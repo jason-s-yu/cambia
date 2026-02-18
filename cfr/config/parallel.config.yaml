@@ -1,0 +1,101 @@
+# API Client Settings (for online play)
+api:
+  base_url: "http://localhost:8080"
+  auth:
+    email: "someone@example.com"
+    password: "password"
+
+# System Settings
+system:
+  recursion_limit: 10000 # Python default is 1000
+
+# CFR Training Parameters
+cfr_training:
+  num_iterations: 10000                   # Total training iterations
+  save_interval: 1                        # Save progress every N iterations
+  pruning_enabled: true                   # Enable Regret-Based Pruning (RBP)
+  pruning_threshold: 1.0e-6               # Regrets below this considered zero for pruning
+  exploitability_interval: 100            # Calculate exploitability every N iterations (higher priority than time)
+  exploitability_interval_seconds: 7200   # Calculate exploitability if X seconds pass (e.g., 2 hours), lower priority
+  num_workers: 23                         # Number of parallel workers for simulations (1 for sequential)
+
+# CFR+ Specific Parameters
+cfr_plus_params:
+  weighted_averaging_enabled: true # Use weighted averaging for strategy sum (t-d)
+  averaging_delay: 100             # Delay 'd' for weighted averaging (start weight at iter d+1)
+
+# Agent Parameters
+agent_params:
+  memory_level: 1           # 0: Perfect Recall, 1: Event Decay, 2: Event+Time Decay
+  time_decay_turns: 3       # Turns until time decay (only for memory_level 2)
+
+# Cambia Game Rules (MUST match target environment/server)
+cambia_rules:
+  allowDrawFromDiscardPile: false  # Can players draw the top discard?
+  allowReplaceAbilities: false     # Do abilities trigger when replacing instead of discarding?
+  snapRace: false                  # If multiple players snap, who acts first? (False=Turn order)
+  penaltyDrawCount: 2              # Cards drawn for failed snap attempt
+  use_jokers: 2                    # Number of Jokers in the deck (0, 1, or 2)
+  cards_per_player: 4              # Initial hand size
+  initial_view_count: 2            # Cards initially peeked by players
+  cambia_allowed_round: 0          # First round (0-indexed) Cambia can be called (0 = immediately)
+  allowOpponentSnapping: false     # Can players snap cards in opponent's hand?
+  max_game_turns: 46               # Maximum turns before game ends automatically (0 = no limit); 46 is first reshuffle
+
+# Persistence Settings
+persistence:
+  # Path relative to execution directory where agent data is saved/loaded
+  agent_data_save_path: "strategy/cambia_cfr_strategy-v0.8.3-l1-p16-archlog-timeexpl.joblib"
+
+# Baseline Agent Settings (primarily for evaluation)
+agents:
+  greedy_agent:
+    # Parameters for the simple greedy baseline agent
+    cambia_call_threshold: 5  # Call Cambia if hand value is this or lower (if legal)
+
+# Analysis Settings
+analysis:
+  # Number of workers within each Best Response calculation process.
+  # 1 = sequential BR action eval. "auto" or 0 defaults based on cfr_training.num_workers.
+  exploitability_num_workers: 0
+
+# Deep CFR Configuration
+deep_cfr:
+  hidden_dim: 256
+  dropout: 0.1
+  learning_rate: 0.001
+  batch_size: 2048
+  train_steps_per_iteration: 4000
+  alpha: 1.5
+  traversals_per_step: 1000
+  advantage_buffer_capacity: 2000000
+  strategy_buffer_capacity: 2000000
+  save_interval: 10
+  use_gpu: false
+
+# Logging Configuration
+logging:
+  log_level_file: "DEBUG"            # Global fallback for main process, and for workers if worker_config missing/doesn't cover.
+  log_level_console: "DEBUG"         # Logging level for the console live display.
+  log_dir: "logs"                   # Directory to store log files
+  log_file_prefix: "cambia"         # Prefix for log files within the run directory
+  log_max_bytes: "10MB"             # Max size before rotation for an individual log file (e.g., worker_N_001.log)
+  log_backup_count: 5               # Max number of backup (rotated) log files to keep *uncompressed* per worker/main process.
+                                    # Files rotating beyond this count are archived if log_archive_enabled is true.
+  log_size_update_interval_sec: 60  # Interval in seconds to update the log size summary in the live display. 0 to disable.
+
+  worker_config:
+    default_level: "INFO"   # Base level for workers, unless a sequential rule or override matches.
+    sequential_rules:
+      - "DEBUG"             # Worker 0: DEBUG. Subsequent workers use default_level unless overridden.
+    overrides: []           # Example: [{worker_ids: [0], level: "WARNING"}]
+
+  # Log Archiving Settings (for worker logs and main process logs)
+  log_archive_enabled: true                # Enable archiving of rotated log files.
+  log_archive_max_archives: 0              # Max number of archive files (tar.gz) to keep per owner (e.g. w0, main); <=0 is unlimited.
+  log_archive_dir: ""                      # Subdirectory within the log file's own directory for storing its archives;
+                                           # empty str means archives are stored in the same directory as the log files.
+
+  # Simulation Trace Logging
+  log_simulation_traces: false              # Set to true to enable detailed trace logging to .jsonl file
+  simulation_trace_filename_prefix: "simulation_traces" # Base filename for the simulation trace file

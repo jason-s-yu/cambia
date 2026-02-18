@@ -1,0 +1,20 @@
+/* Import Tailwind CSS v4 base styles, components, and utilities */
+@import "tailwindcss";
+
+/* Enable class-based dark mode for manual toggling (Tailwind v4 method) */
+/* This allows adding/removing the 'dark' class on the <html> element */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Optional: Define custom base styles or theme overrides via @theme (Tailwind v4 method) */
+/* @theme { */
+/* --color-bg-light: white; */
+/* --color-bg-dark: black; */
+/* } */
+
+/* Optional: Add plugins via @plugin (Tailwind v4 method) */
+/* @plugin require('@tailwindcss/forms'); */
+
+/* Your own global base styles can go here */
+body {
+  @apply bg-white dark:bg-gray-900 text-black dark:text-white transition-colors duration-200;
+}
