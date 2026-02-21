@@ -1,5 +1,10 @@
 """src/analysis_tools.py"""
 
+# WARNING: LEGACY TABULAR CFR CODE
+# This module implements best-response and exploitability analysis for TABULAR CFR only.
+# It is NOT compatible with the Deep CFR pipeline (neural network checkpoints).
+# For Deep CFR evaluation, use evaluate_agents.py and es_validator.py.
+
 import logging
 import json
 import os

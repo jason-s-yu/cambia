@@ -71,8 +71,8 @@ class DeepCFRConfig:
     # Checkpointing
     save_interval: int = 10  # Save every N training steps (not traversals)
 
-    # Use GPU for training if available
-    use_gpu: bool = False
+    # Device for training: "auto" = cuda if available, else xpu if available, else cpu
+    device: str = "auto"
 
     # Sampling method: "outcome" or "external"
     sampling_method: str = "outcome"
@@ -106,6 +106,17 @@ class DeepCFRConfig:
     # Max traversal depth (0 = unlimited, backward compatible)
     traversal_depth_limit: int = 0
 
+    # Worker recycling to prevent RSS growth from glibc malloc fragmentation.
+    # Pipeline workers' RSS grows ~723 MB/step without recycling.
+    # "auto": calculate from system RAM and worker_memory_budget_pct
+    # int: explicit recycling interval (kill/respawn worker every N steps)
+    # None: never recycle (WARNING: RSS grows unbounded, ~723 MB/step)
+    max_tasks_per_child: Optional[Union[int, str]] = "auto"
+
+    # Fraction of system RAM budgeted per worker process (for auto calculation).
+    # Default 0.10 (10%) allows ~8 concurrent training runs on the same machine.
+    worker_memory_budget_pct: float = 0.10
+
     def __post_init__(self):
         if self.pipeline_training and self.num_traversal_threads > 1:
             raise ValueError(
@@ -129,7 +140,7 @@ class DeepCFRConfig:
             "advantage_buffer_capacity": deep_cfg.advantage_buffer_capacity,
             "strategy_buffer_capacity": deep_cfg.strategy_buffer_capacity,
             "save_interval": deep_cfg.save_interval,
-            "use_gpu": deep_cfg.use_gpu,
+            "device": getattr(deep_cfg, "device", "auto"),
             "sampling_method": deep_cfg.sampling_method,
             "exploration_epsilon": deep_cfg.exploration_epsilon,
             "engine_backend": getattr(deep_cfg, "engine_backend", "python"),
@@ -142,12 +153,115 @@ class DeepCFRConfig:
             "num_traversal_threads": getattr(deep_cfg, "num_traversal_threads", 1),
             "validate_inputs": getattr(deep_cfg, "validate_inputs", True),
             "traversal_depth_limit": getattr(deep_cfg, "traversal_depth_limit", 0),
+            "max_tasks_per_child": getattr(deep_cfg, "max_tasks_per_child", "auto"),
+            "worker_memory_budget_pct": getattr(deep_cfg, "worker_memory_budget_pct", 0.10),
         }
         # Apply CLI overrides (only non-None values)
         for key, value in overrides.items():
             if value is not None:
                 kwargs[key] = value
         return cls(**kwargs)
+
+
+def _resolve_device(device: str) -> str:
+    """Resolve 'auto' device string to a concrete device."""
+    if device == "auto":
+        if torch.cuda.is_available():
+            return "cuda"
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            return "xpu"
+        return "cpu"
+    if device == "xpu":
+        if not hasattr(torch, "xpu"):
+            raise RuntimeError(
+                "Device 'xpu' requested but intel_extension_for_pytorch is not installed. "
+                "Install it with: pip install intel_extension_for_pytorch"
+            )
+        if not torch.xpu.is_available():
+            raise RuntimeError(
+                "Device 'xpu' requested but no XPU device is available. "
+                "Ensure an Intel Arc GPU is present and IPEX is installed correctly."
+            )
+    return device
+
+
+def _resolve_max_tasks_per_child(
+    max_tasks_per_child: Optional[Union[int, str]],
+    worker_memory_budget_pct: float,
+) -> Optional[int]:
+    """Resolve max_tasks_per_child for ProcessPoolExecutor.
+
+    Pipeline worker RSS grows ~723 MB per training step due to glibc malloc
+    fragmentation (Python frees objects but glibc retains heap pages). This
+    function calculates how many steps a worker can run before being recycled.
+
+    Empirical constants (measured Feb 2026, Phase 1 profiling):
+        WORKER_WARMUP_MB = 1600   # fresh worker baseline RSS after model load
+        WORKER_GROWTH_MB = 723    # RSS increase per training step (1000 traversals)
+
+    Auto formula:
+        budget_mb = system_ram_gb * worker_memory_budget_pct * 1024
+        max_tasks = floor((budget_mb - WORKER_WARMUP_MB) / WORKER_GROWTH_MB)
+        return clamp(max_tasks, 2, 100)
+
+    Args:
+        max_tasks_per_child: "auto", positive int, or None (no recycling).
+        worker_memory_budget_pct: fraction of system RAM per worker (default 0.10).
+
+    Returns:
+        Resolved integer for ProcessPoolExecutor max_tasks_per_child, or None.
+    """
+    if max_tasks_per_child is None:
+        logger.warning(
+            "max_tasks_per_child=None: worker recycling disabled. "
+            "RSS will grow ~723 MB/step unbounded. Only use for short test runs."
+        )
+        return None
+
+    if isinstance(max_tasks_per_child, int):
+        if max_tasks_per_child < 1:
+            raise ValueError(f"max_tasks_per_child must be >= 1, got {max_tasks_per_child}")
+        return max_tasks_per_child
+
+    if isinstance(max_tasks_per_child, str) and max_tasks_per_child.lower() == "auto":
+        WORKER_WARMUP_MB = 1600
+        WORKER_GROWTH_MB = 723
+
+        try:
+            import psutil
+            total_ram_mb = psutil.virtual_memory().total / (1024 * 1024)
+        except ImportError:
+            # Fallback: read /proc/meminfo
+            try:
+                with open("/proc/meminfo") as f:
+                    for line in f:
+                        if line.startswith("MemTotal:"):
+                            total_ram_mb = int(line.split()[1]) / 1024  # kB to MB
+                            break
+                    else:
+                        total_ram_mb = 16 * 1024  # conservative 16 GB fallback
+            except OSError:
+                total_ram_mb = 16 * 1024
+
+        budget_mb = total_ram_mb * worker_memory_budget_pct
+        raw = int((budget_mb - WORKER_WARMUP_MB) / WORKER_GROWTH_MB)
+        resolved = max(2, min(raw, 100))
+
+        logger.info(
+            "Auto max_tasks_per_child=%d (system_ram=%.1f GB, budget_pct=%.0f%%, "
+            "budget=%.0f MB, warmup=%d MB, growth=%d MB/step)",
+            resolved,
+            total_ram_mb / 1024,
+            worker_memory_budget_pct * 100,
+            budget_mb,
+            WORKER_WARMUP_MB,
+            WORKER_GROWTH_MB,
+        )
+        return resolved
+
+    raise ValueError(
+        f"max_tasks_per_child must be 'auto', a positive int, or None. Got: {max_tasks_per_child!r}"
+    )
 
 
 def _run_traversals_batch(
@@ -178,7 +292,7 @@ def _run_traversals_batch(
             network_config,
             progress_queue,
             archive_queue,
-            i,  # worker_id
+            0,  # worker_id: constant slot (not per-traversal index)
             run_log_dir,
             run_timestamp,
         )
@@ -233,7 +347,7 @@ def _run_traversals_threaded(
             network_config,
             progress_queue,
             archive_queue,
-            i,  # worker_id
+            i % num_threads,  # worker_id: thread pool slot
             run_log_dir,
             run_timestamp,
         ))
@@ -286,10 +400,8 @@ class DeepCFRTrainer:
         self.log_archiver_global_ref: Optional[LogArchiver] = None
 
         # Device selection
-        if self.dcfr_config.use_gpu and torch.cuda.is_available():
-            self.device = torch.device("cuda")
-        else:
-            self.device = torch.device("cpu")
+        resolved_device = _resolve_device(self.dcfr_config.device)
+        self.device = torch.device(resolved_device)
         logger.info("Deep CFR Trainer using device: %s", self.device)
 
         # Networks
@@ -309,8 +421,8 @@ class DeepCFRTrainer:
             validate_inputs=self.dcfr_config.validate_inputs,
         ).to(self.device)
 
-        # B5: torch.compile — gated by config (only effective on CUDA)
-        if self.dcfr_config.use_compile and hasattr(torch, "compile") and self.device.type == "cuda":
+        # B5: torch.compile — gated by config (effective on CUDA and XPU)
+        if self.dcfr_config.use_compile and hasattr(torch, "compile") and self.device.type != "cpu":
             try:
                 self.advantage_net = torch.compile(self.advantage_net, mode="reduce-overhead")
                 self.strategy_net = torch.compile(self.strategy_net, mode="reduce-overhead")
@@ -326,9 +438,9 @@ class DeepCFRTrainer:
             self.strategy_net.parameters(), lr=self.dcfr_config.learning_rate
         )
 
-        # B4: AMP scaler — gated by config (only effective on CUDA)
-        self.use_amp = self.dcfr_config.use_amp and self.device.type == "cuda"
-        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
+        # B4: AMP scaler — gated by config (effective on CUDA and XPU)
+        self.use_amp = self.dcfr_config.use_amp and self.device.type != "cpu"
+        self.scaler = torch.amp.GradScaler(self.device.type, enabled=self.use_amp)
 
         # Reservoir buffers
         self.advantage_buffer = ReservoirBuffer(
@@ -419,7 +531,7 @@ class DeepCFRTrainer:
 
             optimizer.zero_grad()
 
-            with torch.amp.autocast("cuda", enabled=self.use_amp):
+            with torch.amp.autocast(self.device.type, enabled=self.use_amp):
                 predictions = network(features_t, masks_t)
                 # Use masked_fill instead of multiply to avoid -inf * 0 = NaN
                 # (AdvantageNetwork sets illegal actions to -inf)
@@ -550,10 +662,13 @@ class DeepCFRTrainer:
         executor: Optional[concurrent.futures.ProcessPoolExecutor] = None
 
         if self.dcfr_config.pipeline_training:
-            # Use 'spawn' context to avoid CUDA fork deadlock
             ctx = multiprocessing.get_context("spawn")
+            _max_tasks = _resolve_max_tasks_per_child(
+                self.dcfr_config.max_tasks_per_child,
+                self.dcfr_config.worker_memory_budget_pct,
+            )
             executor = concurrent.futures.ProcessPoolExecutor(
-                max_workers=1, mp_context=ctx
+                max_workers=1, mp_context=ctx, max_tasks_per_child=_max_tasks
             )
 
         network_config = self._get_network_config()
@@ -565,14 +680,18 @@ class DeepCFRTrainer:
 
                 step_start_time = time.time()
                 self.training_step = step
+                phase_times = {}  # phase name -> elapsed seconds
 
                 if display and hasattr(display, "update_main_process_status"):
                     display.update_main_process_status(f"Step {step}: Running traversals...")
 
                 # Get current network weights for workers
+                _t0 = time.time()
                 network_weights = self._get_network_weights_for_workers()
+                phase_times["weights_copy"] = time.time() - _t0
 
                 # Collect traversal results — either from pipeline future or synchronously
+                _trav_start = time.time()
                 if pending_future is not None:
                     # B3: Collect results from pipelined traversal started after prev step's adv training
                     step_advantage_samples, step_strategy_samples, traversals_done, total_nodes = (
@@ -602,7 +721,7 @@ class DeepCFRTrainer:
                                 network_config,
                                 self.progress_queue,
                                 self.archive_queue,
-                                i,  # worker_id
+                                i % num_workers,  # worker_id: pool slot (not traversal index)
                                 self.run_log_dir or "logs",
                                 self.run_timestamp or "unknown",
                             ))
@@ -684,13 +803,16 @@ class DeepCFRTrainer:
                         )
                     )
 
+                phase_times["traversal"] = time.time() - _trav_start
                 self.total_traversals += traversals_done
 
                 # Add samples to reservoir buffers
+                _buf_start = time.time()
                 for sample in step_advantage_samples:
                     self.advantage_buffer.add(sample)
                 for sample in step_strategy_samples:
                     self.strategy_buffer.add(sample)
+                phase_times["buffer_insert"] = time.time() - _buf_start
 
                 logger.info(
                     "Step %d: %d traversals, %d advantage samples, %d strategy samples, %d nodes",
@@ -701,22 +823,13 @@ class DeepCFRTrainer:
                 if self.shutdown_event.is_set():
                     raise GracefulShutdownException("Shutdown before network training")
 
-                # Train advantage network
-                if display and hasattr(display, "update_main_process_status"):
-                    display.update_main_process_status(f"Step {step}: Training advantage net...")
-
-                adv_loss = self._train_network(
-                    self.advantage_net, self.advantage_optimizer,
-                    self.advantage_buffer, self.dcfr_config.alpha,
-                    self.dcfr_config.train_steps_per_iteration,
-                    "AdvantageNetwork",
-                )
-                self.advantage_loss_history.append((step, adv_loss))
-
-                if self.shutdown_event.is_set():
-                    raise GracefulShutdownException("Shutdown before strategy training")
-
-                # B3: Submit next traversals async after adv training (if pipelining and not last step)
+                # Submit next traversals BEFORE training so both adv_train and
+                # strat_train overlap with the worker's traversal.  The worker
+                # uses pre-adv-training weights (one step staler for the
+                # advantage net), which is an acceptable approximation — Deep
+                # CFR already tolerates stale strategy weights with the prior
+                # placement.  Saves ~4s/step by overlapping adv_train with
+                # the worker traversal.
                 if executor and step < end_step:
                     next_weights = self._get_network_weights_for_workers()
                     pending_future = executor.submit(
@@ -732,16 +845,35 @@ class DeepCFRTrainer:
                         self.run_timestamp or "unknown",
                     )
 
+                # Train advantage network
+                if display and hasattr(display, "update_main_process_status"):
+                    display.update_main_process_status(f"Step {step}: Training advantage net...")
+
+                _adv_start = time.time()
+                adv_loss = self._train_network(
+                    self.advantage_net, self.advantage_optimizer,
+                    self.advantage_buffer, self.dcfr_config.alpha,
+                    self.dcfr_config.train_steps_per_iteration,
+                    "AdvantageNetwork",
+                )
+                phase_times["adv_train"] = time.time() - _adv_start
+                self.advantage_loss_history.append((step, adv_loss))
+
+                if self.shutdown_event.is_set():
+                    raise GracefulShutdownException("Shutdown before strategy training")
+
                 # Train strategy network (overlaps with async traversals if pipelining)
                 if display and hasattr(display, "update_main_process_status"):
                     display.update_main_process_status(f"Step {step}: Training strategy net...")
 
+                _strat_start = time.time()
                 strat_loss = self._train_network(
                     self.strategy_net, self.strategy_optimizer,
                     self.strategy_buffer, self.dcfr_config.alpha,
                     self.dcfr_config.train_steps_per_iteration,
                     "StrategyNetwork",
                 )
+                phase_times["strat_train"] = time.time() - _strat_start
                 self.strategy_loss_history.append((step, strat_loss))
 
                 step_time = time.time() - step_start_time
@@ -765,12 +897,14 @@ class DeepCFRTrainer:
                     self.total_traversals,
                 )
                 if display is None:
+                    phase_str = " ".join(f"{k}={v:.2f}s" for k, v in phase_times.items())
                     print(
                         f"[step {step}/{end_step}] time={step_time:.1f}s "
                         f"adv_loss={adv_loss:.6f} strat_loss={strat_loss:.6f} "
                         f"adv_buf={len(self.advantage_buffer)} "
                         f"str_buf={len(self.strategy_buffer)} "
-                        f"traversals={self.total_traversals}",
+                        f"traversals={self.total_traversals} "
+                        f"| {phase_str}",
                         flush=True,
                     )
 
@@ -897,6 +1031,14 @@ class DeepCFRTrainer:
             atomic_torch_save(checkpoint, path)
             atomic_npz_save(self.advantage_buffer.save, adv_buffer_path)
             atomic_npz_save(self.strategy_buffer.save, strat_buffer_path)
+
+            # Save iteration-specific .pt copy (no buffers) for post-hoc evaluation
+            iter_path = f"{base_path}_iter_{self.training_step}.pt"
+            try:
+                atomic_torch_save(checkpoint, iter_path)
+            except Exception as e_iter:
+                logger.warning("Failed to save iteration checkpoint %s: %s", iter_path, e_iter)
+
             logger.info(
                 "Checkpoint saved to %s (step %d, %d traversals).",
                 path, self.training_step, self.total_traversals,
@@ -942,6 +1084,15 @@ class DeepCFRTrainer:
             adv_buffer_path = checkpoint.get("advantage_buffer_path")
             strat_buffer_path = checkpoint.get("strategy_buffer_path")
 
+            # Fallback: if buffer paths not in checkpoint, derive them from checkpoint path
+            if not adv_buffer_path and not strat_buffer_path:
+                base_path = os.path.splitext(path)[0]
+                adv_buffer_path = f"{base_path}_advantage_buffer"
+                strat_buffer_path = f"{base_path}_strategy_buffer"
+
+            adv_loaded = False
+            strat_loaded = False
+
             if adv_buffer_path:
                 npz_path = adv_buffer_path if adv_buffer_path.endswith(".npz") else adv_buffer_path + ".npz"
                 if os.path.exists(npz_path):
@@ -949,6 +1100,7 @@ class DeepCFRTrainer:
                         capacity=self.dcfr_config.advantage_buffer_capacity
                     )
                     self.advantage_buffer.load(adv_buffer_path)
+                    adv_loaded = True
                 else:
                     logger.warning(
                         "Advantage buffer file not found: %s. Starting with empty buffer.", npz_path
@@ -961,10 +1113,16 @@ class DeepCFRTrainer:
                         capacity=self.dcfr_config.strategy_buffer_capacity
                     )
                     self.strategy_buffer.load(strat_buffer_path)
+                    strat_loaded = True
                 else:
                     logger.warning(
                         "Strategy buffer file not found: %s. Starting with empty buffer.", npz_path
                     )
+
+            if not adv_loaded and not strat_loaded:
+                logger.warning(
+                    "No buffer files found alongside checkpoint; starting with cold buffer."
+                )
 
             self.training_step = checkpoint.get("training_step", 0)
             self.total_traversals = checkpoint.get("total_traversals", 0)

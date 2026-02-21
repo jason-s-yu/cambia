@@ -732,10 +732,19 @@ class ImperfectGreedyAgent(ImperfectMemoryMixin, BaseAgent):
                 return pass_action
             return next(iter(legal_actions))
 
-        # 4. Call Cambia if estimated hand value is low
+        # 4. Call Cambia if estimated hand value is low (uncertainty-adjusted threshold)
         if ActionCallCambia() in legal_actions:
             estimated_value = self._estimate_own_hand_value()
-            if estimated_value <= self.cambia_threshold:
+            num_unknown = sum(
+                1 for v in self.own_memory.values() if v is None
+            )
+            # Adjust threshold upward for unknowns: unknown cards estimated at 6.5,
+            # so add 5.5 per unknown to trigger when known portion is below threshold.
+            adjusted_threshold = self.cambia_threshold + num_unknown * 5.5
+            # _turn_number counts rounds (not moves). With 2 players & 46 move cap,
+            # max _turn_number ≈ 23. Fall back at round 18 (~turn 36).
+            turn_fallback = game_state._turn_number >= 18
+            if estimated_value <= adjusted_threshold or turn_fallback:
                 return ActionCallCambia()
 
         # 5. Post-draw: discard or replace
@@ -846,10 +855,15 @@ class MemoryHeuristicAgent(ImperfectMemoryMixin, BaseAgent):
                 return pass_action
             return next(iter(legal_actions))
 
-        # 4. Call Cambia when estimated hand total <= threshold
+        # 4. Call Cambia when estimated hand total <= threshold (uncertainty-adjusted)
         if ActionCallCambia() in legal_actions:
             estimated_value = self._estimate_own_hand_value()
-            if estimated_value <= self.cambia_threshold:
+            num_unknown = sum(
+                1 for v in self.own_memory.values() if v is None
+            )
+            adjusted_threshold = self.cambia_threshold + num_unknown * 5.5
+            turn_fallback = game_state._turn_number >= 18
+            if estimated_value <= adjusted_threshold or turn_fallback:
                 return ActionCallCambia()
 
         # 5. Post-draw: discard or replace
@@ -1067,13 +1081,19 @@ class AggressiveSnapAgent(ImperfectMemoryMixin, BaseAgent):
                 return pass_action
             return next(iter(legal_actions))
 
-        # 4. Aggressive Cambia: call if hand small or total low
+        # 4. Aggressive Cambia: call if hand small, total low, or turn fallback
         if ActionCallCambia() in legal_actions:
             hand_size = len(self.own_memory)
             estimated_value = self._estimate_own_hand_value()
+            num_unknown = sum(
+                1 for v in self.own_memory.values() if v is None
+            )
+            adjusted_threshold = self.CAMBIA_VALUE_THRESHOLD + num_unknown * 5.5
+            turn_fallback = game_state._turn_number >= 18
             if (
                 hand_size <= self.CAMBIA_HAND_SIZE_THRESHOLD
-                or estimated_value <= self.CAMBIA_VALUE_THRESHOLD
+                or estimated_value <= adjusted_threshold
+                or turn_fallback
             ):
                 return ActionCallCambia()
 

@@ -10,6 +10,7 @@
     - [Prerequisites](#prerequisites)
     - [Installation](#installation)
     - [Running the Server](#running-the-server)
+  - [Architecture Note](#architecture-note)
   - [License](#license)
 
 ## Getting Started
@@ -53,7 +54,7 @@ air
 
 ## Architecture Note
 
-`internal/game/game.go` wraps `engine.GameState` from the Go engine package. All game rule logic is authoritative from the engine -- the service does not duplicate it. The `CambiaGame` struct holds an `Engine engine.GameState` field and dispatches WebSocket actions through `applyEngineAction`, mapping between service player UUIDs and engine player indices.
+`internal/game/game.go` wraps `engine.GameState` from the Go engine package. All game rule logic is authoritative from the engine (the service does not duplicate it). The `CambiaGame` struct holds an `Engine engine.GameState` field and dispatches WebSocket actions through `applyEngineAction`, mapping between service player UUIDs and engine player indices.
 
 ## License
 

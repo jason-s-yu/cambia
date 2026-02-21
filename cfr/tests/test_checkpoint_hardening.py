@@ -218,10 +218,13 @@ def _extract_deep_cfr_config_class() -> type:
 
     # Build a minimal namespace to exec the class definition
     from src.encoding import INPUT_DIM, NUM_ACTIONS
+    from typing import Optional, Union
     namespace = {
         "dataclass": dataclass,
         "INPUT_DIM": INPUT_DIM,
         "NUM_ACTIONS": NUM_ACTIONS,
+        "Optional": Optional,
+        "Union": Union,
     }
     exec(compile(class_src, "<DeepCFRConfig>", "exec"), namespace)
     return namespace["DeepCFRConfig"]

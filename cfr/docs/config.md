@@ -474,6 +474,41 @@ Parameters for Deep CFR training. These values are loaded from the YAML config a
   * Type: `boolean`
   * Default: `false`
   * CLI Override: `--compile` / `--no-compile`
+* **`sampling_method`**:
+  * Description: MCCFR sampling variant. `"outcome"` uses Outcome Sampling (one trajectory per traversal, lower variance). `"external"` uses External Sampling (full opponent strategy enumeration, higher per-traversal cost but lower total variance). External sampling is infeasible at full game depth for Cambia (~150-200s/step vs ~36s for outcome).
+  * Type: `string` (`"outcome"` or `"external"`)
+  * Default: `"outcome"`
+* **`exploration_epsilon`**:
+  * Description: Exploration parameter for outcome sampling. At each opponent decision point, with probability epsilon the opponent samples uniformly instead of following the current strategy. Higher values increase exploration but add noise. Ignored when `sampling_method` is `"external"`.
+  * Type: `float` (0.0 to 1.0)
+  * Default: `0.6`
+  * CLI Override: `--epsilon`
+* **`num_traversal_threads`**:
+  * Description: Number of threads for Go FFI traversals within a single worker process. Only applies when `engine_backend` is `"go"`. Mutually exclusive with `pipeline_training=true` (validated at startup).
+  * Type: `integer`
+  * Default: `1`
+* **`validate_inputs`**:
+  * Description: If `true`, performs NaN/shape validation on network inputs during forward pass. Useful for debugging but adds ~85% GPU overhead due to GPU→CPU synchronization. Disable for production training runs.
+  * Type: `boolean`
+  * Default: `true`
+* **`traversal_depth_limit`**:
+  * Description: Maximum depth (in game turns) for each traversal. `0` means unlimited (traverse until game termination). Limiting depth reduces per-traversal cost but may miss late-game strategies. Useful for faster iteration during experimentation.
+  * Type: `integer`
+  * Default: `0`
+* **`max_tasks_per_child`**:
+  * Description: Controls worker process recycling for the pipeline training executor. Pipeline workers accumulate ~723 MB/step of RSS due to glibc malloc fragmentation. This setting controls how many training steps a worker runs before being killed and respawned.
+    * `"auto"`: Calculate from system RAM using `worker_memory_budget_pct` (recommended).
+    * Integer: Explicit recycling interval (e.g., `5` = recycle every 5 steps).
+    * `null`: Never recycle (WARNING: RSS grows unbounded, only for short test runs).
+
+    Auto formula: `max_tasks = clamp(floor((system_ram * budget_pct * 1024 - 1600) / 723), 2, 100)`. Constants are empirically measured: 1600 MB worker warmup RSS, 723 MB/step growth rate.
+  * Type: `string`, `integer`, or `null`
+  * Default: `"auto"`
+* **`worker_memory_budget_pct`**:
+  * Description: Fraction of total system RAM allocated as the memory budget per pipeline worker process. Used when `max_tasks_per_child` is `"auto"` to calculate the recycling interval. Lower values recycle more aggressively (less memory, slightly more spawn overhead). 0.10 (10%) allows ~8 concurrent training runs on a typical machine.
+  * Type: `float` (0.0 to 1.0)
+  * Default: `0.10`
+  * Examples: `0.10` (47 GB system → mtpc=4), `0.15` (47 GB → mtpc=7), `0.05` (conservative, mtpc=2)
 
 * Example:
 
@@ -482,22 +517,44 @@ Parameters for Deep CFR training. These values are loaded from the YAML config a
       hidden_dim: 256
       dropout: 0.1
       learning_rate: 0.001
-      batch_size: 2048
+      batch_size: 4096
       train_steps_per_iteration: 4000
       alpha: 1.5
       traversals_per_step: 1000
       advantage_buffer_capacity: 2000000
       strategy_buffer_capacity: 2000000
-      save_interval: 10
-      use_gpu: false
-      engine_backend: "python"
-      es_validation_interval: 10
+      save_interval: 25
+      use_gpu: true
+      sampling_method: "outcome"
+      exploration_epsilon: 0.6
+      engine_backend: "go"
+      es_validation_interval: 0
       es_validation_depth: 10
       es_validation_traversals: 1000
       pipeline_training: true
       use_amp: false
       use_compile: false
+      num_traversal_threads: 1
+      validate_inputs: false
+      traversal_depth_limit: 0
+      max_tasks_per_child: "auto"
+      worker_memory_budget_pct: 0.10
     ```
+
+### Runtime Notes: Worker Memory Management
+
+Deep CFR pipeline training (`pipeline_training: true`) runs game traversals in a separate subprocess via Python's `ProcessPoolExecutor`. Due to glibc malloc fragmentation, the worker process's RSS (resident set size) grows at approximately **723 MB per training step** even though the actual live data per step is only ~9 MB. This is not a Python memory leak — it's caused by glibc retaining freed heap pages internally rather than returning them to the OS.
+
+**`gc.collect()` and `malloc_trim(0)` do not resolve this** (tested: zero RSS reduction, 17-60% traversal overhead). The only effective mitigation is worker recycling via `max_tasks_per_child`.
+
+The `"auto"` setting reads total system RAM at startup and calculates a recycling interval that keeps peak worker RSS within the configured budget. On a 47 GB system at the default 10% budget:
+
+* Budget per worker: 4.7 GB
+* Auto `max_tasks_per_child`: 4 (recycle every 4 steps)
+* Peak worker RSS: ~4.5 GB
+* Spawn overhead: ~3-5s every 4 steps (amortized <3% of step time)
+
+For concurrent training runs, ensure that `system_ram * worker_memory_budget_pct * num_concurrent_runs` does not exceed ~80% of total RAM. The default 10% allows up to 8 concurrent runs.
 
 ---
 

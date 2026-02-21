@@ -563,8 +563,13 @@ class ESValidator:
 
         current_context = _infer_decision_context(legal_mask)
 
+        # Get drawn card bucket for POST_DRAW encoding
+        drawn_bucket = -1
+        if current_context == 1:  # CtxPostDraw
+            drawn_bucket = engine.get_drawn_card_bucket()
+
         try:
-            features = agent_states[player].encode(current_context, drawn_bucket=-1)
+            features = agent_states[player].encode(current_context, drawn_bucket=drawn_bucket)
             action_mask = legal_mask.copy()
         except Exception:
             return np.zeros(NUM_PLAYERS, dtype=np.float64)

@@ -169,11 +169,18 @@ def train_deep(
         help="Reservoir buffer capacity",
         rich_help_panel="Deep CFR Overrides",
     ),
+    device: Optional[str] = typer.Option(
+        None,
+        "--device",
+        help="Training device: auto, cpu, cuda, xpu (default: auto)",
+        rich_help_panel="Deep CFR Overrides",
+    ),
     gpu: Optional[bool] = typer.Option(
         None,
         "--gpu/--no-gpu",
-        help="Use GPU if available",
+        help="[deprecated: use --device] Use GPU if available",
         rich_help_panel="Deep CFR Overrides",
+        hidden=True,
     ),
     amp: Optional[bool] = typer.Option(
         None,
@@ -226,8 +233,11 @@ def train_deep(
     if buffer_capacity is not None:
         overrides["advantage_buffer_capacity"] = buffer_capacity
         overrides["strategy_buffer_capacity"] = buffer_capacity
-    if gpu is not None:
-        overrides["use_gpu"] = gpu
+    if device is not None:
+        overrides["device"] = device
+    elif gpu is not None:
+        # Backward compat: --gpu/--no-gpu maps to device
+        overrides["device"] = "cuda" if gpu else "cpu"
     if amp is not None:
         overrides["use_amp"] = amp
     if compile is not None:
@@ -447,7 +457,7 @@ def benchmark_all(
         "cpu",
         "--device",
         "-d",
-        help="Device to run on (cpu/cuda)",
+        help="Device to run on (cpu/cuda/xpu)",
     ),
     config: Path = typer.Option(
         "/workspace/config/parallel.config.yaml",
@@ -497,7 +507,7 @@ def benchmark_network_cmd(
         "cpu",
         "--device",
         "-d",
-        help="Device to run on (cpu/cuda)",
+        help="Device to run on (cpu/cuda/xpu)",
     ),
     batch_sizes: Optional[str] = typer.Option(
         None,
@@ -689,7 +699,7 @@ def benchmark_e2e_cmd(
         "cpu",
         "--device",
         "-d",
-        help="Device to run on (cpu/cuda)",
+        help="Device to run on (cpu/cuda/xpu)",
     ),
     num_steps: int = typer.Option(
         2,
@@ -824,13 +834,19 @@ def evaluate(
         "--baselines",
         "-b",
         help="Comma-separated list of baseline agents to evaluate against "
-        "(choices: random, greedy, cfr)",
+        "(choices: random, greedy, imperfect_greedy, memory_heuristic, aggressive_snap, cfr)",
     ),
     device: str = typer.Option(
         "cpu",
         "--device",
         "-d",
-        help="Torch device for inference (cpu or cuda)",
+        help="Torch device for inference (cpu, cuda, or xpu)",
+    ),
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-dir",
+        "-o",
+        help="Directory for per-baseline JSONL game logs",
     ),
 ):
     """Evaluate a Deep CFR checkpoint against baseline agents and print a win-rate table."""
@@ -849,6 +865,7 @@ def evaluate(
         num_games=games,
         baselines=baseline_list,
         device=device,
+        output_dir=str(output_dir) if output_dir else None,
     )
 
     console = Console()
@@ -859,6 +876,8 @@ def evaluate(
     table.add_column("Ties", style="yellow")
     table.add_column("Errors", style="dim")
     table.add_column("Win Rate", style="bold green")
+    table.add_column("Avg Margin", style="blue")
+    table.add_column("Avg Turns", style="magenta")
 
     for baseline, results in results_map.items():
         p0_wins = results.get("P0 Wins", 0)
@@ -867,6 +886,16 @@ def evaluate(
         errors = results.get("Errors", 0)
         total = p0_wins + p1_wins + ties
         win_rate = f"{p0_wins / total * 100:.1f}%" if total > 0 else "N/A"
+        stats = getattr(results, "stats", {})
+        avg_margin = stats.get("avg_score_margin")
+        avg_turns = stats.get("avg_game_turns")
+        std_turns = stats.get("std_game_turns")
+        margin_str = f"{avg_margin:.1f}" if avg_margin is not None else "N/A"
+        turns_str = (
+            f"{avg_turns:.1f}±{std_turns:.1f}"
+            if avg_turns is not None and std_turns is not None
+            else "N/A"
+        )
         table.add_row(
             baseline,
             str(p0_wins),
@@ -874,7 +903,96 @@ def evaluate(
             str(ties),
             str(errors),
             win_rate,
+            margin_str,
+            turns_str,
         )
+
+    console.print(table)
+
+
+@app.command("head-to-head", help="Play two Deep CFR checkpoints against each other")
+def head_to_head(
+    checkpoint_a: Path = typer.Option(
+        ...,
+        "--checkpoint-a",
+        "-a",
+        help="Path to first Deep CFR .pt checkpoint",
+        exists=True,
+    ),
+    checkpoint_b: Path = typer.Option(
+        ...,
+        "--checkpoint-b",
+        "-b",
+        help="Path to second Deep CFR .pt checkpoint",
+        exists=True,
+    ),
+    games: int = typer.Option(
+        100,
+        "--games",
+        "-n",
+        help="Number of games to play",
+    ),
+    config: Path = typer.Option(
+        "config.yaml",
+        "--config",
+        "-c",
+        help="Path to configuration YAML file",
+        exists=True,
+    ),
+    device: str = typer.Option(
+        "cpu",
+        "--device",
+        "-d",
+        help="Torch device for inference (cpu, cuda, or xpu)",
+    ),
+):
+    """Play two Deep CFR checkpoints head-to-head and report win rates."""
+    from rich.console import Console
+    from rich.table import Table
+    from .config import load_config
+    from .evaluate_agents import run_head_to_head
+
+    cfg = load_config(str(config))
+    if not cfg:
+        print("ERROR: Failed to load configuration.", file=sys.stderr)
+        raise typer.Exit(1)
+
+    results = run_head_to_head(
+        checkpoint_a=str(checkpoint_a),
+        checkpoint_b=str(checkpoint_b),
+        num_games=games,
+        config=cfg,
+        device=device,
+    )
+
+    total = results["total_games"]
+    a_wins = results["checkpoint_a_wins"]
+    b_wins = results["checkpoint_b_wins"]
+    ties = results["ties"]
+    scored = a_wins + b_wins + ties
+
+    console = Console()
+    table = Table(title="Head-to-Head Results")
+    table.add_column("Checkpoint", style="cyan")
+    table.add_column("Wins", style="green")
+    table.add_column("Win Rate", style="bold green")
+
+    table.add_row(
+        checkpoint_a.name,
+        str(a_wins),
+        f"{a_wins / scored * 100:.1f}%" if scored else "N/A",
+    )
+    table.add_row(
+        checkpoint_b.name,
+        str(b_wins),
+        f"{b_wins / scored * 100:.1f}%" if scored else "N/A",
+    )
+    table.add_row("Ties", str(ties), f"{ties / scored * 100:.1f}%" if scored else "N/A")
+    table.add_row(
+        "Avg Turns",
+        f"{results['avg_game_turns']:.1f} ± {results['std_game_turns']:.1f}",
+        "",
+    )
 
     console.print(table)
 

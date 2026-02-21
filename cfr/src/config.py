@@ -294,7 +294,7 @@ class DeepCfrConfig:
     advantage_buffer_capacity: int = 2_000_000
     strategy_buffer_capacity: int = 2_000_000
     save_interval: int = 10
-    use_gpu: bool = False
+    device: str = "auto"  # "auto" = cuda if available, else xpu if available, else cpu
     sampling_method: str = "outcome"
     exploration_epsilon: float = 0.6
     engine_backend: str = "python"  # "python" or "go"
@@ -307,6 +307,8 @@ class DeepCfrConfig:
     num_traversal_threads: int = 1  # threads for Go FFI traversals (requires engine_backend="go")
     validate_inputs: bool = True  # NaN input check; disable for GPU perf
     traversal_depth_limit: int = 0  # max traversal depth (0 = unlimited)
+    max_tasks_per_child: Optional[Union[int, str]] = "auto"  # "auto" | int | None
+    worker_memory_budget_pct: float = 0.10  # fraction of system RAM per worker for auto calc
 
 
 # --- Baseline Agent Configuration ---
@@ -512,7 +514,13 @@ def load_config(
                     "strategy_buffer_capacity", DeepCfrConfig.strategy_buffer_capacity
                 ),
                 save_interval=deep_cfr_dict.get("save_interval", DeepCfrConfig.save_interval),
-                use_gpu=deep_cfr_dict.get("use_gpu", DeepCfrConfig.use_gpu),
+                device=deep_cfr_dict.get(
+                    "device",
+                    # Backward compat: use_gpu: true -> "cuda", use_gpu: false -> "cpu"
+                    ("cuda" if deep_cfr_dict["use_gpu"] else "cpu")
+                    if "use_gpu" in deep_cfr_dict
+                    else DeepCfrConfig.device,
+                ),
                 sampling_method=deep_cfr_dict.get("sampling_method", DeepCfrConfig.sampling_method),
                 exploration_epsilon=deep_cfr_dict.get("exploration_epsilon", DeepCfrConfig.exploration_epsilon),
                 engine_backend=deep_cfr_dict.get("engine_backend", DeepCfrConfig.engine_backend),
@@ -533,8 +541,17 @@ def load_config(
                 num_traversal_threads=deep_cfr_dict.get(
                     "num_traversal_threads", DeepCfrConfig.num_traversal_threads
                 ),
+                validate_inputs=deep_cfr_dict.get(
+                    "validate_inputs", DeepCfrConfig.validate_inputs
+                ),
                 traversal_depth_limit=deep_cfr_dict.get(
                     "traversal_depth_limit", DeepCfrConfig.traversal_depth_limit
+                ),
+                max_tasks_per_child=deep_cfr_dict.get(
+                    "max_tasks_per_child", DeepCfrConfig.max_tasks_per_child
+                ),
+                worker_memory_budget_pct=deep_cfr_dict.get(
+                    "worker_memory_budget_pct", DeepCfrConfig.worker_memory_budget_pct
                 ),
             )
 

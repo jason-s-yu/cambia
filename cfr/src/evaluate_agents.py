@@ -1,6 +1,7 @@
 """Script to evaluate different Cambia agents against each other."""
 
 import argparse
+import json
 import logging
 import sys
 import random
@@ -9,11 +10,19 @@ import copy
 from typing import Optional, Dict, List, Type, Set
 from collections import Counter
 import numpy as np
+import math
 from tqdm import tqdm
 
 from src.config import load_config, Config
 from src.game.engine import CambiaGameState
-from src.agents.baseline_agents import BaseAgent, RandomAgent, GreedyAgent
+from src.agents.baseline_agents import (
+    BaseAgent,
+    RandomAgent,
+    GreedyAgent,
+    ImperfectGreedyAgent,
+    MemoryHeuristicAgent,
+    AggressiveSnapAgent,
+)
 from src.agent_state import AgentState, AgentObservation
 from src.cfr.trainer import CFRTrainer
 from src.utils import (
@@ -508,6 +517,9 @@ class DeepCFRAgentWrapper(BaseAgent):
 AGENT_REGISTRY: Dict[str, Type[BaseAgent]] = {
     "random": RandomAgent,
     "greedy": GreedyAgent,
+    "imperfect_greedy": ImperfectGreedyAgent,
+    "memory_heuristic": MemoryHeuristicAgent,
+    "aggressive_snap": AggressiveSnapAgent,
     "cfr": CFRAgentWrapper,
     "deep_cfr": DeepCFRAgentWrapper,
 }
@@ -548,6 +560,7 @@ def run_evaluation(
     strategy_path: Optional[str],
     checkpoint_path: Optional[str] = None,
     device: str = "cpu",
+    output_path: Optional[str] = None,
 ) -> Counter:
     """Runs head-to-head evaluation between two agents. Returns results Counter."""
     logger.info("--- Starting Agent Evaluation ---")
@@ -609,157 +622,259 @@ def run_evaluation(
         sys.exit(1)
 
     results: Counter = Counter()
-    start_time = time.time()
+    start_time = time.perf_counter()
+    jsonl_overhead_ms = 0.0
+    # Per-game tracking for enhanced stats
+    score_margins: List[float] = []
+    game_turns_list: List[int] = []
 
-    for game_num in tqdm(range(1, num_games + 1), desc="Simulating Games", unit="game"):
-        try:
-            game_state = CambiaGameState(house_rules=config.cambia_rules)
-            # Initialize stateful agents
-            for agent in agents:
-                if isinstance(agent, (CFRAgentWrapper, DeepCFRAgentWrapper)):
-                    agent.initialize_state(game_state)
+    output_file = None
+    if output_path is not None:
+        output_file = open(output_path, "w", encoding="utf-8")
 
-            turn = 0
-            max_turns = (
-                config.cambia_rules.max_game_turns
-                if config.cambia_rules.max_game_turns > 0
-                else 500
-            )
+    try:
+        for game_num in tqdm(range(1, num_games + 1), desc="Simulating Games", unit="game"):
+            game_start = time.perf_counter()
+            game_actions: List[Dict] = []
+            game_winner = "error"
+            game_error = False
 
-            while not game_state.is_terminal() and turn < max_turns:
-                turn += 1
-                acting_player_id = game_state.get_acting_player()
-                if acting_player_id == -1:
-                    logger.error(
-                        "Game %d Turn %d: Invalid acting player (-1). State: %s",
-                        game_num,
-                        turn,
-                        game_state,
-                    )
-                    results["Errors"] += 1
-                    break
+            try:
+                game_state = CambiaGameState(house_rules=config.cambia_rules)
+                # Initialize stateful agents
+                for agent in agents:
+                    if isinstance(agent, (CFRAgentWrapper, DeepCFRAgentWrapper)):
+                        agent.initialize_state(game_state)
 
-                current_agent = agents[acting_player_id]
-                try:
-                    legal_actions = game_state.get_legal_actions()
-                    if not legal_actions:
-                        # Check again if terminal, might have become terminal after last action
-                        if game_state.is_terminal():
-                            break
+                turn = 0
+                max_turns = (
+                    config.cambia_rules.max_game_turns
+                    if config.cambia_rules.max_game_turns > 0
+                    else 500
+                )
+
+                while not game_state.is_terminal() and turn < max_turns:
+                    turn += 1
+                    acting_player_id = game_state.get_acting_player()
+                    if acting_player_id == -1:
                         logger.error(
-                            "Game %d Turn %d: No legal actions but non-terminal? State: %s",
+                            "Game %d Turn %d: Invalid acting player (-1). State: %s",
                             game_num,
                             turn,
                             game_state,
                         )
                         results["Errors"] += 1
+                        game_error = True
                         break
 
-                    # Choose action
-                    chosen_action = current_agent.choose_action(game_state, legal_actions)
+                    current_agent = agents[acting_player_id]
+                    try:
+                        legal_actions = game_state.get_legal_actions()
+                        if not legal_actions:
+                            # Check again if terminal, might have become terminal after last action
+                            if game_state.is_terminal():
+                                break
+                            logger.error(
+                                "Game %d Turn %d: No legal actions but non-terminal? State: %s",
+                                game_num,
+                                turn,
+                                game_state,
+                            )
+                            results["Errors"] += 1
+                            game_error = True
+                            break
 
-                    # Apply action
-                    state_delta, undo_info = game_state.apply_action(chosen_action)
-                    if not callable(
-                        undo_info
-                    ):  # Should not happen if apply_action succeeds
+                        # Choose action
+                        chosen_action = current_agent.choose_action(game_state, legal_actions)
+
+                        # Collect action record if logging
+                        if output_file is not None:
+                            game_actions.append({
+                                "turn": turn,
+                                "player": acting_player_id,
+                                "action": type(chosen_action).__name__,
+                                "legal_count": len(legal_actions),
+                            })
+
+                        # Apply action
+                        state_delta, undo_info = game_state.apply_action(chosen_action)
+                        if not callable(
+                            undo_info
+                        ):  # Should not happen if apply_action succeeds
+                            logger.error(
+                                "Game %d Turn %d: Action %s applied but returned invalid undo info.",
+                                game_num,
+                                turn,
+                                chosen_action,
+                            )
+                            results["Errors"] += 1
+                            game_error = True
+                            break
+
+                        # Create observation AFTER action (for stateful agents)
+                        has_stateful = any(
+                            isinstance(a, (CFRAgentWrapper, DeepCFRAgentWrapper)) for a in agents
+                        )
+                        observation = None
+                        if has_stateful and hasattr(current_agent, "_create_observation"):
+                            observation = current_agent._create_observation(
+                                game_state, chosen_action, acting_player_id
+                            )
+
+                        # Update agent states (only stateful agents need it)
+                        if observation:
+                            for agent in agents:
+                                if isinstance(agent, (CFRAgentWrapper, DeepCFRAgentWrapper)):
+                                    agent.update_state(observation)
+
+                    except GameStateError as e_turn:
                         logger.error(
-                            "Game %d Turn %d: Action %s applied but returned invalid undo info.",
+                            "Game state error during game %d turn %d for P%d: %s",
                             game_num,
                             turn,
-                            chosen_action,
+                            acting_player_id,
+                            e_turn,
                         )
                         results["Errors"] += 1
-                        break
-
-                    # Create observation AFTER action (for stateful agents)
-                    has_stateful = any(
-                        isinstance(a, (CFRAgentWrapper, DeepCFRAgentWrapper)) for a in agents
-                    )
-                    observation = None
-                    if has_stateful and hasattr(current_agent, "_create_observation"):
-                        observation = current_agent._create_observation(
-                            game_state, chosen_action, acting_player_id
+                        game_error = True
+                        break  # End game on error
+                    except (AgentStateError, ObservationUpdateError) as e_turn:
+                        logger.error(
+                            "Agent state error during game %d turn %d for P%d: %s",
+                            game_num,
+                            turn,
+                            acting_player_id,
+                            e_turn,
                         )
+                        results["Errors"] += 1
+                        game_error = True
+                        break  # End game on error
+                    except Exception as e_turn:  # JUSTIFIED: evaluation resilience
+                        logger.exception(
+                            "Error during game %d turn %d for P%d: %s. State: %s",
+                            game_num,
+                            turn,
+                            acting_player_id,
+                            e_turn,
+                            game_state,
+                        )
+                        results["Errors"] += 1
+                        game_error = True
+                        break  # End game on error
 
-                    # Update agent states (only stateful agents need it)
-                    if observation:
-                        for agent in agents:
-                            if isinstance(agent, (CFRAgentWrapper, DeepCFRAgentWrapper)):
-                                agent.update_state(observation)
+                # Game End
+                if game_state.is_terminal():
+                    winner = game_state._winner
+                    if winner == 0:
+                        results["P0 Wins"] += 1
+                        game_winner = "p0"
+                    elif winner == 1:
+                        results["P1 Wins"] += 1
+                        game_winner = "p1"
+                    else:
+                        results["Ties"] += 1
+                        game_winner = "tie"
+                    # Capture score margin: sum of card values per player hand
+                    try:
+                        hand_scores = [
+                            sum(card.value for card in game_state.players[i].hand)
+                            for i in range(len(game_state.players))
+                        ]
+                        if len(hand_scores) == 2:
+                            margin = abs(hand_scores[0] - hand_scores[1])
+                            score_margins.append(float(margin))
+                    except Exception:
+                        pass  # Skip margin if hand unavailable
+                    game_turns_list.append(turn)
+                elif turn >= max_turns:
+                    logger.debug(
+                        "Game %d reached max turns (%d). Scoring as tie.", game_num, max_turns
+                    )
+                    results["MaxTurnTies"] += 1
+                    game_winner = "max_turns"
+                    game_turns_list.append(turn)
 
-                except GameStateError as e_turn:
-                    logger.error(
-                        "Game state error during game %d turn %d for P%d: %s",
-                        game_num,
-                        turn,
-                        acting_player_id,
-                        e_turn,
-                    )
-                    results["Errors"] += 1
-                    break  # End game on error
-                except (AgentStateError, ObservationUpdateError) as e_turn:
-                    logger.error(
-                        "Agent state error during game %d turn %d for P%d: %s",
-                        game_num,
-                        turn,
-                        acting_player_id,
-                        e_turn,
-                    )
-                    results["Errors"] += 1
-                    break  # End game on error
-                except Exception as e_turn:  # JUSTIFIED: evaluation resilience
-                    logger.exception(
-                        "Error during game %d turn %d for P%d: %s. State: %s",
-                        game_num,
-                        turn,
-                        acting_player_id,
-                        e_turn,
-                        game_state,
-                    )
-                    results["Errors"] += 1
-                    break  # End game on error
-
-            # Game End
-            if game_state.is_terminal():
-                winner = game_state._winner
-                if winner == 0:
-                    results["P0 Wins"] += 1
-                elif winner == 1:
-                    results["P1 Wins"] += 1
-                else:
-                    results["Ties"] += 1
-            elif turn >= max_turns:
-                logger.debug(
-                    "Game %d reached max turns (%d). Scoring as tie.", game_num, max_turns
+            except GameStateError as e_game_loop:
+                logger.error(
+                    "Game state error during game simulation %d: %s",
+                    game_num,
+                    e_game_loop,
                 )
-                results["MaxTurnTies"] += 1
+                results["Errors"] += 1
+                game_error = True
+            except (AgentStateError, ObservationUpdateError) as e_game_loop:
+                logger.error(
+                    "Agent state error during game simulation %d: %s",
+                    game_num,
+                    e_game_loop,
+                )
+                results["Errors"] += 1
+                game_error = True
+            except Exception as e_game_loop:  # JUSTIFIED: evaluation resilience
+                logger.exception(
+                    "Critical error during game simulation %d setup or loop: %s",
+                    game_num,
+                    e_game_loop,
+                )
+                results["Errors"] += 1
+                game_error = True
 
-        except GameStateError as e_game_loop:
-            logger.error(
-                "Game state error during game simulation %d: %s",
-                game_num,
-                e_game_loop,
-            )
-            results["Errors"] += 1
-        except (AgentStateError, ObservationUpdateError) as e_game_loop:
-            logger.error(
-                "Agent state error during game simulation %d: %s",
-                game_num,
-                e_game_loop,
-            )
-            results["Errors"] += 1
-        except Exception as e_game_loop:  # JUSTIFIED: evaluation resilience
-            logger.exception(
-                "Critical error during game simulation %d setup or loop: %s",
-                game_num,
-                e_game_loop,
-            )
-            results["Errors"] += 1
+            game_end = time.perf_counter()
+            game_duration_ms = (game_end - game_start) * 1000.0
 
-    end_time = time.time()
-    total_time = end_time - start_time
+            # Write JSONL record if logging enabled
+            if output_file is not None:
+                if game_error and game_winner == "error":
+                    pass  # winner already set to "error"
+                serialize_start = time.perf_counter()
+                record = {
+                    "game_id": game_num,
+                    "winner": game_winner,
+                    "turns": turn,
+                    "duration_ms": round(game_duration_ms, 3),
+                    "actions": game_actions,
+                }
+                output_file.write(json.dumps(record) + "\n")
+                serialize_end = time.perf_counter()
+                jsonl_overhead_ms += (serialize_end - serialize_start) * 1000.0
+
+    finally:
+        if output_file is not None:
+            output_file.close()
+
+    end_time = time.perf_counter()
+    total_time_ms = (end_time - start_time) * 1000.0
+    total_time = total_time_ms / 1000.0
     games_played = sum(results.values())
+
+    # Report JSONL overhead if logging was enabled
+    if output_path is not None:
+        avg_overhead_ms = jsonl_overhead_ms / num_games if num_games > 0 else 0.0
+        pct_overhead = (jsonl_overhead_ms / total_time_ms * 100) if total_time_ms > 0 else 0.0
+        logger.info(
+            "JSONL logging overhead: total=%.1fms, avg=%.3fms/game, pct=%.2f%% of total time",
+            jsonl_overhead_ms,
+            avg_overhead_ms,
+            pct_overhead,
+        )
+        results["logging_overhead_ms"] = int(jsonl_overhead_ms)
+        results["logging_overhead_pct"] = int(pct_overhead)
+
+    # Aggregate enhanced stats — stored as a plain dict attribute (.stats).
+    # NOT stored in the Counter itself to preserve backward-compat sum invariants.
+    enhanced_stats: Dict = {}
+    if score_margins:
+        avg_margin = sum(score_margins) / len(score_margins)
+        enhanced_stats["avg_score_margin"] = avg_margin
+    if game_turns_list:
+        avg_turns = sum(game_turns_list) / len(game_turns_list)
+        variance = sum((t - avg_turns) ** 2 for t in game_turns_list) / len(game_turns_list)
+        std_turns = math.sqrt(variance)
+        enhanced_stats["avg_game_turns"] = avg_turns
+        enhanced_stats["std_game_turns"] = std_turns
+    # Attach as attribute so CLI and tests can access enhanced stats without
+    # polluting the Counter sum that existing tests rely on.
+    results.stats = enhanced_stats  # type: ignore[attr-defined]
 
     # Report Results
     logger.info("--- Evaluation Results ---")
@@ -788,6 +903,14 @@ def run_evaluation(
         max_turn_ties,
         errors,
     )
+    if "avg_score_margin" in enhanced_stats:
+        logger.info("Avg Score Margin: %.2f", enhanced_stats["avg_score_margin"])
+    if "avg_game_turns" in enhanced_stats:
+        logger.info(
+            "Game Length: mean=%.1f turns, stdev=%.1f turns",
+            enhanced_stats["avg_game_turns"],
+            enhanced_stats.get("std_game_turns", 0.0),
+        )
     logger.info("--------------------------")
     return results
 
@@ -798,6 +921,7 @@ def run_evaluation_multi_baseline(
     num_games: int,
     baselines: List[str],
     device: str = "cpu",
+    output_dir: Optional[str] = None,
 ) -> Dict[str, Counter]:
     """
     Evaluate a Deep CFR checkpoint against multiple baseline agents.
@@ -808,6 +932,7 @@ def run_evaluation_multi_baseline(
         num_games: Number of games per baseline matchup.
         baselines: List of baseline agent type strings.
         device: Torch device string for network inference.
+        output_dir: If set, writes per-game JSONL to {output_dir}/{baseline}.jsonl.
 
     Returns:
         Dict mapping baseline name -> Counter with results.
@@ -815,6 +940,7 @@ def run_evaluation_multi_baseline(
     all_results: Dict[str, Counter] = {}
     for baseline in baselines:
         logger.info("Evaluating deep_cfr vs %s (%d games)...", baseline, num_games)
+        output_path = f"{output_dir}/{baseline}.jsonl" if output_dir is not None else None
         results = run_evaluation(
             config_path=config_path,
             agent1_type="deep_cfr",
@@ -823,9 +949,134 @@ def run_evaluation_multi_baseline(
             strategy_path=None,
             checkpoint_path=checkpoint_path,
             device=device,
+            output_path=output_path,
         )
         all_results[baseline] = results
     return all_results
+
+
+def run_head_to_head(
+    checkpoint_a: str,
+    checkpoint_b: str,
+    num_games: int,
+    config,
+    device: str = "cpu",
+) -> Dict:
+    """
+    Play two Deep CFR checkpoints against each other.
+
+    Alternates which checkpoint goes first every game to reduce first-mover bias.
+
+    Returns:
+        Dict with checkpoint_a_wins, checkpoint_b_wins, ties, avg_game_turns,
+        std_game_turns.
+    """
+    logger.info(
+        "Head-to-head: %s vs %s (%d games)", checkpoint_a, checkpoint_b, num_games
+    )
+
+    checkpoint_a_wins = 0
+    checkpoint_b_wins = 0
+    ties_count = 0
+    errors_count = 0
+    turns_list: List[int] = []
+
+    for game_num in range(1, num_games + 1):
+        # Alternate who goes first
+        a_is_p0 = (game_num % 2 == 1)
+        if a_is_p0:
+            agent0 = DeepCFRAgentWrapper(0, config, checkpoint_a, device=device)
+            agent1 = DeepCFRAgentWrapper(1, config, checkpoint_b, device=device)
+        else:
+            agent0 = DeepCFRAgentWrapper(0, config, checkpoint_b, device=device)
+            agent1 = DeepCFRAgentWrapper(1, config, checkpoint_a, device=device)
+
+        agents = [agent0, agent1]
+
+        try:
+            game_state = CambiaGameState(house_rules=config.cambia_rules)
+            for agent in agents:
+                agent.initialize_state(game_state)
+
+            max_turns = (
+                config.cambia_rules.max_game_turns
+                if config.cambia_rules.max_game_turns > 0
+                else 500
+            )
+            turn = 0
+
+            while not game_state.is_terminal() and turn < max_turns:
+                turn += 1
+                acting_player_id = game_state.get_acting_player()
+                if acting_player_id == -1:
+                    break
+                current_agent = agents[acting_player_id]
+                try:
+                    legal_actions = game_state.get_legal_actions()
+                    if not legal_actions:
+                        if game_state.is_terminal():
+                            break
+                        break
+                    chosen_action = current_agent.choose_action(game_state, legal_actions)
+                    _, undo_info = game_state.apply_action(chosen_action)
+                    if not callable(undo_info):
+                        break
+                    # Update agent states
+                    obs = current_agent._create_observation(
+                        game_state, chosen_action, acting_player_id
+                    )
+                    if obs:
+                        for agent in agents:
+                            agent.update_state(obs)
+                except Exception as e_turn:
+                    logger.error("Head-to-head game %d turn error: %s", game_num, e_turn)
+                    break
+
+            turns_list.append(turn)
+
+            if game_state.is_terminal():
+                winner = game_state._winner
+                if winner is None:
+                    ties_count += 1
+                elif (a_is_p0 and winner == 0) or (not a_is_p0 and winner == 1):
+                    checkpoint_a_wins += 1
+                else:
+                    checkpoint_b_wins += 1
+            else:
+                # Max turns reached without terminal — count as tie
+                ties_count += 1
+
+        except Exception as e_game:
+            logger.error("Head-to-head game %d error: %s", game_num, e_game)
+            errors_count += 1
+
+    avg_turns = sum(turns_list) / len(turns_list) if turns_list else 0.0
+    if turns_list:
+        variance = sum((t - avg_turns) ** 2 for t in turns_list) / len(turns_list)
+        std_turns = math.sqrt(variance)
+    else:
+        std_turns = 0.0
+
+    total = checkpoint_a_wins + checkpoint_b_wins + ties_count
+    logger.info(
+        "Head-to-head results: A=%d (%.1f%%), B=%d (%.1f%%), ties=%d, avg_turns=%.1f",
+        checkpoint_a_wins,
+        checkpoint_a_wins / total * 100 if total else 0,
+        checkpoint_b_wins,
+        checkpoint_b_wins / total * 100 if total else 0,
+        ties_count,
+        avg_turns,
+    )
+
+    return {
+        "checkpoint_a_wins": checkpoint_a_wins,
+        "checkpoint_b_wins": checkpoint_b_wins,
+        "ties": ties_count,
+        "errors": errors_count,
+        "avg_game_turns": avg_turns,
+        "std_game_turns": std_turns,
+        "total_games": num_games,
+    }
 
 
 if __name__ == "__main__":

@@ -15,13 +15,30 @@ pyenv virtualenv 3.13 cfr
 pyenv activate cfr
 
 # Install dependencies
-pip install numpy pyyaml pydantic rich joblib torch typer[all]
+pip install torch numpy cffi pydantic pyyaml joblib tqdm psutil rich "typer[all]"
+# Or alternatively:
+pip install -r requirements.txt
 
 # Install the project in editable mode (registers the `cambia` CLI command)
 pip install -e .
 ```
 
 The editable install (`pip install -e .`) reads `pyproject.toml` and registers the `cambia` entry point. After this, the `cambia` command is available in the virtualenv.
+
+### Device-specific setup
+
+**CUDA (NVIDIA):** Included with the standard `torch` install above. Use `--device cuda` or `--device auto`.
+
+**Intel Arc / XPU:** Requires Intel Extension for PyTorch (IPEX) in addition to the base install:
+
+```bash
+# Install IPEX for Arc GPU (version must match your torch version — check https://github.com/intel/intel-extension-for-pytorch)
+pip install intel_extension_for_pytorch
+```
+
+Then use `--device xpu` or `--device auto` (auto-detects XPU if IPEX is installed and `torch.xpu.is_available()` returns true). IPEX is an optional dependency — not required for CUDA or CPU training.
+
+**CPU-only:** No additional packages needed. Use `--device cpu`.
 
 ## Quickstart
 
@@ -92,7 +109,8 @@ Deep CFR override options (override values from the `deep_cfr` config section):
 - `--traversals` -- traversals per training step
 - `--alpha` -- iteration weighting exponent
 - `--buffer-capacity` -- reservoir buffer capacity (applies to both advantage and strategy)
-- `--gpu` / `--no-gpu` -- use GPU if available
+- `--device` -- compute device: `auto` (default), `cpu`, `cuda`, `xpu`
+- `--gpu` / `--no-gpu` -- *deprecated*, use `--device cuda` / `--device cpu`
 
 Deep CFR parameters are loaded from the `deep_cfr` section of the YAML config. CLI override options take precedence.
 
@@ -186,7 +204,8 @@ These are loaded from the `deep_cfr` section of the YAML config and can be overr
 | `advantage_buffer_capacity` | int | 2,000,000 | `--buffer-capacity` | Advantage reservoir buffer max samples |
 | `strategy_buffer_capacity` | int | 2,000,000 | `--buffer-capacity` | Strategy reservoir buffer max samples |
 | `save_interval` | int | 10 | -- | Save checkpoint every N training steps |
-| `use_gpu` | bool | false | `--gpu/--no-gpu` | Use CUDA for network training if available |
+| `device` | str | `"auto"` | `--device` | Compute device: `auto`, `cpu`, `cuda`, `xpu` |
+| `use_gpu` | bool | false | `--gpu/--no-gpu` | *Deprecated*, use `--device` instead |
 | `engine_backend` | str | `"python"` | -- | Game engine for traversal: `"python"` or `"go"` (requires `make libcambia`) |
 | `es_validation_interval` | int | 10 | -- | Run ES validation every N training steps (0 to disable) |
 | `es_validation_depth` | int | 10 | -- | Max turns per ES validation game |
@@ -198,6 +217,9 @@ These are loaded from the `deep_cfr` section of the YAML config and can be overr
 | `use_compile` | bool | false | -- | `torch.compile` for CUDA graph optimization |
 | `num_traversal_threads` | int | 1 | -- | Threads for Go FFI traversals (requires `engine_backend: "go"`) |
 | `validate_inputs` | bool | true | -- | NaN input validation on network forward pass; disable for GPU perf |
+| `traversal_depth_limit` | int | 0 | -- | Max recursion depth per traversal (0 = unlimited) |
+| `max_tasks_per_child` | int or `"auto"` | `"auto"` | -- | Worker process recycling after N tasks (auto = based on RAM budget) |
+| `worker_memory_budget_pct` | float | 0.10 | -- | Fraction of system RAM per worker for auto max_tasks_per_child calculation |
 
 ### Checkpointing and Resume
 
@@ -236,7 +258,7 @@ src/
   persistence.py          -- Tabular save/load (joblib)
   analysis_tools.py       -- Exploitability via best-response traversal
   ffi/
-    bridge.py             -- ctypes wrapper around libcambia.so (GoEngine, GoAgentState)
+    bridge.py             -- cffi wrapper around libcambia.so (GoEngine, GoAgentState)
   game/
     engine.py             -- CambiaGameState (apply/undo game actions)
     _ability_mixin.py     -- Card ability resolution
@@ -278,7 +300,7 @@ Re-run `pip install -e .` only if you change `pyproject.toml` (e.g. adding entry
 ### Tests
 
 ```bash
-# Run all tests (278 tests)
+# Run all tests (607 tests)
 pytest tests/ -v
 
 # Run a specific test module
@@ -304,10 +326,13 @@ Test modules:
 
 - `numpy` -- array operations
 - `torch` (PyTorch) -- neural networks (Deep CFR only; CPU build sufficient)
+- `cffi` -- low-overhead FFI for libcambia.so (replaces ctypes)
 - `pyyaml` -- config file parsing
 - `pydantic` -- config validation
 - `rich` -- terminal live display
 - `joblib` -- tabular strategy persistence
+- `tqdm` -- progress bars
+- `psutil` -- system resource monitoring
 - `typer[all]` -- CLI framework with Rich integration
 
 ## Known Limitations
