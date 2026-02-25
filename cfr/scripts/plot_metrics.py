@@ -258,8 +258,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--output-dir",
-        default="cfr/runs/plots",
-        help="Directory to save plots (default: cfr/runs/plots)",
+        default="runs/plots",
+        help="Directory to save plots (default: runs/plots)",
     )
     args = parser.parse_args()
     generate_plots(runs_dir=args.runs_dir, output_dir=args.output_dir)

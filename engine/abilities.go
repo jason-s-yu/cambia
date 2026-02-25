@@ -180,7 +180,7 @@ func (g *GameState) kingLook(ownIdx, oppIdx uint8) error {
 	// inferred from context, but we store opp card as the secondary via SwapOppIdx).
 	g.LastAction.ActionIdx = EncodeKingLook(ownIdx, oppIdx)
 	g.LastAction.ActingPlayer = acting
-	g.LastAction.RevealedCard = ownCard  // own card revealed
+	g.LastAction.RevealedCard = ownCard // own card revealed
 	g.LastAction.RevealedIdx = ownIdx
 	g.LastAction.RevealedOwner = acting
 	g.LastAction.SwapOwnIdx = ownIdx
@@ -235,5 +235,212 @@ func (g *GameState) kingSwapDecision(performSwap bool) error {
 	// Clear pending and initiate snap phase for the discarded ability card.
 	g.Pending = PendingAction{}
 	g.initiateSnapPhase(g.DiscardPile[g.DiscardLen-1])
+	return nil
+}
+
+// ===========================================================================
+// N-Player ability handlers — accept explicit target player
+// ===========================================================================
+
+// peekOtherNPlayer resolves PendingPeekOther targeting a specific player.
+func (g *GameState) peekOtherNPlayer(slot uint8, targetPlayer uint8) error {
+	if g.Pending.Type != PendingPeekOther {
+		return fmt.Errorf("pending type is not PendingPeekOther (got %d)", g.Pending.Type)
+	}
+	acting := g.Pending.PlayerID
+	if targetPlayer >= g.Rules.numPlayers() || targetPlayer == acting {
+		return fmt.Errorf("peekOtherNPlayer: invalid target player %d", targetPlayer)
+	}
+	if slot >= g.Players[targetPlayer].HandLen {
+		return fmt.Errorf("peekOtherNPlayer: slot %d out of range (hand size %d)", slot, g.Players[targetPlayer].HandLen)
+	}
+
+	revealed := g.Players[targetPlayer].Hand[slot]
+
+	g.LastAction.ActionIdx = EncodePeekOther(slot)
+	g.LastAction.ActingPlayer = acting
+	g.LastAction.RevealedCard = revealed
+	g.LastAction.RevealedIdx = slot
+	g.LastAction.RevealedOwner = targetPlayer
+
+	g.Pending = PendingAction{}
+	g.initiateSnapPhase(g.DiscardPile[g.DiscardLen-1])
+	return nil
+}
+
+// blindSwapNPlayer resolves PendingBlindSwap targeting a specific opponent.
+func (g *GameState) blindSwapNPlayer(ownIdx, oppSlot uint8, targetPlayer uint8) error {
+	if g.Pending.Type != PendingBlindSwap {
+		return fmt.Errorf("pending type is not PendingBlindSwap (got %d)", g.Pending.Type)
+	}
+	acting := g.Pending.PlayerID
+	if targetPlayer >= g.Rules.numPlayers() || targetPlayer == acting {
+		return fmt.Errorf("blindSwapNPlayer: invalid target player %d", targetPlayer)
+	}
+	if ownIdx >= g.Players[acting].HandLen {
+		return fmt.Errorf("blindSwapNPlayer: own index %d out of range (hand size %d)", ownIdx, g.Players[acting].HandLen)
+	}
+	if oppSlot >= g.Players[targetPlayer].HandLen {
+		return fmt.Errorf("blindSwapNPlayer: opp slot %d out of range (hand size %d)", oppSlot, g.Players[targetPlayer].HandLen)
+	}
+
+	g.Players[acting].Hand[ownIdx], g.Players[targetPlayer].Hand[oppSlot] =
+		g.Players[targetPlayer].Hand[oppSlot], g.Players[acting].Hand[ownIdx]
+
+	g.LastAction.ActionIdx = EncodeBlindSwap(ownIdx, oppSlot)
+	g.LastAction.ActingPlayer = acting
+	g.LastAction.SwapOwnIdx = ownIdx
+	g.LastAction.SwapOppIdx = oppSlot
+
+	g.Pending = PendingAction{}
+	g.initiateSnapPhase(g.DiscardPile[g.DiscardLen-1])
+	return nil
+}
+
+// kingLookNPlayer resolves the look phase of PendingKingLook targeting a specific opponent.
+// Stores targetPlayer in Pending.Data[3] for the subsequent swap decision.
+func (g *GameState) kingLookNPlayer(ownIdx, oppSlot uint8, targetPlayer uint8) error {
+	if g.Pending.Type != PendingKingLook {
+		return fmt.Errorf("pending type is not PendingKingLook (got %d)", g.Pending.Type)
+	}
+	acting := g.Pending.PlayerID
+	if targetPlayer >= g.Rules.numPlayers() || targetPlayer == acting {
+		return fmt.Errorf("kingLookNPlayer: invalid target player %d", targetPlayer)
+	}
+	if ownIdx >= g.Players[acting].HandLen {
+		return fmt.Errorf("kingLookNPlayer: own index %d out of range (hand size %d)", ownIdx, g.Players[acting].HandLen)
+	}
+	if oppSlot >= g.Players[targetPlayer].HandLen {
+		return fmt.Errorf("kingLookNPlayer: opp slot %d out of range (hand size %d)", oppSlot, g.Players[targetPlayer].HandLen)
+	}
+
+	ownCard := g.Players[acting].Hand[ownIdx]
+
+	g.LastAction.ActionIdx = EncodeKingLook(ownIdx, oppSlot)
+	g.LastAction.ActingPlayer = acting
+	g.LastAction.RevealedCard = ownCard
+	g.LastAction.RevealedIdx = ownIdx
+	g.LastAction.RevealedOwner = acting
+	g.LastAction.SwapOwnIdx = ownIdx
+	g.LastAction.SwapOppIdx = oppSlot
+
+	// Transition to PendingKingDecision.
+	// Data[0]=ownIdx, Data[1]=oppSlot, Data[2]=ownCard, Data[3]=targetPlayer.
+	g.Pending.Type = PendingKingDecision
+	g.Pending.Data[0] = ownIdx
+	g.Pending.Data[1] = oppSlot
+	g.Pending.Data[2] = uint8(ownCard)
+	g.Pending.Data[3] = targetPlayer
+	return nil
+}
+
+// kingSwapDecisionNPlayer resolves the swap decision for N-player KingLook.
+// Reads targetPlayer from Pending.Data[3].
+func (g *GameState) kingSwapDecisionNPlayer(performSwap bool) error {
+	if g.Pending.Type != PendingKingDecision {
+		return fmt.Errorf("pending type is not PendingKingDecision (got %d)", g.Pending.Type)
+	}
+	acting := g.Pending.PlayerID
+	ownIdx := g.Pending.Data[0]
+	oppSlot := g.Pending.Data[1]
+	targetPlayer := g.Pending.Data[3]
+
+	if ownIdx >= g.Players[acting].HandLen {
+		return fmt.Errorf("kingSwapDecisionNPlayer: own index %d out of range", ownIdx)
+	}
+	if oppSlot >= g.Players[targetPlayer].HandLen {
+		return fmt.Errorf("kingSwapDecisionNPlayer: opp slot %d out of range", oppSlot)
+	}
+
+	actionIdx := NPlayerActionKingSwapNo
+	if performSwap {
+		actionIdx = NPlayerActionKingSwapYes
+		g.Players[acting].Hand[ownIdx], g.Players[targetPlayer].Hand[oppSlot] =
+			g.Players[targetPlayer].Hand[oppSlot], g.Players[acting].Hand[ownIdx]
+	}
+
+	g.LastAction.ActionIdx = actionIdx
+	g.LastAction.ActingPlayer = acting
+	g.LastAction.SwapOwnIdx = ownIdx
+	g.LastAction.SwapOppIdx = oppSlot
+
+	g.Pending = PendingAction{}
+	g.initiateSnapPhase(g.DiscardPile[g.DiscardLen-1])
+	return nil
+}
+
+// discardWithAbilityNPlayer handles DiscardWithAbility for N-player games (>2 players).
+// Checks ALL opponents to determine if an ability can fire.
+func (g *GameState) discardWithAbilityNPlayer() error {
+	if g.Pending.Type != PendingDiscard {
+		return fmt.Errorf("pending action is not a discard (type %d)", g.Pending.Type)
+	}
+
+	drawn := Card(g.Pending.Data[0])
+	drawnFrom := g.Pending.Data[1]
+	acting := g.Pending.PlayerID
+
+	g.DiscardPile[g.DiscardLen] = drawn
+	g.DiscardLen++
+
+	g.LastAction.ActionIdx = ActionDiscardWithAbility
+	g.LastAction.ActingPlayer = acting
+	g.LastAction.RevealedCard = drawn
+	g.LastAction.DrawnFrom = drawnFrom
+
+	g.Pending = PendingAction{}
+
+	if drawnFrom != DrawnFromStockpile {
+		g.initiateSnapPhase(drawn)
+		return nil
+	}
+
+	ability := drawn.Ability()
+	ownHandLen := g.Players[acting].HandLen
+
+	switch ability {
+	case AbilityPeekOwn:
+		if ownHandLen > 0 {
+			g.Pending.Type = PendingPeekOwn
+			g.Pending.PlayerID = acting
+			return nil
+		}
+	case AbilityPeekOther:
+		for _, opp := range g.Opponents(acting) {
+			if g.Players[opp].HandLen > 0 {
+				g.Pending.Type = PendingPeekOther
+				g.Pending.PlayerID = acting
+				return nil
+			}
+		}
+	case AbilityBlindSwap:
+		if ownHandLen > 0 {
+			for _, opp := range g.Opponents(acting) {
+				if g.Rules.LockCallerHand && g.IsCambiaCalled() && int8(opp) == g.CambiaCaller {
+					continue
+				}
+				if g.Players[opp].HandLen > 0 {
+					g.Pending.Type = PendingBlindSwap
+					g.Pending.PlayerID = acting
+					return nil
+				}
+			}
+		}
+	case AbilityKingLook:
+		if ownHandLen > 0 {
+			for _, opp := range g.Opponents(acting) {
+				if g.Rules.LockCallerHand && g.IsCambiaCalled() && int8(opp) == g.CambiaCaller {
+					continue
+				}
+				if g.Players[opp].HandLen > 0 {
+					g.Pending.Type = PendingKingLook
+					g.Pending.PlayerID = acting
+					return nil
+				}
+			}
+		}
+	}
+
+	g.initiateSnapPhase(drawn)
 	return nil
 }

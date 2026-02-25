@@ -9,6 +9,8 @@ from typing import List, Tuple, Optional, Dict, Any, Set, Union
 from dataclasses import dataclass, field
 import logging
 import copy
+import math
+import random
 import traceback
 
 from .card import Card
@@ -16,6 +18,7 @@ from .constants import (
     ActionSnapOpponentMove,
     CardBucket,
     DecayCategory,
+    EpistemicTag,
     GamePhase,
     StockpileEstimate,
     GameAction,
@@ -25,6 +28,8 @@ from .constants import (
     ActionAbilityBlindSwapSelect,
     ActionAbilityKingLookSelect,
     ActionAbilityKingSwapDecision,
+    EP_PBS_MAX_ACTIVE_MASK,
+    bucket_saliency,
 )
 from .config import Config
 from .abstraction import get_card_bucket, decay_bucket
@@ -102,6 +107,29 @@ class AgentState:
     # Internal tracking
     _current_game_turn: int = 0
 
+    def __post_init__(self):
+        """Initialize EP-PBS epistemic tracking fields (not part of dataclass schema)."""
+        # Slot tags: [0-5] = own hand, [6-11] = opponent hand
+        self.slot_tags: list = [EpistemicTag.UNK] * 12
+        # Slot buckets: 0-8 for known concrete buckets, 0 = unknown
+        self.slot_buckets: list = [0] * 12
+        # Active masks: slots where private knowledge is tracked (max EP_PBS_MAX_ACTIVE_MASK each)
+        self.own_active_mask: list = []  # Slots where WE have PRIV_OWN tag
+        self.opp_active_mask: list = []  # Slots where OPPONENT has PRIV_OPP tag
+
+        # N-Player knowledge mask tracking (Python reference implementation)
+        # num_players: total players in the N-player game (2-6)
+        self.num_players: int = 2
+        # knowledge_masks: (player_idx, card_slot_idx) → set of player IDs who know the card
+        # Slot layout: player_idx * 6 + card_slot_idx (0-35 global slots)
+        self.knowledge_masks: dict = {}  # Dict[(int,int), Set[int]]
+
+        # Memory archetype fields (read from config if present, else default to "perfect").
+        deep_cfg = getattr(self.config, "deep_cfr", None)
+        self.memory_archetype: str = getattr(deep_cfg, "memory_archetype", "perfect")
+        self.memory_decay_lambda: float = getattr(deep_cfg, "memory_decay_lambda", 0.1)
+        self.memory_capacity: int = getattr(deep_cfg, "memory_capacity", 3)
+
     def initialize(
         self,
         initial_observation: AgentObservation,
@@ -152,6 +180,18 @@ class AgentState:
         }
         self.opponent_last_seen_turn = {}
 
+        # EP-PBS state: slots 0-5 = own, 6-11 = opp
+        self.slot_tags = [EpistemicTag.UNK] * 12
+        self.slot_buckets = [0] * 12
+        self.own_active_mask: list = []   # max EP_PBS_MAX_ACTIVE_MASK PrivOwn slot indices
+        self.opp_active_mask: list = []   # max EP_PBS_MAX_ACTIVE_MASK PrivOpp slot indices
+
+        # Initialize own slots from initial peek
+        for slot_idx in range(self.initial_hand_size):
+            info = self.own_hand.get(slot_idx)
+            if info is not None and info.bucket != CardBucket.UNKNOWN:
+                self._eppbs_set_tag(slot_idx, EpistemicTag.PRIV_OWN, info.bucket.value)
+
         logger.debug(
             "Agent %d initialized (T%d). OH(%d): %s. OB(%d): %s",
             self.player_id,
@@ -161,6 +201,165 @@ class AgentState:
             self.opponent_card_count,
             {k: v.name for k, v in self.opponent_belief.items()},
         )
+
+    def _eppbs_set_tag(self, slot: int, tag: int, bucket: int = 0):
+        """Set EP-PBS tag for a slot, managing active masks with saliency/FIFO eviction."""
+        old_tag = self.slot_tags[slot]
+
+        # Remove from old mask
+        if old_tag == EpistemicTag.PRIV_OWN and slot in self.own_active_mask:
+            self.own_active_mask.remove(slot)
+        elif old_tag == EpistemicTag.PRIV_OPP and slot in self.opp_active_mask:
+            self.opp_active_mask.remove(slot)
+
+        self.slot_tags[slot] = tag
+        if tag in (EpistemicTag.PRIV_OWN, EpistemicTag.PUB):
+            self.slot_buckets[slot] = bucket
+        else:
+            self.slot_buckets[slot] = 0
+
+        # Add to new mask with eviction
+        if tag == EpistemicTag.PRIV_OWN:
+            if len(self.own_active_mask) >= EP_PBS_MAX_ACTIVE_MASK:
+                # Saliency eviction: only swap if new slot is more salient than minimum
+                min_sal = float("inf")
+                min_idx = 0
+                for i, s in enumerate(self.own_active_mask):
+                    sal = bucket_saliency(self.slot_buckets[s])
+                    if sal < min_sal:
+                        min_sal = sal
+                        min_idx = i
+                new_sal = bucket_saliency(bucket)
+                if new_sal > min_sal:
+                    evicted = self.own_active_mask.pop(min_idx)
+                    self.slot_tags[evicted] = EpistemicTag.UNK
+                    self.slot_buckets[evicted] = 0
+                    self.own_active_mask.append(slot)
+                else:
+                    # New slot is less salient — revert tag to UNK (don't track it)
+                    self.slot_tags[slot] = EpistemicTag.UNK
+                    self.slot_buckets[slot] = 0
+            else:
+                self.own_active_mask.append(slot)
+
+        elif tag == EpistemicTag.PRIV_OPP:
+            if len(self.opp_active_mask) >= EP_PBS_MAX_ACTIVE_MASK:
+                # FIFO eviction
+                evicted = self.opp_active_mask.pop(0)
+                self.slot_tags[evicted] = EpistemicTag.UNK
+                self.slot_buckets[evicted] = 0
+            self.opp_active_mask.append(slot)
+
+    def _eppbs_update_from_action(self, action, actor: int, observation: "AgentObservation"):
+        """Update EP-PBS epistemic tags based on the observed action.
+
+        Tag transitions:
+        - We peek any card: UNK→PRIV_OWN; PRIV_OPP→PUB
+        - Opponent peeks: UNK→PRIV_OPP; PRIV_OWN→PUB
+        - Blind/King swap: both slots → UNK
+        """
+        if action is None or actor == -1:
+            return
+
+        def _we_learn_slot(slot: int, bucket_val: int):
+            """We learn the identity of `slot`."""
+            cur = self.slot_tags[slot]
+            if cur == EpistemicTag.UNK:
+                self._eppbs_set_tag(slot, EpistemicTag.PRIV_OWN, bucket_val)
+            elif cur == EpistemicTag.PRIV_OPP:
+                # Opponent already knew it; now both know → PUB
+                self._eppbs_set_tag(slot, EpistemicTag.PUB, bucket_val)
+            else:
+                # Already PRIV_OWN or PUB: update bucket in case it changed
+                self.slot_buckets[slot] = bucket_val
+
+        def _opp_learns_slot(slot: int):
+            """Opponent learns the identity of `slot`."""
+            cur = self.slot_tags[slot]
+            if cur == EpistemicTag.UNK:
+                self._eppbs_set_tag(slot, EpistemicTag.PRIV_OPP)
+            elif cur == EpistemicTag.PRIV_OWN:
+                # We already knew it; now both know → PUB
+                self._eppbs_set_tag(slot, EpistemicTag.PUB, self.slot_buckets[slot])
+            # Already PRIV_OPP or PUB: no change
+
+        def _forget_slot(slot: int):
+            """Card at `slot` moved/swapped — both players lose epistemic knowledge."""
+            self._eppbs_set_tag(slot, EpistemicTag.UNK)
+
+        def _bucket_from_peeked(p_idx: int, h_idx: int) -> int:
+            """Extract raw bucket value from peeked_cards observation."""
+            if not observation.peeked_cards:
+                return 0
+            card = observation.peeked_cards.get((p_idx, h_idx))
+            if card is None:
+                return 0
+            bucket = get_card_bucket(card)
+            if bucket == CardBucket.UNKNOWN:
+                return 0
+            return bucket.value
+
+        if actor == self.player_id:
+            if isinstance(action, ActionAbilityPeekOwnSelect):
+                h_idx = action.target_hand_index
+                bv = _bucket_from_peeked(self.player_id, h_idx)
+                _we_learn_slot(h_idx, bv)
+
+            elif isinstance(action, ActionAbilityPeekOtherSelect):
+                h_idx = action.target_opponent_hand_index
+                bv = _bucket_from_peeked(self.opponent_id, h_idx)
+                _we_learn_slot(6 + h_idx, bv)
+
+            elif isinstance(action, ActionAbilityKingLookSelect):
+                own_idx = action.own_hand_index
+                opp_idx = action.opponent_hand_index
+                bv_own = _bucket_from_peeked(self.player_id, own_idx)
+                bv_opp = _bucket_from_peeked(self.opponent_id, opp_idx)
+                _we_learn_slot(own_idx, bv_own)
+                _we_learn_slot(6 + opp_idx, bv_opp)
+
+            elif isinstance(action, ActionAbilityKingSwapDecision) and action.perform_swap:
+                if observation.king_swap_indices is not None:
+                    own_idx, opp_idx = observation.king_swap_indices
+                    # After swap: we hold opp's old card (we peeked it → PRIV_OWN)
+                    # opp holds our old card → forget opp slot (they have our card now)
+                    bv_new_own = self.slot_buckets[6 + opp_idx]  # opp's old card bucket
+                    _we_learn_slot(own_idx, bv_new_own)
+                    _forget_slot(6 + opp_idx)  # opp's slot now has our old card
+
+            elif isinstance(action, ActionAbilityBlindSwapSelect):
+                own_idx = action.own_hand_index
+                opp_idx = action.opponent_hand_index
+                _forget_slot(own_idx)
+                _forget_slot(6 + opp_idx)
+
+        elif actor == self.opponent_id:
+            if isinstance(action, ActionAbilityPeekOwnSelect):
+                h_idx = action.target_hand_index
+                _opp_learns_slot(6 + h_idx)
+
+            elif isinstance(action, ActionAbilityPeekOtherSelect):
+                h_idx = action.target_opponent_hand_index
+                _opp_learns_slot(h_idx)
+
+            elif isinstance(action, ActionAbilityKingLookSelect):
+                own_idx = action.own_hand_index
+                opp_idx = action.opponent_hand_index
+                _opp_learns_slot(6 + own_idx)  # opp sees their own card
+                _opp_learns_slot(opp_idx)       # opp sees our card
+
+            elif isinstance(action, ActionAbilityKingSwapDecision) and action.perform_swap:
+                if observation.king_swap_indices is not None:
+                    opp_own_idx, our_idx = observation.king_swap_indices
+                    # Both slots become uncertain from our perspective
+                    _forget_slot(6 + opp_own_idx)
+                    _forget_slot(our_idx)
+
+            elif isinstance(action, ActionAbilityBlindSwapSelect):
+                opp_own_idx = action.own_hand_index
+                our_idx = action.opponent_hand_index
+                _forget_slot(6 + opp_own_idx)
+                _forget_slot(our_idx)
 
     def update(self, observation: AgentObservation):
         """
@@ -743,6 +942,18 @@ class AgentState:
                     exc_info=True,
                 )
 
+        # --- 4b. EP-PBS epistemic tag updates from action ---
+        try:
+            self._eppbs_update_from_action(action, actor, observation)
+        except Exception as e_eppbs:
+            # JUSTIFIED: EP-PBS update failure should not disrupt core belief tracking
+            logger.debug(
+                "Agent %d: EP-PBS update failed T%d: %s",
+                self.player_id,
+                self._current_game_turn,
+                e_eppbs,
+            )
+
         # --- 5. Apply Time Decay (Level 2) ---
         if self.memory_level == 2:
             self._apply_time_decay(self._current_game_turn)
@@ -888,7 +1099,10 @@ class AgentState:
     def _estimate_stockpile(self, stock_size: int) -> StockpileEstimate:
         """Estimates stockpile category based on size."""
         try:
-            total_cards = 52 + self.config.cambia_rules.use_jokers
+            joker_count = self.config.cambia_rules.use_jokers
+            if isinstance(joker_count, bool):
+                joker_count = 2 if joker_count else 0
+            total_cards = 52 + joker_count
             low_threshold = max(1, total_cards // 5)  # e.g., 10 for 54 cards
             med_threshold = max(
                 low_threshold + 1, total_cards * 2 // 4
@@ -992,6 +1206,52 @@ class AgentState:
                     current_belief.name,
                     decayed_category.name,
                 )
+
+    def apply_memory_decay(self, rng=None):
+        """Apply per-turn memory decay/eviction based on memory_archetype.
+
+        Args:
+            rng: Optional random.Random instance (used for MemoryDecaying).
+                 Falls back to the module-level random if not provided.
+        """
+        archetype = self.memory_archetype
+
+        if archetype == "perfect":
+            # No decay — retain all observations.
+            return
+
+        elif archetype == "decaying":
+            # Probabilistic Bayesian diffusion: each PrivOwn slot decays with
+            # probability p = 1 - exp(-λ).
+            lam = self.memory_decay_lambda
+            if lam <= 0:
+                return
+            p = 1.0 - math.exp(-lam)
+            _rng = rng if rng is not None else random
+            slots_to_evict = []
+            for slot in list(self.own_active_mask):
+                if _rng.random() < p:
+                    slots_to_evict.append(slot)
+            for slot in slots_to_evict:
+                if slot in self.own_active_mask:
+                    self.own_active_mask.remove(slot)
+                    self.slot_tags[slot] = EpistemicTag.UNK
+                    self.slot_buckets[slot] = 0
+
+        elif archetype == "human_like":
+            # Enforce capacity by evicting the lowest-saliency slots.
+            capacity = self.memory_capacity if self.memory_capacity > 0 else EP_PBS_MAX_ACTIVE_MASK
+            while len(self.own_active_mask) > capacity:
+                min_sal = float("inf")
+                min_idx = 0
+                for i, slot in enumerate(self.own_active_mask):
+                    sal = bucket_saliency(self.slot_buckets[slot])
+                    if sal < min_sal:
+                        min_sal = sal
+                        min_idx = i
+                evicted = self.own_active_mask.pop(min_idx)
+                self.slot_tags[evicted] = EpistemicTag.UNK
+                self.slot_buckets[evicted] = 0
 
     def get_infoset_key(self) -> Tuple:  # Return plain tuple for direct use
         """Constructs the canonical, hashable infoset key tuple from the current belief state."""
@@ -1107,6 +1367,77 @@ class AgentState:
 
         return matching_indices
 
+    # --- N-Player Knowledge Mask Methods ---
+
+    def nplayer_initialize(self, num_players: int, initial_peek_indices: tuple = ()):
+        """Initialize N-player knowledge mask tracking.
+
+        Args:
+            num_players: Total number of players (2-6).
+            initial_peek_indices: Card slot indices (0-5) that this player can peek initially.
+        """
+        self.num_players = max(2, int(num_players))
+        self.knowledge_masks = {}
+        # Initialize: encoding player knows their initially peeked own cards
+        for slot_idx in initial_peek_indices:
+            key = (self.player_id, int(slot_idx))
+            if key not in self.knowledge_masks:
+                self.knowledge_masks[key] = set()
+            self.knowledge_masks[key].add(self.player_id)
+
+    def nplayer_record_peek(self, target_player: int, card_slot: int, peeker: int):
+        """Record that `peeker` has learned the identity of target_player's card at card_slot.
+
+        Args:
+            target_player: The player whose card was peeked.
+            card_slot: The card slot index (0-5) within that player's hand.
+            peeker: The player who gained knowledge.
+        """
+        key = (int(target_player), int(card_slot))
+        if key not in self.knowledge_masks:
+            self.knowledge_masks[key] = set()
+        self.knowledge_masks[key].add(int(peeker))
+
+    def nplayer_record_reveal(self, target_player: int, card_slot: int):
+        """Record that a card became public knowledge (all players now know it).
+
+        Args:
+            target_player: The player whose card was revealed.
+            card_slot: The card slot index (0-5) within that player's hand.
+        """
+        key = (int(target_player), int(card_slot))
+        self.knowledge_masks[key] = set(range(self.num_players))
+
+    def nplayer_record_swap(
+        self,
+        player_a: int, slot_a: int,
+        player_b: int, slot_b: int,
+    ):
+        """Record that cards at two slots were swapped; both slots lose all knowledge.
+
+        Args:
+            player_a: First player involved in the swap.
+            slot_a: Card slot index for player_a.
+            player_b: Second player involved in the swap.
+            slot_b: Card slot index for player_b.
+        """
+        key_a = (int(player_a), int(slot_a))
+        key_b = (int(player_b), int(slot_b))
+        self.knowledge_masks.pop(key_a, None)
+        self.knowledge_masks.pop(key_b, None)
+
+    def nplayer_get_knowledge_mask(self, player_idx: int, card_slot: int) -> "set":
+        """Return the set of player IDs who know the card at (player_idx, card_slot).
+
+        Args:
+            player_idx: The player whose hand slot is queried.
+            card_slot: The card slot index (0-5).
+
+        Returns:
+            Set of player IDs (ints) who know this card. Empty set = nobody knows.
+        """
+        return self.knowledge_masks.get((int(player_idx), int(card_slot)), set())
+
     def clone(self) -> "AgentState":
         """Creates a copy of the agent state. Uses manual copy instead of deepcopy
         for performance (called millions of times during traversals)."""
@@ -1133,6 +1464,14 @@ class AgentState:
             cambia_caller=self.cambia_caller,
             _current_game_turn=self._current_game_turn,
         )
+        # Copy EP-PBS state (set after __post_init__ which resets to defaults)
+        new_state.slot_tags = list(self.slot_tags)
+        new_state.slot_buckets = list(self.slot_buckets)
+        new_state.own_active_mask = list(self.own_active_mask)
+        new_state.opp_active_mask = list(self.opp_active_mask)
+        # Copy N-player knowledge mask state
+        new_state.num_players = self.num_players
+        new_state.knowledge_masks = {k: set(v) for k, v in self.knowledge_masks.items()}
         return new_state
 
     def __str__(self) -> str:

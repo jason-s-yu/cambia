@@ -556,6 +556,96 @@ func TestLegalActionsBitmaskRoundTrip(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// LockCallerHand tests
+// ---------------------------------------------------------------------------
+
+func TestLockCallerHandReplaceMasked(t *testing.T) {
+	// CambiaCaller=0, LockCallerHand=true, acting=0 in post-draw.
+	// Verify Replace(i) absent for caller.
+	g := newDealtGame(t)
+	g.Rules.LockCallerHand = true
+	g.CambiaCaller = 0
+	g.Flags |= FlagCambiaCalled
+	// Put player 0 into post-draw with a non-ability card (Ace of Spades).
+	aceCard := NewCard(SuitSpades, RankAce)
+	g.Pending = PendingAction{Type: PendingDiscard, PlayerID: 0, Data: [4]uint8{uint8(aceCard), DrawnFromStockpile, 0, 0}}
+	actions := g.LegalActionsList()
+	// Should have DiscardNoAbility but no Replace.
+	if !containsAction(actions, ActionDiscardNoAbility) {
+		t.Error("expected DiscardNoAbility")
+	}
+	for i := uint8(0); i < g.Players[0].HandLen; i++ {
+		if containsAction(actions, EncodeReplace(i)) {
+			t.Errorf("LockCallerHand: Replace(%d) should be masked for caller", i)
+		}
+	}
+}
+
+func TestLockCallerHandAbilityTargetingCaller(t *testing.T) {
+	// Player 1 is acting, Player 0 is CambiaCaller with LockCallerHand=true.
+	// BlindSwap targeting P0's slots should be absent.
+	g := newDealtGame(t)
+	g.Rules.LockCallerHand = true
+	g.CambiaCaller = 0
+	g.Flags |= FlagCambiaCalled
+	g.Pending = PendingAction{Type: PendingBlindSwap, PlayerID: 1}
+	actions := g.LegalActionsList()
+	if len(actions) != 0 {
+		t.Errorf("LockCallerHand: BlindSwap targeting caller should produce no actions, got %v", actions)
+	}
+}
+
+func TestLockCallerHandKingLookTargetingCaller(t *testing.T) {
+	g := newDealtGame(t)
+	g.Rules.LockCallerHand = true
+	g.CambiaCaller = 0
+	g.Flags |= FlagCambiaCalled
+	g.Pending = PendingAction{Type: PendingKingLook, PlayerID: 1}
+	actions := g.LegalActionsList()
+	if len(actions) != 0 {
+		t.Errorf("LockCallerHand: KingLook targeting caller should produce no actions, got %v", actions)
+	}
+}
+
+func TestLockCallerHandDisabledPreservesOldBehavior(t *testing.T) {
+	// LockCallerHand=false: caller CAN replace.
+	g := newDealtGame(t)
+	g.Rules.LockCallerHand = false
+	g.CambiaCaller = 0
+	g.Flags |= FlagCambiaCalled
+	// Put player 0 into post-draw with a non-ability card.
+	aceCard := NewCard(SuitSpades, RankAce)
+	g.Pending = PendingAction{Type: PendingDiscard, PlayerID: 0, Data: [4]uint8{uint8(aceCard), DrawnFromStockpile, 0, 0}}
+	actions := g.LegalActionsList()
+	found := false
+	for i := uint8(0); i < g.Players[0].HandLen; i++ {
+		if containsAction(actions, EncodeReplace(i)) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("LockCallerHand=false: expected Replace actions for caller")
+	}
+}
+
+func TestCanUseAbilityBlockedWhenOpponentIsCaller(t *testing.T) {
+	// Acting=1, draws a Jack. Opponent=0 is CambiaCaller.
+	// DiscardWithAbility should NOT be legal (canUseAbility returns false).
+	g := newDealtGame(t)
+	g.Rules.LockCallerHand = true
+	g.CambiaCaller = 0
+	g.Flags |= FlagCambiaCalled
+	// Put player 1 in post-draw with a Jack (has BlindSwap ability).
+	jackCard := NewCard(SuitHearts, RankJack)
+	g.Pending = PendingAction{Type: PendingDiscard, PlayerID: 1, Data: [4]uint8{uint8(jackCard), DrawnFromStockpile, 0, 0}}
+	actions := g.LegalActionsList()
+	if containsAction(actions, ActionDiscardWithAbility) {
+		t.Error("LockCallerHand: DiscardWithAbility should be blocked when opponent is caller (BlindSwap target locked)")
+	}
+}
+
 // BenchmarkLegalActions benchmarks zero-allocation legal action generation.
 // Target: <200ns, 0 allocs.
 func BenchmarkLegalActions(b *testing.B) {

@@ -65,7 +65,7 @@ def minimal_config():
     config.deep_cfr.advantage_buffer_capacity = 2000000
     config.deep_cfr.strategy_buffer_capacity = 2000000
     config.deep_cfr.save_interval = 10
-    config.deep_cfr.use_gpu = False
+    config.deep_cfr.device = "cpu"
 
     # LoggingConfig (needed by worker)
     config.logging = SimpleNamespace()
@@ -573,3 +573,110 @@ def test_exploration_epsilon_affects_sampling(minimal_config):
         assert not np.any(np.isnan(sample.target))
     for sample in low_eps_samples:
         assert not np.any(np.isnan(sample.target))
+
+
+# ---------------------------------------------------------------------------
+# Network round-trip contract tests
+# ---------------------------------------------------------------------------
+
+import torch
+from src.networks import AdvantageNetwork, ResidualAdvantageNetwork, build_advantage_network
+from src.encoding import INPUT_DIM, NUM_ACTIONS
+
+
+@pytest.mark.parametrize("use_residual", [False, True], ids=["plain", "residual"])
+def test_worker_network_roundtrip(minimal_config, use_residual):
+    """Trainer serializes weights → worker deserializes into matching architecture.
+
+    This is the contract that was broken for the EP-PBS run: the trainer built
+    a ResidualAdvantageNetwork but _get_network_config() didn't forward
+    use_residual, so the worker built a plain AdvantageNetwork and
+    load_state_dict() failed silently (falling back to uniform strategy).
+    """
+    input_dim = INPUT_DIM
+    hidden_dim = 64  # small for speed
+    output_dim = NUM_ACTIONS
+    num_hidden_layers = 2
+
+    # 1. Build the "trainer-side" network
+    trainer_net = build_advantage_network(
+        input_dim=input_dim,
+        hidden_dim=hidden_dim,
+        output_dim=output_dim,
+        use_residual=use_residual,
+        num_hidden_layers=num_hidden_layers,
+    )
+
+    # 2. Serialize weights the same way _get_network_weights_for_workers() does
+    weights_numpy = {k: v.cpu().numpy() for k, v in trainer_net.state_dict().items()}
+
+    # 3. Build network_config the same way _get_network_config() does
+    network_config = {
+        "input_dim": input_dim,
+        "hidden_dim": hidden_dim,
+        "output_dim": output_dim,
+        "validate_inputs": True,
+        "use_residual": use_residual,
+        "num_hidden_layers": num_hidden_layers,
+    }
+
+    # 4. Reconstruct in the worker the same way run_deep_cfr_worker() does
+    worker_net = build_advantage_network(
+        input_dim=network_config["input_dim"],
+        hidden_dim=network_config["hidden_dim"],
+        output_dim=network_config["output_dim"],
+        validate_inputs=network_config.get("validate_inputs", True),
+        use_residual=network_config.get("use_residual", False),
+        num_hidden_layers=network_config.get("num_hidden_layers", 2),
+    )
+    weights_tensors = {
+        k: torch.tensor(v) if isinstance(v, np.ndarray) else v
+        for k, v in weights_numpy.items()
+    }
+    # This is the line that failed in the EP-PBS run — must not raise
+    worker_net.load_state_dict(weights_tensors)
+
+    # 5. Verify the architectures match
+    if use_residual:
+        assert isinstance(worker_net, ResidualAdvantageNetwork)
+    else:
+        assert isinstance(worker_net, AdvantageNetwork)
+        assert not isinstance(worker_net, ResidualAdvantageNetwork)
+
+    # 6. Verify forward pass produces identical output
+    worker_net.eval()
+    trainer_net.eval()
+    features = torch.randn(1, input_dim)
+    mask = torch.ones(1, output_dim, dtype=torch.bool)
+    with torch.no_grad():
+        trainer_out = trainer_net(features, mask)
+        worker_out = worker_net(features, mask)
+    assert torch.allclose(trainer_out, worker_out, atol=1e-6), (
+        f"Output mismatch: max diff={torch.max(torch.abs(trainer_out - worker_out))}"
+    )
+
+
+@pytest.mark.parametrize("use_residual", [False, True], ids=["plain", "residual"])
+def test_worker_network_mismatch_raises(use_residual):
+    """Loading weights from architecture A into architecture B must raise."""
+    input_dim = INPUT_DIM
+    hidden_dim = 64
+    output_dim = NUM_ACTIONS
+
+    # Build network with one architecture
+    source_net = build_advantage_network(
+        input_dim=input_dim, hidden_dim=hidden_dim, output_dim=output_dim,
+        use_residual=use_residual,
+    )
+    weights_numpy = {k: v.cpu().numpy() for k, v in source_net.state_dict().items()}
+
+    # Build network with the OTHER architecture
+    target_net = build_advantage_network(
+        input_dim=input_dim, hidden_dim=hidden_dim, output_dim=output_dim,
+        use_residual=not use_residual,
+    )
+    weights_tensors = {k: torch.tensor(v) for k, v in weights_numpy.items()}
+
+    # Must fail — this is what the EP-PBS bug looked like
+    with pytest.raises(RuntimeError, match="(Missing key|Unexpected key)"):
+        target_net.load_state_dict(weights_tensors)

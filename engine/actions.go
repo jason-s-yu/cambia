@@ -134,7 +134,7 @@ func (g *GameState) callCambia() error {
 	if g.IsCambiaCalled() {
 		return fmt.Errorf("Cambia has already been called")
 	}
-	currentRound := g.TurnNumber / uint16(MaxPlayers)
+	currentRound := g.TurnNumber / uint16(g.Rules.numPlayers())
 	if currentRound < uint16(g.Rules.CambiaAllowedRound) {
 		return fmt.Errorf("cannot call Cambia before round %d (current round %d)", g.Rules.CambiaAllowedRound, currentRound)
 	}
@@ -223,7 +223,7 @@ func (g *GameState) advanceTurn() {
 	}
 
 	g.TurnNumber++
-	g.CurrentPlayer = g.OpponentOf(g.CurrentPlayer)
+	g.CurrentPlayer = g.NextPlayer(g.CurrentPlayer)
 
 	if g.IsCambiaCalled() {
 		g.TurnsAfterC++
@@ -245,7 +245,7 @@ func (g *GameState) checkGameEnd() {
 	}
 
 	// 2. Cambia final round completed (all players have had their last turn).
-	if g.IsCambiaCalled() && g.TurnsAfterC >= MaxPlayers {
+	if g.IsCambiaCalled() && g.TurnsAfterC >= g.Rules.numPlayers() {
 		g.Flags |= FlagGameOver
 		return
 	}

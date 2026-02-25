@@ -30,3 +30,6 @@ session
 *_pb2_grpc.py
 
 runs/
+*.log
+
+.current_log

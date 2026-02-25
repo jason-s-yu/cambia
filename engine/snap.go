@@ -9,20 +9,23 @@ func (g *GameState) initiateSnapPhase(discardedCard Card) {
 	g.Snap.DiscardedRank = discardedCard.Rank()
 
 	// The acting player just discarded — they are the "discarder".
-	// Non-acting player gets first snap opportunity, then the acting player.
-	discarder := g.CurrentPlayer
-	nonDiscarder := g.OpponentOf(discarder)
-
-	count := uint8(0)
-	var snappers [2]uint8
-
-	// Discarder first, then non-discarder — skip anyone who called Cambia,
-	// and only include players who actually have a matching-rank card (or whose
-	// opponent does, when AllowOpponentSnapping is on).
+	// Build the snapper list: discarder first, then all others in turn order.
+	// Skip anyone who called Cambia.
 	// NOTE: Per RULES.md the non-discarder should go first, but Python's
 	// _initiate_snap_phase computes discarder_player incorrectly (off by one),
-	// resulting in the actual discarder going first. We mirror that behavior.
-	for _, p := range [2]uint8{discarder, nonDiscarder} {
+	// resulting in the actual discarder going first. We mirror that behavior
+	// for 2P. For N-player we keep the same discarder-first ordering.
+	discarder := g.CurrentPlayer
+	n := g.Rules.numPlayers()
+
+	// Build ordered candidate list: discarder first, then remaining players in
+	// turn order starting from discarder+1.
+	count := uint8(0)
+	var snappers [MaxPlayers]uint8
+
+	// Collect players in discarder-first order.
+	for step := uint8(0); step < n; step++ {
+		p := (discarder + step) % n
 		if int8(p) == g.CambiaCaller {
 			continue
 		}
@@ -35,17 +38,22 @@ func (g *GameState) initiateSnapPhase(discardedCard Card) {
 				break
 			}
 		}
-		// Check if this player can snap opponent's card.
+		// Check if this player can snap any opponent's card.
 		canSnapOpp := false
 		if g.Rules.AllowOpponentSnapping && hand.HandLen > 0 {
-			opp := g.OpponentOf(p)
-			if int8(opp) != g.CambiaCaller {
+			for opp := uint8(0); opp < n; opp++ {
+				if opp == p || int8(opp) == g.CambiaCaller {
+					continue
+				}
 				oppHand := &g.Players[opp]
 				for i := uint8(0); i < oppHand.HandLen; i++ {
 					if oppHand.Hand[i].Rank() == discardedCard.Rank() {
 						canSnapOpp = true
 						break
 					}
+				}
+				if canSnapOpp {
+					break
 				}
 			}
 		}

@@ -200,6 +200,18 @@ def train_deep(
         help="Disable Rich TUI; print plain-text progress to stdout. "
         "Auto-enabled when stdout is not a TTY (e.g. nohup, pipes, log redirection).",
     ),
+    deterministic: bool = typer.Option(
+        False,
+        "--deterministic",
+        help="Fix all random seeds (42) and force num_traversal_threads=1 for reproducible runs.",
+        rich_help_panel="Deep CFR Overrides",
+    ),
+    profile_step: Optional[int] = typer.Option(
+        None,
+        "--profile-step",
+        help="Run torch.profiler on this step number and export Chrome trace to the run directory.",
+        rich_help_panel="Deep CFR Overrides",
+    ),
 ):
     """Train a Deep CFR agent."""
     from .config import load_config
@@ -213,6 +225,20 @@ def train_deep(
     if not headless:
         headless = not sys.stdout.isatty()
 
+    if deterministic:
+        import random as _random
+        import numpy as _np
+        import torch as _torch
+
+        _torch.manual_seed(42)
+        _np.random.seed(42)
+        _random.seed(42)
+        if hasattr(_torch, "use_deterministic_algorithms"):
+            try:
+                _torch.use_deterministic_algorithms(True)
+            except Exception:
+                pass
+
     cfg = load_config(str(config))
     if not cfg:
         print("ERROR: Failed to load configuration. Exiting.", file=sys.stderr)
@@ -220,6 +246,8 @@ def train_deep(
 
     # Build overrides dict from CLI options
     overrides = {}
+    if deterministic:
+        overrides["num_traversal_threads"] = 1
     if lr is not None:
         overrides["learning_rate"] = lr
     if batch_size is not None:
@@ -242,6 +270,8 @@ def train_deep(
         overrides["use_amp"] = amp
     if compile is not None:
         overrides["use_compile"] = compile
+    if profile_step is not None:
+        overrides["profile_step"] = profile_step
 
     # Bridge config.py DeepCfrConfig -> deep_trainer.py DeepCFRConfig with overrides
     dcfr_config = DeepCFRConfig.from_yaml_config(cfg, **overrides)
@@ -264,6 +294,189 @@ def train_deep(
         raise typer.Exit(1)
 
     raise typer.Exit(exit_code)
+
+
+@train_app.command("psro", help="Train using Deep CFR with PSRO meta-loop")
+def train_psro(
+    config: Path = typer.Option(
+        "config.yaml",
+        "--config",
+        "-c",
+        help="Path to configuration YAML file",
+        exists=True,
+    ),
+    steps: Optional[int] = typer.Option(
+        None,
+        "--steps",
+        "-n",
+        help="Number of training steps to run",
+    ),
+    checkpoint: Optional[Path] = typer.Option(
+        None,
+        "--checkpoint",
+        help="Resume from checkpoint",
+        exists=True,
+    ),
+    population_size: Optional[int] = typer.Option(
+        None,
+        "--population-size",
+        help="PSRO population size (rolling checkpoint window)",
+    ),
+    eval_games: Optional[int] = typer.Option(
+        None,
+        "--eval-games",
+        help="Total games per PSRO population evaluation",
+    ),
+    headless: bool = typer.Option(
+        False,
+        "--headless",
+        help="Disable Rich TUI; print plain-text progress to stdout.",
+    ),
+    deterministic: bool = typer.Option(
+        False,
+        "--deterministic",
+        help="Fix all random seeds (42) and force num_traversal_threads=1 for reproducible runs.",
+    ),
+):
+    """Train with PSRO (Policy-Space Response Oracles) meta-loop."""
+    from .config import load_config
+    from .main_train import create_infrastructure, run_deep_training, handle_sigint
+    from .cfr.deep_trainer import DeepCFRConfig
+
+    setup_multiprocessing()
+    signal.signal(signal.SIGINT, handle_sigint)
+
+    if not headless:
+        headless = not sys.stdout.isatty()
+
+    if deterministic:
+        import random as _random
+        import numpy as _np
+        import torch as _torch
+
+        _torch.manual_seed(42)
+        _np.random.seed(42)
+        _random.seed(42)
+        if hasattr(_torch, "use_deterministic_algorithms"):
+            try:
+                _torch.use_deterministic_algorithms(True)
+            except Exception:
+                pass
+
+    cfg = load_config(str(config))
+    if not cfg:
+        print("ERROR: Failed to load configuration. Exiting.", file=sys.stderr)
+        raise typer.Exit(1)
+
+    # Force PSRO mode on
+    overrides: dict = {"use_psro": True}
+    if deterministic:
+        overrides["num_traversal_threads"] = 1
+    if population_size is not None:
+        overrides["psro_population_size"] = population_size
+    if eval_games is not None:
+        overrides["psro_eval_games"] = eval_games
+
+    dcfr_config = DeepCFRConfig.from_yaml_config(cfg, **overrides)
+
+    total_steps = steps if steps is not None else 100
+
+    try:
+        infra = create_infrastructure(cfg, total_steps, headless=headless)
+        exit_code = run_deep_training(
+            cfg,
+            dcfr_config,
+            infra,
+            steps=steps,
+            checkpoint=str(checkpoint) if checkpoint else None,
+            headless=headless,
+        )
+    except Exception as e:
+        print(f"FATAL: Error during PSRO training: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+    raise typer.Exit(exit_code)
+
+
+@train_app.command("rebel", help="Train using ReBeL (Recursive Belief-based Learning)")
+def train_rebel(
+    config: Path = typer.Option(
+        "config.yaml",
+        "--config",
+        "-c",
+        help="Path to configuration YAML file",
+        exists=True,
+    ),
+    iterations: Optional[int] = typer.Option(
+        None,
+        "--iterations",
+        "-n",
+        help="Number of training iterations (overrides config rebel_epochs)",
+    ),
+    checkpoint: Optional[Path] = typer.Option(
+        None,
+        "--checkpoint",
+        help="Resume from checkpoint",
+        exists=True,
+    ),
+    save_path: Optional[Path] = typer.Option(
+        None,
+        "--save-path",
+        "-s",
+        help="Override checkpoint save path",
+    ),
+    device: Optional[str] = typer.Option(
+        None,
+        "--device",
+        help="Training device: auto, cpu, cuda, xpu (default: auto)",
+    ),
+):
+    """Train a ReBeL agent."""
+    import warnings
+
+    warnings.warn(
+        "ReBeL training is deprecated. ReBeL/PBS subgame solving is mathematically unsound "
+        "for N-player FFA games with continuous beliefs.",
+        DeprecationWarning,
+    )
+    typer.echo(
+        "ERROR: ReBeL training is deprecated. ReBeL/PBS subgame solving is mathematically "
+        "unsound for N-player FFA games with continuous beliefs (Cambia). "
+        "See docs-gen/current/research-brief-position-aware-pbs.md."
+    )
+    raise typer.Exit(1)
+
+    cfg = load_config(str(config))
+    if not cfg:
+        print("ERROR: Failed to load configuration. Exiting.", file=sys.stderr)
+        raise typer.Exit(1)
+
+    rebel_config = cfg.deep_cfr
+    if device is not None:
+        rebel_config.device = device
+
+    ckpt_path = (
+        str(save_path)
+        if save_path
+        else cfg.persistence.agent_data_save_path.replace(".joblib", "_rebel.pt")
+    )
+
+    trainer = ReBeLTrainer(
+        config=rebel_config,
+        checkpoint_path=ckpt_path,
+        game_config=cfg.cambia_rules,
+    )
+
+    if checkpoint:
+        trainer.load_checkpoint(str(checkpoint))
+
+    total_iters = iterations if iterations is not None else rebel_config.rebel_epochs
+
+    try:
+        trainer.train(num_iterations=total_iters)
+    except Exception as e:
+        print(f"FATAL: Error during ReBeL training: {e}", file=sys.stderr)
+        raise typer.Exit(1)
 
 
 @app.command("resume", help="Resume training from a checkpoint")

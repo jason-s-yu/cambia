@@ -9,8 +9,10 @@ type HouseRules struct {
 	AllowDrawFromDiscard  bool
 	AllowReplaceAbilities bool // if true, replacing also triggers ability
 	AllowOpponentSnapping bool
-	SnapRace              bool // if true, only one successful snap per discard
+	SnapRace              bool  // if true, only one successful snap per discard
 	NumJokers             uint8 // 0, 1, or 2 jokers in the deck
+	LockCallerHand        bool  // if true, the Cambia caller cannot replace cards from hand
+	NumPlayers            uint8 // number of active players (2–6); 0 treated as 2
 }
 
 // DefaultHouseRules returns the standard Cambia house rules.
@@ -25,5 +27,15 @@ func DefaultHouseRules() HouseRules {
 		AllowOpponentSnapping: true,
 		SnapRace:              false,
 		NumJokers:             2,
+		LockCallerHand:        true,
+		NumPlayers:            2,
 	}
+}
+
+// numPlayers returns the effective number of players, treating 0 as 2.
+func (r *HouseRules) numPlayers() uint8 {
+	if r.NumPlayers == 0 {
+		return 2
+	}
+	return r.NumPlayers
 }

@@ -45,6 +45,7 @@ If you believe you have the lowest score, call "Cambia" instead of drawing.
 
 * Your turn ends immediately.
 * Every other player gets **one final turn**.
+* Your hand is **locked** and cannot be altered by any player, including yourself (snaps, swaps, etc.)
 * All cards are revealed.
 
 ## 4. Special Abilities

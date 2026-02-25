@@ -2,7 +2,12 @@
 // for CFR training agents.
 package agent
 
-import engine "github.com/jason-s-yu/cambia/engine"
+import (
+	"math"
+	"math/rand/v2"
+
+	engine "github.com/jason-s-yu/cambia/engine"
+)
 
 // KnownCardInfo holds belief information for one of the agent's own hand slots.
 type KnownCardInfo struct {
@@ -65,6 +70,40 @@ type AgentState struct {
 
 	// Internal
 	CurrentTurn uint16
+
+	// EP-PBS fields (2P epistemic positional belief state).
+	// SlotTags tracks who knows each physical card slot (own slots 0-5, opp slots 6-11).
+	// SlotBuckets holds the known bucket for slots with TagPrivOwn or TagPub; zero otherwise.
+	// OwnActiveMask tracks slot indices we privately know (TagPrivOwn); saliency-evicted.
+	// OppActiveMask tracks slot indices opponent privately knows (TagPrivOpp); FIFO-evicted.
+	SlotTags         [MaxSlots]EpistemicTag
+	SlotBuckets      [MaxSlots]CardBucket
+	OwnActiveMask    [MaxActiveMask]uint8
+	OwnActiveMaskLen uint8
+	OppActiveMask    [MaxActiveMask]uint8
+	OppActiveMaskLen uint8
+
+	// N-Player fields (used when NumPlayers > 2).
+	// NumPlayers is the total number of players in the game.
+	// OpponentIDs holds the player IDs of opponents (up to 5).
+	// KnowledgeMask[slot][playerID] is true when playerID has observed the card at slot.
+	// Slot indices are: playerIndex * MaxHandSize + cardSlot.
+	// NPlayerSlotBuckets holds the bucket for a slot when this agent knows it.
+	// NPlayerSlotKnown indicates whether THIS agent knows the card at each slot.
+	NumPlayers         uint8
+	OpponentIDs        [5]uint8
+	NumOpponents       uint8
+	KnowledgeMask      [MaxTotalSlots][MaxKnowledgePlayers]bool
+	NPlayerSlotBuckets [MaxTotalSlots]CardBucket
+	NPlayerSlotKnown   [MaxTotalSlots]bool
+
+	// Memory archetype controls per-turn decay/eviction behavior.
+	// MemoryPerfect (default): no decay, full retention.
+	// MemoryDecaying: probabilistic Bayesian diffusion per turn.
+	// MemoryHumanLike: saliency eviction capped at MemoryCapacity.
+	MemoryArchetype   MemoryArchetype
+	MemoryDecayLambda float32 // Decay rate λ for MemoryDecaying (default 0.1)
+	MemoryCapacity    uint8   // Max active mask size for MemoryHumanLike (default 3)
 }
 
 // NewAgentState creates a zero-initialized AgentState with the given player IDs
@@ -131,6 +170,23 @@ func (a *AgentState) Initialize(g *engine.GameState) {
 	a.Phase = GamePhaseFromState(g.StockLen, g.IsCambiaCalled(), g.IsTerminal())
 	a.CambiaState = CambiaNone
 	a.CurrentTurn = 0
+
+	// Initialize EP-PBS slot tags.
+	a.OwnActiveMaskLen = 0
+	a.OppActiveMaskLen = 0
+	for i := uint8(0); i < engine.MaxHandSize; i++ {
+		if i < a.OwnHandLen && peekSet[i] {
+			a.SlotTags[i] = TagPrivOwn
+			a.SlotBuckets[i] = a.OwnHand[i].Bucket
+			a.appendOwnActive(i)
+		} else {
+			a.SlotTags[i] = TagUnk
+			a.SlotBuckets[i] = 0
+		}
+		// All opp slots start unknown.
+		a.SlotTags[OppSlotsStart+i] = TagUnk
+		a.SlotBuckets[OppSlotsStart+i] = 0
+	}
 }
 
 // Update refreshes the agent's beliefs based on what happened since the last action.
@@ -225,9 +281,13 @@ func (a *AgentState) processReplace(g *engine.GameState, isSelf bool, targetIdx 
 			LastSeenTurn: a.CurrentTurn,
 			Card:         card,
 		}
+		// EP-PBS: we know the new card at own slot targetIdx.
+		a.eppbsForceOwnSlotKnown(uint8(targetIdx), CardToBucket(card))
 	} else {
 		// Opponent replaced one of their cards — event decay on that slot.
 		a.triggerEventDecay(targetIdx)
+		// EP-PBS: opp knows their new card at opp slot; we don't.
+		a.eppbsForceOppSlotPrivOpp(OppSlotsStart + uint8(targetIdx))
 	}
 }
 
@@ -241,8 +301,12 @@ func (a *AgentState) processPeekOwn(g *engine.GameState, isSelf bool, targetIdx 
 			LastSeenTurn: a.CurrentTurn,
 			Card:         card,
 		}
+		// EP-PBS: we now privately know our slot targetIdx.
+		a.setOwnSlotKnown(uint8(targetIdx), CardToBucket(card))
+	} else {
+		// Opponent peeked their own card at targetIdx → EP-PBS: opp privately knows opp slot.
+		a.setOppSlotPrivOpp(OppSlotsStart + uint8(targetIdx))
 	}
-	// If opponent peeked their own card, we learn nothing.
 }
 
 // processPeekOther handles EncodePeekOther(targetIdx).
@@ -253,8 +317,12 @@ func (a *AgentState) processPeekOther(g *engine.GameState, isSelf bool, targetId
 		a.OppBelief[targetIdx] = BucketBelief(CardToBucket(card))
 		a.OppLastSeen[targetIdx] = a.CurrentTurn
 		a.OppHasLastSeen[targetIdx] = true
+		// EP-PBS: we now privately know opp slot targetIdx.
+		a.setOwnSlotKnown(OppSlotsStart+uint8(targetIdx), CardToBucket(card))
+	} else {
+		// Opponent peeked our card at targetIdx → EP-PBS: opp privately knows our slot.
+		a.setOppSlotPrivOpp(uint8(targetIdx))
 	}
-	// If opponent peeked our card, we learn nothing.
 }
 
 // processBlindSwap handles EncodeBlindSwap(ownIdx, oppIdx).
@@ -270,6 +338,9 @@ func (a *AgentState) processBlindSwap(g *engine.GameState, isSelf bool, ownIdx, 
 			Card:         engine.EmptyCard,
 		}
 		a.triggerEventDecay(oppIdx)
+		// EP-PBS: both physical positions now unknown to us.
+		a.eppbsSetSlotUnk(ownIdx)
+		a.eppbsSetSlotUnk(OppSlotsStart + oppIdx)
 	} else {
 		// Opponent swapped: their ownIdx (their hand) <-> their oppIdx (our hand).
 		// Our card at oppIdx is now unknown (we received opponent's old card).
@@ -280,6 +351,9 @@ func (a *AgentState) processBlindSwap(g *engine.GameState, isSelf bool, ownIdx, 
 			Card:         engine.EmptyCard,
 		}
 		a.triggerEventDecay(ownIdx)
+		// EP-PBS: both physical positions unknown.
+		a.eppbsSetSlotUnk(oppIdx)
+		a.eppbsSetSlotUnk(OppSlotsStart + ownIdx)
 	}
 }
 
@@ -298,8 +372,15 @@ func (a *AgentState) processKingLook(g *engine.GameState, isSelf bool, ownIdx, o
 		a.OppBelief[oppIdx] = BucketBelief(CardToBucket(oppCard))
 		a.OppLastSeen[oppIdx] = a.CurrentTurn
 		a.OppHasLastSeen[oppIdx] = true
+		// EP-PBS: we privately know both slots we looked at.
+		a.setOwnSlotKnown(ownIdx, CardToBucket(ownCard))
+		a.setOwnSlotKnown(OppSlotsStart+oppIdx, CardToBucket(oppCard))
+	} else {
+		// Opponent is king-looking: they see their ownIdx and our oppIdx.
+		// EP-PBS: opp privately knows both slots.
+		a.setOppSlotPrivOpp(OppSlotsStart + ownIdx)
+		a.setOppSlotPrivOpp(oppIdx)
 	}
-	// If opponent is king-looking, we learn nothing.
 }
 
 // processKingSwapYes handles ActionKingSwapYes.
@@ -323,11 +404,13 @@ func (a *AgentState) processKingSwapYes(g *engine.GameState, isSelf bool) {
 		}
 		// Opponent's oppIdx now has our old card — trigger event decay.
 		a.triggerEventDecay(oppIdx)
+		// EP-PBS: swap the epistemic state of both slots (we know both from king look).
+		a.eppbsSwapSlots(ownIdx, OppSlotsStart+oppIdx)
 	} else {
 		// Opponent swapped: opponent's ownIdx <-> our oppIdx.
 		// Our card at oppIdx is now unknown.
 		// Opponent's ownIdx slot gets event decay.
-		ourIdx := oppIdx  // our hand index that got taken
+		ourIdx := oppIdx   // our hand index that got taken
 		theirIdx := ownIdx // their hand index that gave us a card
 		a.OwnHand[ourIdx] = KnownCardInfo{
 			Bucket:       BucketUnknown,
@@ -335,6 +418,8 @@ func (a *AgentState) processKingSwapYes(g *engine.GameState, isSelf bool) {
 			Card:         engine.EmptyCard,
 		}
 		a.triggerEventDecay(theirIdx)
+		// EP-PBS: swap epistemic state (opp knows both from their king look).
+		a.eppbsSwapSlots(ourIdx, OppSlotsStart+theirIdx)
 	}
 }
 
@@ -421,6 +506,26 @@ func (a *AgentState) removeOwnCard(idx uint8) {
 	if idx >= a.OwnHandLen {
 		return
 	}
+	// EP-PBS: remove slot idx from any active masks, shift own slots left.
+	a.removeOwnActive(idx)
+	a.removeOppActive(idx)
+	for i := idx; i < a.OwnHandLen-1; i++ {
+		a.SlotTags[i] = a.SlotTags[i+1]
+		a.SlotBuckets[i] = a.SlotBuckets[i+1]
+	}
+	a.SlotTags[a.OwnHandLen-1] = TagUnk
+	a.SlotBuckets[a.OwnHandLen-1] = 0
+	// Decrement active mask entries > idx (own slots only, < OppSlotsStart).
+	for i := uint8(0); i < a.OwnActiveMaskLen; i++ {
+		if a.OwnActiveMask[i] > idx && a.OwnActiveMask[i] < OppSlotsStart {
+			a.OwnActiveMask[i]--
+		}
+	}
+	for i := uint8(0); i < a.OppActiveMaskLen; i++ {
+		if a.OppActiveMask[i] > idx && a.OppActiveMask[i] < OppSlotsStart {
+			a.OppActiveMask[i]--
+		}
+	}
 	for i := idx; i < a.OwnHandLen-1; i++ {
 		a.OwnHand[i] = a.OwnHand[i+1]
 	}
@@ -432,6 +537,27 @@ func (a *AgentState) removeOwnCard(idx uint8) {
 func (a *AgentState) removeOppCard(idx uint8) {
 	if idx >= a.OppHandLen {
 		return
+	}
+	// EP-PBS: remove global slot OppSlotsStart+idx from masks, shift opp slots left.
+	globalSlot := OppSlotsStart + idx
+	a.removeOwnActive(globalSlot)
+	a.removeOppActive(globalSlot)
+	for i := globalSlot; i < OppSlotsStart+a.OppHandLen-1; i++ {
+		a.SlotTags[i] = a.SlotTags[i+1]
+		a.SlotBuckets[i] = a.SlotBuckets[i+1]
+	}
+	a.SlotTags[OppSlotsStart+a.OppHandLen-1] = TagUnk
+	a.SlotBuckets[OppSlotsStart+a.OppHandLen-1] = 0
+	// Decrement active mask entries > globalSlot (opp slots only).
+	for i := uint8(0); i < a.OwnActiveMaskLen; i++ {
+		if a.OwnActiveMask[i] > globalSlot {
+			a.OwnActiveMask[i]--
+		}
+	}
+	for i := uint8(0); i < a.OppActiveMaskLen; i++ {
+		if a.OppActiveMask[i] > globalSlot {
+			a.OppActiveMask[i]--
+		}
 	}
 	for i := idx; i < a.OppHandLen-1; i++ {
 		a.OppBelief[i] = a.OppBelief[i+1]
@@ -450,6 +576,9 @@ func (a *AgentState) addOwnUnknown(turn uint16) {
 	if a.OwnHandLen >= engine.MaxHandSize {
 		return
 	}
+	// EP-PBS: new slot is TagUnk.
+	a.SlotTags[a.OwnHandLen] = TagUnk
+	a.SlotBuckets[a.OwnHandLen] = 0
 	a.OwnHand[a.OwnHandLen] = KnownCardInfo{
 		Bucket:       BucketUnknown,
 		LastSeenTurn: turn,
@@ -463,6 +592,9 @@ func (a *AgentState) addOppUnknown() {
 	if a.OppHandLen >= engine.MaxHandSize {
 		return
 	}
+	// EP-PBS: new slot is TagUnk.
+	a.SlotTags[OppSlotsStart+a.OppHandLen] = TagUnk
+	a.SlotBuckets[OppSlotsStart+a.OppHandLen] = 0
 	a.OppBelief[a.OppHandLen] = BucketBelief(BucketUnknown)
 	a.OppLastSeen[a.OppHandLen] = 0
 	a.OppHasLastSeen[a.OppHandLen] = false
@@ -477,6 +609,24 @@ func (a *AgentState) insertOwnUnknown(slotIdx uint8, turn uint16) {
 	// Clamp slotIdx.
 	if slotIdx > a.OwnHandLen {
 		slotIdx = a.OwnHandLen
+	}
+	// EP-PBS: shift own slots right, insert TagUnk at slotIdx.
+	for i := a.OwnHandLen; i > slotIdx; i-- {
+		a.SlotTags[i] = a.SlotTags[i-1]
+		a.SlotBuckets[i] = a.SlotBuckets[i-1]
+	}
+	a.SlotTags[slotIdx] = TagUnk
+	a.SlotBuckets[slotIdx] = 0
+	// Increment active mask entries >= slotIdx (own slots only).
+	for i := uint8(0); i < a.OwnActiveMaskLen; i++ {
+		if a.OwnActiveMask[i] >= slotIdx && a.OwnActiveMask[i] < OppSlotsStart {
+			a.OwnActiveMask[i]++
+		}
+	}
+	for i := uint8(0); i < a.OppActiveMaskLen; i++ {
+		if a.OppActiveMask[i] >= slotIdx && a.OppActiveMask[i] < OppSlotsStart {
+			a.OppActiveMask[i]++
+		}
 	}
 	// Shift right to make room.
 	for i := a.OwnHandLen; i > slotIdx; i-- {
@@ -498,6 +648,25 @@ func (a *AgentState) insertOppUnknown(slotIdx uint8) {
 	// Clamp slotIdx.
 	if slotIdx > a.OppHandLen {
 		slotIdx = a.OppHandLen
+	}
+	// EP-PBS: shift opp slots right, insert TagUnk at global slot position.
+	globalSlot := OppSlotsStart + slotIdx
+	for i := OppSlotsStart + a.OppHandLen; i > globalSlot; i-- {
+		a.SlotTags[i] = a.SlotTags[i-1]
+		a.SlotBuckets[i] = a.SlotBuckets[i-1]
+	}
+	a.SlotTags[globalSlot] = TagUnk
+	a.SlotBuckets[globalSlot] = 0
+	// Increment active mask entries >= globalSlot.
+	for i := uint8(0); i < a.OwnActiveMaskLen; i++ {
+		if a.OwnActiveMask[i] >= globalSlot {
+			a.OwnActiveMask[i]++
+		}
+	}
+	for i := uint8(0); i < a.OppActiveMaskLen; i++ {
+		if a.OppActiveMask[i] >= globalSlot {
+			a.OppActiveMask[i]++
+		}
 	}
 	// Shift right to make room.
 	for i := a.OppHandLen; i > slotIdx; i-- {
@@ -524,6 +693,11 @@ func (a *AgentState) reconcileHandLengths(g *engine.GameState) {
 	}
 	for a.OwnHandLen > actualOwn && a.OwnHandLen > 0 {
 		a.OwnHandLen--
+		// EP-PBS: clear the popped slot.
+		a.removeOwnActive(a.OwnHandLen)
+		a.removeOppActive(a.OwnHandLen)
+		a.SlotTags[a.OwnHandLen] = TagUnk
+		a.SlotBuckets[a.OwnHandLen] = 0
 		a.OwnHand[a.OwnHandLen] = KnownCardInfo{}
 	}
 
@@ -533,6 +707,12 @@ func (a *AgentState) reconcileHandLengths(g *engine.GameState) {
 	}
 	for a.OppHandLen > actualOpp && a.OppHandLen > 0 {
 		a.OppHandLen--
+		// EP-PBS: clear the popped opp slot.
+		slotIdx := OppSlotsStart + a.OppHandLen
+		a.removeOwnActive(slotIdx)
+		a.removeOppActive(slotIdx)
+		a.SlotTags[slotIdx] = TagUnk
+		a.SlotBuckets[slotIdx] = 0
 		a.OppBelief[a.OppHandLen] = 0
 		a.OppLastSeen[a.OppHandLen] = 0
 		a.OppHasLastSeen[a.OppHandLen] = false
@@ -580,6 +760,374 @@ func (a *AgentState) applyTimeDecay() {
 // with no pointers, this is simply a value copy.
 func (a *AgentState) Clone() AgentState { return *a }
 
+// ApplyMemoryDecay runs per-turn memory decay or eviction according to MemoryArchetype.
+// It should be called once per turn (e.g., at the start of the agent's decision step).
+// rng must not be nil for MemoryDecaying; it is unused for MemoryPerfect/MemoryHumanLike.
+func (a *AgentState) ApplyMemoryDecay(rng *rand.Rand) {
+	switch a.MemoryArchetype {
+	case MemoryPerfect:
+		// No decay — retain all observations indefinitely.
+		return
+
+	case MemoryDecaying:
+		// Each PrivOwn slot decays to TagUnk with probability p = 1 - exp(-λ).
+		lambda := a.MemoryDecayLambda
+		if lambda <= 0 {
+			return
+		}
+		p := float32(1.0) - float32(math.Exp(float64(-lambda)))
+		i := uint8(0)
+		for i < a.OwnActiveMaskLen {
+			if rng.Float32() < p {
+				slot := a.OwnActiveMask[i]
+				// Decay: clear tag, bucket, remove from active mask.
+				a.SlotTags[slot] = TagUnk
+				a.SlotBuckets[slot] = 0
+				// Remove by swapping with last entry.
+				a.OwnActiveMaskLen--
+				a.OwnActiveMask[i] = a.OwnActiveMask[a.OwnActiveMaskLen]
+				a.OwnActiveMask[a.OwnActiveMaskLen] = 0
+				// Do NOT increment i — recheck this position.
+			} else {
+				i++
+			}
+		}
+
+	case MemoryHumanLike:
+		// Enforce capacity limit by evicting lowest-saliency slots.
+		cap := a.MemoryCapacity
+		if cap == 0 {
+			cap = MaxActiveMask
+		}
+		for a.OwnActiveMaskLen > cap {
+			// Find the slot with minimum saliency.
+			minSal := float32(math.MaxFloat32)
+			minIdx := uint8(0)
+			for i := uint8(0); i < a.OwnActiveMaskLen; i++ {
+				slot := a.OwnActiveMask[i]
+				s := BucketSaliency(a.SlotBuckets[slot])
+				if s < minSal {
+					minSal = s
+					minIdx = i
+				}
+			}
+			// Evict the least-salient slot.
+			slot := a.OwnActiveMask[minIdx]
+			a.SlotTags[slot] = TagUnk
+			a.SlotBuckets[slot] = 0
+			a.OwnActiveMaskLen--
+			a.OwnActiveMask[minIdx] = a.OwnActiveMask[a.OwnActiveMaskLen]
+			a.OwnActiveMask[a.OwnActiveMaskLen] = 0
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// N-Player agent state
+// ---------------------------------------------------------------------------
+
+// NewNPlayerAgentState creates an AgentState for N-player games.
+// Sets up OpponentIDs from playerID and numPlayers.
+// For backward compatibility, 2P games also set OpponentID.
+func NewNPlayerAgentState(playerID, numPlayers, memoryLevel, timeDecayTurns uint8) AgentState {
+	a := AgentState{
+		PlayerID:       playerID,
+		NumPlayers:     numPlayers,
+		MemoryLevel:    memoryLevel,
+		TimeDecayTurns: timeDecayTurns,
+	}
+	idx := uint8(0)
+	for i := uint8(0); i < numPlayers; i++ {
+		if i != playerID {
+			a.OpponentIDs[idx] = i
+			idx++
+		}
+	}
+	a.NumOpponents = idx
+	// For backward compat with 2P code.
+	if numPlayers == 2 {
+		a.OpponentID = a.OpponentIDs[0]
+	}
+	return a
+}
+
+// InitializeNPlayer sets up N-player belief state from a freshly dealt game.
+func (a *AgentState) InitializeNPlayer(g *engine.GameState) {
+	n := g.Rules.NumPlayers
+	if n == 0 {
+		n = 2
+	}
+	a.NumPlayers = n
+
+	a.OwnHandLen = g.Players[a.PlayerID].HandLen
+
+	// Own initial peeks: set knowledge and bucket for peeked slots.
+	peekIdx0 := g.Players[a.PlayerID].InitialPeek[0]
+	peekIdx1 := g.Players[a.PlayerID].InitialPeek[1]
+	for _, peekIdx := range []uint8{peekIdx0, peekIdx1} {
+		if peekIdx < a.OwnHandLen {
+			slot := int(a.PlayerID)*int(engine.MaxHandSize) + int(peekIdx)
+			card := g.Players[a.PlayerID].Hand[peekIdx]
+			bucket := CardToBucket(card)
+			a.NPlayerSlotBuckets[slot] = bucket
+			a.NPlayerSlotKnown[slot] = true
+			a.KnowledgeMask[slot][a.PlayerID] = true
+		}
+	}
+
+	// Public info.
+	discardTop := g.DiscardTop()
+	if discardTop == engine.EmptyCard {
+		a.DiscardTopBucket = BucketUnknown
+	} else {
+		a.DiscardTopBucket = CardToBucket(discardTop)
+	}
+	a.StockEstimate = StockEstimateFromSize(g.StockLen)
+	a.Phase = GamePhaseFromState(g.StockLen, g.IsCambiaCalled(), g.IsTerminal())
+	a.CambiaState = CambiaNone
+	a.CurrentTurn = 0
+}
+
+// UpdateNPlayer updates N-player belief state from the last applied action.
+// Must be called once after each action is applied to the game state.
+func (a *AgentState) UpdateNPlayer(g *engine.GameState) {
+	// Update public knowledge.
+	discardTop := g.DiscardTop()
+	if discardTop == engine.EmptyCard {
+		a.DiscardTopBucket = BucketUnknown
+	} else {
+		a.DiscardTopBucket = CardToBucket(discardTop)
+	}
+	a.StockEstimate = StockEstimateFromSize(g.StockLen)
+	a.Phase = GamePhaseFromState(g.StockLen, g.IsCambiaCalled(), g.IsTerminal())
+	if g.IsCambiaCalled() && a.CambiaState == CambiaNone {
+		if g.CambiaCaller == int8(a.PlayerID) {
+			a.CambiaState = CambiaSelf
+		} else {
+			a.CambiaState = CambiaOpponent
+		}
+	}
+	a.CurrentTurn = g.TurnNumber
+
+	// Update own hand length.
+	a.OwnHandLen = g.Players[a.PlayerID].HandLen
+
+	act := g.LastAction.ActionIdx
+	actingPlayer := g.LastAction.ActingPlayer
+
+	switch {
+	case act == engine.NPlayerActionDrawStockpile || act == engine.NPlayerActionDrawDiscard:
+		// No belief change on draw alone.
+
+	case act == engine.NPlayerActionDiscardNoAbility || act == engine.NPlayerActionDiscardWithAbility:
+		// Discarded card is now public; discard top bucket updated above.
+		// Mark all players as knowing the top discard slot.
+
+	case act == engine.NPlayerActionCallCambia:
+		// Handled via IsCambiaCalled() above.
+
+	case act == engine.NPlayerActionKingSwapNo:
+		// No card movements.
+
+	case act == engine.NPlayerActionKingSwapYes:
+		a.nplayerProcessKingSwapYes(g, actingPlayer)
+
+	case act == engine.NPlayerActionPassSnap:
+		// No belief change.
+
+	default:
+		if slot, ok := engine.NPlayerDecodeReplace(act); ok {
+			a.nplayerProcessReplace(g, actingPlayer, slot)
+		} else if slot, ok := engine.NPlayerDecodePeekOwn(act); ok {
+			a.nplayerProcessPeekOwn(g, actingPlayer, slot)
+		} else if slot, oppIdx, ok := engine.NPlayerDecodePeekOther(act); ok {
+			a.nplayerProcessPeekOther(g, actingPlayer, slot, oppIdx)
+		} else if ownSlot, oppSlot, oppIdx, ok := engine.NPlayerDecodeBlindSwap(act); ok {
+			a.nplayerProcessBlindSwap(g, actingPlayer, ownSlot, oppSlot, oppIdx)
+		} else if ownSlot, oppSlot, oppIdx, ok := engine.NPlayerDecodeKingLook(act); ok {
+			a.nplayerProcessKingLook(g, actingPlayer, ownSlot, oppSlot, oppIdx)
+		} else if slot, ok := engine.NPlayerDecodeSnapOwn(act); ok {
+			a.nplayerProcessSnapOwn(g, actingPlayer, slot)
+		} else if slot, oppIdx, ok := engine.NPlayerDecodeSnapOpponent(act); ok {
+			a.nplayerProcessSnapOpponent(g, actingPlayer, slot, oppIdx)
+		} else if ownIdx, ok := engine.NPlayerDecodeSnapOpponentMove(act); ok {
+			a.nplayerProcessSnapOpponentMove(g, actingPlayer, ownIdx)
+		}
+	}
+}
+
+// nplayerSlot returns the global slot index for a player+card slot.
+func nplayerSlot(playerID, cardSlot uint8) int {
+	return int(playerID)*int(engine.MaxHandSize) + int(cardSlot)
+}
+
+// nplayerOpponentAt returns the actual player ID of opponent at index oppIdx
+// in the ordered Opponents list for actingPlayer.
+func (a *AgentState) nplayerOpponentAt(g *engine.GameState, actingPlayer, oppIdx uint8) uint8 {
+	opps := g.Opponents(actingPlayer)
+	if int(oppIdx) < len(opps) {
+		return opps[oppIdx]
+	}
+	return 255 // invalid
+}
+
+// nplayerSetKnown records that this agent knows the card at a slot.
+func (a *AgentState) nplayerSetKnown(slot int, bucket CardBucket) {
+	if slot < 0 || slot >= MaxTotalSlots {
+		return
+	}
+	a.NPlayerSlotKnown[slot] = true
+	a.NPlayerSlotBuckets[slot] = bucket
+	a.KnowledgeMask[slot][a.PlayerID] = true
+}
+
+// nplayerSetPlayerKnows marks that a specific player knows the card at slot.
+func (a *AgentState) nplayerSetPlayerKnows(slot int, pid uint8) {
+	if slot < 0 || slot >= MaxTotalSlots || int(pid) >= MaxKnowledgePlayers {
+		return
+	}
+	a.KnowledgeMask[slot][pid] = true
+}
+
+// nplayerClearKnowledge removes all knowledge of a slot (after a swap).
+func (a *AgentState) nplayerClearKnowledge(slot int) {
+	if slot < 0 || slot >= MaxTotalSlots {
+		return
+	}
+	a.NPlayerSlotKnown[slot] = false
+	a.NPlayerSlotBuckets[slot] = 0
+	for p := 0; p < MaxKnowledgePlayers; p++ {
+		a.KnowledgeMask[slot][p] = false
+	}
+}
+
+// nplayerSwapKnowledge swaps all knowledge state between two slots.
+func (a *AgentState) nplayerSwapKnowledge(slotA, slotB int) {
+	if slotA < 0 || slotA >= MaxTotalSlots || slotB < 0 || slotB >= MaxTotalSlots {
+		return
+	}
+	a.NPlayerSlotKnown[slotA], a.NPlayerSlotKnown[slotB] = a.NPlayerSlotKnown[slotB], a.NPlayerSlotKnown[slotA]
+	a.NPlayerSlotBuckets[slotA], a.NPlayerSlotBuckets[slotB] = a.NPlayerSlotBuckets[slotB], a.NPlayerSlotBuckets[slotA]
+	a.KnowledgeMask[slotA], a.KnowledgeMask[slotB] = a.KnowledgeMask[slotB], a.KnowledgeMask[slotA]
+}
+
+func (a *AgentState) nplayerProcessReplace(g *engine.GameState, actingPlayer, slot uint8) {
+	globalSlot := nplayerSlot(actingPlayer, slot)
+	if actingPlayer == a.PlayerID {
+		// We replaced our card; we know the new card.
+		card := g.Players[a.PlayerID].Hand[slot]
+		a.nplayerSetKnown(globalSlot, CardToBucket(card))
+	} else {
+		// Opponent replaced: new card is unknown to us. Reset knowledge.
+		// The acting player sees their new card.
+		a.nplayerClearKnowledge(globalSlot)
+		a.nplayerSetPlayerKnows(globalSlot, actingPlayer)
+	}
+}
+
+func (a *AgentState) nplayerProcessPeekOwn(g *engine.GameState, actingPlayer, slot uint8) {
+	globalSlot := nplayerSlot(actingPlayer, slot)
+	a.nplayerSetPlayerKnows(globalSlot, actingPlayer)
+	if actingPlayer == a.PlayerID {
+		card := g.LastAction.RevealedCard
+		a.nplayerSetKnown(globalSlot, CardToBucket(card))
+	}
+}
+
+func (a *AgentState) nplayerProcessPeekOther(g *engine.GameState, actingPlayer, slot, oppIdx uint8) {
+	targetPlayer := a.nplayerOpponentAt(g, actingPlayer, oppIdx)
+	if targetPlayer == 255 {
+		return
+	}
+	globalSlot := nplayerSlot(targetPlayer, slot)
+	a.nplayerSetPlayerKnows(globalSlot, actingPlayer)
+	if actingPlayer == a.PlayerID {
+		card := g.LastAction.RevealedCard
+		a.nplayerSetKnown(globalSlot, CardToBucket(card))
+	}
+}
+
+func (a *AgentState) nplayerProcessBlindSwap(g *engine.GameState, actingPlayer, ownSlot, oppSlot, oppIdx uint8) {
+	targetPlayer := a.nplayerOpponentAt(g, actingPlayer, oppIdx)
+	if targetPlayer == 255 {
+		return
+	}
+	slotA := nplayerSlot(actingPlayer, ownSlot)
+	slotB := nplayerSlot(targetPlayer, oppSlot)
+	// Swap all knowledge bits — both slots physically moved.
+	a.nplayerSwapKnowledge(slotA, slotB)
+	// After a blind swap, neither actor knows what they received (they didn't look).
+	// Clear both slots' knowledge (the swap was blind).
+	a.nplayerClearKnowledge(slotA)
+	a.nplayerClearKnowledge(slotB)
+}
+
+func (a *AgentState) nplayerProcessKingLook(g *engine.GameState, actingPlayer, ownSlot, oppSlot, oppIdx uint8) {
+	targetPlayer := a.nplayerOpponentAt(g, actingPlayer, oppIdx)
+	if targetPlayer == 255 {
+		return
+	}
+	slotA := nplayerSlot(actingPlayer, ownSlot)
+	slotB := nplayerSlot(targetPlayer, oppSlot)
+	// Acting player sees both cards.
+	a.nplayerSetPlayerKnows(slotA, actingPlayer)
+	a.nplayerSetPlayerKnows(slotB, actingPlayer)
+	if actingPlayer == a.PlayerID {
+		card := g.LastAction.RevealedCard
+		a.nplayerSetKnown(slotA, CardToBucket(card))
+		// Also look at target player's card via actual hand.
+		oppCard := g.Players[targetPlayer].Hand[oppSlot]
+		a.nplayerSetKnown(slotB, CardToBucket(oppCard))
+	}
+}
+
+func (a *AgentState) nplayerProcessKingSwapYes(g *engine.GameState, actingPlayer uint8) {
+	ownIdx := g.LastAction.SwapOwnIdx
+	oppIdx := g.LastAction.SwapOppIdx
+	// Find which player held the opposed slot. We need target player.
+	// SwapOppIdx is relative to Opponents(actingPlayer)[0] for 2P; in N-player,
+	// we infer the target from LastAction.RevealedOwner if available.
+	targetPlayer := g.LastAction.RevealedOwner
+	slotA := nplayerSlot(actingPlayer, ownIdx)
+	slotB := nplayerSlot(targetPlayer, oppIdx)
+	a.nplayerSwapKnowledge(slotA, slotB)
+	// After swap, acting player still knows both slots (they looked during king look).
+	a.nplayerSetPlayerKnows(slotA, actingPlayer)
+	a.nplayerSetPlayerKnows(slotB, actingPlayer)
+	// But unless this agent IS actingPlayer, we don't know the cards.
+	// Actual knowledge is unchanged for us from what nplayerSwapKnowledge did.
+}
+
+func (a *AgentState) nplayerProcessSnapOwn(g *engine.GameState, actingPlayer, slot uint8) {
+	// Snap outcome: if successful, the card is publicly revealed and removed.
+	// We just clear knowledge of that slot; hand shrinks (tracked via OwnHandLen update above).
+	globalSlot := nplayerSlot(actingPlayer, slot)
+	if g.LastAction.SnapSuccess {
+		// Card is now gone — mark all knowledge cleared.
+		a.nplayerClearKnowledge(globalSlot)
+	}
+	// If snap failed: penalty cards added (unknown) — OwnHandLen already updated.
+}
+
+func (a *AgentState) nplayerProcessSnapOpponent(g *engine.GameState, actingPlayer, slot, oppIdx uint8) {
+	targetPlayer := a.nplayerOpponentAt(g, actingPlayer, oppIdx)
+	if targetPlayer == 255 {
+		return
+	}
+	globalSlot := nplayerSlot(targetPlayer, slot)
+	if g.LastAction.SnapSuccess {
+		a.nplayerClearKnowledge(globalSlot)
+	}
+}
+
+func (a *AgentState) nplayerProcessSnapOpponentMove(g *engine.GameState, actingPlayer, ownIdx uint8) {
+	// Acting player moves their card at ownIdx to a target player's hand.
+	globalSlot := nplayerSlot(actingPlayer, ownIdx)
+	// Card moves out of actingPlayer's hand — clear its knowledge.
+	a.nplayerClearKnowledge(globalSlot)
+	// Target player gains a card (unknown position), tracked via hand length.
+}
+
 // InfosetKey encodes the belief state into a fixed-size 16-byte array.
 // Layout:
 //
@@ -610,4 +1158,227 @@ func (a *AgentState) InfosetKey() [16]uint8 {
 	key[14] = uint8(a.StockEstimate) | (uint8(a.Phase) << 4)
 	key[15] = uint8(a.CambiaState)
 	return key
+}
+
+// ---------------------------------------------------------------------------
+// EP-PBS helper methods
+// ---------------------------------------------------------------------------
+
+// appendOwnActive appends slotIdx to OwnActiveMask.
+// If the mask is full, evicts the slot with minimum saliency first.
+// No-op if slotIdx is already present.
+func (a *AgentState) appendOwnActive(slotIdx uint8) {
+	for i := uint8(0); i < a.OwnActiveMaskLen; i++ {
+		if a.OwnActiveMask[i] == slotIdx {
+			return // already present
+		}
+	}
+	if a.OwnActiveMaskLen < MaxActiveMask {
+		a.OwnActiveMask[a.OwnActiveMaskLen] = slotIdx
+		a.OwnActiveMaskLen++
+		return
+	}
+	a.evictOwnSaliency()
+	a.OwnActiveMask[a.OwnActiveMaskLen] = slotIdx
+	a.OwnActiveMaskLen++
+}
+
+// appendOppActive appends slotIdx to OppActiveMask.
+// If the mask is full, evicts the oldest entry (FIFO) first.
+// No-op if slotIdx is already present.
+func (a *AgentState) appendOppActive(slotIdx uint8) {
+	for i := uint8(0); i < a.OppActiveMaskLen; i++ {
+		if a.OppActiveMask[i] == slotIdx {
+			return // already present
+		}
+	}
+	if a.OppActiveMaskLen < MaxActiveMask {
+		a.OppActiveMask[a.OppActiveMaskLen] = slotIdx
+		a.OppActiveMaskLen++
+		return
+	}
+	a.evictOppFIFO()
+	a.OppActiveMask[a.OppActiveMaskLen] = slotIdx
+	a.OppActiveMaskLen++
+}
+
+// removeOwnActive removes slotIdx from OwnActiveMask (no-op if absent).
+func (a *AgentState) removeOwnActive(slotIdx uint8) {
+	for i := uint8(0); i < a.OwnActiveMaskLen; i++ {
+		if a.OwnActiveMask[i] == slotIdx {
+			for j := i; j < a.OwnActiveMaskLen-1; j++ {
+				a.OwnActiveMask[j] = a.OwnActiveMask[j+1]
+			}
+			a.OwnActiveMaskLen--
+			a.OwnActiveMask[a.OwnActiveMaskLen] = 0
+			return
+		}
+	}
+}
+
+// removeOppActive removes slotIdx from OppActiveMask (no-op if absent).
+func (a *AgentState) removeOppActive(slotIdx uint8) {
+	for i := uint8(0); i < a.OppActiveMaskLen; i++ {
+		if a.OppActiveMask[i] == slotIdx {
+			for j := i; j < a.OppActiveMaskLen-1; j++ {
+				a.OppActiveMask[j] = a.OppActiveMask[j+1]
+			}
+			a.OppActiveMaskLen--
+			a.OppActiveMask[a.OppActiveMaskLen] = 0
+			return
+		}
+	}
+}
+
+// evictOwnSaliency evicts the entry with minimum BucketSaliency from OwnActiveMask.
+// Sets the evicted slot's tag to TagUnk and clears its bucket.
+func (a *AgentState) evictOwnSaliency() {
+	if a.OwnActiveMaskLen == 0 {
+		return
+	}
+	minIdx := uint8(0)
+	minSal := BucketSaliency(a.SlotBuckets[a.OwnActiveMask[0]])
+	for i := uint8(1); i < a.OwnActiveMaskLen; i++ {
+		sal := BucketSaliency(a.SlotBuckets[a.OwnActiveMask[i]])
+		if sal < minSal {
+			minSal = sal
+			minIdx = i
+		}
+	}
+	evictedSlot := a.OwnActiveMask[minIdx]
+	a.SlotTags[evictedSlot] = TagUnk
+	a.SlotBuckets[evictedSlot] = 0
+	for j := minIdx; j < a.OwnActiveMaskLen-1; j++ {
+		a.OwnActiveMask[j] = a.OwnActiveMask[j+1]
+	}
+	a.OwnActiveMaskLen--
+	a.OwnActiveMask[a.OwnActiveMaskLen] = 0
+}
+
+// evictOppFIFO evicts the oldest entry (index 0) from OppActiveMask.
+// Sets the evicted slot's tag to TagUnk.
+func (a *AgentState) evictOppFIFO() {
+	if a.OppActiveMaskLen == 0 {
+		return
+	}
+	evictedSlot := a.OppActiveMask[0]
+	a.SlotTags[evictedSlot] = TagUnk
+	for j := uint8(0); j < a.OppActiveMaskLen-1; j++ {
+		a.OppActiveMask[j] = a.OppActiveMask[j+1]
+	}
+	a.OppActiveMaskLen--
+	a.OppActiveMask[a.OppActiveMaskLen] = 0
+}
+
+// setOwnSlotKnown transitions slotIdx to TagPrivOwn (we peeked it).
+// Handles all prior-tag cases per EP-PBS transition rules.
+func (a *AgentState) setOwnSlotKnown(slotIdx uint8, bucket CardBucket) {
+	prevTag := a.SlotTags[slotIdx]
+	a.SlotBuckets[slotIdx] = bucket
+	switch prevTag {
+	case TagUnk:
+		a.SlotTags[slotIdx] = TagPrivOwn
+		a.appendOwnActive(slotIdx)
+	case TagPrivOpp:
+		// Opp knew it; we now know it too → TagPub.
+		a.SlotTags[slotIdx] = TagPub
+		a.removeOppActive(slotIdx)
+	case TagPrivOwn:
+		// Re-peek: update bucket in place, mask unchanged.
+	case TagPub:
+		// Already public: just update bucket.
+	}
+}
+
+// setOppSlotPrivOpp transitions slotIdx to TagPrivOpp (opp peeked it).
+// Handles all prior-tag cases per EP-PBS transition rules.
+func (a *AgentState) setOppSlotPrivOpp(slotIdx uint8) {
+	prevTag := a.SlotTags[slotIdx]
+	switch prevTag {
+	case TagUnk:
+		a.SlotTags[slotIdx] = TagPrivOpp
+		a.appendOppActive(slotIdx)
+	case TagPrivOwn:
+		// We knew it; opp now knows it too → TagPub.
+		a.SlotTags[slotIdx] = TagPub
+		a.removeOwnActive(slotIdx)
+	case TagPrivOpp:
+		// Opp re-peeks: refresh FIFO position.
+		a.removeOppActive(slotIdx)
+		a.appendOppActive(slotIdx)
+	case TagPub:
+		// Already public.
+	}
+}
+
+// eppbsSetSlotUnk forces slotIdx to TagUnk, removing it from all active masks.
+func (a *AgentState) eppbsSetSlotUnk(slotIdx uint8) {
+	prev := a.SlotTags[slotIdx]
+	switch prev {
+	case TagPrivOwn:
+		a.removeOwnActive(slotIdx)
+	case TagPrivOpp:
+		a.removeOppActive(slotIdx)
+	}
+	a.SlotTags[slotIdx] = TagUnk
+	a.SlotBuckets[slotIdx] = 0
+}
+
+// eppbsForceOwnSlotKnown directly sets slotIdx to TagPrivOwn (used for Replace).
+// Unlike setOwnSlotKnown, this treats the slot as having a brand-new card regardless
+// of prior tag, so it always results in TagPrivOwn (not TagPub).
+func (a *AgentState) eppbsForceOwnSlotKnown(slotIdx uint8, bucket CardBucket) {
+	prev := a.SlotTags[slotIdx]
+	switch prev {
+	case TagPrivOpp:
+		a.removeOppActive(slotIdx)
+		a.appendOwnActive(slotIdx)
+	case TagUnk, TagPub:
+		a.appendOwnActive(slotIdx)
+	case TagPrivOwn:
+		// Already in OwnActiveMask; update bucket only.
+	}
+	a.SlotTags[slotIdx] = TagPrivOwn
+	a.SlotBuckets[slotIdx] = bucket
+}
+
+// eppbsForceOppSlotPrivOpp directly sets slotIdx to TagPrivOpp (used for Replace).
+// Unlike setOppSlotPrivOpp, always results in TagPrivOpp (opp has new card we don't know).
+func (a *AgentState) eppbsForceOppSlotPrivOpp(slotIdx uint8) {
+	prev := a.SlotTags[slotIdx]
+	switch prev {
+	case TagPrivOwn:
+		a.removeOwnActive(slotIdx)
+		a.appendOppActive(slotIdx)
+	case TagUnk, TagPub:
+		a.appendOppActive(slotIdx)
+	case TagPrivOpp:
+		// Refresh FIFO position.
+		a.removeOppActive(slotIdx)
+		a.appendOppActive(slotIdx)
+	}
+	a.SlotTags[slotIdx] = TagPrivOpp
+	a.SlotBuckets[slotIdx] = 0
+}
+
+// eppbsSwapSlots swaps the EP-PBS state (tag + bucket) between two slot indices,
+// and updates all active mask references accordingly.
+func (a *AgentState) eppbsSwapSlots(slotA, slotB uint8) {
+	a.SlotTags[slotA], a.SlotTags[slotB] = a.SlotTags[slotB], a.SlotTags[slotA]
+	a.SlotBuckets[slotA], a.SlotBuckets[slotB] = a.SlotBuckets[slotB], a.SlotBuckets[slotA]
+	// Update mask references: replace slotA↔slotB in both masks.
+	for i := uint8(0); i < a.OwnActiveMaskLen; i++ {
+		if a.OwnActiveMask[i] == slotA {
+			a.OwnActiveMask[i] = slotB
+		} else if a.OwnActiveMask[i] == slotB {
+			a.OwnActiveMask[i] = slotA
+		}
+	}
+	for i := uint8(0); i < a.OppActiveMaskLen; i++ {
+		if a.OppActiveMask[i] == slotA {
+			a.OppActiveMask[i] = slotB
+		} else if a.OppActiveMask[i] == slotB {
+			a.OppActiveMask[i] = slotA
+		}
+	}
 }

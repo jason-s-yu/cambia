@@ -47,6 +47,8 @@ class ColumnarBatch:
     Provides pre-stacked numpy arrays for direct conversion to PyTorch tensors,
     and also supports len() and iteration over ReservoirSample objects for
     backward compatibility.
+
+    When the buffer was created with has_mask=False, the masks attribute is None.
     """
 
     __slots__ = ("features", "targets", "masks", "iterations", "_size")
@@ -55,12 +57,12 @@ class ColumnarBatch:
         self,
         features: np.ndarray,
         targets: np.ndarray,
-        masks: np.ndarray,
+        masks: Optional[np.ndarray],
         iterations: np.ndarray,
     ):
-        self.features = features  # (N, INPUT_DIM) float32
-        self.targets = targets  # (N, NUM_ACTIONS) float32
-        self.masks = masks  # (N, NUM_ACTIONS) bool
+        self.features = features  # (N, input_dim) float32
+        self.targets = targets  # (N, target_dim) float32
+        self.masks = masks  # (N, target_dim) bool, or None when has_mask=False
         self.iterations = iterations  # (N,) int64
         self._size = len(features)
 
@@ -73,19 +75,21 @@ class ColumnarBatch:
     def __iter__(self):
         """Iterate as ReservoirSample objects (backward compatibility)."""
         for i in range(self._size):
+            mask = self.masks[i] if self.masks is not None else np.empty(0, dtype=bool)
             yield ReservoirSample(
                 features=self.features[i],
                 target=self.targets[i],
-                action_mask=self.masks[i],
+                action_mask=mask,
                 iteration=int(self.iterations[i]),
             )
 
     def __getitem__(self, idx):
         """Index into the batch, returning a ReservoirSample."""
+        mask = self.masks[idx] if self.masks is not None else np.empty(0, dtype=bool)
         return ReservoirSample(
             features=self.features[idx],
             target=self.targets[idx],
-            action_mask=self.masks[idx],
+            action_mask=mask,
             iteration=int(self.iterations[idx]),
         )
 
@@ -112,10 +116,11 @@ class _BufferView:
     def __iter__(self):
         owner = self._owner
         for i in range(owner._size):
+            mask = owner._masks[i].copy() if owner._has_mask else np.empty(0, dtype=bool)
             yield ReservoirSample(
                 features=owner._features[i].copy(),
                 target=owner._targets[i].copy(),
-                action_mask=owner._masks[i].copy(),
+                action_mask=mask,
                 iteration=int(owner._iterations[i]),
             )
 
@@ -127,7 +132,9 @@ class _BufferView:
                 ReservoirSample(
                     features=owner._features[i].copy(),
                     target=owner._targets[i].copy(),
-                    action_mask=owner._masks[i].copy(),
+                    action_mask=(
+                        owner._masks[i].copy() if owner._has_mask else np.empty(0, dtype=bool)
+                    ),
                     iteration=int(owner._iterations[i]),
                 )
                 for i in indices
@@ -136,10 +143,11 @@ class _BufferView:
             idx += owner._size
         if idx < 0 or idx >= owner._size:
             raise IndexError(f"buffer index {idx} out of range")
+        mask = owner._masks[idx].copy() if owner._has_mask else np.empty(0, dtype=bool)
         return ReservoirSample(
             features=owner._features[idx].copy(),
             target=owner._targets[idx].copy(),
-            action_mask=owner._masks[idx].copy(),
+            action_mask=mask,
             iteration=int(owner._iterations[idx]),
         )
 
@@ -151,20 +159,36 @@ class ReservoirBuffer:
     Guarantees a uniform random sample over all items ever added,
     regardless of how many items have been seen.
 
-    Internal storage is columnar: four contiguous numpy arrays are
-    pre-allocated to ``capacity`` rows. This avoids per-sample Python
-    object overhead and enables O(1) batch sampling via fancy indexing.
+    Internal storage is columnar: contiguous numpy arrays pre-allocated to
+    ``capacity`` rows. This avoids per-sample Python object overhead and
+    enables O(1) batch sampling via fancy indexing.
+
+    Args:
+        capacity: Maximum number of samples to store.
+        input_dim: Feature dimension per sample (default: INPUT_DIM = 222).
+        target_dim: Target dimension per sample (default: NUM_ACTIONS = 146).
+        has_mask: Whether to allocate and track action masks. Set to False for
+            value buffers where masking is not applicable (e.g., ESCHER value net).
     """
 
-    def __init__(self, capacity: int = 2_000_000):
+    def __init__(
+        self,
+        capacity: int = 2_000_000,
+        input_dim: int = INPUT_DIM,
+        target_dim: int = NUM_ACTIONS,
+        has_mask: bool = True,
+    ):
         self.capacity = capacity
+        self._input_dim = input_dim
+        self._target_dim = target_dim
+        self._has_mask = has_mask
         self._size: int = 0
         self.seen_count: int = 0
 
         # Pre-allocate columnar storage
-        self._features = np.zeros((capacity, INPUT_DIM), dtype=np.float32)
-        self._targets = np.zeros((capacity, NUM_ACTIONS), dtype=np.float32)
-        self._masks = np.zeros((capacity, NUM_ACTIONS), dtype=bool)
+        self._features = np.zeros((capacity, input_dim), dtype=np.float32)
+        self._targets = np.zeros((capacity, target_dim), dtype=np.float32)
+        self._masks = np.zeros((capacity, target_dim), dtype=bool) if has_mask else None
         self._iterations = np.zeros(capacity, dtype=np.int64)
 
     # Backward-compatible property: tests access buf.buffer
@@ -194,7 +218,8 @@ class ReservoirBuffer:
 
         self._features[idx] = sample.features
         self._targets[idx] = sample.target
-        self._masks[idx] = sample.action_mask
+        if self._has_mask:
+            self._masks[idx] = sample.action_mask
         self._iterations[idx] = sample.iteration
 
     def sample_batch(self, batch_size: int) -> ColumnarBatch:
@@ -210,9 +235,9 @@ class ReservoirBuffer:
         actual_size = min(batch_size, self._size)
         if actual_size == 0:
             return ColumnarBatch(
-                features=np.empty((0, INPUT_DIM), dtype=np.float32),
-                targets=np.empty((0, NUM_ACTIONS), dtype=np.float32),
-                masks=np.empty((0, NUM_ACTIONS), dtype=bool),
+                features=np.empty((0, self._input_dim), dtype=np.float32),
+                targets=np.empty((0, self._target_dim), dtype=np.float32),
+                masks=np.empty((0, self._target_dim), dtype=bool) if self._has_mask else None,
                 iterations=np.empty(0, dtype=np.int64),
             )
 
@@ -220,7 +245,7 @@ class ReservoirBuffer:
         return ColumnarBatch(
             features=self._features[indices],
             targets=self._targets[indices],
-            masks=self._masks[indices],
+            masks=self._masks[indices] if self._has_mask else None,
             iterations=self._iterations[indices],
         )
 
@@ -239,14 +264,18 @@ class ReservoirBuffer:
             filepath.parent.mkdir(parents=True, exist_ok=True)
 
             n = self._size
-            np.savez_compressed(
-                str(filepath),
-                features=self._features[:n],
-                targets=self._targets[:n],
-                masks=self._masks[:n],
-                iterations=self._iterations[:n],
-                meta=np.array([self.seen_count, self.capacity], dtype=np.int64),
-            )
+            save_kwargs: dict = {
+                "features": self._features[:n],
+                "targets": self._targets[:n],
+                "iterations": self._iterations[:n],
+                "meta": np.array([self.seen_count, self.capacity], dtype=np.int64),
+                "has_mask": np.array([self._has_mask]),
+                "input_dim": np.array([self._input_dim], dtype=np.int64),
+                "target_dim": np.array([self._target_dim], dtype=np.int64),
+            }
+            if self._has_mask:
+                save_kwargs["masks"] = self._masks[:n]
+            np.savez_compressed(str(filepath), **save_kwargs)
             logger.info(
                 "Saved reservoir buffer (%d samples, %d seen) to %s",
                 n,
@@ -285,8 +314,14 @@ class ReservoirBuffer:
 
             features = data["features"]
             targets = data["targets"]
-            masks = data["masks"]
             iterations = data["iterations"]
+
+            # Load optional has_mask / dimension metadata (added Feb 2026 for ESCHER)
+            saved_has_mask = bool(data["has_mask"][0]) if "has_mask" in data else True
+            saved_input_dim = int(data["input_dim"][0]) if "input_dim" in data else INPUT_DIM
+            saved_target_dim = int(data["target_dim"][0]) if "target_dim" in data else NUM_ACTIONS
+
+            masks = data["masks"] if saved_has_mask and "masks" in data else None
 
             n = len(features)
 
@@ -303,20 +338,30 @@ class ReservoirBuffer:
                     keep = np.random.choice(n, self.capacity, replace=False)
                     features = features[keep]
                     targets = targets[keep]
-                    masks = masks[keep]
+                    if masks is not None:
+                        masks = masks[keep]
                     iterations = iterations[keep]
                     n = self.capacity
 
-            # Re-allocate arrays if capacity changed since construction
-            if self._features.shape[0] != self.capacity:
-                self._features = np.zeros((self.capacity, INPUT_DIM), dtype=np.float32)
-                self._targets = np.zeros((self.capacity, NUM_ACTIONS), dtype=np.float32)
-                self._masks = np.zeros((self.capacity, NUM_ACTIONS), dtype=bool)
-                self._iterations = np.zeros(self.capacity, dtype=np.int64)
+            # Re-allocate arrays if capacity or dims changed since construction
+            if self._features.shape[0] != self.capacity or self._input_dim != saved_input_dim:
+                self._features = np.zeros(
+                    (self.capacity, self._input_dim), dtype=np.float32
+                )
+            if self._targets.shape[0] != self.capacity or self._target_dim != saved_target_dim:
+                self._targets = np.zeros(
+                    (self.capacity, self._target_dim), dtype=np.float32
+                )
+            if self._has_mask and (
+                self._masks is None or self._masks.shape[0] != self.capacity
+            ):
+                self._masks = np.zeros((self.capacity, self._target_dim), dtype=bool)
+            self._iterations = np.zeros(self.capacity, dtype=np.int64)
 
             self._features[:n] = features
             self._targets[:n] = targets
-            self._masks[:n] = masks
+            if self._has_mask and masks is not None:
+                self._masks[:n] = masks
             self._iterations[:n] = iterations
             self._size = n
 
@@ -356,14 +401,19 @@ class ReservoirBuffer:
         if self._size > new_capacity:
             # Subsample to new capacity
             keep = np.random.choice(self._size, new_capacity, replace=False)
-            new_features = np.zeros((new_capacity, INPUT_DIM), dtype=np.float32)
-            new_targets = np.zeros((new_capacity, NUM_ACTIONS), dtype=np.float32)
-            new_masks = np.zeros((new_capacity, NUM_ACTIONS), dtype=bool)
+            new_features = np.zeros((new_capacity, self._input_dim), dtype=np.float32)
+            new_targets = np.zeros((new_capacity, self._target_dim), dtype=np.float32)
+            new_masks = (
+                np.zeros((new_capacity, self._target_dim), dtype=bool)
+                if self._has_mask
+                else None
+            )
             new_iterations = np.zeros(new_capacity, dtype=np.int64)
 
             new_features[:new_capacity] = self._features[keep]
             new_targets[:new_capacity] = self._targets[keep]
-            new_masks[:new_capacity] = self._masks[keep]
+            if new_masks is not None:
+                new_masks[:new_capacity] = self._masks[keep]
             new_iterations[:new_capacity] = self._iterations[keep]
 
             self._features = new_features
@@ -381,16 +431,21 @@ class ReservoirBuffer:
             )
         else:
             # Growing or same: re-allocate larger arrays, copy existing data
-            new_features = np.zeros((new_capacity, INPUT_DIM), dtype=np.float32)
-            new_targets = np.zeros((new_capacity, NUM_ACTIONS), dtype=np.float32)
-            new_masks = np.zeros((new_capacity, NUM_ACTIONS), dtype=bool)
+            new_features = np.zeros((new_capacity, self._input_dim), dtype=np.float32)
+            new_targets = np.zeros((new_capacity, self._target_dim), dtype=np.float32)
+            new_masks = (
+                np.zeros((new_capacity, self._target_dim), dtype=bool)
+                if self._has_mask
+                else None
+            )
             new_iterations = np.zeros(new_capacity, dtype=np.int64)
 
             n = self._size
             if n > 0:
                 new_features[:n] = self._features[:n]
                 new_targets[:n] = self._targets[:n]
-                new_masks[:n] = self._masks[:n]
+                if new_masks is not None:
+                    new_masks[:n] = self._masks[:n]
                 new_iterations[:n] = self._iterations[:n]
 
             self._features = new_features

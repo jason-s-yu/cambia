@@ -120,6 +120,15 @@ class AbilityMixin:
                     ):
                         can_use = False
 
+                    if rank in [JACK, QUEEN, KING]:
+                        opp_is_locked = (
+                            getattr(getattr(self, 'house_rules', None), 'lockCallerHand', False)
+                            and self.cambia_caller_id is not None
+                            and self.cambia_caller_id == opponent_id
+                        )
+                        if opp_is_locked:
+                            can_use = False
+
                     if can_use:
                         legal_actions.add(ActionDiscard(use_ability=True))
                     else:
@@ -129,7 +138,13 @@ class AbilityMixin:
                         )
 
                 # Add Replace actions only if hand has cards
-                if player_hand_count > 0:
+                # When lockCallerHand is true, the Cambia caller cannot replace
+                lock_caller = (
+                    getattr(getattr(self, 'house_rules', None), 'lockCallerHand', False)
+                    and self.cambia_caller_id is not None
+                    and self.cambia_caller_id == player
+                )
+                if player_hand_count > 0 and not lock_caller:
                     for i in range(player_hand_count):
                         legal_actions.add(ActionReplace(target_hand_index=i))
 
@@ -158,7 +173,12 @@ class AbilityMixin:
                     # Ability fizzles
 
             elif isinstance(action_type, ActionAbilityBlindSwapSelect):  # J/Q Swap Choice
-                if player_hand_count > 0 and opponent_hand_count > 0:
+                opp_is_locked = (
+                    getattr(getattr(self, 'house_rules', None), 'lockCallerHand', False)
+                    and self.cambia_caller_id is not None
+                    and self.cambia_caller_id == opponent_id
+                )
+                if player_hand_count > 0 and opponent_hand_count > 0 and not opp_is_locked:
                     for i in range(player_hand_count):
                         for j in range(opponent_hand_count):
                             legal_actions.add(
@@ -176,7 +196,12 @@ class AbilityMixin:
                     # Ability fizzles
 
             elif isinstance(action_type, ActionAbilityKingLookSelect):  # K Look Choice
-                if player_hand_count > 0 and opponent_hand_count > 0:
+                opp_is_locked = (
+                    getattr(getattr(self, 'house_rules', None), 'lockCallerHand', False)
+                    and self.cambia_caller_id is not None
+                    and self.cambia_caller_id == opponent_id
+                )
+                if player_hand_count > 0 and opponent_hand_count > 0 and not opp_is_locked:
                     for i in range(player_hand_count):
                         for j in range(opponent_hand_count):
                             legal_actions.add(

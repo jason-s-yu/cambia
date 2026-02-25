@@ -81,19 +81,27 @@ func TestNewGameSeedZero(t *testing.T) {
 
 // TestDealCardCounts verifies card counts after Deal.
 func TestDealCardCounts(t *testing.T) {
-	hr := DefaultHouseRules() // CardsPerPlayer = 4
+	hr := DefaultHouseRules() // CardsPerPlayer = 4, NumPlayers = 2
 	g := NewGame(42, hr)
 	g.Deal()
 
-	// Each player should have exactly CardsPerPlayer cards.
-	for p := uint8(0); p < MaxPlayers; p++ {
+	n := g.NumActivePlayers()
+
+	// Active players should have exactly CardsPerPlayer cards.
+	for p := uint8(0); p < n; p++ {
 		if g.Players[p].HandLen != hr.CardsPerPlayer {
 			t.Errorf("player %d HandLen = %d, want %d", p, g.Players[p].HandLen, hr.CardsPerPlayer)
 		}
 	}
+	// Inactive slots should be empty.
+	for p := n; p < MaxPlayers; p++ {
+		if g.Players[p].HandLen != 0 {
+			t.Errorf("inactive player %d HandLen = %d, want 0", p, g.Players[p].HandLen)
+		}
+	}
 
-	// Stockpile should have shrunk by CardsPerPlayer*MaxPlayers + 1 (flipped to discard).
-	dealtCards := uint8(hr.CardsPerPlayer) * MaxPlayers
+	// Stockpile should have shrunk by CardsPerPlayer*NumPlayers + 1 (flipped to discard).
+	dealtCards := uint8(hr.CardsPerPlayer) * n
 	expectedStockLen := uint8(52+hr.NumJokers) - dealtCards - 1
 	if g.StockLen != expectedStockLen {
 		t.Errorf("StockLen = %d, want %d", g.StockLen, expectedStockLen)
@@ -125,8 +133,9 @@ func TestDealDeterministic(t *testing.T) {
 		t.Errorf("DiscardTop: %v vs %v", g1.DiscardTop(), g2.DiscardTop())
 	}
 
-	// Same hands for each player.
-	for p := uint8(0); p < MaxPlayers; p++ {
+	// Same hands for each active player.
+	n := g1.NumActivePlayers()
+	for p := uint8(0); p < n; p++ {
 		for c := uint8(0); c < g1.Players[p].HandLen; c++ {
 			if g1.Players[p].Hand[c] != g2.Players[p].Hand[c] {
 				t.Errorf("player %d card %d: %v vs %v", p, c, g1.Players[p].Hand[c], g2.Players[p].Hand[c])
@@ -147,7 +156,8 @@ func TestDealDifferentSeeds(t *testing.T) {
 
 	// With high probability, at least one card should differ.
 	allSame := true
-	for p := uint8(0); p < MaxPlayers; p++ {
+	n := g1.NumActivePlayers()
+	for p := uint8(0); p < n; p++ {
 		for c := uint8(0); c < g1.Players[p].HandLen; c++ {
 			if g1.Players[p].Hand[c] != g2.Players[p].Hand[c] {
 				allSame = false

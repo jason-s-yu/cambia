@@ -41,9 +41,24 @@ from .constants import (
     CardBucket,
     DecayCategory,
     DecisionContext,
+    EpistemicTag,
     GameAction,
     GamePhase,
     StockpileEstimate,
+    EP_PBS_INPUT_DIM,
+    EP_PBS_MAX_SLOTS,
+    EP_PBS_TAG_DIM,
+    EP_PBS_BUCKET_DIM,
+    EP_PBS_PUBLIC_DIM,
+    EP_PBS_MAX_ACTIVE_MASK,
+    N_PLAYER_INPUT_DIM,
+    N_PLAYER_NUM_ACTIONS,
+    N_PLAYER_MAX_PLAYERS,
+    N_PLAYER_MAX_SLOTS,
+    N_PLAYER_POWERSET_DIM,
+    N_PLAYER_IDENTITY_DIM,
+    N_PLAYER_PUBLIC_DIM,
+    bucket_saliency,
 )
 from src.cfr.exceptions import InfosetEncodingError, ActionEncodingError
 
@@ -52,6 +67,8 @@ MAX_HAND = 6
 SLOT_ENCODING_DIM = 15  # 10 CardBucket + 3 DecayCategory + UNKNOWN + EMPTY
 INPUT_DIM = 222
 NUM_ACTIONS = 146
+
+# EP-PBS constants imported from constants.py above
 
 # Slot encoding indices within each 15-dim one-hot:
 #   0-9:  CardBucket values (ZERO=0, NEG_KING=1, ACE=2, LOW_NUM=3, MID_NUM=4,
@@ -83,6 +100,31 @@ _DECAY_TO_SLOT_IDX = {
 }
 
 EMPTY_SLOT_IDX = 14
+
+# --- EP-PBS Constants ---
+# EP_PBS_INPUT_DIM, EP_PBS_MAX_SLOTS, etc. imported from constants.py above.
+# Layout:
+#   [0-39]    public features (40)
+#   [40-87]   slot tags: 12 slots x 4-dim one-hot (48)
+#   [88-195]  slot identities: 12 slots x 9-dim one-hot (108)
+#   [196-199] padding (4)
+# Slot layout: slots 0-5 = own hand, slots 6-11 = opponent hand.
+
+# 9-dim identity encoding: CardBucket value → identity index (0-8)
+_BUCKET_TO_IDENTITY_IDX = {
+    CardBucket.ZERO.value: 0,
+    CardBucket.NEG_KING.value: 1,
+    CardBucket.ACE.value: 2,
+    CardBucket.LOW_NUM.value: 3,
+    CardBucket.MID_NUM.value: 4,
+    CardBucket.PEEK_SELF.value: 5,
+    CardBucket.PEEK_OTHER.value: 6,
+    CardBucket.SWAP_BLIND.value: 7,
+    CardBucket.HIGH_KING.value: 8,
+}
+
+# eppbs_slot_saliency is an alias for bucket_saliency (imported from constants.py)
+eppbs_slot_saliency = bucket_saliency
 
 # Map StockpileEstimate.value -> one-hot index (4 values)
 _STOCKPILE_TO_IDX = {
@@ -324,6 +366,77 @@ def encode_infoset(
     return features
 
 
+def encode_infoset_eppbs(
+    slot_tags: list,          # list of 12 EpistemicTag values
+    slot_buckets: list,       # list of 12 bucket values (0 if unknown)
+    discard_top_bucket: int,
+    stock_estimate: int,
+    game_phase: int,
+    decision_context: int,
+    cambia_state: int,
+    drawn_card_bucket: int = -1,
+) -> np.ndarray:
+    """EP-PBS encoding for 2-player games. Returns ndarray of shape (200,)."""
+    out = np.zeros(EP_PBS_INPUT_DIM, dtype=np.float32)
+    offset = 0
+
+    # Public features (40 dims)
+    # [0-9]: discard top bucket (10-dim one-hot)
+    if 0 <= discard_top_bucket <= 9:
+        out[offset + discard_top_bucket] = 1.0
+    offset += 10
+
+    # [10-13]: stockpile estimate (4-dim one-hot)
+    if 0 <= stock_estimate <= 3:
+        out[offset + stock_estimate] = 1.0
+    offset += 4
+
+    # [14-19]: game phase (6-dim one-hot)
+    if 0 <= game_phase <= 5:
+        out[offset + game_phase] = 1.0
+    offset += 6
+
+    # [20-25]: decision context (6-dim one-hot)
+    if 0 <= decision_context <= 5:
+        out[offset + decision_context] = 1.0
+    offset += 6
+
+    # [26-28]: cambia state (3-dim one-hot)
+    # Python order: SELF=0, OPPONENT=1, NONE=2
+    if 0 <= cambia_state <= 2:
+        out[offset + cambia_state] = 1.0
+    offset += 3
+
+    # [29-39]: drawn card bucket (11-dim one-hot)
+    if drawn_card_bucket < 0:
+        out[offset + 10] = 1.0  # NONE
+    elif 0 <= drawn_card_bucket <= 9:
+        out[offset + drawn_card_bucket] = 1.0
+    offset += 11
+    # offset = 40
+
+    # Slot tags (48 dims): 12 slots × 4-dim one-hot
+    for i in range(EP_PBS_MAX_SLOTS):
+        tag = slot_tags[i] if i < len(slot_tags) else EpistemicTag.UNK
+        if 0 <= tag <= 3:
+            out[offset + tag] = 1.0
+        offset += EP_PBS_TAG_DIM
+    # offset = 88
+
+    # Slot identities (108 dims): 12 slots × 9-dim bucket
+    for i in range(EP_PBS_MAX_SLOTS):
+        tag = slot_tags[i] if i < len(slot_tags) else EpistemicTag.UNK
+        if tag in (EpistemicTag.PRIV_OWN, EpistemicTag.PUB):
+            bucket = slot_buckets[i] if i < len(slot_buckets) else 0
+            if 0 <= bucket <= 8:
+                out[offset + bucket] = 1.0
+        offset += EP_PBS_BUCKET_DIM
+    # offset = 196
+
+    # 4 dims padding (already zero)
+    return out
+
+
 def action_to_index(action: GameAction) -> int:
     """
     Map a GameAction to its fixed index in the action space [0, 146).
@@ -461,3 +574,252 @@ def encode_action_mask(legal_actions: List[GameAction]) -> np.ndarray:
             # JUSTIFIED: Skip actions that can't be mapped (e.g., hand index >= MAX_HAND)
             pass
     return mask
+
+
+# ---------------------------------------------------------------------------
+# N-Player action index layout (452 total)
+# ---------------------------------------------------------------------------
+# 0: DrawStockpile
+# 1: DrawDiscard
+# 2: CallCambia
+# 3: Discard(no ability)
+# 4: Discard(ability)
+# 5-10: Replace(slot=0-5)
+# 11-16: PeekOwn(slot=0-5)
+# 17-46: PeekOther(slot, opp_idx) = 17 + slot*5 + opp_idx  (6 slots × 5 opponents)
+# 47-226: BlindSwap(own, opp_slot, opp_idx) = 47 + own*30 + opp_slot*5 + opp_idx
+# 227-406: KingLook(own, opp_slot, opp_idx) = 227 + own*30 + opp_slot*5 + opp_idx
+# 407: KingSwapDecision(No)
+# 408: KingSwapDecision(Yes)
+# 409: PassSnap
+# 410-415: SnapOwn(slot=0-5)
+# 416-445: SnapOpponent(slot, opp_idx) = 416 + slot*5 + opp_idx  (6 slots × 5 opponents)
+# 446-451: SnapOpponentMove(own_card_idx=0-5)
+
+_NP_IDX_DRAW_STOCKPILE = 0
+_NP_IDX_DRAW_DISCARD = 1
+_NP_IDX_CALL_CAMBIA = 2
+_NP_IDX_DISCARD_NO_ABILITY = 3
+_NP_IDX_DISCARD_ABILITY = 4
+_NP_IDX_REPLACE_BASE = 5       # 5-10
+_NP_IDX_PEEK_OWN_BASE = 11     # 11-16
+_NP_IDX_PEEK_OTHER_BASE = 17   # 17-46 (6 slots × 5 opps)
+_NP_IDX_BLIND_SWAP_BASE = 47   # 47-226 (6 own × 6 opp_slots × 5 opps = 180)
+_NP_IDX_KING_LOOK_BASE = 227   # 227-406 (6 own × 6 opp_slots × 5 opps = 180)
+_NP_IDX_KING_SWAP_FALSE = 407
+_NP_IDX_KING_SWAP_TRUE = 408
+_NP_IDX_PASS_SNAP = 409
+_NP_IDX_SNAP_OWN_BASE = 410   # 410-415
+_NP_IDX_SNAP_OPP_BASE = 416   # 416-445 (6 slots × 5 opps = 30)
+_NP_IDX_SNAP_OPP_MOVE_BASE = 446  # 446-451
+
+
+def nplayer_action_to_index(action: GameAction, opp_idx: int = 0) -> int:
+    """
+    Map a GameAction to its N-player action index [0, 452).
+
+    For actions targeting a specific opponent, opp_idx is the relative opponent
+    index (0-4, where 0 is the next player clockwise).
+
+    Args:
+        action: A GameAction NamedTuple.
+        opp_idx: Relative opponent index (0-4) for multi-target actions.
+
+    Returns:
+        Integer index in [0, N_PLAYER_NUM_ACTIONS).
+
+    Raises:
+        ActionEncodingError: If action type is unrecognized or index is out of range.
+    """
+    from src.cfr.exceptions import ActionEncodingError
+
+    if action is None:
+        raise ActionEncodingError("Action cannot be None")
+
+    if isinstance(action, ActionDrawStockpile):
+        return _NP_IDX_DRAW_STOCKPILE
+
+    if isinstance(action, ActionDrawDiscard):
+        return _NP_IDX_DRAW_DISCARD
+
+    if isinstance(action, ActionCallCambia):
+        return _NP_IDX_CALL_CAMBIA
+
+    if isinstance(action, ActionDiscard):
+        return _NP_IDX_DISCARD_ABILITY if action.use_ability else _NP_IDX_DISCARD_NO_ABILITY
+
+    if isinstance(action, ActionReplace):
+        idx = action.target_hand_index
+        if 0 <= idx < MAX_HAND:
+            return _NP_IDX_REPLACE_BASE + idx
+        raise ActionEncodingError(f"Replace index {idx} out of range [0, {MAX_HAND})")
+
+    if isinstance(action, ActionAbilityPeekOwnSelect):
+        idx = action.target_hand_index
+        if 0 <= idx < MAX_HAND:
+            return _NP_IDX_PEEK_OWN_BASE + idx
+        raise ActionEncodingError(f"PeekOwn index {idx} out of range")
+
+    if isinstance(action, ActionAbilityPeekOtherSelect):
+        slot = action.target_opponent_hand_index
+        if 0 <= slot < MAX_HAND and 0 <= opp_idx < N_PLAYER_MAX_PLAYERS - 1:
+            return _NP_IDX_PEEK_OTHER_BASE + slot * (N_PLAYER_MAX_PLAYERS - 1) + opp_idx
+        raise ActionEncodingError(
+            f"PeekOther slot={slot} opp_idx={opp_idx} out of range"
+        )
+
+    if isinstance(action, ActionAbilityBlindSwapSelect):
+        own = action.own_hand_index
+        opp_slot = action.opponent_hand_index
+        if 0 <= own < MAX_HAND and 0 <= opp_slot < MAX_HAND and 0 <= opp_idx < N_PLAYER_MAX_PLAYERS - 1:
+            return (
+                _NP_IDX_BLIND_SWAP_BASE
+                + own * MAX_HAND * (N_PLAYER_MAX_PLAYERS - 1)
+                + opp_slot * (N_PLAYER_MAX_PLAYERS - 1)
+                + opp_idx
+            )
+        raise ActionEncodingError(
+            f"BlindSwap own={own} opp_slot={opp_slot} opp_idx={opp_idx} out of range"
+        )
+
+    if isinstance(action, ActionAbilityKingLookSelect):
+        own = action.own_hand_index
+        opp_slot = action.opponent_hand_index
+        if 0 <= own < MAX_HAND and 0 <= opp_slot < MAX_HAND and 0 <= opp_idx < N_PLAYER_MAX_PLAYERS - 1:
+            return (
+                _NP_IDX_KING_LOOK_BASE
+                + own * MAX_HAND * (N_PLAYER_MAX_PLAYERS - 1)
+                + opp_slot * (N_PLAYER_MAX_PLAYERS - 1)
+                + opp_idx
+            )
+        raise ActionEncodingError(
+            f"KingLook own={own} opp_slot={opp_slot} opp_idx={opp_idx} out of range"
+        )
+
+    if isinstance(action, ActionAbilityKingSwapDecision):
+        return _NP_IDX_KING_SWAP_TRUE if action.perform_swap else _NP_IDX_KING_SWAP_FALSE
+
+    if isinstance(action, ActionPassSnap):
+        return _NP_IDX_PASS_SNAP
+
+    if isinstance(action, ActionSnapOwn):
+        idx = action.own_card_hand_index
+        if 0 <= idx < MAX_HAND:
+            return _NP_IDX_SNAP_OWN_BASE + idx
+        raise ActionEncodingError(f"SnapOwn index {idx} out of range")
+
+    if isinstance(action, ActionSnapOpponent):
+        slot = action.opponent_target_hand_index
+        if 0 <= slot < MAX_HAND and 0 <= opp_idx < N_PLAYER_MAX_PLAYERS - 1:
+            return _NP_IDX_SNAP_OPP_BASE + slot * (N_PLAYER_MAX_PLAYERS - 1) + opp_idx
+        raise ActionEncodingError(
+            f"SnapOpponent slot={slot} opp_idx={opp_idx} out of range"
+        )
+
+    if isinstance(action, ActionSnapOpponentMove):
+        own = action.own_card_to_move_hand_index
+        if 0 <= own < MAX_HAND:
+            return _NP_IDX_SNAP_OPP_MOVE_BASE + own
+        raise ActionEncodingError(f"SnapOpponentMove own={own} out of range")
+
+    raise ActionEncodingError(f"Unrecognized action type: {type(action).__name__}")
+
+
+def encode_nplayer_action_mask(uint8_mask: np.ndarray) -> np.ndarray:
+    """
+    Convert a raw uint8 action mask from Go FFI to a boolean numpy array.
+
+    Args:
+        uint8_mask: np.ndarray of shape (452,) with dtype uint8 from GoEngine.
+
+    Returns:
+        np.ndarray of shape (452,) with dtype bool.
+    """
+    return uint8_mask.astype(bool)
+
+
+def encode_infoset_nplayer(
+    knowledge_masks: dict,    # (player_idx, slot_idx) → set of player IDs who know
+    slot_buckets: dict,       # (player_idx, slot_idx) → bucket int (0-8) or -1 unknown
+    encoding_player: int,     # which player is encoding
+    num_players: int,         # total players (2-6)
+    discard_top_bucket: int,  # 0-9
+    stock_estimate: int,      # 0-3
+    game_phase: int,          # 0-5
+    decision_context: int,    # 0-5
+    cambia_state: int,        # 0=self, 1=opponent, 2=none
+    drawn_card_bucket: int = -1,  # -1=none, 0-9=bucket
+) -> np.ndarray:
+    """
+    N-player EP-PBS encoding. Returns ndarray of shape (580,).
+
+    Layout:
+      [0-215]   Powerset masks: 36 slots × 6 bits (which players know each card)
+      [216-539] Slot identities: 36 slots × 9-dim one-hot (zeroed if encoding player doesn't know)
+      [540-579] Public features (40 dims)
+
+    Slot layout: slot = player_idx * 6 + card_idx (row-major over players then cards).
+    """
+    out = np.zeros(N_PLAYER_INPUT_DIM, dtype=np.float32)
+
+    # --- Powerset masks (216 dims): 36 slots × 6 bits ---
+    offset = 0
+    for p in range(N_PLAYER_MAX_PLAYERS):
+        for c in range(MAX_HAND):
+            global_slot = p * MAX_HAND + c
+            if p < num_players:
+                knowers = knowledge_masks.get((p, c), set())
+                for bit in range(N_PLAYER_MAX_PLAYERS):
+                    if bit in knowers:
+                        out[offset + bit] = 1.0
+            # else: non-existent player slots remain zero
+            offset += N_PLAYER_MAX_PLAYERS
+    # offset = 216
+
+    # --- Slot identities (324 dims): 36 slots × 9-dim one-hot ---
+    identity_offset = N_PLAYER_POWERSET_DIM  # 216
+    for p in range(N_PLAYER_MAX_PLAYERS):
+        for c in range(MAX_HAND):
+            if p < num_players and encoding_player in knowledge_masks.get((p, c), set()):
+                bucket = slot_buckets.get((p, c), -1)
+                if 0 <= bucket <= 8:
+                    out[identity_offset + bucket] = 1.0
+            identity_offset += EP_PBS_BUCKET_DIM
+    # identity_offset = 216 + 324 = 540
+
+    # --- Public features (40 dims) ---
+    pub_offset = N_PLAYER_POWERSET_DIM + N_PLAYER_IDENTITY_DIM  # 540
+
+    # [540-549]: discard top bucket (10-dim one-hot)
+    if 0 <= discard_top_bucket <= 9:
+        out[pub_offset + discard_top_bucket] = 1.0
+    pub_offset += 10
+
+    # [550-553]: stockpile estimate (4-dim one-hot)
+    if 0 <= stock_estimate <= 3:
+        out[pub_offset + stock_estimate] = 1.0
+    pub_offset += 4
+
+    # [554-559]: game phase (6-dim one-hot)
+    if 0 <= game_phase <= 5:
+        out[pub_offset + game_phase] = 1.0
+    pub_offset += 6
+
+    # [560-565]: decision context (6-dim one-hot)
+    if 0 <= decision_context <= 5:
+        out[pub_offset + decision_context] = 1.0
+    pub_offset += 6
+
+    # [566-568]: cambia state (3-dim one-hot)
+    if 0 <= cambia_state <= 2:
+        out[pub_offset + cambia_state] = 1.0
+    pub_offset += 3
+
+    # [569-579]: drawn card bucket (11-dim one-hot)
+    if drawn_card_bucket < 0:
+        out[pub_offset + 10] = 1.0  # NONE
+    elif 0 <= drawn_card_bucket <= 9:
+        out[pub_offset + drawn_card_bucket] = 1.0
+    # pub_offset += 11 → total = 580
+
+    return out

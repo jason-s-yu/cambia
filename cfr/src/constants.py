@@ -127,6 +127,56 @@ class StockpileEstimate(enum.Enum):
     EMPTY = 3
 
 
+class EpistemicTag(enum.IntEnum):
+    """
+    Epistemic tags for EP-PBS (Epistemic Public Belief State) encoding.
+
+    Tracks who knows the identity of each card slot from a single agent's perspective.
+    Used in the EP-PBS 200-dim encoding alongside slot identity features.
+    """
+
+    UNK = 0       # Unknown to both players
+    PRIV_OWN = 1  # This agent privately knows
+    PRIV_OPP = 2  # Opponent privately knows
+    PUB = 3       # Common knowledge (both know)
+
+
+# EP-PBS encoding constants
+EP_PBS_INPUT_DIM = 200
+EP_PBS_MAX_SLOTS = 12  # 6 own + 6 opp for 2P
+EP_PBS_TAG_DIM = 4
+EP_PBS_BUCKET_DIM = 9
+EP_PBS_PUBLIC_DIM = 40
+EP_PBS_MAX_ACTIVE_MASK = 3
+
+# N-Player constants
+N_PLAYER_INPUT_DIM = 580
+N_PLAYER_NUM_ACTIONS = 452
+N_PLAYER_MAX_PLAYERS = 6
+N_PLAYER_MAX_SLOTS = 36  # 6 players × 6 cards
+N_PLAYER_POWERSET_DIM = 216  # 36 slots × 6 bits
+N_PLAYER_IDENTITY_DIM = 324  # 36 slots × 9 buckets
+N_PLAYER_PUBLIC_DIM = 40
+
+# Bucket midpoints for saliency eviction
+_BUCKET_MIDPOINTS = {
+    0: 0.0,    # BucketZero (Joker)
+    1: -1.0,   # BucketNegKing
+    2: 1.0,    # BucketAce
+    3: 3.0,    # BucketLowNum (2-4)
+    4: 5.5,    # BucketMidNum (5-6)
+    5: 7.5,    # BucketPeekSelf (7-8)
+    6: 9.5,    # BucketPeekOther (9-10)
+    7: 11.5,   # BucketSwapBlind (J-Q)
+    8: 13.0,   # BucketHighKing
+}
+
+
+def bucket_saliency(bucket: int) -> float:
+    """Saliency = distance from neutral midpoint 4.5."""
+    return abs(_BUCKET_MIDPOINTS.get(bucket, 4.5) - 4.5)
+
+
 # --- Game Constants ---
 INITIAL_HAND_SIZE = 4
 """Initial number of cards dealt to each player."""

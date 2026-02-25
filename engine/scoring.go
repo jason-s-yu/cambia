@@ -1,9 +1,10 @@
 package engine
 
 // computeScores returns the sum of card values for each player.
-func (g *GameState) computeScores() [2]int16 {
-	var scores [2]int16
-	for p := uint8(0); p < 2; p++ {
+func (g *GameState) computeScores() [MaxPlayers]int16 {
+	var scores [MaxPlayers]int16
+	n := g.Rules.numPlayers()
+	for p := uint8(0); p < n; p++ {
 		for i := uint8(0); i < g.Players[p].HandLen; i++ {
 			scores[p] += int16(g.Players[p].Hand[i].Value())
 		}
@@ -11,48 +12,57 @@ func (g *GameState) computeScores() [2]int16 {
 	return scores
 }
 
-// computeUtilities returns the game outcome as utilities in [-1, +1].
-// Winner gets +1, loser gets -1. Ties with no Cambia caller result in [0, 0].
+// computeUtilities returns the game outcome as utilities.
 //
-// Scoring rules:
-//   - If a player has a strictly lower score → that player wins (+1, other -1).
-//   - If scores are tied:
-//     - If Cambia caller is one of the tied players → caller wins (+1, opponent -1).
-//     - If no Cambia caller (or caller isn't tied) → true tie, both 0.
+// For 2P: winner gets +1, loser gets -1. Ties with no Cambia caller → [0,0].
 //
-// If the game is not over, returns [0, 0].
-func (g *GameState) computeUtilities() [2]float32 {
+// For N-player (N>2): pairwise utility u_i = (Σ scores_j - N*score_i) / (N-1).
+// This is zero-sum and reflects how much better/worse each player does vs opponents.
+//
+// If the game is not over, returns all zeros.
+func (g *GameState) computeUtilities() [MaxPlayers]float32 {
 	if !g.IsTerminal() {
-		return [2]float32{0, 0}
+		return [MaxPlayers]float32{}
 	}
 
 	scores := g.computeScores()
+	n := g.Rules.numPlayers()
+	var utils [MaxPlayers]float32
 
-	if scores[0] < scores[1] {
-		// Player 0 has lower score → player 0 wins
-		return [2]float32{1.0, -1.0}
-	} else if scores[1] < scores[0] {
-		// Player 1 has lower score → player 1 wins
-		return [2]float32{-1.0, 1.0}
+	if n <= 2 {
+		// Preserve exact 2P behavior.
+		if scores[0] < scores[1] {
+			return [MaxPlayers]float32{1.0, -1.0}
+		} else if scores[1] < scores[0] {
+			return [MaxPlayers]float32{-1.0, 1.0}
+		}
+		// Tied scores.
+		if g.CambiaCaller >= 0 {
+			caller := uint8(g.CambiaCaller)
+			utils[0] = -1.0
+			utils[1] = -1.0
+			utils[caller] = 1.0
+			return utils
+		}
+		// True tie with no Cambia caller.
+		return [MaxPlayers]float32{}
 	}
 
-	// Scores are tied
-	if g.CambiaCaller >= 0 {
-		// Cambia caller wins the tie
-		caller := uint8(g.CambiaCaller)
-		var u [2]float32
-		u[0] = -1.0
-		u[1] = -1.0
-		u[caller] = 1.0
-		return u
+	// N-player pairwise utility: u_i = (Σ score_j - N*score_i) / (N-1)
+	// Equivalent to (totalScore - N*score_i) / (N-1).
+	var totalScore int16
+	for p := uint8(0); p < n; p++ {
+		totalScore += scores[p]
 	}
-
-	// True tie with no Cambia caller
-	return [2]float32{0, 0}
+	for p := uint8(0); p < n; p++ {
+		raw := float32(totalScore) - float32(n)*float32(scores[p])
+		utils[p] = raw / float32(n-1)
+	}
+	return utils
 }
 
 // GetUtility returns the utility (outcome) for all players.
-// Only meaningful when the game is terminal; returns [0, 0] otherwise.
+// Only meaningful when the game is terminal; returns zeros otherwise.
 func (g *GameState) GetUtility() [MaxPlayers]float32 {
 	return g.computeUtilities()
 }

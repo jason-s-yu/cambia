@@ -3,6 +3,7 @@
 import random
 import logging
 from abc import ABC, abstractmethod
+from collections import deque
 from typing import Set, Optional, List, Dict, Tuple
 
 from ..game.engine import CambiaGameState
@@ -23,6 +24,8 @@ from ..constants import (
     ActionAbilityBlindSwapSelect,
     ActionAbilityKingLookSelect,
     ActionAbilityKingSwapDecision,
+    ACE,
+    JOKER_RANK_STR,
     KING,
     SEVEN,
     EIGHT,
@@ -352,12 +355,12 @@ class GreedyAgent(BaseAgent):
             return action
 
         if isinstance(next(iter(legal_actions), None), ActionSnapOpponentMove):
-            # Move lowest value card from own hand to opponent's empty slot
+            # Move highest value card from own hand to opponent's empty slot
             best_card_idx = -1
-            lowest_value = float("inf")
+            highest_value = float("-inf")
             for i, card in enumerate(my_hand):
-                if isinstance(card, Card) and card.value < lowest_value:
-                    lowest_value = card.value
+                if isinstance(card, Card) and card.value > highest_value:
+                    highest_value = card.value
                     best_card_idx = i
 
             if best_card_idx != -1:
@@ -414,12 +417,19 @@ class ImperfectMemoryMixin:
     Unknown cards are estimated at UNKNOWN_CARD_EXPECTED_VALUE.
     """
 
+    def _needs_reinit(self, game_state: CambiaGameState) -> bool:
+        """Check if memory needs re-initialization for a new game."""
+        return id(game_state) != getattr(self, "_last_game_id", None)
+
     def _init_memory(self, game_state: CambiaGameState):
         """Initialize memory from initial peek (bottom 2 cards, indices 0 and 1)."""
+        self._last_game_id = id(game_state)
         # own_memory[slot_index] = card_value or None if unknown
         self.own_memory: Dict[int, Optional[int]] = {}
+        self.own_rank_memory: Dict[int, Optional[str]] = {}
         # opponent_memory[slot_index] = card_value or None if unknown
         self.opponent_memory: Dict[int, Optional[int]] = {}
+        self.opponent_rank_memory: Dict[int, Optional[str]] = {}
         self._current_turn: int = 0
 
         my_hand = game_state.get_player_hand(self.player_id)
@@ -427,16 +437,19 @@ class ImperfectMemoryMixin:
         # Initialize all slots as unknown
         for i in range(num_cards):
             self.own_memory[i] = None
+            self.own_rank_memory[i] = None
 
         # Peek initial_view_count cards from the bottom (lowest indices per deal order)
         peek_count = game_state.house_rules.initial_view_count
         for i in range(min(peek_count, num_cards)):
             if isinstance(my_hand[i], Card):
                 self.own_memory[i] = my_hand[i].value
+                self.own_rank_memory[i] = my_hand[i].rank
 
         opp_hand = game_state.get_player_hand(self.opponent_id)
         for i in range(len(opp_hand)):
             self.opponent_memory[i] = None
+            self.opponent_rank_memory[i] = None
 
     def _estimate_own_hand_value(self) -> float:
         """Estimate own hand value using known cards + expected value for unknowns."""
@@ -461,24 +474,29 @@ class ImperfectMemoryMixin:
         my_hand = game_state.get_player_hand(self.player_id)
         if 0 <= slot_index < len(my_hand) and isinstance(my_hand[slot_index], Card):
             self.own_memory[slot_index] = my_hand[slot_index].value
+            self.own_rank_memory[slot_index] = my_hand[slot_index].rank
 
     def _update_memory_peek_opp(self, slot_index: int, game_state: CambiaGameState):
         """Update memory when we peek opponent's card at slot_index."""
         opp_hand = game_state.get_player_hand(self.opponent_id)
         if 0 <= slot_index < len(opp_hand) and isinstance(opp_hand[slot_index], Card):
             self.opponent_memory[slot_index] = opp_hand[slot_index].value
+            self.opponent_rank_memory[slot_index] = opp_hand[slot_index].rank
 
     def _update_memory_replace_own(self, slot_index: int, new_card: Card):
         """Update memory when we replace own card with new_card."""
         self.own_memory[slot_index] = new_card.value
+        self.own_rank_memory[slot_index] = new_card.rank
 
     def _mark_own_unknown(self, slot_index: int):
         """Mark own card slot as unknown (e.g., after blind swap)."""
         self.own_memory[slot_index] = None
+        self.own_rank_memory[slot_index] = None
 
     def _mark_opp_unknown(self, slot_index: int):
         """Mark opponent card slot as unknown."""
         self.opponent_memory[slot_index] = None
+        self.opponent_rank_memory[slot_index] = None
 
     def _find_highest_known_own_slot(self) -> Optional[int]:
         """Return slot index of the highest known own card, or None if all unknown."""
@@ -500,26 +518,26 @@ class ImperfectMemoryMixin:
     def _own_card_matches_discard(
         self, slot_index: int, game_state: CambiaGameState
     ) -> bool:
-        """Return True if we know own card at slot matches the discard top."""
-        known_val = self.own_memory.get(slot_index)
-        if known_val is None:
+        """Return True if we know own card at slot matches the discard top by rank."""
+        known_rank = self.own_rank_memory.get(slot_index)
+        if known_rank is None:
             return False
         discard_top = game_state.get_discard_top()
         if discard_top is None:
             return False
-        return known_val == discard_top.value
+        return known_rank == discard_top.rank
 
     def _opp_card_matches_discard(
         self, slot_index: int, game_state: CambiaGameState
     ) -> bool:
-        """Return True if we know opponent's card at slot matches the discard top."""
-        known_val = self.opponent_memory.get(slot_index)
-        if known_val is None:
+        """Return True if we know opponent's card at slot matches the discard top by rank."""
+        known_rank = self.opponent_rank_memory.get(slot_index)
+        if known_rank is None:
             return False
         discard_top = game_state.get_discard_top()
         if discard_top is None:
             return False
-        return known_val == discard_top.value
+        return known_rank == discard_top.rank
 
     def _handle_ability_phase_imperfect(
         self,
@@ -539,12 +557,16 @@ class ImperfectMemoryMixin:
             if unknown_slot is not None:
                 action = ActionAbilityPeekOwnSelect(target_hand_index=unknown_slot)
                 if action in legal_actions:
+                    self._update_memory_peek_own(unknown_slot, game_state)
                     return action
             # Fallback: any legal peek own
-            return next(
+            action = next(
                 (a for a in legal_actions if isinstance(a, ActionAbilityPeekOwnSelect)),
                 sample,
             )
+            if isinstance(action, ActionAbilityPeekOwnSelect):
+                self._update_memory_peek_own(action.target_hand_index, game_state)
+            return action
 
         if isinstance(sample, ActionAbilityPeekOtherSelect):
             # Peek first unknown opponent card for snap setup
@@ -561,8 +583,9 @@ class ImperfectMemoryMixin:
                     target_opponent_hand_index=unknown_opp
                 )
                 if action in legal_actions:
+                    self._update_memory_peek_opp(unknown_opp, game_state)
                     return action
-            return next(
+            action = next(
                 (
                     a
                     for a in legal_actions
@@ -570,6 +593,11 @@ class ImperfectMemoryMixin:
                 ),
                 sample,
             )
+            if isinstance(action, ActionAbilityPeekOtherSelect):
+                self._update_memory_peek_opp(
+                    action.target_opponent_hand_index, game_state
+                )
+            return action
 
         if isinstance(sample, ActionAbilityBlindSwapSelect):
             # Swap own highest-known with an unknown opponent slot
@@ -644,13 +672,13 @@ class ImperfectMemoryMixin:
         if not isinstance(sample, ActionSnapOpponentMove):
             return None
 
-        # Give away lowest known own card; if all unknown, give slot 0
+        # Give away highest-value own card (reduces our score, burdens opponent)
         best_slot = None
-        lowest_val = float("inf")
+        highest_val = float("-inf")
         for slot, val in self.own_memory.items():
             effective_val = val if val is not None else UNKNOWN_CARD_EXPECTED_VALUE
-            if effective_val < lowest_val:
-                lowest_val = effective_val
+            if effective_val > highest_val:
+                highest_val = effective_val
                 best_slot = slot
 
         if best_slot is None:
@@ -664,9 +692,12 @@ class ImperfectMemoryMixin:
         if action in legal_actions:
             # Update memory: the moved own card now goes to opponent
             self.opponent_memory[target_slot] = self.own_memory.get(best_slot)
+            self.opponent_rank_memory[target_slot] = self.own_rank_memory.get(best_slot)
             # Remove the slot from own memory (hand shrinks, so renumber remaining)
             if best_slot in self.own_memory:
                 del self.own_memory[best_slot]
+            if best_slot in self.own_rank_memory:
+                del self.own_rank_memory[best_slot]
             return action
 
         return next(
@@ -695,7 +726,7 @@ class ImperfectGreedyAgent(ImperfectMemoryMixin, BaseAgent):
         )
 
     def _ensure_initialized(self, game_state: CambiaGameState):
-        if not self._initialized:
+        if not self._initialized or self._needs_reinit(game_state):
             self._init_memory(game_state)
             self._initialized = True
 
@@ -732,19 +763,16 @@ class ImperfectGreedyAgent(ImperfectMemoryMixin, BaseAgent):
                 return pass_action
             return next(iter(legal_actions))
 
-        # 4. Call Cambia if estimated hand value is low (uncertainty-adjusted threshold)
+        # 4. Call Cambia — need to know most of hand first
         if ActionCallCambia() in legal_actions:
+            num_known = sum(1 for v in self.own_memory.values() if v is not None)
             estimated_value = self._estimate_own_hand_value()
-            num_unknown = sum(
-                1 for v in self.own_memory.values() if v is None
-            )
-            # Adjust threshold upward for unknowns: unknown cards estimated at 6.5,
-            # so add 5.5 per unknown to trigger when known portion is below threshold.
-            adjusted_threshold = self.cambia_threshold + num_unknown * 5.5
-            # _turn_number counts rounds (not moves). With 2 players & 46 move cap,
-            # max _turn_number ≈ 23. Fall back at round 18 (~turn 36).
-            turn_fallback = game_state._turn_number >= 18
-            if estimated_value <= adjusted_threshold or turn_fallback:
+            # Unknown penalty (6.5) already inflates estimate conservatively.
+            # Compare directly against threshold; require 3+ known cards.
+            if num_known >= 3 and estimated_value <= self.cambia_threshold + 4:
+                return ActionCallCambia()
+            # Late-game fallback at turn 20+
+            if game_state._turn_number >= 20:
                 return ActionCallCambia()
 
         # 5. Post-draw: discard or replace
@@ -778,6 +806,11 @@ class ImperfectGreedyAgent(ImperfectMemoryMixin, BaseAgent):
                     best_replace.target_hand_index, drawn_card
                 )
                 return best_replace
+
+            # Use ability if card has one (information gathering)
+            is_ability_card = drawn_card.rank in [SEVEN, EIGHT, NINE, TEN, KING]
+            if is_ability_card and ActionDiscard(use_ability=True) in legal_actions:
+                return ActionDiscard(use_ability=True)
 
             return (
                 ActionDiscard(use_ability=False)
@@ -819,7 +852,7 @@ class MemoryHeuristicAgent(ImperfectMemoryMixin, BaseAgent):
         )
 
     def _ensure_initialized(self, game_state: CambiaGameState):
-        if not self._initialized:
+        if not self._initialized or self._needs_reinit(game_state):
             self._init_memory(game_state)
             self._initialized = True
 
@@ -855,15 +888,13 @@ class MemoryHeuristicAgent(ImperfectMemoryMixin, BaseAgent):
                 return pass_action
             return next(iter(legal_actions))
 
-        # 4. Call Cambia when estimated hand total <= threshold (uncertainty-adjusted)
+        # 4. Call Cambia — need to know most of hand first
         if ActionCallCambia() in legal_actions:
+            num_known = sum(1 for v in self.own_memory.values() if v is not None)
             estimated_value = self._estimate_own_hand_value()
-            num_unknown = sum(
-                1 for v in self.own_memory.values() if v is None
-            )
-            adjusted_threshold = self.cambia_threshold + num_unknown * 5.5
-            turn_fallback = game_state._turn_number >= 18
-            if estimated_value <= adjusted_threshold or turn_fallback:
+            if num_known >= 3 and estimated_value <= self.cambia_threshold + 4:
+                return ActionCallCambia()
+            if game_state._turn_number >= 20:
                 return ActionCallCambia()
 
         # 5. Post-draw: discard or replace
@@ -916,6 +947,38 @@ class MemoryHeuristicAgent(ImperfectMemoryMixin, BaseAgent):
         return chosen
 
 
+class RandomNoCambiaAgent(RandomAgent):
+    """RandomAgent that never calls Cambia. Avoids early game termination from
+    random Cambia calls, providing a cleaner random baseline."""
+
+    def choose_action(
+        self, game_state: CambiaGameState, legal_actions: Set[GameAction]
+    ) -> GameAction:
+        filtered = {a for a in legal_actions if not isinstance(a, ActionCallCambia)}
+        if not filtered:
+            filtered = legal_actions  # safety fallback if Cambia is the only action
+        return super().choose_action(game_state, filtered)
+
+
+class RandomLateCambiaAgent(RandomAgent):
+    """RandomAgent that suppresses CallCambia until game turn >= n_turns.
+    After n_turns, behaves like normal RandomAgent (including CallCambia)."""
+
+    def __init__(self, player_id: int, config: Config, n_turns: int = 8):
+        super().__init__(player_id, config)
+        self.n_turns = n_turns
+
+    def choose_action(
+        self, game_state: CambiaGameState, legal_actions: Set[GameAction]
+    ) -> GameAction:
+        if game_state._turn_number < self.n_turns:
+            filtered = {a for a in legal_actions if not isinstance(a, ActionCallCambia)}
+            if not filtered:
+                filtered = legal_actions
+            return super().choose_action(game_state, filtered)
+        return super().choose_action(game_state, legal_actions)
+
+
 class AggressiveSnapAgent(ImperfectMemoryMixin, BaseAgent):
     """
     High-risk card elimination agent.
@@ -936,7 +999,7 @@ class AggressiveSnapAgent(ImperfectMemoryMixin, BaseAgent):
         logger.info("AggressiveSnapAgent P%d initialized", self.player_id)
 
     def _ensure_initialized(self, game_state: CambiaGameState):
-        if not self._initialized:
+        if not self._initialized or self._needs_reinit(game_state):
             self._init_memory(game_state)
             self._initialized = True
 
@@ -957,11 +1020,15 @@ class AggressiveSnapAgent(ImperfectMemoryMixin, BaseAgent):
             if unknown is not None:
                 action = ActionAbilityPeekOwnSelect(target_hand_index=unknown)
                 if action in legal_actions:
+                    self._update_memory_peek_own(unknown, game_state)
                     return action
-            return next(
+            action = next(
                 (a for a in legal_actions if isinstance(a, ActionAbilityPeekOwnSelect)),
                 sample,
             )
+            if isinstance(action, ActionAbilityPeekOwnSelect):
+                self._update_memory_peek_own(action.target_hand_index, game_state)
+            return action
 
         if isinstance(sample, ActionAbilityPeekOtherSelect):
             # Peek unknown opponent card for snap setup
@@ -974,8 +1041,9 @@ class AggressiveSnapAgent(ImperfectMemoryMixin, BaseAgent):
                     target_opponent_hand_index=unknown_opp
                 )
                 if action in legal_actions:
+                    self._update_memory_peek_opp(unknown_opp, game_state)
                     return action
-            return next(
+            action = next(
                 (
                     a
                     for a in legal_actions
@@ -983,6 +1051,11 @@ class AggressiveSnapAgent(ImperfectMemoryMixin, BaseAgent):
                 ),
                 sample,
             )
+            if isinstance(action, ActionAbilityPeekOtherSelect):
+                self._update_memory_peek_opp(
+                    action.target_opponent_hand_index, game_state
+                )
+            return action
 
         if isinstance(sample, ActionAbilityBlindSwapSelect):
             # Swap own highest-known with opponent unknown
@@ -1051,7 +1124,7 @@ class AggressiveSnapAgent(ImperfectMemoryMixin, BaseAgent):
         if ability_action is not None:
             return ability_action
 
-        # 2. SnapMove phase: give lowest-value own card
+        # 2. SnapMove phase: give highest-value own card
         snap_move_action = self._handle_snap_move_imperfect(game_state, legal_actions)
         if snap_move_action is not None:
             return snap_move_action
@@ -1084,16 +1157,12 @@ class AggressiveSnapAgent(ImperfectMemoryMixin, BaseAgent):
         # 4. Aggressive Cambia: call if hand small, total low, or turn fallback
         if ActionCallCambia() in legal_actions:
             hand_size = len(self.own_memory)
+            num_known = sum(1 for v in self.own_memory.values() if v is not None)
             estimated_value = self._estimate_own_hand_value()
-            num_unknown = sum(
-                1 for v in self.own_memory.values() if v is None
-            )
-            adjusted_threshold = self.CAMBIA_VALUE_THRESHOLD + num_unknown * 5.5
-            turn_fallback = game_state._turn_number >= 18
             if (
                 hand_size <= self.CAMBIA_HAND_SIZE_THRESHOLD
-                or estimated_value <= adjusted_threshold
-                or turn_fallback
+                or (num_known >= 3 and estimated_value <= self.CAMBIA_VALUE_THRESHOLD + 4)
+                or game_state._turn_number >= 20
             ):
                 return ActionCallCambia()
 
@@ -1142,3 +1211,387 @@ class AggressiveSnapAgent(ImperfectMemoryMixin, BaseAgent):
             "AggressiveSnapAgent P%d fallback to: %s", self.player_id, chosen
         )
         return chosen
+
+
+class HumanPlayerAgent(ImperfectMemoryMixin, BaseAgent):
+    """
+    Models a decent human player with imperfect information and selective memory.
+
+    Information model:
+    - Perfect retention of peeked own/opponent cards (from abilities + initial view)
+    - Short-term discard memory: remembers last DISCARD_MEMORY cards seen on pile
+    - Tracks important discards: Aces, Jokers, 2s, Kings (always remembered)
+    - Tracks discards matching own known ranks (snap awareness)
+    - Observes opponent actions via game state diffing between turns
+
+    Decision heuristics:
+    - Draw from discard when top card is very low (Ace, Joker, 2) and can replace
+    - Replace highest known card if drawn is lower
+    - Replace unknown card if drawn value <= 3
+    - Prioritize replacing cards opponent may have seen (exposed slots)
+    - Use all abilities for info gathering (peek own unknowns, peek opponent, King swap)
+    - Snap own known matches; snap opponent known matches
+    - Call Cambia when estimated hand value is low, informed by information quality
+    """
+
+    DISCARD_MEMORY = 4  # remember last N discarded cards
+    IMPORTANT_RANKS = frozenset({ACE, JOKER_RANK_STR, "2", KING})
+    VERY_LOW_RANKS = frozenset({ACE, JOKER_RANK_STR, "2", "3"})
+    DRAW_FROM_DISCARD_MAX_VALUE = 3  # draw from discard if top card value <= this
+    CAMBIA_THRESHOLD = 8  # call Cambia when estimated hand total <= this
+    UNKNOWN_PENALTY = 5.0  # estimated value for unknown cards (slightly below 6.5 mean)
+    EXPOSED_REPLACE_BONUS = 3  # extra incentive to replace cards opponent may know
+
+    def __init__(self, player_id: int, config: Config):
+        super().__init__(player_id, config)
+        self._initialized = False
+        # Discard tracking
+        self._recent_discards: deque = deque(maxlen=self.DISCARD_MEMORY)
+        self._important_discard_counts: Dict[str, int] = {}  # rank -> count
+        self._own_rank_discard_counts: Dict[str, int] = {}  # rank -> count
+        # Opponent observation
+        self._opponent_may_know_slots: Set[int] = set()  # own slots opponent might know
+        # State diffing
+        self._last_discard_len: int = 0
+
+    def _ensure_initialized(self, game_state: CambiaGameState):
+        if not self._initialized or self._needs_reinit(game_state):
+            self._init_memory(game_state)
+            self._last_discard_len = len(game_state.discard_pile)
+            self._recent_discards.clear()
+            self._important_discard_counts.clear()
+            self._own_rank_discard_counts.clear()
+            self._opponent_may_know_slots.clear()
+            self._initialized = True
+
+    def _sync_observations(self, game_state: CambiaGameState):
+        """Observe what changed since last turn — track new discards."""
+        pile = game_state.discard_pile
+        new_len = len(pile)
+        if new_len > self._last_discard_len:
+            for i in range(self._last_discard_len, new_len):
+                card = pile[i]
+                self._recent_discards.append(card)
+                # Always remember important ranks
+                if card.rank in self.IMPORTANT_RANKS:
+                    self._important_discard_counts[card.rank] = (
+                        self._important_discard_counts.get(card.rank, 0) + 1
+                    )
+                # Track discards matching our known ranks (for snap probability)
+                for slot, rank in self.own_rank_memory.items():
+                    if rank is not None and rank == card.rank:
+                        self._own_rank_discard_counts[rank] = (
+                            self._own_rank_discard_counts.get(rank, 0) + 1
+                        )
+        self._last_discard_len = new_len
+
+    def _rank_copies_in_deck(self, rank: str) -> int:
+        """Estimate how many copies of a rank remain in play (deck + hands).
+
+        Standard deck: 4 copies of each rank (except Joker=2, King=4).
+        Subtract known discards of that rank.
+        """
+        if rank == JOKER_RANK_STR:
+            total = 2
+        else:
+            total = 4
+        gone = self._important_discard_counts.get(rank, 0)
+        if rank not in self.IMPORTANT_RANKS:
+            gone = self._own_rank_discard_counts.get(rank, 0)
+        return max(0, total - gone)
+
+    def _snap_worthwhile(self, rank: str) -> bool:
+        """Is it worth keeping a card of this rank for future snap opportunities?
+
+        If many copies remain in the deck, future snap chances are higher.
+        """
+        return self._rank_copies_in_deck(rank) >= 2
+
+    def _estimate_hand_value(self) -> float:
+        """Estimate own hand value. Known cards use true value, unknowns use UNKNOWN_PENALTY."""
+        total = 0.0
+        for slot, val in self.own_memory.items():
+            total += val if val is not None else self.UNKNOWN_PENALTY
+        return total
+
+    def _count_known(self) -> int:
+        """Count how many own cards we know."""
+        return sum(1 for v in self.own_memory.values() if v is not None)
+
+    def _should_call_cambia(self, game_state: CambiaGameState) -> bool:
+        """Decide whether to call Cambia based on hand knowledge.
+
+        A human player needs to know most of their hand before going out.
+        Estimated hand value includes UNKNOWN_PENALTY for each unknown card,
+        so comparing directly against threshold is properly conservative.
+        """
+        num_known = self._count_known()
+        num_total = len(self.own_memory)
+
+        # Need to know at least 3 of 4 cards before considering Cambia
+        # (a human wouldn't go out knowing only half their hand)
+        if num_known < 3 and game_state._turn_number < 15:
+            return False
+
+        estimated = self._estimate_hand_value()
+
+        # Direct threshold comparison — unknown penalty already makes estimate
+        # conservative (5.0 per unknown vs 6.2 average), so no adjustment needed.
+        if num_known >= 3 and estimated <= self.CAMBIA_THRESHOLD:
+            return True
+
+        # Late-game fallback: accept slightly higher hand at turn 20+
+        if game_state._turn_number >= 20 and estimated <= self.CAMBIA_THRESHOLD + 4:
+            return True
+
+        return False
+
+    def choose_action(
+        self, game_state: CambiaGameState, legal_actions: Set[GameAction]
+    ) -> GameAction:
+        if not legal_actions:
+            raise ValueError(
+                f"HumanPlayerAgent P{self.player_id} cannot choose from empty legal actions."
+            )
+        self._ensure_initialized(game_state)
+        self._sync_observations(game_state)
+
+        # 1. Ability phases (peek/swap decisions)
+        ability_action = self._handle_ability_phase_human(game_state, legal_actions)
+        if ability_action is not None:
+            return ability_action
+
+        # 2. SnapMove phase: give highest-value own card to opponent
+        snap_move_action = self._handle_snap_move_imperfect(game_state, legal_actions)
+        if snap_move_action is not None:
+            return snap_move_action
+
+        # 3. Snap phase: snap own known matches, snap opponent known matches
+        if game_state.snap_phase_active:
+            # Own snaps: only snap cards we know match
+            snap_own = {a for a in legal_actions if isinstance(a, ActionSnapOwn)}
+            for action in snap_own:
+                if self._own_card_matches_discard(action.own_card_hand_index, game_state):
+                    return action
+
+            # Opponent snaps: snap if we know their card matches
+            snap_opp = {a for a in legal_actions if isinstance(a, ActionSnapOpponent)}
+            for action in snap_opp:
+                if self._opp_card_matches_discard(
+                    action.opponent_target_hand_index, game_state
+                ):
+                    return action
+
+            if ActionPassSnap() in legal_actions:
+                return ActionPassSnap()
+            return next(iter(legal_actions))
+
+        # 4. Call Cambia
+        if ActionCallCambia() in legal_actions and self._should_call_cambia(game_state):
+            return ActionCallCambia()
+
+        # 5. Post-draw: replace or discard
+        if any(isinstance(a, (ActionDiscard, ActionReplace)) for a in legal_actions):
+            return self._handle_post_draw(game_state, legal_actions)
+
+        # 6. Draw phase: consider discard pile vs stockpile
+        if ActionDrawStockpile() in legal_actions:
+            return self._handle_draw(game_state, legal_actions)
+
+        return list(legal_actions)[0]
+
+    def _handle_draw(
+        self, game_state: CambiaGameState, legal_actions: Set[GameAction]
+    ) -> GameAction:
+        """Choose between drawing from stockpile or discard pile."""
+        # Draw from discard if the top card is very low and we have a high card to replace
+        if ActionDrawDiscard() in legal_actions:
+            top = game_state.get_discard_top()
+            if top and top.value <= self.DRAW_FROM_DISCARD_MAX_VALUE:
+                # Check if we have a card worth replacing with this
+                high_slot = self._find_highest_known_own_slot()
+                if high_slot is not None:
+                    high_val = self.own_memory[high_slot]
+                    if high_val is not None and top.value < high_val:
+                        return ActionDrawDiscard()
+                # Or replace an unknown slot with a very low card
+                unknown_slot = self._find_unknown_own_slot()
+                if unknown_slot is not None and top.value <= 2:
+                    return ActionDrawDiscard()
+
+        return ActionDrawStockpile()
+
+    def _handle_post_draw(
+        self, game_state: CambiaGameState, legal_actions: Set[GameAction]
+    ) -> GameAction:
+        """Decide whether to replace a hand card or discard (with/without ability)."""
+        drawn_card = game_state.pending_action_data.get("drawn_card")
+        if not drawn_card or not isinstance(drawn_card, Card):
+            return (
+                ActionDiscard(use_ability=False)
+                if ActionDiscard(use_ability=False) in legal_actions
+                else list(legal_actions)[0]
+            )
+
+        # Priority 1: Replace exposed cards (opponent may have seen them)
+        if self._opponent_may_know_slots:
+            for slot in list(self._opponent_may_know_slots):
+                if slot not in self.own_memory:
+                    continue
+                known_val = self.own_memory[slot]
+                if known_val is not None and drawn_card.value < known_val:
+                    action = ActionReplace(target_hand_index=slot)
+                    if action in legal_actions:
+                        self._update_memory_replace_own(slot, drawn_card)
+                        self._opponent_may_know_slots.discard(slot)
+                        return action
+                elif known_val is None and drawn_card.value <= 3:
+                    # Replace exposed unknown with a low card
+                    action = ActionReplace(target_hand_index=slot)
+                    if action in legal_actions:
+                        self._update_memory_replace_own(slot, drawn_card)
+                        self._opponent_may_know_slots.discard(slot)
+                        return action
+
+        # Priority 2: Replace highest known card if drawn is lower
+        best_replace: Optional[ActionReplace] = None
+        max_reduction = 0
+        for slot, val in self.own_memory.items():
+            if val is not None and drawn_card.value < val:
+                reduction = val - drawn_card.value
+                # Bonus for replacing cards whose rank has few copies left
+                # (less snap opportunity = less reason to keep)
+                own_rank = self.own_rank_memory.get(slot)
+                if own_rank and not self._snap_worthwhile(own_rank):
+                    reduction += 1  # mild bonus
+                if reduction > max_reduction:
+                    max_reduction = reduction
+                    best_replace = ActionReplace(target_hand_index=slot)
+
+        # Priority 3: Replace unknown slot with a low drawn card
+        if best_replace is None and drawn_card.value <= 3:
+            unknown_slot = self._find_unknown_own_slot()
+            if unknown_slot is not None:
+                best_replace = ActionReplace(target_hand_index=unknown_slot)
+
+        if best_replace and best_replace in legal_actions:
+            self._update_memory_replace_own(best_replace.target_hand_index, drawn_card)
+            return best_replace
+
+        # Priority 4: Use ability if card has one
+        is_ability_card = drawn_card.rank in [SEVEN, EIGHT, NINE, TEN, KING]
+        if is_ability_card and ActionDiscard(use_ability=True) in legal_actions:
+            return ActionDiscard(use_ability=True)
+
+        return (
+            ActionDiscard(use_ability=False)
+            if ActionDiscard(use_ability=False) in legal_actions
+            else list(legal_actions)[0]
+        )
+
+    def _handle_ability_phase_human(
+        self,
+        game_state: CambiaGameState,
+        legal_actions: Set[GameAction],
+    ) -> Optional[GameAction]:
+        """Handle ability phases with memory updates and opponent tracking."""
+        sample = next(iter(legal_actions), None)
+
+        # 7/8: Peek own unknown card
+        if isinstance(sample, ActionAbilityPeekOwnSelect):
+            unknown_slot = self._find_unknown_own_slot()
+            if unknown_slot is not None:
+                action = ActionAbilityPeekOwnSelect(target_hand_index=unknown_slot)
+                if action in legal_actions:
+                    self._update_memory_peek_own(unknown_slot, game_state)
+                    return action
+            action = next(
+                (a for a in legal_actions if isinstance(a, ActionAbilityPeekOwnSelect)),
+                sample,
+            )
+            if isinstance(action, ActionAbilityPeekOwnSelect):
+                self._update_memory_peek_own(action.target_hand_index, game_state)
+            return action
+
+        # 9/T: Peek opponent unknown card (for snap setup)
+        if isinstance(sample, ActionAbilityPeekOtherSelect):
+            unknown_opp = next(
+                (slot for slot, val in self.opponent_memory.items() if val is None),
+                None,
+            )
+            if unknown_opp is not None:
+                action = ActionAbilityPeekOtherSelect(
+                    target_opponent_hand_index=unknown_opp
+                )
+                if action in legal_actions:
+                    self._update_memory_peek_opp(unknown_opp, game_state)
+                    return action
+            action = next(
+                (
+                    a for a in legal_actions
+                    if isinstance(a, ActionAbilityPeekOtherSelect)
+                ),
+                sample,
+            )
+            if isinstance(action, ActionAbilityPeekOtherSelect):
+                self._update_memory_peek_opp(
+                    action.target_opponent_hand_index, game_state
+                )
+            return action
+
+        # J/Q: Blind swap — swap our highest known with opponent unknown
+        if isinstance(sample, ActionAbilityBlindSwapSelect):
+            own_high = self._find_highest_known_own_slot()
+            opp_unknown = next(
+                (slot for slot, val in self.opponent_memory.items() if val is None),
+                None,
+            )
+            if own_high is not None and opp_unknown is not None:
+                own_val = self.own_memory.get(own_high, 0)
+                # Only swap if our card is bad enough to be worth the gamble
+                if own_val is not None and own_val >= 7:
+                    action = ActionAbilityBlindSwapSelect(
+                        own_hand_index=own_high,
+                        opponent_hand_index=opp_unknown,
+                    )
+                    if action in legal_actions:
+                        self._mark_own_unknown(own_high)
+                        return action
+            # Fallback: default swap
+            return next(
+                (a for a in legal_actions if isinstance(a, ActionAbilityBlindSwapSelect)),
+                sample,
+            )
+
+        # King: Look at own card + opponent card
+        if isinstance(sample, ActionAbilityKingLookSelect):
+            # Look at our highest known (or unknown) and opponent unknown
+            own_slot = self._find_highest_known_own_slot()
+            if own_slot is None:
+                own_slot = self._find_unknown_own_slot() or 0
+            opp_slot = next(
+                (slot for slot, val in self.opponent_memory.items() if val is None),
+                0,
+            )
+            action = ActionAbilityKingLookSelect(
+                own_hand_index=own_slot,
+                opponent_hand_index=opp_slot,
+            )
+            if action in legal_actions:
+                return action
+            return next(
+                (a for a in legal_actions if isinstance(a, ActionAbilityKingLookSelect)),
+                sample,
+            )
+
+        # King swap decision
+        if isinstance(sample, ActionAbilityKingSwapDecision):
+            look_data = game_state.pending_action_data
+            card1 = look_data.get("card1")  # own card
+            card2 = look_data.get("card2")  # opp card
+            if isinstance(card1, Card) and isinstance(card2, Card):
+                if card2.value < card1.value:
+                    return ActionAbilityKingSwapDecision(perform_swap=True)
+            return ActionAbilityKingSwapDecision(perform_swap=False)
+
+        return None

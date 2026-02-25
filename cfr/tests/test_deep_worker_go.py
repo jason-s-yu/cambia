@@ -196,6 +196,7 @@ class TestGoTraversal:
             cambia_allowed_round=0,
             allowOpponentSnapping=False,
             max_game_turns=300,
+            lockCallerHand=True,
         )
         config.logging = SimpleNamespace(
             log_max_bytes=1024 * 1024,
@@ -255,6 +256,41 @@ class TestGoTraversal:
             assert utility.shape == (2,)
             assert len(advantage_samples) > 0
             assert stats.nodes_visited > 0
+
+            # --- Behavioral assertion: 2P zero-sum utility ---
+            # In 2P Cambia, computeUtilities returns {+1,-1}, {-1,+1}, or {0,0}.
+            # The sum must be exactly zero (winner/loser or tie).
+            assert abs(utility[0] + utility[1]) < 1e-9, (
+                f"2P utility not zero-sum: {utility}"
+            )
+
+            # --- Behavioral assertion: utility in valid range ---
+            # Cambia 2P utilities are exactly {-1, 0, +1}.
+            for i in range(2):
+                assert -1.01 <= utility[i] <= 1.01, (
+                    f"Utility[{i}]={utility[i]} outside [-1, 1]"
+                )
+
+            # --- Behavioral assertion: strategy samples sum to ~1.0 ---
+            # In ES-MCCFR, opponent nodes store σ(I) as strategy targets.
+            # Since σ is a probability distribution over legal actions,
+            # the sum over the legal (masked) entries must equal 1.0.
+            for sample in strategy_samples:
+                mask = sample.action_mask
+                strategy_sum = sample.target[mask].sum()
+                assert abs(strategy_sum - 1.0) < 0.01, (
+                    f"Strategy sample sum {strategy_sum} != 1.0"
+                )
+
+            # --- Behavioral assertion: regret mask consistency ---
+            # Regret targets must be zero for illegal actions. The traversal
+            # only writes regrets at legal action indices; the target vector
+            # is zero-initialized, so illegal slots must remain zero.
+            for sample in advantage_samples:
+                illegal_mask = ~sample.action_mask
+                assert (sample.target[illegal_mask] == 0).all(), (
+                    "Non-zero regret found for illegal action"
+                )
         finally:
             for a in agents:
                 a.close()
@@ -345,6 +381,16 @@ class TestGoTraversal:
                 )
                 assert utility.shape == (2,), f"seed={seed}: wrong utility shape"
                 assert len(advantage_samples) > 0, f"seed={seed}: no advantage samples"
+
+                # 2P zero-sum: u0 + u1 = 0 exactly
+                assert abs(utility[0] + utility[1]) < 1e-9, (
+                    f"seed={seed}: 2P utility not zero-sum: {utility}"
+                )
+                # Utility bounded in [-1, 1]
+                for i in range(2):
+                    assert -1.01 <= utility[i] <= 1.01, (
+                        f"seed={seed}: utility[{i}]={utility[i]} out of range"
+                    )
             finally:
                 for a in agents:
                     a.close()
@@ -415,3 +461,74 @@ class TestGoTraversal:
         # With Go backend, at least some samples should be produced (game goes to terminal)
         # The worker should not crash
         assert result.stats.nodes_visited > 0
+
+    def test_os_traversal_behavioral_assertions(self):
+        """OS-MCCFR traversal: strategy sums, regret masks, utility bounds."""
+        from src.cfr.deep_worker import _deep_traverse_os_go  # noqa: PLC0415
+        from src.ffi.bridge import GoEngine, GoAgentState  # noqa: PLC0415
+        from src.encoding import INPUT_DIM, NUM_ACTIONS  # noqa: PLC0415
+        from src.utils import WorkerStats  # noqa: PLC0415
+
+        config = self._make_config()
+
+        for seed in [42, 77, 200]:
+            engine = GoEngine(seed=seed)
+            agents = [GoAgentState(engine, pid) for pid in range(2)]
+            advantage_samples = []
+            strategy_samples = []
+            stats = WorkerStats()
+
+            try:
+                utility = _deep_traverse_os_go(
+                    engine=engine,
+                    agent_states=agents,
+                    updating_player=0,
+                    network=None,
+                    iteration=1,
+                    config=config,
+                    advantage_samples=advantage_samples,
+                    strategy_samples=strategy_samples,
+                    depth=0,
+                    worker_stats=stats,
+                    progress_queue=None,
+                    worker_id=0,
+                    min_depth_after_bottom_out_tracker=[float("inf")],
+                    has_bottomed_out_tracker=[False],
+                    simulation_nodes=[],
+                    exploration_epsilon=0.6,
+                )
+
+                # --- 2P zero-sum: u0 + u1 = 0 exactly ---
+                # Cambia 2P utilities are {+1,-1}, {-1,+1}, or {0,0}.
+                assert abs(utility[0] + utility[1]) < 1e-9, (
+                    f"seed={seed}: OS utility not zero-sum: {utility}"
+                )
+
+                # --- Utility range: each u_i in [-1, 1] ---
+                for i in range(2):
+                    assert -1.01 <= utility[i] <= 1.01, (
+                        f"seed={seed}: OS utility[{i}]={utility[i]} out of range"
+                    )
+
+                # --- Strategy samples: probability distribution sums to 1 ---
+                # OS-MCCFR stores σ(I) at opponent nodes. The strategy over
+                # legal actions is a valid probability distribution.
+                for sample in strategy_samples:
+                    mask = sample.action_mask
+                    strategy_sum = sample.target[mask].sum()
+                    assert abs(strategy_sum - 1.0) < 0.01, (
+                        f"seed={seed}: OS strategy sum {strategy_sum} != 1.0"
+                    )
+
+                # --- Regret mask consistency ---
+                # Regret targets are zero-initialized; only legal action slots
+                # are written. Illegal action slots must remain exactly zero.
+                for sample in advantage_samples:
+                    illegal_mask = ~sample.action_mask
+                    assert (sample.target[illegal_mask] == 0).all(), (
+                        f"seed={seed}: Non-zero regret for illegal action"
+                    )
+            finally:
+                for a in agents:
+                    a.close()
+                engine.close()

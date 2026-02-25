@@ -95,6 +95,78 @@ func CardToBucket(c engine.Card) CardBucket {
 	return BucketUnknown
 }
 
+// EpistemicTag tracks who knows about a card slot's identity.
+// Used by the EP-PBS (Epistemic Positional Belief State) encoding.
+type EpistemicTag uint8
+
+const (
+	TagUnk     EpistemicTag = iota // Nobody relevant has observed
+	TagPrivOwn                     // I privately know this card
+	TagPrivOpp                     // Opponent privately knows it
+	TagPub                         // Common knowledge (both players know)
+)
+
+const (
+	EPPBSInputDim = 200 // Total dimensions for EncodeEPPBS output
+	MaxSlots      = 12  // 6 own + 6 opp for 2P (engine.MaxHandSize * 2)
+	OppSlotsStart = 6   // Opp slots start at index 6 in SlotTags/SlotBuckets
+	MaxActiveMask = 3   // Max entries tracked in OwnActiveMask / OppActiveMask
+)
+
+// N-Player constants (used when NumPlayers > 2).
+const (
+	NPlayerInputDim     = 580                          // Total dimensions for EncodeNPlayer output
+	NPlayerNumActions   = 452                          // matches engine.NPlayerNumActions
+	MaxTotalSlots       = 36                           // 6 players × 6 cards
+	MaxKnowledgePlayers = engine.MaxPlayers            // 6
+)
+
+// MemoryArchetype defines how the agent handles memory decay and eviction.
+type MemoryArchetype uint8
+
+const (
+	MemoryPerfect   MemoryArchetype = iota // No decay or eviction; retains all observations
+	MemoryDecaying                          // Bayesian diffusion: PrivOwn slots decay with prob p = 1-exp(-λ)
+	MemoryHumanLike                         // Stochastic saliency eviction; OwnActiveMask capped at MemoryCapacity
+)
+
+// BucketMidpoint returns the approximate midpoint card value for a CardBucket.
+// Used for saliency-based eviction in OwnActiveMask.
+func BucketMidpoint(b CardBucket) float32 {
+	switch b {
+	case BucketZero:
+		return 0.0
+	case BucketNegKing:
+		return -1.0
+	case BucketAce:
+		return 1.0
+	case BucketLowNum:
+		return 3.0 // 2-4, midpoint 3
+	case BucketMidNum:
+		return 5.5 // 5-6, midpoint 5.5
+	case BucketPeekSelf:
+		return 7.5 // 7-8, midpoint 7.5
+	case BucketPeekOther:
+		return 9.5 // 9-T, midpoint 9.5
+	case BucketSwapBlind:
+		return 11.5 // J-Q, midpoint 11.5
+	case BucketHighKing:
+		return 13.0
+	default: // BucketUnknown
+		return 4.5 // Zero saliency → most evictable
+	}
+}
+
+// BucketSaliency returns |BucketMidpoint(b) - 4.5|. Higher = more salient.
+// Slots with LOWER saliency are evicted first from OwnActiveMask.
+func BucketSaliency(b CardBucket) float32 {
+	d := BucketMidpoint(b) - 4.5
+	if d < 0 {
+		d = -d
+	}
+	return d
+}
+
 // BucketToDecay maps a CardBucket to its DecayCategory.
 func BucketToDecay(b CardBucket) DecayCategory {
 	switch b {

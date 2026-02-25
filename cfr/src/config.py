@@ -1,7 +1,7 @@
 """src/config.py"""
 
 from typing import List, Dict, TypeVar, Optional, Union
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as dataclass_fields
 import os
 import logging
 import re
@@ -163,13 +163,14 @@ class CambiaRulesConfig:
     cambia_allowed_round: int = 0  # 0 means allowed immediately
     allowOpponentSnapping: bool = False  # Default to False
     max_game_turns: int = 300  # Limit game length in simulation
+    lockCallerHand: bool = True  # Cambia caller's hand is locked
 
 
 @dataclass
 class PersistenceConfig:
     """Configuration for saving and loading trained agent data."""
 
-    agent_data_save_path: str = "cambia_cfr_agent_level1.joblib"
+    agent_data_save_path: str = "runs/default/checkpoints/deep_cfr_checkpoint.pt"
 
 
 @dataclass
@@ -310,6 +311,69 @@ class DeepCfrConfig:
     max_tasks_per_child: Optional[Union[int, str]] = "auto"  # "auto" | int | None
     worker_memory_budget_pct: float = 0.10  # fraction of system RAM per worker for auto calc
 
+    # ESCHER traversal method: "outcome" (OS-dCFR), "external" (ES-dCFR), or "escher"
+    traversal_method: str = "outcome"
+    # ESCHER value network hidden dimension
+    value_hidden_dim: int = 512
+    # ESCHER value network learning rate
+    value_learning_rate: float = 1e-3
+    # ESCHER value buffer capacity
+    value_buffer_capacity: int = 2_000_000
+    # ESCHER: whether to use batched counterfactual value estimation
+    batch_counterfactuals: bool = True
+
+    # DEPRECATED: ReBeL fields retained for checkpoint backward compat only.
+    # ReBeL/PBS subgame solving is mathematically unsound for N-player FFA with continuous beliefs.
+    rebel_subgame_depth: int = 4
+    rebel_cfr_iterations: int = 200
+    rebel_value_hidden_dim: int = 1024
+    rebel_policy_hidden_dim: int = 512
+    rebel_value_learning_rate: float = 1e-3
+    rebel_policy_learning_rate: float = 1e-3
+    rebel_value_buffer_capacity: int = 500_000
+    rebel_policy_buffer_capacity: int = 500_000
+    rebel_games_per_epoch: int = 100
+    rebel_epochs: int = 10
+
+    # SD-CFR configuration
+    use_sd_cfr: bool = False
+    sd_cfr_max_snapshots: int = 200
+    sd_cfr_snapshot_weighting: str = "linear"  # "linear" or "uniform"
+    num_hidden_layers: int = 3
+    use_residual: bool = True
+    use_ema: bool = True  # EMA serving weights for O(1) SD-CFR inference
+
+    # Profiling: gate traversal timing logs + handle pool stats behind this flag
+    enable_traversal_profiling: bool = False
+    # Path for structured JSONL profiling output (empty = auto-generate in run dir)
+    profiling_jsonl_path: str = ""
+    # Run torch.profiler on this step number and export Chrome trace (None = disabled)
+    profile_step: Optional[int] = None
+
+    # Encoding mode: "legacy" (222-dim) or "ep_pbs" (200-dim EP-PBS encoding)
+    encoding_mode: str = "legacy"
+
+    # Memory archetype: "perfect" (no decay), "decaying" (Bayesian diffusion),
+    # or "human_like" (saliency eviction with capacity limit).
+    memory_archetype: str = "perfect"
+    memory_decay_lambda: float = 0.1  # Decay rate λ for MemoryDecaying archetype
+    memory_capacity: int = 3          # Max active mask size for MemoryHumanLike archetype
+
+    # N-player configuration
+    num_players: int = 2  # Number of players (2-6)
+
+    # QRE regularization
+    qre_lambda_start: float = 0.5   # Initial QRE temperature
+    qre_lambda_end: float = 0.05    # Final QRE temperature
+    qre_anneal_fraction: float = 0.6  # Fraction of total iterations to anneal over
+
+    # PSRO configuration
+    use_psro: bool = False
+    psro_population_size: int = 15
+    psro_eval_games: int = 200
+    psro_checkpoint_interval: int = 50  # Add to PSRO population every N iterations
+    psro_heuristic_types: str = "random,greedy,memory_heuristic"  # Comma-separated
+
 
 # --- Baseline Agent Configuration ---
 @dataclass
@@ -358,6 +422,30 @@ def load_config(
                     config_path,
                 )
                 config_dict = {}
+
+            # Warn on unknown keys in config sections
+            _SECTION_CLASSES = {
+                "cambia_rules": CambiaRulesConfig,
+                "deep_cfr": DeepCfrConfig,
+                "agent_params": AgentParamsConfig,
+                "cfr_training": CfrTrainingConfig,
+                "cfr_plus_params": CfrPlusParamsConfig,
+                "logging": LoggingConfig,
+                "system": SystemConfig,
+                "persistence": PersistenceConfig,
+                "analysis": AnalysisConfig,
+            }
+            for section_name, section_cls in _SECTION_CLASSES.items():
+                section_data = config_dict.get(section_name, {})
+                if isinstance(section_data, dict):
+                    known_keys = {f.name for f in dataclass_fields(section_cls)}
+                    for key in section_data:
+                        if key not in known_keys:
+                            logging.warning(
+                                "Unknown %s key '%s' — will be ignored",
+                                section_name,
+                                key,
+                            )
 
             # --- Parse sections ---
             api_config_dict = config_dict.get("api", {})
@@ -553,6 +641,98 @@ def load_config(
                 worker_memory_budget_pct=deep_cfr_dict.get(
                     "worker_memory_budget_pct", DeepCfrConfig.worker_memory_budget_pct
                 ),
+                traversal_method=deep_cfr_dict.get(
+                    "traversal_method", DeepCfrConfig.traversal_method
+                ),
+                value_hidden_dim=deep_cfr_dict.get(
+                    "value_hidden_dim", DeepCfrConfig.value_hidden_dim
+                ),
+                value_learning_rate=deep_cfr_dict.get(
+                    "value_learning_rate", DeepCfrConfig.value_learning_rate
+                ),
+                value_buffer_capacity=deep_cfr_dict.get(
+                    "value_buffer_capacity", DeepCfrConfig.value_buffer_capacity
+                ),
+                batch_counterfactuals=deep_cfr_dict.get(
+                    "batch_counterfactuals", DeepCfrConfig.batch_counterfactuals
+                ),
+                rebel_subgame_depth=deep_cfr_dict.get(
+                    "rebel_subgame_depth", DeepCfrConfig.rebel_subgame_depth
+                ),
+                rebel_cfr_iterations=deep_cfr_dict.get(
+                    "rebel_cfr_iterations", DeepCfrConfig.rebel_cfr_iterations
+                ),
+                rebel_value_hidden_dim=deep_cfr_dict.get(
+                    "rebel_value_hidden_dim", DeepCfrConfig.rebel_value_hidden_dim
+                ),
+                rebel_policy_hidden_dim=deep_cfr_dict.get(
+                    "rebel_policy_hidden_dim", DeepCfrConfig.rebel_policy_hidden_dim
+                ),
+                rebel_value_learning_rate=deep_cfr_dict.get(
+                    "rebel_value_learning_rate", DeepCfrConfig.rebel_value_learning_rate
+                ),
+                rebel_policy_learning_rate=deep_cfr_dict.get(
+                    "rebel_policy_learning_rate", DeepCfrConfig.rebel_policy_learning_rate
+                ),
+                rebel_value_buffer_capacity=deep_cfr_dict.get(
+                    "rebel_value_buffer_capacity", DeepCfrConfig.rebel_value_buffer_capacity
+                ),
+                rebel_policy_buffer_capacity=deep_cfr_dict.get(
+                    "rebel_policy_buffer_capacity", DeepCfrConfig.rebel_policy_buffer_capacity
+                ),
+                rebel_games_per_epoch=deep_cfr_dict.get(
+                    "rebel_games_per_epoch", DeepCfrConfig.rebel_games_per_epoch
+                ),
+                rebel_epochs=deep_cfr_dict.get(
+                    "rebel_epochs", DeepCfrConfig.rebel_epochs
+                ),
+                use_sd_cfr=deep_cfr_dict.get("use_sd_cfr", DeepCfrConfig.use_sd_cfr),
+                sd_cfr_max_snapshots=deep_cfr_dict.get(
+                    "sd_cfr_max_snapshots", DeepCfrConfig.sd_cfr_max_snapshots
+                ),
+                sd_cfr_snapshot_weighting=deep_cfr_dict.get(
+                    "sd_cfr_snapshot_weighting", DeepCfrConfig.sd_cfr_snapshot_weighting
+                ),
+                num_hidden_layers=deep_cfr_dict.get(
+                    "num_hidden_layers", DeepCfrConfig.num_hidden_layers
+                ),
+                use_residual=deep_cfr_dict.get("use_residual", DeepCfrConfig.use_residual),
+                use_ema=deep_cfr_dict.get("use_ema", DeepCfrConfig.use_ema),
+                enable_traversal_profiling=deep_cfr_dict.get(
+                    "enable_traversal_profiling", DeepCfrConfig.enable_traversal_profiling
+                ),
+                profiling_jsonl_path=deep_cfr_dict.get(
+                    "profiling_jsonl_path", DeepCfrConfig.profiling_jsonl_path
+                ),
+                profile_step=deep_cfr_dict.get(
+                    "profile_step", DeepCfrConfig.profile_step
+                ),
+                num_players=deep_cfr_dict.get("num_players", DeepCfrConfig.num_players),
+                qre_lambda_start=deep_cfr_dict.get(
+                    "qre_lambda_start", DeepCfrConfig.qre_lambda_start
+                ),
+                qre_lambda_end=deep_cfr_dict.get(
+                    "qre_lambda_end", DeepCfrConfig.qre_lambda_end
+                ),
+                qre_anneal_fraction=deep_cfr_dict.get(
+                    "qre_anneal_fraction", DeepCfrConfig.qre_anneal_fraction
+                ),
+                use_psro=deep_cfr_dict.get("use_psro", DeepCfrConfig.use_psro),
+                psro_population_size=deep_cfr_dict.get(
+                    "psro_population_size", DeepCfrConfig.psro_population_size
+                ),
+                psro_eval_games=deep_cfr_dict.get(
+                    "psro_eval_games", DeepCfrConfig.psro_eval_games
+                ),
+                psro_checkpoint_interval=deep_cfr_dict.get(
+                    "psro_checkpoint_interval", DeepCfrConfig.psro_checkpoint_interval
+                ),
+                psro_heuristic_types=deep_cfr_dict.get(
+                    "psro_heuristic_types", DeepCfrConfig.psro_heuristic_types
+                ),
+                encoding_mode=deep_cfr_dict.get(
+                    "encoding_mode", DeepCfrConfig.encoding_mode
+                ),
             )
 
             # --- Assemble Main Config ---
@@ -673,6 +853,11 @@ def load_config(
                         config_dict,
                         ["cambia_rules", "max_game_turns"],
                         CambiaRulesConfig.max_game_turns,
+                    ),
+                    lockCallerHand=get_nested(
+                        config_dict,
+                        ["cambia_rules", "lockCallerHand"],
+                        CambiaRulesConfig.lockCallerHand,
                     ),
                 ),
                 persistence=PersistenceConfig(

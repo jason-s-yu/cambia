@@ -6,7 +6,7 @@
 package engine
 
 const (
-	MaxPlayers  = 2
+	MaxPlayers  = 6
 	MaxHandSize = 6
 	DeckSize    = 54
 )
@@ -22,7 +22,7 @@ type PlayerState struct {
 
 
 // GameState holds the complete, self-contained state of a Cambia game.
-// It is a flat value type — no pointers, no slices — for zero-allocation
+// It is a flat value type (no pointers, no slices) for zero-allocation
 // use in CFR traversal. sizeof(GameState) ≤ 300 bytes.
 type GameState struct {
 	Players       [MaxPlayers]PlayerState // 2 * 16 = 32 bytes
@@ -114,9 +114,11 @@ func (g *GameState) Deal() {
 		g.Stockpile[i], g.Stockpile[j] = g.Stockpile[j], g.Stockpile[i]
 	}
 
-	// Deal cards: alternate between players (deal 1 to p0, 1 to p1, repeat).
+	n := g.Rules.numPlayers()
+
+	// Deal cards: alternate between players (deal 1 to p0, 1 to p1, ..., repeat).
 	for c := uint8(0); c < g.Rules.CardsPerPlayer; c++ {
-		for p := uint8(0); p < MaxPlayers; p++ {
+		for p := uint8(0); p < n; p++ {
 			g.StockLen--
 			card := g.Stockpile[g.StockLen]
 			g.Players[p].Hand[c] = card
@@ -125,7 +127,7 @@ func (g *GameState) Deal() {
 	}
 
 	// Set initial peek indices (bottom two cards = indices 0, 1).
-	for p := uint8(0); p < MaxPlayers; p++ {
+	for p := uint8(0); p < n; p++ {
 		g.Players[p].InitialPeek = [2]uint8{0, 1}
 	}
 
@@ -135,7 +137,7 @@ func (g *GameState) Deal() {
 	g.DiscardLen = 1
 
 	// Pick random starting player.
-	g.CurrentPlayer = uint8(g.randN(MaxPlayers))
+	g.CurrentPlayer = uint8(g.randN(uint64(n)))
 	g.Flags |= FlagGameStarted
 }
 
@@ -170,8 +172,29 @@ func (g *GameState) DiscardTop() Card {
 }
 
 // OpponentOf returns the player index of the opponent.
+// NOTE: Only meaningful for 2-player games. For N-player games, use Opponents().
 func (g *GameState) OpponentOf(player uint8) uint8 {
 	return 1 - player
+}
+
+// NumActivePlayers returns the number of active players in this game.
+func (g *GameState) NumActivePlayers() uint8 { return g.Rules.numPlayers() }
+
+// NextPlayer returns the next player after current in turn order.
+func (g *GameState) NextPlayer(current uint8) uint8 {
+	return (current + 1) % g.Rules.numPlayers()
+}
+
+// Opponents returns all player indices except the given player.
+func (g *GameState) Opponents(player uint8) []uint8 {
+	n := g.Rules.numPlayers()
+	opps := make([]uint8, 0, n-1)
+	for i := uint8(0); i < n; i++ {
+		if i != player {
+			opps = append(opps, i)
+		}
+	}
+	return opps
 }
 
 // ---------------------------------------------------------------------------
@@ -179,7 +202,7 @@ func (g *GameState) OpponentOf(player uint8) uint8 {
 // ---------------------------------------------------------------------------
 
 // Snapshot is a complete value-copy of GameState for undo support.
-// No heap allocation — saving and restoring are plain struct copies.
+// No heap allocation, saving and restoring are plain struct copies.
 type Snapshot GameState
 
 // Save returns a snapshot of the current game state.

@@ -60,7 +60,7 @@ def make_test_config(
     config.deep_cfr.advantage_buffer_capacity = 10_000
     config.deep_cfr.strategy_buffer_capacity = 10_000
     config.deep_cfr.save_interval = 0
-    config.deep_cfr.use_gpu = False
+    config.deep_cfr.device = "cpu"
     config.deep_cfr.sampling_method = "external"
     config.deep_cfr.exploration_epsilon = 0.6
 
