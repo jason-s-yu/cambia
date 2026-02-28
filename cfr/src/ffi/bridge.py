@@ -60,6 +60,10 @@ _ffi.cdef("""
                                 int8_t drawn_bucket, float *out);
     int32_t cambia_agent_encode_eppbs(int32_t h, uint8_t decision_context,
                                       int8_t drawn_bucket, float *out);
+    int32_t cambia_agent_encode_eppbs_interleaved(int32_t h, uint8_t decision_context,
+                                                   int8_t drawn_bucket, float *out);
+    int32_t cambia_agent_encode_eppbs_dealiased(int32_t h, uint8_t decision_context,
+                                                int8_t drawn_bucket, float *out);
     int32_t cambia_agent_new_with_memory(int32_t game_h, uint8_t player_id,
                                          uint8_t memory_level, uint8_t time_decay_turns,
                                          uint8_t memory_archetype, double memory_decay_lambda,
@@ -730,14 +734,45 @@ class GoAgentState:
         return np.frombuffer(_ffi.buffer(self._encode_buf), dtype=np.float32).copy()
 
     def encode_eppbs(self, decision_context: int, drawn_bucket: int = -1) -> np.ndarray:
-        """EP-PBS encoding via Go FFI. Returns ndarray of shape (200,)."""
-        buf = _ffi.new("float[200]")
+        """EP-PBS encoding via Go FFI. Returns ndarray of shape (224,)."""
+        buf = _ffi.new("float[224]")
         rc = self._lib.cambia_agent_encode_eppbs(
             self._agent_h, int(decision_context), int(drawn_bucket), buf
         )
         if rc != 0:
             raise RuntimeError(f"EP-PBS encode failed: {rc}")
-        return np.frombuffer(_ffi.buffer(buf, 200 * 4), dtype=np.float32).copy()
+        return np.frombuffer(_ffi.buffer(buf, 224 * 4), dtype=np.float32).copy()
+
+    def encode_eppbs_interleaved(self, decision_context: int, drawn_bucket: int = -1) -> np.ndarray:
+        """EP-PBS interleaved encoding via Go FFI. Returns ndarray of shape (224,).
+
+        Uses interleaved slot layout: public(42) + 12×slot(13) + pad(2) + history(24) = 224.
+        Public features include own/opp hand sizes at dims [40] and [41].
+        Required for SlotFiLM and slot_multiply network architectures.
+        """
+        buf = _ffi.new("float[224]")
+        rc = self._lib.cambia_agent_encode_eppbs_interleaved(
+            self._agent_h, int(decision_context), int(drawn_bucket), buf
+        )
+        if rc != 0:
+            raise RuntimeError(f"EP-PBS interleaved encode failed: {rc}")
+        return np.frombuffer(_ffi.buffer(buf, 224 * 4), dtype=np.float32).copy()
+
+    def encode_eppbs_dealiased(self, decision_context: int, drawn_bucket: int = -1) -> np.ndarray:
+        """De-aliased flat EP-PBS encoding via Go FFI. Returns ndarray of shape (224,).
+
+        Uses flat layout (tags grouped, then identities grouped) with two de-aliasing fixes:
+        - Empty slots (beyond hand_size) are all-zeros in both tag and identity regions
+        - Hand sizes at dims [196] and [197]
+        History features at dims [200-223].
+        """
+        buf = _ffi.new("float[224]")
+        rc = self._lib.cambia_agent_encode_eppbs_dealiased(
+            self._agent_h, int(decision_context), int(drawn_bucket), buf
+        )
+        if rc != 0:
+            raise RuntimeError(f"EP-PBS dealiased encode failed: {rc}")
+        return np.frombuffer(_ffi.buffer(buf, 224 * 4), dtype=np.float32).copy()
 
     def encode_nplayer(self, decision_context: int, drawn_bucket: int = -1) -> np.ndarray:
         """N-player encoding via Go FFI. Returns ndarray of shape (580,)."""

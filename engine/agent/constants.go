@@ -107,10 +107,11 @@ const (
 )
 
 const (
-	EPPBSInputDim = 200 // Total dimensions for EncodeEPPBS output
+	EPPBSInputDim = 224 // Total dimensions for EncodeEPPBS output (was 200; +24 for obs ages, discard hist, turn progress)
 	MaxSlots      = 12  // 6 own + 6 opp for 2P (engine.MaxHandSize * 2)
 	OppSlotsStart = 6   // Opp slots start at index 6 in SlotTags/SlotBuckets
 	MaxActiveMask = 3   // Max entries tracked in OwnActiveMask / OppActiveMask
+	NumBuckets    = 10  // Number of card buckets (BucketZero through BucketUnknown)
 )
 
 // N-Player constants (used when NumPlayers > 2).

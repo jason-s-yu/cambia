@@ -32,9 +32,9 @@ func TestEPPBSEncodingDim(t *testing.T) {
 	if !anyNonZero {
 		t.Error("EncodeEPPBS output is all zeros")
 	}
-	// EPPBSInputDim must equal 200.
-	if EPPBSInputDim != 200 {
-		t.Errorf("EPPBSInputDim = %d, want 200", EPPBSInputDim)
+	// EPPBSInputDim must equal 224.
+	if EPPBSInputDim != 224 {
+		t.Errorf("EPPBSInputDim = %d, want 224", EPPBSInputDim)
 	}
 }
 

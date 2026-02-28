@@ -366,6 +366,21 @@ def encode_infoset(
     return features
 
 
+def _write_history_features(out: np.ndarray, own_obs_ages, opp_obs_ages, dead_card_histogram, turn_progress: float):
+    """Write the 24 new dims at offsets [200-223] into an EP-PBS output buffer."""
+    if own_obs_ages is not None:
+        for i in range(min(6, len(own_obs_ages))):
+            out[200 + i] = own_obs_ages[i]
+    if opp_obs_ages is not None:
+        for i in range(min(6, len(opp_obs_ages))):
+            out[206 + i] = opp_obs_ages[i]
+    if dead_card_histogram is not None:
+        for i in range(min(10, len(dead_card_histogram))):
+            out[212 + i] = dead_card_histogram[i]
+    out[222] = turn_progress
+    # [223] padding (already zero)
+
+
 def encode_infoset_eppbs(
     slot_tags: list,          # list of 12 EpistemicTag values
     slot_buckets: list,       # list of 12 bucket values (0 if unknown)
@@ -375,8 +390,12 @@ def encode_infoset_eppbs(
     decision_context: int,
     cambia_state: int,
     drawn_card_bucket: int = -1,
+    own_obs_ages=None,
+    opp_obs_ages=None,
+    dead_card_histogram=None,
+    turn_progress: float = 0.0,
 ) -> np.ndarray:
-    """EP-PBS encoding for 2-player games. Returns ndarray of shape (200,)."""
+    """EP-PBS encoding for 2-player games. Returns ndarray of shape (224,)."""
     out = np.zeros(EP_PBS_INPUT_DIM, dtype=np.float32)
     offset = 0
 
@@ -433,7 +452,236 @@ def encode_infoset_eppbs(
         offset += EP_PBS_BUCKET_DIM
     # offset = 196
 
-    # 4 dims padding (already zero)
+    # [196-199] were padding; now [200-223] are history features.
+    _write_history_features(out, own_obs_ages, opp_obs_ages, dead_card_histogram, turn_progress)
+    return out
+
+
+def encode_infoset_eppbs_dealiased(
+    slot_tags: list,          # list of 12 EpistemicTag values
+    slot_buckets: list,       # list of 12 bucket values (0 if unknown)
+    discard_top_bucket: int,
+    stock_estimate: int,
+    game_phase: int,
+    decision_context: int,
+    cambia_state: int,
+    drawn_card_bucket: int = -1,
+    own_hand_size: int = 6,
+    opp_hand_size: int = 6,
+    own_obs_ages=None,
+    opp_obs_ages=None,
+    dead_card_histogram=None,
+    turn_progress: float = 0.0,
+) -> np.ndarray:
+    """De-aliased flat EP-PBS encoding for 2-player games. Returns ndarray of shape (224,).
+
+    Layout (200 dims):
+      [0-39]:   public features (40 dims, identical to encode_infoset_eppbs)
+      [40-87]:  slot tags (48 dims = 12 slots × 4-dim one-hot)
+                EMPTY slots (slot_in_hand >= hand_size): all zeros (NOT UNK)
+      [88-195]: slot identities (108 dims = 12 slots × 9-dim one-hot)
+                EMPTY slots: all zeros
+      [196]:    own_hand_size / 6.0 (NEW — was padding)
+      [197]:    opp_hand_size / 6.0 (NEW — was padding)
+      [198-199]: padding (2 dims)
+
+    De-aliasing fix: empty slots (beyond hand_size) are all-zeros in both tag
+    and identity regions, distinguishing them from genuinely unknown cards
+    (which have UNK tag [1,0,0,0]).
+    """
+    out = np.zeros(EP_PBS_INPUT_DIM, dtype=np.float32)
+    offset = 0
+
+    # Public features (40 dims) — identical to encode_infoset_eppbs
+    # [0-9]: discard top bucket (10-dim one-hot)
+    if 0 <= discard_top_bucket <= 9:
+        out[offset + discard_top_bucket] = 1.0
+    offset += 10
+
+    # [10-13]: stockpile estimate (4-dim one-hot)
+    if 0 <= stock_estimate <= 3:
+        out[offset + stock_estimate] = 1.0
+    offset += 4
+
+    # [14-19]: game phase (6-dim one-hot)
+    if 0 <= game_phase <= 5:
+        out[offset + game_phase] = 1.0
+    offset += 6
+
+    # [20-25]: decision context (6-dim one-hot)
+    if 0 <= decision_context <= 5:
+        out[offset + decision_context] = 1.0
+    offset += 6
+
+    # [26-28]: cambia state (3-dim one-hot)
+    if 0 <= cambia_state <= 2:
+        out[offset + cambia_state] = 1.0
+    offset += 3
+
+    # [29-39]: drawn card bucket (11-dim one-hot)
+    if drawn_card_bucket < 0:
+        out[offset + 10] = 1.0  # NONE
+    elif 0 <= drawn_card_bucket <= 9:
+        out[offset + drawn_card_bucket] = 1.0
+    offset += 11
+    # offset = 40
+
+    # Slot tags (48 dims): 12 slots × 4-dim one-hot
+    # De-aliasing: skip empty slots (leave all-zeros instead of UNK tag)
+    slots_per_player = EP_PBS_MAX_SLOTS // 2
+    for i in range(EP_PBS_MAX_SLOTS):
+        player_idx = i // slots_per_player
+        slot_in_hand = i % slots_per_player
+        hand_size = own_hand_size if player_idx == 0 else opp_hand_size
+
+        if slot_in_hand < hand_size:
+            tag = slot_tags[i] if i < len(slot_tags) else EpistemicTag.UNK
+            if 0 <= tag <= 3:
+                out[offset + tag] = 1.0
+        # else: empty slot — leave all-zeros (de-aliasing fix)
+        offset += EP_PBS_TAG_DIM
+    # offset = 88
+
+    # Slot identities (108 dims): 12 slots × 9-dim bucket
+    # De-aliasing: skip empty slots (leave all-zeros)
+    for i in range(EP_PBS_MAX_SLOTS):
+        player_idx = i // slots_per_player
+        slot_in_hand = i % slots_per_player
+        hand_size = own_hand_size if player_idx == 0 else opp_hand_size
+
+        if slot_in_hand < hand_size:
+            tag = slot_tags[i] if i < len(slot_tags) else EpistemicTag.UNK
+            if tag in (EpistemicTag.PRIV_OWN, EpistemicTag.PUB):
+                bucket = slot_buckets[i] if i < len(slot_buckets) else 0
+                if 0 <= bucket <= 8:
+                    out[offset + bucket] = 1.0
+        # else: empty slot — leave all-zeros (de-aliasing fix)
+        offset += EP_PBS_BUCKET_DIM
+    # offset = 196
+
+    # [196]: own_hand_size normalized
+    out[196] = own_hand_size / 6.0
+
+    # [197]: opp_hand_size normalized
+    out[197] = opp_hand_size / 6.0
+
+    # [198-199] were padding; now [200-223] are history features.
+    _write_history_features(out, own_obs_ages, opp_obs_ages, dead_card_histogram, turn_progress)
+    return out
+
+
+def encode_infoset_eppbs_interleaved(
+    slot_tags: list,
+    slot_buckets: list,
+    discard_top_bucket: int,
+    stock_estimate: int,
+    game_phase: int,
+    decision_context: int,
+    cambia_state: int,
+    drawn_card_bucket: int = -1,
+    own_hand_size: int = 6,
+    opp_hand_size: int = 6,
+    own_obs_ages=None,
+    opp_obs_ages=None,
+    dead_card_histogram=None,
+    turn_progress: float = 0.0,
+) -> np.ndarray:
+    """EP-PBS interleaved encoding for 2-player games. Returns ndarray of shape (224,).
+
+    Layout (224 dims):
+      [0-41]   public features (42 dims):
+               [0-9]   discard_top one-hot (10)
+               [10-13] stock_estimate one-hot (4)
+               [14-19] game_phase one-hot (6)
+               [20-25] decision_context one-hot (6)
+               [26-28] cambia_state one-hot (3)
+               [29-39] drawn_card one-hot (11)
+               [40]    own_hand_size / 6.0
+               [41]    opp_hand_size / 6.0
+      [42-197] 12 slots × 13 dims each (156 dims):
+               per slot i: tag one-hot (4) then identity bucket one-hot (9)
+               EMPTY slots: all zeros
+               UNK slots: tag=[1,0,0,0], identity=zeros
+      [198-199] padding (2 dims, zeros)
+      [200-223] history features (24 dims):
+               [200-205] own slot obs ages (6)
+               [206-211] opp slot obs ages (6)
+               [212-221] dead-card histogram (10)
+               [222] turn progress
+               [223] padding
+    """
+    out = np.zeros(EP_PBS_INPUT_DIM, dtype=np.float32)
+    offset = 0
+
+    # Public features (40 dims) — identical to encode_infoset_eppbs
+    # [0-9]: discard top bucket (10-dim one-hot)
+    if 0 <= discard_top_bucket <= 9:
+        out[offset + discard_top_bucket] = 1.0
+    offset += 10
+
+    # [10-13]: stockpile estimate (4-dim one-hot)
+    if 0 <= stock_estimate <= 3:
+        out[offset + stock_estimate] = 1.0
+    offset += 4
+
+    # [14-19]: game phase (6-dim one-hot)
+    if 0 <= game_phase <= 5:
+        out[offset + game_phase] = 1.0
+    offset += 6
+
+    # [20-25]: decision context (6-dim one-hot)
+    if 0 <= decision_context <= 5:
+        out[offset + decision_context] = 1.0
+    offset += 6
+
+    # [26-28]: cambia state (3-dim one-hot)
+    if 0 <= cambia_state <= 2:
+        out[offset + cambia_state] = 1.0
+    offset += 3
+
+    # [29-39]: drawn card bucket (11-dim one-hot)
+    if drawn_card_bucket < 0:
+        out[offset + 10] = 1.0  # NONE
+    elif 0 <= drawn_card_bucket <= 9:
+        out[offset + drawn_card_bucket] = 1.0
+    offset += 11
+    # offset = 40
+
+    # [40]: own_hand_size normalized
+    out[offset] = own_hand_size / 6.0
+    offset += 1
+
+    # [41]: opp_hand_size normalized
+    out[offset] = opp_hand_size / 6.0
+    offset += 1
+    # offset = 42
+
+    # Interleaved slot encoding: 12 slots × 13 dims (tag 4 + identity 9)
+    slots_per_player = EP_PBS_MAX_SLOTS // 2
+    for i in range(EP_PBS_MAX_SLOTS):
+        player_idx = i // slots_per_player
+        slot_in_hand = i % slots_per_player
+        hand_size = own_hand_size if player_idx == 0 else opp_hand_size
+        slot_base = 42 + i * (EP_PBS_TAG_DIM + EP_PBS_BUCKET_DIM)
+
+        if slot_in_hand >= hand_size:
+            # Empty slot — leave all zeros
+            continue
+
+        tag = slot_tags[i] if i < len(slot_tags) else EpistemicTag.UNK
+        # Write tag one-hot (4 dims)
+        if 0 <= tag <= 3:
+            out[slot_base + tag] = 1.0
+
+        # Write identity bucket one-hot (9 dims) — same condition as existing function
+        if tag in (EpistemicTag.PRIV_OWN, EpistemicTag.PUB):
+            bucket = slot_buckets[i] if i < len(slot_buckets) else 0
+            if 0 <= bucket <= 8:
+                out[slot_base + EP_PBS_TAG_DIM + bucket] = 1.0
+    # offset after slots = 42 + 12*13 = 198
+
+    # [198-199] were padding; now [200-223] are history features.
+    _write_history_features(out, own_obs_ages, opp_obs_ages, dead_card_histogram, turn_progress)
     return out
 
 

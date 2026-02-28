@@ -228,11 +228,13 @@ func TestNPlayer2PRegression(t *testing.T) {
 		t.Fatal("game did not terminate within maxSteps")
 	}
 
-	// For 2P, |u[0]| + |u[1]| should be either 0 (true tie) or 2 (winner/loser).
+	// With score-margin utility, utilities are continuous in [-1,1] and zero-sum.
 	u := g.GetUtility()
-	total := math.Abs(float64(u[0])) + math.Abs(float64(u[1]))
-	if total != 0 && total != 2.0 {
-		t.Errorf("unexpected 2P utilities: u[0]=%f u[1]=%f", u[0], u[1])
+	if u[0]+u[1] > 1e-5 || u[0]+u[1] < -1e-5 {
+		t.Errorf("2P utilities not zero-sum: u[0]=%f u[1]=%f sum=%f", u[0], u[1], u[0]+u[1])
+	}
+	if u[0] < -1.0 || u[0] > 1.0 || u[1] < -1.0 || u[1] > 1.0 {
+		t.Errorf("utilities out of [-1,1]: u[0]=%f u[1]=%f", u[0], u[1])
 	}
 	// Inactive slots must be zero.
 	for p := uint8(2); p < MaxPlayers; p++ {

@@ -142,12 +142,17 @@ class EpistemicTag(enum.IntEnum):
 
 
 # EP-PBS encoding constants
-EP_PBS_INPUT_DIM = 200
+EP_PBS_INPUT_DIM = 224  # was 200; +24 for obs ages, discard hist, turn progress
 EP_PBS_MAX_SLOTS = 12  # 6 own + 6 opp for 2P
 EP_PBS_TAG_DIM = 4
 EP_PBS_BUCKET_DIM = 9
-EP_PBS_PUBLIC_DIM = 40
+EP_PBS_PUBLIC_DIM = 40  # legacy v1 encoder (encode_infoset_eppbs); do not change
+EP_PBS_PUBLIC_DIM_V2 = 42  # SlotFiLM encoder (+2 hand-size features, -2 padding)
 EP_PBS_MAX_ACTIVE_MASK = 3
+EP_PBS_SLOT_DIM = EP_PBS_TAG_DIM + EP_PBS_BUCKET_DIM  # 13 (tag + identity per slot)
+EP_PBS_PAD_DIM = 2  # padding dims (was 4 before hand-size features)
+EP_PBS_POS_EMBED_DIM = 8  # position embedding dim per slot
+EP_PBS_SLOT_REPR_DIM = 64  # slot encoder output dim
 
 # N-Player constants
 N_PLAYER_INPUT_DIM = 580

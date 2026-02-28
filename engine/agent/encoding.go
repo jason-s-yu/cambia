@@ -201,7 +201,241 @@ func (a *AgentState) EncodeEPPBS(ctx engine.DecisionContext, drawnCardBucket int
 		}
 		offset += 9
 	}
-	// offset = 196 — remaining 4 bytes are padding (already zero).
+	// offset = 196 — [196-199] were padding; now extended.
+	a.writeHistoryFeatures(out)
+}
+
+// writeHistoryFeatures writes the 24 new dims at offsets [200-223] into any EP-PBS output buffer.
+// Layout:
+//
+//	[200-205] own slot observation ages (6 dims, age/MaxGameTurns, 0 if unseen)
+//	[206-211] opp slot observation ages (6 dims, age/MaxGameTurns, 0 if unseen)
+//	[212-221] dead-card histogram (10 dims, count/total, 0 if no discards)
+//	[222]     turn progress (CurrentTurn/MaxGameTurns)
+//	[223]     padding (zero)
+func (a *AgentState) writeHistoryFeatures(out *[EPPBSInputDim]float32) {
+	maxTurns := float32(a.MaxGameTurns)
+	if maxTurns <= 0 {
+		return // no normalization possible
+	}
+
+	// [200-205] Own slot observation ages.
+	for i := uint8(0); i < MaxHand; i++ {
+		if i < a.OwnHandLen && a.OwnHand[i].Bucket != BucketUnknown && a.OwnHand[i].LastSeenTurn > 0 {
+			age := float32(a.CurrentTurn - a.OwnHand[i].LastSeenTurn)
+			out[200+int(i)] = age / maxTurns
+		}
+	}
+
+	// [206-211] Opponent slot observation ages.
+	for i := uint8(0); i < MaxHand; i++ {
+		if i < a.OppHandLen && a.OppHasLastSeen[i] {
+			age := float32(a.CurrentTurn - a.OppLastSeen[i])
+			out[206+int(i)] = age / maxTurns
+		}
+	}
+
+	// [212-221] Dead-card histogram.
+	if a.TotalDiscardsSeen > 0 {
+		total := float32(a.TotalDiscardsSeen)
+		for b := 0; b < NumBuckets; b++ {
+			out[212+b] = float32(a.DiscardBucketCounts[b]) / total
+		}
+	}
+
+	// [222] Turn progress.
+	out[222] = float32(a.CurrentTurn) / maxTurns
+
+	// [223] padding (already zero).
+}
+
+// EncodeEPPBSDealiased writes the 224-dim de-aliased flat EP-PBS feature vector into out.
+// Layout:
+//
+//	[0-39]    public features (40 dims, identical to EncodeEPPBS)
+//	[40-87]   slot tags (12 slots × 4-dim one-hot EpistemicTag)
+//	          Empty slots (slot_in_hand >= hand_size): all zeros (NOT UNK tag)
+//	[88-195]  slot identities (12 slots × 9-dim one-hot bucket)
+//	          Empty slots: all zeros
+//	[196]     own_hand_size / 6.0
+//	[197]     opp_hand_size / 6.0
+//	[198-199] padding (always 0)
+//	[200-223] history features (see writeHistoryFeatures)
+func (a *AgentState) EncodeEPPBSDealiased(ctx engine.DecisionContext, drawnCardBucket int8, out *[EPPBSInputDim]float32) {
+	*out = [EPPBSInputDim]float32{}
+	offset := 0
+
+	// [0-9] Discard top bucket (10-dim).
+	out[offset+int(a.DiscardTopBucket)] = 1.0
+	offset += 10
+
+	// [10-13] Stockpile estimate (4-dim).
+	out[offset+int(a.StockEstimate)] = 1.0
+	offset += 4
+
+	// [14-19] Game phase (6-dim).
+	out[offset+int(a.Phase)] = 1.0
+	offset += 6
+
+	// [20-25] Decision context (6-dim).
+	out[offset+int(ctx)] = 1.0
+	offset += 6
+
+	// [26-28] Cambia state (3-dim, same mapping as Encode).
+	out[offset+int(cambiaOneHotIndex(a.CambiaState))] = 1.0
+	offset += 3
+
+	// [29-39] Drawn card bucket (11-dim).
+	out[offset+int(drawnCardOneHotIndex(drawnCardBucket))] = 1.0
+	offset += 11
+	// offset = 40
+
+	// [40-87] Slot tags (12 slots × 4-dim one-hot).
+	// De-aliasing: empty slots (slot_in_hand >= hand_size) are left all-zeros.
+	slotsPerPlayer := MaxSlots / 2 // 6
+	for i := 0; i < MaxSlots; i++ {
+		playerIdx := i / slotsPerPlayer
+		slotInHand := i % slotsPerPlayer
+		var handSize uint8
+		if playerIdx == 0 {
+			handSize = a.OwnHandLen
+		} else {
+			handSize = a.OppHandLen
+		}
+		if slotInHand < int(handSize) {
+			out[offset+int(a.SlotTags[i])] = 1.0
+		}
+		// else: empty slot — leave all-zeros (de-aliasing fix)
+		offset += 4
+	}
+	// offset = 88
+
+	// [88-195] Slot identities (12 slots × 9-dim one-hot).
+	// De-aliasing: skip empty slots (leave all-zeros).
+	for i := 0; i < MaxSlots; i++ {
+		playerIdx := i / slotsPerPlayer
+		slotInHand := i % slotsPerPlayer
+		var handSize uint8
+		if playerIdx == 0 {
+			handSize = a.OwnHandLen
+		} else {
+			handSize = a.OppHandLen
+		}
+		if slotInHand < int(handSize) {
+			tag := a.SlotTags[i]
+			if tag == TagPrivOwn || tag == TagPub {
+				b := a.SlotBuckets[i]
+				if b < BucketUnknown { // known bucket (0-8)
+					out[offset+int(b)] = 1.0
+				}
+			}
+		}
+		// else: empty slot — leave all-zeros (de-aliasing fix)
+		offset += 9
+	}
+	// offset = 196
+
+	// [196] own_hand_size normalized.
+	out[196] = float32(a.OwnHandLen) / float32(MaxHand)
+
+	// [197] opp_hand_size normalized.
+	out[197] = float32(a.OppHandLen) / float32(MaxHand)
+
+	// [198-199]: padding (already zero).
+	// [200-223]: history features.
+	a.writeHistoryFeatures(out)
+}
+
+// EncodeEPPBSInterleaved writes the 224-dim interleaved EP-PBS feature vector into out.
+// Layout:
+//
+//	[0-41]    public features (42 dims):
+//	          [0-9]   discard top bucket (10)
+//	          [10-13] stockpile estimate (4)
+//	          [14-19] game phase (6)
+//	          [20-25] decision context (6)
+//	          [26-28] cambia state (3)
+//	          [29-39] drawn card bucket (11)
+//	          [40]    own_hand_size / 6.0
+//	          [41]    opp_hand_size / 6.0
+//	[42-197]  12 slots × 13 dims (tag 4-dim one-hot then identity 9-dim one-hot).
+//	          Empty slots (slot_in_hand >= hand_size): all zeros.
+//	[198-199] padding (always 0)
+//	[200-223] history features (see writeHistoryFeatures)
+func (a *AgentState) EncodeEPPBSInterleaved(ctx engine.DecisionContext, drawnCardBucket int8, out *[EPPBSInputDim]float32) {
+	*out = [EPPBSInputDim]float32{}
+	offset := 0
+
+	// [0-9] Discard top bucket (10-dim).
+	out[offset+int(a.DiscardTopBucket)] = 1.0
+	offset += 10
+
+	// [10-13] Stockpile estimate (4-dim).
+	out[offset+int(a.StockEstimate)] = 1.0
+	offset += 4
+
+	// [14-19] Game phase (6-dim).
+	out[offset+int(a.Phase)] = 1.0
+	offset += 6
+
+	// [20-25] Decision context (6-dim).
+	out[offset+int(ctx)] = 1.0
+	offset += 6
+
+	// [26-28] Cambia state (3-dim).
+	out[offset+int(cambiaOneHotIndex(a.CambiaState))] = 1.0
+	offset += 3
+
+	// [29-39] Drawn card bucket (11-dim).
+	out[offset+int(drawnCardOneHotIndex(drawnCardBucket))] = 1.0
+	offset += 11
+	// offset = 40
+
+	// [40] own_hand_size normalized.
+	out[offset] = float32(a.OwnHandLen) / float32(MaxHand)
+	offset++
+
+	// [41] opp_hand_size normalized.
+	out[offset] = float32(a.OppHandLen) / float32(MaxHand)
+	offset++
+	// offset = 42
+
+	// [42-197] Interleaved slot encoding: 12 slots × 13 dims (tag 4 + identity 9).
+	// Slots 0-5 are own hand; slots 6-11 are opponent hand.
+	slotsPerPlayer := MaxSlots / 2 // 6
+	for i := 0; i < MaxSlots; i++ {
+		playerIdx := i / slotsPerPlayer
+		slotInHand := i % slotsPerPlayer
+		var handSize uint8
+		if playerIdx == 0 {
+			handSize = a.OwnHandLen
+		} else {
+			handSize = a.OppHandLen
+		}
+
+		slotBase := 42 + i*13
+		if slotInHand >= int(handSize) {
+			// Empty slot — leave all zeros.
+			continue
+		}
+
+		tag := a.SlotTags[i]
+		// Write tag one-hot (4 dims).
+		out[slotBase+int(tag)] = 1.0
+
+		// Write identity bucket one-hot (9 dims) — only when known.
+		if tag == TagPrivOwn || tag == TagPub {
+			b := a.SlotBuckets[i]
+			if b < BucketUnknown {
+				out[slotBase+4+int(b)] = 1.0
+			}
+		}
+	}
+	// offset after slots = 42 + 12*13 = 198 — [198-199] padding (already zero).
+	_ = offset
+
+	// [200-223]: history features.
+	a.writeHistoryFeatures(out)
 }
 
 // ActionMask writes the legal action mask into out.

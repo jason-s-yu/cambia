@@ -341,17 +341,21 @@ class DeepCfrConfig:
     sd_cfr_snapshot_weighting: str = "linear"  # "linear" or "uniform"
     num_hidden_layers: int = 3
     use_residual: bool = True
+    network_type: str = "residual"  # "mlp", "residual", "slot_film", "slot_multiply"
+    use_pos_embed: bool = True  # position embeddings in SlotFiLM (False for ablation D)
     use_ema: bool = True  # EMA serving weights for O(1) SD-CFR inference
 
     # Profiling: gate traversal timing logs + handle pool stats behind this flag
     enable_traversal_profiling: bool = False
     # Path for structured JSONL profiling output (empty = auto-generate in run dir)
     profiling_jsonl_path: str = ""
-    # Run torch.profiler on this step number and export Chrome trace (None = disabled)
-    profile_step: Optional[int] = None
+    # Run torch.profiler on these step numbers and export Chrome traces (None = disabled)
+    profile_step: Optional[List[int]] = None
 
     # Encoding mode: "legacy" (222-dim) or "ep_pbs" (200-dim EP-PBS encoding)
     encoding_mode: str = "legacy"
+    # Encoding layout: "auto" (infer from network_type) or "interleaved"
+    encoding_layout: str = "auto"
 
     # Memory archetype: "perfect" (no decay), "decaying" (Bayesian diffusion),
     # or "human_like" (saliency eviction with capacity limit).
@@ -373,6 +377,16 @@ class DeepCfrConfig:
     psro_eval_games: int = 200
     psro_checkpoint_interval: int = 50  # Add to PSRO population every N iterations
     psro_heuristic_types: str = "random,greedy,memory_heuristic"  # Comma-separated
+
+    # Adaptive training steps: when > 0, compute steps from buffer size each iteration.
+    # adaptive_steps = int((len(buffer) * target_buffer_passes) / batch_size)
+    # num_steps = min(train_steps_per_iteration, max(250, adaptive_steps))
+    # When 0.0, use fixed train_steps_per_iteration (backward compatible).
+    target_buffer_passes: float = 0.0
+
+    # ESCHER value network adaptive training steps (same formula as target_buffer_passes).
+    # When 0.0, uses fixed train_steps_per_iteration.
+    value_target_buffer_passes: float = 2.0
 
 
 # --- Baseline Agent Configuration ---
@@ -697,6 +711,8 @@ def load_config(
                     "num_hidden_layers", DeepCfrConfig.num_hidden_layers
                 ),
                 use_residual=deep_cfr_dict.get("use_residual", DeepCfrConfig.use_residual),
+                network_type=deep_cfr_dict.get("network_type", DeepCfrConfig.network_type),
+                use_pos_embed=deep_cfr_dict.get("use_pos_embed", DeepCfrConfig.use_pos_embed),
                 use_ema=deep_cfr_dict.get("use_ema", DeepCfrConfig.use_ema),
                 enable_traversal_profiling=deep_cfr_dict.get(
                     "enable_traversal_profiling", DeepCfrConfig.enable_traversal_profiling
@@ -732,6 +748,15 @@ def load_config(
                 ),
                 encoding_mode=deep_cfr_dict.get(
                     "encoding_mode", DeepCfrConfig.encoding_mode
+                ),
+                encoding_layout=deep_cfr_dict.get(
+                    "encoding_layout", DeepCfrConfig.encoding_layout
+                ),
+                target_buffer_passes=deep_cfr_dict.get(
+                    "target_buffer_passes", DeepCfrConfig.target_buffer_passes
+                ),
+                value_target_buffer_passes=deep_cfr_dict.get(
+                    "value_target_buffer_passes", DeepCfrConfig.value_target_buffer_passes
                 ),
             )
 

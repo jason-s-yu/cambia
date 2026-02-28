@@ -104,6 +104,11 @@ type AgentState struct {
 	MemoryArchetype   MemoryArchetype
 	MemoryDecayLambda float32 // Decay rate λ for MemoryDecaying (default 0.1)
 	MemoryCapacity    uint8   // Max active mask size for MemoryHumanLike (default 3)
+
+	// Discard tracking: cumulative dead-card histogram (append-only).
+	DiscardBucketCounts [NumBuckets]uint8 // counts per CardBucket (0-9)
+	TotalDiscardsSeen   uint8             // total discards observed
+	MaxGameTurns        uint16            // from g.Rules.MaxGameTurns, for normalization
 }
 
 // NewAgentState creates a zero-initialized AgentState with the given player IDs
@@ -170,6 +175,12 @@ func (a *AgentState) Initialize(g *engine.GameState) {
 	a.Phase = GamePhaseFromState(g.StockLen, g.IsCambiaCalled(), g.IsTerminal())
 	a.CambiaState = CambiaNone
 	a.CurrentTurn = 0
+	a.MaxGameTurns = g.Rules.MaxGameTurns
+
+	// Track initial discard pile card.
+	if discardTop != engine.EmptyCard {
+		a.trackDiscard()
+	}
 
 	// Initialize EP-PBS slot tags.
 	a.OwnActiveMaskLen = 0
@@ -222,6 +233,7 @@ func (a *AgentState) Update(g *engine.GameState) {
 
 	case act == engine.ActionDiscardNoAbility || act == engine.ActionDiscardWithAbility:
 		// Discarded card is now visible on discard pile; no hand index changes here.
+		a.trackDiscard()
 
 	case act == engine.ActionCallCambia:
 		// Cambia is handled via the IsCambiaCalled() flag above.
@@ -229,6 +241,7 @@ func (a *AgentState) Update(g *engine.GameState) {
 	default:
 		if targetIdx, ok := engine.ActionIsReplace(act); ok {
 			a.processReplace(g, isSelf, targetIdx)
+			a.trackDiscard() // replaced card goes to discard pile
 
 		} else if targetIdx, ok := engine.ActionIsPeekOwn(act); ok {
 			a.processPeekOwn(g, isSelf, targetIdx)
@@ -269,6 +282,16 @@ func (a *AgentState) Update(g *engine.GameState) {
 
 	// Step 4: Apply time decay (memory level 2 only).
 	a.applyTimeDecay()
+}
+
+// trackDiscard records the current discard-top card in the dead-card histogram.
+// Must be called AFTER Step 1 (public knowledge update) sets DiscardTopBucket.
+func (a *AgentState) trackDiscard() {
+	b := a.DiscardTopBucket
+	if b < CardBucket(NumBuckets) {
+		a.DiscardBucketCounts[b]++
+		a.TotalDiscardsSeen++
+	}
 }
 
 // processReplace handles ActionBaseReplace+targetIdx.
