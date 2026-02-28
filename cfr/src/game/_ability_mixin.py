@@ -367,6 +367,7 @@ class AbilityMixin:
             # --- Handle Post-Draw Choices (Discard/Replace) ---
             if isinstance(pending_type, ActionDiscard):
                 drawn_card = self.pending_action_data.get("drawn_card")
+                drawn_from_source = self.pending_action_data.get("drawn_from", "stockpile")
                 if not isinstance(drawn_card, Card):
                     logger.error(
                         "Pending post-draw choice but invalid/missing drawn_card in data! Data: %s",
@@ -523,6 +524,18 @@ class AbilityMixin:
                     )
                     card_just_discarded_for_snap_check = replaced_card
                     self._clear_pending_action(undo_stack, delta_list)
+
+                    # AllowReplaceAbilities: if enabled, the old (replaced-out) card's ability
+                    # triggers when drawn from the stockpile (mirrors Go engine logic).
+                    if (
+                        getattr(getattr(self, "house_rules", None), "allowReplaceAbilities", False)
+                        and drawn_from_source == "stockpile"
+                        and card_has_discard_ability(replaced_card)
+                    ):
+                        self._trigger_discard_ability(
+                            player, replaced_card, undo_stack, delta_list
+                        )
+                        card_just_discarded_for_snap_check = None  # snap deferred to ability resolution
 
                 else:
                     # This path is now unreachable due to the legal action check at the start

@@ -14,10 +14,11 @@ const (
 // PlayerState holds one player's hand and initial peek information.
 // Padded to exactly 16 bytes for cache alignment.
 type PlayerState struct {
-	Hand        [MaxHandSize]Card // 6 bytes
-	HandLen     uint8             // 1 byte
-	InitialPeek [2]uint8          // 2 bytes
-	_pad        [7]uint8          // 7 bytes → total 6+1+2+7=16
+	Hand             [MaxHandSize]Card  // 6 bytes
+	HandLen          uint8              // 1 byte
+	InitialPeek      [MaxHandSize]uint8 // 6 bytes (indices of initially peeked cards)
+	InitialPeekCount uint8              // 1 byte (number of valid entries in InitialPeek)
+	_pad             [2]uint8           // 2 bytes → total 6+1+6+1+2=16
 }
 
 
@@ -126,9 +127,16 @@ func (g *GameState) Deal() {
 		}
 	}
 
-	// Set initial peek indices (bottom two cards = indices 0, 1).
+	// Set initial peek indices based on InitialViewCount.
 	for p := uint8(0); p < n; p++ {
-		g.Players[p].InitialPeek = [2]uint8{0, 1}
+		count := g.Rules.InitialViewCount
+		if count > g.Rules.CardsPerPlayer {
+			count = g.Rules.CardsPerPlayer
+		}
+		for i := uint8(0); i < count; i++ {
+			g.Players[p].InitialPeek[i] = i
+		}
+		g.Players[p].InitialPeekCount = count
 	}
 
 	// Flip top stockpile card to start the discard pile (per RULES.md §2).

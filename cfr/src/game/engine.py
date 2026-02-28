@@ -332,7 +332,7 @@ class CambiaGameState(QueryMixin, SnapLogicMixin, AbilityMixin):
                                     use_ability=False
                                 )  # Placeholder type
                                 self.pending_action_player = player
-                                self.pending_action_data = {"drawn_card": drawn_card}
+                                self.pending_action_data = {"drawn_card": drawn_card, "drawn_from": "stockpile"}
 
                             def undo_draw_stock():
                                 drawn_card_in_pending = (
@@ -407,7 +407,7 @@ class CambiaGameState(QueryMixin, SnapLogicMixin, AbilityMixin):
                                 )
                                 self.pending_action = ActionDiscard(use_ability=False)
                                 self.pending_action_player = player
-                                self.pending_action_data = {"drawn_card": drawn_card}
+                                self.pending_action_data = {"drawn_card": drawn_card, "drawn_from": "discard"}
 
                             def undo_draw_discard():
                                 drawn_card_in_pending = (

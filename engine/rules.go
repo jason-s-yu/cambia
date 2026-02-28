@@ -13,6 +13,7 @@ type HouseRules struct {
 	NumJokers             uint8 // 0, 1, or 2 jokers in the deck
 	LockCallerHand        bool  // if true, the Cambia caller cannot replace cards from hand
 	NumPlayers            uint8 // number of active players (2–6); 0 treated as 2
+	InitialViewCount      uint8 // how many cards each player peeks at game start (default 2)
 }
 
 // DefaultHouseRules returns the standard Cambia house rules.
@@ -29,6 +30,7 @@ func DefaultHouseRules() HouseRules {
 		NumJokers:             2,
 		LockCallerHand:        true,
 		NumPlayers:            2,
+		InitialViewCount:      2,
 	}
 }
 

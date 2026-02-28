@@ -131,13 +131,12 @@ func (a *AgentState) Initialize(g *engine.GameState) {
 
 	// Own hand: peek indices from InitialPeek get actual bucket; rest are unknown.
 	peekSet := [engine.MaxHandSize]bool{}
-	peekIdx0 := g.Players[a.PlayerID].InitialPeek[0]
-	peekIdx1 := g.Players[a.PlayerID].InitialPeek[1]
-	if peekIdx0 < a.OwnHandLen {
-		peekSet[peekIdx0] = true
-	}
-	if peekIdx1 < a.OwnHandLen {
-		peekSet[peekIdx1] = true
+	ps := g.Players[a.PlayerID]
+	for i := uint8(0); i < ps.InitialPeekCount; i++ {
+		peekIdx := ps.InitialPeek[i]
+		if peekIdx < a.OwnHandLen {
+			peekSet[peekIdx] = true
+		}
 	}
 
 	for i := uint8(0); i < a.OwnHandLen; i++ {
@@ -885,9 +884,9 @@ func (a *AgentState) InitializeNPlayer(g *engine.GameState) {
 	a.OwnHandLen = g.Players[a.PlayerID].HandLen
 
 	// Own initial peeks: set knowledge and bucket for peeked slots.
-	peekIdx0 := g.Players[a.PlayerID].InitialPeek[0]
-	peekIdx1 := g.Players[a.PlayerID].InitialPeek[1]
-	for _, peekIdx := range []uint8{peekIdx0, peekIdx1} {
+	nps := g.Players[a.PlayerID]
+	for i := uint8(0); i < nps.InitialPeekCount; i++ {
+		peekIdx := nps.InitialPeek[i]
 		if peekIdx < a.OwnHandLen {
 			slot := int(a.PlayerID)*int(engine.MaxHandSize) + int(peekIdx)
 			card := g.Players[a.PlayerID].Hand[peekIdx]

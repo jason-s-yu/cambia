@@ -193,6 +193,7 @@ func (g *GameState) replace(targetIdx uint8) error {
 	}
 
 	drawn := Card(g.Pending.Data[0])
+	drawnFrom := g.Pending.Data[1]
 	old := g.Players[acting].Hand[targetIdx]
 
 	// Swap drawn card into hand.
@@ -211,6 +212,41 @@ func (g *GameState) replace(targetIdx uint8) error {
 
 	// Clear pending.
 	g.Pending = PendingAction{}
+
+	// If AllowReplaceAbilities is enabled and the old card has an ability and was
+	// drawn from the stockpile, trigger the old card's ability instead of immediately
+	// advancing to the snap phase.
+	if g.Rules.AllowReplaceAbilities && drawnFrom == DrawnFromStockpile && old.HasAbility() {
+		opp := g.OpponentOf(acting)
+		ownHandLen := g.Players[acting].HandLen
+		oppHandLen := g.Players[opp].HandLen
+		switch old.Ability() {
+		case AbilityPeekOwn:
+			if ownHandLen > 0 {
+				g.Pending.Type = PendingPeekOwn
+				g.Pending.PlayerID = acting
+				return nil
+			}
+		case AbilityPeekOther:
+			if oppHandLen > 0 {
+				g.Pending.Type = PendingPeekOther
+				g.Pending.PlayerID = acting
+				return nil
+			}
+		case AbilityBlindSwap:
+			if ownHandLen > 0 && oppHandLen > 0 {
+				g.Pending.Type = PendingBlindSwap
+				g.Pending.PlayerID = acting
+				return nil
+			}
+		case AbilityKingLook:
+			if ownHandLen > 0 && oppHandLen > 0 {
+				g.Pending.Type = PendingKingLook
+				g.Pending.PlayerID = acting
+				return nil
+			}
+		}
+	}
 
 	g.initiateSnapPhase(old)
 	return nil

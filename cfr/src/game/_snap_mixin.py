@@ -587,40 +587,45 @@ class SnapLogicMixin:
         # --- Advance Snap Turn or End Phase ---
         # (Do not advance if ActionSnapOpponent succeeded and set a pending move)
         if not (isinstance(action, ActionSnapOpponent) and snap_success):
-            try:
-                original_snap_idx_local = self.snap_current_snapper_idx
-                next_snap_idx = original_snap_idx_local + 1
+            # If snap succeeded and snap race is enabled, end the phase immediately
+            # (remaining snappers forfeit their chance)
+            if snap_success and self.house_rules.snapRace:
+                self._end_snap_phase(undo_stack, delta_list)
+            else:
+                try:
+                    original_snap_idx_local = self.snap_current_snapper_idx
+                    next_snap_idx = original_snap_idx_local + 1
 
-                def change_snap_idx():
-                    self.snap_current_snapper_idx = next_snap_idx
+                    def change_snap_idx():
+                        self.snap_current_snapper_idx = next_snap_idx
 
-                def undo_snap_idx():
-                    # Assert precondition
-                    assert self.snap_current_snapper_idx == next_snap_idx
-                    self.snap_current_snapper_idx = original_snap_idx_local
+                    def undo_snap_idx():
+                        # Assert precondition
+                        assert self.snap_current_snapper_idx == next_snap_idx
+                        self.snap_current_snapper_idx = original_snap_idx_local
 
-                self._add_change(
-                    change_snap_idx,
-                    undo_snap_idx,
-                    (
-                        "set_attr",
-                        "snap_current_snapper_idx",
-                        next_snap_idx,
-                        original_snap_idx_local,
-                    ),
-                    undo_stack,
-                    delta_list,
-                )
+                    self._add_change(
+                        change_snap_idx,
+                        undo_snap_idx,
+                        (
+                            "set_attr",
+                            "snap_current_snapper_idx",
+                            next_snap_idx,
+                            original_snap_idx_local,
+                        ),
+                        undo_stack,
+                        delta_list,
+                    )
 
-                if next_snap_idx >= len(self.snap_potential_snappers):
-                    self._end_snap_phase(undo_stack, delta_list)
-                # else: Next snapper's turn
-            except ActionApplicationError:
-                raise
-            except Exception as e_advance_snap:
-                # JUSTIFIED: Catch errors advancing snap turn to attempt cleanup
-                logger.exception("Error advancing snap turn index: %s", e_advance_snap)
-                self._end_snap_phase(undo_stack, delta_list)  # Attempt cleanup
+                    if next_snap_idx >= len(self.snap_potential_snappers):
+                        self._end_snap_phase(undo_stack, delta_list)
+                    # else: Next snapper's turn
+                except ActionApplicationError:
+                    raise
+                except Exception as e_advance_snap:
+                    # JUSTIFIED: Catch errors advancing snap turn to attempt cleanup
+                    logger.exception("Error advancing snap turn index: %s", e_advance_snap)
+                    self._end_snap_phase(undo_stack, delta_list)  # Attempt cleanup
 
         return True  # Action was processed (passed, snapped, penalized, or errored out but handled)
 
