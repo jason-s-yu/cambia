@@ -115,11 +115,20 @@ const (
 )
 
 // N-Player constants (used when NumPlayers > 2).
+// Derived from MaxPlayers=8 and MaxHandSize=6:
+//   MaxTotalSlots       = MaxPlayers × MaxHandSize = 8 × 6 = 48
+//   MaxKnowledgePlayers = MaxPlayers = 8
+//   NPlayerPowersetDim  = MaxTotalSlots × MaxKnowledgePlayers = 48 × 8 = 384
+//   NPlayerIdentityDim  = MaxTotalSlots × 9 (buckets) = 48 × 9 = 432
+//   NPlayerInputDim     = NPlayerPowersetDim + NPlayerIdentityDim + 40 (public) = 856
+//   NPlayerNumActions   = 620 (see engine.NPlayerNumActions; scales with MaxOpponents=7)
 const (
-	NPlayerInputDim     = 580                          // Total dimensions for EncodeNPlayer output
-	NPlayerNumActions   = 452                          // matches engine.NPlayerNumActions
-	MaxTotalSlots       = 36                           // 6 players × 6 cards
-	MaxKnowledgePlayers = engine.MaxPlayers            // 6
+	MaxTotalSlots       = 48                           // 8 players × 6 cards
+	MaxKnowledgePlayers = engine.MaxPlayers            // 8
+	NPlayerPowersetDim  = MaxTotalSlots * MaxKnowledgePlayers // 48 × 8 = 384
+	NPlayerIdentityDim  = MaxTotalSlots * 9            // 48 × 9 = 432
+	NPlayerInputDim     = NPlayerPowersetDim + NPlayerIdentityDim + 40 // 856
+	NPlayerNumActions   = 620                          // matches engine.NPlayerNumActions
 )
 
 // MemoryArchetype defines how the agent handles memory decay and eviction.

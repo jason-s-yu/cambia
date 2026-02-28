@@ -227,18 +227,18 @@ func (g *GameState) legalSnapMove(mask *[3]uint64) {
 }
 
 // ===========================================================================
-// N-Player legal action generation (452-action space)
+// N-Player legal action generation (620-action space)
 // ===========================================================================
 
-// nplayerSetBit sets bit idx in an [8]uint64 bitmask (512 bits, covers 452).
-func nplayerSetBit(mask *[8]uint64, idx uint16) {
+// nplayerSetBit sets bit idx in an [10]uint64 bitmask (640 bits, covers 620).
+func nplayerSetBit(mask *[10]uint64, idx uint16) {
 	mask[idx/64] |= 1 << (idx % 64)
 }
 
-// NPlayerLegalActions returns a bitmask of legal N-player action indices (452 actions).
-// Uses [8]uint64 (512 bits). Zero heap allocation.
-func (g *GameState) NPlayerLegalActions() [8]uint64 {
-	var mask [8]uint64
+// NPlayerLegalActions returns a bitmask of legal N-player action indices (620 actions).
+// Uses [10]uint64 (640 bits). Zero heap allocation.
+func (g *GameState) NPlayerLegalActions() [10]uint64 {
+	var mask [10]uint64
 
 	switch g.DecisionCtx() {
 	case CtxTerminal:
@@ -275,7 +275,7 @@ func (g *GameState) NPlayerLegalActionsList() []uint16 {
 	return actions
 }
 
-func (g *GameState) nplayerLegalStartTurn(mask *[8]uint64) {
+func (g *GameState) nplayerLegalStartTurn(mask *[10]uint64) {
 	if g.StockLen > 0 || g.DiscardLen > 1 {
 		nplayerSetBit(mask, NPlayerActionDrawStockpile)
 	}
@@ -288,7 +288,7 @@ func (g *GameState) nplayerLegalStartTurn(mask *[8]uint64) {
 	}
 }
 
-func (g *GameState) nplayerLegalPostDraw(mask *[8]uint64) {
+func (g *GameState) nplayerLegalPostDraw(mask *[10]uint64) {
 	acting := g.Pending.PlayerID
 	drawnCard := Card(g.Pending.Data[0])
 	drawnFrom := g.Pending.Data[1]
@@ -343,7 +343,7 @@ func (g *GameState) nplayerCanUseAbility(acting uint8, card Card) bool {
 	}
 }
 
-func (g *GameState) nplayerLegalAbilitySelect(mask *[8]uint64) {
+func (g *GameState) nplayerLegalAbilitySelect(mask *[10]uint64) {
 	acting := g.Pending.PlayerID
 	opps := g.Opponents(acting)
 	ownHandLen := g.Players[acting].HandLen
@@ -394,7 +394,7 @@ func (g *GameState) nplayerLegalAbilitySelect(mask *[8]uint64) {
 	}
 }
 
-func (g *GameState) nplayerLegalSnapDecision(mask *[8]uint64) {
+func (g *GameState) nplayerLegalSnapDecision(mask *[10]uint64) {
 	acting := g.Snap.Snappers[g.Snap.CurrentSnapperIdx]
 	opps := g.Opponents(acting)
 	ownHandLen := g.Players[acting].HandLen
@@ -415,7 +415,7 @@ func (g *GameState) nplayerLegalSnapDecision(mask *[8]uint64) {
 	}
 }
 
-func (g *GameState) nplayerLegalSnapMove(mask *[8]uint64) {
+func (g *GameState) nplayerLegalSnapMove(mask *[10]uint64) {
 	snapperIdx := g.Pending.PlayerID
 	ownHandLen := g.Players[snapperIdx].HandLen
 	for i := uint8(0); i < ownHandLen; i++ {

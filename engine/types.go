@@ -322,9 +322,12 @@ const (
 )
 
 // ---------------------------------------------------------------------------
-// N-Player action index constants (452 actions for up to 6 players)
+// N-Player action index constants (620 actions for up to 8 players)
 // ---------------------------------------------------------------------------
 // Used when NumPlayers > 2. The legacy 146-action encoding above is unchanged.
+//
+// MaxOpponents = MaxPlayers - 1 = 7.
+// MaxHandSize = 6 (cards per player, unchanged).
 //
 // Layout:
 //   0   DrawStockpile
@@ -334,16 +337,16 @@ const (
 //   4   DiscardWithAbility
 //   5–10    Replace(slot), 6 entries
 //   11–16   PeekOwn(slot), 6 entries
-//   17–46   PeekOther(slot*5 + oppIdx), 6 slots × 5 opponents = 30 entries
-//   47–226  BlindSwap(own*30 + oppSlot*5 + oppIdx), 6 own × 6 opp-slots × 5 opp-idx = 180 entries
-//   227–406 KingLook(own*30 + oppSlot*5 + oppIdx), 180 entries
-//   407     KingSwapNo
-//   408     KingSwapYes
-//   409     PassSnap
-//   410–415 SnapOwn(slot), 6 entries
-//   416–445 SnapOpponent(slot*5 + oppIdx), 6 slots × 5 opp-idx = 30 entries
-//   446–451 SnapOpponentMove(ownCardIdx), 6 entries
-//   Total: 452
+//   17–58   PeekOther(slot*7 + oppIdx), 6 slots × 7 opponents = 42 entries
+//   59–310  BlindSwap(own*42 + oppSlot*7 + oppIdx), 6 own × 6 opp-slots × 7 opp-idx = 252 entries
+//   311–562 KingLook(own*42 + oppSlot*7 + oppIdx), 252 entries
+//   563     KingSwapNo
+//   564     KingSwapYes
+//   565     PassSnap
+//   566–571 SnapOwn(slot), 6 entries
+//   572–613 SnapOpponent(slot*7 + oppIdx), 6 slots × 7 opp-idx = 42 entries
+//   614–619 SnapOpponentMove(ownCardIdx), 6 entries
+//   Total: 620
 
 const (
 	NPlayerActionDrawStockpile      uint16 = 0
@@ -354,18 +357,18 @@ const (
 
 	NPlayerActionBaseReplace          uint16 = 5   // Replace(slot), 6 entries
 	NPlayerActionBasePeekOwn          uint16 = 11  // PeekOwn(slot), 6 entries
-	NPlayerActionBasePeekOther        uint16 = 17  // PeekOther(slot, oppIdx), 30 entries
-	NPlayerActionBaseBlindSwap        uint16 = 47  // BlindSwap(own, oppSlot, oppIdx), 180 entries
-	NPlayerActionBaseKingLook         uint16 = 227 // KingLook(own, oppSlot, oppIdx), 180 entries
-	NPlayerActionKingSwapNo           uint16 = 407
-	NPlayerActionKingSwapYes          uint16 = 408
-	NPlayerActionPassSnap             uint16 = 409
-	NPlayerActionBaseSnapOwn          uint16 = 410 // SnapOwn(slot), 6 entries
-	NPlayerActionBaseSnapOpponent     uint16 = 416 // SnapOpponent(slot, oppIdx), 30 entries
-	NPlayerActionBaseSnapOpponentMove uint16 = 446 // SnapOpponentMove(ownCardIdx), 6 entries
+	NPlayerActionBasePeekOther        uint16 = 17  // PeekOther(slot, oppIdx), 42 entries
+	NPlayerActionBaseBlindSwap        uint16 = 59  // BlindSwap(own, oppSlot, oppIdx), 252 entries
+	NPlayerActionBaseKingLook         uint16 = 311 // KingLook(own, oppSlot, oppIdx), 252 entries
+	NPlayerActionKingSwapNo           uint16 = 563
+	NPlayerActionKingSwapYes          uint16 = 564
+	NPlayerActionPassSnap             uint16 = 565
+	NPlayerActionBaseSnapOwn          uint16 = 566 // SnapOwn(slot), 6 entries
+	NPlayerActionBaseSnapOpponent     uint16 = 572 // SnapOpponent(slot, oppIdx), 42 entries
+	NPlayerActionBaseSnapOpponentMove uint16 = 614 // SnapOpponentMove(ownCardIdx), 6 entries
 
-	NPlayerNumActions uint16 = 452
-	MaxOpponents      uint8  = 5 // MaxPlayers - 1
+	NPlayerNumActions uint16 = 620
+	MaxOpponents      uint8  = 7 // MaxPlayers - 1
 )
 
 // ---------------------------------------------------------------------------
@@ -378,24 +381,30 @@ func NPlayerEncodePeekOwn(slot uint8) uint16 { return NPlayerActionBasePeekOwn +
 // NPlayerEncodePeekOther encodes PeekOther(slot, oppIdx) where oppIdx is 0-based
 // index into Opponents(acting).
 func NPlayerEncodePeekOther(slot, oppIdx uint8) uint16 {
-	return NPlayerActionBasePeekOther + uint16(slot)*5 + uint16(oppIdx)
+	return NPlayerActionBasePeekOther + uint16(slot)*uint16(MaxOpponents) + uint16(oppIdx)
 }
 
 // NPlayerEncodeBlindSwap encodes BlindSwap(ownSlot, oppSlot, oppIdx).
 func NPlayerEncodeBlindSwap(ownSlot, oppSlot, oppIdx uint8) uint16 {
-	return NPlayerActionBaseBlindSwap + uint16(ownSlot)*30 + uint16(oppSlot)*5 + uint16(oppIdx)
+	return NPlayerActionBaseBlindSwap +
+		uint16(ownSlot)*uint16(MaxHandSize)*uint16(MaxOpponents) +
+		uint16(oppSlot)*uint16(MaxOpponents) +
+		uint16(oppIdx)
 }
 
 // NPlayerEncodeKingLook encodes KingLook(ownSlot, oppSlot, oppIdx).
 func NPlayerEncodeKingLook(ownSlot, oppSlot, oppIdx uint8) uint16 {
-	return NPlayerActionBaseKingLook + uint16(ownSlot)*30 + uint16(oppSlot)*5 + uint16(oppIdx)
+	return NPlayerActionBaseKingLook +
+		uint16(ownSlot)*uint16(MaxHandSize)*uint16(MaxOpponents) +
+		uint16(oppSlot)*uint16(MaxOpponents) +
+		uint16(oppIdx)
 }
 
 func NPlayerEncodeSnapOwn(slot uint8) uint16 { return NPlayerActionBaseSnapOwn + uint16(slot) }
 
 // NPlayerEncodeSnapOpponent encodes SnapOpponent(slot, oppIdx).
 func NPlayerEncodeSnapOpponent(slot, oppIdx uint8) uint16 {
-	return NPlayerActionBaseSnapOpponent + uint16(slot)*5 + uint16(oppIdx)
+	return NPlayerActionBaseSnapOpponent + uint16(slot)*uint16(MaxOpponents) + uint16(oppIdx)
 }
 
 // NPlayerEncodeSnapOpponentMove encodes SnapOpponentMove(ownCardIdx).
@@ -424,23 +433,30 @@ func NPlayerDecodePeekOwn(idx uint16) (slot uint8, ok bool) {
 func NPlayerDecodePeekOther(idx uint16) (slot, oppIdx uint8, ok bool) {
 	if idx >= NPlayerActionBasePeekOther && idx < NPlayerActionBaseBlindSwap {
 		offset := idx - NPlayerActionBasePeekOther
-		return uint8(offset / 5), uint8(offset % 5), true
+		nOpp := uint16(MaxOpponents)
+		return uint8(offset / nOpp), uint8(offset % nOpp), true
 	}
 	return 0, 0, false
 }
 
 func NPlayerDecodeBlindSwap(idx uint16) (ownSlot, oppSlot, oppIdx uint8, ok bool) {
 	if idx >= NPlayerActionBaseBlindSwap && idx < NPlayerActionBaseKingLook {
+		nOpp := uint16(MaxOpponents)
+		oppSlotFactor := nOpp
+		ownSlotFactor := uint16(MaxHandSize) * nOpp
 		offset := idx - NPlayerActionBaseBlindSwap
-		return uint8(offset / 30), uint8((offset % 30) / 5), uint8(offset % 5), true
+		return uint8(offset / ownSlotFactor), uint8((offset % ownSlotFactor) / oppSlotFactor), uint8(offset % nOpp), true
 	}
 	return 0, 0, 0, false
 }
 
 func NPlayerDecodeKingLook(idx uint16) (ownSlot, oppSlot, oppIdx uint8, ok bool) {
 	if idx >= NPlayerActionBaseKingLook && idx < NPlayerActionKingSwapNo {
+		nOpp := uint16(MaxOpponents)
+		oppSlotFactor := nOpp
+		ownSlotFactor := uint16(MaxHandSize) * nOpp
 		offset := idx - NPlayerActionBaseKingLook
-		return uint8(offset / 30), uint8((offset % 30) / 5), uint8(offset % 5), true
+		return uint8(offset / ownSlotFactor), uint8((offset % ownSlotFactor) / oppSlotFactor), uint8(offset % nOpp), true
 	}
 	return 0, 0, 0, false
 }
@@ -454,8 +470,9 @@ func NPlayerDecodeSnapOwn(idx uint16) (slot uint8, ok bool) {
 
 func NPlayerDecodeSnapOpponent(idx uint16) (slot, oppIdx uint8, ok bool) {
 	if idx >= NPlayerActionBaseSnapOpponent && idx < NPlayerActionBaseSnapOpponentMove {
+		nOpp := uint16(MaxOpponents)
 		offset := idx - NPlayerActionBaseSnapOpponent
-		return uint8(offset / 5), uint8(offset % 5), true
+		return uint8(offset / nOpp), uint8(offset % nOpp), true
 	}
 	return 0, 0, false
 }

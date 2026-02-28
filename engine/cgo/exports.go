@@ -637,8 +637,8 @@ func cambia_game_nplayer_legal_actions(h C.int32_t, out *C.uint64_t) C.int32_t {
 		return -1
 	}
 	mask := gamePool[h].NPlayerLegalActions()
-	outSlice := (*[8]C.uint64_t)(unsafe.Pointer(out))
-	for i := 0; i < 8; i++ {
+	outSlice := (*[10]C.uint64_t)(unsafe.Pointer(out))
+	for i := 0; i < 10; i++ {
 		outSlice[i] = C.uint64_t(mask[i])
 	}
 	return 0

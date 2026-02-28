@@ -6,7 +6,7 @@
 package engine
 
 const (
-	MaxPlayers      = 6
+	MaxPlayers      = 8
 	MaxHandSize     = 6
 	StandardDeckSize = 54
 	MaxDeckSize     = 216 // 4 × 54 — supports up to 4 decks shuffled together

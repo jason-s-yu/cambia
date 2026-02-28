@@ -451,17 +451,17 @@ func ActionMask(legalActions [3]uint64, out *[NumActions]bool) {
 	}
 }
 
-// EncodeNPlayer writes the 580-dim N-player feature vector into out.
+// EncodeNPlayer writes the 856-dim N-player feature vector into out.
 // Layout:
 //
-//	[0-215]   Powerset masks: 36 slots × 6 bits (which players know each card)
-//	[216-539] Slot identities: 36 slots × 9 buckets (one-hot, zeroed if agent doesn't know)
-//	[540-579] Public features: discard(10) + stock(4) + phase(6) + ctx(6) + cambia(3) + drawn(11) = 40
+//	[0-383]   Powerset masks: 48 slots × 8 bits (which players know each card)
+//	[384-815] Slot identities: 48 slots × 9 buckets (one-hot, zeroed if agent doesn't know)
+//	[816-855] Public features: discard(10) + stock(4) + phase(6) + ctx(6) + cambia(3) + drawn(11) = 40
 func (a *AgentState) EncodeNPlayer(ctx engine.DecisionContext, drawnCardBucket int8, out *[NPlayerInputDim]float32) {
 	*out = [NPlayerInputDim]float32{}
 	offset := 0
 
-	// Powerset masks: 36 slots × 6 bits = 216
+	// Powerset masks: 48 slots × 8 bits = 384
 	for slot := 0; slot < MaxTotalSlots; slot++ {
 		for p := 0; p < MaxKnowledgePlayers; p++ {
 			if a.KnowledgeMask[slot][p] {
@@ -470,9 +470,9 @@ func (a *AgentState) EncodeNPlayer(ctx engine.DecisionContext, drawnCardBucket i
 			offset++
 		}
 	}
-	// offset = 216
+	// offset = 384
 
-	// Slot identities: 36 slots × 9 buckets = 324
+	// Slot identities: 48 slots × 9 buckets = 432
 	for slot := 0; slot < MaxTotalSlots; slot++ {
 		if a.NPlayerSlotKnown[slot] {
 			b := a.NPlayerSlotBuckets[slot]
@@ -482,7 +482,7 @@ func (a *AgentState) EncodeNPlayer(ctx engine.DecisionContext, drawnCardBucket i
 		}
 		offset += 9
 	}
-	// offset = 540
+	// offset = 816
 
 	// Public features: 40 dims total
 	// Discard top bucket (10)
@@ -502,12 +502,12 @@ func (a *AgentState) EncodeNPlayer(ctx engine.DecisionContext, drawnCardBucket i
 	offset += 3
 	// Drawn card (11)
 	out[offset+int(drawnCardOneHotIndex(drawnCardBucket))] = 1.0
-	// offset = 580
+	// offset = 856
 }
 
 // NPlayerActionMask writes the N-player legal action mask into out.
-// legalActions is the 8×uint64 bitmask from GameState.NPlayerLegalActions().
-func NPlayerActionMask(legalActions [8]uint64, out *[NPlayerNumActions]bool) {
+// legalActions is the 10×uint64 bitmask from GameState.NPlayerLegalActions().
+func NPlayerActionMask(legalActions [10]uint64, out *[NPlayerNumActions]bool) {
 	*out = [NPlayerNumActions]bool{}
 	for i := uint16(0); i < engine.NPlayerNumActions; i++ {
 		word := i / 64

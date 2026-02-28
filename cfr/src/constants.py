@@ -154,14 +154,14 @@ EP_PBS_PAD_DIM = 2  # padding dims (was 4 before hand-size features)
 EP_PBS_POS_EMBED_DIM = 8  # position embedding dim per slot
 EP_PBS_SLOT_REPR_DIM = 64  # slot encoder output dim
 
-# N-Player constants
-N_PLAYER_INPUT_DIM = 580
-N_PLAYER_NUM_ACTIONS = 452
-N_PLAYER_MAX_PLAYERS = 6
-N_PLAYER_MAX_SLOTS = 36  # 6 players × 6 cards
-N_PLAYER_POWERSET_DIM = 216  # 36 slots × 6 bits
-N_PLAYER_IDENTITY_DIM = 324  # 36 slots × 9 buckets
+# N-Player constants (MaxPlayers=8, MaxHandSize=6, MaxOpponents=7)
+N_PLAYER_MAX_PLAYERS = 8
+N_PLAYER_MAX_SLOTS = 48        # 8 players × 6 cards
+N_PLAYER_POWERSET_DIM = 384    # 48 slots × 8 bits (MaxKnowledgePlayers)
+N_PLAYER_IDENTITY_DIM = 432    # 48 slots × 9 buckets
 N_PLAYER_PUBLIC_DIM = 40
+N_PLAYER_INPUT_DIM = N_PLAYER_POWERSET_DIM + N_PLAYER_IDENTITY_DIM + N_PLAYER_PUBLIC_DIM  # 856
+N_PLAYER_NUM_ACTIONS = 620     # scales with MaxOpponents=7; see engine.NPlayerNumActions
 
 # Bucket midpoints for saliency eviction
 _BUCKET_MIDPOINTS = {

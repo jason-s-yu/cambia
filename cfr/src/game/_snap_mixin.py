@@ -520,6 +520,34 @@ class SnapLogicMixin:
                                     delta_snap_active
                                 )  # Log snap phase change separately
 
+                                # SnapRace: explicitly clear remaining snap state so
+                                # other snappers forfeit. snap_phase_active already False.
+                                if self.house_rules.snapRace:
+                                    orig_sr_potentials = list(self.snap_potential_snappers)
+                                    orig_sr_card = self.snap_discarded_card
+                                    orig_sr_idx = self.snap_current_snapper_idx
+
+                                    def change_snap_race_opp_clear():
+                                        self.snap_potential_snappers = []
+                                        self.snap_discarded_card = None
+                                        self.snap_current_snapper_idx = 0
+
+                                    def undo_snap_race_opp_clear():
+                                        self.snap_potential_snappers = orig_sr_potentials
+                                        self.snap_discarded_card = orig_sr_card
+                                        self.snap_current_snapper_idx = orig_sr_idx
+
+                                    self._add_change(
+                                        change_snap_race_opp_clear,
+                                        undo_snap_race_opp_clear,
+                                        (
+                                            "snap_race_opp_clear",
+                                            acting_player,
+                                        ),
+                                        undo_stack,
+                                        delta_list,
+                                    )
+
                             else:  # Card rank doesn't match
                                 logger.warning(
                                     "P%d invalid Snap Opponent: %s (Target: %s, Attempted: %s). Penalty.",

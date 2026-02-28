@@ -48,7 +48,7 @@ func playNPlayerRandom(t *testing.T, seed uint64, n uint8) *GameState {
 // ---------------------------------------------------------------------------
 
 func TestNPlayerDeal(t *testing.T) {
-	for _, n := range []uint8{3, 4, 6} {
+	for _, n := range []uint8{3, 4, 6, 7, 8} {
 		t.Run("N="+string(rune('0'+n)), func(t *testing.T) {
 			rules := nplayerRules(n)
 			g := NewGame(42, rules)
@@ -89,7 +89,7 @@ func TestNPlayerDeal(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestNPlayerUtilityZeroSum(t *testing.T) {
-	for _, n := range []uint8{3, 4, 6} {
+	for _, n := range []uint8{3, 4, 6, 7, 8} {
 		t.Run("N="+string(rune('0'+n)), func(t *testing.T) {
 			// Run several random games to terminal; verify Σ utilities ≈ 0.
 			for seed := uint64(1); seed <= 20; seed++ {
@@ -322,7 +322,7 @@ func TestNPlayerCambiaFinalRound(t *testing.T) {
 func TestNPlayerEncodeDecodeRoundTrip(t *testing.T) {
 	// PeekOther
 	for slot := uint8(0); slot < 6; slot++ {
-		for opp := uint8(0); opp < 5; opp++ {
+		for opp := uint8(0); opp < MaxOpponents; opp++ {
 			idx := NPlayerEncodePeekOther(slot, opp)
 			gotSlot, gotOpp, ok := NPlayerDecodePeekOther(idx)
 			if !ok || gotSlot != slot || gotOpp != opp {
@@ -334,7 +334,7 @@ func TestNPlayerEncodeDecodeRoundTrip(t *testing.T) {
 	// BlindSwap
 	for own := uint8(0); own < 6; own++ {
 		for oppSlot := uint8(0); oppSlot < 6; oppSlot++ {
-			for oppIdx := uint8(0); oppIdx < 5; oppIdx++ {
+			for oppIdx := uint8(0); oppIdx < MaxOpponents; oppIdx++ {
 				idx := NPlayerEncodeBlindSwap(own, oppSlot, oppIdx)
 				gotOwn, gotOppSlot, gotOppIdx, ok := NPlayerDecodeBlindSwap(idx)
 				if !ok || gotOwn != own || gotOppSlot != oppSlot || gotOppIdx != oppIdx {
@@ -348,7 +348,7 @@ func TestNPlayerEncodeDecodeRoundTrip(t *testing.T) {
 	// KingLook
 	for own := uint8(0); own < 6; own++ {
 		for oppSlot := uint8(0); oppSlot < 6; oppSlot++ {
-			for oppIdx := uint8(0); oppIdx < 5; oppIdx++ {
+			for oppIdx := uint8(0); oppIdx < MaxOpponents; oppIdx++ {
 				idx := NPlayerEncodeKingLook(own, oppSlot, oppIdx)
 				gotOwn, gotOppSlot, gotOppIdx, ok := NPlayerDecodeKingLook(idx)
 				if !ok || gotOwn != own || gotOppSlot != oppSlot || gotOppIdx != oppIdx {
@@ -361,7 +361,7 @@ func TestNPlayerEncodeDecodeRoundTrip(t *testing.T) {
 
 	// SnapOpponent
 	for slot := uint8(0); slot < 6; slot++ {
-		for opp := uint8(0); opp < 5; opp++ {
+		for opp := uint8(0); opp < MaxOpponents; opp++ {
 			idx := NPlayerEncodeSnapOpponent(slot, opp)
 			gotSlot, gotOpp, ok := NPlayerDecodeSnapOpponent(idx)
 			if !ok || gotSlot != slot || gotOpp != opp {
@@ -380,8 +380,8 @@ func TestNPlayerEncodeDecodeRoundTrip(t *testing.T) {
 	}
 
 	// Verify NPlayerNumActions boundary
-	if NPlayerNumActions != 452 {
-		t.Errorf("NPlayerNumActions=%d, want 452", NPlayerNumActions)
+	if NPlayerNumActions != 620 {
+		t.Errorf("NPlayerNumActions=%d, want 620", NPlayerNumActions)
 	}
 }
 

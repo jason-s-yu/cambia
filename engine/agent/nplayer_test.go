@@ -70,7 +70,7 @@ func TestNPlayerAgentInit(t *testing.T) {
 	}
 }
 
-// TestNPlayerEncoding verifies EncodeNPlayer produces exactly 580 floats
+// TestNPlayerEncoding verifies EncodeNPlayer produces exactly NPlayerInputDim floats
 // with correct structural properties.
 func TestNPlayerEncoding(t *testing.T) {
 	g := makeNPlayerGame(t, 4, 99)
@@ -80,10 +80,10 @@ func TestNPlayerEncoding(t *testing.T) {
 	var out [NPlayerInputDim]float32
 	a.EncodeNPlayer(engine.CtxStartTurn, -1, &out)
 
-	// Verify exactly NPlayerInputDim = 580 elements (array size already enforces this).
-	// Check powerset section [0-215]: should have exactly 2 bits set (player 0 knows 2 slots).
+	// NPlayerPowersetDim = 48*8 = 384; NPlayerIdentityDim = 48*9 = 432.
+	// Check powerset section [0-383]: should have exactly 2 bits set (player 0 knows 2 slots).
 	powBitsSet := 0
-	for i := 0; i < 216; i++ {
+	for i := 0; i < NPlayerPowersetDim; i++ {
 		if out[i] != 0.0 {
 			powBitsSet++
 		}
@@ -92,9 +92,9 @@ func TestNPlayerEncoding(t *testing.T) {
 		t.Errorf("powerset section: %d bits set, want 2 (initial peeks for player 0)", powBitsSet)
 	}
 
-	// Slot identity section [216-539]: should have exactly 2 one-hot entries.
+	// Slot identity section [384-815]: should have exactly 2 one-hot entries.
 	idBitsSet := 0
-	for i := 216; i < 540; i++ {
+	for i := NPlayerPowersetDim; i < NPlayerPowersetDim+NPlayerIdentityDim; i++ {
 		if out[i] != 0.0 {
 			idBitsSet++
 		}
@@ -103,15 +103,15 @@ func TestNPlayerEncoding(t *testing.T) {
 		t.Errorf("identity section: %d bits set, want 2", idBitsSet)
 	}
 
-	// Public section [540-579]: should have exactly 5 one-hot bits
-	// (discard, stock, phase, ctx, cambia) plus drawn card = 6 total.
+	// Public section [816-855]: should have exactly 6 one-hot bits.
+	// (discard(1), stock(1), phase(1), ctx(1), cambia(1), drawn(1) = 6)
 	pubBitsSet := 0
-	for i := 540; i < 580; i++ {
+	pubStart := NPlayerPowersetDim + NPlayerIdentityDim
+	for i := pubStart; i < NPlayerInputDim; i++ {
 		if out[i] != 0.0 {
 			pubBitsSet++
 		}
 	}
-	// 6 one-hot groups: discard(1), stock(1), phase(1), ctx(1), cambia(1), drawn(1) = 6
 	if pubBitsSet != 6 {
 		t.Errorf("public section: %d bits set, want 6", pubBitsSet)
 	}
@@ -119,21 +119,21 @@ func TestNPlayerEncoding(t *testing.T) {
 
 // TestNPlayerEncodingDimConstant verifies the NPlayerInputDim constant matches the spec.
 func TestNPlayerEncodingDimConstant(t *testing.T) {
-	// 36 slots × 6 bits = 216
-	// 36 slots × 9 buckets = 324
+	// 48 slots × 8 bits = 384
+	// 48 slots × 9 buckets = 432
 	// public: 10+4+6+6+3+11 = 40
-	// total = 580
-	if NPlayerInputDim != 580 {
-		t.Errorf("NPlayerInputDim = %d, want 580", NPlayerInputDim)
+	// total = 856
+	if NPlayerInputDim != 856 {
+		t.Errorf("NPlayerInputDim = %d, want 856", NPlayerInputDim)
 	}
-	if NPlayerNumActions != 452 {
-		t.Errorf("NPlayerNumActions = %d, want 452", NPlayerNumActions)
+	if NPlayerNumActions != 620 {
+		t.Errorf("NPlayerNumActions = %d, want 620", NPlayerNumActions)
 	}
-	if MaxTotalSlots != 36 {
-		t.Errorf("MaxTotalSlots = %d, want 36", MaxTotalSlots)
+	if MaxTotalSlots != 48 {
+		t.Errorf("MaxTotalSlots = %d, want 48", MaxTotalSlots)
 	}
-	if MaxKnowledgePlayers != 6 {
-		t.Errorf("MaxKnowledgePlayers = %d, want 6", MaxKnowledgePlayers)
+	if MaxKnowledgePlayers != 8 {
+		t.Errorf("MaxKnowledgePlayers = %d, want 8", MaxKnowledgePlayers)
 	}
 }
 
@@ -147,7 +147,7 @@ func TestNPlayerActionMask(t *testing.T) {
 
 	// Count set bits in the raw bitmask.
 	rawCount := 0
-	for w := 0; w < 8; w++ {
+	for w := 0; w < 10; w++ {
 		v := mask[w]
 		for v != 0 {
 			rawCount++
