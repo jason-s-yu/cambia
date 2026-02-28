@@ -11,7 +11,7 @@ src.* imports so that modules like agent_state and encoding can be loaded.
 import sys
 import types
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 # Ensure project root is on sys.path
 _project_root = str(Path(__file__).resolve().parent.parent)
@@ -45,6 +45,7 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         allowOpponentSnapping: bool = False
         max_game_turns: int = 300
         lockCallerHand: bool = True
+        num_decks: int = 1
 
     @_dataclass
     class _DeepCfrConfig:
@@ -97,11 +98,14 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         sd_cfr_snapshot_weighting: str = "linear"
         num_hidden_layers: int = 3
         use_residual: bool = True
+        network_type: str = "residual"
+        use_pos_embed: bool = True
         use_ema: bool = True  # EMA serving weights for O(1) SD-CFR inference
         enable_traversal_profiling: bool = False
         profiling_jsonl_path: str = ""
-        profile_step: Optional[int] = None
+        profile_step: Optional[List[int]] = None
         encoding_mode: str = "legacy"  # "legacy" (222-dim) or "ep_pbs" (200-dim)
+        encoding_layout: str = "auto"  # "auto" or "interleaved"
         # Memory archetype fields
         memory_archetype: str = "perfect"
         memory_decay_lambda: float = 0.1
@@ -119,6 +123,8 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         psro_eval_games: int = 200
         psro_checkpoint_interval: int = 50
         psro_heuristic_types: str = "random,greedy,memory_heuristic"
+        target_buffer_passes: float = 0.0
+        value_target_buffer_passes: float = 2.0
 
     def _load_config(path: str):
         """Stub load_config: delegate to the real load_config implementation."""

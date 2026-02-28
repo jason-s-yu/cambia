@@ -164,6 +164,7 @@ class CambiaRulesConfig:
     allowOpponentSnapping: bool = False  # Default to False
     max_game_turns: int = 300  # Limit game length in simulation
     lockCallerHand: bool = True  # Cambia caller's hand is locked
+    num_decks: int = 1  # number of standard decks shuffled together (1-4)
 
 
 @dataclass

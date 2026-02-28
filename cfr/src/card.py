@@ -90,16 +90,20 @@ class Card:
 
 
 # --- Standard Deck Creation ---
-def create_standard_deck(include_jokers: int = 2) -> list["Card"]:
-    """Creates a standard 52-card deck plus optional jokers."""
-    # Use ALL_RANKS_STR from constants
-    deck = [
+def create_standard_deck(include_jokers: int = 2, num_decks: int = 1) -> list["Card"]:
+    """Creates one or more standard 52-card decks plus optional jokers.
+
+    Args:
+        include_jokers: Number of jokers per deck (0, 1, or 2).
+        num_decks: Number of standard decks to include (1-4).
+    """
+    single_deck = [
         Card(rank, suit)
         for rank in ALL_RANKS_STR
         if rank != JOKER_RANK_STR
         for suit in ALL_SUITS
-    ]  # Use JOKER_RANK_STR
-    deck.extend(
-        [Card(rank=JOKER_RANK_STR) for _ in range(include_jokers)]
-    )  # Use JOKER_RANK_STR
-    return deck
+    ]
+    single_deck.extend([Card(rank=JOKER_RANK_STR) for _ in range(include_jokers)])
+    if num_decks <= 1:
+        return single_deck
+    return single_deck * num_decks

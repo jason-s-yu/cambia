@@ -38,7 +38,9 @@ _ffi.cdef("""
         uint8_t  snapRace,
         uint8_t  numJokers,
         uint8_t  lockCallerHand,
-        uint8_t  numPlayers
+        uint8_t  numPlayers,
+        uint8_t  initialViewCount,
+        uint8_t  numDecks
     );
     void    cambia_game_free(int32_t h);
     int32_t cambia_game_apply_action(int32_t h, uint16_t action);
@@ -216,6 +218,8 @@ class GoEngine:
                 house_rules.use_jokers,
                 1 if getattr(house_rules, "lockCallerHand", True) else 0,
                 int(np_val),
+                getattr(house_rules, "initial_view_count", 2),
+                getattr(house_rules, "num_decks", 1),
             )
         else:
             warnings.warn(

@@ -234,10 +234,12 @@ func TestOpponentOf(t *testing.T) {
 	}
 }
 
-// TestGameStateSize verifies sizeof(GameState) ≤ 300 bytes.
+// TestGameStateSize verifies sizeof(GameState) ≤ 650 bytes.
+// The struct holds two [MaxDeckSize]Card arrays (216 bytes each) plus metadata,
+// so the bound is higher than the legacy single-deck limit.
 func TestGameStateSize(t *testing.T) {
 	size := unsafe.Sizeof(GameState{})
-	const maxSize = 300
+	const maxSize = 650
 	if size > maxSize {
 		t.Errorf("sizeof(GameState) = %d, want ≤ %d", size, maxSize)
 	}

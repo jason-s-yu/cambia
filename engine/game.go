@@ -6,9 +6,10 @@
 package engine
 
 const (
-	MaxPlayers  = 6
-	MaxHandSize = 6
-	DeckSize    = 54
+	MaxPlayers      = 6
+	MaxHandSize     = 6
+	StandardDeckSize = 54
+	MaxDeckSize     = 216 // 4 × 54 — supports up to 4 decks shuffled together
 )
 
 // PlayerState holds one player's hand and initial peek information.
@@ -27,9 +28,9 @@ type PlayerState struct {
 // use in CFR traversal. sizeof(GameState) ≤ 300 bytes.
 type GameState struct {
 	Players       [MaxPlayers]PlayerState // 2 * 16 = 32 bytes
-	Stockpile     [DeckSize]Card          // 54 bytes
+	Stockpile     [MaxDeckSize]Card        // up to 216 bytes (4 decks)
 	StockLen      uint8                   // 1 byte
-	DiscardPile   [DeckSize]Card          // 54 bytes
+	DiscardPile   [MaxDeckSize]Card       // up to 216 bytes (4 decks)
 	DiscardLen    uint8                   // 1 byte
 	CurrentPlayer uint8                   // 1 byte
 	TurnNumber    uint16                  // 2 bytes
@@ -89,19 +90,26 @@ func NewGame(seed uint64, rules HouseRules) GameState {
 	g.Rules = rules
 	g.CambiaCaller = -1
 
-	// Initialize deck: 4 suits × 13 ranks = 52 + NumJokers jokers.
+	// Build NumDecks copies of the standard deck.
+	numDecks := rules.NumDecks
+	if numDecks == 0 {
+		numDecks = 1
+	}
+	jokerSuits := [2]uint8{SuitRedJoker, SuitBlackJoker}
 	idx := 0
-	for suit := uint8(0); suit < 4; suit++ {
-		for rank := uint8(0); rank <= RankKing; rank++ {
-			g.Stockpile[idx] = NewCard(suit, rank)
+	for d := uint8(0); d < numDecks; d++ {
+		for suit := uint8(0); suit < 4; suit++ {
+			for rank := uint8(0); rank <= RankKing; rank++ {
+				g.Stockpile[idx] = NewCard(suit, rank)
+				idx++
+			}
+		}
+		for j := uint8(0); j < rules.NumJokers && j < 2; j++ {
+			g.Stockpile[idx] = NewCard(jokerSuits[j], RankJoker)
 			idx++
 		}
 	}
-	jokerSuits := [2]uint8{SuitRedJoker, SuitBlackJoker}
-	for j := uint8(0); j < rules.NumJokers && j < 2; j++ {
-		g.Stockpile[52+int(j)] = NewCard(jokerSuits[j], RankJoker)
-	}
-	g.StockLen = uint8(52 + rules.NumJokers)
+	g.StockLen = uint8(int(numDecks) * (52 + int(rules.NumJokers)))
 
 	return g
 }
