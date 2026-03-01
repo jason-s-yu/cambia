@@ -155,11 +155,11 @@ Defines the specific rules of the Cambia game variant to be used for training an
   * Default: `false`
   * Example: `true`
 * **`allowReplaceAbilities`**:
-  * Description: If `true`, special card abilities (like King's peek/swap) trigger when a player replaces one of their face-down cards with the drawn card that has an ability. If `false`, abilities only trigger when the drawn card itself is discarded *after drawing*.
+  * Description: If `true`, replacing a hand card with a drawn-from-stockpile card triggers the OLD card's ability (7/8=peek own, 9/T=peek other, J/Q=blind swap, K=look & swap). If `false`, abilities only trigger on discard. Implemented in both Go and Python engines.
   * Type: `boolean`
   * Default: `false`
 * **`snapRace`**:
-  * Description: If `true` and multiple players can snap simultaneously, a "race" condition determines who acts (not fully defined/implemented in current base spec, typically implies a specific resolution order). If `false`, snaps are resolved in player turn order starting from the player after the one who caused the discard.
+  * Description: If `true`, the snap phase ends immediately after the first successful snap (race mode). If `false`, all eligible snappers get their turn in order. Implemented in both Go and Python engines.
   * Type: `boolean`
   * Default: `false`
 * **`penaltyDrawCount`**:
@@ -177,8 +177,13 @@ Defines the specific rules of the Cambia game variant to be used for training an
   * Type: `integer`
   * Default: `4`
   * Example: `3`
+* **`num_decks`**:
+  * Description: Number of 54-card decks shuffled together. Supports 1-4 (MaxDeckSize=216). Implemented in both Go and Python engines + FFI.
+  * Type: `integer`
+  * Default: `1`
+  * Example: `2` (108 cards)
 * **`initial_view_count`**:
-  * Description: The number of their own closest face-down cards a player is allowed to peek at the start of the game.
+  * Description: The number of their own closest face-down cards a player is allowed to peek at the start of the game. Implemented in both Go (via FFI) and Python engines.
   * Type: `integer`
   * Default: `2`
   * Example: `1`
@@ -435,11 +440,11 @@ Parameters for Deep CFR training. These values are loaded from the YAML config a
   * Description: Save a checkpoint every N training steps. Set to `0` to disable periodic saves (a final save still occurs).
   * Type: `integer`
   * Default: `10`
-* **`use_gpu`**:
-  * Description: If `true` and a CUDA-capable GPU is available, use it for network training. Workers always run on CPU regardless of this setting.
-  * Type: `boolean`
-  * Default: `false`
-  * CLI Override: `--gpu` / `--no-gpu`
+* **`device`**:
+  * Description: Compute device for network training. `"auto"` checks for CUDA first, then XPU, then falls back to CPU. Workers always run on CPU regardless of this setting.
+  * Type: `string` (`"auto"`, `"cuda"`, `"xpu"`, `"cpu"`)
+  * Default: `"auto"`
+  * CLI Override: `--device`
 * **`engine_backend`**:
   * Description: Controls which game engine the deep worker uses for traversal. `"python"` uses the Python `CambiaGameState` engine. `"go"` routes through the FFI bridge (`src/ffi/bridge.py`) to `libcambia.so`, which wraps the Go engine. The Go backend is significantly faster per traversal but requires building the shared library first (`make libcambia` from the repo root).
   * Type: `string` (`"python"` or `"go"`)
@@ -510,6 +515,128 @@ Parameters for Deep CFR training. These values are loaded from the YAML config a
   * Default: `0.10`
   * Examples: `0.10` (47 GB system → mtpc=4), `0.15` (47 GB → mtpc=7), `0.05` (conservative, mtpc=2)
 
+**Traversal and Algorithm:**
+
+* **`traversal_method`**:
+  * Description: MCCFR traversal variant at the config level. `"outcome"` (OS-dCFR), `"external"` (ES-dCFR), or `"escher"` (ESCHER with value network). Note: `sampling_method` controls the worker-level dispatch; `traversal_method` is the higher-level config field read by the trainer.
+  * Type: `string`
+  * Default: `"outcome"`
+
+**ESCHER / Value Network:**
+
+* **`value_hidden_dim`**:
+  * Description: Width of hidden layers in the ESCHER value network (`HistoryValueNetwork`).
+  * Type: `integer`
+  * Default: `512`
+* **`value_learning_rate`**:
+  * Description: Learning rate for the value network optimizer.
+  * Type: `float`
+  * Default: `0.001`
+* **`value_buffer_capacity`**:
+  * Description: Maximum number of samples in the value reservoir buffer.
+  * Type: `integer`
+  * Default: `2000000`
+* **`batch_counterfactuals`**:
+  * Description: If `true`, vectorize counterfactual value estimation in ESCHER traversal via BLAS matrix operations instead of looping over actions.
+  * Type: `boolean`
+  * Default: `true`
+* **`value_target_buffer_passes`**:
+  * Description: Adaptive train step scaling for the value network. Uses the same formula as `target_buffer_passes` but applied to the value buffer size. `0.0` disables adaptive steps and falls back to fixed `train_steps_per_iteration`.
+  * Type: `float`
+  * Default: `2.0`
+
+**SD-CFR:**
+
+* **`use_sd_cfr`**:
+  * Description: If `true`, use Sample-based Deep CFR: drop the strategy network, store advantage network snapshots, and use EMA weights for inference. Reduces memory footprint compared to maintaining a separate strategy network.
+  * Type: `boolean`
+  * Default: `false`
+* **`sd_cfr_max_snapshots`**:
+  * Description: Maximum number of advantage network snapshots to retain for SD-CFR averaging.
+  * Type: `integer`
+  * Default: `200`
+* **`sd_cfr_snapshot_weighting`**:
+  * Description: Weighting scheme for snapshot averaging. `"linear"` applies `(t+1)^alpha` weights to give more influence to recent snapshots. `"uniform"` weights all snapshots equally.
+  * Type: `string` (`"linear"` or `"uniform"`)
+  * Default: `"linear"`
+* **`use_ema`**:
+  * Description: If `true`, maintain an exponential moving average of advantage network weights for O(1) SD-CFR inference at eval time, instead of averaging all snapshots on every query.
+  * Type: `boolean`
+  * Default: `true`
+
+**Network Architecture:**
+
+* **`network_type`**:
+  * Description: Network architecture variant for the advantage (and strategy) network. `"mlp"` is a plain feedforward network. `"residual"` adds skip connections and LayerNorm (recommended). `"slot_film"` applies FiLM conditioning on the EP-PBS slot structure. `"slot_multiply"` uses multiplicative slot interactions.
+  * Type: `string` (`"mlp"`, `"residual"`, `"slot_film"`, `"slot_multiply"`)
+  * Default: `"residual"`
+* **`num_hidden_layers`**:
+  * Description: Number of hidden layers in the network.
+  * Type: `integer`
+  * Default: `3`
+* **`use_residual`**:
+  * Description: If `true`, add skip connections between hidden layers. Only meaningful when `network_type` is `"mlp"` (for `"residual"` the skip connections are always present).
+  * Type: `boolean`
+  * Default: `true`
+* **`use_pos_embed`**:
+  * Description: If `true`, add learned position embeddings to slot-based networks (SlotFiLM, SlotMultiply). Has no effect on `"mlp"` or `"residual"` network types.
+  * Type: `boolean`
+  * Default: `true`
+
+**Encoding:**
+
+* **`encoding_mode`**:
+  * Description: Input tensor encoding format. `"legacy"` uses the 222-dim flat encoding (original). `"ep_pbs"` uses the 224-dim EP-PBS encoding with per-card bucket slots.
+  * Type: `string` (`"legacy"` or `"ep_pbs"`)
+  * Default: `"legacy"`
+* **`encoding_layout`**:
+  * Description: Tensor layout for EP-PBS encoding. `"auto"` infers from `network_type`: slot-based networks (`slot_film`, `slot_multiply`) use interleaved layout; others use flat. `"interleaved"` forces interleaved layout regardless of network type. `"flat_dealiased"` forces the de-aliased flat layout.
+  * Type: `string` (`"auto"`, `"interleaved"`, `"flat_dealiased"`)
+  * Default: `"auto"`
+
+**Adaptive Training:**
+
+* **`target_buffer_passes`**:
+  * Description: Adaptive train step scaling for the advantage network. When greater than `0.0`, the number of SGD steps per iteration is computed as: `min(train_steps_per_iteration, max(250, int(len(buffer) * target_buffer_passes / batch_size)))`. This scales training proportionally to buffer fill level, preventing overtraining on small early buffers and undertraining once the buffer is full. `0.0` disables this and uses fixed `train_steps_per_iteration`.
+  * Type: `float`
+  * Default: `0.0`
+
+**Memory Archetype:**
+
+* **`memory_archetype`**:
+  * Description: Agent memory model used during CFR traversal. `"perfect"` gives full recall with no decay. `"decaying"` applies Bayesian diffusion controlled by `memory_decay_lambda`. `"human_like"` uses saliency-based eviction with a hard capacity cap.
+  * Type: `string` (`"perfect"`, `"decaying"`, `"human_like"`)
+  * Default: `"perfect"`
+* **`memory_decay_lambda`**:
+  * Description: Decay rate for the `"decaying"` memory archetype. Higher values mean slower decay (longer memory).
+  * Type: `float`
+  * Default: `0.1`
+* **`memory_capacity`**:
+  * Description: Maximum number of active card observations retained by the `"human_like"` memory archetype.
+  * Type: `integer`
+  * Default: `3`
+
+**Profiling:**
+
+* **`enable_traversal_profiling`**:
+  * Description: If `true`, log per-traversal timing data and Go FFI handle pool statistics. Adds measurable overhead; disable for production training runs.
+  * Type: `boolean`
+  * Default: `false`
+* **`profiling_jsonl_path`**:
+  * Description: Path for structured JSONL profiling output. An empty string auto-generates a path inside the run directory.
+  * Type: `string`
+  * Default: `""` (auto-generate)
+* **`profile_step`**:
+  * Description: List of training step numbers on which to activate `torch.profiler` and export Chrome traces to the run directory. `null` disables profiling entirely.
+  * Type: `list of integers` or `null`
+  * Default: `null`
+
+**Deprecated (ReBeL):**
+
+The following fields are retained for checkpoint backward compatibility only and must not be used in new configs. ReBeL/PBS subgame solving is deprecated: it is mathematically unsound for N-player free-for-all with continuous belief states.
+
+`rebel_subgame_depth`, `rebel_cfr_iterations`, `rebel_value_hidden_dim`, `rebel_policy_hidden_dim`, `rebel_value_learning_rate`, `rebel_policy_learning_rate`, `rebel_value_buffer_capacity`, `rebel_policy_buffer_capacity`, `rebel_games_per_epoch`, `rebel_epochs`.
+
 * Example:
 
     ```yaml
@@ -520,30 +647,33 @@ Parameters for Deep CFR training. These values are loaded from the YAML config a
       batch_size: 4096
       train_steps_per_iteration: 4000
       alpha: 1.5
-      traversals_per_step: 1000
+      traversals_per_step: 333
       advantage_buffer_capacity: 2000000
       strategy_buffer_capacity: 2000000
       save_interval: 25
-      use_gpu: true
+      device: "auto"
       sampling_method: "outcome"
+      traversal_method: "outcome"
       exploration_epsilon: 0.6
       engine_backend: "go"
-      es_validation_interval: 0
-      es_validation_depth: 10
-      es_validation_traversals: 1000
       pipeline_training: true
       use_amp: false
       use_compile: false
-      num_traversal_threads: 1
       validate_inputs: false
-      traversal_depth_limit: 0
       max_tasks_per_child: "auto"
       worker_memory_budget_pct: 0.10
+      use_sd_cfr: true
+      use_ema: true
+      network_type: "residual"
+      encoding_mode: "ep_pbs"
+      encoding_layout: "interleaved"
+      target_buffer_passes: 4.0
+      memory_archetype: "perfect"
     ```
 
 ### Runtime Notes: Worker Memory Management
 
-Deep CFR pipeline training (`pipeline_training: true`) runs game traversals in a separate subprocess via Python's `ProcessPoolExecutor`. Due to glibc malloc fragmentation, the worker process's RSS (resident set size) grows at approximately **723 MB per training step** even though the actual live data per step is only ~9 MB. This is not a Python memory leak — it's caused by glibc retaining freed heap pages internally rather than returning them to the OS.
+Deep CFR pipeline training (`pipeline_training: true`) runs game traversals in a separate subprocess via Python's `ProcessPoolExecutor`. Due to glibc malloc fragmentation, the worker process's RSS (resident set size) grows at approximately **723 MB per training step** even though the actual live data per step is only ~9 MB. This is not a Python memory leak; glibc retains freed heap pages internally rather than returning them to the OS.
 
 **`gc.collect()` and `malloc_trim(0)` do not resolve this** (tested: zero RSS reduction, 17-60% traversal overhead). The only effective mitigation is worker recycling via `max_tasks_per_child`.
 
