@@ -24,11 +24,17 @@ LEGACY_CONFIG = "runs/prod-full-333/config.yaml"
 CHECKPOINT_DIR = Path("runs/prod-full-333/checkpoints")
 GAMES_PER_BASELINE = 5000  # 2500 per seat
 
-# Only re-eval imperfect baselines (greedy/random were unaffected)
-BASELINES = ["imperfect_greedy", "memory_heuristic", "aggressive_snap"]
+# mean_imp baselines — the core metric set
+MEAN_IMP_BASELINES = [
+    "random_no_cambia",
+    "random_late_cambia",
+    "imperfect_greedy",
+    "memory_heuristic",
+    "aggressive_snap",
+]
 
-# Also include greedy and random for comparison (unaffected but useful to have)
-ALL_BASELINES = ["random", "greedy"] + BASELINES
+# Full evaluation set — includes context-only baselines not in mean_imp
+ALL_BASELINES = ["random", "greedy"] + MEAN_IMP_BASELINES
 
 # Key checkpoints: every 100 iters + final
 KEY_ITERS = list(range(100, 1100, 100)) + [1075]

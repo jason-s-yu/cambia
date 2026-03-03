@@ -2,7 +2,9 @@
 import React, { useEffect, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useCurrentLobbyStore } from '@/stores/lobbyStore';
-import { useLobbySocket } from '@/hooks/useLobbySocket';
+import { useSocket } from '@/hooks/useSocket';
+import { useGameStore, selectGameState } from '@/stores/gameStore';
+import GameBoard from '@/components/game/GameBoard';
 import PlayerList from '@/components/lobby/PlayerList';
 import ChatWindow from '@/components/lobby/ChatWindow';
 import ReadyButton from '@/components/lobby/ReadyButton';
@@ -37,47 +39,36 @@ const LobbyPage: React.FC = () => {
 		chatMessages,
 		isConnected,
 		setCurrentLobbyId,
-		leaveLobby, // Use store's leaveLobby for state cleanup
+		leaveLobby,
 		clearError: clearStoreError,
-		countdownStartTime, // Add countdown state selector
-		countdownDuration,  // Add countdown state selector
+		countdownStartTime,
+		countdownDuration,
+		phase,
 	} = useCurrentLobbyStore();
+
+	const gameState = useGameStore(selectGameState);
 
 	// --- Validate URL Lobby ID ---
 	const isValidLobbyId = useMemo(() => urlLobbyId && typeof urlLobbyId === 'string' && urlLobbyId.length > 5, [urlLobbyId]);
 
 	// --- WebSocket Hook ---
-	// Pass the valid URL ID or null to the hook.
-	// IMPORTANT: We do *not* call closeSocket when navigating to the game.
-	const { sendMessage, closeSocket: closeLobbySocket } = useLobbySocket(isValidLobbyId ? urlLobbyId : null);
+	const { sendMessage, closeSocket } = useSocket(isValidLobbyId ? urlLobbyId : null);
 
 	// --- Effect to Synchronize URL ID with Store ID & Trigger Connection ---
 	useEffect(() => {
 		if (isValidLobbyId && urlLobbyId) {
 			if (urlLobbyId !== storeLobbyId) {
 				hasAttemptedConnectionRef.current = false;
-				setCurrentLobbyId(urlLobbyId); // Hook reacts to this implicitly via prop update
+				setCurrentLobbyId(urlLobbyId);
 			} else if (!isConnected && !isStoreLoading && !hasAttemptedConnectionRef.current) {
 				hasAttemptedConnectionRef.current = true;
-				// Re-triggering connection handled by useLobbySocket hook
 			}
 		} else {
 			if (storeLobbyId !== null) {
-				setCurrentLobbyId(null); // Triggers disconnect via useLobbySocket effect
+				setCurrentLobbyId(null);
 			}
 		}
 	}, [urlLobbyId, isValidLobbyId, storeLobbyId, isConnected, isStoreLoading, setCurrentLobbyId]);
-
-	// --- Effect to Handle Game Start Navigation ---
-	useEffect(() => {
-		if (lobbyDetails?.inGame && lobbyDetails.game_id && lobbyDetails.id === urlLobbyId) {
-			console.log(`[LobbyPage] Detected game start (ID: ${lobbyDetails.game_id}). Navigating...`);
-			// IMPORTANT: Do NOT close the lobby socket here.
-			// The lobby socket hook (`useLobbySocket`) remains active based on `urlLobbyId`.
-			navigate(`/game/${lobbyDetails.game_id}`);
-		}
-	}, [lobbyDetails?.inGame, lobbyDetails?.game_id, lobbyDetails?.id, urlLobbyId, navigate]);
-
 
 	// --- Derived State ---
 	const players = useMemo(() => lobbyDetails?.lobby_status?.users ?? [], [lobbyDetails]);
@@ -86,9 +77,9 @@ const LobbyPage: React.FC = () => {
 
 	// --- Event Handlers ---
 	const handleLeaveLobbyClick = () => {
-		closeLobbySocket(); // Explicitly close the WebSocket connection *when leaving the lobby entirely*.
-		leaveLobby();       // Clear client-side store state (sets storeLobbyId to null).
-		navigate('/dashboard', { replace: true }); // Navigate away.
+		closeSocket();
+		leaveLobby();
+		navigate('/dashboard', { replace: true });
 	};
 
 	// --- Redirect Logic ---
@@ -97,11 +88,11 @@ const LobbyPage: React.FC = () => {
 	useEffect(() => {
 		if (shouldRedirectToDash) {
 			if (storeError) clearStoreError();
-			closeLobbySocket(); // Ensure socket is closed before leaving due to error/invalid ID.
-			leaveLobby();      // Clear store state.
+			closeSocket();
+			leaveLobby();
 			navigate('/dashboard', { replace: true });
 		}
-	}, [shouldRedirectToDash, isValidLobbyId, storeError, isStoreLoading, isConnected, navigate, clearStoreError, closeLobbySocket, leaveLobby]);
+	}, [shouldRedirectToDash, isValidLobbyId, storeError, isStoreLoading, isConnected, navigate, clearStoreError, closeSocket, leaveLobby]);
 
 	// --- Loading State ---
 	const isLoading = isStoreLoading || (storeLobbyId === urlLobbyId && isValidLobbyId && !isConnected && !storeError);
@@ -142,6 +133,31 @@ const LobbyPage: React.FC = () => {
 		</div>
 	);
 
+	// --- Phase: In Game ---
+	if (phase === 'in_game' && gameState) {
+		return (
+			<div className="w-full h-full flex flex-col items-center justify-center">
+				<h2 className="text-xl font-semibold mb-4 text-center text-gray-800 dark:text-gray-100">
+					Game: {lobbyShortId}
+				</h2>
+				<GameBoard gameState={gameState} sendMessage={sendMessage} />
+			</div>
+		);
+	}
+
+	// --- Phase: Post Game ---
+	if (phase === 'post_game') {
+		return (
+			<div className="flex flex-col items-center justify-center h-full pt-10">
+				<h2 className="text-2xl font-semibold mb-4 text-gray-800 dark:text-gray-100">Game Over</h2>
+				<p className="text-gray-600 dark:text-gray-400 mb-6">Returning to lobby...</p>
+				<Button onClick={() => useCurrentLobbyStore.getState().setPhase('open')} variant="secondary">
+					Back to Lobby
+				</Button>
+			</div>
+		);
+	}
+
 	// --- Main Lobby UI Render ---
 	return (
 		<div className="flex flex-col md:flex-row gap-4 h-full max-h-[calc(100vh-150px)]">
@@ -151,7 +167,6 @@ const LobbyPage: React.FC = () => {
 					<h2 className="text-xl font-semibold text-gray-800 dark:text-gray-100 truncate" title={`Lobby ID: ${lobbyDetails.id}`}>Lobby: {lobbyShortId}</h2>
 					<Button onClick={handleLeaveLobbyClick} variant='secondary' size='sm'>Leave Lobby</Button>
 				</div>
-				{/* Use countdownStartTime/Duration from store */}
 				{countdownStartTime && countdownDuration ? (
 					<MemoizedCountdownBanner />
 				) : null}

@@ -14,9 +14,9 @@ import (
 // Updated in lockstep with every engine action.
 type CardUUIDTracker struct {
 	Players    [engine.MaxPlayers]PlayerUUIDState
-	StockUUIDs [engine.DeckSize]uuid.UUID
+	StockUUIDs [engine.MaxDeckSize]uuid.UUID
 	StockLen   uint8
-	DiscardUUIDs [engine.DeckSize]uuid.UUID
+	DiscardUUIDs [engine.MaxDeckSize]uuid.UUID
 	DiscardLen  uint8
 
 	// Registry maps UUID -> full card details for event payloads.
@@ -78,6 +78,13 @@ func (g *CambiaGame) mapHouseRulesToEngine() engine.HouseRules {
 	penaltyCount := uint8(g.HouseRules.PenaltyDrawCount)
 	if penaltyCount == 0 {
 		penaltyCount = 2
+	}
+	// In circuit mode, use tournament-enforced rules.
+	if g.Circuit.Enabled {
+		hr := engine.TournamentHouseRules()
+		hr.PenaltyDrawCount = penaltyCount
+		hr.NumPlayers = uint8(len(g.Players))
+		return hr
 	}
 	return engine.HouseRules{
 		MaxGameTurns:          46,
@@ -1105,9 +1112,6 @@ func (g *CambiaGame) scheduleNextTurnTimerEngine() {
 
 	g.turnTimer = time.AfterFunc(g.TurnDuration, func() {
 		go func(expectedTurnID int) {
-			g.Mu.Lock()
-			defer g.Mu.Unlock()
-
 			isValid := !g.GameOver && g.Started && g.TurnID == expectedTurnID
 			if isValid {
 				log.Printf("Game %s, Turn %d: Timer fired for player %s.", g.ID, g.TurnID, capturedPlayerUUID)

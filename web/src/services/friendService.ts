@@ -8,15 +8,8 @@ import type { FriendRelationship } from '@/types'; // Import from central types
  */
 export const listFriends = async (): Promise<FriendRelationship[]> => {
 	try {
-		// Replace with actual API call when backend is ready
-		// const response = await api.get<FriendRelationship[]>('/friends/list');
-		// return response.data;
-		await new Promise(resolve => setTimeout(resolve, 500)); // Simulate network delay
-		// Example data:
-		return [
-			{ user1_id: 'me', user2_id: 'friend1', status: 'accepted' },
-			{ user1_id: 'friend2', user2_id: 'me', status: 'pending' },
-		];
+		const response = await api.get<FriendRelationship[]>('/friends/list');
+		return response.data;
 	} catch (error: any) {
 		console.error('List Friends API call failed:', error.response?.data || error.message);
 		throw error; // Re-throw for UI error handling
@@ -30,9 +23,7 @@ export const listFriends = async (): Promise<FriendRelationship[]> => {
  */
 export const addFriend = async (friendId: string): Promise<void> => {
 	try {
-		// TODO: Replace with actual API call when backend is ready
-		// await api.post('/friends/add', { friend_id: friendId });
-		await new Promise(resolve => setTimeout(resolve, 300)); // Simulate network delay
+		await api.post('/friends/add', { friend_id: friendId });
 	} catch (error: any) {
 		console.error('Add Friend API call failed:', error.response?.data || error.message);
 		throw error; // Re-throw for UI error handling
@@ -46,9 +37,7 @@ export const addFriend = async (friendId: string): Promise<void> => {
  */
 export const acceptFriend = async (friendId: string): Promise<void> => {
 	try {
-		// TODO: Replace with actual API call when backend is ready
-		// await api.post('/friends/accept', { friend_id: friendId });
-		await new Promise(resolve => setTimeout(resolve, 300)); // Simulate network delay
+		await api.post('/friends/accept', { friend_id: friendId });
 	} catch (error: any) {
 		console.error('Accept Friend API call failed:', error.response?.data || error.message);
 		throw error; // Re-throw for UI error handling
@@ -62,9 +51,7 @@ export const acceptFriend = async (friendId: string): Promise<void> => {
  */
 export const removeFriend = async (friendId: string): Promise<void> => {
 	try {
-		// TODO: Replace with actual API call when backend is ready
-		// await api.post('/friends/remove', { friend_id: friendId });
-		await new Promise(resolve => setTimeout(resolve, 300)); // Simulate network delay
+		await api.post('/friends/remove', { friend_id: friendId });
 	} catch (error: any) {
 		console.error('Remove Friend API call failed:', error.response?.data || error.message);
 		throw error; // Re-throw for UI error handling

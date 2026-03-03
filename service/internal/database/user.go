@@ -28,9 +28,15 @@ func CreateUser(ctx context.Context, user *models.User) error {
 	q := `INSERT INTO users (id, email, password, username, is_ephemeral, is_admin)
 	      VALUES ($1, $2, $3, $4, $5, $6)`
 
+	// Use NULL for empty email so multiple ephemeral users don't violate UNIQUE.
+	var emailVal interface{} = user.Email
+	if user.Email == "" {
+		emailVal = nil
+	}
+
 	err = pgx.BeginTxFunc(ctx, DB, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		_, execErr := tx.Exec(ctx, q,
-			user.ID, user.Email, user.Password, user.Username,
+			user.ID, emailVal, user.Password, user.Username,
 			user.IsEphemeral, user.IsAdmin,
 		)
 		return execErr
@@ -43,42 +49,57 @@ func CreateUser(ctx context.Context, user *models.User) error {
 
 func GetUserByEmail(ctx context.Context, email string) (*models.User, error) {
 	var u models.User
+	var pw *string
 	q := `
 	SELECT id, email, password, username, is_ephemeral, is_admin,
 	       elo_1v1, elo_4p, elo_7p8p,
-	       phi_1v1, sigma_1v1
+	       phi_1v1, sigma_1v1,
+	       open_skill_mu, open_skill_sigma
 	FROM users
 	WHERE email=$1
 	`
 	err := DB.QueryRow(ctx, q, email).Scan(
-		&u.ID, &u.Email, &u.Password, &u.Username,
+		&u.ID, &u.Email, &pw, &u.Username,
 		&u.IsEphemeral, &u.IsAdmin,
 		&u.Elo1v1, &u.Elo4p, &u.Elo7p8p,
 		&u.Phi1v1, &u.Sigma1v1,
+		&u.OpenSkillMu, &u.OpenSkillSigma,
 	)
 	if err != nil {
 		return nil, err
+	}
+	if pw != nil {
+		u.Password = *pw
 	}
 	return &u, nil
 }
 
 func GetUserByID(ctx context.Context, id uuid.UUID) (*models.User, error) {
 	var u models.User
+	var email, password *string
 	q := `
 	SELECT id, email, password, username, is_ephemeral, is_admin,
 	       elo_1v1, elo_4p, elo_7p8p,
-	       phi_1v1, sigma_1v1
+	       phi_1v1, sigma_1v1,
+	       open_skill_mu, open_skill_sigma
 	FROM users
 	WHERE id=$1
 	`
 	err := DB.QueryRow(ctx, q, id).Scan(
-		&u.ID, &u.Email, &u.Password, &u.Username,
+		&u.ID, &email, &password, &u.Username,
 		&u.IsEphemeral, &u.IsAdmin,
 		&u.Elo1v1, &u.Elo4p, &u.Elo7p8p,
 		&u.Phi1v1, &u.Sigma1v1,
+		&u.OpenSkillMu, &u.OpenSkillSigma,
 	)
 	if err != nil {
 		return nil, err
+	}
+	if email != nil {
+		u.Email = *email
+	}
+	if password != nil {
+		u.Password = *password
 	}
 	return &u, nil
 }

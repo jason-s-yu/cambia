@@ -18,7 +18,103 @@ The configuration file is structured with the following top-level keys:
 * `analysis`: Parameters for analysis tools, like parallel exploitability calculation.
 * `deep_cfr`: Parameters for Deep CFR training (network architecture, training schedule, buffer capacity).
 
----
+## Config System
+
+### Pydantic v2 Validation
+
+Config is validated via Pydantic v2 `BaseModel` at load time. Unknown keys trigger a warning (not an error; the model uses `extra="ignore"`). Type mismatches raise a `ValidationError` before any training begins.
+
+### Config Inheritance via `_base`
+
+Any config file can declare `_base: path/to/base.yaml` to inherit fields from a base config. The base path is resolved relative to the config file's directory. Override fields are deep-merged: nested dicts merge recursively, and the overriding file wins on conflicts. Inheritance is single-level only — chaining `_base` in the base file is not supported.
+
+Example:
+```yaml
+_base: ../../config/production_train.yaml
+deep_cfr:
+  traversal_method: escher
+  value_target_buffer_passes: 2.0
+```
+
+### Rule Profiles via `_rule_profile`
+
+Shorthand for loading a predefined `cambia_rules` block. Profile files live in `cfr/config/rule_profiles/`. Setting `_rule_profile` merges the named profile's `cambia_rules` into the config before any inline `cambia_rules` overrides are applied. Available profiles: `default.yaml`, `competitive.yaml`.
+
+Example:
+```yaml
+_rule_profile: competitive
+deep_cfr:
+  traversal_method: escher
+```
+
+### Schema Version
+
+The root `Config` model has a `config_schema_version: int = 1` field. A model validator emits a warning if the version in the file exceeds the current supported version, so old tooling does not silently misparse newer configs.
+
+### Backward Compatibility
+
+`use_gpu: true` in old configs is auto-converted to `device: cuda` during loading. All existing YAML files continue to work without modification.
+
+### JSON Schema Export
+
+```bash
+cambia config schema > schema.json
+```
+
+Exports the full config as a JSON Schema document. Useful for editor validation (VS Code, PyCharm) and as an input to a future web UI config editor.
+
+### Config Diff
+
+```bash
+cambia config diff file1.yaml file2.yaml
+```
+
+Compares two config files field-by-field and prints a human-readable diff of values that differ.
+
+## Run Metadata
+
+### `run_meta.json`
+
+Auto-generated per run by the trainer and the backfill script. Contains:
+
+| Field | Description |
+|-|-|
+| `run_name` | Unique run identifier |
+| `algorithm` | Traversal method (e.g., `"escher"`) |
+| `status` | `"running"`, `"complete"`, `"failed"` |
+| `config_hash` | SHA-256 of the resolved config (after `_base` merge) |
+| `house_rules_hash` | SHA-256 of the `cambia_rules` block |
+| `best_metric` | Best `mean_imp` achieved |
+| `tags` | List of string tags |
+| `notes` | Free-text notes |
+| `checkpoint_count` | Number of saved checkpoints |
+
+### `eval_summary.jsonl`
+
+Auto-generated per run. One JSON line per `(iteration, baseline)` evaluation with: `win_rate`, `ci_lower`, `ci_upper` (Wilson score bounds), `games_played`, `avg_game_turns`.
+
+### `cambia_runs.db`
+
+SQLite database in WAL mode at `cfr/runs/cambia_runs.db`. Tables: `runs`, `config_snapshots`, `checkpoints`, `eval_results`, `head_to_head`. Queryable directly via SQL or through the CLI commands below.
+
+### CLI Commands
+
+**List runs:**
+```bash
+cambia runs list [--status running|complete|failed] [--sort-by best_metric|run_name|checkpoint_count]
+```
+
+**Prune checkpoints:**
+```bash
+cambia runs prune <run-name> [--keep-every-n 50] [--keep-latest 3] [--dry-run]
+```
+Removes intermediate checkpoints, keeping every Nth and the N most recent. `--dry-run` prints what would be deleted without removing anything.
+
+**Backfill metadata:**
+```bash
+cambia runs backfill [--runs-dir cfr/runs]
+```
+Scans a runs directory and populates `cambia_runs.db` from existing checkpoint files and eval logs. Use after manually copying runs from another machine.
 
 ## `api`
 
@@ -49,8 +145,6 @@ Settings for the API client used for interacting with a live Cambia game server.
           password: "securepassword123"
         ```
 
----
-
 ## `system`
 
 General system-level configurations.
@@ -60,8 +154,6 @@ General system-level configurations.
   * Type: `integer`
   * Default: `10000`
   * Example: `15000`
-
----
 
 ## `cfr_training`
 
@@ -106,8 +198,6 @@ Parameters controlling the main Counterfactual Regret Minimization training proc
   * Default: `1`
   * Examples: `1` (sequential), `0` (auto), `"auto"` (auto), `8` (8 workers)
 
----
-
 ## `cfr_plus_params`
 
 Parameters specific to variations and enhancements of the CFR algorithm, such as CFR+.
@@ -122,8 +212,6 @@ Parameters specific to variations and enhancements of the CFR algorithm, such as
   * Type: `integer`
   * Default: `100`
   * Example: `0` (weights by `t`)
-
----
 
 ## `agent_params`
 
@@ -142,8 +230,6 @@ Parameters defining the agent's internal model and memory capabilities.
   * Type: `integer`
   * Default: `3`
   * Example: `5`
-
----
 
 ## `cambia_rules`
 
@@ -202,8 +288,11 @@ Defines the specific rules of the Cambia game variant to be used for training an
   * Type: `integer`
   * Default: `300`
   * Example: `200`
-
----
+* **`lockCallerHand`**:
+  * Description: If true, the Cambia caller cannot modify their hand (draw, swap, or snap) during the final round after calling Cambia.
+  * Type: `boolean`
+  * Default: `true`
+  * Example: `false`
 
 ## `persistence`
 
@@ -212,10 +301,8 @@ Settings related to saving and loading the trained agent's data.
 * **`agent_data_save_path`**:
   * Description: The file path (relative to the execution directory) where the agent's learned data (regret sums, strategy sums, iteration count, etc.) will be saved and loaded from.
   * Type: `string`
-  * Default: `"cambia_cfr_agent_level1.joblib"`
-  * Example: `"strategy/my_cambia_agent_v1.joblib"`
-
----
+  * Default: `"runs/default/checkpoints/deep_cfr_checkpoint.pt"`
+  * Example: `"runs/my_run/checkpoints/deep_cfr_checkpoint.pt"`
 
 ## `logging`
 
@@ -340,8 +427,6 @@ Configuration for logging messages generated during training.
   * Default: `"simulation_traces"`
   * Example: `"sim_details"`
 
----
-
 ## `agents`
 
 Configuration settings for baseline agents, primarily used during separate evaluation phases, not directly during CFR training.
@@ -364,8 +449,6 @@ Configuration settings for baseline agents, primarily used during separate evalu
         cambia_call_threshold: 5
     ```
 
----
-
 ## `analysis`
 
 Parameters controlling analysis tools, such as exploitability calculation.
@@ -385,8 +468,6 @@ Parameters controlling analysis tools, such as exploitability calculation.
     analysis:
       exploitability_num_workers: 4 # Use 4 workers inside each of the 2 BR processes
     ```
-
----
 
 ## `deep_cfr`
 
@@ -597,7 +678,7 @@ Parameters for Deep CFR training. These values are loaded from the YAML config a
 **Adaptive Training:**
 
 * **`target_buffer_passes`**:
-  * Description: Adaptive train step scaling for the advantage network. When greater than `0.0`, the number of SGD steps per iteration is computed as: `min(train_steps_per_iteration, max(250, int(len(buffer) * target_buffer_passes / batch_size)))`. This scales training proportionally to buffer fill level, preventing overtraining on small early buffers and undertraining once the buffer is full. `0.0` disables this and uses fixed `train_steps_per_iteration`.
+  * Description: Adaptive train step scaling for the advantage network. When greater than `0.0`, the number of SGD steps per iteration is computed as: `min(train_steps_per_iteration, max(10, int(len(buffer) * target_buffer_passes / batch_size)))`. This scales training proportionally to buffer fill level, preventing overtraining on small early buffers and undertraining once the buffer is full. `0.0` disables this and uses fixed `train_steps_per_iteration`.
   * Type: `float`
   * Default: `0.0`
 
@@ -685,8 +766,6 @@ The `"auto"` setting reads total system RAM at startup and calculates a recyclin
 * Spawn overhead: ~3-5s every 4 steps (amortized <3% of step time)
 
 For concurrent training runs, ensure that `system_ram * worker_memory_budget_pct * num_concurrent_runs` does not exceed ~80% of total RAM. The default 10% allows up to 8 concurrent runs.
-
----
 
 ## Example Full `logging` Section
 

@@ -6,6 +6,14 @@ export interface User {
   username: string; // Now mandatory based on usage
   is_ephemeral: boolean;
   is_admin?: boolean; // Optional, might not always be present
+  email?: string;
+  elo?: number;
+  rd?: number;
+  volatility?: number;
+  open_skill_mu?: number;
+  open_skill_sigma?: number;
+  created_at?: string;
+  last_login?: string;
 }
 
 /** Represents the state of a user within a lobby */
@@ -72,6 +80,12 @@ export interface LobbyState {
   lobby_id?: string;      // From WS, should match 'id'
   your_id?: string;       // From WS
   your_is_host?: boolean; // From WS
+  // Matchmaking fields (from WS or REST)
+  queueId?: string;
+  visibility?: 'private' | 'public';
+  mode?: 'casual' | 'ranked';
+  isRanked?: boolean;
+  matchState?: MatchState;
 }
 
 
@@ -94,6 +108,18 @@ export interface FriendRelationship {
     user2_username?: string;
 }
 
+
+/** Match state for multi-round ranked matches */
+export interface MatchState {
+  queueId: string;
+  isRanked: boolean;
+  totalRounds: number;
+  currentRound: number;
+  roundScores: Record<string, number>[];  // per-round scores (player UUID string → score)
+  cumulativeScores: Record<string, number>;
+  subsidies?: Record<string, number>;      // last round's subsidies
+  ratingChanges?: Record<string, { before: number; after: number }>;
+}
 
 /** Generic type for API error responses */
 export interface ApiErrorResponse {

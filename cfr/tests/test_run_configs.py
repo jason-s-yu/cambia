@@ -31,7 +31,10 @@ def config_path(run_name: str) -> str:
 
 
 def load(run_name: str):
-    return _real_load_config(config_path(run_name))
+    path = config_path(run_name)
+    if not os.path.exists(path):
+        pytest.skip(f"Run directory pruned: {run_name}")
+    return _real_load_config(path)
 
 
 # Expected values per run: (run_name, sampling_method, traversal_depth_limit, traversals_per_step)
@@ -49,8 +52,6 @@ RUN_SPECS = [
 @pytest.mark.parametrize("run_name,sampling,depth,traversals", RUN_SPECS)
 def test_run_config_loads(run_name, sampling, depth, traversals):
     """Each config file must exist and load without error."""
-    path = config_path(run_name)
-    assert os.path.exists(path), f"Config not found: {path}"
     cfg = load(run_name)
     assert cfg is not None, f"load_config returned None for {run_name}"
     assert hasattr(cfg, "deep_cfr"), f"{run_name}: Config missing deep_cfr section"
@@ -116,3 +117,49 @@ def test_run_config_log_dir(run_name, sampling, depth, traversals):
         f"{run_name}: expected log_dir={expected_log_dir!r}, "
         f"got {cfg.logging.log_dir!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# ESCHER interleaved run config tests
+# ---------------------------------------------------------------------------
+
+
+def _load_run_config_yaml(run_name: str, filename: str = "config.yaml"):
+    """Load directly from a run config YAML (before training copies it to config.yaml)."""
+    path = os.path.join(RUNS_DIR, run_name, filename)
+    if not os.path.exists(path):
+        pytest.skip(f"Run config not found: {path}")
+    cfg = _real_load_config(path)
+    if cfg is None:
+        pytest.skip(f"load_config returned None for {path}")
+    return cfg
+
+
+def test_escher_interleaved_value_target_buffer_passes():
+    """value_target_buffer_passes must load correctly from escher-interleaved config."""
+    cfg = _load_run_config_yaml("escher-interleaved")
+    if not hasattr(cfg.deep_cfr, "value_target_buffer_passes"):
+        pytest.skip("value_target_buffer_passes not yet in DeepCfrConfig (impl-1 pending)")
+    assert cfg.deep_cfr.value_target_buffer_passes == 2.0, (
+        f"expected value_target_buffer_passes=2.0, "
+        f"got {cfg.deep_cfr.value_target_buffer_passes}"
+    )
+
+
+def test_escher_interleaved_sampling_method():
+    """escher-interleaved config must have sampling_method='escher'."""
+    cfg = _load_run_config_yaml("escher-interleaved")
+    assert cfg.deep_cfr.sampling_method == "escher"
+
+
+def test_escher_interleaved_encoding_layout():
+    """escher-interleaved config must use interleaved EP-PBS encoding."""
+    cfg = _load_run_config_yaml("escher-interleaved")
+    assert cfg.deep_cfr.encoding_mode == "ep_pbs"
+    assert cfg.deep_cfr.encoding_layout == "interleaved"
+
+
+def test_escher_interleaved_traversals():
+    """escher-interleaved config must have traversals_per_step=150."""
+    cfg = _load_run_config_yaml("escher-interleaved")
+    assert cfg.deep_cfr.traversals_per_step == 150

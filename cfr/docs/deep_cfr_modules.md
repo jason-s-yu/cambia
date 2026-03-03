@@ -2,8 +2,6 @@
 
 Reference documentation for the core modules used in the Deep CFR training pipeline.
 
----
-
 ## `src/encoding.py`
 
 Converts `AgentState` + legal actions into fixed-size numpy tensors for neural network input.
@@ -149,8 +147,6 @@ Creates a `(146,)` boolean mask with `True` for each legal action's index. Actio
 - `index_to_action` uses linear scan over legal actions rather than building a reverse lookup table, since legal action lists are small (typically 5-15 actions).
 - Hand slots beyond `MAX_HAND` are silently dropped in `encode_action_mask`. The `own_card_count` scalar retains the true count as a signal to the network.
 - EP-PBS separates epistemic tag (what you know about knowing: PRIV_OWN, PRIV_OPP, MEMORY, UNKNOWN) from bucket identity. This factored structure is the motivation for slot-aware architectures.
-
----
 
 ## `src/networks.py`
 
@@ -303,8 +299,6 @@ Used during both traversal (to derive current strategy from advantage prediction
 - `get_strategy_from_advantages` uses ReLU+normalize (not softmax) to match the RM+ convergence guarantee: only actions with positive predicted advantage get probability mass.
 - `validate_inputs` gates the NaN check in the forward pass. Disabling it eliminates the GPU-to-CPU sync on every forward pass (~85% GPU overhead at large batch sizes).
 
----
-
 ## `src/reservoir.py`
 
 Fixed-capacity reservoir sampling buffers for Deep CFR training data.
@@ -357,8 +351,6 @@ Batch-converts a list of samples into stacked numpy arrays: `(N, input_dim)` fea
 | 500K | ~300 MB |
 | 2M (default) | ~1.2 GB |
 | 5M | ~3 GB |
-
----
 
 ## `src/cfr/deep_trainer.py`
 
@@ -428,7 +420,7 @@ class DeepCFRConfig:
     ...
 ```
 
-This is the runtime config dataclass (in `deep_trainer.py`). It is separate from `DeepCfrConfig` (in `config.py`), which is the YAML-facing dataclass. `from_yaml_config()` bridges the two.
+This is the runtime config dataclass (in `deep_trainer.py`). It is separate from `DeepCfrConfig` (in `config.py`), which is the YAML-facing Pydantic model. `from_yaml_config()` bridges the two.
 
 Full field list and defaults: see source. Reference `cfr/config/` YAML files for typical production values.
 
@@ -478,10 +470,10 @@ Computes adaptive training steps when `target_buffer_passes > 0`:
 
 ```
 adaptive_steps = int(len(buffer) * target_buffer_passes / batch_size)
-num_steps = min(train_steps_per_iteration, max(250, adaptive_steps))
+num_steps = min(train_steps_per_iteration, max(10, adaptive_steps))
 ```
 
-Floor of 250 prevents running too few steps on small early buffers. Returns `train_steps_per_iteration` unchanged when `target_buffer_passes == 0.0`.
+Floor of 10 prevents running zero steps on small early buffers. Returns `train_steps_per_iteration` unchanged when `target_buffer_passes == 0.0`.
 
 ```python
 def _train_value_network(self, num_steps: int) -> float:
@@ -551,9 +543,7 @@ The main checkpoint (`.pt` file via `torch.save`) contains:
 - `_snapshot_count` (SD-CFR) tracks reservoir stream count independently of `training_step`. This prevents warm-start bias when loading a checkpoint mid-training.
 - Gradient clipping (`max_norm=1.0`) is applied to both networks.
 - NaN loss fix: use `predictions.masked_fill(~mask_bool, 0.0)` rather than multiplication, to avoid `0 * -inf = NaN`.
-- Two separate dataclasses (`DeepCfrConfig` in config.py, `DeepCFRConfig` in deep_trainer.py) exist for historical reasons. The YAML-facing one uses snake_case fields with YAML-compatible types; the runtime one has the full set of derived fields.
-
----
+- Two separate Pydantic models (`DeepCfrConfig` in config.py, `DeepCFRConfig` in deep_trainer.py) exist for historical reasons. The YAML-facing one uses snake_case fields with YAML-compatible types; the runtime one has the full set of derived fields.
 
 ## `src/cfr/deep_worker.py`
 
@@ -721,8 +711,6 @@ deep_worker.py
 - The updating player alternates each iteration (`iteration % NUM_PLAYERS`), matching the standard Deep CFR protocol.
 - `MAX_IS_WEIGHT = 20.0` is a module-level constant, not inline, to make it easy to tune and to keep the three call sites consistent.
 
----
-
 ## `src/ffi/bridge.py`
 
 Python cffi ABI-mode wrapper around `libcambia.so`, providing `GoEngine` and `GoAgentState` as drop-in replacements for `CambiaGameState` and `AgentState`.
@@ -876,8 +864,6 @@ ffi/bridge.py
   +-- deep_worker.py: GoEngine and GoAgentState used when engine_backend="go"
   +-- evaluate_agents.py: NeuralAgentWrapper uses GoAgentState for eval encoding
 ```
-
----
 
 ## `src/cfr/es_validator.py`
 

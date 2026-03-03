@@ -50,6 +50,13 @@ export const registerUser = async (details: RegisterDetails): Promise<User | nul
 };
 
 /**
+ * Logs out the current user by clearing the auth_token cookie on the server.
+ */
+export const logoutUser = async (): Promise<void> => {
+	await api.post('/user/logout');
+};
+
+/**
  * Fetches the currently authenticated user's details from the backend.
  * Relies on the auth_token cookie being sent automatically by the browser.
  * @returns The User object if authenticated, null otherwise (e.g., 401/403 response).

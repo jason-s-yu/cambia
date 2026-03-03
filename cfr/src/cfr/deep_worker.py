@@ -77,6 +77,9 @@ class DeepCFRWorkerResult:
     stats: WorkerStats = field(default_factory=WorkerStats)
     simulation_nodes: List[SimulationNodeData] = field(default_factory=list)
     final_utility: Optional[List[float]] = None
+    # ESCHER regret telemetry: mean(abs(sampled_regret)) and mean(abs(cf_regret)) across traverser nodes
+    escher_sampled_regret_mag: Optional[float] = None
+    escher_cf_regret_mag: Optional[float] = None
 
 
 def _get_strategy_from_network(
@@ -805,6 +808,24 @@ def _infer_decision_context(legal_mask: np.ndarray) -> int:
     return 0  # fallback
 
 
+_INTERLEAVED_NETWORK_TYPES = frozenset({"slot_film", "slot_multiply"})
+
+
+def _encode_ep_pbs(agent_state: "GoAgentState", decision_context: int, drawn_bucket: int,
+                   network_type: str, encoding_layout: str = "auto") -> "np.ndarray":
+    """Route EP-PBS encoding to interleaved or flat layout.
+
+    Uses interleaved layout when: encoding_layout="interleaved", or
+    network_type is in _INTERLEAVED_NETWORK_TYPES (slot_film, slot_multiply).
+    All other cases use the flat encode_eppbs() layout.
+    """
+    if encoding_layout == "flat_dealiased":
+        return agent_state.encode_eppbs_dealiased(decision_context, drawn_bucket=drawn_bucket)
+    if encoding_layout == "interleaved" or network_type in _INTERLEAVED_NETWORK_TYPES:
+        return agent_state.encode_eppbs_interleaved(decision_context, drawn_bucket=drawn_bucket)
+    return agent_state.encode_eppbs(decision_context, drawn_bucket=drawn_bucket)
+
+
 def _deep_traverse_go(
     engine: "GoEngine",
     agent_states: List["GoAgentState"],
@@ -938,10 +959,12 @@ def _deep_traverse_go(
 
     # Encode infoset using Go agent
     _encoding_mode = getattr(getattr(config, "deep_cfr", None), "encoding_mode", "legacy")
+    _network_type = getattr(getattr(config, "deep_cfr", None), "network_type", "residual")
+    _encoding_layout = getattr(getattr(config, "deep_cfr", None), "encoding_layout", "auto")
     try:
         if _encoding_mode == "ep_pbs":
-            features = agent_states[player].encode_eppbs(
-                current_context, drawn_bucket=drawn_bucket
+            features = _encode_ep_pbs(
+                agent_states[player], current_context, drawn_bucket, _network_type, _encoding_layout
             )
         else:
             features = agent_states[player].encode(current_context, drawn_bucket=drawn_bucket)
@@ -1363,10 +1386,12 @@ def _deep_traverse_os_go(
 
     # Encode infoset using Go agent
     _encoding_mode = getattr(getattr(config, "deep_cfr", None), "encoding_mode", "legacy")
+    _network_type = getattr(getattr(config, "deep_cfr", None), "network_type", "residual")
+    _encoding_layout = getattr(getattr(config, "deep_cfr", None), "encoding_layout", "auto")
     try:
         if _encoding_mode == "ep_pbs":
-            features = agent_states[player].encode_eppbs(
-                current_context, drawn_bucket=drawn_bucket
+            features = _encode_ep_pbs(
+                agent_states[player], current_context, drawn_bucket, _network_type, _encoding_layout
             )
         else:
             features = agent_states[player].encode(current_context, drawn_bucket=drawn_bucket)
@@ -1417,11 +1442,16 @@ def _deep_traverse_os_go(
         local_strategy = np.ones(num_actions, dtype=np.float64) / num_actions
 
     # --- Outcome Sampling Logic ---
-    # Compute exploration policy: q(a) = epsilon * uniform + (1-epsilon) * sigma(a)
-    uniform_prob = 1.0 / num_actions
-    exploration_policy = (
-        exploration_epsilon * uniform_prob + (1.0 - exploration_epsilon) * local_strategy
-    )
+    if player == updating_player:
+        # Traverser: use exploration policy q(a) = epsilon * uniform + (1-epsilon) * sigma(a)
+        uniform_prob = 1.0 / num_actions
+        exploration_policy = (
+            exploration_epsilon * uniform_prob + (1.0 - exploration_epsilon) * local_strategy
+        )
+    else:
+        # Opponent: sample from pure strategy (no exploration)
+        # This ensures unbiased counterfactual value estimation — see Lanctot et al. 2009
+        exploration_policy = local_strategy.copy()
 
     # Normalize
     total_prob = exploration_policy.sum()
@@ -1762,11 +1792,16 @@ def _deep_traverse_os_go_nplayer(
         local_strategy = np.ones(num_actions, dtype=np.float64) / num_actions
 
     # --- Outcome Sampling Logic ---
-    # Compute exploration policy: q(a) = epsilon * uniform + (1-epsilon) * sigma(a)
-    uniform_prob = 1.0 / num_actions
-    exploration_policy = (
-        exploration_epsilon * uniform_prob + (1.0 - exploration_epsilon) * local_strategy
-    )
+    if player == updating_player:
+        # Traverser: use exploration policy q(a) = epsilon * uniform + (1-epsilon) * sigma(a)
+        uniform_prob = 1.0 / num_actions
+        exploration_policy = (
+            exploration_epsilon * uniform_prob + (1.0 - exploration_epsilon) * local_strategy
+        )
+    else:
+        # Opponent: sample from pure strategy (no exploration)
+        # This ensures unbiased counterfactual value estimation — see Lanctot et al. 2009
+        exploration_policy = local_strategy.copy()
 
     # Normalize
     total_prob = exploration_policy.sum()
@@ -1961,6 +1996,8 @@ def _escher_traverse_go(
     _mask_buf: Optional[torch.Tensor] = None,
     depth_limit: Optional[int] = None,
     recursion_limit: Optional[int] = None,
+    _sampled_regret_track: Optional[List[float]] = None,
+    _cf_regret_track: Optional[List[float]] = None,
 ) -> np.ndarray:
     """
     ESCHER traversal for Deep CFR using Go engine backend.
@@ -2080,10 +2117,12 @@ def _escher_traverse_go(
 
     # Encode acting player's infoset
     _encoding_mode = getattr(getattr(config, "deep_cfr", None), "encoding_mode", "legacy")
+    _network_type = getattr(getattr(config, "deep_cfr", None), "network_type", "residual")
+    _encoding_layout = getattr(getattr(config, "deep_cfr", None), "encoding_layout", "auto")
     try:
         if _encoding_mode == "ep_pbs":
-            features_player = agent_states[player].encode_eppbs(
-                current_context, drawn_bucket=drawn_bucket
+            features_player = _encode_ep_pbs(
+                agent_states[player], current_context, drawn_bucket, _network_type, _encoding_layout
             )
         else:
             features_player = agent_states[player].encode(current_context, drawn_bucket=drawn_bucket)
@@ -2198,6 +2237,8 @@ def _escher_traverse_go(
                 _mask_buf,
                 depth_limit,
                 recursion_limit,
+                _sampled_regret_track,
+                _cf_regret_track,
             )
         except Exception as e_recurse:  # JUSTIFIED: worker resilience
             logger.error(
@@ -2222,10 +2263,12 @@ def _escher_traverse_go(
     # --- Encode BOTH players for value network (444-dim concatenation) ---
     # Non-acting player uses context 0 (START_TURN) and drawn_bucket=-1 (not in POST_DRAW)
     opponent = 1 - player
-    opp_context = engine.decision_ctx() if False else 0  # use START_TURN for non-actor
+    opp_context = engine.decision_ctx()
     try:
         if _encoding_mode == "ep_pbs":
-            features_opp = agent_states[opponent].encode_eppbs(opp_context, drawn_bucket=-1)
+            features_opp = _encode_ep_pbs(
+                agent_states[opponent], opp_context, -1, _network_type, _encoding_layout
+            )
         else:
             features_opp = agent_states[opponent].encode(opp_context, drawn_bucket=-1)
     except Exception as e_enc_opp:
@@ -2275,6 +2318,8 @@ def _escher_traverse_go(
         regret_full = np.zeros(NUM_ACTIONS, dtype=np.float32)
         sampled_regret = float(node_value[player]) - v_hat
         regret_full[chosen_action_idx] = sampled_regret
+        if _sampled_regret_track is not None:
+            _sampled_regret_track.append(abs(sampled_regret))
 
         if num_actions > 1 and value_net is not None:
             if batch_counterfactuals:
@@ -2318,13 +2363,17 @@ def _escher_traverse_go(
                         if cf_ctx == 1:  # CtxPostDraw for the next acting player
                             cf_drawn = engine.get_drawn_card_bucket()
                         if _encoding_mode == "ep_pbs":
-                            cf_feat_p0 = agent_states[0].encode_eppbs(
+                            cf_feat_p0 = _encode_ep_pbs(
+                                agent_states[0],
                                 cf_ctx if cf_next_player == 0 else 0,
-                                drawn_bucket=cf_drawn if cf_next_player == 0 else -1,
+                                cf_drawn if cf_next_player == 0 else -1,
+                                _network_type, _encoding_layout,
                             )
-                            cf_feat_p1 = agent_states[1].encode_eppbs(
+                            cf_feat_p1 = _encode_ep_pbs(
+                                agent_states[1],
                                 cf_ctx if cf_next_player == 1 else 0,
-                                drawn_bucket=cf_drawn if cf_next_player == 1 else -1,
+                                cf_drawn if cf_next_player == 1 else -1,
+                                _network_type, _encoding_layout,
                             )
                         else:
                             cf_feat_p0 = agent_states[0].encode(
@@ -2413,13 +2462,17 @@ def _escher_traverse_go(
                         if cf_ctx == 1:
                             cf_drawn = engine.get_drawn_card_bucket()
                         if _encoding_mode == "ep_pbs":
-                            cf_feat_p0 = agent_states[0].encode_eppbs(
+                            cf_feat_p0 = _encode_ep_pbs(
+                                agent_states[0],
                                 cf_ctx if cf_next_player == 0 else 0,
-                                drawn_bucket=cf_drawn if cf_next_player == 0 else -1,
+                                cf_drawn if cf_next_player == 0 else -1,
+                                _network_type, _encoding_layout,
                             )
-                            cf_feat_p1 = agent_states[1].encode_eppbs(
+                            cf_feat_p1 = _encode_ep_pbs(
+                                agent_states[1],
                                 cf_ctx if cf_next_player == 1 else 0,
-                                drawn_bucket=cf_drawn if cf_next_player == 1 else -1,
+                                cf_drawn if cf_next_player == 1 else -1,
+                                _network_type, _encoding_layout,
                             )
                         else:
                             cf_feat_p0 = agent_states[0].encode(
@@ -2455,6 +2508,12 @@ def _escher_traverse_go(
                     engine.free_snapshot(cf_snap)
 
                     regret_full[int(action_idx)] = cf_val - v_hat
+
+        # Track CF regret magnitudes for telemetry
+        if _cf_regret_track is not None and num_actions > 1:
+            for _cf_idx in legal_indices:
+                if int(_cf_idx) != chosen_action_idx:
+                    _cf_regret_track.append(abs(float(regret_full[int(_cf_idx)])))
 
         # Store regret sample
         regret_samples.append(
@@ -2750,11 +2809,16 @@ def _deep_traverse_os(
         strategy = np.ones(num_actions, dtype=np.float64) / num_actions
 
     # --- Outcome Sampling Logic ---
-    # Compute exploration policy: q(a) = epsilon * uniform + (1-epsilon) * sigma(a)
-    uniform_prob = 1.0 / num_actions
-    exploration_policy = (
-        exploration_epsilon * uniform_prob + (1.0 - exploration_epsilon) * strategy
-    )
+    if player == updating_player:
+        # Traverser: use exploration policy q(a) = epsilon * uniform + (1-epsilon) * sigma(a)
+        uniform_prob = 1.0 / num_actions
+        exploration_policy = (
+            exploration_epsilon * uniform_prob + (1.0 - exploration_epsilon) * strategy
+        )
+    else:
+        # Opponent: sample from pure strategy (no exploration)
+        # This ensures unbiased counterfactual value estimation — see Lanctot et al. 2009
+        exploration_policy = strategy.copy()
 
     # Normalize just in case
     total_prob = exploration_policy.sum()
@@ -3030,6 +3094,9 @@ def run_deep_cfr_worker(
     advantage_samples: List[ReservoirSample] = []
     strategy_samples: List[ReservoirSample] = []
     value_samples: List[ReservoirSample] = []
+    # ESCHER regret telemetry accumulation (populated only during ESCHER traversal)
+    _escher_sampled_track: List[float] = []
+    _escher_cf_track: List[float] = []
 
     # --- Logging setup (same pattern as tabular worker) ---
     worker_root_logger = logging.getLogger()
@@ -3111,10 +3178,13 @@ def run_deep_cfr_worker(
                     validate_inputs=network_config.get("validate_inputs", True),
                     use_residual=network_config.get("use_residual", False),
                     num_hidden_layers=network_config.get("num_hidden_layers", 2),
+                    network_type=network_config.get("network_type", "residual"),
+                    use_pos_embed=network_config.get("use_pos_embed", True),
                 )
                 weights_tensors = {
                     k: torch.tensor(v) if isinstance(v, np.ndarray) else v
                     for k, v in network_weights_serialized.items()
+                    if k != "__value_net__"  # Value net weights stored separately
                 }
                 advantage_network.load_state_dict(weights_tensors)
                 advantage_network.eval()
@@ -3160,8 +3230,9 @@ def run_deep_cfr_worker(
             if value_weights_serialized is not None:
                 try:
                     value_hidden_dim = network_config.get("value_hidden_dim", 512)
+                    _vnet_base_dim = network_config.get("input_dim", INPUT_DIM)
                     value_network = HistoryValueNetwork(
-                        input_dim=INPUT_DIM * 2,
+                        input_dim=_vnet_base_dim * 2,
                         hidden_dim=value_hidden_dim,
                         validate_inputs=network_config.get("validate_inputs", True),
                     )
@@ -3264,6 +3335,8 @@ def run_deep_cfr_worker(
                         _mask_buf=_mask_buf,
                         depth_limit=depth_limit,
                         recursion_limit=recursion_limit,
+                        _sampled_regret_track=_escher_sampled_track,
+                        _cf_regret_track=_escher_cf_track,
                     )
                 elif sampling_method == "outcome":
                     exploration_epsilon = getattr(config.deep_cfr, "exploration_epsilon", 0.6)
@@ -3525,6 +3598,8 @@ def run_deep_cfr_worker(
                 worker_stats.nodes_visited,
             )
 
+        _escher_sampled_mag = float(np.mean(_escher_sampled_track)) if _escher_sampled_track else None
+        _escher_cf_mag = float(np.mean(_escher_cf_track)) if _escher_cf_track else None
         return DeepCFRWorkerResult(
             advantage_samples=advantage_samples,
             strategy_samples=strategy_samples,
@@ -3532,6 +3607,8 @@ def run_deep_cfr_worker(
             stats=worker_stats,
             simulation_nodes=simulation_nodes_this_sim,
             final_utility=final_utility_value.tolist(),
+            escher_sampled_regret_mag=_escher_sampled_mag,
+            escher_cf_regret_mag=_escher_cf_mag,
         )
 
     except KeyboardInterrupt:

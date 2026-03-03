@@ -2,21 +2,39 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/jason-s-yu/cambia/service/internal/auth"
 	"github.com/jason-s-yu/cambia/service/internal/cache"
 	"github.com/jason-s-yu/cambia/service/internal/database"
 	"github.com/jason-s-yu/cambia/service/internal/handlers"
+	"github.com/jason-s-yu/cambia/service/internal/hub"
+	"github.com/jason-s-yu/cambia/service/internal/matchmaking"
 	"github.com/jason-s-yu/cambia/service/internal/middleware"
 	_ "github.com/joho/godotenv/autoload"
 	"github.com/sirupsen/logrus"
 )
 
 func main() {
-	auth.Init()
+	dataDir := os.Getenv("DATA_DIR")
+	if dataDir == "" {
+		dataDir = "./data"
+	}
+	privPath := filepath.Join(dataDir, "jwt_keys", "private.pem")
+	pubPath := filepath.Join(dataDir, "jwt_keys", "public.pem")
+	if err := auth.InitFromPath(privPath, pubPath); err != nil {
+		if err2 := auth.InitAndSave(dataDir); err2 != nil {
+			log.Fatalf("failed to init JWT keys: %v", err2)
+		}
+		log.Println("Generated new JWT key pair and saved to disk.")
+	} else {
+		log.Println("Loaded JWT keys from disk.")
+	}
 	go database.ConnectDBAsync()
 
 	// ADDED: Connect to Redis
@@ -32,8 +50,11 @@ func main() {
 
 	// user endpoints
 	mux.HandleFunc("/user/create", handlers.CreateUserHandler)
+	mux.HandleFunc("/user/guest", handlers.GuestHandler)
 	mux.HandleFunc("/user/login", handlers.LoginHandler)
+	mux.HandleFunc("/user/logout", handlers.LogoutHandler)
 	mux.HandleFunc("/user/me", handlers.MeHandler)
+	mux.HandleFunc("/user/claim", handlers.ClaimEphemeralHandler)
 
 	// friend endpoints
 	mux.HandleFunc("/friends/add", handlers.AddFriendHandler)
@@ -41,11 +62,30 @@ func main() {
 	mux.HandleFunc("/friends/list", handlers.ListFriendsHandler)
 	mux.HandleFunc("/friends/remove", handlers.RemoveFriendHandler)
 
-	// game websocket
 	srv := handlers.NewGameServer()
 
-	mux.Handle("/game/ws/", middleware.LogMiddleware(logger)(http.HandlerFunc(
-		handlers.GameWSHandler(logger, srv),
+	// Wire matchmaker callback before starting Run.
+	srv.Matchmaker.OnMatchFormed = func(result matchmaking.MatchResult) {
+		h, ok := srv.HubStore.GetHub(result.HostLobbyID)
+		if !ok {
+			log.Printf("Match formed but host hub %s not found", result.HostLobbyID)
+			return
+		}
+		players := make([]hub.MatchedPlayer, len(result.Players))
+		for i, p := range result.Players {
+			players[i] = hub.MatchedPlayer{
+				UserID:   p.UserID,
+				Username: p.Username,
+			}
+		}
+		h.Matched() <- players
+	}
+
+	go srv.Matchmaker.Run(context.Background())
+
+	// unified WebSocket endpoint
+	mux.Handle("/ws/", middleware.LogMiddleware(logger)(http.HandlerFunc(
+		handlers.HubWSHandler(logger, srv),
 	)))
 
 	// lobby endpoints
@@ -56,9 +96,31 @@ func main() {
 		handlers.ListLobbiesHandler(srv),
 	)))
 
-	// lobby ws
-	mux.Handle("/lobby/ws/", middleware.LogMiddleware(logger)(http.HandlerFunc(
-		handlers.LobbyWSHandler(logger, srv),
+	// lobby action router (join, search)
+	mux.Handle("/lobby/", middleware.LogMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) >= 3 {
+			switch parts[2] {
+			case "search":
+				if r.Method == http.MethodPost {
+					handlers.SearchLobbyHandler(srv)(w, r)
+				} else if r.Method == http.MethodDelete {
+					handlers.CancelSearchHandler(srv)(w, r)
+				} else {
+					http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				}
+				return
+			case "join":
+				handlers.JoinLobbyHandler(srv)(w, r)
+				return
+			}
+		}
+		http.NotFound(w, r)
+	})))
+
+	// matchmaking queue list
+	mux.Handle("/matchmaking/queues", middleware.LogMiddleware(logger)(http.HandlerFunc(
+		handlers.ListQueuesHandler(srv),
 	)))
 
 	addr := ":8080"

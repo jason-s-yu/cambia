@@ -72,7 +72,7 @@ class TestCollectMetrics:
 
     def _fake_multi_baseline_results(self) -> dict:
         """Returns fake run_evaluation_multi_baseline results."""
-        baselines = ["random", "greedy", "imperfect_greedy", "memory_heuristic", "aggressive_snap"]
+        baselines = ["random", "random_no_cambia", "random_late_cambia", "greedy", "imperfect_greedy", "memory_heuristic", "aggressive_snap"]
         results = {}
         for bl in baselines:
             results[bl] = Counter({
@@ -122,6 +122,7 @@ class TestCollectMetrics:
         required_fields = {
             "run", "iter", "baseline", "win_rate", "games_played",
             "p0_wins", "p1_wins", "ties", "adv_loss", "strat_loss", "timestamp",
+            "avg_game_turns",
         }
         rows = []
         with open(metrics_path) as f:
@@ -131,8 +132,8 @@ class TestCollectMetrics:
                 missing = required_fields - set(row.keys())
                 assert not missing, f"Missing fields in JSONL row: {missing}"
 
-        # Should have 5 rows (one per baseline).
-        assert len(rows) == 5
+        # Should have 7 rows (one per baseline: 5 mean_imp + random + greedy).
+        assert len(rows) == 7
 
     def test_jsonl_row_values(self, tmp_path):
         """win_rate and games_played should be correctly computed from Counter."""
@@ -409,8 +410,8 @@ class TestPlotMetrics:
     def _write_sample_metrics(self, runs_dir: Path) -> None:
         """Write sample metrics.jsonl files to test runs."""
         runs = [
-            {"run": "os-20", "iters": [25, 50], "baselines": ["random", "greedy", "imperfect_greedy", "memory_heuristic", "aggressive_snap"]},
-            {"run": "os-30", "iters": [25], "baselines": ["random", "greedy", "imperfect_greedy", "memory_heuristic", "aggressive_snap"]},
+            {"run": "os-20", "iters": [25, 50], "baselines": ["random", "random_no_cambia", "random_late_cambia", "greedy", "imperfect_greedy", "memory_heuristic", "aggressive_snap"]},
+            {"run": "os-30", "iters": [25], "baselines": ["random", "random_no_cambia", "random_late_cambia", "greedy", "imperfect_greedy", "memory_heuristic", "aggressive_snap"]},
         ]
         for run_spec in runs:
             run_dir = runs_dir / run_spec["run"]
@@ -427,7 +428,9 @@ class TestPlotMetrics:
                             "p0_wins": 55,
                             "p1_wins": 40,
                             "ties": 5,
-                            "avg_game_turns": 25.0,
+                            "avg_game_turns": 15.0,
+                            "t1_cambia_rate": 0.35,
+                            "avg_score_margin": 8.5,
                             "adv_loss": 4.0,
                             "strat_loss": 0.08,
                             "timestamp": "2026-02-19T12:00:00Z",
@@ -441,8 +444,8 @@ class TestPlotMetrics:
         self._write_sample_metrics(tmp_path)
         rows = load_all_metrics(tmp_path)
 
-        # os-20: 2 iters x 5 baselines = 10; os-30: 1 iter x 5 = 5; total = 15
-        assert len(rows) == 15
+        # os-20: 2 iters x 7 baselines = 14; os-30: 1 iter x 7 = 7; total = 21
+        assert len(rows) == 21
 
     def test_load_metrics_empty_dir(self, tmp_path):
         """load_all_metrics on a directory with no metrics.jsonl should return []."""
@@ -485,7 +488,9 @@ class TestPlotMetrics:
                     "win_rate": 0.5,
                     "games_played": 100,
                     "p0_wins": 50, "p1_wins": 50, "ties": 0,
-                    "avg_game_turns": 20.0,
+                    "avg_game_turns": 15.0,
+                    "t1_cambia_rate": 0.35,
+                    "avg_score_margin": 8.5,
                     "adv_loss": 3.5, "strat_loss": 0.06,
                     "timestamp": "2026-02-19T12:00:00Z",
                 }
@@ -516,9 +521,9 @@ class TestPlotMetrics:
         run_dir = tmp_path / "bad-run"
         run_dir.mkdir()
         with open(run_dir / "metrics.jsonl", "w") as f:
-            f.write('{"run": "bad-run", "iter": 1, "baseline": "random", "win_rate": 0.5, "games_played": 10, "p0_wins": 5, "p1_wins": 5, "ties": 0, "adv_loss": null, "strat_loss": null, "timestamp": "2026-02-19T12:00:00Z"}\n')
+            f.write('{"run": "bad-run", "iter": 1, "baseline": "random", "win_rate": 0.5, "games_played": 10, "p0_wins": 5, "p1_wins": 5, "ties": 0, "avg_game_turns": 15.0, "t1_cambia_rate": 0.35, "avg_score_margin": 8.5, "adv_loss": null, "strat_loss": null, "timestamp": "2026-02-19T12:00:00Z"}\n')
             f.write("NOT VALID JSON {\n")
-            f.write('{"run": "bad-run", "iter": 2, "baseline": "random", "win_rate": 0.6, "games_played": 10, "p0_wins": 6, "p1_wins": 4, "ties": 0, "adv_loss": null, "strat_loss": null, "timestamp": "2026-02-19T12:00:00Z"}\n')
+            f.write('{"run": "bad-run", "iter": 2, "baseline": "random", "win_rate": 0.6, "games_played": 10, "p0_wins": 6, "p1_wins": 4, "ties": 0, "avg_game_turns": 15.0, "t1_cambia_rate": 0.35, "avg_score_margin": 8.5, "adv_loss": null, "strat_loss": null, "timestamp": "2026-02-19T12:00:00Z"}\n')
 
         rows = load_all_metrics(tmp_path)
         # Only 2 valid rows.

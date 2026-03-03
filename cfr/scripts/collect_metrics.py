@@ -14,6 +14,7 @@ Writes one JSONL row per (checkpoint, baseline) pair to <run_dir>/metrics.jsonl.
 import argparse
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -28,19 +29,25 @@ if str(_CFR_SRC.parent) not in sys.path:
 
 import torch
 
-from src.evaluate_agents import run_evaluation_multi_baseline
+from src.evaluate_agents import run_evaluation_multi_baseline, MEAN_IMP_BASELINES
 from src.config import load_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-ALL_BASELINES = [
-    "random",
-    "greedy",
-    "imperfect_greedy",
-    "memory_heuristic",
-    "aggressive_snap",
-]
+# MEAN_IMP_BASELINES imported from src.evaluate_agents (canonical source)
+ALL_BASELINES = ["random", "greedy"] + list(MEAN_IMP_BASELINES)
+
+
+def wilson_ci(wins: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """Wilson score interval for a proportion. Returns (ci_low, ci_high)."""
+    if n == 0:
+        return 0.0, 0.0
+    p = wins / n
+    denom = 1 + z**2 / n
+    center = (p + z**2 / (2 * n)) / denom
+    margin = (z / denom) * math.sqrt(p * (1 - p) / n + z**2 / (4 * n**2))
+    return max(0.0, center - margin), min(1.0, center + margin)
 
 
 def _infer_iter_from_path(checkpoint_path: str) -> int:
@@ -130,17 +137,23 @@ def collect_metrics(
             ties = results.get("Ties", 0) + results.get("MaxTurnTies", 0)
             total_played = p0_wins + p1_wins + ties
             win_rate = p0_wins / total_played if total_played > 0 else 0.0
+            ci_low, ci_high = wilson_ci(p0_wins, total_played)
 
+            stats = getattr(results, "stats", {})
             row = {
                 "run": run_name,
                 "iter": iter_num,
                 "baseline": baseline,
                 "win_rate": round(win_rate, 6),
+                "ci_low": round(ci_low, 6),
+                "ci_high": round(ci_high, 6),
                 "games_played": total_played,
                 "p0_wins": p0_wins,
                 "p1_wins": p1_wins,
                 "ties": ties,
-                "avg_game_turns": None,  # not tracked at this level; use per-game JSONL for this
+                "avg_game_turns": round(stats.get("avg_game_turns", 0), 2),
+                "t1_cambia_rate": round(stats.get("t1_cambia_rate", 0), 4),
+                "avg_score_margin": round(stats.get("avg_score_margin", 0), 2),
                 "adv_loss": None if adv_loss != adv_loss else round(adv_loss, 6),  # nan check
                 "strat_loss": None if strat_loss != strat_loss else round(strat_loss, 6),
                 "timestamp": timestamp,

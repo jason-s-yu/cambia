@@ -332,12 +332,13 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
     used by DeepCFRAgentWrapper, ESCHERAgentWrapper, and ReBeLAgentWrapper.
     """
 
-    def __init__(self, player_id: int, config, device: str = "cpu"):
+    def __init__(self, player_id: int, config, device: str = "cpu", use_argmax: bool = False):
         super().__init__(player_id, config)
         import torch
         self._torch = torch
         self.device = torch.device(device)
         self.agent_state: Optional[AgentState] = None
+        self._use_argmax = use_argmax
 
     @abc.abstractmethod
     def choose_action(
@@ -414,8 +415,18 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
         return DecisionContext.START_TURN
 
     def _encode_eppbs(self, decision_context: DecisionContext) -> np.ndarray:
-        """Encode agent state using EP-PBS encoding for evaluation."""
-        from src.encoding import encode_infoset_eppbs
+        """Encode agent state using EP-PBS encoding for evaluation.
+
+        Dispatches to the correct layout encoder based on encoding_layout and network_type,
+        mirroring the logic in deep_worker.py:_encode_ep_pbs().
+        """
+        from src.encoding import (
+            encode_infoset_eppbs,
+            encode_infoset_eppbs_interleaved,
+            encode_infoset_eppbs_dealiased,
+        )
+
+        _INTERLEAVED_NETWORK_TYPES = frozenset({"slot_film", "slot_multiply"})
 
         st = self.agent_state
         # Determine cambia_state: 0=self called, 1=opponent called, 2=none
@@ -426,7 +437,7 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
         else:
             cambia_state = 1
 
-        return encode_infoset_eppbs(
+        kwargs = dict(
             slot_tags=[t.value if hasattr(t, 'value') else int(t) for t in st.slot_tags],
             slot_buckets=[int(b) for b in st.slot_buckets],
             discard_top_bucket=st.known_discard_top_bucket.value if hasattr(st.known_discard_top_bucket, 'value') else int(st.known_discard_top_bucket),
@@ -435,6 +446,26 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
             decision_context=decision_context.value if hasattr(decision_context, 'value') else int(decision_context),
             cambia_state=cambia_state,
         )
+
+        layout = getattr(self, "_encoding_layout", "auto")
+        network_type = getattr(self, "_network_type", "mlp")
+
+        if layout == "flat_dealiased":
+            kwargs["own_hand_size"] = len(st.own_hand)
+            kwargs["opp_hand_size"] = st.opponent_card_count
+            encoding = encode_infoset_eppbs_dealiased(**kwargs)
+        elif layout == "interleaved" or network_type in _INTERLEAVED_NETWORK_TYPES:
+            kwargs["own_hand_size"] = len(st.own_hand)
+            kwargs["opp_hand_size"] = st.opponent_card_count
+            encoding = encode_infoset_eppbs_interleaved(**kwargs)
+        else:
+            encoding = encode_infoset_eppbs(**kwargs)
+
+        # Truncate to network input_dim for backward compat (200→224 migration)
+        expected_dim = getattr(self, "_net_input_dim", len(encoding))
+        if len(encoding) > expected_dim:
+            encoding = encoding[:expected_dim]
+        return encoding
 
     def _create_observation(
         self,
@@ -503,8 +534,9 @@ class DeepCFRAgentWrapper(NeuralAgentWrapper):
         config: Config,
         checkpoint_path: str,
         device: str = "cpu",
+        use_argmax: bool = False,
     ):
-        super().__init__(player_id, config, device=device)
+        super().__init__(player_id, config, device=device, use_argmax=use_argmax)
         from src.networks import AdvantageNetwork, get_strategy_from_advantages, build_advantage_network
         from src.encoding import INPUT_DIM, NUM_ACTIONS
 
@@ -523,10 +555,18 @@ class DeepCFRAgentWrapper(NeuralAgentWrapper):
         hidden_dim = dcfr_config.get("hidden_dim", 256)
         num_hidden_layers = dcfr_config.get("num_hidden_layers", 2)
         use_residual = dcfr_config.get("use_residual", False)
+        network_type = dcfr_config.get("network_type", "residual")
         self._encoding_mode = dcfr_config.get("encoding_mode", "legacy")
+        self._encoding_layout = dcfr_config.get("encoding_layout", "auto")
+        self._network_type = network_type
 
         from src.constants import EP_PBS_INPUT_DIM
-        net_input_dim = EP_PBS_INPUT_DIM if self._encoding_mode == "ep_pbs" else INPUT_DIM
+        # Use checkpoint's input_dim if available (handles 200→224 migration)
+        net_input_dim = dcfr_config.get(
+            "input_dim",
+            EP_PBS_INPUT_DIM if self._encoding_mode == "ep_pbs" else INPUT_DIM,
+        )
+        self._net_input_dim = net_input_dim
 
         self.advantage_net = build_advantage_network(
             input_dim=net_input_dim,
@@ -536,6 +576,7 @@ class DeepCFRAgentWrapper(NeuralAgentWrapper):
             validate_inputs=False,
             num_hidden_layers=num_hidden_layers,
             use_residual=use_residual,
+            network_type=network_type,
         )
         self.advantage_net.load_state_dict(checkpoint["advantage_net_state_dict"])
         self.advantage_net.to(self.device)
@@ -591,7 +632,10 @@ class DeepCFRAgentWrapper(NeuralAgentWrapper):
         else:
             legal_probs = legal_probs / prob_sum
 
-        chosen_local = np.random.choice(len(legal_indices), p=legal_probs)
+        if self._use_argmax:
+            chosen_local = np.argmax(legal_probs)
+        else:
+            chosen_local = np.random.choice(len(legal_indices), p=legal_probs)
         chosen_global_idx = legal_indices[chosen_local]
 
         try:
@@ -605,10 +649,12 @@ class DeepCFRAgentWrapper(NeuralAgentWrapper):
 
 class ESCHERAgentWrapper(NeuralAgentWrapper):
     """
-    Wraps a trained ESCHER StrategyNetwork for use in evaluation.
+    Wraps a trained ESCHER network for use in evaluation.
 
-    Loads a .pt checkpoint, reconstructs the StrategyNetwork, and samples
-    actions directly from the strategy probabilities (no regret matching).
+    Supports two checkpoint formats:
+    - New format (SD-CFR + ESCHER): loads AdvantageNetwork (advantage_net_state_dict),
+      uses get_strategy_from_advantages() for action selection. Supports EP-PBS encoding.
+    - Legacy format: loads StrategyNetwork (strategy_net_state_dict) for backward compat.
     """
 
     def __init__(
@@ -617,9 +663,9 @@ class ESCHERAgentWrapper(NeuralAgentWrapper):
         config,
         checkpoint_path: str,
         device: str = "cpu",
+        use_argmax: bool = False,
     ):
-        super().__init__(player_id, config, device=device)
-        from src.networks import StrategyNetwork
+        super().__init__(player_id, config, device=device, use_argmax=use_argmax)
         from src.encoding import INPUT_DIM, NUM_ACTIONS
 
         self._INPUT_DIM = INPUT_DIM
@@ -633,16 +679,53 @@ class ESCHERAgentWrapper(NeuralAgentWrapper):
         self._load_cambia_rules_mismatch_check(checkpoint, config, player_id)
 
         hidden_dim = dcfr_config.get("hidden_dim", 256)
+        num_hidden_layers = dcfr_config.get("num_hidden_layers", 3)
+        use_residual = dcfr_config.get("use_residual", True)
+        network_type = dcfr_config.get("network_type", "residual")
+        self._encoding_mode = dcfr_config.get("encoding_mode", "legacy")
+        self._encoding_layout = dcfr_config.get("encoding_layout", "auto")
+        self._network_type = network_type
 
-        self.policy_net = StrategyNetwork(
-            input_dim=INPUT_DIM,
-            hidden_dim=hidden_dim,
-            output_dim=NUM_ACTIONS,
-            validate_inputs=False,
+        from src.constants import EP_PBS_INPUT_DIM
+        # Use checkpoint's input_dim if available (handles 200→224 migration)
+        net_input_dim = dcfr_config.get(
+            "input_dim",
+            EP_PBS_INPUT_DIM if self._encoding_mode == "ep_pbs" else INPUT_DIM,
         )
-        self.policy_net.load_state_dict(checkpoint["strategy_net_state_dict"])
-        self.policy_net.to(self.device)
-        self.policy_net.eval()
+        self._net_input_dim = net_input_dim
+
+        if "advantage_net_state_dict" in checkpoint:
+            # New format: AdvantageNetwork + regret matching (SD-CFR ESCHER)
+            from src.networks import build_advantage_network, get_strategy_from_advantages
+            self._get_strategy_from_advantages = get_strategy_from_advantages
+            self.advantage_net = build_advantage_network(
+                input_dim=net_input_dim,
+                hidden_dim=hidden_dim,
+                output_dim=NUM_ACTIONS,
+                dropout=0.1,
+                validate_inputs=False,
+                num_hidden_layers=num_hidden_layers,
+                use_residual=use_residual,
+                network_type=network_type,
+            )
+            self.advantage_net.load_state_dict(checkpoint["advantage_net_state_dict"])
+            self.advantage_net.to(self.device)
+            self.advantage_net.eval()
+            self.policy_net = None
+        else:
+            # Legacy format: StrategyNetwork (backward compat for old checkpoints)
+            from src.networks import StrategyNetwork
+            self.advantage_net = None
+            self._get_strategy_from_advantages = None
+            self.policy_net = StrategyNetwork(
+                input_dim=INPUT_DIM,
+                hidden_dim=hidden_dim,
+                output_dim=NUM_ACTIONS,
+                validate_inputs=False,
+            )
+            self.policy_net.load_state_dict(checkpoint["strategy_net_state_dict"])
+            self.policy_net.to(self.device)
+            self.policy_net.eval()
 
         logger.info(
             "ESCHERAgent P%d loaded checkpoint (step=%s, traversals=%s)",
@@ -654,7 +737,7 @@ class ESCHERAgentWrapper(NeuralAgentWrapper):
     def choose_action(
         self, game_state, legal_actions: Set[GameAction]
     ) -> GameAction:
-        """Choose an action using the StrategyNetwork probabilities."""
+        """Choose an action using regret matching (new) or direct policy probabilities (legacy)."""
         from src.encoding import encode_infoset, encode_action_mask, index_to_action
         from src.cfr.exceptions import ActionEncodingError
 
@@ -665,7 +748,10 @@ class ESCHERAgentWrapper(NeuralAgentWrapper):
         decision_context = self._get_decision_context(game_state)
 
         try:
-            features = encode_infoset(self.agent_state, decision_context)
+            if self._encoding_mode == "ep_pbs":
+                features = self._encode_eppbs(decision_context)
+            else:
+                features = encode_infoset(self.agent_state, decision_context)
             action_mask = encode_action_mask(legal_list)
         except Exception as e:  # JUSTIFIED: evaluation resilience
             logger.error("ESCHERAgent P%d encoding error: %s", self.player_id, e)
@@ -675,21 +761,31 @@ class ESCHERAgentWrapper(NeuralAgentWrapper):
         with torch.inference_mode():
             feat_t = torch.from_numpy(features).unsqueeze(0).to(self.device)
             mask_t = torch.from_numpy(action_mask).unsqueeze(0).to(self.device)
-            probs = self.policy_net(feat_t, mask_t)
-            probs_np = probs.squeeze(0).cpu().numpy()
+            if self.advantage_net is not None:
+                # New format: advantages → regret matching → strategy
+                advantages = self.advantage_net(feat_t, mask_t)
+                strategy = self._get_strategy_from_advantages(advantages, mask_t)
+                probs = strategy.squeeze(0).cpu().numpy()
+            else:
+                # Legacy format: direct strategy probabilities
+                probs = self.policy_net(feat_t, mask_t)
+                probs = probs.squeeze(0).cpu().numpy()
 
         legal_indices = np.where(action_mask)[0]
         if len(legal_indices) == 0:
             return random.choice(legal_list)
 
-        legal_probs = probs_np[legal_indices]
+        legal_probs = probs[legal_indices]
         prob_sum = legal_probs.sum()
         if prob_sum <= 0:
             legal_probs = np.ones(len(legal_indices)) / len(legal_indices)
         else:
             legal_probs = legal_probs / prob_sum
 
-        chosen_local = np.random.choice(len(legal_indices), p=legal_probs)
+        if self._use_argmax:
+            chosen_local = np.argmax(legal_probs)
+        else:
+            chosen_local = np.random.choice(len(legal_indices), p=legal_probs)
         chosen_global_idx = legal_indices[chosen_local]
 
         try:
@@ -879,8 +975,9 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
         checkpoint_path: str,
         device: str = "cpu",
         use_ema: bool = True,
+        use_argmax: bool = False,
     ):
-        super().__init__(player_id, config, device=device)
+        super().__init__(player_id, config, device=device, use_argmax=use_argmax)
         from src.networks import build_advantage_network, get_strategy_from_advantages
         from src.encoding import INPUT_DIM, NUM_ACTIONS
 
@@ -897,11 +994,19 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
         hidden_dim = dcfr_config.get("hidden_dim", 256)
         num_hidden_layers = dcfr_config.get("num_hidden_layers", 3)
         use_residual = dcfr_config.get("use_residual", True)
+        network_type = dcfr_config.get("network_type", "residual")
         self._weighting = dcfr_config.get("sd_cfr_snapshot_weighting", "linear")
         self._encoding_mode = dcfr_config.get("encoding_mode", "legacy")
+        self._encoding_layout = dcfr_config.get("encoding_layout", "auto")
+        self._network_type = network_type
 
         from src.constants import EP_PBS_INPUT_DIM
-        net_input_dim = EP_PBS_INPUT_DIM if self._encoding_mode == "ep_pbs" else INPUT_DIM
+        # Use checkpoint's input_dim if available (handles 200→224 migration)
+        net_input_dim = dcfr_config.get(
+            "input_dim",
+            EP_PBS_INPUT_DIM if self._encoding_mode == "ep_pbs" else INPUT_DIM,
+        )
+        self._net_input_dim = net_input_dim
 
         base_path = os.path.splitext(checkpoint_path)[0]
 
@@ -919,6 +1024,7 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
                 validate_inputs=False,
                 num_hidden_layers=num_hidden_layers,
                 use_residual=use_residual,
+                network_type=network_type,
             )
             ema_state = {k: v for k, v in ema_data["ema_state_dict"].items()}
             ema_net.load_state_dict(ema_state)
@@ -935,6 +1041,14 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
             self._ema_net = None
             # Fall back to full snapshot averaging
             sd_snapshots_path = checkpoint.get("sd_snapshots_path", f"{base_path}_sd_snapshots.pt")
+            if not os.path.exists(sd_snapshots_path):
+                # Fall back to sibling file (handles moved run directories)
+                sd_snapshots_path = f"{base_path}_sd_snapshots.pt"
+            if not os.path.exists(sd_snapshots_path):
+                # Try stripping _iter_NNN suffix (snapshot file is shared)
+                import re
+                canon = re.sub(r"_iter_\d+$", "", base_path)
+                sd_snapshots_path = f"{canon}_sd_snapshots.pt"
             if not os.path.exists(sd_snapshots_path):
                 raise FileNotFoundError(f"SD-CFR snapshots not found: {sd_snapshots_path}")
 
@@ -963,6 +1077,7 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
                     validate_inputs=False,
                     num_hidden_layers=num_hidden_layers,
                     use_residual=use_residual,
+                    network_type=network_type,
                 )
                 # snap_weights are already tensors from torch.load
                 net.load_state_dict(snap_weights)
@@ -1041,13 +1156,173 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
         else:
             legal_probs = legal_probs / prob_sum
 
-        chosen_local = np.random.choice(len(legal_indices), p=legal_probs)
+        if self._use_argmax:
+            chosen_local = np.argmax(legal_probs)
+        else:
+            chosen_local = np.random.choice(len(legal_indices), p=legal_probs)
         chosen_global_idx = legal_indices[chosen_local]
 
         try:
             return index_to_action(int(chosen_global_idx), legal_list)
         except ActionEncodingError:
             return random.choice(legal_list)
+
+
+# --- PPO Agent Wrapper ---
+
+
+class PPOAgentWrapper(BaseAgent):
+    """Wraps a trained SB3 MaskablePPO model for evaluation."""
+
+    def __init__(self, player_id: int, config, model_path: str, device: str = "cpu"):
+        super().__init__(player_id, config)
+        try:
+            from sb3_contrib import MaskablePPO
+        except ImportError:
+            raise ImportError(
+                "sb3-contrib required for PPO agent. "
+                "Install with: pip install -e '.[rl]'"
+            )
+        self._model = MaskablePPO.load(model_path, device=device)
+        self._agent_state: Optional[AgentState] = None
+
+    def initialize_state(self, initial_game_state):
+        """Initialize internal AgentState."""
+        initial_hand = initial_game_state.players[self.player_id].hand
+        initial_peeks = initial_game_state.players[self.player_id].initial_peek_indices
+        self._agent_state = AgentState(
+            player_id=self.player_id,
+            opponent_id=self.opponent_id,
+            memory_level=self.config.agent_params.memory_level,
+            time_decay_turns=self.config.agent_params.time_decay_turns,
+            initial_hand_size=len(initial_hand),
+            config=self.config,
+        )
+        initial_obs = AgentObservation(
+            acting_player=-1,
+            action=None,
+            discard_top_card=initial_game_state.get_discard_top(),
+            player_hand_sizes=[
+                initial_game_state.get_player_card_count(i)
+                for i in range(NUM_PLAYERS)
+            ],
+            stockpile_size=initial_game_state.get_stockpile_size(),
+            drawn_card=None,
+            peeked_cards=None,
+            snap_results=list(initial_game_state.snap_results_log),
+            did_cambia_get_called=initial_game_state.cambia_caller_id is not None,
+            who_called_cambia=initial_game_state.cambia_caller_id,
+            is_game_over=initial_game_state.is_terminal(),
+            current_turn=initial_game_state.get_turn_number(),
+        )
+        self._agent_state.initialize(initial_obs, initial_hand, initial_peeks)
+
+    def update_state(self, observation: AgentObservation):
+        """Update internal state based on observation."""
+        if not self._agent_state:
+            return
+        filtered = copy.copy(observation)
+        filtered.drawn_card = None
+        filtered.peeked_cards = None
+        try:
+            self._agent_state.update(filtered)
+        except Exception as e:
+            logger.error("PPOAgent P%d state update error: %s", self.player_id, e)
+
+    def choose_action(self, game_state, legal_actions) -> GameAction:
+        """Choose action using the trained PPO model."""
+        from src.encoding import (
+            encode_infoset_eppbs_interleaved,
+            encode_action_mask,
+            index_to_action,
+        )
+        from src.constants import (
+            DecisionContext,
+            ActionDiscard,
+            ActionAbilityPeekOwnSelect,
+            ActionAbilityPeekOtherSelect,
+            ActionAbilityBlindSwapSelect,
+            ActionAbilityKingLookSelect,
+            ActionAbilityKingSwapDecision,
+            ActionSnapOpponentMove,
+        )
+
+        if not self._agent_state:
+            import random as _random
+
+            return _random.choice(list(legal_actions))
+
+        # Decision context
+        if game_state.snap_phase_active:
+            ctx = DecisionContext.SNAP_DECISION
+        elif game_state.pending_action:
+            p = game_state.pending_action
+            if isinstance(p, ActionDiscard):
+                ctx = DecisionContext.POST_DRAW
+            elif isinstance(
+                p,
+                (
+                    ActionAbilityPeekOwnSelect,
+                    ActionAbilityPeekOtherSelect,
+                    ActionAbilityBlindSwapSelect,
+                    ActionAbilityKingLookSelect,
+                    ActionAbilityKingSwapDecision,
+                ),
+            ):
+                ctx = DecisionContext.ABILITY_SELECT
+            elif isinstance(p, ActionSnapOpponentMove):
+                ctx = DecisionContext.SNAP_MOVE
+            else:
+                ctx = DecisionContext.START_TURN
+        else:
+            ctx = DecisionContext.START_TURN
+
+        st = self._agent_state
+        if st.cambia_caller is None:
+            cambia_state = 2
+        elif st.cambia_caller == self.player_id:
+            cambia_state = 0
+        else:
+            cambia_state = 1
+
+        obs = encode_infoset_eppbs_interleaved(
+            slot_tags=[t.value if hasattr(t, "value") else int(t) for t in st.slot_tags],
+            slot_buckets=[int(b) for b in st.slot_buckets],
+            discard_top_bucket=(
+                st.known_discard_top_bucket.value
+                if hasattr(st.known_discard_top_bucket, "value")
+                else int(st.known_discard_top_bucket)
+            ),
+            stock_estimate=(
+                st.stockpile_estimate.value
+                if hasattr(st.stockpile_estimate, "value")
+                else int(st.stockpile_estimate)
+            ),
+            game_phase=(
+                st.game_phase.value
+                if hasattr(st.game_phase, "value")
+                else int(st.game_phase)
+            ),
+            decision_context=ctx.value,
+            cambia_state=cambia_state,
+            own_hand_size=len(st.own_hand),
+            opp_hand_size=st.opponent_card_count,
+        )
+
+        mask = encode_action_mask(list(legal_actions))
+        import numpy as np
+
+        action_idx, _ = self._model.predict(
+            np.array(obs, dtype=np.float32),
+            action_masks=mask,
+            deterministic=True,
+        )
+        try:
+            return index_to_action(int(action_idx), list(legal_actions))
+        except (ValueError, IndexError):
+            import random as _random
+
+            return _random.choice(list(legal_actions))
 
 
 # --- N-Player Agent Wrapper ---
@@ -1069,9 +1344,10 @@ class NPlayerAgentWrapper(NeuralAgentWrapper):
         device: str = "cpu",
         num_players: int = 2,
         qre_lambda: float = 0.05,
+        use_argmax: bool = False,
         **kwargs,
     ):
-        super().__init__(player_id, config, device=device)
+        super().__init__(player_id, config, device=device, use_argmax=use_argmax)
         from src.networks import build_advantage_network
         from src.constants import N_PLAYER_INPUT_DIM, N_PLAYER_NUM_ACTIONS
 
@@ -1091,6 +1367,7 @@ class NPlayerAgentWrapper(NeuralAgentWrapper):
             hidden_dim = dcfr_config.get("hidden_dim", 256)
             num_hidden_layers = dcfr_config.get("num_hidden_layers", 3)
             use_residual = dcfr_config.get("use_residual", True)
+            network_type = dcfr_config.get("network_type", "residual")
 
             self.advantage_net = build_advantage_network(
                 input_dim=N_PLAYER_INPUT_DIM,
@@ -1100,6 +1377,7 @@ class NPlayerAgentWrapper(NeuralAgentWrapper):
                 validate_inputs=False,
                 num_hidden_layers=num_hidden_layers,
                 use_residual=use_residual,
+                network_type=network_type,
             )
             self.advantage_net.load_state_dict(checkpoint["advantage_net_state_dict"])
             self.advantage_net.to(self.device)
@@ -1185,7 +1463,10 @@ class NPlayerAgentWrapper(NeuralAgentWrapper):
         else:
             legal_probs = legal_probs / prob_sum
 
-        chosen_local = np.random.choice(len(legal_indices), p=legal_probs)
+        if self._use_argmax:
+            chosen_local = np.argmax(legal_probs)
+        else:
+            chosen_local = np.random.choice(len(legal_indices), p=legal_probs)
         chosen_global_idx = legal_indices[chosen_local]
 
         try:
@@ -1193,6 +1474,45 @@ class NPlayerAgentWrapper(NeuralAgentWrapper):
         except (ActionEncodingError, Exception):
             return random.choice(legal_list)
 
+
+class MixedOpponentAgent(BaseAgent):
+    """Agent that delegates to one of two sub-agents per action, sampled by weight.
+
+    Used for H3 diagnostic: simulates the bugged opponent that played
+    epsilon-random (e.g. 0.6 * random + 0.4 * baseline).
+    """
+
+    def __init__(
+        self,
+        player_id: int,
+        config: Config,
+        agent_a: BaseAgent,
+        agent_b: BaseAgent,
+        weight_a: float = 0.6,
+    ):
+        super().__init__(player_id, config)
+        self.agent_a = agent_a
+        self.agent_b = agent_b
+        self.weight_a = weight_a
+
+    def choose_action(
+        self, game_state: CambiaGameState, legal_actions: Set[GameAction]
+    ) -> GameAction:
+        if random.random() < self.weight_a:
+            return self.agent_a.choose_action(game_state, legal_actions)
+        return self.agent_b.choose_action(game_state, legal_actions)
+
+
+# --- Constants ---
+
+# Canonical mean_imp baseline set. Import this from all scripts that compute mean_imp.
+MEAN_IMP_BASELINES: tuple[str, ...] = (
+    "random_no_cambia",
+    "random_late_cambia",
+    "imperfect_greedy",
+    "memory_heuristic",
+    "aggressive_snap",
+)
 
 # --- Agent Factory ---
 
@@ -1206,6 +1526,7 @@ AGENT_REGISTRY: Dict[str, Type[BaseAgent]] = {
     "deep_cfr": DeepCFRAgentWrapper,
     "escher": ESCHERAgentWrapper,
     "sd_cfr": SDCFRAgentWrapper,
+    "ppo": PPOAgentWrapper,
     "nplayer": NPlayerAgentWrapper,
     "random_no_cambia": RandomNoCambiaAgent,
     "random_late_cambia": RandomLateCambiaAgent,
@@ -1233,7 +1554,14 @@ def get_agent(agent_type: str, player_id: int, config, **kwargs) -> BaseAgent:
                 f"{agent_class.__name__} requires 'checkpoint_path'."
             )
         device = kwargs.get("device", "cpu")
-        return agent_class(player_id, config, checkpoint_path, device=device)
+        use_argmax = kwargs.get("use_argmax", False)
+        return agent_class(player_id, config, checkpoint_path, device=device, use_argmax=use_argmax)
+    elif agent_type.lower() == "ppo":
+        model_path = kwargs.get("model_path") or kwargs.get("checkpoint_path")
+        if not model_path:
+            raise ValueError("PPOAgentWrapper requires 'model_path' or 'checkpoint_path'.")
+        device = kwargs.get("device", "cpu")
+        return PPOAgentWrapper(player_id, config, model_path, device=device)
     else:
         # Pass config to baseline agents as well
         return agent_class(player_id, config)
@@ -1251,6 +1579,7 @@ def run_evaluation(
     checkpoint_path: Optional[str] = None,
     device: str = "cpu",
     output_path: Optional[str] = None,
+    use_argmax: bool = False,
 ) -> Counter:
     """Runs head-to-head evaluation between two agents. Returns results Counter."""
     logger.info("--- Starting Agent Evaluation ---")
@@ -1263,7 +1592,7 @@ def run_evaluation(
             logger.error("Strategy file path (--strategy) required for CFR agent.")
             sys.exit(1)
         logger.info("CFR Strategy File: %s", strategy_path)
-    _checkpoint_agent_types = {"deep_cfr", "escher", "sd_cfr", "nplayer"}
+    _checkpoint_agent_types = {"deep_cfr", "escher", "sd_cfr", "nplayer", "ppo"}
     if agent1_type.lower() in _checkpoint_agent_types or agent2_type.lower() in _checkpoint_agent_types:
         if not checkpoint_path:
             logger.error("Checkpoint path (--checkpoint) required for %s agent.", agent1_type)
@@ -1299,11 +1628,11 @@ def run_evaluation(
         if agent1_type.lower() == "cfr":
             agent1_kwargs = {"average_strategy": average_strategy}
         elif agent1_type.lower() in _checkpoint_agent_types:
-            agent1_kwargs = {"checkpoint_path": checkpoint_path, "device": device}
+            agent1_kwargs = {"checkpoint_path": checkpoint_path, "device": device, "use_argmax": use_argmax}
         if agent2_type.lower() == "cfr":
             agent2_kwargs = {"average_strategy": average_strategy}
         elif agent2_type.lower() in _checkpoint_agent_types:
-            agent2_kwargs = {"checkpoint_path": checkpoint_path, "device": device}
+            agent2_kwargs = {"checkpoint_path": checkpoint_path, "device": device, "use_argmax": use_argmax}
         agent1 = get_agent(agent1_type, player_id=0, config=config, **agent1_kwargs)
         agent2 = get_agent(agent2_type, player_id=1, config=config, **agent2_kwargs)
         agents = [agent1, agent2]
@@ -1318,6 +1647,7 @@ def run_evaluation(
     # Per-game tracking for enhanced stats
     score_margins: List[float] = []
     game_turns_list: List[int] = []
+    t1_cambia_count = 0
 
     output_file = None
     if output_path is not None:
@@ -1377,6 +1707,10 @@ def run_evaluation(
 
                         # Choose action
                         chosen_action = current_agent.choose_action(game_state, legal_actions)
+
+                        # Track T1 Cambia calls by P0 (neural agent)
+                        if turn == 1 and acting_player_id == 0 and type(chosen_action).__name__ == "ActionCallCambia":
+                            t1_cambia_count += 1
 
                         # Collect action record if logging
                         if output_file is not None:
@@ -1563,6 +1897,7 @@ def run_evaluation(
         std_turns = math.sqrt(variance)
         enhanced_stats["avg_game_turns"] = avg_turns
         enhanced_stats["std_game_turns"] = std_turns
+    enhanced_stats["t1_cambia_rate"] = t1_cambia_count / num_games if num_games > 0 else 0.0
     # Attach as attribute so CLI and tests can access enhanced stats without
     # polluting the Counter sum that existing tests rely on.
     results.stats = enhanced_stats  # type: ignore[attr-defined]
@@ -1613,6 +1948,7 @@ def run_evaluation_multi_baseline(
     baselines: List[str],
     device: str = "cpu",
     output_dir: Optional[str] = None,
+    use_argmax: bool = False,
 ) -> Dict[str, Counter]:
     """
     Evaluate a Deep CFR checkpoint against multiple baseline agents.
@@ -1624,6 +1960,7 @@ def run_evaluation_multi_baseline(
         baselines: List of baseline agent type strings.
         device: Torch device string for network inference.
         output_dir: If set, writes per-game JSONL to {output_dir}/{baseline}.jsonl.
+        use_argmax: If True, use argmax instead of stochastic sampling for action selection.
 
     Returns:
         Dict mapping baseline name -> Counter with results.
@@ -1641,6 +1978,7 @@ def run_evaluation_multi_baseline(
             checkpoint_path=checkpoint_path,
             device=device,
             output_path=output_path,
+            use_argmax=use_argmax,
         )
         all_results[baseline] = results
     return all_results

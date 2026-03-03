@@ -44,25 +44,22 @@ def make_test_config(
     """
     config = SimpleNamespace()
 
-    # deep_cfr sub-config
-    config.deep_cfr = SimpleNamespace()
-    config.deep_cfr.es_validation_interval = interval
-    config.deep_cfr.es_validation_depth = depth
-    config.deep_cfr.es_validation_traversals = traversals
-    config.deep_cfr.engine_backend = backend
-    config.deep_cfr.hidden_dim = 256
-    config.deep_cfr.dropout = 0.1
-    config.deep_cfr.learning_rate = 1e-3
-    config.deep_cfr.batch_size = 2048
-    config.deep_cfr.train_steps_per_iteration = 100
-    config.deep_cfr.alpha = 1.5
-    config.deep_cfr.traversals_per_step = 10
-    config.deep_cfr.advantage_buffer_capacity = 10_000
-    config.deep_cfr.strategy_buffer_capacity = 10_000
-    config.deep_cfr.save_interval = 0
-    config.deep_cfr.device = "cpu"
-    config.deep_cfr.sampling_method = "external"
-    config.deep_cfr.exploration_epsilon = 0.6
+    # deep_cfr sub-config — use real Pydantic model with test overrides
+    from src.config import DeepCfrConfig
+
+    config.deep_cfr = DeepCfrConfig(
+        es_validation_interval=interval,
+        es_validation_depth=depth,
+        es_validation_traversals=traversals,
+        engine_backend=backend,
+        train_steps_per_iteration=100,
+        traversals_per_step=10,
+        advantage_buffer_capacity=10_000,
+        strategy_buffer_capacity=10_000,
+        save_interval=0,
+        device="cpu",
+        sampling_method="external",
+    )
 
     # system sub-config
     config.system = SimpleNamespace()

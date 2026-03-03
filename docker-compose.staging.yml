@@ -1,0 +1,78 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: cambia-postgres
+    environment:
+      POSTGRES_USER: cambia
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: cambia
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./service/migrations:/docker-entrypoint-initdb.d:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cambia"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: cambia-redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  service:
+    build:
+      context: .
+      dockerfile: service/Dockerfile
+    container_name: cambia-service
+    environment:
+      PORT: "8080"
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      PG_DATABASE: cambia
+      POSTGRES_USER: cambia
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      REDIS_ADDR: redis:6379
+      DATA_DIR: /app/data
+    volumes:
+      - service_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build:
+      context: web/
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ""
+        VITE_WS_URL: ""
+    container_name: cambia-web
+    environment:
+      STAGING_DOMAIN: ${STAGING_DOMAIN:?STAGING_DOMAIN must be set}
+      NGINX_ENVSUBST_FILTER: STAGING_DOMAIN
+    volumes:
+      - ./nginx/${NGINX_CONF:-nginx.conf}:/etc/nginx/templates/default.conf.template:ro
+      - letsencrypt:/etc/letsencrypt:ro
+      - certbot_webroot:/var/www/certbot:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - service
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  service_data:
+  letsencrypt:
+  certbot_webroot:

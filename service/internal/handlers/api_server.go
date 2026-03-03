@@ -6,100 +6,187 @@ import (
 	"log"
 	"sync"
 
+	engine "github.com/jason-s-yu/cambia/engine"
 	"github.com/google/uuid"
 	"github.com/jason-s-yu/cambia/service/internal/game"
+	"github.com/jason-s-yu/cambia/service/internal/hub"
 	"github.com/jason-s-yu/cambia/service/internal/lobby"
+	"github.com/jason-s-yu/cambia/service/internal/matchmaking"
 	"github.com/jason-s-yu/cambia/service/internal/models"
 )
 
 // GameServer manages the central stores for active lobbies and games.
-// It provides methods for creating game instances from lobbies.
 type GameServer struct {
-	Mutex      sync.Mutex // Protects access to the stores themselves if needed (currently stores handle internal locking).
-	LobbyStore *lobby.LobbyStore
-	GameStore  *game.GameStore
+	Mutex        sync.Mutex
+	LobbyStore   *lobby.LobbyStore
+	GameStore    *game.GameStore
+	CircuitStore *game.CircuitStore
+	HubStore     *hub.HubStore
+	Matchmaker   *matchmaking.Matchmaker
 }
 
 // NewGameServer initializes a new GameServer with empty, ephemeral stores.
 func NewGameServer() *GameServer {
 	return &GameServer{
-		LobbyStore: lobby.NewLobbyStore(),
-		GameStore:  game.NewGameStore(),
+		LobbyStore:   lobby.NewLobbyStore(),
+		GameStore:    game.NewGameStore(),
+		CircuitStore: game.NewCircuitStore(),
+		HubStore:     hub.NewHubStore(),
+		Matchmaker:   matchmaking.NewMatchmaker(),
 	}
 }
 
-// NewCambiaGameFromLobby creates a new Cambia game instance based on the state of a lobby.
-// It gathers participant IDs, copies lobby rules, sets up game end callbacks,
-// adds the game to the store, and starts the pre-game phase.
-// This function assumes the lobby lock is HELD by the caller or that lobby state is immutable during this call.
-// It's now recommended to use CreateGameInstance which avoids passing the locked lobby object directly.
+// NewCambiaGameFromLobby creates a game instance from a Lobby's current state.
+// Prefer CreateGameInstance for new code; this is kept for backward compatibility.
 func (gs *GameServer) NewCambiaGameFromLobby(ctx context.Context, lob *lobby.Lobby) *game.CambiaGame {
-	lob.Mu.Lock() // Lock lobby to safely read initial state.
-	g := game.NewCambiaGame()
-	g.LobbyID = lob.ID
-	g.HouseRules = lob.HouseRules // Copy rules from lobby.
-	g.Circuit = lob.Circuit       // Copy circuit settings.
+	playerIDs := lob.JoinedUsers() // acquires lock internally
 
-	// Gather participants from the lobby's connections map.
 	var players []*models.Player
-	for userID, conn := range lob.Connections {
-		// Need user details potentially? Fetch username from connection.
+	for _, uid := range playerIDs {
 		players = append(players, &models.Player{
-			ID:        userID,
-			Connected: true, // Assume connected at game start.
+			ID:        uid,
+			Connected: true,
 			Hand:      []*models.Card{},
-			User:      &models.User{ID: userID, Username: conn.Username}, // Use username stored in LobbyConnection.
+			User:      &models.User{ID: uid},
 		})
 	}
+
+	lob.Mu.Lock()
+	g := game.NewCambiaGame()
+	g.LobbyID = lob.ID
+	g.HouseRules = lob.HouseRules
+	g.Circuit = lob.Circuit
 	g.Players = players
-	lobbyID := lob.ID // Capture lobby ID before unlocking.
-	lob.Mu.Unlock()   // Unlock lobby after reading state.
+	lobbyID := lob.ID
+	lob.Mu.Unlock()
 
-	// Attach OnGameEnd callback function.
-	// This callback handles transitioning the lobby back from in-game state
-	// and broadcasting results when the game concludes.
-	g.OnGameEnd = func(endedLobbyID uuid.UUID, winner uuid.UUID, scores map[uuid.UUID]int) {
-		log.Printf("Game %s ended. OnGameEnd callback executing for lobby %s.", g.ID, endedLobbyID)
-		lobInstance, exists := gs.LobbyStore.GetLobby(endedLobbyID)
-		if !exists {
-			log.Printf("Error in OnGameEnd: Lobby %s not found in store.", endedLobbyID)
-			gs.GameStore.DeleteGame(g.ID) // Clean up game if lobby is gone.
-			return
-		}
-
-		lobInstance.Mu.Lock() // Lock lobby before modifying its state.
-		lobInstance.InGame = false
-		lobInstance.GameID = uuid.Nil // Clear game ID reference.
-
-		// Reset ready states for players still connected.
-		for uid := range lobInstance.Connections {
-			lobInstance.ReadyStates[uid] = false
-		}
-		// Get current lobby status *after* resetting ready states.
-		statusPayload := lobInstance.GetLobbyStatusPayloadUnsafe()
-		lobInstance.Mu.Unlock() // Unlock before broadcasting.
-
-		// Prepare and broadcast results message back to the lobby.
-		log.Printf("Broadcasting game end results to lobby %s", endedLobbyID)
-		resultMsg := map[string]interface{}{
-			"type":         "game_results", // Consider a more specific type?
-			"winner":       winner.String(),
-			"scores":       map[string]int{},
-			"lobby_status": statusPayload, // Include updated lobby status.
-		}
-		for pid, sc := range scores {
-			resultMsg["scores"].(map[string]int)[pid.String()] = sc
-		}
-		lobInstance.BroadcastAll(resultMsg) // BroadcastAll handles its own locking.
-
-		// Clean up the game instance from the store after results are sent.
-		gs.GameStore.DeleteGame(g.ID)
-		log.Printf("Game %s instance removed from store.", g.ID)
-	}
-
-	// Store the newly created game and start its pre-game phase.
+	gs.attachOnGameEnd(g, lobbyID)
 	gs.GameStore.AddGame(g)
 	g.BeginPreGame()
 	log.Printf("Created and started game %s from lobby %s", g.ID, lobbyID)
 	return g
+}
+
+// CreateGameInstance creates a game from pre-extracted parameters.
+// playerIDs lists the UUIDs of all players joining the game.
+func (gs *GameServer) CreateGameInstance(ctx context.Context, lobbyID, hostID uuid.UUID, gameMode string, houseRules game.HouseRules, circuit game.Circuit, playerIDs []uuid.UUID) *game.CambiaGame {
+	g := game.NewCambiaGame()
+	g.LobbyID = lobbyID
+	g.Circuit = circuit
+	if circuit.Enabled {
+		g.HouseRules = houseRules
+		g.HouseRules.AllowDrawFromDiscardPile = true
+		g.HouseRules.AllowReplaceAbilities = true
+		g.HouseRules.ForfeitOnDisconnect = false
+	} else {
+		g.HouseRules = houseRules
+	}
+
+	var players []*models.Player
+	for _, uid := range playerIDs {
+		players = append(players, &models.Player{
+			ID:        uid,
+			Connected: true,
+			Hand:      []*models.Card{},
+		})
+	}
+	if len(players) < 2 {
+		log.Printf("Lobby %s: cannot start game, not enough players (%d).", lobbyID, len(players))
+		return nil
+	}
+	g.Players = players
+
+	if circuit.Enabled && gs.CircuitStore != nil {
+		existingState, _ := gs.CircuitStore.Get(lobbyID)
+		if existingState == nil {
+			pIDs := make([]int, len(playerIDs))
+			playerMap := make(map[uuid.UUID]int)
+			for i, uid := range playerIDs {
+				pIDs[i] = i
+				playerMap[uid] = i
+			}
+			cfg := engine.CircuitConfig{
+				Format:     engine.CircuitFormat(circuit.Mode),
+				NumPlayers: len(playerIDs),
+				PlayerIDs:  pIDs,
+			}
+			circuitState, err := engine.NewCircuit(cfg)
+			if err != nil {
+				log.Printf("Lobby %s: failed to create circuit state: %v", lobbyID, err)
+			} else {
+				gs.CircuitStore.Set(lobbyID, circuitState, playerMap)
+				log.Printf("Lobby %s: circuit state created (%s, %d rounds).", lobbyID, cfg.Format, circuitState.Config.NumRounds)
+			}
+		}
+	}
+
+	gs.attachOnGameEnd(g, lobbyID)
+	gs.GameStore.AddGame(g)
+	g.BeginPreGame()
+	return g
+}
+
+// attachOnGameEnd wires the OnGameEnd callback that resets lobby state and emits results.
+func (gs *GameServer) attachOnGameEnd(g *game.CambiaGame, lobbyID uuid.UUID) {
+	g.OnGameEnd = func(endedLobbyID uuid.UUID, winner uuid.UUID, scores map[uuid.UUID]int) {
+		log.Printf("Game %s ended. OnGameEnd executing for lobby %s.", g.ID, endedLobbyID)
+
+		lobInstance, exists := gs.LobbyStore.GetLobby(endedLobbyID)
+		if !exists {
+			log.Printf("Error in OnGameEnd: Lobby %s not found.", endedLobbyID)
+			gs.GameStore.DeleteGame(g.ID)
+			return
+		}
+
+		lobInstance.Mu.Lock()
+		lobInstance.InGame = false
+		lobInstance.GameID = uuid.Nil
+		for uid := range lobInstance.ReadyStates {
+			lobInstance.ReadyStates[uid] = false
+		}
+		statusPayload := lobInstance.GetLobbyStatusPayloadUnsafe()
+		lobInstance.Mu.Unlock()
+
+		// Emit game results to the hub.
+		h, hasHub := gs.HubStore.GetHub(endedLobbyID)
+		if hasHub {
+			resultMsg := map[string]interface{}{
+				"type":         "game_results",
+				"winner":       winner.String(),
+				"scores":       map[string]int{},
+				"lobby_status": statusPayload,
+			}
+			for pid, sc := range scores {
+				resultMsg["scores"].(map[string]int)[pid.String()] = sc
+			}
+			h.Emit("game_results", resultMsg)
+
+			// Circuit round/completion events.
+			if g.Circuit.Enabled && gs.CircuitStore != nil {
+				circuitState, playerMap := gs.CircuitStore.Get(endedLobbyID)
+				if circuitState != nil && playerMap != nil {
+					engineScores := make(map[int]int)
+					for playerUUID, score := range scores {
+						if engineID, ok := playerMap[playerUUID]; ok {
+							engineScores[engineID] = score
+						}
+					}
+					if err := circuitState.RecordRound(engineScores, -1); err != nil {
+						log.Printf("Circuit round error for lobby %s: %v", endedLobbyID, err)
+					} else if circuitState.IsComplete() {
+						h.Emit("circuit_complete", map[string]interface{}{"standings": circuitState.GetStandings()})
+						gs.CircuitStore.Delete(endedLobbyID)
+					} else {
+						h.Emit("circuit_round", map[string]interface{}{
+							"current_round": circuitState.CurrentRound,
+							"standings":     circuitState.GetStandings(),
+						})
+					}
+				}
+			}
+		}
+
+		gs.GameStore.DeleteGame(g.ID)
+		log.Printf("Game %s removed from store.", g.ID)
+	}
 }

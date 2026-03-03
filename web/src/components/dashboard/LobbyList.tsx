@@ -1,13 +1,16 @@
 // src/components/dashboard/LobbyList.tsx
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useLobbyListStore } from '@/stores/lobbyStore';
-import { Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import ErrorMessage from '@/components/common/ErrorMessage';
 import Button from '../common/Button';
+import { joinLobby } from '@/services/lobbyService';
 
 const LobbyList: React.FC = () => {
 	const { lobbies, isLoading, error, fetchLobbies, clearError } = useLobbyListStore();
+	const navigate = useNavigate();
+	const [joinError, setJoinError] = useState<string | null>(null);
 
 	useEffect(() => {
 		fetchLobbies();
@@ -18,9 +21,20 @@ const LobbyList: React.FC = () => {
 
 	const publicLobbies = Object.values(lobbies).filter(entry => entry.lobby?.type === 'public');
 
+	const handleJoin = async (lobbyId: string) => {
+		setJoinError(null);
+		try {
+			await joinLobby(lobbyId);
+			navigate(`/lobby/${lobbyId}`);
+		} catch (err: any) {
+			setJoinError(err.response?.data?.message || err.message || 'Failed to join lobby.');
+		}
+	};
+
 	return (
 		<div className="bg-white dark:bg-gray-800 shadow rounded-lg p-4 min-h-[10rem]">
 			<ErrorMessage message={error} onClear={clearError} />
+			<ErrorMessage message={joinError} onClear={() => setJoinError(null)} />
 			{isLoading && (
 				<div className="flex justify-center items-center h-40">
 					<LoadingSpinner />
@@ -52,11 +66,9 @@ const LobbyList: React.FC = () => {
 										({playerCount}/{maxPlayers} players)
 									</span>
 								</div>
-								<Link to={`/lobby/${lobby.id}`}>
-									<Button size='sm' variant='secondary' className='shrink-0' disabled={playerCount >= maxPlayers}>
-										{playerCount >= maxPlayers ? 'Full' : 'Join'}
-									</Button>
-								</Link>
+								<Button size='sm' variant='secondary' className='shrink-0' disabled={playerCount >= maxPlayers} onClick={() => handleJoin(lobby.id)}>
+									{playerCount >= maxPlayers ? 'Full' : 'Join'}
+								</Button>
 							</li>
 						);
 					})}

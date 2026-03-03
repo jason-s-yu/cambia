@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"math"
 	"testing"
 )
 
@@ -162,5 +163,106 @@ func TestUtilityNotTerminal(t *testing.T) {
 	u := gs.GetUtility()
 	if u[0] != 0.0 || u[1] != 0.0 {
 		t.Errorf("expected [0, 0] for non-terminal game, got [%f, %f]", u[0], u[1])
+	}
+}
+
+// ---- ComputeAggressionSubsidy tests ----
+
+// TestAggressionSubsidyH2H: 2-player, 1st=-3, 2nd=0.
+func TestAggressionSubsidyH2H(t *testing.T) {
+	subs := ComputeAggressionSubsidy(2, []int{0, 1}, -1)
+	if subs[0] != -3 {
+		t.Errorf("H2H 1st: expected -3, got %d", subs[0])
+	}
+	if subs[1] != 0 {
+		t.Errorf("H2H 2nd: expected 0, got %d", subs[1])
+	}
+}
+
+// TestAggressionSubsidyFFA4: 4-player, 1st=-5, 2nd=-2, 3rd/4th=0.
+func TestAggressionSubsidyFFA4(t *testing.T) {
+	subs := ComputeAggressionSubsidy(4, []int{0, 1, 2, 3}, -1)
+	want := []int{-5, -2, 0, 0}
+	for i, w := range want {
+		if subs[i] != w {
+			t.Errorf("FFA4 place %d: expected %d, got %d", i, w, subs[i])
+		}
+	}
+}
+
+// TestAggressionSubsidy5Plus: 6-player, 1st=-5, 2nd=-2, 3rd=-1, 4th+=0.
+func TestAggressionSubsidy5Plus(t *testing.T) {
+	subs := ComputeAggressionSubsidy(6, []int{0, 1, 2, 3, 4, 5}, -1)
+	want := []int{-5, -2, -1, 0, 0, 0}
+	for i, w := range want {
+		if subs[i] != w {
+			t.Errorf("5+P place %d: expected %d, got %d", i, w, subs[i])
+		}
+	}
+}
+
+// TestAggressionSubsidyCallerWinsTie: tied players at placement 0; Cambia caller (idx=1) gets -3, other gets 0.
+func TestAggressionSubsidyCallerWinsTie(t *testing.T) {
+	// H2H: both at placement 0 (tied), player 1 called Cambia → player 1 gets -3, player 0 gets 0.
+	subs := ComputeAggressionSubsidy(2, []int{0, 0}, 1)
+	if subs[1] != -3 {
+		t.Errorf("Cambia caller (tied 1st): expected -3, got %d", subs[1])
+	}
+	if subs[0] != 0 {
+		t.Errorf("Non-caller (tied 1st): expected 0 (bumped to 2nd bonus), got %d", subs[0])
+	}
+}
+
+// TestAggressionSubsidyTieNoCaller: both tied at placement 0, no Cambia caller → both get 1st bonus.
+func TestAggressionSubsidyTieNoCaller(t *testing.T) {
+	subs := ComputeAggressionSubsidy(2, []int{0, 0}, -1)
+	if subs[0] != -3 || subs[1] != -3 {
+		t.Errorf("Tied no caller: expected both -3, got %d %d", subs[0], subs[1])
+	}
+}
+
+// ---- ComputeScoreDiffOutcome tests ----
+
+// TestScoreDiffOutcomeTieBand: within tie band → 0.5.
+func TestScoreDiffOutcomeTieBand(t *testing.T) {
+	out := ComputeScoreDiffOutcome(10, 12, 0.15, 3)
+	if out != 0.5 {
+		t.Errorf("tie band: expected 0.5, got %f", out)
+	}
+}
+
+// TestScoreDiffOutcomeLogistic: score2 > score1 → player1 wins (s > 0.5).
+func TestScoreDiffOutcomeLogistic(t *testing.T) {
+	// diff=10, k=0.15 → 1/(1+exp(-1.5)) ≈ 0.8176
+	out := ComputeScoreDiffOutcome(10, 20, 0.15, 0)
+	expected := 1.0 / (1.0 + math.Exp(-0.15*10))
+	if math.Abs(out-expected) > 1e-9 {
+		t.Errorf("logistic: expected %f, got %f", expected, out)
+	}
+}
+
+// TestScoreDiffOutcomeSymmetry: swap scores → 1 - result.
+func TestScoreDiffOutcomeSymmetry(t *testing.T) {
+	s1 := ComputeScoreDiffOutcome(5, 20, 0.15, 0)
+	s2 := ComputeScoreDiffOutcome(20, 5, 0.15, 0)
+	if math.Abs(s1+s2-1.0) > 1e-9 {
+		t.Errorf("symmetry: expected s1+s2=1.0, got %f+%f=%f", s1, s2, s1+s2)
+	}
+}
+
+// TestScoreDiffOutcomeBoundaryClamp: large diff clamped to 30.
+func TestScoreDiffOutcomeBoundaryClamp(t *testing.T) {
+	out100 := ComputeScoreDiffOutcome(0, 100, 0.15, 0)
+	out30 := ComputeScoreDiffOutcome(0, 30, 0.15, 0)
+	if math.Abs(out100-out30) > 1e-9 {
+		t.Errorf("clamp: diff=100 should equal diff=30; got %f vs %f", out100, out30)
+	}
+}
+
+// TestScoreDiffOutcomeEqualScores: same scores, tieBand=0 → 0.5.
+func TestScoreDiffOutcomeEqualScores(t *testing.T) {
+	out := ComputeScoreDiffOutcome(7, 7, 0.15, 0)
+	if out != 0.5 {
+		t.Errorf("equal scores: expected 0.5, got %f", out)
 	}
 }

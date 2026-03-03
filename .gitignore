@@ -16,6 +16,7 @@ go.work.sum
 
 # Local dev environment
 .docker/
+certs/
 docs-gen/
 sync-generated.sh
 

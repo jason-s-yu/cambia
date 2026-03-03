@@ -82,6 +82,20 @@ func EnsureEphemeralUser(w http.ResponseWriter, r *http.Request) (uuid.UUID, err
 	return uuidVal, nil
 }
 
+// GuestHandler provisions an ephemeral guest session via REST (no WebSocket required).
+// GET /user/guest — if the caller already has a valid auth_token cookie, returns
+// the existing user; otherwise creates a new ephemeral user and sets the cookie.
+func GuestHandler(w http.ResponseWriter, r *http.Request) {
+	userID, err := EnsureEphemeralUser(w, r)
+	if err != nil {
+		log.Printf("GuestHandler: failed to ensure ephemeral user: %v", err)
+		http.Error(w, "failed to create guest session", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"id": userID.String()})
+}
+
 // ClaimEphemeralHandler handles requests to convert an ephemeral user account
 // into a persistent one by adding email and password.
 // Note: This handler is defined but not currently routed in main.go.
@@ -156,6 +170,18 @@ func ClaimEphemeralHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "Account claimed successfully.") // Simple confirmation message.
+}
+
+// LogoutHandler clears the auth_token cookie, effectively logging the user out.
+func LogoutHandler(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "auth_token",
+		Value:    "",
+		HttpOnly: true,
+		Path:     "/",
+		MaxAge:   -1,
+	})
+	w.WriteHeader(http.StatusOK)
 }
 
 // CreateUserHandler handles new user registration requests.

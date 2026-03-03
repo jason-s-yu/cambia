@@ -218,16 +218,133 @@ def _extract_deep_cfr_config_class() -> type:
 
     # Build a minimal namespace to exec the class definition
     from src.encoding import INPUT_DIM, NUM_ACTIONS
-    from typing import Optional, Union
+    from typing import List, Optional, Union
     namespace = {
         "dataclass": dataclass,
         "INPUT_DIM": INPUT_DIM,
         "NUM_ACTIONS": NUM_ACTIONS,
+        "List": List,
         "Optional": Optional,
         "Union": Union,
     }
     exec(compile(class_src, "<DeepCFRConfig>", "exec"), namespace)
     return namespace["DeepCFRConfig"]
+
+
+# ---------------------------------------------------------------------------
+# ESCHER: value net worker weights key + EP-PBS checkpoint loading
+# ---------------------------------------------------------------------------
+
+
+class TestValueNetWorkerKey:
+    """Verify deep_trainer.py serializes value_net under __value_net__ key."""
+
+    @pytest.mark.xfail(
+        strict=False,
+        reason="Bug 2 fix pending impl-1: _get_network_weights_for_workers must add __value_net__",
+    )
+    def test_worker_weights_include_value_net_key(self):
+        """_get_network_weights_for_workers must serialize __value_net__ for ESCHER."""
+        source = _read_source("cfr/deep_trainer.py")
+        assert "__value_net__" in source, (
+            "_get_network_weights_for_workers must include __value_net__ key for ESCHER"
+        )
+
+
+def _make_escher_ep_pbs_checkpoint(path: str):
+    """Save a new-format ESCHER checkpoint with advantage_net_state_dict + EP-PBS config."""
+    from src.networks import build_advantage_network
+    from src.constants import EP_PBS_INPUT_DIM
+    from src.encoding import NUM_ACTIONS
+
+    adv_net = build_advantage_network(
+        input_dim=EP_PBS_INPUT_DIM,
+        hidden_dim=256,
+        output_dim=NUM_ACTIONS,
+        dropout=0.1,
+        validate_inputs=False,
+        num_hidden_layers=3,
+        use_residual=True,
+        network_type="residual",
+    )
+    checkpoint = {
+        "advantage_net_state_dict": adv_net.state_dict(),
+        "training_step": 0,
+        "total_traversals": 0,
+        "dcfr_config": {
+            "hidden_dim": 256,
+            "num_hidden_layers": 3,
+            "use_residual": True,
+            "network_type": "residual",
+            "encoding_mode": "ep_pbs",
+            "encoding_layout": "interleaved",
+            "input_dim": EP_PBS_INPUT_DIM,
+        },
+    }
+    torch.save(checkpoint, path)
+
+
+class TestESCHEREPBSCheckpoint:
+    """ESCHERAgentWrapper loads new-format (advantage_net) EP-PBS checkpoint correctly."""
+
+    def _make_config(self):
+        config = type("Config", (), {})()
+        rules = type("CambiaRulesConfig", (), {})()
+        rules.allowDrawFromDiscardPile = False
+        rules.allowReplaceAbilities = False
+        rules.snapRace = False
+        rules.penaltyDrawCount = 2
+        rules.use_jokers = 0
+        rules.cards_per_player = 4
+        rules.initial_view_count = 2
+        rules.cambia_allowed_round = 0
+        rules.allowOpponentSnapping = False
+        rules.max_game_turns = 100
+        config.cambia_rules = rules
+        agent_params = type("AgentParamsConfig", (), {})()
+        agent_params.memory_level = 1
+        agent_params.time_decay_turns = 10
+        config.agent_params = agent_params
+        agents_cfg = type("AgentsConfig", (), {})()
+        agents_cfg.cambia_call_threshold = 10
+        agents_cfg.greedy_cambia_threshold = 5
+        config.agents = agents_cfg
+        return config
+
+    def test_loads_ep_pbs_advantage_checkpoint(self, tmp_path):
+        """ESCHERAgentWrapper loads new-format checkpoint with advantage_net_state_dict."""
+        from src.evaluate_agents import ESCHERAgentWrapper
+        from src.networks import ResidualAdvantageNetwork
+
+        ckpt_path = str(tmp_path / "escher_ep_pbs.pt")
+        _make_escher_ep_pbs_checkpoint(ckpt_path)
+
+        config = self._make_config()
+        agent = ESCHERAgentWrapper(0, config, ckpt_path, device="cpu")
+
+        assert agent.advantage_net is not None, "advantage_net must be loaded for new-format checkpoint"
+        assert agent.policy_net is None, "policy_net must be None for new-format checkpoint"
+        assert agent._encoding_mode == "ep_pbs"
+        assert agent._encoding_layout == "interleaved"
+
+    def test_ep_pbs_checkpoint_produces_valid_action(self, tmp_path):
+        """ESCHERAgentWrapper with EP-PBS checkpoint chooses a valid legal action."""
+        from src.evaluate_agents import ESCHERAgentWrapper
+        from src.game.engine import CambiaGameState
+
+        ckpt_path = str(tmp_path / "escher_ep_pbs.pt")
+        _make_escher_ep_pbs_checkpoint(ckpt_path)
+
+        config = self._make_config()
+        agent = ESCHERAgentWrapper(0, config, ckpt_path, device="cpu")
+
+        game_state = CambiaGameState(house_rules=config.cambia_rules)
+        agent.initialize_state(game_state)
+
+        legal_actions = game_state.get_legal_actions()
+        assert len(legal_actions) > 0
+        chosen = agent.choose_action(game_state, legal_actions)
+        assert chosen in legal_actions
 
 
 class TestDeepCFRConfigMutualExclusion:

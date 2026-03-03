@@ -6,7 +6,7 @@ import Button from '../common/Button';
 
 interface LobbySettingsPanelProps {
 	currentSettings: LobbyState;
-	sendMessage: (message: { type: string; rules?: any; }) => void;
+	sendMessage: (message: { type: string; body?: any; }) => void;
 }
 
 function deepEqual(obj1: any, obj2: any): boolean {
@@ -68,7 +68,7 @@ const LobbySettingsPanel: React.FC<LobbySettingsPanelProps> = ({ currentSettings
 		console.log('[LobbySettingsPanel] Sending update_rules message with payload:', rulesPayload);
 		setSaveStatus('saving');
 		try {
-			sendMessage({ type: 'update_rules', rules: rulesPayload });
+			sendMessage({ type: 'update_rules', body: { rules: rulesPayload } });
 			setSaveStatus('saved');
 			setTimeout(() => setSaveStatus('idle'), 2000);
 		} catch (error) {

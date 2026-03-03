@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-from src.networks import AdvantageNetwork, ResidualAdvantageNetwork
+from src.networks import AdvantageNetwork, ResidualAdvantageNetwork, SlotFiLMAdvantageNetwork
 
 # Encoding dimensions per project spec
 LEGACY_INPUT_DIM = 222
@@ -86,6 +86,23 @@ def test_advantage_network_overfit(input_dim: int, label: str):
     )
 
 
+def test_slot_film_overfit_small_batch():
+    """SlotFiLMAdvantageNetwork memorizes polarized regrets (same protocol as other overfit tests)."""
+    features, mask, targets = _make_overfit_data(EPPBS_INPUT_DIM)
+    torch.manual_seed(99)
+    net = SlotFiLMAdvantageNetwork(
+        input_dim=EPPBS_INPUT_DIM,
+        hidden_dim=256,
+        output_dim=NUM_ACTIONS,
+        num_hidden_layers=3,
+        validate_inputs=False,
+    )
+    mse = _train_and_eval(net, features, mask, targets)
+    assert mse < MSE_THRESHOLD, (
+        f"SlotFiLMAdvantageNetwork: MSE={mse:.6f} exceeds threshold {MSE_THRESHOLD}"
+    )
+
+
 @pytest.mark.parametrize(
     "input_dim,label",
     [
@@ -106,4 +123,47 @@ def test_residual_advantage_network_overfit(input_dim: int, label: str):
     mse = _train_and_eval(net, features, mask, targets)
     assert mse < MSE_THRESHOLD, (
         f"ResidualAdvantageNetwork ({label}): MSE={mse:.6f} exceeds threshold {MSE_THRESHOLD}"
+    )
+
+
+def test_history_value_network_mse_decreases():
+    """HistoryValueNetwork MSE decreases on synthetic scalar utility targets."""
+    from src.networks import HistoryValueNetwork
+
+    VALUE_INPUT_DIM = 444  # 2 * INPUT_DIM (legacy)
+    VALUE_TRAIN_STEPS = 200
+    VALUE_LR = 1e-2
+
+    torch.manual_seed(42)
+    features = torch.randn(BATCH_SIZE, VALUE_INPUT_DIM)
+    # Targets: sign of first feature element ±0.8 (bounded scalar, like game utility)
+    targets = (features[:, 0] > 0).float().unsqueeze(1) * 1.6 - 0.8
+
+    torch.manual_seed(99)
+    net = HistoryValueNetwork(
+        input_dim=VALUE_INPUT_DIM,
+        hidden_dim=512,
+        validate_inputs=False,
+    )
+
+    net.eval()
+    with torch.no_grad():
+        initial_loss = F.mse_loss(net(features), targets).item()
+
+    net.train()
+    optimizer = torch.optim.Adam(net.parameters(), lr=VALUE_LR)
+    for _ in range(VALUE_TRAIN_STEPS):
+        optimizer.zero_grad()
+        preds = net(features)
+        loss = F.mse_loss(preds, targets)
+        loss.backward()
+        optimizer.step()
+
+    net.eval()
+    with torch.no_grad():
+        final_loss = F.mse_loss(net(features), targets).item()
+
+    assert final_loss < initial_loss * 0.5, (
+        f"HistoryValueNetwork MSE did not decrease sufficiently: "
+        f"initial={initial_loss:.4f}, final={final_loss:.4f}"
     )
