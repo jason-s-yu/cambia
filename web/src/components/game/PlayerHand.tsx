@@ -1,35 +1,54 @@
 // src/components/game/PlayerHand.tsx
 import React from 'react';
-import type { ObfCard, ClientGameAction } from '@/types/game';
-import Card from './Card'; // Assuming Card component exists
+import { motion, AnimatePresence } from 'framer-motion';
+import Card from './Card';
+import type { ObfCard } from '@/types/game';
 
 interface PlayerHandProps {
 	hand: ObfCard[];
-	sendMessage: (action: ClientGameAction) => void;
-	// Add props for selection handling later
+	selectedIdx: number | null;
+	onCardClick: (card: ObfCard, idx: number) => void;
 }
 
-const PlayerHand: React.FC<PlayerHandProps> = ({ hand }) => {
-	// TODO: Implement card selection logic for replace/snap/special actions
-	// TODO: Add click handlers
-
+const PlayerHand: React.FC<PlayerHandProps> = ({ hand, selectedIdx, onCardClick }) => {
 	return (
-		<div className="flex justify-center items-end space-x-[-20px] p-2 bg-black/20 rounded mb-2">
-			{hand.length === 0 && <div className="text-gray-400 italic h-[100px] flex items-center">Empty Hand</div>}
-			{hand.map((card) => (
-				<div key={card.id} className="transform transition-transform hover:scale-110 hover:-translate-y-2">
-					<Card
-						id={card.id}
-						rank={card.rank}
-						suit={card.suit}
-						faceUp={card.known} // Player always sees their own cards face up
-						className="w-16 h-auto shadow-md" // Adjust size as needed
-						// onClick={() => handleCardClick(card)}
-					/>
-				</div>
-			))}
+		<div className="bg-black/20 rounded-lg p-3 flex items-end">
+			<AnimatePresence initial={false}>
+				{hand.length === 0 ? (
+					<motion.span
+						key="empty"
+						initial={{ opacity: 0 }}
+						animate={{ opacity: 1 }}
+						exit={{ opacity: 0 }}
+						className="text-white/50 italic text-sm h-[89px] flex items-center"
+					>
+						Empty Hand
+					</motion.span>
+				) : (
+					hand.map((card, idx) => (
+						<motion.div
+							key={card.id}
+							initial={{ opacity: 0, y: 20 }}
+							animate={{ opacity: 1, y: 0 }}
+							exit={{ opacity: 0, scale: 0.8 }}
+							className={idx === 0 ? 'ml-0' : 'ml-[-12px]'}
+						>
+							<Card
+								id={card.id}
+								rank={card.rank}
+								suit={card.suit}
+								faceUp={card.known}
+								layoutId={`hand-card-${card.id}`}
+								isSelected={idx === selectedIdx}
+								isInteractive
+								onClick={() => onCardClick(card, idx)}
+							/>
+						</motion.div>
+					))
+				)}
+			</AnimatePresence>
 		</div>
 	);
 };
 
-export default PlayerHand;
+export default React.memo(PlayerHand);

@@ -1,87 +1,274 @@
 // src/components/game/GameBoard.tsx
-import React from 'react';
-import type { ObfGameState, ClientGameAction } from '@/types/game';
-import PlayerHand from './PlayerHand'; // To be created
-import OpponentHand from './OpponentHand'; // To be created
-import Deck from './Deck'; // To be created
-import DiscardPile from './DiscardPile'; // To be created
-import GameInfoPanel from './GameInfoPanel'; // To be created
-import ActionControls from './ActionControls'; // To be created
-import DrawnCardDisplay from './DrawnCardDisplay'; // To be created
+import React, { useState, useCallback, useMemo } from 'react';
+import { LayoutGroup, AnimatePresence } from 'framer-motion';
+import type { ObfGameState, ObfCard, ClientGameAction } from '@/types/game';
+import {
+	drawStockpileAction,
+	drawDiscardPileAction,
+	discardAction,
+	replaceAction,
+	snapAction,
+	peekSelfAction,
+	peekOtherAction,
+	blindSwapAction,
+	kingPeekAction,
+} from '@/types/game';
 import { useGameStore } from '@/stores/gameStore';
+import {
+	selectPendingAction,
+	selectIsSelfTurn,
+	selectIsProcessingAction,
+	selectDisplayedDrawnCard,
+} from '@/stores/gameStore';
 import { useAuthStore } from '@/stores/authStore';
+import { HINT_LABELS } from './CardAnimations';
+import GameTable from './GameTable';
+import PlayerHand from './PlayerHand';
+import OpponentHand from './OpponentHand';
+import Deck from './Deck';
+import DiscardPile from './DiscardPile';
+import GameInfoPanel from './GameInfoPanel';
+import ActionControls from './ActionControls';
+import DrawnCardDisplay from './DrawnCardDisplay';
 
 interface GameBoardProps {
 	gameState: ObfGameState;
-	sendMessage: (action: ClientGameAction) => void;
+	sendMessage: (msg: ClientGameAction) => void;
 }
 
 const GameBoard: React.FC<GameBoardProps> = ({ gameState, sendMessage }) => {
+	const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
+
 	const selfId = useAuthStore((state) => state.user?.id);
-	const displayedDrawnCard = useGameStore((state) => state.displayedDrawnCard);
+	const pendingAction = useGameStore(selectPendingAction);
+	const isMyTurn = useGameStore(selectIsSelfTurn);
+	const isProcessing = useGameStore(selectIsProcessingAction);
+	const displayedDrawnCard = useGameStore(selectDisplayedDrawnCard);
 	const clearDisplayedDrawnCard = useGameStore((state) => state.clearDisplayedDrawnCard);
 
-	// Find self and opponents
-	const selfState = gameState.players.find(p => p.playerId === selfId);
-	const opponents = gameState.players.filter(p => p.playerId !== selfId);
+	const selfState = gameState.players.find((p) => p.playerId === selfId);
+	const opponents = gameState.players.filter((p) => p.playerId !== selfId);
+	const specialAction = gameState.specialAction;
 
-	if (!selfState) {
-		// This shouldn't happen if the player is connected to the game
-		return <div className='text-red-500'>Error: Could not find player state for self.</div>;
-	}
+	// --- Interaction handlers ---
 
-	// Basic layout logic (replace with more sophisticated table layout)
-	// Example: Arrange opponents around the center
-	const getOpponentPosition = (index: number, totalOpponents: number) => {
-		// Simple linear layout for now
-		// TODO: Implement circular/table layout
-		const positions = [
-			'top-0 left-1/2 -translate-x-1/2', // Top center
-			'top-1/2 left-0 -translate-y-1/2', // Middle left
-			'top-1/2 right-0 -translate-y-1/2' // Middle right
-		];
-		return positions[index % positions.length] || 'top-0 right-0'; // Fallback
-	};
+	const handlePlayerCardClick = useCallback(
+		(card: ObfCard, idx: number) => {
+			if (isProcessing) return;
+
+			if (pendingAction === 'discard_replace') {
+				sendMessage(replaceAction(card.id, idx));
+				setSelectedIdx(null);
+				return;
+			}
+
+			if (pendingAction === 'special_action' && specialAction) {
+				const rank = specialAction.cardRank;
+				if (rank === '7' || rank === '8') {
+					sendMessage(peekSelfAction(card.id, idx));
+					setSelectedIdx(null);
+					return;
+				}
+				if ((rank === 'J' || rank === 'Q') && selectedIdx === null) {
+					setSelectedIdx(idx);
+					return;
+				}
+				if (rank === 'K' && selectedIdx === null) {
+					setSelectedIdx(idx);
+					return;
+				}
+			}
+
+			if (pendingAction === null) {
+				setSelectedIdx((prev) => (prev === idx ? null : idx));
+			}
+		},
+		[isProcessing, pendingAction, specialAction, selectedIdx, sendMessage],
+	);
+
+	const handleDeckClick = useCallback(() => {
+		if (!isMyTurn || pendingAction !== null || isProcessing) return;
+		sendMessage(drawStockpileAction());
+	}, [isMyTurn, pendingAction, isProcessing, sendMessage]);
+
+	const handleDiscardClick = useCallback(() => {
+		if (isProcessing) return;
+
+		if (isMyTurn && pendingAction === null) {
+			if (
+				(gameState.houseRules as any).allowDrawFromDiscardPile &&
+				gameState.discardTop
+			) {
+				sendMessage(drawDiscardPileAction());
+				return;
+			}
+		}
+
+		if (pendingAction === 'discard_replace') {
+			if (selfState?.drawnCard) {
+				sendMessage(discardAction(selfState.drawnCard.id));
+				setSelectedIdx(null);
+				return;
+			}
+		}
+
+		if (selectedIdx !== null && pendingAction === null) {
+			const selectedCard = selfState?.revealedHand?.[selectedIdx];
+			if (selectedCard) {
+				sendMessage(snapAction(selectedCard.id));
+				setSelectedIdx(null);
+			}
+		}
+	}, [isMyTurn, isProcessing, pendingAction, selectedIdx, selfState, gameState, sendMessage]);
+
+	const handleOpponentCardClick = useCallback(
+		(playerId: string, idx: number) => {
+			if (isProcessing) return;
+			const placeholderId = `${playerId}-card-${idx}`;
+
+			if (pendingAction === 'special_action' && specialAction) {
+				const rank = specialAction.cardRank;
+
+				if (rank === '9' || rank === 'T') {
+					sendMessage(peekOtherAction(placeholderId, idx, playerId));
+					setSelectedIdx(null);
+					return;
+				}
+
+				if ((rank === 'J' || rank === 'Q') && selectedIdx !== null) {
+					const myCard = selfState?.revealedHand?.[selectedIdx];
+					if (myCard && selfId) {
+						sendMessage(blindSwapAction(myCard.id, selectedIdx, selfId, placeholderId, idx, playerId));
+						setSelectedIdx(null);
+					}
+					return;
+				}
+
+				if (rank === 'K' && selectedIdx !== null) {
+					const myCard = selfState?.revealedHand?.[selectedIdx];
+					if (myCard && selfId) {
+						sendMessage(kingPeekAction(myCard.id, selectedIdx, selfId, placeholderId, idx, playerId));
+						setSelectedIdx(null);
+					}
+					return;
+				}
+			}
+
+			if (selectedIdx !== null && pendingAction === null) {
+				const allowOpponentSnapping = (gameState.houseRules as any).allowOpponentSnapping ?? true;
+				if (allowOpponentSnapping) {
+					const selectedCard = selfState?.revealedHand?.[selectedIdx];
+					if (selectedCard) {
+						sendMessage(snapAction(selectedCard.id));
+						setSelectedIdx(null);
+					}
+				}
+			}
+		},
+		[isProcessing, pendingAction, specialAction, selectedIdx, selfState, selfId, gameState, sendMessage],
+	);
+
+	// --- Derived values ---
+
+	const hint = useMemo(() => {
+		if (gameState.cambiaCalled) return HINT_LABELS.cambia_called;
+		if (!isMyTurn) return HINT_LABELS.waiting;
+		if (pendingAction === 'special_action' && specialAction) {
+			const rank = specialAction.cardRank;
+			if (rank === '7' || rank === '8') return HINT_LABELS.peek_self;
+			if (rank === '9' || rank === 'T') return HINT_LABELS.peek_other;
+			if (rank === 'J' || rank === 'Q') return HINT_LABELS.swap_blind;
+			if (rank === 'K') return HINT_LABELS.swap_peek;
+		}
+		if (pendingAction === 'discard_replace') return HINT_LABELS.select_replace;
+		if (selectedIdx !== null) return HINT_LABELS.select_snap;
+		return HINT_LABELS.your_turn;
+	}, [isMyTurn, pendingAction, selectedIdx, specialAction, gameState.cambiaCalled]);
+
+	const canCallCambia =
+		isMyTurn &&
+		pendingAction === null &&
+		!isProcessing &&
+		!gameState.cambiaCalled &&
+		gameState.started &&
+		!gameState.gameOver;
+
+	const canSkipSpecial = isMyTurn && pendingAction === 'special_action' && !isProcessing;
+
+	const opponentTargetable =
+		pendingAction === 'special_action' || (selectedIdx !== null && pendingAction === null);
+
+	const deckInteractive =
+		isMyTurn && pendingAction === null && !isProcessing && gameState.stockpileSize > 0;
+
+	const discardInteractive =
+		(isMyTurn &&
+			pendingAction === null &&
+			!!(gameState.houseRules as any).allowDrawFromDiscardPile &&
+			!!gameState.discardTop) ||
+		pendingAction === 'discard_replace' ||
+		(selectedIdx !== null && pendingAction === null);
+
+	// --- Render ---
+
+	const centerSlot = (
+		<div className="flex flex-col items-center gap-3">
+			<GameInfoPanel
+				currentPlayerId={gameState.currentPlayerId}
+				players={gameState.players}
+				turnId={gameState.turnId}
+			/>
+			<div className="flex gap-4">
+				<Deck
+					count={gameState.stockpileSize}
+					onClick={handleDeckClick}
+					isInteractive={deckInteractive}
+				/>
+				<DiscardPile
+					card={gameState.discardTop}
+					onClick={handleDiscardClick}
+					isInteractive={discardInteractive}
+				/>
+			</div>
+		</div>
+	);
+
+	const selfSlot = (
+		<div className="flex flex-col items-center gap-2 w-full">
+			<PlayerHand
+				hand={selfState?.revealedHand ?? []}
+				selectedIdx={selectedIdx}
+				onCardClick={handlePlayerCardClick}
+			/>
+			<ActionControls
+				sendMessage={sendMessage}
+				hint={hint}
+				canCallCambia={canCallCambia}
+				canSkipSpecial={canSkipSpecial}
+			/>
+		</div>
+	);
 
 	return (
-		<div className="relative w-full max-w-4xl aspect-[4/3] bg-green-700 dark:bg-green-900 border-4 border-yellow-700 dark:border-yellow-500 rounded-lg p-4 shadow-lg flex flex-col items-center justify-between">
-
-			{/* Opponents */}
-			<div className="absolute inset-0">
-				{opponents.map((opponent, index) => (
-					<div key={opponent.playerId} className={`absolute ${getOpponentPosition(index, opponents.length)} m-2`}>
-						<OpponentHand playerState={opponent} />
-					</div>
+		<LayoutGroup>
+			<GameTable
+				opponents={opponents.map((opp) => (
+					<OpponentHand
+						key={opp.playerId}
+						playerState={opp}
+						isTargetable={opponentTargetable}
+						onCardClick={handleOpponentCardClick}
+					/>
 				))}
-			</div>
-
-			{/* Center Area (Deck, Discard, Info) */}
-			<div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 flex flex-col items-center gap-4 z-10">
-				<GameInfoPanel
-					currentPlayerId={gameState.currentPlayerId}
-					players={gameState.players}
-					turnId={gameState.turnId}
-				/>
-				<div className="flex gap-4">
-					<Deck count={gameState.stockpileSize} />
-					<DiscardPile card={gameState.discardTop} />
-				</div>
-			</div>
-
-			{/* Self Hand and Controls */}
-			<div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-full flex flex-col items-center p-2">
-				<PlayerHand hand={selfState.revealedHand ?? []} sendMessage={sendMessage} />
-				<ActionControls sendMessage={sendMessage} />
-			</div>
-
-			{/* Magnified Drawn Card Display */}
-			{displayedDrawnCard && (
-				<DrawnCardDisplay
-					card={displayedDrawnCard}
-					onClose={clearDisplayedDrawnCard}
-				/>
-			)}
-		</div>
+				centerSlot={centerSlot}
+				selfSlot={selfSlot}
+			/>
+			<AnimatePresence>
+				{displayedDrawnCard && (
+					<DrawnCardDisplay card={displayedDrawnCard} onClose={clearDisplayedDrawnCard} />
+				)}
+			</AnimatePresence>
+		</LayoutGroup>
 	);
 };
 

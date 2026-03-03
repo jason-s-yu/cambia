@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // src/stores/lobbyStore.ts
 import { create } from 'zustand';
-import type { LobbyState, ChatMessage, CircuitSettings, User, LobbyUser } from '@/types/index';
+import type { LobbyState, ChatMessage, CircuitSettings, User, LobbyUser, MatchState } from '@/types/index';
 import { listLobbies, createLobby as apiCreateLobby } from '@/services/lobbyService';
 import { useAuthStore } from './authStore';
 import { NIL as NIL_UUID } from 'uuid';
@@ -23,6 +23,9 @@ interface LobbyListState {
 	removeLobbyFromList: (lobbyId: string) => void;
 }
 
+/** Hub phase values matching the server's LobbyPhase string encoding. */
+export type LobbyPhase = 'open' | 'searching' | 'ready_check' | 'countdown' | 'in_game' | 'round_end' | 'post_game' | 'match_end';
+
 /** State for managing the currently joined lobby */
 interface CurrentLobbyState {
 	currentLobbyId: string | null;
@@ -31,19 +34,24 @@ interface CurrentLobbyState {
 	isConnected: boolean; // WebSocket connection status
 	isLoading: boolean;   // Loading state for API calls or initial WS connection/sync
 	error: string | null;
+	phase: LobbyPhase; // Current hub phase
+	seq: number; // Last known server seq for this lobby
 	// Countdown state
 	countdownStartTime: number | null; // System timestamp (ms) when countdown started
 	countdownDuration: number | null; // Duration in seconds
-	setCurrentLobbyId: (lobbyId: string | null) => void; // Sets the target lobby ID, affecting connection status
-	processLobbyWebSocketMessage: (message: any) => void; // Handles incoming WS messages
-	addChatMessage: (message: ChatMessage) => void; // Adds a message to the chat
-	setConnected: (status: boolean) => void; // Updates WS connection status
-	setLoading: (loading: boolean) => void; // Sets loading indicator state
-	setError: (error: string | null) => void; // Sets error message
-	clearError: () => void; // Clears the error message
-	clearChat: () => void; // Clears chat messages
-	createAndJoinLobby: (settings: Partial<LobbyState>) => Promise<string | null>; // Creates a lobby via API and sets it as current
-	leaveLobby: () => void; // Clears the current lobby state (client-side only)
+	matchState: MatchState | null;
+	setCurrentLobbyId: (lobbyId: string | null) => void;
+	processLobbyWebSocketMessage: (type: string, payload: any) => void; // Envelope-unwrapped: type + payload
+	addChatMessage: (message: ChatMessage) => void;
+	setConnected: (status: boolean) => void;
+	setLoading: (loading: boolean) => void;
+	setError: (error: string | null) => void;
+	clearError: () => void;
+	clearChat: () => void;
+	setPhase: (phase: LobbyPhase) => void;
+	forceSync: (state: any) => void; // Full state replacement from sync_state
+	createAndJoinLobby: (settings: Partial<LobbyState>) => Promise<string | null>;
+	leaveLobby: () => void;
 }
 
 // --- Lobby List Store Implementation ---
@@ -120,55 +128,96 @@ export const useCurrentLobbyStore = create<CurrentLobbyState>((set, get) => ({
 	isConnected: false,
 	isLoading: false,
 	error: null,
+	phase: 'open' as LobbyPhase,
+	seq: 0,
 	countdownStartTime: null,
 	countdownDuration: null,
+	matchState: null,
+
+	setPhase: (phase) => set({ phase }),
+
+	forceSync: (payload) => {
+		set((state) => {
+			const updated: Partial<CurrentLobbyState> = {};
+			if (typeof payload?.seq === "number") updated.seq = payload.seq;
+			if (payload.phase) updated.phase = payload.phase as LobbyPhase;
+			// Rebuild lobby details from sync payload (same shape as lobby_state)
+			if (payload.lobby_id || payload.lobby_status) {
+				const usersState = mapLobbyUsers(payload.lobby_status?.users);
+				updated.lobbyDetails = {
+					id: payload.lobby_id ?? state.currentLobbyId,
+					hostUserID: payload.host_id,
+					host_id: payload.host_id,
+					type: payload.lobby_type ?? state.lobbyDetails?.type ?? 'private',
+					gameMode: payload.game_mode ?? state.lobbyDetails?.gameMode ?? 'unknown',
+					inGame: payload.in_game ?? false,
+					game_id: payload.game_id ?? null,
+					houseRules: payload.house_rules ?? state.lobbyDetails?.houseRules ?? {},
+					circuit: payload.circuit ?? state.lobbyDetails?.circuit ?? {},
+					lobbySettings: payload.settings ?? state.lobbyDetails?.lobbySettings ?? { autoStart: false },
+					settings: payload.settings ?? state.lobbyDetails?.settings ?? { autoStart: false },
+					lobby_status: { users: usersState },
+					your_id: payload.your_id,
+					your_is_host: payload.your_is_host ?? (payload.your_id === payload.host_id),
+					lobby_id: payload.lobby_id ?? state.currentLobbyId,
+				};
+			}
+			if (payload.match_state) {
+				updated.matchState = {
+					queueId: payload.match_state.queue_id ?? '',
+					isRanked: payload.match_state.is_ranked ?? false,
+					totalRounds: payload.match_state.total_rounds ?? 1,
+					currentRound: payload.match_state.current_round ?? 0,
+					roundScores: payload.match_state.round_history ?? [],
+					cumulativeScores: payload.match_state.cumulative_scores ?? {},
+				};
+			}
+			updated.isConnected = true;
+			updated.isLoading = false;
+			updated.error = null;
+			return updated;
+		});
+	},
 
 	setCurrentLobbyId: (lobbyId) => {
 		const currentId = get().currentLobbyId;
 		if (currentId === lobbyId) {
-			// If ID is the same, ensure loading state reflects connection attempt status
 			if (!get().isConnected && lobbyId !== null) {
-				set({ isLoading: true, error: null }); // Mark as loading if trying to connect
+				set({ isLoading: true, error: null });
 			} else if (get().isConnected) {
-				set({ isLoading: false, error: null }); // Mark as not loading if already connected
+				set({ isLoading: false, error: null });
 			}
 			return;
 		}
 
-		// If ID is changing, reset relevant state for the new lobby context
 		set({
 			currentLobbyId: lobbyId,
 			lobbyDetails: null,
 			chatMessages: [],
 			isConnected: false,
-			isLoading: !!lobbyId, // Start loading only if joining a new lobby (non-null ID)
+			isLoading: !!lobbyId,
 			error: null,
-			countdownStartTime: null, // Reset countdown on lobby change
-			countdownDuration: null
+			phase: 'open' as LobbyPhase,
+			countdownStartTime: null,
+			countdownDuration: null,
+			matchState: null
 		});
 	},
 
-	processLobbyWebSocketMessage: (message) => {
+	processLobbyWebSocketMessage: (type, payload) => {
 		const currentLobbyId = get().currentLobbyId;
-		// Ignore messages if no lobby is active or message is for a different lobby
-		if (!currentLobbyId || !message || (message.lobby_id && message.lobby_id !== currentLobbyId)) {
-			if (message && message.lobby_id && currentLobbyId && message.lobby_id !== currentLobbyId) {
-				console.warn(`[Store] Ignoring message for lobby ${message.lobby_id} while current is ${currentLobbyId}`);
-			}
-			return;
-		}
+		if (!currentLobbyId || !type) return;
+
+		// Alias: the payload IS the message data (already unwrapped from envelope)
+		const message = payload ?? {};
 
 		set((state) => {
-			// Double-check state hasn't changed unexpectedly
-			if (state.currentLobbyId !== currentLobbyId) {
-				console.warn(`[Store] Store ID changed during processing. Ignoring message type ${message?.type}`);
-				return {};
-			}
+			if (state.currentLobbyId !== currentLobbyId) return {};
 
 			const newLobbyDetails = state.lobbyDetails ? { ...state.lobbyDetails } : null;
 
 			try {
-				switch (message.type) {
+				switch (type) {
 					case 'lobby_state': {
 						const usersState = mapLobbyUsers(message.lobby_status?.users);
 						const updatedDetails: LobbyState = {
@@ -181,32 +230,30 @@ export const useCurrentLobbyStore = create<CurrentLobbyState>((set, get) => ({
 							game_id: message.game_id ?? null,
 							houseRules: message.house_rules ?? state.lobbyDetails?.houseRules ?? {},
 							circuit: message.circuit ?? state.lobbyDetails?.circuit ?? {},
-							// Important: Prefer 'settings' from WS message if available for LobbySettings
 							lobbySettings: message.settings ?? state.lobbyDetails?.lobbySettings ?? { autoStart: false },
-							settings: message.settings ?? state.lobbyDetails?.settings ?? { autoStart: false }, // Keep `settings` for comparison if needed
+							settings: message.settings ?? state.lobbyDetails?.settings ?? { autoStart: false },
 							lobby_status: { users: usersState },
 							your_id: message.your_id,
 							your_is_host: message.your_is_host ?? (message.your_id === message.host_id),
 							lobby_id: message.lobby_id
 						};
-						// Update state only if details changed or connection status was previously false/loading
+						const phaseUpdate = message.phase ? { phase: message.phase as LobbyPhase } : {};
 						if (!deepEqual(state.lobbyDetails, updatedDetails) || !state.isConnected || state.isLoading) {
 							return {
 								lobbyDetails: updatedDetails,
 								isLoading: false,
 								error: null,
-								isConnected: true
+								isConnected: true,
+								...phaseUpdate
 							};
 						}
-						return {};
+						return phaseUpdate;
 					}
 
 					case 'lobby_update': {
 						if (!newLobbyDetails) return {};
 						const newUsersUpdate = mapLobbyUsers(message.lobby_status?.users);
 						const newLobbyStatusUpdate = { users: newUsersUpdate };
-
-						// Prefer 'settings' if present in the update message
 						const updatedLobbySettings = message.settings ?? newLobbyDetails.lobbySettings;
 
 						const updatedDetails: LobbyState = {
@@ -215,12 +262,25 @@ export const useCurrentLobbyStore = create<CurrentLobbyState>((set, get) => ({
 							hostUserID: message.host_id ?? newLobbyDetails.hostUserID,
 							host_id: message.host_id ?? newLobbyDetails.host_id,
 							your_is_host: message.host_id ? (newLobbyDetails.your_id === message.host_id) : newLobbyDetails.your_is_host,
-							// Update both lobbySettings and settings based on the message or existing state
 							lobbySettings: updatedLobbySettings,
-							settings: message.settings ?? newLobbyDetails.settings // Keep settings consistent
+							settings: message.settings ?? newLobbyDetails.settings
 						};
 						if (!deepEqual(state.lobbyDetails, updatedDetails)) {
 							return { lobbyDetails: updatedDetails };
+						}
+						return {};
+					}
+
+					case 'phase_change': {
+						const newPhase = message.phase as LobbyPhase;
+						if (newPhase && newPhase !== state.phase) {
+							const updates: any = { phase: newPhase };
+							// Clear countdown on phase transitions out of countdown
+							if (newPhase !== 'countdown') {
+								updates.countdownStartTime = null;
+								updates.countdownDuration = null;
+							}
+							return updates;
 						}
 						return {};
 					}
@@ -243,7 +303,6 @@ export const useCurrentLobbyStore = create<CurrentLobbyState>((set, get) => ({
 									...newLobbyDetails,
 									lobby_status: { users: newUsersReady }
 								},
-								// Cancel countdown if someone becomes unready
 								countdownStartTime: message.is_ready ? state.countdownStartTime : null,
 								countdownDuration: message.is_ready ? state.countdownDuration : null
 							};
@@ -253,18 +312,13 @@ export const useCurrentLobbyStore = create<CurrentLobbyState>((set, get) => ({
 
 					case 'lobby_rules_updated': {
 						if (!newLobbyDetails) return {};
-						if (!message.rules || typeof message.rules !== 'object') {
-							console.warn('[Store] Received lobby_rules_updated without valid nested "rules" object.');
-							return {};
-						}
+						if (!message.rules || typeof message.rules !== 'object') return {};
 
 						const incomingRules = message.rules;
 						const incomingHouseRules = incomingRules.house_rules || {};
 						const incomingCircuit = incomingRules.circuit || {};
-						// Expect lobby settings under the 'settings' key from the server
 						const incomingSettings = incomingRules.settings || {};
 
-						// Create potential new state based on merging incoming rules with existing ones
 						const potentialDetails: LobbyState = { ...newLobbyDetails };
 						let updated = false;
 
@@ -274,7 +328,6 @@ export const useCurrentLobbyStore = create<CurrentLobbyState>((set, get) => ({
 							updated = true;
 						}
 
-						// Deep merge for circuit rules
 						const updatedCircuit: CircuitSettings = { ...potentialDetails.circuit, ...incomingCircuit };
 						if (incomingCircuit.rules) {
 							updatedCircuit.rules = { ...(potentialDetails.circuit?.rules || {}), ...incomingCircuit.rules };
@@ -284,54 +337,45 @@ export const useCurrentLobbyStore = create<CurrentLobbyState>((set, get) => ({
 							updated = true;
 						}
 
-						// Update lobby settings (both 'settings' and 'lobbySettings' for consistency)
 						const updatedSettings = { ...(potentialDetails.lobbySettings || {}), ...incomingSettings };
 						if (!deepEqual(potentialDetails.lobbySettings, updatedSettings)) {
 							potentialDetails.lobbySettings = updatedSettings;
-							potentialDetails.settings = updatedSettings; // Keep both consistent
+							potentialDetails.settings = updatedSettings;
 							updated = true;
 						}
 
-						if (updated) {
-							console.log('[Store] lobby_rules_updated: Detected changes, updating state.');
-							return { lobbyDetails: potentialDetails };
-						} else {
-							console.log('[Store] lobby_rules_updated: No effective changes detected.');
-							return {};
-						}
+						if (updated) return { lobbyDetails: potentialDetails };
+						return {};
 					}
 
 					case 'game_start': {
 						if (!newLobbyDetails) return {};
-						if (!newLobbyDetails.inGame || newLobbyDetails.game_id !== message.game_id) {
-							return {
-								lobbyDetails: {
-									...newLobbyDetails,
-									inGame: true,
-									game_id: message.game_id
-								},
-								isLoading: false,
-								countdownStartTime: null, // Clear countdown on game start
-								countdownDuration: null
-							};
-						}
-						return {};
+						return {
+							lobbyDetails: {
+								...newLobbyDetails,
+								inGame: true,
+								game_id: message.game_id ?? newLobbyDetails.game_id
+							},
+							phase: 'in_game' as LobbyPhase,
+							isLoading: false,
+							countdownStartTime: null,
+							countdownDuration: null
+						};
 					}
 
 					case 'error': {
-						console.error('[Store] Received server error message:', message.message);
-						// Clear countdown if an error related to it occurs? Maybe not necessary.
-						return { error: message.message || 'Unknown error from server.', isLoading: false };
+						console.error('[Store] Received server error:', message.error || message.message);
+						return { error: message.error || message.message || 'Unknown error from server.', isLoading: false };
 					}
 
 					case 'chat': {
-						if (message.user_id && message.msg && message.ts) {
-							const chatUsername = message.username || `User_${message.user_id.substring(0, 4)}`;
+						if (message.userID && message.msg) {
+							const chatUsername = message.username || `User_${message.userID.substring(0, 4)}`;
 							const chatMsg: ChatMessage = {
-								user_id: message.user_id,
+								user_id: message.userID,
 								username: chatUsername,
 								msg: message.msg,
-								ts: message.ts
+								ts: message.ts ?? new Date().toISOString()
 							};
 							if (!state.chatMessages.some(m => m.ts === chatMsg.ts && m.user_id === chatMsg.user_id)) {
 								return { chatMessages: [...state.chatMessages, chatMsg].slice(-100) };
@@ -340,35 +384,100 @@ export const useCurrentLobbyStore = create<CurrentLobbyState>((set, get) => ({
 						return {};
 					}
 
-					// Countdown handling
 					case 'lobby_countdown_start': {
 						const duration = typeof message.seconds === 'number' ? message.seconds : 0;
-						console.log(`[Store] Received countdown start: ${duration}s`);
 						return {
 							countdownStartTime: Date.now(),
 							countdownDuration: duration
 						};
 					}
 					case 'lobby_countdown_cancel': {
-						console.log('[Store] Received countdown cancel');
 						return {
 							countdownStartTime: null,
 							countdownDuration: null
 						};
 					}
 
-					// Info messages, no state change needed in store
 					case 'lobby_invite':
-						console.log(`[Store] Received info message: ${message.type}`);
 						return {};
 
+					case 'search_status': {
+						const searching = message.searching === true;
+						return { phase: searching ? 'searching' as LobbyPhase : 'open' as LobbyPhase };
+					}
+
+					case 'match_found': {
+						return {
+							phase: 'ready_check' as LobbyPhase,
+							matchState: {
+								queueId: message.queue_id ?? '',
+								isRanked: message.is_ranked ?? false,
+								totalRounds: message.total_rounds ?? 1,
+								currentRound: 0,
+								roundScores: [],
+								cumulativeScores: {},
+							},
+						};
+					}
+
+					case 'round_start': {
+						const currentMatchState = state.matchState;
+						return {
+							phase: 'in_game' as LobbyPhase,
+							matchState: currentMatchState ? {
+								...currentMatchState,
+								currentRound: message.round ?? (currentMatchState.currentRound + 1),
+							} : null,
+						};
+					}
+
+					case 'round_end': {
+						const ms = state.matchState;
+						const roundScores = message.round_scores ?? {};
+						const cumulativeScores = message.cumulative_scores ?? {};
+						const subsidies = message.subsidies ?? {};
+						return {
+							phase: 'round_end' as LobbyPhase,
+							matchState: ms ? {
+								...ms,
+								currentRound: message.round ?? ms.currentRound,
+								roundScores: [...ms.roundScores, roundScores],
+								cumulativeScores,
+								subsidies,
+							} : null,
+						};
+					}
+
+					case 'match_end': {
+						const ms2 = state.matchState;
+						const finalRoundScores = message.round_scores ?? {};
+						const finalCumulative = message.cumulative_scores ?? {};
+						const finalSubsidies = message.subsidies ?? {};
+						const ratingChanges = message.rating_changes;
+						return {
+							phase: 'match_end' as LobbyPhase,
+							matchState: ms2 ? {
+								...ms2,
+								roundScores: message.final ? [...ms2.roundScores, finalRoundScores] : ms2.roundScores,
+								cumulativeScores: finalCumulative,
+								subsidies: finalSubsidies,
+								ratingChanges: ratingChanges ?? undefined,
+							} : null,
+						};
+					}
+
+					case 'game_results': {
+						// Casual single-game results (existing flow)
+						return { phase: 'post_game' as LobbyPhase };
+					}
+
 					default:
-						console.warn(`[Store] Unhandled WebSocket message type: ${message.type}`);
+						console.warn(`[Store] Unhandled lobby message type: ${type}`);
 						return {};
 				}
-			} catch (processingError: unknown) { // Use unknown type
-				console.error(`[Store] Error processing WebSocket message type ${message?.type}:`, processingError);
-				let errorMsg = `Failed to process update (type: ${message?.type})`;
+			} catch (processingError: unknown) {
+				console.error(`[Store] Error processing message type ${type}:`, processingError);
+				let errorMsg = `Failed to process update (type: ${type})`;
 				if (processingError instanceof Error) {
 					errorMsg = `${errorMsg}: ${processingError.message}`;
 				}
@@ -441,8 +550,6 @@ export const useCurrentLobbyStore = create<CurrentLobbyState>((set, get) => ({
 	},
 
 	leaveLobby: () => {
-		// This action only clears the client-side state.
-		// WebSocket closure is handled by the useLobbySocket hook reacting to currentLobbyId becoming null.
 		set({
 			currentLobbyId: null,
 			lobbyDetails: null,
@@ -450,8 +557,11 @@ export const useCurrentLobbyStore = create<CurrentLobbyState>((set, get) => ({
 			isConnected: false,
 			isLoading: false,
 			error: null,
-			countdownStartTime: null, // Clear countdown on leave
-			countdownDuration: null
+			phase: 'open' as LobbyPhase,
+			seq: 0,
+			countdownStartTime: null,
+			countdownDuration: null,
+			matchState: null
 		});
 	}
 }));

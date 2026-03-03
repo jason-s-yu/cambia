@@ -15,7 +15,7 @@ class TestEPPBSEncoding:
         tags = [EpistemicTag.UNK] * 12
         buckets = [0] * 12
         out = encode_infoset_eppbs(tags, buckets, 0, 0, 0, 0, 0)
-        assert out.shape == (200,)
+        assert out.shape == (EP_PBS_INPUT_DIM,)
         assert out.dtype == np.float32
 
     def test_public_features(self):

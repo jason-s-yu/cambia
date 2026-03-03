@@ -1,55 +1,47 @@
 // src/components/game/DrawnCardDisplay.tsx
-import React, { useEffect, useState } from 'react';
-import type { ObfCard } from '@/types/game';
+import React from 'react';
+import { motion } from 'framer-motion';
+import { springTransition } from './CardAnimations';
 import Card from './Card';
+import type { ObfCard } from '@/types/game';
 
 interface DrawnCardDisplayProps {
 	card: ObfCard;
-	onClose: () => void; // Callback to signal display can be closed (e.g., after animation)
+	onClose: () => void;
 }
 
 const DrawnCardDisplay: React.FC<DrawnCardDisplayProps> = ({ card, onClose }) => {
-	const [isVisible, setIsVisible] = useState(false);
-
-	// Effect for fade-in animation
-	useEffect(() => {
-		setIsVisible(true); // Trigger fade-in
-		// Optional: Auto-close after a delay if needed, or rely on game state changes
-		// const timer = setTimeout(() => {
-		//   handleClose();
-		// }, 3000); // Example: close after 3 seconds
-		// return () => clearTimeout(timer);
-	}, [card]); // Rerun effect if the card prop changes
-
-	const handleClose = () => {
-		setIsVisible(false);
-		// Call onClose after the fade-out animation completes
-		setTimeout(onClose, 300); // Match transition duration
-	};
-
-	// Use a simple overlay for now
 	return (
-		<div
-			className={`fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm transition-opacity duration-300 ${isVisible ? 'opacity-100' : 'opacity-0'}`}
-			onClick={handleClose} // Close on overlay click
+		<motion.div
+			initial={{ opacity: 0 }}
+			animate={{ opacity: 1 }}
+			exit={{ opacity: 0 }}
+			className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+			onClick={onClose}
 		>
-			<div
-				className={`transform transition-transform duration-300 ${isVisible ? 'scale-100' : 'scale-90'}`}
-				onClick={(e) => e.stopPropagation()} // Prevent closing when clicking the card itself
+			<motion.div
+				initial={{ scale: 0.8, y: 30 }}
+				animate={{ scale: 1, y: 0 }}
+				exit={{ scale: 0.8, y: 30 }}
+				transition={springTransition}
+				className="flex flex-col items-center gap-3"
+				onClick={(e) => e.stopPropagation()}
 			>
-				<Card
-					id={card.id}
-					rank={card.rank}
-					suit={card.suit}
-					faceUp={card.known}
-					className="w-40 h-auto shadow-2xl rounded-lg" // Larger size
-				/>
-				<p className="text-center text-white text-sm mt-2">
+				<p className="text-white text-sm font-medium">
 					{card.known ? 'You drew:' : 'Opponent drew a card'}
 				</p>
-			</div>
-		</div>
+				<div className="w-36">
+					<Card
+						id={card.id}
+						rank={card.rank}
+						suit={card.suit}
+						faceUp={card.known}
+						isInteractive={false}
+					/>
+				</div>
+			</motion.div>
+		</motion.div>
 	);
 };
 
-export default DrawnCardDisplay;
+export default React.memo(DrawnCardDisplay);

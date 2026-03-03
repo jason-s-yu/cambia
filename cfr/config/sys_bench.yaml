@@ -36,7 +36,7 @@ cambia_rules:
   lockCallerHand: true
 
 persistence:
-  agent_data_save_path: "runs/sys-bench/checkpoints/deep_cfr_checkpoint.pt"
+  agent_data_save_path: "runs/_archive/sys-bench/checkpoints/deep_cfr_checkpoint.pt"
 
 agents:
   greedy_agent:
@@ -88,7 +88,7 @@ deep_cfr:
 logging:
   log_level_file: "INFO"
   log_level_console: "INFO"
-  log_dir: "runs/sys-bench/logs"
+  log_dir: "runs/_archive/sys-bench/logs"
   log_file_prefix: "cambia"
   log_max_bytes: "10MB"
   log_backup_count: 5

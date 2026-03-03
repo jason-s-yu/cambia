@@ -506,6 +506,7 @@ class TestAgentBehaviors:
 
             # All own cards unknown — no snap should happen
             agent.own_memory = {0: None, 1: None, 2: None, 3: None}
+            agent.own_rank_memory = {0: None, 1: None, 2: None, 3: None}
 
             snap_own = ActionSnapOwn(own_card_hand_index=0)
             pass_snap = ActionPassSnap()
@@ -546,6 +547,7 @@ class TestAgentBehaviors:
 
         # Agent knows opponent slot 2 has a 5
         agent.opponent_memory = {0: None, 1: None, 2: 5, 3: None}
+        agent.opponent_rank_memory = {0: None, 1: None, 2: "5", 3: None}
 
         snap_opp = ActionSnapOpponent(opponent_target_hand_index=2)
         pass_snap = ActionPassSnap()

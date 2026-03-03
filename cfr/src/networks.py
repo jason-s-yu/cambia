@@ -22,6 +22,16 @@ import torch.nn.functional as F
 
 from .encoding import INPUT_DIM, NUM_ACTIONS
 from .cfr.exceptions import InvalidNetworkInputError
+from .constants import (
+    EP_PBS_INPUT_DIM,
+    EP_PBS_MAX_SLOTS,
+    EP_PBS_TAG_DIM,
+    EP_PBS_BUCKET_DIM,
+    EP_PBS_SLOT_DIM,
+    EP_PBS_SLOT_REPR_DIM,
+    EP_PBS_POS_EMBED_DIM,
+    EP_PBS_PUBLIC_DIM_V2,
+)
 
 
 class AdvantageNetwork(nn.Module):
@@ -193,6 +203,169 @@ class ResidualAdvantageNetwork(nn.Module):
         return out
 
 
+class SlotFiLMAdvantageNetwork(nn.Module):
+    """
+    Slot-structured advantage network with Residual FiLM conditioning.
+    Processes EP-PBS interleaved encoding: [public(42)][12×slot(13)][pad(2)] = 200 dims.
+    """
+
+    def __init__(
+        self,
+        input_dim: int = EP_PBS_INPUT_DIM,
+        hidden_dim: int = 256,
+        output_dim: int = NUM_ACTIONS,
+        dropout: float = 0.1,
+        validate_inputs: bool = True,
+        num_hidden_layers: int = 3,
+        num_slots: int = EP_PBS_MAX_SLOTS,
+        public_dim: int = EP_PBS_PUBLIC_DIM_V2,
+        slot_dim: int = EP_PBS_SLOT_DIM,
+        tag_dim: int = EP_PBS_TAG_DIM,
+        id_dim: int = EP_PBS_BUCKET_DIM,
+        slot_repr_dim: int = EP_PBS_SLOT_REPR_DIM,
+        pos_embed_dim: int = EP_PBS_POS_EMBED_DIM,
+        embed_dim: int = 32,
+        use_film: bool = True,
+        use_pos_embed: bool = True,
+        num_players: int = 2,
+    ):
+        super().__init__()
+        self.validate_inputs = validate_inputs
+        self.num_slots = num_slots
+        self.public_dim = public_dim
+        self.slot_dim = slot_dim
+        self.tag_dim = tag_dim
+        self.id_dim = id_dim
+        self.slot_repr_dim = slot_repr_dim
+        self.pos_embed_dim = pos_embed_dim
+        self.embed_dim = embed_dim
+        self.use_film = use_film
+        self.use_pos_embed = use_pos_embed
+        self.num_players = num_players
+        self.slots_per_player = num_slots // num_players
+
+        # Stage 1 — Slot Encoder (shared across all slots)
+        self.tag_embed = nn.Linear(tag_dim, embed_dim)
+        self.id_embed = nn.Linear(id_dim, embed_dim)
+
+        if use_film:
+            self.film_gamma = nn.Linear(embed_dim, embed_dim)
+            self.film_beta = nn.Linear(embed_dim, embed_dim)
+        else:
+            self.tag_gate = nn.Linear(embed_dim, embed_dim)
+
+        if use_pos_embed:
+            self.slot_pos_embed = nn.Embedding(self.slots_per_player, 4)
+            self.owner_embed = nn.Embedding(num_players, 4)
+            self.slot_proj = nn.Linear(embed_dim + pos_embed_dim, slot_repr_dim)
+        else:
+            self.slot_proj = nn.Linear(embed_dim, slot_repr_dim)
+
+        self.slot_norm = nn.LayerNorm(slot_repr_dim)
+
+        # Stage 2 — Aggregation
+        self.global_proj = nn.Linear(public_dim, slot_repr_dim)
+        aggregated_dim = slot_repr_dim * (num_players + 1)
+        self.input_proj = nn.Linear(aggregated_dim, hidden_dim)
+        self.input_norm = nn.LayerNorm(hidden_dim)
+
+        # Stage 3 — Trunk
+        self.blocks = nn.ModuleList(
+            [_ResBlock(hidden_dim, dropout) for _ in range(num_hidden_layers)]
+        )
+        self.output_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, output_dim),
+        )
+
+        self._init_weights()
+
+    def _init_weights(self):
+        for name, module in self.named_modules():
+            if isinstance(module, nn.Linear):
+                if "film_gamma" in name or "film_beta" in name:
+                    nn.init.zeros_(module.weight)
+                    if module.bias is not None:
+                        nn.init.zeros_(module.bias)
+                elif "tag_embed" in name or "id_embed" in name:
+                    nn.init.kaiming_normal_(module.weight, nonlinearity="relu")
+                    if module.bias is not None:
+                        nn.init.zeros_(module.bias)
+                else:
+                    nn.init.kaiming_normal_(module.weight, nonlinearity="relu")
+                    if module.bias is not None:
+                        nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+
+    def forward(self, features: torch.Tensor, action_mask: torch.Tensor) -> torch.Tensor:
+        batch = features.shape[0]
+
+        if self.validate_inputs:
+            if torch.isnan(features).any():
+                raise ValueError("NaN in input features")
+
+        # Extract public and slot portions
+        public = features[:, : self.public_dim]
+        slot_start = self.public_dim
+        slot_end = slot_start + self.num_slots * self.slot_dim
+        slot_data = features[:, slot_start:slot_end].view(
+            batch, self.num_slots, self.slot_dim
+        )
+
+        # Split tag and identity
+        tag_input = slot_data[:, :, : self.tag_dim]
+        id_input = slot_data[:, :, self.tag_dim :]
+
+        # Shared encoder
+        tag_h = F.relu(self.tag_embed(tag_input))
+        id_h = F.relu(self.id_embed(id_input))
+
+        if self.use_film:
+            gamma_delta = self.film_gamma(tag_h)
+            beta = self.film_beta(tag_h)
+            gated = (1.0 + gamma_delta) * id_h + beta
+        else:
+            gate = torch.sigmoid(self.tag_gate(tag_h))
+            gated = gate * id_h
+
+        if self.use_pos_embed:
+            slot_indices = torch.arange(self.num_slots, device=features.device)
+            slot_pos_idx = slot_indices % self.slots_per_player
+            owner_idx = slot_indices // self.slots_per_player
+            pos = torch.cat(
+                [self.slot_pos_embed(slot_pos_idx), self.owner_embed(owner_idx)], dim=-1
+            )
+            pos = pos.unsqueeze(0).expand(batch, -1, -1)
+            slot_input = torch.cat([gated, pos], dim=-1)
+        else:
+            slot_input = gated
+
+        slot_repr = F.relu(self.slot_norm(self.slot_proj(slot_input)))
+
+        # Aggregate by ownership group
+        pools = []
+        for p in range(self.num_players):
+            start = p * self.slots_per_player
+            end = start + self.slots_per_player
+            pools.append(slot_repr[:, start:end].mean(dim=1))
+
+        global_feat = F.relu(self.global_proj(public))
+        x = torch.cat(pools + [global_feat], dim=1)
+
+        # Trunk
+        x = F.relu(self.input_norm(self.input_proj(x)))
+        for block in self.blocks:
+            x = block(x)
+
+        # Output
+        out = self.output_head(x)
+        out = out.masked_fill(~action_mask.bool(), float("-inf"))
+        return out
+
+
 def build_advantage_network(
     input_dim: int = INPUT_DIM,
     hidden_dim: int = 256,
@@ -201,24 +374,59 @@ def build_advantage_network(
     validate_inputs: bool = True,
     num_hidden_layers: int = 2,
     use_residual: bool = False,
+    network_type: str = "residual",
+    **kwargs,  # forward extra args to SlotFiLM (use_film, use_pos_embed, num_players, etc.)
 ) -> nn.Module:
-    """Factory: returns ResidualAdvantageNetwork when use_residual=True, else AdvantageNetwork."""
-    if use_residual:
-        return ResidualAdvantageNetwork(
+    """Factory: dispatches to AdvantageNetwork, ResidualAdvantageNetwork, or SlotFiLMAdvantageNetwork.
+
+    network_type values:
+      "mlp"           -> AdvantageNetwork
+      "residual"      -> ResidualAdvantageNetwork if use_residual=True, else AdvantageNetwork
+      "slot_film"     -> SlotFiLMAdvantageNetwork(use_film=True)
+      "slot_multiply" -> SlotFiLMAdvantageNetwork(use_film=False)
+    """
+    if network_type == "mlp":
+        return AdvantageNetwork(
             input_dim=input_dim,
             hidden_dim=hidden_dim,
-            num_hidden_layers=num_hidden_layers,
             output_dim=output_dim,
             dropout=dropout,
             validate_inputs=validate_inputs,
         )
-    return AdvantageNetwork(
-        input_dim=input_dim,
-        hidden_dim=hidden_dim,
-        output_dim=output_dim,
-        dropout=dropout,
-        validate_inputs=validate_inputs,
-    )
+    elif network_type == "residual":
+        if use_residual:
+            return ResidualAdvantageNetwork(
+                input_dim=input_dim,
+                hidden_dim=hidden_dim,
+                num_hidden_layers=num_hidden_layers,
+                output_dim=output_dim,
+                dropout=dropout,
+                validate_inputs=validate_inputs,
+            )
+        return AdvantageNetwork(
+            input_dim=input_dim,
+            hidden_dim=hidden_dim,
+            output_dim=output_dim,
+            dropout=dropout,
+            validate_inputs=validate_inputs,
+        )
+    elif network_type in ("slot_film", "slot_multiply"):
+        use_film = network_type == "slot_film"
+        return SlotFiLMAdvantageNetwork(
+            input_dim=input_dim,
+            hidden_dim=hidden_dim,
+            output_dim=output_dim,
+            dropout=dropout,
+            validate_inputs=validate_inputs,
+            num_hidden_layers=num_hidden_layers,
+            use_film=use_film,
+            **kwargs,
+        )
+    else:
+        raise ValueError(
+            f"Unknown network_type '{network_type}'. "
+            "Valid values: 'mlp', 'residual', 'slot_film', 'slot_multiply'."
+        )
 
 
 class StrategyNetwork(nn.Module):

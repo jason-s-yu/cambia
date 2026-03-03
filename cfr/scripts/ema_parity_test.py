@@ -157,7 +157,7 @@ def main():
     parser.add_argument(
         "--checkpoint",
         type=str,
-        default="runs/sys-bench/checkpoints/deep_cfr_checkpoint.pt",
+        default="runs/_archive/sys-bench/checkpoints/deep_cfr_checkpoint.pt",
         help="Path to checkpoint (must have companion _ema.pt and _sd_snapshots.pt files)",
     )
     parser.add_argument(

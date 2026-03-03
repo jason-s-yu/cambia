@@ -3,15 +3,14 @@ tests/conftest.py
 
 Shared fixtures and bootstrap logic for all tests.
 
-The project's config.py is currently incomplete (missing dataclass import
-and several Config sub-classes). We inject a minimal stub before any
-src.* imports so that modules like agent_state and encoding can be loaded.
+Injects a minimal stub for src.config so that modules like agent_state and
+encoding can be loaded before the real config module is fully initialised.
 """
 
 import sys
 import types
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Union
 
 # Ensure project root is on sys.path
 _project_root = str(Path(__file__).resolve().parent.parent)
@@ -24,15 +23,14 @@ _config_mod = sys.modules.get("src.config")
 if _config_mod is None or not hasattr(_config_mod, "Config"):
     _config_stub = types.ModuleType("src.config")
 
-    class _StubConfig:
-        """Minimal placeholder for Config and its sub-classes."""
-        pass
+    from pydantic import BaseModel as _BaseModel, Field as _Field, ConfigDict as _ConfigDict
 
-    from dataclasses import dataclass as _dataclass, field as _field
+    class _StubConfig(_BaseModel):
+        """Minimal placeholder for Config and its sub-classes."""
+        model_config = _ConfigDict(extra="allow")
 
     # CambiaRulesConfig needs real defaults because CambiaGameState reads them
-    @_dataclass
-    class _CambiaRulesConfig:
+    class _CambiaRulesConfig(_BaseModel):
         """Stub for CambiaRulesConfig with real game defaults."""
         allowDrawFromDiscardPile: bool = False
         allowReplaceAbilities: bool = False
@@ -47,8 +45,7 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         lockCallerHand: bool = True
         num_decks: int = 1
 
-    @_dataclass
-    class _DeepCfrConfig:
+    class _DeepCfrConfig(_BaseModel):
         """Stub for DeepCfrConfig with real defaults."""
         hidden_dim: int = 256
         dropout: float = 0.1
@@ -73,6 +70,8 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         num_traversal_threads: int = 1
         validate_inputs: bool = True
         traversal_depth_limit: int = 0
+        max_tasks_per_child: Optional[Union[int, str]] = "auto"
+        worker_memory_budget_pct: float = 0.10
         # ESCHER fields
         traversal_method: str = "outcome"
         value_hidden_dim: int = 512
@@ -80,7 +79,6 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         value_buffer_capacity: int = 2_000_000
         batch_counterfactuals: bool = True
         # DEPRECATED: ReBeL fields retained for checkpoint backward compat only.
-        # ReBeL/PBS subgame solving is mathematically unsound for N-player FFA with continuous beliefs.
         rebel_subgame_depth: int = 4
         rebel_cfr_iterations: int = 200
         rebel_value_hidden_dim: int = 1024
@@ -90,7 +88,7 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         rebel_value_buffer_capacity: int = 500_000
         rebel_policy_buffer_capacity: int = 500_000
         rebel_games_per_epoch: int = 100
-        rebel_epochs: int = 500
+        rebel_epochs: int = 10
 
         # SD-CFR fields
         use_sd_cfr: bool = False
@@ -100,12 +98,12 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         use_residual: bool = True
         network_type: str = "residual"
         use_pos_embed: bool = True
-        use_ema: bool = True  # EMA serving weights for O(1) SD-CFR inference
+        use_ema: bool = True
         enable_traversal_profiling: bool = False
         profiling_jsonl_path: str = ""
         profile_step: Optional[List[int]] = None
-        encoding_mode: str = "legacy"  # "legacy" (222-dim) or "ep_pbs" (200-dim)
-        encoding_layout: str = "auto"  # "auto" or "interleaved"
+        encoding_mode: str = "legacy"
+        encoding_layout: str = "auto"
         # Memory archetype fields
         memory_archetype: str = "perfect"
         memory_decay_lambda: float = 0.1

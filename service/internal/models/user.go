@@ -18,4 +18,8 @@ type User struct {
 	// Glicko2 for 1v1
 	Phi1v1   float64 `json:"phi_1v1"`
 	Sigma1v1 float64 `json:"sigma_1v1"`
+
+	// OpenSkill (Plackett-Luce) for circuit/tournament mode
+	OpenSkillMu    float64 `json:"open_skill_mu"`
+	OpenSkillSigma float64 `json:"open_skill_sigma"`
 }

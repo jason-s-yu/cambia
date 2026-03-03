@@ -4,7 +4,8 @@ import LoginPage from '@/pages/LoginPage';
 import RegisterPage from '@/pages/RegisterPage';
 import DashboardPage from '@/pages/DashboardPage';
 import LobbyPage from '@/pages/LobbyPage';
-import GamePage from '@/pages/GamePage';
+import ProfilePage from '@/pages/ProfilePage';
+import PlayPage from '@/pages/PlayPage';
 import AuthLayout from '@/layouts/AuthLayout';
 import AppLayout from '@/layouts/AppLayout';
 import ProtectedRoute from '@/routes/ProtectedRoute';
@@ -39,7 +40,8 @@ function App() {
 			<Route element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
 				<Route path="/dashboard" element={<DashboardPage />} />
 				<Route path="/lobby/:lobbyId" element={<LobbyPage />} />
-				<Route path="/game/:gameId" element={<GamePage />} />
+				<Route path="/profile" element={<ProfilePage />} />
+				<Route path="/play" element={<PlayPage />} />
 			</Route>
 
 			{/* Redirect root path */}

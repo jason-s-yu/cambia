@@ -9,7 +9,7 @@ import { useCurrentLobbyStore } from '@/stores/lobbyStore';
 
 interface ChatWindowProps {
 	messages: ChatMessage[];
-	sendMessage: (message: { type: string; msg: string; }) => void;
+	sendMessage: (message: { type: string; body?: Record<string, unknown> }) => void;
 }
 
 const ChatWindow: React.FC<ChatWindowProps> = ({ messages, sendMessage }) => {
@@ -31,7 +31,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ messages, sendMessage }) => {
 		e.preventDefault();
 		const trimmedMessage = newMessage.trim();
 		if (trimmedMessage) {
-			sendMessage({ type: 'chat', msg: trimmedMessage });
+			sendMessage({ type: 'chat', body: { msg: trimmedMessage } });
 			setNewMessage('');
 		}
 	};

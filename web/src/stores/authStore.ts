@@ -2,7 +2,7 @@
 // src/stores/authStore.ts
 import { create } from 'zustand';
 import type { User } from '@/types';
-import { loginUser, registerUser, fetchMe } from '@/services/authService';
+import { loginUser, registerUser, fetchMe, logoutUser } from '@/services/authService';
 
 interface LoginCredentials {
 	email: string;
@@ -22,7 +22,7 @@ interface AuthState {
 	error: string | null;
 	login: (credentials: LoginCredentials) => Promise<boolean>;
 	register: (details: RegisterDetails) => Promise<boolean>;
-	logout: () => void;
+	logout: () => Promise<void>;
 	checkAuth: () => Promise<void>; // Action to verify authentication status on app load
 	setUser: (user: User | null) => void; // Action to directly set user data (e.g., after WS guest creation)
 	clearError: () => void;
@@ -80,10 +80,13 @@ export const useAuthStore = create<AuthState>()(
 			}
 		},
 
-		logout: () => {
-			// TODO: Call a '/user/logout' API endpoint if implemented on backend.
+		logout: async () => {
+			try {
+				await logoutUser();
+			} catch (e) {
+				// Best-effort — clear local state regardless
+			}
 			set({ isAuthenticated: false, user: null, error: null, isLoading: false });
-			// If using persist middleware, ensure persisted state is cleared appropriately on logout.
 		},
 
 		checkAuth: async () => {

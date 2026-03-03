@@ -1,6 +1,6 @@
 // src/layouts/AppLayout.tsx
 import React from 'react';
-import { Outlet, Link } from 'react-router-dom';
+import { Outlet, Link, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@/stores/authStore';
 import Button from '@/components/common/Button';
 import ThemeToggle from '@/components/common/ThemeToggle';
@@ -13,6 +13,12 @@ import ThemeToggle from '@/components/common/ThemeToggle';
 const AppLayout: React.FC = () => {
 	const logout = useAuthStore((state) => state.logout);
 	const user = useAuthStore((state) => state.user);
+	const navigate = useNavigate();
+
+	const handleLogout = async () => {
+		await logout();
+		navigate('/login');
+	};
 
 	return (
 		<div className="min-h-screen flex flex-col bg-gray-50 dark:bg-gray-900">
@@ -22,11 +28,11 @@ const AppLayout: React.FC = () => {
 						Cambia Online
 					</Link>
 					<div className='flex items-center space-x-4'>
-						<span className="text-sm text-gray-700 dark:text-gray-300 hidden sm:inline">
+						<Link to="/profile" className="text-sm text-gray-700 dark:text-gray-300 hidden sm:inline hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
 							Welcome, <strong className='font-medium'>{user?.username ?? 'Player'}</strong>!
-						</span>
+						</Link>
 						<ThemeToggle />
-						<Button onClick={logout} variant='secondary' size='sm'>
+						<Button onClick={handleLogout} variant='secondary' size='sm'>
 							Logout
 						</Button>
 					</div>

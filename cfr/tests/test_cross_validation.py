@@ -578,15 +578,19 @@ class TestEPPBSCrossEngine:
             assert np.all(np.isfinite(go_enc)), f"Go EP-PBS has NaN/Inf at step {step}"
             assert np.all(np.isfinite(py_enc)), f"Py EP-PBS has NaN/Inf at step {step}"
 
-            if not np.allclose(go_enc, py_enc, atol=1e-4):
-                diff_indices = np.where(~np.isclose(go_enc, py_enc, atol=1e-4))[0]
+            # Compare only first 200 dims (core EP-PBS layout). Dims 200-223 are
+            # history features written by Go agent state (obs ages, discard histogram,
+            # turn progress) which the Python reference encoder doesn't track.
+            _EPPBS_CORE_DIMS = 200
+            if not np.allclose(go_enc[:_EPPBS_CORE_DIMS], py_enc[:_EPPBS_CORE_DIMS], atol=1e-4):
+                diff_indices = np.where(~np.isclose(go_enc[:_EPPBS_CORE_DIMS], py_enc[:_EPPBS_CORE_DIMS], atol=1e-4))[0]
                 first_divergence = (
                     f"seed={seed} step={step} actor=P{actor} "
                     f"ctx={ctx_int} drawn={drawn_int}\n"
                     f"  Divergent indices: {diff_indices.tolist()}\n"
                     f"  Go values: {go_enc[diff_indices].tolist()}\n"
                     f"  Py values: {py_enc[diff_indices].tolist()}\n"
-                    f"  Max abs diff: {np.max(np.abs(go_enc - py_enc)):.6f}"
+                    f"  Max abs diff: {np.max(np.abs(go_enc[:_EPPBS_CORE_DIMS] - py_enc[:_EPPBS_CORE_DIMS])):.6f}"
                 )
                 break
 
@@ -802,12 +806,15 @@ class TestMemoryDecayParity:
         assert np.all(np.isfinite(go_enc)), f"Go EP-PBS has NaN/Inf"
         assert np.all(np.isfinite(py_enc)), f"Py EP-PBS has NaN/Inf"
 
-        if not np.allclose(go_enc, py_enc, atol=1e-4):
-            diff_indices = np.where(~np.isclose(go_enc, py_enc, atol=1e-4))[0]
+        # Compare only first 200 dims (core EP-PBS). Dims 200-223 are Go-only
+        # history features (obs ages, discard histogram, turn progress).
+        _EPPBS_CORE_DIMS = 200
+        if not np.allclose(go_enc[:_EPPBS_CORE_DIMS], py_enc[:_EPPBS_CORE_DIMS], atol=1e-4):
+            diff_indices = np.where(~np.isclose(go_enc[:_EPPBS_CORE_DIMS], py_enc[:_EPPBS_CORE_DIMS], atol=1e-4))[0]
             pytest.fail(
                 f"seed={seed}: decaying archetype EP-PBS encoding mismatch\n"
                 f"  Divergent indices: {diff_indices.tolist()}\n"
-                f"  Max abs diff: {np.max(np.abs(go_enc - py_enc)):.6f}"
+                f"  Max abs diff: {np.max(np.abs(go_enc[:_EPPBS_CORE_DIMS] - py_enc[:_EPPBS_CORE_DIMS])):.6f}"
             )
 
         for ga in go_agents:

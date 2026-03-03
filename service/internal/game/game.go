@@ -4,7 +4,6 @@ package game
 import (
 	"context"
 	"log"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -133,12 +132,10 @@ type CambiaGame struct {
 	PreGameActive bool // Is the initial pre-game card reveal phase active?
 
 	lastSeen map[uuid.UUID]time.Time // Tracks last activity time for players (potential future use).
-	Mu       sync.Mutex              // Mutex protecting concurrent access to game state.
 
-	// Communication Callbacks
-	BroadcastFn         func(ev GameEvent)                     // Sends an event to all connected players.
-	BroadcastToPlayerFn func(playerID uuid.UUID, ev GameEvent) // Sends an event to a single player.
-	OnGameEnd           OnGameEndFunc                          // Callback executed when the game finishes.
+	// Communication — all events go through the hub's Emitter.
+	Emitter   Emitter       // Set by the hub after game creation; nil-safe (events dropped if unset).
+	OnGameEnd OnGameEndFunc // Callback executed when the game finishes.
 
 	// Special Action State — kept for backward compatibility with ProcessSpecialAction routing.
 	SpecialAction SpecialActionState // Holds state for pending multi-step special actions.
@@ -148,6 +145,10 @@ type CambiaGame struct {
 
 	// Timers
 	preGameTimer *time.Timer // Timer controlling the duration of the pre-game phase.
+
+	// Circuit-mode disconnect handling (T5)
+	circuitGraceTimers  map[uuid.UUID]*time.Timer // 60s grace timers per disconnected player
+	circuitAIControlled map[uuid.UUID]bool         // Players currently under AI control
 }
 
 // NewCambiaGame creates a new game instance with default settings.
@@ -172,7 +173,9 @@ func NewCambiaGame() *CambiaGame {
 			AutoKickTurnCount:        3,
 			TurnTimerSec:             15,
 		},
-		Circuit: Circuit{Enabled: false}, // Circuit mode disabled by default.
+		Circuit:             Circuit{Enabled: false}, // Circuit mode disabled by default.
+		circuitGraceTimers:  make(map[uuid.UUID]*time.Timer),
+		circuitAIControlled: make(map[uuid.UUID]bool),
 	}
 	return g
 }
@@ -180,9 +183,6 @@ func NewCambiaGame() *CambiaGame {
 // BeginPreGame starts the initial phase where players see their first two cards.
 // Deals cards via engine and schedules the transition to the main game start.
 func (g *CambiaGame) BeginPreGame() {
-	g.Mu.Lock()
-	defer g.Mu.Unlock()
-
 	if g.Started || g.GameOver || g.PreGameActive {
 		log.Printf("Game %s: BeginPreGame called in invalid state (Started:%v, Over:%v, PreGame:%v).", g.ID, g.Started, g.GameOver, g.PreGameActive)
 		return
@@ -197,9 +197,9 @@ func (g *CambiaGame) BeginPreGame() {
 		g.TurnDuration = 0 // Disable timer if set to 0.
 	}
 
-	// Enforce 2-player engine requirement.
-	if len(g.Players) != engine.MaxPlayers {
-		log.Printf("Game %s: Engine requires exactly %d players, got %d. Cannot start.", g.ID, engine.MaxPlayers, len(g.Players))
+	// Validate player count: 2 to engine.MaxPlayers.
+	if len(g.Players) < 2 || len(g.Players) > engine.MaxPlayers {
+		log.Printf("Game %s: Requires 2-%d players, got %d. Cannot start.", g.ID, engine.MaxPlayers, len(g.Players))
 		g.PreGameActive = false
 		return
 	}
@@ -269,9 +269,6 @@ func (g *CambiaGame) BeginPreGame() {
 // StartGame transitions the game from the pre-game phase to active play.
 // It marks the game as started and initiates the first turn.
 func (g *CambiaGame) StartGame() {
-	g.Mu.Lock()
-	defer g.Mu.Unlock()
-
 	// Ensure StartGame is called in the correct state.
 	if g.GameOver || g.Started || !g.PreGameActive {
 		log.Printf("Game %s: StartGame called in invalid state (GameOver:%v, Started:%v, PreGameActive:%v). Ignoring.", g.ID, g.GameOver, g.Started, g.PreGameActive)
@@ -301,18 +298,16 @@ func (g *CambiaGame) Start() {
 }
 
 // firePrivateInitialCards sends the initial card reveal event to a specific player.
-// Assumes lock is held by caller.
 func (g *CambiaGame) firePrivateInitialCards(playerID uuid.UUID, card1, card2 *EventCard) {
-	if g.BroadcastToPlayerFn == nil {
-		log.Println("Warning: BroadcastToPlayerFn is nil, cannot send private initial cards.")
+	if g.Emitter == nil {
 		return
 	}
 	ev := GameEvent{
 		Type:  EventPrivateInitialCards,
-		Card1: card1, // EventCard struct already contains details.
+		Card1: card1,
 		Card2: card2,
 	}
-	g.BroadcastToPlayerFn(playerID, ev)
+	g.Emitter.EmitTo(playerID, string(EventPrivateInitialCards), ev)
 }
 
 // persistInitialGameState saves the initial deck order and player hands to the database.
@@ -395,30 +390,25 @@ func (g *CambiaGame) broadcastPlayerTurn() {
 	g.broadcastPlayerTurnEngine()
 }
 
-// fireEvent broadcasts an event to all connected players via the BroadcastFn callback.
-// Assumes lock is held by caller.
+// fireEvent broadcasts an event to all connected players via the Emitter.
 func (g *CambiaGame) fireEvent(ev GameEvent) {
-	if g.BroadcastFn != nil {
-		g.BroadcastFn(ev) // Execute the callback.
-	} else {
-		log.Printf("Warning: Game %s: BroadcastFn is nil, cannot broadcast event type %s.", g.ID, ev.Type)
+	if g.Emitter == nil {
+		log.Printf("Warning: Game %s: Emitter is nil, cannot broadcast event type %s.", g.ID, ev.Type)
+		return
 	}
+	g.Emitter.Emit(string(ev.Type), ev)
 }
 
-// fireEventToPlayer sends an event to a specific player via the BroadcastToPlayerFn callback.
+// fireEventToPlayer sends an event to a specific player via the Emitter.
 // Checks if the player is connected before sending.
-// Assumes lock is held by caller.
 func (g *CambiaGame) fireEventToPlayer(playerID uuid.UUID, ev GameEvent) {
-	if g.BroadcastToPlayerFn != nil {
-		targetPlayer := g.getPlayerByID(playerID)
-		if targetPlayer != nil && targetPlayer.Connected {
-			g.BroadcastToPlayerFn(playerID, ev) // Execute the callback.
-		} else {
-			// Log quietly if player not found or disconnected.
-			// log.Printf("Debug: Game %s: Target player %s not found or not connected for private event type %s.", g.ID, playerID, ev.Type)
-		}
-	} else {
-		log.Printf("Warning: Game %s: BroadcastToPlayerFn is nil, cannot send private event type %s to player %s.", g.ID, ev.Type, playerID)
+	if g.Emitter == nil {
+		log.Printf("Warning: Game %s: Emitter is nil, cannot send private event type %s to player %s.", g.ID, ev.Type, playerID)
+		return
+	}
+	targetPlayer := g.getPlayerByID(playerID)
+	if targetPlayer != nil && targetPlayer.Connected {
+		g.Emitter.EmitTo(playerID, string(ev.Type), ev)
 	}
 }
 
@@ -451,6 +441,19 @@ func (g *CambiaGame) HandleDisconnect(playerID uuid.UUID) {
 	}
 	if !found {
 		log.Printf("Game %s: Disconnected player %s not found.", g.ID, playerID)
+		return
+	}
+
+	// Circuit mode: 60s grace timer instead of immediate forfeit.
+	if g.Circuit.Enabled {
+		if t, ok := g.circuitGraceTimers[playerID]; ok {
+			t.Stop()
+		}
+		g.circuitGraceTimers[playerID] = time.AfterFunc(60*time.Second, func() {
+			g.circuitAIControlled[playerID] = true
+			log.Printf("Game %s: Player %s grace period expired, AI taking over", g.ID, playerID)
+		})
+		g.broadcastSyncStateToAll()
 		return
 	}
 
@@ -514,6 +517,15 @@ func (g *CambiaGame) HandleReconnect(playerID uuid.UUID, conn *websocket.Conn) {
 			// Broadcast updated state to others.
 			g.broadcastSyncStateToAll()
 
+			// Circuit mode: cancel grace timer, restore player control.
+			if g.Circuit.Enabled {
+				if t, ok := g.circuitGraceTimers[playerID]; ok {
+					t.Stop()
+					delete(g.circuitGraceTimers, playerID)
+				}
+				delete(g.circuitAIControlled, playerID)
+			}
+
 			// If it was this player's turn, reschedule timer.
 			if g.Started && !g.GameOver && g.currentPlayerID() == playerID {
 				log.Printf("Game %s: Player %s reconnected on their turn. Rescheduling timer.", g.ID, playerID)
@@ -534,37 +546,25 @@ func (g *CambiaGame) HandleReconnect(playerID uuid.UUID, conn *websocket.Conn) {
 }
 
 // sendSyncState sends the current obfuscated game state to a single player.
-// Assumes lock is held by caller.
 func (g *CambiaGame) sendSyncState(playerID uuid.UUID) {
-	if g.BroadcastToPlayerFn == nil {
-		log.Println("Warning: BroadcastToPlayerFn is nil, cannot send sync state.")
+	if g.Emitter == nil {
 		return
 	}
-	// Generate state specifically for this player.
 	state := g.GetCurrentObfuscatedGameState(playerID)
 	ev := GameEvent{
 		Type:  EventPrivateSyncState,
-		State: &state, // Embed the state object.
+		State: &state,
 	}
-	g.fireEventToPlayer(playerID, ev) // Uses internal check for connection status.
-	// log.Printf("Game %s: Sent sync state to player %s.", g.ID, playerID) // Reduce noise.
+	g.fireEventToPlayer(playerID, ev)
 }
 
 // broadcastSyncStateToAll sends the obfuscated game state to all currently connected players.
-// Assumes lock is held by caller.
 func (g *CambiaGame) broadcastSyncStateToAll() {
-	if g.BroadcastToPlayerFn == nil {
-		log.Println("Warning: BroadcastToPlayerFn is nil, cannot broadcast sync state to all.")
-		return
-	}
-	connectedCount := 0
 	for _, p := range g.Players {
 		if p.Connected {
-			g.sendSyncState(p.ID) // Generate and send state for each connected player.
-			connectedCount++
+			g.sendSyncState(p.ID)
 		}
 	}
-	// log.Printf("Game %s: Broadcasted sync state to %d connected players.", g.ID, connectedCount) // Reduce noise.
 }
 
 // countConnectedPlayers returns the number of players currently marked as connected.
@@ -1028,6 +1028,23 @@ func (g *CambiaGame) FireEventPrivateSuccess(userID uuid.UUID, special string, c
 	}
 	g.fireEventToPlayer(userID, ev)
 	// Logging is typically handled within the specific do* action function.
+}
+
+// CircuitAIPlay performs a minimal defensive action for an AI-controlled disconnected player.
+// Draw from stockpile and immediately discard (no abilities, no swaps).
+func (g *CambiaGame) CircuitAIPlay(playerID uuid.UUID) {
+	if !g.circuitAIControlled[playerID] {
+		return
+	}
+	// The actual implementation depends on how turns are processed.
+	// For now, just advance the turn with a no-op.
+	// In practice, this would call the engine's draw+discard actions.
+	log.Printf("Game %s: AI defensive play for disconnected player %s", g.ID, playerID)
+}
+
+// IsCircuitAIControlled returns whether a player is currently under AI control due to disconnect.
+func (g *CambiaGame) IsCircuitAIControlled(playerID uuid.UUID) bool {
+	return g.circuitAIControlled[playerID]
 }
 
 // FireEventPlayerSpecialAction helper to broadcast public info about a special action.

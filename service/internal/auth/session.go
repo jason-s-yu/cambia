@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -43,6 +44,23 @@ func Init() {
 		os.Exit(1)
 	}
 	parseTokenExpireTime()
+}
+
+// InitAndSave generates a fresh key pair via Init and saves the raw key bytes to
+// <dir>/jwt_keys/private.pem and <dir>/jwt_keys/public.pem.
+func InitAndSave(dir string) error {
+	Init()
+	keysDir := filepath.Join(dir, "jwt_keys")
+	if err := os.MkdirAll(keysDir, 0700); err != nil {
+		return fmt.Errorf("failed to create jwt_keys dir: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(keysDir, "private.pem"), []byte(privateKey), 0600); err != nil {
+		return fmt.Errorf("failed to write private key: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(keysDir, "public.pem"), []byte(publicKey), 0644); err != nil {
+		return fmt.Errorf("failed to write public key: %w", err)
+	}
+	return nil
 }
 
 // InitFromPath reads ed25519 private/public keys from file and sets the token expiration.

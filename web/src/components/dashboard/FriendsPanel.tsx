@@ -5,13 +5,15 @@ import ErrorMessage from '@/components/common/ErrorMessage';
 import Button from '../common/Button';
 import Input from '../common/Input';
 import type { FriendRelationship } from '@/types';
+import { useAuthStore } from '@/stores/authStore';
 
 const FriendsPanel: React.FC = () => {
   const [friends, setFriends] = useState<FriendRelationship[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [addFriendId, setAddFriendId] = useState('');
-  const currentUserId = 'me'; // TODO: Replace with actual user ID from authStore
+  const user = useAuthStore((state) => state.user);
+  const currentUserId = user?.id ?? '';
 
   const fetchFriendsList = async () => {
     setIsLoading(true);

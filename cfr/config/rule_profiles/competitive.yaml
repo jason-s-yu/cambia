@@ -1,0 +1,13 @@
+# Competitive ruleset — richer strategy space
+allowDrawFromDiscardPile: true
+allowReplaceAbilities: true
+snapRace: false
+penaltyDrawCount: 2
+use_jokers: 2
+cards_per_player: 4
+initial_view_count: 2
+cambia_allowed_round: 0
+allowOpponentSnapping: true
+max_game_turns: 300
+lockCallerHand: false
+num_decks: 1

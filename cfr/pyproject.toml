@@ -19,6 +19,9 @@ dependencies = [
     "typer[all]>=0.9",
 ]
 
+[project.optional-dependencies]
+rl = ["gymnasium>=1.0", "stable-baselines3>=2.4", "sb3-contrib>=2.4"]
+
 [project.scripts]
 cambia = "src.cli:app"
 

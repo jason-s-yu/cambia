@@ -35,7 +35,14 @@ logger = logging.getLogger(__name__)
 
 RUNS = ["os-full", "os-30", "os-20", "os-15", "os-10", "es-15", "es-10"]
 TARGET_ITERATIONS = [25, 50, 75, 250, 500, 750]
-BASELINES = ["random", "greedy", "imperfect_greedy", "memory_heuristic", "aggressive_snap"]
+MEAN_IMP_BASELINES = [
+    "random_no_cambia",
+    "random_late_cambia",
+    "imperfect_greedy",
+    "memory_heuristic",
+    "aggressive_snap",
+]
+BASELINES = ["random", "greedy"] + MEAN_IMP_BASELINES
 GAMES_INTERMEDIATE = 400
 GAMES_FINAL = 500
 MAX_ITERATION = 750

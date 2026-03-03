@@ -258,14 +258,13 @@ class TestGoTraversal:
             assert stats.nodes_visited > 0
 
             # --- Behavioral assertion: 2P zero-sum utility ---
-            # In 2P Cambia, computeUtilities returns {+1,-1}, {-1,+1}, or {0,0}.
-            # The sum must be exactly zero (winner/loser or tie).
-            assert abs(utility[0] + utility[1]) < 1e-9, (
+            # Score-margin utility: continuous in [-1, 1], zero-sum.
+            assert abs(utility[0] + utility[1]) < 1e-5, (
                 f"2P utility not zero-sum: {utility}"
             )
 
             # --- Behavioral assertion: utility in valid range ---
-            # Cambia 2P utilities are exactly {-1, 0, +1}.
+            # Score-margin utilities are clamped to [-1, 1].
             for i in range(2):
                 assert -1.01 <= utility[i] <= 1.01, (
                     f"Utility[{i}]={utility[i]} outside [-1, 1]"

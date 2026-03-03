@@ -14,6 +14,7 @@ import (
 )
 
 // mockBroadcaster captures game events for testing assertions.
+// It implements the Emitter interface.
 type mockBroadcaster struct {
 	mu           sync.Mutex
 	allEvents    []GameEvent
@@ -27,13 +28,23 @@ func newMockBroadcaster() *mockBroadcaster {
 	}
 }
 
-func (mb *mockBroadcaster) broadcastFn(ev GameEvent) {
+// Emit implements Emitter — captures broadcast events.
+func (mb *mockBroadcaster) Emit(eventType string, payload any) {
+	ev, ok := payload.(GameEvent)
+	if !ok {
+		return
+	}
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
 	mb.allEvents = append(mb.allEvents, ev)
 }
 
-func (mb *mockBroadcaster) broadcastToPlayerFn(playerID uuid.UUID, ev GameEvent) {
+// EmitTo implements Emitter — captures per-player events.
+func (mb *mockBroadcaster) EmitTo(playerID uuid.UUID, eventType string, payload any) {
+	ev, ok := payload.(GameEvent)
+	if !ok {
+		return
+	}
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
 	mb.playerEvents[playerID] = append(mb.playerEvents[playerID], ev)
@@ -77,18 +88,14 @@ func (mb *mockBroadcaster) findEventByType(eventType GameEventType) *GameEvent {
 }
 
 // setupTestGame initializes a CambiaGame instance with mock players and broadcasters for testing.
-// The engine requires exactly 2 players.
 func setupTestGame(t *testing.T, numPlayers int, rules *HouseRules) (*CambiaGame, []*models.Player, *mockBroadcaster) {
-	// Engine requires exactly 2 players; clamp to 2 for engine-backed tests.
-	if numPlayers != engine.MaxPlayers {
-		t.Logf("Note: engine requires %d players, adjusting from %d", engine.MaxPlayers, numPlayers)
-		numPlayers = engine.MaxPlayers
+	if numPlayers < 2 {
+		numPlayers = 2
 	}
 
 	g := NewCambiaGame()
 	mb := newMockBroadcaster()
-	g.BroadcastFn = mb.broadcastFn
-	g.BroadcastToPlayerFn = mb.broadcastToPlayerFn
+	g.Emitter = mb
 
 	if rules != nil {
 		g.HouseRules = *rules
@@ -196,10 +203,8 @@ func TestBasicDrawDiscard(t *testing.T) {
 
 	// After discard (no ability card path or special triggered):
 	// Check that either special is active or turn advanced.
-	g.Mu.Lock()
 	specialActive := g.SpecialAction.Active && g.SpecialAction.PlayerID == currentPlayer.ID
 	nextTurnPlayer := currentTurnPlayer(g)
-	g.Mu.Unlock()
 
 	if specialActive {
 		// Special was triggered — skip it.
@@ -208,9 +213,7 @@ func TestBasicDrawDiscard(t *testing.T) {
 		assert.Equal(t, EventPlayerSpecialChoice, lastPublicEvent.Type)
 
 		g.ProcessSpecialAction(currentPlayer.ID, "skip", nil, nil)
-		g.Mu.Lock()
 		nextTurnPlayer = currentTurnPlayer(g)
-		g.Mu.Unlock()
 		assert.Equal(t, otherPlayer.ID, nextTurnPlayer.ID, "Turn should advance to other player after skip")
 	} else {
 		// No special — check turn advanced and discard pile grew.
@@ -283,10 +286,8 @@ func TestBasicDrawReplace(t *testing.T) {
 	assert.Equal(t, 0, *discardEvent.Card.Idx)
 
 	// If no special action was triggered, turn should advance.
-	g.Mu.Lock()
 	specialActive := g.SpecialAction.Active && g.SpecialAction.PlayerID == currentPlayer.ID
 	nextTurnPlayer := currentTurnPlayer(g)
-	g.Mu.Unlock()
 
 	// Default house rules: AllowReplaceAbilities=false, so no special on replace.
 	require.False(t, specialActive, "Special action should NOT be active if AllowReplaceAbilities is false")
@@ -622,9 +623,7 @@ func TestCambiaLock(t *testing.T) {
 	g.ProcessSpecialAction(first.ID, "swap_blind", swapCard1Data, swapCard2Data)
 
 	// Assert: special action should still be active (Cambia lock prevented swap).
-	g.Mu.Lock()
 	specialStillActive := g.SpecialAction.Active && g.SpecialAction.PlayerID == first.ID
-	g.Mu.Unlock()
 
 	assert.True(t, specialStillActive, "Special action should still be active after failed swap attempt due to Cambia lock")
 

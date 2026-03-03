@@ -1,12 +1,14 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // src/stores/gameStore.ts
 import { create } from 'zustand';
-import type { ObfGameState, ObfCard, ServerGameEvent } from '@/types/game';
+import type { ObfGameState, ObfCard } from '@/types/game';
 import { immer } from 'zustand/middleware/immer';
+import { useAuthStore } from './authStore';
 
 interface GameState {
 	gameId: string | null;
 	gameState: ObfGameState | null;
+	seq: number;
 	isConnected: boolean;
 	isLoading: boolean; // For initial connection/sync
 	error: string | null;
@@ -22,7 +24,8 @@ interface GameActions {
 	setLoading: (loading: boolean) => void;
 	setError: (error: string | null) => void;
 	clearError: () => void;
-	processGameWebSocketMessage: (message: ServerGameEvent) => void;
+	processGameWebSocketMessage: (type: string, payload: any) => void;
+	forceSync: (payload: any) => void;
 	clearGameState: () => void; // For leaving game
 	setDisplayedDrawnCard: (card: ObfCard | null) => void;
 	clearDisplayedDrawnCard: () => void;
@@ -33,6 +36,7 @@ interface GameActions {
 const initialState: GameState = {
 	gameId: null,
 	gameState: null,
+	seq: 0,
 	isConnected: false,
 	isLoading: false,
 	error: null,
@@ -119,20 +123,36 @@ export const useGameStore = create<GameState & GameActions>()(
 			});
 		},
 
-		processGameWebSocketMessage: (message) => {
+		forceSync: (payload) => {
+			set((state) => {
+				if (payload?.state) {
+					state.gameState = payload.state;
+				}
+				if (typeof payload?.seq === 'number') {
+					state.seq = payload.seq;
+				}
+				state.pendingAction = null;
+				state.displayedDrawnCard = null;
+				state.isLoading = false;
+				state.isConnected = true;
+				state.error = null;
+			});
+		},
+
+		processGameWebSocketMessage: (type, payload) => {
 			set((state) => {
 				state.lastMessageTimestamp = Date.now();
 				state.isProcessingAction = false; // Assume action processed on any message receipt
 
-				if (!state.gameState && message.type !== 'private_sync_state') {
-					console.warn(`[GameStore] Received message type ${message.type} before initial state sync. Ignoring.`);
+				if (!state.gameState && type !== 'private_sync_state') {
+					console.warn(`[GameStore] Received message type ${type} before initial state sync. Ignoring.`);
 					return;
 				}
 
 				try { // Add try-catch for safety during state updates
-					switch (message.type) {
+					switch (type) {
 						case 'private_sync_state':
-							state.gameState = message.state;
+							state.gameState = payload.state;
 							state.isLoading = false; // Sync received, no longer loading initial state
 							state.isConnected = true; // Mark as connected on successful sync
 							state.error = null;
@@ -149,18 +169,18 @@ export const useGameStore = create<GameState & GameActions>()(
 							// This is mainly for the client to "remember" cards.
 							// We don't usually update the main ObfGameState based on this,
 							// but could store it separately if needed for UI hints.
-							console.log('[GameStore] Received initial cards:', message.card1, message.card2);
+							console.log('[GameStore] Received initial cards:', payload.card1, payload.card2);
 							break;
 
 						case 'game_player_turn':
 							if (state.gameState) {
-								state.gameState.currentPlayerId = message.user.id;
-								state.gameState.turnId = message.turn;
+								state.gameState.currentPlayerId = payload.user?.id;
+								state.gameState.turnId = payload.turn;
 								state.pendingAction = null; // New turn clears pending actions
 								state.displayedDrawnCard = null; // Clear magnified card
 								// Update isCurrentTurn for all players
 								state.gameState.players.forEach(p => {
-									p.isCurrentTurn = (p.playerId === message.user.id);
+									p.isCurrentTurn = (p.playerId === payload.user?.id);
 								});
 							}
 							break;
@@ -168,31 +188,31 @@ export const useGameStore = create<GameState & GameActions>()(
 						case 'player_draw_stockpile':
 						case 'private_draw_stockpile': // Treat both similarly for state update, but display logic differs
 							if (state.gameState) {
-								if (message.type === 'player_draw_stockpile') {
+								if (type === 'player_draw_stockpile') {
 									// Public draw - update stockpile size, show card back magnified for others
-									if (message.payload.source === 'stockpile') {
-										state.gameState.stockpileSize = message.payload.stockpileSize ?? state.gameState.stockpileSize - 1;
+									if (payload.payload?.source === 'stockpile') {
+										state.gameState.stockpileSize = payload.payload?.stockpileSize ?? state.gameState.stockpileSize - 1;
 									} else {
-										state.gameState.discardSize = message.payload.discardSize ?? state.gameState.discardSize - 1;
+										state.gameState.discardSize = payload.payload?.discardSize ?? state.gameState.discardSize - 1;
 										// Update discardTop if drawn from discard
 										state.gameState.discardTop = null; // Simplified: assume next sync will fix it
 									}
-									const player = state.gameState.players.find(p => p.playerId === message.user.id);
+									const player = state.gameState.players.find(p => p.playerId === payload.user?.id);
 									const self = state.gameState.players.find(p => p.revealedHand !== undefined);
 									if (player && self && player.playerId !== self.playerId) {
 										// Magnify card back for others
-										state.displayedDrawnCard = { id: message.card.id, known: false };
+										state.displayedDrawnCard = { id: payload.card?.id, known: false };
 									}
 								} else { // Private draw
 									// Update the specific player's drawnCard state
 									const player = state.gameState.players.find(p => p.playerId === state.gameState?.players.find(pl => pl.revealedHand !== undefined)?.playerId); // Find 'self'
 									if (player && player.playerId === state.gameState.currentPlayerId) {
-										player.drawnCard = message.card;
+										player.drawnCard = payload.card;
 										state.pendingAction = 'discard_replace'; // Player must now discard/replace
-										state.displayedDrawnCard = message.card; // Magnify revealed card for self
+										state.displayedDrawnCard = payload.card; // Magnify revealed card for self
 									}
 									// Update stockpile/discard size based on source
-									if (message.payload.source === 'stockpile') {
+									if (payload.payload?.source === 'stockpile') {
 										state.gameState.stockpileSize--; // Approximate if size not sent
 									} else {
 										state.gameState.discardSize--; // Approximate
@@ -206,9 +226,9 @@ export const useGameStore = create<GameState & GameActions>()(
 							if (state.gameState) {
 								// Update discard pile
 								state.gameState.discardSize++;
-								state.gameState.discardTop = message.card;
+								state.gameState.discardTop = payload.card;
 								// Clear drawn card for the discarding player
-								const player = state.gameState.players.find(p => p.playerId === message.user.id);
+								const player = state.gameState.players.find(p => p.playerId === payload.user?.id);
 								if (player) {
 									player.drawnCard = null;
 								}
@@ -220,12 +240,12 @@ export const useGameStore = create<GameState & GameActions>()(
 						case 'player_replace': // Treat as discard for state update simplicity
 							if (state.gameState) {
 								state.gameState.discardSize++;
-								state.gameState.discardTop = message.card; // The replaced card goes to discard
-								const player = state.gameState.players.find(p => p.playerId === message.user.id);
+								state.gameState.discardTop = payload.card; // The replaced card goes to discard
+								const player = state.gameState.players.find(p => p.playerId === payload.user?.id);
 								if (player) {
 									player.drawnCard = null;
 									// If we have revealedHand, update it (tricky without full card info)
-									if (player.revealedHand && message.card.idx !== undefined) {
+									if (player.revealedHand && payload.card?.idx !== undefined) {
 										// We don't know what the drawn card was here easily,
 										// rely on next sync or private events for perfect hand state.
 										// For now, just clear drawnCard.
@@ -239,14 +259,14 @@ export const useGameStore = create<GameState & GameActions>()(
 						case 'player_special_choice':
 							if (state.gameState) {
 								const player = state.gameState.players.find(p => p.revealedHand !== undefined); // Find 'self'
-								if (player && player.playerId === message.user.id) {
+								if (player && player.playerId === payload.user?.id) {
 									state.pendingAction = 'special_action'; // Player needs to make choice
 								}
 								// Optionally store special action details
 								state.gameState.specialAction = {
 									active: true,
-									playerId: message.user.id,
-									cardRank: message.card.rank
+									playerId: payload.user?.id,
+									cardRank: payload.card?.rank
 								};
 							}
 							break;
@@ -254,7 +274,7 @@ export const useGameStore = create<GameState & GameActions>()(
 						case 'player_special_action': // Public confirmation/info
 							if (state.gameState) {
 								// If the action was 'skip' or a completed swap/peek, clear pending state
-								if (message.special === 'skip' || message.special === 'peek_self' || message.special === 'peek_other' || message.special === 'swap_blind' || message.special === 'swap_peek_swap') {
+								if (payload.special === 'skip' || payload.special === 'peek_self' || payload.special === 'peek_other' || payload.special === 'swap_blind' || payload.special === 'swap_peek_swap') {
 									state.pendingAction = null;
 									state.gameState.specialAction = null;
 								}
@@ -270,7 +290,7 @@ export const useGameStore = create<GameState & GameActions>()(
 							break;
 						case 'private_special_action_fail':
 							// Show error message to the user
-							// state.error = `Special action failed: ${message.message}`; // Maybe too aggressive?
+							// state.error = `Special action failed: ${payload.message}`; // Maybe too aggressive?
 							state.pendingAction = 'special_action'; // Allow retry or skip
 							state.isProcessingAction = false; // Allow sending new action
 							break;
@@ -278,14 +298,14 @@ export const useGameStore = create<GameState & GameActions>()(
 						// --- Snap Events ---
 						case 'player_snap_success':
 							if (state.gameState) {
-								const player = state.gameState.players.find(p => p.playerId === message.user.id);
+								const player = state.gameState.players.find(p => p.playerId === payload.user?.id);
 								if (player) {
 									player.handSize--; // Update hand size
 									// Remove card from revealedHand if it's 'self'
-									if (player.revealedHand && message.card.idx !== undefined) {
-										player.revealedHand.splice(message.card.idx, 1);
+									if (player.revealedHand && payload.card?.idx !== undefined) {
+										player.revealedHand.splice(payload.card.idx, 1);
 										// Adjust indices of subsequent cards
-										for (let i = message.card.idx; i < player.revealedHand.length; i++) {
+										for (let i = payload.card.idx; i < player.revealedHand.length; i++) {
 											if (player.revealedHand[i].idx !== undefined) {
 												player.revealedHand[i].idx!--;
 											}
@@ -293,7 +313,7 @@ export const useGameStore = create<GameState & GameActions>()(
 									}
 								}
 								state.gameState.discardSize++;
-								state.gameState.discardTop = message.card;
+								state.gameState.discardTop = payload.card;
 							}
 							break;
 						case 'player_snap_fail':
@@ -301,7 +321,7 @@ export const useGameStore = create<GameState & GameActions>()(
 							break;
 						case 'player_snap_penalty': // Public penalty draw notification
 							if (state.gameState) {
-								const player = state.gameState.players.find(p => p.playerId === message.user.id);
+								const player = state.gameState.players.find(p => p.playerId === payload.user?.id);
 								if (player) {
 									player.handSize++; // Increment hand size
 								}
@@ -311,12 +331,12 @@ export const useGameStore = create<GameState & GameActions>()(
 						case 'private_snap_penalty': // Private penalty card details
 							if (state.gameState) {
 								const player = state.gameState.players.find(p => p.revealedHand !== undefined); // Find 'self'
-								if (player && player.playerId === state.gameState?.players.find(p => p.playerId === message.card?.id)?.playerId) { // Check if message is for self? No, need user ID
+								if (player && player.playerId === state.gameState?.players.find(p => p.playerId === payload.card?.id)?.playerId) { // Check if message is for self? No, need user ID
 									// This logic is tricky without user id in the private message.
 									// Assuming it's for 'self' if received.
-									if (player.revealedHand && message.card.idx !== undefined) {
+									if (player.revealedHand && payload.card?.idx !== undefined) {
 										// Add card at the specified index
-										player.revealedHand.splice(message.card.idx, 0, message.card);
+										player.revealedHand.splice(payload.card.idx, 0, payload.card);
 										// Adjust subsequent indices (might be off if server adds to end)
 										// Relying on sync state is safer here.
 									}
@@ -328,8 +348,8 @@ export const useGameStore = create<GameState & GameActions>()(
 						case 'player_cambia':
 							if (state.gameState) {
 								state.gameState.cambiaCalled = true;
-								state.gameState.cambiaCallerId = message.user.id;
-								const player = state.gameState.players.find(p => p.playerId === message.user.id);
+								state.gameState.cambiaCallerId = payload.user?.id;
+								const player = state.gameState.players.find(p => p.playerId === payload.user?.id);
 								if (player) player.hasCalledCambia = true;
 								state.pendingAction = null; // Turn ends immediately
 								state.displayedDrawnCard = null; // Clear magnified card
@@ -343,22 +363,22 @@ export const useGameStore = create<GameState & GameActions>()(
 								state.pendingAction = null;
 								state.displayedDrawnCard = null;
 								// Store final scores/winner if needed, maybe trigger modal
-								// state.finalScores = message.payload.scores;
-								// state.winnerId = message.payload.winner;
+								// state.finalScores = payload.payload?.scores;
+								// state.winnerId = payload.payload?.winner;
 							}
 							break;
 
 						case 'error': // Server-sent error message
-							state.error = `Game Error: ${message.message}`;
+							state.error = `Game Error: ${payload.message ?? payload.error ?? 'Unknown error'}`;
 							state.isProcessingAction = false; // Allow new actions after error
 							// Should we clear pending state on error? Depends on the error.
 							break;
 
 						default:
-							console.warn(`[GameStore] Unhandled WebSocket message type: ${message.type}`);
+							console.warn(`[GameStore] Unhandled WebSocket message type: ${type}`);
 					}
 				} catch (e: unknown) {
-					console.error(`[GameStore] Error processing message type ${message.type}:`, e);
+					console.error(`[GameStore] Error processing message type ${type}:`, e);
 					state.error = `Client error processing game update: ${(e instanceof Error) ? e.message : 'Unknown error'}`;
 				}
 			});
@@ -376,7 +396,10 @@ export const selectDisplayedDrawnCard = (state: GameState) => state.displayedDra
 export const selectPendingAction = (state: GameState) => state.pendingAction;
 export const selectIsProcessingAction = (state: GameState) => state.isProcessingAction;
 export const selectCurrentPlayerId = (state: GameState) => state.gameState?.currentPlayerId;
-export const selectSelfPlayerState = (state: GameState) => state.gameState?.players.find(p => p.revealedHand !== undefined);
+export const selectSelfPlayerState = (state: GameState) => {
+	const selfId = useAuthStore.getState().user?.id;
+	return state.gameState?.players.find(p => p.playerId === selfId);
+};
 export const selectIsSelfTurn = (state: GameState) => {
 	const self = selectSelfPlayerState(state);
 	const currentId = selectCurrentPlayerId(state);

@@ -1,0 +1,13 @@
+# Default training rules — matches CambiaRulesConfig defaults
+allowDrawFromDiscardPile: false
+allowReplaceAbilities: false
+snapRace: false
+penaltyDrawCount: 2
+use_jokers: 2
+cards_per_player: 4
+initial_view_count: 2
+cambia_allowed_round: 0
+allowOpponentSnapping: false
+max_game_turns: 300
+lockCallerHand: true
+num_decks: 1

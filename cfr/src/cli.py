@@ -479,6 +479,64 @@ def train_rebel(
         raise typer.Exit(1)
 
 
+@train_app.command("ppo", help="Train PPO best-response diagnostic agent")
+def train_ppo_cmd(
+    opponent: str = typer.Option(
+        "imperfect_greedy",
+        "--opponent",
+        "-o",
+        help="Opponent agent type to train against",
+    ),
+    timesteps: int = typer.Option(
+        500_000,
+        "--timesteps",
+        "-t",
+        help="Total training timesteps",
+    ),
+    save_path: Path = typer.Option(
+        "runs/ppo-diagnostic/model",
+        "--save-path",
+        "-s",
+        help="Path to save trained model",
+    ),
+    n_envs: int = typer.Option(
+        4,
+        "--n-envs",
+        help="Number of parallel training environments",
+    ),
+    eval_freq: int = typer.Option(
+        10_000,
+        "--eval-freq",
+        help="Evaluate every N timesteps",
+    ),
+    config: Path = typer.Option(
+        "config.yaml",
+        "--config",
+        "-c",
+        help="Path to configuration YAML file",
+        exists=True,
+    ),
+    seed: int = typer.Option(
+        42,
+        "--seed",
+        help="Random seed",
+    ),
+):
+    """Train a PPO agent as best-response to a fixed opponent (diagnostic)."""
+    from .ppo_train import train_ppo
+
+    train_ppo(
+        opponent=opponent,
+        timesteps=timesteps,
+        save_path=str(save_path),
+        n_envs=n_envs,
+        eval_freq=eval_freq,
+        net_arch=[256, 256],
+        seed=seed,
+        config_path=str(config),
+    )
+
+
 @app.command("resume", help="Resume training from a checkpoint")
 def resume(
     checkpoint: Path = typer.Argument(
@@ -1043,11 +1101,12 @@ def evaluate(
         help="Number of games per baseline matchup",
     ),
     baselines: str = typer.Option(
-        "random,greedy",
+        None,
         "--baselines",
         "-b",
         help="Comma-separated list of baseline agents to evaluate against "
-        "(choices: random, greedy, imperfect_greedy, memory_heuristic, aggressive_snap, cfr)",
+        "(choices: random, random_no_cambia, random_late_cambia, greedy, imperfect_greedy, memory_heuristic, aggressive_snap, cfr). "
+        "Defaults to the full MEAN_IMP_BASELINES set.",
     ),
     device: str = typer.Option(
         "cpu",
@@ -1061,13 +1120,21 @@ def evaluate(
         "-o",
         help="Directory for per-baseline JSONL game logs",
     ),
+    argmax: bool = typer.Option(
+        False,
+        "--argmax",
+        help="Use argmax action selection instead of stochastic sampling during evaluation",
+    ),
 ):
     """Evaluate a Deep CFR checkpoint against baseline agents and print a win-rate table."""
     from rich.console import Console
     from rich.table import Table
-    from .evaluate_agents import run_evaluation_multi_baseline
+    from .evaluate_agents import run_evaluation_multi_baseline, MEAN_IMP_BASELINES
 
-    baseline_list = [b.strip() for b in baselines.split(",") if b.strip()]
+    if baselines is None:
+        baseline_list = list(MEAN_IMP_BASELINES)
+    else:
+        baseline_list = [b.strip() for b in baselines.split(",") if b.strip()]
     if not baseline_list:
         print("ERROR: No baselines specified.", file=sys.stderr)
         raise typer.Exit(1)
@@ -1079,6 +1146,7 @@ def evaluate(
         baselines=baseline_list,
         device=device,
         output_dir=str(output_dir) if output_dir else None,
+        use_argmax=argmax,
     )
 
     console = Console()
@@ -1123,6 +1191,94 @@ def evaluate(
     console.print(table)
 
 
+@app.command("play", help="Play Cambia interactively against an AI opponent")
+def play(
+    opponent: str = typer.Option(
+        "random_no_cambia",
+        "--opponent",
+        "-o",
+        help="Opponent agent type (e.g., random, imperfect_greedy, sd_cfr)",
+    ),
+    config: Path = typer.Option(
+        "config.yaml",
+        "--config",
+        "-c",
+        help="Path to configuration YAML file",
+        exists=True,
+    ),
+    checkpoint: Optional[Path] = typer.Option(
+        None,
+        "--checkpoint",
+        help="Checkpoint path (required for neural agents: deep_cfr, escher, sd_cfr)",
+    ),
+    device: str = typer.Option(
+        "cpu",
+        "--device",
+        "-d",
+        help="Torch device for neural agent inference",
+    ),
+    num_players: int = typer.Option(
+        2,
+        "--num-players",
+        "-n",
+        help="Number of players (2-6)",
+    ),
+    human_seats: str = typer.Option(
+        "0",
+        "--human-seats",
+        help="Comma-separated seat indices for human players (e.g., '0' or '0,2')",
+    ),
+    your_name: str = typer.Option(
+        "You",
+        "--name",
+        help="Your player name",
+    ),
+):
+    """Play a game of Cambia against AI opponents interactively."""
+    from .evaluate_agents import get_agent, load_config, AGENT_REGISTRY
+    from .play import SeatConfig, play_game
+
+    cfg = load_config(str(config))
+    if not cfg:
+        print(f"ERROR: Failed to load config from {config}", file=sys.stderr)
+        raise typer.Exit(1)
+
+    human_indices = {int(s.strip()) for s in human_seats.split(",") if s.strip()}
+    _checkpoint_types = {"deep_cfr", "escher", "sd_cfr", "nplayer", "ppo"}
+
+    seats = []
+    human_count = 0
+    for seat_id in range(num_players):
+        if seat_id in human_indices:
+            human_count += 1
+            name = your_name if human_count == 1 else f"Player {seat_id}"
+            seats.append(SeatConfig(seat_id=seat_id, is_human=True, name=name))
+        else:
+            agent_kwargs = {}
+            if opponent.lower() in _checkpoint_types:
+                if not checkpoint:
+                    print(f"ERROR: --checkpoint required for {opponent} agent", file=sys.stderr)
+                    raise typer.Exit(1)
+                agent_kwargs["checkpoint_path"] = str(checkpoint)
+                agent_kwargs["device"] = device
+            agent = get_agent(opponent, player_id=seat_id, config=cfg, **agent_kwargs)
+            seats.append(SeatConfig(
+                seat_id=seat_id, is_human=False, name=f"{opponent} (P{seat_id})",
+                agent_type=opponent, agent=agent,
+            ))
+
+    if not human_indices:
+        print("ERROR: At least one seat must be human", file=sys.stderr)
+        raise typer.Exit(1)
+
+    available = list(AGENT_REGISTRY.keys())
+    if opponent.lower() not in [a.lower() for a in available]:
+        print(f"ERROR: Unknown opponent '{opponent}'. Available: {available}", file=sys.stderr)
+        raise typer.Exit(1)
+
+    play_game(seats, cfg.cambia_rules)
+
+
 @app.command("head-to-head", help="Play two Deep CFR checkpoints against each other")
 def head_to_head(
     checkpoint_a: Path = typer.Option(
@@ -1140,7 +1296,7 @@ def head_to_head(
         exists=True,
     ),
     games: int = typer.Option(
-        100,
+        2000,
         "--games",
         "-n",
         help="Number of games to play",
@@ -1208,6 +1364,246 @@ def head_to_head(
     )
 
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# Config subcommands
+# ---------------------------------------------------------------------------
+config_app = typer.Typer(
+    help="Config schema and diff utilities",
+    no_args_is_help=True,
+)
+app.add_typer(config_app, name="config")
+
+
+@config_app.command("schema")
+def config_schema(
+    output: Optional[Path] = typer.Option(
+        None, "--output", "-o", help="Write JSON schema to file (default: stdout)"
+    ),
+):
+    """Dump the Config JSON schema."""
+    from src.config import Config
+    import json
+
+    schema = Config.model_json_schema()
+    text = json.dumps(schema, indent=2)
+    if output:
+        output.write_text(text)
+        typer.echo(f"Schema written to {output}")
+    else:
+        typer.echo(text)
+
+
+@config_app.command("diff")
+def config_diff(
+    file1: Path = typer.Argument(..., help="First config YAML"),
+    file2: Path = typer.Argument(..., help="Second config YAML"),
+    as_json: bool = typer.Option(False, "--json", help="Output diff as JSON"),
+):
+    """Show differences between two config files."""
+    from src.config import load_config
+    import json
+
+    c1 = load_config(str(file1))
+    c2 = load_config(str(file2))
+    if c1 is None or c2 is None:
+        typer.echo("Error: could not load one or both config files.", err=True)
+        raise typer.Exit(1)
+
+    d1 = c1.model_dump(exclude_defaults=True)
+    d2 = c2.model_dump(exclude_defaults=True)
+
+    def _diff(a, b, path=""):
+        diffs = []
+        all_keys = set(list(a.keys()) + list(b.keys()))
+        for k in sorted(all_keys):
+            p = f"{path}.{k}" if path else k
+            va, vb = a.get(k), b.get(k)
+            if isinstance(va, dict) and isinstance(vb, dict):
+                diffs.extend(_diff(va, vb, p))
+            elif va != vb:
+                diffs.append((p, va, vb))
+        return diffs
+
+    diffs = _diff(d1, d2)
+    if not diffs:
+        typer.echo("No differences.")
+        return
+
+    if as_json:
+        result = {p: {"file1": v1, "file2": v2} for p, v1, v2 in diffs}
+        typer.echo(json.dumps(result, indent=2, default=str))
+    else:
+        from rich.console import Console
+        from rich.table import Table
+
+        console = Console()
+        table = Table(title=f"Config diff: {file1.name} vs {file2.name}")
+        table.add_column("Field", style="cyan")
+        table.add_column(file1.name, style="yellow")
+        table.add_column(file2.name, style="green")
+        for p, v1, v2 in diffs:
+            table.add_row(p, str(v1) if v1 is not None else "(default)", str(v2) if v2 is not None else "(default)")
+        console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# Runs subcommands
+# ---------------------------------------------------------------------------
+runs_app = typer.Typer(
+    help="Run database management",
+    no_args_is_help=True,
+)
+app.add_typer(runs_app, name="runs")
+
+
+@runs_app.command("list")
+def runs_list(
+    status: Optional[str] = typer.Option(None, "--status", "-s", help="Filter by status"),
+    tag: Optional[str] = typer.Option(None, "--tag", "-t", help="Filter by tag"),
+    sort_by: str = typer.Option("name", "--sort-by", help="Sort by field (name, status, best_metric_value, created_at)"),
+):
+    """List all runs in the database."""
+    from src.run_db import get_db
+    import json
+
+    db = get_db()
+    query = "SELECT * FROM runs"
+    conditions = []
+    params = []
+    if status:
+        conditions.append("status = ?")
+        params.append(status)
+    if tag:
+        conditions.append("tags LIKE ?")
+        params.append(f"%{tag}%")
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+
+    valid_sorts = {"name", "status", "best_metric_value", "created_at", "updated_at"}
+    if sort_by in valid_sorts:
+        query += f" ORDER BY {sort_by}"
+    else:
+        query += " ORDER BY name"
+
+    rows = db.execute(query, params).fetchall()
+    db.close()
+
+    if not rows:
+        typer.echo("No runs found.")
+        return
+
+    from rich.console import Console
+    from rich.table import Table
+
+    console = Console()
+    table = Table(title="Cambia CFR Runs")
+    table.add_column("Name", style="cyan")
+    table.add_column("Algorithm", style="yellow")
+    table.add_column("Status", style="green")
+    table.add_column("Best Metric")
+    table.add_column("Tags")
+    table.add_column("Updated")
+
+    for row in rows:
+        best = ""
+        if row["best_metric_name"]:
+            best = f"{row['best_metric_name']}={row['best_metric_value']:.3f} @{row['best_metric_iter']}"
+        tags = json.loads(row["tags"]) if row["tags"] else []
+        table.add_row(
+            row["name"],
+            row["algorithm"] or "",
+            row["status"],
+            best,
+            ", ".join(tags) if tags else "",
+            (row["updated_at"] or "")[:10],
+        )
+    console.print(table)
+
+
+@runs_app.command("prune")
+def runs_prune(
+    run_name: str = typer.Argument(..., help="Run name to prune"),
+    keep_every_n: int = typer.Option(50, "--keep-every-n", help="Keep every Nth checkpoint"),
+    keep_latest: int = typer.Option(3, "--keep-latest", help="Keep N most recent checkpoints"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be deleted without deleting"),
+):
+    """Prune non-retained checkpoints from a run."""
+    from src.run_db import get_db, compute_retention_flags
+
+    db = get_db()
+    row = db.execute("SELECT id FROM runs WHERE name = ?", (run_name,)).fetchone()
+    if not row:
+        typer.echo(f"Run '{run_name}' not found.")
+        db.close()
+        raise typer.Exit(1)
+
+    run_id = row["id"]
+    non_retained = compute_retention_flags(db, run_id, keep_every_n, keep_latest)
+
+    if not non_retained:
+        typer.echo("No checkpoints to prune.")
+        db.close()
+        return
+
+    # Get file paths for non-retained
+    placeholders = ",".join("?" * len(non_retained))
+    ckpts = db.execute(
+        f"SELECT id, iteration, file_path FROM checkpoints WHERE id IN ({placeholders})",
+        non_retained,
+    ).fetchall()
+
+    typer.echo(f"Checkpoints to prune ({len(ckpts)}):")
+    total_size = 0
+    for c in ckpts:
+        fpath = Path(c["file_path"])
+        size = fpath.stat().st_size if fpath.exists() else 0
+        total_size += size
+        typer.echo(f"  iter {c['iteration']}: {fpath.name} ({size / 1024 / 1024:.1f} MB)")
+
+    typer.echo(f"\nTotal space to reclaim: {total_size / 1024 / 1024:.1f} MB")
+
+    if dry_run:
+        typer.echo("(dry run — no files deleted)")
+        db.close()
+        return
+
+    if not typer.confirm("Delete these checkpoints?"):
+        typer.echo("Aborted.")
+        db.close()
+        return
+
+    deleted = 0
+    for c in ckpts:
+        fpath = Path(c["file_path"])
+        if fpath.exists():
+            fpath.unlink()
+            deleted += 1
+    typer.echo(f"Deleted {deleted} checkpoint files.")
+    db.close()
+
+
+@runs_app.command("backfill")
+def runs_backfill(
+    runs_dir: Path = typer.Option(
+        Path("runs"), "--runs-dir", help="Path to runs directory"
+    ),
+):
+    """Backfill the run database from existing run directories."""
+    import subprocess
+    import sys
+
+    script = Path(__file__).parent.parent / "scripts" / "backfill_db.py"
+    if not script.exists():
+        typer.echo(f"Backfill script not found: {script}", err=True)
+        raise typer.Exit(1)
+
+    result = subprocess.run(
+        [sys.executable, str(script), "--runs-dir", str(runs_dir)],
+        capture_output=False,
+    )
+    raise typer.Exit(result.returncode)
 
 
 if __name__ == "__main__":

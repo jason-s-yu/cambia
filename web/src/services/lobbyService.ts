@@ -24,6 +24,15 @@ export const createLobby = async (settings: Partial<LobbyState>): Promise<LobbyS
  * @returns A promise resolving to a map where keys are lobby UUIDs and values are lobby state objects.
  * @throws {Error} If the API request fails.
  */
+export const joinLobby = async (lobbyId: string): Promise<void> => {
+	try {
+		await api.post(`/lobby/${lobbyId}/join`);
+	} catch (error: any) {
+		console.error('Join Lobby API call failed:', error.response?.data || error.message, error);
+		throw error;
+	}
+};
+
 export const listLobbies = async (): Promise<Record<string, LobbyState>> => {
 	try {
 		const response = await api.get<Record<string, LobbyState>>('/lobby/list');

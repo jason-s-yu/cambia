@@ -1,32 +1,48 @@
 // src/components/game/OpponentHand.tsx
 import React from 'react';
 import type { ObfPlayerState } from '@/types/game';
-import Card from './Card'; // Assuming Card component exists
+import Card from './Card';
 
 interface OpponentHandProps {
 	playerState: ObfPlayerState;
+	isTargetable: boolean;
+	onCardClick?: (playerId: string, idx: number) => void;
 }
 
-const OpponentHand: React.FC<OpponentHandProps> = ({ playerState }) => {
-	const cardCount = playerState.handSize;
-	const isCurrent = playerState.isCurrentTurn;
+const OpponentHand: React.FC<OpponentHandProps> = ({ playerState, isTargetable, onCardClick }) => {
+	const { playerId, username, handSize, isCurrentTurn, connected, hasCalledCambia } = playerState;
 
 	return (
-		<div className={`flex flex-col items-center p-2 rounded ${isCurrent ? 'bg-yellow-300 dark:bg-yellow-700 ring-2 ring-yellow-500' : 'bg-gray-400 dark:bg-gray-600 opacity-80'}`}>
-			<span className="text-xs font-semibold mb-1 truncate max-w-[100px] text-black dark:text-white">{playerState.username}</span>
-			<div className="flex justify-center space-x-[-15px]">
-				{cardCount === 0 && <div className="text-gray-600 dark:text-gray-300 italic h-[60px] flex items-center text-xs">Empty</div>}
-				{Array.from({ length: cardCount }).map((_, index) => (
-					<Card
-						key={`${playerState.playerId}-card-${index}`}
-						id={`${playerState.playerId}-card-${index}`} // Placeholder ID
-						faceUp={false} // Opponent cards always face down
-						className="w-10 h-auto shadow-sm" // Smaller size for opponents
-					/>
-				))}
+		<div
+			className={`flex flex-col items-center p-2 rounded-lg transition-all ${
+				isCurrentTurn
+					? 'bg-yellow-300/80 dark:bg-yellow-700/80 ring-2 ring-yellow-400'
+					: 'bg-black/40'
+			}`}
+		>
+			<span className="text-xs font-semibold mb-1 truncate max-w-[100px] text-white drop-shadow">
+				{username}
+			</span>
+			<div className="flex">
+				{handSize === 0 ? (
+					<div className="text-gray-300 italic h-[67px] flex items-center text-xs">Empty</div>
+				) : (
+					Array.from({ length: handSize }).map((_, idx) => (
+						<Card
+							key={`${playerId}-card-${idx}`}
+							id={`${playerId}-card-${idx}`}
+							faceUp={false}
+							compact
+							isTargetable={isTargetable}
+							isInteractive={isTargetable && !!onCardClick}
+							onClick={isTargetable && onCardClick ? () => onCardClick(playerId, idx) : undefined}
+							className={idx > 0 ? '-ml-3' : ''}
+						/>
+					))
+				)}
 			</div>
-			<span className={`text-xs mt-1 ${playerState.connected ? 'text-green-800 dark:text-green-300' : 'text-red-800 dark:text-red-300'}`}>
-				{playerState.connected ? 'Online' : 'Offline'} {playerState.hasCalledCambia ? '(C!)' : ''}
+			<span className={`text-[10px] mt-1 ${connected ? 'text-green-300' : 'text-red-300'}`}>
+				{connected ? 'Online' : 'Offline'}{hasCalledCambia ? ' · C!' : ''}
 			</span>
 		</div>
 	);
