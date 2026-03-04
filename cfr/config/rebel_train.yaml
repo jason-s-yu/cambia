@@ -1,0 +1,38 @@
+num_players: 2
+
+deep_cfr:
+  device: xpu
+  batch_size: 2048
+  train_steps_per_iteration: 200
+  alpha: 1.5
+  save_interval: 50
+  exploration_epsilon: 0.05
+  rebel_subgame_depth: 4
+  rebel_cfr_iterations: 200
+  rebel_value_hidden_dim: 1024
+  rebel_policy_hidden_dim: 512
+  rebel_value_learning_rate: 0.001
+  rebel_policy_learning_rate: 0.001
+  rebel_value_buffer_capacity: 500000
+  rebel_policy_buffer_capacity: 500000
+  rebel_games_per_epoch: 50
+  rebel_epochs: 1000
+
+cambia_rules:
+  allowDrawFromDiscardPile: false
+  allowReplaceAbilities: false
+  snapRace: false
+  penaltyDrawCount: 2
+  use_jokers: 2
+  cards_per_player: 4
+  initial_view_count: 2
+  cambia_allowed_round: 0
+  allowOpponentSnapping: false
+  max_game_turns: 46
+
+persistence:
+  agent_data_save_path: runs/rebel-phase1/checkpoints/rebel_checkpoint.pt
+
+logging:
+  log_level_file: INFO
+  log_level_console: WARNING

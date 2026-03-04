@@ -1,0 +1,95 @@
+{
+  "timestamp": "2026-03-03T22:31:09.919411+00:00",
+  "hardware": {
+    "cpu": "AMD Ryzen 9 9900X",
+    "vcpus": 22,
+    "ram_gb": 64,
+    "gpu": "Intel Arc A310 LP (XPU)",
+    "pytorch": "2.10.0+xpu"
+  },
+  "config": {
+    "rebel_subgame_depth": 4,
+    "rebel_cfr_iterations": 200,
+    "rebel_value_hidden_dim": 1024,
+    "rebel_policy_hidden_dim": 512,
+    "batch_size": 2048,
+    "alpha": 1.5,
+    "max_game_turns": 46
+  },
+  "self_play": {
+    "1": {
+      "workers": 1,
+      "total_episodes": 24,
+      "total_samples": 228,
+      "wall_time_s": 18.52,
+      "episodes_per_sec": 1.3,
+      "samples_per_sec": 12.31,
+      "samples_per_episode": 9.5
+    },
+    "2": {
+      "workers": 2,
+      "total_episodes": 24,
+      "total_samples": 177,
+      "wall_time_s": 20.04,
+      "episodes_per_sec": 1.2,
+      "samples_per_sec": 8.83,
+      "samples_per_episode": 7.4
+    },
+    "4": {
+      "workers": 4,
+      "total_episodes": 24,
+      "total_samples": 194,
+      "wall_time_s": 27.1,
+      "episodes_per_sec": 0.89,
+      "samples_per_sec": 7.16,
+      "samples_per_episode": 8.1
+    },
+    "8": {
+      "workers": 8,
+      "total_episodes": 24,
+      "total_samples": 238,
+      "wall_time_s": 40.93,
+      "episodes_per_sec": 0.59,
+      "samples_per_sec": 5.81,
+      "samples_per_episode": 9.9
+    },
+    "12": {
+      "workers": 12,
+      "total_episodes": 24,
+      "total_samples": 241,
+      "wall_time_s": 38.59,
+      "episodes_per_sec": 0.62,
+      "samples_per_sec": 6.24,
+      "samples_per_episode": 10.0
+    },
+    "16": {
+      "workers": 16,
+      "total_episodes": 16,
+      "total_samples": 210,
+      "wall_time_s": 36.24,
+      "episodes_per_sec": 0.44,
+      "samples_per_sec": 5.8,
+      "samples_per_episode": 13.1
+    }
+  },
+  "training": {
+    "cpu": {
+      "device": "cpu",
+      "batch_size": 2048,
+      "value_step_ms": 96.2,
+      "policy_step_ms": 23.1,
+      "total_step_ms": 119.3,
+      "value_steps_per_sec": 10.4,
+      "policy_steps_per_sec": 43.3
+    },
+    "xpu": {
+      "device": "xpu",
+      "batch_size": 2048,
+      "value_step_ms": 26.2,
+      "policy_step_ms": 6.6,
+      "total_step_ms": 32.8,
+      "value_steps_per_sec": 38.1,
+      "policy_steps_per_sec": 151.1
+    }
+  }
+}

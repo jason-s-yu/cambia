@@ -124,6 +124,21 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         target_buffer_passes: float = 0.0
         value_target_buffer_passes: float = 2.0
 
+        # GT-CFR fields
+        gtcfr_expansion_budget: int = 100
+        gtcfr_c_puct: float = 2.0
+        gtcfr_cfr_iters_per_expansion: int = 10
+        gtcfr_cvpn_hidden_dim: int = 512
+        gtcfr_cvpn_num_blocks: int = 4
+        gtcfr_cvpn_learning_rate: float = 3e-4
+        gtcfr_value_loss_weight: float = 1.0
+        gtcfr_policy_loss_weight: float = 1.0
+        gtcfr_buffer_capacity: int = 1_000_000
+        gtcfr_games_per_epoch: int = 50
+        gtcfr_epochs: int = 20
+        gtcfr_exploration_epsilon: float = 0.05
+        gtcfr_warm_start_rebel_checkpoint: str = ""
+
     def _load_config(path: str):
         """Stub load_config: delegate to the real load_config implementation."""
         try:

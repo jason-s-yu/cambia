@@ -11,10 +11,6 @@ import numpy as np
 import pytest
 import torch
 
-pytestmark = pytest.mark.skip(
-    reason="ReBeL is deprecated: mathematically unsound for N-player FFA with continuous beliefs"
-)
-
 from src.networks import PBSValueNetwork, PBSPolicyNetwork
 from src.pbs import PBS_INPUT_DIM, NUM_HAND_TYPES
 

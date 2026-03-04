@@ -22,6 +22,7 @@ import torch.nn.functional as F
 
 from .encoding import INPUT_DIM, NUM_ACTIONS
 from .cfr.exceptions import InvalidNetworkInputError
+from .pbs import PBS_INPUT_DIM, NUM_HAND_TYPES
 from .constants import (
     EP_PBS_INPUT_DIM,
     EP_PBS_MAX_SLOTS,
@@ -591,15 +592,6 @@ class PBSValueNetwork(nn.Module):
         dropout: float = 0.1,
         validate_inputs: bool = True,
     ):
-        import warnings
-
-        warnings.warn(
-            "PBSValueNetwork is DEPRECATED and will be removed. "
-            "ReBeL/PBS-based subgame solving is mathematically unsound for N-player FFA games "
-            "with continuous beliefs (Cambia). See docs-gen/current/research-brief-position-aware-pbs.md.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
         super().__init__()
         self._input_dim = input_dim
         self._output_dim = output_dim
@@ -667,15 +659,6 @@ class PBSPolicyNetwork(nn.Module):
         dropout: float = 0.1,
         validate_inputs: bool = True,
     ):
-        import warnings
-
-        warnings.warn(
-            "PBSPolicyNetwork is DEPRECATED and will be removed. "
-            "ReBeL/PBS-based subgame solving is mathematically unsound for N-player FFA games "
-            "with continuous beliefs (Cambia). See docs-gen/current/research-brief-position-aware-pbs.md.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
         super().__init__()
         self._input_dim = input_dim
         self._output_dim = output_dim
@@ -738,6 +721,169 @@ class PBSPolicyNetwork(nn.Module):
         # NaN guard: if all actions are masked (shouldn't happen), replace with 0
         probs = torch.nan_to_num(probs, nan=0.0)
         return probs
+
+
+class CVPN(nn.Module):
+    """Counterfactual Value-and-Policy Network for GT-CFR.
+
+    Shared ResNet trunk with dual heads:
+    - Value head: predicts per-hand-type CFVs for both players (936-dim)
+    - Policy head: predicts action logits with masking (146-dim)
+
+    Architecture (~400K params with defaults):
+      input_proj(956 → hidden_dim) → [ResBlock × num_blocks] → {
+        value_head: Linear(hidden_dim → hidden_dim//2) → ReLU → Linear(→ 936)
+        policy_head: Linear(hidden_dim → hidden_dim//2) → ReLU → Linear(→ 146)
+      }
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 956,  # PBS_INPUT_DIM
+        hidden_dim: int = 512,
+        num_blocks: int = 4,
+        value_dim: int = 936,  # 2 * NUM_HAND_TYPES
+        policy_dim: int = 146,  # NUM_ACTIONS
+        dropout: float = 0.1,
+        validate_inputs: bool = True,
+    ):
+        super().__init__()
+        self._input_dim = input_dim
+        self._hidden_dim = hidden_dim
+        self._value_dim = value_dim
+        self._policy_dim = policy_dim
+        self._validate_inputs = validate_inputs
+
+        # Input projection
+        self.input_proj = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+        )
+
+        # Shared trunk
+        self.trunk = nn.Sequential(*[_ResBlock(hidden_dim, dropout) for _ in range(num_blocks)])
+
+        # Value head
+        half = hidden_dim // 2
+        self.value_head = nn.Sequential(
+            nn.Linear(hidden_dim, half),
+            nn.ReLU(),
+            nn.Linear(half, value_dim),
+        )
+
+        # Policy head
+        self.policy_head = nn.Sequential(
+            nn.Linear(hidden_dim, half),
+            nn.ReLU(),
+            nn.Linear(half, policy_dim),
+        )
+
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+                nn.init.zeros_(m.bias)
+
+    def forward(
+        self, pbs_encoding: torch.Tensor, action_mask: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Args:
+            pbs_encoding: (B, input_dim) PBS encoding.
+            action_mask: (B, policy_dim) bool, True for legal actions.
+
+        Returns:
+            (values, policy_logits):
+              values: (B, value_dim) counterfactual value estimates
+              policy_logits: (B, policy_dim) masked action logits (-inf for illegal)
+        """
+        if self._validate_inputs:
+            if pbs_encoding.dim() != 2 or pbs_encoding.shape[1] != self._input_dim:
+                raise InvalidNetworkInputError(
+                    f"Invalid pbs_encoding shape: expected (batch, {self._input_dim}), "
+                    f"got {tuple(pbs_encoding.shape)}"
+                )
+            if action_mask.dim() != 2 or action_mask.shape[1] != self._policy_dim:
+                raise InvalidNetworkInputError(
+                    f"Invalid action_mask shape: expected (batch, {self._policy_dim}), "
+                    f"got {tuple(action_mask.shape)}"
+                )
+            if pbs_encoding.shape[0] != action_mask.shape[0]:
+                raise InvalidNetworkInputError(
+                    f"Batch size mismatch: pbs_encoding has {pbs_encoding.shape[0]}, "
+                    f"action_mask has {action_mask.shape[0]}"
+                )
+            if torch.isnan(pbs_encoding).any():
+                raise InvalidNetworkInputError("pbs_encoding tensor contains NaN values")
+
+        x = self.input_proj(pbs_encoding)
+        x = self.trunk(x)
+        values = self.value_head(x)
+        policy_logits = self.policy_head(x)
+        policy_logits = policy_logits.masked_fill(~action_mask, float("-inf"))
+        return values, policy_logits
+
+    def policy_probs(
+        self, pbs_encoding: torch.Tensor, action_mask: torch.Tensor
+    ) -> torch.Tensor:
+        """Convenience: returns softmax policy probabilities (B, policy_dim)."""
+        _, logits = self.forward(pbs_encoding, action_mask)
+        probs = F.softmax(logits, dim=-1)
+        return torch.nan_to_num(probs, nan=0.0)
+
+
+def build_cvpn(
+    input_dim: int = 956,
+    hidden_dim: int = 512,
+    num_blocks: int = 4,
+    value_dim: int = 936,
+    policy_dim: int = 146,
+    dropout: float = 0.1,
+    validate_inputs: bool = True,
+) -> "CVPN":
+    """Factory for CVPN with default PBS dimensions."""
+    return CVPN(
+        input_dim=input_dim,
+        hidden_dim=hidden_dim,
+        num_blocks=num_blocks,
+        value_dim=value_dim,
+        policy_dim=policy_dim,
+        dropout=dropout,
+        validate_inputs=validate_inputs,
+    )
+
+
+def warm_start_cvpn_from_rebel(
+    cvpn: "CVPN",
+    policy_state_dict: dict,
+    value_state_dict: Optional[dict] = None,
+) -> list:
+    """Load compatible weights from Phase 1 PBSPolicyNetwork/PBSValueNetwork into CVPN.
+
+    Copies weights layer-by-layer where shapes match. Returns list of skipped keys.
+    Policy head gets priority (most useful for PUCT guidance early in training).
+    """
+    cvpn_state = cvpn.state_dict()
+    skipped: list[str] = []
+
+    source_dicts = []
+    if policy_state_dict:
+        source_dicts.append(policy_state_dict)
+    if value_state_dict:
+        source_dicts.append(value_state_dict)
+
+    for src_dict in source_dicts:
+        for src_key, src_tensor in src_dict.items():
+            if src_key in cvpn_state and cvpn_state[src_key].shape == src_tensor.shape:
+                cvpn_state[src_key] = src_tensor
+            else:
+                skipped.append(src_key)
+
+    cvpn.load_state_dict(cvpn_state)
+    return skipped
 
 
 def get_strategy_from_advantages(

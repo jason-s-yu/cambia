@@ -83,7 +83,12 @@ def _infer_iter(checkpoint_path: str) -> int:
     return int(match.group(1)) if match else -1
 
 
-def _get_run_id_for_dir(db, run_dir_path: Path, config_path: str) -> int:
+def _get_run_id_for_dir(
+    db,
+    run_dir_path: Path,
+    config_path: str,
+    checkpoint_path: str = None,
+) -> int:
     """Upsert a run record for the given run directory. Returns run_id."""
     run_name = run_dir_path.name
     yaml_text = None
@@ -98,7 +103,11 @@ def _get_run_id_for_dir(db, run_dir_path: Path, config_path: str) -> int:
             pass
     except Exception:
         pass
-    algorithm = run_db.infer_algorithm(config_dict)
+    # Pass checkpoint filename for ReBeL detection by filename pattern
+    algorithm = run_db.infer_algorithm(
+        config_dict,
+        checkpoint_filename=checkpoint_path,
+    )
     return run_db.upsert_run(
         db,
         name=run_name,
@@ -114,6 +123,7 @@ def evaluate_checkpoint(
     checkpoint_path: str,
     num_games: int,
     config_path: str,
+    agent_type: str = "deep_cfr",
 ) -> dict:
     """Evaluate a single checkpoint, write metrics.jsonl rows and per-game JSONL."""
     run_dir_path = Path(run_dir).resolve()
@@ -124,12 +134,28 @@ def evaluate_checkpoint(
     eval_dir = run_dir_path / "evaluations" / f"iter_{iter_num}"
     eval_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load checkpoint for loss info
+    # Load checkpoint for loss info — guard for agent-specific key differences
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    adv_hist = checkpoint.get("adv_loss_history", [])
-    strat_hist = checkpoint.get("strat_loss_history", [])
-    adv_loss = float(adv_hist[-1]) if adv_hist else float("nan")
-    strat_loss = float(strat_hist[-1]) if strat_hist else float("nan")
+    is_rebel = "rebel_value_net_state_dict" in checkpoint or agent_type == "rebel"
+    if is_rebel:
+        # ReBeL uses value/policy loss histories
+        try:
+            val_hist = checkpoint.get("value_loss_history", [])
+            pol_hist = checkpoint.get("policy_loss_history", [])
+            adv_loss = float(val_hist[-1]) if val_hist else float("nan")
+            strat_loss = float(pol_hist[-1]) if pol_hist else float("nan")
+        except Exception:
+            adv_loss = float("nan")
+            strat_loss = float("nan")
+    else:
+        try:
+            adv_hist = checkpoint.get("adv_loss_history", [])
+            strat_hist = checkpoint.get("strat_loss_history", [])
+            adv_loss = float(adv_hist[-1]) if adv_hist else float("nan")
+            strat_loss = float(strat_hist[-1]) if strat_hist else float("nan")
+        except Exception:
+            adv_loss = float("nan")
+            strat_loss = float("nan")
 
     # Run eval once with per-game JSONL output
     all_results = run_evaluation_multi_baseline(
@@ -139,6 +165,7 @@ def evaluate_checkpoint(
         baselines=ALL_BASELINES,
         device="cpu",
         output_dir=str(eval_dir),
+        agent_type=agent_type,
     )
 
     # Append metrics.jsonl rows
@@ -196,6 +223,8 @@ def evaluate_head_to_head(
     iter_num: int,
     config_path: str,
     num_games: int = 2000,
+    agent_type: str = "deep_cfr",
+    checkpoint_prefix: str = "deep_cfr_checkpoint",
 ) -> None:
     """Pit checkpoint against earlier iterations and write head_to_head.jsonl."""
     if num_games <= 0:
@@ -208,7 +237,7 @@ def evaluate_head_to_head(
 
     run_dir_path = Path(run_dir).resolve()
     ckpt_dir = run_dir_path / "checkpoints"
-    all_ckpts = sorted(glob(str(ckpt_dir / "deep_cfr_checkpoint_iter_*.pt")))
+    all_ckpts = sorted(glob(str(ckpt_dir / f"{checkpoint_prefix}_iter_*.pt")))
 
     if not all_ckpts:
         return
@@ -258,6 +287,7 @@ def evaluate_head_to_head(
                     num_games=num_games,
                     config=config,
                     device="cpu",
+                    agent_type=agent_type,
                 )
                 total_scored = h2h["checkpoint_a_wins"] + h2h["checkpoint_b_wins"] + h2h["ties"]
                 a_win_rate = h2h["checkpoint_a_wins"] / total_scored if total_scored > 0 else 0.0
@@ -333,11 +363,43 @@ def main() -> None:
         default=2000,
         help="Games per head-to-head comparison (default: 2000, 0 to disable).",
     )
+    parser.add_argument(
+        "--agent-type",
+        type=str,
+        default="deep_cfr",
+        help=(
+            "Agent type to evaluate (default: deep_cfr). "
+            "Choices: deep_cfr, rebel, sd_cfr, escher, nplayer, ppo."
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint-prefix",
+        type=str,
+        default=None,
+        help=(
+            "Filename prefix for checkpoint glob (default: inferred from --agent-type). "
+            "E.g. 'rebel_checkpoint' for ReBeL, 'deep_cfr_checkpoint' for Deep CFR."
+        ),
+    )
     args = parser.parse_args()
+
+    # Infer checkpoint prefix from agent type if not explicitly provided
+    _PREFIX_MAP = {
+        "rebel": "rebel_checkpoint",
+        "deep_cfr": "deep_cfr_checkpoint",
+        "sd_cfr": "deep_cfr_checkpoint",
+        "escher": "deep_cfr_checkpoint",
+        "nplayer": "deep_cfr_checkpoint",
+        "ppo": "ppo_checkpoint",
+    }
+    checkpoint_prefix = args.checkpoint_prefix or _PREFIX_MAP.get(args.agent_type, "deep_cfr_checkpoint")
 
     run_dirs = [str(Path(d).resolve()) for d in args.run_dirs]
     logger.info("Watching %d run dir(s): %s", len(run_dirs), run_dirs)
-    logger.info("Games per eval: %d, poll interval: %ds", args.games, args.poll_interval)
+    logger.info(
+        "Agent type: %s, checkpoint prefix: %s, games: %d, poll interval: %ds",
+        args.agent_type, checkpoint_prefix, args.games, args.poll_interval,
+    )
 
     try:
         while True:
@@ -348,7 +410,9 @@ def main() -> None:
                     continue
 
                 state = load_state(run_dir)
-                ckpt_pattern = os.path.join(run_dir, "checkpoints", "deep_cfr_checkpoint_iter_*.pt")
+                ckpt_pattern = os.path.join(
+                    run_dir, "checkpoints", f"{checkpoint_prefix}_iter_*.pt"
+                )
                 checkpoints = sorted(glob(ckpt_pattern))
 
                 for ckpt in checkpoints:
@@ -359,7 +423,8 @@ def main() -> None:
                     logger.info("New checkpoint: %s", ckpt)
                     try:
                         all_results, iter_num = evaluate_checkpoint(
-                            run_dir, ckpt, args.games, config_path
+                            run_dir, ckpt, args.games, config_path,
+                            agent_type=args.agent_type,
                         )
                         log_line = format_results(run_dir, iter_num, all_results)
                         print(log_line, flush=True)
@@ -370,6 +435,8 @@ def main() -> None:
                             try:
                                 evaluate_head_to_head(
                                     run_dir, ckpt, iter_num, config_path, args.h2h_games,
+                                    agent_type=args.agent_type,
+                                    checkpoint_prefix=checkpoint_prefix,
                                 )
                             except Exception:
                                 logger.exception("H2H evaluation failed for iter %d", iter_num)

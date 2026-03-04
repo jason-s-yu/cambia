@@ -32,6 +32,9 @@ include = ["src", "src.*"]
 filterwarnings = [
     "ignore:GoEngine\\(\\) without house_rules:DeprecationWarning",
 ]
+markers = [
+    "integration: slow end-to-end tests requiring libcambia.so (>10s)",
+]
 
 [tool.black]
 target-version = ['py313']

@@ -76,7 +76,71 @@ Baseline win rates can be gamed by RPS-cycling against fixed opponents. Head-to-
 
 Head-to-head evaluation is fully implemented in `cfr/scripts/eval_watcher.py` (`evaluate_head_to_head` function). It runs automatically after each checkpoint evaluation unless disabled with `--h2h-games 0`. Results are written to `head_to_head.jsonl` and dual-written to the SQLite run database.
 
-## 4. Future: RL Best-Response Exploitability
+## 4. Multi-Agent-Type Support
+
+Both `cambia evaluate` and `cambia eval-watch` support `--agent-type` for evaluating different training algorithms.
+
+### Supported Agent Types
+
+| Agent Type | Checkpoint Prefix | Notes |
+|-|-|-|
+| `deep_cfr` (default) | `deep_cfr_checkpoint` | OS-MCCFR / Deep CFR |
+| `rebel` | `rebel_checkpoint` | ReBeL (Phase 1) — PBS subgame solving |
+| `gtcfr` | `gtcfr_checkpoint` | GT-CFR (Phase 2) — growing tree search |
+| `sd_cfr` | `sd_cfr_checkpoint` | Stochastic Discount CFR |
+| `escher` | `escher_checkpoint` | ESCHER |
+
+### CLI Examples
+
+```bash
+# Evaluate a single ReBeL checkpoint
+cambia evaluate runs/rebel-phase1/checkpoints/rebel_checkpoint_iter_500.pt \
+  -c config/rebel_train.yaml --agent-type rebel --games 5000
+
+# Evaluate a GT-CFR checkpoint
+cambia evaluate runs/gtcfr-phase2/checkpoints/gtcfr_checkpoint_iter_100.pt \
+  -c config/gtcfr_train.yaml --agent-type gtcfr --games 5000
+```
+
+## 5. Parallel Training + Eval (Operational Guide)
+
+Training and evaluation should run in **separate processes** to avoid CPU contention (which causes 7-10x slowdown in self-play).
+
+### Recommended Setup
+
+**Terminal 1 — Training:**
+```bash
+cd cfr
+cambia train rebel -c config/rebel_train.yaml 2>&1 | tee runs/rebel-phase1/logs/training.log
+```
+
+**Terminal 2 — Eval Watcher (start after first checkpoint at iter 50):**
+```bash
+cd cfr
+cambia eval-watch runs/rebel-phase1 --agent-type rebel --games 5000 \
+  2>&1 | tee runs/rebel-phase1/logs/eval.log
+```
+
+### Resource Partitioning
+
+| Process | CPU | GPU/XPU | Notes |
+|-|-|-|-|
+| Training (self-play) | All cores (Go CFR solver) | XPU (training steps only) | Self-play is CPU-bound |
+| Eval watcher | All cores (game simulation) | None (CPU inference) | Runs between checkpoints |
+
+**Important:** Do NOT run eval watcher concurrently with active self-play iterations. The eval watcher polls every 30s (configurable via `--poll-interval`) and only evaluates new checkpoints. Self-play and eval both saturate CPU — overlapping them degrades both.
+
+**Strategy:** Start eval watcher after training begins. The watcher will queue up evaluations and run them in the ~6s gap between self-play and training steps, or during training steps (which use XPU, not CPU). At checkpoint boundaries (every 50 iters), eval dominates CPU for ~10 min while training pauses to save.
+
+### Manual Eval (Alternative)
+
+If the eval watcher isn't running, evaluate checkpoints manually:
+```bash
+cambia evaluate runs/rebel-phase1/checkpoints/rebel_checkpoint_iter_N.pt \
+  -c config/rebel_train.yaml --agent-type rebel --games 5000
+```
+
+## 6. Future: RL Best-Response Exploitability
 
 **Status: DEFERRED**
 
@@ -89,7 +153,7 @@ Freeze the EMA strategy network and train a PPO or DQN agent to maximally exploi
 - Cannot run concurrently with CFR training on Intel Arc A310 (4 GB VRAM)
 - Mean_imp + H2H provides sufficient signal for current training phases
 
-## 5. Baseline Agent Descriptions
+## 7. Baseline Agent Descriptions
 
 ### Included in mean_imp
 
@@ -109,7 +173,7 @@ Freeze the EMA strategy network and train a PPO or DQN agent to maximally exploi
 
 **greedy**: Perfect-information oracle that acts optimally given full knowledge of all card positions. Provides a theoretical ceiling. The CFR agent is not expected to exceed 50% win rate against this baseline in the near term.
 
-## 6. Output File Schemas
+## 8. Output File Schemas
 
 ### `metrics.jsonl`
 
@@ -194,7 +258,7 @@ Per-game records for detailed analysis. Written only when per-game logging is en
 - `legal_count` records the size of the legal action set at the time of the action for action diversity analysis
 - Per-game logs are large; enable only for targeted diagnostic evaluations
 
-## 7. Interpretation Guide
+## 9. Interpretation Guide
 
 ### Convergence Patterns
 

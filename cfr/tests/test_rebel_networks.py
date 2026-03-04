@@ -8,10 +8,6 @@ import textwrap
 import pytest
 import torch
 
-pytestmark = pytest.mark.skip(
-    reason="ReBeL is deprecated: mathematically unsound for N-player FFA with continuous beliefs"
-)
-
 from src.networks import PBSValueNetwork, PBSPolicyNetwork
 from src.config import DeepCfrConfig, load_config
 from src.cfr.exceptions import InvalidNetworkInputError
@@ -154,7 +150,7 @@ def test_rebel_config_defaults():
     assert cfg.rebel_value_buffer_capacity == 500_000
     assert cfg.rebel_policy_buffer_capacity == 500_000
     assert cfg.rebel_games_per_epoch == 100
-    assert cfg.rebel_epochs == 500
+    assert cfg.rebel_epochs == 10
 
 
 def test_rebel_config_from_yaml(tmp_path):
