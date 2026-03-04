@@ -723,6 +723,85 @@ func cambia_agent_nplayer_action_mask(agent_h C.int32_t, game_h C.int32_t, out *
 	return 0
 }
 
+//export cambia_subgame_solve_ranged
+func cambia_subgame_solve_ranged(
+	solver_h C.int32_t,
+	num_iterations C.int32_t,
+	num_hand_types C.int32_t,
+	leaf_values *C.float,
+	range_p0 *C.float,
+	range_p1 *C.float,
+	strategy_out *C.float,
+	root_cfvs_out *C.float,
+) C.int32_t {
+	if solver_h < 0 || solver_h >= maxSolvers || !solverInUse[solver_h] {
+		return -1
+	}
+	entry := &solverPool[solver_h]
+	leafCount := entry.leafCount
+	nht := int(num_hand_types)
+
+	// Convert leaf_values to Go slice: [leafCount * 2 * nht] floats.
+	leafValGo := make([]float32, leafCount*2*nht)
+	if leafCount > 0 && leaf_values != nil {
+		src := (*[1 << 24]C.float)(unsafe.Pointer(leaf_values))
+		for i := 0; i < leafCount*2*nht; i++ {
+			leafValGo[i] = float32(src[i])
+		}
+	}
+
+	// Convert range arrays.
+	ranges := [2][]float32{
+		make([]float32, nht),
+		make([]float32, nht),
+	}
+	if range_p0 != nil {
+		src := (*[1 << 16]C.float)(unsafe.Pointer(range_p0))
+		for h := 0; h < nht; h++ {
+			ranges[0][h] = float32(src[h])
+		}
+	}
+	if range_p1 != nil {
+		src := (*[1 << 16]C.float)(unsafe.Pointer(range_p1))
+		for h := 0; h < nht; h++ {
+			ranges[1][h] = float32(src[h])
+		}
+	}
+
+	strategy, rootCFVs := SolveSubgameRanged(entry.root, int(num_iterations), leafValGo, ranges, nht)
+
+	// Write strategy to full action space.
+	stratOut := (*[agent.NumActions]C.float)(unsafe.Pointer(strategy_out))
+	for i := range stratOut {
+		stratOut[i] = 0
+	}
+	for i, child := range entry.root.Children {
+		if int(child.ActionIdx) < agent.NumActions && i < len(strategy) {
+			stratOut[child.ActionIdx] = C.float(strategy[i])
+		}
+	}
+
+	// Write root CFVs: [2 * nht] floats — p0 values then p1 values.
+	cfvOut := (*[1 << 16]C.float)(unsafe.Pointer(root_cfvs_out))
+	for h := 0; h < nht; h++ {
+		cfvOut[h] = C.float(rootCFVs[0][h])
+		cfvOut[nht+h] = C.float(rootCFVs[1][h])
+	}
+	return 0
+}
+
+//export cambia_game_discard_top
+func cambia_game_discard_top(game_h C.int32_t) C.int32_t {
+	if game_h < 0 || game_h >= maxGames || !gameInUse[game_h] {
+		return -1
+	}
+	top := gamePool[game_h].DiscardTop()
+	if top == engine.EmptyCard {
+		return -1
+	}
+	return C.int32_t(agent.CardToBucket(top))
+}
+
 //export cambia_subgame_free
 func cambia_subgame_free(solver_h C.int32_t) {
 	freeSolver(int32(solver_h))

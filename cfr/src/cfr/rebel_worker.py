@@ -14,18 +14,6 @@ Training data shapes:
     action_mask:   (NUM_ACTIONS,)  = (146,)  bool
 """
 
-# DEPRECATED: ReBeL/PBS-based subgame solving is mathematically unsound for N-player FFA games
-# with continuous beliefs (Cambia). See docs-gen/current/research-brief-position-aware-pbs.md.
-import warnings
-
-warnings.warn(
-    "rebel_worker is DEPRECATED and will be removed. "
-    "ReBeL/PBS-based subgame solving is mathematically unsound for N-player FFA games "
-    "with continuous beliefs (Cambia). See docs-gen/current/research-brief-position-aware-pbs.md.",
-    DeprecationWarning,
-    stacklevel=2,
-)
-
 import logging
 import multiprocessing as mp
 import queue
@@ -46,6 +34,7 @@ from ..pbs import (
     encode_pbs,
     encode_pbs_batch,
     uniform_range,
+    update_range,
     make_public_features,
     PHASE_DRAW,
     PHASE_DISCARD,
@@ -92,7 +81,7 @@ def _build_pbs(game: Any, range_p0: np.ndarray, range_p1: np.ndarray) -> PBS:
         turn=game.turn_number(),
         max_turns=_MAX_TURNS,
         phase=phase,
-        discard_top_bucket=None,  # not exposed via current FFI
+        discard_top_bucket=game.discard_top(),
         stockpile_remaining=game.stock_len(),
         stockpile_total=_STOCK_TOTAL,
     )
@@ -110,7 +99,7 @@ def _get_leaf_values(
     range_p1: np.ndarray,
 ) -> np.ndarray:
     """
-    Encode each leaf's PBS through the value network and collapse to per-player scalars.
+    Encode each leaf's PBS through the value network and return per-hand-type values.
 
     Args:
         value_net: PBSValueNetwork in eval mode.
@@ -119,12 +108,14 @@ def _get_leaf_values(
         range_p1: Current range distribution for player 1 (NUM_HAND_TYPES,).
 
     Returns:
-        float32 array of shape (n_leaves, 2) — per-player scalar value at each leaf.
-        Player 0 value = dot(range_p0, V[0:468]); Player 1 = dot(range_p1, V[468:936]).
+        float32 array of shape (n_leaves, 2, NUM_HAND_TYPES) — per-hand-type
+        counterfactual values at each leaf for each player.
+        result[i, 0, h] = value network output for player 0, hand type h, at leaf i.
+        result[i, 1, h] = value network output for player 1, hand type h, at leaf i.
     """
     n = len(leaf_engines)
     if n == 0:
-        return np.empty((0, 2), dtype=np.float32)
+        return np.empty((0, 2, NUM_HAND_TYPES), dtype=np.float32)
 
     leaf_pbss = [_build_pbs(eng, range_p0, range_p1) for eng in leaf_engines]
     leaf_enc = encode_pbs_batch(leaf_pbss)  # (n, 956)
@@ -132,11 +123,52 @@ def _get_leaf_values(
     enc_t = torch.from_numpy(leaf_enc)
     leaf_cf = value_net(enc_t).detach().numpy()  # (n, 936)
 
-    # Collapse per-hand-type CFs to per-player scalars via range dot product
-    v_p0 = leaf_cf[:, :NUM_HAND_TYPES] @ range_p0   # (n,)
-    v_p1 = leaf_cf[:, NUM_HAND_TYPES:] @ range_p1   # (n,)
+    # Return per-hand-type values without collapsing via range dot product
+    return leaf_cf.reshape(n, 2, NUM_HAND_TYPES).astype(np.float32)
 
-    return np.column_stack([v_p0, v_p1]).astype(np.float32)  # (n, 2)
+
+def _compute_policy_matrix(
+    policy_net: PBSPolicyNetwork,
+    game,
+    range_p0: np.ndarray,
+    range_p1: np.ndarray,
+) -> np.ndarray:
+    """Compute P(action | hand_type) for all hand types.
+
+    For each hand type h, constructs a PBS with a delta range (1.0 at h, 0 elsewhere)
+    for the acting player, runs the policy net, and collects the action distribution.
+    All 468 hand types are batched into a single forward pass.
+
+    Args:
+        policy_net: PBSPolicyNetwork in eval mode.
+        game: GoEngine instance at the current decision point.
+        range_p0: Current range for player 0 (NUM_HAND_TYPES,).
+        range_p1: Current range for player 1 (NUM_HAND_TYPES,).
+
+    Returns:
+        np.ndarray of shape (NUM_HAND_TYPES, NUM_ACTIONS) — policy_matrix[h, a] is
+        the probability that a player with hand type h takes action a.
+    """
+    mask_u8 = game.legal_actions_mask()  # (146,) uint8
+    mask_t = torch.from_numpy(mask_u8.astype(bool)).unsqueeze(0)  # (1, 146)
+    mask_batch = mask_t.expand(NUM_HAND_TYPES, -1)  # (468, 146)
+
+    acting = game.acting_player()
+
+    # Build 468 PBS encodings with delta ranges
+    pbs_encs = np.empty((NUM_HAND_TYPES, PBS_INPUT_DIM), dtype=np.float32)
+    for h in range(NUM_HAND_TYPES):
+        delta = np.zeros(NUM_HAND_TYPES, dtype=np.float32)
+        delta[h] = 1.0
+        if acting == 0:
+            pbs = _build_pbs(game, delta, range_p1)
+        else:
+            pbs = _build_pbs(game, range_p0, delta)
+        pbs_encs[h] = encode_pbs(pbs)
+
+    pbs_t = torch.from_numpy(pbs_encs)  # (468, 956)
+    probs = policy_net(pbs_t, mask_batch)  # (468, 146)
+    return probs.detach().numpy()
 
 
 def rebel_self_play_episode(
@@ -158,9 +190,8 @@ def rebel_self_play_episode(
       6. Sample action with epsilon-greedy exploration
       7. Apply action and update both agent belief states
 
-    Range vectors are initialised as uniform and kept uniform throughout this
-    initial implementation (full Bayesian updating requires per-hand-type policy
-    queries and is deferred to a later phase).
+    Range vectors are initialised as uniform and updated via Bayes' rule after
+    each action using _compute_policy_matrix to weight by P(action | hand_type).
 
     Args:
         game_config: House rules object passed to GoEngine (or None for Go defaults).
@@ -176,6 +207,12 @@ def rebel_self_play_episode(
 
     samples: List[EpisodeSample] = []
     seed = random.getrandbits(64)
+
+    # Diagnostic accumulators
+    _entropy_p0: List[float] = []
+    _entropy_p1: List[float] = []
+    _value_variances: List[float] = []
+    _discard_buckets: List[int] = []
 
     with GoEngine(seed=seed, house_rules=game_config) as game:
         a0 = GoAgentState(game, player_id=0)
@@ -202,7 +239,7 @@ def rebel_self_play_episode(
                     n_legal = int(mask_bool.sum())
                     strategy = np.zeros(NUM_ACTIONS, dtype=np.float32)
                     strategy[mask_bool] = 1.0 / n_legal
-                    root_values_2d = np.zeros(2, dtype=np.float32)
+                    root_cfvs = np.zeros((2, NUM_HAND_TYPES), dtype=np.float32)
 
                     # --- Build subgame and solve ---
                     with SubgameSolver(
@@ -214,23 +251,22 @@ def rebel_self_play_episode(
                         if n_leaves > 0:
                             leaf_values = _get_leaf_values(
                                 value_net, leaf_engines, range_p0, range_p1
-                            )  # (n_leaves, 2)
+                            )  # (n_leaves, 2, NUM_HAND_TYPES)
                             # Free leaf game handles eagerly — they consumed
                             # game pool slots and are no longer needed.
                             del leaf_engines
                             solver.free_leaves()
-                            strategy, root_values_2d = solver.solve(
+                            strategy, root_cfvs = solver.solve_ranged(
                                 leaf_values,
+                                range_p0,
+                                range_p1,
                                 num_iterations=rebel_config.rebel_cfr_iterations,
-                            )
+                            )  # root_cfvs: (2, NUM_HAND_TYPES)
 
-                    # --- Build 936-dim value target ---
-                    # Tile per-player scalar root values across all hand-type slots.
-                    # Full per-hand-type CFs would require the Go solver to propagate
-                    # range-weighted values — deferred to a later implementation phase.
+                    # --- Build 936-dim value target from per-hand-type CFVs ---
                     value_target = np.empty(VALUE_DIM, dtype=np.float32)
-                    value_target[:NUM_HAND_TYPES] = root_values_2d[0]
-                    value_target[NUM_HAND_TYPES:] = root_values_2d[1]
+                    value_target[:NUM_HAND_TYPES] = root_cfvs[0]
+                    value_target[NUM_HAND_TYPES:] = root_cfvs[1]
 
                     samples.append(
                         EpisodeSample(
@@ -239,6 +275,18 @@ def rebel_self_play_episode(
                             policy_target=strategy.astype(np.float32),
                             action_mask=mask_bool.copy(),
                         )
+                    )
+
+                    # --- Diagnostics: value target variance, discard bucket ---
+                    _value_variances.append(float(np.var(root_cfvs)))
+                    _disc = game.discard_top()
+                    if _disc is not None:
+                        _discard_buckets.append(_disc)
+
+                    # --- Capture acting player and policy matrix BEFORE apply_action ---
+                    acting_player = game.acting_player()
+                    policy_matrix = _compute_policy_matrix(
+                        policy_net, game, range_p0, range_p1
                     )
 
                     # --- Sample action with epsilon-greedy exploration ---
@@ -259,9 +307,38 @@ def rebel_self_play_episode(
                     game.apply_action(action)
                     game.update_both(a0, a1)
 
+                    # --- Bayesian range update after observing action ---
+                    if acting_player == 0:
+                        range_p0 = update_range(range_p0, action, policy_matrix)
+                    else:
+                        range_p1 = update_range(range_p1, action, policy_matrix)
+
+                    # --- Diagnostics: range entropy after update ---
+                    _h0 = float(-np.sum(range_p0 * np.log(range_p0 + 1e-10)))
+                    _h1 = float(-np.sum(range_p1 * np.log(range_p1 + 1e-10)))
+                    _entropy_p0.append(_h0)
+                    _entropy_p1.append(_h1)
+
         finally:
             a0.close()
             a1.close()
+
+    # --- Episode diagnostic summary ---
+    if _entropy_p0:
+        from collections import Counter
+        bucket_counts = Counter(_discard_buckets)
+        logger.info(
+            "rebel_episode done: steps=%d samples=%d "
+            "range_entropy p0=%.3f→%.3f p1=%.3f→%.3f "
+            "value_var mean=%.4f "
+            "discard_buckets=%s",
+            len(_entropy_p0),
+            len(samples),
+            _entropy_p0[0], _entropy_p0[-1],
+            _entropy_p1[0], _entropy_p1[-1],
+            float(np.mean(_value_variances)) if _value_variances else 0.0,
+            dict(bucket_counts),
+        )
 
     return samples
 

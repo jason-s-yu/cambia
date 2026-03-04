@@ -104,7 +104,15 @@ _ffi.cdef("""
     int32_t cambia_subgame_solve(int32_t solver_h, int32_t num_iterations,
                                  float *leaf_values, float *strategy_out,
                                  float *root_values_out);
+    int32_t cambia_subgame_solve_ranged(int32_t solver_h, int32_t num_iterations,
+                                        int32_t num_hand_types,
+                                        float *leaf_values,
+                                        float *range_p0, float *range_p1,
+                                        float *strategy_out, float *root_cfvs_out);
     void    cambia_subgame_free(int32_t solver_h);
+
+    /* Discard top */
+    int32_t cambia_game_discard_top(int32_t game_h);
 
     /* Handle pool diagnostics */
     void    cambia_handle_pool_stats(int32_t *games_out, int32_t *agents_out, int32_t *snaps_out);
@@ -384,6 +392,11 @@ class GoEngine:
     def stock_len(self) -> int:
         """Return the number of cards remaining in the stockpile."""
         return int(self._lib.cambia_game_stock_len(self._game_h))
+
+    def discard_top(self) -> Optional[int]:
+        """Return the bucket index of the top discard card, or None if empty."""
+        result = int(self._lib.cambia_game_discard_top(self._game_h))
+        return result if result >= 0 else None
 
     def get_drawn_card_bucket(self) -> int:
         """
@@ -843,15 +856,6 @@ class SubgameSolver:
     """
 
     def __init__(self, game: GoEngine, max_depth: int = 4) -> None:
-        import warnings
-
-        warnings.warn(
-            "SubgameSolver is DEPRECATED and will be removed. "
-            "ReBeL/PBS-based subgame solving is mathematically unsound for N-player FFA games "
-            "with continuous beliefs (Cambia). See docs-gen/current/research-brief-position-aware-pbs.md.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
         self._lib = _get_lib()
         self._closed = False
         self._leaf_handles: list = []  # track exported leaf game handles for cleanup
@@ -936,6 +940,53 @@ class SubgameSolver:
             raise RuntimeError(f"cambia_subgame_solve failed: {rc}")
 
         return strategy_buf, root_values_buf
+
+    def solve_ranged(
+        self,
+        leaf_values: np.ndarray,
+        range_p0: np.ndarray,
+        range_p1: np.ndarray,
+        num_iterations: int = 200,
+    ) -> tuple:
+        """Run ranged CFR and return (strategy, root_cfvs).
+
+        Args:
+            leaf_values: float32 array of shape (leaf_count, 2, num_hand_types)
+                or equivalently (leaf_count * 2 * num_hand_types,).
+            range_p0: float32 array of shape (num_hand_types,).
+            range_p1: float32 array of shape (num_hand_types,).
+            num_iterations: Number of CFR iterations.
+
+        Returns:
+            Tuple of (strategy, root_cfvs) as numpy float32 arrays.
+            strategy has shape (146,).
+            root_cfvs has shape (2, num_hand_types) — per-hand-type CFVs for each player.
+        """
+        nht = len(range_p0)
+        leaf_values = np.ascontiguousarray(leaf_values.ravel(), dtype=np.float32)
+        expected = self._leaf_count * 2 * nht
+        if leaf_values.size != expected:
+            raise ValueError(
+                f"leaf_values must have {expected} elements, got {leaf_values.size}"
+            )
+        range_p0 = np.ascontiguousarray(range_p0, dtype=np.float32)
+        range_p1 = np.ascontiguousarray(range_p1, dtype=np.float32)
+        strategy_buf = np.zeros(146, dtype=np.float32)
+        root_cfvs_buf = np.zeros(2 * nht, dtype=np.float32)
+
+        lv_ptr = _ffi.cast("float *", leaf_values.ctypes.data)
+        r0_ptr = _ffi.cast("float *", range_p0.ctypes.data)
+        r1_ptr = _ffi.cast("float *", range_p1.ctypes.data)
+        st_ptr = _ffi.cast("float *", strategy_buf.ctypes.data)
+        rv_ptr = _ffi.cast("float *", root_cfvs_buf.ctypes.data)
+
+        rc = self._lib.cambia_subgame_solve_ranged(
+            self._solver_h, num_iterations, nht, lv_ptr, r0_ptr, r1_ptr, st_ptr, rv_ptr
+        )
+        if rc < 0:
+            raise RuntimeError(f"cambia_subgame_solve_ranged failed: {rc}")
+
+        return strategy_buf, root_cfvs_buf.reshape(2, nht)
 
     def free(self) -> None:
         """Release all resources: leaf game handles then solver handle."""

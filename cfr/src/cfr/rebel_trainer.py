@@ -19,25 +19,12 @@ Training loop per iteration:
 7. Headless output: phase timing, buffer sizes, losses
 """
 
-# DEPRECATED: ReBeL/PBS-based subgame solving is mathematically unsound for N-player FFA games
-# with continuous beliefs (Cambia). See docs-gen/current/research-brief-position-aware-pbs.md.
-import warnings
-
-warnings.warn(
-    "rebel_trainer is DEPRECATED and will be removed. "
-    "ReBeL/PBS-based subgame solving is mathematically unsound for N-player FFA games "
-    "with continuous beliefs (Cambia). See docs-gen/current/research-brief-position-aware-pbs.md.",
-    DeprecationWarning,
-    stacklevel=2,
-)
-
 import concurrent.futures
 import logging
 import multiprocessing
 import os
 import threading
 import time
-from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -470,7 +457,7 @@ class ReBeLTrainer:
                     f"{k}={v:.1f}s" for k, v in phase_times.items()
                 )
                 print(
-                    f"[rebel] iter {iteration} | episodes={len(all_samples)} "
+                    f"[rebel] iter {iteration} | samples={len(all_samples)} "
                     f"{phase_str} | "
                     f"v_loss={v_loss:.2f} p_loss={p_loss:.2f} | "
                     f"v_buf={len(self.value_buffer)} p_buf={len(self.policy_buffer)}",
@@ -522,7 +509,7 @@ class ReBeLTrainer:
 
         # Full config snapshot
         try:
-            config_dict = asdict(self.config)
+            config_dict = self.config.model_dump()
             import json
             json.dumps(config_dict, default=str)
             metadata["config"] = config_dict
@@ -603,7 +590,7 @@ class ReBeLTrainer:
                 "rebel_value_optimizer_state_dict": self.value_optimizer.state_dict(),
                 "rebel_policy_optimizer_state_dict": self.policy_optimizer.state_dict(),
                 "iteration": self.current_iteration,
-                "rebel_config": asdict(self.config),
+                "rebel_config": self.config.model_dump(),
                 "metadata": self._build_checkpoint_metadata(),
                 "value_loss_history": self.value_loss_history,
                 "policy_loss_history": self.policy_loss_history,

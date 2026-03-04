@@ -37,18 +37,6 @@ Index  Field                       Size  Description
 from __future__ import annotations
 
 import functools
-# DEPRECATED: ReBeL/PBS-based subgame solving is mathematically unsound for N-player FFA games
-# with continuous beliefs (Cambia). See docs-gen/current/research-brief-position-aware-pbs.md.
-import warnings
-
-warnings.warn(
-    "pbs is DEPRECATED and will be removed. "
-    "ReBeL/PBS-based subgame solving is mathematically unsound for N-player FFA games "
-    "with continuous beliefs (Cambia). See docs-gen/current/research-brief-position-aware-pbs.md.",
-    DeprecationWarning,
-    stacklevel=2,
-)
-
 from dataclasses import dataclass
 from itertools import combinations_with_replacement
 from typing import Sequence
@@ -78,6 +66,52 @@ DECK_COUNTS: tuple[int, ...] = (2, 2, 4, 12, 8, 8, 8, 8, 2)
 NUM_BUCKETS: int = len(BUCKET_NAMES)
 assert NUM_BUCKETS == 9
 assert len(DECK_COUNTS) == NUM_BUCKETS
+
+# Rank→bucket lookup table: index is card rank (0=Ace, 1-9=2-10, 10=J, 11=Q, 12=K, 13=Joker).
+# Kings (rank 12) default to HighKing (8) since suit info is unavailable by rank alone.
+# Use CardToBucket from the Go FFI (cambia_game_discard_top) when full card info is needed.
+_RANK_TO_BUCKET: list[int] = [
+    2,  # rank 0: Ace → BucketAce
+    3,  # rank 1: 2 → BucketLowNum
+    3,  # rank 2: 3 → BucketLowNum
+    3,  # rank 3: 4 → BucketLowNum
+    4,  # rank 4: 5 → BucketMidNum
+    4,  # rank 5: 6 → BucketMidNum
+    5,  # rank 6: 7 → BucketPeekSelf
+    5,  # rank 7: 8 → BucketPeekSelf
+    6,  # rank 8: 9 → BucketPeekOther
+    6,  # rank 9: T → BucketPeekOther
+    7,  # rank 10: J → BucketSwapBlind
+    7,  # rank 11: Q → BucketSwapBlind
+    8,  # rank 12: K → BucketHighKing (default; suit-specific split unavailable)
+    0,  # rank 13: Joker → BucketZero
+]
+
+
+def rank_to_bucket(rank: int) -> int:
+    """Map a card rank integer (0-13) to a bucket index (0-8).
+
+    Rank encoding: 0=Ace, 1-9=2-10, 10=Jack, 11=Queen, 12=King, 13=Joker.
+    Bucket encoding matches the CardBucket enum in the Go engine.
+
+    Note: Kings (rank 12) always map to BucketHighKing (8). Red Kings (BucketNegKing=1)
+    cannot be distinguished from Black Kings by rank alone. Use the Go-side
+    ``cambia_game_discard_top`` export when the full card (rank + suit) is available.
+
+    Returns
+    -------
+    int
+        Bucket index in [0, 8].
+
+    Raises
+    ------
+    ValueError
+        If rank is outside [0, 13].
+    """
+    if not (0 <= rank <= 13):
+        raise ValueError(f"rank must be in [0, 13], got {rank}")
+    return _RANK_TO_BUCKET[rank]
+
 
 HAND_SIZE: int = 4
 """Default number of cards in a hand for 4-card games."""

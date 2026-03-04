@@ -19,10 +19,6 @@ import numpy as np
 import pytest
 import torch
 
-pytestmark = pytest.mark.skip(
-    reason="ReBeL is deprecated: mathematically unsound for N-player FFA with continuous beliefs"
-)
-
 from src.config import DeepCfrConfig
 from src.cfr.rebel_trainer import (
     ReBeLTrainer,

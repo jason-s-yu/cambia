@@ -190,3 +190,7 @@ cython_debug/
 benchmarks/**/*.json
 benchmarks/**/*.log
 benchmarks/**/*.md
+
+# Training checkpoints / buffers
+*.pt
+*.npz

@@ -811,19 +811,15 @@ class ReBeLAgentWrapper(NeuralAgentWrapper):
         config,
         checkpoint_path: str,
         device: str = "cpu",
+        use_search: bool = True,
     ):
-        import warnings
-
-        warnings.warn(
-            "ReBeLAgentWrapper is DEPRECATED and will be removed. "
-            "ReBeL/PBS-based subgame solving is mathematically unsound for N-player FFA games "
-            "with continuous beliefs (Cambia). See docs-gen/current/research-brief-position-aware-pbs.md.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
         super().__init__(player_id, config, device=device)
         from src.networks import PBSValueNetwork, PBSPolicyNetwork
-        from src.pbs import PBS_INPUT_DIM, NUM_HAND_TYPES
+        from src.pbs import PBS_INPUT_DIM, NUM_HAND_TYPES, uniform_range
+
+        self.use_search = use_search
+        self._range_p0 = uniform_range()
+        self._range_p1 = uniform_range()
 
         torch = self._torch
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
@@ -863,15 +859,22 @@ class ReBeLAgentWrapper(NeuralAgentWrapper):
             checkpoint.get("total_traversals", "N/A"),
         )
 
+    def initialize_state(self, initial_game_state):
+        """Reset ranges to uniform and delegate to parent."""
+        from src.pbs import uniform_range
+        self._range_p0 = uniform_range()
+        self._range_p1 = uniform_range()
+        super().initialize_state(initial_game_state)
+
     def _build_pbs(self, game_state):
-        """Build a PBS from the current game state using uniform ranges."""
+        """Build a PBS from the current game state using tracked ranges."""
         from src.pbs import (
-            PBS, uniform_range, make_public_features,
+            PBS, make_public_features,
             PHASE_DRAW, PHASE_DISCARD, PHASE_ABILITY, PHASE_SNAP, PHASE_TERMINAL,
         )
 
-        range_p0 = uniform_range()
-        range_p1 = uniform_range()
+        range_p0 = self._range_p0
+        range_p1 = self._range_p1
         try:
             # Determine phase from game state
             if game_state.is_terminal():
@@ -900,10 +903,26 @@ class ReBeLAgentWrapper(NeuralAgentWrapper):
             stockpile_remaining = game_state.get_stockpile_size()
             stockpile_total = 46  # Standard initial stockpile (54 - 8 dealt - 1 discard + jokers)
 
+            discard_top_bucket = None
+            try:
+                from src.pbs import rank_to_bucket
+                from src.constants import JOKER_RANK_STR, RED_SUITS, ALL_RANKS_STR
+                discard_card = game_state.get_discard_top()
+                if discard_card is not None:
+                    rank_int = ALL_RANKS_STR.index(discard_card.rank)
+                    bucket = rank_to_bucket(rank_int)
+                    # Distinguish Red King (bucket 1) from Black King (bucket 8)
+                    if discard_card.rank == "K" and discard_card.suit in RED_SUITS:
+                        bucket = 1
+                    discard_top_bucket = bucket
+            except Exception:
+                discard_top_bucket = None
+
             public_features = make_public_features(
                 turn=game_state.get_turn_number(),
                 max_turns=getattr(self.config.cambia_rules, "max_game_turns", 100),
                 phase=phase,
+                discard_top_bucket=discard_top_bucket,
                 stockpile_remaining=stockpile_remaining,
                 stockpile_total=stockpile_total,
             )
@@ -954,10 +973,214 @@ class ReBeLAgentWrapper(NeuralAgentWrapper):
         chosen_local = np.random.choice(len(legal_indices), p=legal_probs)
         chosen_global_idx = legal_indices[chosen_local]
 
+        # Update own range using observed action and current strategy.
+        # Policy matrix: broadcast probs_np uniformly across hand types.
+        # (Full per-hand-type range update requires GoEngine + NUM_HAND_TYPES
+        # forward passes; this trivial update maintains the interface.)
+        try:
+            from src.pbs import update_range, NUM_HAND_TYPES
+            policy_matrix = np.tile(probs_np, (NUM_HAND_TYPES, 1))
+            if self.player_id == 0:
+                self._range_p0 = update_range(self._range_p0, int(chosen_global_idx), policy_matrix)
+            else:
+                self._range_p1 = update_range(self._range_p1, int(chosen_global_idx), policy_matrix)
+        except Exception:
+            pass
+
         try:
             return index_to_action(int(chosen_global_idx), legal_list)
         except ActionEncodingError:
             return random.choice(legal_list)
+
+
+class GTCFRAgentWrapper(NeuralAgentWrapper):
+    """Evaluation wrapper for GT-CFR agent.
+
+    Uses CVPN direct inference at each decision point to select actions.
+    Maintains range distributions across turns (same approach as ReBeLAgentWrapper).
+
+    Note: Full GT-CFR search (GTCFRSearch.search()) requires GoEngine, which is
+    not available in the Python eval harness. This wrapper uses CVPN direct
+    inference on PBS-encoded state as a proxy for the search policy.
+    """
+
+    def __init__(self, player_id: int, config, checkpoint_path: str = "", **kwargs):
+        device = kwargs.get("device", "cpu")
+        super().__init__(player_id, config, device=device)
+        import torch
+        from src.networks import build_cvpn
+        from src.pbs import uniform_range
+
+        self._cvpn = build_cvpn(
+            hidden_dim=config.deep_cfr.gtcfr_cvpn_hidden_dim,
+            num_blocks=config.deep_cfr.gtcfr_cvpn_num_blocks,
+            validate_inputs=False,
+        )
+        if checkpoint_path:
+            ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+            self._cvpn.load_state_dict(ckpt["cvpn_state_dict"])
+        self._cvpn.to(self.device)
+        self._cvpn.eval()
+
+        self._range_p0 = uniform_range()
+        self._range_p1 = uniform_range()
+
+        logger.info(
+            "GTCFRAgent P%d initialized (checkpoint=%s)",
+            self.player_id,
+            checkpoint_path or "none",
+        )
+
+    def initialize_state(self, initial_game_state):
+        """Reset ranges to uniform and delegate to parent."""
+        from src.pbs import uniform_range
+        self._range_p0 = uniform_range()
+        self._range_p1 = uniform_range()
+        super().initialize_state(initial_game_state)
+
+    def _build_pbs(self, game_state):
+        """Build a PBS from current game state using tracked ranges."""
+        from src.pbs import (
+            PBS, make_public_features,
+            PHASE_DRAW, PHASE_DISCARD, PHASE_ABILITY, PHASE_SNAP, PHASE_TERMINAL,
+        )
+
+        range_p0 = self._range_p0
+        range_p1 = self._range_p1
+        try:
+            if game_state.is_terminal():
+                phase = PHASE_TERMINAL
+            elif game_state.snap_phase_active:
+                phase = PHASE_SNAP
+            elif game_state.pending_action is not None:
+                if isinstance(game_state.pending_action, ActionDiscard):
+                    phase = PHASE_DISCARD
+                elif isinstance(
+                    game_state.pending_action,
+                    (
+                        ActionAbilityPeekOwnSelect,
+                        ActionAbilityPeekOtherSelect,
+                        ActionAbilityBlindSwapSelect,
+                        ActionAbilityKingLookSelect,
+                        ActionAbilityKingSwapDecision,
+                    ),
+                ):
+                    phase = PHASE_ABILITY
+                else:
+                    phase = PHASE_DRAW
+            else:
+                phase = PHASE_DRAW
+
+            stockpile_remaining = game_state.get_stockpile_size()
+            stockpile_total = 46
+
+            discard_top_bucket = None
+            try:
+                from src.pbs import rank_to_bucket
+                from src.constants import RED_SUITS, ALL_RANKS_STR
+                discard_card = game_state.get_discard_top()
+                if discard_card is not None:
+                    rank_int = ALL_RANKS_STR.index(discard_card.rank)
+                    bucket = rank_to_bucket(rank_int)
+                    if discard_card.rank == "K" and discard_card.suit in RED_SUITS:
+                        bucket = 1
+                    discard_top_bucket = bucket
+            except Exception:
+                discard_top_bucket = None
+
+            public_features = make_public_features(
+                turn=game_state.get_turn_number(),
+                max_turns=getattr(self.config.cambia_rules, "max_game_turns", 100),
+                phase=phase,
+                discard_top_bucket=discard_top_bucket,
+                stockpile_remaining=stockpile_remaining,
+                stockpile_total=stockpile_total,
+            )
+        except Exception:
+            from src.pbs import NUM_PUBLIC_FEATURES
+            public_features = np.zeros(NUM_PUBLIC_FEATURES, dtype=np.float32)
+
+        return PBS(range_p0=range_p0, range_p1=range_p1, public_features=public_features)
+
+    def choose_action(self, game_state, legal_actions, **kwargs) -> GameAction:
+        """Select action via CVPN policy inference."""
+        from src.encoding import encode_action_mask, index_to_action
+        from src.cfr.exceptions import ActionEncodingError
+        from src.pbs import encode_pbs
+        import torch.nn.functional as F
+
+        if not self.agent_state or game_state is None:
+            return random.choice(list(legal_actions))
+
+        legal_list = list(legal_actions)
+        try:
+            pbs = self._build_pbs(game_state)
+            pbs_enc = encode_pbs(pbs)
+            action_mask = encode_action_mask(legal_list)
+        except Exception as e:  # JUSTIFIED: evaluation resilience
+            logger.error("GTCFRAgent P%d encoding error: %s", self.player_id, e)
+            return random.choice(legal_list)
+
+        torch = self._torch
+        with torch.inference_mode():
+            pbs_t = torch.from_numpy(pbs_enc).unsqueeze(0).to(self.device)
+            mask_t = torch.from_numpy(action_mask).unsqueeze(0).to(self.device)
+            _, policy_logits = self._cvpn(pbs_t, mask_t)
+            probs_np = F.softmax(policy_logits, dim=-1).squeeze(0).cpu().numpy()
+
+        legal_indices = np.where(action_mask)[0]
+        if len(legal_indices) == 0:
+            return random.choice(legal_list)
+
+        legal_probs = probs_np[legal_indices]
+        prob_sum = legal_probs.sum()
+        if prob_sum <= 0:
+            legal_probs = np.ones(len(legal_indices)) / len(legal_indices)
+        else:
+            legal_probs = legal_probs / prob_sum
+
+        chosen_local = np.random.choice(len(legal_indices), p=legal_probs)
+        chosen_global_idx = legal_indices[chosen_local]
+
+        # Simplified range update: broadcast policy uniformly across hand types
+        try:
+            from src.pbs import update_range, NUM_HAND_TYPES
+            policy_matrix = np.tile(probs_np, (NUM_HAND_TYPES, 1))
+            if self.player_id == 0:
+                self._range_p0 = update_range(self._range_p0, int(chosen_global_idx), policy_matrix)
+            else:
+                self._range_p1 = update_range(self._range_p1, int(chosen_global_idx), policy_matrix)
+        except Exception:
+            pass
+
+        try:
+            return index_to_action(int(chosen_global_idx), legal_list)
+        except ActionEncodingError:
+            return random.choice(legal_list)
+
+    def observe_action(self, action, acting_player: int, **kwargs):
+        """Update opponent range after observing their action (uniform policy fallback)."""
+        try:
+            from src.pbs import update_range, NUM_HAND_TYPES
+            from src.encoding import NUM_ACTIONS, encode_action_mask
+            uniform_policy = np.ones(NUM_ACTIONS, dtype=np.float32) / NUM_ACTIONS
+            policy_matrix = np.tile(uniform_policy, (NUM_HAND_TYPES, 1))
+            action_mask = encode_action_mask([action])
+            legal_indices = np.where(action_mask)[0]
+            if len(legal_indices) > 0:
+                action_idx = int(legal_indices[0])
+                if acting_player == 0:
+                    self._range_p0 = update_range(self._range_p0, action_idx, policy_matrix)
+                else:
+                    self._range_p1 = update_range(self._range_p1, action_idx, policy_matrix)
+        except Exception:
+            pass
+
+    def reset(self):
+        """Reset ranges for a new game."""
+        from src.pbs import uniform_range
+        self._range_p0 = uniform_range()
+        self._range_p1 = uniform_range()
 
 
 class SDCFRAgentWrapper(NeuralAgentWrapper):
@@ -1527,6 +1750,8 @@ AGENT_REGISTRY: Dict[str, Type[BaseAgent]] = {
     "escher": ESCHERAgentWrapper,
     "sd_cfr": SDCFRAgentWrapper,
     "ppo": PPOAgentWrapper,
+    "rebel": ReBeLAgentWrapper,
+    "gtcfr": GTCFRAgentWrapper,
     "nplayer": NPlayerAgentWrapper,
     "random_no_cambia": RandomNoCambiaAgent,
     "random_late_cambia": RandomLateCambiaAgent,
@@ -1562,6 +1787,16 @@ def get_agent(agent_type: str, player_id: int, config, **kwargs) -> BaseAgent:
             raise ValueError("PPOAgentWrapper requires 'model_path' or 'checkpoint_path'.")
         device = kwargs.get("device", "cpu")
         return PPOAgentWrapper(player_id, config, model_path, device=device)
+    elif agent_type.lower() == "rebel":
+        checkpoint_path = kwargs.get("checkpoint_path")
+        if not checkpoint_path:
+            raise ValueError("ReBeLAgentWrapper requires 'checkpoint_path'.")
+        device = kwargs.get("device", "cpu")
+        return ReBeLAgentWrapper(player_id, config, checkpoint_path, device=device)
+    elif agent_type.lower() == "gtcfr":
+        checkpoint_path = kwargs.get("checkpoint_path", "")
+        device = kwargs.get("device", "cpu")
+        return GTCFRAgentWrapper(player_id, config, checkpoint_path, device=device)
     else:
         # Pass config to baseline agents as well
         return agent_class(player_id, config)
@@ -1592,7 +1827,7 @@ def run_evaluation(
             logger.error("Strategy file path (--strategy) required for CFR agent.")
             sys.exit(1)
         logger.info("CFR Strategy File: %s", strategy_path)
-    _checkpoint_agent_types = {"deep_cfr", "escher", "sd_cfr", "nplayer", "ppo"}
+    _checkpoint_agent_types = {"deep_cfr", "escher", "sd_cfr", "nplayer", "ppo", "rebel", "gtcfr"}
     if agent1_type.lower() in _checkpoint_agent_types or agent2_type.lower() in _checkpoint_agent_types:
         if not checkpoint_path:
             logger.error("Checkpoint path (--checkpoint) required for %s agent.", agent1_type)
@@ -1949,9 +2184,10 @@ def run_evaluation_multi_baseline(
     device: str = "cpu",
     output_dir: Optional[str] = None,
     use_argmax: bool = False,
+    agent_type: str = "deep_cfr",
 ) -> Dict[str, Counter]:
     """
-    Evaluate a Deep CFR checkpoint against multiple baseline agents.
+    Evaluate a checkpoint against multiple baseline agents.
 
     Args:
         config_path: Path to YAML config.
@@ -1961,17 +2197,18 @@ def run_evaluation_multi_baseline(
         device: Torch device string for network inference.
         output_dir: If set, writes per-game JSONL to {output_dir}/{baseline}.jsonl.
         use_argmax: If True, use argmax instead of stochastic sampling for action selection.
+        agent_type: Agent type string (default: "deep_cfr"). Use "rebel" for ReBeL agents.
 
     Returns:
         Dict mapping baseline name -> Counter with results.
     """
     all_results: Dict[str, Counter] = {}
     for baseline in baselines:
-        logger.info("Evaluating deep_cfr vs %s (%d games)...", baseline, num_games)
+        logger.info("Evaluating %s vs %s (%d games)...", agent_type, baseline, num_games)
         output_path = f"{output_dir}/{baseline}.jsonl" if output_dir is not None else None
         results = run_evaluation(
             config_path=config_path,
-            agent1_type="deep_cfr",
+            agent1_type=agent_type,
             agent2_type=baseline,
             num_games=num_games,
             strategy_path=None,
@@ -1990,19 +2227,23 @@ def run_head_to_head(
     num_games: int,
     config,
     device: str = "cpu",
+    agent_type: str = "deep_cfr",
 ) -> Dict:
     """
-    Play two Deep CFR checkpoints against each other.
+    Play two checkpoints of the same agent type against each other.
 
     Alternates which checkpoint goes first every game to reduce first-mover bias.
+    Supports deep_cfr, rebel, sd_cfr, escher, and other NeuralAgentWrapper types.
 
     Returns:
         Dict with checkpoint_a_wins, checkpoint_b_wins, ties, avg_game_turns,
         std_game_turns.
     """
     logger.info(
-        "Head-to-head: %s vs %s (%d games)", checkpoint_a, checkpoint_b, num_games
+        "Head-to-head (%s): %s vs %s (%d games)", agent_type, checkpoint_a, checkpoint_b, num_games
     )
+
+    _agent_class = AGENT_REGISTRY.get(agent_type.lower(), DeepCFRAgentWrapper)
 
     checkpoint_a_wins = 0
     checkpoint_b_wins = 0
@@ -2014,11 +2255,11 @@ def run_head_to_head(
         # Alternate who goes first
         a_is_p0 = (game_num % 2 == 1)
         if a_is_p0:
-            agent0 = DeepCFRAgentWrapper(0, config, checkpoint_a, device=device)
-            agent1 = DeepCFRAgentWrapper(1, config, checkpoint_b, device=device)
+            agent0 = _agent_class(0, config, checkpoint_a, device=device)
+            agent1 = _agent_class(1, config, checkpoint_b, device=device)
         else:
-            agent0 = DeepCFRAgentWrapper(0, config, checkpoint_b, device=device)
-            agent1 = DeepCFRAgentWrapper(1, config, checkpoint_a, device=device)
+            agent0 = _agent_class(0, config, checkpoint_b, device=device)
+            agent1 = _agent_class(1, config, checkpoint_a, device=device)
 
         agents = [agent0, agent1]
 

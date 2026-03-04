@@ -4,7 +4,7 @@ import sys
 import signal
 import multiprocessing
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import typer
 
@@ -431,20 +431,11 @@ def train_rebel(
         help="Training device: auto, cpu, cuda, xpu (default: auto)",
     ),
 ):
-    """Train a ReBeL agent."""
-    import warnings
+    """Train a ReBeL agent (2-player)."""
+    from .cfr.rebel_trainer import ReBeLTrainer
+    from .config import load_config
 
-    warnings.warn(
-        "ReBeL training is deprecated. ReBeL/PBS subgame solving is mathematically unsound "
-        "for N-player FFA games with continuous beliefs.",
-        DeprecationWarning,
-    )
-    typer.echo(
-        "ERROR: ReBeL training is deprecated. ReBeL/PBS subgame solving is mathematically "
-        "unsound for N-player FFA games with continuous beliefs (Cambia). "
-        "See docs-gen/current/research-brief-position-aware-pbs.md."
-    )
-    raise typer.Exit(1)
+    setup_multiprocessing()
 
     cfg = load_config(str(config))
     if not cfg:
@@ -476,6 +467,85 @@ def train_rebel(
         trainer.train(num_iterations=total_iters)
     except Exception as e:
         print(f"FATAL: Error during ReBeL training: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+@train_app.command("gtcfr", help="Train using GT-CFR (Growing-Tree CFR, Phase 2)")
+def train_gtcfr(
+    config: Path = typer.Option(
+        "config.yaml",
+        "--config",
+        "-c",
+        help="Path to configuration YAML file",
+        exists=True,
+    ),
+    epochs: Optional[int] = typer.Option(
+        None,
+        "--epochs",
+        "-e",
+        help="Number of training epochs (overrides config gtcfr_epochs)",
+    ),
+    checkpoint: Optional[Path] = typer.Option(
+        None,
+        "--checkpoint",
+        help="Resume from GT-CFR checkpoint",
+    ),
+    warm_start: Optional[Path] = typer.Option(
+        None,
+        "--warm-start",
+        help="Warm-start CVPN from a Phase 1 ReBeL checkpoint",
+    ),
+    save_path: Optional[Path] = typer.Option(
+        None,
+        "--save-path",
+        "-s",
+        help="Override checkpoint save path",
+    ),
+    device: Optional[str] = typer.Option(
+        None,
+        "--device",
+        help="Training device: auto, cpu, cuda, xpu (default: auto)",
+    ),
+):
+    """Train a GT-CFR agent (Phase 2 search-based training)."""
+    from .cfr.gtcfr_trainer import GTCFRTrainer
+    from .config import load_config
+
+    setup_multiprocessing()
+
+    cfg = load_config(str(config))
+    if not cfg:
+        print("ERROR: Failed to load configuration. Exiting.", file=sys.stderr)
+        raise typer.Exit(1)
+
+    gtcfr_config = cfg.deep_cfr
+    if device is not None:
+        gtcfr_config.device = device
+
+    ckpt_path = (
+        str(save_path)
+        if save_path
+        else os.path.splitext(cfg.persistence.agent_data_save_path)[0] + "_gtcfr.pt"
+    )
+
+    trainer = GTCFRTrainer(
+        config=gtcfr_config,
+        game_config=cfg.cambia_rules,
+        checkpoint_path=ckpt_path,
+    )
+
+    if warm_start:
+        trainer.warm_start_from_rebel(str(warm_start))
+
+    if checkpoint:
+        trainer.load_checkpoint(str(checkpoint))
+
+    total_epochs = epochs if epochs is not None else gtcfr_config.gtcfr_epochs
+
+    try:
+        trainer.train(num_epochs=total_epochs)
+    except Exception as e:
+        print(f"FATAL: Error during GT-CFR training: {e}", file=sys.stderr)
         raise typer.Exit(1)
 
 
@@ -1084,7 +1154,7 @@ def benchmark_es_cmd(
 def evaluate(
     checkpoint: Path = typer.Argument(
         ...,
-        help="Path to Deep CFR .pt checkpoint file",
+        help="Path to .pt checkpoint file",
         exists=True,
     ),
     config: Path = typer.Option(
@@ -1125,8 +1195,13 @@ def evaluate(
         "--argmax",
         help="Use argmax action selection instead of stochastic sampling during evaluation",
     ),
+    agent_type: str = typer.Option(
+        "deep_cfr",
+        "--agent-type",
+        help="Agent type: deep_cfr, rebel, sd_cfr, escher, gtcfr",
+    ),
 ):
-    """Evaluate a Deep CFR checkpoint against baseline agents and print a win-rate table."""
+    """Evaluate a checkpoint against baseline agents and print a win-rate table."""
     from rich.console import Console
     from rich.table import Table
     from .evaluate_agents import run_evaluation_multi_baseline, MEAN_IMP_BASELINES
@@ -1147,12 +1222,13 @@ def evaluate(
         device=device,
         output_dir=str(output_dir) if output_dir else None,
         use_argmax=argmax,
+        agent_type=agent_type,
     )
 
     console = Console()
     table = Table(title=f"Evaluation: {checkpoint.name}")
     table.add_column("Baseline", style="cyan")
-    table.add_column("DeepCFR Wins", style="green")
+    table.add_column(f"{agent_type} Wins", style="green")
     table.add_column("Baseline Wins", style="red")
     table.add_column("Ties", style="yellow")
     table.add_column("Errors", style="dim")
@@ -1189,6 +1265,74 @@ def evaluate(
         )
 
     console.print(table)
+
+
+@app.command(
+    "eval-watch",
+    help="Poll run dir(s) and auto-evaluate new checkpoints as they appear (CPU-only).",
+)
+def eval_watch(
+    run_dirs: List[Path] = typer.Argument(
+        ...,
+        help="One or more run directories to watch for new checkpoints.",
+    ),
+    games: int = typer.Option(
+        5000,
+        "--games",
+        "-n",
+        help="Games per baseline per checkpoint (default: 5000).",
+    ),
+    poll_interval: int = typer.Option(
+        30,
+        "--poll-interval",
+        help="Seconds between polling cycles (default: 30).",
+    ),
+    h2h_games: int = typer.Option(
+        2000,
+        "--h2h-games",
+        help="Games per head-to-head comparison (default: 2000, 0 to disable).",
+    ),
+    agent_type: str = typer.Option(
+        "deep_cfr",
+        "--agent-type",
+        help="Agent type to evaluate (default: deep_cfr). Choices: deep_cfr, rebel, sd_cfr, escher.",
+    ),
+    checkpoint_prefix: Optional[str] = typer.Option(
+        None,
+        "--checkpoint-prefix",
+        help=(
+            "Filename prefix for checkpoint glob (auto-inferred from --agent-type if omitted). "
+            "E.g. 'rebel_checkpoint' for ReBeL."
+        ),
+    ),
+):
+    """
+    Watch run directories and evaluate every new checkpoint against all baselines.
+
+    Writes metrics.jsonl and (optionally) head_to_head.jsonl into each run directory.
+    Supports Deep CFR, ReBeL, SD-CFR, and ESCHER agent types via --agent-type.
+    """
+    import subprocess
+    import sys as _sys
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "eval_watcher.py"
+    cmd = [
+        _sys.executable,
+        str(script),
+        "--run-dirs",
+        *[str(d) for d in run_dirs],
+        "--games",
+        str(games),
+        "--poll-interval",
+        str(poll_interval),
+        "--h2h-games",
+        str(h2h_games),
+        "--agent-type",
+        agent_type,
+    ]
+    if checkpoint_prefix:
+        cmd += ["--checkpoint-prefix", checkpoint_prefix]
+    raise SystemExit(subprocess.call(cmd))
 
 
 @app.command("play", help="Play Cambia interactively against an AI opponent")

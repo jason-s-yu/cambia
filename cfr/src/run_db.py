@@ -157,17 +157,34 @@ def house_rules_hash(config_dict: Dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
-def infer_algorithm(config_dict: Dict[str, Any]) -> str:
+def infer_algorithm(
+    config_dict: Dict[str, Any],
+    checkpoint_keys: Optional[set] = None,
+    checkpoint_filename: Optional[str] = None,
+) -> str:
     """
-    Infer algorithm name from config dict.
+    Infer algorithm name from config dict, checkpoint keys, or filename.
 
     Priority:
-    1. traversal_method == "escher" → "escher"
-    2. use_sd_cfr → "sd-cfr"
-    3. use_psro → "psro"
-    4. sampling_method == "external" → "es-mccfr"
-    5. default → "os-mccfr"
+    1. checkpoint_keys contains "rebel_value_net_state_dict" → "rebel"
+    2. checkpoint_filename matches "rebel_checkpoint*" → "rebel"
+    3. config has rebel section → "rebel"
+    4. traversal_method == "escher" → "escher"
+    5. use_sd_cfr → "sd-cfr"
+    6. use_psro → "psro"
+    7. sampling_method == "external" → "es-mccfr"
+    8. default → "os-mccfr"
     """
+    # Detect ReBeL by checkpoint contents or filename
+    if checkpoint_keys and "rebel_value_net_state_dict" in checkpoint_keys:
+        return "rebel"
+    if checkpoint_filename:
+        import os
+        basename = os.path.basename(checkpoint_filename)
+        if basename.startswith("rebel_checkpoint"):
+            return "rebel"
+    if config_dict.get("rebel"):
+        return "rebel"
     deep_cfr = config_dict.get("deep_cfr", {}) or {}
     traversal = deep_cfr.get("traversal_method", "")
     if traversal == "escher":
