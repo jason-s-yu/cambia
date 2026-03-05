@@ -31,8 +31,9 @@ if str(_CFR_ROOT) not in sys.path:
 
 import torch
 
-from src.evaluate_agents import run_evaluation_multi_baseline, run_head_to_head, MEAN_IMP_BASELINES
+from src.evaluate_agents import run_evaluation_multi_baseline, run_head_to_head, MEAN_IMP_BASELINES, get_agent
 from src.config import load_config
+from src.cfr.sampled_lbr import sampled_lbr
 
 try:
     import src.run_db as run_db
@@ -124,6 +125,9 @@ def evaluate_checkpoint(
     num_games: int,
     config_path: str,
     agent_type: str = "deep_cfr",
+    run_lbr: bool = False,
+    lbr_infosets: int = 10000,
+    lbr_rollouts: int = 100,
 ) -> dict:
     """Evaluate a single checkpoint, write metrics.jsonl rows and per-game JSONL."""
     run_dir_path = Path(run_dir).resolve()
@@ -201,6 +205,45 @@ def evaluate_checkpoint(
             row["avg_score_margin"] = round(stats.get("avg_score_margin", 0), 2)
             f.write(json.dumps(row) + "\n")
             all_rows.append(row)
+
+    # Optional: sampled LBR exploitability measurement
+    if run_lbr:
+        try:
+            lbr_config = load_config(config_path)
+            if lbr_config is not None:
+                lbr_agent = get_agent(
+                    agent_type,
+                    player_id=0,
+                    config=lbr_config,
+                    checkpoint_path=checkpoint_path,
+                    device="cpu",
+                )
+                lbr_result = sampled_lbr(
+                    lbr_agent,
+                    lbr_config,
+                    num_infosets=lbr_infosets,
+                    br_rollouts_per_infoset=lbr_rollouts,
+                )
+                lbr_row = {
+                    "run": run_dir_path.name,
+                    "iter": iter_num,
+                    "baseline": "lbr",
+                    "exploitability": round(lbr_result["exploitability"], 6),
+                    "num_infosets_sampled": lbr_result["num_infosets_sampled"],
+                    "std_err": round(lbr_result["std_err"], 6),
+                    "timestamp": timestamp,
+                }
+                with open(metrics_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(lbr_row) + "\n")
+                logger.info(
+                    "[lbr] iter %d: exploitability=%.3f (n=%d, stderr=%.3f)",
+                    iter_num,
+                    lbr_result["exploitability"],
+                    lbr_result["num_infosets_sampled"],
+                    lbr_result["std_err"],
+                )
+        except Exception:
+            logger.exception("LBR evaluation failed for iter %d", iter_num)
 
     # DB dual-write
     if _RUN_DB_AVAILABLE:
@@ -381,6 +424,24 @@ def main() -> None:
             "E.g. 'rebel_checkpoint' for ReBeL, 'deep_cfr_checkpoint' for Deep CFR."
         ),
     )
+    parser.add_argument(
+        "--lbr",
+        action="store_true",
+        default=False,
+        help="After each checkpoint eval, run sampled LBR and append to metrics.jsonl.",
+    )
+    parser.add_argument(
+        "--lbr-infosets",
+        type=int,
+        default=10000,
+        help="Number of infosets to sample for LBR (default: 10000).",
+    )
+    parser.add_argument(
+        "--lbr-rollouts",
+        type=int,
+        default=100,
+        help="Rollouts per infoset for LBR (default: 100).",
+    )
     args = parser.parse_args()
 
     # Infer checkpoint prefix from agent type if not explicitly provided
@@ -391,6 +452,9 @@ def main() -> None:
         "escher": "deep_cfr_checkpoint",
         "nplayer": "deep_cfr_checkpoint",
         "ppo": "ppo_checkpoint",
+        "gtcfr": "gtcfr_checkpoint",
+        "sog": "sog_checkpoint",
+        "sog_inference": "sog_checkpoint",
     }
     checkpoint_prefix = args.checkpoint_prefix or _PREFIX_MAP.get(args.agent_type, "deep_cfr_checkpoint")
 
@@ -425,6 +489,9 @@ def main() -> None:
                         all_results, iter_num = evaluate_checkpoint(
                             run_dir, ckpt, args.games, config_path,
                             agent_type=args.agent_type,
+                            run_lbr=args.lbr,
+                            lbr_infosets=args.lbr_infosets,
+                            lbr_rollouts=args.lbr_rollouts,
                         )
                         log_line = format_results(run_dir, iter_num, all_results)
                         print(log_line, flush=True)

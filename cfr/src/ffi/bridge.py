@@ -11,12 +11,81 @@ import os
 import random
 import warnings
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import cffi
 import numpy as np
 
 from src.config import CambiaRulesConfig
+
+# ---------------------------------------------------------------------------
+# Card index mapping utilities
+# ---------------------------------------------------------------------------
+
+# Python suit → canonical index (C=0, D=1, H=2, S=3)
+SUIT_OFFSET = {"C": 0, "D": 1, "H": 2, "S": 3}
+
+# Python rank → canonical rank index (A=0, 2=1, ..., K=12)
+RANK_VALUE = {
+    "A": 0, "2": 1, "3": 2, "4": 3, "5": 4, "6": 5,
+    "7": 6, "8": 7, "9": 8, "T": 9, "J": 10, "Q": 11, "K": 12,
+}
+
+
+def python_card_to_go_index(card) -> int:
+    """Convert a Python Card object to a canonical uint8 card index.
+
+    Index encoding: suit*13 + rank (suits C=0,D=1,H=2,S=3; ranks A=0..K=12).
+    Jokers (rank=='R', suit=None) map to index 52.
+    Use extract_deck_from_python_game to distinguish two jokers (52 vs 53).
+    """
+    if card.rank == "R":  # JOKER_RANK_STR
+        return 52
+    return SUIT_OFFSET[card.suit] * 13 + RANK_VALUE[card.rank]
+
+
+def extract_deck_from_python_game(game) -> Tuple[List[int], int]:
+    """Reconstruct the deal-order deck from a fully-dealt Python CambiaGameState.
+
+    Returns (deck_indices, starting_player) where:
+    - deck_indices is a list of uint8 card indices in deal order:
+      [p0c0, p1c0, ..., p0cN, p1cN, ..., discard_flip, stock_top, ..., stock_bottom]
+    - starting_player is game.current_player_index
+
+    This ordering matches what cambia_game_new_with_deck expects: deck[0] is the
+    first card dealt (Player 0, slot 0) and is placed at Stockpile[deckLen-1]
+    so that Deal's pop-from-end logic works correctly.
+    """
+    players = game.players
+    num_players = len(players)
+    cards_per_player = len(players[0].hand) if players else 4
+
+    deck_indices: List[int] = []
+    joker_count = 0
+
+    def _card_index(card) -> int:
+        nonlocal joker_count
+        if card.rank == "R":
+            idx = 52 + min(joker_count, 1)
+            joker_count += 1
+            return idx
+        return SUIT_OFFSET[card.suit] * 13 + RANK_VALUE[card.rank]
+
+    # Round-robin dealt cards: c=0..N-1, p=0..numPlayers-1
+    for c in range(cards_per_player):
+        for p in range(num_players):
+            deck_indices.append(_card_index(players[p].hand[c]))
+
+    # Discard flip card (top of discard pile at game start)
+    if game.discard_pile:
+        deck_indices.append(_card_index(game.discard_pile[0]))
+
+    # Remaining stockpile: top (last element) to bottom (first element)
+    for card in reversed(game.stockpile):
+        deck_indices.append(_card_index(card))
+
+    starting_player = getattr(game, "current_player_index", 0)
+    return deck_indices, starting_player
 
 # ---------------------------------------------------------------------------
 # Library loading — module-level singleton
@@ -26,6 +95,16 @@ _ffi = cffi.FFI()
 _ffi.cdef("""
     /* Game lifecycle */
     int32_t cambia_game_new(uint64_t seed);
+    int32_t cambia_game_new_with_deck(
+        uint8_t *deck, int32_t deck_len,
+        uint8_t  num_players, uint8_t  cards_per_player,
+        uint8_t  starting_player,
+        uint16_t max_game_turns, uint8_t  cambia_allowed_round,
+        uint8_t  penalty_draw_count, uint8_t  allow_draw_from_discard,
+        uint8_t  allow_replace_abilities, uint8_t  allow_opponent_snapping,
+        uint8_t  snap_race, uint8_t  num_jokers, uint8_t  lock_caller_hand,
+        uint8_t  initial_view_count, uint8_t  num_decks
+    );
     int32_t cambia_game_new_with_rules(
         uint64_t seed,
         uint16_t maxGameTurns,
@@ -263,6 +342,82 @@ class GoEngine:
         obj._nplayer_util_buf = _ffi.new("float[2]")
         obj._closed = False
         obj._owned = False
+        return obj
+
+    @classmethod
+    def from_deck(
+        cls,
+        deck_indices: List[int],
+        starting_player: int = 0,
+        house_rules=None,
+    ) -> "GoEngine":
+        """Create a GoEngine with a pre-determined deck order.
+
+        The deck_indices list encodes the deal order: deck[0] is dealt to
+        Player 0's first slot, deck[1] to Player 1's first slot, etc.
+        Use extract_deck_from_python_game() to produce this list from a
+        Python CambiaGameState.
+
+        Args:
+            deck_indices: List of uint8 card indices in deal order.
+            starting_player: Which player acts first (0-indexed).
+            house_rules: CambiaRulesConfig instance (or None for defaults).
+
+        Returns:
+            A new GoEngine instance owning the game handle.
+        """
+        lib = _get_lib()
+        obj = object.__new__(cls)
+        obj._lib = lib
+        obj._closed = False
+        obj._owned = True
+
+        if house_rules is not None:
+            np_val = int(getattr(house_rules, "num_players", 2) or 2)
+        else:
+            np_val = 2
+        obj._num_players = max(2, np_val)
+
+        obj._mask_buf = _ffi.new("uint8_t[146]")
+        obj._util_buf = _ffi.new("float[2]")
+        obj._nplayer_mask_buf = _ffi.new("uint8_t[452]")
+        obj._nplayer_legal_buf = _ffi.new("uint64_t[8]")
+        obj._nplayer_util_buf = _ffi.new(f"float[{obj._num_players}]")
+
+        deck_arr = _ffi.new("uint8_t[]", deck_indices)
+
+        if house_rules is not None:
+            game_h = lib.cambia_game_new_with_deck(
+                deck_arr, len(deck_indices),
+                obj._num_players,
+                int(house_rules.cards_per_player),
+                int(starting_player),
+                int(house_rules.max_game_turns),
+                int(house_rules.cambia_allowed_round),
+                int(house_rules.penaltyDrawCount),
+                1 if house_rules.allowDrawFromDiscardPile else 0,
+                1 if house_rules.allowReplaceAbilities else 0,
+                1 if house_rules.allowOpponentSnapping else 0,
+                1 if house_rules.snapRace else 0,
+                int(house_rules.use_jokers),
+                1 if getattr(house_rules, "lockCallerHand", True) else 0,
+                int(getattr(house_rules, "initial_view_count", 2)),
+                int(getattr(house_rules, "num_decks", 1)),
+            )
+        else:
+            # Defaults: 2 players, 4 cards each, standard competitive rules
+            game_h = lib.cambia_game_new_with_deck(
+                deck_arr, len(deck_indices),
+                2, 4, int(starting_player),
+                46, 0, 2, 1, 0, 1, 0, 2, 1, 2, 1,
+            )
+
+        if game_h < 0:
+            raise RuntimeError(
+                f"cambia_game_new_with_deck failed (returned {game_h}). "
+                "Handle pool may be exhausted or deck length invalid."
+            )
+        obj._game_h = int(game_h)
         return obj
 
     # --- Properties ---
