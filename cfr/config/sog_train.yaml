@@ -1,0 +1,58 @@
+num_players: 2
+
+deep_cfr:
+  device: auto
+  batch_size: 2048
+  train_steps_per_iteration: 200
+  save_interval: 25
+
+  # GT-CFR search hyperparameters (shared with SoG)
+  gtcfr_expansion_budget: 100
+  gtcfr_c_puct: 2.0
+  gtcfr_cfr_iters_per_expansion: 10
+  gtcfr_exploration_epsilon: 0.05
+
+  # CVPN architecture (3.1M params, matches Phase 2)
+  gtcfr_cvpn_hidden_dim: 512
+  gtcfr_cvpn_num_blocks: 4
+  gtcfr_cvpn_learning_rate: 0.0003
+  cvpn_detach_policy_grad: true
+
+  # Loss weights
+  gtcfr_value_loss_weight: 1.0
+  gtcfr_policy_loss_weight: 1.0
+
+  # Buffer
+  gtcfr_buffer_capacity: 1000000
+
+  # SoG-specific
+  sog_train_budget: 50
+  sog_eval_budget: 200
+  sog_c_puct: 2.0
+  sog_cfr_iters_per_expansion: 10
+  sog_max_persist_depth: 8
+  sog_max_persist_handles: 512
+  sog_safety_margin: 0.01
+  sog_games_per_epoch: 30
+  sog_epochs: 500
+  sog_exploration_epsilon: 0.05
+  sog_warm_start_checkpoint: runs/gtcfr-phase2/checkpoints/checkpoint_gtcfr_epoch_200.pt
+
+cambia_rules:
+  allowDrawFromDiscardPile: false
+  allowReplaceAbilities: false
+  snapRace: false
+  penaltyDrawCount: 2
+  use_jokers: 2
+  cards_per_player: 4
+  initial_view_count: 2
+  cambia_allowed_round: 0
+  allowOpponentSnapping: false
+  max_game_turns: 46
+
+persistence:
+  agent_data_save_path: runs/sog-phase3/checkpoints/checkpoint.pt
+
+logging:
+  log_level_file: INFO
+  log_level_console: WARNING

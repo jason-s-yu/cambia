@@ -81,6 +81,7 @@ class SoGTrainer:
         self.cvpn = build_cvpn(
             hidden_dim=config.gtcfr_cvpn_hidden_dim,
             num_blocks=config.gtcfr_cvpn_num_blocks,
+            detach_policy_grad=config.cvpn_detach_policy_grad,
         ).to(self.device)
 
         self.optimizer = optim.Adam(
@@ -104,9 +105,14 @@ class SoGTrainer:
         self.loss_history: List[Tuple[int, float, float]] = []
 
         logger.info(
-            "SoGTrainer initialized. CVPN params: %d",
+            "SoGTrainer initialized. CVPN params: %d, detach_policy_grad: %s",
             sum(p.numel() for p in self.cvpn.parameters()),
+            config.cvpn_detach_policy_grad,
         )
+
+        # Auto warm-start from config if specified and no explicit checkpoint
+        if config.sog_warm_start_checkpoint and checkpoint_path and not os.path.exists(checkpoint_path):
+            self.warm_start_from_gtcfr(config.sog_warm_start_checkpoint)
 
     # ------------------------------------------------------------------
     # Internal helpers

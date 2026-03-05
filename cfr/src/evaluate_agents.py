@@ -1015,6 +1015,7 @@ class GTCFRAgentWrapper(NeuralAgentWrapper):
             hidden_dim=config.deep_cfr.gtcfr_cvpn_hidden_dim,
             num_blocks=config.deep_cfr.gtcfr_cvpn_num_blocks,
             validate_inputs=False,
+            detach_policy_grad=False,
         )
         if checkpoint_path:
             ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
