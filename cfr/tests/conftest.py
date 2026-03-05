@@ -139,6 +139,19 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         gtcfr_exploration_epsilon: float = 0.05
         gtcfr_warm_start_rebel_checkpoint: str = ""
 
+        # SoG fields
+        sog_train_budget: int = 50
+        sog_eval_budget: int = 200
+        sog_c_puct: float = 2.0
+        sog_cfr_iters_per_expansion: int = 10
+        sog_max_persist_depth: int = 8
+        sog_max_persist_handles: int = 512
+        sog_safety_margin: float = 0.01
+        sog_games_per_epoch: int = 50
+        sog_epochs: int = 1000
+        sog_exploration_epsilon: float = 0.05
+        sog_warm_start_checkpoint: str = ""
+
     def _load_config(path: str):
         """Stub load_config: delegate to the real load_config implementation."""
         try:

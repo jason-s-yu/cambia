@@ -1,5 +1,6 @@
 """src/cli.py - Typer-based CLI for Cambia CFR Training Suite."""
 
+import os
 import sys
 import signal
 import multiprocessing
@@ -546,6 +547,96 @@ def train_gtcfr(
         trainer.train(num_epochs=total_epochs)
     except Exception as e:
         print(f"FATAL: Error during GT-CFR training: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+@train_app.command("sog", help="Train using SoG (Student of Games, Phase 3)")
+def train_sog(
+    config: Path = typer.Option(
+        "config.yaml",
+        "--config",
+        "-c",
+        help="Path to configuration YAML file",
+        exists=True,
+    ),
+    epochs: Optional[int] = typer.Option(
+        None,
+        "--epochs",
+        "-e",
+        help="Number of training epochs (overrides config sog_epochs)",
+    ),
+    checkpoint: Optional[Path] = typer.Option(
+        None,
+        "--checkpoint",
+        help="Resume from SoG checkpoint",
+    ),
+    warm_start: Optional[Path] = typer.Option(
+        None,
+        "--warm-start",
+        help="Warm-start CVPN from a GT-CFR or ReBeL checkpoint",
+    ),
+    save_path: Optional[Path] = typer.Option(
+        None,
+        "--save-path",
+        "-s",
+        help="Override checkpoint save path",
+    ),
+    device: Optional[str] = typer.Option(
+        None,
+        "--device",
+        help="Training device: auto, cpu, cuda, xpu (default: auto)",
+    ),
+):
+    """Train a SoG agent (Phase 3 continual re-solving + budget decoupling)."""
+    from .cfr.sog_trainer import SoGTrainer
+    from .config import load_config
+
+    setup_multiprocessing()
+
+    cfg = load_config(str(config))
+    if not cfg:
+        print("ERROR: Failed to load configuration. Exiting.", file=sys.stderr)
+        raise typer.Exit(1)
+
+    sog_config = cfg.deep_cfr
+    if device is not None:
+        sog_config.device = device
+
+    ckpt_path = (
+        str(save_path)
+        if save_path
+        else os.path.splitext(cfg.persistence.agent_data_save_path)[0] + "_sog.pt"
+    )
+
+    trainer = SoGTrainer(
+        config=sog_config,
+        game_config=cfg.cambia_rules,
+        checkpoint_path=ckpt_path,
+    )
+
+    if warm_start:
+        warm_start_str = str(warm_start)
+        # Detect checkpoint type by presence of sog_metadata or cvpn_state_dict
+        try:
+            import torch as _torch
+            ckpt_peek = _torch.load(warm_start_str, map_location="cpu", weights_only=True)
+            if "rebel_policy_net_state_dict" in ckpt_peek:
+                trainer.warm_start_from_rebel(warm_start_str)
+            else:
+                trainer.warm_start_from_gtcfr(warm_start_str)
+        except Exception:
+            # Fallback: try GT-CFR format
+            trainer.warm_start_from_gtcfr(warm_start_str)
+
+    if checkpoint:
+        trainer.load_checkpoint(str(checkpoint))
+
+    total_epochs = epochs if epochs is not None else sog_config.sog_epochs
+
+    try:
+        trainer.train(num_epochs=total_epochs)
+    except Exception as e:
+        print(f"FATAL: Error during SoG training: {e}", file=sys.stderr)
         raise typer.Exit(1)
 
 
@@ -1200,6 +1291,21 @@ def evaluate(
         "--agent-type",
         help="Agent type: deep_cfr, rebel, sd_cfr, escher, gtcfr",
     ),
+    lbr: bool = typer.Option(
+        False,
+        "--lbr",
+        help="Run sampled LBR exploitability measurement after evaluation",
+    ),
+    lbr_infosets: int = typer.Option(
+        10000,
+        "--lbr-infosets",
+        help="Number of infosets to sample for LBR",
+    ),
+    lbr_rollouts: int = typer.Option(
+        100,
+        "--lbr-rollouts",
+        help="Rollouts per infoset for LBR",
+    ),
 ):
     """Evaluate a checkpoint against baseline agents and print a win-rate table."""
     from rich.console import Console
@@ -1265,6 +1371,34 @@ def evaluate(
         )
 
     console.print(table)
+
+    if lbr:
+        from .cfr.sampled_lbr import sampled_lbr as run_lbr
+        from .config import load_config as _load_config
+        from .evaluate_agents import get_agent
+
+        lbr_config = _load_config(str(config))
+        if lbr_config is None:
+            print("[lbr] ERROR: could not load config for LBR.", file=sys.stderr)
+        else:
+            agent = get_agent(
+                agent_type,
+                player_id=0,
+                config=lbr_config,
+                checkpoint_path=str(checkpoint),
+                device=device,
+            )
+            result = run_lbr(
+                agent,
+                lbr_config,
+                num_infosets=lbr_infosets,
+                br_rollouts_per_infoset=lbr_rollouts,
+            )
+            print(
+                f"[lbr] exploitability={result['exploitability']:.3f} "
+                f"({result['num_infosets_sampled']} infosets, "
+                f"stderr={result['std_err']:.3f})"
+            )
 
 
 @app.command(

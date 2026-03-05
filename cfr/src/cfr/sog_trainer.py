@@ -1,20 +1,15 @@
 """
-src/cfr/gtcfr_trainer.py
+src/cfr/sog_trainer.py
 
-GT-CFR Trainer — training loop orchestrator for Phase 2.
+SoG Trainer: training loop coordinator for Phase 3.
 
-Architecture:
-- CVPN (dual-head): predicts counterfactual values (936) + policy logits (146)
-- Two ReservoirBuffers: value_buffer (has_mask=False) and policy_buffer (has_mask=True)
-- Self-play episodes via ProcessPoolExecutor (spawn context)
-
-Training loop per epoch:
-1. Copy CVPN state_dict (numpy) for worker pickling
-2. Run gtcfr_games_per_epoch episodes via ProcessPoolExecutor
-3. Insert episode samples into value and policy buffers
-4. Train CVPN: combined MSE(values) + CE(policy) loss from separate buffer samples
-5. Checkpoint save every save_interval epochs
-6. Headless output: epoch timing, buffer sizes, losses
+Mirrors GTCFRTrainer closely. Differences:
+- Uses _sog_batch_worker (SoG self-play with tree persistence)
+- Buffer paths: *_sog_value_buffer.npz, *_sog_policy_buffer.npz
+- Checkpoint key: cvpn_state_dict (same as GT-CFR for cross-loading) + sog_metadata
+- Epoch checkpoint: *_sog_epoch_N.pt
+- Uses sog_games_per_epoch and sog_epochs config fields
+- Warm start from GT-CFR checkpoint or ReBeL
 """
 
 import concurrent.futures
@@ -28,7 +23,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
@@ -42,6 +36,7 @@ from .exceptions import (
     CheckpointLoadError,
     GracefulShutdownException,
 )
+from .sog_worker import _sog_batch_worker
 
 logger = logging.getLogger(__name__)
 
@@ -52,75 +47,18 @@ VALUE_DIM: int = 2 * NUM_HAND_TYPES   # 936
 POLICY_DIM: int = NUM_ACTIONS          # 146
 
 
-# ---------------------------------------------------------------------------
-# Module-level worker function (must be module-level for ProcessPoolExecutor pickle)
-# ---------------------------------------------------------------------------
-
-
-def _gtcfr_batch_worker(args: Tuple) -> List:
+class SoGTrainer:
     """
-    ProcessPoolExecutor worker — runs N GT-CFR self-play episodes and returns all samples.
-
-    Must be at module level (not a closure or method) so ProcessPoolExecutor can
-    pickle it for spawn-based worker processes.
-
-    Args:
-        args: (num_episodes, cvpn_state_numpy, config, game_config)
-            cvpn_state_numpy: {str: np.ndarray} state_dict for CVPN
-            config: DeepCfrConfig carrying gtcfr_* hyper-parameters
-            game_config: house rules for GoEngine (None = Go defaults)
-
-    Returns:
-        Flat list of EpisodeSample objects from all completed episodes.
-    """
-    num_episodes, cvpn_state_numpy, config, game_config = args
-
-    from ..networks import build_cvpn
-    from .gtcfr_worker import gtcfr_self_play_episode
-
-    cvpn = build_cvpn(
-        hidden_dim=config.gtcfr_cvpn_hidden_dim,
-        num_blocks=config.gtcfr_cvpn_num_blocks,
-        validate_inputs=False,
-    )
-    weights = {
-        k: torch.tensor(v) if isinstance(v, np.ndarray) else v
-        for k, v in cvpn_state_numpy.items()
-    }
-    cvpn.load_state_dict(weights)
-    cvpn.eval()
-
-    all_samples = []
-    with torch.inference_mode():
-        for _ in range(num_episodes):
-            try:
-                samples = gtcfr_self_play_episode(
-                    game_config,
-                    cvpn,
-                    config,
-                    exploration_epsilon=config.gtcfr_exploration_epsilon,
-                )
-                all_samples.extend(samples)
-            except Exception as e:
-                logger.warning("GT-CFR episode failed: %s", e)
-
-    return all_samples
-
-
-# ---------------------------------------------------------------------------
-# GTCFRTrainer
-# ---------------------------------------------------------------------------
-
-
-class GTCFRTrainer:
-    """
-    Orchestrates GT-CFR training with self-play episode workers.
+    Runs SoG training with self-play episode workers.
 
     Each epoch:
-    1. Run gtcfr_games_per_epoch episodes via ProcessPoolExecutor
+    1. Run sog_games_per_epoch episodes via ProcessPoolExecutor (SoG self-play)
     2. Insert episode samples into value_buffer and policy_buffer
     3. Train CVPN with combined value + policy loss (separate buffer samples)
     4. Save checkpoint every save_interval epochs
+
+    Uses the same CVPN architecture and checkpoint key (cvpn_state_dict) as
+    GTCFRTrainer, enabling cross-loading from GT-CFR checkpoints.
     """
 
     def __init__(
@@ -132,26 +70,23 @@ class GTCFRTrainer:
     ):
         self.config = config
         self.game_config = game_config
-        self.checkpoint_path = checkpoint_path or "gtcfr_checkpoint.pt"
+        self.checkpoint_path = checkpoint_path or "sog_checkpoint.pt"
         self.shutdown_event = shutdown_event or threading.Event()
 
-        # Device
         resolved_device = _resolve_device(config.device)
         self.device = torch.device(resolved_device)
-        logger.info("GTCFRTrainer using device: %s", self.device)
+        logger.info("SoGTrainer using device: %s", self.device)
 
-        # Network
+        # Network (same CVPN architecture as GT-CFR, reuse gtcfr_* config fields)
         self.cvpn = build_cvpn(
             hidden_dim=config.gtcfr_cvpn_hidden_dim,
             num_blocks=config.gtcfr_cvpn_num_blocks,
         ).to(self.device)
 
-        # Optimizer
         self.optimizer = optim.Adam(
             self.cvpn.parameters(), lr=config.gtcfr_cvpn_learning_rate
         )
 
-        # Two buffers (like rebel): value (no mask), policy (with mask)
         self.value_buffer = ReservoirBuffer(
             capacity=config.gtcfr_buffer_capacity,
             input_dim=PBS_INPUT_DIM,
@@ -165,12 +100,11 @@ class GTCFRTrainer:
             has_mask=True,
         )
 
-        # Training state
         self.current_epoch: int = 0
         self.loss_history: List[Tuple[int, float, float]] = []
 
         logger.info(
-            "GTCFRTrainer initialized. CVPN params: %d",
+            "SoGTrainer initialized. CVPN params: %d",
             sum(p.numel() for p in self.cvpn.parameters()),
         )
 
@@ -188,7 +122,7 @@ class GTCFRTrainer:
             v_sample = ReservoirSample(
                 features=sample.features,
                 target=sample.value_target,
-                action_mask=np.empty(0, dtype=bool),  # not used (has_mask=False)
+                action_mask=np.empty(0, dtype=bool),
                 iteration=epoch,
             )
             self.value_buffer.add(v_sample)
@@ -202,7 +136,7 @@ class GTCFRTrainer:
             self.policy_buffer.add(p_sample)
 
     def _generate_episodes(self, num_episodes: int) -> List:
-        """Run self-play episodes via ProcessPoolExecutor."""
+        """Run SoG self-play episodes via ProcessPoolExecutor."""
         cvpn_state = self._get_cvpn_state_numpy()
         worker_args = (num_episodes, cvpn_state, self.config, self.game_config)
 
@@ -216,10 +150,10 @@ class GTCFRTrainer:
             max_workers=1, mp_context=ctx, max_tasks_per_child=_max_tasks
         ) as executor:
             try:
-                future = executor.submit(_gtcfr_batch_worker, worker_args)
+                future = executor.submit(_sog_batch_worker, worker_args)
                 return future.result()
             except Exception as e:
-                logger.error("GT-CFR self-play workers failed: %s", e)
+                logger.error("SoG self-play workers failed: %s", e)
                 return []
 
     def _train_step(self, num_steps: int) -> Tuple[float, float]:
@@ -228,8 +162,6 @@ class GTCFRTrainer:
 
         Loss = gtcfr_value_loss_weight * MSE(values, value_targets)
              + gtcfr_policy_loss_weight * CE(policy_logits, policy_targets)
-
-        Samples value and policy from their respective buffers separately.
 
         Returns:
             (avg_value_loss, avg_policy_loss)
@@ -256,29 +188,22 @@ class GTCFRTrainer:
             if not v_batch or not p_batch:
                 break
 
-            # Value head: no masks needed
             v_features = torch.from_numpy(v_batch.features).float().to(self.device)
             value_targets = torch.from_numpy(v_batch.targets).float().to(self.device)
-            # Use all-true mask (value head ignores masking)
             v_mask = torch.ones(
                 v_features.shape[0], POLICY_DIM, dtype=torch.bool, device=self.device
             )
 
-            # Policy head
             p_features = torch.from_numpy(p_batch.features).float().to(self.device)
             policy_targets = torch.from_numpy(p_batch.targets).float().to(self.device)
             p_mask = torch.from_numpy(p_batch.masks).to(self.device)
 
             self.optimizer.zero_grad()
 
-            # Forward value head
             values_pred, _ = self.cvpn(v_features, v_mask)
             v_loss = F.mse_loss(values_pred, value_targets)
 
-            # Forward policy head
             _, policy_logits = self.cvpn(p_features, p_mask)
-            # Cross-entropy with soft targets: -(target * log_softmax).sum(dim=-1).mean()
-            # Mask illegal actions to 0 in log_probs to avoid 0 * -inf = nan
             log_probs = F.log_softmax(policy_logits, dim=-1)
             safe_log_probs = log_probs.masked_fill(~p_mask, 0.0)
             p_loss = -(policy_targets * safe_log_probs).sum(dim=-1).mean()
@@ -307,13 +232,13 @@ class GTCFRTrainer:
 
     def train(self, num_epochs: Optional[int] = None) -> None:
         """
-        Main GT-CFR training loop.
+        Main SoG training loop.
 
         Args:
-            num_epochs: Number of training epochs (overrides config.gtcfr_epochs if given).
+            num_epochs: Number of training epochs (overrides config.sog_epochs if given).
         """
-        total_epochs = num_epochs if num_epochs is not None else self.config.gtcfr_epochs
-        episodes_per_epoch = self.config.gtcfr_games_per_epoch
+        total_epochs = num_epochs if num_epochs is not None else self.config.sog_epochs
+        episodes_per_epoch = self.config.sog_games_per_epoch
         train_steps = self.config.train_steps_per_iteration
         save_interval = self.config.save_interval
 
@@ -321,7 +246,7 @@ class GTCFRTrainer:
         end_epoch = self.current_epoch + total_epochs
 
         logger.info(
-            "Starting GT-CFR training from epoch %d to %d "
+            "Starting SoG training from epoch %d to %d "
             "(%d episodes/epoch, %d train_steps/epoch).",
             start_epoch, end_epoch, episodes_per_epoch, train_steps,
         )
@@ -334,15 +259,12 @@ class GTCFRTrainer:
                 self.current_epoch = epoch
                 epoch_start = time.time()
 
-                # 1. Self-play
                 _sp_start = time.time()
                 all_samples = self._generate_episodes(episodes_per_epoch)
                 sp_time = time.time() - _sp_start
 
-                # 2. Insert into buffers
                 self._insert_samples(all_samples, epoch)
 
-                # 3. Train CVPN
                 if self.shutdown_event.is_set():
                     raise GracefulShutdownException("Shutdown before training")
 
@@ -353,13 +275,11 @@ class GTCFRTrainer:
 
                 epoch_time = time.time() - epoch_start
 
-                # 4. Checkpoint
                 if save_interval > 0 and epoch % save_interval == 0:
                     self.save_checkpoint()
 
-                # 5. Headless output
                 print(
-                    f"[gtcfr] epoch {epoch} | samples={len(all_samples)} "
+                    f"[sog] epoch {epoch} | samples={len(all_samples)} "
                     f"sp={sp_time:.1f}s train={train_time:.1f}s | "
                     f"v_loss={v_loss:.4f} p_loss={p_loss:.4f} | "
                     f"v_buf={len(self.value_buffer)} p_buf={len(self.policy_buffer)}",
@@ -373,19 +293,18 @@ class GTCFRTrainer:
                     len(self.value_buffer), len(self.policy_buffer), len(all_samples),
                 )
 
-            logger.info("GT-CFR training completed %d epochs.", total_epochs)
+            logger.info("SoG training completed %d epochs.", total_epochs)
 
         except (GracefulShutdownException, KeyboardInterrupt) as e:
-            logger.warning("Shutdown during GT-CFR training: %s", type(e).__name__)
+            logger.warning("Shutdown during SoG training: %s", type(e).__name__)
             self.save_checkpoint()
-            raise GracefulShutdownException("Shutdown processed in GTCFRTrainer") from e
+            raise GracefulShutdownException("Shutdown processed in SoGTrainer") from e
 
         except Exception as e:
-            logger.exception("Unhandled error in GT-CFR training loop.")
+            logger.exception("Unhandled error in SoG training loop.")
             self.save_checkpoint()
             raise
 
-        # Final save on clean exit
         if not self.shutdown_event.is_set():
             self.save_checkpoint()
 
@@ -393,17 +312,44 @@ class GTCFRTrainer:
     # Warm start
     # ------------------------------------------------------------------
 
+    def warm_start_from_gtcfr(self, gtcfr_checkpoint_path: str) -> None:
+        """Load CVPN weights from a GT-CFR Phase 2 checkpoint."""
+        if not os.path.exists(gtcfr_checkpoint_path):
+            logger.warning(
+                "GT-CFR checkpoint not found at %s, skipping warm start.",
+                gtcfr_checkpoint_path,
+            )
+            return
+        try:
+            ckpt = torch.load(
+                gtcfr_checkpoint_path, map_location="cpu", weights_only=True
+            )
+            self.cvpn.load_state_dict(ckpt["cvpn_state_dict"])
+            epoch = ckpt.get("epoch", 0)
+            logger.info(
+                "Warm start from GT-CFR checkpoint %s (epoch %d).",
+                gtcfr_checkpoint_path, epoch,
+            )
+            print(
+                f"[sog] warm start from GT-CFR {gtcfr_checkpoint_path} (epoch {epoch})"
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to warm start from GT-CFR %s: %s", gtcfr_checkpoint_path, e
+            )
+
     def warm_start_from_rebel(self, rebel_checkpoint_path: str) -> None:
-        """Load compatible weights from a Phase 1 ReBeL checkpoint into CVPN."""
+        """Load compatible weights from a Phase 1 ReBeL checkpoint."""
         if not os.path.exists(rebel_checkpoint_path):
             logger.warning(
-                "ReBeL checkpoint not found at %s — skipping warm start.",
+                "ReBeL checkpoint not found at %s, skipping warm start.",
                 rebel_checkpoint_path,
             )
             return
-
         try:
-            ckpt = torch.load(rebel_checkpoint_path, map_location="cpu", weights_only=True)
+            ckpt = torch.load(
+                rebel_checkpoint_path, map_location="cpu", weights_only=True
+            )
             policy_state = ckpt.get("rebel_policy_net_state_dict", {})
             value_state = ckpt.get("rebel_value_net_state_dict", {})
             skipped = warm_start_cvpn_from_rebel(
@@ -413,9 +359,14 @@ class GTCFRTrainer:
                 "Warm start from ReBeL checkpoint %s. Skipped %d keys.",
                 rebel_checkpoint_path, len(skipped),
             )
-            print(f"[gtcfr] warm start from {rebel_checkpoint_path} (skipped {len(skipped)} keys)")
+            print(
+                f"[sog] warm start from ReBeL {rebel_checkpoint_path} "
+                f"(skipped {len(skipped)} keys)"
+            )
         except Exception as e:
-            logger.error("Failed to warm start from %s: %s", rebel_checkpoint_path, e)
+            logger.error(
+                "Failed to warm start from ReBeL %s: %s", rebel_checkpoint_path, e
+            )
 
     # ------------------------------------------------------------------
     # Checkpoint
@@ -423,6 +374,9 @@ class GTCFRTrainer:
 
     def save_checkpoint(self, filepath: Optional[str] = None) -> None:
         """Save CVPN, optimizer, buffers, epoch counter.
+
+        Uses cvpn_state_dict key (same as GT-CFR) for cross-loading.
+        Adds sog_metadata key with SoG-specific info.
 
         Raises:
             CheckpointSaveError: If saving fails.
@@ -434,8 +388,8 @@ class GTCFRTrainer:
             os.makedirs(checkpoint_dir, exist_ok=True)
 
             base_path = os.path.splitext(path)[0]
-            value_buffer_path = f"{base_path}_gtcfr_value_buffer"
-            policy_buffer_path = f"{base_path}_gtcfr_policy_buffer"
+            value_buffer_path = f"{base_path}_sog_value_buffer"
+            policy_buffer_path = f"{base_path}_sog_policy_buffer"
 
             checkpoint = {
                 "cvpn_state_dict": self.cvpn.state_dict(),
@@ -446,6 +400,12 @@ class GTCFRTrainer:
                 "loss_history": self.loss_history,
                 "value_buffer_path": value_buffer_path,
                 "policy_buffer_path": policy_buffer_path,
+                "sog_metadata": {
+                    "phase": 3,
+                    "trainer": "SoGTrainer",
+                    "train_budget": self.config.sog_train_budget,
+                    "eval_budget": self.config.sog_eval_budget,
+                },
                 "metadata": {
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "device": str(self.device),
@@ -457,7 +417,7 @@ class GTCFRTrainer:
             atomic_npz_save(self.policy_buffer.save, policy_buffer_path)
 
             # Epoch-specific .pt copy for post-hoc evaluation
-            epoch_path = f"{base_path}_epoch_{self.current_epoch}.pt"
+            epoch_path = f"{base_path}_sog_epoch_{self.current_epoch}.pt"
             try:
                 atomic_torch_save(checkpoint, epoch_path)
             except Exception as e_epoch:
@@ -465,8 +425,11 @@ class GTCFRTrainer:
                     "Failed to save epoch checkpoint %s: %s", epoch_path, e_epoch
                 )
 
-            logger.info("GT-CFR checkpoint saved to %s (epoch %d).", path, self.current_epoch)
-            print(f"[checkpoint] gtcfr saved to {path} (epoch {self.current_epoch})", flush=True)
+            logger.info("SoG checkpoint saved to %s (epoch %d).", path, self.current_epoch)
+            print(
+                f"[checkpoint] sog saved to {path} (epoch {self.current_epoch})",
+                flush=True,
+            )
 
         except (OSError, IOError, PermissionError) as e:
             logger.error("Failed to save checkpoint to %s: %s", path, e)
@@ -479,6 +442,9 @@ class GTCFRTrainer:
 
     def load_checkpoint(self, filepath: Optional[str] = None) -> None:
         """Load CVPN, optimizer, buffers, epoch counter.
+
+        Compatible with both GT-CFR checkpoints (cvpn_state_dict key) and
+        SoG checkpoints (same key + sog_metadata).
 
         Raises:
             CheckpointLoadError: If loading fails.
@@ -497,7 +463,6 @@ class GTCFRTrainer:
             self.current_epoch = checkpoint.get("epoch", 0)
             self.loss_history = checkpoint.get("loss_history", [])
 
-            # Load value buffer
             vbp = checkpoint.get("value_buffer_path")
             if vbp:
                 npz = vbp if vbp.endswith(".npz") else vbp + ".npz"
@@ -513,7 +478,6 @@ class GTCFRTrainer:
                 else:
                     logger.warning("Value buffer file not found: %s", npz)
 
-            # Load policy buffer
             pbp = checkpoint.get("policy_buffer_path")
             if pbp:
                 npz = pbp if pbp.endswith(".npz") else pbp + ".npz"
@@ -525,12 +489,14 @@ class GTCFRTrainer:
                         has_mask=True,
                     )
                     self.policy_buffer.load(pbp)
-                    logger.info("Loaded policy buffer: %d samples.", len(self.policy_buffer))
+                    logger.info(
+                        "Loaded policy buffer: %d samples.", len(self.policy_buffer)
+                    )
                 else:
-                    logger.warning("Policy buffer file not found: %s", npz)
+                    logger.warning("Policy buffer file not found: %s", pbp)
 
             logger.info(
-                "GT-CFR checkpoint loaded from %s. Resuming at epoch %d.",
+                "SoG checkpoint loaded from %s. Resuming at epoch %d.",
                 path, self.current_epoch,
             )
 

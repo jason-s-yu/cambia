@@ -1183,6 +1183,180 @@ class GTCFRAgentWrapper(NeuralAgentWrapper):
         self._range_p1 = uniform_range()
 
 
+class SoGAgentWrapper(GTCFRAgentWrapper):
+    """Search-at-eval wrapper using a shadow GoEngine and SoGSearch.
+
+    Maintains a matched-deck GoEngine (via cambia_game_new_with_deck) as a
+    shadow simulator. At each decision point, runs SoGSearch on the shadow
+    engine to get a high-quality policy, then applies the chosen action to
+    keep the shadow engine in sync with the Python game.
+
+    Falls back to CVPN-only inference (parent class) if GoEngine is
+    unavailable (e.g., libcambia.so not found).
+    """
+
+    def __init__(self, player_id: int, config, checkpoint_path: str = "", **kwargs):
+        super().__init__(player_id, config, checkpoint_path, **kwargs)
+        self._eval_budget = int(kwargs.get("eval_budget", 200))
+        self._sog_c_puct = float(kwargs.get("c_puct", 2.0))
+        self._sog_cfr_iters = int(kwargs.get("cfr_iters", 10))
+        self._go_engine = None
+        self._sog_search = None
+        self._last_tree = None
+        self._last_action_idx: Optional[int] = None
+
+    def initialize_state(self, initial_game_state):
+        """Reset ranges, create shadow GoEngine from Python game state."""
+        super().initialize_state(initial_game_state)
+        self._cleanup_search()
+        try:
+            from src.ffi.bridge import GoEngine, extract_deck_from_python_game
+            from src.cfr.sog_search import SoGSearch
+            deck_indices, starting_player = extract_deck_from_python_game(initial_game_state)
+            house_rules = getattr(self.config, "cambia_rules", None)
+            self._go_engine = GoEngine.from_deck(deck_indices, starting_player, house_rules)
+            self._sog_search = SoGSearch(
+                self._cvpn,
+                train_budget=self._eval_budget,
+                eval_budget=self._eval_budget,
+                c_puct=self._sog_c_puct,
+                cfr_iters_per_expansion=self._sog_cfr_iters,
+                device=str(self.device),
+            )
+        except Exception as e:
+            logger.warning(
+                "SoGAgentWrapper P%d: GoEngine init failed (%s). Using CVPN-only fallback.",
+                self.player_id, e,
+            )
+            self._go_engine = None
+            self._sog_search = None
+
+    def choose_action(self, game_state, legal_actions, **kwargs) -> GameAction:
+        """Run SoGSearch on shadow GoEngine; fall back to CVPN-only if unavailable."""
+        from src.encoding import encode_action_mask, index_to_action
+        from src.cfr.exceptions import ActionEncodingError
+
+        if self._go_engine is None or self._sog_search is None:
+            return super().choose_action(game_state, legal_actions, **kwargs)
+
+        legal_list = list(legal_actions)
+        if not legal_list:
+            return super().choose_action(game_state, legal_actions, **kwargs)
+
+        try:
+            result = self._sog_search.search(
+                self._go_engine,
+                self._range_p0,
+                self._range_p1,
+                prior_tree=self._last_tree,
+                action_taken=self._last_action_idx,
+            )
+            self._last_tree = self._sog_search.get_tree()
+
+            policy = result.policy  # (NUM_ACTIONS,) float32
+            action_mask = encode_action_mask(legal_list)
+            legal_indices = np.where(action_mask)[0]
+            if len(legal_indices) == 0:
+                return random.choice(legal_list)
+
+            legal_probs = policy[legal_indices].astype(np.float32)
+            prob_sum = legal_probs.sum()
+            if prob_sum <= 0:
+                legal_probs = np.ones(len(legal_indices), dtype=np.float32) / len(legal_indices)
+            else:
+                legal_probs /= prob_sum
+
+            chosen_local = np.random.choice(len(legal_indices), p=legal_probs)
+            chosen_global_idx = int(legal_indices[chosen_local])
+            self._last_action_idx = chosen_global_idx
+
+            # Apply to shadow GoEngine to keep it in sync
+            try:
+                self._go_engine.apply_action(chosen_global_idx)
+            except Exception as e_go:
+                logger.warning(
+                    "SoGAgent P%d: GoEngine apply_action failed: %s. Disabling shadow engine.",
+                    self.player_id, e_go,
+                )
+                self._cleanup_search()
+
+            # Update ranges (same as GTCFRAgentWrapper)
+            try:
+                from src.pbs import update_range, NUM_HAND_TYPES
+                policy_matrix = np.tile(policy, (NUM_HAND_TYPES, 1))
+                if self.player_id == 0:
+                    self._range_p0 = update_range(self._range_p0, chosen_global_idx, policy_matrix)
+                else:
+                    self._range_p1 = update_range(self._range_p1, chosen_global_idx, policy_matrix)
+            except Exception:
+                pass
+
+            try:
+                return index_to_action(chosen_global_idx, legal_list)
+            except ActionEncodingError:
+                return random.choice(legal_list)
+
+        except Exception as e:
+            logger.error("SoGAgentWrapper P%d search error: %s", self.player_id, e)
+            return super().choose_action(game_state, legal_actions, **kwargs)
+
+    def update_state(self, observation):
+        """Update Python agent state and apply opponent actions to shadow GoEngine."""
+        super().update_state(observation)
+        if self._go_engine is None:
+            return
+        acting = getattr(observation, "acting_player", -1)
+        if acting == -1 or acting == self.player_id:
+            return
+        action = getattr(observation, "action", None)
+        if action is None:
+            return
+        try:
+            from src.encoding import encode_action_mask
+            action_mask = encode_action_mask([action])
+            legal_indices = np.where(action_mask)[0]
+            if len(legal_indices) > 0:
+                opp_idx = int(legal_indices[0])
+                self._go_engine.apply_action(opp_idx)
+        except Exception as e:
+            logger.warning(
+                "SoGAgent P%d: opponent GoEngine apply failed: %s. Disabling shadow engine.",
+                self.player_id, e,
+            )
+            self._cleanup_search()
+
+    def reset(self):
+        """Reset ranges and cleanup GoEngine."""
+        super().reset()
+        self._cleanup_search()
+
+    def _cleanup_search(self):
+        """Free GoEngine handle and SoGSearch tree."""
+        if self._sog_search is not None:
+            try:
+                self._sog_search.cleanup()
+            except Exception:
+                pass
+        self._sog_search = None
+        self._last_tree = None
+        self._last_action_idx = None
+        if self._go_engine is not None:
+            try:
+                self._go_engine.close()
+            except Exception:
+                pass
+            self._go_engine = None
+
+    def __del__(self):
+        self._cleanup_search()
+
+
+class SoGInferenceAgentWrapper(GTCFRAgentWrapper):
+    """CVPN-only eval for SoG checkpoints. Inherits all GTCFRAgentWrapper logic."""
+
+    pass
+
+
 class SDCFRAgentWrapper(NeuralAgentWrapper):
     """
     Wraps SD-CFR advantage network snapshots for evaluation.
@@ -1752,6 +1926,8 @@ AGENT_REGISTRY: Dict[str, Type[BaseAgent]] = {
     "ppo": PPOAgentWrapper,
     "rebel": ReBeLAgentWrapper,
     "gtcfr": GTCFRAgentWrapper,
+    "sog": SoGAgentWrapper,
+    "sog_inference": SoGInferenceAgentWrapper,
     "nplayer": NPlayerAgentWrapper,
     "random_no_cambia": RandomNoCambiaAgent,
     "random_late_cambia": RandomLateCambiaAgent,
@@ -1797,6 +1973,20 @@ def get_agent(agent_type: str, player_id: int, config, **kwargs) -> BaseAgent:
         checkpoint_path = kwargs.get("checkpoint_path", "")
         device = kwargs.get("device", "cpu")
         return GTCFRAgentWrapper(player_id, config, checkpoint_path, device=device)
+    elif agent_type.lower() == "sog":
+        checkpoint_path = kwargs.get("checkpoint_path", "")
+        device = kwargs.get("device", "cpu")
+        eval_budget = int(kwargs.get("eval_budget", 200))
+        c_puct = float(kwargs.get("c_puct", 2.0))
+        cfr_iters = int(kwargs.get("cfr_iters", 10))
+        return SoGAgentWrapper(
+            player_id, config, checkpoint_path,
+            device=device, eval_budget=eval_budget, c_puct=c_puct, cfr_iters=cfr_iters,
+        )
+    elif agent_type.lower() == "sog_inference":
+        checkpoint_path = kwargs.get("checkpoint_path", "")
+        device = kwargs.get("device", "cpu")
+        return SoGInferenceAgentWrapper(player_id, config, checkpoint_path, device=device)
     else:
         # Pass config to baseline agents as well
         return agent_class(player_id, config)
@@ -1827,7 +2017,7 @@ def run_evaluation(
             logger.error("Strategy file path (--strategy) required for CFR agent.")
             sys.exit(1)
         logger.info("CFR Strategy File: %s", strategy_path)
-    _checkpoint_agent_types = {"deep_cfr", "escher", "sd_cfr", "nplayer", "ppo", "rebel", "gtcfr"}
+    _checkpoint_agent_types = {"deep_cfr", "escher", "sd_cfr", "nplayer", "ppo", "rebel", "gtcfr", "sog", "sog_inference"}
     if agent1_type.lower() in _checkpoint_agent_types or agent2_type.lower() in _checkpoint_agent_types:
         if not checkpoint_path:
             logger.error("Checkpoint path (--checkpoint) required for %s agent.", agent1_type)

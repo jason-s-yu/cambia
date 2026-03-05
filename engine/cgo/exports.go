@@ -141,6 +141,36 @@ func freeSolver(h int32) {
 }
 
 // ---------------------------------------------------------------------------
+// Card index conversion helpers
+// ---------------------------------------------------------------------------
+
+// indexToCard converts a canonical Python-side card index to a Go Card.
+// Index encoding: suit*13+rank where suit C=0,D=1,H=2,S=3; rank A=0..K=12.
+// Jokers: 52 = RedJoker, 53 = BlackJoker.
+func indexToCard(idx uint8) engine.Card {
+	if idx == 52 {
+		return engine.NewCard(engine.SuitRedJoker, engine.RankJoker)
+	}
+	if idx == 53 {
+		return engine.NewCard(engine.SuitBlackJoker, engine.RankJoker)
+	}
+	suit := idx / 13
+	rank := idx % 13
+	var goSuit uint8
+	switch suit {
+	case 0:
+		goSuit = engine.SuitClubs
+	case 1:
+		goSuit = engine.SuitDiamonds
+	case 2:
+		goSuit = engine.SuitHearts
+	default:
+		goSuit = engine.SuitSpades
+	}
+	return engine.NewCard(goSuit, rank)
+}
+
+// ---------------------------------------------------------------------------
 // Game lifecycle
 // ---------------------------------------------------------------------------
 
@@ -197,6 +227,91 @@ func cambia_game_new_with_rules(
 	}
 	gamePool[h] = engine.NewGame(uint64(seed), rules)
 	gamePool[h].Deal()
+	return C.int32_t(h)
+}
+
+//export cambia_game_new_with_deck
+func cambia_game_new_with_deck(
+	deckPtr *C.uint8_t, deckLen C.int32_t,
+	numPlayers C.uint8_t, cardsPerPlayer C.uint8_t,
+	startingPlayer C.uint8_t,
+	maxGameTurns C.uint16_t, cambiaAllowedRound C.uint8_t,
+	penaltyDrawCount C.uint8_t, allowDrawFromDiscard C.uint8_t,
+	allowReplaceAbilities C.uint8_t, allowOpponentSnapping C.uint8_t,
+	snapRace C.uint8_t, numJokers C.uint8_t, lockCallerHand C.uint8_t,
+	initialViewCount C.uint8_t, numDecks C.uint8_t,
+) C.int32_t {
+	h := allocGame()
+	if h < 0 {
+		return -1
+	}
+	np := uint8(numPlayers)
+	if np < 2 {
+		np = 2
+	}
+	rules := engine.HouseRules{
+		MaxGameTurns:          uint16(maxGameTurns),
+		CardsPerPlayer:        uint8(cardsPerPlayer),
+		CambiaAllowedRound:    uint8(cambiaAllowedRound),
+		PenaltyDrawCount:      uint8(penaltyDrawCount),
+		AllowDrawFromDiscard:  allowDrawFromDiscard != 0,
+		AllowReplaceAbilities: allowReplaceAbilities != 0,
+		AllowOpponentSnapping: allowOpponentSnapping != 0,
+		SnapRace:              snapRace != 0,
+		NumJokers:             uint8(numJokers),
+		LockCallerHand:        lockCallerHand != 0,
+		NumPlayers:            np,
+		InitialViewCount:      uint8(initialViewCount),
+		NumDecks:              uint8(numDecks),
+	}
+	// Create a base game state with the right rules (deck contents will be overwritten).
+	gamePool[h] = engine.NewGame(1, rules)
+	g := &gamePool[h]
+
+	// Load provided deck into stockpile in reverse order so that deck[0] is
+	// the first card popped (i.e., placed at Stockpile[deckLen-1]).
+	n := int(deckLen)
+	if n > engine.MaxDeckSize {
+		n = engine.MaxDeckSize
+	}
+	deck := (*[256]C.uint8_t)(unsafe.Pointer(deckPtr))
+	for i := 0; i < n; i++ {
+		g.Stockpile[n-1-i] = indexToCard(uint8(deck[i]))
+	}
+	g.StockLen = uint8(n)
+
+	// Round-robin deal (same as Deal() but without Fisher-Yates shuffle).
+	cpp := rules.CardsPerPlayer
+	for c := uint8(0); c < cpp; c++ {
+		for p := uint8(0); p < np; p++ {
+			g.StockLen--
+			card := g.Stockpile[g.StockLen]
+			g.Players[p].Hand[c] = card
+			g.Players[p].HandLen++
+		}
+	}
+
+	// Set initial peek indices.
+	for p := uint8(0); p < np; p++ {
+		count := rules.InitialViewCount
+		if count > cpp {
+			count = cpp
+		}
+		for i := uint8(0); i < count; i++ {
+			g.Players[p].InitialPeek[i] = i
+		}
+		g.Players[p].InitialPeekCount = count
+	}
+
+	// Flip top stockpile card to start the discard pile.
+	g.StockLen--
+	g.DiscardPile[0] = g.Stockpile[g.StockLen]
+	g.DiscardLen = 1
+
+	// Set starting player and mark game as started.
+	g.CurrentPlayer = uint8(startingPlayer)
+	g.Flags |= engine.FlagGameStarted
+
 	return C.int32_t(h)
 }
 
