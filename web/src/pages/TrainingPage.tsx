@@ -1,12 +1,11 @@
 // src/pages/TrainingPage.tsx
-import React, { useEffect } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { formatDistanceToNow, parseISO } from 'date-fns';
 import { useTrainingStore } from '@/stores/trainingStore';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import type { Run } from '@/types/training';
 
-const ALGORITHM_OPTIONS = ['', 'deep_cfr', 'rebel', 'gtcfr', 'sog', 'ppo'];
 const STATUS_OPTIONS = ['', 'running', 'stopped', 'completed', 'failed', 'created'];
 
 const STATUS_BADGE: Record<string, string> = {
@@ -29,6 +28,11 @@ function statusBadge(status: string) {
 const TrainingPage: React.FC = () => {
 	const navigate = useNavigate();
 	const { runs, filters, isLoading, fetchRuns, setFilter } = useTrainingStore();
+
+	const algorithmOptions = useMemo(
+		() => [...new Set(runs.map((r) => r.algorithm))].sort(),
+		[runs],
+	);
 
 	useEffect(() => {
 		fetchRuns();
@@ -56,7 +60,7 @@ const TrainingPage: React.FC = () => {
 					className="rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 text-sm px-3 py-1.5"
 				>
 					<option value="">All Algorithms</option>
-					{ALGORITHM_OPTIONS.filter(Boolean).map((a) => (
+					{algorithmOptions.map((a) => (
 						<option key={a} value={a}>{a}</option>
 					))}
 				</select>

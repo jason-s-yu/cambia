@@ -24,3 +24,6 @@ tmp/
 temp/
 
 /server
+
+# Runtime data (JWT keys, etc.)
+data/
