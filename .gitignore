@@ -21,7 +21,7 @@ docs-gen/
 sync-generated.sh
 
 # Build artifacts (generated)
-cgo
+/cgo
 
 # Runtime
 session
