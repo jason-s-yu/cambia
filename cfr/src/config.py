@@ -361,6 +361,9 @@ class DeepCfrConfig(_CambiaBaseModel):
     gtcfr_exploration_epsilon: float = 0.05
     gtcfr_warm_start_rebel_checkpoint: str = ""
 
+    # CVPN gradient control
+    cvpn_detach_policy_grad: bool = True
+
     # SoG (Student of Games) configuration
     sog_train_budget: int = 50
     sog_eval_budget: int = 200

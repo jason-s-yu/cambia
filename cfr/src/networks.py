@@ -746,6 +746,7 @@ class CVPN(nn.Module):
         policy_dim: int = 146,  # NUM_ACTIONS
         dropout: float = 0.1,
         validate_inputs: bool = True,
+        detach_policy_grad: bool = False,
     ):
         super().__init__()
         self._input_dim = input_dim
@@ -753,6 +754,7 @@ class CVPN(nn.Module):
         self._value_dim = value_dim
         self._policy_dim = policy_dim
         self._validate_inputs = validate_inputs
+        self._detach_policy_grad = detach_policy_grad
 
         # Input projection
         self.input_proj = nn.Sequential(
@@ -822,7 +824,7 @@ class CVPN(nn.Module):
         x = self.input_proj(pbs_encoding)
         x = self.trunk(x)
         values = self.value_head(x)
-        policy_logits = self.policy_head(x)
+        policy_logits = self.policy_head(x.detach() if self._detach_policy_grad else x)
         policy_logits = policy_logits.masked_fill(~action_mask, float("-inf"))
         return values, policy_logits
 
@@ -843,6 +845,7 @@ def build_cvpn(
     policy_dim: int = 146,
     dropout: float = 0.1,
     validate_inputs: bool = True,
+    detach_policy_grad: bool = False,
 ) -> "CVPN":
     """Factory for CVPN with default PBS dimensions."""
     return CVPN(
@@ -853,6 +856,7 @@ def build_cvpn(
         policy_dim=policy_dim,
         dropout=dropout,
         validate_inputs=validate_inputs,
+        detach_policy_grad=detach_policy_grad,
     )
 
 

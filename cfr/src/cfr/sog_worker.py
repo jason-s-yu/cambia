@@ -224,6 +224,7 @@ def _sog_batch_worker(args: Tuple) -> List:
         hidden_dim=config.gtcfr_cvpn_hidden_dim,
         num_blocks=config.gtcfr_cvpn_num_blocks,
         validate_inputs=False,
+        detach_policy_grad=config.cvpn_detach_policy_grad,
     )
     weights = {
         k: torch.tensor(v) if isinstance(v, np.ndarray) else v
