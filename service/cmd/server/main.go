@@ -16,6 +16,7 @@ import (
 	"github.com/jason-s-yu/cambia/service/internal/hub"
 	"github.com/jason-s-yu/cambia/service/internal/matchmaking"
 	"github.com/jason-s-yu/cambia/service/internal/middleware"
+	"github.com/jason-s-yu/cambia/service/internal/training"
 	_ "github.com/joho/godotenv/autoload"
 	"github.com/sirupsen/logrus"
 )
@@ -122,6 +123,37 @@ func main() {
 	mux.Handle("/matchmaking/queues", middleware.LogMiddleware(logger)(http.HandlerFunc(
 		handlers.ListQueuesHandler(srv),
 	)))
+
+	// Training dashboard routes
+	runsDir := os.Getenv("CAMBIA_RUNS_DIR")
+	if runsDir == "" {
+		runsDir = "../cfr/runs"
+	}
+	trainingStore, err := training.NewTrainingStore(runsDir)
+	if err != nil {
+		log.Printf("Training store init failed (non-fatal): %v", err)
+	} else {
+		defer trainingStore.Close()
+		mux.Handle("/training/runs", middleware.LogMiddleware(logger)(http.HandlerFunc(trainingStore.HandleListRuns)))
+		mux.Handle("/training/runs/", middleware.LogMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+			if len(parts) == 3 {
+				trainingStore.HandleGetRun(w, r)
+			} else if len(parts) == 4 {
+				switch parts[3] {
+				case "metrics":
+					trainingStore.HandleGetMetrics(w, r)
+				case "checkpoints":
+					trainingStore.HandleGetCheckpoints(w, r)
+				default:
+					http.NotFound(w, r)
+				}
+			} else {
+				http.NotFound(w, r)
+			}
+		})))
+		mux.Handle("/ws/training/", middleware.LogMiddleware(logger)(http.HandlerFunc(trainingStore.HandleLogStream)))
+	}
 
 	addr := ":8080"
 	if port := os.Getenv("PORT"); port != "" {

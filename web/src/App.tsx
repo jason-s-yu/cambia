@@ -6,6 +6,8 @@ import DashboardPage from '@/pages/DashboardPage';
 import LobbyPage from '@/pages/LobbyPage';
 import ProfilePage from '@/pages/ProfilePage';
 import PlayPage from '@/pages/PlayPage';
+import TrainingPage from '@/pages/TrainingPage';
+import RunDetailPage from '@/pages/RunDetailPage';
 import AuthLayout from '@/layouts/AuthLayout';
 import AppLayout from '@/layouts/AppLayout';
 import ProtectedRoute from '@/routes/ProtectedRoute';
@@ -42,6 +44,8 @@ function App() {
 				<Route path="/lobby/:lobbyId" element={<LobbyPage />} />
 				<Route path="/profile" element={<ProfilePage />} />
 				<Route path="/play" element={<PlayPage />} />
+				<Route path="/training" element={<TrainingPage />} />
+				<Route path="/training/:runName" element={<RunDetailPage />} />
 			</Route>
 
 			{/* Redirect root path */}

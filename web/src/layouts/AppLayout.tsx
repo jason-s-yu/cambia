@@ -27,6 +27,9 @@ const AppLayout: React.FC = () => {
 					<Link to="/dashboard" className="text-xl font-bold text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-colors">
 						Cambia Online
 					</Link>
+					<Link to="/training" className="text-sm text-gray-600 dark:text-gray-300 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
+						Training
+					</Link>
 					<div className='flex items-center space-x-4'>
 						<Link to="/profile" className="text-sm text-gray-700 dark:text-gray-300 hidden sm:inline hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
 							Welcome, <strong className='font-medium'>{user?.username ?? 'Player'}</strong>!
