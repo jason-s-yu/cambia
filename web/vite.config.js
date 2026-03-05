@@ -8,5 +8,8 @@ export default defineConfig({
         tsconfigPaths(), // Enables tsconfig path aliases like @/*
         tailwindcss(), // Integrates Tailwind CSS v4 via its Vite plugin
         react() // Standard React plugin
-    ]
+    ],
+    server: {
+        host: '0.0.0.0',
+    },
 });
