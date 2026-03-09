@@ -1368,9 +1368,18 @@ def evaluate(
             raise typer.Exit(1)
 
         def _find_checkpoints(pfx):
-            found = sorted(ckpt_dir.glob(f"*{pfx}*epoch_*.pt"))
-            if not found:
-                found = sorted(ckpt_dir.glob(f"*{pfx}*iter_*.pt"))
+            # Legacy prefix fallback for pre-2026-03-09 runs
+            _LEGACY_PREFIXES = {
+                "gtcfr_checkpoint": ["checkpoint_gtcfr"],
+                "sog_checkpoint": ["checkpoint_sog_sog", "checkpoint_sog"],
+            }
+            prefixes = [pfx] + _LEGACY_PREFIXES.get(pfx, [])
+            found = sorted(set(
+                match
+                for p in prefixes
+                for pattern in [f"*{p}*epoch_*.pt", f"*{p}*iter_*.pt"]
+                for match in ckpt_dir.glob(pattern)
+            ))
             return found
 
         all_ckpts = _find_checkpoints(prefix)
