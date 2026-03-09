@@ -477,8 +477,8 @@ class SoGTrainer:
             os.makedirs(checkpoint_dir, exist_ok=True)
 
             base_path = os.path.splitext(path)[0]
-            value_buffer_path = f"{base_path}_sog_value_buffer"
-            policy_buffer_path = f"{base_path}_sog_policy_buffer"
+            value_buffer_path = f"{base_path}_value_buffer"
+            policy_buffer_path = f"{base_path}_policy_buffer"
 
             checkpoint = {
                 "cvpn_state_dict": self.cvpn.state_dict(),
@@ -506,7 +506,7 @@ class SoGTrainer:
             atomic_npz_save(self.policy_buffer.save, policy_buffer_path)
 
             # Epoch-specific .pt copy for post-hoc evaluation
-            epoch_path = f"{base_path}_sog_epoch_{self.current_epoch}.pt"
+            epoch_path = f"{base_path}_epoch_{self.current_epoch}.pt"
             try:
                 atomic_torch_save(checkpoint, epoch_path)
             except Exception as e_epoch:

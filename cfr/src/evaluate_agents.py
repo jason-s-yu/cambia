@@ -2469,6 +2469,30 @@ def run_evaluation(
     return results
 
 
+def _run_single_baseline(args: tuple) -> tuple:
+    """Worker function for parallel baseline evaluation.
+
+    Runs in a spawned process so must re-import everything from scratch.
+    Takes a tuple to work with ProcessPoolExecutor.map().
+
+    Returns:
+        (baseline_name, Counter_results)
+    """
+    config_path, agent_type, baseline, num_games, checkpoint_path, device, output_path, use_argmax = args
+    results = run_evaluation(
+        config_path=config_path,
+        agent1_type=agent_type,
+        agent2_type=baseline,
+        num_games=num_games,
+        strategy_path=None,
+        checkpoint_path=checkpoint_path,
+        device=device,
+        output_path=output_path,
+        use_argmax=use_argmax,
+    )
+    return baseline, results
+
+
 def run_evaluation_multi_baseline(
     config_path: str,
     checkpoint_path: str,
@@ -2478,6 +2502,7 @@ def run_evaluation_multi_baseline(
     output_dir: Optional[str] = None,
     use_argmax: bool = False,
     agent_type: str = "deep_cfr",
+    max_workers: Optional[int] = None,
 ) -> Dict[str, Counter]:
     """
     Evaluate a checkpoint against multiple baseline agents.
@@ -2491,26 +2516,59 @@ def run_evaluation_multi_baseline(
         output_dir: If set, writes per-game JSONL to {output_dir}/{baseline}.jsonl.
         use_argmax: If True, use argmax instead of stochastic sampling for action selection.
         agent_type: Agent type string (default: "deep_cfr"). Use "rebel" for ReBeL agents.
+        max_workers: Number of parallel baseline workers. None = auto (min of baseline
+            count and cpu_count/2, capped at 7). Set to 1 for sequential execution.
 
     Returns:
         Dict mapping baseline name -> Counter with results.
     """
-    all_results: Dict[str, Counter] = {}
+    import multiprocessing as mp
+    import os as _os
+
+    if max_workers is None:
+        cpu_count = _os.cpu_count() or 1
+        max_workers = min(len(baselines), max(1, cpu_count // 2), 7)
+
+    # Build argument tuples
+    work_items = []
     for baseline in baselines:
-        logger.info("Evaluating %s vs %s (%d games)...", agent_type, baseline, num_games)
         output_path = f"{output_dir}/{baseline}.jsonl" if output_dir is not None else None
-        results = run_evaluation(
-            config_path=config_path,
-            agent1_type=agent_type,
-            agent2_type=baseline,
-            num_games=num_games,
-            strategy_path=None,
-            checkpoint_path=checkpoint_path,
-            device=device,
-            output_path=output_path,
-            use_argmax=use_argmax,
-        )
-        all_results[baseline] = results
+        work_items.append((
+            config_path, agent_type, baseline, num_games,
+            checkpoint_path, device, output_path, use_argmax,
+        ))
+
+    if max_workers <= 1 or len(baselines) <= 1:
+        # Sequential fallback
+        all_results: Dict[str, Counter] = {}
+        for item in work_items:
+            baseline, results = _run_single_baseline(item)
+            logger.info("Completed %s vs %s (%d games)", agent_type, baseline, num_games)
+            all_results[baseline] = results
+        return all_results
+
+    logger.info(
+        "Parallel eval: %d baselines across %d workers", len(baselines), max_workers,
+    )
+    all_results = {}
+    ctx = mp.get_context("spawn")
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as pool:
+        future_to_baseline = {
+            pool.submit(_run_single_baseline, item): item[2]
+            for item in work_items
+        }
+        for future in as_completed(future_to_baseline):
+            baseline = future_to_baseline[future]
+            try:
+                _, results = future.result()
+                all_results[baseline] = results
+                logger.info("Completed %s vs %s (%d games)", agent_type, baseline, num_games)
+            except Exception:
+                logger.exception("Failed evaluating vs %s", baseline)
+                all_results[baseline] = Counter()
+
     return all_results
 
 

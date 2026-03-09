@@ -526,7 +526,7 @@ def train_gtcfr(
     ckpt_path = (
         str(save_path)
         if save_path
-        else os.path.splitext(cfg.persistence.agent_data_save_path)[0] + "_gtcfr.pt"
+        else str(Path(cfg.persistence.agent_data_save_path).parent / "gtcfr_checkpoint.pt")
     )
 
     trainer = GTCFRTrainer(
@@ -605,7 +605,7 @@ def train_sog(
     ckpt_path = (
         str(save_path)
         if save_path
-        else os.path.splitext(cfg.persistence.agent_data_save_path)[0] + "_sog.pt"
+        else str(Path(cfg.persistence.agent_data_save_path).parent / "sog_checkpoint.pt")
     )
 
     trainer = SoGTrainer(
@@ -1314,6 +1314,12 @@ def evaluate(
         "--lbr-rollouts",
         help="Rollouts per infoset for LBR",
     ),
+    max_workers: Optional[int] = typer.Option(
+        None,
+        "--max-workers",
+        "-j",
+        help="Parallel baseline workers (default: auto, set 1 for sequential)",
+    ),
 ):
     """Evaluate a checkpoint against baseline agents and print a win-rate table."""
     import re
@@ -1444,6 +1450,7 @@ def evaluate(
         output_dir=str(output_dir) if output_dir else None,
         use_argmax=argmax,
         agent_type=agent_type,
+        max_workers=max_workers,
     )
 
     console = Console()
@@ -1568,12 +1575,18 @@ def eval_watch(
             "E.g. 'rebel_checkpoint' for ReBeL."
         ),
     ),
+    max_workers: Optional[int] = typer.Option(
+        None,
+        "--max-workers",
+        "-j",
+        help="Parallel baseline workers per checkpoint (default: auto, set 1 for sequential)",
+    ),
 ):
     """
     Watch run directories and evaluate every new checkpoint against all baselines.
 
     Writes metrics.jsonl and (optionally) head_to_head.jsonl into each run directory.
-    Supports Deep CFR, ReBeL, SD-CFR, and ESCHER agent types via --agent-type.
+    Supports all agent types via --agent-type (deep_cfr, rebel, gtcfr, sog, etc.).
     """
     import subprocess
     import sys as _sys
@@ -1595,6 +1608,8 @@ def eval_watch(
     ]
     if checkpoint_prefix:
         cmd += ["--checkpoint-prefix", checkpoint_prefix]
+    if max_workers is not None:
+        cmd += ["--max-workers", str(max_workers)]
     raise SystemExit(subprocess.call(cmd))
 
 
