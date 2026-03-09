@@ -1006,6 +1006,8 @@ class GTCFRAgentWrapper(NeuralAgentWrapper):
 
     def __init__(self, player_id: int, config, checkpoint_path: str = "", **kwargs):
         device = kwargs.get("device", "cpu")
+        self._deterministic = kwargs.get("deterministic", True)
+        self._per_hand_ranges = kwargs.get("per_hand_ranges", False)
         super().__init__(player_id, config, device=device)
         import torch
         from src.networks import build_cvpn
@@ -1140,13 +1142,23 @@ class GTCFRAgentWrapper(NeuralAgentWrapper):
         else:
             legal_probs = legal_probs / prob_sum
 
-        chosen_local = np.random.choice(len(legal_indices), p=legal_probs)
+        if self._deterministic:
+            chosen_local = np.argmax(legal_probs)
+        else:
+            chosen_local = np.random.choice(len(legal_indices), p=legal_probs)
         chosen_global_idx = legal_indices[chosen_local]
 
-        # Simplified range update: broadcast policy uniformly across hand types
+        # Range update: per-hand-type (slow, correct) or tiled (fast, approximate)
         try:
             from src.pbs import update_range, NUM_HAND_TYPES
-            policy_matrix = np.tile(probs_np, (NUM_HAND_TYPES, 1))
+            if self._per_hand_ranges:
+                from src.cfr.range_utils import compute_policy_matrix_cvpn_from_pbs
+                policy_matrix = compute_policy_matrix_cvpn_from_pbs(
+                    self._cvpn, pbs, action_mask, self.player_id,
+                    self._range_p0, self._range_p1,
+                )
+            else:
+                policy_matrix = np.tile(probs_np, (NUM_HAND_TYPES, 1))
             if self.player_id == 0:
                 self._range_p0 = update_range(self._range_p0, int(chosen_global_idx), policy_matrix)
             else:
@@ -1216,12 +1228,16 @@ class SoGAgentWrapper(GTCFRAgentWrapper):
             deck_indices, starting_player = extract_deck_from_python_game(initial_game_state)
             house_rules = getattr(self.config, "cambia_rules", None)
             self._go_engine = GoEngine.from_deck(deck_indices, starting_player, house_rules)
+            _exp_k = 3
+            if hasattr(self.config, "deep_cfr") and hasattr(self.config.deep_cfr, "gtcfr_expansion_k"):
+                _exp_k = self.config.deep_cfr.gtcfr_expansion_k
             self._sog_search = SoGSearch(
                 self._cvpn,
                 train_budget=self._eval_budget,
                 eval_budget=self._eval_budget,
                 c_puct=self._sog_c_puct,
                 cfr_iters_per_expansion=self._sog_cfr_iters,
+                expansion_k=_exp_k,
                 device=str(self.device),
             )
         except Exception as e:
@@ -1267,9 +1283,23 @@ class SoGAgentWrapper(GTCFRAgentWrapper):
             else:
                 legal_probs /= prob_sum
 
-            chosen_local = np.random.choice(len(legal_indices), p=legal_probs)
+            if self._deterministic:
+                chosen_local = np.argmax(legal_probs)
+            else:
+                chosen_local = np.random.choice(len(legal_indices), p=legal_probs)
             chosen_global_idx = int(legal_indices[chosen_local])
             self._last_action_idx = chosen_global_idx
+
+            # Per-hand-type policy matrix BEFORE apply_action (needs pre-action state)
+            policy_matrix_np = None
+            try:
+                from src.cfr.range_utils import compute_policy_matrix_cvpn
+                policy_matrix_np = compute_policy_matrix_cvpn(
+                    self._cvpn, self._go_engine,
+                    self._range_p0, self._range_p1,
+                )
+            except Exception:
+                pass
 
             # Apply to shadow GoEngine to keep it in sync
             try:
@@ -1281,14 +1311,16 @@ class SoGAgentWrapper(GTCFRAgentWrapper):
                 )
                 self._cleanup_search()
 
-            # Update ranges (same as GTCFRAgentWrapper)
+            # Bayesian range update with per-hand-type policies
             try:
-                from src.pbs import update_range, NUM_HAND_TYPES
-                policy_matrix = np.tile(policy, (NUM_HAND_TYPES, 1))
+                from src.pbs import update_range
+                if policy_matrix_np is None:
+                    from src.pbs import NUM_HAND_TYPES
+                    policy_matrix_np = np.tile(policy, (NUM_HAND_TYPES, 1))
                 if self.player_id == 0:
-                    self._range_p0 = update_range(self._range_p0, chosen_global_idx, policy_matrix)
+                    self._range_p0 = update_range(self._range_p0, chosen_global_idx, policy_matrix_np)
                 else:
-                    self._range_p1 = update_range(self._range_p1, chosen_global_idx, policy_matrix)
+                    self._range_p1 = update_range(self._range_p1, chosen_global_idx, policy_matrix_np)
             except Exception:
                 pass
 
@@ -1353,9 +1385,75 @@ class SoGAgentWrapper(GTCFRAgentWrapper):
 
 
 class SoGInferenceAgentWrapper(GTCFRAgentWrapper):
-    """CVPN-only eval for SoG checkpoints. Inherits all GTCFRAgentWrapper logic."""
+    """CVPN-only eval for SoG checkpoints. Inherits all GTCFRAgentWrapper logic.
 
-    pass
+    Disables per-hand-type range updates (468 forward passes per decision)
+    since the CVPN was trained with aggregate ranges. Uses the fast tiled
+    surrogate instead. This keeps CVPN-only eval at ~50ms/game vs ~12-28s.
+    """
+
+    def __init__(self, player_id: int, config, checkpoint_path: str = "", **kwargs):
+        super().__init__(player_id, config, checkpoint_path, **kwargs)
+        self._skip_range_matrix = True
+
+    def choose_action(self, game_state, legal_actions, **kwargs):
+        """Override to use fast tiled range update instead of 468-pass matrix."""
+        from src.encoding import encode_action_mask, index_to_action
+        from src.cfr.exceptions import ActionEncodingError
+        from src.pbs import encode_pbs
+        import torch.nn.functional as F
+
+        if not self.agent_state or game_state is None:
+            return random.choice(list(legal_actions))
+
+        legal_list = list(legal_actions)
+        try:
+            pbs = self._build_pbs(game_state)
+            pbs_enc = encode_pbs(pbs)
+            action_mask = encode_action_mask(legal_list)
+        except Exception as e:
+            logger.error("SoGInferenceAgent P%d encoding error: %s", self.player_id, e)
+            return random.choice(legal_list)
+
+        torch = self._torch
+        with torch.inference_mode():
+            pbs_t = torch.from_numpy(pbs_enc).unsqueeze(0).to(self.device)
+            mask_t = torch.from_numpy(action_mask).unsqueeze(0).to(self.device)
+            _, policy_logits = self._cvpn(pbs_t, mask_t)
+            probs_np = F.softmax(policy_logits, dim=-1).squeeze(0).cpu().numpy()
+
+        legal_indices = np.where(action_mask)[0]
+        if len(legal_indices) == 0:
+            return random.choice(legal_list)
+
+        legal_probs = probs_np[legal_indices]
+        prob_sum = legal_probs.sum()
+        if prob_sum <= 0:
+            legal_probs = np.ones(len(legal_indices)) / len(legal_indices)
+        else:
+            legal_probs = legal_probs / prob_sum
+
+        if self._deterministic:
+            chosen_local = np.argmax(legal_probs)
+        else:
+            chosen_local = np.random.choice(len(legal_indices), p=legal_probs)
+        chosen_global_idx = legal_indices[chosen_local]
+
+        # Fast tiled range update (skip 468-pass matrix for inference-only eval)
+        try:
+            from src.pbs import update_range, NUM_HAND_TYPES
+            policy_matrix = np.tile(probs_np, (NUM_HAND_TYPES, 1))
+            if self.player_id == 0:
+                self._range_p0 = update_range(self._range_p0, int(chosen_global_idx), policy_matrix)
+            else:
+                self._range_p1 = update_range(self._range_p1, int(chosen_global_idx), policy_matrix)
+        except Exception:
+            pass
+
+        try:
+            return index_to_action(int(chosen_global_idx), legal_list)
+        except ActionEncodingError:
+            return random.choice(legal_list)
 
 
 class SDCFRAgentWrapper(NeuralAgentWrapper):
@@ -1973,21 +2071,25 @@ def get_agent(agent_type: str, player_id: int, config, **kwargs) -> BaseAgent:
     elif agent_type.lower() == "gtcfr":
         checkpoint_path = kwargs.get("checkpoint_path", "")
         device = kwargs.get("device", "cpu")
-        return GTCFRAgentWrapper(player_id, config, checkpoint_path, device=device)
+        deterministic = kwargs.get("use_argmax", True)
+        return GTCFRAgentWrapper(player_id, config, checkpoint_path, device=device, deterministic=deterministic)
     elif agent_type.lower() == "sog":
         checkpoint_path = kwargs.get("checkpoint_path", "")
         device = kwargs.get("device", "cpu")
         eval_budget = int(kwargs.get("eval_budget", 200))
         c_puct = float(kwargs.get("c_puct", 2.0))
         cfr_iters = int(kwargs.get("cfr_iters", 10))
+        deterministic = kwargs.get("use_argmax", True)
         return SoGAgentWrapper(
             player_id, config, checkpoint_path,
             device=device, eval_budget=eval_budget, c_puct=c_puct, cfr_iters=cfr_iters,
+            deterministic=deterministic,
         )
     elif agent_type.lower() == "sog_inference":
         checkpoint_path = kwargs.get("checkpoint_path", "")
         device = kwargs.get("device", "cpu")
-        return SoGInferenceAgentWrapper(player_id, config, checkpoint_path, device=device)
+        deterministic = kwargs.get("use_argmax", True)
+        return SoGInferenceAgentWrapper(player_id, config, checkpoint_path, device=device, deterministic=deterministic)
     else:
         # Pass config to baseline agents as well
         return agent_class(player_id, config)
@@ -2672,6 +2774,152 @@ def run_head_to_head_typed(
         "avg_game_turns": avg_turns,
         "std_game_turns": std_turns,
     }
+
+
+def persist_eval_results(
+    run_dir: str,
+    iteration: int,
+    results_map: Dict[str, Counter],
+    run_name: Optional[str] = None,
+    checkpoint_path: Optional[str] = None,
+    adv_loss: Optional[float] = None,
+    strat_loss: Optional[float] = None,
+) -> None:
+    """Dual-write eval results to metrics.jsonl and SQLite.
+
+    Args:
+        run_dir: Path to run directory (e.g., runs/sog-phase3-v3/).
+        iteration: Checkpoint iteration/epoch number.
+        results_map: Dict mapping baseline name -> Counter with P0 Wins, P1 Wins, Ties, stats.
+        run_name: Run name for JSONL rows. Auto-derived from run_dir basename if None.
+        checkpoint_path: Path to checkpoint file (for SQLite registration).
+        adv_loss: Advantage/value loss from training logs (optional).
+        strat_loss: Strategy/policy loss from training logs (optional).
+    """
+    from datetime import datetime, timezone
+    from pathlib import Path as _Path
+
+    run_dir_path = _Path(run_dir).resolve()
+    if run_name is None:
+        run_name = run_dir_path.name
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Build rows
+    all_rows = []
+    for baseline, results in results_map.items():
+        p0_wins = results.get("P0 Wins", 0)
+        p1_wins = results.get("P1 Wins", 0)
+        ties = results.get("Ties", 0) + results.get("MaxTurnTies", 0)
+        total = p0_wins + p1_wins + ties
+        win_rate = p0_wins / total if total > 0 else 0.0
+
+        # Wilson CI
+        ci_low, ci_high = 0.0, 0.0
+        if total > 0:
+            z = 1.96
+            p = win_rate
+            denom = 1 + z**2 / total
+            center = (p + z**2 / (2 * total)) / denom
+            margin = (z / denom) * math.sqrt(
+                p * (1 - p) / total + z**2 / (4 * total**2)
+            )
+            ci_low = max(0.0, center - margin)
+            ci_high = min(1.0, center + margin)
+
+        stats = getattr(results, "stats", {})
+        avg_game_turns = stats.get("avg_game_turns")
+        t1_cambia_rate = stats.get("t1_cambia_rate")
+        avg_score_margin = stats.get("avg_score_margin")
+
+        row = {
+            "run": run_name,
+            "iter": iteration,
+            "baseline": baseline,
+            "win_rate": round(win_rate, 6),
+            "ci_low": round(ci_low, 6),
+            "ci_high": round(ci_high, 6),
+            "games_played": total,
+            "p0_wins": p0_wins,
+            "p1_wins": p1_wins,
+            "ties": ties,
+            "adv_loss": None if adv_loss is None or adv_loss != adv_loss else round(adv_loss, 6),
+            "strat_loss": None if strat_loss is None or strat_loss != strat_loss else round(strat_loss, 6),
+            "timestamp": timestamp,
+            "avg_game_turns": round(avg_game_turns, 2) if avg_game_turns is not None else None,
+            "t1_cambia_rate": round(t1_cambia_rate, 4) if t1_cambia_rate is not None else None,
+            "avg_score_margin": round(avg_score_margin, 2) if avg_score_margin is not None else None,
+        }
+        all_rows.append(row)
+
+    # Append to metrics.jsonl
+    if all_rows:
+        run_dir_path.mkdir(parents=True, exist_ok=True)
+        metrics_path = run_dir_path / "metrics.jsonl"
+        with open(metrics_path, "a", encoding="utf-8") as f:
+            for row in all_rows:
+                f.write(json.dumps(row) + "\n")
+
+    # Create evaluations directory
+    eval_dir = run_dir_path / "evaluations" / f"iter_{iteration}"
+    eval_dir.mkdir(parents=True, exist_ok=True)
+
+    # SQLite dual-write (non-fatal)
+    if all_rows:
+        try:
+            import src.run_db as run_db
+
+            db = run_db.get_db()
+            # Upsert run
+            config_path = run_dir_path / "config.yaml"
+            yaml_text = None
+            config_dict = {}
+            if config_path.exists():
+                try:
+                    yaml_text = config_path.read_text(encoding="utf-8")
+                    import yaml
+
+                    config_dict = yaml.safe_load(yaml_text) or {}
+                except Exception:
+                    pass
+
+            ckpt_keys = None
+            if checkpoint_path:
+                try:
+                    import torch
+
+                    ckpt_data = torch.load(
+                        str(checkpoint_path), map_location="cpu", weights_only=True
+                    )
+                    ckpt_keys = set(ckpt_data.keys())
+                    del ckpt_data
+                except Exception:
+                    pass
+
+            algorithm = run_db.infer_algorithm(
+                config_dict, checkpoint_keys=ckpt_keys
+            )
+            run_id = run_db.upsert_run(
+                db,
+                name=run_name,
+                algorithm=algorithm,
+                config_yaml=yaml_text,
+                config_dict=config_dict,
+                status="running",
+            )
+            ckpt_id = None
+            if checkpoint_path:
+                ckpt_id = run_db.register_checkpoint(
+                    db, run_id, iteration, str(checkpoint_path)
+                )
+            for row in all_rows:
+                run_db.insert_eval_result(db, run_id, ckpt_id, row)
+            run_db.write_eval_summary_jsonl(db, run_id, str(run_dir_path))
+            db.close()
+        except Exception:
+            logger.warning(
+                "SQLite dual-write failed for %s iter %d", run_name, iteration
+            )
 
 
 if __name__ == "__main__":

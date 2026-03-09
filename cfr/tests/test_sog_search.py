@@ -356,6 +356,74 @@ class TestResolveSearch:
         assert result.policy.shape == (NUM_ACTIONS,)
         assert result.policy.sum() > 0
 
+    def test_resolve_safety_check_skips_non_acting_player(self, small_cvpn):
+        """Safety check should NOT fire when only the non-acting player's value drops.
+
+        In zero-sum games, improving one player's value necessarily worsens
+        the other's. The old OR condition made re-solving impossible. The fix
+        checks only the acting player (subtree.acting_player).
+        """
+        sog = SoGSearch(cvpn=small_cvpn, train_budget=2, safety_margin=0.1)
+
+        child_lv = np.ones((2, NUM_HAND_TYPES), dtype=np.float32) * 0.5
+
+        root, child, root_engine, child_engine = self._build_prior_tree_with_child(0)
+        child.leaf_values = child_lv.copy()
+        # acting_player=0 from make_mock_node
+
+        r0, r1 = uniform_range(), uniform_range()
+
+        # P0 (acting) improves: 0.6 > 0.5. P1 worsens: 0.3 < 0.5 - 0.1.
+        # Old OR condition would fire. New acting-player-only check should NOT.
+        mixed_cfvs = np.ones((2, NUM_HAND_TYPES), dtype=np.float32)
+        mixed_cfvs[0] *= 0.6  # acting player improved
+        mixed_cfvs[1] *= 0.3  # non-acting player worsened
+
+        with patch.object(sog._inner, "_cleanup_tree"), \
+             patch.object(sog._inner, "_cfr_traverse", return_value=mixed_cfvs), \
+             patch.object(sog._inner, "_expand_once", return_value=0), \
+             patch.object(sog._inner, "_collect_depths",
+                          side_effect=lambda n, d: d.extend([0])), \
+             patch.object(sog._inner, "_count_nodes", return_value=2):
+
+            result = sog._resolve_search(make_mock_engine(), r0, r1, root, 0)
+
+        assert result is not None
+        # Safety check did NOT fire, so policy should come from average_strategy
+        # (the new re-solved strategy), not the prior
+        assert result.policy.shape == (NUM_ACTIONS,)
+
+    def test_resolve_safety_check_disabled_allows_worse_values(self, small_cvpn):
+        """When safety_check_enabled=False, worse values are accepted (training mode)."""
+        sog = SoGSearch(
+            cvpn=small_cvpn, train_budget=2, safety_margin=0.1,
+            safety_check_enabled=False,
+        )
+
+        child_lv = np.ones((2, NUM_HAND_TYPES), dtype=np.float32) * 0.5
+
+        root, child, root_engine, child_engine = self._build_prior_tree_with_child(0)
+        child.leaf_values = child_lv.copy()
+        child.cumulative_strategy[1] = 10.0  # distinct prior strategy
+
+        r0, r1 = uniform_range(), uniform_range()
+
+        # Values worse for acting player: would trigger if enabled
+        bad_cfvs = np.zeros((2, NUM_HAND_TYPES), dtype=np.float32)
+
+        with patch.object(sog._inner, "_cleanup_tree"), \
+             patch.object(sog._inner, "_cfr_traverse", return_value=bad_cfvs), \
+             patch.object(sog._inner, "_expand_once", return_value=0), \
+             patch.object(sog._inner, "_collect_depths",
+                          side_effect=lambda n, d: d.extend([0])), \
+             patch.object(sog._inner, "_count_nodes", return_value=2):
+
+            result = sog._resolve_search(make_mock_engine(), r0, r1, root, 0)
+
+        assert result is not None
+        # Safety check disabled: policy comes from re-solved average_strategy, not prior
+        assert result.policy.shape == (NUM_ACTIONS,)
+
     def test_search_dispatches_to_resolve(self, small_cvpn):
         """search() should call _resolve_search when prior_tree + action given."""
         sog = SoGSearch(cvpn=small_cvpn, train_budget=2)

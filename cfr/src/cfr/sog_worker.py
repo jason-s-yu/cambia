@@ -55,6 +55,7 @@ _CTX_TO_PHASE: Dict[int, int] = {
 
 _MAX_TURNS: int = 46
 _STOCK_TOTAL: int = 46
+_MAX_DECISIONS: int = 200  # safety cap: abort episode if stuck in loops
 
 
 def _build_pbs(game: Any, range_p0: np.ndarray, range_p1: np.ndarray) -> PBS:
@@ -112,10 +113,12 @@ def sog_self_play_episode(
         eval_budget=config.sog_eval_budget,
         c_puct=config.sog_c_puct,
         cfr_iters_per_expansion=config.sog_cfr_iters_per_expansion,
+        expansion_k=config.gtcfr_expansion_k,
         device="cpu",
         max_persist_depth=config.sog_max_persist_depth,
         max_persist_handles=config.sog_max_persist_handles,
         safety_margin=config.sog_safety_margin,
+        safety_check_enabled=False,  # training: low budget can't beat CVPN estimates
     )
     sog_search.use_train_budget()
 
@@ -129,9 +132,24 @@ def sog_self_play_episode(
         range_p0 = uniform_range()
         range_p1 = uniform_range()
 
+        # Diagnostic accumulators
+        _entropy_p0: List[float] = []
+        _entropy_p1: List[float] = []
+        _policy_entropies: List[float] = []
+        _tree_depths: List[int] = []
+        _decision_count: int = 0
+
         try:
             with torch.inference_mode():
                 while not game.is_terminal():
+                    if _decision_count >= _MAX_DECISIONS:
+                        logger.warning(
+                            "sog_episode: hit %d decision cap, aborting.",
+                            _MAX_DECISIONS,
+                        )
+                        break
+                    _decision_count += 1
+
                     mask_u8 = game.legal_actions_mask()
                     mask_bool = mask_u8.astype(bool)
 
@@ -180,15 +198,34 @@ def sog_self_play_episode(
                             probs /= total
                             action = int(np.random.choice(NUM_ACTIONS, p=probs))
 
+                    # Per-hand-type policy matrix BEFORE apply_action
+                    # (state must reflect pre-action decision point)
+                    from .range_utils import compute_policy_matrix_cvpn
+                    policy_matrix = compute_policy_matrix_cvpn(
+                        cvpn, game, range_p0, range_p1
+                    )
+
                     game.apply_action(action)
                     game.update_both(a0, a1)
 
-                    # Simplified range update (scalar policy surrogate, same as Phase 2)
-                    surrogate_matrix = np.tile(policy[None, :], (NUM_HAND_TYPES, 1))
+                    # Bayesian range update with per-hand-type policies
                     if acting_player == 0:
-                        range_p0 = update_range(range_p0, action, surrogate_matrix)
+                        range_p0 = update_range(range_p0, action, policy_matrix)
                     else:
-                        range_p1 = update_range(range_p1, action, surrogate_matrix)
+                        range_p1 = update_range(range_p1, action, policy_matrix)
+
+                    # Diagnostics: range entropy, policy entropy, tree depth
+                    _h0 = float(-np.sum(range_p0 * np.log(range_p0 + 1e-10)))
+                    _h1 = float(-np.sum(range_p1 * np.log(range_p1 + 1e-10)))
+                    _entropy_p0.append(_h0)
+                    _entropy_p1.append(_h1)
+
+                    legal_p = policy[mask_bool]
+                    legal_p = legal_p / (legal_p.sum() + 1e-10)
+                    _pe = float(-np.sum(legal_p * np.log(legal_p + 1e-10)))
+                    _policy_entropies.append(_pe)
+
+                    _tree_depths.append(result.depth_stats.get("max", 0))
 
                     prev_action = action
 
@@ -197,7 +234,19 @@ def sog_self_play_episode(
             a1.close()
             sog_search.cleanup()
 
-    logger.info("sog_episode done: samples=%d", len(samples))
+    if _entropy_p0:
+        logger.info(
+            "sog_episode done: samples=%d "
+            "range_entropy p0=%.3f->%.3f p1=%.3f->%.3f "
+            "policy_entropy mean=%.3f tree_depth_max mean=%.1f",
+            len(samples),
+            _entropy_p0[0], _entropy_p0[-1],
+            _entropy_p1[0], _entropy_p1[-1],
+            float(np.mean(_policy_entropies)),
+            float(np.mean(_tree_depths)),
+        )
+    else:
+        logger.info("sog_episode done: samples=%d", len(samples))
     return samples
 
 

@@ -19,6 +19,7 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -37,6 +38,13 @@ from .exceptions import (
     GracefulShutdownException,
 )
 from .sog_worker import _sog_batch_worker
+
+try:
+    from .. import run_db as _run_db
+    _RUN_DB_AVAILABLE = True
+except Exception:
+    _run_db = None  # type: ignore[assignment]
+    _RUN_DB_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +117,49 @@ class SoGTrainer:
             sum(p.numel() for p in self.cvpn.parameters()),
             config.cvpn_detach_policy_grad,
         )
+
+        # Run DB state (never raises - DB is optional)
+        self._db_run_id: Optional[int] = None
+        self._db_conn = None
+        if _RUN_DB_AVAILABLE:
+            try:
+                _persistence = getattr(self.config, "persistence", None)
+                ckpt_path = getattr(
+                    _persistence, "agent_data_save_path",
+                    "strategy/sog_checkpoint.pt",
+                ) if _persistence is not None else "strategy/sog_checkpoint.pt"
+                save_dir = os.path.dirname(ckpt_path) if os.path.dirname(ckpt_path) else "."
+                db_path = str(Path(save_dir).parent.parent / "cambia_runs.db")
+                self._db_conn = _run_db.get_db(db_path)
+                run_name = Path(save_dir).parent.name if Path(save_dir).name == "checkpoints" else Path(save_dir).name
+                config_yaml = None
+                config_dict = {}
+                run_dir = Path(save_dir).parent if Path(save_dir).name == "checkpoints" else Path(save_dir)
+                config_path = run_dir / "config.yaml"
+                if config_path.exists():
+                    try:
+                        config_yaml = config_path.read_text(encoding="utf-8")
+                        try:
+                            import yaml
+                            config_dict = yaml.safe_load(config_yaml) or {}
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                algorithm = _run_db.infer_algorithm(config_dict) if config_dict else "sog"
+                self._db_run_id = _run_db.upsert_run(
+                    self._db_conn,
+                    name=run_name,
+                    algorithm=algorithm,
+                    config_yaml=config_yaml,
+                    config_dict=config_dict,
+                    status="running",
+                )
+                logger.info("Run DB: registered run '%s' (id=%d)", run_name, self._db_run_id)
+            except Exception as _e:
+                logger.debug("Run DB init failed (non-fatal): %s", _e)
+                self._db_run_id = None
+                self._db_conn = None
 
         # Auto warm-start from config if specified and no explicit checkpoint
         if config.sog_warm_start_checkpoint and checkpoint_path and not os.path.exists(checkpoint_path):
@@ -269,6 +320,20 @@ class SoGTrainer:
                 all_samples = self._generate_episodes(episodes_per_epoch)
                 sp_time = time.time() - _sp_start
 
+                # Instrumented logging: policy target entropy
+                if all_samples:
+                    _p_entropies = []
+                    for s in all_samples:
+                        pt = s.policy_target
+                        m = s.action_mask
+                        legal_p = pt[m]
+                        legal_p = legal_p / (legal_p.sum() + 1e-10)
+                        _pe = float(-np.sum(legal_p * np.log(legal_p + 1e-10)))
+                        _p_entropies.append(_pe)
+                    _mean_pe = float(np.mean(_p_entropies))
+                else:
+                    _mean_pe = 0.0
+
                 self._insert_samples(all_samples, epoch)
 
                 if self.shutdown_event.is_set():
@@ -287,7 +352,8 @@ class SoGTrainer:
                 print(
                     f"[sog] epoch {epoch} | samples={len(all_samples)} "
                     f"sp={sp_time:.1f}s train={train_time:.1f}s | "
-                    f"v_loss={v_loss:.4f} p_loss={p_loss:.4f} | "
+                    f"v_loss={v_loss:.4f} p_loss={p_loss:.4f} "
+                    f"p_entropy={_mean_pe:.3f} | "
                     f"v_buf={len(self.value_buffer)} p_buf={len(self.policy_buffer)}",
                     flush=True,
                 )
@@ -304,15 +370,32 @@ class SoGTrainer:
         except (GracefulShutdownException, KeyboardInterrupt) as e:
             logger.warning("Shutdown during SoG training: %s", type(e).__name__)
             self.save_checkpoint()
+            try:
+                if _RUN_DB_AVAILABLE and self._db_conn is not None and self._db_run_id is not None:
+                    _run_db.update_run_status(self._db_conn, self._db_run_id, "interrupted")
+            except Exception:
+                pass
             raise GracefulShutdownException("Shutdown processed in SoGTrainer") from e
 
         except Exception as e:
             logger.exception("Unhandled error in SoG training loop.")
             self.save_checkpoint()
+            try:
+                if _RUN_DB_AVAILABLE and self._db_conn is not None and self._db_run_id is not None:
+                    _run_db.update_run_status(self._db_conn, self._db_run_id, "failed")
+            except Exception:
+                pass
             raise
 
         if not self.shutdown_event.is_set():
             self.save_checkpoint()
+
+        # Mark run completed
+        try:
+            if _RUN_DB_AVAILABLE and self._db_conn is not None and self._db_run_id is not None:
+                _run_db.update_run_status(self._db_conn, self._db_run_id, "completed")
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Warm start
@@ -436,6 +519,16 @@ class SoGTrainer:
                 f"[checkpoint] sog saved to {path} (epoch {self.current_epoch})",
                 flush=True,
             )
+
+            # DB: register checkpoint and update retention flags
+            if _RUN_DB_AVAILABLE and self._db_conn is not None and self._db_run_id is not None:
+                try:
+                    _run_db.register_checkpoint(
+                        self._db_conn, self._db_run_id, self.current_epoch, epoch_path
+                    )
+                    _run_db.compute_retention_flags(self._db_conn, self._db_run_id)
+                except Exception as _dbe:
+                    logger.debug("DB checkpoint register failed (non-fatal): %s", _dbe)
 
         except (OSError, IOError, PermissionError) as e:
             logger.error("Failed to save checkpoint to %s: %s", path, e)

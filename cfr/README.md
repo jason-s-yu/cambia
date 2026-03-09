@@ -1,9 +1,12 @@
 # CFR Trainer for Cambia Self-Play
 
-Trains a Cambia card game agent via Counterfactual Regret Minimization. Supports two training modes:
+Trains a Cambia card game agent via Counterfactual Regret Minimization and search-based self-play. Training modes:
 
-- Tabular CFR+ with outcome sampling (original)
-- Deep CFR with external sampling and neural networks (new)
+- Tabular CFR+ with outcome sampling
+- Deep CFR with external sampling and neural networks
+- ReBeL: PBS subgame solving with value/policy networks
+- GT-CFR: growing tree search with CVPN dual-head network
+- SoG (Student of Games): continual re-solving with GT-CFR search and budget decoupling
 
 ## Setup
 
@@ -32,11 +35,11 @@ The editable install (`pip install -e .`) reads `pyproject.toml` and registers t
 **Intel Arc / XPU:** Requires Intel Extension for PyTorch (IPEX) in addition to the base install:
 
 ```bash
-# Install IPEX for Arc GPU (version must match your torch version — check https://github.com/intel/intel-extension-for-pytorch)
+# Install IPEX for Arc GPU (version must match your torch version; check https://github.com/intel/intel-extension-for-pytorch)
 pip install intel_extension_for_pytorch
 ```
 
-Then use `--device xpu` or `--device auto` (auto-detects XPU if IPEX is installed and `torch.xpu.is_available()` returns true). IPEX is an optional dependency — not required for CUDA or CPU training.
+Then use `--device xpu` or `--device auto` (auto-detects XPU if IPEX is installed and `torch.xpu.is_available()` returns true). IPEX is an optional dependency; not required for CUDA or CPU training.
 
 **CPU-only:** No additional packages needed. Use `--device cpu`.
 
@@ -113,6 +116,26 @@ Deep CFR override options (override values from the `deep_cfr` config section):
 - `--gpu` / `--no-gpu` -- *deprecated*, use `--device cuda` / `--device cpu`
 
 Deep CFR parameters are loaded from the `deep_cfr` section of the YAML config. CLI override options take precedence.
+
+### ReBeL Training
+
+```bash
+cambia train rebel -c config/rebel_train.yaml
+```
+
+### GT-CFR Training
+
+```bash
+cambia train gtcfr -c config/gtcfr_train.yaml
+```
+
+### SoG Training
+
+```bash
+cambia train sog -c config/sog_train.yaml
+```
+
+SoG warm-starts from a GT-CFR checkpoint (configured via `sog_warm_start_checkpoint` in the YAML config).
 
 ### Resume and Inspect
 
@@ -247,16 +270,15 @@ Key source files:
 src/
   cli.py                  -- Typer CLI entry point (cambia command)
   main_train.py           -- Training orchestration and infrastructure
-  config.py               -- Config loading from YAML (includes DeepCfrConfig)
+  config.py               -- Config loading from YAML (Pydantic v2)
   constants.py            -- Game actions, card buckets, enums
-  encoding.py             -- InfosetKey -> fixed-size tensor encoding (Deep CFR)
-  networks.py             -- AdvantageNetwork, StrategyNetwork (PyTorch)
-  reservoir.py            -- ReservoirBuffer for training samples (Deep CFR)
+  encoding.py             -- Tensor encoding (222-dim legacy, 224-dim EP-PBS, 146 actions)
+  networks.py             -- AdvantageNetwork, ResidualAdvantageNetwork, StrategyNetwork, CVPN
+  reservoir.py            -- ReservoirBuffer for training samples
   agent_state.py          -- Agent belief state and observation model
-  abstraction.py          -- CardBucket mapping
-  utils.py                -- InfosetKey, WorkerResult, helper functions
-  persistence.py          -- Tabular save/load (joblib)
-  analysis_tools.py       -- Exploitability via best-response traversal
+  evaluate_agents.py      -- Agent wrappers for eval, persist_eval_results(), baselines
+  run_db.py               -- SQLite run database, algorithm detection, mapping tables
+  pbs.py                  -- PBS encoding (936-dim value input, 146-dim policy)
   ffi/
     bridge.py             -- cffi wrapper around libcambia.so (GoEngine, GoAgentState)
   game/
@@ -265,23 +287,33 @@ src/
     _snap_mixin.py        -- Snap phase logic
     _query_mixin.py       -- Legal action generation
   cfr/
-    trainer.py            -- Tabular CFR+ trainer (orchestrator)
-    deep_trainer.py       -- Deep CFR trainer (orchestrator)
-    worker.py             -- Tabular worker (outcome sampling traversal)
-    deep_worker.py        -- Deep CFR worker (external sampling traversal)
+    trainer.py            -- Tabular CFR+ trainer
+    deep_trainer.py       -- Deep CFR / ReBeL / GT-CFR trainer (run_db integrated)
+    deep_worker.py        -- Deep CFR worker (OS and ES traversal)
+    sog_trainer.py        -- SoG trainer (run_db integrated)
+    sog_search.py         -- SoG search: continual re-solving over GT-CFR tree
+    sog_worker.py         -- SoG self-play worker
+    gtcfr_search.py       -- GT-CFR growing tree with PUCT + CFR selection
+    gtcfr_worker.py       -- GT-CFR self-play worker
+    sampled_lbr.py        -- Sampled Local Best Response exploitability
     es_validator.py       -- ES validation against Python reference engine
-    training_loop_mixin.py -- Tabular training loop with worker pool
-    data_manager_mixin.py -- Tabular merge step
-    recursion_mixin.py    -- Observation helpers (delegates to worker.py)
+scripts/
+  eval_watcher.py         -- Continuous checkpoint polling and evaluation
+  collect_metrics.py      -- Batch metrics collection
+  plot_metrics.py         -- Matplotlib plots from metrics.jsonl
+  aggregate_evals.py      -- Aggregate per-game JSONL into metrics.jsonl
+  backfill_db.py          -- One-time migration: run dirs into SQLite
 ```
 
 Documentation in `docs/`:
 
+- `docs/eval_protocol.md` -- Evaluation protocol, metrics, interpretation guide
 - `docs/architecture.md` -- Deep CFR pipeline overview
 - `docs/deep_cfr_modules.md` -- Module reference for Deep CFR files
 - `docs/config.md` -- Full configuration reference
 - `docs/sampling.md` -- Sampling methods (outcome vs external)
 - `docs/exploitability.md` -- Exploitability computation details
+- `docs/baselines.md` -- Baseline agent descriptions
 
 ## Development
 
@@ -297,30 +329,65 @@ python -m src.main_train --config parallel.config.yaml --iterations 2
 
 Re-run `pip install -e .` only if you change `pyproject.toml` (e.g. adding entry points or metadata).
 
+### Evaluation
+
+The `cambia evaluate` command supports two invocation patterns.
+
+Run-dir mode (preferred): pass a run directory and let the CLI auto-detect everything.
+
+```bash
+# Evaluate latest checkpoint, 5000 games per baseline, auto-detect agent type
+cambia evaluate runs/sog-phase3-v3/ --latest
+
+# Evaluate a specific epoch
+cambia evaluate runs/gtcfr-phase2/ --epoch 200
+
+# Quick spot-check with fewer games
+cambia evaluate runs/rebel-phase1/ --latest -n 100
+```
+
+File mode (backward compatible): pass a .pt file with explicit flags.
+
+```bash
+cambia evaluate runs/rebel-phase1/checkpoints/rebel_checkpoint_iter_500.pt \
+  -c config/rebel_train.yaml --agent-type rebel -n 5000
+```
+
+In run-dir mode, results are always persisted to `metrics.jsonl` and the SQLite run database. In file mode, results persist if the checkpoint sits inside a recognized run directory; otherwise they print to stdout only.
+
+For continuous evaluation during training:
+
+```bash
+cambia eval-watch runs/sog-phase3-v3/ --agent-type sog_inference --games 5000
+```
+
+See `docs/eval_protocol.md` for the full evaluation protocol, metric definitions, and interpretation guide.
+
 ### Tests
 
 ```bash
-# Run all tests (607 tests)
+# Run all tests
 pytest tests/ -v
 
 # Run a specific test module
 pytest tests/test_encoding.py -v
 ```
 
-Test modules:
+Key test files:
 
 - `test_encoding.py` -- feature encoding and action space mapping
 - `test_networks.py` -- network forward passes, masking, strategy conversion
 - `test_reservoir.py` -- reservoir buffer sampling, save/load, resize
-- `test_phase0_regression.py` -- regression tests for Phase 0 engine bug fixes
+- `test_eval_persist.py` -- eval result persistence, CLI run-dir detection, checkpoint discovery
+- `test_run_db_mappings.py` -- algorithm detection, agent type and prefix mapping tables
+- `test_sog_trainer_db.py` -- SoG trainer run database integration
+- `test_metrics_scripts.py` -- metrics collection, aggregation, plotting
 - `test_deep_worker_os.py` -- OS traversal and Go engine backend integration
 - `test_deep_worker_go.py` -- Go engine backend with threaded traversals
 - `test_go_fuzz_oracle.py` -- fuzz oracle comparing Go engine against Python reference
 - `test_ffi_bridge.py` -- Go FFI bridge (ctypes) unit tests
-- `test_es_validator.py` -- external sampling validation against Python reference
 - `test_cross_engine_samples.py` -- cross-engine parity (Python vs Go) at every decision point
-- `test_snap_legal_actions.py` -- snap-phase legal action generation with known card configs
-- `test_threaded_traversal.py` -- multi-threaded Go FFI traversal correctness
+- `test_sog_search.py`, `test_sog_worker.py`, `test_sog_trainer.py` -- SoG pipeline tests (CPU-heavy, use Go FFI)
 
 ## Dependencies
 
