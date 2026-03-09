@@ -119,10 +119,24 @@ When the checkpoint sits inside a `runs/*/checkpoints/` directory with a `config
 For long training runs, the eval watcher polls for new checkpoints and evaluates them automatically:
 
 ```bash
-cambia eval-watch runs/sog-phase3-v3/ --agent-type sog_inference --games 5000
+cambia eval-watch runs/sog-phase3-v4/ --agent-type sog_inference --games 5000
 ```
 
 The watcher writes `metrics.jsonl`, `head_to_head.jsonl`, per-game JSONL in `evaluations/iter_N/`, and SQLite records. It tracks state in `eval_watcher_state.json` to avoid re-evaluating checkpoints.
+
+Checkpoint discovery supports both `_iter_N.pt` (deep_cfr, rebel) and `_epoch_N.pt` (gtcfr, sog) naming patterns.
+
+### Parallel baseline evaluation
+
+Baselines run in parallel by default via `ProcessPoolExecutor` with `spawn` context. Each worker loads config and checkpoint independently, so no pickling of model objects.
+
+```bash
+cambia evaluate runs/sog-phase3-v4/ --epoch 50 -j 5    # 5 parallel workers
+cambia eval-watch runs/sog-phase3-v4/ --agent-type sog -j 3  # 3 workers per checkpoint
+cambia evaluate runs/foo/ --latest -j 1                 # force sequential
+```
+
+Default worker count: `min(num_baselines, cpu_count/2, 7)`. Use `-j 1` for sequential execution (useful for debugging or when CPU-bound search agents consume all cores).
 
 ## 5. Multi-Agent-Type Support
 

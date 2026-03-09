@@ -22,6 +22,7 @@ import time
 from datetime import datetime, timezone
 from glob import glob
 from pathlib import Path
+from typing import Optional
 
 # Ensure cfr/ is importable when run directly.
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -80,7 +81,11 @@ def save_state(run_dir: str, state: dict) -> None:
 
 
 def _infer_iter(checkpoint_path: str) -> int:
-    match = re.search(r"_iter_(\d+)\.pt$", checkpoint_path)
+    """Extract iteration/epoch number from checkpoint filename.
+
+    Supports both _iter_N.pt (deep_cfr, rebel) and _epoch_N.pt (gtcfr, sog).
+    """
+    match = re.search(r"_(?:iter|epoch)_(\d+)\.pt$", checkpoint_path)
     return int(match.group(1)) if match else -1
 
 
@@ -128,6 +133,7 @@ def evaluate_checkpoint(
     run_lbr: bool = False,
     lbr_infosets: int = 10000,
     lbr_rollouts: int = 100,
+    max_workers: Optional[int] = None,
 ) -> dict:
     """Evaluate a single checkpoint, write metrics.jsonl rows and per-game JSONL."""
     run_dir_path = Path(run_dir).resolve()
@@ -161,7 +167,7 @@ def evaluate_checkpoint(
             adv_loss = float("nan")
             strat_loss = float("nan")
 
-    # Run eval once with per-game JSONL output
+    # Run eval once with per-game JSONL output (parallel across baselines)
     all_results = run_evaluation_multi_baseline(
         config_path=config_path,
         checkpoint_path=checkpoint_path,
@@ -170,6 +176,7 @@ def evaluate_checkpoint(
         device="cpu",
         output_dir=str(eval_dir),
         agent_type=agent_type,
+        max_workers=max_workers,
     )
 
     # Persist metrics.jsonl + SQLite via shared function
@@ -246,7 +253,17 @@ def evaluate_head_to_head(
 
     run_dir_path = Path(run_dir).resolve()
     ckpt_dir = run_dir_path / "checkpoints"
-    all_ckpts = sorted(glob(str(ckpt_dir / f"{checkpoint_prefix}_iter_*.pt")))
+    _LEGACY_PREFIXES = {
+        "gtcfr_checkpoint": ["checkpoint_gtcfr"],
+        "sog_checkpoint": ["checkpoint_sog_sog", "checkpoint_sog"],
+    }
+    prefixes = [checkpoint_prefix] + _LEGACY_PREFIXES.get(checkpoint_prefix, [])
+    all_ckpts = sorted(set(
+        match
+        for pfx in prefixes
+        for pattern in [f"{pfx}_iter_*.pt", f"{pfx}_epoch_*.pt"]
+        for match in glob(str(ckpt_dir / pattern))
+    ))
 
     if not all_ckpts:
         return
@@ -408,9 +425,16 @@ def main() -> None:
         default=100,
         help="Rollouts per infoset for LBR (default: 100).",
     )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=None,
+        help="Parallel baseline workers per checkpoint (default: auto, set 1 for sequential).",
+    )
     args = parser.parse_args()
 
-    # Infer checkpoint prefix from agent type if not explicitly provided
+    # Infer checkpoint prefix from agent type if not explicitly provided.
+    # Prefix must match the actual filename stem before _iter_N or _epoch_N.
     _PREFIX_MAP = {
         "rebel": "rebel_checkpoint",
         "deep_cfr": "deep_cfr_checkpoint",
@@ -440,10 +464,21 @@ def main() -> None:
                     continue
 
                 state = load_state(run_dir)
-                ckpt_pattern = os.path.join(
-                    run_dir, "checkpoints", f"{checkpoint_prefix}_iter_*.pt"
-                )
-                checkpoints = sorted(glob(ckpt_pattern))
+                ckpt_dir = os.path.join(run_dir, "checkpoints")
+                # Support both _iter_N.pt (deep_cfr, rebel) and _epoch_N.pt (gtcfr, sog).
+                # Also scan legacy naming (checkpoint_gtcfr_*, checkpoint_sog_sog_*)
+                # for backward compat with pre-2026-03-09 runs.
+                _LEGACY_PREFIXES = {
+                    "gtcfr_checkpoint": ["checkpoint_gtcfr"],
+                    "sog_checkpoint": ["checkpoint_sog_sog", "checkpoint_sog"],
+                }
+                prefixes = [checkpoint_prefix] + _LEGACY_PREFIXES.get(checkpoint_prefix, [])
+                checkpoints = sorted(set(
+                    match
+                    for pfx in prefixes
+                    for pattern in [f"{pfx}_iter_*.pt", f"{pfx}_epoch_*.pt"]
+                    for match in glob(os.path.join(ckpt_dir, pattern))
+                ))
 
                 for ckpt in checkpoints:
                     filename = os.path.basename(ckpt)
@@ -458,6 +493,7 @@ def main() -> None:
                             run_lbr=args.lbr,
                             lbr_infosets=args.lbr_infosets,
                             lbr_rollouts=args.lbr_rollouts,
+                            max_workers=args.max_workers,
                         )
                         log_line = format_results(run_dir, iter_num, all_results)
                         print(log_line, flush=True)
