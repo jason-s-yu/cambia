@@ -51,20 +51,24 @@ class SoGSearch:
         eval_budget: int = 200,
         c_puct: float = 2.0,
         cfr_iters_per_expansion: int = 10,
+        expansion_k: int = 3,
         device: str = "cpu",
         max_persist_depth: int = 8,
         max_persist_handles: int = 512,
         safety_margin: float = 0.01,
+        safety_check_enabled: bool = True,
     ):
         self._cvpn = cvpn
         self._train_budget = train_budget
         self._eval_budget = eval_budget
         self._c_puct = c_puct
         self._cfr_iters = cfr_iters_per_expansion
+        self._expansion_k = expansion_k
         self._device = device
         self._max_persist_depth = max_persist_depth
         self._max_persist_handles = max_persist_handles
         self._safety_margin = safety_margin
+        self._safety_check_enabled = safety_check_enabled
         self._current_budget = train_budget
         self._last_tree: Optional[GTCFRNode] = None
         self._inner: GTCFRSearch = self._build_inner()
@@ -231,18 +235,27 @@ class SoGSearch:
 
         new_policy = subtree.average_strategy()
 
-        # Safety check: retain prior strategy if values regressed vs commitment
-        if commitment_v0 is not None and commitment_v1 is not None:
+        # Safety check: retain prior strategy if acting player's value regressed.
+        # Disabled during training (budget too low to beat trained CVPN estimates,
+        # causing 100% rejection and blocking all policy learning signal).
+        # Active at eval/play for deployment soundness.
+        if (self._safety_check_enabled
+                and commitment_v0 is not None and commitment_v1 is not None):
             new_v0 = float(np.dot(range_p0, last_cfvs[0]))
             new_v1 = float(np.dot(range_p1, last_cfvs[1]))
-            if (
-                new_v0 < commitment_v0 - self._safety_margin
-                or new_v1 < commitment_v1 - self._safety_margin
-            ):
+            ap = subtree.acting_player
+            if ap == 0:
+                regressed = new_v0 < commitment_v0 - self._safety_margin
+            elif ap == 1:
+                regressed = new_v1 < commitment_v1 - self._safety_margin
+            else:
+                regressed = False  # terminal or unknown: skip check
+            if regressed:
                 logger.warning(
-                    "SoGSearch safety check: new=(%.4f,%.4f) < commit=(%.4f,%.4f) "
-                    "- margin=%.4f. Retaining prior strategy.",
-                    new_v0, new_v1, commitment_v0, commitment_v1, self._safety_margin,
+                    "SoGSearch safety check (player %d): new=(%.4f,%.4f) "
+                    "< commit=(%.4f,%.4f) margin=%.4f. Retaining prior strategy.",
+                    ap, new_v0, new_v1, commitment_v0, commitment_v1,
+                    self._safety_margin,
                 )
                 new_policy = prior_strategy
 
@@ -401,5 +414,6 @@ class SoGSearch:
             expansion_budget=self._current_budget,
             c_puct=self._c_puct,
             cfr_iters_per_expansion=self._cfr_iters,
+            expansion_k=self._expansion_k,
             device=self._device,
         )

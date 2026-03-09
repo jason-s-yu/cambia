@@ -182,12 +182,14 @@ class GTCFRSearch:
         expansion_budget: int = 100,
         c_puct: float = 2.0,
         cfr_iters_per_expansion: int = 10,
+        expansion_k: int = 3,
         device: str = "cpu",
     ):
         self._cvpn = cvpn
         self._expansion_budget = expansion_budget
         self._c_puct = c_puct
         self._cfr_iters = cfr_iters_per_expansion
+        self._expansion_k = expansion_k
         self._device = device
         self._cvpn.eval()
 
@@ -389,7 +391,14 @@ class GTCFRSearch:
             node.is_expanded = True
             return 0
 
-        # Create child engines for all legal actions
+        if self._expansion_k > 0 and len(legal_actions) > self._expansion_k:
+            # Select top-k actions by PUCT score
+            puct_scores = self._puct_scores(node)
+            legal_puct = [(a, puct_scores[a]) for a in legal_actions]
+            legal_puct.sort(key=lambda x: x[1], reverse=True)
+            legal_actions = [a for a, _ in legal_puct[:self._expansion_k]]
+
+        # Create child engines for selected legal actions
         child_engines: List[Any] = []
         child_terminal_flags: List[bool] = []
         child_utilities: List[Optional[np.ndarray]] = []

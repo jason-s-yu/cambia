@@ -1245,21 +1245,19 @@ def benchmark_es_cmd(
 def evaluate(
     checkpoint: Path = typer.Argument(
         ...,
-        help="Path to .pt checkpoint file",
-        exists=True,
+        help="Path to .pt checkpoint file, or path to a run directory",
     ),
-    config: Path = typer.Option(
-        "config.yaml",
+    config: Optional[Path] = typer.Option(
+        None,
         "--config",
         "-c",
-        help="Path to configuration YAML file",
-        exists=True,
+        help="Path to configuration YAML file (auto-detected in run-dir mode)",
     ),
     games: int = typer.Option(
         100,
         "--games",
         "-n",
-        help="Number of games per baseline matchup",
+        help="Number of games per baseline matchup (default: 5000 in run-dir mode)",
     ),
     baselines: str = typer.Option(
         None,
@@ -1289,7 +1287,17 @@ def evaluate(
     agent_type: str = typer.Option(
         "deep_cfr",
         "--agent-type",
-        help="Agent type: deep_cfr, rebel, sd_cfr, escher, gtcfr",
+        help="Agent type: deep_cfr, rebel, sd_cfr, escher, gtcfr, sog, sog_inference",
+    ),
+    latest: bool = typer.Option(
+        False,
+        "--latest",
+        help="Auto-select the highest-numbered checkpoint in the run directory",
+    ),
+    epoch: Optional[int] = typer.Option(
+        None,
+        "--epoch",
+        help="Select a specific checkpoint by epoch/iteration number",
     ),
     lbr: bool = typer.Option(
         False,
@@ -1308,9 +1316,116 @@ def evaluate(
     ),
 ):
     """Evaluate a checkpoint against baseline agents and print a win-rate table."""
+    import re
     from rich.console import Console
     from rich.table import Table
     from .evaluate_agents import run_evaluation_multi_baseline, MEAN_IMP_BASELINES
+
+    run_dir = None
+    checkpoint_path = None
+    games_was_default = (games == 100)
+
+    if checkpoint.is_dir():
+        # Run-dir mode
+        run_dir = checkpoint
+        run_config = run_dir / "config.yaml"
+        if not run_config.exists():
+            print(f"ERROR: No config.yaml found in {run_dir}", file=sys.stderr)
+            raise typer.Exit(1)
+
+        if config is None:
+            config = run_config
+
+        # Auto-detect algorithm and agent type
+        from .run_db import infer_algorithm, algo_to_agent_type, algo_to_checkpoint_prefix
+        import yaml
+
+        with open(run_config, encoding="utf-8") as f:
+            config_dict = yaml.safe_load(f) or {}
+
+        algorithm = infer_algorithm(config_dict)
+
+        # Use auto-detected values unless user explicitly overrode
+        if agent_type == "deep_cfr":
+            agent_type = algo_to_agent_type(algorithm)
+
+        prefix = algo_to_checkpoint_prefix(algorithm)
+
+        # Default to 5000 games in run-dir mode (but respect explicit user override)
+        if games_was_default:
+            games = 5000
+
+        # Resolve checkpoint
+        ckpt_dir = run_dir / "checkpoints"
+        if not ckpt_dir.exists():
+            print(f"ERROR: No checkpoints/ directory in {run_dir}", file=sys.stderr)
+            raise typer.Exit(1)
+
+        def _find_checkpoints(pfx):
+            found = sorted(ckpt_dir.glob(f"*{pfx}*epoch_*.pt"))
+            if not found:
+                found = sorted(ckpt_dir.glob(f"*{pfx}*iter_*.pt"))
+            return found
+
+        all_ckpts = _find_checkpoints(prefix)
+
+        def extract_num(p):
+            m = re.search(r"(?:epoch|iter)_(\d+)", p.name)
+            return int(m.group(1)) if m else 0
+
+        if latest:
+            if not all_ckpts:
+                print(f"ERROR: No checkpoints matching prefix '{prefix}' found", file=sys.stderr)
+                raise typer.Exit(1)
+            all_ckpts.sort(key=extract_num)
+            checkpoint_path = all_ckpts[-1]
+        elif epoch is not None:
+            matches = [
+                p for p in all_ckpts
+                if f"epoch_{epoch}.pt" in p.name or f"iter_{epoch}.pt" in p.name
+            ]
+            if not matches:
+                print(f"ERROR: No checkpoint for epoch/iter {epoch} found", file=sys.stderr)
+                raise typer.Exit(1)
+            checkpoint_path = matches[0]
+        else:
+            print("ERROR: Run-dir mode requires --latest or --epoch N", file=sys.stderr)
+            raise typer.Exit(1)
+
+        # Refine algorithm detection with checkpoint keys
+        try:
+            import torch
+
+            ckpt_data = torch.load(str(checkpoint_path), map_location="cpu", weights_only=True)
+            ckpt_keys = set(ckpt_data.keys())
+            refined_algo = infer_algorithm(config_dict, checkpoint_keys=ckpt_keys)
+            if agent_type == algo_to_agent_type(algorithm):
+                agent_type = algo_to_agent_type(refined_algo)
+            del ckpt_data
+        except Exception:
+            pass
+
+        checkpoint = checkpoint_path
+    else:
+        # File mode
+        if not checkpoint.exists():
+            print(f"ERROR: Checkpoint file not found: {checkpoint}", file=sys.stderr)
+            raise typer.Exit(1)
+        checkpoint_path = checkpoint
+        # Try to detect run_dir from checkpoint path
+        if checkpoint.parent.name == "checkpoints" and (checkpoint.parent.parent / "config.yaml").exists():
+            run_dir = checkpoint.parent.parent
+
+        if config is None:
+            # Fall back to config.yaml in cwd
+            config = Path("config.yaml")
+            if not config.exists():
+                print("ERROR: No --config specified and no config.yaml in current directory.", file=sys.stderr)
+                raise typer.Exit(1)
+
+    if not config.exists():
+        print(f"ERROR: Config file not found: {config}", file=sys.stderr)
+        raise typer.Exit(1)
 
     if baselines is None:
         baseline_list = list(MEAN_IMP_BASELINES)
@@ -1371,6 +1486,20 @@ def evaluate(
         )
 
     console.print(table)
+
+    # Persist results if we have a run directory context
+    if run_dir is not None:
+        from .evaluate_agents import persist_eval_results
+
+        m = re.search(r"(?:epoch|iter)_(\d+)", str(checkpoint))
+        iteration = int(m.group(1)) if m else 0
+        persist_eval_results(
+            run_dir=str(run_dir),
+            iteration=iteration,
+            results_map=results_map,
+            checkpoint_path=str(checkpoint),
+        )
+        print(f"\nResults persisted to {run_dir}/metrics.jsonl")
 
     if lbr:
         from .cfr.sampled_lbr import sampled_lbr as run_lbr

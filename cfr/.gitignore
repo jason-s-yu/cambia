@@ -191,6 +191,11 @@ benchmarks/**/*.json
 benchmarks/**/*.log
 benchmarks/**/*.md
 
+# Runtime SQLite databases
+cambia_runs.db
+cambia_runs.db-shm
+cambia_runs.db-wal
+
 # Training checkpoints / buffers
 *.pt
 *.npz

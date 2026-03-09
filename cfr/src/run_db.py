@@ -27,6 +27,38 @@ from src.evaluate_agents import MEAN_IMP_BASELINES  # canonical source
 
 _DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "runs" / "cambia_runs.db"
 
+ALGO_TO_AGENT_TYPE: Dict[str, str] = {
+    "rebel": "rebel",
+    "os-mccfr": "deep_cfr",
+    "es-mccfr": "deep_cfr",
+    "escher": "escher",
+    "sd-cfr": "sd_cfr",
+    "gtcfr": "gtcfr",
+    "sog": "sog_inference",
+    "psro": "deep_cfr",
+}
+
+ALGO_TO_CHECKPOINT_PREFIX: Dict[str, str] = {
+    "rebel": "rebel_checkpoint",
+    "os-mccfr": "deep_cfr_checkpoint",
+    "es-mccfr": "deep_cfr_checkpoint",
+    "escher": "deep_cfr_checkpoint",
+    "sd-cfr": "deep_cfr_checkpoint",
+    "gtcfr": "gtcfr_checkpoint",
+    "sog": "sog_checkpoint",
+    "psro": "deep_cfr_checkpoint",
+}
+
+
+def algo_to_agent_type(algorithm: str) -> str:
+    """Map algorithm name to eval agent_type string. Falls back to 'deep_cfr'."""
+    return ALGO_TO_AGENT_TYPE.get(algorithm, "deep_cfr")
+
+
+def algo_to_checkpoint_prefix(algorithm: str) -> str:
+    """Map algorithm name to checkpoint filename prefix. Falls back to 'deep_cfr_checkpoint'."""
+    return ALGO_TO_CHECKPOINT_PREFIX.get(algorithm, "deep_cfr_checkpoint")
+
 _DDL = """
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -175,6 +207,20 @@ def infer_algorithm(
     7. sampling_method == "external" → "es-mccfr"
     8. default → "os-mccfr"
     """
+    deep_cfr_section = config_dict.get("deep_cfr", {}) or {}
+
+    # Detect SoG (must come before GT-CFR since SoG checkpoints also contain cvpn_state_dict)
+    if checkpoint_keys and "sog_metadata" in checkpoint_keys:
+        return "sog"
+    if "sog_epochs" in deep_cfr_section or "sog_games_per_epoch" in deep_cfr_section:
+        return "sog"
+
+    # Detect GT-CFR
+    if checkpoint_keys and "cvpn_state_dict" in checkpoint_keys:
+        return "gtcfr"
+    if "gtcfr_epochs" in deep_cfr_section or "gtcfr_games_per_epoch" in deep_cfr_section:
+        return "gtcfr"
+
     # Detect ReBeL by checkpoint contents or filename
     if checkpoint_keys and "rebel_value_net_state_dict" in checkpoint_keys:
         return "rebel"
@@ -185,15 +231,14 @@ def infer_algorithm(
             return "rebel"
     if config_dict.get("rebel"):
         return "rebel"
-    deep_cfr = config_dict.get("deep_cfr", {}) or {}
-    traversal = deep_cfr.get("traversal_method", "")
+    traversal = deep_cfr_section.get("traversal_method", "")
     if traversal == "escher":
         return "escher"
-    if deep_cfr.get("use_sd_cfr"):
+    if deep_cfr_section.get("use_sd_cfr"):
         return "sd-cfr"
-    if deep_cfr.get("use_psro"):
+    if deep_cfr_section.get("use_psro"):
         return "psro"
-    sampling = deep_cfr.get("sampling_method", "")
+    sampling = deep_cfr_section.get("sampling_method", "")
     if sampling == "external":
         return "es-mccfr"
     return "os-mccfr"

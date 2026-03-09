@@ -58,6 +58,7 @@ _CTX_TO_PHASE: Dict[int, int] = {
 
 _MAX_TURNS: int = 46
 _STOCK_TOTAL: int = 46
+_MAX_DECISIONS: int = 200  # safety cap: abort episode if stuck in loops
 
 
 @dataclass
@@ -130,6 +131,7 @@ def gtcfr_self_play_episode(
         expansion_budget=config.gtcfr_expansion_budget,
         c_puct=config.gtcfr_c_puct,
         cfr_iters_per_expansion=config.gtcfr_cfr_iters_per_expansion,
+        expansion_k=config.gtcfr_expansion_k,
         device="cpu",
     )
 
@@ -141,9 +143,19 @@ def gtcfr_self_play_episode(
         range_p0 = uniform_range()
         range_p1 = uniform_range()
 
+        _decision_count: int = 0
+
         try:
             with torch.inference_mode():
                 while not game.is_terminal():
+                    if _decision_count >= _MAX_DECISIONS:
+                        logger.warning(
+                            "gtcfr_episode: hit %d decision cap, aborting.",
+                            _MAX_DECISIONS,
+                        )
+                        break
+                    _decision_count += 1
+
                     mask_u8 = game.legal_actions_mask()  # (146,) uint8
                     mask_bool = mask_u8.astype(bool)
 
@@ -188,19 +200,21 @@ def gtcfr_self_play_episode(
                             probs /= total
                             action = int(np.random.choice(NUM_ACTIONS, p=probs))
 
+                    # --- Per-hand-type policy matrix BEFORE apply_action ---
+                    from .range_utils import compute_policy_matrix_cvpn
+                    policy_matrix = compute_policy_matrix_cvpn(
+                        cvpn, game, range_p0, range_p1
+                    )
+
                     # --- Apply action and update agent beliefs ---
                     game.apply_action(action)
                     game.update_both(a0, a1)
 
-                    # --- Simplified range update using search policy as surrogate ---
-                    # update_range expects policy_matrix (NUM_HAND_TYPES, NUM_ACTIONS)
-                    # We use the scalar policy as a uniform surrogate across all hand types
-                    # (Phase 2 approximation; Phase 3 will add full range tracking)
-                    surrogate_matrix = np.tile(policy[None, :], (NUM_HAND_TYPES, 1))  # (468, 146)
+                    # --- Bayesian range update with per-hand-type policies ---
                     if acting_player == 0:
-                        range_p0 = update_range(range_p0, action, surrogate_matrix)
+                        range_p0 = update_range(range_p0, action, policy_matrix)
                     else:
-                        range_p1 = update_range(range_p1, action, surrogate_matrix)
+                        range_p1 = update_range(range_p1, action, policy_matrix)
 
         finally:
             a0.close()

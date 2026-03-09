@@ -31,7 +31,7 @@ if str(_CFR_ROOT) not in sys.path:
 
 import torch
 
-from src.evaluate_agents import run_evaluation_multi_baseline, run_head_to_head, MEAN_IMP_BASELINES, get_agent
+from src.evaluate_agents import run_evaluation_multi_baseline, run_head_to_head, MEAN_IMP_BASELINES, get_agent, persist_eval_results
 from src.config import load_config
 from src.cfr.sampled_lbr import sampled_lbr
 
@@ -172,39 +172,15 @@ def evaluate_checkpoint(
         agent_type=agent_type,
     )
 
-    # Append metrics.jsonl rows
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    metrics_path = run_dir_path / "metrics.jsonl"
-    all_rows = []
-    with open(metrics_path, "a", encoding="utf-8") as f:
-        for baseline, results in all_results.items():
-            p0_wins = results.get("P0 Wins", 0)
-            p1_wins = results.get("P1 Wins", 0)
-            ties = results.get("Ties", 0) + results.get("MaxTurnTies", 0)
-            total = p0_wins + p1_wins + ties
-            win_rate = p0_wins / total if total > 0 else 0.0
-            ci_low, ci_high = wilson_ci(p0_wins, total)
-            row = {
-                "run": run_dir_path.name,
-                "iter": iter_num,
-                "baseline": baseline,
-                "win_rate": round(win_rate, 6),
-                "ci_low": round(ci_low, 6),
-                "ci_high": round(ci_high, 6),
-                "games_played": total,
-                "p0_wins": p0_wins,
-                "p1_wins": p1_wins,
-                "ties": ties,
-                "adv_loss": None if adv_loss != adv_loss else round(adv_loss, 6),
-                "strat_loss": None if strat_loss != strat_loss else round(strat_loss, 6),
-                "timestamp": timestamp,
-            }
-            stats = getattr(results, 'stats', {})
-            row["avg_game_turns"] = round(stats.get("avg_game_turns", 0), 2)
-            row["t1_cambia_rate"] = round(stats.get("t1_cambia_rate", 0), 4)
-            row["avg_score_margin"] = round(stats.get("avg_score_margin", 0), 2)
-            f.write(json.dumps(row) + "\n")
-            all_rows.append(row)
+    # Persist metrics.jsonl + SQLite via shared function
+    persist_eval_results(
+        run_dir=str(run_dir_path),
+        iteration=iter_num,
+        results_map=all_results,
+        checkpoint_path=checkpoint_path,
+        adv_loss=adv_loss,
+        strat_loss=strat_loss,
+    )
 
     # Optional: sampled LBR exploitability measurement
     if run_lbr:
@@ -224,6 +200,7 @@ def evaluate_checkpoint(
                     num_infosets=lbr_infosets,
                     br_rollouts_per_infoset=lbr_rollouts,
                 )
+                lbr_timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 lbr_row = {
                     "run": run_dir_path.name,
                     "iter": iter_num,
@@ -231,9 +208,10 @@ def evaluate_checkpoint(
                     "exploitability": round(lbr_result["exploitability"], 6),
                     "num_infosets_sampled": lbr_result["num_infosets_sampled"],
                     "std_err": round(lbr_result["std_err"], 6),
-                    "timestamp": timestamp,
+                    "timestamp": lbr_timestamp,
                 }
-                with open(metrics_path, "a", encoding="utf-8") as f:
+                lbr_metrics_path = run_dir_path / "metrics.jsonl"
+                with open(lbr_metrics_path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(lbr_row) + "\n")
                 logger.info(
                     "[lbr] iter %d: exploitability=%.3f (n=%d, stderr=%.3f)",
@@ -244,18 +222,6 @@ def evaluate_checkpoint(
                 )
         except Exception:
             logger.exception("LBR evaluation failed for iter %d", iter_num)
-
-    # DB dual-write
-    if _RUN_DB_AVAILABLE:
-        try:
-            db = run_db.get_db()
-            db_run_id = _get_run_id_for_dir(db, run_dir_path, config_path)
-            ckpt_id = run_db.register_checkpoint(db, db_run_id, iter_num, checkpoint_path)
-            for row in all_rows:
-                run_db.insert_eval_result(db, db_run_id, ckpt_id, row)
-            db.close()
-        except Exception:
-            logger.debug("DB dual-write failed for %s iter %d", run_dir_path.name, iter_num)
 
     return all_results, iter_num
 

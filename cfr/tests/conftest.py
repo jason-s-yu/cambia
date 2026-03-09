@@ -128,11 +128,12 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         gtcfr_expansion_budget: int = 100
         gtcfr_c_puct: float = 2.0
         gtcfr_cfr_iters_per_expansion: int = 10
+        gtcfr_expansion_k: int = 3
         gtcfr_cvpn_hidden_dim: int = 512
         gtcfr_cvpn_num_blocks: int = 4
         gtcfr_cvpn_learning_rate: float = 3e-4
         gtcfr_value_loss_weight: float = 1.0
-        gtcfr_policy_loss_weight: float = 1.0
+        gtcfr_policy_loss_weight: float = 5.0
         gtcfr_buffer_capacity: int = 1_000_000
         gtcfr_games_per_epoch: int = 50
         gtcfr_epochs: int = 20
@@ -140,7 +141,7 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         gtcfr_warm_start_rebel_checkpoint: str = ""
 
         # CVPN gradient control
-        cvpn_detach_policy_grad: bool = True
+        cvpn_detach_policy_grad: bool = False
 
         # SoG fields
         sog_train_budget: int = 50
