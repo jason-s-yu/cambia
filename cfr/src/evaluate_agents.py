@@ -2846,7 +2846,7 @@ def persist_eval_results(
     """Dual-write eval results to metrics.jsonl and SQLite.
 
     Args:
-        run_dir: Path to run directory (e.g., runs/sog-phase3-v3/).
+        run_dir: Path to run directory (e.g., runs/v2.2-sog-v3/).
         iteration: Checkpoint iteration/epoch number.
         results_map: Dict mapping baseline name -> Counter with P0 Wins, P1 Wins, Ties, stats.
         run_name: Run name for JSONL rows. Auto-derived from run_dir basename if None.

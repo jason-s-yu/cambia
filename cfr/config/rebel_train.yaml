@@ -31,7 +31,7 @@ cambia_rules:
   max_game_turns: 46
 
 persistence:
-  agent_data_save_path: runs/rebel-phase1/checkpoints/rebel_checkpoint.pt
+  agent_data_save_path: runs/v2.0-rebel/checkpoints/rebel_checkpoint.pt
 
 logging:
   log_level_file: INFO

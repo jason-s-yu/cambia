@@ -337,19 +337,19 @@ Run-dir mode (preferred): pass a run directory and let the CLI auto-detect every
 
 ```bash
 # Evaluate latest checkpoint, 5000 games per baseline, auto-detect agent type
-cambia evaluate runs/sog-phase3-v3/ --latest
+cambia evaluate runs/v2.2-sog-v3/ --latest
 
 # Evaluate a specific epoch
-cambia evaluate runs/gtcfr-phase2/ --epoch 200
+cambia evaluate runs/v2.1-gtcfr/ --epoch 200
 
 # Quick spot-check with fewer games
-cambia evaluate runs/rebel-phase1/ --latest -n 100
+cambia evaluate runs/v2.0-rebel/ --latest -n 100
 ```
 
 File mode (backward compatible): pass a .pt file with explicit flags.
 
 ```bash
-cambia evaluate runs/rebel-phase1/checkpoints/rebel_checkpoint_iter_500.pt \
+cambia evaluate runs/v2.0-rebel/checkpoints/rebel_checkpoint_iter_500.pt \
   -c config/rebel_train.yaml --agent-type rebel -n 5000
 ```
 
@@ -358,7 +358,7 @@ In run-dir mode, results are always persisted to `metrics.jsonl` and the SQLite 
 For continuous evaluation during training:
 
 ```bash
-cambia eval-watch runs/sog-phase3-v3/ --agent-type sog_inference --games 5000
+cambia eval-watch runs/v2.2-sog-v3/ --agent-type sog_inference --games 5000
 ```
 
 See `docs/eval_protocol.md` for the full evaluation protocol, metric definitions, and interpretation guide.

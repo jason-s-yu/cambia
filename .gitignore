@@ -20,6 +20,7 @@ go.work.sum
 .docker/
 certs/
 docs-gen/
+.docs/
 sync-generated.sh
 
 # Build artifacts (generated)

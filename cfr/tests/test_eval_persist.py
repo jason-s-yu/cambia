@@ -234,7 +234,7 @@ class TestRunDirDetection:
         """Iteration number correctly extracted from checkpoint filenames."""
         patterns = [
             ("deep_cfr_checkpoint_iter_100.pt", 100),
-            ("sog_checkpoint_sog_epoch_50.pt", 50),
+            ("sog_checkpoint_epoch_50.pt", 50),
             ("gtcfr_checkpoint_epoch_200.pt", 200),
             ("rebel_checkpoint_iter_1.pt", 1),
         ]
@@ -252,7 +252,7 @@ class TestCheckpointDiscovery:
         ckpt_dir = tmp_path / "checkpoints"
         ckpt_dir.mkdir()
         for i in [50, 100, 200, 150]:
-            (ckpt_dir / f"sog_checkpoint_sog_epoch_{i}.pt").touch()
+            (ckpt_dir / f"sog_checkpoint_epoch_{i}.pt").touch()
 
         all_ckpts = sorted(ckpt_dir.glob("*sog*epoch_*.pt"))
 

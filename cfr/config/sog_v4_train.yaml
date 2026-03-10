@@ -43,7 +43,7 @@ deep_cfr:
   sog_exploration_epsilon: 0.05
 
   # Warm start from v4 epoch 25 (D1-D4 fixes validated, v_loss 0.056, p_loss 0.675)
-  sog_warm_start_checkpoint: runs/sog-phase3-v4/checkpoints/checkpoint_sog_sog_epoch_25.pt
+  sog_warm_start_checkpoint: runs/v2.3-sog-fixed/checkpoints/sog_checkpoint_epoch_25.pt
 
 cambia_rules:
   allowDrawFromDiscardPile: false
@@ -58,7 +58,7 @@ cambia_rules:
   max_game_turns: 46
 
 persistence:
-  agent_data_save_path: runs/sog-phase3-v4/checkpoints/checkpoint.pt
+  agent_data_save_path: runs/v2.3-sog-fixed/checkpoints/sog_checkpoint.pt
 
 logging:
   log_level_file: INFO

@@ -84,13 +84,13 @@ The `cambia evaluate` command accepts a run directory as its positional argument
 
 ```bash
 # Evaluate the latest checkpoint in a run directory (5000 games per baseline)
-cambia evaluate runs/sog-phase3-v3/ --latest
+cambia evaluate runs/v2.2-sog-v3/ --latest
 
 # Evaluate a specific epoch
-cambia evaluate runs/gtcfr-phase2/ --epoch 200
+cambia evaluate runs/v2.1-gtcfr/ --epoch 200
 
 # Override game count for a quick spot-check
-cambia evaluate runs/rebel-phase1/ --latest -n 100
+cambia evaluate runs/v2.0-rebel/ --latest -n 100
 ```
 
 Auto-detection works as follows:
@@ -108,7 +108,7 @@ All flags can be overridden explicitly. For example, `--agent-type sog` forces s
 Passing a .pt file directly still works:
 
 ```bash
-cambia evaluate runs/rebel-phase1/checkpoints/rebel_checkpoint_iter_500.pt \
+cambia evaluate runs/v2.0-rebel/checkpoints/rebel_checkpoint_iter_500.pt \
   -c config/rebel_train.yaml --agent-type rebel -n 5000
 ```
 
@@ -119,7 +119,7 @@ When the checkpoint sits inside a `runs/*/checkpoints/` directory with a `config
 For long training runs, the eval watcher polls for new checkpoints and evaluates them automatically:
 
 ```bash
-cambia eval-watch runs/sog-phase3-v4/ --agent-type sog_inference --games 5000
+cambia eval-watch runs/v2.3-sog-fixed/ --agent-type sog_inference --games 5000
 ```
 
 The watcher writes `metrics.jsonl`, `head_to_head.jsonl`, per-game JSONL in `evaluations/iter_N/`, and SQLite records. It tracks state in `eval_watcher_state.json` to avoid re-evaluating checkpoints.
@@ -131,8 +131,8 @@ Checkpoint discovery supports both `_iter_N.pt` (deep_cfr, rebel) and `_epoch_N.
 Baselines run in parallel by default via `ProcessPoolExecutor` with `spawn` context. Each worker loads config and checkpoint independently, so no pickling of model objects.
 
 ```bash
-cambia evaluate runs/sog-phase3-v4/ --epoch 50 -j 5    # 5 parallel workers
-cambia eval-watch runs/sog-phase3-v4/ --agent-type sog -j 3  # 3 workers per checkpoint
+cambia evaluate runs/v2.3-sog-fixed/ --epoch 50 -j 5    # 5 parallel workers
+cambia eval-watch runs/v2.3-sog-fixed/ --agent-type sog -j 3  # 3 workers per checkpoint
 cambia evaluate runs/foo/ --latest -j 1                 # force sequential
 ```
 
@@ -215,13 +215,13 @@ cambia train sog -c config/sog_train.yaml
 Terminal 2, eval watcher (start after first checkpoint appears):
 ```bash
 cd cfr
-cambia eval-watch runs/sog-phase3-v3/ --agent-type sog_inference --games 5000
+cambia eval-watch runs/v2.2-sog-v3/ --agent-type sog_inference --games 5000
 ```
 
 Alternatively, for one-off evaluation of a specific checkpoint:
 ```bash
 cd cfr
-cambia evaluate runs/sog-phase3-v3/ --epoch 100
+cambia evaluate runs/v2.2-sog-v3/ --epoch 100
 ```
 
 ### Resource partitioning
