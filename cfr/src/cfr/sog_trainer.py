@@ -1,7 +1,7 @@
 """
 src/cfr/sog_trainer.py
 
-SoG Trainer: training loop coordinator for Phase 3.
+SoG Trainer: training loop coordinator for v2.3.
 
 Mirrors GTCFRTrainer closely. Differences:
 - Uses _sog_batch_worker (SoG self-play with tree persistence)
@@ -490,7 +490,7 @@ class SoGTrainer:
                 "value_buffer_path": value_buffer_path,
                 "policy_buffer_path": policy_buffer_path,
                 "sog_metadata": {
-                    "phase": 3,
+                    "version": "2.3",
                     "trainer": "SoGTrainer",
                     "train_budget": self.config.sog_train_budget,
                     "eval_budget": self.config.sog_eval_budget,

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Monitors training log and annotates each iteration with CPU load.
-# Usage: ./training_load_monitor.sh runs/rebel-phase1/logs/training.log
-LOG="${1:-runs/rebel-phase1/logs/training.log}"
+# Usage: ./training_load_monitor.sh runs/v2.0-rebel/logs/training.log
+LOG="${1:-runs/v2.0-rebel/logs/training.log}"
 OUT="${LOG%.log}_load.log"
 echo "# Training load monitor — $(date -Iseconds)" > "$OUT"
 echo "# Format: iter | self_play_s | load_1m | load_5m | cpus_busy" >> "$OUT"

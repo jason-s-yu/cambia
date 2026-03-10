@@ -41,7 +41,7 @@ cambia_rules:
   max_game_turns: 46
 
 persistence:
-  agent_data_save_path: runs/gtcfr-phase2/checkpoints/checkpoint.pt
+  agent_data_save_path: runs/v2.1-gtcfr/checkpoints/gtcfr_checkpoint.pt
 
 logging:
   log_level_file: INFO

@@ -36,7 +36,7 @@ deep_cfr:
   sog_games_per_epoch: 30
   sog_epochs: 500
   sog_exploration_epsilon: 0.05
-  sog_warm_start_checkpoint: runs/gtcfr-phase2/checkpoints/checkpoint_gtcfr_epoch_200.pt
+  sog_warm_start_checkpoint: runs/v2.1-gtcfr/checkpoints/gtcfr_checkpoint_epoch_200.pt
 
 cambia_rules:
   allowDrawFromDiscardPile: false
@@ -51,7 +51,7 @@ cambia_rules:
   max_game_turns: 46
 
 persistence:
-  agent_data_save_path: runs/sog-phase3/checkpoints/checkpoint.pt
+  agent_data_save_path: runs/v2.2-sog/checkpoints/sog_checkpoint.pt
 
 logging:
   log_level_file: INFO
