@@ -23,6 +23,7 @@ from typing import List, Optional, Tuple, Union
 import numpy as np
 
 from .agent_state import AgentState, KnownCardInfo
+from .pbs import DECK_COUNTS, NUM_BUCKETS
 from .constants import (
     ActionAbilityBlindSwapSelect,
     ActionAbilityKingLookSelect,
@@ -51,6 +52,13 @@ from .constants import (
     EP_PBS_BUCKET_DIM,
     EP_PBS_PUBLIC_DIM,
     EP_PBS_MAX_ACTIVE_MASK,
+    EP_PBS_V2_INPUT_DIM,
+    V2_CARD_COUNT_DIM,
+    V2_ACTION_HISTORY_DIM,
+    V2_ACTION_HISTORY_PER_PLAYER,
+    V2_ACTION_HISTORY_SLOTS,
+    V2_ACTION_CATEGORY_DIM,
+    V2_ACTION_SLOT_FEATURE_DIM,
     N_PLAYER_INPUT_DIM,
     N_PLAYER_NUM_ACTIONS,
     N_PLAYER_MAX_PLAYERS,
@@ -585,8 +593,21 @@ def encode_infoset_eppbs_interleaved(
     opp_obs_ages=None,
     dead_card_histogram=None,
     turn_progress: float = 0.0,
+    encoding_version: int = 1,
+    card_counting_posterior=None,
+    action_history_window=None,
 ) -> np.ndarray:
-    """EP-PBS interleaved encoding for 2-player games. Returns ndarray of shape (224,).
+    """EP-PBS interleaved encoding for 2-player games.
+
+    Output shape depends on ``encoding_version``:
+      encoding_version == 1 (default): (224,) - v1 layout, unchanged.
+      encoding_version == 2: (257,) - v2 layout with 9-dim card-counting posterior at
+        [224:233] and 24-dim action history window at [233:257]. Callers must supply
+        ``card_counting_posterior`` (np.ndarray[9]) and ``action_history_window``
+        (np.ndarray[24]); both default to zeros if omitted.
+
+    The high-level wrapper ``encode_infoset_eppbs_interleaved_v2(agent_state, ...)``
+    computes the v2 extras from AgentState and is the recommended v2 entry point.
 
     Layout (224 dims):
       [0-41]   public features (42 dims):
@@ -610,7 +631,12 @@ def encode_infoset_eppbs_interleaved(
                [222] turn progress
                [223] padding
     """
-    out = np.zeros(EP_PBS_INPUT_DIM, dtype=np.float32)
+    if encoding_version not in (1, 2):
+        raise InfosetEncodingError(
+            f"Unsupported encoding_version={encoding_version}; expected 1 or 2"
+        )
+    output_dim = EP_PBS_V2_INPUT_DIM if encoding_version == 2 else EP_PBS_INPUT_DIM
+    out = np.zeros(output_dim, dtype=np.float32)
     offset = 0
 
     # Public features (40 dims) — identical to encode_infoset_eppbs
@@ -682,7 +708,280 @@ def encode_infoset_eppbs_interleaved(
 
     # [198-199] were padding; now [200-223] are history features.
     _write_history_features(out, own_obs_ages, opp_obs_ages, dead_card_histogram, turn_progress)
+
+    # Encoding v2: append card-counting posterior + action history window.
+    if encoding_version == 2:
+        if card_counting_posterior is not None:
+            arr = np.asarray(card_counting_posterior, dtype=np.float32)
+            if arr.shape[0] != V2_CARD_COUNT_DIM:
+                raise InfosetEncodingError(
+                    f"card_counting_posterior must have {V2_CARD_COUNT_DIM} entries, got {arr.shape[0]}"
+                )
+            out[EP_PBS_INPUT_DIM:EP_PBS_INPUT_DIM + V2_CARD_COUNT_DIM] = arr
+        if action_history_window is not None:
+            arr = np.asarray(action_history_window, dtype=np.float32)
+            if arr.shape[0] != V2_ACTION_HISTORY_DIM:
+                raise InfosetEncodingError(
+                    f"action_history_window must have {V2_ACTION_HISTORY_DIM} entries, got {arr.shape[0]}"
+                )
+            out[EP_PBS_INPUT_DIM + V2_CARD_COUNT_DIM:EP_PBS_V2_INPUT_DIM] = arr
     return out
+
+
+# ---------------------------------------------------------------------------
+# Encoding v2 (Phase 0 DESCA foundation)
+# ---------------------------------------------------------------------------
+# Layout:
+#   [0:224]   = v1 interleaved encoding (unchanged)
+#   [224:233] = card-counting posterior over remaining deck, 9 buckets
+#   [233:257] = action history window, 24 dims
+#
+# Action history window layout (24 dims total):
+#   [233:245] own player's last 3 actions, oldest first, 4 dims each
+#   [245:257] opponent's last 3 actions, oldest first, 4 dims each
+# Per-action 4 dims:
+#   [0:3] action_category one-hot (0=DRAW_PHASE, 1=DISCARD_PHASE, 2=ABILITY_OR_SNAP)
+#   [3]   target_slot_norm scalar in [0, 1] (slot_idx / 5.0, or 0.0 if no target)
+
+
+def compute_card_counting_posterior(agent_state: AgentState) -> np.ndarray:
+    """Compute the 9-dim card-counting posterior over remaining deck cards.
+
+    remaining[b] = DECK_COUNTS[b]
+                 - known cards in own hand of bucket b (tag in {PRIV_OWN, PUB})
+                 - known cards in opp hand of bucket b (tag == PUB only;
+                   PRIV_OPP excludes: opp knows, but the agent does not)
+                 - observed discard count of bucket b
+
+    The result is clamped to >= 0 and normalized so entries sum to 1.0. If the
+    remaining deck computes as all-zero (pathological inputs), returns uniform
+    1/9 to preserve the sum-to-1 invariant.
+    """
+    remaining = np.array(DECK_COUNTS, dtype=np.float64)
+
+    slot_tags = getattr(agent_state, "slot_tags", [])
+    slot_buckets = getattr(agent_state, "slot_buckets", [])
+    own_hand_size = len(getattr(agent_state, "own_hand", {}))
+    opp_hand_size = int(getattr(agent_state, "opponent_card_count", 0))
+
+    # Own hand (slots 0..5): PRIV_OWN or PUB means the bucket is known.
+    for i in range(min(6, own_hand_size)):
+        if i >= len(slot_tags):
+            break
+        tag = slot_tags[i]
+        tag_val = tag.value if hasattr(tag, "value") else int(tag)
+        if tag_val in (int(EpistemicTag.PRIV_OWN), int(EpistemicTag.PUB)):
+            b = int(slot_buckets[i]) if i < len(slot_buckets) else 0
+            if 0 <= b < NUM_BUCKETS:
+                remaining[b] -= 1.0
+
+    # Opponent hand (slots 6..11): only PUB reveals bucket identity.
+    for j in range(min(6, opp_hand_size)):
+        slot = 6 + j
+        if slot >= len(slot_tags):
+            break
+        tag = slot_tags[slot]
+        tag_val = tag.value if hasattr(tag, "value") else int(tag)
+        if tag_val == int(EpistemicTag.PUB):
+            b = int(slot_buckets[slot]) if slot < len(slot_buckets) else 0
+            if 0 <= b < NUM_BUCKETS:
+                remaining[b] -= 1.0
+
+    # Discards seen.
+    hist = getattr(agent_state, "discard_bucket_counts", None)
+    if hist is not None:
+        for b in range(min(NUM_BUCKETS, len(hist))):
+            remaining[b] -= float(hist[b])
+
+    np.clip(remaining, 0.0, None, out=remaining)
+    total = remaining.sum()
+    if total <= 0.0:
+        # Defensive fallback: uniform posterior keeps sum == 1 for downstream code.
+        return np.full(NUM_BUCKETS, 1.0 / NUM_BUCKETS, dtype=np.float32)
+    return (remaining / total).astype(np.float32)
+
+
+def compute_action_history_window(agent_state: AgentState) -> np.ndarray:
+    """Build the 24-dim action history window for the encoding player.
+
+    Layout:
+      [0:12]  encoding player's (own) ring: 3 slots * 4 dims, oldest first.
+      [12:24] opponent's ring: 3 slots * 4 dims, oldest first.
+
+    Per slot: 3-dim one-hot category + 1-dim target_slot_norm. Empty slots
+    are left as all zeros (which is distinguishable from an action whose
+    target_slot_norm is 0.0 by the category one-hot being absent).
+    """
+    out = np.zeros(V2_ACTION_HISTORY_DIM, dtype=np.float32)
+    history = getattr(agent_state, "action_history", {})
+    player_id = int(getattr(agent_state, "player_id", 0))
+    opponent_id = int(getattr(agent_state, "opponent_id", 1 - player_id))
+
+    def _write_ring(offset: int, ring):
+        if ring is None:
+            return
+        # Write up to V2_ACTION_HISTORY_SLOTS entries. Oldest first (index 0).
+        for slot_idx in range(min(V2_ACTION_HISTORY_SLOTS, len(ring))):
+            entry = ring[slot_idx]
+            if entry is None:
+                continue
+            category, slot_norm = entry
+            base = offset + slot_idx * V2_ACTION_SLOT_FEATURE_DIM
+            if 0 <= int(category) < V2_ACTION_CATEGORY_DIM:
+                out[base + int(category)] = 1.0
+            # Clamp slot_norm defensively.
+            sn = float(slot_norm)
+            if sn < 0.0:
+                sn = 0.0
+            elif sn > 1.0:
+                sn = 1.0
+            out[base + V2_ACTION_CATEGORY_DIM] = sn
+
+    _write_ring(0, history.get(player_id))
+    _write_ring(V2_ACTION_HISTORY_PER_PLAYER, history.get(opponent_id))
+    return out
+
+
+def encode_infoset_v2(
+    agent_state: AgentState,
+    base_v1: np.ndarray,
+) -> np.ndarray:
+    """Produce the 257-dim v2 encoding given an AgentState and its 224-dim v1 encoding.
+
+    This is the high-level dispatch helper for ``encoding_version=2`` callers that
+    already computed the v1 output via ``encode_infoset_eppbs_interleaved(...)``.
+    """
+    if base_v1.shape[0] != EP_PBS_INPUT_DIM:
+        raise InfosetEncodingError(
+            f"Expected v1 base of size {EP_PBS_INPUT_DIM}, got {base_v1.shape[0]}"
+        )
+    out = np.zeros(EP_PBS_V2_INPUT_DIM, dtype=np.float32)
+    out[:EP_PBS_INPUT_DIM] = base_v1
+    posterior = compute_card_counting_posterior(agent_state)
+    history = compute_action_history_window(agent_state)
+    out[EP_PBS_INPUT_DIM:EP_PBS_INPUT_DIM + V2_CARD_COUNT_DIM] = posterior
+    out[EP_PBS_INPUT_DIM + V2_CARD_COUNT_DIM:EP_PBS_V2_INPUT_DIM] = history
+    return out
+
+
+def encode_infoset_eppbs_interleaved_v2(
+    agent_state: AgentState,
+    decision_context,
+    drawn_card_bucket: int = -1,
+    *,
+    out: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """High-level v2 entry point: derives all encoder inputs from AgentState.
+
+    Returns a 257-dim float32 vector.
+
+    This wrapper constructs the low-level kwargs for
+    ``encode_infoset_eppbs_interleaved`` from ``agent_state`` and then appends
+    the posterior + action history window. It handles the observation-age and
+    dead-card histogram features that Python AgentState now tracks (Phase 0
+    parity fields B1), producing bit-for-bit matching output with the Go v2
+    encoder on equivalent states.
+
+    When ``agent_state`` is backed by a Go FFI agent (carries ``_go_agent``
+    attribute pointing at a ``GoAgentState``), the encoding short-circuits to
+    the Go-side ``encode_eppbs_interleaved_v2`` FFI which is byte-equivalent
+    by construction. Otherwise the slow Python fallback runs, mirroring
+    bit-exactly with the Go encoder.
+
+    If ``out`` is provided as a (257,) float32 ndarray, the result is written
+    into it (T1-2 buffer reuse hook for callers that pre-allocate).
+    """
+    # Go FFI fast path: detect a GoAgentState directly or a thin Python adapter
+    # carrying ``_go_agent`` (used by the DESCA Go env_factory in cli.py).
+    go_agent = getattr(agent_state, "_go_agent", agent_state)
+    if hasattr(go_agent, "_agent_h") and hasattr(go_agent, "encode_eppbs_interleaved_v2"):
+        ctx = decision_context.value if hasattr(decision_context, "value") else int(decision_context)
+        return go_agent.encode_eppbs_interleaved_v2(int(ctx), int(drawn_card_bucket), out=out)
+
+    st = agent_state
+    # Cambia state mapping (SELF=0, OPPONENT=1, NONE=2).
+    if st.cambia_caller is None:
+        cambia_state = 2
+    elif st.cambia_caller == st.player_id:
+        cambia_state = 0
+    else:
+        cambia_state = 1
+
+    slot_tags = [t.value if hasattr(t, "value") else int(t) for t in st.slot_tags]
+    slot_buckets = [int(b) for b in st.slot_buckets]
+
+    discard_top = (
+        st.known_discard_top_bucket.value
+        if hasattr(st.known_discard_top_bucket, "value")
+        else int(st.known_discard_top_bucket)
+    )
+    stock_estimate = (
+        st.stockpile_estimate.value
+        if hasattr(st.stockpile_estimate, "value")
+        else int(st.stockpile_estimate)
+    )
+    game_phase = (
+        st.game_phase.value if hasattr(st.game_phase, "value") else int(st.game_phase)
+    )
+    ctx = (
+        decision_context.value
+        if hasattr(decision_context, "value")
+        else int(decision_context)
+    )
+
+    own_hand_size = len(st.own_hand)
+    opp_hand_size = int(st.opponent_card_count)
+
+    # History parity features: observation ages, dead-card histogram, turn progress.
+    max_turns = max(1, int(getattr(st, "max_game_turns", 1) or 1))
+    current_turn = int(getattr(st, "_current_game_turn", 0))
+    slot_last_seen = getattr(st, "slot_last_seen_turn", [-1] * 12)
+    own_obs_ages = [0.0] * 6
+    opp_obs_ages = [0.0] * 6
+    # Mirror Go ``writeHistoryFeatures``: gate on LastSeenTurn > 0 (strict).
+    # The Go engine uses 0 as "never observed" sentinel, so initial peeks stamped
+    # at turn 0 are not counted toward an observation age until a later update
+    # refreshes the timestamp.
+    for i in range(min(6, own_hand_size)):
+        ls = slot_last_seen[i] if i < len(slot_last_seen) else -1
+        if ls > 0:
+            own_obs_ages[i] = (current_turn - int(ls)) / float(max_turns)
+    for j in range(min(6, opp_hand_size)):
+        ls = slot_last_seen[6 + j] if (6 + j) < len(slot_last_seen) else -1
+        if ls > 0:
+            opp_obs_ages[j] = (current_turn - int(ls)) / float(max_turns)
+
+    hist_counts = list(getattr(st, "discard_bucket_counts", [0] * NUM_BUCKETS))
+    total = int(getattr(st, "total_discards_seen", 0))
+    dead_card_histogram = [0.0] * 10  # [212:222] = 10 entries; bucket 9 is unused
+    if total > 0:
+        for b in range(min(NUM_BUCKETS, len(hist_counts))):
+            dead_card_histogram[b] = float(hist_counts[b]) / float(total)
+
+    turn_progress = float(current_turn) / float(max_turns)
+
+    posterior = compute_card_counting_posterior(st)
+    history = compute_action_history_window(st)
+
+    return encode_infoset_eppbs_interleaved(
+        slot_tags=slot_tags,
+        slot_buckets=slot_buckets,
+        discard_top_bucket=discard_top,
+        stock_estimate=stock_estimate,
+        game_phase=game_phase,
+        decision_context=ctx,
+        cambia_state=cambia_state,
+        drawn_card_bucket=int(drawn_card_bucket),
+        own_hand_size=own_hand_size,
+        opp_hand_size=opp_hand_size,
+        own_obs_ages=own_obs_ages,
+        opp_obs_ages=opp_obs_ages,
+        dead_card_histogram=dead_card_histogram,
+        turn_progress=turn_progress,
+        encoding_version=2,
+        card_counting_posterior=posterior,
+        action_history_window=history,
+    )
 
 
 def action_to_index(action: GameAction) -> int:

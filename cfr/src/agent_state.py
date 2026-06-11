@@ -22,6 +22,7 @@ from .constants import (
     GamePhase,
     StockpileEstimate,
     GameAction,
+    ActionDiscard,
     ActionReplace,
     ActionAbilityPeekOwnSelect,
     ActionAbilityPeekOtherSelect,
@@ -130,6 +131,32 @@ class AgentState:
         self.memory_decay_lambda: float = getattr(deep_cfg, "memory_decay_lambda", 0.1)
         self.memory_capacity: int = getattr(deep_cfg, "memory_capacity", 3)
 
+        # --- Phase 0 DESCA parity fields (match Go AgentState semantics) ---
+        # Per-slot observation ages: length 12 (own 0..5, opp 6..11). Each entry is the
+        # turn the slot was last observed, or -1 if never observed. Consumers compute
+        # age = current_turn - last_seen and normalize by max_game_turns.
+        self.slot_last_seen_turn: list = [-1] * 12
+        # Cumulative dead-card histogram: counts of each bucket observed on the discard
+        # pile across the full game. 9 entries (bucket 0..8). Bucket 9 (UNKNOWN) ignored.
+        self.discard_bucket_counts: list = [0] * 9
+        self.total_discards_seen: int = 0
+        # Normalization bound for turn progress and observation ages. Read from config.
+        rules_cfg = getattr(self.config, "cambia_rules", None)
+        self.max_game_turns: int = int(getattr(rules_cfg, "max_game_turns", 300) or 300)
+        # Last known top-of-discard card (tracked on first appearance) to avoid
+        # double-incrementing the histogram on the same discard.
+        self._last_tracked_discard_bucket: int = -1
+
+        # --- Phase 0 DESCA action history ring buffer ---
+        # Per player, the 3 most recent actions this agent has observed. Each slot is
+        # either None (empty) or a tuple (category: int, target_slot_norm: float).
+        # Stored oldest first: index 0 = oldest of the last 3, index 2 = most recent.
+        # Keyed by player_id (self.player_id for own, self.opponent_id for opp).
+        self.action_history: dict = {
+            int(self.player_id): [None, None, None],
+            int(self.opponent_id): [None, None, None],
+        }
+
     def initialize(
         self,
         initial_observation: AgentObservation,
@@ -186,11 +213,31 @@ class AgentState:
         self.own_active_mask: list = []   # max EP_PBS_MAX_ACTIVE_MASK PrivOwn slot indices
         self.opp_active_mask: list = []   # max EP_PBS_MAX_ACTIVE_MASK PrivOpp slot indices
 
+        # Phase 0 parity: reset history + discard tracking at game start. The EP-PBS tag
+        # setter below stamps slot_last_seen_turn for peeked slots automatically.
+        self.slot_last_seen_turn = [-1] * 12
+        self.discard_bucket_counts = [0] * 9
+        self.total_discards_seen = 0
+        self._last_tracked_discard_bucket = -1
+        self.action_history = {
+            int(self.player_id): [None, None, None],
+            int(self.opponent_id): [None, None, None],
+        }
+
         # Initialize own slots from initial peek
         for slot_idx in range(self.initial_hand_size):
             info = self.own_hand.get(slot_idx)
             if info is not None and info.bucket != CardBucket.UNKNOWN:
                 self._eppbs_set_tag(slot_idx, EpistemicTag.PRIV_OWN, info.bucket.value)
+
+        # Track initial discard top (matches Go Initialize -> trackDiscard()).
+        initial_bucket = self.known_discard_top_bucket
+        if initial_bucket is not None:
+            bv = initial_bucket.value if hasattr(initial_bucket, "value") else int(initial_bucket)
+            if 0 <= bv < len(self.discard_bucket_counts):
+                self.discard_bucket_counts[bv] += 1
+                self.total_discards_seen += 1
+                self._last_tracked_discard_bucket = bv
 
         logger.debug(
             "Agent %d initialized (T%d). OH(%d): %s. OB(%d): %s",
@@ -249,6 +296,141 @@ class AgentState:
                 self.slot_tags[evicted] = EpistemicTag.UNK
                 self.slot_buckets[evicted] = 0
             self.opp_active_mask.append(slot)
+
+        # Phase 0 parity: stamp last-seen turn whenever this agent gained or confirmed
+        # knowledge of the card identity (PrivOwn or Pub). PrivOpp and Unk leave the
+        # timestamp untouched (opponent-only knowledge is not observable to the agent).
+        final_tag = self.slot_tags[slot]
+        if final_tag in (EpistemicTag.PRIV_OWN, EpistemicTag.PUB):
+            if 0 <= slot < len(self.slot_last_seen_turn):
+                self.slot_last_seen_turn[slot] = int(self._current_game_turn)
+
+    # --- Phase 0 DESCA helpers ---
+
+    @staticmethod
+    def _action_category(action) -> int:
+        """Return the 3-class category index for an action (see V2_ACTION_CATEGORY_*).
+
+        0 = DRAW_PHASE (DrawStockpile, DrawDiscard, CallCambia)
+        1 = DISCARD_PHASE (Discard, Replace)
+        2 = ABILITY_OR_SNAP (everything else)
+
+        Returns -1 for None so callers can skip recording.
+        """
+        from .constants import (
+            V2_ACTION_CATEGORY_DRAW,
+            V2_ACTION_CATEGORY_DISCARD,
+            V2_ACTION_CATEGORY_ABILITY_SNAP,
+        )
+        if action is None:
+            return -1
+        from .constants import (
+            ActionCallCambia,
+            ActionDiscard,
+            ActionDrawDiscard,
+            ActionDrawStockpile,
+        )
+        if isinstance(action, (ActionDrawStockpile, ActionDrawDiscard, ActionCallCambia)):
+            return V2_ACTION_CATEGORY_DRAW
+        if isinstance(action, (ActionDiscard, ActionReplace)):
+            return V2_ACTION_CATEGORY_DISCARD
+        return V2_ACTION_CATEGORY_ABILITY_SNAP
+
+    @staticmethod
+    def _action_primary_slot(action) -> int:
+        """Return the primary hand-slot index (0..5) for an action, or -1 if none."""
+        from .constants import (
+            ActionAbilityBlindSwapSelect,
+            ActionAbilityKingLookSelect,
+            ActionAbilityPeekOtherSelect,
+            ActionAbilityPeekOwnSelect,
+            ActionReplace,
+            ActionSnapOpponent,
+            ActionSnapOpponentMove,
+            ActionSnapOwn,
+        )
+        if action is None:
+            return -1
+        if isinstance(action, ActionReplace):
+            return int(action.target_hand_index)
+        if isinstance(action, ActionAbilityPeekOwnSelect):
+            return int(action.target_hand_index)
+        if isinstance(action, ActionAbilityPeekOtherSelect):
+            return int(action.target_opponent_hand_index)
+        if isinstance(action, (ActionAbilityBlindSwapSelect, ActionAbilityKingLookSelect)):
+            return int(action.own_hand_index)
+        if isinstance(action, ActionSnapOwn):
+            return int(action.own_card_hand_index)
+        if isinstance(action, ActionSnapOpponent):
+            return int(action.opponent_target_hand_index)
+        if isinstance(action, ActionSnapOpponentMove):
+            return int(action.own_card_to_move_hand_index)
+        return -1
+
+    def _record_action_history(self, actor: int, action) -> None:
+        """Push an action entry into the actor's ring buffer.
+
+        Matches Go ``pushActionHistory`` semantics exactly (engine/agent/state.go):
+        - While length < capacity: place the new entry at index ``length`` and bump.
+        - Once full: shift all entries left by one (dropping index 0, the oldest)
+          and write the new entry at the last index.
+
+        Oldest-first ordering: index 0 is always the earliest surviving action;
+        index ``length-1`` is the most recent. Trailing ``None`` slots represent
+        positions that have not yet been filled.
+        """
+        if action is None or actor is None or int(actor) < 0:
+            return
+        actor = int(actor)
+        if actor not in self.action_history:
+            return
+        category = self._action_category(action)
+        if category < 0:
+            return
+        primary = self._action_primary_slot(action)
+        slot_norm = (primary / 5.0) if primary >= 0 else 0.0
+        if slot_norm < 0.0:
+            slot_norm = 0.0
+        elif slot_norm > 1.0:
+            slot_norm = 1.0
+        ring = self.action_history[actor]
+        capacity = len(ring)
+        # Count filled slots (length).
+        length = 0
+        for entry in ring:
+            if entry is None:
+                break
+            length += 1
+        new_entry = (int(category), float(slot_norm))
+        if length < capacity:
+            ring[length] = new_entry
+            return
+        # Full: shift left, evicting the oldest at index 0.
+        for i in range(capacity - 1):
+            ring[i] = ring[i + 1]
+        ring[capacity - 1] = new_entry
+
+    def _track_new_discard(self, observation: "AgentObservation") -> None:
+        """Increment the dead-card histogram if a new card became visible on discard.
+
+        Fires when the observed action is Discard (either ability flag) or Replace, since
+        those are the only actions that push a card to the discard pile. Aligns with
+        Go-side ``trackDiscard()`` which runs after the public-knowledge update.
+        """
+        action = observation.action
+        if action is None:
+            return
+        if not isinstance(action, (ActionDiscard, ActionReplace)):
+            return
+        bucket_enum = self.known_discard_top_bucket
+        if bucket_enum is None:
+            return
+        bucket_val = bucket_enum.value if hasattr(bucket_enum, "value") else int(bucket_enum)
+        if bucket_val < 0 or bucket_val >= len(self.discard_bucket_counts):
+            return
+        self.discard_bucket_counts[bucket_val] += 1
+        self.total_discards_seen += 1
+        self._last_tracked_discard_bucket = bucket_val
 
     def _eppbs_update_from_action(self, action, actor: int, observation: "AgentObservation"):
         """Update EP-PBS epistemic tags based on the observed action.
@@ -414,6 +596,14 @@ class AgentState:
         self.game_phase = self._estimate_game_phase(
             observation.stockpile_size, self.cambia_caller, self._current_game_turn
         )
+
+        # Phase 0 parity: dead-card histogram update (must run AFTER known_discard_top_bucket
+        # is set and BEFORE any reconciliation, matching Go's trackDiscard() ordering).
+        try:
+            self._track_new_discard(observation)
+        except Exception as _e_track:
+            logger.debug("Agent %d: discard tracking failed T%d: %s",
+                         self.player_id, self._current_game_turn, _e_track)
         logger.debug(
             " Public State Updated: Disc:%s, Stock:%s, Phase:%s, Cambia:%s",
             self.known_discard_top_bucket.name,
@@ -954,6 +1144,17 @@ class AgentState:
                 e_eppbs,
             )
 
+        # --- 4c. Phase 0 DESCA action history ring buffer ---
+        try:
+            self._record_action_history(actor, action)
+        except Exception as e_hist:
+            logger.debug(
+                "Agent %d: action-history record failed T%d: %s",
+                self.player_id,
+                self._current_game_turn,
+                e_hist,
+            )
+
         # --- 5. Apply Time Decay (Level 2) ---
         if self.memory_level == 2:
             self._apply_time_decay(self._current_game_turn)
@@ -1472,6 +1673,15 @@ class AgentState:
         # Copy N-player knowledge mask state
         new_state.num_players = self.num_players
         new_state.knowledge_masks = {k: set(v) for k, v in self.knowledge_masks.items()}
+        # Copy Phase 0 DESCA parity fields
+        new_state.slot_last_seen_turn = list(self.slot_last_seen_turn)
+        new_state.discard_bucket_counts = list(self.discard_bucket_counts)
+        new_state.total_discards_seen = int(self.total_discards_seen)
+        new_state.max_game_turns = int(self.max_game_turns)
+        new_state._last_tracked_discard_bucket = int(self._last_tracked_discard_bucket)
+        new_state.action_history = {
+            k: list(v) for k, v in self.action_history.items()
+        }
         return new_state
 
     def __str__(self) -> str:

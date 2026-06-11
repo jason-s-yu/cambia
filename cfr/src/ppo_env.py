@@ -10,6 +10,7 @@ from src.game.engine import CambiaGameState
 from src.agent_state import AgentState, AgentObservation
 from src.encoding import (
     encode_infoset_eppbs_interleaved,
+    encode_infoset_eppbs_interleaved_v2,
     encode_action_mask,
     action_to_index,
     index_to_action,
@@ -26,10 +27,28 @@ from src.constants import (
     ActionAbilityKingSwapDecision,
     ActionSnapOpponentMove,
     NUM_PLAYERS,
+    EP_PBS_V2_INPUT_DIM,
 )
 from src.evaluate_agents import get_agent, NeuralAgentWrapper
 
 logger = logging.getLogger(__name__)
+
+
+def _peek_encoding_version(config_path: str) -> int:
+    """Read encoding_version from YAML without full Pydantic validation.
+
+    Used by CambiaEnv.__init__ to set observation_space shape before the
+    config is fully loaded. Keeps _config lazy (None until first reset).
+    Returns 1 on any read or parse error.
+    """
+    try:
+        import yaml
+
+        with open(config_path) as f:
+            raw = yaml.safe_load(f) or {}
+        return int(raw.get("deep_cfr", {}).get("encoding_version", 1))
+    except Exception:
+        return 1
 
 
 class CambiaEnv(gymnasium.Env):
@@ -49,8 +68,12 @@ class CambiaEnv(gymnasium.Env):
         config_path: str = "config.yaml",
     ):
         super().__init__()
+        # Peek at encoding_version from raw YAML to set obs dim.
+        # _config stays None until _load_config() is called on first reset().
+        self._encoding_version: int = _peek_encoding_version(config_path)
+        obs_dim = EP_PBS_V2_INPUT_DIM if self._encoding_version == 2 else EP_PBS_INPUT_DIM
         self.observation_space = gymnasium.spaces.Box(
-            -5.0, 5.0, (EP_PBS_INPUT_DIM,), np.float32
+            -5.0, 5.0, (obs_dim,), np.float32
         )
         self.action_space = gymnasium.spaces.Discrete(NUM_ACTIONS)
         self._opponent_type = opponent_type
@@ -72,6 +95,19 @@ class CambiaEnv(gymnasium.Env):
             from src.config import load_config
 
             self._config = load_config(self._config_path)
+            full_version = self._config.deep_cfr.encoding_version
+            if full_version != self._encoding_version:
+                raise RuntimeError(
+                    f"encoding_version mismatch between YAML peek ({self._encoding_version}) "
+                    f"and fully-resolved config ({full_version}). The peek in "
+                    f"_peek_encoding_version only reads the child YAML and does not follow "
+                    f"_base: inheritance or rule-profile defaults. observation_space was "
+                    f"sized from the peek value and cannot change after __init__, so a "
+                    f"mismatch would make the gym obs incompatible with the actual encoder "
+                    f"output. Fix by setting deep_cfr.encoding_version explicitly in "
+                    f"{self._config_path} (not inherited)."
+                )
+            self._encoding_version = full_version
 
     # ------------------------------------------------------------------
     # gymnasium API
@@ -200,6 +236,9 @@ class CambiaEnv(gymnasium.Env):
         gs = self._game_state
         ctx = self._get_decision_context(gs)
         st = self._agent_states[self._agent_seat]
+
+        if self._encoding_version == 2:
+            return encode_infoset_eppbs_interleaved_v2(st, ctx).astype(np.float32)
 
         if st.cambia_caller is None:
             cambia_state = 2
