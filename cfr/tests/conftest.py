@@ -104,6 +104,7 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         profile_step: Optional[List[int]] = None
         encoding_mode: str = "legacy"
         encoding_layout: str = "auto"
+        encoding_version: int = 1
         # Memory archetype fields
         memory_archetype: str = "perfect"
         memory_decay_lambda: float = 0.1
@@ -156,6 +157,32 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         sog_exploration_epsilon: float = 0.05
         sog_warm_start_checkpoint: str = ""
 
+    class _StallDetectionConfig(_BaseModel):
+        """Stub for StallDetectionConfig."""
+        window_size_iters: int = 50
+        num_windows: int = 5
+        max_iter_abs: int = 3000
+
+    class _DESCAConfig(_BaseModel):
+        """Stub for DESCAConfig."""
+        encoding_version: int = 2
+        hidden_dim: int = 512
+        num_abstract_actions: int = 32
+        iterations: int = 1000
+        traversals_per_iter: int = 2000
+        minibatch: int = 1024
+        lr: float = 3.0e-4
+        weight_decay: float = 1.0e-4
+        grad_clip: float = 1.0
+        dcfr_alpha: float = 1.5
+        apcfr_asymmetry: float = 0.9
+        buffer_capacity: int = 2_000_000
+        checkpoint_every: int = 50
+        eval_every: int = 50
+        warmup_iters: int = 50
+        inner_update: str = "apcfr_plus"
+        stall_detection: _StallDetectionConfig = _Field(default_factory=_StallDetectionConfig)
+
     def _load_config(path: str):
         """Stub load_config: delegate to the real load_config implementation."""
         try:
@@ -183,6 +210,8 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
     _config_stub.AgentsConfig = _StubConfig
     _config_stub.AnalysisConfig = _StubConfig
     _config_stub.DeepCfrConfig = _DeepCfrConfig
+    _config_stub.StallDetectionConfig = _StallDetectionConfig
+    _config_stub.DESCAConfig = _DESCAConfig
     _config_stub.load_config = _load_config
 
     sys.modules["src.config"] = _config_stub

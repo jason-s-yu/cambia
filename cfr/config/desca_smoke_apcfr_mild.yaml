@@ -1,0 +1,10 @@
+_base: desca_smoke_base.yaml
+
+run_name: desca-smoke-apcfr-mild
+
+persistence:
+  agent_data_save_path: "runs/desca-smoke-apcfr-mild/checkpoints/desca_checkpoint.pt"
+
+desca:
+  inner_update: apcfr_plus
+  apcfr_asymmetry: 0.5

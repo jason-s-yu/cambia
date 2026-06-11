@@ -1,0 +1,14 @@
+_base: desca_phase1_base.yaml
+
+# DESCA Phase 1 APCFR+ mild: lower asymmetry ratio (0.5) for bracketing.
+# Paired with desca_phase1_apcfr.yaml (apcfr_asymmetry=0.9, "strong") to
+# empirically ground the extrapolation coefficient choice.
+
+run_name: desca-phase1-apcfr-mild
+
+persistence:
+  agent_data_save_path: "runs/desca-phase1-apcfr-mild/checkpoints/desca_checkpoint.pt"
+
+desca:
+  inner_update: apcfr_plus
+  apcfr_asymmetry: 0.5

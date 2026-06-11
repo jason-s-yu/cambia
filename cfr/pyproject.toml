@@ -32,8 +32,10 @@ include = ["src", "src.*"]
 filterwarnings = [
     "ignore:GoEngine\\(\\) without house_rules:DeprecationWarning",
 ]
+addopts = "-m 'not slow'"
 markers = [
     "integration: slow end-to-end tests requiring libcambia.so (>10s)",
+    "slow: tests that run >30s (convergence, large eval loops); excluded from default CI run",
 ]
 
 [tool.black]
