@@ -1,0 +1,57 @@
+# DESCA Phase 1 base config - shared hyperparameters for both ablation runs.
+# Do not train directly from this file; use desca_phase1_apcfr.yaml or
+# desca_phase1_rmplus.yaml, which inherit via _base and set inner_update.
+#
+# Usage:
+#   cambia train desca --config config/desca_phase1_apcfr.yaml
+#   cambia train desca --config config/desca_phase1_rmplus.yaml
+
+algorithm: desca
+
+agent_params:
+  memory_level: 1
+  time_decay_turns: 3
+
+cambia_rules:
+  allowDrawFromDiscardPile: false
+  allowReplaceAbilities: false
+  snapRace: false
+  penaltyDrawCount: 2
+  use_jokers: 2
+  cards_per_player: 4
+  initial_view_count: 2
+  cambia_allowed_round: 0
+  allowOpponentSnapping: false
+  max_game_turns: 46
+
+persistence:
+  agent_data_save_path: "runs/desca-phase1/checkpoints/desca_checkpoint.pt"
+
+logging:
+  log_level_file: "INFO"
+  log_level_console: "WARNING"
+
+desca:
+  encoding_version: 2
+  hidden_dim: 512
+  num_abstract_actions: 32
+  iterations: 1000
+  # K=2000 per spec §8.3 default. Restored 2026-04-25 after Go FFI env_factory
+  # landed: the K=500 reduction was a banned deferral type 4 under the policy
+  # in `protocol.md` §"Deferrals and performance". Calibrated post-perf-work,
+  # K=2000 lands at ~111s/iter single-process (within spec §8.4 ≤130s/iter SLO).
+  traversals_per_iter: 2000
+  minibatch: 1024
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  dcfr_alpha: 1.5
+  apcfr_asymmetry: 0.9
+  buffer_capacity: 2000000
+  checkpoint_every: 50
+  eval_every: 50
+  warmup_iters: 50
+  stall_detection:
+    window_size_iters: 50
+    num_windows: 5
+    max_iter_abs: 3000

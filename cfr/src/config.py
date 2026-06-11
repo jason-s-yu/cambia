@@ -1,6 +1,6 @@
 """src/config.py"""
 
-from typing import List, Dict, TypeVar, Optional, Union, Any
+from typing import List, Dict, TypeVar, Optional, Union, Any, Literal
 import os
 import logging
 import re
@@ -396,6 +396,7 @@ class DeepCfrConfig(_CambiaBaseModel):
     # Encoding
     encoding_mode: str = "legacy"
     encoding_layout: str = "auto"
+    encoding_version: int = 1  # 1 = legacy 224-dim, 2 = 257-dim (Phase 0 DESCA)
 
     # Memory archetype
     memory_archetype: str = "perfect"
@@ -420,6 +421,40 @@ class DeepCfrConfig(_CambiaBaseModel):
     # Adaptive training steps
     target_buffer_passes: float = 0.0
     value_target_buffer_passes: float = 2.0
+
+
+# --- DESCA Configuration ---
+
+
+class StallDetectionConfig(_CambiaBaseModel):
+    """Stall detection parameters for DESCA training."""
+
+    window_size_iters: int = 50
+    num_windows: int = 5
+    max_iter_abs: int = 3000
+
+
+class DESCAConfig(_CambiaBaseModel):
+    """Configuration for DESCA (Dense ESCHER + Semantic Action Abstraction) training."""
+
+    encoding_version: int = 2
+    hidden_dim: int = 512
+    num_abstract_actions: int = 32
+    iterations: int = 1000
+    traversals_per_iter: int = 2000
+    minibatch: int = 1024
+    lr: float = 3.0e-4
+    weight_decay: float = 1.0e-4
+    grad_clip: float = 1.0
+    dcfr_alpha: float = 1.5
+    apcfr_asymmetry: float = 0.9
+    buffer_capacity: int = 2_000_000
+    checkpoint_every: int = 50
+    eval_every: int = 50
+    warmup_iters: int = 50
+    inner_update: Literal["apcfr_plus", "rm_plus"] = "apcfr_plus"
+    use_bf16_inference: bool = True
+    stall_detection: StallDetectionConfig = Field(default_factory=StallDetectionConfig)
 
 
 # --- Baseline Agent Configuration ---
@@ -455,6 +490,7 @@ class Config(_CambiaBaseModel):
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
     deep_cfr: DeepCfrConfig = Field(default_factory=DeepCfrConfig)
+    desca: Optional[DESCAConfig] = None
     _source_path: Optional[str] = PrivateAttr(default=None)
 
     @model_validator(mode="before")
@@ -471,34 +507,53 @@ class Config(_CambiaBaseModel):
         return values
 
 
+def resolve_config_yaml(config_path: Union[str, Path]) -> dict:
+    """Read a config YAML and return the merged raw dict (resolves _base + _rule_profile).
+
+    _base resolution searches: (1) next to config_path, (2) cfr/config/. The fallback
+    lets eval load run-dir configs that retain a _base reference even though the base
+    file lives in cfr/config/, not in the run dir.
+    """
+    config_path = Path(config_path)
+    with open(config_path, encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+    base_path = raw.pop("_base", None)
+    if base_path:
+        candidates = [
+            config_path.parent / base_path,
+            Path(__file__).parent.parent / "config" / base_path,
+        ]
+        base_resolved = next((c for c in candidates if c.exists()), None)
+        if base_resolved is None:
+            raise FileNotFoundError(
+                f"_base '{base_path}' referenced by {config_path} not found in: "
+                f"{[str(c) for c in candidates]}"
+            )
+        with open(base_resolved, encoding="utf-8") as bf:
+            base_raw = yaml.safe_load(bf) or {}
+        base_raw.pop("_base", None)
+        raw = _deep_merge(base_raw, raw)
+    rule_profile = raw.pop("_rule_profile", None)
+    if rule_profile:
+        config_dir = config_path.parent
+        profile_path = config_dir / "rule_profiles" / f"{rule_profile}.yaml"
+        if not profile_path.exists():
+            profile_path = (
+                Path(__file__).parent.parent / "config" / "rule_profiles" / f"{rule_profile}.yaml"
+            )
+        if profile_path.exists():
+            with open(profile_path, encoding="utf-8") as pf:
+                profile_raw = yaml.safe_load(pf) or {}
+            raw["cambia_rules"] = _deep_merge(profile_raw, raw.get("cambia_rules", {}))
+        else:
+            log.warning("Rule profile '%s' not found at %s", rule_profile, profile_path)
+    return raw
+
+
 def load_config(config_path: str = "config.yaml") -> Config:
     """Loads configuration from a YAML file."""
     try:
-        with open(config_path) as f:
-            raw = yaml.safe_load(f) or {}
-        base_path = raw.pop("_base", None)
-        if base_path:
-            abs_base = Path(config_path).parent / base_path
-            with open(abs_base) as bf:
-                base_raw = yaml.safe_load(bf) or {}
-            base_raw.pop("_base", None)
-            raw = _deep_merge(base_raw, raw)
-        # _rule_profile support
-        rule_profile = raw.pop("_rule_profile", None)
-        if rule_profile:
-            config_dir = Path(config_path).parent
-            profile_path = config_dir / "rule_profiles" / f"{rule_profile}.yaml"
-            if not profile_path.exists():
-                profile_path = (
-                    Path(__file__).parent.parent / "config" / "rule_profiles" / f"{rule_profile}.yaml"
-                )
-            if profile_path.exists():
-                with open(profile_path) as pf:
-                    profile_raw = yaml.safe_load(pf) or {}
-                raw["cambia_rules"] = _deep_merge(profile_raw, raw.get("cambia_rules", {}))
-            else:
-                log.warning("Rule profile '%s' not found at %s", rule_profile, profile_path)
-        # use_gpu backward compat
+        raw = resolve_config_yaml(config_path)
         deep = raw.get("deep_cfr", {})
         if "use_gpu" in deep and "device" not in deep:
             deep["device"] = "cuda" if deep.pop("use_gpu") else "cpu"

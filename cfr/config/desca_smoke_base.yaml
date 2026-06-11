@@ -1,0 +1,16 @@
+# DESCA smoke test base - fast variant for integration smoke only.
+# traversals_per_iter=20 keeps 2-iter smoke under a minute.
+# Not for production training; use desca_phase1_*.yaml for that.
+
+_base: desca_phase1_base.yaml
+
+logging:
+  log_level_file: "WARNING"
+  log_level_console: "WARNING"
+
+desca:
+  traversals_per_iter: 20
+  buffer_capacity: 10000
+  checkpoint_every: 1
+  eval_every: 1000
+  warmup_iters: 1

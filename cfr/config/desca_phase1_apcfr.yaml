@@ -1,0 +1,14 @@
+_base: desca_phase1_base.yaml
+
+# DESCA Phase 1 APCFR+ strong: asymmetry ratio 0.9 (config default).
+# Asymmetric predictive step sizes per Meng et al. Mar 2025.
+# Paired with desca_phase1_apcfr_mild.yaml (0.5) to bracket the coefficient.
+
+run_name: desca-phase1-apcfr-strong
+
+persistence:
+  agent_data_save_path: "runs/desca-phase1-apcfr-strong/checkpoints/desca_checkpoint.pt"
+
+desca:
+  inner_update: apcfr_plus
+  apcfr_asymmetry: 0.9

@@ -1,0 +1,9 @@
+_base: desca_smoke_base.yaml
+
+run_name: desca-smoke-rmplus
+
+persistence:
+  agent_data_save_path: "runs/desca-smoke-rmplus/checkpoints/desca_checkpoint.pt"
+
+desca:
+  inner_update: rm_plus

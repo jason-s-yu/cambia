@@ -1,0 +1,12 @@
+_base: desca_phase1_base.yaml
+
+# DESCA Phase 1 ablation baseline: plain RM+ inner update.
+# Required to establish whether APCFR+ is worth the added complexity.
+
+run_name: desca-phase1-rmplus
+
+persistence:
+  agent_data_save_path: "runs/desca-phase1-rmplus/checkpoints/desca_checkpoint.pt"
+
+desca:
+  inner_update: rm_plus
