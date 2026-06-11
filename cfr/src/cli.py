@@ -25,6 +25,17 @@ train_app = typer.Typer(
 app.add_typer(train_app, name="train")
 
 
+def register_with_aliases(app, names, fn, *, help: Optional[str] = None) -> None:
+    """Register a single Typer callback under multiple command names.
+
+    Typer/Click lacks native command aliases, so the same callable is
+    registered once per alias. Used to let users invoke identical behaviour via
+    dashed, undashed, or underscored forms (e.g. `gt-cfr` <-> `gtcfr`).
+    """
+    for name in names:
+        app.command(name, help=help)(fn)
+
+
 def setup_multiprocessing():
     """Set up multiprocessing start method for stability."""
     try:
@@ -698,6 +709,932 @@ def train_ppo_cmd(
     )
 
 
+def _build_desca_python_env_factory(cfg):
+    """Build the production DESCA env_factory backed by the Python CambiaGameState.
+
+    Factored out of `train_desca` so the regression test in
+    `tests/test_desca_env_factory_omniscient.py` can exercise the same code
+    path. The classes are defined inside this builder (not at module scope)
+    so that `_Agent.update`'s `isinstance(engine, _Engine)` check binds to
+    the same class object the factory produces.
+    """
+    import copy
+    from .game.engine import CambiaGameState
+    from .agent_state import AgentState, AgentObservation
+    from .constants import DecisionContext, ActionDiscard
+    from .abstraction import get_card_bucket
+
+    _counter = [0]
+
+    class _Engine:
+        def __init__(self, game):
+            self._game = game
+            self._last_actor = -1
+            self._last_action = None
+
+        def legal_actions(self):
+            return sorted(self._game.get_legal_actions(), key=repr)
+
+        def is_terminal(self):
+            return self._game.is_terminal()
+
+        def get_utility(self):
+            if not self._game.is_terminal():
+                return [0.0] * len(self._game.players)
+            return [float(self._game.get_utility(i)) for i in range(len(self._game.players))]
+
+        def get_acting_player(self):
+            return int(self._game.current_player_index)
+
+        def apply_action(self, action):
+            self._last_actor = int(self._game.current_player_index)
+            self._last_action = action
+            try:
+                self._game.apply_action(action)
+            except Exception:
+                pass
+
+        def save(self):
+            return copy.deepcopy(self._game)
+
+        def restore(self, snap):
+            self._game.__dict__.update(snap.__dict__)
+            self._last_actor = -1
+            self._last_action = None
+
+        def free_snapshot(self, snap):
+            pass
+
+        def get_decision_context(self):
+            if getattr(self._game, "snap_phase_active", False):
+                return DecisionContext.SNAP_DECISION.value
+            pending = getattr(self._game, "pending_action", None)
+            if pending is not None:
+                if isinstance(pending, ActionDiscard):
+                    return DecisionContext.POST_DRAW.value
+                return DecisionContext.ABILITY_SELECT.value
+            return DecisionContext.START_TURN.value
+
+        def get_drawn_card_bucket(self):
+            return -1
+
+        def _omniscient_features(self):
+            """Return 120-dim (2P) omniscient feature vector reading Python game cards.
+
+            Format mirrors `cfr.src.cfr.omniscient.compute_omniscient_features`:
+            10-dim per slot (one-hot 0..8 for CardBucket, 9 for empty/unknown);
+            slot order is `p * MaxHandSize + s` for p in [0, num_players),
+            s in [0, MaxHandSize). Avoids the silent zero-fallback at
+            `desca_worker._encode_omniscient` for the Python backend.
+            """
+            import numpy as _np
+            _MAX_HAND_SIZE = 6  # matches engine.MaxHandSize on the Go side
+            _PER_SLOT = 10
+            num_players = len(self._game.players)
+            feats = _np.zeros(num_players * _MAX_HAND_SIZE * _PER_SLOT, dtype=_np.float32)
+            for p in range(num_players):
+                hand = self._game.players[p].hand
+                for s in range(_MAX_HAND_SIZE):
+                    base = (p * _MAX_HAND_SIZE + s) * _PER_SLOT
+                    if s >= len(hand) or hand[s] is None:
+                        feats[base + 9] = 1.0
+                        continue
+                    v = get_card_bucket(hand[s]).value
+                    if v >= 9:
+                        feats[base + 9] = 1.0
+                    else:
+                        feats[base + v] = 1.0
+            return feats
+
+    class _Agent:
+        def __init__(self, agent_state):
+            object.__setattr__(self, "_agent", agent_state)
+
+        def update(self, engine):
+            if not isinstance(engine, _Engine):
+                return
+            if engine._last_action is None:
+                return
+            game = engine._game
+            try:
+                obs = AgentObservation(
+                    acting_player=engine._last_actor,
+                    action=engine._last_action,
+                    discard_top_card=game.get_discard_top(),
+                    player_hand_sizes=[
+                        game.get_player_card_count(i)
+                        for i in range(len(game.players))
+                    ],
+                    stockpile_size=game.get_stockpile_size(),
+                    drawn_card=None,
+                    peeked_cards=None,
+                    snap_results=[],
+                    did_cambia_get_called=False,
+                    who_called_cambia=None,
+                    is_game_over=game.is_terminal(),
+                    current_turn=game.get_turn_number(),
+                )
+                object.__getattribute__(self, "_agent").update(obs)
+            except Exception:
+                pass
+
+        def clone(self):
+            return _Agent(copy.deepcopy(object.__getattribute__(self, "_agent")))
+
+        def __getattr__(self, name):
+            return getattr(object.__getattribute__(self, "_agent"), name)
+
+        def __setattr__(self, name, value):
+            setattr(object.__getattribute__(self, "_agent"), name, value)
+
+    memory_level = getattr(getattr(cfg, "agent_params", None), "memory_level", 1)
+    time_decay_turns = getattr(getattr(cfg, "agent_params", None), "time_decay_turns", 3)
+
+    def factory(rng=None):
+        _counter[0] += 1
+        game = CambiaGameState(house_rules=cfg.cambia_rules)
+        engine = _Engine(game)
+        num_players = len(game.players)
+        init_obs = AgentObservation(
+            acting_player=-1,
+            action=None,
+            discard_top_card=game.get_discard_top(),
+            player_hand_sizes=[game.get_player_card_count(i) for i in range(num_players)],
+            stockpile_size=game.get_stockpile_size(),
+            drawn_card=None,
+            peeked_cards=None,
+            snap_results=[],
+            did_cambia_get_called=False,
+            who_called_cambia=None,
+            is_game_over=False,
+            current_turn=0,
+        )
+        agents = []
+        for pid in range(num_players):
+            initial_hand = list(game.players[pid].hand)
+            initial_peeks = getattr(
+                game.players[pid], "initial_peek_indices", tuple(range(len(initial_hand)))
+            )
+            agent_state = AgentState(
+                player_id=pid,
+                opponent_id=1 - pid,
+                memory_level=memory_level,
+                time_decay_turns=time_decay_turns,
+                initial_hand_size=len(initial_hand),
+                config=cfg,
+            )
+            agent_state.initialize(init_obs, initial_hand, initial_peeks)
+            agents.append(_Agent(agent_state))
+        return engine, agents
+
+    return factory
+
+
+def _build_desca_env_factory_for_test():
+    """Test-only convenience wrapper. Builds a minimal DESCA config and returns
+    the production env_factory. Used by `tests/test_desca_env_factory_omniscient.py`
+    to verify the omniscient pipe end-to-end."""
+    from .config import load_config
+    from pathlib import Path as _Path
+    cfg_path = _Path(__file__).parent.parent / "config" / "desca_phase1_rmplus.yaml"
+    cfg = load_config(str(cfg_path))
+    return _build_desca_python_env_factory(cfg)
+
+
+def _build_desca_go_env_factory(cfg):
+    """Build a DESCA env_factory backed by the Go FFI engine + agent.
+
+    Production path. Eliminates `copy.deepcopy` of Python `CambiaGameState`
+    in the hot loop and routes the omniscient critic through
+    `GoEngine._get_all_cards_unsafe` (compute_omniscient_features uses this
+    directly, no fallback needed).
+
+    The adapter classes mirror the surface contract documented on
+    `desca_worker.run_desca_iteration`:
+      - engine: legal_actions, is_terminal, get_utility, get_acting_player,
+                apply_action, save, restore, free_snapshot,
+                get_decision_context, get_drawn_card_bucket. The FFI engine
+                also exposes `_get_all_cards_unsafe` so
+                `compute_omniscient_features` works directly without the
+                `_omniscient_features` fallback.
+      - agent:  update(engine), clone(); plus Python AgentState attrs needed
+                by `cfr/src/action_abstraction.py`: own_hand (dict[slot ->
+                _OwnInfo(bucket, last_seen_turn)]), opponent_belief (dict[slot
+                -> CardBucket]), _current_game_turn (int).
+    """
+    import numpy as np
+    from dataclasses import dataclass
+    from .ffi.bridge import GoEngine, GoAgentState
+    from .constants import (
+        ActionAbilityBlindSwapSelect,
+        ActionAbilityKingLookSelect,
+        ActionAbilityKingSwapDecision,
+        ActionAbilityPeekOtherSelect,
+        ActionAbilityPeekOwnSelect,
+        ActionCallCambia,
+        ActionDiscard,
+        ActionDrawDiscard,
+        ActionDrawStockpile,
+        ActionPassSnap,
+        ActionReplace,
+        ActionSnapOpponent,
+        ActionSnapOpponentMove,
+        ActionSnapOwn,
+        CardBucket,
+    )
+
+    # --- 146-action index decoder (mirror of engine/types.go EncodeXxx) ---
+    _IDX_DRAW_STOCKPILE = 0
+    _IDX_DRAW_DISCARD = 1
+    _IDX_CALL_CAMBIA = 2
+    _IDX_DISCARD_NO_ABILITY = 3
+    _IDX_DISCARD_ABILITY = 4
+    _IDX_REPLACE_BASE = 5  # 5-10
+    _IDX_PEEK_OWN_BASE = 11  # 11-16
+    _IDX_PEEK_OTHER_BASE = 17  # 17-22
+    _IDX_BLIND_SWAP_BASE = 23  # 23-58 (6x6=36)
+    _IDX_KING_LOOK_BASE = 59  # 59-94 (6x6=36)
+    _IDX_KING_SWAP_FALSE = 95
+    _IDX_KING_SWAP_TRUE = 96
+    _IDX_PASS_SNAP = 97
+    _IDX_SNAP_OWN_BASE = 98  # 98-103
+    _IDX_SNAP_OPP_BASE = 104  # 104-109
+    _IDX_SNAP_OPP_MOVE_BASE = 110  # 110-145 (6x6=36)
+    _MAX_HAND = 6
+
+    def _index_to_named_action(idx: int):
+        """Decode an action index in [0,146) to its NamedTuple."""
+        if idx == _IDX_DRAW_STOCKPILE:
+            return ActionDrawStockpile()
+        if idx == _IDX_DRAW_DISCARD:
+            return ActionDrawDiscard()
+        if idx == _IDX_CALL_CAMBIA:
+            return ActionCallCambia()
+        if idx == _IDX_DISCARD_NO_ABILITY:
+            return ActionDiscard(use_ability=False)
+        if idx == _IDX_DISCARD_ABILITY:
+            return ActionDiscard(use_ability=True)
+        if _IDX_REPLACE_BASE <= idx < _IDX_PEEK_OWN_BASE:
+            return ActionReplace(target_hand_index=idx - _IDX_REPLACE_BASE)
+        if _IDX_PEEK_OWN_BASE <= idx < _IDX_PEEK_OTHER_BASE:
+            return ActionAbilityPeekOwnSelect(target_hand_index=idx - _IDX_PEEK_OWN_BASE)
+        if _IDX_PEEK_OTHER_BASE <= idx < _IDX_BLIND_SWAP_BASE:
+            return ActionAbilityPeekOtherSelect(
+                target_opponent_hand_index=idx - _IDX_PEEK_OTHER_BASE
+            )
+        if _IDX_BLIND_SWAP_BASE <= idx < _IDX_KING_LOOK_BASE:
+            offset = idx - _IDX_BLIND_SWAP_BASE
+            return ActionAbilityBlindSwapSelect(
+                own_hand_index=offset // _MAX_HAND,
+                opponent_hand_index=offset % _MAX_HAND,
+            )
+        if _IDX_KING_LOOK_BASE <= idx < _IDX_KING_SWAP_FALSE:
+            offset = idx - _IDX_KING_LOOK_BASE
+            return ActionAbilityKingLookSelect(
+                own_hand_index=offset // _MAX_HAND,
+                opponent_hand_index=offset % _MAX_HAND,
+            )
+        if idx == _IDX_KING_SWAP_FALSE:
+            return ActionAbilityKingSwapDecision(perform_swap=False)
+        if idx == _IDX_KING_SWAP_TRUE:
+            return ActionAbilityKingSwapDecision(perform_swap=True)
+        if idx == _IDX_PASS_SNAP:
+            return ActionPassSnap()
+        if _IDX_SNAP_OWN_BASE <= idx < _IDX_SNAP_OPP_BASE:
+            return ActionSnapOwn(own_card_hand_index=idx - _IDX_SNAP_OWN_BASE)
+        if _IDX_SNAP_OPP_BASE <= idx < _IDX_SNAP_OPP_MOVE_BASE:
+            return ActionSnapOpponent(opponent_target_hand_index=idx - _IDX_SNAP_OPP_BASE)
+        if _IDX_SNAP_OPP_MOVE_BASE <= idx < 146:
+            offset = idx - _IDX_SNAP_OPP_MOVE_BASE
+            return ActionSnapOpponentMove(
+                own_card_to_move_hand_index=offset // _MAX_HAND,
+                target_empty_slot_index=offset % _MAX_HAND,
+            )
+        raise ValueError(f"unrecognized action index {idx}")
+
+    def _named_action_to_index(action) -> int:
+        """Encode a NamedTuple action back to its 146-action index."""
+        tag = getattr(action, "tag", None)
+        if tag == "draw_stockpile":
+            return _IDX_DRAW_STOCKPILE
+        if tag == "draw_discard":
+            return _IDX_DRAW_DISCARD
+        if tag == "call_cambia":
+            return _IDX_CALL_CAMBIA
+        if tag == "discard":
+            return _IDX_DISCARD_ABILITY if action.use_ability else _IDX_DISCARD_NO_ABILITY
+        if tag == "replace":
+            return _IDX_REPLACE_BASE + int(action.target_hand_index)
+        if tag == "peek_own":
+            return _IDX_PEEK_OWN_BASE + int(action.target_hand_index)
+        if tag == "peek_other":
+            return _IDX_PEEK_OTHER_BASE + int(action.target_opponent_hand_index)
+        if tag == "blind_swap":
+            return (
+                _IDX_BLIND_SWAP_BASE
+                + int(action.own_hand_index) * _MAX_HAND
+                + int(action.opponent_hand_index)
+            )
+        if tag == "king_look":
+            return (
+                _IDX_KING_LOOK_BASE
+                + int(action.own_hand_index) * _MAX_HAND
+                + int(action.opponent_hand_index)
+            )
+        if tag == "king_swap":
+            return _IDX_KING_SWAP_TRUE if action.perform_swap else _IDX_KING_SWAP_FALSE
+        if tag == "pass_snap":
+            return _IDX_PASS_SNAP
+        if tag == "snap_own":
+            return _IDX_SNAP_OWN_BASE + int(action.own_card_hand_index)
+        if tag == "snap_opp":
+            return _IDX_SNAP_OPP_BASE + int(action.opponent_target_hand_index)
+        if tag == "snap_opp_move":
+            return (
+                _IDX_SNAP_OPP_MOVE_BASE
+                + int(action.own_card_to_move_hand_index) * _MAX_HAND
+                + int(action.target_empty_slot_index)
+            )
+        raise ValueError(f"unrecognized action tag {tag!r}")
+
+    @dataclass
+    class _OwnInfo:
+        """Lightweight stand-in for Python AgentState.KnownCardInfo.
+
+        action_abstraction.py only reads ``.bucket`` and ``.last_seen_turn``;
+        we deliberately avoid exposing a Card attribute because we don't have
+        actual card identity (only bucket) on the Go path. This is byte-equal
+        to the inputs action_abstraction needs.
+        """
+
+        bucket: CardBucket
+        last_seen_turn: int
+
+    class _GoEngineAdapter:
+        """Adapter mirroring the duck-typed contract on `desca_worker._traverse`.
+
+        Wraps a `GoEngine`. Exposes:
+          legal_actions, is_terminal, get_utility, get_acting_player,
+          apply_action (NamedTuple), save, restore, free_snapshot,
+          get_decision_context, get_drawn_card_bucket, _get_all_cards_unsafe.
+        """
+
+        def __init__(self, go_engine: GoEngine) -> None:
+            self._engine = go_engine
+            # `compute_omniscient_features` checks for `num_players`; expose it.
+            self.num_players = int(getattr(go_engine, "_num_players", 2))
+
+        def legal_actions(self):
+            mask = self._engine.legal_actions_mask()
+            indices = np.flatnonzero(mask)
+            return [_index_to_named_action(int(i)) for i in indices]
+
+        def is_terminal(self) -> bool:
+            return self._engine.is_terminal()
+
+        def get_utility(self):
+            return self._engine.get_utility()
+
+        def get_acting_player(self) -> int:
+            return self._engine.acting_player()
+
+        def apply_action(self, action) -> None:
+            self._engine.apply_action(_named_action_to_index(action))
+
+        def save(self) -> int:
+            return self._engine.save()
+
+        def restore(self, snap_h: int) -> None:
+            self._engine.restore(snap_h)
+
+        def free_snapshot(self, snap_h: int) -> None:
+            self._engine.free_snapshot(snap_h)
+
+        def get_decision_context(self) -> int:
+            return self._engine.decision_ctx()
+
+        def get_drawn_card_bucket(self) -> int:
+            return self._engine.get_drawn_card_bucket()
+
+        def _get_all_cards_unsafe(self) -> np.ndarray:
+            """Bridge to GoEngine for compute_omniscient_features."""
+            return self._engine._get_all_cards_unsafe()
+
+        def close(self) -> None:
+            try:
+                self._engine.close()
+            except Exception:
+                pass
+
+        # Expose the underlying GoEngine for tests / parity checks.
+        @property
+        def go_engine(self) -> GoEngine:
+            return self._engine
+
+    class _GoAgentStateAdapter:
+        """Adapter wrapping a GoAgentState for DESCA traversal.
+
+        Exposes the Python AgentState attribute surface that
+        `cfr/src/action_abstraction.py` reads:
+          own_hand: Dict[int, _OwnInfo]
+          opponent_belief: Dict[int, CardBucket]
+          _current_game_turn: int
+
+        These are refreshed on every `update(engine)` call. `_go_agent` is
+        also published so `cfr/src/encoding.py:encode_infoset_eppbs_interleaved_v2`
+        can fast-path through the FFI v2 encoder (byte-equivalent to the
+        slow Python path on equivalent state, by Phase 0 cross-validation).
+        """
+
+        def __init__(self, go_agent: GoAgentState) -> None:
+            object.__setattr__(self, "_go_agent", go_agent)
+            object.__setattr__(self, "own_hand", {})
+            object.__setattr__(self, "opponent_belief", {})
+            object.__setattr__(self, "_current_game_turn", 0)
+            self._refresh()
+
+        def _refresh(self) -> None:
+            """Pull own_hand, opponent_belief, current_turn from the Go agent.
+
+            Bucket value mapping (Go -> Python CardBucket):
+              0..8 -> CardBucket(0..8) (ZERO..HIGH_KING)
+              9    -> CardBucket.UNKNOWN (Python uses sentinel value 99 for UNKNOWN)
+              0xFF -> CardBucket.UNKNOWN (Go sentinel for empty/out-of-range slot)
+            """
+            ga: GoAgentState = self._go_agent
+            own_arr = ga.get_own_hand_buckets_and_seen()
+            opp_arr = ga.get_opp_belief_buckets()
+            own_len, opp_len = ga.get_hand_lens()
+            current_turn = ga.get_current_turn()
+
+            def _go_bucket_to_py(v: int) -> CardBucket:
+                if v == 0xFF or v == 9:
+                    return CardBucket.UNKNOWN
+                if 0 <= v <= 8:
+                    return CardBucket(v)
+                return CardBucket.UNKNOWN
+
+            new_own = {}
+            for s in range(own_len):
+                bucket = _go_bucket_to_py(int(own_arr[s, 0]))
+                last_seen = int(own_arr[s, 1])
+                new_own[s] = _OwnInfo(bucket=bucket, last_seen_turn=last_seen)
+
+            new_opp = {}
+            for s in range(opp_len):
+                new_opp[s] = _go_bucket_to_py(int(opp_arr[s]))
+
+            object.__setattr__(self, "own_hand", new_own)
+            object.__setattr__(self, "opponent_belief", new_opp)
+            object.__setattr__(self, "_current_game_turn", int(current_turn))
+
+        def update(self, engine_adapter) -> None:
+            """Update the Go-side belief state, then refresh cached attrs.
+
+            Accepts either a `_GoEngineAdapter` or a raw GoEngine for
+            flexibility; the GoAgentState.update API needs the raw GoEngine.
+            """
+            go_engine = getattr(engine_adapter, "go_engine", engine_adapter)
+            self._go_agent.update(go_engine)
+            self._refresh()
+
+        def clone(self) -> "_GoAgentStateAdapter":
+            new_go_agent = self._go_agent.clone()
+            new_obj = _GoAgentStateAdapter.__new__(_GoAgentStateAdapter)
+            object.__setattr__(new_obj, "_go_agent", new_go_agent)
+            object.__setattr__(new_obj, "own_hand", dict(self.own_hand))
+            object.__setattr__(new_obj, "opponent_belief", dict(self.opponent_belief))
+            object.__setattr__(
+                new_obj, "_current_game_turn", int(self._current_game_turn)
+            )
+            return new_obj
+
+        def close(self) -> None:
+            try:
+                self._go_agent.close()
+            except Exception:
+                pass
+
+    memory_level = getattr(getattr(cfg, "agent_params", None), "memory_level", 1)
+    time_decay_turns = getattr(getattr(cfg, "agent_params", None), "time_decay_turns", 3)
+
+    def factory(rng=None):
+        seed = None
+        if rng is not None:
+            try:
+                seed = int(rng.integers(0, 2**63 - 1))
+            except Exception:
+                seed = None
+        go_engine = GoEngine(seed=seed, house_rules=cfg.cambia_rules)
+        engine = _GoEngineAdapter(go_engine)
+        num_players = int(go_engine._num_players)
+        agents = []
+        for pid in range(num_players):
+            ga = GoAgentState(
+                go_engine,
+                pid,
+                memory_level=memory_level,
+                time_decay_turns=time_decay_turns,
+            )
+            agents.append(_GoAgentStateAdapter(ga))
+        return engine, agents
+
+    return factory
+
+
+def _build_desca_env_factory_for_test_go():
+    """Test-only convenience wrapper for the Go-backed env_factory.
+
+    Mirrors `_build_desca_env_factory_for_test` so the parametrized
+    regression tests can exercise both backends from one harness.
+    """
+    from .config import load_config
+    from pathlib import Path as _Path
+    cfg_path = _Path(__file__).parent.parent / "config" / "desca_phase1_rmplus.yaml"
+    cfg = load_config(str(cfg_path))
+    return _build_desca_go_env_factory(cfg)
+
+
+def train_desca(
+    config: Path = typer.Option(
+        "config.yaml",
+        "--config",
+        "-c",
+        help="Path to configuration YAML file",
+        exists=True,
+    ),
+    iterations: Optional[int] = typer.Option(
+        None,
+        "--iterations",
+        "-n",
+        help="Number of training iterations (overrides config desca.iterations)",
+    ),
+    checkpoint: Optional[Path] = typer.Option(
+        None,
+        "--checkpoint",
+        help="Resume from DESCA checkpoint",
+    ),
+    save_path: Optional[Path] = typer.Option(
+        None,
+        "--save-path",
+        "-s",
+        help="Override checkpoint save directory",
+    ),
+    device: Optional[str] = typer.Option(
+        None,
+        "--device",
+        help="Training device: auto, cpu, cuda, xpu (default: auto)",
+    ),
+    backend: str = typer.Option(
+        "go",
+        "--backend",
+        help=(
+            "DESCA env_factory backend: 'go' (default; Go FFI engine + agent) "
+            "or 'python' (legacy CambiaGameState + AgentState; kept for "
+            "fallback comparisons)."
+        ),
+    ),
+):
+    """Train a DESCA agent (v3.1 Dense ESCHER with Semantic Action Abstraction)."""
+    import copy
+    import logging as _logging
+
+    from .config import load_config
+    from .action_abstraction import NUM_ABSTRACT_ACTIONS_2P
+
+    setup_multiprocessing()
+
+    # Surface per-iter progress from the trainer's logger. Without this, the
+    # default logging config suppresses INFO messages and training runs dark.
+    _root_logger = _logging.getLogger()
+    if not any(isinstance(h, _logging.StreamHandler) for h in _root_logger.handlers):
+        _h = _logging.StreamHandler(sys.stderr)
+        _h.setLevel(_logging.INFO)
+        _h.setFormatter(_logging.Formatter("[%(asctime)s] %(name)s %(levelname)s: %(message)s"))
+        _root_logger.addHandler(_h)
+    _logging.getLogger("src.cfr.desca_trainer").setLevel(_logging.INFO)
+
+    cfg = load_config(str(config))
+    if not cfg:
+        print("ERROR: Failed to load configuration. Exiting.", file=sys.stderr)
+        raise typer.Exit(1)
+
+    if cfg.desca is None:
+        print(
+            "ERROR: Config missing [desca] section. "
+            "Add a `desca:` block to your YAML or use a DESCA-specific config.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(1)
+
+    desca_cfg = cfg.desca
+
+    if desca_cfg.num_abstract_actions != NUM_ABSTRACT_ACTIONS_2P:
+        print(
+            f"ERROR: config.desca.num_abstract_actions={desca_cfg.num_abstract_actions} "
+            f"does not match action_abstraction.NUM_ABSTRACT_ACTIONS_2P={NUM_ABSTRACT_ACTIONS_2P}. "
+            "Update your config to match the landed abstraction layer.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(1)
+
+    if iterations is not None:
+        desca_cfg.iterations = iterations
+
+    # Resolve device: CLI > "cpu". Avoid "auto" - resolve it concretely here.
+    _raw_device = device or getattr(getattr(cfg, "deep_cfr", None), "device", None) or "cpu"
+    if _raw_device == "auto":
+        try:
+            import torch as _torch
+            if _torch.cuda.is_available():
+                _device = "cuda"
+            elif hasattr(_torch, "xpu") and _torch.xpu.is_available():
+                _device = "xpu"
+            else:
+                _device = "cpu"
+        except Exception:
+            _device = "cpu"
+    else:
+        _device = _raw_device
+
+    try:
+        from .desca_networks import (
+            AvgStrategyNetwork,
+            HistoryValueNetwork,
+            RegretNetwork,
+        )
+    except ImportError as e:
+        print(f"ERROR: Could not import DESCA networks: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+    try:
+        from .cfr.desca_trainer import DESCATrainer
+    except ImportError as e:
+        print(f"ERROR: Could not import DESCATrainer: {e}", file=sys.stderr)
+        print("Stream B (desca_trainer.py) must be merged before training.", file=sys.stderr)
+        raise typer.Exit(1)
+
+    # Build networks
+    _hidden = desca_cfg.hidden_dim
+    _n_abs = desca_cfg.num_abstract_actions
+    regret_net = RegretNetwork(input_dim=257, hidden_dim=_hidden, num_actions=_n_abs)
+    avg_strategy_net = AvgStrategyNetwork(input_dim=257, hidden_dim=_hidden, num_actions=_n_abs)
+    history_value_net = HistoryValueNetwork(input_dim=257, omniscient_dim=120, hidden_dim=_hidden)
+
+    # Build the production env_factory. Default backend is Go FFI: eliminates
+    # `copy.deepcopy` of Python game/agent state in the worker hot loop and
+    # routes the omniscient critic through GoEngine._get_all_cards_unsafe
+    # directly. The Python backend stays callable via `--backend python` for
+    # fallback comparisons (used by `tests/test_desca_env_factory_omniscient.py`).
+    _backend = (backend or "go").strip().lower()
+    if _backend not in ("go", "python"):
+        print(
+            f"ERROR: --backend must be 'go' or 'python', got {backend!r}.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(1)
+    if _backend == "go":
+        env_factory = _build_desca_go_env_factory(cfg)
+    else:
+        env_factory = _build_desca_python_env_factory(cfg)
+
+    # Checkpoint path: CLI --save-path > config.persistence.agent_data_save_path
+    _ckpt_path = (
+        str(save_path) if save_path else cfg.persistence.agent_data_save_path
+    )
+    _ckpt_dir = Path(_ckpt_path).parent
+    _ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write materialized config.yaml to run dir (resolves _base) so the run dir is
+    # self-contained for `cambia evaluate runs/X/ --latest`.
+    _run_dir = _ckpt_dir.parent if _ckpt_dir.name == "checkpoints" else _ckpt_dir
+    _run_config_dst = _run_dir / "config.yaml"
+    if not _run_config_dst.exists():
+        try:
+            from .config import resolve_config_yaml
+            import yaml as _yaml
+            _merged = resolve_config_yaml(str(config))
+            with open(_run_config_dst, "w", encoding="utf-8") as _f:
+                _yaml.safe_dump(_merged, _f, sort_keys=False)
+        except Exception as _e:
+            print(f"WARNING: could not write materialized config.yaml to run dir: {_e}", file=sys.stderr)
+
+    trainer = DESCATrainer(
+        desca_cfg,
+        regret_net,
+        avg_strategy_net,
+        history_value_net,
+        env_factory,
+        device=_device,
+        checkpoint_path=_ckpt_path,
+    )
+
+    if checkpoint:
+        trainer.load_checkpoint(str(checkpoint))
+
+    try:
+        trainer.train(num_iterations=None)
+    except KeyboardInterrupt:
+        print("\nInterrupted. Saving checkpoint before exit...", file=sys.stderr)
+        try:
+            trainer.save_checkpoint()
+        except Exception as e_save:
+            print(f"WARNING: checkpoint save failed: {e_save}", file=sys.stderr)
+        raise typer.Exit(0)
+    except Exception as e:
+        print(f"FATAL: Error during DESCA training: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+
+# Register DESCA under all three official aliases (spec Section 5 / contract
+# item 5). These share the same callback so `--help` is identical across names.
+register_with_aliases(
+    train_app,
+    ["desca", "dense-escher", "dense_escher"],
+    train_desca,
+    help="Train using DESCA (Dense ESCHER + Semantic Action Abstraction, Phase 1)",
+)
+
+# Dashed aliases for existing primary commands.
+register_with_aliases(
+    train_app,
+    ["gt-cfr"],
+    train_gtcfr,
+    help="Alias for `gtcfr`.",
+)
+
+
+def train_sd_cfr(
+    config: Path = typer.Option(
+        "config.yaml",
+        "--config",
+        "-c",
+        help="Path to configuration YAML file",
+        exists=True,
+    ),
+    steps: Optional[int] = typer.Option(
+        None,
+        "--steps",
+        "-n",
+        help="Number of training steps to run",
+    ),
+    checkpoint: Optional[Path] = typer.Option(
+        None,
+        "--checkpoint",
+        help="Resume from checkpoint",
+        exists=True,
+    ),
+    save_path: Optional[Path] = typer.Option(
+        None,
+        "--save-path",
+        "-s",
+        help="Override checkpoint save path",
+    ),
+    device: Optional[str] = typer.Option(
+        None,
+        "--device",
+        help="Training device: auto, cpu, cuda, xpu (default: auto)",
+    ),
+    headless: bool = typer.Option(
+        False,
+        "--headless",
+        help="Disable Rich TUI; print plain-text progress to stdout.",
+    ),
+):
+    """Train using SD-CFR (Single Deep CFR; no strategy network)."""
+    from .config import load_config
+    from .main_train import create_infrastructure, run_deep_training, handle_sigint
+    from .cfr.deep_trainer import DeepCFRConfig
+
+    setup_multiprocessing()
+    signal.signal(signal.SIGINT, handle_sigint)
+
+    if not headless:
+        headless = not sys.stdout.isatty()
+
+    cfg = load_config(str(config))
+    if not cfg:
+        print("ERROR: Failed to load configuration. Exiting.", file=sys.stderr)
+        raise typer.Exit(1)
+
+    overrides: dict = {"use_sd_cfr": True}
+    if device is not None:
+        overrides["device"] = device
+
+    dcfr_config = DeepCFRConfig.from_yaml_config(cfg, **overrides)
+    total_steps = steps if steps is not None else 100
+
+    try:
+        infra = create_infrastructure(cfg, total_steps, headless=headless)
+        exit_code = run_deep_training(
+            cfg,
+            dcfr_config,
+            infra,
+            steps=steps,
+            checkpoint=str(checkpoint) if checkpoint else None,
+            save_path=str(save_path) if save_path else None,
+            headless=headless,
+        )
+    except Exception as e:
+        print(f"FATAL: Error during SD-CFR training: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+    raise typer.Exit(exit_code)
+
+
+def train_os_mccfr(
+    config: Path = typer.Option(
+        "config.yaml",
+        "--config",
+        "-c",
+        help="Path to configuration YAML file",
+        exists=True,
+    ),
+    steps: Optional[int] = typer.Option(
+        None,
+        "--steps",
+        "-n",
+        help="Number of training steps to run",
+    ),
+    checkpoint: Optional[Path] = typer.Option(
+        None,
+        "--checkpoint",
+        help="Resume from checkpoint",
+        exists=True,
+    ),
+    save_path: Optional[Path] = typer.Option(
+        None,
+        "--save-path",
+        "-s",
+        help="Override checkpoint save path",
+    ),
+    device: Optional[str] = typer.Option(
+        None,
+        "--device",
+        help="Training device: auto, cpu, cuda, xpu (default: auto)",
+    ),
+    headless: bool = typer.Option(
+        False,
+        "--headless",
+        help="Disable Rich TUI; print plain-text progress to stdout.",
+    ),
+):
+    """Train using Outcome-Sampling MCCFR."""
+    from .config import load_config
+    from .main_train import create_infrastructure, run_deep_training, handle_sigint
+    from .cfr.deep_trainer import DeepCFRConfig
+
+    setup_multiprocessing()
+    signal.signal(signal.SIGINT, handle_sigint)
+
+    if not headless:
+        headless = not sys.stdout.isatty()
+
+    cfg = load_config(str(config))
+    if not cfg:
+        print("ERROR: Failed to load configuration. Exiting.", file=sys.stderr)
+        raise typer.Exit(1)
+
+    overrides: dict = {"sampling_method": "os"}
+    if device is not None:
+        overrides["device"] = device
+
+    dcfr_config = DeepCFRConfig.from_yaml_config(cfg, **overrides)
+    total_steps = steps if steps is not None else 100
+
+    try:
+        infra = create_infrastructure(cfg, total_steps, headless=headless)
+        exit_code = run_deep_training(
+            cfg,
+            dcfr_config,
+            infra,
+            steps=steps,
+            checkpoint=str(checkpoint) if checkpoint else None,
+            save_path=str(save_path) if save_path else None,
+            headless=headless,
+        )
+    except Exception as e:
+        print(f"FATAL: Error during OS-MCCFR training: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+
+    raise typer.Exit(exit_code)
+
+
+register_with_aliases(
+    train_app,
+    ["sd-cfr", "sdcfr", "sd_cfr"],
+    train_sd_cfr,
+    help="Train using SD-CFR (Single Deep CFR; no strategy network)",
+)
+
+register_with_aliases(
+    train_app,
+    ["os-mccfr", "osmccfr", "os_mccfr"],
+    train_os_mccfr,
+    help="Train using Outcome-Sampling MCCFR",
+)
+
+
 @app.command("resume", help="Resume training from a checkpoint")
 def resume(
     checkpoint: Path = typer.Argument(
@@ -1344,12 +2281,28 @@ def evaluate(
 
         # Auto-detect algorithm and agent type
         from .run_db import infer_algorithm, algo_to_agent_type, algo_to_checkpoint_prefix
-        import yaml
+        from .config import resolve_config_yaml
 
-        with open(run_config, encoding="utf-8") as f:
-            config_dict = yaml.safe_load(f) or {}
+        try:
+            config_dict = resolve_config_yaml(run_config)
+        except FileNotFoundError as e:
+            # _base unresolvable (legacy run dir without co-located base or fallback hit).
+            # Fall back to raw load; algorithm detection will rely on checkpoint filename below.
+            print(f"WARNING: {e}", file=sys.stderr)
+            import yaml as _yaml
+            with open(run_config, encoding="utf-8") as f:
+                config_dict = _yaml.safe_load(f) or {}
 
+        # Initial algorithm guess from config; refined below using checkpoint filename.
         algorithm = infer_algorithm(config_dict)
+
+        # Sample any checkpoint filename to refine algorithm detection (handles the case
+        # where config is unmaterialized and `algorithm` field is hidden behind _base).
+        ckpt_dir = run_dir / "checkpoints"
+        if ckpt_dir.exists():
+            sample_ckpts = sorted(ckpt_dir.glob("*_checkpoint*.pt"))
+            if sample_ckpts:
+                algorithm = infer_algorithm(config_dict, checkpoint_filename=sample_ckpts[0].name)
 
         # Use auto-detected values unless user explicitly overrode
         if agent_type == "deep_cfr":
@@ -1362,7 +2315,6 @@ def evaluate(
             games = 5000
 
         # Resolve checkpoint
-        ckpt_dir = run_dir / "checkpoints"
         if not ckpt_dir.exists():
             print(f"ERROR: No checkpoints/ directory in {run_dir}", file=sys.stderr)
             raise typer.Exit(1)
