@@ -145,6 +145,12 @@ _ffi.cdef("""
                                                    int8_t drawn_bucket, float *out);
     int32_t cambia_agent_encode_eppbs_dealiased(int32_t h, uint8_t decision_context,
                                                 int8_t drawn_bucket, float *out);
+    int32_t cambia_agent_encode_eppbs_interleaved_v2(int32_t h, uint8_t decision_context,
+                                                      int8_t drawn_bucket, float *out);
+
+    /* Training-only: omniscient card inspection */
+    int32_t cambia_game_get_all_cards(int32_t game_h, uint8_t *out_buf, int32_t buf_len);
+    uint8_t cambia_game_num_players(int32_t h);
     int32_t cambia_agent_new_with_memory(int32_t game_h, uint8_t player_id,
                                          uint8_t memory_level, uint8_t time_decay_turns,
                                          uint8_t memory_archetype, double memory_decay_lambda,
@@ -192,6 +198,12 @@ _ffi.cdef("""
 
     /* Discard top */
     int32_t cambia_game_discard_top(int32_t game_h);
+
+    /* Agent attribute getters (training-only; for Python action_abstraction) */
+    int32_t cambia_agent_get_own_hand(int32_t agent_h, uint8_t *out_buf, int32_t buf_len);
+    int32_t cambia_agent_get_opp_belief(int32_t agent_h, uint8_t *out_buf, int32_t buf_len);
+    uint16_t cambia_agent_get_current_turn(int32_t agent_h);
+    int32_t cambia_agent_get_hand_lens(int32_t agent_h, uint8_t *out_buf);
 
     /* Handle pool diagnostics */
     void    cambia_handle_pool_stats(int32_t *games_out, int32_t *agents_out, int32_t *snaps_out);
@@ -251,6 +263,10 @@ class GoEngine:
     NUM_ACTIONS: int = 146
     N_PLAYER_INPUT_DIM: int = 580
     N_PLAYER_NUM_ACTIONS: int = 452
+    # Encoding v2 (DESCA Phase 0) constants. Kept in sync with the Go
+    # constants in engine/agent/constants.go (EPPBSV2InputDim etc.).
+    EPPBS_V2_INPUT_DIM: int = 257
+    MAX_HAND_SIZE: int = 6
 
     def __init__(
         self,
@@ -571,6 +587,31 @@ class GoEngine:
         """
         return int(self._lib.cambia_game_decision_ctx(self._game_h))
 
+    def _get_all_cards_unsafe(self) -> np.ndarray:
+        """Return a packed uint8 array of bucket indices for every slot in
+        every player's hand.
+
+        Output shape: (num_players * MAX_HAND_SIZE,). Empty or unknown slots
+        receive the sentinel value 0xFF. Known slots receive the CardBucket
+        index (0..8) for BucketZero..BucketHighKing.
+
+        WARNING: Training-only. Exposes ground-truth card identities for all
+        players. The leading underscore and _unsafe suffix mark this as a
+        deliberate omniscience leak; do not call from eval-time code paths.
+        Use cfr.src.cfr.omniscient.compute_omniscient_features for the standard
+        training wrapper.
+        """
+        n = int(self._num_players)
+        size = n * self.MAX_HAND_SIZE
+        buf = _ffi.new(f"uint8_t[{size}]")
+        written = self._lib.cambia_game_get_all_cards(self._game_h, buf, size)
+        if written < 0:
+            raise RuntimeError(
+                f"cambia_game_get_all_cards failed (returned {written}) "
+                f"on handle {self._game_h} (buf_len={size})"
+            )
+        return np.frombuffer(_ffi.buffer(buf, size), dtype=np.uint8).copy()
+
     def update_both(self, a0: "GoAgentState", a1: "GoAgentState") -> None:
         """
         Update both agent belief states in a single FFI call.
@@ -694,8 +735,18 @@ class GoAgentState:
         self._lib = _get_lib()
         self._closed = False
 
-        # Pre-allocated reusable encode buffer
+        # Pre-allocated reusable encode buffers (T1-2 cffi buffer reuse).
+        # encode (222), encode_eppbs (224), encode_eppbs_interleaved_v2 (257),
+        # encode_nplayer (580), plus agent-attr getter buffers.
         self._encode_buf = _ffi.new("float[222]")
+        self._encode_buf_224 = _ffi.new("float[224]")
+        self._encode_buf_257 = _ffi.new(f"float[{GoEngine.EPPBS_V2_INPUT_DIM}]")
+        self._encode_buf_580 = None  # lazy alloc only when N-player is used
+        # Agent-attr getter buffers (training-only path for Python adapters):
+        # 6*4 own hand triplets + 6 opp belief bytes + 2 hand-len bytes.
+        self._own_hand_buf = _ffi.new(f"uint8_t[{GoEngine.MAX_HAND_SIZE * 4}]")
+        self._opp_belief_buf = _ffi.new(f"uint8_t[{GoEngine.MAX_HAND_SIZE}]")
+        self._hand_lens_buf = _ffi.new("uint8_t[2]")
 
         self._agent_h: int = self._lib.cambia_agent_new(
             engine.handle,
@@ -719,7 +770,14 @@ class GoAgentState:
         obj = object.__new__(cls)
         obj._lib = _get_lib()
         obj._agent_h = agent_h
+        # Pre-allocated reusable buffers (T1-2 cffi buffer reuse).
         obj._encode_buf = _ffi.new("float[222]")
+        obj._encode_buf_224 = _ffi.new("float[224]")
+        obj._encode_buf_257 = _ffi.new(f"float[{GoEngine.EPPBS_V2_INPUT_DIM}]")
+        obj._encode_buf_580 = None
+        obj._own_hand_buf = _ffi.new(f"uint8_t[{GoEngine.MAX_HAND_SIZE * 4}]")
+        obj._opp_belief_buf = _ffi.new(f"uint8_t[{GoEngine.MAX_HAND_SIZE}]")
+        obj._hand_lens_buf = _ffi.new("uint8_t[2]")
         obj._closed = False
         return obj
 
@@ -764,7 +822,14 @@ class GoAgentState:
         obj = object.__new__(cls)
         obj._lib = lib
         obj._agent_h = int(agent_h)
+        # Pre-allocated reusable buffers (T1-2 cffi buffer reuse).
         obj._encode_buf = _ffi.new("float[222]")
+        obj._encode_buf_224 = _ffi.new("float[224]")
+        obj._encode_buf_257 = _ffi.new(f"float[{GoEngine.EPPBS_V2_INPUT_DIM}]")
+        obj._encode_buf_580 = None
+        obj._own_hand_buf = _ffi.new(f"uint8_t[{GoEngine.MAX_HAND_SIZE * 4}]")
+        obj._opp_belief_buf = _ffi.new(f"uint8_t[{GoEngine.MAX_HAND_SIZE}]")
+        obj._hand_lens_buf = _ffi.new("uint8_t[2]")
         obj._closed = False
         return obj
 
@@ -820,7 +885,14 @@ class GoAgentState:
         obj = object.__new__(cls)
         obj._lib = lib
         obj._agent_h = int(agent_h)
+        # Pre-allocated reusable buffers (T1-2 cffi buffer reuse).
         obj._encode_buf = _ffi.new("float[222]")
+        obj._encode_buf_224 = _ffi.new("float[224]")
+        obj._encode_buf_257 = _ffi.new(f"float[{GoEngine.EPPBS_V2_INPUT_DIM}]")
+        obj._encode_buf_580 = None
+        obj._own_hand_buf = _ffi.new(f"uint8_t[{GoEngine.MAX_HAND_SIZE * 4}]")
+        obj._opp_belief_buf = _ffi.new(f"uint8_t[{GoEngine.MAX_HAND_SIZE}]")
+        obj._hand_lens_buf = _ffi.new("uint8_t[2]")
         obj._closed = False
         return obj
 
@@ -878,13 +950,17 @@ class GoAgentState:
             )
         return GoAgentState._from_handle(int(new_h))
 
-    def encode(self, decision_context: int, drawn_bucket: int = -1) -> np.ndarray:
+    def encode(self, decision_context: int, drawn_bucket: int = -1, out: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Encode agent belief state as a 222-dimensional float32 feature vector.
+
+        Reuses a cached cffi buffer (T1-2). If ``out`` is supplied with matching
+        shape/dtype, the encoded floats are copied into it.
 
         Args:
             decision_context: Integer encoding of the current decision context.
             drawn_bucket: Bucket index of the drawn card, or -1 if none.
+            out: Optional pre-allocated float32 ndarray of shape (222,).
 
         Returns:
             np.ndarray of shape (222,) and dtype float32.
@@ -903,58 +979,211 @@ class GoAgentState:
                 f"cambia_agent_encode failed (returned {ret}) "
                 f"on agent handle {self._agent_h}"
             )
-        return np.frombuffer(_ffi.buffer(self._encode_buf), dtype=np.float32).copy()
+        view = np.frombuffer(_ffi.buffer(self._encode_buf), dtype=np.float32)
+        if out is not None:
+            if out.shape != (222,) or out.dtype != np.float32:
+                raise ValueError(
+                    f"out buffer shape/dtype mismatch: got {out.shape}/{out.dtype}, "
+                    f"expected (222,)/float32"
+                )
+            np.copyto(out, view)
+            return out
+        return view.copy()
 
-    def encode_eppbs(self, decision_context: int, drawn_bucket: int = -1) -> np.ndarray:
-        """EP-PBS encoding via Go FFI. Returns ndarray of shape (224,)."""
-        buf = _ffi.new("float[224]")
+    def encode_eppbs(self, decision_context: int, drawn_bucket: int = -1, out: Optional[np.ndarray] = None) -> np.ndarray:
+        """EP-PBS encoding via Go FFI. Returns ndarray of shape (224,).
+
+        Uses a pre-allocated cffi buffer cached on this GoAgentState instance
+        to avoid per-call ``_ffi.new`` allocation (T1-2). If ``out`` is given
+        and shape/dtype matches, the encoded floats are copied into it and
+        returned; otherwise a fresh ndarray copy is returned.
+        """
         rc = self._lib.cambia_agent_encode_eppbs(
-            self._agent_h, int(decision_context), int(drawn_bucket), buf
+            self._agent_h, int(decision_context), int(drawn_bucket), self._encode_buf_224
         )
         if rc != 0:
             raise RuntimeError(f"EP-PBS encode failed: {rc}")
-        return np.frombuffer(_ffi.buffer(buf, 224 * 4), dtype=np.float32).copy()
+        view = np.frombuffer(_ffi.buffer(self._encode_buf_224, 224 * 4), dtype=np.float32)
+        if out is not None:
+            if out.shape != (224,) or out.dtype != np.float32:
+                raise ValueError(
+                    f"out buffer shape/dtype mismatch: got {out.shape}/{out.dtype}, "
+                    f"expected (224,)/float32"
+                )
+            np.copyto(out, view)
+            return out
+        return view.copy()
 
-    def encode_eppbs_interleaved(self, decision_context: int, drawn_bucket: int = -1) -> np.ndarray:
+    def encode_eppbs_interleaved(self, decision_context: int, drawn_bucket: int = -1, out: Optional[np.ndarray] = None) -> np.ndarray:
         """EP-PBS interleaved encoding via Go FFI. Returns ndarray of shape (224,).
 
         Uses interleaved slot layout: public(42) + 12×slot(13) + pad(2) + history(24) = 224.
         Public features include own/opp hand sizes at dims [40] and [41].
         Required for SlotFiLM and slot_multiply network architectures.
+
+        Reuses a cached cffi buffer (T1-2). If ``out`` is supplied with matching
+        shape/dtype, the encoded floats are copied into it.
         """
-        buf = _ffi.new("float[224]")
         rc = self._lib.cambia_agent_encode_eppbs_interleaved(
-            self._agent_h, int(decision_context), int(drawn_bucket), buf
+            self._agent_h, int(decision_context), int(drawn_bucket), self._encode_buf_224
         )
         if rc != 0:
             raise RuntimeError(f"EP-PBS interleaved encode failed: {rc}")
-        return np.frombuffer(_ffi.buffer(buf, 224 * 4), dtype=np.float32).copy()
+        view = np.frombuffer(_ffi.buffer(self._encode_buf_224, 224 * 4), dtype=np.float32)
+        if out is not None:
+            if out.shape != (224,) or out.dtype != np.float32:
+                raise ValueError(
+                    f"out buffer shape/dtype mismatch: got {out.shape}/{out.dtype}, "
+                    f"expected (224,)/float32"
+                )
+            np.copyto(out, view)
+            return out
+        return view.copy()
 
-    def encode_eppbs_dealiased(self, decision_context: int, drawn_bucket: int = -1) -> np.ndarray:
+    def encode_eppbs_interleaved_v2(self, decision_context: int, drawn_bucket: int = -1, out: Optional[np.ndarray] = None) -> np.ndarray:
+        """Encoding v2 (257-dim): base 224-dim interleaved EP-PBS + 9-dim
+        card-counting posterior + 24-dim action history window.
+
+        See engine/agent/encoding.go EncodeEPPBSInterleavedV2 for the full
+        layout rationale. The Python binding in src/encoding.py dispatches on
+        encoding_version; this method is the raw FFI bridge.
+
+        Reuses a cached cffi buffer (T1-2). If ``out`` is supplied with matching
+        shape/dtype, the encoded floats are copied into it.
+        """
+        dim = GoEngine.EPPBS_V2_INPUT_DIM
+        rc = self._lib.cambia_agent_encode_eppbs_interleaved_v2(
+            self._agent_h, int(decision_context), int(drawn_bucket), self._encode_buf_257
+        )
+        if rc != 0:
+            raise RuntimeError(f"EP-PBS v2 interleaved encode failed: {rc}")
+        view = np.frombuffer(_ffi.buffer(self._encode_buf_257, dim * 4), dtype=np.float32)
+        if out is not None:
+            if out.shape != (dim,) or out.dtype != np.float32:
+                raise ValueError(
+                    f"out buffer shape/dtype mismatch: got {out.shape}/{out.dtype}, "
+                    f"expected ({dim},)/float32"
+                )
+            np.copyto(out, view)
+            return out
+        return view.copy()
+
+    def encode_eppbs_dealiased(self, decision_context: int, drawn_bucket: int = -1, out: Optional[np.ndarray] = None) -> np.ndarray:
         """De-aliased flat EP-PBS encoding via Go FFI. Returns ndarray of shape (224,).
 
         Uses flat layout (tags grouped, then identities grouped) with two de-aliasing fixes:
         - Empty slots (beyond hand_size) are all-zeros in both tag and identity regions
         - Hand sizes at dims [196] and [197]
         History features at dims [200-223].
+
+        Reuses a cached cffi buffer (T1-2). If ``out`` is supplied with matching
+        shape/dtype, the encoded floats are copied into it.
         """
-        buf = _ffi.new("float[224]")
         rc = self._lib.cambia_agent_encode_eppbs_dealiased(
-            self._agent_h, int(decision_context), int(drawn_bucket), buf
+            self._agent_h, int(decision_context), int(drawn_bucket), self._encode_buf_224
         )
         if rc != 0:
             raise RuntimeError(f"EP-PBS dealiased encode failed: {rc}")
-        return np.frombuffer(_ffi.buffer(buf, 224 * 4), dtype=np.float32).copy()
+        view = np.frombuffer(_ffi.buffer(self._encode_buf_224, 224 * 4), dtype=np.float32)
+        if out is not None:
+            if out.shape != (224,) or out.dtype != np.float32:
+                raise ValueError(
+                    f"out buffer shape/dtype mismatch: got {out.shape}/{out.dtype}, "
+                    f"expected (224,)/float32"
+                )
+            np.copyto(out, view)
+            return out
+        return view.copy()
 
-    def encode_nplayer(self, decision_context: int, drawn_bucket: int = -1) -> np.ndarray:
-        """N-player encoding via Go FFI. Returns ndarray of shape (580,)."""
-        buf = _ffi.new("float[580]")
+    def encode_nplayer(self, decision_context: int, drawn_bucket: int = -1, out: Optional[np.ndarray] = None) -> np.ndarray:
+        """N-player encoding via Go FFI. Returns ndarray of shape (580,).
+
+        Lazy-allocates a 580-float cffi buffer on first call (T1-2 buffer reuse
+        for N-player path). If ``out`` is supplied with matching shape/dtype,
+        the encoded floats are copied into it.
+        """
+        if self._encode_buf_580 is None:
+            self._encode_buf_580 = _ffi.new("float[580]")
         rc = self._lib.cambia_agent_encode_nplayer(
-            self._agent_h, int(decision_context), int(drawn_bucket), buf
+            self._agent_h, int(decision_context), int(drawn_bucket), self._encode_buf_580
         )
         if rc != 0:
             raise RuntimeError(f"N-player encode failed: {rc}")
-        return np.frombuffer(_ffi.buffer(buf, 580 * 4), dtype=np.float32).copy()
+        view = np.frombuffer(_ffi.buffer(self._encode_buf_580, 580 * 4), dtype=np.float32)
+        if out is not None:
+            if out.shape != (580,) or out.dtype != np.float32:
+                raise ValueError(
+                    f"out buffer shape/dtype mismatch: got {out.shape}/{out.dtype}, "
+                    f"expected (580,)/float32"
+                )
+            np.copyto(out, view)
+            return out
+        return view.copy()
+
+    # --- Training-only attribute getters (T1-1) ---
+    #
+    # These wrap the cambia_agent_get_* FFI exports to expose minimal agent
+    # state required by cfr/src/action_abstraction.py when running the DESCA
+    # Go FFI env_factory. They are read-only views into the live agent state;
+    # the returned ndarrays are copies safe to retain across FFI calls.
+
+    def get_own_hand_buckets_and_seen(self) -> np.ndarray:
+        """Return a (MaxHandSize, 3) int32 ndarray of (bucket, last_seen_turn, valid).
+
+        Slot rows are 0..MaxHandSize-1; valid==1 means the slot is within
+        OwnHandLen, else 0. ``bucket`` ranges 0..9 (CardBucket values; 9 is
+        BucketUnknown). ``last_seen_turn`` is the encoded turn index packed
+        from the Go uint16 (low byte | high byte << 8).
+        """
+        rc = self._lib.cambia_agent_get_own_hand(
+            self._agent_h, self._own_hand_buf, GoEngine.MAX_HAND_SIZE * 4
+        )
+        if rc != 0:
+            raise RuntimeError(f"cambia_agent_get_own_hand failed: {rc}")
+        raw = np.frombuffer(
+            _ffi.buffer(self._own_hand_buf, GoEngine.MAX_HAND_SIZE * 4),
+            dtype=np.uint8,
+        )
+        out = np.zeros((GoEngine.MAX_HAND_SIZE, 3), dtype=np.int32)
+        for s in range(GoEngine.MAX_HAND_SIZE):
+            base = s * 4
+            out[s, 0] = int(raw[base + 0])
+            out[s, 1] = int(raw[base + 1]) | (int(raw[base + 2]) << 8)
+            out[s, 2] = int(raw[base + 3])
+        return out
+
+    def get_opp_belief_buckets(self) -> np.ndarray:
+        """Return a (MaxHandSize,) uint8 ndarray of opponent belief buckets.
+
+        Indices 0..OppHandLen-1 hold CardBucket values 0..9 (9=Unknown);
+        slots beyond OppHandLen receive sentinel 0xFF. Decay-encoded beliefs
+        collapse to 9 (Unknown) per the Go-side getter contract.
+        """
+        rc = self._lib.cambia_agent_get_opp_belief(
+            self._agent_h, self._opp_belief_buf, GoEngine.MAX_HAND_SIZE
+        )
+        if rc != 0:
+            raise RuntimeError(f"cambia_agent_get_opp_belief failed: {rc}")
+        return np.frombuffer(
+            _ffi.buffer(self._opp_belief_buf, GoEngine.MAX_HAND_SIZE),
+            dtype=np.uint8,
+        ).copy()
+
+    def get_current_turn(self) -> int:
+        """Return the agent's CurrentTurn observation counter."""
+        v = int(self._lib.cambia_agent_get_current_turn(self._agent_h))
+        if v == 0xFFFF:
+            raise RuntimeError(
+                f"cambia_agent_get_current_turn failed on agent {self._agent_h}"
+            )
+        return v
+
+    def get_hand_lens(self) -> Tuple[int, int]:
+        """Return (own_hand_len, opp_hand_len)."""
+        rc = self._lib.cambia_agent_get_hand_lens(self._agent_h, self._hand_lens_buf)
+        if rc != 0:
+            raise RuntimeError(f"cambia_agent_get_hand_lens failed: {rc}")
+        return int(self._hand_lens_buf[0]), int(self._hand_lens_buf[1])
 
     def nplayer_action_mask(self, engine: GoEngine) -> np.ndarray:
         """

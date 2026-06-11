@@ -438,6 +438,134 @@ func (a *AgentState) EncodeEPPBSInterleaved(ctx engine.DecisionContext, drawnCar
 	a.writeHistoryFeatures(out)
 }
 
+// EncodeEPPBSInterleavedV2 writes the 257-dim v2 EP-PBS feature vector into out.
+// Layout:
+//
+//	[0:224]    identical to EncodeEPPBSInterleaved (base EP-PBS)
+//	[224:233]  card-counting posterior (9 buckets) - probability over remaining
+//	           deck conditioned on observed discards + known own-hand cards
+//	[233:257]  action history window (24 dims = 6 entries x 4 dims)
+//	           entries ordered: own[oldest..newest] then opp[oldest..newest]
+//	           each entry = [category_3onehot | target_slot_norm]
+//
+// See constants.go CategorizeAction and DeckBucketCounts for the semantics.
+// The posterior sums to 1.0 when any bucket has remaining cards; zeros otherwise.
+// Unfilled history slots are all-zero 4-dim blocks.
+func (a *AgentState) EncodeEPPBSInterleavedV2(ctx engine.DecisionContext, drawnCardBucket int8, out *[EPPBSV2InputDim]float32) {
+	*out = [EPPBSV2InputDim]float32{}
+
+	// Reuse the v1 interleaved encoding for [0:224].
+	var base [EPPBSInputDim]float32
+	a.EncodeEPPBSInterleaved(ctx, drawnCardBucket, &base)
+	for i := 0; i < EPPBSInputDim; i++ {
+		out[i] = base[i]
+	}
+
+	// [224:233] card-counting posterior (9 dims).
+	a.writeCardCountPosterior(out)
+
+	// [233:257] action history window (24 dims).
+	a.writeActionHistoryWindow(out)
+}
+
+// writeCardCountPosterior writes the 9-dim card-counting posterior at offset V2CardCountOffset.
+//
+// remaining[b] = DeckBucketCounts[b]
+//              - own-hand slots with tag in {TagPrivOwn, TagPub} at bucket b
+//              - opp-hand slots with tag == TagPub at bucket b (TagPrivOpp excluded:
+//                opp knows, but the agent does not, so the bucket is unknown)
+//              - DiscardBucketCounts[b]
+//
+// The vector is clamped to >= 0 and normalized to sum to 1.0. If the clamped
+// total is 0 (pathological), returns the uniform 1/9 prior. Mirrors
+// cfr/src/encoding.py compute_card_counting_posterior.
+func (a *AgentState) writeCardCountPosterior(out *[EPPBSV2InputDim]float32) {
+	remaining := [V2CardCountDim]float32{}
+	for b := 0; b < V2CardCountDim; b++ {
+		remaining[b] = float32(DeckBucketCounts[b])
+	}
+
+	// Own hand (slots 0..OwnHandLen-1): subtract PrivOwn or Pub.
+	for i := uint8(0); i < a.OwnHandLen && i < MaxHand; i++ {
+		tag := a.SlotTags[i]
+		if tag == TagPrivOwn || tag == TagPub {
+			b := a.SlotBuckets[i]
+			if b < V2CardCountDim {
+				remaining[b] -= 1.0
+			}
+		}
+	}
+
+	// Opp hand (slots OppSlotsStart..+OppHandLen-1): subtract only Pub.
+	for j := uint8(0); j < a.OppHandLen && j < MaxHand; j++ {
+		slot := OppSlotsStart + j
+		if a.SlotTags[slot] == TagPub {
+			b := a.SlotBuckets[slot]
+			if b < V2CardCountDim {
+				remaining[b] -= 1.0
+			}
+		}
+	}
+
+	// Observed discards.
+	for b := 0; b < V2CardCountDim; b++ {
+		remaining[b] -= float32(a.DiscardBucketCounts[b])
+		if remaining[b] < 0 {
+			remaining[b] = 0
+		}
+	}
+
+	var total float32
+	for b := 0; b < V2CardCountDim; b++ {
+		total += remaining[b]
+	}
+
+	if total > 0 {
+		for b := 0; b < V2CardCountDim; b++ {
+			out[V2CardCountOffset+b] = remaining[b] / total
+		}
+		return
+	}
+	uniform := float32(1.0) / float32(V2CardCountDim)
+	for b := 0; b < V2CardCountDim; b++ {
+		out[V2CardCountOffset+b] = uniform
+	}
+}
+
+// writeActionHistoryWindow writes the 24-dim action history window starting at
+// V2ActionHistoryOffset. Order: own[0..Len-1] first (oldest to newest), then opp[0..Len-1].
+// Unfilled entries are all-zero 4-dim blocks.
+func (a *AgentState) writeActionHistoryWindow(out *[EPPBSV2InputDim]float32) {
+	writeSide := func(buf *[ActionHistorySize]ActionHistoryEntry, length uint8, baseOffset int) {
+		for i := 0; i < ActionHistorySize; i++ {
+			entryBase := baseOffset + i*V2ActionHistoryEntryDim
+			if uint8(i) >= length {
+				continue // leave zeros
+			}
+			e := buf[i]
+			if !e.Valid {
+				continue
+			}
+			if e.Category < 3 {
+				out[entryBase+int(e.Category)] = 1.0
+			}
+			if e.HasSlot {
+				denom := float32(MaxHand - 1) // 5.0
+				if denom > 0 {
+					slot := e.TargetSlot
+					if slot >= MaxHand {
+						slot = MaxHand - 1
+					}
+					out[entryBase+3] = float32(slot) / denom
+				}
+			}
+		}
+	}
+
+	writeSide(&a.OwnActionHistory, a.OwnActionHistoryLen, V2ActionHistoryOffset)
+	writeSide(&a.OppActionHistory, a.OppActionHistoryLen, V2ActionHistoryOffset+ActionHistorySize*V2ActionHistoryEntryDim)
+}
+
 // ActionMask writes the legal action mask into out.
 // legalActions is the bitmask from GameState.LegalActions().
 func ActionMask(legalActions [3]uint64, out *[NumActions]bool) {

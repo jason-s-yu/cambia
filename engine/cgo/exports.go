@@ -553,6 +553,81 @@ func cambia_agent_encode_eppbs_dealiased(agent_h C.int32_t, decision_ctx C.uint8
 	return 0
 }
 
+//export cambia_agent_encode_eppbs_interleaved_v2
+func cambia_agent_encode_eppbs_interleaved_v2(agent_h C.int32_t, decision_ctx C.uint8_t, drawn_bucket C.int8_t, out *C.float) C.int32_t {
+	if agent_h < 0 || agent_h >= maxAgents || !agentInUse[agent_h] {
+		return -1
+	}
+	outBuf := (*[agent.EPPBSV2InputDim]float32)(unsafe.Pointer(out))
+	agentPool[agent_h].EncodeEPPBSInterleavedV2(
+		engine.DecisionContext(decision_ctx),
+		int8(drawn_bucket),
+		outBuf,
+	)
+	return 0
+}
+
+// cambia_game_get_all_cards writes a packed byte array of card bucket indices
+// for every slot in every player's hand. Layout: player p's slot s at offset
+// p*engine.MaxHandSize + s. Empty slots (s >= HandLen) and unrecognized cards
+// write the sentinel value 0xFF. Returns the number of bytes written, or -1 on
+// error (invalid handle or buf_len too small).
+//
+// Intended use: training-only omniscient feature extraction (see the Python-side
+// compute_omniscient_features helper). Must NOT be called by eval-time code.
+//
+//export cambia_game_get_all_cards
+func cambia_game_get_all_cards(game_h C.int32_t, out_buf *C.uint8_t, buf_len C.int32_t) C.int32_t {
+	if game_h < 0 || game_h >= maxGames || !gameInUse[game_h] {
+		return -1
+	}
+	g := &gamePool[game_h]
+	np := int(g.Rules.NumPlayers)
+	if np < 2 {
+		np = 2
+	}
+	if np > engine.MaxPlayers {
+		np = engine.MaxPlayers
+	}
+	required := np * int(engine.MaxHandSize)
+	if int(buf_len) < required {
+		return -1
+	}
+
+	outSlice := (*[engine.MaxPlayers * engine.MaxHandSize]C.uint8_t)(unsafe.Pointer(out_buf))
+	// Fill the written region with the sentinel first so absent slots are explicit.
+	for i := 0; i < required; i++ {
+		outSlice[i] = 0xFF
+	}
+	for p := 0; p < np; p++ {
+		ps := &g.Players[p]
+		for s := 0; s < int(ps.HandLen) && s < int(engine.MaxHandSize); s++ {
+			card := ps.Hand[s]
+			if card == engine.EmptyCard {
+				continue
+			}
+			b := agent.CardToBucket(card)
+			if b >= agent.BucketUnknown {
+				continue
+			}
+			outSlice[p*int(engine.MaxHandSize)+s] = C.uint8_t(uint8(b))
+		}
+	}
+	return C.int32_t(required)
+}
+
+//export cambia_game_num_players
+func cambia_game_num_players(h C.int32_t) C.uint8_t {
+	if h < 0 || h >= maxGames || !gameInUse[h] {
+		return 0
+	}
+	np := gamePool[h].Rules.NumPlayers
+	if np < 2 {
+		np = 2
+	}
+	return C.uint8_t(np)
+}
+
 //export cambia_game_decision_ctx
 func cambia_game_decision_ctx(h C.int32_t) C.uint8_t {
 	poolMu.Lock()
@@ -956,6 +1031,111 @@ func cambia_terminal_eval_mc(h C.int32_t, player C.uint8_t, num_samples C.int32_
 // ---------------------------------------------------------------------------
 // Handle pool diagnostics
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Agent attribute getters (training-only; for action_abstraction in Python)
+// ---------------------------------------------------------------------------
+//
+// These helpers expose minimal AgentState fields required by
+// cfr/src/action_abstraction.py when running the DESCA Go FFI env_factory.
+// Each getter copies into a caller-owned buffer; the agent state is not
+// mutated. Output layout matches the Python AgentState semantics so the
+// adapter in cli.py can construct equivalent dict views.
+
+//export cambia_agent_get_own_hand
+// cambia_agent_get_own_hand fills out_buf with engine.MaxHandSize triplets:
+//   (bucket, last_seen_turn_lo, last_seen_turn_hi, valid)
+// where valid is 1 if the slot index is < OwnHandLen, else 0. Each triplet
+// is 4 bytes wide, total = engine.MaxHandSize * 4 bytes. Returns 0 on
+// success, -1 on bad agent handle.
+//
+// The Python adapter consumes this to populate `own_hand` as
+//   {slot: KnownCardInfoLite(bucket, last_seen_turn) for slot in 0..OwnHandLen}
+// matching action_abstraction.py's expectations.
+func cambia_agent_get_own_hand(agent_h C.int32_t, out_buf *C.uint8_t, buf_len C.int32_t) C.int32_t {
+	if agent_h < 0 || agent_h >= maxAgents || !agentInUse[agent_h] {
+		return -1
+	}
+	required := engine.MaxHandSize * 4
+	if int(buf_len) < required {
+		return -1
+	}
+	a := &agentPool[agent_h]
+	outSlice := (*[engine.MaxHandSize * 4]C.uint8_t)(unsafe.Pointer(out_buf))
+	for s := 0; s < int(engine.MaxHandSize); s++ {
+		base := s * 4
+		if uint8(s) < a.OwnHandLen {
+			outSlice[base+0] = C.uint8_t(a.OwnHand[s].Bucket)
+			outSlice[base+1] = C.uint8_t(a.OwnHand[s].LastSeenTurn & 0xFF)
+			outSlice[base+2] = C.uint8_t((a.OwnHand[s].LastSeenTurn >> 8) & 0xFF)
+			outSlice[base+3] = 1
+		} else {
+			outSlice[base+0] = 0
+			outSlice[base+1] = 0
+			outSlice[base+2] = 0
+			outSlice[base+3] = 0
+		}
+	}
+	return 0
+}
+
+//export cambia_agent_get_opp_belief
+// cambia_agent_get_opp_belief fills out_buf with engine.MaxHandSize bucket
+// values (one byte each) for the opponent's hand slots [0..OppHandLen). Slots
+// beyond OppHandLen receive sentinel 0xFF. Decay-encoded beliefs collapse to
+// BucketUnknown (sentinel 9) since action_abstraction only checks for
+// known/unknown. Returns 0 on success, -1 on bad agent handle.
+func cambia_agent_get_opp_belief(agent_h C.int32_t, out_buf *C.uint8_t, buf_len C.int32_t) C.int32_t {
+	if agent_h < 0 || agent_h >= maxAgents || !agentInUse[agent_h] {
+		return -1
+	}
+	required := int(engine.MaxHandSize)
+	if int(buf_len) < required {
+		return -1
+	}
+	a := &agentPool[agent_h]
+	outSlice := (*[engine.MaxHandSize]C.uint8_t)(unsafe.Pointer(out_buf))
+	for s := 0; s < int(engine.MaxHandSize); s++ {
+		if uint8(s) < a.OppHandLen {
+			bv := a.OppBelief[s]
+			if bv.IsBucket() {
+				outSlice[s] = C.uint8_t(uint8(bv.Bucket()))
+			} else {
+				// Decay belief: action_abstraction treats anything non-bucket
+				// as unknown. Map to BucketUnknown=9.
+				outSlice[s] = C.uint8_t(9)
+			}
+		} else {
+			outSlice[s] = C.uint8_t(0xFF)
+		}
+	}
+	return 0
+}
+
+//export cambia_agent_get_current_turn
+// cambia_agent_get_current_turn returns the agent's CurrentTurn observation
+// counter as a uint16. Returns 0xFFFF on bad agent handle (callers must
+// validate).
+func cambia_agent_get_current_turn(agent_h C.int32_t) C.uint16_t {
+	if agent_h < 0 || agent_h >= maxAgents || !agentInUse[agent_h] {
+		return 0xFFFF
+	}
+	return C.uint16_t(agentPool[agent_h].CurrentTurn)
+}
+
+//export cambia_agent_get_hand_lens
+// cambia_agent_get_hand_lens fills a 2-byte buffer with [OwnHandLen,
+// OppHandLen]. Returns 0 on success, -1 on bad agent handle.
+func cambia_agent_get_hand_lens(agent_h C.int32_t, out_buf *C.uint8_t) C.int32_t {
+	if agent_h < 0 || agent_h >= maxAgents || !agentInUse[agent_h] {
+		return -1
+	}
+	a := &agentPool[agent_h]
+	outSlice := (*[2]C.uint8_t)(unsafe.Pointer(out_buf))
+	outSlice[0] = C.uint8_t(a.OwnHandLen)
+	outSlice[1] = C.uint8_t(a.OppHandLen)
+	return 0
+}
 
 //export cambia_handle_pool_stats
 // cambia_handle_pool_stats writes the number of in-use slots for games,

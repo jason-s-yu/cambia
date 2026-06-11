@@ -154,6 +154,21 @@ EP_PBS_PAD_DIM = 2  # padding dims (was 4 before hand-size features)
 EP_PBS_POS_EMBED_DIM = 8  # position embedding dim per slot
 EP_PBS_SLOT_REPR_DIM = 64  # slot encoder output dim
 
+# Encoding v2 additions (Phase 0 DESCA foundation).
+# Layout: v1 [0:224] unchanged, v2 appends [224:233] posterior, [233:257] action history.
+V2_CARD_COUNT_DIM = 9          # 9-bucket card-counting posterior over remaining deck
+V2_ACTION_HISTORY_DIM = 24     # last 3 actions per player, 4 dims each, 2 players
+V2_ACTION_HISTORY_PER_PLAYER = 12
+V2_ACTION_HISTORY_SLOTS = 3    # ring buffer depth per player
+V2_ACTION_CATEGORY_DIM = 3     # 3-one-hot: DRAW_PHASE, DISCARD_PHASE, ABILITY_OR_SNAP
+V2_ACTION_SLOT_FEATURE_DIM = 4 # category(3) + target_slot_norm(1)
+EP_PBS_V2_INPUT_DIM = EP_PBS_INPUT_DIM + V2_CARD_COUNT_DIM + V2_ACTION_HISTORY_DIM  # 257
+
+# Action categories for the action history window (oldest first per player).
+V2_ACTION_CATEGORY_DRAW = 0
+V2_ACTION_CATEGORY_DISCARD = 1
+V2_ACTION_CATEGORY_ABILITY_SNAP = 2
+
 # N-Player constants (MaxPlayers=8, MaxHandSize=6, MaxOpponents=7)
 N_PLAYER_MAX_PLAYERS = 8
 N_PLAYER_MAX_SLOTS = 48        # 8 players × 6 cards

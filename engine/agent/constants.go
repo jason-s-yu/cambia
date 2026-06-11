@@ -114,6 +114,113 @@ const (
 	NumBuckets    = 10  // Number of card buckets (BucketZero through BucketUnknown)
 )
 
+// Encoding v2 constants (DESCA Phase 0 foundation).
+const (
+	// ActionHistorySize is the per-side ring buffer depth for the v2 encoding
+	// action history window (last 3 observed own + 3 observed opp actions).
+	ActionHistorySize = 3
+
+	// V2CardCountDim is the number of card-counting posterior dimensions
+	// (one per CardBucket 0..8; BucketUnknown is excluded).
+	V2CardCountDim = 9
+
+	// V2ActionHistoryEntryDim is the per-entry dimension of the action history
+	// window: 3-one-hot category + 1 scalar target_slot_norm.
+	V2ActionHistoryEntryDim = 4
+
+	// V2ActionHistoryDim is the total action history window size
+	// (6 entries = 3 own + 3 opp, each V2ActionHistoryEntryDim wide).
+	V2ActionHistoryDim = 2 * ActionHistorySize * V2ActionHistoryEntryDim
+
+	// V2CardCountOffset is the starting index of the posterior in the v2 vector.
+	V2CardCountOffset = EPPBSInputDim
+
+	// V2ActionHistoryOffset is the starting index of the action history window.
+	V2ActionHistoryOffset = V2CardCountOffset + V2CardCountDim
+
+	// EPPBSV2InputDim is the total v2 encoding dimension (expected 257).
+	EPPBSV2InputDim = EPPBSInputDim + V2CardCountDim + V2ActionHistoryDim
+)
+
+// DeckBucketCounts lists the maximum number of cards per CardBucket
+// across the full 54-card deck. Index aligns with CardBucket (0..8):
+//
+//	0: BucketZero (Jokers)       2
+//	1: BucketNegKing (Red Kings) 2
+//	2: BucketAce                 4
+//	3: BucketLowNum (2-4)        12
+//	4: BucketMidNum (5-6)        8
+//	5: BucketPeekSelf (7-8)      8
+//	6: BucketPeekOther (9-10)    8
+//	7: BucketSwapBlind (J-Q)     8
+//	8: BucketHighKing (Black K)  2
+//
+// Mirrors cfr/src/pbs.py DECK_COUNTS.
+var DeckBucketCounts = [V2CardCountDim]uint8{2, 2, 4, 12, 8, 8, 8, 8, 2}
+
+// Action category constants for the v2 encoding action history window.
+// Values MUST stay in sync with cfr/src/constants.py V2_ACTION_CATEGORY_*.
+//
+//	0 = DRAW phase: DrawStockpile, DrawDiscard, CallCambia
+//	1 = DISCARD phase: Discard*, Replace
+//	2 = ABILITY_OR_SNAP: peek/look/swap (including king swap), snap_*, pass_snap
+const (
+	ActionCategoryDraw         uint8 = 0
+	ActionCategoryDiscard      uint8 = 1
+	ActionCategoryAbilityOrSnap uint8 = 2
+)
+
+// CategorizeAction maps a 2P action index to the v2 encoding tuple:
+// (category, targetSlot, hasSlot). See ActionCategory* constants for semantics.
+//
+// The targetSlot is the primary hand-slot index (0..engine.MaxHandSize-1)
+// associated with the action (own slot for Replace/PeekOwn/BlindSwap/KingLook/
+// SnapOwn/SnapOpponentMove; opponent slot for PeekOther/SnapOpponent). For
+// actions without a slot target, hasSlot is false and targetSlot is 0.
+//
+// Unknown or out-of-range action indices yield category AbilityOrSnap with
+// hasSlot=false; the category one-hot will still be written but the slot
+// will stay at zero.
+func CategorizeAction(actionIdx uint16) (category uint8, targetSlot uint8, hasSlot bool) {
+	switch actionIdx {
+	case engine.ActionDrawStockpile,
+		engine.ActionDrawDiscard,
+		engine.ActionCallCambia:
+		return ActionCategoryDraw, 0, false
+	case engine.ActionDiscardNoAbility,
+		engine.ActionDiscardWithAbility:
+		return ActionCategoryDiscard, 0, false
+	case engine.ActionKingSwapNo, engine.ActionKingSwapYes, engine.ActionPassSnap:
+		return ActionCategoryAbilityOrSnap, 0, false
+	}
+
+	if slot, ok := engine.ActionIsReplace(actionIdx); ok {
+		return ActionCategoryDiscard, slot, true
+	}
+	if slot, ok := engine.ActionIsPeekOwn(actionIdx); ok {
+		return ActionCategoryAbilityOrSnap, slot, true
+	}
+	if slot, ok := engine.ActionIsPeekOther(actionIdx); ok {
+		return ActionCategoryAbilityOrSnap, slot, true
+	}
+	if ownIdx, _, ok := engine.ActionIsBlindSwap(actionIdx); ok {
+		return ActionCategoryAbilityOrSnap, ownIdx, true
+	}
+	if ownIdx, _, ok := engine.ActionIsKingLook(actionIdx); ok {
+		return ActionCategoryAbilityOrSnap, ownIdx, true
+	}
+	if slot, ok := engine.ActionIsSnapOwn(actionIdx); ok {
+		return ActionCategoryAbilityOrSnap, slot, true
+	}
+	if slot, ok := engine.ActionIsSnapOpponent(actionIdx); ok {
+		return ActionCategoryAbilityOrSnap, slot, true
+	}
+	if ownIdx, _, ok := engine.ActionIsSnapOpponentMove(actionIdx); ok {
+		return ActionCategoryAbilityOrSnap, ownIdx, true
+	}
+	return ActionCategoryAbilityOrSnap, 0, false
+}
+
 // N-Player constants (used when NumPlayers > 2).
 // Derived from MaxPlayers=8 and MaxHandSize=6:
 //   MaxTotalSlots       = MaxPlayers × MaxHandSize = 8 × 6 = 48

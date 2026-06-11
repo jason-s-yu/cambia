@@ -109,6 +109,38 @@ type AgentState struct {
 	DiscardBucketCounts [NumBuckets]uint8 // counts per CardBucket (0-9)
 	TotalDiscardsSeen   uint8             // total discards observed
 	MaxGameTurns        uint16            // from g.Rules.MaxGameTurns, for normalization
+
+	// Action history ring buffers. Stores the last 3 actions observed from
+	// this agent ("own") and from its opponent ("opp") respectively.
+	// Entries are ordered oldest-first at index 0; newest at index Len-1.
+	// Len is capped at ActionHistorySize; writes past the cap shift older
+	// entries out deterministically.
+	OwnActionHistory    [ActionHistorySize]ActionHistoryEntry
+	OwnActionHistoryLen uint8
+	OppActionHistory    [ActionHistorySize]ActionHistoryEntry
+	OppActionHistoryLen uint8
+}
+
+// ActionHistoryEntry is a compact record of one observed action for the
+// v2 encoding action-history window.
+type ActionHistoryEntry struct {
+	// Category is the 3-way semantic class of the action as produced by
+	// CategorizeAction in constants.go:
+	//   0 = DRAW (draw_stockpile, draw_discard, call_cambia)
+	//   1 = DISCARD (discard_*, replace)
+	//   2 = ABILITY_OR_SNAP (peek_*, king_*, blind_swap, snap_*, pass_snap)
+	// Python mirrors this in V2_ACTION_CATEGORY_* constants; keep both in
+	// lockstep when changing.
+	Category uint8
+	// TargetSlot is the primary own-hand slot index (0..MaxHandSize-1)
+	// associated with the action. Set to 0 when the action has no slot target
+	// (see HasSlot); consumers should rely on HasSlot rather than treating
+	// TargetSlot=0 as special.
+	TargetSlot uint8
+	// HasSlot is true if the action has a slot target encoded in TargetSlot.
+	HasSlot bool
+	// Valid is true for populated entries; false for unused ring slots.
+	Valid bool
 }
 
 // NewAgentState creates a zero-initialized AgentState with the given player IDs
@@ -281,6 +313,41 @@ func (a *AgentState) Update(g *engine.GameState) {
 
 	// Step 4: Apply time decay (memory level 2 only).
 	a.applyTimeDecay()
+
+	// Step 5: Record this action into the per-side history ring buffer.
+	a.recordActionHistory(act, actingPlayer)
+}
+
+// recordActionHistory pushes an action onto the acting side's ring buffer.
+// Called at the end of Update(); independent of memory level or N-player mode.
+func (a *AgentState) recordActionHistory(actionIdx uint16, actingPlayer uint8) {
+	category, slot, hasSlot := CategorizeAction(actionIdx)
+	entry := ActionHistoryEntry{
+		Category:   category,
+		TargetSlot: slot,
+		HasSlot:    hasSlot,
+		Valid:      true,
+	}
+	if actingPlayer == a.PlayerID {
+		pushActionHistory(&a.OwnActionHistory, &a.OwnActionHistoryLen, entry)
+	} else {
+		pushActionHistory(&a.OppActionHistory, &a.OppActionHistoryLen, entry)
+	}
+}
+
+// pushActionHistory appends to a ring buffer that keeps the newest three entries.
+// On overflow, it shifts elements left so the oldest is evicted.
+func pushActionHistory(buf *[ActionHistorySize]ActionHistoryEntry, lenOut *uint8, entry ActionHistoryEntry) {
+	if *lenOut < ActionHistorySize {
+		buf[*lenOut] = entry
+		*lenOut++
+		return
+	}
+	// Shift left: drop oldest.
+	for i := 0; i < ActionHistorySize-1; i++ {
+		buf[i] = buf[i+1]
+	}
+	buf[ActionHistorySize-1] = entry
 }
 
 // trackDiscard records the current discard-top card in the dead-card histogram.

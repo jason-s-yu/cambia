@@ -1,0 +1,58 @@
+# PPO baseline config for encoding v2 (~257-dim).
+#
+# Mirrors the 60% PPO diagnostic run (runs/_archive/ppo-diagnostic/) with two
+# changes:
+#   1. deep_cfr.encoding_version = 2  (requires Stream B B5 to take effect)
+#   2. persistence path points to runs/ppo-encoding-v2/
+#
+# Training invocation (after Stream B B5 lands):
+#   cd cfr && cambia train ppo \
+#     --config config/ppo_encoding_v2.yaml \
+#     --timesteps 60000000 \
+#     --n-envs 16 \
+#     --save-path runs/ppo-encoding-v2/checkpoints/ppo_model \
+#     --opponent imperfect_greedy \
+#     --seed 42
+#
+# MaskablePPO hyperparameters (hardcoded in ppo_train.py, same as diagnostic):
+#   net_arch: [256, 256]
+#   n_steps: 2048
+#   batch_size: 256
+#   n_epochs: 10
+#   learning_rate: 3e-4
+#   gamma: 1.0
+#   ent_coef: 0.01
+
+agent_params:
+  memory_level: 1
+  time_decay_turns: 3
+
+cambia_rules:
+  allowDrawFromDiscardPile: false
+  allowReplaceAbilities: false
+  snapRace: false
+  penaltyDrawCount: 2
+  use_jokers: 2
+  cards_per_player: 4
+  initial_view_count: 2
+  cambia_allowed_round: 0
+  allowOpponentSnapping: false
+  max_game_turns: 46
+
+persistence:
+  agent_data_save_path: "runs/ppo-encoding-v2/checkpoints/ppo_model"
+
+agents:
+  greedy_agent:
+    cambia_call_threshold: 5
+
+deep_cfr:
+  # encoding_version: 2 activates the 257-dim v2 layout in
+  # encode_infoset_eppbs_interleaved and sets CambiaEnv.observation_space
+  # accordingly. Requires Stream B (B5) to be merged before training.
+  encoding_version: 2
+  device: cpu
+
+logging:
+  log_level_file: "INFO"
+  log_level_console: "WARNING"
