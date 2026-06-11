@@ -1999,6 +1999,155 @@ class MixedOpponentAgent(BaseAgent):
         return self.agent_b.choose_action(game_state, legal_actions)
 
 
+# --- DESCA Agent Wrapper ---
+
+
+class DESCAAgentWrapper(NeuralAgentWrapper):
+    """
+    Wraps a trained DESCA AvgStrategyNetwork for evaluation.
+
+    At each decision: encode to 257-dim EP-PBS v2, compute abstract action mask,
+    forward through avg-strategy network, sample or argmax, then unabstract to a
+    concrete legal action.
+    """
+
+    def __init__(
+        self,
+        player_id: int,
+        config,
+        checkpoint_path: str,
+        device: str = "cpu",
+        use_argmax: bool = False,
+    ):
+        super().__init__(player_id, config, device=device, use_argmax=use_argmax)
+
+        torch = self._torch
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
+
+        try:
+            from src.desca_networks import AvgStrategyNetwork
+        except ImportError as e:
+            raise ImportError(
+                f"DESCAAgentWrapper requires desca_networks.py (Stream A): {e}"
+            ) from e
+
+        from src.constants import EP_PBS_V2_INPUT_DIM
+        from src.action_abstraction import NUM_ABSTRACT_ACTIONS_2P
+
+        desca_cfg = checkpoint.get("desca_config", {})
+        hidden_dim = desca_cfg.get("hidden_dim", 512)
+        input_dim = desca_cfg.get("encoding_dim", EP_PBS_V2_INPUT_DIM)
+        num_actions = desca_cfg.get("num_abstract_actions", NUM_ABSTRACT_ACTIONS_2P)
+
+        self._num_abstract_actions = num_actions
+        self._input_dim = input_dim
+
+        self.avg_strategy_net = AvgStrategyNetwork(
+            input_dim=input_dim,
+            hidden_dim=hidden_dim,
+            num_actions=num_actions,
+        )
+        self.avg_strategy_net.load_state_dict(checkpoint["avg_strategy_state_dict"])
+        self.avg_strategy_net.to(self.device)
+        self.avg_strategy_net.eval()
+
+        logger.info(
+            "DESCAAgent P%d loaded checkpoint (iter=%s)",
+            self.player_id,
+            checkpoint.get("iteration", "N/A"),
+        )
+
+    def _encode_v2(self, decision_context) -> np.ndarray:
+        """Encode agent state to 257-dim EP-PBS v2."""
+        from src.encoding import encode_infoset_eppbs_interleaved
+
+        st = self.agent_state
+        if st.cambia_caller is None:
+            cambia_state = 2
+        elif st.cambia_caller == self.player_id:
+            cambia_state = 0
+        else:
+            cambia_state = 1
+
+        return encode_infoset_eppbs_interleaved(
+            slot_tags=[t.value if hasattr(t, "value") else int(t) for t in st.slot_tags],
+            slot_buckets=[int(b) for b in st.slot_buckets],
+            discard_top_bucket=(
+                st.known_discard_top_bucket.value
+                if hasattr(st.known_discard_top_bucket, "value")
+                else int(st.known_discard_top_bucket)
+            ),
+            stock_estimate=(
+                st.stockpile_estimate.value
+                if hasattr(st.stockpile_estimate, "value")
+                else int(st.stockpile_estimate)
+            ),
+            game_phase=(
+                st.game_phase.value if hasattr(st.game_phase, "value") else int(st.game_phase)
+            ),
+            decision_context=(
+                decision_context.value
+                if hasattr(decision_context, "value")
+                else int(decision_context)
+            ),
+            cambia_state=cambia_state,
+            own_hand_size=len(st.own_hand),
+            opp_hand_size=st.opponent_card_count,
+            encoding_version=2,
+        )
+
+    def choose_action(
+        self, game_state: CambiaGameState, legal_actions: Set[GameAction]
+    ) -> GameAction:
+        """Choose an action via DESCA avg-strategy network over the abstract action space."""
+        from src.action_abstraction import abstract_actions, unabstract
+
+        if not self.agent_state:
+            return random.choice(list(legal_actions))
+
+        legal_list = list(legal_actions)
+        decision_context = self._get_decision_context(game_state)
+
+        try:
+            features = self._encode_v2(decision_context)
+            abstract_mask = abstract_actions(legal_list, self.agent_state)
+        except Exception as e:  # JUSTIFIED: evaluation resilience
+            logger.error("DESCAAgent P%d encoding error: %s", self.player_id, e)
+            return random.choice(legal_list)
+
+        torch = self._torch
+        with torch.inference_mode():
+            feat_t = torch.from_numpy(features).float().unsqueeze(0).to(self.device)
+            mask_t = torch.from_numpy(abstract_mask).bool().unsqueeze(0).to(self.device)
+            probs = self.avg_strategy_net(feat_t, mask_t)
+            probs_np = probs.squeeze(0).cpu().numpy()
+
+        legal_abstract = np.where(abstract_mask)[0]
+        if len(legal_abstract) == 0:
+            return random.choice(legal_list)
+
+        legal_probs = probs_np[legal_abstract]
+        prob_sum = legal_probs.sum()
+        if prob_sum <= 0:
+            legal_probs = np.ones(len(legal_abstract)) / len(legal_abstract)
+        else:
+            legal_probs = legal_probs / prob_sum
+
+        if self._use_argmax:
+            chosen_local = int(np.argmax(legal_probs))
+        else:
+            chosen_local = int(np.random.choice(len(legal_abstract), p=legal_probs))
+
+        chosen_abstract_idx = int(legal_abstract[chosen_local])
+
+        seed = hash((id(game_state), chosen_abstract_idx)) & 0xFFFF_FFFF
+        try:
+            return unabstract(chosen_abstract_idx, legal_list, self.agent_state, seed=seed)
+        except (ValueError, Exception) as e:
+            logger.error("DESCAAgent P%d unabstract error: %s", self.player_id, e)
+            return random.choice(legal_list)
+
+
 # --- Constants ---
 
 # Canonical mean_imp baseline set. Import this from all scripts that compute mean_imp.
@@ -2028,6 +2177,8 @@ AGENT_REGISTRY: Dict[str, Type[BaseAgent]] = {
     "sog": SoGAgentWrapper,
     "sog_inference": SoGInferenceAgentWrapper,
     "nplayer": NPlayerAgentWrapper,
+    "desca": DESCAAgentWrapper,
+    "dense-escher": DESCAAgentWrapper,
     "random_no_cambia": RandomNoCambiaAgent,
     "random_late_cambia": RandomLateCambiaAgent,
     "human_player": HumanPlayerAgent,
@@ -2090,6 +2241,13 @@ def get_agent(agent_type: str, player_id: int, config, **kwargs) -> BaseAgent:
         device = kwargs.get("device", "cpu")
         deterministic = kwargs.get("use_argmax", True)
         return SoGInferenceAgentWrapper(player_id, config, checkpoint_path, device=device, deterministic=deterministic)
+    elif agent_type.lower() in ("desca", "dense-escher"):
+        checkpoint_path = kwargs.get("checkpoint_path")
+        if not checkpoint_path:
+            raise ValueError("DESCAAgentWrapper requires 'checkpoint_path'.")
+        device = kwargs.get("device", "cpu")
+        use_argmax = kwargs.get("use_argmax", False)
+        return DESCAAgentWrapper(player_id, config, checkpoint_path, device=device, use_argmax=use_argmax)
     else:
         # Pass config to baseline agents as well
         return agent_class(player_id, config)
@@ -2120,7 +2278,7 @@ def run_evaluation(
             logger.error("Strategy file path (--strategy) required for CFR agent.")
             sys.exit(1)
         logger.info("CFR Strategy File: %s", strategy_path)
-    _checkpoint_agent_types = {"deep_cfr", "escher", "sd_cfr", "nplayer", "ppo", "rebel", "gtcfr", "sog", "sog_inference"}
+    _checkpoint_agent_types = {"deep_cfr", "escher", "sd_cfr", "nplayer", "ppo", "rebel", "gtcfr", "sog", "sog_inference", "desca", "dense-escher"}
     if agent1_type.lower() in _checkpoint_agent_types or agent2_type.lower() in _checkpoint_agent_types:
         if not checkpoint_path:
             logger.error("Checkpoint path (--checkpoint) required for %s agent.", agent1_type)

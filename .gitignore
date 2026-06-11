@@ -28,6 +28,9 @@ sync-generated.sh
 
 # Runtime
 session
+cambia_runs.db
+cambia_runs.db-shm
+cambia_runs.db-wal
 
 # Generated protobuf
 *_pb2.py

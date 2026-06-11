@@ -36,6 +36,9 @@ ALGO_TO_AGENT_TYPE: Dict[str, str] = {
     "gtcfr": "gtcfr",
     "sog": "sog_inference",
     "psro": "deep_cfr",
+    # v3.1 DESCA (Dense ESCHER + Semantic Action Abstraction)
+    "desca": "desca",
+    "desca-search": "desca_search",
 }
 
 ALGO_TO_CHECKPOINT_PREFIX: Dict[str, str] = {
@@ -47,6 +50,9 @@ ALGO_TO_CHECKPOINT_PREFIX: Dict[str, str] = {
     "gtcfr": "gtcfr_checkpoint",
     "sog": "sog_checkpoint",
     "psro": "deep_cfr_checkpoint",
+    # v3.1 DESCA checkpoints follow the {algo}_checkpoint convention.
+    "desca": "desca_checkpoint",
+    "desca-search": "desca_search_checkpoint",
 }
 
 
@@ -198,6 +204,8 @@ def infer_algorithm(
     Infer algorithm name from config dict, checkpoint keys, or filename.
 
     Priority:
+    0. algorithm == "desca" or desca_state_dict in checkpoint -> "desca"
+    0a. algorithm == "desca-search" or desca_search_state_dict -> "desca-search"
     1. checkpoint_keys contains "rebel_value_net_state_dict" → "rebel"
     2. checkpoint_filename matches "rebel_checkpoint*" → "rebel"
     3. config has rebel section → "rebel"
@@ -208,6 +216,28 @@ def infer_algorithm(
     8. default → "os-mccfr"
     """
     deep_cfr_section = config_dict.get("deep_cfr", {}) or {}
+
+    # Detect DESCA (placed before ReBeL/GT-CFR/SoG; DESCA checkpoints may lack
+    # their legacy marker keys and must be identified by the explicit
+    # `algorithm` field or a `desca_state_dict` / `desca_search_state_dict`
+    # marker).
+    declared_algo = str(config_dict.get("algorithm", "") or "").strip().lower()
+    if declared_algo == "desca-search":
+        return "desca-search"
+    if declared_algo == "desca":
+        return "desca"
+    if checkpoint_keys:
+        if "desca_search_state_dict" in checkpoint_keys:
+            return "desca-search"
+        if "desca_state_dict" in checkpoint_keys:
+            return "desca"
+    if checkpoint_filename:
+        import os as _os
+        basename = _os.path.basename(checkpoint_filename)
+        if basename.startswith("desca_search_checkpoint"):
+            return "desca-search"
+        if basename.startswith("desca_checkpoint"):
+            return "desca"
 
     # Detect SoG (must come before GT-CFR since SoG checkpoints also contain cvpn_state_dict)
     if checkpoint_keys and "sog_metadata" in checkpoint_keys:
