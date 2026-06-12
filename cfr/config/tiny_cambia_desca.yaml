@@ -1,0 +1,64 @@
+# Tiny-Cambia DESCA config (research experiment E1).
+# IDENTICAL cambia_rules to config/tiny_cambia_tabular.yaml so the deep pipeline
+# trains on the exact same game tabular CFR solves. Tiny networks + short
+# horizon: the production DESCA code path (encoding v2, ESCHER estimator,
+# APCFR+ inner loop, omniscient critic, 146->32 abstraction, avg-strategy
+# extraction) on a solvable game. See e1-report.md.
+#
+# Variant T2-R4: 4 ranks {A,2,3,K}, 2 cards/player, view 1, 6 turns, Cambia
+# from round 1.
+
+algorithm: desca
+
+agent_params:
+  memory_level: 1
+  time_decay_turns: 3
+
+cambia_rules:
+  allowDrawFromDiscardPile: false
+  allowReplaceAbilities: false
+  snapRace: false
+  penaltyDrawCount: 1
+  use_jokers: 0
+  cards_per_player: 2
+  initial_view_count: 1
+  cambia_allowed_round: 1
+  allowOpponentSnapping: false
+  max_game_turns: 6
+  deck_ranks: ["A", "2", "3", "6"]
+
+persistence:
+  agent_data_save_path: "runs/tiny-desca-cell0/checkpoints/desca_checkpoint.pt"
+
+logging:
+  log_level_file: "WARNING"
+  log_level_console: "ERROR"
+
+desca:
+  encoding_version: 2
+  hidden_dim: 128          # tiny net (prod 512); game is tiny
+  num_abstract_actions: 32 # MUST match action_abstraction.NUM_ABSTRACT_ACTIONS_2P
+  iterations: 250
+  traversals_per_iter: 24  # tiny tree (~300 infosets); Python backend is slow per traversal
+  # SGD steps/iter slashed from prod defaults (2000/2000/1000) for the tiny game:
+  # the buffers fill from a tiny infoset space, so few steps/iter suffice and
+  # 600 iters still gives ample total gradient steps.
+  regret_sgd_steps: 60
+  strategy_sgd_steps: 60
+  value_sgd_steps: 40
+  minibatch: 512
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  dcfr_alpha: 1.5
+  apcfr_asymmetry: 0.5     # apcfr-mild (the locked Phase 2 winner setting)
+  inner_update: apcfr_plus
+  buffer_capacity: 500000
+  checkpoint_every: 50
+  eval_every: 50
+  warmup_iters: 30
+  use_bf16_inference: false  # CPU run; bf16 inference off for numeric cleanliness
+  stall_detection:
+    window_size_iters: 50
+    num_windows: 5
+    max_iter_abs: 2000

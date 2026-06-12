@@ -196,6 +196,10 @@ class CambiaRulesConfig(_CambiaBaseModel):
     max_game_turns: int = 300
     lockCallerHand: bool = True
     num_decks: int = 1
+    # Optional reduced-deck rank subset for tractable tabular ground truth
+    # (research experiment E1). None = full 13-rank deck. When set (e.g.
+    # ["A","2","3","4","K"]), the engine deals only those non-joker ranks.
+    deck_ranks: Optional[List[str]] = None
 
 
 class PersistenceConfig(_CambiaBaseModel):
@@ -454,6 +458,12 @@ class DESCAConfig(_CambiaBaseModel):
     warmup_iters: int = 50
     inner_update: Literal["apcfr_plus", "rm_plus"] = "apcfr_plus"
     use_bf16_inference: bool = True
+    # SGD steps per training iteration for each head. Trainer reads these via
+    # _cfg_get with these defaults; exposing them on the model lets tiny-game /
+    # fast configs override them (the defaults are tuned for full Cambia).
+    regret_sgd_steps: int = 2000
+    strategy_sgd_steps: int = 2000
+    value_sgd_steps: int = 1000
     stall_detection: StallDetectionConfig = Field(default_factory=StallDetectionConfig)
 
 

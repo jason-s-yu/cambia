@@ -90,19 +90,34 @@ class Card:
 
 
 # --- Standard Deck Creation ---
-def create_standard_deck(include_jokers: int = 2, num_decks: int = 1) -> list["Card"]:
+def create_standard_deck(
+    include_jokers: int = 2,
+    num_decks: int = 1,
+    deck_ranks: Optional[list[str]] = None,
+) -> list["Card"]:
     """Creates one or more standard 52-card decks plus optional jokers.
 
     Args:
         include_jokers: Number of jokers per deck (0, 1, or 2).
         num_decks: Number of standard decks to include (1-4).
+        deck_ranks: Optional rank subset (e.g. ["A","2","3","4","K"]). When
+            provided, only those non-joker ranks are dealt (each with all four
+            suits). Used to build reduced-deck variants for tractable tabular
+            ground truth (research experiment E1). When None, the full 13-rank
+            deck is used. Joker count is always governed by include_jokers.
     """
-    single_deck = [
-        Card(rank, suit)
-        for rank in ALL_RANKS_STR
-        if rank != JOKER_RANK_STR
-        for suit in ALL_SUITS
-    ]
+    if deck_ranks is None:
+        ranks = [r for r in ALL_RANKS_STR if r != JOKER_RANK_STR]
+    else:
+        invalid = [r for r in deck_ranks if r not in ALL_RANKS_STR or r == JOKER_RANK_STR]
+        if invalid:
+            raise ValueError(
+                f"create_standard_deck: deck_ranks contains invalid/non-suited ranks "
+                f"{invalid}; valid non-joker ranks are "
+                f"{[r for r in ALL_RANKS_STR if r != JOKER_RANK_STR]}"
+            )
+        ranks = list(deck_ranks)
+    single_deck = [Card(rank, suit) for rank in ranks for suit in ALL_SUITS]
     single_deck.extend([Card(rank=JOKER_RANK_STR) for _ in range(include_jokers)])
     if num_decks <= 1:
         return single_deck

@@ -87,6 +87,7 @@ class CambiaGameState(QueryMixin, SnapLogicMixin, AbilityMixin):
             self.stockpile = create_standard_deck(
                 include_jokers=self.house_rules.use_jokers,
                 num_decks=getattr(self.house_rules, "num_decks", 1),
+                deck_ranks=getattr(self.house_rules, "deck_ranks", None),
             )
             self._rng.shuffle(self.stockpile)
         except Exception as e_deck:

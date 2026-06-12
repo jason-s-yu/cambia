@@ -1,0 +1,17 @@
+algorithm: tabular
+agent_params: {memory_level: 2, time_decay_turns: 999}
+cambia_rules:
+  allowDrawFromDiscardPile: false
+  allowReplaceAbilities: false
+  snapRace: false
+  penaltyDrawCount: 1
+  use_jokers: 0
+  cards_per_player: 1
+  initial_view_count: 1
+  cambia_allowed_round: 1
+  allowOpponentSnapping: false
+  max_game_turns: 3
+  deck_ranks: ["A", "6"]
+cfr_training: {num_iterations: 100, num_workers: 1}
+analysis: {exploitability_num_workers: 0}
+logging: {log_level_file: "CRITICAL", log_level_console: "CRITICAL"}

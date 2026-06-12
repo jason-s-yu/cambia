@@ -1,0 +1,55 @@
+# Tiny-Cambia tabular CFR+ config (research experiment E1).
+# Reduced deck for tractable exact tabular ground truth. See
+# .docs/research/cfr-ceiling/experiments/e1-report.md.
+#
+# Variant T2-R4N (primary, abilities OFF): 4 ranks {A,2,3,6} -> values
+# {1,2,3,6}, 16-card deck (4 suits x 4 ranks), 2 cards/player, initial view 1,
+# max 6 engine turns, Cambia suppressed in round 0 (allowed from round 1).
+# None of {A,2,3,6} triggers a discard ability (ability ranks are 7-K), so the
+# only special mechanic is snapping. This keeps the soundness question clean:
+# draw/replace/discard/snap/cambia, with replace-decision aliasing exercised
+# (A,2,3 all map to the LOW slot bucket) and a 1..6 value spread. The King
+# variant {A,2,3,K} (value spread to 13/-1 plus look&swap) is recorded as a
+# faithfulness extension; the King ability floods the traversal with engine
+# state-machine warnings and is slower, so it is not the primary clean run.
+
+algorithm: tabular
+
+agent_params:
+  memory_level: 1
+  time_decay_turns: 3
+
+cambia_rules:
+  allowDrawFromDiscardPile: false
+  allowReplaceAbilities: false
+  snapRace: false
+  penaltyDrawCount: 1
+  use_jokers: 0
+  cards_per_player: 2
+  initial_view_count: 1
+  cambia_allowed_round: 1
+  allowOpponentSnapping: false
+  max_game_turns: 6
+  deck_ranks: ["A", "2", "3", "6"]
+
+cfr_training:
+  num_iterations: 20000
+  save_interval: 5000
+  pruning_enabled: false
+  exploitability_interval: 2000
+  exploitability_interval_seconds: 0
+  num_workers: 1
+
+cfr_plus_params:
+  weighted_averaging_enabled: true
+  averaging_delay: 100
+
+persistence:
+  agent_data_save_path: "runs/tiny-cambia-tabular/agent.joblib"
+
+analysis:
+  exploitability_num_workers: 0
+
+logging:
+  log_level_file: "WARNING"
+  log_level_console: "ERROR"
