@@ -1681,6 +1681,16 @@ class PPOAgentWrapper(BaseAgent):
             )
         self._model = MaskablePPO.load(model_path, device=device)
         self._agent_state: Optional[AgentState] = None
+        # The model's observation space dictates which encoding layout to feed.
+        # 257-dim models were trained on EP-PBS v2 (encoding_version=2); 224-dim
+        # models on the v1 base layout. Feeding the wrong width crashes
+        # MaskablePPO.predict, which previously forced a random-action fallback.
+        try:
+            obs_dim = int(self._model.observation_space.shape[0])
+        except Exception:
+            obs_dim = 224
+        self._encoding_version = 2 if obs_dim >= 257 else 1
+        self._obs_dim = obs_dim
 
     def initialize_state(self, initial_game_state):
         """Initialize internal AgentState."""
@@ -1803,6 +1813,7 @@ class PPOAgentWrapper(BaseAgent):
             cambia_state=cambia_state,
             own_hand_size=len(st.own_hand),
             opp_hand_size=st.opponent_card_count,
+            encoding_version=getattr(self, "_encoding_version", 1),
         )
 
         mask = encode_action_mask(list(legal_actions))
@@ -2866,6 +2877,8 @@ def run_head_to_head_typed(
     num_games: int,
     config,
     device: str = "cpu",
+    use_argmax_a: bool = False,
+    use_argmax_b: bool = False,
 ) -> Dict:
     """
     Play two typed agent checkpoints against each other.
@@ -2893,11 +2906,11 @@ def run_head_to_head_typed(
 
         try:
             if a_is_p0:
-                agent0 = get_agent(agent_a_type, 0, config, checkpoint_path=checkpoint_a, device=device)
-                agent1 = get_agent(agent_b_type, 1, config, checkpoint_path=checkpoint_b, device=device)
+                agent0 = get_agent(agent_a_type, 0, config, checkpoint_path=checkpoint_a, device=device, use_argmax=use_argmax_a)
+                agent1 = get_agent(agent_b_type, 1, config, checkpoint_path=checkpoint_b, device=device, use_argmax=use_argmax_b)
             else:
-                agent0 = get_agent(agent_b_type, 0, config, checkpoint_path=checkpoint_b, device=device)
-                agent1 = get_agent(agent_a_type, 1, config, checkpoint_path=checkpoint_a, device=device)
+                agent0 = get_agent(agent_b_type, 0, config, checkpoint_path=checkpoint_b, device=device, use_argmax=use_argmax_b)
+                agent1 = get_agent(agent_a_type, 1, config, checkpoint_path=checkpoint_a, device=device, use_argmax=use_argmax_a)
 
             agents = [agent0, agent1]
 
