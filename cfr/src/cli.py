@@ -2251,6 +2251,14 @@ def evaluate(
         "--lbr-rollouts",
         help="Rollouts per infoset for LBR",
     ),
+    lbr_tier: str = typer.Option(
+        "A",
+        "--lbr-tier",
+        help=(
+            "LBR tier: 'A' (random rollouts, loose lower bound) or 'B' "
+            "(agent-policy rollouts vs a strong opponent, tighter bound)."
+        ),
+    ),
     max_workers: Optional[int] = typer.Option(
         None,
         "--max-workers",
@@ -2470,9 +2478,13 @@ def evaluate(
         print(f"\nResults persisted to {run_dir}/metrics.jsonl")
 
     if lbr:
-        from .cfr.sampled_lbr import sampled_lbr as run_lbr
         from .config import load_config as _load_config
         from .evaluate_agents import get_agent
+
+        tier = (lbr_tier or "A").strip().upper()
+        if tier not in ("A", "B"):
+            print(f"[lbr] ERROR: unknown --lbr-tier {lbr_tier!r}", file=sys.stderr)
+            tier = "A"
 
         lbr_config = _load_config(str(config))
         if lbr_config is None:
@@ -2485,17 +2497,35 @@ def evaluate(
                 checkpoint_path=str(checkpoint),
                 device=device,
             )
-            result = run_lbr(
-                agent,
-                lbr_config,
-                num_infosets=lbr_infosets,
-                br_rollouts_per_infoset=lbr_rollouts,
-            )
-            print(
-                f"[lbr] exploitability={result['exploitability']:.3f} "
-                f"({result['num_infosets_sampled']} infosets, "
-                f"stderr={result['std_err']:.3f})"
-            )
+            if tier == "B":
+                from .cfr.lbr import tier_b_lbr
+
+                result = tier_b_lbr(
+                    agent,
+                    lbr_config,
+                    num_infosets=lbr_infosets,
+                    br_rollouts_per_infoset=lbr_rollouts,
+                )
+                opp = result.get("rollout_opponent", "?")
+                print(
+                    f"[lbr] tier=B exploitability={result['exploitability']:.3f} "
+                    f"({result['num_infosets_sampled']} infosets, "
+                    f"stderr={result['std_err']:.3f}, opp={opp})"
+                )
+            else:
+                from .cfr.sampled_lbr import sampled_lbr as run_lbr
+
+                result = run_lbr(
+                    agent,
+                    lbr_config,
+                    num_infosets=lbr_infosets,
+                    br_rollouts_per_infoset=lbr_rollouts,
+                )
+                print(
+                    f"[lbr] tier=A exploitability={result['exploitability']:.3f} "
+                    f"({result['num_infosets_sampled']} infosets, "
+                    f"stderr={result['std_err']:.3f})"
+                )
 
 
 @app.command(

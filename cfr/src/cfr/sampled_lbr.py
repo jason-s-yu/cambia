@@ -13,13 +13,13 @@ Exploitability is estimated by:
 
 import copy
 import logging
-import random as _random_module
 from typing import Any, Dict
 
 import numpy as np
 
 from src.game.engine import CambiaGameState
 from src.agents.baseline_agents import RandomAgent
+from src.cfr.lbr import collect_infosets, _make_random_opponent
 
 logger = logging.getLogger(__name__)
 
@@ -70,11 +70,18 @@ def sampled_lbr(
     br_rollouts_per_infoset: int = 100,
     seed: int = 42,
 ) -> Dict[str, Any]:
-    """Compute sampled LBR exploitability estimate.
+    """Compute the Tier-A sampled LBR exploitability estimate.
+
+    Tier A: trajectories are generated against a uniform-random opponent and BR
+    continuation rollouts play both seats uniform-random. This is a LOOSE lower
+    bound (a real adversary plays well after a deviation); the relative ordering
+    across agents is trustworthy, the absolute number is not. For the tighter
+    agent-policy variant see ``src.cfr.lbr.tier_b_lbr``.
 
     Algorithm:
     1. Play games under agent's policy (as P0) vs RandomAgent (as P1).
-    2. At P0 decision points, sample infosets with a target rate.
+    2. Collect P0 decision points until ``num_infosets`` are gathered
+       (via ``src.cfr.lbr.collect_infosets``; fixes the old 14x over-request).
     3. For each sampled infoset:
        a. For each legal action: deep-copy state, apply action, rollout, record utility.
        b. BR value = max over actions of mean rollout utility.
@@ -95,80 +102,27 @@ def sampled_lbr(
           - num_infosets_sampled: int
           - std_err: float (standard error of the mean)
     """
-    rng = np.random.default_rng(seed)
-    _random_module.seed(seed)
-
     house_rules = config.cambia_rules
     max_turns = getattr(house_rules, "max_game_turns", 0)
     if max_turns <= 0:
         max_turns = 500
 
-    # Estimate how many games to play to collect ~num_infosets samples.
-    # Typical game: ~40 P0 decisions. We plan for ~10% sample rate.
-    expected_p0_decisions = 40
-    games_needed = max(200, (num_infosets * 10) // expected_p0_decisions)
-    sample_prob = min(1.0, num_infosets / max(1, expected_p0_decisions * games_needed))
-
-    # Each entry: (state_copy, legal_actions_list, agent_action_idx)
-    sampled_infosets = []
-
-    for game_idx in range(games_needed):
-        if len(sampled_infosets) >= num_infosets:
-            break
-
-        # Seed the per-game RNG deterministically from the numpy rng.
-        game_seed = int(rng.integers(0, 2**31))
-        game_rng = _random_module.Random(game_seed)
-        game_state = CambiaGameState(house_rules=house_rules, _rng=game_rng)
-        opp_agent = RandomAgent(1, config)
-
-        if hasattr(agent_wrapper, "initialize_state"):
-            try:
-                agent_wrapper.initialize_state(game_state)
-            except Exception:
-                pass
-
-        turn = 0
-        while not game_state.is_terminal() and turn < max_turns:
-            turn += 1
-            ap = game_state.get_acting_player()
-            if ap == -1:
-                break
-            legal_actions = game_state.get_legal_actions()
-            if not legal_actions:
-                break
-
-            if ap == _PLAYER_ID:
-                # Deepcopy BEFORE choose_action so we capture pre-decision state.
-                if (
-                    len(sampled_infosets) < num_infosets
-                    and rng.random() < sample_prob
-                ):
-                    state_copy = copy.deepcopy(game_state)
-                    actions_list = list(legal_actions)
-                    agent_action = agent_wrapper.choose_action(game_state, legal_actions)
-                    try:
-                        action_idx = actions_list.index(agent_action)
-                    except ValueError:
-                        action_idx = 0
-                    sampled_infosets.append(
-                        (state_copy, actions_list, action_idx)
-                    )
-                    chosen_action = agent_action
-                else:
-                    chosen_action = agent_wrapper.choose_action(game_state, legal_actions)
-            else:
-                chosen_action = opp_agent.choose_action(game_state, legal_actions)
-
-            try:
-                game_state.apply_action(chosen_action)
-            except Exception:
-                break
+    # Collect P0 infosets via the shared collector. Tier A uses a uniform-random
+    # trajectory opponent (and random rollouts below). Routing through
+    # collect_infosets fixes BUG-3: the old inline collector sized games_needed
+    # and the sample rate for an assumed 40 P0 decisions/game while real games
+    # average ~3, so requesting N infosets collected ~0.07*N. The shared
+    # collector loops until the requested count is met (subject to a safety cap).
+    sampled_infosets = collect_infosets(
+        agent_wrapper,
+        config,
+        num_infosets=num_infosets,
+        seed=seed,
+        trajectory_opponent_factory=_make_random_opponent,
+    )
 
     if not sampled_infosets:
-        logger.warning(
-            "sampled_lbr: No infosets sampled after %d games.", games_needed
-        )
+        logger.warning("sampled_lbr: No infosets sampled.")
         return {"exploitability": 0.0, "num_infosets_sampled": 0, "std_err": 0.0}
 
     exploitability_gaps = []
