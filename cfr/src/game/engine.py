@@ -59,6 +59,12 @@ class CambiaGameState(QueryMixin, SnapLogicMixin, AbilityMixin):
     pending_action_data: Dict[str, Any] = field(default_factory=dict)
 
     # --- Game-local RNG (for reproducibility) ---
+    # When `seed` is provided, the game-local RNG is seeded deterministically in
+    # __post_init__ before the deck shuffle and first-player draw, so the entire
+    # deal is reproducible. This enables common-random-numbers (CRN) seat pairing
+    # in evaluation: a paired A/B game with the same seed faces an identical deal.
+    # Default None preserves the prior unseeded (process-entropy) behavior.
+    seed: Optional[int] = None
     _rng: random.Random = field(default_factory=random.Random)
 
     # --- Snap Phase State (Managed primarily by SnapLogicMixin) ---
@@ -70,6 +76,11 @@ class CambiaGameState(QueryMixin, SnapLogicMixin, AbilityMixin):
 
     # --- Initialization ---
     def __post_init__(self):
+        # Seed the game-local RNG before setup so the deck shuffle and first-player
+        # draw are reproducible when a seed is supplied. Reseeding the existing
+        # Random instance keeps the field identity stable for undo/clone code paths.
+        if self.seed is not None:
+            self._rng.seed(self.seed)
         if not self.players:
             self._setup_game()
         if len(self._utilities) != self.num_players:

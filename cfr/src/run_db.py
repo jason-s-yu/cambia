@@ -39,6 +39,8 @@ ALGO_TO_AGENT_TYPE: Dict[str, str] = {
     # v3.1 DESCA (Dense ESCHER + Semantic Action Abstraction)
     "desca": "desca",
     "desca-search": "desca_search",
+    # PPO eval baseline (sb3-contrib MaskablePPO), not a CFR variant.
+    "ppo": "ppo",
 }
 
 ALGO_TO_CHECKPOINT_PREFIX: Dict[str, str] = {
@@ -53,6 +55,8 @@ ALGO_TO_CHECKPOINT_PREFIX: Dict[str, str] = {
     # v3.1 DESCA checkpoints follow the {algo}_checkpoint convention.
     "desca": "desca_checkpoint",
     "desca-search": "desca_search_checkpoint",
+    # PPO (sb3-contrib) saves .zip files; the prefix follows the same convention.
+    "ppo": "ppo_checkpoint",
 }
 
 
@@ -125,6 +129,9 @@ CREATE TABLE IF NOT EXISTS eval_results (
     adv_loss REAL,
     strat_loss REAL,
     seat_balanced INTEGER DEFAULT 0,
+    selection_mode TEXT,
+    crn_seed TEXT,
+    seat_scheme TEXT,
     timestamp TEXT NOT NULL,
     UNIQUE(run_id, iteration, baseline)
 );
@@ -174,8 +181,46 @@ def get_db(db_path: Optional[str] = None) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
 
     conn.executescript(_DDL)
+    _migrate_schema(conn)
     conn.commit()
     return conn
+
+
+# Additive column migrations: {table: [(column, type_with_default), ...]}. Applied
+# idempotently after the DDL so databases created before a column existed gain it
+# without dropping data. CREATE TABLE IF NOT EXISTS never alters an existing table,
+# so new columns must be added here too (the DDL above carries them for fresh DBs).
+_COLUMN_MIGRATIONS: Dict[str, list] = {
+    "eval_results": [
+        ("selection_mode", "TEXT"),
+        ("crn_seed", "TEXT"),
+        ("seat_scheme", "TEXT"),
+    ],
+}
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Add any missing additive columns to existing tables.
+
+    SQLite's ALTER TABLE ADD COLUMN errors if the column already exists, so each
+    add is guarded by a PRAGMA table_info existence check. Safe to run on every
+    connection; a no-op once columns are present. Old rows read back the new
+    columns as NULL, which downstream code treats as "unknown".
+    """
+    for table, columns in _COLUMN_MIGRATIONS.items():
+        try:
+            existing = {
+                row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+        except sqlite3.Error:
+            # Table absent (e.g. older schema variant) — DDL above creates it with
+            # the columns already present, so nothing to migrate.
+            continue
+        if not existing:
+            continue
+        for col, col_type in columns:
+            if col not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
 
 
 def _now() -> str:
@@ -206,6 +251,7 @@ def infer_algorithm(
     Priority:
     0. algorithm == "desca" or desca_state_dict in checkpoint -> "desca"
     0a. algorithm == "desca-search" or desca_search_state_dict -> "desca-search"
+    0b. algorithm == "ppo" -> "ppo" (explicit; PPO is an eval baseline, not CFR)
     1. checkpoint_keys contains "rebel_value_net_state_dict" → "rebel"
     2. checkpoint_filename matches "rebel_checkpoint*" → "rebel"
     3. config has rebel section → "rebel"
@@ -226,6 +272,10 @@ def infer_algorithm(
         return "desca-search"
     if declared_algo == "desca":
         return "desca"
+    # PPO is an eval baseline, not a CFR variant; without this branch a PPO run's
+    # config (which carries no CFR markers) would fall through to os-mccfr.
+    if declared_algo == "ppo":
+        return "ppo"
     if checkpoint_keys:
         if "desca_search_state_dict" in checkpoint_keys:
             return "desca-search"
@@ -455,16 +505,18 @@ def insert_eval_result(
 
     row_dict should contain: iteration, baseline, win_rate, games_played,
     p0_wins, p1_wins, ties, adv_loss, strat_loss, avg_game_turns,
-    t1_cambia_rate, avg_score_margin, timestamp.
+    t1_cambia_rate, avg_score_margin, timestamp. Optional hygiene fields:
+    seat_balanced, selection_mode, crn_seed, seat_scheme (absent -> NULL).
     """
+    crn_seed = row_dict.get("crn_seed")
     db.execute(
         """
         INSERT OR REPLACE INTO eval_results
             (run_id, checkpoint_id, iteration, baseline, win_rate, ci_low, ci_high,
              games_played, p0_wins, p1_wins, ties, avg_game_turns,
              t1_cambia_rate, avg_score_margin, adv_loss, strat_loss,
-             seat_balanced, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             seat_balanced, selection_mode, crn_seed, seat_scheme, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             run_id,
@@ -484,6 +536,9 @@ def insert_eval_result(
             row_dict.get("adv_loss"),
             row_dict.get("strat_loss"),
             row_dict.get("seat_balanced", 0),
+            row_dict.get("selection_mode"),
+            None if crn_seed is None else str(crn_seed),
+            row_dict.get("seat_scheme"),
             row_dict.get("timestamp", _now()),
         ),
     )
@@ -700,3 +755,163 @@ def write_eval_summary_jsonl(
                 "baselines": per_baseline,
             }
             f.write(json.dumps(line) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Database hygiene hooks (additive, idempotent, backward-compatible)
+# ---------------------------------------------------------------------------
+
+
+def recompute_best_metric(
+    db: sqlite3.Connection,
+    run_id: int,
+    metric_name: str = "mean_imp",
+) -> Optional[float]:
+    """Recompute and store a run's best_metric_* from its eval_results rows.
+
+    Derives per-iteration mean_imp (mean win_rate over MEAN_IMP_BASELINES present
+    at that iteration) and records the maximum into runs.best_metric_*. Corrects
+    stale or NULL bests left behind by interrupted training or by metric-set
+    changes. Idempotent: rerunning on unchanged data leaves the row identical.
+
+    Returns the best metric value, or None if the run has no eval data.
+    """
+    rows = db.execute(
+        "SELECT iteration, baseline, win_rate FROM eval_results WHERE run_id=?",
+        (run_id,),
+    ).fetchall()
+    if not rows:
+        return None
+
+    by_iter: Dict[int, Dict[str, float]] = {}
+    for row in rows:
+        if row["win_rate"] is None:
+            continue
+        by_iter.setdefault(row["iteration"], {})[row["baseline"]] = row["win_rate"]
+
+    best_value: Optional[float] = None
+    best_iter: Optional[int] = None
+    for it, bl_map in by_iter.items():
+        imp = [bl_map[b] for b in MEAN_IMP_BASELINES if b in bl_map]
+        if not imp:
+            continue
+        mean_imp = sum(imp) / len(imp)
+        if best_value is None or mean_imp > best_value:
+            best_value = mean_imp
+            best_iter = it
+
+    if best_value is None:
+        return None
+
+    db.execute(
+        "UPDATE runs SET best_metric_name=?, best_metric_value=?, best_metric_iter=?, updated_at=? WHERE id=?",
+        (metric_name, round(best_value, 6), best_iter, _now(), run_id),
+    )
+    db.commit()
+    return best_value
+
+
+def mark_stale_running_runs(
+    db: sqlite3.Connection,
+    max_age_hours: float = 24.0,
+    new_status: str = "interrupted",
+) -> int:
+    """Flip runs stuck in status='running' with no recent progress to new_status.
+
+    A run whose updated_at is older than max_age_hours is treated as no longer
+    active (a finished or crashed process leaves the status lingering, since
+    persist/upsert flips it to 'running' on the last eval write). Runs touched
+    within the window are left alone so genuinely active training is untouched.
+
+    Returns the number of runs updated.
+    """
+    cutoff_epoch = datetime.now(timezone.utc).timestamp() - max_age_hours * 3600.0
+    rows = db.execute(
+        "SELECT id, updated_at FROM runs WHERE status='running'"
+    ).fetchall()
+    updated = 0
+    for row in rows:
+        ts = row["updated_at"]
+        try:
+            row_epoch = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc
+            ).timestamp()
+        except (TypeError, ValueError):
+            # Unparseable timestamp -> treat as stale so it does not linger forever.
+            row_epoch = 0.0
+        if row_epoch < cutoff_epoch:
+            db.execute(
+                "UPDATE runs SET status=?, updated_at=? WHERE id=?",
+                (new_status, _now(), row["id"]),
+            )
+            updated += 1
+    if updated:
+        db.commit()
+    return updated
+
+
+def apply_checkpoint_retention(
+    db: sqlite3.Connection,
+    run_id: int,
+    keep_last_n: int = 0,
+    keep_best: bool = True,
+) -> int:
+    """Set is_retained flags on a run's checkpoints by a keep policy.
+
+    Marks the highest-iteration `keep_last_n` checkpoints retained (plus the best
+    checkpoint when keep_best); the rest are flagged is_retained=0. keep_last_n=0
+    retains all checkpoints (no-op flagging everything retained), so this only
+    prunes flags when an explicit window is given. Flag-only: it never deletes
+    files, so it is safe to run repeatedly and harmless on databases that ignore
+    the flag.
+
+    Returns the number of checkpoints flagged is_retained=0.
+    """
+    rows = db.execute(
+        "SELECT id, iteration, is_best FROM checkpoints WHERE run_id=? ORDER BY iteration DESC",
+        (run_id,),
+    ).fetchall()
+    if not rows:
+        return 0
+
+    keep_ids = set()
+    if keep_best:
+        keep_ids.update(r["id"] for r in rows if r["is_best"])
+    if keep_last_n <= 0:
+        keep_ids.update(r["id"] for r in rows)  # retain everything
+    else:
+        keep_ids.update(r["id"] for r in rows[:keep_last_n])
+
+    dropped = 0
+    for r in rows:
+        retained = 1 if r["id"] in keep_ids else 0
+        db.execute(
+            "UPDATE checkpoints SET is_retained=? WHERE id=?", (retained, r["id"])
+        )
+        if retained == 0:
+            dropped += 1
+    db.commit()
+    return dropped
+
+
+def cleanup_database(
+    db: sqlite3.Connection,
+    stale_running_hours: float = 24.0,
+    recompute_metrics: bool = True,
+) -> Dict[str, int]:
+    """Run all additive hygiene passes over the whole database.
+
+    - Flips stale status='running' runs to 'interrupted'.
+    - Recomputes best_metric_* for every run from its eval_results.
+
+    Idempotent and non-destructive (no file or row deletion). Returns a summary
+    dict of counts for logging.
+    """
+    summary = {"stale_runs_marked": 0, "best_metrics_recomputed": 0}
+    summary["stale_runs_marked"] = mark_stale_running_runs(db, stale_running_hours)
+    if recompute_metrics:
+        run_rows = db.execute("SELECT id FROM runs").fetchall()
+        for r in run_rows:
+            if recompute_best_metric(db, r["id"]) is not None:
+                summary["best_metrics_recomputed"] += 1
+    return summary

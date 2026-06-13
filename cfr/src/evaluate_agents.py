@@ -1,6 +1,7 @@
 """Script to evaluate different Cambia agents against each other."""
 
 import argparse
+import hashlib
 import json
 import logging
 import sys
@@ -2302,8 +2303,33 @@ def run_evaluation(
     device: str = "cpu",
     output_path: Optional[str] = None,
     use_argmax: bool = False,
+    seat_scheme: str = "alternated",
+    crn_seed_base: Optional[int] = None,
 ) -> Counter:
-    """Runs head-to-head evaluation between two agents. Returns results Counter."""
+    """Runs head-to-head evaluation between two agents. Returns results Counter.
+
+    Win attribution is agent-relative, not seat-relative: results["P0 Wins"]
+    counts wins by the agent under test (agent1) and results["P1 Wins"] counts
+    wins by the opponent (agent2), regardless of which physical seat each
+    occupied in a given game. This keeps the Counter's meaning stable as "the
+    evaluated agent's record" across both seat schemes, so downstream win-rate
+    math (p0_wins / total) and the baseline strength-ordering invariants remain
+    correct after alternation.
+
+    Args:
+        seat_scheme: "alternated" (default) swaps which seat the agent under test
+            occupies every game to cancel first-mover bias; "fixed" keeps agent1
+            in seat 0 for every game (legacy behavior).
+        crn_seed_base: When set, each seat-swap pair of games shares a
+            deterministic deck seed so the agent under test faces an identical
+            deal from both seats (common random numbers). None leaves the deck
+            unseeded (process entropy), preserving prior behavior.
+    """
+    seat_scheme = (seat_scheme or "alternated").lower()
+    if seat_scheme not in ("alternated", "fixed"):
+        logger.warning("Unknown seat_scheme %r; falling back to 'alternated'.", seat_scheme)
+        seat_scheme = "alternated"
+    alternate_seats = seat_scheme == "alternated"
     logger.info("--- Starting Agent Evaluation ---")
     logger.info("Config: %s", config_path)
     logger.info("Agent 1 (P0): %s", agent1_type.upper())
@@ -2355,13 +2381,42 @@ def run_evaluation(
             agent2_kwargs = {"average_strategy": average_strategy}
         elif agent2_type.lower() in _checkpoint_agent_types:
             agent2_kwargs = {"checkpoint_path": checkpoint_path, "device": device, "use_argmax": use_argmax}
-        agent1 = get_agent(agent1_type, player_id=0, config=config, **agent1_kwargs)
-        agent2 = get_agent(agent2_type, player_id=1, config=config, **agent2_kwargs)
-        agents = [agent1, agent2]
-        logger.info("Agents instantiated.")
+
+        # Build each side at the seat(s) it will occupy. A wrapper's player_id is
+        # baked in at construction and threaded into its AgentState, so swapping
+        # seats requires a distinct instance per seat. Construct once up front
+        # (loading any checkpoint at most twice total) rather than per game, then
+        # reset per-game belief via initialize_state inside the loop.
+        #
+        # Seat layout: in odd games the agent under test (agent1) sits at seat 0;
+        # in even games it sits at seat 1. Under the fixed scheme only the seat-0
+        # agent1 / seat-1 agent2 pair is ever used, so the mirror seats are built
+        # lazily to avoid redundant checkpoint loads.
+        agent1_by_seat: Dict[int, BaseAgent] = {
+            0: get_agent(agent1_type, player_id=0, config=config, **agent1_kwargs)
+        }
+        agent2_by_seat: Dict[int, BaseAgent] = {
+            1: get_agent(agent2_type, player_id=1, config=config, **agent2_kwargs)
+        }
+        if alternate_seats:
+            agent1_by_seat[1] = get_agent(
+                agent1_type, player_id=1, config=config, **agent1_kwargs
+            )
+            agent2_by_seat[0] = get_agent(
+                agent2_type, player_id=0, config=config, **agent2_kwargs
+            )
+        logger.info(
+            "Agents instantiated (seat_scheme=%s, crn=%s).",
+            seat_scheme,
+            "on" if crn_seed_base is not None else "off",
+        )
     except ValueError as e:
         logger.error("Error creating agents: %s", e)
         sys.exit(1)
+
+    # Stable string identifying the agent under test, used in the CRN seed hash so
+    # the deck sequence is deterministic per (agent, baseline) matchup.
+    crn_identity = checkpoint_path or agent1_type
 
     results: Counter = Counter()
     start_time = time.perf_counter()
@@ -2370,6 +2425,10 @@ def run_evaluation(
     score_margins: List[float] = []
     game_turns_list: List[int] = []
     t1_cambia_count = 0
+    # Track how many distinct seats the agent under test actually occupied across
+    # decisive games. seat_balanced is reported True only if alternation ran and
+    # the agent played from both seats (so the win rate is genuinely seat-fair).
+    agent_under_test_seats_used: Set[int] = set()
 
     output_file = None
     if output_path is not None:
@@ -2383,18 +2442,63 @@ def run_evaluation(
             game_error = False
 
             try:
-                game_state = CambiaGameState(house_rules=config.cambia_rules)
-                # Initialize stateful agents
+                # Seat assignment: agent under test (agent1) sits at seat 0 on odd
+                # games, seat 1 on even games when alternating; always seat 0 under
+                # the fixed scheme. Win attribution below maps physical seats back
+                # to agent-relative wins, so the Counter stays agent-indexed.
+                a_is_p0 = (game_num % 2 == 1) if alternate_seats else True
+                if a_is_p0:
+                    agents = [agent1_by_seat[0], agent2_by_seat[1]]
+                else:
+                    agents = [agent2_by_seat[0], agent1_by_seat[1]]
+                # Seat index occupied by the agent under test this game.
+                agent_seat = 0 if a_is_p0 else 1
+
+                # Common-random-numbers seat pairing: each seat-swap pair shares one
+                # deck seed so the agent under test faces the identical deal from
+                # both seats, canceling deck-luck variance. Pair index groups games
+                # (1,2), (3,4), ... under one seed; the seat differs within a pair.
+                deck_seed: Optional[int] = None
+                if crn_seed_base is not None:
+                    pair_index = (game_num - 1) // 2 if alternate_seats else (game_num - 1)
+                    seed_key = f"{crn_seed_base}|{crn_identity}|{agent2_type}|{pair_index}"
+                    deck_seed = int(
+                        hashlib.sha256(seed_key.encode("utf-8")).hexdigest()[:8], 16
+                    )
+
+                game_state = CambiaGameState(
+                    house_rules=config.cambia_rules, seed=deck_seed
+                )
+                # Reset per-game agent state. Neural/CFR wrappers reinitialize
+                # belief explicitly; baseline agents detect a new game lazily by
+                # the game_state object id (_needs_reinit). That id check is unsafe
+                # when an agent instance is reused across non-consecutive games
+                # (as under seat alternation, where each instance plays every other
+                # game): Python can recycle a freed game_state's address, so the new
+                # game collides with a stale _last_game_id and the agent keeps the
+                # prior game's memory, immediately calling Cambia (games collapse to
+                # ~4 turns and win rates regress to coin-flips). Invalidating the id
+                # sentinel here forces a fresh reinit every game for every agent.
                 for agent in agents:
                     if isinstance(agent, (CFRAgentWrapper, NeuralAgentWrapper)):
                         agent.initialize_state(game_state)
+                    elif hasattr(agent, "_last_game_id"):
+                        agent._last_game_id = None
 
                 turn = 0
-                max_turns = (
+                # Safety valve in action-units. The engine itself enforces the
+                # max_game_turns cap on its turn-number scale via _check_game_end
+                # (becoming terminal and scoring normally), so this local cap is a
+                # runaway guard, not the primary termination scale. Sized well above
+                # the engine cap in action terms: a single turn may span several
+                # actions (draw, ability sub-selects, snap responses), so multiply
+                # the turn-number cap by a per-turn action factor.
+                engine_turn_cap = (
                     config.cambia_rules.max_game_turns
                     if config.cambia_rules.max_game_turns > 0
                     else 500
                 )
+                max_turns = engine_turn_cap * 16
 
                 while not game_state.is_terminal() and turn < max_turns:
                     turn += 1
@@ -2430,8 +2534,9 @@ def run_evaluation(
                         # Choose action
                         chosen_action = current_agent.choose_action(game_state, legal_actions)
 
-                        # Track T1 Cambia calls by P0 (neural agent)
-                        if turn == 1 and acting_player_id == 0 and type(chosen_action).__name__ == "ActionCallCambia":
+                        # Track first-turn Cambia calls by the agent under test
+                        # (which may sit at either seat under alternation).
+                        if turn == 1 and acting_player_id == agent_seat and type(chosen_action).__name__ == "ActionCallCambia":
                             t1_cambia_count += 1
 
                         # Collect action record if logging
@@ -2512,14 +2617,24 @@ def run_evaluation(
                 # Game End
                 if game_state.is_terminal():
                     winner = game_state._winner
-                    if winner == 0:
+                    # Counter is agent-relative: "P0 Wins" = agent under test (agent1),
+                    # "P1 Wins" = opponent (agent2), regardless of physical seat. The
+                    # JSONL game_winner label below stays seat-relative ("p0"/"p1")
+                    # to match the seat-indexed per-action trace.
+                    if winner == agent_seat:
                         results["P0 Wins"] += 1
-                        game_winner = "p0"
-                    elif winner == 1:
+                        agent_under_test_seats_used.add(agent_seat)
+                    elif winner is not None and winner != agent_seat:
                         results["P1 Wins"] += 1
-                        game_winner = "p1"
+                        agent_under_test_seats_used.add(agent_seat)
                     else:
                         results["Ties"] += 1
+
+                    if winner == 0:
+                        game_winner = "p0"
+                    elif winner == 1:
+                        game_winner = "p1"
+                    else:
                         game_winner = "tie"
                     # Capture score margin: sum of card values per player hand
                     try:
@@ -2535,7 +2650,8 @@ def run_evaluation(
                     game_turns_list.append(turn)
                 elif turn >= max_turns:
                     logger.debug(
-                        "Game %d reached max turns (%d). Scoring as tie.", game_num, max_turns
+                        "Game %d hit the action-count safety valve (%d actions) without "
+                        "engine termination. Scoring as MaxTurnTie.", game_num, max_turns
                     )
                     results["MaxTurnTies"] += 1
                     game_winner = "max_turns"
@@ -2620,6 +2736,14 @@ def run_evaluation(
         enhanced_stats["avg_game_turns"] = avg_turns
         enhanced_stats["std_game_turns"] = std_turns
     enhanced_stats["t1_cambia_rate"] = t1_cambia_count / num_games if num_games > 0 else 0.0
+    # Eval-hygiene provenance: seat scheme actually used, whether the agent under
+    # test genuinely played both seats (seat_balanced), and the CRN seed root.
+    enhanced_stats["seat_scheme"] = seat_scheme
+    enhanced_stats["seat_balanced"] = bool(
+        alternate_seats and len(agent_under_test_seats_used) >= 2
+    )
+    enhanced_stats["selection_mode"] = "argmax" if use_argmax else "stochastic"
+    enhanced_stats["crn_seed"] = crn_seed_base
     # Attach as attribute so CLI and tests can access enhanced stats without
     # polluting the Counter sum that existing tests rely on.
     results.stats = enhanced_stats  # type: ignore[attr-defined]
@@ -2670,9 +2794,15 @@ def _run_single_baseline(args: tuple) -> tuple:
     Takes a tuple to work with ProcessPoolExecutor.map().
 
     Returns:
-        (baseline_name, Counter_results)
+        (baseline_name, Counter_results, stats_dict). The stats dict is returned
+        separately because a Counter's dynamically-attached `.stats` attribute is
+        NOT preserved by pickling across the ProcessPoolExecutor boundary; the
+        parent reattaches it so enhanced/hygiene stats survive parallel runs.
     """
-    config_path, agent_type, baseline, num_games, checkpoint_path, device, output_path, use_argmax = args
+    (
+        config_path, agent_type, baseline, num_games, checkpoint_path, device,
+        output_path, use_argmax, seat_scheme, crn_seed_base,
+    ) = args
     results = run_evaluation(
         config_path=config_path,
         agent1_type=agent_type,
@@ -2683,8 +2813,10 @@ def _run_single_baseline(args: tuple) -> tuple:
         device=device,
         output_path=output_path,
         use_argmax=use_argmax,
+        seat_scheme=seat_scheme,
+        crn_seed_base=crn_seed_base,
     )
-    return baseline, results
+    return baseline, results, getattr(results, "stats", {})
 
 
 def run_evaluation_multi_baseline(
@@ -2697,6 +2829,8 @@ def run_evaluation_multi_baseline(
     use_argmax: bool = False,
     agent_type: str = "deep_cfr",
     max_workers: Optional[int] = None,
+    seat_scheme: str = "alternated",
+    crn_seed_base: Optional[int] = None,
 ) -> Dict[str, Counter]:
     """
     Evaluate a checkpoint against multiple baseline agents.
@@ -2712,6 +2846,11 @@ def run_evaluation_multi_baseline(
         agent_type: Agent type string (default: "deep_cfr"). Use "rebel" for ReBeL agents.
         max_workers: Number of parallel baseline workers. None = auto (min of baseline
             count and cpu_count/2, capped at 7). Set to 1 for sequential execution.
+        seat_scheme: "alternated" (default) or "fixed". Passed through to run_evaluation.
+        crn_seed_base: Common-random-numbers seed root for deck pairing. When None
+            (default), a deterministic root is derived from the checkpoint path so
+            seat-swap pairs share decks reproducibly across runs while distinct
+            checkpoints get distinct deck sequences. Set explicitly to override.
 
     Returns:
         Dict mapping baseline name -> Counter with results.
@@ -2723,6 +2862,13 @@ def run_evaluation_multi_baseline(
         cpu_count = _os.cpu_count() or 1
         max_workers = min(len(baselines), max(1, cpu_count // 2), 7)
 
+    # Default CRN on: derive a stable seed root from the checkpoint identity so the
+    # deck sequence is reproducible per checkpoint and the agent under test faces
+    # identical deals from both seats within each seat-swap pair.
+    if crn_seed_base is None:
+        ident = str(checkpoint_path or agent_type)
+        crn_seed_base = int(hashlib.sha256(ident.encode("utf-8")).hexdigest()[:8], 16)
+
     # Build argument tuples
     work_items = []
     for baseline in baselines:
@@ -2730,15 +2876,22 @@ def run_evaluation_multi_baseline(
         work_items.append((
             config_path, agent_type, baseline, num_games,
             checkpoint_path, device, output_path, use_argmax,
+            seat_scheme, crn_seed_base,
         ))
+
+    def _reattach(results: Counter, stats: Dict) -> Counter:
+        # Counter pickling drops dynamic attributes, so the worker returns stats
+        # separately; reattach so persist/CLI see enhanced + hygiene stats.
+        results.stats = stats or {}  # type: ignore[attr-defined]
+        return results
 
     if max_workers <= 1 or len(baselines) <= 1:
         # Sequential fallback
         all_results: Dict[str, Counter] = {}
         for item in work_items:
-            baseline, results = _run_single_baseline(item)
+            baseline, results, stats = _run_single_baseline(item)
             logger.info("Completed %s vs %s (%d games)", agent_type, baseline, num_games)
-            all_results[baseline] = results
+            all_results[baseline] = _reattach(results, stats)
         return all_results
 
     logger.info(
@@ -2756,8 +2909,8 @@ def run_evaluation_multi_baseline(
         for future in as_completed(future_to_baseline):
             baseline = future_to_baseline[future]
             try:
-                _, results = future.result()
-                all_results[baseline] = results
+                _, results, stats = future.result()
+                all_results[baseline] = _reattach(results, stats)
                 logger.info("Completed %s vs %s (%d games)", agent_type, baseline, num_games)
             except Exception:
                 logger.exception("Failed evaluating vs %s", baseline)
@@ -3038,6 +3191,9 @@ def persist_eval_results(
     checkpoint_path: Optional[str] = None,
     adv_loss: Optional[float] = None,
     strat_loss: Optional[float] = None,
+    selection_mode: Optional[str] = None,
+    crn_seed: Optional[int] = None,
+    seat_scheme: Optional[str] = None,
 ) -> None:
     """Dual-write eval results to metrics.jsonl and SQLite.
 
@@ -3049,6 +3205,10 @@ def persist_eval_results(
         checkpoint_path: Path to checkpoint file (for SQLite registration).
         adv_loss: Advantage/value loss from training logs (optional).
         strat_loss: Strategy/policy loss from training logs (optional).
+        selection_mode: "argmax" / "stochastic" override. Per-baseline values from
+            results.stats take precedence when present (they reflect the actual run).
+        crn_seed: Common-random-numbers seed root override (fallback for stats).
+        seat_scheme: "alternated" / "fixed" override (fallback for stats).
     """
     from datetime import datetime, timezone
     from pathlib import Path as _Path
@@ -3086,6 +3246,16 @@ def persist_eval_results(
         t1_cambia_rate = stats.get("t1_cambia_rate")
         avg_score_margin = stats.get("avg_score_margin")
 
+        # Eval-hygiene provenance. Per-baseline values produced by run_evaluation
+        # (in results.stats) take precedence; the function-level overrides serve as
+        # a fallback for callers that pass hand-built Counters without stats.
+        row_seat_scheme = stats.get("seat_scheme", seat_scheme)
+        row_selection_mode = stats.get("selection_mode", selection_mode)
+        row_crn_seed = stats.get("crn_seed", crn_seed)
+        # seat_balanced is only true when alternation actually ran and the agent
+        # under test played both seats; default 0 keeps legacy/fixed runs honest.
+        row_seat_balanced = int(bool(stats.get("seat_balanced", False)))
+
         row = {
             "run": run_name,
             "iter": iteration,
@@ -3103,6 +3273,10 @@ def persist_eval_results(
             "avg_game_turns": round(avg_game_turns, 2) if avg_game_turns is not None else None,
             "t1_cambia_rate": round(t1_cambia_rate, 4) if t1_cambia_rate is not None else None,
             "avg_score_margin": round(avg_score_margin, 2) if avg_score_margin is not None else None,
+            "seat_scheme": row_seat_scheme,
+            "selection_mode": row_selection_mode,
+            "crn_seed": None if row_crn_seed is None else str(row_crn_seed),
+            "seat_balanced": row_seat_balanced,
         }
         all_rows.append(row)
 
@@ -3169,6 +3343,12 @@ def persist_eval_results(
             for row in all_rows:
                 run_db.insert_eval_result(db, run_id, ckpt_id, row)
             run_db.write_eval_summary_jsonl(db, run_id, str(run_dir_path))
+            # Refresh best_metric_* from the freshly written eval rows so the
+            # run's recorded best never lags behind its eval history.
+            try:
+                run_db.recompute_best_metric(db, run_id)
+            except Exception:
+                pass
             db.close()
         except Exception:
             logger.warning(

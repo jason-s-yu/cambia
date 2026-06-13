@@ -2505,6 +2505,21 @@ def evaluate(
 
     console.print(table)
 
+    # Eval-hygiene provenance line: seat scheme, selection mode, and whether the
+    # agent under test genuinely played both seats (seat_balanced).
+    _first_stats = next(
+        (getattr(r, "stats", {}) for r in results_map.values()), {}
+    )
+    _seat_scheme = _first_stats.get("seat_scheme", "alternated")
+    _selection_mode = _first_stats.get(
+        "selection_mode", "argmax" if argmax else "stochastic"
+    )
+    _seat_balanced = bool(_first_stats.get("seat_balanced", False))
+    console.print(
+        f"[dim]seat_scheme={_seat_scheme}  seat_balanced={_seat_balanced}  "
+        f"selection_mode={_selection_mode}[/dim]"
+    )
+
     # Persist results if we have a run directory context
     if run_dir is not None:
         from .evaluate_agents import persist_eval_results
@@ -2516,6 +2531,8 @@ def evaluate(
             iteration=iteration,
             results_map=results_map,
             checkpoint_path=str(checkpoint),
+            selection_mode="argmax" if argmax else "stochastic",
+            seat_scheme="alternated",
         )
         print(f"\nResults persisted to {run_dir}/metrics.jsonl")
 
