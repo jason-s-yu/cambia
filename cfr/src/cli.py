@@ -651,13 +651,20 @@ def train_sog(
         raise typer.Exit(1)
 
 
-@train_app.command("ppo", help="Train PPO best-response diagnostic agent")
+@train_app.command(
+    "ppo", help="Train PPO: fair self-play (--self-play, E2 anchor) or best-response diagnostic"
+)
 def train_ppo_cmd(
     opponent: str = typer.Option(
         "imperfect_greedy",
         "--opponent",
         "-o",
-        help="Opponent agent type to train against",
+        help="Fixed opponent agent type (best-response diagnostic). Ignored when --self-play is set.",
+    ),
+    self_play: bool = typer.Option(
+        False,
+        "--self-play",
+        help="Fair self-play: opponent is a frozen-periodic snapshot of the learning policy (E2 anchor).",
     ),
     timesteps: int = typer.Option(
         500_000,
@@ -669,7 +676,12 @@ def train_ppo_cmd(
         "runs/ppo-diagnostic/model",
         "--save-path",
         "-s",
-        help="Path to save trained model",
+        help="Path to save trained model (runs/<run>/checkpoints/<model> derives the run dir)",
+    ),
+    run_name: Optional[str] = typer.Option(
+        None,
+        "--run-name",
+        help="Run name for metrics.jsonl / run_db rows. Defaults to the run-dir basename.",
     ),
     n_envs: int = typer.Option(
         4,
@@ -679,7 +691,27 @@ def train_ppo_cmd(
     eval_freq: int = typer.Option(
         10_000,
         "--eval-freq",
-        help="Evaluate every N timesteps",
+        help="Run per-baseline mean_imp eval every N timesteps",
+    ),
+    eval_games: int = typer.Option(
+        5000,
+        "--eval-games",
+        help="Games per baseline in each eval cycle",
+    ),
+    eval_workers: Optional[int] = typer.Option(
+        None,
+        "--eval-workers",
+        help="Parallel baseline eval workers (None = auto)",
+    ),
+    snapshot_freq: int = typer.Option(
+        200_000,
+        "--snapshot-freq",
+        help="Refresh the self-play opponent snapshot every N timesteps (self-play only)",
+    ),
+    checkpoint_freq: Optional[int] = typer.Option(
+        None,
+        "--checkpoint-freq",
+        help="Save a timestamped checkpoint every N timesteps (None disables periodic checkpoints)",
     ),
     config: Path = typer.Option(
         "config.yaml",
@@ -694,11 +726,16 @@ def train_ppo_cmd(
         help="Random seed",
     ),
 ):
-    """Train a PPO agent as best-response to a fixed opponent (diagnostic)."""
+    """Train a PPO agent. With --self-play, the opponent is a frozen snapshot of
+    the learning policy (the E2 equilibrium anchor, per-baseline persisted);
+    otherwise the agent best-responds to a fixed baseline (diagnostic)."""
     from .ppo_train import train_ppo
+    from .ppo_env import SELF_PLAY_OPPONENT
+
+    opponent_arg = SELF_PLAY_OPPONENT if self_play else opponent
 
     train_ppo(
-        opponent=opponent,
+        opponent=opponent_arg,
         timesteps=timesteps,
         save_path=str(save_path),
         n_envs=n_envs,
@@ -706,6 +743,11 @@ def train_ppo_cmd(
         net_arch=[256, 256],
         seed=seed,
         config_path=str(config),
+        run_name=run_name,
+        eval_games=eval_games,
+        selfplay_snapshot_freq=snapshot_freq,
+        eval_max_workers=eval_workers,
+        checkpoint_freq=checkpoint_freq,
     )
 
 

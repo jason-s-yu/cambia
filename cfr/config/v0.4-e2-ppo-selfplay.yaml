@@ -1,0 +1,79 @@
+# E2: fair self-play PPO equilibrium anchor (Phase 0, 0.4.0).
+#
+# Purpose (contract AC7, research report U5): re-derive the metric's reachable
+# headroom with a TRUSTWORTHY anchor. PPO learns by fair self-play: the opponent
+# seat is a frozen-periodic snapshot of the learning policy, refreshed every
+# 200k timesteps, and the agent seat is randomized per episode. PPO improves
+# only by beating copies of itself, so its mean_imp5 is an equilibrium-anchor
+# re-derivation, NEVER a target to optimize toward. The folklore 60-62.3% PPO
+# anchor (E0 could not reproduce it; all local artifacts scored 0.380-0.388) is
+# replaced by whatever this run converges to.
+#
+# Opponent model: frozen-periodic-snapshot self-play (not a fixed baseline, not
+# a live mirror). Frozen-periodic keeps the opponent stationary within each PPO
+# rollout (required by on-policy advantage estimation) while tracking the
+# learner with a lag of at most one refresh interval. See ppo_env.py
+# SelfPlayPolicyOpponent and ppo_train.py SelfPlaySnapshotCallback.
+#
+# Launch (run as a persistent background process; outlives the launching shell):
+#   cd cfr && nohup cambia train ppo \
+#     --self-play \
+#     --config config/v0.4-e2-ppo-selfplay.yaml \
+#     --timesteps 30000000 \
+#     --n-envs 16 \
+#     --save-path runs/v0.4-e2-ppo/checkpoints/ppo_model \
+#     --run-name v0.4-e2-ppo \
+#     --eval-freq 1000000 \
+#     --eval-games 5000 \
+#     --snapshot-freq 200000 \
+#     --seed 42 \
+#     > runs/v0.4-e2-ppo/train.log 2>&1 &
+#
+# Eval-during-training persists per baseline over the 5 MEAN_IMP_BASELINES
+# (random_no_cambia, random_late_cambia, imperfect_greedy, memory_heuristic,
+# aggressive_snap) to runs/v0.4-e2-ppo/metrics.jsonl and the SQLite run_db via
+# the shared persist_eval_results path. Each eval cycle also saves an
+# evaluation checkpoint (ppo_model_eval_<steps>.zip) that the eval workers load.
+#
+# MaskablePPO hyperparameters (hardcoded in ppo_train.py, same as the diagnostic
+# and the encoding-v2 baseline): net_arch [256,256], n_steps 2048,
+# batch_size 256, n_epochs 10, learning_rate 3e-4, gamma 1.0, ent_coef 0.01.
+
+# Read by run_db.infer_algorithm to label the run (additive detection branch
+# for "ppo" pending in run_db; harmless if absent: the run still persists and
+# per-baseline eval_results rows are unaffected).
+algorithm: ppo
+
+agent_params:
+  memory_level: 1
+  time_decay_turns: 3
+
+cambia_rules:
+  allowDrawFromDiscardPile: false
+  allowReplaceAbilities: false
+  snapRace: false
+  penaltyDrawCount: 2
+  use_jokers: 2
+  cards_per_player: 4
+  initial_view_count: 2
+  cambia_allowed_round: 0
+  allowOpponentSnapping: false
+  max_game_turns: 46
+
+persistence:
+  agent_data_save_path: "runs/v0.4-e2-ppo/checkpoints/ppo_model"
+
+agents:
+  greedy_agent:
+    cambia_call_threshold: 5
+
+deep_cfr:
+  # encoding_version: 2 activates the 257-dim v2 layout in
+  # encode_infoset_eppbs_interleaved_v2 and sizes CambiaEnv.observation_space
+  # to 257. Both seats (learner and self-play snapshot) use this same encoder.
+  encoding_version: 2
+  device: cpu
+
+logging:
+  log_level_file: "INFO"
+  log_level_console: "WARNING"
