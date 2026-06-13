@@ -52,6 +52,34 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def _drawn_card_bucket_from_game_state(game_state) -> int:
+    """The acting player's own drawn-card bucket, or -1 if none is pending.
+
+    Mirrors the Go FFI ``cambia_game_get_drawn_card_bucket`` the v2 trainer
+    feeds ``encode_infoset_eppbs_interleaved_v2``: a bucket only exists while a
+    discard decision is pending (POST_DRAW); otherwise -1. The drawn card is the
+    acting player's own private information, legitimately known at decision time.
+    Used by the v2 eval wrappers so their encoding matches the training
+    distribution byte-for-byte on dims [0:11] (the drawn-card one-hot).
+    """
+    try:
+        from src.abstraction import get_card_bucket
+        from src.constants import CardBucket
+
+        if getattr(game_state, "snap_phase_active", False):
+            return -1
+        if not isinstance(getattr(game_state, "pending_action", None), ActionDiscard):
+            return -1
+        drawn = (getattr(game_state, "pending_action_data", None) or {}).get("drawn_card")
+        if drawn is None:
+            return -1
+        bucket = get_card_bucket(drawn)
+        return int(bucket.value) if bucket != CardBucket.UNKNOWN else -1
+    except Exception:  # JUSTIFIED: evaluation resilience -- fall back to "no draw"
+        return -1
+
+
 # --- CFR Agent Wrapper ---
 
 
@@ -1735,13 +1763,61 @@ class PPOAgentWrapper(BaseAgent):
         except Exception as e:
             logger.error("PPOAgent P%d state update error: %s", self.player_id, e)
 
-    def choose_action(self, game_state, legal_actions) -> GameAction:
-        """Choose action using the trained PPO model."""
+    def _encode_obs(self, ctx, drawn_card_bucket: int = -1) -> np.ndarray:
+        """Encode the PPO player's infoset, dispatching on the model's obs width.
+
+        v2 (257-dim) models trained through ``ppo_env._get_obs`` on the canonical
+        ``encode_infoset_eppbs_interleaved_v2`` (posterior + action-history block
+        populated from AgentState). v1 (224-dim) models trained on the v1
+        interleaved layout. Per-agent parity: each model is encoded at eval the
+        same way it was trained, so the detected ``_encoding_version`` selects
+        the path. Feeding the wrong width crashes ``MaskablePPO.predict``.
+        """
         from src.encoding import (
             encode_infoset_eppbs_interleaved,
-            encode_action_mask,
-            index_to_action,
+            encode_infoset_eppbs_interleaved_v2,
         )
+
+        st = self._agent_state
+        if getattr(self, "_encoding_version", 1) == 2:
+            return encode_infoset_eppbs_interleaved_v2(
+                st, ctx, int(drawn_card_bucket)
+            ).astype(np.float32)
+
+        if st.cambia_caller is None:
+            cambia_state = 2
+        elif st.cambia_caller == self.player_id:
+            cambia_state = 0
+        else:
+            cambia_state = 1
+
+        return encode_infoset_eppbs_interleaved(
+            slot_tags=[t.value if hasattr(t, "value") else int(t) for t in st.slot_tags],
+            slot_buckets=[int(b) for b in st.slot_buckets],
+            discard_top_bucket=(
+                st.known_discard_top_bucket.value
+                if hasattr(st.known_discard_top_bucket, "value")
+                else int(st.known_discard_top_bucket)
+            ),
+            stock_estimate=(
+                st.stockpile_estimate.value
+                if hasattr(st.stockpile_estimate, "value")
+                else int(st.stockpile_estimate)
+            ),
+            game_phase=(
+                st.game_phase.value
+                if hasattr(st.game_phase, "value")
+                else int(st.game_phase)
+            ),
+            decision_context=ctx.value if hasattr(ctx, "value") else int(ctx),
+            cambia_state=cambia_state,
+            own_hand_size=len(st.own_hand),
+            opp_hand_size=st.opponent_card_count,
+        ).astype(np.float32)
+
+    def choose_action(self, game_state, legal_actions) -> GameAction:
+        """Choose action using the trained PPO model."""
+        from src.encoding import encode_action_mask, index_to_action
         from src.constants import (
             DecisionContext,
             ActionDiscard,
@@ -1783,38 +1859,8 @@ class PPOAgentWrapper(BaseAgent):
         else:
             ctx = DecisionContext.START_TURN
 
-        st = self._agent_state
-        if st.cambia_caller is None:
-            cambia_state = 2
-        elif st.cambia_caller == self.player_id:
-            cambia_state = 0
-        else:
-            cambia_state = 1
-
-        obs = encode_infoset_eppbs_interleaved(
-            slot_tags=[t.value if hasattr(t, "value") else int(t) for t in st.slot_tags],
-            slot_buckets=[int(b) for b in st.slot_buckets],
-            discard_top_bucket=(
-                st.known_discard_top_bucket.value
-                if hasattr(st.known_discard_top_bucket, "value")
-                else int(st.known_discard_top_bucket)
-            ),
-            stock_estimate=(
-                st.stockpile_estimate.value
-                if hasattr(st.stockpile_estimate, "value")
-                else int(st.stockpile_estimate)
-            ),
-            game_phase=(
-                st.game_phase.value
-                if hasattr(st.game_phase, "value")
-                else int(st.game_phase)
-            ),
-            decision_context=ctx.value,
-            cambia_state=cambia_state,
-            own_hand_size=len(st.own_hand),
-            opp_hand_size=st.opponent_card_count,
-            encoding_version=getattr(self, "_encoding_version", 1),
-        )
+        drawn_card_bucket = _drawn_card_bucket_from_game_state(game_state)
+        obs = self._encode_obs(ctx, drawn_card_bucket)
 
         mask = encode_action_mask(list(legal_actions))
         import numpy as np
@@ -2068,43 +2114,21 @@ class DESCAAgentWrapper(NeuralAgentWrapper):
             checkpoint.get("iteration", "N/A"),
         )
 
-    def _encode_v2(self, decision_context) -> np.ndarray:
-        """Encode agent state to 257-dim EP-PBS v2."""
-        from src.encoding import encode_infoset_eppbs_interleaved
+    def _encode_v2(self, decision_context, drawn_card_bucket: int = -1) -> np.ndarray:
+        """Encode agent state to 257-dim EP-PBS v2 via the canonical encoder.
 
-        st = self.agent_state
-        if st.cambia_caller is None:
-            cambia_state = 2
-        elif st.cambia_caller == self.player_id:
-            cambia_state = 0
-        else:
-            cambia_state = 1
+        Routes through ``encode_infoset_eppbs_interleaved_v2`` -- the same
+        high-level entry point the DESCA trainer (``desca_worker._encode_state``)
+        uses. That encoder derives the card-counting posterior (dims [224:233])
+        and action-history window (dims [233:257]) from ``AgentState`` directly,
+        plus the v1 history-parity features (observation ages, dead-card
+        histogram, turn progress). The prior hand-rolled low-level call omitted
+        all of those, zeroing ~57 input dims relative to training (RC-B).
+        """
+        from src.encoding import encode_infoset_eppbs_interleaved_v2
 
-        return encode_infoset_eppbs_interleaved(
-            slot_tags=[t.value if hasattr(t, "value") else int(t) for t in st.slot_tags],
-            slot_buckets=[int(b) for b in st.slot_buckets],
-            discard_top_bucket=(
-                st.known_discard_top_bucket.value
-                if hasattr(st.known_discard_top_bucket, "value")
-                else int(st.known_discard_top_bucket)
-            ),
-            stock_estimate=(
-                st.stockpile_estimate.value
-                if hasattr(st.stockpile_estimate, "value")
-                else int(st.stockpile_estimate)
-            ),
-            game_phase=(
-                st.game_phase.value if hasattr(st.game_phase, "value") else int(st.game_phase)
-            ),
-            decision_context=(
-                decision_context.value
-                if hasattr(decision_context, "value")
-                else int(decision_context)
-            ),
-            cambia_state=cambia_state,
-            own_hand_size=len(st.own_hand),
-            opp_hand_size=st.opponent_card_count,
-            encoding_version=2,
+        return encode_infoset_eppbs_interleaved_v2(
+            self.agent_state, decision_context, int(drawn_card_bucket)
         )
 
     def choose_action(
@@ -2118,9 +2142,10 @@ class DESCAAgentWrapper(NeuralAgentWrapper):
 
         legal_list = list(legal_actions)
         decision_context = self._get_decision_context(game_state)
+        drawn_card_bucket = _drawn_card_bucket_from_game_state(game_state)
 
         try:
-            features = self._encode_v2(decision_context)
+            features = self._encode_v2(decision_context, drawn_card_bucket)
             abstract_mask = abstract_actions(legal_list, self.agent_state)
         except Exception as e:  # JUSTIFIED: evaluation resilience
             logger.error("DESCAAgent P%d encoding error: %s", self.player_id, e)
