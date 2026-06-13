@@ -108,14 +108,49 @@ def _advance(game, action, acting, ag):
 
 
 class Builder:
-    def __init__(self, cfg, max_nodes, enumerate_draws=True):
+    def __init__(self, cfg, max_nodes, enumerate_draws=True, perfect_recall=False):
         self.cfg = cfg
         self.max_nodes = max_nodes
         self.enumerate_draws = enumerate_draws
+        self.perfect_recall = perfect_recall
         self.n = 0
         self.aborted = False
         self.iset_actions = {}     # iset -> num actions (consistency check)
         self.iset_count = 0
+        # Perfect-recall keying (X1 keystone). When on, a decision node's policy
+        # key is the ACTING player's genuine perfect-recall information state
+        # rather than the production imperfect-recall belief abstraction.
+        #
+        # A perfect-recall info state for player p at node h is everything p has
+        # privately observed plus everything publicly observable along the path:
+        #   - priv_init[p]: p's initial private knowledge (peeked initial-hand
+        #     card contents at deal time; p sees its own peeked cards).
+        #   - priv_draw[p]: p's own private draw observations (the stockpile card
+        #     p drew and now holds in pending; hidden from the opponent).
+        #   - pub_path: the common-knowledge action+reveal sequence for ALL
+        #     players: (acting, repr(action), repr(discard_top_after)). Actions
+        #     are NamedTuples whose repr carries only public structure (tags,
+        #     slot indices, flags) and never card contents; discarded/replaced
+        #     card identities become public via the post-action discard top.
+        #
+        # The acting player's key = ("PR", priv_init[p], tuple(priv_draw[p]),
+        # tuple(pub_path)). This is a strict refinement of the belief partition;
+        # because the public path is a deterministic function that fixes the
+        # legal-action count, it cures BUG-1 (key not determining nA) by
+        # construction.
+        #
+        # Deviation from the dispatch code-map: the map sketched pkey =
+        # tuple(path[acting]) over the acting player's OWN actions only. That
+        # under-keys: at the root every deal yields the empty own-action history,
+        # collapsing distinct dealt hands a perfect-recall player CAN tell apart
+        # (it peeked its hand). That collapse is coarser than perfect recall and
+        # would corrupt the verdict, so the key here additionally carries p's
+        # private prefix/draws and the full public reveal sequence. Accumulators
+        # live in the builder (not AgentState, whose action_history is a lossy
+        # 3-slot ring and whose infoset key is belief-only).
+        self.priv_init = {0: (), 1: ()}
+        self.priv_draw = {0: [], 1: []}
+        self.pub_path = []
 
     def build_decision_or_terminal(self, game, ag, depth):
         self.n += 1
@@ -142,7 +177,18 @@ class Builder:
         # that semantics. For my own exact CFR table we still want per-(key,nA)
         # separation; iset_actions records nA per the LAST-seen count (only used
         # for the uniform null control + CFR sizing, both length-robust).
-        pkey = iset.astuple()
+        if self.perfect_recall:
+            # X1 keystone: key by the acting player's genuine perfect-recall
+            # information state (see Builder.__init__ for the construction and
+            # the deviation from the code-map). Determines nA by construction.
+            pkey = (
+                "PR",
+                self.priv_init[acting],
+                tuple(self.priv_draw[acting]),
+                tuple(self.pub_path),
+            )
+        else:
+            pkey = iset.astuple()
         # iset_actions is keyed by (pkey, nA) so my own exact CFR table and the
         # uniform null control are well-defined under variable action counts.
         # The production tabular policy is looked up by the BARE node.pkey.
@@ -193,7 +239,35 @@ class Builder:
             except Exception:
                 pass
             return Terminal((0.0, 0.0))
+        # Perfect-recall path bookkeeping: push on descend, pop on ascend so the
+        # accumulators reflect exactly the path to the current subtree. The
+        # public token is common knowledge (action repr + post-action discard
+        # top); the private draw token is the acting player's just-drawn card,
+        # which after a stockpile draw sits in pending_action_data.
+        pushed_pub = False
+        pushed_priv = None
+        if self.perfect_recall:
+            try:
+                top = game.get_discard_top()
+            except Exception:
+                top = None
+            self.pub_path.append((acting, repr(action), repr(top)))
+            pushed_pub = True
+            if isinstance(action, ActionDrawStockpile):
+                drawn = None
+                try:
+                    if game.pending_action_player == acting:
+                        drawn = game.pending_action_data.get("drawn_card")
+                except Exception:
+                    drawn = None
+                if drawn is not None:
+                    self.priv_draw[acting].append(repr(drawn))
+                    pushed_priv = acting
         child = self.build_decision_or_terminal(game, new_ag, depth + 1)
+        if pushed_priv is not None:
+            self.priv_draw[pushed_priv].pop()
+        if pushed_pub:
+            self.pub_path.pop()
         try:
             undo()
         except Exception:
@@ -201,17 +275,34 @@ class Builder:
         return child
 
 
-def build_tree(cfg, n_deals, seed0, max_nodes_per_deal, enumerate_draws=True):
+def build_tree(cfg, n_deals, seed0, max_nodes_per_deal, enumerate_draws=True,
+               perfect_recall=False):
     """Synthetic root: K deals, each weight 1/K; each is a full chance-tree."""
     root = Chance()
     all_isets = {}
     total_nodes = 0
     aborted_deals = 0
     for d in range(n_deals):
-        b = Builder(cfg, max_nodes_per_deal, enumerate_draws=enumerate_draws)
+        b = Builder(cfg, max_nodes_per_deal, enumerate_draws=enumerate_draws,
+                    perfect_recall=perfect_recall)
         game = CambiaGameState(house_rules=cfg.cambia_rules, _rng=random.Random(seed0 + d))
         init_obs = AnalysisTools._create_observation_for_br(game, None, -1)
         ag = {0: _mk_agent(game, 0, 1, cfg, init_obs), 1: _mk_agent(game, 1, 0, cfg, init_obs)}
+        if perfect_recall:
+            # Seed each player's private prefix with the cards it peeked at deal
+            # time, keyed by hand index so identical contents at different slots
+            # stay distinct. This is p's genuine initial private information; it
+            # also separates distinct dealt hands at the root (the collapse the
+            # code-map's own-action-only key would have caused). The deal index d
+            # is NOT part of any key: two deals that produce the same observation
+            # for p are genuinely indistinguishable to p and correctly merge.
+            for pid in (0, 1):
+                peeks = tuple(
+                    (i, repr(game.players[pid].hand[i]))
+                    for i in sorted(game.players[pid].initial_peek_indices)
+                    if i < len(game.players[pid].hand)
+                )
+                b.priv_init[pid] = peeks
         sub = b.build_decision_or_terminal(game, ag, 0)
         root.children.append(sub)
         root.weights.append(1.0)  # normalized below
@@ -427,6 +518,12 @@ def main():
     ap.add_argument("--enumerate-draws", action="store_true",
                     help="enumerate stockpile-draw chance (exact draws; large tree). "
                          "Default off: draws follow realized deck order, covered by K deals.")
+    ap.add_argument("--perfect-recall", action="store_true",
+                    help="X1 keystone: key the tabular policy by each player's "
+                         "genuine perfect-recall information state (initial peek "
+                         "+ own draws + public action/reveal sequence) instead of "
+                         "the production imperfect-recall belief abstraction. "
+                         "Tests whether perfect recall cures the NashConv plateau.")
     ap.add_argument("--save-tree", type=str, default=None)
     ap.add_argument("--save-policy", type=str, default=None)
     ap.add_argument("--eval-every", type=int, default=200)
@@ -434,11 +531,12 @@ def main():
 
     cfg = load_config(args.config)
     print(f"[build] deals={args.deals} seed0={args.seed0} deck={cfg.cambia_rules.deck_ranks} "
-          f"cpp={cfg.cambia_rules.cards_per_player} maxturns={cfg.cambia_rules.max_game_turns}", flush=True)
+          f"cpp={cfg.cambia_rules.cards_per_player} maxturns={cfg.cambia_rules.max_game_turns} "
+          f"perfect_recall={args.perfect_recall}", flush=True)
     t0 = time.time()
     root, isets, nnodes, aborted = build_tree(
         cfg, args.deals, args.seed0, args.max_nodes_per_deal,
-        enumerate_draws=args.enumerate_draws)
+        enumerate_draws=args.enumerate_draws, perfect_recall=args.perfect_recall)
     print(f"[build] nodes~{nnodes} infosets={len(isets)} aborted_deals={aborted} "
           f"build_time={time.time()-t0:.1f}s", flush=True)
     if aborted:

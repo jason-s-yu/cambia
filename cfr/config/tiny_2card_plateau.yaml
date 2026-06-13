@@ -1,0 +1,60 @@
+# Tiny-Cambia 2-card cause-isolation game (research E1 plateau game; X1 keystone).
+#
+# This is the EXACT game on which E1 proved the imperfect-recall NashConv
+# plateau and verified it flat to iter1200 (e1-tiny-game-verified.json):
+#   deck {A,6}, 2 cards/hand, 3 engine turns, draw-chance ENUMERATED, K=5 deals,
+#   seed0=0 -> tree 28,397 nodes, 249 infosets, NashConv iter30=0.08126,
+#   iter150=0.07296, flat ~0.083 from iter400 to iter1200 (does NOT reach 0).
+#
+# The 1-card {A,6} variant (tiny_norecall.yaml) converges to ~0.006; going to
+# 2 cards/hand is the single change that breaks convergence under the production
+# belief abstraction. The plateau is decay-INDEPENDENT (byte-identical at
+# time_decay_turns 1 vs 999), so it is the lossy slot/bucket infoset key (BUG-1:
+# key does not determine the legal-action count), not memory decay.
+#
+# X1 keystone tests whether perfect-recall keying (--perfect-recall) drives this
+# same game's NashConv to ~0. NOTE: tiny_cambia_tabular.yaml is the 4-rank
+# {A,2,3,6} PRODUCTION-COMPARISON variant whose ENUMERATED tree exceeds 1.5M
+# nodes/deal and is NOT the verified cause-isolation plateau game; this config
+# is the correct keystone target.
+
+algorithm: tabular
+
+agent_params:
+  memory_level: 1
+  time_decay_turns: 3
+
+cambia_rules:
+  allowDrawFromDiscardPile: false
+  allowReplaceAbilities: false
+  snapRace: false
+  penaltyDrawCount: 1
+  use_jokers: 0
+  cards_per_player: 2
+  initial_view_count: 1
+  cambia_allowed_round: 1
+  allowOpponentSnapping: false
+  max_game_turns: 3
+  deck_ranks: ["A", "6"]
+
+cfr_training:
+  num_iterations: 20000
+  save_interval: 5000
+  pruning_enabled: false
+  exploitability_interval: 2000
+  exploitability_interval_seconds: 0
+  num_workers: 1
+
+cfr_plus_params:
+  weighted_averaging_enabled: true
+  averaging_delay: 100
+
+persistence:
+  agent_data_save_path: "runs/tiny-2card-plateau/agent.joblib"
+
+analysis:
+  exploitability_num_workers: 0
+
+logging:
+  log_level_file: "WARNING"
+  log_level_console: "ERROR"
