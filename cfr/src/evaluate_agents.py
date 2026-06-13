@@ -1781,9 +1781,12 @@ class PPOAgentWrapper(BaseAgent):
 
         st = self._agent_state
         if getattr(self, "_encoding_version", 1) == 2:
-            return encode_infoset_eppbs_interleaved_v2(
-                st, ctx, int(drawn_card_bucket)
-            ).astype(np.float32)
+            # Match PPO training (ppo_env._get_obs), which calls the v2 encoder
+            # WITHOUT a drawn-card bucket (defaults to -1). Passing a real bucket
+            # here would set a dims[0:11] one-hot the trained policy never saw,
+            # reintroducing RC-B on the PPO anchor. (DESCA differs: its trainer
+            # does pass the bucket, so DESCA eval passes it too.)
+            return encode_infoset_eppbs_interleaved_v2(st, ctx).astype(np.float32)
 
         if st.cambia_caller is None:
             cambia_state = 2
@@ -2126,10 +2129,63 @@ class DESCAAgentWrapper(NeuralAgentWrapper):
         histogram, turn progress). The prior hand-rolled low-level call omitted
         all of those, zeroing ~57 input dims relative to training (RC-B).
         """
+        import os
+
+        if os.environ.get("CAMBIA_DESCA_LEGACY_ENC") == "1":
+            # V1 arm B (RC-B attribution): reproduce the pre-39f28f7 hand-rolled
+            # encode that zeroed the posterior, action-history, and v1
+            # history-parity / drawn-card dims. Eval-only, default off.
+            return self._encode_v2_legacy_rcb(decision_context)
+
         from src.encoding import encode_infoset_eppbs_interleaved_v2
 
         return encode_infoset_eppbs_interleaved_v2(
             self.agent_state, decision_context, int(drawn_card_bucket)
+        )
+
+    def _encode_v2_legacy_rcb(self, decision_context) -> np.ndarray:
+        """RC-B reproduction (V1 arm B): faithful copy of the pre-fix encode path.
+
+        Gated by CAMBIA_DESCA_LEGACY_ENC=1 for the V1 encoder-attribution split.
+        Calls the low-level interleaved encoder without the posterior /
+        action-history / drawn-card derivation, leaving the same dims zeroed as the
+        historical DESCA eval. Not used in training.
+        """
+        from src.encoding import encode_infoset_eppbs_interleaved
+
+        st = self.agent_state
+        if st.cambia_caller is None:
+            cambia_state = 2
+        elif st.cambia_caller == self.player_id:
+            cambia_state = 0
+        else:
+            cambia_state = 1
+
+        return encode_infoset_eppbs_interleaved(
+            slot_tags=[t.value if hasattr(t, "value") else int(t) for t in st.slot_tags],
+            slot_buckets=[int(b) for b in st.slot_buckets],
+            discard_top_bucket=(
+                st.known_discard_top_bucket.value
+                if hasattr(st.known_discard_top_bucket, "value")
+                else int(st.known_discard_top_bucket)
+            ),
+            stock_estimate=(
+                st.stockpile_estimate.value
+                if hasattr(st.stockpile_estimate, "value")
+                else int(st.stockpile_estimate)
+            ),
+            game_phase=(
+                st.game_phase.value if hasattr(st.game_phase, "value") else int(st.game_phase)
+            ),
+            decision_context=(
+                decision_context.value
+                if hasattr(decision_context, "value")
+                else int(decision_context)
+            ),
+            cambia_state=cambia_state,
+            own_hand_size=len(st.own_hand),
+            opp_hand_size=st.opponent_card_count,
+            encoding_version=2,
         )
 
     def choose_action(

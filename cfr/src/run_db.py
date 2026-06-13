@@ -192,6 +192,7 @@ def get_db(db_path: Optional[str] = None) -> sqlite3.Connection:
 # so new columns must be added here too (the DDL above carries them for fresh DBs).
 _COLUMN_MIGRATIONS: Dict[str, list] = {
     "eval_results": [
+        ("seat_balanced", "INTEGER DEFAULT 0"),
         ("selection_mode", "TEXT"),
         ("crn_seed", "TEXT"),
         ("seat_scheme", "TEXT"),

@@ -236,9 +236,16 @@ def _run_parity_check(wrapper, min_states: int = 100):
             drawn = _drawn_card_bucket(py_state)
             agent_state = py_agents[actor]
 
-            # Reference: canonical trainer encoder.
+            # Reference: the canonical encoder fed exactly what THIS wrapper's
+            # trainer feeds. DESCA's trainer (desca_worker._encode_state) passes
+            # the drawn-card bucket; PPO's trainer (ppo_env._get_obs) does not
+            # (default -1). Per-agent train/eval parity means the reference must
+            # match each wrapper's own training convention, not a fixed bucket.
+            from src.evaluate_agents import PPOAgentWrapper
+
+            ref_bucket = -1 if isinstance(wrapper, PPOAgentWrapper) else drawn
             ref = encode_infoset_eppbs_interleaved_v2(
-                agent_state, ctx, drawn_card_bucket=drawn
+                agent_state, ctx, drawn_card_bucket=ref_bucket
             )
             # Under test: wrapper encode path.
             got = _wrapper_encode(wrapper, agent_state, ctx, drawn)

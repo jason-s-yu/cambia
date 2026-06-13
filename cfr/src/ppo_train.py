@@ -278,6 +278,22 @@ def train_ppo(
         checkpoint_freq: Save a periodic timestamped checkpoint every N
             timesteps. None disables periodic checkpoints (eval still saves one).
     """
+    # Thread pinning: SubprocVecEnv spawns n_envs workers, each importing torch +
+    # numpy; the self-play opponent also loads a MaskablePPO per worker. Without
+    # pinning, every worker opens a full-core BLAS/OMP pool, so n_envs x ncores
+    # threads oversubscribe the box and thrash (load ~100 at n_envs=16). setdefault
+    # lets a launch-time override win; spawn workers inherit the env at import.
+    import torch as _torch
+
+    for _tvar in (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
+        os.environ.setdefault(_tvar, "1")
+    _torch.set_num_threads(1)
+
     try:
         from sb3_contrib import MaskablePPO
     except ImportError:

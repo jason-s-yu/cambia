@@ -478,6 +478,12 @@ def make_env(
     """Factory for SubprocVecEnv compatibility."""
 
     def _init():
+        # Pin torch intra-op threads per SubprocVecEnv worker: env stepping and
+        # the self-play opponent's MaskablePPO inference both use torch, and an
+        # unpinned per-worker pool thrashes cores at high n_envs.
+        import torch
+
+        torch.set_num_threads(1)
         return CambiaEnv(
             opponent_type=opponent_type,
             seed=seed,
