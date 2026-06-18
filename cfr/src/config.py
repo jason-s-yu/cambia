@@ -467,6 +467,51 @@ class DESCAConfig(_CambiaBaseModel):
     stall_detection: StallDetectionConfig = Field(default_factory=StallDetectionConfig)
 
 
+# --- PRT-CFR Configuration ---
+
+
+class PRTCFRConfig(_CambiaBaseModel):
+    """Configuration for PRT-CFR (Perfect-Recall Trajectory CFR) training.
+
+    Minimal Phase 1 (X2 gate) surface: the GRU sequence net dims, the m-rollout
+    MC estimator, the from-scratch refit loop, and SD-CFR snapshot weighting. The
+    net dims are pinned by the Phase 1 Sprint 1 interface contract (shared with
+    the X2 scorer); changing them breaks snapshot/checkpoint compatibility.
+    """
+
+    # GRU sequence encoder (pinned).
+    gru_vocab_size: int = 325
+    gru_embed_dim: int = 64
+    gru_hidden_dim: int = 256
+    gru_num_layers: int = 2
+    gru_dropout: float = 0.1
+    head_hidden_dim: int = 256
+    seq_cap: int = 256
+
+    # Estimator + training loop.
+    m_rollouts: int = 4
+    k_games_per_iter: int = 200
+    iterations: int = 100
+    lr: float = 1.0e-3
+    batch_size: int = 1024
+    train_steps_per_iter: int = 256
+    buffer_capacity: int = 2_000_000
+    weight_decay: float = 0.0
+    grad_clip: float = 1.0
+
+    # Refit init: False re-inits the net each iteration (Brown 2019 from-scratch);
+    # True warm-starts from the previous iterate and fine-tunes to convergence.
+    # SD-CFR-valid either way (the fit's fixed point R^t is init-independent given
+    # convergence); warm-start reaches R^t with fewer steps (the underfit fix).
+    warm_start: bool = False
+
+    # SD-CFR snapshot realization. Only "linear" (w_t = t) is implemented for X2.
+    snapshot_weighting: str = "linear"
+
+    seed: int = 0
+    device: str = "cuda"
+
+
 # --- Baseline Agent Configuration ---
 
 
@@ -501,6 +546,7 @@ class Config(_CambiaBaseModel):
     analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
     deep_cfr: DeepCfrConfig = Field(default_factory=DeepCfrConfig)
     desca: Optional[DESCAConfig] = None
+    prt_cfr: Optional[PRTCFRConfig] = None
     _source_path: Optional[str] = PrivateAttr(default=None)
 
     @model_validator(mode="before")

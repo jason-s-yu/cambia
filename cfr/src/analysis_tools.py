@@ -24,6 +24,7 @@ from .card import Card
 from .agent_state import AgentState, AgentObservation
 from .constants import (
     ActionReplace,
+    ActionDrawStockpile,
     GameAction,
     DecisionContext,
     NUM_PLAYERS,
@@ -1083,6 +1084,22 @@ class AnalysisTools:
                             else -1
                         ),
                     )
+            elif isinstance(action, ActionDrawStockpile):
+                # Surface the freshly-drawn stockpile card to the actor at the
+                # post-draw decision node. The card lives in pending_action_data
+                # after the draw is applied (engine.py sets pending_action_player +
+                # pending_action_data={"drawn_card": ...}); mirrors the X1 pkey path
+                # in tools/tiny_solver.py. Guarded so production callers where the
+                # pending state is absent get drawn_card=None (no behavior change).
+                try:
+                    if game_state.pending_action_player == acting_player:
+                        drawn_card_for_obs = game_state.pending_action_data.get(
+                            "drawn_card"
+                        )
+                except (AttributeError, KeyError):
+                    # Pending state absent/None (production callers) -> drawn_card
+                    # is simply unavailable. Narrow: real errors still propagate.
+                    drawn_card_for_obs = None
 
             peeked_cards_for_obs = None
 
@@ -1117,12 +1134,16 @@ class AnalysisTools:
         """
         Filters observation for BR agent state updates.
         Keeps drawn_card info *if* the observer is the acting player
-        and the action was Replace/Discard.
+        and the action was DrawStockpile/Replace/Discard. The DrawStockpile case
+        lets the actor's perfect-recall stream carry the freshly-drawn card at the
+        post-draw decision node; the opponent never sees it.
         """
         filtered_obs = copy.copy(obs)
 
         if obs.drawn_card and obs.acting_player == observer_id:
-            if not isinstance(obs.action, (ActionDiscard, ActionReplace)):
+            if not isinstance(
+                obs.action, (ActionDiscard, ActionReplace, ActionDrawStockpile)
+            ):
                 filtered_obs.drawn_card = None
         elif obs.drawn_card and obs.acting_player != observer_id:
             filtered_obs.drawn_card = None

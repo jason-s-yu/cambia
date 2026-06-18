@@ -183,6 +183,29 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         inner_update: str = "apcfr_plus"
         stall_detection: _StallDetectionConfig = _Field(default_factory=_StallDetectionConfig)
 
+    class _PRTCFRConfig(_BaseModel):
+        """Stub for PRTCFRConfig (Phase 1 X2 PRT-CFR)."""
+        gru_vocab_size: int = 325
+        gru_embed_dim: int = 64
+        gru_hidden_dim: int = 256
+        gru_num_layers: int = 2
+        gru_dropout: float = 0.1
+        head_hidden_dim: int = 256
+        seq_cap: int = 256
+        m_rollouts: int = 4
+        k_games_per_iter: int = 200
+        iterations: int = 100
+        lr: float = 1.0e-3
+        batch_size: int = 1024
+        train_steps_per_iter: int = 256
+        buffer_capacity: int = 2_000_000
+        weight_decay: float = 0.0
+        grad_clip: float = 1.0
+        warm_start: bool = False
+        snapshot_weighting: str = "linear"
+        seed: int = 0
+        device: str = "cuda"
+
     def _load_config(path: str):
         """Stub load_config: delegate to the real load_config implementation."""
         try:
@@ -212,6 +235,7 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
     _config_stub.DeepCfrConfig = _DeepCfrConfig
     _config_stub.StallDetectionConfig = _StallDetectionConfig
     _config_stub.DESCAConfig = _DESCAConfig
+    _config_stub.PRTCFRConfig = _PRTCFRConfig
     _config_stub.load_config = _load_config
 
     sys.modules["src.config"] = _config_stub

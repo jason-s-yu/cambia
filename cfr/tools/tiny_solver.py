@@ -40,6 +40,20 @@ from src.agent_state import AgentState
 from src.analysis_tools import AnalysisTools
 from src.constants import NUM_PLAYERS, ActionDrawStockpile
 from src.utils import InfosetKey
+from src.sequence_encoding import encode_observation_sequence
+
+
+def _encode_seq(hand, peek_indices, observations, observer_id, seq_cap):
+    """Tokenize one player's perfect-recall observation-action stream.
+
+    Thin wrapper over src.sequence_encoding.encode_observation_sequence so the
+    tiny-solver token path and the PRT-CFR worker/eval token path share one
+    implementation. observations are the player's FILTERED post-action
+    observations in temporal order (the production information boundary).
+    """
+    return encode_observation_sequence(
+        hand, peek_indices, observations, observer_id, seq_cap=seq_cap
+    )
 
 # Suppress the engine's chatty per-node warnings during full-tree expansion.
 import logging as _logging
@@ -67,11 +81,18 @@ class Chance:
         self.weights = []
 
 class Decision:
-    __slots__ = ("player", "iset", "pkey", "actions", "children")
+    __slots__ = ("player", "iset", "pkey", "actions", "children", "seq_tokens")
     kind = "D"
     def __init__(self, player, iset, pkey, actions):
         self.player = player
         self.iset = iset            # production infoset key (get_infoset_key + ctx)
+        # PRT-CFR token sequence for the ACTING player at this node (perfect-recall
+        # observation-action stream, tokenized via src.sequence_encoding). Populated
+        # only when the tree is built with tokenize=True; None otherwise. This is the
+        # single-sourced parity seam: both the PRT-CFR worker (training) and the X2
+        # scorer (eval) read the same node.seq_tokens via prtcfr_net.tiny_node_to_tokens,
+        # so train-time and eval-time token inputs are byte-identical by construction.
+        self.seq_tokens = None
         # policy key = (iset, num_actions). The production infoset key does NOT
         # determine the legal-action count (~8% of keys / 37% of visits vary);
         # production CFR silently resets regret/strategy vectors on mismatch.
@@ -108,11 +129,29 @@ def _advance(game, action, acting, ag):
 
 
 class Builder:
-    def __init__(self, cfg, max_nodes, enumerate_draws=True, perfect_recall=False):
+    def __init__(self, cfg, max_nodes, enumerate_draws=True, perfect_recall=False,
+                 tokenize=False, seq_cap=256):
         self.cfg = cfg
         self.max_nodes = max_nodes
         self.enumerate_draws = enumerate_draws
         self.perfect_recall = perfect_recall
+        # PRT-CFR tokenization (additive, default off). When on, each Decision node
+        # gets seq_tokens: the acting player's perfect-recall observation-action token
+        # stream, produced by src.sequence_encoding.encode_observation_sequence over the
+        # per-player FILTERED observations accumulated along the descent path. Same data
+        # source as the X1 perfect-recall pkey (priv_init + priv_draw + pub_path), routed
+        # through the production observation filter and the real tokenizer so the tokens
+        # are genuine, lossless perfect recall. tokenize implies perfect-recall semantics
+        # but does not require perfect_recall keying to be on (they are independent flags).
+        self.tokenize = tokenize
+        self.seq_cap = seq_cap
+        # Per-player initial private state (hand contents + peeked slots), seeded per
+        # deal in build_tree. obs_path[p] is the ordered list of p's filtered
+        # post-action observations along the current path (push on descend, pop on
+        # ascend), matching pub_path one-to-one for the public events.
+        self.tok_hand = {0: [], 1: []}
+        self.tok_peek = {0: (), 1: ()}
+        self.obs_path = {0: [], 1: []}
         self.n = 0
         self.aborted = False
         self.iset_actions = {}     # iset -> num actions (consistency check)
@@ -194,6 +233,16 @@ class Builder:
         # The production tabular policy is looked up by the BARE node.pkey.
         self.iset_actions[(pkey, nA)] = nA
         node = Decision(acting, iset, pkey, legal)
+        if self.tokenize:
+            # Acting player's perfect-recall token stream: BOS + their peeked initial
+            # hand + every filtered observation they have received along this path.
+            node.seq_tokens = _encode_seq(
+                self.tok_hand[acting],
+                self.tok_peek[acting],
+                self.obs_path[acting],
+                acting,
+                self.seq_cap,
+            )
 
         for action in legal:
             if self.enumerate_draws and isinstance(action, ActionDrawStockpile) and game.stockpile:
@@ -263,7 +312,23 @@ class Builder:
                 if drawn is not None:
                     self.priv_draw[acting].append(repr(drawn))
                     pushed_priv = acting
+        # Tokenize-mode path bookkeeping: push each player's FILTERED post-action
+        # observation onto obs_path so a decision node deeper in this subtree can
+        # tokenize the acting player's full perfect-recall stream. Uses the same
+        # observation + filter as _advance (the production information boundary).
+        pushed_obs = False
+        if self.tokenize:
+            obs = AnalysisTools._create_observation_for_br(game, action, acting)
+            if obs is not None:
+                for pid in (0, 1):
+                    self.obs_path[pid].append(
+                        AnalysisTools._filter_observation_for_br(obs, pid)
+                    )
+                pushed_obs = True
         child = self.build_decision_or_terminal(game, new_ag, depth + 1)
+        if pushed_obs:
+            for pid in (0, 1):
+                self.obs_path[pid].pop()
         if pushed_priv is not None:
             self.priv_draw[pushed_priv].pop()
         if pushed_pub:
@@ -276,18 +341,30 @@ class Builder:
 
 
 def build_tree(cfg, n_deals, seed0, max_nodes_per_deal, enumerate_draws=True,
-               perfect_recall=False):
-    """Synthetic root: K deals, each weight 1/K; each is a full chance-tree."""
+               perfect_recall=False, tokenize=False, seq_cap=256):
+    """Synthetic root: K deals, each weight 1/K; each is a full chance-tree.
+
+    tokenize (default off): populate Decision.seq_tokens with each acting player's
+    perfect-recall observation-action token stream (src.sequence_encoding), the
+    single-sourced input for the PRT-CFR net. Independent of perfect_recall keying.
+    """
     root = Chance()
     all_isets = {}
     total_nodes = 0
     aborted_deals = 0
     for d in range(n_deals):
         b = Builder(cfg, max_nodes_per_deal, enumerate_draws=enumerate_draws,
-                    perfect_recall=perfect_recall)
+                    perfect_recall=perfect_recall, tokenize=tokenize, seq_cap=seq_cap)
         game = CambiaGameState(house_rules=cfg.cambia_rules, _rng=random.Random(seed0 + d))
         init_obs = AnalysisTools._create_observation_for_br(game, None, -1)
         ag = {0: _mk_agent(game, 0, 1, cfg, init_obs), 1: _mk_agent(game, 1, 0, cfg, init_obs)}
+        if tokenize:
+            # Seed each player's initial private state for the tokenizer: their dealt
+            # hand contents and the slots they peeked at deal time. encode_observation_sequence
+            # emits the BOS-anchored init_peek prefix from these (the X1 priv_init content).
+            for pid in (0, 1):
+                b.tok_hand[pid] = list(game.players[pid].hand)
+                b.tok_peek[pid] = tuple(game.players[pid].initial_peek_indices)
         if perfect_recall:
             # Seed each player's private prefix with the cards it peeked at deal
             # time, keyed by hand index so identical contents at different slots
