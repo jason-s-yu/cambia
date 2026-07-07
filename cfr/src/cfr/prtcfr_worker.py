@@ -619,6 +619,13 @@ def _sample_and_apply(
     )
 
 
+#: Optional S1W6 hook type: PRTCFRProductionWorker.traverse calls this at
+#: every TRAVERSER decision with ``(tokens_h, driver, pooled_rollout_mean,
+#: iteration)`` -- see PRTCFRProductionWorker.value_sink for the exact
+#: synchronous-call contract (no cloning happens on the worker's behalf).
+ValueSinkFn = Callable[[List[int], "GameDriver", float, int], None]
+
+
 class PRTCFRProductionWorker:
     """Single-trajectory ESCHER sampler on the real engine (production path).
 
@@ -642,11 +649,27 @@ class PRTCFRProductionWorker:
         seq_cap: int = PRODUCTION_SEQ_CAP,
         seed: int = 0,
         max_trajectory_steps: int = 4000,
+        value_sink: Optional[ValueSinkFn] = None,
     ):
         self.sigma = sigma
         self.m_rollouts = m_rollouts
         self.seq_cap = seq_cap
         self.max_trajectory_steps = max_trajectory_steps
+        # S1W6 (p2-redesign.md sec 2.4): OPTIONAL tap for the V_phi critic,
+        # OUTSIDE the regret path -- this worker never reads value_sink's
+        # return value and never lets it influence q_hat/baseline/regret_full
+        # above. Default None: zero behavior change to the sampler or the
+        # regret reservoir. When set, called synchronously at every TRAVERSER
+        # decision (see the call site in ``traverse`` below) with the SAME
+        # live, not-yet-mutated ``driver`` reference used for that decision's
+        # rollouts -- valid only for the duration of the call (the trajectory
+        # advances immediately after value_sink returns); a sink that needs
+        # to retain game state beyond the call must clone it itself
+        # (``driver.clone()``). Omniscient-feature extraction from that
+        # driver is deliberately NOT this file's concern (training-only
+        # boundary owned by cfr/src/cfr/omniscient.py); value_sink
+        # implementations route it through ``compute_omniscient_features``.
+        self.value_sink = value_sink
         self._rng = random.Random(seed)
         self._rollout_counter = 0
         self._added = 0
@@ -746,6 +769,14 @@ class PRTCFRProductionWorker:
                     )
                 )
                 self._added += 1
+
+                # S1W6 value-sink tap (read-only; see __init__ for the
+                # contract). ``baseline`` here is EXACTLY the pooled
+                # sigma-weighted rollout mean already computed above for the
+                # regret target -- the sink receives the identical float, it
+                # never triggers extra rollouts or recomputation.
+                if self.value_sink is not None:
+                    self.value_sink(tokens_h, driver, baseline, iteration)
             # else: every legal action was rejected for this decision (should
             # be exceedingly rare); no regret sample is recorded, and the
             # trajectory still advances below via the full `legal`/b_i (which
