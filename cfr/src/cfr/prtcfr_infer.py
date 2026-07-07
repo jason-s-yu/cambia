@@ -187,3 +187,113 @@ class PRTCFRInferenceService:
 
     def __len__(self) -> int:
         return len(self._hidden)
+
+    # -- production wiring surface (S1W15) -----------------------------------
+    #
+    # ``register``/``step`` above are the pinned S1W3 primitives. The three
+    # methods below are the S1W15 refinement the production generation loop
+    # (prtcfr_worker.PRTCFRBatchedProductionWorker) consumes; each is covered
+    # by an equivalence test in tests/test_prtcfr_infer.py so the carry-vs-
+    # reencode identity extends to the exact call pattern production uses
+    # (batched advance, hidden fork at rollout branch points, transient EOS
+    # query). None of them touch ``register``/``step``.
+
+    @torch.no_grad()
+    def fork(self, src_id, dst_id) -> None:
+        """Copy ``src_id``'s carried hidden state into ``dst_id`` (a rollout
+        branch point: the child stream conditions on the SAME prefix as the
+        parent, then advances independently -- the torch-side mirror of the Go
+        ``cambia_state_clone`` fan-out, S1W12).
+
+        No-op if ``src_id`` has no carried state (an unqueried stream): the
+        child stays absent and its first ``advance`` carries from a zero hidden
+        over the full prefix, which is identical to a fork of the zero state.
+        The clone is a fresh tensor so subsequent ``advance``/``step`` on either
+        stream never aliases the other's hidden.
+        """
+        h = self._hidden.get(src_id)
+        if h is not None:
+            self._hidden[dst_id] = h.clone()
+
+    @torch.no_grad()
+    def advance(self, stream_ids: List, new_tokens: List[List[int]]) -> None:
+        """Persist-advance each stream's carried hidden by its ``new_tokens``.
+
+        Differs from ``step`` in three ways the production carry needs: (1) a
+        stream with an EMPTY ``new_tokens`` is left untouched (``step`` would
+        inject a spurious PAD-token GRU step, corrupting the carry); (2) a
+        stream NOT yet present is registered from a zero hidden over its
+        ``new_tokens`` (no separate ``register`` call needed -- a first
+        ``advance`` over ``[BOS]+body`` IS the registration); (3) present and
+        absent streams are advanced in ONE batched GRU pass (absent rows use a
+        zero ``h0`` column), so a decision tick with a mix of fresh and carried
+        streams is a single forward.
+        """
+        idx = [i for i, t in enumerate(new_tokens) if len(t) > 0]
+        if not idx:
+            return
+        sids = [stream_ids[i] for i in idx]
+        toks = [new_tokens[i] for i in idx]
+        zero: Optional[torch.Tensor] = None
+        cols: List[torch.Tensor] = []
+        for s in sids:
+            h = self._hidden.get(s)
+            if h is None:
+                if zero is None:
+                    zero = torch.zeros(
+                        self.net.num_layers,
+                        self.net.hidden_dim,
+                        device=self.device,
+                        dtype=self.dtype,
+                    )
+                cols.append(zero)
+            else:
+                cols.append(h)
+        h0 = torch.stack(cols, dim=1)  # (num_layers, B, hidden)
+        h_n = self._run_gru(toks, h0=h0)
+        for j, s in enumerate(sids):
+            self._hidden[s] = h_n[:, j, :].contiguous()
+
+    @torch.no_grad()
+    def query_transient(
+        self,
+        stream_ids: List,
+        transient_tokens: List[List[int]],
+        masks: torch.Tensor,
+    ) -> torch.Tensor:
+        """Regret-matched strategy [n, 146] from each stream's carried hidden
+        advanced by a TRANSIENT ``transient_tokens`` suffix that is NOT
+        persisted.
+
+        Production usage: the carried hidden tracks ``[BOS]+body`` (no trailing
+        EOS, so the carry stays a monotonic prefix of the growing observation
+        stream); a policy query needs the hidden after ``[BOS]+body+[EOS]`` to
+        match a full ``encode_observation_sequence`` re-encode (which appends
+        EOS). ``transient_tokens=[[EOS_ID], ...]`` supplies that suffix for the
+        query only, leaving the carry at ``[BOS]+body`` so the NEXT frame
+        appends cleanly. Absent streams query from a zero hidden over just the
+        transient tokens (defensive; the production flow always ``advance``s a
+        stream before querying it, so it is present by query time).
+        """
+        zero: Optional[torch.Tensor] = None
+        cols: List[torch.Tensor] = []
+        for s in stream_ids:
+            h = self._hidden.get(s)
+            if h is None:
+                if zero is None:
+                    zero = torch.zeros(
+                        self.net.num_layers,
+                        self.net.hidden_dim,
+                        device=self.device,
+                        dtype=self.dtype,
+                    )
+                cols.append(zero)
+            else:
+                cols.append(h)
+        h0 = torch.stack(cols, dim=1)
+        h_n = self._run_gru(transient_tokens, h0=h0)  # transient (not stored)
+        top = h_n[-1]  # (B, hidden), top layer post-suffix
+        head_dtype = next(self.net.head.parameters()).dtype
+        normed = self.net.encoder["norm"](top.to(head_dtype))
+        adv = self.net.head(normed)
+        return _regret_match(adv, masks)

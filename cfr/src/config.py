@@ -540,6 +540,23 @@ class PRTCFRConfig(_CambiaBaseModel):
     num_players: int = 2
     max_trajectory_steps: int = 4000
     backend: str = "go"  # production GameDriver backend: "go" | "python"
+    # --- Batched incremental production generation (S1W15). ---
+    # gen_batched=True routes production generation through the batched
+    # incremental PRTCFRInferenceService (all live games + their m rollouts
+    # share one carried-hidden forward per decision tick) instead of the
+    # per-decision full-prefix NetProductionSigma; it is the X3 gen remedy and
+    # the production default. False keeps the original sequential path (kept for
+    # the semantic-equivalence gate and as a fallback).
+    gen_batched: bool = True
+    # Concurrent games per scheduler chunk. Bounds peak simultaneously-live
+    # drivers (~gen_chunk_games * max_legal * m_rollouts rollout clones); keep
+    # it under the Go handle pool (maxGames=2048) with margin.
+    gen_chunk_games: int = 64
+    # Inference precision for the batched sigma service: "bf16" (throughput
+    # default, p2-redesign sec 6) or "fp32" (used by the equivalence gate). The
+    # carry-vs-reencode identity holds at either precision; bf16 is an
+    # independent approximation of the fp32 sigma.
+    infer_dtype: str = "bf16"
     # V_phi critic outside the regret path (S1W6 wiring).
     critic_enabled: bool = True
     critic_capacity: int = 200_000

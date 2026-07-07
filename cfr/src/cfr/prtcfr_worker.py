@@ -44,13 +44,23 @@ from __future__ import annotations
 
 import copy
 import random
-from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+)
 
 import numpy as np
 
 from ..encoding import NUM_ACTIONS, action_to_index
 from ..reservoir import ReservoirBuffer, ReservoirSample
-from ..sequence_encoding import SEQ_CAP
+from ..sequence_encoding import PAD_ID, SEQ_CAP
 from .prtcfr_net import pad_tokens, tiny_node_to_token_array
 
 # A policy function maps a tiny_solver Decision node to a length-nA probability
@@ -1030,3 +1040,547 @@ class PRTCFRProductionWorker:
             probs = self.sigma(tokens, mask)
             _sample_and_apply(driver, legal, probs, rng)
         return driver.utility(traverser)
+
+
+# ===========================================================================
+# Batched incremental production generation (S1W15, cambia-239)
+# ===========================================================================
+#
+# The X3 gen verdict (S1W7): production generation ran 9.09 s/game at K=16 with
+# 97% of wall in inference, because the single-trajectory sampler above issues
+# ONE un-batched, non-incrementally-carried full-prefix GRU forward per decision
+# and per m-rollout step (NetProductionSigma.__call__). The designed remedy is
+# the S1W3 batched incremental PRTCFRInferenceService, which S1W5 never
+# consumed. This section consumes it.
+#
+# Two wins, both required (p2-redesign.md sec 6: "batched incremental GRU steps
+# (carried hidden state per live rollout) ... batching across ~10^4 concurrent
+# rollouts keeps occupancy high"):
+#
+#   1. Incremental carry: a live game/rollout's per-player token stream grows
+#      monotonically (BOS + init_peek + observation frames); a policy query
+#      needs the GRU hidden after [BOS]+body+[EOS]. Carrying the raw hidden over
+#      [BOS]+body and stepping only new frames turns each decision's O(prefix)
+#      re-encode into O(new frames), i.e. the whole trajectory's inference from
+#      O(L^2) to O(L). The EOS is appended TRANSIENTLY per query
+#      (PRTCFRInferenceService.query_transient) so the carry stays a clean
+#      prefix -- this is the BOS/EOS/frame-boundary subtlety the equivalence
+#      test pins.
+#   2. Batching: all K live games AND all their m CRN rollouts that reach a
+#      decision on the same scheduler tick have their queries gathered into ONE
+#      batched forward. A rollout branch forks the carried hidden
+#      (PRTCFRInferenceService.fork, the torch mirror of Go's cambia_state_clone)
+#      instead of re-encoding the shared prefix.
+#
+# Structure: the sampler logic is expressed as generators that ``yield`` a
+# _Query at each policy-query point (opponent action, traverser regret pricing,
+# rollout step) and receive the strategy vector back. A cooperative scheduler
+# (_run_batched_scheduler) pumps every live generator to its next query, gathers
+# them, evaluates once, and resumes them -- so the generation is a faithful
+# restatement of the sequential estimator above (same per-stream RNG draw order,
+# same CRN pairing, same regret math), only the INFERENCE is batched and
+# incremental. Semantic equivalence to the sequential full-prefix path is a hard
+# gate (tests/test_prtcfr_batched_gen.py).
+
+
+class _Query:
+    """A policy-query request a sampler coroutine yields; the scheduler fills
+    ``result`` with the (146,) float64 strategy vector and resumes the coro."""
+
+    __slots__ = ("stream", "player", "tokens", "mask", "result")
+
+    def __init__(self, stream: int, player: int, tokens: List[int], mask: np.ndarray):
+        self.stream = stream
+        self.player = player
+        self.tokens = tokens
+        self.mask = mask
+        self.result: Optional[np.ndarray] = None
+
+
+class _Join:
+    """A structured-concurrency request: run ``subtasks`` (generators) to
+    completion, batching their queries with everything else live, then resume
+    the parent coroutine with the ordered list of their return values."""
+
+    __slots__ = ("subtasks",)
+
+    def __init__(self, subtasks: List[Iterator]):
+        self.subtasks = subtasks
+
+
+class _Task:
+    """Scheduler bookkeeping for one live generator (a main trajectory or a
+    rollout). Parent/child links implement _Join."""
+
+    __slots__ = (
+        "gen",
+        "parent",
+        "idx",
+        "send_val",
+        "join_pending",
+        "join_results",
+    )
+
+    def __init__(self, gen: Iterator, parent: "Optional[_Task]" = None, idx: int = 0):
+        self.gen = gen
+        self.parent = parent
+        self.idx = idx
+        self.send_val: Any = None
+        self.join_pending: int = 0
+        self.join_results: List[Any] = []
+
+
+class SigmaBackend(Protocol):
+    """The inference seam the batched sampler queries through. ``evaluate``
+    fills every _Query's ``result`` in ONE batch; ``fork``/``drop`` mirror the
+    driver clone/close so carried hidden state fans out and frees with the
+    game/rollout trajectories it backs."""
+
+    def evaluate(self, queries: List[_Query]) -> None: ...
+
+    def fork(self, src_stream: int, dst_stream: int) -> None: ...
+
+    def drop(self, stream: int) -> None: ...
+
+
+def _run_batched_scheduler(
+    root_gens: List[Iterator], backend: SigmaBackend
+) -> None:
+    """Cooperative trampoline: run every generator in ``root_gens`` (and any
+    _Join subtasks they spawn) to completion, gathering all pending _Query
+    yields at each tick into a single ``backend.evaluate`` call.
+
+    Contract each generator obeys: it ``yield``s either a ``_Query`` (and is
+    resumed with the filled ``result``) or a ``_Join`` (and is resumed with the
+    ordered list of its subtasks' return values); ``return`` ends it. This is a
+    standard batched-inference trampoline (cf. vLLM-style continuous batching):
+    the interleaving across generators changes only the TIMING of the shared
+    forward, never any single generator's own instruction/RNG order, so the
+    generation is bit-faithful to the sequential estimator per stream.
+    """
+    runnable: List[_Task] = [_Task(g) for g in root_gens]
+
+    def complete(task: _Task, value: Any) -> None:
+        parent = task.parent
+        if parent is not None:
+            parent.join_results[task.idx] = value
+            parent.join_pending -= 1
+            if parent.join_pending == 0:
+                parent.send_val = parent.join_results
+                runnable.append(parent)
+
+    while runnable:
+        pending: List[_Task] = []
+        # Drain: pump every runnable task (and any children it spawns this tick)
+        # to its next query / join / completion.
+        while runnable:
+            task = runnable.pop()
+            try:
+                y = task.gen.send(task.send_val)
+                task.send_val = None
+            except StopIteration as si:
+                complete(task, si.value)
+                continue
+            if type(y) is _Query:
+                task.send_val = y  # stash the query on the task for the batch
+                pending.append(task)
+            elif type(y) is _Join:
+                subs = y.subtasks
+                if not subs:
+                    task.send_val = []
+                    runnable.append(task)
+                else:
+                    task.join_pending = len(subs)
+                    task.join_results = [None] * len(subs)
+                    for k, cg in enumerate(subs):
+                        runnable.append(_Task(cg, parent=task, idx=k))
+                    # task itself waits (not runnable) until all children finish
+            else:
+                raise TypeError(
+                    f"sampler coroutine yielded {type(y).__name__}, expected "
+                    f"_Query or _Join"
+                )
+        if not pending:
+            break
+        queries = [t.send_val for t in pending]
+        backend.evaluate(queries)
+        for t in pending:
+            q: _Query = t.send_val
+            t.send_val = q.result
+            runnable.append(t)
+
+
+class IncrementalSigmaManager:
+    """Production ``SigmaBackend``: batched incremental GRU inference over the
+    live games and rollouts, on top of ``PRTCFRInferenceService``.
+
+    Per (stream, player) it carries the raw GRU hidden state over ``[BOS]+body``
+    (no trailing EOS) and its length; a query steps only the newly-appended
+    frames (``advance``), then a TRANSIENT ``[EOS]`` step (``query_transient``)
+    yields the masked regret-matched strategy that matches a full
+    ``encode_observation_sequence`` re-encode. ``fork`` copies both players'
+    carried hidden at a rollout branch (the shared prefix is not re-encoded).
+
+    The returned strategy is the same (146,) float64 masked vector
+    ``NetProductionSigma`` returns for the same tokens+mask (carry-vs-reencode
+    identity, tests/test_prtcfr_infer.py + test_prtcfr_batched_gen.py); at bf16
+    it is that vector within bf16 tolerance (an independent precision axis, not
+    the carry identity -- see the equivalence report).
+    """
+
+    def __init__(self, service: Any, num_players: int = 2):
+        self.service = service
+        self.num_players = num_players
+        # (stream, player) -> carried [BOS]+body length folded into the hidden.
+        self._carry_len: Dict[Tuple[int, int], int] = {}
+        self._players_of: Dict[int, set] = {}
+
+    def _sid(self, stream: int, player: int) -> Tuple[int, int]:
+        return (stream, player)
+
+    def evaluate(self, queries: List[_Query]) -> None:
+        if not queries:
+            return
+        import torch
+
+        sids: List[Tuple[int, int]] = []
+        news: List[List[int]] = []
+        transients: List[List[int]] = []
+        for q in queries:
+            toks = q.tokens
+            if not toks:
+                raise ValueError(
+                    "IncrementalSigmaManager.evaluate: empty query tokens; "
+                    "driver.tokens() must yield at least [BOS]"
+                )
+            # The carry conditions on the MONOTONIC prefix tokens[:-1]
+            # ([BOS]+body for the real tokenizer -- body grows by append every
+            # frame); the FINAL token (EOS for the real tokenizer, a per-query
+            # marker for a test driver) is applied TRANSIENTLY so the carry
+            # never absorbs it and the next frame appends cleanly. This is exact
+            # for any driver whose tokens[:-1] is a growing prefix per
+            # (stream, player) -- the general form of the [BOS]+body+[EOS]
+            # window-semantics decision.
+            body_prefix = toks[:-1]
+            transients.append([toks[-1]])
+            sid = self._sid(q.stream, q.player)
+            cl = self._carry_len.get(sid, 0)
+            if cl > len(body_prefix):
+                # Non-monotonic prefix (would only happen under a truncating,
+                # non-strict window -- production uses the non-firing strict
+                # cap). Re-register from scratch rather than corrupt the carry.
+                self.service.drop(sid)
+                cl = 0
+            sids.append(sid)
+            news.append(body_prefix[cl:])
+        # One batched register/step over the new frames (skips empty streams,
+        # registers fresh ones from a zero hidden -- see service.advance).
+        self.service.advance(sids, news)
+        for sid, new, q in zip(sids, news, queries):
+            self._carry_len[sid] = self._carry_len.get(sid, 0) + len(new)
+            self._players_of.setdefault(q.stream, set()).add(q.player)
+        # Transient final-token step -> masked regret-matched strategy, one batch.
+        masks = torch.stack(
+            [torch.as_tensor(np.asarray(q.mask, dtype=bool)) for q in queries]
+        ).to(self.service.device)
+        strat = self.service.query_transient(sids, transients, masks)
+        strat_np = strat.detach().to("cpu", dtype=torch.float64).numpy()
+        for i, q in enumerate(queries):
+            q.result = strat_np[i]
+
+    def fork(self, src_stream: int, dst_stream: int) -> None:
+        for p in self._players_of.get(src_stream, ()):  # copy only live streams
+            src = self._sid(src_stream, p)
+            dst = self._sid(dst_stream, p)
+            self.service.fork(src, dst)
+            self._carry_len[dst] = self._carry_len[src]
+            self._players_of.setdefault(dst_stream, set()).add(p)
+
+    def drop(self, stream: int) -> None:
+        for p in self._players_of.pop(stream, ()):
+            sid = self._sid(stream, p)
+            self.service.drop(sid)
+            self._carry_len.pop(sid, None)
+
+
+class _FullReencodeSigmaBackend:
+    """Reference ``SigmaBackend`` for the equivalence gate: each query is a
+    fresh, single-item ``net.strategy_from_tokens`` full re-encode -- bit-for-
+    bit the sequential ``NetProductionSigma.__call__`` computation. Carries no
+    state, so ``fork``/``drop`` are no-ops.
+
+    Running the batched worker with THIS backend isolates the coroutine
+    scheduler / rollout-fork / RNG-order restatement (it must reproduce the
+    sequential worker's samples exactly, since the sigma per query is identical);
+    the IncrementalSigmaManager is then shown equivalent to this backend per
+    query by the carry-identity test. The composition is the semantic-
+    equivalence gate.
+    """
+
+    def __init__(self, net: Any, seq_cap: int = PRODUCTION_SEQ_CAP):
+        self.net = net.eval()
+        self.seq_cap = int(seq_cap)
+
+    def evaluate(self, queries: List[_Query]) -> None:
+        import torch
+
+        device = self.net.device
+        for q in queries:
+            toks = list(q.tokens) if q.tokens else [PAD_ID]
+            if len(toks) > self.seq_cap:
+                toks = toks[-self.seq_cap :]
+            t = torch.as_tensor(toks, dtype=torch.long, device=device).unsqueeze(0)
+            m = torch.as_tensor(
+                np.asarray(q.mask, dtype=bool), device=device
+            ).unsqueeze(0)
+            with torch.no_grad():
+                strat = self.net.strategy_from_tokens(t, m)
+            q.result = strat[0].detach().to("cpu", dtype=torch.float64).numpy()
+
+    def fork(self, src_stream: int, dst_stream: int) -> None:
+        pass
+
+    def drop(self, stream: int) -> None:
+        pass
+
+
+class PRTCFRBatchedProductionWorker:
+    """Batched, incrementally-carried restatement of ``PRTCFRProductionWorker``.
+
+    Same single-trajectory ESCHER estimator (traverser actions from b_i uniform,
+    opponent from sigma^t, m-rollout CRN-paired Monte-Carlo q-targets, SD-CFR
+    averaging so opponent nodes record nothing), but the whole chunk of games
+    runs concurrently through ``_run_batched_scheduler`` so every live game and
+    rollout that reaches a decision on a tick shares ONE batched, incremental
+    inference call (``SigmaBackend.evaluate``).
+
+    Per-game reproducibility: each game gets an independent, deterministic RNG
+    seeded from its own game seed (and an independent rollout-seed counter), so
+    a game's samples are a pure function of its seed -- unlike the sequential
+    worker's single continuing RNG threaded across games. This makes generation
+    reproducible per game and lets the equivalence test drive both paths from
+    matched per-game seeds; the estimator's statistics are unchanged (the RNG is
+    only a sampling source).
+    """
+
+    def __init__(
+        self,
+        m_rollouts: int = 4,
+        seq_cap: int = PRODUCTION_SEQ_CAP,
+        max_trajectory_steps: int = 4000,
+        value_sink: Optional[ValueSinkFn] = None,
+    ):
+        self.m_rollouts = m_rollouts
+        self.seq_cap = seq_cap
+        self.max_trajectory_steps = max_trajectory_steps
+        self.value_sink = value_sink
+        self._key_counter = 0
+
+    def _new_key(self) -> int:
+        self._key_counter += 1
+        return self._key_counter
+
+    def generate(
+        self,
+        game_specs: List[Dict[str, Any]],
+        backend: SigmaBackend,
+    ) -> Dict[int, int]:
+        """Run one batched generation chunk. ``game_specs`` is a list of dicts,
+        each ``{"seed", "driver", "traverser", "iteration", "buf"}``. Appends
+        traverser regret samples to each game's ``buf`` and returns
+        ``{game_index: samples_added}``.
+
+        The trainer owns the top-level game drivers (closes them after); this
+        worker closes only its own clones (rollout drivers and per-action child
+        drivers), unconditionally, so the finite Go handle pool never leaks.
+        """
+        added: Dict[int, int] = {}
+        gens: List[Iterator] = []
+        main_streams: List[int] = []
+        for gi, spec in enumerate(game_specs):
+            added[gi] = 0
+            stream = self._new_key()
+            main_streams.append(stream)
+            gens.append(
+                self._traverse_coro(
+                    game_index=gi,
+                    stream=stream,
+                    driver=spec["driver"],
+                    traverser=int(spec["traverser"]),
+                    iteration=int(spec["iteration"]),
+                    buf=spec["buf"],
+                    rng=random.Random(int(spec["seed"])),
+                    rollout_counter=[0],
+                    backend=backend,
+                    added=added,
+                )
+            )
+        _run_batched_scheduler(gens, backend)
+        # Rollout streams self-drop (see _rollout_coro); free the per-game main
+        # streams too so a service/manager reused across chunks never leaks
+        # carried hidden state.
+        for stream in main_streams:
+            backend.drop(stream)
+        return added
+
+    def _next_seed_base(self, rollout_counter: List[int]) -> int:
+        # Mirror PRTCFRProductionWorker._next_seed_base with a per-game counter
+        # so rollout CRN seeds are reproducible from the game seed alone.
+        rollout_counter[0] += 1
+        return rollout_counter[0] * (self.m_rollouts + 1009)
+
+    def _traverse_coro(
+        self,
+        game_index: int,
+        stream: int,
+        driver: GameDriver,
+        traverser: int,
+        iteration: int,
+        buf: ReservoirBuffer,
+        rng: random.Random,
+        rollout_counter: List[int],
+        backend: SigmaBackend,
+        added: Dict[int, int],
+    ) -> Iterator:
+        """Coroutine restatement of ``PRTCFRProductionWorker.traverse`` for one
+        game: yields a _Query at every policy-query point, a _Join to price a
+        traverser decision's rollouts. Faithful to the sequential RNG-draw order
+        (see the class docstring)."""
+        steps = 0
+        while not driver.is_terminal():
+            steps += 1
+            if steps > self.max_trajectory_steps:
+                break
+            actor = driver.current_player()
+            if actor == -1:
+                break
+            legal = driver.legal_actions()
+            if not legal:
+                break
+            mask = _legal_mask(legal)
+
+            if actor != traverser:
+                tokens = driver.tokens(actor)
+                probs = yield _Query(stream, actor, tokens, mask)
+                _sample_and_apply(driver, legal, probs, rng)
+                continue
+
+            # Traverser decision: price every legal action with m CRN-paired
+            # rollouts (each from a driver clone + a forked hidden), record the
+            # regret sample, then advance the trajectory via b_i (uniform).
+            tokens_h = driver.tokens(traverser)
+            sigma_node = yield _Query(stream, traverser, tokens_h, mask)
+            seed_base = self._next_seed_base(rollout_counter)
+
+            kept_actions: List[Any] = []
+            rollout_subtasks: List[Iterator] = []
+            rollout_owner: List[int] = []
+            for action in legal:
+                child = driver.clone()
+                if not child.apply(action):
+                    # Engine rejected this nominally-legal action for the
+                    # pending sub-decision (same pre-existing interaction the
+                    # sequential worker guards): exclude it rather than price a
+                    # phantom q-value.
+                    child.close()
+                    continue
+                ai = len(kept_actions)
+                kept_actions.append(action)
+                for k in range(self.m_rollouts):
+                    rdriver = child.clone()
+                    rstream = self._new_key()
+                    backend.fork(stream, rstream)  # child rollouts branch from h
+                    rollout_subtasks.append(
+                        self._rollout_coro(
+                            driver=rdriver,
+                            stream=rstream,
+                            traverser=traverser,
+                            rng=random.Random(seed_base + k),
+                            backend=backend,
+                        )
+                    )
+                    rollout_owner.append(ai)
+                # The child driver's only role was to seed the m rollout clones;
+                # close it (and it never got its own sigma stream) now.
+                child.close()
+
+            if kept_actions:
+                results = yield _Join(rollout_subtasks)
+                q_sums = [0.0] * len(kept_actions)
+                q_cnts = [0] * len(kept_actions)
+                for util, ai in zip(results, rollout_owner):
+                    q_sums[ai] += util
+                    q_cnts[ai] += 1
+                q_hat = np.array(
+                    [q_sums[i] / q_cnts[i] for i in range(len(kept_actions))],
+                    dtype=np.float64,
+                )
+                sigma_legal = np.array(
+                    [sigma_node[_action_index(a)] for a in kept_actions],
+                    dtype=np.float64,
+                )
+                sigma_total = sigma_legal.sum()
+                sigma_legal = (
+                    sigma_legal / sigma_total
+                    if sigma_total > 0
+                    else np.full(len(kept_actions), 1.0 / len(kept_actions))
+                )
+                baseline = float(np.dot(sigma_legal, q_hat))
+
+                regret_full = np.zeros(NUM_ACTIONS, dtype=np.float32)
+                kept_mask = np.zeros(NUM_ACTIONS, dtype=bool)
+                for i, action in enumerate(kept_actions):
+                    gi = _action_index(action)
+                    regret_full[gi] = q_hat[i] - baseline
+                    kept_mask[gi] = True
+                buf.add(
+                    ReservoirSample(
+                        features=pad_tokens(tokens_h, seq_cap=self.seq_cap),
+                        target=regret_full,
+                        action_mask=kept_mask,
+                        iteration=iteration,
+                    )
+                )
+                added[game_index] += 1
+
+                if self.value_sink is not None:
+                    self.value_sink(tokens_h, driver, baseline, iteration)
+
+            b_i_probs = uniform_policy_production(tokens_h, mask)
+            _sample_and_apply(driver, legal, b_i_probs, rng)
+
+        return added[game_index]
+
+    def _rollout_coro(
+        self,
+        driver: GameDriver,
+        stream: int,
+        traverser: int,
+        rng: random.Random,
+        backend: SigmaBackend,
+    ) -> Iterator:
+        """Coroutine restatement of ``PRTCFRProductionWorker._rollout_to_terminal``
+        for one CRN replicate: play both players under sigma^t to termination,
+        yielding a _Query per step; return the traverser's utility. Closes its
+        own driver and drops its hidden stream when done (finite Go handle pool /
+        carried-hidden memory)."""
+        try:
+            steps = 0
+            while not driver.is_terminal():
+                steps += 1
+                if steps > self.max_trajectory_steps:
+                    break
+                actor = driver.current_player()
+                if actor == -1:
+                    break
+                legal = driver.legal_actions()
+                if not legal:
+                    break
+                mask = _legal_mask(legal)
+                tokens = driver.tokens(actor)
+                probs = yield _Query(stream, actor, tokens, mask)
+                _sample_and_apply(driver, legal, probs, rng)
+            return driver.utility(traverser)
+        finally:
+            driver.close()
+            backend.drop(stream)

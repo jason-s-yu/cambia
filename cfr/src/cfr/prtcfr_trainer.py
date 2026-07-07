@@ -55,6 +55,8 @@ from .prtcfr_stability import BestSnapshotController, write_deployable_manifest
 from .prtcfr_worker import (
     PRODUCTION_SEQ_CAP,
     GameDriver,
+    IncrementalSigmaManager,
+    PRTCFRBatchedProductionWorker,
     PRTCFRProductionWorker,
     PRTCFRWorker,
     new_production_driver,
@@ -861,6 +863,10 @@ class PRTCFRProductionTrainer:
         self.seed = int(getattr(config, "seed", 0))
         self.device = getattr(config, "device", "cuda")
         self.reservoir_capacity = int(getattr(config, "reservoir_capacity", 20_000_000))
+        # Batched incremental generation (S1W15, the X3 gen remedy).
+        self.gen_batched = bool(getattr(config, "gen_batched", True))
+        self.gen_chunk_games = int(getattr(config, "gen_chunk_games", 64))
+        self.infer_dtype = str(getattr(config, "infer_dtype", "bf16"))
 
         # Stability controller (production default ON; config-gated).
         self.stability_enabled = bool(getattr(config, "stability_enabled", True))
@@ -1103,6 +1109,83 @@ class PRTCFRProductionTrainer:
 
     # -- the iteration ------------------------------------------------------
 
+    def _infer_torch_dtype(self):
+        import torch
+
+        return torch.float32 if self.infer_dtype in ("fp32", "float32") else torch.bfloat16
+
+    def _generate_sequential(self, t: int, added: Dict[int, int], value_sink) -> None:
+        """Original per-decision full-prefix generation (NetProductionSigma):
+        one un-batched, non-carried GRU forward per decision and per rollout
+        step. Kept as a fallback and the equivalence-gate reference; the
+        production default is the batched path below (config.gen_batched)."""
+        sigma = NetProductionSigma(self.net, seq_cap=self.seq_cap)
+        worker = PRTCFRProductionWorker(
+            sigma,
+            m_rollouts=self.m_rollouts,
+            seq_cap=self.seq_cap,
+            seed=self.seed + t * 7_000_003,
+            max_trajectory_steps=self.max_trajectory_steps,
+            value_sink=value_sink,
+        )
+        for k in range(self.k_games):
+            traverser = (t + k) % self.num_players
+            game_seed = self.seed + t * 1_000_003 + k
+            driver = self._driver_factory(game_seed)
+            try:
+                n = worker.traverse(driver, traverser, t, self.reservoirs[traverser])
+                added[traverser] += n
+            finally:
+                driver.close()
+
+    def _generate_batched(self, t: int, added: Dict[int, int], value_sink) -> None:
+        """Batched incremental generation (S1W15, the X3 gen remedy): every
+        live game and its m CRN rollouts that reach a decision on a scheduler
+        tick share ONE carried-hidden GRU forward via the
+        PRTCFRInferenceService. Games run in chunks of ``gen_chunk_games`` to
+        bound peak simultaneously-live drivers under the Go handle pool; one
+        service (a frozen bf16/fp32 snapshot of sigma^t) + manager is reused
+        across chunks (each game's streams are dropped when its chunk finishes,
+        so no hidden state leaks).
+        """
+        from .prtcfr_infer import PRTCFRInferenceService
+
+        service = PRTCFRInferenceService(
+            self.net, device=str(self.device), dtype=self._infer_torch_dtype()
+        )
+        mgr = IncrementalSigmaManager(service, num_players=self.num_players)
+        worker = PRTCFRBatchedProductionWorker(
+            m_rollouts=self.m_rollouts,
+            seq_cap=self.seq_cap,
+            max_trajectory_steps=self.max_trajectory_steps,
+            value_sink=value_sink,
+        )
+        chunk = max(1, self.gen_chunk_games)
+        for start in range(0, self.k_games, chunk):
+            end = min(start + chunk, self.k_games)
+            specs: List[Dict[str, Any]] = []
+            for k in range(start, end):
+                traverser = (t + k) % self.num_players
+                game_seed = self.seed + t * 1_000_003 + k
+                rng_seed = self.seed + t * 7_000_003 + k * 2_000_029
+                driver = self._driver_factory(game_seed)
+                specs.append(
+                    {
+                        "seed": rng_seed,
+                        "driver": driver,
+                        "traverser": traverser,
+                        "iteration": t,
+                        "buf": self.reservoirs[traverser],
+                    }
+                )
+            try:
+                chunk_added = worker.generate(specs, mgr)
+                for gi, spec in enumerate(specs):
+                    added[spec["traverser"]] += chunk_added[gi]
+            finally:
+                for spec in specs:
+                    spec["driver"].close()
+
     def run_iteration(self, t: int) -> PRTCFRProductionTrainState:
         """One production PRT-CFR iteration.
 
@@ -1114,33 +1197,14 @@ class PRTCFRProductionTrainer:
         """
         if self.net is None:
             self.net = self._net_factory()
-        sigma = NetProductionSigma(self.net, seq_cap=self.seq_cap)
         value_sink = self._make_value_sink()
-
-        worker = PRTCFRProductionWorker(
-            sigma,
-            m_rollouts=self.m_rollouts,
-            seq_cap=self.seq_cap,
-            seed=self.seed + t * 7_000_003,
-            max_trajectory_steps=self.max_trajectory_steps,
-            value_sink=value_sink,
-        )
 
         added = {p: 0 for p in range(self.num_players)}
         gen_start = time.perf_counter()
-        for k in range(self.k_games):
-            traverser = (t + k) % self.num_players
-            game_seed = self.seed + t * 1_000_003 + k
-            driver = self._driver_factory(game_seed)
-            try:
-                n = worker.traverse(driver, traverser, t, self.reservoirs[traverser])
-                added[traverser] += n
-            finally:
-                # The trainer owns the top-level trajectory driver; the worker
-                # closes only its own clones. Go handles come from a finite
-                # pool, so close every game driver (python stub close() is a
-                # no-op).
-                driver.close()
+        if self.gen_batched:
+            self._generate_batched(t, added, value_sink)
+        else:
+            self._generate_sequential(t, added, value_sink)
         gen_seconds = time.perf_counter() - gen_start
 
         # Refit the SHARED net on both reservoirs. From-scratch re-init when
