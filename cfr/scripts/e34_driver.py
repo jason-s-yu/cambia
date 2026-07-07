@@ -126,7 +126,7 @@ def _build_agent(agent_type, config, checkpoint, device, argmax):
     kwargs = {"device": device}
     if checkpoint:
         kwargs["checkpoint_path"] = checkpoint
-    if agent_type in ("deep_cfr", "escher", "sd_cfr", "desca", "dense-escher"):
+    if agent_type in ("deep_cfr", "escher", "sd_cfr", "desca", "dense-escher", "prt_cfr"):
         kwargs["use_argmax"] = argmax
     return get_agent(agent_type, player_id=0, config=config, **kwargs)
 

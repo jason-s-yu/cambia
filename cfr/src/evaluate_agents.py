@@ -2241,6 +2241,204 @@ class DESCAAgentWrapper(NeuralAgentWrapper):
             return random.choice(legal_list)
 
 
+# --- PRT-CFR SD-CFR Mixture Wrapper ---
+
+
+class PRTCFRAgentWrapper(NeuralAgentWrapper):
+    """Evaluate a PRT-CFR run as an SD-CFR snapshot mixture over the deployable window.
+
+    PRT-CFR has no strategy net: the served average strategy is realized by
+    SD-CFR snapshot sampling (v0.4 design decision 4). This wrapper:
+
+      - loads the deployable snapshot set (the ``prtcfr_deployable.json`` S1W1
+        manifest seam; unpinned default = every ``prtcfr_snapshot_iter_{t}.pt``
+        in the run's snapshot dir) into a ``PRTCFRMixture``;
+      - samples ONE snapshot per EPISODE (proportional to ``w_t = t``) in
+        ``initialize_state`` and plays the whole game with it -- the SD-CFR
+        trajectory-sampling procedure, NOT per-decision averaging;
+      - consumes the ENGINE token stream: ``observe_transition`` (driven by
+        ``run_evaluation`` once per applied action, both players) builds each
+        frame from the post-action Python engine state via the SAME
+        ``worker._create_observation`` / ``worker._filter_observation`` the
+        training driver uses, so the eval token prefix is byte-identical to the
+        training token prefix (RC-B parity). The wrapper never re-derives
+        observations from a belief abstraction (measurement-layer rule) and does
+        not use ``AgentState`` at all.
+
+    ``choose_action`` encodes the accumulated per-player token prefix via the
+    single-sourced ``encode_observation_sequence`` and queries the episode's
+    sampled snapshot for a masked regret-matched policy over the 146 global
+    actions -- the identical policy path as the training-time sigma^t.
+    """
+
+    def __init__(
+        self,
+        player_id: int,
+        config,
+        checkpoint_path: str,
+        device: str = "cpu",
+        use_argmax: bool = False,
+        weighting: str = "linear",
+        mixture_seed: Optional[int] = None,
+    ):
+        super().__init__(player_id, config, device=device, use_argmax=use_argmax)
+        from src.cfr.prtcfr_mixture import PRTCFRMixture
+        from src.cfr.prtcfr_worker import PRODUCTION_SEQ_CAP
+        from src.sequence_encoding import SequenceOverflowError
+
+        self._SequenceOverflowError = SequenceOverflowError
+        self._seq_cap = PRODUCTION_SEQ_CAP
+        self._mixture = PRTCFRMixture.from_checkpoint(
+            checkpoint_path,
+            device=str(self.device),
+            weighting=weighting,
+            seq_cap=PRODUCTION_SEQ_CAP,
+        )
+        # Deterministic per-wrapper episode RNG so eval is reproducible and the
+        # unit tests can pin the sampled-snapshot sequence. Seat instances differ
+        # by player_id so the two seats sample independently (like action
+        # sampling, SD-CFR snapshot sampling is inherent policy stochasticity and
+        # is not CRN-paired across the seat-swap; only the deck is).
+        seed = (
+            mixture_seed
+            if mixture_seed is not None
+            else 0x9E3779B1 ^ (player_id * 0x85EBCA77)
+        ) & 0xFFFF_FFFF
+        self._episode_rng = np.random.default_rng(seed)
+        # Per-episode token-stream state (populated in initialize_state).
+        self._init_hand: list = []
+        self._init_peeks: tuple = ()
+        self._obs_stream: List = []
+        self._overflow_warned = False
+        logger.info(
+            "PRTCFRAgent P%d loaded %d deployable snapshot(s) (iters=%s, weighting=%s)",
+            self.player_id, len(self._mixture),
+            self._mixture.iters if len(self._mixture) <= 12 else
+            f"{self._mixture.iters[:3]}..{self._mixture.iters[-3:]}",
+            weighting,
+        )
+
+    def initialize_state(self, initial_game_state):
+        """Reset the token stream for a new game and sample this episode's snapshot.
+
+        Overrides the AgentState-building base: PRT-CFR conditions on the raw
+        token stream, not a belief abstraction, so no ``AgentState`` is built.
+        """
+        self.agent_state = None
+        self._init_hand = list(initial_game_state.players[self.player_id].hand)
+        self._init_peeks = tuple(
+            initial_game_state.players[self.player_id].initial_peek_indices
+        )
+        self._obs_stream = []
+        self._mixture.sample_episode(self._episode_rng)
+
+    def update_state(self, observation):
+        """No-op: the token stream is fed by ``observe_transition`` (every applied
+        action, both players), not by the eval loop's public-observation sharing
+        (which is gated on the acting agent having ``_create_observation`` and
+        would drop baseline-actor frames -- corrupting the full-recall prefix)."""
+        return
+
+    def observe_transition(self, game_state, action, acting_player: int) -> None:
+        """Append the training-faithful, observer-filtered frame for one applied
+        transition to this player's token stream.
+
+        ``game_state`` is the POST-action state (matches the training driver's
+        ``next_state`` semantics). Uses the SAME builders the production sampler
+        uses (``worker._create_observation`` -> full obs with the actor's private
+        drawn/peeked cards; ``worker._filter_observation`` -> this observer's
+        view), so ``encode_observation_sequence`` over the accumulated stream
+        reproduces the exact training token prefix.
+        """
+        from src.cfr.worker import _create_observation, _filter_observation
+
+        snap_results = list(getattr(game_state, "snap_results_log", []) or [])
+        full_obs = _create_observation(
+            None, action, game_state, acting_player, snap_results
+        )
+        if full_obs is None:
+            logger.error(
+                "PRTCFRAgent P%d: observation build failed for actor %d action %r",
+                self.player_id, acting_player, action,
+            )
+            return
+        self._obs_stream.append(_filter_observation(full_obs, self.player_id))
+
+    def _encode_tokens(self) -> List[int]:
+        """Full-recall token prefix for this player over the accumulated stream.
+
+        Strict (full-recall, no silent truncation) to match the training driver's
+        ``tokens()`` contract; on overflow (a game longer than the production cap)
+        fall back to keep-most-recent, matching ``NetProductionSigma``'s own
+        overflow tolerance rather than crashing the eval.
+        """
+        from src.sequence_encoding import encode_observation_sequence
+
+        try:
+            return encode_observation_sequence(
+                self._init_hand,
+                self._init_peeks,
+                self._obs_stream,
+                self.player_id,
+                seq_cap=self._seq_cap,
+                strict=True,
+            )
+        except self._SequenceOverflowError as e:
+            if not self._overflow_warned:
+                logger.warning(
+                    "PRTCFRAgent P%d: token stream over seq_cap=%d (%s); "
+                    "falling back to keep-most-recent for this game.",
+                    self.player_id, self._seq_cap, e,
+                )
+                self._overflow_warned = True
+            return encode_observation_sequence(
+                self._init_hand,
+                self._init_peeks,
+                self._obs_stream,
+                self.player_id,
+                seq_cap=self._seq_cap,
+                strict=False,
+            )
+
+    def choose_action(self, game_state, legal_actions: Set[GameAction]) -> GameAction:
+        """Query the episode's sampled snapshot with the engine token prefix."""
+        from src.encoding import encode_action_mask, index_to_action
+        from src.cfr.exceptions import ActionEncodingError
+
+        legal_list = list(legal_actions)
+        if not legal_list:
+            raise ValueError(
+                f"PRTCFRAgent P{self.player_id} cannot choose from empty legal actions."
+            )
+        try:
+            tokens = self._encode_tokens()
+            mask = encode_action_mask(legal_list)  # (146,) bool
+            probs = self._mixture.strategy(tokens, mask)  # (146,) float64
+        except Exception as e:  # JUSTIFIED: evaluation resilience
+            logger.error("PRTCFRAgent P%d policy error: %s", self.player_id, e)
+            return random.choice(legal_list)
+
+        legal_indices = np.where(np.asarray(mask, dtype=bool))[0]
+        if len(legal_indices) == 0:
+            return random.choice(legal_list)
+        legal_probs = probs[legal_indices]
+        prob_sum = legal_probs.sum()
+        if prob_sum <= 0:
+            legal_probs = np.ones(len(legal_indices)) / len(legal_indices)
+        else:
+            legal_probs = legal_probs / prob_sum
+
+        if self._use_argmax:
+            chosen_local = int(np.argmax(legal_probs))
+        else:
+            chosen_local = int(np.random.choice(len(legal_indices), p=legal_probs))
+        chosen_global_idx = int(legal_indices[chosen_local])
+        try:
+            return index_to_action(chosen_global_idx, legal_list)
+        except ActionEncodingError:
+            return random.choice(legal_list)
+
+
 # --- Constants ---
 
 # Canonical mean_imp baseline set. Import this from all scripts that compute mean_imp.
@@ -2272,6 +2470,7 @@ AGENT_REGISTRY: Dict[str, Type[BaseAgent]] = {
     "nplayer": NPlayerAgentWrapper,
     "desca": DESCAAgentWrapper,
     "dense-escher": DESCAAgentWrapper,
+    "prt_cfr": PRTCFRAgentWrapper,
     "random_no_cambia": RandomNoCambiaAgent,
     "random_late_cambia": RandomLateCambiaAgent,
     "human_player": HumanPlayerAgent,
@@ -2341,6 +2540,15 @@ def get_agent(agent_type: str, player_id: int, config, **kwargs) -> BaseAgent:
         device = kwargs.get("device", "cpu")
         use_argmax = kwargs.get("use_argmax", False)
         return DESCAAgentWrapper(player_id, config, checkpoint_path, device=device, use_argmax=use_argmax)
+    elif agent_type.lower() == "prt_cfr":
+        checkpoint_path = kwargs.get("checkpoint_path")
+        if not checkpoint_path:
+            raise ValueError("PRTCFRAgentWrapper requires 'checkpoint_path'.")
+        device = kwargs.get("device", "cpu")
+        use_argmax = kwargs.get("use_argmax", False)
+        return PRTCFRAgentWrapper(
+            player_id, config, checkpoint_path, device=device, use_argmax=use_argmax
+        )
     else:
         # Pass config to baseline agents as well
         return agent_class(player_id, config)
@@ -2396,7 +2604,7 @@ def run_evaluation(
             logger.error("Strategy file path (--strategy) required for CFR agent.")
             sys.exit(1)
         logger.info("CFR Strategy File: %s", strategy_path)
-    _checkpoint_agent_types = {"deep_cfr", "escher", "sd_cfr", "nplayer", "ppo", "rebel", "gtcfr", "sog", "sog_inference", "desca", "dense-escher"}
+    _checkpoint_agent_types = {"deep_cfr", "escher", "sd_cfr", "nplayer", "ppo", "rebel", "gtcfr", "sog", "sog_inference", "desca", "dense-escher", "prt_cfr"}
     if agent1_type.lower() in _checkpoint_agent_types or agent2_type.lower() in _checkpoint_agent_types:
         if not checkpoint_path:
             logger.error("Checkpoint path (--checkpoint) required for %s agent.", agent1_type)
@@ -2618,6 +2826,20 @@ def run_evaluation(
                             results["Errors"] += 1
                             game_error = True
                             break
+
+                        # PRT-CFR token-stream feed (measurement-layer rule):
+                        # every applied transition, both players, independent of
+                        # the public-observation sharing below. That sharing is
+                        # gated on the ACTING agent having _create_observation, so
+                        # a baseline actor's move would be dropped -- corrupting
+                        # PRT-CFR's full-recall token prefix. observe_transition
+                        # builds each frame from the post-action engine state via
+                        # the training driver's own observation builders.
+                        for agent in agents:
+                            if isinstance(agent, PRTCFRAgentWrapper):
+                                agent.observe_transition(
+                                    game_state, chosen_action, acting_player_id
+                                )
 
                         # Create observation AFTER action (for stateful agents)
                         has_stateful = any(
