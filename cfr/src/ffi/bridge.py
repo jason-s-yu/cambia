@@ -31,6 +31,11 @@ RANK_VALUE = {
     "7": 6, "8": 7, "9": 8, "T": 9, "J": 10, "Q": 11, "K": 12,
 }
 
+# PRT-CFR per-agent token stream hard cap (must equal agent.MaxTokenStream in
+# engine/agent/tokens.go). The Go side raises on overflow; this sizes the read
+# buffer to hold the full stream.
+TOKEN_STREAM_CAP = 4096
+
 
 def python_card_to_go_index(card) -> int:
     """Convert a Python Card object to a canonical uint8 card index.
@@ -207,6 +212,19 @@ _ffi.cdef("""
 
     /* Handle pool diagnostics */
     void    cambia_handle_pool_stats(int32_t *games_out, int32_t *agents_out, int32_t *snaps_out);
+
+    /* PRT-CFR event-stream token FFI (S1W2, additive) */
+    int32_t cambia_agent_token_len(int32_t agent_h);
+    int32_t cambia_agent_tokens(int32_t agent_h, int32_t *out, int32_t max);
+    int32_t cambia_agent_tokens_since(int32_t agent_h, int32_t since, int32_t *out, int32_t max);
+    int32_t cambia_games_apply_batch(int32_t *game_hs, int32_t *a0s, int32_t *a1s,
+                                     uint16_t *actions, int32_t n);
+    int32_t cambia_state_save(int32_t game_h, int32_t a0_h, int32_t a1_h);
+    int32_t cambia_state_restore(int32_t game_h, int32_t snap_h, int32_t a0_h, int32_t a1_h);
+    void    cambia_state_snapshot_free(int32_t h);
+    int32_t cambia_token_vocab(int32_t *out, int32_t max);
+    int32_t cambia_token_encode_card(uint8_t go_card_index);
+    int32_t cambia_token_encode_action(uint16_t action_idx);
 """)
 
 _LIB = None
@@ -747,6 +765,8 @@ class GoAgentState:
         self._own_hand_buf = _ffi.new(f"uint8_t[{GoEngine.MAX_HAND_SIZE * 4}]")
         self._opp_belief_buf = _ffi.new(f"uint8_t[{GoEngine.MAX_HAND_SIZE}]")
         self._hand_lens_buf = _ffi.new("uint8_t[2]")
+        # PRT-CFR token stream read buffer (full Go per-agent hard cap).
+        self._token_buf = _ffi.new(f"int32_t[{TOKEN_STREAM_CAP}]")
 
         self._agent_h: int = self._lib.cambia_agent_new(
             engine.handle,
@@ -778,6 +798,7 @@ class GoAgentState:
         obj._own_hand_buf = _ffi.new(f"uint8_t[{GoEngine.MAX_HAND_SIZE * 4}]")
         obj._opp_belief_buf = _ffi.new(f"uint8_t[{GoEngine.MAX_HAND_SIZE}]")
         obj._hand_lens_buf = _ffi.new("uint8_t[2]")
+        obj._token_buf = _ffi.new(f"int32_t[{TOKEN_STREAM_CAP}]")
         obj._closed = False
         return obj
 
@@ -949,6 +970,56 @@ class GoAgentState:
                 f"on agent handle {self._agent_h}"
             )
         return GoAgentState._from_handle(int(new_h))
+
+    # --- PRT-CFR token stream (S1W2) ---
+
+    @property
+    def handle(self) -> int:
+        """Expose the raw agent handle (for apply_games_batch / state_save)."""
+        return self._agent_h
+
+    def token_len(self) -> int:
+        """Return the number of tokens in this agent's full stream body."""
+        n = self._lib.cambia_agent_token_len(self._agent_h)
+        if n < 0:
+            raise RuntimeError(
+                f"cambia_agent_token_len failed (returned {n}) "
+                f"on agent handle {self._agent_h}"
+            )
+        return int(n)
+
+    def tokens(self) -> np.ndarray:
+        """Return the FULL token stream body as an int32 numpy array.
+
+        No BOS/EOS and no truncation: this is the raw frame body. Use
+        frame_aligned_window() to produce the byte-exact
+        encode_observation_sequence output for a given cap.
+        """
+        n = self._lib.cambia_agent_tokens(
+            self._agent_h, self._token_buf, TOKEN_STREAM_CAP
+        )
+        if n < 0:
+            raise RuntimeError(
+                f"cambia_agent_tokens failed (returned {n}) "
+                f"on agent handle {self._agent_h}"
+            )
+        return np.frombuffer(
+            _ffi.buffer(self._token_buf, int(n) * 4), dtype=np.int32
+        ).copy()
+
+    def tokens_since(self, since: int) -> np.ndarray:
+        """Return the incremental tail tokens[since:] as an int32 numpy array."""
+        n = self._lib.cambia_agent_tokens_since(
+            self._agent_h, int(since), self._token_buf, TOKEN_STREAM_CAP
+        )
+        if n < 0:
+            raise RuntimeError(
+                f"cambia_agent_tokens_since failed (returned {n}) "
+                f"agent={self._agent_h} since={since}"
+            )
+        return np.frombuffer(
+            _ffi.buffer(self._token_buf, int(n) * 4), dtype=np.int32
+        ).copy()
 
     def encode(self, decision_context: int, drawn_bucket: int = -1, out: Optional[np.ndarray] = None) -> np.ndarray:
         """
@@ -1415,3 +1486,177 @@ def get_handle_pool_stats() -> dict:
         "agents": int(agents_p[0]),
         "snapshots": int(snaps_p[0]),
     }
+
+
+# ---------------------------------------------------------------------------
+# PRT-CFR event-stream token FFI (S1W2, additive)
+# ---------------------------------------------------------------------------
+
+
+def apply_games_batch(
+    game_handles: List[int],
+    a0_handles: List[int],
+    a1_handles: List[int],
+    actions: List[int],
+) -> None:
+    """Apply one action to each game and update its two agents (belief + tokens).
+
+    Vectorized single-FFI-call batch step: for game i, applies actions[i], then
+    updates agents a0_handles[i] and a1_handles[i] (belief state + append-only
+    token stream). An agent handle of -1 skips that agent. Per-call overhead is
+    O(len(game_handles)) with no per-game Python roundtrip.
+
+    Raises:
+        ValueError: If the input lists differ in length.
+        RuntimeError: On invalid handle / apply error, or token-stream overflow
+            (the hard 4096-token cap is exceeded; never silently truncated).
+    """
+    n = len(game_handles)
+    if not (len(a0_handles) == n and len(a1_handles) == n and len(actions) == n):
+        raise ValueError(
+            "apply_games_batch: game/a0/a1/action lists must be equal length"
+        )
+    if n == 0:
+        return
+    lib = _get_lib()
+    gh = _ffi.new("int32_t[]", [int(x) for x in game_handles])
+    a0 = _ffi.new("int32_t[]", [int(x) for x in a0_handles])
+    a1 = _ffi.new("int32_t[]", [int(x) for x in a1_handles])
+    act = _ffi.new("uint16_t[]", [int(x) for x in actions])
+    ret = lib.cambia_games_apply_batch(gh, a0, a1, act, n)
+    if ret == -2:
+        raise RuntimeError(
+            "cambia_games_apply_batch: token stream overflow (>4096 tokens); "
+            "hard cap exceeded, no silent truncation"
+        )
+    if ret < 0:
+        raise RuntimeError(
+            f"cambia_games_apply_batch failed (returned {ret}); invalid handle "
+            "or apply error"
+        )
+
+
+def state_save(game_h: int, a0_h: int, a1_h: int) -> int:
+    """Snapshot a (game, both agents' belief + token) checkpoint. Returns handle."""
+    lib = _get_lib()
+    sh = lib.cambia_state_save(int(game_h), int(a0_h), int(a1_h))
+    if sh < 0:
+        raise RuntimeError(
+            f"cambia_state_save failed (returned {sh}) "
+            f"game={game_h} a0={a0_h} a1={a1_h}"
+        )
+    return int(sh)
+
+
+def state_restore(game_h: int, snap_h: int, a0_h: int, a1_h: int) -> None:
+    """Restore a (game, both agents' belief + token) checkpoint from a snapshot.
+
+    a0_h/a1_h must match the handles passed to the paired state_save.
+    """
+    lib = _get_lib()
+    ret = lib.cambia_state_restore(int(game_h), int(snap_h), int(a0_h), int(a1_h))
+    if ret < 0:
+        raise RuntimeError(
+            f"cambia_state_restore failed (returned {ret}) "
+            f"game={game_h} snap={snap_h} a0={a0_h} a1={a1_h}"
+        )
+
+
+def state_snapshot_free(snap_h: int) -> None:
+    """Release a state snapshot handle from state_save."""
+    _get_lib().cambia_state_snapshot_free(int(snap_h))
+
+
+# Fixed field order of cambia_token_vocab (mirrors agent.TokenVocab). Consumers
+# read positionally; the cross-check test asserts each against sequence_encoding.
+TOKEN_VOCAB_FIELDS = [
+    "VOCAB_SIZE", "PAD_ID", "BOS_ID", "EOS_ID", "SEP_ID", "NUM_SPECIAL",
+    "FRAME_BASE", "NUM_FRAME_IDS", "ACTOR_BASE", "MAX_ACTORS",
+    "ACTION_BASE", "NUM_ACTION_IDS", "CARD_BASE", "NUM_CARD_IDS",
+    "SLOT_BASE", "NUM_SLOT_IDS", "OUTCOME_BASE", "NUM_SNAP_OUTCOME_IDS",
+    "MAX_SLOTS", "SEQ_CAP", "GO_TOKEN_STREAM_CAP",
+]
+
+
+def get_token_vocab() -> dict:
+    """Return the Go token vocabulary layout as a {field: value} dict."""
+    lib = _get_lib()
+    n = len(TOKEN_VOCAB_FIELDS)
+    buf = _ffi.new(f"int32_t[{n}]")
+    written = lib.cambia_token_vocab(buf, n)
+    if written < 0:
+        raise RuntimeError(f"cambia_token_vocab failed (returned {written})")
+    return {TOKEN_VOCAB_FIELDS[i]: int(buf[i]) for i in range(int(written))}
+
+
+def encode_card_token(go_card_index: int) -> int:
+    """Return the CARD-block token for a canonical Go card index (suit*13+rank)."""
+    return int(_get_lib().cambia_token_encode_card(int(go_card_index)))
+
+
+def encode_action_token(action_idx: int) -> int:
+    """Return the ACTION-block token for a 2-player action index, or -1."""
+    return int(_get_lib().cambia_token_encode_action(int(action_idx)))
+
+
+# Frame widths keyed by frame-kind local id (order: init_peek, public, drawn,
+# snap, cambia). Structural; matches the decoder in sequence_encoding.py.
+_FRAME_WIDTHS = (3, 4, 2, 4, 2)
+
+
+def frame_aligned_window(
+    token_body,
+    seq_cap: int,
+    add_bos_eos: bool = True,
+    frame_base: int = 4,
+    num_frame_ids: int = 5,
+    bos_id: int = 1,
+    eos_id: int = 2,
+) -> List[int]:
+    """Frame-aligned keep-most-recent window over a raw token body.
+
+    Byte-exact reproduction of sequence_encoding.encode_observation_sequence's
+    truncation + BOS/EOS wrapping, applied to a FULL token body returned by the
+    Go side (or Python add_bos_eos=False path). Whole OLDEST frames are dropped
+    until the body fits seq_cap (minus BOS/EOS), so the kept suffix always starts
+    on a frame marker. ``seq_cap`` is a PARAMETER: production passes the raised
+    window cap, tiny paths pass 256; the Go side itself never truncates.
+
+    frame_base/num_frame_ids/bos_id/eos_id default to the tokenizer's layout but
+    are overridable so the caller can pin them to the live sequence_encoding
+    constants (the cross-check keeps Go and Python in lockstep).
+    """
+    body = [int(t) for t in token_body]
+    # Segment the flat body into whole frames by walking frame markers.
+    frames: List[List[int]] = []
+    i = 0
+    n = len(body)
+    while i < n:
+        tok = body[i]
+        local = tok - frame_base
+        if not (0 <= local < num_frame_ids):
+            raise ValueError(
+                f"frame_aligned_window: expected a FRAME marker at pos {i}, got {tok}"
+            )
+        width = _FRAME_WIDTHS[local]
+        frames.append(body[i : i + width])
+        i += width
+    budget = seq_cap - (2 if add_bos_eos else 0)
+    if budget < 0:
+        budget = 0
+    kept_rev: List[List[int]] = []
+    used = 0
+    for g in reversed(frames):
+        if used + len(g) > budget:
+            break
+        kept_rev.append(g)
+        used += len(g)
+    kept = list(reversed(kept_rev))
+    seq: List[int] = []
+    if add_bos_eos:
+        seq.append(bos_id)
+    for g in kept:
+        seq.extend(g)
+    if add_bos_eos:
+        seq.append(eos_id)
+    return seq

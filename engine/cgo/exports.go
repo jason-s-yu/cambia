@@ -1,6 +1,19 @@
 // Package cgo provides C-exported functions for building libcambia.so.
 //
 // Build with: go build -buildmode=c-shared -o cfr/libcambia.so ./engine/cgo/
+//
+// PRT-CFR event-stream token surface (S1W2, additive): each agent carries an
+// append-only int32 token stream mirroring cfr/src/sequence_encoding.py.
+//
+//	cambia_agent_token_len / cambia_agent_tokens / cambia_agent_tokens_since
+//	  - read the full stream / an incremental tail.
+//	cambia_games_apply_batch - vectorized apply + per-game agent belief+token
+//	  update, O(n) with no per-game Python roundtrip.
+//	cambia_state_save / cambia_state_restore / cambia_state_snapshot_free -
+//	  token-inclusive (game, both-agents) checkpoint pair (additive to the
+//	  game-only cambia_game_save/restore, which are unchanged).
+//	cambia_token_vocab / cambia_token_encode_card / cambia_token_encode_action
+//	  - expose the Go vocabulary layout + mappings for the parity cross-check.
 package main
 
 /*
@@ -23,7 +36,7 @@ import (
 
 const (
 	maxGames     = 2048
-	maxAgents    = 512
+	maxAgents    = 4096
 	maxSnapshots = 256
 	maxSolvers   = 32
 )
@@ -32,6 +45,16 @@ const (
 type solverEntry struct {
 	root      *SubgameNode
 	leafCount int
+}
+
+// stateSnapshot is a complete (game, both agents' belief + token state)
+// checkpoint used by cambia_state_save/restore for per-node rollout fan-out.
+type stateSnapshot struct {
+	game engine.GameState
+	a0   agent.AgentState
+	a1   agent.AgentState
+	t0   agent.TokenStream
+	t1   agent.TokenStream
 }
 
 var (
@@ -44,8 +67,17 @@ var (
 	agentInUse [maxAgents]bool
 	agentGameH [maxAgents]int32 // which game handle each agent is associated with
 
+	// tokenPool holds the per-agent PRT-CFR observation token stream, parallel
+	// to agentPool by handle. Kept outside AgentState so that Go-internal CFR
+	// clone-by-value stays cheap; only FFI clone / state-snapshot copy it.
+	tokenPool [maxAgents]agent.TokenStream
+
 	snapPool  [maxSnapshots]engine.GameState // Snapshot = GameState copy
 	snapInUse [maxSnapshots]bool
+
+	// stateSnapPool backs the token-inclusive cambia_state_save/restore pair.
+	stateSnapPool  [maxSnapshots]stateSnapshot
+	stateSnapInUse [maxSnapshots]bool
 
 	solverPool  [maxSolvers]solverEntry
 	solverInUse [maxSolvers]bool
@@ -95,6 +127,7 @@ func freeAgent(h int32) {
 		agentInUse[h] = false
 		agentPool[h] = agent.AgentState{}
 		agentGameH[h] = -1
+		tokenPool[h].Reset()
 	}
 }
 
@@ -116,6 +149,27 @@ func freeSnapshot(h int32) {
 	if h >= 0 && h < maxSnapshots {
 		snapInUse[h] = false
 		snapPool[h] = engine.GameState{}
+	}
+}
+
+func allocStateSnapshot() int32 {
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	for i := 0; i < maxSnapshots; i++ {
+		if !stateSnapInUse[i] {
+			stateSnapInUse[i] = true
+			return int32(i)
+		}
+	}
+	return -1
+}
+
+func freeStateSnapshot(h int32) {
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	if h >= 0 && h < maxSnapshots {
+		stateSnapInUse[h] = false
+		stateSnapPool[h] = stateSnapshot{}
 	}
 }
 
@@ -428,6 +482,8 @@ func cambia_agent_new(game_h C.int32_t, player_id C.uint8_t, memory_level C.uint
 	agentPool[ah] = agent.NewAgentState(pid, oppID, uint8(memory_level), uint8(time_decay_turns))
 	agentPool[ah].Initialize(&gamePool[game_h])
 	agentGameH[ah] = int32(game_h)
+	// Seed the PRT-CFR token stream with the observer's private init-peek frames.
+	tokenPool[ah].Init(&gamePool[game_h], pid)
 	return C.int32_t(ah)
 }
 
@@ -453,6 +509,7 @@ func cambia_agent_new_with_memory(game_h C.int32_t, player_id C.uint8_t, memory_
 	agentPool[ah].MemoryCapacity = uint8(memory_capacity)
 	agentPool[ah].Initialize(&gamePool[game_h])
 	agentGameH[ah] = int32(game_h)
+	tokenPool[ah].Init(&gamePool[game_h], pid)
 	return C.int32_t(ah)
 }
 
@@ -482,6 +539,9 @@ func cambia_agent_clone(h C.int32_t) C.int32_t {
 	}
 	agentPool[newH] = agentPool[h].Clone()
 	agentGameH[newH] = agentGameH[h]
+	// Carry the token stream (and its snap-phase accumulator) into the clone so a
+	// cloned trajectory retains the observer's full perfect-recall history.
+	tokenPool[newH] = tokenPool[h]
 	return C.int32_t(newH)
 }
 
@@ -1042,16 +1102,21 @@ func cambia_terminal_eval_mc(h C.int32_t, player C.uint8_t, num_samples C.int32_
 // mutated. Output layout matches the Python AgentState semantics so the
 // adapter in cli.py can construct equivalent dict views.
 
-//export cambia_agent_get_own_hand
 // cambia_agent_get_own_hand fills out_buf with engine.MaxHandSize triplets:
-//   (bucket, last_seen_turn_lo, last_seen_turn_hi, valid)
+//
+//	(bucket, last_seen_turn_lo, last_seen_turn_hi, valid)
+//
 // where valid is 1 if the slot index is < OwnHandLen, else 0. Each triplet
 // is 4 bytes wide, total = engine.MaxHandSize * 4 bytes. Returns 0 on
 // success, -1 on bad agent handle.
 //
 // The Python adapter consumes this to populate `own_hand` as
-//   {slot: KnownCardInfoLite(bucket, last_seen_turn) for slot in 0..OwnHandLen}
+//
+//	{slot: KnownCardInfoLite(bucket, last_seen_turn) for slot in 0..OwnHandLen}
+//
 // matching action_abstraction.py's expectations.
+//
+//export cambia_agent_get_own_hand
 func cambia_agent_get_own_hand(agent_h C.int32_t, out_buf *C.uint8_t, buf_len C.int32_t) C.int32_t {
 	if agent_h < 0 || agent_h >= maxAgents || !agentInUse[agent_h] {
 		return -1
@@ -1079,12 +1144,13 @@ func cambia_agent_get_own_hand(agent_h C.int32_t, out_buf *C.uint8_t, buf_len C.
 	return 0
 }
 
-//export cambia_agent_get_opp_belief
 // cambia_agent_get_opp_belief fills out_buf with engine.MaxHandSize bucket
 // values (one byte each) for the opponent's hand slots [0..OppHandLen). Slots
 // beyond OppHandLen receive sentinel 0xFF. Decay-encoded beliefs collapse to
 // BucketUnknown (sentinel 9) since action_abstraction only checks for
 // known/unknown. Returns 0 on success, -1 on bad agent handle.
+//
+//export cambia_agent_get_opp_belief
 func cambia_agent_get_opp_belief(agent_h C.int32_t, out_buf *C.uint8_t, buf_len C.int32_t) C.int32_t {
 	if agent_h < 0 || agent_h >= maxAgents || !agentInUse[agent_h] {
 		return -1
@@ -1112,10 +1178,11 @@ func cambia_agent_get_opp_belief(agent_h C.int32_t, out_buf *C.uint8_t, buf_len 
 	return 0
 }
 
-//export cambia_agent_get_current_turn
 // cambia_agent_get_current_turn returns the agent's CurrentTurn observation
 // counter as a uint16. Returns 0xFFFF on bad agent handle (callers must
 // validate).
+//
+//export cambia_agent_get_current_turn
 func cambia_agent_get_current_turn(agent_h C.int32_t) C.uint16_t {
 	if agent_h < 0 || agent_h >= maxAgents || !agentInUse[agent_h] {
 		return 0xFFFF
@@ -1123,9 +1190,10 @@ func cambia_agent_get_current_turn(agent_h C.int32_t) C.uint16_t {
 	return C.uint16_t(agentPool[agent_h].CurrentTurn)
 }
 
-//export cambia_agent_get_hand_lens
 // cambia_agent_get_hand_lens fills a 2-byte buffer with [OwnHandLen,
 // OppHandLen]. Returns 0 on success, -1 on bad agent handle.
+//
+//export cambia_agent_get_hand_lens
 func cambia_agent_get_hand_lens(agent_h C.int32_t, out_buf *C.uint8_t) C.int32_t {
 	if agent_h < 0 || agent_h >= maxAgents || !agentInUse[agent_h] {
 		return -1
@@ -1137,10 +1205,11 @@ func cambia_agent_get_hand_lens(agent_h C.int32_t, out_buf *C.uint8_t) C.int32_t
 	return 0
 }
 
-//export cambia_handle_pool_stats
 // cambia_handle_pool_stats writes the number of in-use slots for games,
 // agents, and snapshots into the three output pointers.
 // It is thread-safe and uses the existing poolMu mutex.
+//
+//export cambia_handle_pool_stats
 func cambia_handle_pool_stats(games_out *C.int32_t, agents_out *C.int32_t, snaps_out *C.int32_t) {
 	poolMu.Lock()
 	defer poolMu.Unlock()
@@ -1163,6 +1232,194 @@ func cambia_handle_pool_stats(games_out *C.int32_t, agents_out *C.int32_t, snaps
 	*games_out = C.int32_t(gCount)
 	*agents_out = C.int32_t(aCount)
 	*snaps_out = C.int32_t(sCount)
+}
+
+// ---------------------------------------------------------------------------
+// PRT-CFR event-stream token FFI (S1W2)
+// ---------------------------------------------------------------------------
+//
+// Each agent carries an append-only int32 token stream that mirrors
+// cfr/src/sequence_encoding.py byte-for-byte (the FULL frame body: init-peek
+// frames + one frame group per observed action, NO BOS/EOS, NO truncation).
+// The stream is seeded at cambia_agent_new* and grown by cambia_games_apply_batch.
+// Truncation to a window (SEQ_CAP) and BOS/EOS wrapping are the consumer's job
+// at encode time; the Go side never truncates. Overflow past the 4096-token hard
+// cap is an explicit error, never silent truncation.
+
+//export cambia_agent_token_len
+func cambia_agent_token_len(agent_h C.int32_t) C.int32_t {
+	if agent_h < 0 || agent_h >= maxAgents || !agentInUse[agent_h] {
+		return -1
+	}
+	return C.int32_t(tokenPool[agent_h].Len())
+}
+
+// cambia_agent_tokens copies up to max tokens of the agent's FULL token stream
+// into out and returns the number written, or -1 on bad handle.
+//
+//export cambia_agent_tokens
+func cambia_agent_tokens(agent_h C.int32_t, out *C.int32_t, max C.int32_t) C.int32_t {
+	if agent_h < 0 || agent_h >= maxAgents || !agentInUse[agent_h] {
+		return -1
+	}
+	m := int(max)
+	if m <= 0 {
+		return 0
+	}
+	dst := (*[1 << 22]int32)(unsafe.Pointer(out))[:m:m]
+	return C.int32_t(tokenPool[agent_h].CopyTo(dst))
+}
+
+// cambia_agent_tokens_since copies the incremental tail tokens[since:] (up to
+// max) into out and returns the number written, or -1 on bad handle. Used for
+// incremental hidden-state carry in the batched GRU inference service.
+//
+//export cambia_agent_tokens_since
+func cambia_agent_tokens_since(agent_h C.int32_t, since C.int32_t, out *C.int32_t, max C.int32_t) C.int32_t {
+	if agent_h < 0 || agent_h >= maxAgents || !agentInUse[agent_h] {
+		return -1
+	}
+	m := int(max)
+	if m <= 0 {
+		return 0
+	}
+	dst := (*[1 << 22]int32)(unsafe.Pointer(out))[:m:m]
+	return C.int32_t(tokenPool[agent_h].CopySince(int32(since), dst))
+}
+
+// cambia_games_apply_batch applies one action to each of n games and updates
+// that game's two agents (belief state + token stream) in a single FFI call,
+// keeping per-call overhead O(n) with no per-game Python roundtrip. game_hs,
+// a0s, a1s, actions are length-n arrays. An agent handle of -1 skips that agent.
+//
+// Returns 0 on success. On the first failing game it returns:
+//
+//	-1  invalid game/agent handle or apply error
+//	-2  token stream overflow (hard cap exceeded)
+//
+// Games before the failure are already applied.
+//
+//export cambia_games_apply_batch
+func cambia_games_apply_batch(game_hs *C.int32_t, a0s *C.int32_t, a1s *C.int32_t, actions *C.uint16_t, n C.int32_t) C.int32_t {
+	count := int(n)
+	if count <= 0 {
+		return 0
+	}
+	ghs := (*[1 << 20]C.int32_t)(unsafe.Pointer(game_hs))[:count:count]
+	as0 := (*[1 << 20]C.int32_t)(unsafe.Pointer(a0s))[:count:count]
+	as1 := (*[1 << 20]C.int32_t)(unsafe.Pointer(a1s))[:count:count]
+	acts := (*[1 << 20]C.uint16_t)(unsafe.Pointer(actions))[:count:count]
+
+	for i := 0; i < count; i++ {
+		gh := int32(ghs[i])
+		if gh < 0 || gh >= maxGames || !gameInUse[gh] {
+			return -1
+		}
+		if gamePool[gh].ApplyAction(uint16(acts[i])) != nil {
+			return -1
+		}
+		g := &gamePool[gh]
+		for _, ah := range [2]int32{int32(as0[i]), int32(as1[i])} {
+			if ah < 0 {
+				continue
+			}
+			if ah >= maxAgents || !agentInUse[ah] {
+				return -1
+			}
+			agentPool[ah].Update(g)
+			if tokenPool[ah].Observe(g, agentPool[ah].PlayerID) != nil {
+				return -2
+			}
+		}
+	}
+	return 0
+}
+
+// cambia_state_save snapshots a complete (game, both agents' belief + token
+// state) checkpoint into a new state-snapshot slot and returns its handle, or
+// -1 on error. Additive to cambia_game_save (which is game-only and unchanged).
+//
+//export cambia_state_save
+func cambia_state_save(game_h C.int32_t, a0_h C.int32_t, a1_h C.int32_t) C.int32_t {
+	if game_h < 0 || game_h >= maxGames || !gameInUse[game_h] {
+		return -1
+	}
+	if a0_h < 0 || a0_h >= maxAgents || !agentInUse[a0_h] {
+		return -1
+	}
+	if a1_h < 0 || a1_h >= maxAgents || !agentInUse[a1_h] {
+		return -1
+	}
+	sh := allocStateSnapshot()
+	if sh < 0 {
+		return -1
+	}
+	stateSnapPool[sh].game = gamePool[game_h]
+	stateSnapPool[sh].a0 = agentPool[a0_h]
+	stateSnapPool[sh].a1 = agentPool[a1_h]
+	stateSnapPool[sh].t0 = tokenPool[a0_h]
+	stateSnapPool[sh].t1 = tokenPool[a1_h]
+	return C.int32_t(sh)
+}
+
+// cambia_state_restore restores a (game, both agents' belief + token state)
+// checkpoint. The a0_h/a1_h handles must match the ones passed to the paired
+// cambia_state_save. Returns 0 on success, -1 on error.
+//
+//export cambia_state_restore
+func cambia_state_restore(game_h C.int32_t, snap_h C.int32_t, a0_h C.int32_t, a1_h C.int32_t) C.int32_t {
+	if game_h < 0 || game_h >= maxGames || !gameInUse[game_h] {
+		return -1
+	}
+	if snap_h < 0 || snap_h >= maxSnapshots || !stateSnapInUse[snap_h] {
+		return -1
+	}
+	if a0_h < 0 || a0_h >= maxAgents || !agentInUse[a0_h] {
+		return -1
+	}
+	if a1_h < 0 || a1_h >= maxAgents || !agentInUse[a1_h] {
+		return -1
+	}
+	gamePool[game_h] = stateSnapPool[snap_h].game
+	agentPool[a0_h] = stateSnapPool[snap_h].a0
+	agentPool[a1_h] = stateSnapPool[snap_h].a1
+	tokenPool[a0_h] = stateSnapPool[snap_h].t0
+	tokenPool[a1_h] = stateSnapPool[snap_h].t1
+	return 0
+}
+
+//export cambia_state_snapshot_free
+func cambia_state_snapshot_free(h C.int32_t) {
+	freeStateSnapshot(int32(h))
+}
+
+// cambia_token_vocab writes the token vocabulary layout constants (fixed order,
+// agent.TokenVocabFields entries) into out for the Python constants cross-check.
+// Returns the count written, or -1 if max is too small.
+//
+//export cambia_token_vocab
+func cambia_token_vocab(out *C.int32_t, max C.int32_t) C.int32_t {
+	if int(max) < agent.TokenVocabFields {
+		return -1
+	}
+	dst := (*[agent.TokenVocabFields]int32)(unsafe.Pointer(out))
+	return C.int32_t(agent.TokenVocab(dst[:]))
+}
+
+// cambia_token_encode_card returns the CARD-block token for a canonical Go card
+// index (suit*13+rank; jokers 52/53). For the constants cross-check test.
+//
+//export cambia_token_encode_card
+func cambia_token_encode_card(go_card_index C.uint8_t) C.int32_t {
+	return C.int32_t(agent.EncodeCardToken(uint8(go_card_index)))
+}
+
+// cambia_token_encode_action returns the ACTION-block token for a 2-player
+// action index, or -1 if it does not encode a known action. Cross-check test.
+//
+//export cambia_token_encode_action
+func cambia_token_encode_action(action_idx C.uint16_t) C.int32_t {
+	return C.int32_t(agent.EncodeActionToken(uint16(action_idx)))
 }
 
 func main() {}
