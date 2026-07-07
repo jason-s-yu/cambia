@@ -63,7 +63,14 @@ class SnapLogicMixin:
             )
             return legal_actions
 
-        target_rank = self.snap_discarded_card.rank
+        # NOTE: Per RULES.md Sec.5, a snap targets ANY known card, and a rank
+        # mismatch is a legal-but-penalized attempt ("If you snap incorrectly...
+        # you receive a 2-card penalty"), not an illegal action. Legal-action
+        # generation therefore does NOT filter by rank -- it mirrors the Go
+        # engine's legalSnapDecision (engine/legal.go), offering SnapOwn /
+        # SnapOpponent for every hand slot. _handle_snap_action below already
+        # resolves the rank check and applies the penalty on a mismatch for
+        # both SnapOwn and SnapOpponent.
 
         # Basic validation of snapper's hand
         if not all(isinstance(card, Card) for card in snapper_hand):
@@ -79,12 +86,13 @@ class SnapLogicMixin:
         # Always possible to pass
         legal_actions.add(ActionPassSnap())
 
-        # Check for own snaps
+        # Own snaps: every hand slot is a legal (possibly wrong, penalized) target.
         for i, card in enumerate(snapper_hand):
-            if isinstance(card, Card) and card.rank == target_rank:
+            if isinstance(card, Card):
                 legal_actions.add(ActionSnapOwn(own_card_hand_index=i))
 
-        # Check for opponent snaps if allowed
+        # Opponent snaps if allowed: every opponent hand slot is a legal target,
+        # gated only on the snapper having a card to move into the vacated slot.
         if self.house_rules.allowOpponentSnapping:
             opponent_idx = self.get_opponent_index(acting_player)
             if not (
@@ -104,10 +112,9 @@ class SnapLogicMixin:
                         opponent_hand,
                     )
                 else:
-                    # Check opponent hand for matches ONLY IF the snapper has a card to move
                     if len(snapper_hand) > 0:
                         for i, card in enumerate(opponent_hand):
-                            if isinstance(card, Card) and card.rank == target_rank:
+                            if isinstance(card, Card):
                                 legal_actions.add(
                                     ActionSnapOpponent(opponent_target_hand_index=i)
                                 )
@@ -371,6 +378,8 @@ class SnapLogicMixin:
                             elif attempted_card.rank == target_rank:
                                 card_to_remove = attempted_card
                                 card_to_log = card_to_remove  # Log card being removed
+                                original_discard_len_opp = len(self.discard_pile)
+                                original_discard_top_opp = self.get_discard_top()
 
                                 def change_snap_opp_remove():
                                     # Check index validity and card identity before popping
@@ -386,6 +395,15 @@ class SnapLogicMixin:
                                         removed = self.players[opp_idx].hand.pop(
                                             target_opp_hand_idx
                                         )
+                                        # Per RULES.md Sec.5, a snapped card (own or
+                                        # opponent's) goes onto the discard pile --
+                                        # mirrors change_snap_own above and the Go
+                                        # engine's snapOpponent (DiscardPile[DiscardLen]
+                                        # = card; DiscardLen++). Previously omitted here:
+                                        # the card vanished instead of joining discard,
+                                        # silently desyncing discard-top/reshuffle
+                                        # material from the Go engine.
+                                        self.discard_pile.append(removed)
                                     else:
                                         logger.error(
                                             "SnapOpponent change error: Index %d OOB or card mismatch (Opp Hand size %d). Expected %s, Got %s",
@@ -407,6 +425,13 @@ class SnapLogicMixin:
                                 def undo_snap_opp_remove():
                                     # Assert preconditions (optional, but good practice)
                                     assert (
+                                        self.discard_pile
+                                        and self.discard_pile[-1] is card_to_remove
+                                    ), f"Undo SnapOpponentRemove: Discard top mismatch (Expected {card_to_remove}, Got {self.discard_pile[-1] if self.discard_pile else 'Empty'})"
+
+                                    self.discard_pile.pop()
+
+                                    assert (
                                         0
                                         <= target_opp_hand_idx
                                         <= len(self.players[opp_idx].hand)
@@ -420,6 +445,8 @@ class SnapLogicMixin:
                                         self.players[opp_idx].hand
                                         == original_opp_hand_state
                                     ), f"Undo SnapOpponentRemove: Hand state mismatch! Expected {original_opp_hand_state}, Got {self.players[opp_idx].hand}"
+                                    assert len(self.discard_pile) == original_discard_len_opp
+                                    assert self.get_discard_top() is original_discard_top_opp
 
                                 delta_snap_opp_remove = (
                                     "snap_opponent_remove",
@@ -858,6 +885,129 @@ class SnapLogicMixin:
         else:
             logger.error(
                 "Snap Logic: Cannot advance turn after ending snap phase - _advance_turn missing."
+            )
+
+    def _flush_snap_results_log(
+        self: "CambiaGameState", undo_stack: Deque, delta_list: StateDelta
+    ) -> None:
+        """Clears snap_results_log once its contents have been exposed to the
+        single observation that should see them.
+
+        Mirrors the Go engine's tokenizer semantics (engine/agent/tokens.go
+        Observe(): "if Snap.Active { emit the accumulated frames } else {
+        silently reset }"). For a normal (non-SnapOpponent) last-snapper
+        action, Go's Snap.Active goes false within the SAME ApplyAction call
+        that appended the final entry, so no external reader (Go's own
+        Observe(), called separately afterward) ever sees the accumulated
+        block -- _end_snap_phase above already mirrors this (its clear runs
+        before any external caller can read the log).
+
+        A successful SnapOpponent is the one path where Go's Snap.Active
+        stays true through the pending move (so the accumulated log IS
+        externally visible for that one step), then goes false once the move
+        resolves (silent reset, nothing further emitted). Python's
+        change_pending_move (above) must set snap_phase_active=False at the
+        SnapOpponent-success step itself -- apply_action's dispatch checks
+        snap_phase_active before pending_action, so the follow-up
+        SnapOpponentMove action would never reach _handle_pending_action
+        otherwise -- which leaves snap_results_log populated with no later
+        natural clear point. An external reader would then see the SAME
+        entries again when the SnapOpponentMove resolves, double-counting
+        the outcome relative to Go. This flush (called from the
+        SnapOpponentMove completion handler in _ability_mixin.py) reproduces
+        Go's post-move silent reset.
+        """
+        if not self.snap_results_log:
+            return
+        original_log = list(self.snap_results_log)
+
+        def change_flush():
+            self.snap_results_log = []
+
+        def undo_flush():
+            self.snap_results_log = original_log
+
+        self._add_change(
+            change_flush, undo_flush, ("flush_snap_results_log",), undo_stack, delta_list
+        )
+
+    def _resume_or_end_snap_phase_after_move(
+        self: "CambiaGameState", undo_stack: Deque, delta_list: StateDelta
+    ) -> None:
+        """Mirrors Go's advanceSnapper(), called from snapOpponentMove() once
+        a successful SnapOpponent's move completes: advances to the next
+        snapper, resuming the (paused) snap decision phase if any remain, or
+        genuinely concluding it (flush + advance the main turn) otherwise.
+
+        Context: change_pending_move (in _handle_snap_action's SnapOpponent
+        success branch, above) sets snap_phase_active=False immediately at
+        the success step, because apply_action's dispatch checks
+        snap_phase_active before pending_action -- the follow-up
+        SnapOpponentMove action would never reach _handle_pending_action
+        otherwise. Go has no such constraint: its Snap.Active stays true
+        through the paused move, and advanceSnapper() (called after the move
+        resolves) either advances to the next eligible snapper -- who still
+        gets a real decision -- or ends the phase, exactly mirroring the
+        normal (PassSnap/SnapOwn/failed-SnapOpponent) last-snapper path. This
+        restores that resume-or-end behavior at the point Go's own state
+        machine would reach it: right after the move completes.
+
+        Not gated on snap_phase_active (already False here) or on
+        house_rules.snapRace explicitly: a successful SnapRace snap already
+        clears snap_potential_snappers to [] at the success step (see the
+        SnapRace branch above), so next_idx >= len([]) is always true here,
+        naturally routing to the "phase ends" branch without a separate
+        check -- exactly matching Go's advanceSnapper(), which also performs
+        no SnapRace-specific branching itself.
+        """
+        original_idx = self.snap_current_snapper_idx
+        next_idx = original_idx + 1
+
+        def change_advance():
+            self.snap_current_snapper_idx = next_idx
+
+        def undo_advance():
+            self.snap_current_snapper_idx = original_idx
+
+        self._add_change(
+            change_advance,
+            undo_advance,
+            ("set_attr", "snap_current_snapper_idx", next_idx, original_idx),
+            undo_stack,
+            delta_list,
+        )
+
+        if next_idx >= len(self.snap_potential_snappers):
+            # No snapper remains: the phase is genuinely over. Flush the
+            # results log now (matching Go's Snap.Active -> false silent
+            # token reset). Do NOT advance the turn here: the caller
+            # (_ability_mixin.py's SnapOpponentMove handler returns None with
+            # pending_action already cleared) falls into engine.py's generic
+            # "handler returned None but cleared state" path, which already
+            # sets turn_should_advance_after_action=True and calls
+            # _advance_turn() itself once snap_phase_active is confirmed
+            # false -- calling it again here would double-advance the turn.
+            self._flush_snap_results_log(undo_stack, delta_list)
+        else:
+            # A snapper remains: resume the paused decision phase for them.
+            # Do NOT flush snap_results_log here -- Go's tokenizer keeps
+            # re-emitting the accumulated block while Snap.Active stays true,
+            # so both this move-step's own observation and the resumed
+            # snapper's subsequent one must still see it.
+            original_active = self.snap_phase_active
+
+            def change_resume():
+                self.snap_phase_active = True
+
+            def undo_resume():
+                self.snap_phase_active = original_active
+
+            self._add_change(
+                change_resume,
+                undo_resume,
+                ("set_attr", "snap_phase_active", True, original_active),
+                undo_stack,
+                delta_list,
             )
 
     def _get_snap_target_rank_str(self: "CambiaGameState") -> str:
