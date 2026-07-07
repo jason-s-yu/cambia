@@ -28,6 +28,7 @@ from src.cfr.prtcfr_worker import (
     _sample_and_apply,
     uniform_policy_production,
 )  # noqa: E402
+from src.constants import ActionCallCambia  # noqa: E402
 from src.encoding import NUM_ACTIONS  # noqa: E402
 from src.sequence_encoding import BOS_ID  # noqa: E402
 
@@ -50,7 +51,21 @@ def _real_long_token_sequence(min_len: int = 300) -> list:
     """Play a real full game via the production driver until player 0's
     full-recall token stream is at least ``min_len`` tokens; return it. Uses
     the actual tokenizer output (not synthetic ids), matching sign-off
-    condition 3's "real multi-hundred-token sequences" requirement."""
+    condition 3's "real multi-hundred-token sequences" requirement.
+
+    S1W11 fixed a snap-token-duplication bug that used to inflate sequential
+    play lengths; on the corrected engine, the "natural" cohort (CallCambia
+    played as soon as it is legal) terminates at ~69 tokens mean / p99 253 --
+    too short to reliably clear a several-hundred-token bar. This helper
+    instead drives the "avoid_cambia" cohort (mirrors
+    scripts/prtcfr_p100_instrument.py and tests/test_sequence_tokenizer.py's
+    established stress convention): never select ActionCallCambia while any
+    other legal action exists, so the game runs to its natural
+    non-Cambia-terminated length, bounded only by the engine's own 300-turn
+    cap -- the same cohort observed reaching several thousand tokens. A single
+    seed clears any realistic ``min_len`` under this policy; the seed loop and
+    failure report below are a safety net, not the expected path."""
+    longest = 0
     for seed in range(200):
         # Explicitly the Python stub backend: this helper mutates .seq_cap
         # directly to force an uncapped-window generation run, a
@@ -68,16 +83,28 @@ def _real_long_token_sequence(min_len: int = 300) -> list:
             legal = driver.legal_actions()
             if not legal:
                 break
-            mask = _legal_mask(legal)
+            pool = legal
+            non_cambia = [a for a in legal if not isinstance(a, ActionCallCambia)]
+            if non_cambia:
+                pool = non_cambia
+            mask = _legal_mask(pool)
             probs = uniform_policy_production([], mask)
             try:
-                _sample_and_apply(driver, legal, probs, rng)
+                _sample_and_apply(driver, pool, probs, rng)
             except RuntimeError:
                 break
             toks = driver.tokens(0)
             if len(toks) >= min_len:
                 return toks
-    pytest.fail("could not reach a real token sequence of the required length")
+        toks = driver.tokens(0)
+        longest = max(longest, len(toks))
+    pytest.fail(
+        f"could not reach a real token sequence of length >= {min_len} tokens "
+        f"across 200 seeds even under the avoid_cambia policy (longest single "
+        f"game observed: {longest} tokens); this would indicate a real "
+        f"regression in game length, not a test-tuning issue -- investigate "
+        f"before lowering min_len."
+    )
 
 
 # ---------------------------------------------------------------------------
