@@ -39,6 +39,8 @@ ALGO_TO_AGENT_TYPE: Dict[str, str] = {
     # v3.1 DESCA (Dense ESCHER + Semantic Action Abstraction)
     "desca": "desca",
     "desca-search": "desca_search",
+    # v0.4 PRT-CFR (Perfect-Recall Trajectory CFR)
+    "prt-cfr": "prt_cfr",
     # PPO eval baseline (sb3-contrib MaskablePPO), not a CFR variant.
     "ppo": "ppo",
 }
@@ -55,6 +57,8 @@ ALGO_TO_CHECKPOINT_PREFIX: Dict[str, str] = {
     # v3.1 DESCA checkpoints follow the {algo}_checkpoint convention.
     "desca": "desca_checkpoint",
     "desca-search": "desca_search_checkpoint",
+    # v0.4 PRT-CFR rolling checkpoint (snapshots: prtcfr_snapshot_iter_{t}.pt).
+    "prt-cfr": "prtcfr_checkpoint",
     # PPO (sb3-contrib) saves .zip files under the stem configured via
     # agent_data_save_path / --save-path (e.g. "ppo_model"); ppo_train.py's
     # periodic/eval callbacks derive "ppo_model_steps_<N>.zip" and
@@ -254,6 +258,10 @@ def infer_algorithm(
     Infer algorithm name from config dict, checkpoint keys, or filename.
 
     Priority:
+    -1. algorithm == "prt-cfr", a `prt_cfr` config block, or a prtcfr_* checkpoint
+        filename -> "prt-cfr" (registered BEFORE the desca rule: both carry
+        sequence dims, and PRT-CFR's rolling checkpoint {encoder,head} keys are
+        not distinctive, so it is matched by the explicit markers first).
     0. algorithm == "desca" or desca_state_dict in checkpoint -> "desca"
     0a. algorithm == "desca-search" or desca_search_state_dict -> "desca-search"
     0b. algorithm == "ppo" -> "ppo" (explicit; PPO is an eval baseline, not CFR)
@@ -273,6 +281,18 @@ def infer_algorithm(
     # `algorithm` field or a `desca_state_dict` / `desca_search_state_dict`
     # marker).
     declared_algo = str(config_dict.get("algorithm", "") or "").strip().lower()
+    # PRT-CFR detection FIRST (before desca): explicit algorithm id, a non-null
+    # `prt_cfr` config block, or a prtcfr_* checkpoint filename. The design
+    # overview pins this ordering ("register before the desca rule").
+    if declared_algo == "prt-cfr":
+        return "prt-cfr"
+    if config_dict.get("prt_cfr"):
+        return "prt-cfr"
+    if checkpoint_filename:
+        import os as _os_prt
+
+        if _os_prt.path.basename(checkpoint_filename).startswith("prtcfr_"):
+            return "prt-cfr"
     if declared_algo == "desca-search":
         return "desca-search"
     if declared_algo == "desca":
