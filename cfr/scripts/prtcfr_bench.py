@@ -22,13 +22,21 @@ instrumentation, per the sprint's "bench is additive" constraint.
 Bucket attribution:
   gen phase   -- ffi (GameDriver method calls: apply/clone/tokens/
                  legal_actions/is_terminal/current_player/close on whichever
-                 backend driver class is active), inference (every
-                 NetProductionSigma.__call__, which is what a traverser or
-                 opponent decision, AND each of the m*legal_actions CRN
-                 rollout-to-termination steps, invokes -- there is no
-                 incremental carry on this path, PRTCFRInferenceService is
-                 not wired into the production trainer yet; see the trainer's
-                 own NetProductionSigma docstring), reservoir_write
+                 backend driver class is active), inference (the policy-query
+                 seam of whichever gen path is active: with config.gen_batched
+                 True -- the S1W15 default -- this is
+                 IncrementalSigmaManager.evaluate, the SigmaBackend entry
+                 _run_batched_scheduler calls once per tick with every live
+                 game/rollout query that reached a decision that tick (a
+                 single batched, carried-hidden GRU forward covering
+                 potentially many queries); with --no-gen-batched this is the
+                 original per-query NetProductionSigma.__call__ (one un-batched,
+                 non-carried GRU forward per decision and per m*legal_actions
+                 CRN rollout step -- see the trainer's own NetProductionSigma
+                 docstring). Both are timed into the same "inference" bucket
+                 so gen_seconds' cost breakdown is comparable across the two
+                 paths even though the batched path's call COUNT reflects
+                 scheduler ticks, not individual queries), reservoir_write
                  (_UnpaddingReservoir.add), other (derived remainder).
   fit phase   -- reservoir_sample (_MultiReservoirSampler.sample_batch, the
                  per-step IO), forward (PRTCFRNet.raw_advantages calls with
@@ -80,6 +88,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.config import PRTCFRConfig, load_config  # noqa: E402
 from src.cfr.prtcfr_worker import (  # noqa: E402
     GoEngineGameDriver,
+    IncrementalSigmaManager,
     PRODUCTION_SEQ_CAP,
     PythonEngineGameDriver,
     new_production_driver,
@@ -498,7 +507,14 @@ def run_cell(args: argparse.Namespace, batch_size_override: Optional[int] = None
                 for meth in _FFI_METHODS:
                     stack.enter_context(_patched(cls, meth, timers, "ffi"))
                 stack.enter_context(_heartbeat_patched(cls, "close", hb, "game-done"))
+            # Sequential path (--no-gen-batched): per-query un-batched forward.
             stack.enter_context(_patched(NetProductionSigma, "__call__", timers, "inference"))
+            # Batched path (config.gen_batched default True, S1W15): the
+            # SigmaBackend.evaluate seam the scheduler calls once per tick
+            # with the whole batch of live queries; only one of these two
+            # patches ever actually fires for a given run, depending on which
+            # generation path run_iteration takes.
+            stack.enter_context(_patched(IncrementalSigmaManager, "evaluate", timers, "inference"))
             stack.enter_context(_patched(_UnpaddingReservoir, "add", timers, "reservoir_write"))
             stack.enter_context(
                 _patched(_MultiReservoirSampler, "sample_batch", timers, "reservoir_sample")

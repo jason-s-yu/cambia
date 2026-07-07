@@ -421,6 +421,146 @@ def materialize_policy(
     return policy
 
 
+class IncrementalPolicyAccumulator:
+    """Incremental, memory-bounded SD-CFR policy materializer.
+
+    ``materialize_policy`` stacks EVERY infoset's token row into one
+    ``(N, seq_cap)`` batch and calls ``strategy_from_tokens`` ONCE over the
+    whole thing per net -- fine at small N, but at production net dims
+    (``PRTCFRNet`` defaults: embed_dim=64, hidden_dim=256) and N in the tens
+    of thousands (the {A,6} tree post-S1W11 snap-legality fix: 69636
+    perfect-recall infosets, up from 12884 pre-fix), a single N-row forward
+    allocates tens of GB: the pre-pack embedding tensor alone is
+    N * seq_cap * embed_dim * 4 bytes (~4.6GB at N=69636, seq_cap=256,
+    embed_dim=64), and ``pack_padded_sequence``'s sort-reorder
+    ``index_select`` (``enforce_sorted=False``) copies it again before the
+    GRU forward even starts. Confirmed by a bounded (``ulimit -v``) repro
+    that failed inside exactly that ``index_select`` at exactly this size
+    (test_x2_plumbing_random_net's reported 28.7GB RSS OOM, S1W11 gate-fix
+    sprint).
+
+    This accumulator computes the numerically equivalent SD-CFR weighted
+    average (same accumulation order as ``materialize_policy``: per-net
+    ``w * strategy``, summed in ``nets_by_iter`` order, normalized once at
+    the end) via ``chunk_size``-row forwards, so peak memory is bounded by
+    the chunk regardless of tree size. It also skips any ``(iter, net)``
+    pair already folded in, so repeated calls across a growing snapshot
+    horizon (the real gate's per-eval-checkpoint usage during training) cost
+    each snapshot ONE forward ever, not once per subsequent eval (linear in
+    the horizon instead of quadratic) -- mirrors the incremental-accumulation
+    technique prototyped in the S1W11 X2 revalidation launcher
+    (``cfr/scratch/prtcfr_x2_s1w11_gpu.py``, uncommitted).
+
+    Equivalence to ``materialize_policy`` (same ``root``, ``nets_by_iter``,
+    ``weighting``, ``seq_cap``) holds up to float32 matmul-reordering noise
+    (chunking only changes how rows are grouped into the net's float32 batched
+    matmuls; each row's own arithmetic is independent of which other rows
+    share its batch since neither the GRU nor LayerNorm mixes across the
+    batch dimension -- the outer SD-CFR accumulation is float64 regardless of
+    chunking) -- verified on a small tree by
+    tests/test_prtcfr_x2_gate.py::test_incremental_policy_matches_materialize_policy_small_tree
+    (empirically ~1.8e-6 max abs diff, well inside float32 precision).
+    """
+
+    def __init__(
+        self,
+        root: Any,
+        weighting: str = "linear",
+        seq_cap: int = SEQ_CAP,
+        chunk_size: int = 2048,
+    ):
+        if tiny_node_to_tokens is None:
+            raise RuntimeError(
+                "src.cfr.prtcfr_net.tiny_node_to_tokens unavailable. Core has not "
+                "landed; the gate test injects a stub for plumbing runs."
+            )
+        self.weighting = weighting
+        self.seq_cap = seq_cap
+        self.chunk_size = max(1, int(chunk_size))
+        self.nodes = enumerate_infosets(root)
+        n = len(self.nodes)
+        self._tok_rows = np.empty((n, seq_cap), dtype=np.int64)
+        self._mask_rows = np.zeros((n, NUM_ACTIONS), dtype=bool)
+        self._legal_idx: List[List[int]] = []
+        for i, node in enumerate(self.nodes):
+            self._tok_rows[i] = _pad_tokens(tiny_node_to_tokens(node), seq_cap=seq_cap)
+            self._mask_rows[i] = encode_action_mask(node.actions)
+            self._legal_idx.append([action_to_index(a) for a in node.actions])
+        self._acc146 = np.zeros((n, NUM_ACTIONS), dtype=np.float64)
+        self._wsum = 0.0
+        self._accumulated: set = set()
+
+    def accumulate(self, nets_by_iter: List[Tuple[int, Any]]) -> None:
+        """Fold every ``(iter, net)`` not already accumulated into the
+        running weighted sum, in the given order, one chunked forward per
+        net (bounds peak memory to ``chunk_size`` rows regardless of N)."""
+        import torch
+
+        n = len(self.nodes)
+        for it, net in nets_by_iter:
+            if it in self._accumulated:
+                continue
+            self._accumulated.add(it)
+            w = float(it) if self.weighting == "linear" else 1.0
+            if w <= 0.0:
+                continue
+            dev = getattr(net, "device", None) or torch.device("cpu")
+            for lo in range(0, n, self.chunk_size):
+                hi = min(lo + self.chunk_size, n)
+                tok_t = torch.as_tensor(self._tok_rows[lo:hi], dtype=torch.long, device=dev)
+                mask_t = torch.as_tensor(self._mask_rows[lo:hi], dtype=torch.bool, device=dev)
+                with torch.no_grad():
+                    strat = net.strategy_from_tokens(tok_t, mask_t)
+                strat_np = strat.detach().to("cpu", dtype=torch.float64).numpy()
+                if strat_np.shape != (hi - lo, NUM_ACTIONS):
+                    raise ValueError(
+                        f"strategy_from_tokens returned shape {strat_np.shape}, "
+                        f"expected {(hi - lo, NUM_ACTIONS)}"
+                    )
+                self._acc146[lo:hi] += w * strat_np
+            self._wsum += w
+
+    def policy(self) -> Dict[Any, np.ndarray]:
+        """Materialize the current ``{pkey: strategy_vector(nA)}`` dict from
+        the running accumulation state (same normalization as
+        ``materialize_policy``)."""
+        out: Dict[Any, np.ndarray] = {}
+        for i, node in enumerate(self.nodes):
+            idx = self._legal_idx[i]
+            nA = len(idx)
+            if self._wsum <= 0.0:
+                out[node.pkey] = np.ones(nA, dtype=np.float64) / nA
+                continue
+            vec = self._acc146[i, idx] / self._wsum
+            s = vec.sum()
+            out[node.pkey] = vec / s if s > 1e-12 else np.ones(nA, dtype=np.float64) / nA
+        return out
+
+
+def materialize_policy_incremental(
+    root: Any,
+    nets_by_iter: List[Tuple[int, Any]],
+    weighting: str = "linear",
+    seq_cap: int = SEQ_CAP,
+    chunk_size: int = 2048,
+) -> Dict[Any, np.ndarray]:
+    """Drop-in, memory-bounded replacement for ``materialize_policy`` (same
+    signature; numerically equivalent up to float summation order -- see
+    ``IncrementalPolicyAccumulator``): computes the SD-CFR weighted average
+    via chunked per-net forwards so peak memory is bounded by ``chunk_size``
+    rows instead of one N-row forward. Prefer this over ``materialize_policy``
+    whenever N (infosets) times production net dims makes a single-shot batch
+    forward too large -- which is always, for the real {A,6} tree at
+    production net dims (see the class docstring for the concrete OOM this
+    avoids); ``materialize_policy`` itself is kept unchanged as the
+    equivalence-gate reference."""
+    acc = IncrementalPolicyAccumulator(
+        root, weighting=weighting, seq_cap=seq_cap, chunk_size=chunk_size
+    )
+    acc.accumulate(nets_by_iter)
+    return acc.policy()
+
+
 def score_policy_on_tiny_game(
     checkpoint_or_snapshot_dir: str,
     config_path: str = TINY_2CARD_CONFIG,
@@ -448,7 +588,13 @@ def score_policy_on_tiny_game(
     snaps = discover_snapshots(checkpoint_or_snapshot_dir)
     nets_by_iter = [(it, _load_net(fp, device=device)) for it, fp in snaps]
     root, _isets, _n, _ab = build_tiny_tree(config_path, seq_cap=seq_cap)
-    policy = materialize_policy(root, nets_by_iter, weighting=weighting, seq_cap=seq_cap)
+    # materialize_policy_incremental, not materialize_policy: at production net
+    # dims (embed=64, hidden=256) and the real {A,6} tree's 69636 infosets, a
+    # single N-row batched forward OOMs (see IncrementalPolicyAccumulator's
+    # docstring); the chunked accumulator is numerically equivalent.
+    policy = materialize_policy_incremental(
+        root, nets_by_iter, weighting=weighting, seq_cap=seq_cap
+    )
     nashconv, components = exploitability(root, policy)
     return {
         "nashconv": float(nashconv),
@@ -472,7 +618,9 @@ def score_with_loaded_nets(
     PRTCFRNet instances directly. ``nets_by_iter`` is [(iter, net), ...].
     """
     root, _isets, _n, _ab = build_tiny_tree(config_path, seq_cap=seq_cap)
-    policy = materialize_policy(root, nets_by_iter, weighting=weighting, seq_cap=seq_cap)
+    # See score_policy_on_tiny_game: incremental/chunked, not the single-batch
+    # materialize_policy, to stay well under a few GB RSS at production dims.
+    policy = materialize_policy_incremental(root, nets_by_iter, weighting=weighting, seq_cap=seq_cap)
     nashconv, components = exploitability(root, policy)
     return {
         "nashconv": float(nashconv),

@@ -177,11 +177,18 @@ def test_x2_plumbing_multi_snapshot_average():
     """SD-CFR linear-weighted average over multiple random snapshots yields a
     finite NashConv and a normalized policy. Exercises the multi-net averaging
     path the real verdict uses with a trained snapshot directory.
+
+    Uses ``materialize_policy_incremental`` (not ``materialize_policy``): at
+    production net dims (embed=64, hidden=256) and the real {A,6} tree's
+    69636 infosets, a single-batch forward per net OOMs (RSS in the tens of
+    GB -- see IncrementalPolicyAccumulator's docstring); the chunked
+    accumulator is numerically equivalent and is what the real gate path
+    (score_with_loaded_nets / score_policy_on_tiny_game) now uses.
     """
     nets = [(it, _make_random_net(seed=it)) for it in (10, 20, 30)]
 
     root, _isets, _n, _ab = prtcfr_eval.build_tiny_tree()
-    policy = prtcfr_eval.materialize_policy(root, nets, weighting="linear")
+    policy = prtcfr_eval.materialize_policy_incremental(root, nets, weighting="linear")
 
     # Every materialized strategy is a valid distribution over its legal actions.
     for pkey, vec in policy.items():
@@ -193,6 +200,63 @@ def test_x2_plumbing_multi_snapshot_average():
     nashconv, components = exploitability(root, policy)
     assert np.isfinite(nashconv)
     assert all(np.isfinite(x) for x in components)
+
+
+def test_incremental_policy_matches_materialize_policy_small_tree():
+    """Equivalence gate: materialize_policy_incremental (chunked, additive
+    src code) reproduces materialize_policy (the single-batch reference)
+    exactly, on a tree small enough that the reference path itself is safe
+    to run (the full {A,6} tree's 69636 infosets at production net dims is
+    NOT -- that single-batch forward is exactly what OOMs; see
+    IncrementalPolicyAccumulator's docstring).
+
+    Small tree: 1 deal, draws NOT enumerated (realized-deck-order draws
+    only) -- 14346 nodes / 4433 perfect-recall infosets, versus the real
+    gate's 230206 / 69636. Same net dims (production defaults), same
+    weighting, same seq_cap, 3 snapshots (exercises the SD-CFR multi-net
+    accumulation path, not just the single-net case) plus a deliberately
+    small ``chunk_size`` (67 -- not a divisor of 4433) so the chunked path
+    actually exercises multiple partial-final-chunk batches rather than one
+    chunk covering everything.
+    """
+    from src.config import load_config
+    from tools.tiny_solver import build_tree
+
+    cfg = load_config(prtcfr_eval.TINY_2CARD_CONFIG)
+    root, _isets, nnodes, aborted = build_tree(
+        cfg, 1, 0, 2_000_000, enumerate_draws=False,
+        perfect_recall=True, tokenize=True, seq_cap=256,
+    )
+    assert aborted == 0
+    assert nnodes < 20_000, f"small-tree fixture grew unexpectedly: {nnodes} nodes"
+
+    nets = [(it, _make_random_net(seed=it)) for it in (5, 15, 25)]
+
+    reference = prtcfr_eval.materialize_policy(root, nets, weighting="linear", seq_cap=256)
+    incremental = prtcfr_eval.materialize_policy_incremental(
+        root, nets, weighting="linear", seq_cap=256, chunk_size=67
+    )
+
+    assert set(reference.keys()) == set(incremental.keys())
+    max_abs_diff = 0.0
+    for pkey, ref_vec in reference.items():
+        inc_vec = incremental[pkey]
+        assert inc_vec.shape == ref_vec.shape
+        max_abs_diff = max(max_abs_diff, float(np.abs(ref_vec - inc_vec).max()))
+    # Chunking only changes which rows share a batched matmul call; no layer
+    # in PRTCFRNet mixes across the batch dimension (GRU is per-row
+    # recurrent, LayerNorm normalizes per-row over features), so results
+    # match up to float32 matmul-reordering noise (the GRU forward itself
+    # runs in float32; only the outer SD-CFR accumulation is float64) --
+    # NOT a chunking bug. Empirically ~1.8e-6 on this fixture (single-
+    # precision, ~7 significant digits). 1e-4 is far tighter than any real
+    # divergence would be: a genuine chunking bug (e.g. an off-by-one at a
+    # chunk boundary, a dropped/duplicated row) would show up as an O(1)
+    # difference (a whole strategy entry wrong), not float32-noise-scale.
+    assert max_abs_diff < 1e-4, (
+        f"materialize_policy_incremental diverged from materialize_policy: "
+        f"max abs diff {max_abs_diff:.3e} across {len(reference)} infosets"
+    )
 
 
 def test_x2_tokens_are_single_sourced():
