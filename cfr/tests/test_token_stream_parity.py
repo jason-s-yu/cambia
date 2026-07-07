@@ -97,8 +97,11 @@ if go_available:
         encode_action_token,
         encode_card_token,
         frame_aligned_window,
+        get_token_stream_cap,
         get_token_vocab,
         python_card_to_go_index,
+        state_clone,
+        state_clone_wrapped,
         state_restore,
         state_save,
         state_snapshot_free,
@@ -144,6 +147,16 @@ def test_token_vocab_layout_matches_python():
     for k, want in expected.items():
         assert v[k] == want, f"vocab field {k}: Go={v[k]} Python={want}"
     assert v["GO_TOKEN_STREAM_CAP"] >= se.SEQ_CAP
+
+
+@skip_if_no_go
+def test_token_stream_cap_dedicated_export_matches_vocab_field():
+    """cambia_token_stream_cap agrees with cambia_token_vocab's embedded field
+    (two independent Go-side read paths must return the same live value;
+    S1W12 cap raise 4096 -> 12288)."""
+    cap = get_token_stream_cap()
+    assert cap == get_token_vocab()["GO_TOKEN_STREAM_CAP"]
+    assert cap == 12288, f"expected the S1W12 cap raise to 12288, got {cap}"
 
 
 @skip_if_no_go
@@ -574,6 +587,229 @@ def test_state_save_restore_round_trip_tokens():
         finally:
             state_snapshot_free(snap)
     finally:
+        a0.close()
+        a1.close()
+        eng.close()
+
+
+# ---------------------------------------------------------------------------
+# cambia_state_clone (S1W12): independent clone onto fresh handles, for the
+# rollout fan-out sampler. Distinct from state_save/restore, which rewinds the
+# SAME handles and so cannot back independent, simultaneously-live branches.
+# ---------------------------------------------------------------------------
+
+
+def _new_engine_and_agents(seed: int):
+    eng = GoEngine(seed=seed, house_rules=_TEST_RULES)
+    a0 = GoAgentState(eng, 0)
+    a1 = GoAgentState(eng, 1)
+    return eng, a0, a1
+
+
+def _apply_first_legal(eng: "GoEngine", a0: "GoAgentState", a1: "GoAgentState") -> int:
+    legal = sorted(_go_legal_set(eng))
+    assert legal, "no legal actions"
+    idx = legal[0]
+    apply_games_batch([eng.handle], [a0.handle], [a1.handle], [idx])
+    return idx
+
+
+def _apply_random_legal(
+    eng: "GoEngine", a0: "GoAgentState", a1: "GoAgentState", rng: random.Random
+) -> int:
+    legal = sorted(_go_legal_set(eng))
+    assert legal, "no legal actions"
+    idx = rng.choice(legal)
+    apply_games_batch([eng.handle], [a0.handle], [a1.handle], [idx])
+    return idx
+
+
+def _observable_state(eng: "GoEngine") -> Tuple[int, int, Optional[int]]:
+    """A cheap fingerprint of Go-observable game state for stability checks."""
+    return (eng.turn_number(), eng.stock_len(), eng.discard_top())
+
+
+@skip_if_no_go
+def test_state_clone_independence_game_and_tokens():
+    """Applying divergent actions to a clone never mutates the source, and
+    vice versa -- both game state (turn/stock/discard) and token streams."""
+    eng, a0, a1 = _new_engine_and_agents(seed=5)
+    try:
+        for _ in range(6):
+            if eng.is_terminal():
+                break
+            _apply_first_legal(eng, a0, a1)
+
+        pre_state = _observable_state(eng)
+        pre_tokens0 = a0.tokens().tolist()
+        pre_tokens1 = a1.tokens().tolist()
+
+        c_eng, c_a0, c_a1 = state_clone_wrapped(eng, a0, a1)
+        try:
+            # Fresh handles, not aliases.
+            assert c_eng.handle != eng.handle
+            assert c_a0.handle != a0.handle
+            assert c_a1.handle != a1.handle
+
+            # Byte-identical at clone time.
+            assert _observable_state(c_eng) == pre_state
+            assert c_a0.tokens().tolist() == pre_tokens0
+            assert c_a1.tokens().tolist() == pre_tokens1
+
+            # Diverge the CLONE only; source must stay byte-stable.
+            for _ in range(6):
+                if c_eng.is_terminal():
+                    break
+                _apply_first_legal(c_eng, c_a0, c_a1)
+            assert _observable_state(eng) == pre_state, "source game mutated by clone apply"
+            assert a0.tokens().tolist() == pre_tokens0, "source a0 tokens mutated by clone apply"
+            assert a1.tokens().tolist() == pre_tokens1, "source a1 tokens mutated by clone apply"
+
+            # Diverge the SOURCE further; the (already-advanced) clone must be
+            # unaffected by source-side apply.
+            clone_state_before = _observable_state(c_eng)
+            clone_tokens0_before = c_a0.tokens().tolist()
+            for _ in range(4):
+                if eng.is_terminal():
+                    break
+                _apply_first_legal(eng, a0, a1)
+            assert _observable_state(c_eng) == clone_state_before, (
+                "clone game mutated by source apply"
+            )
+            assert c_a0.tokens().tolist() == clone_tokens0_before, (
+                "clone a0 tokens mutated by source apply"
+            )
+        finally:
+            c_a0.close()
+            c_a1.close()
+            c_eng.close()
+    finally:
+        a0.close()
+        a1.close()
+        eng.close()
+
+
+@skip_if_no_go
+def test_state_clone_of_clone():
+    """A clone-of-a-clone is itself an independent third instance."""
+    eng, a0, a1 = _new_engine_and_agents(seed=11)
+    try:
+        for _ in range(4):
+            _apply_first_legal(eng, a0, a1)
+
+        c1_eng, c1_a0, c1_a1 = state_clone_wrapped(eng, a0, a1)
+        try:
+            for _ in range(3):
+                if c1_eng.is_terminal():
+                    break
+                _apply_first_legal(c1_eng, c1_a0, c1_a1)
+
+            c2_eng, c2_a0, c2_a1 = state_clone_wrapped(c1_eng, c1_a0, c1_a1)
+            try:
+                assert c2_eng.handle not in (eng.handle, c1_eng.handle)
+                assert c2_a0.handle not in (a0.handle, c1_a0.handle)
+                assert _observable_state(c2_eng) == _observable_state(c1_eng)
+                assert c2_a0.tokens().tolist() == c1_a0.tokens().tolist()
+
+                c1_state_before = _observable_state(c1_eng)
+                src_state_before = _observable_state(eng)
+                for _ in range(3):
+                    if c2_eng.is_terminal():
+                        break
+                    _apply_first_legal(c2_eng, c2_a0, c2_a1)
+                assert _observable_state(c1_eng) == c1_state_before, (
+                    "parent clone mutated by grandchild apply"
+                )
+                assert _observable_state(eng) == src_state_before, (
+                    "source mutated by grandchild apply"
+                )
+            finally:
+                c2_a0.close()
+                c2_a1.close()
+                c2_eng.close()
+        finally:
+            c1_a0.close()
+            c1_a1.close()
+            c1_eng.close()
+    finally:
+        a0.close()
+        a1.close()
+        eng.close()
+
+
+@skip_if_no_go
+def test_state_clone_pool_exhaustion_error_path():
+    """Exhausting the game handle pool makes state_clone raise RuntimeError,
+    and leaves no partially-allocated handle behind (the source and the
+    exhausting handles remain usable afterward)."""
+    eng, a0, a1 = _new_engine_and_agents(seed=23)
+    filled = []
+    try:
+        lib = eng._lib  # same singleton _get_lib() everywhere
+        # Fill the game pool (maxGames=2048) via the lightest-weight allocator.
+        while True:
+            h = lib.cambia_game_new(0)
+            if h < 0:
+                break
+            filled.append(int(h))
+
+        with pytest.raises(RuntimeError, match="cambia_state_clone"):
+            state_clone(eng.handle, a0.handle, a1.handle)
+
+        # Source is still usable (not corrupted by the failed clone attempt).
+        _apply_first_legal(eng, a0, a1)
+    finally:
+        for h in filled:
+            eng._lib.cambia_game_free(h)
+        a0.close()
+        a1.close()
+        eng.close()
+
+
+@skip_if_no_go
+def test_state_clone_rollout_fanout_shaped_stress():
+    """One source, 20 clones, divergent random playouts, source byte-stable."""
+    eng, a0, a1 = _new_engine_and_agents(seed=71)
+    clones: List[Tuple["GoEngine", "GoAgentState", "GoAgentState"]] = []
+    try:
+        for _ in range(5):
+            if eng.is_terminal():
+                break
+            _apply_first_legal(eng, a0, a1)
+
+        src_state = _observable_state(eng)
+        src_tokens0 = a0.tokens().tolist()
+        src_tokens1 = a1.tokens().tolist()
+
+        for _ in range(20):
+            clones.append(state_clone_wrapped(eng, a0, a1))
+
+        rng = random.Random(999)
+        for i, (c_eng, c_a0, c_a1) in enumerate(clones):
+            steps = (i % 5) + 1
+            for _ in range(steps):
+                if c_eng.is_terminal():
+                    break
+                _apply_random_legal(c_eng, c_a0, c_a1, rng)
+
+        # Source untouched by any of the 20 divergent clone playouts.
+        assert _observable_state(eng) == src_state, "source mutated by fan-out playouts"
+        assert a0.tokens().tolist() == src_tokens0, "source a0 tokens mutated by fan-out"
+        assert a1.tokens().tolist() == src_tokens1, "source a1 tokens mutated by fan-out"
+
+        # Clones genuinely diverged from each other (independence, not aliasing).
+        distinct_token_streams = {
+            tuple(c_a0.tokens().tolist()) for _c_eng, c_a0, _c_a1 in clones
+        }
+        assert len(distinct_token_streams) >= 2, (
+            f"expected clones to diverge, got {len(distinct_token_streams)} "
+            f"distinct token streams across {len(clones)} clones"
+        )
+    finally:
+        for c_eng, c_a0, c_a1 in clones:
+            c_a0.close()
+            c_a1.close()
+            c_eng.close()
         a0.close()
         a1.close()
         eng.close()

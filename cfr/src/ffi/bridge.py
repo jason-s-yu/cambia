@@ -32,9 +32,12 @@ RANK_VALUE = {
 }
 
 # PRT-CFR per-agent token stream hard cap (must equal agent.MaxTokenStream in
-# engine/agent/tokens.go). The Go side raises on overflow; this sizes the read
-# buffer to hold the full stream.
-TOKEN_STREAM_CAP = 4096
+# engine/agent/tokens.go, which is itself paired with prtcfr_worker.py's
+# PRODUCTION_SEQ_CAP=12288). The Go side raises on overflow; this sizes the
+# read buffer to hold the full stream. Raised 4096 -> 12288 in S1W12 alongside
+# the Go constant; verify live via get_token_stream_cap() rather than trusting
+# this literal to stay in sync (the FFI export is the source of truth).
+TOKEN_STREAM_CAP = 12288
 
 
 def python_card_to_go_index(card) -> int:
@@ -222,9 +225,12 @@ _ffi.cdef("""
     int32_t cambia_state_save(int32_t game_h, int32_t a0_h, int32_t a1_h);
     int32_t cambia_state_restore(int32_t game_h, int32_t snap_h, int32_t a0_h, int32_t a1_h);
     void    cambia_state_snapshot_free(int32_t h);
+    int32_t cambia_state_clone(int32_t game_h, int32_t a0_h, int32_t a1_h,
+                               int32_t *out_game_h, int32_t *out_a0_h, int32_t *out_a1_h);
     int32_t cambia_token_vocab(int32_t *out, int32_t max);
     int32_t cambia_token_encode_card(uint8_t go_card_index);
     int32_t cambia_token_encode_action(uint16_t action_idx);
+    int32_t cambia_token_stream_cap(void);
 """)
 
 _LIB = None
@@ -359,11 +365,14 @@ class GoEngine:
             )
 
     @classmethod
-    def _from_handle(cls, game_h: int) -> "GoEngine":
-        """Create a non-owning GoEngine view from an existing game handle.
+    def _from_handle(cls, game_h: int, owned: bool = False) -> "GoEngine":
+        """Create a GoEngine view from an existing game handle.
 
-        The returned object will NOT free the handle when closed or GC'd.
-        Used by SubgameSolver.export_leaves() to wrap leaf game handles.
+        By default (owned=False) the returned object will NOT free the handle
+        when closed or GC'd -- the non-owning mode used by
+        SubgameSolver.export_leaves() to wrap leaf game handles it manages
+        separately. Pass owned=True when the handle is freshly allocated and
+        this wrapper should own its lifecycle (e.g. state_clone()).
         """
         obj = object.__new__(cls)
         obj._lib = _get_lib()
@@ -375,7 +384,7 @@ class GoEngine:
         obj._nplayer_legal_buf = _ffi.new("uint64_t[8]")
         obj._nplayer_util_buf = _ffi.new("float[2]")
         obj._closed = False
-        obj._owned = False
+        obj._owned = owned
         return obj
 
     @classmethod
@@ -1526,8 +1535,9 @@ def apply_games_batch(
     ret = lib.cambia_games_apply_batch(gh, a0, a1, act, n)
     if ret == -2:
         raise RuntimeError(
-            "cambia_games_apply_batch: token stream overflow (>4096 tokens); "
-            "hard cap exceeded, no silent truncation"
+            f"cambia_games_apply_batch: token stream overflow "
+            f"(> {TOKEN_STREAM_CAP} tokens); hard cap exceeded, no silent "
+            f"truncation"
         )
     if ret < 0:
         raise RuntimeError(
@@ -1565,6 +1575,66 @@ def state_restore(game_h: int, snap_h: int, a0_h: int, a1_h: int) -> None:
 def state_snapshot_free(snap_h: int) -> None:
     """Release a state snapshot handle from state_save."""
     _get_lib().cambia_state_snapshot_free(int(snap_h))
+
+
+def state_clone(game_h: int, a0_h: int, a1_h: int) -> Tuple[int, int, int]:
+    """Clone (game, both agents' belief + token state) onto FRESH handles.
+
+    Independent clone for rollout fan-out (p2-redesign.md: "clone the engine
+    state" at a decision node, then apply divergent playouts on each clone).
+    Distinct from state_save/restore, which rewinds the SAME handles and so
+    cannot back independent, simultaneously-live branches.
+
+    Returns (game_h, a0_h, a1_h) for the new clone. The caller owns the new
+    handles and must free them (GoEngine/GoAgentState.close(), or
+    cambia_game_free/cambia_agent_free directly) when done.
+
+    Raises:
+        RuntimeError: On invalid source handle or pool exhaustion (game or
+            agent pool full). No handles are leaked on failure -- the Go side
+            frees any partially allocated handles before returning the error.
+    """
+    lib = _get_lib()
+    out_g = _ffi.new("int32_t *")
+    out_a0 = _ffi.new("int32_t *")
+    out_a1 = _ffi.new("int32_t *")
+    ret = lib.cambia_state_clone(
+        int(game_h), int(a0_h), int(a1_h), out_g, out_a0, out_a1
+    )
+    if ret < 0:
+        raise RuntimeError(
+            f"cambia_state_clone failed (returned {ret}) "
+            f"game={game_h} a0={a0_h} a1={a1_h}; pool may be exhausted"
+        )
+    return int(out_g[0]), int(out_a0[0]), int(out_a1[0])
+
+
+def state_clone_wrapped(
+    engine: "GoEngine", a0: "GoAgentState", a1: "GoAgentState"
+) -> Tuple["GoEngine", "GoAgentState", "GoAgentState"]:
+    """Object-wrapping convenience over state_clone().
+
+    Returns owning GoEngine/GoAgentState objects for the clone (closing them
+    frees the underlying handles, unlike the non-owning GoEngine._from_handle
+    default used by SubgameSolver leaf export).
+    """
+    new_g, new_a0, new_a1 = state_clone(engine.handle, a0.handle, a1.handle)
+    return (
+        GoEngine._from_handle(new_g, owned=True),
+        GoAgentState._from_handle(new_a0),
+        GoAgentState._from_handle(new_a1),
+    )
+
+
+def get_token_stream_cap() -> int:
+    """Return the live Go per-agent hard token-stream cap (agent.MaxTokenStream).
+
+    Paired with cfr/src/cfr/prtcfr_worker.py::PRODUCTION_SEQ_CAP; callers that
+    need to assert the invariant (Go cap >= PRODUCTION_SEQ_CAP) should read
+    this live rather than trusting the module-level TOKEN_STREAM_CAP literal
+    or PRODUCTION_SEQ_CAP to stay in sync by inspection.
+    """
+    return int(_get_lib().cambia_token_stream_cap())
 
 
 # Fixed field order of cambia_token_vocab (mirrors agent.TokenVocab). Consumers
