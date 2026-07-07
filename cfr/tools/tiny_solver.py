@@ -26,6 +26,8 @@ deck. Build is the bottleneck; CFR iterations over a built tree are fast.
 """
 
 import argparse
+import contextlib
+import logging as _logging
 import pickle
 import random
 import sys
@@ -56,13 +58,46 @@ def _encode_seq(hand, peek_indices, observations, observer_id, seq_cap):
     )
 
 # Suppress the engine's chatty per-node warnings during full-tree expansion.
-import logging as _logging
-_logging.getLogger("src.game").setLevel(_logging.CRITICAL)
-_logging.getLogger("src.agent_state").setLevel(_logging.CRITICAL)
-_logging.getLogger("src.game.engine").setLevel(_logging.CRITICAL)
-for _n in list(_logging.root.manager.loggerDict):
-    if _n.startswith("src."):
-        _logging.getLogger(_n).setLevel(_logging.CRITICAL)
+# Scoped to the expansion call path (see _quiet_src_loggers / Builder.
+# build_decision_or_terminal), NOT import time: setting logger levels as a
+# module-level side effect at import would permanently mute every "src.*"
+# logger for the rest of the process (or pytest session) the moment anything
+# imports this module, even transitively (prtcfr_trainer.py / prtcfr_eval.py
+# both `from tools.tiny_solver import build_tree`). That was the root cause
+# of a session-wide test flake: unrelated tests asserting on src.* log output
+# would silently fail depending on import order.
+_QUIET_LOGGER_PREFIX = "src."
+_QUIET_EXPLICIT_LOGGERS = ("src.game", "src.agent_state", "src.game.engine")
+_quiet_depth = 0
+
+
+@contextlib.contextmanager
+def _quiet_src_loggers():
+    """Mute src.* loggers for the duration of a tree expansion, then restore.
+
+    Reentrant via a depth counter: only the outermost enter captures levels
+    and mutes; only the outermost exit restores. Safe (and cheap) to nest —
+    Builder.build_decision_or_terminal enters this once per top-level call
+    (once per deal in build_tree), not once per recursively-expanded node.
+    """
+    global _quiet_depth
+    if _quiet_depth == 0:
+        names = set(_QUIET_EXPLICIT_LOGGERS) | {
+            n for n in _logging.root.manager.loggerDict if n.startswith(_QUIET_LOGGER_PREFIX)
+        }
+        saved = {n: _logging.getLogger(n).level for n in names}
+        for n in names:
+            _logging.getLogger(n).setLevel(_logging.CRITICAL)
+    else:
+        saved = None
+    _quiet_depth += 1
+    try:
+        yield
+    finally:
+        _quiet_depth -= 1
+        if _quiet_depth == 0 and saved is not None:
+            for n, lvl in saved.items():
+                _logging.getLogger(n).setLevel(lvl)
 
 
 # ---- Node types (lightweight; built once, traversed many times) ----
@@ -191,7 +226,22 @@ class Builder:
         self.priv_draw = {0: [], 1: []}
         self.pub_path = []
 
-    def build_decision_or_terminal(self, game, ag, depth):
+    def build_decision_or_terminal(self, game, ag, depth, quiet=True):
+        """Expansion entry point. Recurses via _build_decision_or_terminal.
+
+        quiet=True (default, matching prior CLI/solver behavior): mutes the
+        engine's chatty src.* per-node warnings for the duration of this call
+        via _quiet_src_loggers, restoring prior levels on return. The context
+        is entered once here (not per recursive node) even though this method
+        is itself recursive-in-spirit; the actual recursion runs through
+        _build_decision_or_terminal, which does not re-enter the mute.
+        """
+        if quiet:
+            with _quiet_src_loggers():
+                return self._build_decision_or_terminal(game, ag, depth)
+        return self._build_decision_or_terminal(game, ag, depth)
+
+    def _build_decision_or_terminal(self, game, ag, depth):
         self.n += 1
         if self.n > self.max_nodes:
             self.aborted = True
@@ -325,7 +375,7 @@ class Builder:
                         AnalysisTools._filter_observation_for_br(obs, pid)
                     )
                 pushed_obs = True
-        child = self.build_decision_or_terminal(game, new_ag, depth + 1)
+        child = self._build_decision_or_terminal(game, new_ag, depth + 1)
         if pushed_obs:
             for pid in (0, 1):
                 self.obs_path[pid].pop()
@@ -341,12 +391,17 @@ class Builder:
 
 
 def build_tree(cfg, n_deals, seed0, max_nodes_per_deal, enumerate_draws=True,
-               perfect_recall=False, tokenize=False, seq_cap=256):
+               perfect_recall=False, tokenize=False, seq_cap=256, quiet=True):
     """Synthetic root: K deals, each weight 1/K; each is a full chance-tree.
 
     tokenize (default off): populate Decision.seq_tokens with each acting player's
     perfect-recall observation-action token stream (src.sequence_encoding), the
     single-sourced input for the PRT-CFR net. Independent of perfect_recall keying.
+
+    quiet (default True, matching prior CLI/solver behavior): mute the engine's
+    chatty src.* per-node warnings for each deal's expansion (see
+    Builder.build_decision_or_terminal / _quiet_src_loggers). Set False to see
+    the underlying warnings, e.g. while debugging engine behavior.
     """
     root = Chance()
     all_isets = {}
@@ -380,7 +435,7 @@ def build_tree(cfg, n_deals, seed0, max_nodes_per_deal, enumerate_draws=True,
                     if i < len(game.players[pid].hand)
                 )
                 b.priv_init[pid] = peeks
-        sub = b.build_decision_or_terminal(game, ag, 0)
+        sub = b.build_decision_or_terminal(game, ag, 0, quiet=quiet)
         root.children.append(sub)
         root.weights.append(1.0)  # normalized below
         total_nodes += b.n
