@@ -49,9 +49,15 @@ class ColumnarBatch:
     backward compatibility.
 
     When the buffer was created with has_mask=False, the masks attribute is None.
+
+    ``lengths`` is an optional (N,) int64 array of per-row valid token counts,
+    populated only by ragged/variable-length producers (DiskReservoir); it is
+    None for this module's fixed-width ReservoirBuffer. When present, callers
+    (e.g. the trainer) use it for ``pack_padded_sequence``-style handling of
+    ``features`` batches padded to the longest row in the batch.
     """
 
-    __slots__ = ("features", "targets", "masks", "iterations", "_size")
+    __slots__ = ("features", "targets", "masks", "iterations", "lengths", "_size")
 
     def __init__(
         self,
@@ -59,11 +65,13 @@ class ColumnarBatch:
         targets: np.ndarray,
         masks: Optional[np.ndarray],
         iterations: np.ndarray,
+        lengths: Optional[np.ndarray] = None,
     ):
-        self.features = features  # (N, input_dim) float32
+        self.features = features  # (N, input_dim) float32, or (N, max_len_in_batch) int for ragged producers
         self.targets = targets  # (N, target_dim) float32
         self.masks = masks  # (N, target_dim) bool, or None when has_mask=False
         self.iterations = iterations  # (N,) int64
+        self.lengths = lengths  # (N,) int64 valid-token-count per row, or None
         self._size = len(features)
 
     def __len__(self) -> int:
