@@ -303,3 +303,167 @@ def test_go_token_stream_cap_at_least_production_cap():
         f"cambia_token_vocab's GO_TOKEN_STREAM_CAP ({vocab_cap}) disagrees "
         f"with cambia_token_stream_cap ({go_cap})"
     )
+
+
+# ---------------------------------------------------------------------------
+# S1W13: the Go-backed production sampler (GoEngineGameDriver + S1W12's
+# cambia_state_clone). new_production_driver defaults to backend="go"; these
+# tests exercise PRTCFRProductionWorker's actual production substrate, not
+# just the raw bridge primitives above. Go-side self-consistency only (no
+# Python-engine value comparisons, per the S1W11 snap/reshuffle caveat).
+# ---------------------------------------------------------------------------
+
+
+def test_go_driver_full_traversal_appends_plausible_regret_samples():
+    """A full single-trajectory ESCHER traversal on the real Go-backed driver
+    runs to completion and appends well-formed regret samples: legal-only
+    nonzero targets, a nonempty mask, finite values."""
+    import numpy as np
+
+    from src.cfr.prtcfr_worker import (
+        PRODUCTION_SEQ_CAP,
+        PRTCFRProductionWorker,
+        new_production_driver,
+        uniform_policy_production,
+    )
+    from src.encoding import NUM_ACTIONS
+    from src.reservoir import ReservoirBuffer
+
+    buf = ReservoirBuffer(capacity=2000, input_dim=PRODUCTION_SEQ_CAP, has_mask=True)
+    worker = PRTCFRProductionWorker(
+        sigma=uniform_policy_production, m_rollouts=2, seed=0, max_trajectory_steps=600
+    )
+    total_added = 0
+    for i in range(3):
+        driver = new_production_driver(seed=i)  # backend="go" default
+        try:
+            worker.reseed(500 + i)
+            n = worker.traverse(driver, traverser=i % 2, iteration=1, buf=buf)
+            assert driver.is_terminal(), f"game {i} did not reach a terminal state"
+            total_added += n
+        finally:
+            driver.close()
+
+    assert (
+        total_added > 0
+    ), "no traverser regret samples recorded across 3 Go-backed games"
+    assert len(buf) == total_added
+    batch = buf.sample_batch(len(buf))
+    assert batch.features.shape == (total_added, PRODUCTION_SEQ_CAP)
+    assert batch.targets.shape == (total_added, NUM_ACTIONS)
+    for i in range(total_added):
+        mask = batch.masks[i]
+        target = batch.targets[i]
+        assert mask.sum() >= 1
+        assert np.all(np.isfinite(target))
+        assert np.all(target[~mask] == 0.0)
+
+
+def test_go_driver_clone_independence_under_fan_out():
+    """The Go-backed driver's clone() must be a true independent clone: the
+    m-rollout / per-action fan-out in PRTCFRProductionWorker mutates each
+    clone freely without perturbing the SOURCE trajectory's driver -- the
+    precondition S1W3 stage 2 could not validate against the (rewind-only)
+    state_save/state_restore primitive, resolved by S1W12's
+    cambia_state_clone (fresh handles)."""
+    from src.cfr.prtcfr_worker import new_production_driver
+
+    driver = new_production_driver(seed=3)
+    try:
+        parent_turn_before = driver.engine.turn_number()
+        parent_tokens_before = driver.tokens(driver.current_player())
+
+        clone = driver.clone()
+        try:
+            # Drive the clone forward several real steps.
+            for _ in range(6):
+                if clone.is_terminal():
+                    break
+                legal = clone.legal_actions()
+                if not legal:
+                    break
+                clone.apply(legal[0])
+
+            # The clone actually advanced (fan-out did something).
+            assert clone.engine.turn_number() >= parent_turn_before
+
+            # The parent driver is completely unaffected.
+            assert driver.engine.turn_number() == parent_turn_before
+            assert driver.tokens(driver.current_player()) == parent_tokens_before
+            assert driver.engine.handle != clone.engine.handle
+            assert driver.a0.handle != clone.a0.handle
+            assert driver.a1.handle != clone.a1.handle
+        finally:
+            clone.close()
+    finally:
+        driver.close()
+
+
+def test_go_driver_crn_pairing_determinism_same_seeds_identical_q_hats():
+    """CRN-pairing precondition on the Go substrate: running the SAME
+    single-trajectory traversal (fixed worker seed, fixed driver seed) twice
+    must produce IDENTICAL recorded regret targets. This is the Go-driver
+    analogue of the bridge-level restore-replay determinism test above, at
+    the sampler's actual granularity (q_hat / regret_full), Go-side only."""
+    import numpy as np
+
+    from src.cfr.prtcfr_worker import (
+        PRODUCTION_SEQ_CAP,
+        PRTCFRProductionWorker,
+        new_production_driver,
+        uniform_policy_production,
+    )
+    from src.reservoir import ReservoirBuffer
+
+    def run_once():
+        buf = ReservoirBuffer(capacity=2000, input_dim=PRODUCTION_SEQ_CAP, has_mask=True)
+        worker = PRTCFRProductionWorker(
+            sigma=uniform_policy_production,
+            m_rollouts=2,
+            seed=11,
+            max_trajectory_steps=400,
+        )
+        driver = new_production_driver(seed=21)
+        try:
+            worker.reseed(11)
+            worker.traverse(driver, traverser=0, iteration=1, buf=buf)
+        finally:
+            driver.close()
+        batch = buf.sample_batch(len(buf))
+        return batch.targets.copy(), batch.masks.copy()
+
+    t1, m1 = run_once()
+    t2, m2 = run_once()
+    assert t1.shape == t2.shape and t1.shape[0] > 0
+    np.testing.assert_array_equal(m1, m2)
+    np.testing.assert_allclose(t1, t2)
+
+
+def test_go_driver_traversal_completes_at_production_cap_without_overflow():
+    """Mixed check: several full single-trajectory traversals under the real
+    300-turn production rule profile complete without hitting
+    SequenceOverflowError or a token-stream overflow RuntimeError -- the
+    P100-sized cap (12288) headroom holding up end-to-end through the actual
+    sampler, not just the raw bridge (matches
+    test_go_token_stream_cap_at_least_production_cap's static invariant with
+    a dynamic, sampler-level run)."""
+    from src.cfr.prtcfr_worker import (
+        PRODUCTION_SEQ_CAP,
+        PRTCFRProductionWorker,
+        new_production_driver,
+        uniform_policy_production,
+    )
+    from src.reservoir import ReservoirBuffer
+
+    buf = ReservoirBuffer(capacity=5000, input_dim=PRODUCTION_SEQ_CAP, has_mask=True)
+    worker = PRTCFRProductionWorker(
+        sigma=uniform_policy_production, m_rollouts=2, seed=0, max_trajectory_steps=800
+    )
+    for i in range(5):
+        driver = new_production_driver(seed=1000 + i)
+        try:
+            worker.reseed(2000 + i)
+            worker.traverse(driver, traverser=i % 2, iteration=1, buf=buf)
+            assert driver.is_terminal()
+        finally:
+            driver.close()
