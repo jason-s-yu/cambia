@@ -1180,6 +1180,19 @@ class AbilityMixin:
                         target_slot_idx,
                     )
                     self._clear_pending_action(undo_stack, delta_list)
+                    # This is where Go's advanceSnapper() would run (called
+                    # from snapOpponentMove() after a successful move):
+                    # advance to the next snapper, resuming the snap decision
+                    # phase for them if any remain (mirroring Go's
+                    # Snap.Active staying true), or genuinely concluding the
+                    # phase (flush + advance the main turn) otherwise. Without
+                    # this, any remaining eligible snapper never gets a
+                    # decision, and the accumulated snap-outcome log would
+                    # otherwise leak into unrelated later observations.
+                    if hasattr(self, "_resume_or_end_snap_phase_after_move"):
+                        self._resume_or_end_snap_phase_after_move(
+                            undo_stack, delta_list
+                        )
                     # Turn advances after pending action resolved and no snap phase active
                     return None  # No card discarded this step
                 else:

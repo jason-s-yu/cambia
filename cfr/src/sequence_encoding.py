@@ -381,12 +381,14 @@ def _classify_snap(snap_info: dict) -> Tuple[str, int]:
         return "penalty", -1
     if success:
         if action_type == "ActionSnapOwn":
-            return "success_own", int(snap_info.get("removed_own_index", -1) or -1)
+            # NOTE: no "or -1" fallback here -- removed_own_index legitimately
+            # can be 0 (the first hand slot), and `0 or -1` would incorrectly
+            # collapse a valid index-0 success to the "no slot" sentinel.
+            idx = snap_info.get("removed_own_index")
+            return "success_own", int(idx) if idx is not None else -1
         if action_type == "ActionSnapOpponent":
-            return (
-                "success_opp",
-                int(snap_info.get("removed_opponent_index", -1) or -1),
-            )
+            idx = snap_info.get("removed_opponent_index")
+            return "success_opp", int(idx) if idx is not None else -1
         return "success_other", -1
     return "fail", -1
 

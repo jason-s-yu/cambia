@@ -31,6 +31,15 @@ from src.cfr.exceptions import (
 
 logger = logging.getLogger(__name__)
 
+# Matches engine.MaxHandSize (engine/game.go) -- a structural bound, not a
+# game rule: the 146-action space encodes hand-slot-addressed actions
+# (Replace/PeekOwn/SnapOwn/etc.) for exactly 6 slots, so a 7th+ card would
+# have no action index able to ever reference it. Go's PlayerState.Hand is a
+# fixed [MaxHandSize]Card array enforcing this; _apply_penalty below mirrors
+# the same cap (see drawPenalty's per-draw "HandLen >= MaxHandSize" check in
+# engine/snap.go), which Python's dynamic list previously left unenforced.
+MAX_HAND_SIZE = 6
+
 
 class GoXorShift64Rng:
     """Mirrors the Go engine's XorShift64 PRNG (engine/game.go nextRand/randN)
@@ -759,6 +768,15 @@ class CambiaGameState(QueryMixin, SnapLogicMixin, AbilityMixin):
 
         try:
             for i in range(num_cards):
+                if len(self.players[player_index].hand) >= MAX_HAND_SIZE:
+                    logger.debug(
+                        "P%d hand already at MAX_HAND_SIZE (%d); stopping penalty draw %d/%d.",
+                        player_index,
+                        MAX_HAND_SIZE,
+                        i + 1,
+                        num_cards,
+                    )
+                    break
                 if not self.stockpile:
                     reshuffle_outcome_deltas = self._attempt_reshuffle(_discard_undo_stack)
                     if reshuffle_outcome_deltas:

@@ -79,8 +79,13 @@ def build_snap_state(
 
 def test_player_has_matching_own_cards():
     """P0 has two 5s at indices 0 and 2; P1 has a 5 at index 1.
-    With allowOpponentSnapping=True, P0 should be able to snap own(0), own(2),
-    and opponent(1)."""
+
+    Per RULES.md Sec.5, a snap targets ANY known card -- a rank mismatch is a
+    legal-but-penalized attempt, not an illegal action (S1W11: matches the Go
+    engine's legalSnapDecision, which offers every hand slot). So with
+    allowOpponentSnapping=True, ALL of P0's own indices and ALL of P1's
+    opponent indices are legal targets, not just the rank-matching ones.
+    """
     p0_hand = [
         Card(rank="5", suit="H"),
         Card(rank="7", suit="D"),
@@ -99,18 +104,9 @@ def test_player_has_matching_own_cards():
     legal = state.get_legal_actions()
 
     assert ActionPassSnap() in legal
-    assert ActionSnapOwn(own_card_hand_index=0) in legal
-    assert ActionSnapOwn(own_card_hand_index=2) in legal
-    assert ActionSnapOpponent(opponent_target_hand_index=1) in legal
-
-    # Non-matching own cards should not appear
-    assert ActionSnapOwn(own_card_hand_index=1) not in legal
-    assert ActionSnapOwn(own_card_hand_index=3) not in legal
-
-    # Non-matching opponent cards should not appear
-    assert ActionSnapOpponent(opponent_target_hand_index=0) not in legal
-    assert ActionSnapOpponent(opponent_target_hand_index=2) not in legal
-    assert ActionSnapOpponent(opponent_target_hand_index=3) not in legal
+    for i in range(4):
+        assert ActionSnapOwn(own_card_hand_index=i) in legal
+        assert ActionSnapOpponent(opponent_target_hand_index=i) in legal
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +114,13 @@ def test_player_has_matching_own_cards():
 # ---------------------------------------------------------------------------
 
 def test_player_has_no_matching_cards():
-    """P0 has no 5s; snap discard is 5D. Only PassSnap should be legal."""
+    """P0 has no 5s and P1 has no 5s; snap discard is 5D.
+
+    Per RULES.md Sec.5 (S1W11), a snap is legal on ANY known card -- absence
+    of a rank match doesn't shrink the legal set, it just means every
+    SnapOwn/SnapOpponent attempt will be a (legal, penalized) miss. PassSnap
+    plus every own/opponent hand slot is legal.
+    """
     p0_hand = [
         Card(rank="7", suit="D"),
         Card(rank="8", suit="H"),
@@ -136,9 +138,12 @@ def test_player_has_no_matching_cards():
     state = build_snap_state(p0_hand, p1_hand, snap_card, allow_opponent_snapping=True)
     legal = state.get_legal_actions()
 
+    expected = {ActionPassSnap()}
+    expected.update(ActionSnapOwn(own_card_hand_index=i) for i in range(4))
+    expected.update(ActionSnapOpponent(opponent_target_hand_index=i) for i in range(4))
     # get_legal_actions() returns a canonically-ordered list (not a set); compare
     # as a set here since this test only cares about membership, not order.
-    assert set(legal) == {ActionPassSnap()}
+    assert set(legal) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -236,8 +241,12 @@ def test_opponent_snapping_disabled():
 # ---------------------------------------------------------------------------
 
 def test_snap_opponent_cards_no_own_match():
-    """P0 has no own matches but P1 has two 5s. With allowOpponentSnapping=True,
-    P0 should be able to snap opponent at indices 0 and 1."""
+    """P0 has no own matches but P1 has two 5s.
+
+    Per RULES.md Sec.5 (S1W11), P0 can still attempt SnapOwn on any of their
+    own 4 slots (a legal, penalized miss, since none match) in addition to
+    SnapOpponent on any of P1's 4 slots.
+    """
     p0_hand = [
         Card(rank="7", suit="D"),
         Card(rank="8", suit="H"),
@@ -256,15 +265,9 @@ def test_snap_opponent_cards_no_own_match():
     legal = state.get_legal_actions()
 
     assert ActionPassSnap() in legal
-    assert ActionSnapOpponent(opponent_target_hand_index=0) in legal
-    assert ActionSnapOpponent(opponent_target_hand_index=1) in legal
-
-    # No own snaps (P0 has no 5s)
-    assert not any(isinstance(a, ActionSnapOwn) for a in legal)
-
-    # Non-matching opponent positions not legal
-    assert ActionSnapOpponent(opponent_target_hand_index=2) not in legal
-    assert ActionSnapOpponent(opponent_target_hand_index=3) not in legal
+    for i in range(4):
+        assert ActionSnapOwn(own_card_hand_index=i) in legal
+        assert ActionSnapOpponent(opponent_target_hand_index=i) in legal
 
 
 # ---------------------------------------------------------------------------
@@ -289,7 +292,13 @@ def test_action_index_mapping_snap_opponent():
 
 
 def test_action_indices_in_legal_set_test1():
-    """Verify action indices from Test 1 scenario match expected values."""
+    """Verify action indices from Test 1 scenario match expected values.
+
+    Per RULES.md Sec.5 (S1W11), every own/opponent slot is a legal snap
+    target (rank mismatch is a penalized miss, not illegal), so indices
+    98-103 (SnapOwn 0-5, only 0-3 exist for a 4-card hand) and 104-107
+    (SnapOpponent 0-3) are ALL present.
+    """
     p0_hand = [
         Card(rank="5", suit="H"),
         Card(rank="7", suit="D"),
@@ -309,16 +318,8 @@ def test_action_indices_in_legal_set_test1():
     legal_indices = {action_to_index(a) for a in legal}
 
     assert 97 in legal_indices   # PassSnap
-    assert 98 in legal_indices   # SnapOwn(0)
-    assert 100 in legal_indices  # SnapOwn(2)
-    assert 105 in legal_indices  # SnapOpponent(1)
-
-    # Indices that should NOT be present
-    assert 99 not in legal_indices   # SnapOwn(1)
-    assert 101 not in legal_indices  # SnapOwn(3)
-    assert 104 not in legal_indices  # SnapOpponent(0)
-    assert 106 not in legal_indices  # SnapOpponent(2)
-    assert 107 not in legal_indices  # SnapOpponent(3)
+    for idx in list(range(98, 102)) + list(range(104, 108)):  # SnapOwn(0-3) + SnapOpponent(0-3)
+        assert idx in legal_indices, f"expected idx {idx} legal"
 
 
 def test_action_indices_in_legal_set_test4():
@@ -351,7 +352,12 @@ def test_action_indices_in_legal_set_test4():
 
 
 def test_action_indices_in_legal_set_test5():
-    """Verify Test 5 (opponent cards match, no own match) action indices."""
+    """Verify Test 5 (opponent cards match, no own match) action indices.
+
+    Per RULES.md Sec.5 (S1W11), P0's own slots (98-101) are legal too (a
+    penalized miss, since P0 has no matching rank), in addition to all of
+    P1's opponent slots (104-107).
+    """
     p0_hand = [
         Card(rank="7", suit="D"),
         Card(rank="8", suit="H"),
@@ -371,13 +377,5 @@ def test_action_indices_in_legal_set_test5():
     legal_indices = {action_to_index(a) for a in legal}
 
     assert 97 in legal_indices    # PassSnap
-    assert 104 in legal_indices   # SnapOpponent(0)
-    assert 105 in legal_indices   # SnapOpponent(1)
-
-    # No SnapOwn actions (98-103)
-    for idx in range(98, 104):
-        assert idx not in legal_indices
-
-    # Non-matching opponent positions
-    assert 106 not in legal_indices  # SnapOpponent(2)
-    assert 107 not in legal_indices  # SnapOpponent(3)
+    for idx in list(range(98, 102)) + list(range(104, 108)):  # SnapOwn(0-3) + SnapOpponent(0-3)
+        assert idx in legal_indices, f"expected idx {idx} legal"
