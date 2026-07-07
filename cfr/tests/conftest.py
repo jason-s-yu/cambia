@@ -203,6 +203,32 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         grad_clip: float = 1.0
         warm_start: bool = False
         snapshot_weighting: str = "linear"
+        # Stability + LR schedule (defaults match the tiny trainer's getattr
+        # fallbacks; production values come from the run config, not here).
+        lr_min: float = 0.0
+        lr_schedule: str = "restart"
+        reanchor_every: int = 0
+        stability_enabled: bool = False
+        stability_eval_every: int = 10
+        stability_patience: int = 3
+        stability_rel_tolerance: float = 0.15
+        stability_min_iters: int = 10
+        stability_metric_mode: str = "min"
+        stability_metric_name: str = "nashconv"
+        # Production trainer (Phase 2 S1W5).
+        train_steps: int = 3000
+        reservoir_capacity: int = 20_000_000
+        reservoir_dir: object = None
+        snapshot_dir: object = None
+        num_players: int = 2
+        max_trajectory_steps: int = 4000
+        backend: str = "go"
+        critic_enabled: bool = True
+        critic_capacity: int = 200_000
+        critic_steps_per_iter: int = 500
+        critic_batch_size: int = 512
+        critic_lr: float = 1.0e-3
+        critic_held_out_fraction: float = 0.1
         seed: int = 0
         device: str = "cuda"
 
@@ -221,6 +247,22 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         except Exception:
             return None
 
+    def _resolve_config_yaml(path):
+        """Stub resolve_config_yaml: delegate to the real implementation.
+
+        The PRT-CFR (and DESCA) CLI materializes the run-dir config via
+        ``resolve_config_yaml``; the stub delegates like ``_load_config`` so a
+        direct CLI-function call under the stub still resolves _base/_rule_profile.
+        """
+        _saved = sys.modules.pop("src.config", None)
+        import importlib
+        _real_mod = importlib.import_module("src.config")
+        try:
+            return _real_mod.resolve_config_yaml(path)
+        finally:
+            if _saved is not None:
+                sys.modules["src.config"] = _saved
+
     _config_stub.Config = _StubConfig
     _config_stub.CambiaRulesConfig = _CambiaRulesConfig
     _config_stub.CfrTrainingConfig = _StubConfig
@@ -237,6 +279,7 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
     _config_stub.DESCAConfig = _DESCAConfig
     _config_stub.PRTCFRConfig = _PRTCFRConfig
     _config_stub.load_config = _load_config
+    _config_stub.resolve_config_yaml = _resolve_config_yaml
 
     sys.modules["src.config"] = _config_stub
 

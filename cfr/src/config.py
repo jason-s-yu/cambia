@@ -508,6 +508,46 @@ class PRTCFRConfig(_CambiaBaseModel):
     # SD-CFR snapshot realization. Only "linear" (w_t = t) is implemented for X2.
     snapshot_weighting: str = "linear"
 
+    # --- Late-training stability + LR schedule (Phase 2 S1W1). ---
+    # These field DEFAULTS deliberately match the tiny trainer's prior getattr
+    # fallbacks (schedule "restart", stability OFF) so the X2 tiny-game paths and
+    # their tests stay byte-for-byte identical. The PRODUCTION defaults
+    # (warm_start + global_cosine + stability ON, design-overview Trainer
+    # conventions amended 2026-07-07) are set in the production run config YAML
+    # (config/prtcfr_production.yaml), NOT flipped here -- flipping the model
+    # defaults would break the tiny gate reproduction (e.g. stability-OFF tests)
+    # and force the 256-wide tiny reservoir to a 12288-wide allocation.
+    lr_min: float = 0.0
+    lr_schedule: str = "restart"  # "restart" | "global_cosine"
+    reanchor_every: int = 0
+    stability_enabled: bool = False
+    stability_eval_every: int = 10
+    stability_patience: int = 3
+    stability_rel_tolerance: float = 0.15
+    stability_min_iters: int = 10
+    stability_metric_mode: str = "min"
+    stability_metric_name: str = "nashconv"
+
+    # --- Production trainer (Phase 2 S1W5): full-game PRT-CFR. ---
+    # Read only by PRTCFRProductionTrainer (the tiny trainer never touches
+    # these), so production-scale defaults here are safe for the tiny paths.
+    # A production run points seq_cap/k_games_per_iter/batch_size/warm_start/
+    # lr_schedule/stability_enabled at the production values via the run config.
+    train_steps: int = 3000  # per-iteration fit budget (p2 sec 2.3)
+    reservoir_capacity: int = 20_000_000  # per-player disk reservoir rows (AC5)
+    reservoir_dir: Optional[str] = None  # override; default <run_dir>/reservoir
+    snapshot_dir: Optional[str] = None  # override; default <run_dir>/snapshots
+    num_players: int = 2
+    max_trajectory_steps: int = 4000
+    backend: str = "go"  # production GameDriver backend: "go" | "python"
+    # V_phi critic outside the regret path (S1W6 wiring).
+    critic_enabled: bool = True
+    critic_capacity: int = 200_000
+    critic_steps_per_iter: int = 500
+    critic_batch_size: int = 512
+    critic_lr: float = 1.0e-3
+    critic_held_out_fraction: float = 0.1
+
     seed: int = 0
     device: str = "cuda"
 

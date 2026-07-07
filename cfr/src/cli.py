@@ -1497,6 +1497,161 @@ register_with_aliases(
     help="Train using DESCA (Dense ESCHER + Semantic Action Abstraction, Phase 1)",
 )
 
+
+def train_prtcfr(
+    config: Path = typer.Option(
+        "config.yaml",
+        "--config",
+        "-c",
+        help="Path to configuration YAML file (must carry a `prt_cfr:` block)",
+        exists=True,
+    ),
+    run_name: Optional[str] = typer.Option(
+        None,
+        "--run-name",
+        help="Run name (e.g. v0.4-prtcfr-pilot); run dir is runs/<run-name>",
+    ),
+    iterations: Optional[int] = typer.Option(
+        None,
+        "--iterations",
+        "-n",
+        help="Number of training iterations (overrides config prt_cfr.iterations)",
+    ),
+    save_path: Optional[Path] = typer.Option(
+        None,
+        "--save-path",
+        "-s",
+        help="Override the run directory (defaults to runs/<run-name>)",
+    ),
+    device: Optional[str] = typer.Option(
+        None,
+        "--device",
+        help="Training device: auto, cpu, cuda (default: config prt_cfr.device)",
+    ),
+    backend: Optional[str] = typer.Option(
+        None,
+        "--backend",
+        help="Production GameDriver backend: 'go' (default) or 'python'",
+    ),
+):
+    """Train using PRT-CFR (Perfect-Recall Trajectory CFR, v0.4 Phase 2)."""
+    import logging as _logging
+
+    from .config import load_config, resolve_config_yaml
+    from .cfr import gpu_safety
+
+    setup_multiprocessing()
+
+    # Surface per-iter progress from the trainer's logger.
+    _root_logger = _logging.getLogger()
+    if not any(isinstance(h, _logging.StreamHandler) for h in _root_logger.handlers):
+        _h = _logging.StreamHandler(sys.stderr)
+        _h.setLevel(_logging.INFO)
+        _h.setFormatter(
+            _logging.Formatter("[%(asctime)s] %(name)s %(levelname)s: %(message)s")
+        )
+        _root_logger.addHandler(_h)
+    _logging.getLogger("src.cfr.prtcfr_trainer").setLevel(_logging.INFO)
+
+    cfg = load_config(str(config))
+    if not cfg:
+        print("ERROR: Failed to load configuration. Exiting.", file=sys.stderr)
+        raise typer.Exit(1)
+    if getattr(cfg, "prt_cfr", None) is None:
+        print(
+            "ERROR: Config missing [prt_cfr] section. Add a `prt_cfr:` block "
+            "(see config/prtcfr_production.yaml) or use a PRT-CFR config.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(1)
+    prt_cfg = cfg.prt_cfr
+
+    if iterations is not None:
+        prt_cfg.iterations = iterations
+    if backend is not None:
+        _b = backend.strip().lower()
+        if _b not in ("go", "python"):
+            print(
+                f"ERROR: --backend must be 'go' or 'python', got {backend!r}.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(1)
+        prt_cfg.backend = _b
+
+    # Resolve device: CLI > config > cpu. Resolve "auto" concretely.
+    _raw_device = device or getattr(prt_cfg, "device", None) or "cpu"
+    if _raw_device == "auto":
+        try:
+            import torch as _torch
+            _device = "cuda" if _torch.cuda.is_available() else "cpu"
+        except Exception:
+            _device = "cpu"
+    else:
+        _device = _raw_device
+    prt_cfg.device = _device
+
+    # Run directory: --save-path > runs/<run-name>.
+    _name = run_name or "v0.4-prtcfr-run"
+    _run_dir = Path(save_path) if save_path else (Path("runs") / _name)
+    _run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Materialized config.yaml (resolves _base) so the run dir is self-contained
+    # for `cambia evaluate runs/X/ --latest`.
+    _config_dict = None
+    _config_yaml = None
+    _run_config_dst = _run_dir / "config.yaml"
+    try:
+        import yaml as _yaml
+        _config_dict = resolve_config_yaml(str(config))
+        _config_yaml = _yaml.safe_dump(_config_dict, sort_keys=False)
+        if not _run_config_dst.exists():
+            with open(_run_config_dst, "w", encoding="utf-8") as _f:
+                _f.write(_config_yaml)
+    except Exception as _e:
+        print(f"WARNING: could not materialize config.yaml: {_e}", file=sys.stderr)
+
+    # GPU failsafes for the run path (no-ops on CPU; keeps the caching allocator).
+    if _device.startswith("cuda") and gpu_safety.cuda_available():
+        try:
+            gpu_safety.require_free_vram(2.0, label="prtcfr")
+        except RuntimeError as _e:
+            print(f"ERROR: {_e}", file=sys.stderr)
+            raise typer.Exit(1)
+
+    from .cfr.prtcfr_trainer import PRTCFRProductionTrainer
+
+    trainer = PRTCFRProductionTrainer(
+        prt_cfg,
+        str(_run_dir),
+        run_name=_name,
+        config_yaml=_config_yaml,
+        config_dict=_config_dict,
+    )
+
+    _iters = iterations if iterations is not None else prt_cfg.iterations
+    try:
+        trainer.train(iterations=_iters)
+    except KeyboardInterrupt:
+        print(
+            "\nInterrupted. The last completed iteration's snapshot + rolling "
+            "checkpoint are on disk; reservoirs flushed.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(0)
+    except Exception as e:
+        print(f"FATAL: Error during PRT-CFR training: {e}", file=sys.stderr)
+        raise typer.Exit(1)
+    finally:
+        trainer.close()
+
+
+register_with_aliases(
+    train_app,
+    ["prtcfr", "prt-cfr", "prt_cfr"],
+    train_prtcfr,
+    help="Train using PRT-CFR (Perfect-Recall Trajectory CFR, v0.4 Phase 2)",
+)
+
 # Dashed aliases for existing primary commands.
 register_with_aliases(
     train_app,
