@@ -52,7 +52,11 @@ def _real_long_token_sequence(min_len: int = 300) -> list:
     the actual tokenizer output (not synthetic ids), matching sign-off
     condition 3's "real multi-hundred-token sequences" requirement."""
     for seed in range(200):
-        driver = new_production_driver(seed=seed)
+        # Explicitly the Python stub backend: this helper mutates .seq_cap
+        # directly to force an uncapped-window generation run, a
+        # PythonEngineGameDriver-specific affordance (new_production_driver's
+        # S1W13 default is Go-backed).
+        driver = new_production_driver(seed=seed, backend="python")
         driver.seq_cap = 20000
         rng = random.Random(seed)
         for _ in range(3000):

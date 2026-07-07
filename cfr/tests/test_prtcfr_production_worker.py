@@ -41,7 +41,13 @@ from src.cfr.prtcfr_worker import (  # noqa: E402
 
 
 def _new_driver(seed: int, seq_cap: int = PRODUCTION_SEQ_CAP) -> PythonEngineGameDriver:
-    d = new_production_driver(seed=seed)
+    # This file specifically exercises PythonEngineGameDriver's own contract
+    # (window semantics via .game, clone independence via .obs_streams, the
+    # engine-rejection guard) -- explicitly request the stub backend rather
+    # than new_production_driver's S1W13 Go-backed default. Go-backed
+    # coverage of the same sampler lives in
+    # tests/test_prtcfr_go_bridge_integration.py.
+    d = new_production_driver(seed=seed, backend="python")
     d.seq_cap = seq_cap
     return d
 

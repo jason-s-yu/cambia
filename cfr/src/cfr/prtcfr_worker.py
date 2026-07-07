@@ -394,6 +394,8 @@ class GameDriver(Protocol):
 
     def clone(self) -> "GameDriver": ...
 
+    def close(self) -> None: ...
+
 
 class PythonEngineGameDriver:
     """Thin reference GameDriver over the Python engine (src.game.engine).
@@ -510,11 +512,149 @@ class PythonEngineGameDriver:
             self.seq_cap,
         )
 
+    def close(self) -> None:
+        """No-op: nothing to free (plain Python objects, GC'd normally)."""
 
-def new_production_driver(
+
+class GoEngineGameDriver:
+    """GameDriver backed by the real Go engine via the FFI bridge (S1W13).
+
+    The production substrate: correctness AND throughput (unlike
+    PythonEngineGameDriver, the "thin stub" this file developed against
+    before S1W12/S1W13 landed).
+
+    ``clone()`` uses ``bridge.state_clone_wrapped`` (S1W12's
+    ``cambia_state_clone``): a TRUE independent clone onto FRESH handles
+    (game + both agents' belief + token streams), distinct from
+    ``state_save``/``state_restore``'s same-handle rewind checkpoint (which
+    cannot back independent, simultaneously-live branches -- the reason S1W3
+    stage 2 did not implement a Go-backed driver against that primitive).
+
+    ``tokens()`` reads the raw per-agent token body via the FFI and
+    frame-aligns it at ``seq_cap`` with an explicit STRICT overflow guard
+    (mirrors ``PythonEngineGameDriver``'s ``strict=True`` contract): the Go
+    side's own ``MaxTokenStream`` hard-errors at APPEND time (surfaced via
+    ``apply()``) before a body could ever exceed it, but
+    ``bridge.frame_aligned_window`` itself has no strict mode and would
+    silently window a body that's exactly at the raw cap if the BOS/EOS
+    budget were not separately checked here -- this guard closes that gap.
+
+    Owns its (engine, a0, a1) handles: ``close()`` frees them and is
+    idempotent (safe to call multiple times, matching the underlying
+    GoEngine/GoAgentState convention). The handle pool is finite --
+    ``PRTCFRProductionWorker`` closes every clone after it is done exploring
+    it (see ``traverse``/``_rollout_mc``).
+    """
+
+    def __init__(
+        self,
+        engine: Any,
+        a0: Any,
+        a1: Any,
+        seq_cap: int = PRODUCTION_SEQ_CAP,
+    ):
+        self.engine = engine
+        self.a0 = a0
+        self.a1 = a1
+        self.seq_cap = seq_cap
+        self._closed = False
+
+    def current_player(self) -> int:
+        return self.engine.acting_player()
+
+    def is_terminal(self) -> bool:
+        return self.engine.is_terminal()
+
+    def utility(self, player: int) -> float:
+        return float(self.engine.get_utility()[player])
+
+    def legal_actions(self) -> List[int]:
+        # legal_actions_mask() -> (146,) uint8; nonzero() is already ascending
+        # index order (no set-ordering nondeterminism, unlike the Python
+        # driver's get_legal_actions()).
+        mask = self.engine.legal_actions_mask()
+        return [int(i) for i in mask.nonzero()[0]]
+
+    def apply(self, action: int) -> bool:
+        """Apply the action-index ``action`` via a length-1
+        ``apply_games_batch`` call (the only FFI path that both advances the
+        game AND appends to both agents' token streams -- the single-agent
+        ``cambia_agent_update`` export does not touch the token stream at
+        all, per the Go source). Length-1 batches are atomic: either this
+        fully succeeds (game + both token streams advance) or nothing
+        changes, so unlike the Python driver there is no phantom-observation
+        risk from a partially-applied action.
+
+        Returns True on success. Returns False if the engine rejected the
+        action for the current state (mirrors PythonEngineGameDriver.apply's
+        bool contract so ``_sample_and_apply`` retries uniformly across
+        drivers). A token-stream OVERFLOW is a different, non-retryable
+        condition -- retrying with a different action cannot help since the
+        stream is already too long -- so it is re-raised, not swallowed.
+        """
+        from ..ffi import bridge
+
+        try:
+            bridge.apply_games_batch(
+                [self.engine.handle],
+                [self.a0.handle],
+                [self.a1.handle],
+                [int(action)],
+            )
+            return True
+        except RuntimeError as e:
+            if "overflow" in str(e):
+                raise
+            return False
+
+    def tokens(self, player: int) -> List[int]:
+        from ..ffi import bridge
+        from ..sequence_encoding import SequenceOverflowError
+
+        agent = self.a0 if player == 0 else self.a1
+        body = agent.tokens()  # raw frame body, no BOS/EOS, never truncated
+        budget = self.seq_cap - 2  # BOS + EOS, matching frame_aligned_window
+        if len(body) > budget:
+            raise SequenceOverflowError(
+                f"Go agent token body length {len(body)} exceeds strict cap "
+                f"budget {budget} (seq_cap={self.seq_cap}); raise seq_cap "
+                f"rather than let frame_aligned_window silently truncate"
+            )
+        return bridge.frame_aligned_window(body, seq_cap=self.seq_cap, add_bos_eos=True)
+
+    def clone(self) -> "GoEngineGameDriver":
+        from ..ffi import bridge
+
+        new_engine, new_a0, new_a1 = bridge.state_clone_wrapped(
+            self.engine, self.a0, self.a1
+        )
+        return GoEngineGameDriver(new_engine, new_a0, new_a1, seq_cap=self.seq_cap)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.a0.close()
+        self.a1.close()
+        self.engine.close()
+
+
+def _default_production_house_rules() -> Any:
+    from ..config import CambiaRulesConfig
+
+    house_rules = CambiaRulesConfig()
+    house_rules.allowDrawFromDiscardPile = True
+    house_rules.allowReplaceAbilities = True
+    house_rules.allowOpponentSnapping = True
+    house_rules.max_game_turns = 300
+    house_rules.lockCallerHand = False
+    return house_rules
+
+
+def _new_python_production_driver(
     seed: int, house_rules: Optional[Any] = None, num_players: int = 2
 ) -> PythonEngineGameDriver:
-    """Build a fresh production game + driver for ``seed``.
+    """Build a fresh production game + PythonEngineGameDriver for ``seed``.
 
     Uses the engine's own internal deal (``CambiaGameState(house_rules=...,
     _rng=...)``, the same construction path tiny_solver's tree builder uses),
@@ -522,16 +662,10 @@ def new_production_driver(
     internally consistent engine instance here, independent of Go-parity,
     which is covered separately by the FFI cross-path parity tests.
     """
-    from ..config import CambiaRulesConfig
     from ..game.engine import CambiaGameState
 
     if house_rules is None:
-        house_rules = CambiaRulesConfig()
-        house_rules.allowDrawFromDiscardPile = True
-        house_rules.allowReplaceAbilities = True
-        house_rules.allowOpponentSnapping = True
-        house_rules.max_game_turns = 300
-        house_rules.lockCallerHand = False
+        house_rules = _default_production_house_rules()
 
     game = CambiaGameState(house_rules=house_rules, _rng=random.Random(seed))
     init_hands = {p: list(game.players[p].hand) for p in range(num_players)}
@@ -539,6 +673,46 @@ def new_production_driver(
         p: tuple(game.players[p].initial_peek_indices) for p in range(num_players)
     }
     return PythonEngineGameDriver(game, init_hands, init_peeks)
+
+
+def _new_go_production_driver(
+    seed: int, house_rules: Optional[Any] = None, seq_cap: int = PRODUCTION_SEQ_CAP
+) -> "GoEngineGameDriver":
+    """Build a fresh production game + GoEngineGameDriver for ``seed`` over
+    the real Go engine via the FFI bridge (S1W13: the production substrate)."""
+    from ..ffi.bridge import GoAgentState, GoEngine
+
+    if house_rules is None:
+        house_rules = _default_production_house_rules()
+
+    engine = GoEngine(seed=seed, house_rules=house_rules)
+    a0 = GoAgentState(engine, player_id=0)
+    a1 = GoAgentState(engine, player_id=1)
+    return GoEngineGameDriver(engine, a0, a1, seq_cap=seq_cap)
+
+
+def new_production_driver(
+    seed: int,
+    house_rules: Optional[Any] = None,
+    num_players: int = 2,
+    backend: str = "go",
+) -> "GameDriver":
+    """Build a fresh production game + driver for ``seed``.
+
+    ``backend="go"`` (default, S1W13): the real Go engine via the FFI bridge
+    (``GoEngineGameDriver``) -- the production substrate. ``backend="python"``:
+    ``PythonEngineGameDriver``, the reference/stub implementation this file
+    developed against before the Go clone-to-fresh-handles FFI export
+    (``cambia_state_clone``, S1W12) landed; kept for tests exercising its
+    specific internals and as a fallback where ``libcambia.so`` is
+    unavailable. Both satisfy the same ``GameDriver`` protocol; sampler code
+    (``PRTCFRProductionWorker``) never branches on which one it was handed.
+    """
+    if backend == "go":
+        return _new_go_production_driver(seed, house_rules, seq_cap=PRODUCTION_SEQ_CAP)
+    if backend == "python":
+        return _new_python_production_driver(seed, house_rules, num_players)
+    raise ValueError(f"unknown backend {backend!r}; expected 'go' or 'python'")
 
 
 # Production sigma^t signature: (full-recall token prefix, legal action mask)
@@ -560,11 +734,28 @@ def uniform_policy_production(tokens: List[int], legal_mask: np.ndarray) -> np.n
     return probs / total
 
 
+def _action_index(action: Any) -> int:
+    """Global [0, NUM_ACTIONS) index for a production-driver action.
+
+    Driver-agnostic: PythonEngineGameDriver's legal_actions()/apply() traffic
+    in GameAction NamedTuples (routed through encoding.action_to_index);
+    GoEngineGameDriver's traffic in the same integer indices GoEngine.
+    apply_action already uses (legal_actions_mask() is index-native, so no
+    translation is needed there). This adapter lets every driver-agnostic
+    helper below (_legal_mask, _sample_legal_action, the traverser's regret
+    bookkeeping) accept whichever action representation the active driver
+    produces without branching on driver type.
+    """
+    if isinstance(action, (int, np.integer)):
+        return int(action)
+    return action_to_index(action)
+
+
 def _legal_mask(legal: Sequence[Any]) -> np.ndarray:
     """NUM_ACTIONS-wide bool mask for a legal-action list (production driver)."""
     mask = np.zeros(NUM_ACTIONS, dtype=bool)
     for a in legal:
-        mask[action_to_index(a)] = True
+        mask[_action_index(a)] = True
     return mask
 
 
@@ -572,9 +763,9 @@ def _sample_legal_action(
     legal: Sequence[Any], probs: np.ndarray, rng: random.Random
 ) -> Any:
     """Sample one action object from ``legal`` given a NUM_ACTIONS-wide probs
-    vector (indexed by action_to_index); renormalizes defensively so a
+    vector (indexed by _action_index); renormalizes defensively so a
     slightly-off-mass sigma never raises."""
-    weights = np.array([probs[action_to_index(a)] for a in legal], dtype=np.float64)
+    weights = np.array([probs[_action_index(a)] for a in legal], dtype=np.float64)
     total = weights.sum()
     if total <= 0:
         weights = np.full(len(legal), 1.0 / len(legal))
@@ -728,22 +919,31 @@ class PRTCFRProductionWorker:
             kept_q: List[float] = []
             for action in legal:
                 child = driver.clone()
-                if not child.apply(action):
-                    # The engine rejected this nominally-"legal" action for
-                    # the current pending sub-decision (the same pre-existing
-                    # engine/ability-pending-chain interaction
-                    # PythonEngineGameDriver.apply guards against). Exclude it
-                    # from THIS decision's regret sample rather than
-                    # fabricate a q-value for an action that was never
-                    # actually applied to the clone.
-                    continue
-                kept_actions.append(action)
-                kept_q.append(self._rollout_mc(child, traverser, seed_base))
+                try:
+                    if not child.apply(action):
+                        # The engine rejected this nominally-"legal" action
+                        # for the current pending sub-decision (the same
+                        # pre-existing engine/ability-pending-chain
+                        # interaction PythonEngineGameDriver.apply guards
+                        # against). Exclude it from THIS decision's regret
+                        # sample rather than fabricate a q-value for an
+                        # action that was never actually applied to the
+                        # clone.
+                        continue
+                    kept_actions.append(action)
+                    kept_q.append(self._rollout_mc(child, traverser, seed_base))
+                finally:
+                    # Every clone() call allocates real resources on a
+                    # Go-backed driver (fresh game+2 agent handles from a
+                    # finite pool, S1W12's cambia_state_clone); the Python
+                    # stub's close() is a no-op. Close unconditionally,
+                    # whether kept or rejected.
+                    child.close()
 
             if kept_actions:
                 q_hat = np.array(kept_q, dtype=np.float64)
                 sigma_legal = np.array(
-                    [sigma_node[action_to_index(a)] for a in kept_actions],
+                    [sigma_node[_action_index(a)] for a in kept_actions],
                     dtype=np.float64,
                 )
                 sigma_total = sigma_legal.sum()
@@ -757,7 +957,7 @@ class PRTCFRProductionWorker:
                 regret_full = np.zeros(NUM_ACTIONS, dtype=np.float32)
                 kept_mask = np.zeros(NUM_ACTIONS, dtype=bool)
                 for i, action in enumerate(kept_actions):
-                    gi = action_to_index(action)
+                    gi = _action_index(action)
                     regret_full[gi] = q_hat[i] - baseline
                     kept_mask[gi] = True
                 buf.add(
@@ -802,7 +1002,10 @@ class PRTCFRProductionWorker:
         for k in range(self.m_rollouts):
             rng = random.Random(seed_base + k)
             rollout_driver = child.clone()
-            total += self._rollout_to_terminal(rollout_driver, traverser, rng)
+            try:
+                total += self._rollout_to_terminal(rollout_driver, traverser, rng)
+            finally:
+                rollout_driver.close()
         return total / self.m_rollouts
 
     def _rollout_to_terminal(
