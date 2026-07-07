@@ -21,6 +21,31 @@ from ..constants import (
 logger = logging.getLogger(__name__)
 
 
+def _legal_action_sort_key(action: GameAction) -> tuple:
+    """Total-order sort key for a ``GameAction``, independent of hashing.
+
+    Every concrete action type in ``src/constants.py`` is a ``NamedTuple``
+    with a ``tag: str`` field that uniquely identifies its class (documented
+    there as a "type discriminator"). Keying first on the class name and
+    only then on the action's own field tuple:
+
+      - never depends on ``PYTHONHASHSEED`` (unlike raw ``set`` iteration
+        order, which is what ``get_legal_actions`` used to expose directly);
+      - never raises ``TypeError`` from comparing incompatible field types
+        across different action classes (e.g. the ``bool`` in
+        ``ActionDiscard.use_ability`` vs. the ``int`` in
+        ``ActionReplace.target_hand_index`` both occupy tuple position 0),
+        because the class-name string is always compared first and two
+        different action classes never fall through to comparing their
+        field tuples against each other;
+      - is a true total order within a class, since all instances of a
+        given action class share identical field types positionally, so a
+        plain tuple comparison of remaining fields (index positions, swap
+        targets, boolean flags, etc.) is always well-defined.
+    """
+    return (type(action).__name__, action)
+
+
 class QueryMixin:
     """Mixin containing query methods and legal action calculation for CambiaGameState."""
 
@@ -187,8 +212,22 @@ class QueryMixin:
 
     # --- Legal Actions ---
 
-    def get_legal_actions(self) -> Set[GameAction]:
-        """Returns the set of valid actions for the current acting player."""
+    def get_legal_actions(self) -> List[GameAction]:
+        """Returns the valid actions for the current acting player, in a
+        deterministic canonical order.
+
+        Internally the per-phase helpers (``_get_legal_start_turn_actions``,
+        ``_get_legal_pending_actions``, ``_get_legal_snap_actions``) still
+        build a ``Set[GameAction]`` for dedup convenience, but iterating a
+        Python set is ordered by object hash, which for these NamedTuple
+        actions depends on ``PYTHONHASHSEED`` (string-field hashing is
+        randomized per-process by default). That makes any consumer that
+        relies on iteration order (e.g. ``random.Random(seed).choice(list(...))``)
+        non-reproducible across processes even with a fixed RNG seed. This
+        boundary sorts the set into a list using ``_legal_action_sort_key``
+        before returning, so the same game state always yields the same
+        action sequence regardless of process or hash seed.
+        """
         legal_actions: Set[GameAction] = set()
 
         if self.is_terminal():
@@ -249,7 +288,7 @@ class QueryMixin:
             )
             legal_actions = set()  # Return empty set on error
 
-        return legal_actions
+        return sorted(legal_actions, key=_legal_action_sort_key)
 
     def _get_legal_start_turn_actions(self, player: int) -> Set[GameAction]:
         """Calculates legal actions at the start of a regular turn."""

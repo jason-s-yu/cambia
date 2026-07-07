@@ -136,7 +136,9 @@ def test_player_has_no_matching_cards():
     state = build_snap_state(p0_hand, p1_hand, snap_card, allow_opponent_snapping=True)
     legal = state.get_legal_actions()
 
-    assert legal == {ActionPassSnap()}
+    # get_legal_actions() returns a canonically-ordered list (not a set); compare
+    # as a set here since this test only cares about membership, not order.
+    assert set(legal) == {ActionPassSnap()}
 
 
 # ---------------------------------------------------------------------------
