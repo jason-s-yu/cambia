@@ -17,12 +17,21 @@ go.work.sum
 .idea/
 
 # Local dev environment
-.codebridge/
+.codebridge/*
+!.codebridge/config.yaml
 .docker/
 certs/
 docs-gen/
 .docs/
 sync-generated.sh
+
+# Local-only CFR research/analysis docs (kept in working tree, unpublished)
+cfr/docs/baseline_analysis.md
+cfr/docs/sota_survey.md
+cfr/docs/ui_survey.md
+
+# Scratch drivers and probes (harvest sources, local only)
+cfr/scratch/
 
 # Build artifacts (generated)
 /cgo

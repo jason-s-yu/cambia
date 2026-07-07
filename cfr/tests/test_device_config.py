@@ -8,6 +8,13 @@ from dataclasses import dataclass
 import pytest
 import yaml
 
+try:
+    import torch
+
+    _HAS_XPU = hasattr(torch, "xpu") and torch.xpu.is_available()
+except Exception:  # torch absent or XPU probe failed
+    _HAS_XPU = False
+
 
 # ---------------------------------------------------------------------------
 # Helpers: extract real dataclass definitions from source files
@@ -68,6 +75,11 @@ class TestResolveDevice:
         from src.cfr.deep_trainer import _resolve_device
         assert _resolve_device("cuda") == "cuda"
 
+    @pytest.mark.skipif(
+        not _HAS_XPU,
+        reason="_resolve_device('xpu') passes through only where an Intel XPU is "
+        "present; it fail-fasts otherwise (deep_trainer.py). No XPU on this host.",
+    )
     def test_xpu_passthrough(self):
         from src.cfr.deep_trainer import _resolve_device
         assert _resolve_device("xpu") == "xpu"
