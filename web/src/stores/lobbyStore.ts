@@ -1,17 +1,10 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // src/stores/lobbyStore.ts
 import { create } from 'zustand';
-import type { LobbyState, ChatMessage, CircuitSettings, User, LobbyUser, MatchState } from '@/types/index';
+import type { LobbyState, ChatMessage, CircuitSettings, User, LobbyUser, MatchState, LobbyListEntry } from '@/types/index';
 import { listLobbies, createLobby as apiCreateLobby } from '@/services/lobbyService';
 import { useAuthStore } from './authStore';
 import { NIL as NIL_UUID } from 'uuid';
-
-/** Represents lobby information displayed in the dashboard list */
-interface LobbyListEntry {
-	lobby: LobbyState;
-	playerCount: number;
-	maxPlayers: number;
-}
 
 /** State for managing the list of available lobbies */
 interface LobbyListState {

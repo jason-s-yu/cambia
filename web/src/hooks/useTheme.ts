@@ -34,7 +34,7 @@ export function useTheme() {
 		applyTheme(storedTheme);
 
 		/** Listener for changes in the system's preferred color scheme. */
-		const handleSystemThemeChange = (e: MediaQueryListEvent) => {
+		const handleSystemThemeChange = () => {
 			// Only re-apply theme if the current setting is 'system'.
 			if (useUiStore.getState().theme === 'system') {
 				// console.log(`System theme changed (matches dark: ${e.matches}). Re-applying 'system' theme.`);

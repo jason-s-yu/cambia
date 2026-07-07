@@ -2,7 +2,6 @@
 // src/types/game.ts
 
 import type { HouseRules } from './index';
-import { v4 as uuidv4 } from 'uuid'; // Import UUID generator
 
 /** Represents the potentially obfuscated state of a single card */
 export interface ObfCard {
