@@ -3,9 +3,29 @@
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
 import api from '@/lib/axios';
-import type { Run, RunDetail, EvalMetric, MeanImpPoint, Checkpoint } from '@/types/training';
+import type {
+	Run,
+	RunDetail,
+	EvalMetric,
+	MeanImpPoint,
+	Checkpoint,
+	ProcessState,
+	PreflightCheck,
+	CreateRunRequest,
+	CreateRunResponse,
+	ProcessActionResponse,
+	StartRunOptions,
+	StopRunOptions,
+	ResumeRunOptions,
+} from '@/types/training';
 
 const LOG_BUFFER_CAP = 5000;
+
+/** Pulls a PreflightCheck[] out of a 409 preflight_failed body, if present. */
+function extractPreflightChecks(err: any): PreflightCheck[] | null {
+	const checks = err?.response?.data?.checks;
+	return Array.isArray(checks) ? checks : null;
+}
 
 interface TrainingState {
 	runs: Run[];
@@ -16,6 +36,9 @@ interface TrainingState {
 	logBuffer: string[];
 	filters: { algorithm: string; status: string };
 	isLoading: boolean;
+	processes: Record<string, ProcessState>;
+	templates: string[];
+	preflight: PreflightCheck[] | null;
 }
 
 interface TrainingActions {
@@ -28,6 +51,11 @@ interface TrainingActions {
 	appendLogBackfill: (lines: string[]) => void;
 	clearLogBuffer: () => void;
 	setFilter: (key: 'algorithm' | 'status', value: string) => void;
+	createRun: (req: CreateRunRequest) => Promise<void>;
+	startRun: (name: string, opts?: StartRunOptions) => Promise<void>;
+	stopRun: (name: string, opts?: StopRunOptions) => Promise<void>;
+	resumeRun: (name: string, opts?: ResumeRunOptions) => Promise<void>;
+	fetchTemplates: () => Promise<void>;
 }
 
 export const useTrainingStore = create<TrainingState & TrainingActions>()(
@@ -40,6 +68,9 @@ export const useTrainingStore = create<TrainingState & TrainingActions>()(
 		logBuffer: [],
 		filters: { algorithm: '', status: '' },
 		isLoading: false,
+		processes: {},
+		templates: [],
+		preflight: null,
 
 		fetchRuns: async () => {
 			set((state) => { state.isLoading = true; });
@@ -101,6 +132,90 @@ export const useTrainingStore = create<TrainingState & TrainingActions>()(
 				});
 			} catch (err: any) {
 				console.error('Failed to fetch checkpoints:', err);
+			}
+		},
+
+		createRun: async (req: CreateRunRequest) => {
+			set((state) => { state.isLoading = true; });
+			try {
+				const res = await api.post<CreateRunResponse>('/training/runs', req);
+				set((state) => {
+					state.runs.push(res.data.run);
+					state.processes[res.data.process.name] = res.data.process;
+					state.preflight = null;
+					state.isLoading = false;
+				});
+			} catch (err: any) {
+				console.error('Failed to create run:', err);
+				set((state) => {
+					state.isLoading = false;
+					state.preflight = extractPreflightChecks(err);
+				});
+			}
+		},
+
+		startRun: async (name: string, opts: StartRunOptions = {}) => {
+			set((state) => { state.isLoading = true; });
+			try {
+				const res = await api.post<ProcessActionResponse>(`/training/runs/${name}/start`, opts);
+				set((state) => {
+					state.processes[name] = res.data.process;
+					state.preflight = null;
+					state.isLoading = false;
+				});
+			} catch (err: any) {
+				console.error(`Failed to start run ${name}:`, err);
+				set((state) => {
+					state.isLoading = false;
+					state.preflight = extractPreflightChecks(err);
+				});
+			}
+		},
+
+		stopRun: async (name: string, opts: StopRunOptions = {}) => {
+			set((state) => { state.isLoading = true; });
+			try {
+				const res = await api.post<ProcessActionResponse>(`/training/runs/${name}/stop`, opts);
+				set((state) => {
+					state.processes[name] = res.data.process;
+					state.preflight = null;
+					state.isLoading = false;
+				});
+			} catch (err: any) {
+				console.error(`Failed to stop run ${name}:`, err);
+				set((state) => {
+					state.isLoading = false;
+					state.preflight = extractPreflightChecks(err);
+				});
+			}
+		},
+
+		resumeRun: async (name: string, opts: ResumeRunOptions = {}) => {
+			set((state) => { state.isLoading = true; });
+			try {
+				const res = await api.post<ProcessActionResponse>(`/training/runs/${name}/resume`, opts);
+				set((state) => {
+					state.processes[name] = res.data.process;
+					state.preflight = null;
+					state.isLoading = false;
+				});
+			} catch (err: any) {
+				console.error(`Failed to resume run ${name}:`, err);
+				set((state) => {
+					state.isLoading = false;
+					state.preflight = extractPreflightChecks(err);
+				});
+			}
+		},
+
+		fetchTemplates: async () => {
+			try {
+				const res = await api.get<string[]>('/training/config/templates');
+				set((state) => {
+					state.templates = res.data;
+				});
+			} catch (err: any) {
+				console.error('Failed to fetch templates:', err);
 			}
 		},
 
