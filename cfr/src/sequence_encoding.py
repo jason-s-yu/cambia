@@ -183,18 +183,18 @@ _ACTION_SPEC: List[Tuple[str, str]] = [
     ("draw_stockpile", _TAG_NONE),
     ("draw_discard", _TAG_NONE),
     ("call_cambia", _TAG_NONE),
-    ("discard_ability", _TAG_NONE),     # ActionDiscard(use_ability=True)
+    ("discard_ability", _TAG_NONE),  # ActionDiscard(use_ability=True)
     ("discard_no_ability", _TAG_NONE),  # ActionDiscard(use_ability=False)
-    ("replace", _TAG_SLOT1),            # target_hand_index
-    ("peek_own", _TAG_SLOT1),           # target_hand_index
-    ("peek_other", _TAG_SLOT1),         # target_opponent_hand_index
-    ("blind_swap", _TAG_SLOT2),         # (own_hand_index, opponent_hand_index)
-    ("king_look", _TAG_SLOT2),          # (own_hand_index, opponent_hand_index)
-    ("king_swap", _TAG_FLAG),           # perform_swap
+    ("replace", _TAG_SLOT1),  # target_hand_index
+    ("peek_own", _TAG_SLOT1),  # target_hand_index
+    ("peek_other", _TAG_SLOT1),  # target_opponent_hand_index
+    ("blind_swap", _TAG_SLOT2),  # (own_hand_index, opponent_hand_index)
+    ("king_look", _TAG_SLOT2),  # (own_hand_index, opponent_hand_index)
+    ("king_swap", _TAG_FLAG),  # perform_swap
     ("pass_snap", _TAG_NONE),
-    ("snap_own", _TAG_SLOT1),           # own_card_hand_index
-    ("snap_opp", _TAG_SLOT1),           # opponent_target_hand_index
-    ("snap_opp_move", _TAG_SLOT2),      # (own_card_to_move, target_empty_slot)
+    ("snap_own", _TAG_SLOT1),  # own_card_hand_index
+    ("snap_opp", _TAG_SLOT1),  # opponent_target_hand_index
+    ("snap_opp_move", _TAG_SLOT2),  # (own_card_to_move, target_empty_slot)
 ]
 
 
@@ -362,11 +362,11 @@ def _decode_action_local_id(local: int) -> Any:
 # token). Outcomes are a small fixed enum.
 
 _SNAP_OUTCOMES: List[str] = [
-    "penalty",          # snapper drew penalty cards
-    "success_own",      # ActionSnapOwn success (removed own slot)
-    "success_opp",      # ActionSnapOpponent success (removed opp slot)
-    "success_other",    # success with an unrecognized/absent action_type
-    "fail",             # explicit failure, no penalty
+    "penalty",  # snapper drew penalty cards
+    "success_own",  # ActionSnapOwn success (removed own slot)
+    "success_opp",  # ActionSnapOpponent success (removed opp slot)
+    "success_other",  # success with an unrecognized/absent action_type
+    "fail",  # explicit failure, no penalty
 ]
 _SNAP_OUTCOME_TO_LOCAL: dict = {o: i for i, o in enumerate(_SNAP_OUTCOMES)}
 NUM_SNAP_OUTCOME_IDS: int = len(_SNAP_OUTCOMES)
@@ -398,11 +398,11 @@ def _classify_snap(snap_info: dict) -> Tuple[str, int]:
 # decoder can segment the flat id stream without ambiguity.
 
 _FRAME_KINDS: List[str] = [
-    "init_peek",   # private: a peeked initial-hand slot. payload: SLOT, CARD
-    "public",      # public turn event. payload: ACTOR, ACTION, CARD(discard top)
-    "drawn",       # private: the observer's own drawn card. payload: CARD
-    "snap",        # public snap outcome. payload: ACTOR, OUTCOME, SLOT
-    "cambia",      # public: cambia called. payload: ACTOR(caller)
+    "init_peek",  # private: a peeked initial-hand slot. payload: SLOT, CARD
+    "public",  # public turn event. payload: ACTOR, ACTION, CARD(discard top)
+    "drawn",  # private: the observer's own drawn card. payload: CARD
+    "snap",  # public snap outcome. payload: ACTOR, OUTCOME, SLOT
+    "cambia",  # public: cambia called. payload: ACTOR(caller)
 ]
 _FRAME_TO_LOCAL: dict = {k: i for i, k in enumerate(_FRAME_KINDS)}
 NUM_FRAME_IDS: int = len(_FRAME_KINDS)
@@ -612,6 +612,22 @@ def observation_frames(observation: Any, observer_id: int) -> List[int]:
     return flat
 
 
+class SequenceOverflowError(ValueError):
+    """Raised by ``encode_observation_sequence(..., strict=True)`` when the raw
+    (untruncated) sequence would exceed ``seq_cap``.
+
+    Production PRT-CFR call sites condition on the FULL observation-action
+    prefix (v0.4 Phase 2 window-semantics decision: option A, full-recall both
+    sides via a non-firing cap). Silent keep-most-recent truncation there would
+    merge distinct full-recall histories that happen to share a common suffix --
+    exactly the RC-A/E1 recall-merge PRT-CFR exists to eliminate. ``seq_cap`` in
+    production is therefore an ALLOCATION bound, not a window: if this fires, the
+    fix is to raise ``seq_cap`` (re-run the P100 instrumentation), never to let
+    truncation proceed. Tiny-game paths (X2 gate) keep the default
+    ``strict=False`` truncating behavior unchanged.
+    """
+
+
 def encode_observation_sequence(
     initial_hand: List[Card],
     initial_peek_indices: Tuple[int, ...],
@@ -619,6 +635,7 @@ def encode_observation_sequence(
     observer_id: int,
     seq_cap: int = SEQ_CAP,
     add_bos_eos: bool = True,
+    strict: bool = False,
 ) -> List[int]:
     """Encode a full per-player episode to a flat token-id sequence.
 
@@ -640,6 +657,14 @@ def encode_observation_sequence(
     Raising SEQ_CAP (or narrowing per-event frame width) is a downstream
     (GRU/trainer) decision; this tokenizer makes truncation lossless-decodable at
     any cap and the gate test reports the observed max length.
+
+    ``strict``: when True, raise ``SequenceOverflowError`` instead of truncating
+    if the raw (untruncated) body would exceed the ``seq_cap`` budget. Production
+    PRT-CFR call sites (the raised, non-firing cap) pass ``strict=True`` so an
+    overflow is a hard error, never a silent truncation (v0.4 Phase 2
+    window-semantics decision, condition 1). Default False preserves the
+    existing truncating behavior for tiny-game/X2 and any other caller that
+    accepts a bounded window.
     """
     peek_groups: List[List[int]] = []
     for slot in sorted(initial_peek_indices):
@@ -660,6 +685,16 @@ def encode_observation_sequence(
     # whole frames while they fit. Observation frames are preferred over the
     # init_peek prefix only in that the prefix is considered last (oldest).
     ordered = peek_groups + obs_groups  # oldest -> newest
+
+    if strict:
+        total_len = sum(len(g) for g in ordered)
+        if total_len > budget:
+            raise SequenceOverflowError(
+                f"observation sequence length {total_len} exceeds strict cap "
+                f"budget {budget} (seq_cap={seq_cap}); raise seq_cap rather than "
+                f"truncate a production (full-recall) call site"
+            )
+
     kept_rev: List[List[int]] = []
     used = 0
     for g in reversed(ordered):  # newest -> oldest
