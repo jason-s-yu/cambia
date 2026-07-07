@@ -143,6 +143,31 @@ def test_manifest_absent_returns_none(tmp_path):
     assert read_deployable_iters(str(tmp_path)) is None
 
 
+def test_eval_path_consumption_drops_diverged_tail(tmp_path):
+    """The eval path (discover_snapshots) filtered by the manifest serves only the
+    pre-divergence window; the diverged tail snapshots are dropped from the served
+    SD-CFR average. This is the deployable-set realization without touching the
+    scorer: read_deployable_iters is the seam."""
+    from src.cfr.prtcfr_eval import discover_snapshots
+
+    d = str(tmp_path)
+    for it in range(1, 13):
+        torch.save(
+            {"encoder_state_dict": {}, "head_state_dict": {}, "iteration": it},
+            os.path.join(d, f"prtcfr_snapshot_iter_{it}.pt"),
+        )
+    c = BestSnapshotController(rel_tolerance=0.15, patience=2, min_iters=1, mode="min")
+    for it, m in [(2, 0.3), (4, 0.2), (6, 0.15), (8, 0.12), (10, 0.30), (12, 0.45)]:
+        c.update(it, m)
+    write_deployable_manifest(d, c, list(range(1, 13)), stopped_early=True)
+
+    all_iters = [it for it, _ in discover_snapshots(d)]
+    dep = set(read_deployable_iters(d))
+    served = [it for it in all_iters if it in dep]
+    assert max(served) == 8
+    assert not (dep & {9, 10, 11, 12})
+
+
 # ---------------------------------------------------------------------------
 # Peak-LR schedule
 # ---------------------------------------------------------------------------
