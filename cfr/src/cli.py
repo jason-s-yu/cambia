@@ -2411,7 +2411,12 @@ def _find_run_dir_checkpoints(ckpt_dir: Path, prefix: str, algorithm: str) -> Li
     with legacy prefix aliases. PPO: "<prefix>*steps_<N>.zip" or
     "<prefix>*eval_<N>.zip" (sb3-contrib .zip saves).
     """
-    if algorithm in _ZIP_CHECKPOINT_ALGOS:
+    if algorithm == "prt-cfr":
+        # PRT-CFR writes per-iteration regret-net SNAPSHOTS (the SD-CFR mixture
+        # inputs), not epoch/iter-numbered rolling checkpoints. They live in
+        # run_dir/snapshots as prtcfr_snapshot_iter_{t}.pt.
+        patterns = ["prtcfr_snapshot_iter_*.pt"]
+    elif algorithm in _ZIP_CHECKPOINT_ALGOS:
         patterns = [f"*{prefix}*steps_*.zip", f"*{prefix}*eval_*.zip"]
     else:
         prefixes = [prefix] + _LEGACY_CHECKPOINT_PREFIXES.get(prefix, [])
@@ -2570,9 +2575,9 @@ def evaluate(
 
         # Sample any checkpoint filename to refine algorithm detection (handles the case
         # where config is unmaterialized and `algorithm` field is hidden behind _base).
-        ckpt_dir = run_dir / "checkpoints"
-        if ckpt_dir.exists():
-            sample_ckpts = sorted(ckpt_dir.glob("*_checkpoint*.pt"))
+        chk_ckpt_dir = run_dir / "checkpoints"
+        if chk_ckpt_dir.exists():
+            sample_ckpts = sorted(chk_ckpt_dir.glob("*_checkpoint*.pt"))
             if sample_ckpts:
                 algorithm = infer_algorithm(config_dict, checkpoint_filename=sample_ckpts[0].name)
 
@@ -2582,13 +2587,18 @@ def evaluate(
 
         prefix = algo_to_checkpoint_prefix(algorithm)
 
+        # PRT-CFR writes per-iteration regret-net snapshots to run_dir/snapshots
+        # (the SD-CFR mixture inputs), not to run_dir/checkpoints; every other
+        # algorithm uses checkpoints/.
+        ckpt_dir = run_dir / ("snapshots" if algorithm == "prt-cfr" else "checkpoints")
+
         # Default to 5000 games in run-dir mode (but respect explicit user override)
         if games_was_default:
             games = 5000
 
         # Resolve checkpoint
         if not ckpt_dir.exists():
-            print(f"ERROR: No checkpoints/ directory in {run_dir}", file=sys.stderr)
+            print(f"ERROR: No {ckpt_dir.name}/ directory in {run_dir}", file=sys.stderr)
             raise typer.Exit(1)
 
         all_ckpts = _find_run_dir_checkpoints(ckpt_dir, prefix, algorithm)

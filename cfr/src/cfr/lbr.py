@@ -208,6 +208,17 @@ def collect_infosets(
             except Exception:  # JUSTIFIED: eval resilience
                 break
 
+            # Full-recall token-stream feed for agents that consume the engine
+            # token stream (PRT-CFR): every applied action, both seats. Generic
+            # and guarded by hasattr, so only such agents are affected; without
+            # it the PRT-CFR prefix would stay empty across the game and its
+            # policy (hence the LBR exploitability) would be measured wrong.
+            if hasattr(agent_wrapper, "observe_transition"):
+                try:
+                    agent_wrapper.observe_transition(game_state, chosen_action, ap)
+                except Exception:  # JUSTIFIED: eval resilience
+                    pass
+
             if len(sampled) >= num_infosets:
                 break
 

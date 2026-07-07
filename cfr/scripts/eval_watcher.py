@@ -385,8 +385,21 @@ def _infer_checkpoint_prefix(agent_type: str, explicit_prefix: Optional[str] = N
         "gtcfr": "gtcfr_checkpoint",
         "sog": "sog_checkpoint",
         "sog_inference": "sog_checkpoint",
+        # PRT-CFR: the SD-CFR mixture inputs are per-iteration regret-net
+        # snapshots (prtcfr_snapshot_iter_{t}.pt in run_dir/snapshots), not
+        # rolling checkpoints.
+        "prt_cfr": "prtcfr_snapshot",
     }
     return prefix_map.get(agent_type, "deep_cfr_checkpoint")
+
+
+def _scan_dir_for_agent(run_dir: str, agent_type: str) -> str:
+    """The subdirectory holding an agent type's per-iteration checkpoint files.
+
+    PRT-CFR writes its snapshots to run_dir/snapshots; every other algorithm
+    uses run_dir/checkpoints.
+    """
+    return os.path.join(run_dir, "snapshots" if agent_type == "prt_cfr" else "checkpoints")
 
 
 def main() -> None:
@@ -480,7 +493,7 @@ def main() -> None:
                     continue
 
                 state = load_state(run_dir)
-                ckpt_dir = os.path.join(run_dir, "checkpoints")
+                ckpt_dir = _scan_dir_for_agent(run_dir, args.agent_type)
                 # Support both _iter_N.pt (deep_cfr, rebel) and _epoch_N.pt (gtcfr, sog).
                 # Also scan legacy naming (checkpoint_gtcfr_*, checkpoint_sog_sog_*)
                 # for backward compat with pre-2026-03-09 runs.
@@ -515,8 +528,11 @@ def main() -> None:
                         print(log_line, flush=True)
                         state["evaluated"].append(filename)
                         save_state(run_dir, state)
-                        # Head-to-head cross-iteration eval
-                        if args.h2h_games > 0:
+                        # Head-to-head cross-iteration eval. Skipped for PRT-CFR:
+                        # the wrapper reads the whole run's deployable snapshot
+                        # set, so two snapshot files in the same dir resolve to
+                        # the identical SD-CFR mixture (a self-vs-self matchup).
+                        if args.h2h_games > 0 and args.agent_type != "prt_cfr":
                             try:
                                 evaluate_head_to_head(
                                     run_dir, ckpt, iter_num, config_path, args.h2h_games,
