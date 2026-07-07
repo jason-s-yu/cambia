@@ -133,11 +133,15 @@ def _build_agent(agent_type, config, checkpoint, device, argmax):
 
 def cmd_lbr(args):
     from src.config import load_config
-    from src.cfr.sampled_lbr import sampled_lbr
 
     cfg = load_config(args.config)
     if cfg is None:
         _eprint("[E3] ERROR: config load failed")
+        sys.exit(1)
+
+    tier = (getattr(args, "tier", "A") or "A").strip().upper()
+    if tier not in ("A", "B"):
+        _eprint(f"[E3] ERROR: unknown --tier {tier!r}")
         sys.exit(1)
 
     agent = _build_agent(
@@ -145,16 +149,35 @@ def cmd_lbr(args):
     )
 
     t0 = time.time()
-    res = sampled_lbr(
-        agent,
-        cfg,
-        num_infosets=args.infosets,
-        br_rollouts_per_infoset=args.rollouts,
-        seed=args.seed,
-    )
+    if tier == "B":
+        # Tier B: agent-policy continuation rollouts vs a strong opponent.
+        from src.cfr.lbr import tier_b_lbr
+
+        res = tier_b_lbr(
+            agent,
+            cfg,
+            num_infosets=args.infosets,
+            br_rollouts_per_infoset=args.rollouts,
+            seed=args.seed,
+        )
+        rollout_opponent = f"{res.get('rollout_opponent', '?')} (tier B, agent-policy)"
+        experiment = "E3-LBR-tierB"
+    else:
+        from src.cfr.sampled_lbr import sampled_lbr
+
+        res = sampled_lbr(
+            agent,
+            cfg,
+            num_infosets=args.infosets,
+            br_rollouts_per_infoset=args.rollouts,
+            seed=args.seed,
+        )
+        rollout_opponent = "RandomAgent (tier A)"
+        experiment = "E3-LBR-tierA"
     elapsed = time.time() - t0
     out = {
-        "experiment": "E3-LBR-tierA",
+        "experiment": experiment,
+        "tier": tier,
         "agent_type": args.agent_type,
         "checkpoint": args.checkpoint,
         "config": args.config,
@@ -166,11 +189,11 @@ def cmd_lbr(args):
         "exploitability": round(res["exploitability"], 6),
         "std_err": round(res["std_err"], 6),
         "ci95_half": round(1.96 * res["std_err"], 6),
-        "rollout_opponent": "RandomAgent (tier A)",
+        "rollout_opponent": rollout_opponent,
         "elapsed_sec": round(elapsed, 1),
     }
     _eprint(
-        f"[E3] {args.agent_type} expl={out['exploitability']:.4f} "
+        f"[E3] tier={tier} {args.agent_type} expl={out['exploitability']:.4f} "
         f"+/-{out['ci95_half']:.4f} (n={out['infosets_sampled']}, "
         f"seed={args.seed}, {elapsed:.1f}s)"
     )
@@ -260,6 +283,12 @@ def main():
     lb.add_argument("--seed", type=int, default=42)
     lb.add_argument("--device", default="cpu")
     lb.add_argument("--argmax", action="store_true")
+    lb.add_argument(
+        "--tier",
+        choices=["A", "B"],
+        default="A",
+        help="A: random rollouts (loose). B: agent-policy rollouts vs strong opp (tighter).",
+    )
     lb.set_defaults(func=cmd_lbr)
 
     h = sub.add_parser("h2h")

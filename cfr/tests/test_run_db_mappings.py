@@ -92,6 +92,7 @@ def test_algo_to_checkpoint_prefix_all_entries():
         "gtcfr": "gtcfr_checkpoint",
         "sog": "sog_checkpoint",
         "psro": "deep_cfr_checkpoint",
+        "ppo": "ppo_model",
     }
     for algo, prefix in expected.items():
         assert algo_to_checkpoint_prefix(algo) == prefix, f"Failed for {algo}"
@@ -100,3 +101,15 @@ def test_algo_to_checkpoint_prefix_all_entries():
 
 def test_algo_to_checkpoint_prefix_fallback():
     assert algo_to_checkpoint_prefix("unknown-algo") == "deep_cfr_checkpoint"
+
+
+def test_algo_to_checkpoint_prefix_ppo_matches_e2_trainer_save_naming():
+    """ppo_train.py saves under the agent_data_save_path stem (e.g. "ppo_model"),
+    with periodic/eval callbacks writing "ppo_model_steps_<N>.zip" and
+    "ppo_model_eval_<N>.zip" (see config/v0.4-e2-ppo-selfplay.yaml
+    agent_data_save_path). Run-dir auto-detect must glob on that stem, not on
+    a "ppo_checkpoint" prefix the trainer never writes.
+    """
+    assert algo_to_checkpoint_prefix("ppo") == "ppo_model"
+    assert "ppo_model_steps_1000.zip".startswith(ALGO_TO_CHECKPOINT_PREFIX["ppo"])
+    assert "ppo_model_eval_1000.zip".startswith(ALGO_TO_CHECKPOINT_PREFIX["ppo"])

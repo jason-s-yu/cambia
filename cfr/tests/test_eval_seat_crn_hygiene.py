@@ -631,7 +631,7 @@ class TestPPOAlgorithmDetection:
         import src.run_db as run_db
 
         assert run_db.algo_to_agent_type("ppo") == "ppo"
-        assert run_db.algo_to_checkpoint_prefix("ppo") == "ppo_checkpoint"
+        assert run_db.algo_to_checkpoint_prefix("ppo") == "ppo_model"
 
     def test_existing_detection_unchanged(self):
         import src.run_db as run_db

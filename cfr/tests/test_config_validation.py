@@ -286,7 +286,17 @@ class TestEvalCambiaRulesMismatch:
         class _FakeConfig:
             cambia_rules = _FakeCambiaRules()
 
-        with caplog.at_level(logging.WARNING):
+        # Target the emitting logger explicitly (module: src.evaluate_agents),
+        # not just root. Some full-suite orderings (e.g. tools/tiny_solver.py,
+        # imported by the PRT-CFR tests, permanently sets every already-created
+        # "src.*" logger to CRITICAL to silence chatty per-node warnings during
+        # tree expansion) leave this logger's own .level pinned above WARNING
+        # for the rest of the session. caplog.at_level(logger="root") only
+        # resets the root logger's level, which doesn't help once a child
+        # logger has an explicit level of its own; naming the logger here
+        # forces it back down to WARNING for the duration of the check,
+        # regardless of what an earlier-imported module did to it.
+        with caplog.at_level(logging.WARNING, logger="src.evaluate_agents"):
             ea.NeuralAgentWrapper._load_cambia_rules_mismatch_check(
                 checkpoint, _FakeConfig(), player_id=0
             )
