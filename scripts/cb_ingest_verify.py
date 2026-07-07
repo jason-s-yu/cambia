@@ -233,13 +233,29 @@ def hub_doc_count(base_url: str, project: str, secret: str) -> int | None:
 def reconcile(manifest: dict, preview: dict, hub: dict[int, dict]) -> dict:
     """Three-way reconcile. Returns {class: [records]} + counts."""
     man_docs = manifest.get("documents", [])
-    # manifest keyed by source_path (its stable on-disk locator)
-    man_by_path = {d["source_path"]: d for d in man_docs}
-    man_paths = set(man_by_path)
-
     prev_docs = preview.get("documents", [])
     prev_by_path = {d["source_path"]: d for d in prev_docs}
     prev_paths = set(prev_by_path)
+
+    # manifest keyed by source_path (its stable on-disk locator). Supersession
+    # chains leave multiple rows per path; the live end of the chain is the row
+    # whose content_hash matches what the parser sees on disk now. Older chain
+    # rows are history, not drift.
+    man_by_path: dict[str, dict] = {}
+    for d in man_docs:
+        sp = d["source_path"]
+        cur = man_by_path.get(sp)
+        if cur is None:
+            man_by_path[sp] = d
+            continue
+        disk_hash = (prev_by_path.get(sp) or {}).get("content_hash")
+        if disk_hash and d.get("content_hash") == disk_hash:
+            man_by_path[sp] = d
+        elif disk_hash and cur.get("content_hash") == disk_hash:
+            pass  # already holding the live row
+        else:
+            man_by_path[sp] = d  # no disk match on either row: last wins
+    man_paths = set(man_by_path)
 
     buckets: dict[str, list] = {
         "in_sync": [], "changed_on_disk": [], "moved_on_disk": [], "added_on_disk": [],
