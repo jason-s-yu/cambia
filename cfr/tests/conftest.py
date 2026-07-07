@@ -223,6 +223,9 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         num_players: int = 2
         max_trajectory_steps: int = 4000
         backend: str = "go"
+        gen_batched: bool = True
+        gen_chunk_games: int = 64
+        infer_dtype: str = "bf16"
         critic_enabled: bool = True
         critic_capacity: int = 200_000
         critic_steps_per_iter: int = 500

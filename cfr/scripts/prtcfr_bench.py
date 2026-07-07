@@ -419,6 +419,14 @@ def build_bench_config(args: argparse.Namespace) -> PRTCFRConfig:
         critic_enabled=args.critic_enabled,
         stability_enabled=False,
     )
+    # S1W15 additive: select the generation path / batching knobs when the flag
+    # is given; otherwise inherit the config default (batched, chunk 64, bf16).
+    if getattr(args, "gen_batched", None) is not None:
+        overrides["gen_batched"] = bool(args.gen_batched)
+    if getattr(args, "gen_chunk_games", None) is not None:
+        overrides["gen_chunk_games"] = int(args.gen_chunk_games)
+    if getattr(args, "infer_dtype", None) is not None:
+        overrides["infer_dtype"] = str(args.infer_dtype)
     merged = prt_cfg.model_dump()
     merged.update(overrides)
     return PRTCFRConfig(**merged)
@@ -845,6 +853,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--num-players", type=int, default=2)
     ap.add_argument("--max-trajectory-steps", type=int, default=4000)
     ap.add_argument("--seed", type=int, default=0)
+    # S1W15 additive knobs (do not change any measurement semantics; they only
+    # select which generation path run_iteration takes so the X3 gen cell can be
+    # measured before/after the batched-incremental wiring).
+    ap.add_argument(
+        "--gen-batched",
+        dest="gen_batched",
+        action="store_true",
+        default=None,
+        help="force the batched incremental generation path (S1W15). Default: "
+        "inherit the config (production default True).",
+    )
+    ap.add_argument(
+        "--no-gen-batched",
+        dest="gen_batched",
+        action="store_false",
+        help="force the original per-decision full-prefix generation path (the "
+        "S1W7 X3 'before' baseline).",
+    )
+    ap.add_argument("--gen-chunk-games", type=int, default=None)
+    ap.add_argument("--infer-dtype", default=None, choices=["bf16", "fp32"])
     ap.add_argument("--critic-enabled", action="store_true", default=False)
     ap.add_argument("--run-dir", default=None)
     ap.add_argument("--out", default=None, help="JSON results output path")
