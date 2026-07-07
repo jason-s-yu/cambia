@@ -55,8 +55,12 @@ ALGO_TO_CHECKPOINT_PREFIX: Dict[str, str] = {
     # v3.1 DESCA checkpoints follow the {algo}_checkpoint convention.
     "desca": "desca_checkpoint",
     "desca-search": "desca_search_checkpoint",
-    # PPO (sb3-contrib) saves .zip files; the prefix follows the same convention.
-    "ppo": "ppo_checkpoint",
+    # PPO (sb3-contrib) saves .zip files under the stem configured via
+    # agent_data_save_path / --save-path (e.g. "ppo_model"); ppo_train.py's
+    # periodic/eval callbacks derive "ppo_model_steps_<N>.zip" and
+    # "ppo_model_eval_<N>.zip" from that same stem. Prefix must match what the
+    # trainer actually writes, not a "{algo}_checkpoint" guess.
+    "ppo": "ppo_model",
 }
 
 
