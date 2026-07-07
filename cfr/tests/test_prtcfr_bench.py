@@ -21,6 +21,8 @@ torch = pytest.importorskip("torch")
 
 from scripts.prtcfr_bench import (  # noqa: E402
     ContentionMonitor,
+    Heartbeat,
+    _cuda_warm_or_timeout,
     _replicate_reservoir_to_size,
     build_arg_parser,
     build_bench_config,
@@ -212,3 +214,48 @@ def test_run_fit_scale_probe_tiny_python_backend_cpu(tmp_path):
     sizes = result["config"]["reservoir_sizes_after_replication"]
     assert all(v >= 1 for v in sizes.values())
     assert "caveat" in result and "REAL" in result["caveat"]
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat + fail-fast CUDA init (hang localization, added after the K=2
+# GPU probe hung silently under contention -- see the S1W7 verdict).
+# ---------------------------------------------------------------------------
+
+
+def test_heartbeat_tick_throttles_force_always_prints(capsys):
+    hb = Heartbeat(min_interval_s=1000.0)  # effectively never elapses in-test
+    hb.force("first")
+    hb.tick("suppressed")  # too soon after force(); must not print
+    hb.force("second")  # force always prints regardless of throttle
+    out = capsys.readouterr().out
+    assert out.count("heartbeat") == 2
+    assert "first" in out and "second" in out
+    assert "suppressed" not in out
+
+
+def test_cuda_warm_or_timeout_is_noop_on_cpu():
+    # Must return immediately and never raise when device is not CUDA.
+    _cuda_warm_or_timeout("cpu", timeout_s=1.0)
+
+
+def test_cuda_warm_or_timeout_raises_timeout_when_warm_fn_hangs(monkeypatch):
+    """Simulate a wedged CUDA context (as observed with tgx at ~100% SM
+    util): torch.zeros/synchronize block forever. The helper must raise
+    TimeoutError promptly rather than hang."""
+    import time as _time
+
+    import scripts.prtcfr_bench as bench_mod
+
+    class _HangingTorch:
+        class cuda:
+            @staticmethod
+            def synchronize():
+                _time.sleep(5.0)
+
+        @staticmethod
+        def zeros(*a, **kw):
+            return object()
+
+    monkeypatch.setitem(sys.modules, "torch", _HangingTorch)
+    with pytest.raises(TimeoutError):
+        bench_mod._cuda_warm_or_timeout("cuda", timeout_s=0.2)

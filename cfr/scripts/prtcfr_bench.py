@@ -204,6 +204,66 @@ class ContentionMonitor:
         return out
 
 
+class Heartbeat:
+    """Throttled progress log so a future hang is localizable from the bench
+    log (which phase/game it stalled in) instead of a silent `timeout` reap.
+    ``tick`` is rate-limited to ``min_interval_s``; ``force`` always prints."""
+
+    def __init__(self, min_interval_s: float = 2.0):
+        self.min_interval_s = min_interval_s
+        self._last = 0.0
+        self._t0 = time.perf_counter()
+
+    def force(self, label: str) -> None:
+        now = time.perf_counter()
+        print(f"[prtcfr-bench] heartbeat t+{now - self._t0:6.1f}s: {label}", flush=True)
+        self._last = now
+
+    def tick(self, label: str) -> None:
+        now = time.perf_counter()
+        if now - self._last >= self.min_interval_s:
+            self.force(label)
+
+
+def _cuda_warm_or_timeout(device: str, timeout_s: float = 20.0) -> None:
+    """Fail fast if CUDA init / first allocation hangs, rather than let an
+    outer `timeout` reap the process with no diagnostic (observed: a
+    co-tenant spiking SM util to ~100% around context-creation time can stall
+    it indefinitely). Runs a trivial alloc+sync on a background thread with a
+    join timeout; the thread cannot be force-killed if CUDA itself is wedged,
+    but the caller gets a clear, immediate, actionable error instead of
+    silence. No-op for non-CUDA devices."""
+    if not device.startswith("cuda"):
+        return
+    import torch
+
+    result: Dict[str, Any] = {}
+
+    def _warm() -> None:
+        try:
+            t0 = time.perf_counter()
+            x = torch.zeros(1, device=device)
+            torch.cuda.synchronize()
+            _ = x.cpu()
+            result["ok"] = True
+            result["seconds"] = time.perf_counter() - t0
+        except Exception as e:  # noqa: BLE001
+            result["error"] = str(e)
+
+    th = threading.Thread(target=_warm, daemon=True)
+    th.start()
+    th.join(timeout=timeout_s)
+    if th.is_alive():
+        raise TimeoutError(
+            f"CUDA init/first-alloc did not return within {timeout_s:.0f}s "
+            f"(device={device}); a co-tenant likely holds the SM/allocator "
+            "(check nvidia-smi util/mem). Failing fast rather than hanging "
+            "under an outer timeout with no diagnostic."
+        )
+    if "error" in result:
+        raise RuntimeError(f"CUDA init/first-alloc failed: {result['error']}")
+
+
 def _wait_for_clean_host(max_load: float, poll_s: float, timeout_s: float) -> float:
     """Block until 1-min load avg <= ``max_load`` or ``timeout_s`` elapses
     (host protocol: a full-suite batch gate may run concurrently early in a
@@ -267,6 +327,31 @@ def _patched(
             dt = time.perf_counter() - t0
             if predicate is None or predicate(a, kw):
                 timers.add(bucket, dt)
+
+    setattr(cls, method_name, wrapper)
+    try:
+        yield
+    finally:
+        setattr(cls, method_name, orig)
+
+
+@contextlib.contextmanager
+def _heartbeat_patched(cls: type, method_name: str, hb: "Heartbeat", label: str):
+    """Temporarily wrap ``cls.method_name`` with a throttled heartbeat tick
+    (composes with ``_patched`` on the same method via ExitStack nesting: each
+    context captures whatever is currently installed as its own "orig", so
+    stacking a timing patch and a heartbeat patch on the same method chains
+    both effects). Restores the original on exit."""
+    if not hasattr(cls, method_name):
+        yield
+        return
+    orig = getattr(cls, method_name)
+    counter = {"n": 0}
+
+    def wrapper(self, *a, **kw):
+        counter["n"] += 1
+        hb.tick(f"{label} #{counter['n']}")
+        return orig(self, *a, **kw)
 
     setattr(cls, method_name, wrapper)
     try:
@@ -356,6 +441,9 @@ def run_cell(args: argparse.Namespace, batch_size_override: Optional[int] = None
         cfg = PRTCFRConfig(**{**cfg.model_dump(), "batch_size": batch_size_override})
 
     device = str(cfg.device)
+    hb = Heartbeat(min_interval_s=args.heartbeat_interval_s)
+    hb.force(f"start (device={device} backend={cfg.backend} k={cfg.k_games_per_iter})")
+
     pre = contention_snapshot()
     gpu_pre = pre.get("gpu") if device.startswith("cuda") else None
     if device.startswith("cuda") and isinstance(gpu_pre, dict) and "mem_free_mib" in gpu_pre:
@@ -370,13 +458,19 @@ def run_cell(args: argparse.Namespace, batch_size_override: Optional[int] = None
                 "card); re-check nvidia-smi and retry, or lower --min-free-vram-mib"
             )
 
+    hb.force("cuda-init:start")
+    _cuda_warm_or_timeout(device, timeout_s=args.cuda_init_timeout_s)
+    hb.force("cuda-init:done")
+
     run_dir = args.run_dir or tempfile.mkdtemp(prefix="prtcfr_bench_")
     os.makedirs(run_dir, exist_ok=True)
     db_path = os.path.join(run_dir, "cambia_runs_bench.db")
 
     def driver_factory(seed: int):
+        hb.tick(f"driver-init game_seed={seed}")
         return new_production_driver(seed, num_players=cfg.num_players, backend=cfg.backend)
 
+    hb.force("trainer-init:start")
     trainer = PRTCFRProductionTrainer(
         cfg,
         run_dir,
@@ -384,6 +478,7 @@ def run_cell(args: argparse.Namespace, batch_size_override: Optional[int] = None
         db_path=db_path,
         run_name=f"x3-bench-{int(time.time())}",
     )
+    hb.force("trainer-init:done")
 
     timers = BenchTimers()
     host_load_before = os.getloadavg()[0]
@@ -394,6 +489,7 @@ def run_cell(args: argparse.Namespace, batch_size_override: Optional[int] = None
             for cls in (GoEngineGameDriver, PythonEngineGameDriver):
                 for meth in _FFI_METHODS:
                     stack.enter_context(_patched(cls, meth, timers, "ffi"))
+                stack.enter_context(_heartbeat_patched(cls, "close", hb, "game-done"))
             stack.enter_context(_patched(NetProductionSigma, "__call__", timers, "inference"))
             stack.enter_context(_patched(_UnpaddingReservoir, "add", timers, "reservoir_write"))
             stack.enter_context(
@@ -406,7 +502,9 @@ def run_cell(args: argparse.Namespace, batch_size_override: Optional[int] = None
                 )
             )
             with ContentionMonitor(interval_s=args.contention_interval_s) as mon:
+                hb.force("gen+fit:start")
                 state = trainer.run_iteration(1)
+                hb.force("gen+fit:done")
     finally:
         trainer.close()
 
@@ -567,23 +665,35 @@ def run_fit_scale_probe(args: argparse.Namespace, seed_k_games: int = 16) -> Dic
     seed_args.k_games = seed_k_games
     seed_args.train_steps = 1
     cfg = build_bench_config(seed_args)
+    device = str(cfg.device)
+
+    hb = Heartbeat(min_interval_s=args.heartbeat_interval_s)
+    hb.force(f"fit-scale-probe start (device={device} backend={cfg.backend})")
+    hb.force("cuda-init:start")
+    _cuda_warm_or_timeout(device, timeout_s=args.cuda_init_timeout_s)
+    hb.force("cuda-init:done")
 
     run_dir = args.run_dir or tempfile.mkdtemp(prefix="prtcfr_fitprobe_")
     os.makedirs(run_dir, exist_ok=True)
     db_path = os.path.join(run_dir, "cambia_runs_bench.db")
 
     def driver_factory(seed: int):
+        hb.tick(f"seed-gen driver-init game_seed={seed}")
         return new_production_driver(seed, num_players=cfg.num_players, backend=cfg.backend)
 
+    hb.force("trainer-init:start")
     trainer = PRTCFRProductionTrainer(
         cfg, run_dir, driver_factory=driver_factory, db_path=db_path,
         run_name=f"x3-fitprobe-{int(time.time())}",
     )
+    hb.force("trainer-init:done")
     try:
         print(f"[prtcfr-bench] fit-scale probe: seeding {seed_k_games} real games...")
+        hb.force("seed-gen:start")
         seed_gen_start = time.perf_counter()
         trainer.run_iteration(1)  # populates trainer.reservoirs; its own fit is throwaway
         seed_gen_seconds = time.perf_counter() - seed_gen_start
+        hb.force("seed-gen:done")
 
         target_per_player = max(args.batch_size // cfg.num_players + 128, 256)
         for p in range(cfg.num_players):
@@ -603,6 +713,7 @@ def run_fit_scale_probe(args: argparse.Namespace, seed_k_games: int = 16) -> Dic
             stack.enter_context(
                 _patched(_MultiReservoirSampler, "sample_batch", timers, "reservoir_sample")
             )
+            stack.enter_context(_heartbeat_patched(PRTCFRNet, "raw_advantages", hb, "fit-step"))
             stack.enter_context(
                 _patched(
                     PRTCFRNet, "raw_advantages", timers, "fit_forward",
@@ -610,6 +721,7 @@ def run_fit_scale_probe(args: argparse.Namespace, seed_k_games: int = 16) -> Dic
                 )
             )
             with ContentionMonitor(interval_s=args.contention_interval_s) as mon:
+                hb.force(f"fit:start batch_size={args.batch_size} train_steps={args.train_steps}")
                 t0 = time.perf_counter()
                 loss = _fit_from_scratch(
                     trainer.net, sampler,
@@ -617,6 +729,7 @@ def run_fit_scale_probe(args: argparse.Namespace, seed_k_games: int = 16) -> Dic
                     weight_decay=cfg.weight_decay, grad_clip=cfg.grad_clip, lr_min=cfg.lr_min,
                 )
                 fit_seconds = time.perf_counter() - t0
+                hb.force("fit:done")
         host_after = os.getloadavg()[0]
         gpu_after = contention_snapshot().get("gpu")
     finally:
@@ -739,6 +852,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--max-oom-retries", type=int, default=4)
     ap.add_argument("--min-free-vram-mib", type=int, default=800)
     ap.add_argument("--contention-interval-s", type=float, default=5.0)
+    ap.add_argument(
+        "--heartbeat-interval-s", type=float, default=2.0,
+        help="Minimum seconds between throttled progress heartbeat log lines.",
+    )
+    ap.add_argument(
+        "--cuda-init-timeout-s", type=float, default=20.0,
+        help=(
+            "Fail fast (raise) if CUDA init / first alloc does not return "
+            "within this many seconds (a co-tenant at ~100%% SM util can "
+            "stall context creation indefinitely)."
+        ),
+    )
     ap.add_argument("--max-host-load", type=float, default=8.0)
     ap.add_argument("--host-wait-timeout-s", type=float, default=900.0)
     ap.add_argument("--host-wait-poll-s", type=float, default=15.0)
