@@ -5,7 +5,7 @@ import sys
 import signal
 import multiprocessing
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Union, get_args, get_origin
 
 import typer
 
@@ -1533,6 +1533,11 @@ def train_prtcfr(
         "--backend",
         help="Production GameDriver backend: 'go' (default) or 'python'",
     ),
+    resume: bool = typer.Option(
+        False,
+        "--resume",
+        help="Warm-start from resume_state.json + the rolling checkpoint in the run dir",
+    ),
 ):
     """Train using PRT-CFR (Perfect-Recall Trajectory CFR, v0.4 Phase 2)."""
     import logging as _logging
@@ -1629,8 +1634,26 @@ def train_prtcfr(
     )
 
     _iters = iterations if iterations is not None else prt_cfg.iterations
+
+    # Thread --resume into trainer.train(resume=...) only if the trainer
+    # actually accepts it. Guards against a hard TypeError while the trainer
+    # side of resume-from-disk (a separate task) hasn't landed yet; --resume
+    # without support fails with a clear message instead of a raw crash.
+    import inspect as _inspect
+
+    _train_kwargs = {"iterations": _iters}
+    if "resume" in _inspect.signature(trainer.train).parameters:
+        _train_kwargs["resume"] = resume
+    elif resume:
+        print(
+            "ERROR: --resume requires a PRT-CFR trainer build with resume "
+            "support (trainer.train() has no 'resume' parameter).",
+            file=sys.stderr,
+        )
+        raise typer.Exit(1)
+
     try:
-        trainer.train(iterations=_iters)
+        trainer.train(**_train_kwargs)
     except KeyboardInterrupt:
         print(
             "\nInterrupted. The last completed iteration's snapshot + rolling "
@@ -3127,6 +3150,143 @@ def config_diff(
         for p, v1, v2 in diffs:
             table.add_row(p, str(v1) if v1 is not None else "(default)", str(v2) if v2 is not None else "(default)")
         console.print(table)
+
+
+def _coerce_override_value(raw: str):
+    """Coerce a `--set key=value` string to bool/int/float, else leave as str."""
+    low = raw.strip().lower()
+    if low in ("true", "false"):
+        return low == "true"
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+    return raw
+
+
+def _resolve_nested_model_cls(annotation):
+    """Unwrap Optional[...]/Union[...] to find a pydantic BaseModel subclass.
+
+    Returns None if the annotation isn't (or doesn't wrap) a BaseModel, which
+    means the corresponding field is a leaf (can't be dotted into further).
+    """
+    from pydantic import BaseModel
+
+    if get_origin(annotation) is Union:
+        for arg in get_args(annotation):
+            if arg is type(None):
+                continue
+            resolved = _resolve_nested_model_cls(arg)
+            if resolved is not None:
+                return resolved
+        return None
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return annotation
+    return None
+
+
+def _apply_dotted_override(merged: dict, dotted_key: str, raw_value: str, root_model_cls) -> None:
+    """Validate a dotted `--set` key against the Config schema and apply it.
+
+    Walks `root_model_cls.model_fields` one dotted segment at a time,
+    descending into nested dicts (creating them as needed) only where the
+    schema actually has a nested model at that position. Raises ValueError
+    with a human-readable message on any unknown segment or non-object
+    descent, so a bad key is caught here rather than silently ignored by
+    Config's `extra="ignore"` model config.
+    """
+    parts = [p for p in dotted_key.split(".")]
+    if not parts or any(not p for p in parts):
+        raise ValueError(f"malformed key '{dotted_key}'")
+
+    cur_model_cls = root_model_cls
+    cur_dict = merged
+    for i, part in enumerate(parts):
+        fields = getattr(cur_model_cls, "model_fields", None)
+        if not fields or part not in fields:
+            raise ValueError(
+                f"unknown config key '{dotted_key}' (no field '{part}' on "
+                f"{getattr(cur_model_cls, '__name__', cur_model_cls)!s})"
+            )
+        if i == len(parts) - 1:
+            cur_dict[part] = _coerce_override_value(raw_value)
+            return
+        nested_model_cls = _resolve_nested_model_cls(fields[part].annotation)
+        if nested_model_cls is None:
+            raise ValueError(
+                f"cannot descend into non-object field '{part}' in key '{dotted_key}'"
+            )
+        next_dict = cur_dict.setdefault(part, {})
+        if not isinstance(next_dict, dict):
+            raise ValueError(
+                f"field '{part}' in key '{dotted_key}' is not an object in the base config"
+            )
+        cur_dict = next_dict
+        cur_model_cls = nested_model_cls
+
+
+@config_app.command("render")
+def config_render(
+    base: Path = typer.Argument(..., help="Base config YAML (may reference _base)", exists=True),
+    set_: List[str] = typer.Option(
+        [],
+        "--set",
+        help="Dotted-key override key=value, e.g. --set prt_cfr.iterations=5 (repeatable)",
+    ),
+    output: Path = typer.Option(
+        ..., "-o", "--output", help="Materialized output YAML path"
+    ),
+):
+    """Resolve _base, apply --set overrides, validate, and write a materialized config."""
+    from src.config import Config, resolve_config_yaml
+    import yaml as _yaml
+
+    try:
+        merged = resolve_config_yaml(str(base))
+    except Exception as e:
+        typer.echo(f"Error: could not resolve '{base}': {e}", err=True)
+        raise typer.Exit(1)
+
+    for item in set_:
+        if "=" not in item:
+            typer.echo(f"Error: --set value must be key=value, got '{item}'", err=True)
+            raise typer.Exit(1)
+        key, _, value = item.partition("=")
+        try:
+            _apply_dotted_override(merged, key, value, Config)
+        except ValueError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
+
+    try:
+        Config.model_validate(merged)
+    except Exception as e:
+        typer.echo(f"Error: materialized config is invalid: {e}", err=True)
+        raise typer.Exit(1)
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(_yaml.safe_dump(merged, sort_keys=False), encoding="utf-8")
+    typer.echo(f"Rendered config written to {output}")
+
+
+@config_app.command("validate")
+def config_validate(
+    path: Path = typer.Argument(..., help="Config YAML to validate", exists=True),
+):
+    """Validate a config YAML: resolves _base, validates against the Config schema."""
+    from src.config import Config, resolve_config_yaml
+
+    try:
+        raw = resolve_config_yaml(str(path))
+        Config.model_validate(raw)
+    except Exception as e:
+        typer.echo(f"Error: '{path}' is invalid: {e}", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"OK: '{path}' is valid.")
 
 
 # ---------------------------------------------------------------------------
