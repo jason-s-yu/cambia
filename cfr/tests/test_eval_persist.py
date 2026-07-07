@@ -293,3 +293,94 @@ class TestCheckpointDiscovery:
         # Then try iter pattern
         found = sorted(ckpt_dir.glob("*deep_cfr*iter_*.pt"))
         assert len(found) == 3
+
+
+class TestPPOCheckpointDiscovery:
+    """Run-dir --latest/--epoch checkpoint discovery for PPO's step-numbered
+    .zip naming (ppo_model_steps_<N>.zip / ppo_model_eval_<N>.zip), exercised
+    against the real cli.py finder functions (not a re-implementation)."""
+
+    def _make_run_dir(self, tmp_path):
+        from src.cli import _find_run_dir_checkpoints  # noqa: F401 (import check)
+
+        ckpt_dir = tmp_path / "checkpoints"
+        ckpt_dir.mkdir()
+        return ckpt_dir
+
+    def test_finds_steps_and_eval_zip_checkpoints(self, tmp_path):
+        from src.cli import _find_run_dir_checkpoints
+
+        ckpt_dir = self._make_run_dir(tmp_path)
+        for n in [1000, 2000, 3000]:
+            (ckpt_dir / f"ppo_model_steps_{n}.zip").touch()
+        for n in [2000, 4000]:
+            (ckpt_dir / f"ppo_model_eval_{n}.zip").touch()
+        # A .pt file with a similar prefix must not leak into ppo discovery.
+        (ckpt_dir / "ppo_model_epoch_5.pt").touch()
+
+        found = _find_run_dir_checkpoints(ckpt_dir, "ppo_model", "ppo")
+        names = {p.name for p in found}
+        assert names == {
+            "ppo_model_steps_1000.zip",
+            "ppo_model_steps_2000.zip",
+            "ppo_model_steps_3000.zip",
+            "ppo_model_eval_2000.zip",
+            "ppo_model_eval_4000.zip",
+        }
+
+    def test_non_ppo_algorithm_still_uses_pt_globs(self, tmp_path):
+        from src.cli import _find_run_dir_checkpoints
+
+        ckpt_dir = self._make_run_dir(tmp_path)
+        for n in [100, 200]:
+            (ckpt_dir / f"deep_cfr_checkpoint_iter_{n}.pt").touch()
+        (ckpt_dir / "ppo_model_steps_500.zip").touch()
+
+        found = _find_run_dir_checkpoints(ckpt_dir, "deep_cfr_checkpoint", "os-mccfr")
+        names = {p.name for p in found}
+        assert names == {"deep_cfr_checkpoint_iter_100.pt", "deep_cfr_checkpoint_iter_200.pt"}
+
+    def test_latest_picks_highest_step_across_steps_and_eval(self, tmp_path):
+        from src.cli import _find_run_dir_checkpoints, _extract_checkpoint_num
+
+        ckpt_dir = self._make_run_dir(tmp_path)
+        (ckpt_dir / "ppo_model_steps_1000.zip").touch()
+        (ckpt_dir / "ppo_model_eval_2000.zip").touch()
+        (ckpt_dir / "ppo_model_steps_1500.zip").touch()
+
+        found = _find_run_dir_checkpoints(ckpt_dir, "ppo_model", "ppo")
+        found.sort(key=_extract_checkpoint_num)
+        assert found[-1].name == "ppo_model_eval_2000.zip"
+
+    def test_latest_tie_break_prefers_eval_over_steps(self, tmp_path):
+        """On an exact step-count tie, the eval_ checkpoint (has a persisted
+        mean_imp row already) wins over the steps_ checkpoint."""
+        from src.cli import _find_run_dir_checkpoints, _extract_checkpoint_num
+
+        ckpt_dir = self._make_run_dir(tmp_path)
+        (ckpt_dir / "ppo_model_steps_5000.zip").touch()
+        (ckpt_dir / "ppo_model_eval_5000.zip").touch()
+
+        found = _find_run_dir_checkpoints(ckpt_dir, "ppo_model", "ppo")
+        found.sort(key=_extract_checkpoint_num)
+        assert found[-1].name == "ppo_model_eval_5000.zip"
+
+    def test_epoch_flag_matches_ppo_step_number(self, tmp_path):
+        from src.cli import _find_run_dir_checkpoints, _checkpoint_matches_epoch
+
+        ckpt_dir = self._make_run_dir(tmp_path)
+        (ckpt_dir / "ppo_model_steps_1000.zip").touch()
+        (ckpt_dir / "ppo_model_eval_2000.zip").touch()
+
+        found = _find_run_dir_checkpoints(ckpt_dir, "ppo_model", "ppo")
+        matches = [p for p in found if _checkpoint_matches_epoch(p, 2000, "ppo")]
+        assert len(matches) == 1
+        assert matches[0].name == "ppo_model_eval_2000.zip"
+
+    def test_iteration_extraction_covers_steps_and_eval(self):
+        from src.cli import _checkpoint_iteration_from_name
+
+        assert _checkpoint_iteration_from_name("ppo_model_steps_1000.zip") == 1000
+        assert _checkpoint_iteration_from_name("ppo_model_eval_2000.zip") == 2000
+        assert _checkpoint_iteration_from_name("deep_cfr_checkpoint_iter_50.pt") == 50
+        assert _checkpoint_iteration_from_name("no_number_here.pt") == 0

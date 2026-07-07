@@ -361,6 +361,34 @@ def format_results(run_dir: str, iter_num: int, all_results: dict) -> str:
     return f"[{ts}] Evaluated {run_name} iter {iter_num}: {', '.join(parts)}"
 
 
+def _infer_checkpoint_prefix(agent_type: str, explicit_prefix: Optional[str] = None) -> str:
+    """Resolve the checkpoint filename prefix for an eval-watcher agent type.
+
+    Prefix must match the actual filename stem before _iter_N/_epoch_N (or,
+    for ppo, before _steps_N/_eval_N). An explicit --checkpoint-prefix always
+    wins; otherwise this infers it from --agent-type.
+    """
+    if explicit_prefix:
+        return explicit_prefix
+    prefix_map = {
+        "rebel": "rebel_checkpoint",
+        "deep_cfr": "deep_cfr_checkpoint",
+        "sd_cfr": "deep_cfr_checkpoint",
+        "escher": "deep_cfr_checkpoint",
+        "nplayer": "deep_cfr_checkpoint",
+        # ppo agent_type coincides with run_db's "ppo" algorithm key; source
+        # from ALGO_TO_CHECKPOINT_PREFIX (single authoritative source -
+        # ppo_train.py's actual save-stem convention, see run_db.py) rather
+        # than a local copy, so the two can't drift out of sync again. Falls
+        # back to the known-correct value if run_db is unavailable.
+        "ppo": run_db.ALGO_TO_CHECKPOINT_PREFIX["ppo"] if _RUN_DB_AVAILABLE else "ppo_model",
+        "gtcfr": "gtcfr_checkpoint",
+        "sog": "sog_checkpoint",
+        "sog_inference": "sog_checkpoint",
+    }
+    return prefix_map.get(agent_type, "deep_cfr_checkpoint")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Poll run dirs and auto-evaluate new checkpoints (CPU-only)."
@@ -434,19 +462,7 @@ def main() -> None:
     args = parser.parse_args()
 
     # Infer checkpoint prefix from agent type if not explicitly provided.
-    # Prefix must match the actual filename stem before _iter_N or _epoch_N.
-    _PREFIX_MAP = {
-        "rebel": "rebel_checkpoint",
-        "deep_cfr": "deep_cfr_checkpoint",
-        "sd_cfr": "deep_cfr_checkpoint",
-        "escher": "deep_cfr_checkpoint",
-        "nplayer": "deep_cfr_checkpoint",
-        "ppo": "ppo_checkpoint",
-        "gtcfr": "gtcfr_checkpoint",
-        "sog": "sog_checkpoint",
-        "sog_inference": "sog_checkpoint",
-    }
-    checkpoint_prefix = args.checkpoint_prefix or _PREFIX_MAP.get(args.agent_type, "deep_cfr_checkpoint")
+    checkpoint_prefix = _infer_checkpoint_prefix(args.agent_type, args.checkpoint_prefix)
 
     run_dirs = [str(Path(d).resolve()) for d in args.run_dirs]
     logger.info("Watching %d run dir(s): %s", len(run_dirs), run_dirs)

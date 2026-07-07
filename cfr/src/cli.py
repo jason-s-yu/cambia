@@ -2220,6 +2220,74 @@ def benchmark_es_cmd(
     print(f"\nResults saved to {json_path}")
 
 
+# Run-dir checkpoint discovery (used by `evaluate` below in --latest/--epoch
+# mode). Most algorithms (CFR family) write epoch/iter-numbered .pt files.
+# PPO (sb3-contrib) is the exception: two independent training callbacks
+# (see ppo_train.py) save step-numbered .zip archives off the same global
+# timestep counter: "<prefix>_steps_<N>.zip" (periodic) and
+# "<prefix>_eval_<N>.zip" (post-eval; already has a persisted mean_imp row
+# in run_db/metrics.jsonl at that step).
+_ZIP_CHECKPOINT_ALGOS = {"ppo"}
+
+# Legacy prefix aliases for pre-2026-03-09 .pt-naming runs.
+_LEGACY_CHECKPOINT_PREFIXES = {
+    "gtcfr_checkpoint": ["checkpoint_gtcfr"],
+    "sog_checkpoint": ["checkpoint_sog_sog", "checkpoint_sog"],
+}
+
+
+def _checkpoint_iteration_from_name(name: str) -> int:
+    """Extract the epoch/iter/steps/eval training-step number from a checkpoint name.
+
+    Shared by run-dir checkpoint discovery (--latest/--epoch) and eval-results
+    persistence (the `iteration` column), so PPO's steps_/eval_ naming and the
+    CFR-family epoch_/iter_ naming both parse into the same field.
+    """
+    import re
+
+    m = re.search(r"(?:epoch|iter|steps|eval)_(\d+)", name)
+    return int(m.group(1)) if m else 0
+
+
+def _find_run_dir_checkpoints(ckpt_dir: Path, prefix: str, algorithm: str) -> List[Path]:
+    """Glob run_dir/checkpoints/ for files matching an algorithm's naming convention.
+
+    CFR-family algorithms: "<prefix>*epoch_<N>.pt" or "<prefix>*iter_<N>.pt",
+    with legacy prefix aliases. PPO: "<prefix>*steps_<N>.zip" or
+    "<prefix>*eval_<N>.zip" (sb3-contrib .zip saves).
+    """
+    if algorithm in _ZIP_CHECKPOINT_ALGOS:
+        patterns = [f"*{prefix}*steps_*.zip", f"*{prefix}*eval_*.zip"]
+    else:
+        prefixes = [prefix] + _LEGACY_CHECKPOINT_PREFIXES.get(prefix, [])
+        patterns = [
+            f"*{p}*{suffix}"
+            for p in prefixes
+            for suffix in ["epoch_*.pt", "iter_*.pt"]
+        ]
+    return sorted(set(match for pattern in patterns for match in ckpt_dir.glob(pattern)))
+
+
+def _extract_checkpoint_num(p: Path) -> tuple:
+    """Sort key for --latest checkpoint selection: (step number, tie-break).
+
+    On an exact numeric tie between a PPO "eval_" and "steps_" checkpoint (the
+    two callbacks can coincide if eval_freq divides checkpoint_freq evenly),
+    the eval_ checkpoint wins: it already carries a persisted mean_imp row in
+    run_db/metrics.jsonl from training, so re-evaluating it corroborates a
+    known result rather than blindly evaluating an unlogged snapshot.
+    """
+    tie_break = 1 if "_eval_" in p.name else 0
+    return (_checkpoint_iteration_from_name(p.name), tie_break)
+
+
+def _checkpoint_matches_epoch(p: Path, epoch: int, algorithm: str) -> bool:
+    """Check whether a checkpoint filename matches the requested --epoch/N target."""
+    if algorithm in _ZIP_CHECKPOINT_ALGOS:
+        return f"steps_{epoch}.zip" in p.name or f"eval_{epoch}.zip" in p.name
+    return f"epoch_{epoch}.pt" in p.name or f"iter_{epoch}.pt" in p.name
+
+
 @app.command("evaluate", help="Evaluate a Deep CFR checkpoint against baseline agents")
 def evaluate(
     checkpoint: Path = typer.Argument(
@@ -2309,7 +2377,6 @@ def evaluate(
     ),
 ):
     """Evaluate a checkpoint against baseline agents and print a win-rate table."""
-    import re
     from rich.console import Console
     from rich.table import Table
     from .evaluate_agents import run_evaluation_multi_baseline, MEAN_IMP_BASELINES
@@ -2369,38 +2436,16 @@ def evaluate(
             print(f"ERROR: No checkpoints/ directory in {run_dir}", file=sys.stderr)
             raise typer.Exit(1)
 
-        def _find_checkpoints(pfx):
-            # Legacy prefix fallback for pre-2026-03-09 runs
-            _LEGACY_PREFIXES = {
-                "gtcfr_checkpoint": ["checkpoint_gtcfr"],
-                "sog_checkpoint": ["checkpoint_sog_sog", "checkpoint_sog"],
-            }
-            prefixes = [pfx] + _LEGACY_PREFIXES.get(pfx, [])
-            found = sorted(set(
-                match
-                for p in prefixes
-                for pattern in [f"*{p}*epoch_*.pt", f"*{p}*iter_*.pt"]
-                for match in ckpt_dir.glob(pattern)
-            ))
-            return found
-
-        all_ckpts = _find_checkpoints(prefix)
-
-        def extract_num(p):
-            m = re.search(r"(?:epoch|iter)_(\d+)", p.name)
-            return int(m.group(1)) if m else 0
+        all_ckpts = _find_run_dir_checkpoints(ckpt_dir, prefix, algorithm)
 
         if latest:
             if not all_ckpts:
                 print(f"ERROR: No checkpoints matching prefix '{prefix}' found", file=sys.stderr)
                 raise typer.Exit(1)
-            all_ckpts.sort(key=extract_num)
+            all_ckpts.sort(key=_extract_checkpoint_num)
             checkpoint_path = all_ckpts[-1]
         elif epoch is not None:
-            matches = [
-                p for p in all_ckpts
-                if f"epoch_{epoch}.pt" in p.name or f"iter_{epoch}.pt" in p.name
-            ]
+            matches = [p for p in all_ckpts if _checkpoint_matches_epoch(p, epoch, algorithm)]
             if not matches:
                 print(f"ERROR: No checkpoint for epoch/iter {epoch} found", file=sys.stderr)
                 raise typer.Exit(1)
@@ -2524,8 +2569,7 @@ def evaluate(
     if run_dir is not None:
         from .evaluate_agents import persist_eval_results
 
-        m = re.search(r"(?:epoch|iter)_(\d+)", str(checkpoint))
-        iteration = int(m.group(1)) if m else 0
+        iteration = _checkpoint_iteration_from_name(str(checkpoint))
         persist_eval_results(
             run_dir=str(run_dir),
             iteration=iteration,
