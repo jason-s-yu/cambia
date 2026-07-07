@@ -135,6 +135,9 @@ class _ScriptedDriver:
         self._terminal = terminal
         self._util = util
 
+    def close(self) -> None:
+        """No-op: GameDriver.close() (S1W13) on a plain scripted object."""
+
     def current_player(self) -> int:
         return 0
 

@@ -1,0 +1,94 @@
+# PRT-CFR production config (v0.4 Phase 2, S1W5).
+#
+# Delivers the PRODUCTION trainer conventions (design-overview Trainer
+# conventions, amended 2026-07-07): warm_start + global cosine peak-LR decay +
+# best-snapshot/early-stop controller ON, K raised into the published envelope
+# (8192), full production sequence cap (PRODUCTION_SEQ_CAP=12288), 20M-row
+# disk-backed reservoirs. The PRTCFRConfig model defaults stay tiny-safe (the
+# X2 gate reproduction); these production values live here, in the run config.
+#
+# Usage:
+#   cambia train prtcfr --config config/prtcfr_production.yaml --run-name v0.4-prtcfr-pilot
+#
+# The iterations default (300) is the X4 pilot length; override with -n for the
+# X5 full run.
+
+algorithm: prt-cfr
+
+agent_params:
+  memory_level: 1
+  time_decay_turns: 3
+
+# Production rule profile (mirrors the driver's _default_production_house_rules:
+# the Go/Python production GameDriver deals under these rules). max_game_turns
+# 300 is the real engine cap the PRODUCTION_SEQ_CAP P100 instrumentation pinned.
+cambia_rules:
+  allowDrawFromDiscardPile: true
+  allowReplaceAbilities: true
+  allowOpponentSnapping: true
+  snapRace: false
+  penaltyDrawCount: 2
+  use_jokers: 2
+  cards_per_player: 4
+  initial_view_count: 2
+  cambia_allowed_round: 0
+  max_game_turns: 300
+
+persistence:
+  agent_data_save_path: "runs/v0.4-prtcfr-pilot/snapshots/prtcfr_checkpoint.pt"
+
+logging:
+  log_level_file: "INFO"
+  log_level_console: "INFO"
+
+prt_cfr:
+  # GRU sequence encoder (pinned; shared with the X2 scorer).
+  gru_vocab_size: 325
+  gru_embed_dim: 64
+  gru_hidden_dim: 256
+  gru_num_layers: 2
+  gru_dropout: 0.1
+  head_hidden_dim: 256
+  seq_cap: 12288            # PRODUCTION_SEQ_CAP (full-recall conditioning)
+
+  # Estimator + generation.
+  m_rollouts: 4
+  k_games_per_iter: 8192    # published envelope (p2 sec 2.2)
+  iterations: 300           # X4 pilot length
+  backend: go               # Go engine substrate (S1W13)
+  num_players: 2
+  max_trajectory_steps: 4000
+
+  # Fit (production conventions).
+  train_steps: 3000         # p2 sec 2.3 fit budget
+  batch_size: 8192
+  lr: 1.0e-3
+  lr_min: 1.0e-5
+  lr_schedule: global_cosine
+  warm_start: true
+  weight_decay: 0.0
+  grad_clip: 1.0
+  reanchor_every: 0
+
+  # Reservoir (disk-backed, per-player).
+  reservoir_capacity: 20000000
+
+  # Late-training stability controller (ON in production).
+  stability_enabled: true
+  stability_eval_every: 10
+  stability_patience: 3
+  stability_rel_tolerance: 0.15
+  stability_min_iters: 10
+  stability_metric_mode: min
+  stability_metric_name: nashconv
+
+  # V_phi critic (outside the regret path).
+  critic_enabled: true
+  critic_capacity: 200000
+  critic_steps_per_iter: 500
+  critic_batch_size: 512
+  critic_lr: 1.0e-3
+  critic_held_out_fraction: 0.1
+
+  seed: 0
+  device: cuda

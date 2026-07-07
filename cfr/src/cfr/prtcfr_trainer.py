@@ -29,27 +29,36 @@ so the worker's per-node sigma lookup is O(1) and exactly the fixed sigma^t.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
+import time
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 
 from ..encoding import NUM_ACTIONS, action_to_index, encode_action_mask
-from ..reservoir import ReservoirBuffer
-from ..sequence_encoding import SEQ_CAP
+from ..reservoir import ColumnarBatch, ReservoirBuffer, ReservoirSample
+from ..sequence_encoding import PAD_ID, SEQ_CAP
 from .prtcfr_net import (
     PRTCFRNet,
     _regret_match,
     build_prtcfr_net,
+    pad_tokens,
     tiny_node_to_token_array,
     tiny_node_to_tokens,
 )
 from .prtcfr_stability import BestSnapshotController, write_deployable_manifest
-from .prtcfr_worker import PRTCFRWorker
+from .prtcfr_worker import (
+    PRODUCTION_SEQ_CAP,
+    GameDriver,
+    PRTCFRProductionWorker,
+    PRTCFRWorker,
+    new_production_driver,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -559,3 +568,746 @@ def train_tiny_prtcfr(
 
     trainer = PRTCFRTinyTrainer(root, prt_cfg, snapshot_dir)
     return trainer.train(iterations=iterations)
+
+
+# ===========================================================================
+# Production trainer (Phase 2 S1W5): full-game PRT-CFR
+# ===========================================================================
+#
+# Ties every merged Phase-2 component into one iteration loop:
+#   generate K single-trajectory ESCHER traversals (prtcfr_worker,
+#   traverser alternating, one game per traversal through an injectable
+#   driver_factory -- the Go substrate by default)
+#     -> append traverser regret samples to per-player DiskReservoirs (p2 sec
+#        2.2: reservoir B_i per traverser)
+#     -> refit ONE shared regret net on both reservoirs (production trainer
+#        conventions, design-overview amended 2026-07-07: warm_start +
+#        global_cosine + stability controller are the production defaults, set
+#        in the run config; masked-SUM loss + normalized-linear weighting +
+#        clip-last, reusing ``_fit_from_scratch``)
+#     -> interleave the V_phi critic fit (outside the regret path) and log its
+#        held-out MSE vs the constant-predictor baseline
+#     -> snapshot ``prtcfr_snapshot_iter_{t}.pt`` + rolling
+#        ``prtcfr_checkpoint.pt`` (Phase-1 dict format; rolling adds config)
+#     -> BestSnapshotController manifest when an eval_fn is supplied.
+#
+# The sigma^t provider is stateless (one batched forward per query from the
+# current net's regret-matched strategy). The incremental hidden-state carry
+# (PRTCFRInferenceService) is an X3-ladder throughput swap owned elsewhere;
+# this trainer never rewires the worker.
+
+
+# A per-game driver builder: seed -> a fresh GameDriver. The default delegates
+# to prtcfr_worker.new_production_driver (Go substrate); tests inject a
+# python-backend or scripted factory.
+DriverFactory = Callable[[int], GameDriver]
+
+
+class NetProductionSigma:
+    """Stateless sigma^t for the production worker: the current regret net's
+    regret-matched strategy over the 146 global actions.
+
+    Signature matches ``prtcfr_worker.ProductionPolicyFn`` -- ``(tokens, mask)
+    -> (146,) probability vector`` -- so it composes at the same call sites as
+    the fixed uniform b_i. One forward per query (no incremental carry): the
+    batched-carry inference service (``PRTCFRInferenceService``) is the X3
+    throughput swap owned elsewhere; at this stage a direct forward is the
+    contract (design-overview / task S1W5). The net is put in ``eval()`` and
+    never trained through here; a new iterate is a new provider instance,
+    matching SD-CFR's per-iteration regret-net turnover.
+    """
+
+    def __init__(self, net: PRTCFRNet, seq_cap: int = PRODUCTION_SEQ_CAP):
+        self.net = net.eval()
+        self.seq_cap = int(seq_cap)
+
+    def __call__(self, tokens: List[int], legal_mask: np.ndarray) -> np.ndarray:
+        toks = list(tokens) if tokens else [PAD_ID]
+        if len(toks) > self.seq_cap:
+            # The driver already caps at seq_cap; this only guards a caller that
+            # somehow hands a longer prefix (keep-most-recent, matching
+            # pad_tokens / encode_observation_sequence overflow semantics).
+            toks = toks[-self.seq_cap :]
+        device = self.net.device
+        t = torch.as_tensor(toks, dtype=torch.long, device=device).unsqueeze(0)
+        mask_arr = np.asarray(legal_mask, dtype=bool)
+        m = torch.as_tensor(mask_arr, device=device).unsqueeze(0)
+        with torch.no_grad():
+            strat = self.net.strategy_from_tokens(t, m)  # (1, 146)
+        return strat[0].detach().to("cpu", dtype=torch.float64).numpy()
+
+
+def _merge_columnar_batches(batches: List[ColumnarBatch]) -> Optional[ColumnarBatch]:
+    """Concatenate ColumnarBatches from the per-player reservoirs into one
+    batch for the shared-net fit.
+
+    Each producer pads its features to the longest row in ITS batch, so the
+    merge re-pads every sub-batch to the global max width with PAD_ID (0 --
+    ``DiskReservoir``/``pad_tokens`` pad with 0, and net.encode recovers real
+    lengths via the PAD_ID mask, so the extra zeros are inert).
+    """
+    batches = [b for b in batches if len(b) > 0]
+    if not batches:
+        return None
+    if len(batches) == 1:
+        return batches[0]
+    max_w = max(int(b.features.shape[1]) for b in batches)
+    feats = []
+    for b in batches:
+        f = b.features
+        if f.shape[1] < max_w:
+            padw = np.full(
+                (f.shape[0], max_w - f.shape[1]), PAD_ID, dtype=f.dtype
+            )
+            f = np.concatenate([f, padw], axis=1)
+        feats.append(f)
+    features = np.concatenate(feats, axis=0)
+    targets = np.concatenate([b.targets for b in batches], axis=0)
+    masks = (
+        np.concatenate([b.masks for b in batches], axis=0)
+        if all(b.masks is not None for b in batches)
+        else None
+    )
+    iterations = np.concatenate([b.iterations for b in batches], axis=0)
+    lengths = (
+        np.concatenate([b.lengths for b in batches], axis=0)
+        if all(b.lengths is not None for b in batches)
+        else None
+    )
+    return ColumnarBatch(
+        features=features,
+        targets=targets,
+        masks=masks,
+        iterations=iterations,
+        lengths=lengths,
+    )
+
+
+class _UnpaddingReservoir:
+    """Impedance-match between the production worker (pads) and the DiskReservoir
+    (ragged).
+
+    ``PRTCFRProductionWorker.traverse`` stores each regret sample as
+    ``pad_tokens(tokens_h, seq_cap)`` -- a FIXED-WIDTH seq_cap row, correct for
+    the in-RAM ReservoirBuffer the tiny path uses. The DiskReservoir instead
+    wants the RAGGED natural-length row (``add_batch`` contract: "NOT padded"):
+    storing the padded 12288-wide row would consume seq_cap tokens per sample
+    and blow the 20M-row reservoir to ~457GB, the exact case the ragged design
+    exists to avoid (disk_reservoir.py docstring; p2 sec 6 targets ~12-25GB).
+
+    This adapter strips the trailing PAD_ID before delegating to the disk
+    reservoir. PAD_ID (0) is reserved as padding only -- real token bodies begin
+    with BOS and never contain an interior 0 -- so the trailing run is pure
+    right-padding and trimming it recovers the exact natural length. Everything
+    else (len / sample_batch / save / load) delegates straight through.
+    """
+
+    def __init__(self, reservoir: Any):
+        self._r = reservoir
+
+    def add(self, sample: ReservoirSample) -> None:
+        feats = np.asarray(sample.features)
+        nz = np.nonzero(feats != PAD_ID)[0]
+        natural = feats[: int(nz[-1]) + 1] if nz.size else feats[:0]
+        self._r.add(
+            ReservoirSample(
+                features=natural,
+                target=sample.target,
+                action_mask=sample.action_mask,
+                iteration=sample.iteration,
+            )
+        )
+
+    def __len__(self) -> int:
+        return len(self._r)
+
+    def sample_batch(self, batch_size: int) -> ColumnarBatch:
+        return self._r.sample_batch(batch_size)
+
+    def save(self, *a, **k):
+        return self._r.save(*a, **k)
+
+    def load(self, *a, **k):
+        return self._r.load(*a, **k)
+
+    @property
+    def raw(self) -> Any:
+        return self._r
+
+
+class _MultiReservoirSampler:
+    """Presents the per-player DiskReservoirs as one ``sample_batch`` source so
+    ``_fit_from_scratch`` fits the SINGLE shared regret net on both.
+
+    Single shared net across seats is the default (p2 sec 2.3 fits R_theta on
+    B_i; here unified) because PRT-CFR's token stream is SEAT-RELATIVE -- it
+    encodes the acting seat's own observation-action history, not an absolute
+    seat id -- so one net generalizes across both reservoirs without a per-seat
+    head. Each fit step draws a batch split across reservoirs in proportion to
+    their current sizes.
+    """
+
+    def __init__(self, reservoirs: List[Any], rng: Optional[np.random.Generator] = None):
+        self._rs = list(reservoirs)
+        self._rng = rng if rng is not None else np.random.default_rng()
+
+    def __len__(self) -> int:
+        return sum(len(r) for r in self._rs)
+
+    def sample_batch(self, batch_size: int) -> ColumnarBatch:
+        sizes = [len(r) for r in self._rs]
+        total = sum(sizes)
+        if total == 0:
+            return ColumnarBatch(
+                features=np.empty((0, 0), dtype=np.int16),
+                targets=np.empty((0, NUM_ACTIONS), dtype=np.float32),
+                masks=np.empty((0, NUM_ACTIONS), dtype=bool),
+                iterations=np.empty(0, dtype=np.int64),
+                lengths=np.empty(0, dtype=np.int64),
+            )
+        # Proportional allocation; remainder to the largest reservoir.
+        alloc = [int(batch_size * s // total) for s in sizes]
+        deficit = batch_size - sum(alloc)
+        if deficit > 0:
+            alloc[int(np.argmax(sizes))] += deficit
+        sub = [r.sample_batch(a) for r, a in zip(self._rs, alloc) if a > 0]
+        merged = _merge_columnar_batches(sub)
+        if merged is None:
+            # Every allocation landed on an empty reservoir; fall back to the
+            # non-empty one at the full batch size.
+            idx = int(np.argmax(sizes))
+            return self._rs[idx].sample_batch(batch_size)
+        return merged
+
+
+@dataclass
+class PRTCFRProductionTrainState:
+    """Per-iteration record (returned for logging/tests; one metrics.jsonl row)."""
+
+    iteration: int
+    samples_added: Dict[int, int]
+    buffer_sizes: Dict[int, int]
+    fit_loss: float
+    peak_lr: float
+    critic_held_out_mse: float
+    critic_constant_baseline_mse: float
+    critic_ratio: float
+    gen_seconds: float
+    fit_seconds: float
+    snapshot_path: str
+
+
+class PRTCFRProductionTrainer:
+    """Full-game PRT-CFR production trainer (additive; the tiny trainer above is
+    untouched).
+
+    Parameters
+    ----------
+    config : PRTCFRConfig-like
+        Read via getattr so a plain SimpleNamespace works in tests. Production
+        values (warm_start, global_cosine, stability_enabled, K=8192,
+        seq_cap=PRODUCTION_SEQ_CAP, reservoir_capacity=20M) come from the run
+        config; the model defaults stay tiny-safe.
+    run_dir : str
+        The run directory. Snapshots -> ``<run_dir>/snapshots`` (unless
+        config.snapshot_dir), reservoirs -> ``<run_dir>/reservoir`` (unless
+        config.reservoir_dir), metrics -> ``<run_dir>/metrics.jsonl``.
+    driver_factory : optional (seed) -> GameDriver
+        Defaults to ``new_production_driver`` on the configured backend (Go by
+        default). Tests inject a python-backend or scripted factory. The trainer
+        owns each per-game driver and ``close()``s it after the traversal.
+    net_factory : optional () -> PRTCFRNet
+        Defaults to ``build_prtcfr_net(config)``.
+    eval_fn : optional (trainer, iteration) -> float
+        Trend metric for the BestSnapshotController (e.g. exploitability). None
+        (the S1W5 default) means no early-stop scoring; the deployable manifest,
+        when stability is enabled, keeps the whole set deployable.
+    db_path : optional str
+        run_db location; defaults to ``<run_dir>/../cambia_runs.db``.
+    """
+
+    def __init__(
+        self,
+        config,
+        run_dir: str,
+        driver_factory: Optional[DriverFactory] = None,
+        net_factory: Optional[Callable[[], PRTCFRNet]] = None,
+        eval_fn: Optional[Callable[["PRTCFRProductionTrainer", int], float]] = None,
+        db_path: Optional[str] = None,
+        run_name: Optional[str] = None,
+        config_yaml: Optional[str] = None,
+        config_dict: Optional[dict] = None,
+    ):
+        self.config = config
+        self.run_dir = run_dir
+        os.makedirs(run_dir, exist_ok=True)
+
+        self.seq_cap = int(getattr(config, "seq_cap", PRODUCTION_SEQ_CAP))
+        self.m_rollouts = int(getattr(config, "m_rollouts", 4))
+        self.k_games = int(getattr(config, "k_games_per_iter", 8192))
+        self.iterations = int(getattr(config, "iterations", 300))
+        self.lr = float(getattr(config, "lr", 1e-3))
+        self.lr_min = float(getattr(config, "lr_min", 0.0))
+        self.lr_schedule = str(getattr(config, "lr_schedule", "global_cosine"))
+        self.batch_size = int(getattr(config, "batch_size", 8192))
+        self.train_steps = int(getattr(config, "train_steps", 3000))
+        self.weight_decay = float(getattr(config, "weight_decay", 0.0))
+        self.grad_clip = float(getattr(config, "grad_clip", 1.0))
+        self.warm_start = bool(getattr(config, "warm_start", True))
+        self.reanchor_every = int(getattr(config, "reanchor_every", 0))
+        self.num_players = int(getattr(config, "num_players", 2))
+        self.max_trajectory_steps = int(getattr(config, "max_trajectory_steps", 4000))
+        self.backend = str(getattr(config, "backend", "go"))
+        self.seed = int(getattr(config, "seed", 0))
+        self.device = getattr(config, "device", "cuda")
+        self.reservoir_capacity = int(getattr(config, "reservoir_capacity", 20_000_000))
+
+        # Stability controller (production default ON; config-gated).
+        self.stability_enabled = bool(getattr(config, "stability_enabled", True))
+        self.stability_eval_every = int(getattr(config, "stability_eval_every", 10))
+        self.stability_patience = int(getattr(config, "stability_patience", 3))
+        self.stability_rel_tolerance = float(
+            getattr(config, "stability_rel_tolerance", 0.15)
+        )
+        self.stability_min_iters = int(
+            getattr(config, "stability_min_iters", self.stability_eval_every)
+        )
+        self.stability_metric_mode = str(getattr(config, "stability_metric_mode", "min"))
+        self.stability_metric_name = str(
+            getattr(config, "stability_metric_name", "nashconv")
+        )
+        self.eval_fn = eval_fn
+        self.controller: Optional[BestSnapshotController] = None
+        if self.stability_enabled:
+            self.controller = BestSnapshotController(
+                rel_tolerance=self.stability_rel_tolerance,
+                patience=self.stability_patience,
+                min_iters=self.stability_min_iters,
+                mode=self.stability_metric_mode,
+            )
+
+        # Directory layout.
+        self.snapshot_dir = str(
+            getattr(config, "snapshot_dir", None) or os.path.join(run_dir, "snapshots")
+        )
+        self.reservoir_root = str(
+            getattr(config, "reservoir_dir", None) or os.path.join(run_dir, "reservoir")
+        )
+        os.makedirs(self.snapshot_dir, exist_ok=True)
+        os.makedirs(self.reservoir_root, exist_ok=True)
+        self.metrics_path = os.path.join(run_dir, "metrics.jsonl")
+
+        self._driver_factory: DriverFactory = driver_factory or (
+            lambda seed: new_production_driver(
+                seed, num_players=self.num_players, backend=self.backend
+            )
+        )
+        self._net_factory = net_factory or (
+            lambda: build_prtcfr_net(config, device=self.device)
+        )
+
+        # Per-player DiskReservoirs B_i (p2 sec 2.2). Ragged token storage,
+        # disk-backed; the shared net fits on both via _MultiReservoirSampler.
+        from ..disk_reservoir import DiskReservoir
+
+        self.reservoirs: Dict[int, Any] = {}
+        for p in range(self.num_players):
+            disk = DiskReservoir(
+                path=os.path.join(self.reservoir_root, f"player_{p}"),
+                capacity=self.reservoir_capacity,
+                seq_cap=self.seq_cap,
+                target_dim=NUM_ACTIONS,
+                has_mask=True,
+                seed=self.seed + 101 + p,
+            )
+            # Unpad the worker's fixed-width samples into ragged disk rows.
+            self.reservoirs[p] = _UnpaddingReservoir(disk)
+        self._fit_rng = np.random.default_rng(self.seed + 202)
+
+        # V_phi critic (outside the regret path, S1W6). Optional.
+        self.critic_enabled = bool(getattr(config, "critic_enabled", True))
+        self._critic_net = None
+        self._critic_trainer = None
+        self._critic_reservoir = None
+        self._critic_sink = None
+        self.critic_steps = int(getattr(config, "critic_steps_per_iter", 500))
+        self.critic_batch_size = int(getattr(config, "critic_batch_size", 512))
+        if self.critic_enabled:
+            self._init_critic()
+
+        self.net: Optional[PRTCFRNet] = None
+        self._history: List[PRTCFRProductionTrainState] = []
+        self._written_iters: List[int] = []
+
+        # run_db registration (optional, never fatal).
+        self._db_conn = None
+        self._db_run_id: Optional[int] = None
+        self._init_run_db(db_path, run_name, config_yaml, config_dict)
+
+    # -- setup helpers ------------------------------------------------------
+
+    def _init_critic(self) -> None:
+        from .prtcfr_critic import (
+            CriticReservoir,
+            CriticReservoirSink,
+            CriticTrainer,
+            build_prtcfr_critic_net,
+        )
+
+        self._critic_net = build_prtcfr_critic_net(
+            self.config, num_players=self.num_players, device=self.device
+        )
+        self._critic_trainer = CriticTrainer(
+            self._critic_net, lr=float(getattr(self.config, "critic_lr", 1e-3))
+        )
+        self._critic_reservoir = CriticReservoir(
+            capacity=int(getattr(self.config, "critic_capacity", 200_000)),
+            held_out_fraction=float(
+                getattr(self.config, "critic_held_out_fraction", 0.1)
+            ),
+            seq_cap=self.seq_cap,
+            num_players=self.num_players,
+            seed=self.seed + 303,
+        )
+        self._critic_sink = CriticReservoirSink(
+            self._critic_reservoir, num_players=self.num_players, seq_cap=self.seq_cap
+        )
+
+    def _make_value_sink(self):
+        """Wrap the critic sink so it works with BOTH driver backends.
+
+        ``CriticReservoirSink`` -> ``omniscient_features_from_driver`` accepts a
+        ``_get_all_cards_unsafe`` holder or a ``.game`` holder. The Go driver
+        (S1W13) exposes its GoEngine as ``.engine`` (which HAS
+        ``_get_all_cards_unsafe``); the Python stub exposes ``.game``. Passing
+        ``getattr(driver, "engine", driver)`` hands the resolver an object it
+        recognizes in either case, using only the single-source public function
+        (no bespoke omniscient extraction here).
+        """
+        if not self.critic_enabled or self._critic_sink is None:
+            return None
+        sink = self._critic_sink
+
+        def value_sink(tokens_h, driver, pooled_mean, iteration):
+            source = getattr(driver, "engine", driver)
+            sink(tokens_h, source, pooled_mean, iteration)
+
+        return value_sink
+
+    def _init_run_db(self, db_path, run_name, config_yaml, config_dict) -> None:
+        try:
+            from .. import run_db as _run_db
+        except Exception:  # pragma: no cover - run_db optional
+            return
+        try:
+            if db_path is None:
+                db_path = os.path.join(
+                    os.path.dirname(os.path.abspath(self.run_dir)), "cambia_runs.db"
+                )
+            self._db_conn = _run_db.get_db(db_path)
+            name = run_name or os.path.basename(os.path.normpath(self.run_dir))
+            algorithm = "prt-cfr"
+            if config_dict:
+                try:
+                    algorithm = _run_db.infer_algorithm(config_dict)
+                except Exception:
+                    algorithm = "prt-cfr"
+            self._db_run_id = _run_db.upsert_run(
+                self._db_conn,
+                name=name,
+                algorithm=algorithm,
+                config_yaml=config_yaml,
+                config_dict=config_dict,
+                status="running",
+            )
+            logger.info("[prtcfr] run_db: registered '%s' (id=%s)", name, self._db_run_id)
+        except Exception as e:  # pragma: no cover - never fatal
+            logger.debug("[prtcfr] run_db init failed (non-fatal): %s", e)
+            self._db_conn = None
+            self._db_run_id = None
+
+    # -- paths + persistence ------------------------------------------------
+
+    def snapshot_path(self, t: int) -> str:
+        return os.path.join(self.snapshot_dir, f"prtcfr_snapshot_iter_{t}.pt")
+
+    def checkpoint_path(self) -> str:
+        return os.path.join(self.snapshot_dir, "prtcfr_checkpoint.pt")
+
+    def _config_dict(self) -> dict:
+        if hasattr(self.config, "model_dump"):
+            try:
+                return self.config.model_dump()
+            except Exception:
+                pass
+        return {
+            "seq_cap": self.seq_cap,
+            "m_rollouts": self.m_rollouts,
+            "k_games_per_iter": self.k_games,
+            "iterations": self.iterations,
+            "lr": self.lr,
+            "batch_size": self.batch_size,
+            "train_steps": self.train_steps,
+            "reservoir_capacity": self.reservoir_capacity,
+        }
+
+    def _save_snapshot(self, t: int) -> str:
+        path = self.snapshot_path(t)
+        torch.save(
+            {
+                "encoder_state_dict": self.net.encoder_state_dict(),
+                "head_state_dict": self.net.head_state_dict(),
+                "iteration": t,
+            },
+            path,
+        )
+        return path
+
+    def _save_checkpoint(self, t: int) -> None:
+        torch.save(
+            {
+                "encoder_state_dict": self.net.encoder_state_dict(),
+                "head_state_dict": self.net.head_state_dict(),
+                "config": self._config_dict(),
+                "iteration": t,
+            },
+            self.checkpoint_path(),
+        )
+
+    def _register_checkpoint_in_db(self, t: int, path: str) -> None:
+        if self._db_conn is None or self._db_run_id is None:
+            return
+        try:
+            from .. import run_db as _run_db
+
+            _run_db.register_checkpoint(self._db_conn, self._db_run_id, t, path)
+        except Exception as e:  # pragma: no cover - never fatal
+            logger.debug("[prtcfr] register_checkpoint failed (non-fatal): %s", e)
+
+    def _update_db_status(self, status: str) -> None:
+        if self._db_conn is None or self._db_run_id is None:
+            return
+        try:
+            from .. import run_db as _run_db
+
+            _run_db.update_run_status(self._db_conn, self._db_run_id, status)
+        except Exception:  # pragma: no cover
+            pass
+
+    def save_reservoirs(self) -> None:
+        for r in self.reservoirs.values():
+            try:
+                r.save()
+            except Exception as e:  # pragma: no cover
+                logger.warning("[prtcfr] reservoir save failed (non-fatal): %s", e)
+
+    # -- the iteration ------------------------------------------------------
+
+    def run_iteration(self, t: int) -> PRTCFRProductionTrainState:
+        """One production PRT-CFR iteration.
+
+        sigma^t is the regret-matched strategy of the net trained at t-1 (a
+        fresh near-uniform net at t=1). K single-trajectory ESCHER traversals
+        (traverser alternating) append regret samples to the per-player
+        reservoirs; the shared net is then refit on both. A snapshot + rolling
+        checkpoint are written and the critic is fit (outside the regret path).
+        """
+        if self.net is None:
+            self.net = self._net_factory()
+        sigma = NetProductionSigma(self.net, seq_cap=self.seq_cap)
+        value_sink = self._make_value_sink()
+
+        worker = PRTCFRProductionWorker(
+            sigma,
+            m_rollouts=self.m_rollouts,
+            seq_cap=self.seq_cap,
+            seed=self.seed + t * 7_000_003,
+            max_trajectory_steps=self.max_trajectory_steps,
+            value_sink=value_sink,
+        )
+
+        added = {p: 0 for p in range(self.num_players)}
+        gen_start = time.perf_counter()
+        for k in range(self.k_games):
+            traverser = (t + k) % self.num_players
+            game_seed = self.seed + t * 1_000_003 + k
+            driver = self._driver_factory(game_seed)
+            try:
+                n = worker.traverse(driver, traverser, t, self.reservoirs[traverser])
+                added[traverser] += n
+            finally:
+                # The trainer owns the top-level trajectory driver; the worker
+                # closes only its own clones. Go handles come from a finite
+                # pool, so close every game driver (python stub close() is a
+                # no-op).
+                driver.close()
+        gen_seconds = time.perf_counter() - gen_start
+
+        # Refit the SHARED net on both reservoirs. From-scratch re-init when
+        # warm_start is off or a periodic re-anchor fires; else fine-tune the
+        # previous iterate. peak LR follows the global schedule.
+        reanchor = self.reanchor_every > 0 and t % self.reanchor_every == 0
+        if (not self.warm_start) or reanchor:
+            self.net = self._net_factory()
+        peak_lr = _peak_lr_for_iter(
+            self.lr, self.lr_min, t, self.iterations, self.lr_schedule
+        )
+        sampler = _MultiReservoirSampler(
+            [self.reservoirs[p] for p in range(self.num_players)], rng=self._fit_rng
+        )
+        fit_start = time.perf_counter()
+        loss = _fit_from_scratch(
+            self.net,
+            sampler,
+            lr=peak_lr,
+            batch_size=self.batch_size,
+            num_steps=self.train_steps,
+            weight_decay=self.weight_decay,
+            grad_clip=self.grad_clip,
+            lr_min=self.lr_min,
+        )
+        fit_seconds = time.perf_counter() - fit_start
+
+        # Critic fit (outside the regret path); held-out MSE vs constant baseline.
+        c_mse = float("nan")
+        c_base = float("nan")
+        c_ratio = float("nan")
+        if self.critic_enabled and self._critic_trainer is not None:
+            cm = self._critic_trainer.fit(
+                self._critic_reservoir,
+                steps=self.critic_steps,
+                batch_size=self.critic_batch_size,
+            )
+            c_mse = cm.held_out_mse
+            c_base = cm.constant_baseline_mse
+            c_ratio = cm.ratio
+
+        snap = self._save_snapshot(t)
+        self._save_checkpoint(t)
+        self._register_checkpoint_in_db(t, snap)
+        self.save_reservoirs()
+
+        return PRTCFRProductionTrainState(
+            iteration=t,
+            samples_added=dict(added),
+            buffer_sizes={p: len(self.reservoirs[p]) for p in range(self.num_players)},
+            fit_loss=loss,
+            peak_lr=peak_lr,
+            critic_held_out_mse=c_mse,
+            critic_constant_baseline_mse=c_base,
+            critic_ratio=c_ratio,
+            gen_seconds=gen_seconds,
+            fit_seconds=fit_seconds,
+            snapshot_path=snap,
+        )
+
+    def _write_metrics_row(self, st: PRTCFRProductionTrainState) -> None:
+        row = {
+            "iteration": st.iteration,
+            "samples_added": {str(p): int(n) for p, n in st.samples_added.items()},
+            "buffer_sizes": {str(p): int(n) for p, n in st.buffer_sizes.items()},
+            "fit_loss": _json_num(st.fit_loss),
+            "peak_lr": _json_num(st.peak_lr),
+            "critic_held_out_mse": _json_num(st.critic_held_out_mse),
+            "critic_constant_baseline_mse": _json_num(st.critic_constant_baseline_mse),
+            "critic_ratio": _json_num(st.critic_ratio),
+            "gen_seconds": _json_num(st.gen_seconds),
+            "fit_seconds": _json_num(st.fit_seconds),
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        with open(self.metrics_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
+
+    def _stability_check_due(self, t: int, n: int) -> bool:
+        return t == 1 or t % self.stability_eval_every == 0 or t == n
+
+    def train(self, iterations: Optional[int] = None) -> List[PRTCFRProductionTrainState]:
+        """Run ``iterations`` (default config.iterations) production iterations.
+
+        Each iteration appends a metrics.jsonl row. With stability enabled the
+        trend metric is scored at the cadence (via ``eval_fn`` when supplied),
+        the deployable manifest is (re)written, and training early-stops once
+        the metric rises past tolerance for ``patience`` checks; the deployable
+        window pins to ``[1 .. best_iteration]`` so the served SD-CFR average
+        excludes any diverged tail. run_db status transitions to completed /
+        interrupted / failed.
+        """
+        n = iterations if iterations is not None else self.iterations
+        self.iterations = n  # global LR schedule spans the run actually requested
+        try:
+            for t in range(1, n + 1):
+                st = self.run_iteration(t)
+                self._history.append(st)
+                self._written_iters.append(t)
+                self._write_metrics_row(st)
+                logger.info(
+                    "[prtcfr-prod] iter=%d added=%s buffers=%s fit_loss=%.5f "
+                    "peak_lr=%.2e critic_mse=%.4f/%.4f gen=%.1fs fit=%.1fs",
+                    st.iteration, st.samples_added, st.buffer_sizes, st.fit_loss,
+                    st.peak_lr, st.critic_held_out_mse,
+                    st.critic_constant_baseline_mse, st.gen_seconds, st.fit_seconds,
+                )
+
+                if not self.stability_enabled or self.controller is None:
+                    continue
+                if not self._stability_check_due(t, n):
+                    continue
+                if self.eval_fn is None:
+                    write_deployable_manifest(
+                        self.snapshot_dir, self.controller, self._written_iters,
+                        metric_name=self.stability_metric_name, stopped_early=False,
+                    )
+                    continue
+                metric = float(self.eval_fn(self, t))
+                decision = self.controller.update(t, metric)
+                logger.info(
+                    "[prtcfr-prod] stability iter=%d %s=%.5f best_iter=%d best=%.5f "
+                    "worse_streak=%d stop=%s",
+                    t, self.stability_metric_name, metric, decision.best_iteration,
+                    decision.best_metric, decision.num_worse_since_best,
+                    decision.should_stop,
+                )
+                write_deployable_manifest(
+                    self.snapshot_dir, self.controller, self._written_iters,
+                    metric_name=self.stability_metric_name,
+                    stopped_early=decision.should_stop,
+                )
+                if decision.should_stop:
+                    logger.info(
+                        "[prtcfr-prod] early-stop at iter=%d; deployable window "
+                        "pinned to [1..%d]", t, decision.best_iteration,
+                    )
+                    break
+        except KeyboardInterrupt:
+            logger.warning("[prtcfr-prod] interrupted; last snapshot is on disk")
+            self.save_reservoirs()
+            self._update_db_status("interrupted")
+            raise
+        except Exception:
+            self.save_reservoirs()
+            self._update_db_status("failed")
+            raise
+        self.save_reservoirs()
+        self._update_db_status("completed")
+        return self._history
+
+    def close(self) -> None:
+        """Flush reservoirs and close the run_db connection (idempotent)."""
+        self.save_reservoirs()
+        if self._db_conn is not None:
+            try:
+                self._db_conn.close()
+            except Exception:  # pragma: no cover
+                pass
+            self._db_conn = None
+
+
+def _json_num(x: float):
+    """JSON-safe number: NaN/inf -> None (JSON has no NaN literal)."""
+    try:
+        xf = float(x)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(xf) or math.isinf(xf):
+        return None
+    return xf
