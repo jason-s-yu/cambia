@@ -24,10 +24,24 @@ import (
 
 const (
 	// MaxTokenStream is the hard per-agent token buffer cap. A stream that would
-	// exceed this is an explicit overflow ERROR, never silent truncation. It is
-	// >= the production window cap; full 2-player games run ~726 tokens (worst
-	// case ~1200), far under this bound.
-	MaxTokenStream = 4096
+	// exceed this is an explicit overflow ERROR, never silent truncation.
+	//
+	// PAIRED CONSTANT: cfr/src/cfr/prtcfr_worker.py::PRODUCTION_SEQ_CAP (12288).
+	// This value MUST stay >= PRODUCTION_SEQ_CAP -- the durable invariant is
+	// asserted live by cfr/tests/test_prtcfr_go_bridge_integration.py::
+	// test_go_token_stream_cap_at_least_production_cap (reads this value via
+	// the cambia_token_stream_cap FFI export, never hardcodes it). Raised
+	// 4096 -> 12288 in S1W12 after S1W3's real P100 instrumentation
+	// (scripts/prtcfr_p100_instrument.py, ~8800 games, production 300-turn
+	// rule profile, avoid_cambia cohort) measured worst-case token length 7284
+	// and rising with sample size at n=10000 -- the original 4096 cap (built
+	// from the pre-P100 "~726 mean, ~1200 worst" estimate in
+	// sequence_encoding.py, measured under the SHORTER 46-turn tiny/test rule
+	// profile, not the 300-turn production one) was already below production
+	// reality and would hard-error long self-play trajectories. If a future
+	// larger P100 run ever approaches this cap, raise both constants together
+	// and re-run the P100 script per PRODUCTION_SEQ_CAP's own docstring.
+	MaxTokenStream = 12288
 
 	// tokMaxSlots is the maximum hand-slot index the tokenizer represents
 	// (MAX_SLOTS in Python). SLOT ids = tokMaxSlots concrete + one "no slot".

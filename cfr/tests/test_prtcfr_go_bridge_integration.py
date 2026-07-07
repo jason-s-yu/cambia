@@ -11,16 +11,17 @@ S1W11). These tests therefore validate Go-SIDE SELF-CONSISTENCY only --
 save/restore round-trips and CRN-style replay determinism -- never comparing
 values against the Python engine across a snap/reshuffle boundary.
 
-IMPORTANT CROSS-LANE FINDING (see also prtcfr_worker.py's PRODUCTION_SEQ_CAP
-docstring): the Go engine hard-caps per-agent token storage at
-MaxTokenStream=4096 (engine/agent/tokens.go), independent of and BELOW the
-v0.4 Phase 2 window-semantics decision's P100-derived PRODUCTION_SEQ_CAP=12288
-(measured worst-case avoid_cambia token length 7284 at n=10000, still rising).
-This is flagged, not fixed, here (engine/agent/* is S1W2's owned file; raising
-it needs a Go source change + libcambia.so rebuild + S1W2's own overflow/parity
-tests re-verified) -- see test_token_stream_overflow_hard_errors below, which
-demonstrates the hard-error contract IS honored (never silent truncation) at
-whatever the current cap is, and reproduces the gap.
+CROSS-LANE GAP RESOLVED (S1W12): the Go engine's per-agent token cap
+(MaxTokenStream, engine/agent/tokens.go) was raised 4096 -> 12288 to match
+prtcfr_worker.py's P100-derived PRODUCTION_SEQ_CAP=12288 (measured worst-case
+avoid_cambia token length 7284 at n=10000). The durable invariant -- Go cap
+>= PRODUCTION_SEQ_CAP, read live via bridge.get_token_stream_cap() (backed by
+the cambia_token_stream_cap FFI export), never hardcoded -- is asserted by
+test_go_token_stream_cap_at_least_production_cap below. See also
+test_token_stream_overflow_hard_errors_never_silent_truncation, which still
+demonstrates the hard-error contract (never silent truncation) at whatever
+the current cap is, via a synthetic long-game stress profile since a real
+300-turn production game no longer reaches the (now larger) cap.
 """
 
 import os
@@ -203,22 +204,23 @@ def test_state_restore_replay_determinism_crn_invariant():
 
 
 # ---------------------------------------------------------------------------
-# Token overflow: hard error, never silent truncation -- AND the cross-lane
-# cap-mismatch reproduction (flagged, not fixed here).
+# Token overflow: hard error, never silent truncation.
 # ---------------------------------------------------------------------------
 
 
 def test_token_stream_overflow_hard_errors_never_silent_truncation():
-    """Drive a single game far enough (skip CallCambia whenever a non-Cambia
-    action exists, matching the P100 script's avoid_cambia stress cohort) to
-    cross the Go engine's MaxTokenStream=4096 hard cap. Must raise RuntimeError
+    """Drive a single game far enough to cross the Go engine's MaxTokenStream
+    hard cap (currently 12288, S1W12). Must raise RuntimeError
     (apply_games_batch's ret==-2 path), never silently truncate.
 
-    This reproduces, against the REAL .so, the exact cross-lane finding in
-    prtcfr_worker.py's PRODUCTION_SEQ_CAP docstring: MaxTokenStream=4096 is
-    below the P100-measured production worst case (up to 7284+ tokens,
-    avoid_cambia cohort) -- a real self-play trajectory of that shape WILL hit
-    this and hard-error during training, not just in this synthetic test.
+    A REAL production game (max_game_turns=300) no longer reaches the cap
+    (P100-measured worst case 7284 tokens, comfortably under 12288) -- that is
+    the point of S1W12's cap raise. To still exercise the hard-error CONTRACT
+    against the real .so, this uses a synthetic long-game rule profile
+    (max_game_turns=900, 3x production) purely to accumulate enough tokens;
+    it is not claiming that a real production trajectory overflows. The
+    Go-side unit test (engine/agent/tokens_test.go::TestTokenOverflowIsHardError)
+    covers the same contract at the unit level, cap-agnostically.
     """
     import random
 
@@ -227,18 +229,22 @@ def test_token_stream_overflow_hard_errors_never_silent_truncation():
 
     call_cambia_idx = action_to_index(ActionCallCambia())
 
-    # A deterministic "always smallest legal index" policy is low-eventfulness
-    # (few ability/snap triggers) and lands just under the cap (~3966 tokens
-    # at seed 17, empirically) even over the full 300 turns; RANDOM play (like
-    # the P100 script's avoid_cambia cohort) is what drives the higher,
-    # overflow-crossing counts (mean 3217, p99 4476 at n=10000). Try a handful
-    # of seeds with uniform-random non-Cambia play to reliably reproduce it.
+    def _long_game_rules() -> CambiaRulesConfig:
+        hr = _production_rules()
+        hr.max_game_turns = 900  # synthetic: only to reliably exceed 12288 tokens
+        return hr
+
+    # Uniform-random non-Cambia play (matching the P100 script's avoid_cambia
+    # cohort shape) reliably overflows within a handful of seeds at this
+    # length (verified empirically: 10/10 seeds overflow within ~9000 steps).
     overflowed = False
-    for seed in range(20):
-        engine, a0, a1 = _new_game_and_agents(seed=1000 + seed)
+    for seed in range(10):
+        engine = GoEngine(seed=1000 + seed, house_rules=_long_game_rules())
+        a0 = GoAgentState(engine, player_id=0)
+        a1 = GoAgentState(engine, player_id=1)
         rng = random.Random(seed)
         try:
-            for _ in range(3000):
+            for _ in range(9000):
                 if engine.is_terminal():
                     break
                 mask = engine.legal_actions_mask()
@@ -266,26 +272,34 @@ def test_token_stream_overflow_hard_errors_never_silent_truncation():
             break
 
     assert overflowed, (
-        "expected a token-stream overflow within 20 random-play seeds at the "
-        "production rule profile's 300-turn cap; if this no longer fires, "
-        "MaxTokenStream may have been raised -- update this test's "
-        "expectation and the PRODUCTION_SEQ_CAP cross-lane note"
+        "expected a token-stream overflow within 10 random-play seeds at the "
+        "synthetic 900-turn stress profile; if this no longer fires, "
+        "MaxTokenStream may have been raised further -- update this test's "
+        "stress profile to accumulate more tokens"
     )
 
 
-def test_go_token_stream_cap_below_p100_production_cap():
-    """Documents the cross-lane gap as a live, executable assertion (not just
-    a docstring claim): the Go engine's hard token cap is currently BELOW the
-    v0.4 Phase 2 P100-derived PRODUCTION_SEQ_CAP. If this test starts failing
-    (GO_TOKEN_STREAM_CAP raised to >= PRODUCTION_SEQ_CAP), that is GOOD NEWS --
-    delete this test and drop the cross-lane flag."""
+def test_go_token_stream_cap_at_least_production_cap():
+    """Durable invariant (inverted from the pre-S1W12 gap-reproduction guard):
+    the Go engine's hard token cap must stay >= the P100-derived
+    PRODUCTION_SEQ_CAP. Reads BOTH sides live -- the Go cap via the dedicated
+    cambia_token_stream_cap FFI export (bridge.get_token_stream_cap()), never
+    a hardcoded literal -- so this cannot silently drift out of sync with
+    either constant's actual value."""
     from src.cfr.prtcfr_worker import PRODUCTION_SEQ_CAP
 
-    vocab = bridge.get_token_vocab()
-    go_cap = vocab["GO_TOKEN_STREAM_CAP"]
-    assert go_cap < PRODUCTION_SEQ_CAP, (
-        f"expected the known cross-lane gap (Go cap {go_cap} < Python "
-        f"PRODUCTION_SEQ_CAP {PRODUCTION_SEQ_CAP}); if this assertion now "
-        f"fails, the gap has been resolved -- update the docstrings and "
-        f"remove this guard test"
+    go_cap = bridge.get_token_stream_cap()
+    assert go_cap >= PRODUCTION_SEQ_CAP, (
+        f"Go token-stream cap {go_cap} (engine/agent/tokens.go::MaxTokenStream) "
+        f"is below PRODUCTION_SEQ_CAP {PRODUCTION_SEQ_CAP} "
+        f"(cfr/src/cfr/prtcfr_worker.py) -- long self-play trajectories will "
+        f"hard-error during training. Raise MaxTokenStream to at least "
+        f"PRODUCTION_SEQ_CAP and rebuild libcambia.so."
+    )
+    # Cross-check: the vocab-embedded field must agree with the dedicated
+    # single-value export (two independent Go-side read paths, one value).
+    vocab_cap = bridge.get_token_vocab()["GO_TOKEN_STREAM_CAP"]
+    assert vocab_cap == go_cap, (
+        f"cambia_token_vocab's GO_TOKEN_STREAM_CAP ({vocab_cap}) disagrees "
+        f"with cambia_token_stream_cap ({go_cap})"
     )

@@ -12,8 +12,13 @@
 //	cambia_state_save / cambia_state_restore / cambia_state_snapshot_free -
 //	  token-inclusive (game, both-agents) checkpoint pair (additive to the
 //	  game-only cambia_game_save/restore, which are unchanged).
+//	cambia_state_clone - independent (game, both-agents) clone onto FRESH
+//	  handles, for rollout fan-out (S1W12; distinct from state_save/restore's
+//	  rewind-on-same-handles checkpointing).
 //	cambia_token_vocab / cambia_token_encode_card / cambia_token_encode_action
 //	  - expose the Go vocabulary layout + mappings for the parity cross-check.
+//	cambia_token_stream_cap - the live MaxTokenStream value (S1W12), paired
+//	  with cfr/src/cfr/prtcfr_worker.py::PRODUCTION_SEQ_CAP.
 package main
 
 /*
@@ -1393,6 +1398,66 @@ func cambia_state_snapshot_free(h C.int32_t) {
 	freeStateSnapshot(int32(h))
 }
 
+// cambia_state_clone allocates FRESH game+agent handles and value-copies the
+// game state, both agents' belief state, and both agents' token streams into
+// them: an INDEPENDENT clone, not a rewind-on-same-handles checkpoint like
+// cambia_state_save/restore. This is the primitive the rollout fan-out
+// sampler needs (p2-redesign.md: "clone the engine state" at a decision node,
+// then apply DIVERGENT playouts on each clone without perturbing the source
+// or sibling clones). Aliasing state_save/restore for this would be wrong:
+// restore always rewinds the SAME handles, so N fan-out branches would fight
+// over one game/agent triple instead of evolving independently.
+//
+// Writes the new handles to *out_game_h/*out_a0_h/*out_a1_h on success (0).
+// On allocation failure (pool exhaustion) returns -1 and frees any handles
+// already allocated for this call -- never leaks a partial clone; the out
+// pointers are left unwritten and must not be read by the caller on error.
+//
+//export cambia_state_clone
+func cambia_state_clone(
+	game_h C.int32_t, a0_h C.int32_t, a1_h C.int32_t,
+	out_game_h *C.int32_t, out_a0_h *C.int32_t, out_a1_h *C.int32_t,
+) C.int32_t {
+	if game_h < 0 || game_h >= maxGames || !gameInUse[game_h] {
+		return -1
+	}
+	if a0_h < 0 || a0_h >= maxAgents || !agentInUse[a0_h] {
+		return -1
+	}
+	if a1_h < 0 || a1_h >= maxAgents || !agentInUse[a1_h] {
+		return -1
+	}
+
+	newGH := allocGame()
+	if newGH < 0 {
+		return -1
+	}
+	newA0 := allocAgent()
+	if newA0 < 0 {
+		freeGame(newGH)
+		return -1
+	}
+	newA1 := allocAgent()
+	if newA1 < 0 {
+		freeGame(newGH)
+		freeAgent(newA0)
+		return -1
+	}
+
+	gamePool[newGH] = gamePool[game_h]
+	agentPool[newA0] = agentPool[a0_h]
+	agentPool[newA1] = agentPool[a1_h]
+	tokenPool[newA0] = tokenPool[a0_h]
+	tokenPool[newA1] = tokenPool[a1_h]
+	agentGameH[newA0] = newGH
+	agentGameH[newA1] = newGH
+
+	*out_game_h = C.int32_t(newGH)
+	*out_a0_h = C.int32_t(newA0)
+	*out_a1_h = C.int32_t(newA1)
+	return 0
+}
+
 // cambia_token_vocab writes the token vocabulary layout constants (fixed order,
 // agent.TokenVocabFields entries) into out for the Python constants cross-check.
 // Returns the count written, or -1 if max is too small.
@@ -1420,6 +1485,18 @@ func cambia_token_encode_card(go_card_index C.uint8_t) C.int32_t {
 //export cambia_token_encode_action
 func cambia_token_encode_action(action_idx C.uint16_t) C.int32_t {
 	return C.int32_t(agent.EncodeActionToken(uint16(action_idx)))
+}
+
+// cambia_token_stream_cap returns the Go per-agent hard token-stream cap
+// (agent.MaxTokenStream), so callers can assert live against the paired
+// Python constant (cfr/src/cfr/prtcfr_worker.py::PRODUCTION_SEQ_CAP) instead
+// of hardcoding either value. Also available as the GO_TOKEN_STREAM_CAP field
+// of cambia_token_vocab; this is a direct single-value read for callers that
+// only need the cap.
+//
+//export cambia_token_stream_cap
+func cambia_token_stream_cap() C.int32_t {
+	return C.int32_t(agent.MaxTokenStream)
 }
 
 func main() {}
