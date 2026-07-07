@@ -47,7 +47,7 @@ const initialState: GameState = {
 };
 
 export const useGameStore = create<GameState & GameActions>()(
-	immer((set, get) => ({
+	immer((set) => ({
 		...initialState,
 
 		setGameId: (id) => {
@@ -151,19 +151,23 @@ export const useGameStore = create<GameState & GameActions>()(
 
 				try { // Add try-catch for safety during state updates
 					switch (type) {
-						case 'private_sync_state':
+						case 'private_sync_state': {
 							state.gameState = payload.state;
 							state.isLoading = false; // Sync received, no longer loading initial state
 							state.isConnected = true; // Mark as connected on successful sync
 							state.error = null;
 							state.pendingAction = null; // Clear pending actions on full sync
 							// Determine pending action based on new state
-							const userState = state.gameState.players.find(p => p.playerId === state.gameState?.players.find(pl => pl.revealedHand !== undefined)?.playerId); // Find 'self'
-							if (userState?.drawnCard && state.gameState.currentPlayerId === userState.playerId && !state.gameState.gameOver && state.gameState.started) {
-								state.pendingAction = 'discard_replace';
+							const gs = state.gameState;
+							if (gs) {
+								const userState = gs.players.find(p => p.playerId === gs.players.find(pl => pl.revealedHand !== undefined)?.playerId); // Find 'self'
+								if (userState?.drawnCard && gs.currentPlayerId === userState.playerId && !gs.gameOver && gs.started) {
+									state.pendingAction = 'discard_replace';
+								}
 							}
 							// TODO: Add logic for pending special action based on state.gameState.specialAction
 							break;
+						}
 
 						case 'private_initial_cards':
 							// This is mainly for the client to "remember" cards.

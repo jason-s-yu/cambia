@@ -52,7 +52,7 @@ const getJokerColor = (s?: string): string => {
 };
 
 const Card: React.FC<CardProps> = ({
-	id, rank, suit, faceUp, onClick, className = '',
+	rank, suit, faceUp, onClick, className = '',
 	layoutId, isSelected = false, isInteractive = true,
 	isTargetable = false, compact = false,
 }) => {

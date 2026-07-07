@@ -88,6 +88,13 @@ export interface LobbyState {
   matchState?: MatchState;
 }
 
+/** Entry in the /lobby/list response: lobby summary plus player counts (see service ListLobbiesResponse). */
+export interface LobbyListEntry {
+  lobby: LobbyState;
+  playerCount: number;
+  maxPlayers: number;
+}
+
 
 /** Represents a chat message */
 export interface ChatMessage {

@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import api from '@/lib/axios';
-import type { LobbyState } from '@/types';
+import type { LobbyState, LobbyListEntry } from '@/types';
 
 /**
  * Creates a new lobby via the backend API.
@@ -33,9 +33,9 @@ export const joinLobby = async (lobbyId: string): Promise<void> => {
 	}
 };
 
-export const listLobbies = async (): Promise<Record<string, LobbyState>> => {
+export const listLobbies = async (): Promise<Record<string, LobbyListEntry>> => {
 	try {
-		const response = await api.get<Record<string, LobbyState>>('/lobby/list');
+		const response = await api.get<Record<string, LobbyListEntry>>('/lobby/list');
 		return response.data || {}; // Return empty object if data is null/undefined to prevent errors
 	} catch (error: any) {
 		console.error('List Lobbies API call failed:', error.response?.data || error.message, error);

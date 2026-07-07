@@ -4,7 +4,10 @@
     "skipLibCheck": true,
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "allowSyntheticDefaultImports": true
+    "allowSyntheticDefaultImports": true,
+    "allowJs": true,
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
+    "outDir": "./node_modules/.tmp/tsconfig.node.out"
   },
-  "include": ["vite.config.ts", "tailwind.config.js", "eslint.config.js"] // Include config files
+  "include": ["vite.config.js", "tailwind.config.js", "eslint.config.js"] // Include config files
 }
