@@ -63,7 +63,14 @@ class SnapLogicMixin:
             )
             return legal_actions
 
-        target_rank = self.snap_discarded_card.rank
+        # NOTE: Per RULES.md Sec.5, a snap targets ANY known card, and a rank
+        # mismatch is a legal-but-penalized attempt ("If you snap incorrectly...
+        # you receive a 2-card penalty"), not an illegal action. Legal-action
+        # generation therefore does NOT filter by rank -- it mirrors the Go
+        # engine's legalSnapDecision (engine/legal.go), offering SnapOwn /
+        # SnapOpponent for every hand slot. _handle_snap_action below already
+        # resolves the rank check and applies the penalty on a mismatch for
+        # both SnapOwn and SnapOpponent.
 
         # Basic validation of snapper's hand
         if not all(isinstance(card, Card) for card in snapper_hand):
@@ -79,12 +86,13 @@ class SnapLogicMixin:
         # Always possible to pass
         legal_actions.add(ActionPassSnap())
 
-        # Check for own snaps
+        # Own snaps: every hand slot is a legal (possibly wrong, penalized) target.
         for i, card in enumerate(snapper_hand):
-            if isinstance(card, Card) and card.rank == target_rank:
+            if isinstance(card, Card):
                 legal_actions.add(ActionSnapOwn(own_card_hand_index=i))
 
-        # Check for opponent snaps if allowed
+        # Opponent snaps if allowed: every opponent hand slot is a legal target,
+        # gated only on the snapper having a card to move into the vacated slot.
         if self.house_rules.allowOpponentSnapping:
             opponent_idx = self.get_opponent_index(acting_player)
             if not (
@@ -104,10 +112,9 @@ class SnapLogicMixin:
                         opponent_hand,
                     )
                 else:
-                    # Check opponent hand for matches ONLY IF the snapper has a card to move
                     if len(snapper_hand) > 0:
                         for i, card in enumerate(opponent_hand):
-                            if isinstance(card, Card) and card.rank == target_rank:
+                            if isinstance(card, Card):
                                 legal_actions.add(
                                     ActionSnapOpponent(opponent_target_hand_index=i)
                                 )

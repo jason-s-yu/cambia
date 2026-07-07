@@ -32,6 +32,62 @@ from src.cfr.exceptions import (
 logger = logging.getLogger(__name__)
 
 
+class GoXorShift64Rng:
+    """Mirrors the Go engine's XorShift64 PRNG (engine/game.go nextRand/randN)
+    bit for bit, for cross-engine reshuffle-order parity.
+
+    The Go engine draws from ONE continuous XorShift64 stream for the whole
+    game: the initial Fisher-Yates deck shuffle + starting-player pick in
+    Deal(), and any subsequent attemptReshuffle() Fisher-Yates shuffles. For
+    a Python game to reproduce a Go game byte-for-byte past a reshuffle, its
+    RNG stream must be this same algorithm, seeded identically and advanced
+    through the identical sequence of operations (see
+    tests/test_token_stream_parity.py's lockstep driver, which seeds and
+    pre-advances an instance of this class to match Go's post-Deal() state
+    before installing it as CambiaGameState._rng).
+
+    Exposes shuffle()/randint() with signatures duck-type-compatible with
+    random.Random, so it can be assigned directly to CambiaGameState._rng
+    (used by _setup_game() and _attempt_reshuffle()) without any other engine
+    change. This is opt-in: the dataclass default for _rng remains
+    random.Random, so unrelated callers (e.g. tools/tiny_solver.py's own
+    explicit _rng=random.Random(...) construction) are unaffected.
+    """
+
+    _MASK64 = (1 << 64) - 1
+
+    def __init__(self, seed: int = 0):
+        self.state = 1
+        self.seed(seed)
+
+    def seed(self, seed: int) -> None:
+        self.state = (seed & self._MASK64) or 1
+
+    def next_rand(self) -> int:
+        x = self.state
+        x ^= (x << 13) & self._MASK64
+        x ^= (x >> 7) & self._MASK64
+        x ^= (x << 17) & self._MASK64
+        self.state = x
+        return x
+
+    def rand_n(self, n: int) -> int:
+        return self.next_rand() % n
+
+    def randint(self, a: int, b: int) -> int:
+        """Inclusive [a, b], matching random.Random.randint's signature (used
+        by _setup_game() for the starting-player draw)."""
+        return a + self.rand_n(b - a + 1)
+
+    def shuffle(self, lst: list) -> None:
+        """In-place Fisher-Yates, matching Go's attemptReshuffle/Deal loop
+        (`for i := len-1; i > 0; i--`)."""
+        n = len(lst)
+        for i in range(n - 1, 0, -1):
+            j = self.rand_n(i + 1)
+            lst[i], lst[j] = lst[j], lst[i]
+
+
 @dataclass
 class CambiaGameState(QueryMixin, SnapLogicMixin, AbilityMixin):
     """

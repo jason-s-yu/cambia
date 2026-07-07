@@ -24,16 +24,20 @@ Coverage (asserted below):
 - snap success/penalty + slot frames: Go-emitted, decoded by the Python codec.
 - token-inclusive state save/restore round-trip.
 
-Lockstep-narrowing note (per the AC3 rule "narrow the compare scope per-condition
-and document; never skip wholesale"): the Go and Python engines have a KNOWN
-pre-existing parity gap in snap-phase entry and successful-snap resolution
-(engine core, out of this task's scope; see test_cross_engine_samples.py and
-test_encoding_v2.py's ring_drift handling). The live driver therefore drains
-snap phases via the common PassSnap action (which stays byte-identical) and stops
-a game the instant the two engines' snap-phase state disagrees. Successful-snap
-and ability-select frame *assembly* is byte-identical to any other snap/public
-frame; the specific outcome/action tokens are covered by the exhaustive mapping
-cross-check and (for snap success/penalty) a Go-emit -> Python-decode check.
+Full-game byte-equality note (S1W11): the engines previously had two behavioral
+divergences: (1) Python's snap legal-action generator filtered SnapOwn/
+SnapOpponent to rank-matching cards only, while Go (correctly, per RULES.md
+Sec.5's "if you snap incorrectly... 2-card penalty" clause) offers a snap on
+every hand slot, letting _handle_snap_action resolve success/penalty; (2)
+Python's stockpile reshuffle used an independent random.Random stream instead
+of mirroring Go's continuous XorShift64 stream, so post-reshuffle draws
+diverged. Both are fixed on the Python side (src/game/_snap_mixin.py's
+_get_legal_snap_actions; engine.GoXorShift64Rng installed as the lockstep
+game's _rng, pre-advanced to Go's post-Deal() state -- see _play_lockstep).
+The live driver now plays FULL games through real snap resolutions and
+reshuffles with full observable-state byte-equality asserted after every
+action (legal-action sets, terminal/acting-player, stock length, discard-top
+bucket, and the token-stream body itself) -- no narrowing, no early stop.
 
 Run (needs libcambia.so):
   python -m pytest tests/test_token_stream_parity.py -v -s
@@ -52,6 +56,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.card import Card
+from src.game.engine import GoXorShift64Rng
 from src.constants import (
     NUM_PLAYERS,
     ActionAbilityBlindSwapSelect,
@@ -235,6 +240,7 @@ def _py_legal_set(pygame) -> set:
 
 
 _DRAW_STOCKPILE_IDX = 0
+_REAL_SNAP_MIN = 98  # PassSnap=97; SnapOwn/SnapOpponent/SnapOpponentMove >= 98.
 
 
 def _is_snap_only(s: set) -> bool:
@@ -244,10 +250,10 @@ def _is_snap_only(s: set) -> bool:
 def _states_diverged(eng: "GoEngine", pygame) -> bool:
     """Detect hidden-state divergence via observable signals.
 
-    Catches the pre-existing engine reshuffle-order gap: when the stockpile
-    empties and refills, Go and Python re-order it differently, so subsequent
-    drawn/discarded cards differ. The discard-top bucket and stockpile size
-    surface that without needing card-identity FFI.
+    Used only by test_state_save_restore_round_trip_tokens below, which tests
+    save/restore round-tripping (not full-game snap/reshuffle coverage) and so
+    keeps the original narrow/avoid-reshuffle step_n helper; the main
+    _play_lockstep driver asserts state equality directly instead (see below).
     """
     if eng.is_terminal() != pygame.is_terminal():
         return True
@@ -263,6 +269,22 @@ def _states_diverged(eng: "GoEngine", pygame) -> bool:
     if go_bucket is None:
         go_bucket = -1
     return go_bucket != py_bucket
+
+
+def _install_go_synced_rng(pygame, seed: int) -> None:
+    """Install a GoXorShift64Rng on pygame, pre-advanced to match the state
+    Go's own per-game RNG is in immediately after Deal(): 53 draws for the
+    54-card Fisher-Yates shuffle, then 1 draw for the starting-player pick
+    (mirrors _setup_python_game_matching_go's local deck-sync shuffle and
+    engine/game.go's Deal()). Subsequent Python-side reshuffles
+    (_attempt_reshuffle -> self._rng.shuffle) then draw from the SAME
+    continuing stream Go's attemptReshuffle() uses, reproducing Go's
+    post-reshuffle stockpile order byte-for-byte.
+    """
+    rng = GoXorShift64Rng(seed)
+    rng.shuffle([0] * 54)
+    rng.randint(0, NUM_PLAYERS - 1)
+    pygame._rng = rng
 
 
 def _py_body(init_hand, init_peek, obs_stream, observer) -> List[int]:
@@ -284,21 +306,26 @@ class _GameResult:
 
 
 def _play_lockstep(seed: int, call_cambia_after: int = -1) -> _GameResult:
-    """Play one Python+Go lockstep game, asserting token-body byte-equality.
+    """Play one Python+Go lockstep FULL game, asserting byte-equality.
 
-    Selection is deterministic lowest-common-action (the Phase-0 discipline):
-    stays in engine lockstep for full games while draining snap phases via the
-    common PassSnap. call_cambia_after >= 0 forces a CallCambia at the first
-    start-turn after that many steps (covers the cambia frame). The game stops
-    cleanly the instant the engines' snap-phase state disagrees (documented
-    engine parity gap, out of scope).
+    Selection is a seeded pseudo-random policy (src/tests's own RNG stream,
+    independent of the game engines) biased toward real snaps and stockpile
+    draws, so real snap resolutions and stockpile reshuffles -- previously
+    narrowed out of this driver -- are actually exercised. Every action
+    asserts: legal-action-set equality, terminal/acting-player equality,
+    stock length equality, discard-top bucket equality, and token-stream body
+    byte-equality. call_cambia_after >= 0 forces a CallCambia at the first
+    start-turn after that many steps (covers the cambia frame).
     """
     res = _GameResult()
     pygame = _setup_python_game_matching_go(seed)
+    _install_go_synced_rng(pygame, seed)
     eng = GoEngine(seed=seed, house_rules=_TEST_RULES)
     a0 = GoAgentState(eng, 0)
     a1 = GoAgentState(eng, 1)
     agents = {0: a0, 1: a1}
+
+    action_rng = random.Random(0xC0FFEE ^ seed)
 
     obs_streams: Dict[int, List[Any]] = {p: [] for p in range(NUM_PLAYERS)}
     init_hands = {p: list(pygame.players[p].hand) for p in range(NUM_PLAYERS)}
@@ -315,14 +342,27 @@ def _play_lockstep(seed: int, call_cambia_after: int = -1) -> _GameResult:
                 f"  Go={go_body}\n  Py={py_body}"
             )
 
-        for step in range(400):
-            if eng.is_terminal() or pygame.is_terminal():
+        for step in range(800):
+            g_term, p_term = eng.is_terminal(), pygame.is_terminal()
+            if g_term or p_term:
+                assert g_term == p_term, (
+                    f"seed {seed} step {step}: terminal mismatch Go={g_term} Py={p_term}"
+                )
                 break
             go_set = _go_legal_set(eng)
-            # Snap-phase agreement guard (the documented narrowing condition).
-            if _is_snap_only(go_set) != bool(pygame.snap_phase_active):
-                break
-            common = sorted(go_set & _py_legal_set(pygame))
+            py_set = _py_legal_set(pygame)
+            # _DISCARD_WITH_ABILITY_IDX is a separate, pre-existing, already
+            # out-of-scope engine legal-gen gap (py-only ability-fizzle
+            # mismatch on the drawn card; unrelated to snap/reshuffle -- see
+            # the constant's comment). Excluded from the equality bar here,
+            # same as it is from action selection below.
+            go_cmp = go_set - {_DISCARD_WITH_ABILITY_IDX}
+            py_cmp = py_set - {_DISCARD_WITH_ABILITY_IDX}
+            assert go_cmp == py_cmp, (
+                f"seed {seed} step {step}: legal-action-set mismatch\n"
+                f"  go_only={sorted(go_cmp - py_cmp)}\n  py_only={sorted(py_cmp - go_cmp)}"
+            )
+            common = sorted(go_set & py_set)
             if not common:
                 break
 
@@ -335,16 +375,21 @@ def _play_lockstep(seed: int, call_cambia_after: int = -1) -> _GameResult:
                 action_idx = _CAMBIA_IDX
                 called = True
             else:
-                pool = [c for c in common if c not in (_CAMBIA_IDX, _DISCARD_WITH_ABILITY_IDX)]
-                if not pool:
-                    break
-                action_idx = pool[0]
-
-            # A stockpile draw from an empty stock triggers a reshuffle whose
-            # order differs between the engines (pre-existing engine gap): stop
-            # cleanly before it desyncs the deck.
-            if action_idx == _DRAW_STOCKPILE_IDX and eng.stock_len() == 0:
-                break
+                real_snaps = [c for c in common if c >= _REAL_SNAP_MIN]
+                if real_snaps and action_rng.random() < 0.6:
+                    action_idx = action_rng.choice(real_snaps)
+                elif _is_snap_only(set(common)):
+                    action_idx = _SNAP_MIN if _SNAP_MIN in common else action_rng.choice(common)
+                else:
+                    pool = [
+                        c for c in common if c not in (_CAMBIA_IDX, _DISCARD_WITH_ABILITY_IDX)
+                    ]
+                    if _DRAW_STOCKPILE_IDX in pool and action_rng.random() < 0.5:
+                        action_idx = _DRAW_STOCKPILE_IDX
+                    elif pool:
+                        action_idx = action_rng.choice(pool)
+                    else:
+                        action_idx = action_rng.choice(common)
 
             actor = pygame.get_acting_player()
             py_action = None
@@ -352,23 +397,45 @@ def _play_lockstep(seed: int, call_cambia_after: int = -1) -> _GameResult:
                 if action_to_index(a) == action_idx:
                     py_action = a
                     break
-            if py_action is None:
-                break
+            assert py_action is not None, (
+                f"seed {seed} step {step}: no python action found for idx {action_idx}"
+            )
 
             pygame.apply_action(py_action)
             apply_games_batch([eng.handle], [a0.handle], [a1.handle], [action_idx])
 
             snap_results = list(getattr(pygame, "snap_results_log", []) or [])
             full_obs = _create_observation(None, py_action, pygame, actor, snap_results)
-            if full_obs is None:
-                break
+            assert full_obs is not None, (
+                f"seed {seed} step {step}: observation construction failed for action {action_idx}"
+            )
             for observer in range(NUM_PLAYERS):
                 obs_streams[observer].append(_filter_observation(full_obs, observer))
 
-            # Attribute any hidden-state divergence on this apply to the engine
-            # gap, not the tokenizer: stop without asserting if state diverged.
-            if _states_diverged(eng, pygame):
-                break
+            # Full-game byte equality is now the acceptance bar: any observable
+            # divergence is a hard failure, not a silent stop.
+            g_term, p_term = eng.is_terminal(), pygame.is_terminal()
+            assert g_term == p_term, (
+                f"seed {seed} step {step}: post-action terminal mismatch "
+                f"Go={g_term} Py={p_term} action={action_idx}"
+            )
+            if not g_term:
+                assert eng.acting_player() == pygame.get_acting_player(), (
+                    f"seed {seed} step {step}: acting-player mismatch after action {action_idx}"
+                )
+            assert eng.stock_len() == len(pygame.stockpile), (
+                f"seed {seed} step {step}: stock_len mismatch "
+                f"Go={eng.stock_len()} Py={len(pygame.stockpile)} action={action_idx}"
+            )
+            py_top = pygame.get_discard_top()
+            py_bucket = -1 if py_top is None else get_card_bucket(py_top).value
+            go_bucket = eng.discard_top()
+            if go_bucket is None:
+                go_bucket = -1
+            assert go_bucket == py_bucket, (
+                f"seed {seed} step {step}: discard-top bucket mismatch "
+                f"Go={go_bucket} Py={py_bucket} action={action_idx}"
+            )
 
             for observer in range(NUM_PLAYERS):
                 go_body = agents[observer].tokens().tolist()
