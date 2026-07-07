@@ -48,9 +48,40 @@ from .prtcfr_net import (
     tiny_node_to_token_array,
     tiny_node_to_tokens,
 )
+from .prtcfr_stability import BestSnapshotController, write_deployable_manifest
 from .prtcfr_worker import PRTCFRWorker
 
 logger = logging.getLogger(__name__)
+
+
+def _peak_lr_for_iter(
+    lr: float, lr_min: float, t: int, total_iters: int, schedule: str
+) -> float:
+    """Per-iteration peak LR for the fit at iteration ``t`` (1-based).
+
+    ``schedule="restart"`` (default) returns ``lr`` unchanged every iteration --
+    the original per-iteration cosine warm-restart to the same peak, which keeps
+    the effective step size constant across iterations. Near equilibrium the
+    regret targets are MC-noise-dominated (the estimator floor does not shrink as
+    the strategy converges), so a warm-started net keeps taking full-size steps
+    that fit that noise; the linear reservoir/SD-CFR recency weighting then
+    amplifies the late overfit into the divergence.
+
+    ``schedule="global_cosine"`` decays the per-iteration PEAK across the whole
+    run (cosine from ``lr`` at t=1 to ``lr_min`` at t=total_iters), a
+    Robbins-Monro decreasing step size: late iterations take small steps and can
+    no longer overfit the near-equilibrium noise, while early iterations still
+    converge fast. The within-iteration cosine (to ``lr_min``) is unchanged.
+    """
+    if schedule == "restart":
+        return lr
+    if schedule == "global_cosine":
+        if total_iters <= 1:
+            return lr
+        frac = (t - 1) / (total_iters - 1)
+        frac = min(max(frac, 0.0), 1.0)
+        return lr_min + 0.5 * (lr - lr_min) * (1.0 + math.cos(math.pi * frac))
+    raise ValueError(f"unknown lr_schedule {schedule!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -165,12 +196,14 @@ def _fit_from_scratch(
     num_steps: int,
     weight_decay: float = 0.0,
     grad_clip: float = 1.0,
+    lr_min: float = 0.0,
 ) -> float:
     """Refit ``net`` (already freshly initialized) on the reservoir.
 
     Loss = normalized-linear-weighted, masked-SUM MSE over legal actions. Adam +
-    cosine-decayed lr across ``num_steps``. Gradient clip applied LAST. Returns the
-    mean weighted loss over executed steps.
+    cosine-decayed lr across ``num_steps`` (floored at ``lr_min``, default 0.0 =
+    the original decay-to-zero). Gradient clip applied LAST. Returns the mean
+    weighted loss over executed steps.
     """
     if len(buf) == 0:
         return 0.0
@@ -178,7 +211,7 @@ def _fit_from_scratch(
     net.train()
     optimizer = torch.optim.Adam(net.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=max(num_steps, 1)
+        optimizer, T_max=max(num_steps, 1), eta_min=lr_min
     )
 
     total_loss = 0.0
@@ -225,6 +258,7 @@ class PRTCFRTinyTrainer:
         config,
         snapshot_dir: str,
         net_factory: Optional[Callable[[], PRTCFRNet]] = None,
+        eval_fn: Optional[Callable[["PRTCFRTinyTrainer", int], float]] = None,
     ):
         self.root = root
         self.config = config
@@ -244,6 +278,39 @@ class PRTCFRTinyTrainer:
         self.warm_start = bool(getattr(config, "warm_start", False))
         self.seed = int(getattr(config, "seed", 0))
         self.device = getattr(config, "device", "cuda")
+
+        # --- Late-training stability (all config-gated, defaults reproduce the
+        # Phase 1 gate byte-for-byte). ---
+        # Optimizer-side fix for the warm-start blow-up: a global (across-run) LR
+        # decay so late near-equilibrium iterations take small steps.
+        self.lr_schedule = str(getattr(config, "lr_schedule", "restart"))
+        self.lr_min = float(getattr(config, "lr_min", 0.0))
+        # Periodic re-anchor: re-initialize the net from scratch every N iters even
+        # under warm_start (0 = never; breaks the warm-start error accumulation).
+        self.reanchor_every = int(getattr(config, "reanchor_every", 0))
+        # Best-snapshot / early-stop controller over the exploitability trend.
+        self.stability_enabled = bool(getattr(config, "stability_enabled", False))
+        self.stability_eval_every = int(getattr(config, "stability_eval_every", 10))
+        self.stability_patience = int(getattr(config, "stability_patience", 3))
+        self.stability_rel_tolerance = float(
+            getattr(config, "stability_rel_tolerance", 0.15)
+        )
+        self.stability_min_iters = int(
+            getattr(config, "stability_min_iters", self.stability_eval_every)
+        )
+        self.stability_metric_mode = str(getattr(config, "stability_metric_mode", "min"))
+        self.stability_metric_name = str(
+            getattr(config, "stability_metric_name", "nashconv")
+        )
+        self.eval_fn = eval_fn
+        self.controller: Optional[BestSnapshotController] = None
+        if self.stability_enabled:
+            self.controller = BestSnapshotController(
+                rel_tolerance=self.stability_rel_tolerance,
+                patience=self.stability_patience,
+                min_iters=self.stability_min_iters,
+                mode=self.stability_metric_mode,
+            )
 
         self._net_factory = net_factory or (
             lambda: build_prtcfr_net(config, device=self.device)
@@ -343,16 +410,23 @@ class PRTCFRTinyTrainer:
         # regret map R^t (init only changes the optimization path, given the fit
         # converges); warm-start reaches it with fewer steps -- the from-scratch
         # underfit fix the capacity probe pointed at.
-        if not self.warm_start:
+        # Re-init from scratch when warm_start is off (Brown 2019), or when the
+        # periodic re-anchor fires (breaks warm-start error accumulation).
+        reanchor = self.reanchor_every > 0 and t % self.reanchor_every == 0
+        if (not self.warm_start) or reanchor:
             self.net = self._net_factory()
+        peak_lr = _peak_lr_for_iter(
+            self.lr, self.lr_min, t, self.iterations, self.lr_schedule
+        )
         loss = _fit_from_scratch(
             self.net,
             self.buffer,
-            lr=self.lr,
+            lr=peak_lr,
             batch_size=self.batch_size,
             num_steps=self.train_steps,
             weight_decay=self.weight_decay,
             grad_clip=self.grad_clip,
+            lr_min=self.lr_min,
         )
 
         snap = self._save_snapshot(t)
@@ -365,18 +439,67 @@ class PRTCFRTinyTrainer:
             snapshot_path=snap,
         )
 
+    def _stability_check_due(self, t: int, n: int) -> bool:
+        return t == 1 or t % self.stability_eval_every == 0 or t == n
+
     def train(self, iterations: Optional[int] = None) -> List[PRTCFRTrainState]:
-        """Run ``iterations`` (default config.iterations) PRT-CFR iterations."""
+        """Run ``iterations`` (default config.iterations) PRT-CFR iterations.
+
+        With ``stability_enabled`` and an ``eval_fn``, the trend metric is scored
+        at the stability cadence, fed to the best-snapshot controller, and the
+        deployable manifest is (re)written each check; training early-stops once
+        the metric has risen past the tolerance band for ``patience`` checks. The
+        deployable snapshot set pins to ``[1 .. best_iteration]`` so the served
+        SD-CFR average excludes the diverged tail regardless.
+        """
         n = iterations if iterations is not None else self.iterations
+        # The global LR schedule spans the run actually requested.
+        self.iterations = n
         history: List[PRTCFRTrainState] = []
+        written_iters: List[int] = []
         for t in range(1, n + 1):
             st = self.run_iteration(t)
             history.append(st)
+            written_iters.append(t)
             logger.info(
                 "[prtcfr] iter=%d samples+=%d buffer=%d fit_loss=%.5f snapshot=%s",
                 st.iteration, st.samples_added, st.buffer_size, st.fit_loss,
                 os.path.basename(st.snapshot_path),
             )
+
+            if not self.stability_enabled or self.controller is None:
+                continue
+            if not self._stability_check_due(t, n):
+                continue
+            if self.eval_fn is None:
+                # No trend metric available: keep the whole set deployable.
+                write_deployable_manifest(
+                    self.snapshot_dir, self.controller, written_iters,
+                    metric_name=self.stability_metric_name, stopped_early=False,
+                )
+                continue
+            metric = float(self.eval_fn(self, t))
+            decision = self.controller.update(t, metric)
+            logger.info(
+                "[prtcfr] stability iter=%d %s=%.5f best_iter=%d best=%.5f "
+                "worse_streak=%d stop=%s",
+                t, self.stability_metric_name, metric, decision.best_iteration,
+                decision.best_metric, decision.num_worse_since_best,
+                decision.should_stop,
+            )
+            write_deployable_manifest(
+                self.snapshot_dir, self.controller, written_iters,
+                metric_name=self.stability_metric_name,
+                stopped_early=decision.should_stop,
+            )
+            if decision.should_stop:
+                logger.info(
+                    "[prtcfr] early-stop at iter=%d; deployable window pinned to "
+                    "[1..%d] (%s=%.5f)",
+                    t, decision.best_iteration, self.stability_metric_name,
+                    decision.best_metric,
+                )
+                break
         return history
 
 
