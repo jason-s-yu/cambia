@@ -461,6 +461,7 @@ def test_cli_smoke_direct_call(tmp_path, monkeypatch):
         save_path=run_dir,
         device="cpu",
         backend="python",
+        resume=False,
     )
 
     assert (run_dir / "config.yaml").exists()
