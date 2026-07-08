@@ -1586,7 +1586,10 @@ class PRTCFRProductionTrainer:
             self._update_db_status("interrupted")
             raise
         except Exception:
-            self.save_reservoirs()
+            # Same rule as the KeyboardInterrupt handler above: a partial
+            # iteration's in-memory reservoir mutations must not be flushed
+            # past the last-committed (t-1) on-disk state, or --resume
+            # double-counts iteration t's samples.
             self._update_db_status("failed")
             raise
         self.save_reservoirs()
@@ -1594,8 +1597,14 @@ class PRTCFRProductionTrainer:
         return self._history
 
     def close(self) -> None:
-        """Flush reservoirs and close the run_db connection (idempotent)."""
-        self.save_reservoirs()
+        """Close the run_db connection (idempotent).
+
+        Deliberately does NOT flush reservoirs: close() runs in the CLI's
+        finally block, so flushing here would persist a partial iteration's
+        mutations after an interrupt or crash (the double-count path the
+        abnormal-exit handlers in train() refuse). Reservoir state is owned
+        by the per-iteration commit inside train().
+        """
         if self._db_conn is not None:
             try:
                 self._db_conn.close()
