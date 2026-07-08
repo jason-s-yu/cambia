@@ -1271,6 +1271,10 @@ class IncrementalSigmaManager:
                 # cap). Re-register from scratch rather than corrupt the carry.
                 self.service.drop(sid)
                 cl = 0
+                # Reset the stored carry too: leaving the stale value makes
+                # line +7's get()+len(new) accumulate past the true prefix,
+                # re-firing this drop on every later query for the sid.
+                self._carry_len[sid] = 0
             sids.append(sid)
             news.append(body_prefix[cl:])
         # One batched register/step over the new frames (skips empty streams,
