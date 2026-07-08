@@ -782,6 +782,71 @@ class _MultiReservoirSampler:
         return merged
 
 
+# ---------------------------------------------------------------------------
+# Resume-from-disk (S1T3): resume_state.json + reservoir/net/RNG reload.
+# ---------------------------------------------------------------------------
+#
+# resume_state.json is written every iteration next to the run's rolling
+# checkpoint + per-player reservoirs; --resume reloads all three so training
+# continues at t+1 with the exact stream a non-interrupted run would produce:
+#   - net: the rolling ``prtcfr_checkpoint.pt`` (the fitted iterate at t).
+#   - reservoirs: each per-player DiskReservoir's on-disk bookkeeping (count,
+#     seen_count, pool cursors, and its own sampling RNG) via ``.load()``.
+#   - RNG: ``self._fit_rng`` (numpy Generator state) + the torch global RNG.
+#     Per-iteration worker/game seeds are a deterministic function of ``t``
+#     (prtcfr_worker seeds every traversal/rollout from ``self.seed + t*...``),
+#     so they need no persistence -- resuming at the right ``t`` reproduces them.
+#   - controller: the BestSnapshotController's public fields, so the deployable
+#     window and early-stop streak survive the interruption.
+
+RESUME_SCHEMA_VERSION = 1
+
+
+class PRTCFRResumeError(RuntimeError):
+    """Raised when ``train(resume=True)`` finds no resumable state on disk."""
+
+
+def _controller_to_dict(controller: BestSnapshotController) -> dict:
+    """Serialize a BestSnapshotController's public fields (JSON-safe).
+
+    ``best_metric`` starts at +/-inf (mode-dependent) before the first check;
+    inf has no JSON literal, so it is stored as ``None`` and reconstructed from
+    ``mode`` on load.
+    """
+    bm = controller.best_metric
+    return {
+        "rel_tolerance": controller.rel_tolerance,
+        "patience": controller.patience,
+        "min_iters": controller.min_iters,
+        "mode": controller.mode,
+        "best_iteration": controller.best_iteration,
+        "best_metric": bm if math.isfinite(bm) else None,
+        "num_worse_since_best": controller.num_worse_since_best,
+        "stopped": controller.stopped,
+        "history": list(controller.history),
+    }
+
+
+def _controller_from_dict(d: dict) -> BestSnapshotController:
+    """Rebuild a BestSnapshotController from ``_controller_to_dict`` output."""
+    c = BestSnapshotController(
+        rel_tolerance=float(d["rel_tolerance"]),
+        patience=int(d["patience"]),
+        min_iters=int(d["min_iters"]),
+        mode=str(d["mode"]),
+    )
+    # __post_init__ set best_metric to the mode's inf sentinel; a stored None
+    # means "no best yet" (keep that sentinel), else restore the saved value.
+    bm = d.get("best_metric")
+    if bm is not None:
+        c.best_metric = float(bm)
+    c.best_iteration = int(d.get("best_iteration", 0))
+    c.num_worse_since_best = int(d.get("num_worse_since_best", 0))
+    c.stopped = bool(d.get("stopped", False))
+    c.history = list(d.get("history", []))
+    return c
+
+
 @dataclass
 class PRTCFRProductionTrainState:
     """Per-iteration record (returned for logging/tests; one metrics.jsonl row)."""
@@ -1107,6 +1172,116 @@ class PRTCFRProductionTrainer:
             except Exception as e:  # pragma: no cover
                 logger.warning("[prtcfr] reservoir save failed (non-fatal): %s", e)
 
+    # -- resume-from-disk ---------------------------------------------------
+
+    def resume_state_path(self) -> str:
+        return os.path.join(self.run_dir, "resume_state.json")
+
+    def _save_resume_state(self, t: int) -> None:
+        """Persist the iteration-``t`` resume point (written each iteration).
+
+        Captured AFTER the iteration's snapshot/checkpoint + reservoir save, so
+        the on-disk reservoir RNG state and these RNG states are all as of the
+        end of iteration ``t``. Written via a temp file + atomic rename so an
+        interruption mid-write never leaves a torn resume_state.json.
+        """
+        state = {
+            "schema": RESUME_SCHEMA_VERSION,
+            "iteration": int(t),
+            "snapshots": [int(i) for i in self._written_iters],
+            "numpy_rng": self._fit_rng.bit_generator.state,
+            "torch_rng": torch.random.get_rng_state().numpy().tobytes().hex(),
+            "controller": (
+                _controller_to_dict(self.controller)
+                if self.controller is not None
+                else None
+            ),
+        }
+        path = self.resume_state_path()
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh)
+        os.replace(tmp, path)
+
+    def _load_resume_state(self) -> int:
+        """Restore net + reservoirs + RNG + controller from disk for ``--resume``.
+
+        Returns the last completed iteration ``t`` (the loop resumes at ``t+1``).
+        Raises :class:`PRTCFRResumeError` when the run has no resumable
+        checkpoint, leaving the run directory otherwise untouched.
+        """
+        ckpt = self.checkpoint_path()
+        rs_path = self.resume_state_path()
+        if not os.path.isfile(ckpt):
+            raise PRTCFRResumeError(
+                f"cannot resume: no rolling checkpoint at {ckpt}"
+            )
+        if not os.path.isfile(rs_path):
+            raise PRTCFRResumeError(
+                f"cannot resume: no resume_state.json at {rs_path}"
+            )
+        with open(rs_path, "r", encoding="utf-8") as fh:
+            state = json.load(fh)
+        schema = int(state.get("schema", 0))
+        if schema != RESUME_SCHEMA_VERSION:
+            raise PRTCFRResumeError(
+                f"cannot resume: resume_state.json schema {schema} != expected "
+                f"{RESUME_SCHEMA_VERSION}"
+            )
+
+        # 1. Rolling checkpoint net (the fitted iterate at t). Load onto CPU then
+        # copy into the (possibly non-CPU) params -- load_state_dict handles the
+        # cross-device copy, so this is device-agnostic.
+        if self.net is None:
+            self.net = self._net_factory()
+        payload = torch.load(ckpt, map_location="cpu", weights_only=False)
+        # resume_state.json is the commit marker written LAST each iteration; the
+        # rolling checkpoint + reservoirs are saved just before it (inside
+        # run_iteration). An interrupt in that narrow gap leaves the checkpoint
+        # one iteration ahead of resume_state, so replaying resume_state's
+        # iteration would warm-start from the wrong net and double-count the
+        # reservoir. Cross-check the two and refuse rather than corrupt.
+        ckpt_iter = int(payload.get("iteration", -1))
+        rs_iter = int(state["iteration"])
+        if ckpt_iter != rs_iter:
+            raise PRTCFRResumeError(
+                f"cannot resume: rolling checkpoint iteration {ckpt_iter} != "
+                f"resume_state iteration {rs_iter} (interrupted between the "
+                f"checkpoint save and the resume_state commit; the partial "
+                f"iteration must be discarded before resuming)"
+            )
+        self.net.load_encoder_head(
+            payload["encoder_state_dict"], payload["head_state_dict"]
+        )
+
+        # 2. Per-player DiskReservoirs (through the _UnpaddingReservoir adapter):
+        # restores count / seen_count / pool cursors / each reservoir's own RNG.
+        for p in range(self.num_players):
+            self.reservoirs[p].load()
+
+        # 3. RNG: the fit-side numpy Generator + the torch global RNG.
+        self._fit_rng.bit_generator.state = state["numpy_rng"]
+        torch_bytes = np.frombuffer(
+            bytes.fromhex(state["torch_rng"]), dtype=np.uint8
+        ).copy()
+        torch.random.set_rng_state(torch.from_numpy(torch_bytes))
+
+        # 4. Controller + the written-snapshot list (drives the deployable
+        # manifest). ``self._history`` stays empty: train() returns only the
+        # resumed portion, so the caller sees the loop start at t+1.
+        if self.controller is not None and state.get("controller") is not None:
+            self.controller = _controller_from_dict(state["controller"])
+        self._written_iters = [int(i) for i in state.get("snapshots", [])]
+
+        last_t = int(state["iteration"])
+        logger.info(
+            "[prtcfr-prod] resumed from iter=%d: reservoirs=%s snapshots=%s",
+            last_t,
+            {p: len(self.reservoirs[p]) for p in range(self.num_players)},
+            self._written_iters,
+        )
+        return last_t
+
     # -- the iteration ------------------------------------------------------
 
     def _infer_torch_dtype(self):
@@ -1285,25 +1460,47 @@ class PRTCFRProductionTrainer:
     def _stability_check_due(self, t: int, n: int) -> bool:
         return t == 1 or t % self.stability_eval_every == 0 or t == n
 
-    def train(self, iterations: Optional[int] = None) -> List[PRTCFRProductionTrainState]:
+    def train(
+        self, iterations: Optional[int] = None, resume: bool = False
+    ) -> List[PRTCFRProductionTrainState]:
         """Run ``iterations`` (default config.iterations) production iterations.
 
-        Each iteration appends a metrics.jsonl row. With stability enabled the
-        trend metric is scored at the cadence (via ``eval_fn`` when supplied),
-        the deployable manifest is (re)written, and training early-stops once
-        the metric rises past tolerance for ``patience`` checks; the deployable
-        window pins to ``[1 .. best_iteration]`` so the served SD-CFR average
-        excludes any diverged tail. run_db status transitions to completed /
-        interrupted / failed.
+        Each iteration appends a metrics.jsonl row and rewrites
+        ``resume_state.json``. With stability enabled the trend metric is scored
+        at the cadence (via ``eval_fn`` when supplied), the deployable manifest
+        is (re)written, and training early-stops once the metric rises past
+        tolerance for ``patience`` checks; the deployable window pins to
+        ``[1 .. best_iteration]`` so the served SD-CFR average excludes any
+        diverged tail. run_db status transitions to completed / interrupted /
+        failed.
+
+        With ``resume=True`` the trainer reloads the rolling checkpoint, the
+        per-player reservoirs, the RNG state, and the controller from disk (see
+        :meth:`_load_resume_state`) and continues at ``t+1``; the returned
+        history covers only the resumed iterations, so the loop is observed to
+        start at ``t+1``. A resume with no checkpoint raises
+        :class:`PRTCFRResumeError`. The run_db row is reused by name (the
+        by-name upsert in ``__init__`` never creates a duplicate on resume).
         """
         n = iterations if iterations is not None else self.iterations
         self.iterations = n  # global LR schedule spans the run actually requested
+        start_t = 1
+        if resume:
+            last_t = self._load_resume_state()
+            start_t = last_t + 1
+            if start_t > n:
+                logger.info(
+                    "[prtcfr-prod] resume: last iter=%d already at/past n=%d; "
+                    "nothing to run",
+                    last_t, n,
+                )
         try:
-            for t in range(1, n + 1):
+            for t in range(start_t, n + 1):
                 st = self.run_iteration(t)
                 self._history.append(st)
                 self._written_iters.append(t)
                 self._write_metrics_row(st)
+                self._save_resume_state(t)
                 logger.info(
                     "[prtcfr-prod] iter=%d added=%s buffers=%s fit_loss=%.5f "
                     "peak_lr=%.2e critic_mse=%.4f/%.4f gen=%.1fs fit=%.1fs",
