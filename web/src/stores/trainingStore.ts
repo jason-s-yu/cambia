@@ -78,6 +78,14 @@ export const useTrainingStore = create<TrainingState & TrainingActions>()(
 				const res = await api.get<Run[]>('/training/runs');
 				set((state) => {
 					state.runs = res.data;
+					// Hydrate the processes map from each run's embedded process
+					// record so process-derived UI (status badges, start/stop
+					// controls) reflects the list response without a separate fetch.
+					for (const run of res.data) {
+						if (run.process) {
+							state.processes[run.name] = run.process;
+						}
+					}
 					state.isLoading = false;
 				});
 			} catch (err: any) {
@@ -92,6 +100,9 @@ export const useTrainingStore = create<TrainingState & TrainingActions>()(
 				const res = await api.get<RunDetail>(`/training/runs/${name}`);
 				set((state) => {
 					state.selectedRun = res.data;
+					if (res.data.process) {
+						state.processes[res.data.name] = res.data.process;
+					}
 					state.isLoading = false;
 				});
 			} catch (err: any) {

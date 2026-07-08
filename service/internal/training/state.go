@@ -28,6 +28,19 @@ type ProcessState struct {
 	FinishedAt string `json:"finished_at,omitempty"`
 	ExitCode   *int   `json:"exit_code,omitempty"`
 	LastError  string `json:"last_error,omitempty"`
+	// StartTicks is /proc/<pid>/stat field 22 (starttime, in clock ticks since
+	// boot), recorded at spawn. Combined with BootID it lets pidAlive tell this
+	// run's process apart from an unrelated process that later reuses the same
+	// pid (after this process exits, or after a reboot resets the pid space).
+	// Zero on process.json rows written before this field existed, or when
+	// /proc could not be read at spawn time; pidAlive falls back to a bare pid
+	// liveness probe in that case (documented compatibility gap).
+	StartTicks int64 `json:"start_ticks,omitempty"`
+	// BootID is /proc/stat's "btime" (boot time, seconds since the epoch),
+	// recorded at spawn. It disambiguates a StartTicks collision across a
+	// reboot, since the clock-tick counter resets at boot and the same tick
+	// count can recur for an unrelated process in a later boot.
+	BootID int64 `json:"boot_id,omitempty"`
 }
 
 // Status constants for ProcessState.Status.

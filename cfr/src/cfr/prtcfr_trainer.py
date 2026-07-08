@@ -1135,6 +1135,13 @@ class PRTCFRProductionTrainer:
         return path
 
     def _save_checkpoint(self, t: int) -> None:
+        """Write the rolling checkpoint via a temp file + atomic rename, mirroring
+        ``_save_resume_state``'s pattern, so an interruption mid-write never
+        leaves a torn ``prtcfr_checkpoint.pt`` (a torn checkpoint that happens to
+        still deserialize with stale/partial tensor data would silently corrupt
+        the next resume or eval)."""
+        path = self.checkpoint_path()
+        tmp = path + ".tmp"
         torch.save(
             {
                 "encoder_state_dict": self.net.encoder_state_dict(),
@@ -1142,8 +1149,9 @@ class PRTCFRProductionTrainer:
                 "config": self._config_dict(),
                 "iteration": t,
             },
-            self.checkpoint_path(),
+            tmp,
         )
+        os.replace(tmp, path)
 
     def _register_checkpoint_in_db(self, t: int, path: str) -> None:
         if self._db_conn is None or self._db_run_id is None:
@@ -1184,6 +1192,13 @@ class PRTCFRProductionTrainer:
         the on-disk reservoir RNG state and these RNG states are all as of the
         end of iteration ``t``. Written via a temp file + atomic rename so an
         interruption mid-write never leaves a torn resume_state.json.
+
+        ``torch_cuda_rng`` is populated only when this trainer's device is CUDA
+        and CUDA is available; it is omitted (not merely null) otherwise, so a
+        CPU-trained run's resume_state.json carries no CUDA key at all. Older
+        resume_state.json files written before this field existed simply lack
+        the key, which ``_load_resume_state`` treats as "nothing to restore"
+        (CPU-only restore, backward compatible).
         """
         state = {
             "schema": RESUME_SCHEMA_VERSION,
@@ -1197,6 +1212,10 @@ class PRTCFRProductionTrainer:
                 else None
             ),
         }
+        if str(self.device).startswith("cuda") and torch.cuda.is_available():
+            state["torch_cuda_rng"] = [
+                s.numpy().tobytes().hex() for s in torch.cuda.get_rng_state_all()
+            ]
         path = self.resume_state_path()
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -1259,12 +1278,24 @@ class PRTCFRProductionTrainer:
         for p in range(self.num_players):
             self.reservoirs[p].load()
 
-        # 3. RNG: the fit-side numpy Generator + the torch global RNG.
+        # 3. RNG: the fit-side numpy Generator + the torch global (CPU) RNG,
+        # plus the CUDA RNG when this resume_state.json carries it. A
+        # resume_state.json written by a CPU run (or by a pre-CUDA-RNG version
+        # of this trainer) simply has no "torch_cuda_rng" key: restore is
+        # CPU-only in that case, which is the documented backward-compatible
+        # fallback, not an error.
         self._fit_rng.bit_generator.state = state["numpy_rng"]
         torch_bytes = np.frombuffer(
             bytes.fromhex(state["torch_rng"]), dtype=np.uint8
         ).copy()
         torch.random.set_rng_state(torch.from_numpy(torch_bytes))
+        cuda_rng = state.get("torch_cuda_rng")
+        if cuda_rng and torch.cuda.is_available():
+            cuda_states = [
+                torch.from_numpy(np.frombuffer(bytes.fromhex(s), dtype=np.uint8).copy())
+                for s in cuda_rng
+            ]
+            torch.cuda.set_rng_state_all(cuda_states)
 
         # 4. Controller + the written-snapshot list (drives the deployable
         # manifest). ``self._history`` stays empty: train() returns only the
@@ -1540,8 +1571,18 @@ class PRTCFRProductionTrainer:
                     )
                     break
         except KeyboardInterrupt:
+            # Do NOT save_reservoirs() here. The last COMPLETED iteration's
+            # reservoir state was already flushed to disk inside that
+            # iteration's own run_iteration() call, before resume_state.json
+            # committed it. An interrupt mid-iteration-t (e.g. during
+            # generation, after samples were already added to the in-memory
+            # reservoir but before this iteration's own checkpoint/reservoir
+            # save) must leave the on-disk reservoir at its last-committed
+            # (t-1) state: flushing here would persist iteration t's partial
+            # in-memory mutations while checkpoint + resume_state.json stay at
+            # t-1, and a later --resume would replay iteration t from scratch
+            # on top of that partial state, double-counting its samples.
             logger.warning("[prtcfr-prod] interrupted; last snapshot is on disk")
-            self.save_reservoirs()
             self._update_db_status("interrupted")
             raise
         except Exception:

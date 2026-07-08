@@ -8,11 +8,21 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
+
+// killGroupFunc sends signal sig to the process group led by pgid (the
+// kill(2) negative-pgid convention). It is a seam: tests override it to
+// observe Stop's signal-or-not decision without risking a real signal to a
+// live process group, which could be the test binary's own group when a test
+// fakes process.json with the test process's own pid.
+var killGroupFunc = func(pgid int, sig syscall.Signal) error {
+	return syscall.Kill(-pgid, sig)
+}
 
 // stopGracePeriod is how long Stop waits after SIGINT before escalating to
 // SIGKILL for the process group.
@@ -33,6 +43,12 @@ var (
 	ErrUnsupportedAlgorithm = errors.New("unsupported algorithm")
 	// ErrAlreadyRunning is returned by Start/Resume when the run is already live.
 	ErrAlreadyRunning = errors.New("run already running")
+	// ErrConcurrencyCapReached is the hard backstop returned by launch when the
+	// in-flight count this manager itself is supervising is already at the
+	// configured cap. It is checked and incremented atomically under m.mu, so
+	// it closes the TOCTOU window the disk-scanning preflight concurrencyCapCheck
+	// cannot: two concurrent launches racing the same disk snapshot.
+	ErrConcurrencyCapReached = errors.New("concurrency cap reached")
 )
 
 // runNameRe is the strict run-name allowlist. Combined with the explicit ".."
@@ -103,13 +119,16 @@ type ProcessManager struct {
 	// HTTP wiring; the supervisor itself does not read it.
 	store *TrainingStore
 
-	mu    sync.Mutex
-	procs map[string]*managedProc
+	mu            sync.Mutex
+	procs         map[string]*managedProc
+	maxConcurrent int
 }
 
 // NewProcessManager constructs a ProcessManager. runsDir is the runs root,
 // cfrDir is the working directory for spawned subprocesses, cambiaBin is the
 // cambia executable, and store is the read-only run database (may be nil).
+// maxConcurrent defaults to 0 (disabled); call SetMaxConcurrent to enable the
+// hard-backstop cap.
 func NewProcessManager(runsDir, cfrDir, cambiaBin string, store *TrainingStore) *ProcessManager {
 	return &ProcessManager{
 		runsDir:   runsDir,
@@ -118,6 +137,17 @@ func NewProcessManager(runsDir, cfrDir, cambiaBin string, store *TrainingStore) 
 		store:     store,
 		procs:     make(map[string]*managedProc),
 	}
+}
+
+// SetMaxConcurrent sets the hard-backstop cap on processes this manager
+// instance is actively supervising (len(m.procs)). max <= 0 disables it. This
+// is the authority enforced atomically under m.mu inside launch; the disk-
+// scanning preflight concurrencyCapCheck is the advisory, user-facing 409 and
+// cannot by itself close the race between two concurrent launch calls.
+func (m *ProcessManager) SetMaxConcurrent(max int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.maxConcurrent = max
 }
 
 // runDir returns the absolute-or-relative run directory for name. Callers must
@@ -197,6 +227,13 @@ func (m *ProcessManager) launch(name string, opts StartOpts, resume bool) (*Proc
 		return nil, fmt.Errorf("%w: %s", ErrAlreadyRunning, name)
 	}
 
+	// Hard backstop: count-then-launch happens atomically under m.mu, so two
+	// concurrent launches for different run names cannot both slip past the
+	// cap (the TOCTOU window the disk-scanning preflight check alone allows).
+	if m.maxConcurrent > 0 && len(m.procs) >= m.maxConcurrent {
+		return nil, fmt.Errorf("%w: %d/%d", ErrConcurrencyCapReached, len(m.procs), m.maxConcurrent)
+	}
+
 	runDir := m.runDir(name)
 	st, err := readProcessState(runDir)
 	if err != nil {
@@ -205,7 +242,7 @@ func (m *ProcessManager) launch(name string, opts StartOpts, resume bool) (*Proc
 
 	switch st.Status {
 	case StatusRunning, StatusStarting, StatusStopping:
-		if pidAlive(st.PID) {
+		if pidAlive(st) {
 			return nil, fmt.Errorf("%w: %s is %s", ErrAlreadyRunning, name, st.Status)
 		}
 	}
@@ -267,6 +304,15 @@ func (m *ProcessManager) launch(name string, opts StartOpts, resume bool) (*Proc
 	// equals its pid.
 	pgid := pid
 
+	// Record starttime/btime now, while the pid is freshly ours, so a later
+	// liveness check (pidAlive) can tell this exact process apart from
+	// whatever the kernel eventually recycles pid for. A read failure here
+	// (non-Linux, or a very fast child exit) leaves both at zero, which
+	// pidAlive treats as "no verification available" and falls back to the
+	// bare pid probe.
+	startTicks, _ := readProcStarttime(pid)
+	bootID, _ := readBootTime()
+
 	p := &managedProc{
 		name: name,
 		cmd:  cmd,
@@ -283,6 +329,8 @@ func (m *ProcessManager) launch(name string, opts StartOpts, resume bool) (*Proc
 		s.FinishedAt = ""
 		s.ExitCode = nil
 		s.LastError = ""
+		s.StartTicks = startTicks
+		s.BootID = bootID
 	})
 
 	go m.waitFor(p)
@@ -337,12 +385,12 @@ func (m *ProcessManager) Stop(name string, force bool) (*ProcessState, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read process state for %q: %w", name, err)
 		}
-		if pidAlive(st.PID) && st.PGID > 0 {
+		if pidAlive(st) && st.PGID > 0 {
 			sig := syscall.SIGINT
 			if force {
 				sig = syscall.SIGKILL
 			}
-			_ = syscall.Kill(-st.PGID, sig)
+			_ = killGroupFunc(st.PGID, sig)
 		}
 		return st, nil
 	}
@@ -358,12 +406,22 @@ func (m *ProcessManager) Stop(name string, force bool) (*ProcessState, error) {
 	if force {
 		sig = syscall.SIGKILL
 	}
-	_ = syscall.Kill(-p.pgid, sig)
+	_ = killGroupFunc(p.pgid, sig)
 
 	if !force {
 		pgid := p.pgid
+		runDir := m.runDir(name)
 		p.killTimer = time.AfterFunc(stopGracePeriod, func() {
-			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			// Re-check liveness (starttime-validated) before escalating: by the
+			// time the grace period elapses the child may already have been
+			// reaped, or -- under enough pid churn -- pgid may have been
+			// recycled for an unrelated process group. Only SIGKILL a pid we
+			// can still positively identify as this run's.
+			st, err := readProcessState(runDir)
+			if err != nil || !pidAlive(st) {
+				return
+			}
+			_ = killGroupFunc(pgid, syscall.SIGKILL)
 		})
 	}
 
@@ -390,7 +448,7 @@ func (m *ProcessManager) Reconcile() {
 	for _, st := range states {
 		switch st.Status {
 		case StatusRunning, StatusStarting, StatusStopping:
-			if pidAlive(st.PID) {
+			if pidAlive(st) {
 				continue
 			}
 			st.Status = StatusCrashed
@@ -415,16 +473,84 @@ func (m *ProcessManager) mutateStateLocked(name string, fn func(*ProcessState)) 
 	return writeProcessState(runDir, st)
 }
 
-// pidAlive reports whether pid names a live process (signal 0 probe).
-func pidAlive(pid int) bool {
-	if pid <= 0 {
+// pidAlive reports whether st's pid names a live process that is plausibly
+// the same process this manager recorded: the pid must answer a signal(0)
+// probe, and when StartTicks was recorded at spawn, the pid's current
+// /proc/<pid>/stat starttime (and, when BootID was recorded, the current
+// boot's btime) must match. A pid the kernel has since recycled for an
+// unrelated process -- after this run's process exited, or after a reboot --
+// is treated as not alive rather than a false positive. process.json rows
+// written before these fields existed have StartTicks == 0 and fall back to
+// the bare pid probe (documented compatibility gap).
+func pidAlive(st *ProcessState) bool {
+	if st == nil || st.PID <= 0 {
 		return false
 	}
-	proc, err := os.FindProcess(pid)
+	proc, err := os.FindProcess(st.PID)
 	if err != nil {
 		return false
 	}
-	return proc.Signal(syscall.Signal(0)) == nil
+	if proc.Signal(syscall.Signal(0)) != nil {
+		return false
+	}
+	if st.StartTicks == 0 {
+		return true
+	}
+	ticks, err := readProcStarttime(st.PID)
+	if err != nil {
+		// Can no longer positively verify identity (e.g. the process exited in
+		// the gap between the signal probe and this read): treat as not alive
+		// rather than risk reporting a stale/reused pid as live.
+		return false
+	}
+	if ticks != st.StartTicks {
+		return false
+	}
+	if st.BootID != 0 {
+		if boot, err := readBootTime(); err == nil && boot != st.BootID {
+			return false
+		}
+	}
+	return true
+}
+
+// readProcStarttime reads field 22 (starttime, clock ticks since boot) from
+// /proc/<pid>/stat. The comm field (2) is parenthesized and may itself
+// contain spaces or parentheses, so parsing anchors on the last ')' before
+// splitting the remaining whitespace-separated fields.
+func readProcStarttime(pid int) (int64, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0, err
+	}
+	s := string(data)
+	idx := strings.LastIndexByte(s, ')')
+	if idx < 0 || idx+2 > len(s) {
+		return 0, fmt.Errorf("unparseable /proc/%d/stat", pid)
+	}
+	// fields[0] here is field 3 (state); starttime is field 22, i.e. index 19.
+	fields := strings.Fields(s[idx+2:])
+	const starttimeIdx = 22 - 3
+	if len(fields) <= starttimeIdx {
+		return 0, fmt.Errorf("too few fields in /proc/%d/stat", pid)
+	}
+	return strconv.ParseInt(fields[starttimeIdx], 10, 64)
+}
+
+// readBootTime reads the system boot time (seconds since the epoch) from the
+// "btime" line of /proc/stat. Paired with a recorded StartTicks, it
+// disambiguates a starttime collision that recurs across a reboot.
+func readBootTime() (int64, error) {
+	data, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return 0, err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if v, ok := strings.CutPrefix(line, "btime "); ok {
+			return strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		}
+	}
+	return 0, fmt.Errorf("btime not found in /proc/stat")
 }
 
 // exitCodeFromErr extracts the exit code from a cmd.Wait error: 0 for nil, the

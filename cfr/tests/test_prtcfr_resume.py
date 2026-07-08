@@ -398,6 +398,105 @@ def test_resume_reproduces_uninterrupted_run(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# MED-1 regression: a mid-iteration interrupt (generation already added the
+# iteration's samples to the in-memory reservoir, but no disk artifact for
+# that iteration exists yet) must not double-count samples on resume.
+# ---------------------------------------------------------------------------
+
+
+def test_resume_after_mid_iteration_interrupt_no_duplicate_samples(tmp_path):
+    """Before the fix, the KeyboardInterrupt handler in ``train()`` called
+    ``save_reservoirs()`` unconditionally. Interrupting mid-iteration-t (after
+    generation appended t's samples to the in-memory reservoir, but before
+    that iteration's own checkpoint/reservoir/resume_state commit) would flush
+    the partial in-memory reservoir to disk while checkpoint + resume_state.json
+    stayed at t-1. A later ``--resume`` would then replay iteration t from
+    scratch on top of that already-partially-populated reservoir, double-
+    counting t's samples. The fix removes that flush: the on-disk reservoir
+    must stay at its last fully-committed (t-1) state, so resume reproduces
+    exactly the uninterrupted run's reservoir counts.
+    """
+    cfg = _prod_config(iterations=4)  # sequential fp32 gen, critic OFF, no stability
+
+    # Reference: a single uninterrupted 4-iteration run.
+    torch.manual_seed(12345)
+    tr_u = _make_trainer(cfg, tmp_path / "U", tmp_path / "dbU.sqlite", "v0.4-mid-iter-U")
+    hist_u = tr_u.train(iterations=4)
+    tr_u.close()
+    ref_iter3_total = sum(hist_u[2].buffer_sizes.values())
+    ref_final_total = sum(hist_u[-1].buffer_sizes.values())
+
+    # Split: identical net-init seed. Interrupt via _save_snapshot, the first
+    # disk-touching call inside run_iteration(3) -- generation and the fit
+    # step have already run (iteration 3's samples are in the in-memory
+    # reservoir), but nothing for iteration 3 has reached disk yet.
+    torch.manual_seed(12345)
+    run_dir = tmp_path / "S"
+    db_path = tmp_path / "dbS.sqlite"
+    tr_s = _make_trainer(cfg, run_dir, db_path, "v0.4-mid-iter-S")
+    orig_save_snapshot = tr_s._save_snapshot
+
+    def interrupting_save_snapshot(t):
+        if t == 3:
+            raise KeyboardInterrupt("simulated SIGINT mid-iteration 3 (post-gen, pre-commit)")
+        return orig_save_snapshot(t)
+
+    tr_s._save_snapshot = interrupting_save_snapshot
+    with pytest.raises(KeyboardInterrupt):
+        tr_s.train(iterations=4)  # completes 1, 2; interrupted mid-iteration 3
+
+    # No disk artifact for iteration 3: checkpoint + resume_state.json both
+    # still reflect iteration 2, the last iteration whose own in-loop commit
+    # actually ran.
+    rs_iter = json.loads((run_dir / "resume_state.json").read_text())["iteration"]
+    assert rs_iter == 2
+    ckpt = torch.load(
+        run_dir / "snapshots" / "prtcfr_checkpoint.pt", map_location="cpu", weights_only=False
+    )
+    assert int(ckpt["iteration"]) == 2
+
+    # Resume toward the full 4 iterations: iteration 3 replays from scratch.
+    tr_r = _make_trainer(cfg, run_dir, db_path, "v0.4-mid-iter-S")
+    hist_r = tr_r.train(iterations=4, resume=True)
+    tr_r.close()
+
+    assert [s.iteration for s in hist_r] == [3, 4]
+    # Reservoir totals after the resumed run must match the uninterrupted
+    # reference exactly at both the just-resumed iteration and the final
+    # iteration -- no doubled samples from the discarded partial attempt.
+    resumed_iter3_total = sum(hist_r[0].buffer_sizes.values())
+    assert resumed_iter3_total == ref_iter3_total
+    resumed_final_total = sum(hist_r[-1].buffer_sizes.values())
+    assert resumed_final_total == ref_final_total
+
+
+# ---------------------------------------------------------------------------
+# LOW-6: CUDA RNG is persisted/restored only when relevant; a CPU run's
+# resume_state.json carries no torch_cuda_rng key, and loading one without the
+# key (the pre-existing / pre-upgrade shape) does not raise.
+# ---------------------------------------------------------------------------
+
+
+def test_resume_state_omits_cuda_rng_on_cpu(tmp_path):
+    cfg = _prod_config(iterations=2)  # device=cpu via _prod_config's default
+    run_dir = tmp_path / "run"
+    db_path = tmp_path / "db.sqlite"
+    tr = _make_trainer(cfg, run_dir, db_path, "v0.4-cuda-rng-cpu")
+    tr.train(iterations=2)
+    tr.close()
+
+    state = json.loads((run_dir / "resume_state.json").read_text())
+    assert "torch_cuda_rng" not in state
+
+    # Loading a resume_state.json with no torch_cuda_rng key (identical to a
+    # pre-upgrade file) must not raise; restore is CPU-only in that case.
+    tr2 = _make_trainer(cfg, run_dir, db_path, "v0.4-cuda-rng-cpu")
+    last_t = tr2._load_resume_state()
+    assert last_t == 2
+    tr2.close()
+
+
+# ---------------------------------------------------------------------------
 # run_db: resume reuses the row by name (no duplicate, id + created_at stable)
 # ---------------------------------------------------------------------------
 

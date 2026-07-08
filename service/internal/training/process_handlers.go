@@ -57,7 +57,18 @@ type ProcessHandlersConfig struct {
 }
 
 // NewProcessHandlers builds the handler set. gpuQuery defaults to nvidia-smi.
+// A non-positive MinVRAMGB/MinDiskGB in cfg (including the zero value of an
+// unset field) falls back to DefaultMinVRAMGB/DefaultMinDiskGB: the safety
+// rails are on by default, not silently disabled by an unconfigured caller.
 func NewProcessHandlers(cfg ProcessHandlersConfig) *ProcessHandlers {
+	minVRAM := cfg.MinVRAMGB
+	if minVRAM <= 0 {
+		minVRAM = DefaultMinVRAMGB
+	}
+	minDisk := cfg.MinDiskGB
+	if minDisk <= 0 {
+		minDisk = DefaultMinDiskGB
+	}
 	return &ProcessHandlers{
 		mgr:           cfg.Manager,
 		store:         cfg.Store,
@@ -66,8 +77,8 @@ func NewProcessHandlers(cfg ProcessHandlersConfig) *ProcessHandlers {
 		runsDir:       cfg.RunsDir,
 		templateDir:   cfg.TemplateDir,
 		maxConcurrent: cfg.MaxConcurrent,
-		minVRAMGB:     cfg.MinVRAMGB,
-		minDiskGB:     cfg.MinDiskGB,
+		minVRAMGB:     minVRAM,
+		minDiskGB:     minDisk,
 		gpuQuery:      defaultGPUQuery,
 	}
 }
@@ -249,7 +260,10 @@ func (h *ProcessHandlers) launchHandler(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		force = req.Force
-		if req.MinFreeVRAMGB != nil {
+		// A non-positive request override falls back to the configured
+		// default rather than disabling the check; disabling it is what
+		// force=true is for.
+		if req.MinFreeVRAMGB != nil && *req.MinFreeVRAMGB > 0 {
 			minVRAM = *req.MinFreeVRAMGB
 		}
 		if !hasCheckpoint(h.runsDir, name) {
@@ -264,10 +278,10 @@ func (h *ProcessHandlers) launchHandler(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		force = req.Force
-		if req.MinFreeVRAMGB != nil {
+		if req.MinFreeVRAMGB != nil && *req.MinFreeVRAMGB > 0 {
 			minVRAM = *req.MinFreeVRAMGB
 		}
-		if req.MinFreeDiskGB != nil {
+		if req.MinFreeDiskGB != nil && *req.MinFreeDiskGB > 0 {
 			minDisk = *req.MinFreeDiskGB
 		}
 	}
@@ -354,6 +368,8 @@ func (h *ProcessHandlers) writeLaunchError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrAlreadyRunning):
 		writeJSONError(w, http.StatusConflict, "already_running", err.Error())
+	case errors.Is(err, ErrConcurrencyCapReached):
+		writeJSONError(w, http.StatusConflict, "concurrency_cap_reached", err.Error())
 	case errors.Is(err, ErrConfigMissing):
 		writeJSONError(w, http.StatusBadRequest, "config_missing", err.Error())
 	case errors.Is(err, ErrUnsupportedAlgorithm):

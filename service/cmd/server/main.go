@@ -147,6 +147,20 @@ func main() {
 			maxConcurrent = n
 		}
 	}
+	// minVRAMGB/minDiskGB are 0 unless the env var overrides them, which tells
+	// NewProcessHandlers to fall back to the contract defaults (4 GiB / 5 GiB) --
+	// the preflight rails must not be left off by an empty environment.
+	var minVRAMGB, minDiskGB float64
+	if v := os.Getenv("CAMBIA_MIN_FREE_VRAM_GB"); v != "" {
+		if f, perr := strconv.ParseFloat(v, 64); perr == nil && f > 0 {
+			minVRAMGB = f
+		}
+	}
+	if v := os.Getenv("CAMBIA_MIN_FREE_DISK_GB"); v != "" {
+		if f, perr := strconv.ParseFloat(v, 64); perr == nil && f > 0 {
+			minDiskGB = f
+		}
+	}
 	trainingStore, err := training.NewTrainingStore(runsDir)
 	if err != nil {
 		log.Printf("Training store init failed (non-fatal): %v", err)
@@ -159,6 +173,7 @@ func main() {
 		}
 
 		procMgr := training.NewProcessManager(runsDir, cfrDir, cambiaBin, trainingStore)
+		procMgr.SetMaxConcurrent(maxConcurrent)
 		procMgr.Reconcile()
 		procHandlers := training.NewProcessHandlers(training.ProcessHandlersConfig{
 			Manager:       procMgr,
@@ -168,6 +183,8 @@ func main() {
 			RunsDir:       runsDir,
 			TemplateDir:   filepath.Join(cfrDir, "config"),
 			MaxConcurrent: maxConcurrent,
+			MinVRAMGB:     minVRAMGB,
+			MinDiskGB:     minDiskGB,
 		})
 
 		// GET list / POST create.

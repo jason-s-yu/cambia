@@ -217,6 +217,50 @@ func TestHandleCreateInvalidConfigValidate(t *testing.T) {
 	}
 }
 
+// TestNewProcessHandlersDefaultsPreflightOn confirms the safety rails default
+// on: a config that leaves MinVRAMGB/MinDiskGB unset (the zero value) must not
+// silently disable the GPU/disk preflight checks (F1).
+func TestNewProcessHandlersDefaultsPreflightOn(t *testing.T) {
+	h := NewProcessHandlers(ProcessHandlersConfig{})
+	if h.minVRAMGB != DefaultMinVRAMGB {
+		t.Errorf("minVRAMGB = %v, want default %v", h.minVRAMGB, DefaultMinVRAMGB)
+	}
+	if h.minDiskGB != DefaultMinDiskGB {
+		t.Errorf("minDiskGB = %v, want default %v", h.minDiskGB, DefaultMinDiskGB)
+	}
+}
+
+// TestNewProcessHandlersRespectsExplicitConfig confirms an explicit positive
+// config value is not clobbered by the default.
+func TestNewProcessHandlersRespectsExplicitConfig(t *testing.T) {
+	h := NewProcessHandlers(ProcessHandlersConfig{MinVRAMGB: 8, MinDiskGB: 20})
+	if h.minVRAMGB != 8 {
+		t.Errorf("minVRAMGB = %v, want 8 (explicit config must win)", h.minVRAMGB)
+	}
+	if h.minDiskGB != 20 {
+		t.Errorf("minDiskGB = %v, want 20 (explicit config must win)", h.minDiskGB)
+	}
+}
+
+// TestHandleStartRequestNonPositiveOverrideFallsBackNotDisable confirms a
+// request-level min_free_disk_gb of 0 or negative falls back to the
+// configured default rather than disabling the check (F1). The fixture is
+// pinned to an impossible configured default so the only way this could pass
+// is if the non-positive override wrongly disabled the check.
+func TestHandleStartRequestNonPositiveOverrideFallsBackNotDisable(t *testing.T) {
+	f := newHandlerFixture(t)
+	f.ph.minDiskGB = 1e9 // configured default: intentionally impossible
+	mustCreate(t, f, "zero-override-blocked")
+
+	for _, v := range []string{"0", "-5"} {
+		w := doReq(f.ph.HandleStart, http.MethodPost, "/training/runs/zero-override-blocked/start",
+			`{"min_free_disk_gb":`+v+`}`)
+		if w.Code != http.StatusConflict {
+			t.Errorf("min_free_disk_gb=%s: status = %d, want 409 (must fall back to configured default, not disable)", v, w.Code)
+		}
+	}
+}
+
 func TestHandleTemplates(t *testing.T) {
 	f := newHandlerFixture(t)
 	w := doReq(f.ph.HandleTemplates, http.MethodGet, "/training/config/templates", "")

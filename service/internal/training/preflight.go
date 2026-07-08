@@ -28,6 +28,16 @@ var overridableChecks = map[string]bool{
 	"concurrency_cap": true,
 }
 
+// DefaultMinVRAMGB and DefaultMinDiskGB are the contract's baseline preflight
+// thresholds (.docs/dashboard/phase2-process-mgmt/contract.md). NewProcessHandlers
+// applies them whenever its config leaves MinVRAMGB/MinDiskGB <= 0 (the zero
+// value), so the GPU/disk rails are on by default rather than silently
+// disabled by an unset config field.
+const (
+	DefaultMinVRAMGB = 4.0
+	DefaultMinDiskGB = 5.0
+)
+
 // gpuQueryFunc returns the raw CSV output of an nvidia-smi VRAM query. It is a
 // seam so tests can inject fake output (or an exec.ErrNotFound to simulate a
 // CPU host) without touching a real GPU.
