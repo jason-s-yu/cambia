@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jason-s-yu/cambia/service/internal/auth"
 	"github.com/jason-s-yu/cambia/service/internal/cache"
@@ -187,49 +188,36 @@ func main() {
 			MinDiskGB:     minDiskGB,
 		})
 
-		// GET list / POST create.
-		mux.Handle("/training/runs", authWrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch r.Method {
-			case http.MethodGet:
-				trainingStore.HandleListRuns(w, r)
-			case http.MethodPost:
-				procHandlers.HandleCreate(w, r)
-			default:
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		// Eval subsystem: a supervised `cambia evaluate` child with its own
+		// in-memory job registry and concurrency cap (default 1), separate from the
+		// training cap in ProcessManager. Same preflight defaults as ProcessHandlers.
+		maxConcurrentEvals := 1
+		if v := os.Getenv("CAMBIA_MAX_CONCURRENT_EVALS"); v != "" {
+			if n, perr := strconv.Atoi(v); perr == nil && n > 0 {
+				maxConcurrentEvals = n
 			}
-		})))
+		}
+		evalMgr := training.NewEvalManager(runsDir, cfrDir, cambiaBin)
+		evalMgr.SetMaxConcurrent(maxConcurrentEvals)
+		evalHandlers := training.NewEvalHandlers(training.EvalHandlersConfig{
+			Manager:   evalMgr,
+			RunsDir:   runsDir,
+			MinVRAMGB: minVRAMGB,
+			MinDiskGB: minDiskGB,
+		})
 
-		// GET detail/metrics/checkpoints; POST start/stop/resume.
-		mux.Handle("/training/runs/", authWrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-			if len(parts) == 3 {
-				trainingStore.HandleGetRun(w, r)
-				return
+		// Host resource sampler: one server-side poller with WS fan-out. A
+		// non-positive CAMBIA_RESOURCE_POLL_SEC falls back to the 2s default.
+		resourcePoll := 2 * time.Second
+		if v := os.Getenv("CAMBIA_RESOURCE_POLL_SEC"); v != "" {
+			if n, perr := strconv.Atoi(v); perr == nil && n > 0 {
+				resourcePoll = time.Duration(n) * time.Second
 			}
-			if len(parts) == 4 {
-				switch parts[3] {
-				case "metrics":
-					trainingStore.HandleGetMetrics(w, r)
-				case "checkpoints":
-					trainingStore.HandleGetCheckpoints(w, r)
-				case "start":
-					procHandlers.HandleStart(w, r)
-				case "stop":
-					procHandlers.HandleStop(w, r)
-				case "resume":
-					procHandlers.HandleResume(w, r)
-				default:
-					http.NotFound(w, r)
-				}
-				return
-			}
-			http.NotFound(w, r)
-		})))
+		}
+		resMon := training.NewResourceMonitor(runsDir, resourcePoll)
+		defer resMon.Close()
 
-		// GET config template listing.
-		mux.Handle("/training/config/templates", authWrap(http.HandlerFunc(procHandlers.HandleTemplates)))
-
-		mux.Handle("/ws/training/", authWrap(http.HandlerFunc(trainingStore.HandleLogStream)))
+		registerTrainingRoutes(mux, authWrap, trainingStore, procHandlers, evalHandlers, resMon)
 	}
 
 	addr := ":8080"
@@ -240,4 +228,87 @@ func main() {
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("server exited: %v", err)
 	}
+}
+
+// registerTrainingRoutes wires every /training and /ws/training endpoint onto mux
+// behind authWrap. It is split out of main so the routing rules -- the
+// /training/runs sub-router (including the eval GET/POST case), the resources and
+// compare endpoints, and the /ws/training resources-vs-logs disambiguation -- are
+// exercised by a wiring test without standing up the full server.
+func registerTrainingRoutes(
+	mux *http.ServeMux,
+	authWrap func(http.Handler) http.Handler,
+	trainingStore *training.TrainingStore,
+	procHandlers *training.ProcessHandlers,
+	evalHandlers *training.EvalHandlers,
+	resMon *training.ResourceMonitor,
+) {
+	// GET list / POST create.
+	mux.Handle("/training/runs", authWrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			trainingStore.HandleListRuns(w, r)
+		case http.MethodPost:
+			procHandlers.HandleCreate(w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
+
+	// GET detail/metrics/checkpoints/eval; POST start/stop/resume/eval.
+	mux.Handle("/training/runs/", authWrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) == 3 {
+			trainingStore.HandleGetRun(w, r)
+			return
+		}
+		if len(parts) == 4 {
+			switch parts[3] {
+			case "metrics":
+				trainingStore.HandleGetMetrics(w, r)
+			case "checkpoints":
+				trainingStore.HandleGetCheckpoints(w, r)
+			case "eval":
+				switch r.Method {
+				case http.MethodGet:
+					evalHandlers.HandleList(w, r)
+				case http.MethodPost:
+					evalHandlers.HandleTrigger(w, r)
+				default:
+					http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				}
+			case "start":
+				procHandlers.HandleStart(w, r)
+			case "stop":
+				procHandlers.HandleStop(w, r)
+			case "resume":
+				procHandlers.HandleResume(w, r)
+			default:
+				http.NotFound(w, r)
+			}
+			return
+		}
+		http.NotFound(w, r)
+	})))
+
+	// GET config template listing.
+	mux.Handle("/training/config/templates", authWrap(http.HandlerFunc(procHandlers.HandleTemplates)))
+
+	// GET one-off host resource snapshot.
+	mux.Handle("/training/system/resources", authWrap(http.HandlerFunc(resMon.HandleSnapshot)))
+
+	// GET run comparison (?runs=a,b,c).
+	mux.Handle("/training/compare", authWrap(http.HandlerFunc(trainingStore.HandleCompare)))
+
+	// WS disambiguation: /ws/training/resources is the resource stream; every other
+	// /ws/training/{name}/logs path is the per-run log streamer. The exact-match must
+	// come first or the log streamer swallows the resources path (extractRunName
+	// would otherwise treat "resources" as a run name).
+	mux.Handle("/ws/training/", authWrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/ws/training/resources" {
+			resMon.HandleWS(w, r)
+			return
+		}
+		trainingStore.HandleLogStream(w, r)
+	})))
 }
