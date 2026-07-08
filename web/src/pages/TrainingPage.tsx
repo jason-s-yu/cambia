@@ -6,6 +6,7 @@ import { useTrainingStore } from '@/stores/trainingStore';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import StatusBadge from '@/components/training/StatusBadge';
 import CreateRunModal from '@/components/training/CreateRunModal';
+import ResourceMonitor from '@/components/training/ResourceMonitor';
 import type { Run, ProcessStatus } from '@/types/training';
 
 const STATUS_OPTIONS = ['', 'running', 'stopped', 'completed', 'failed', 'created'];
@@ -68,6 +69,8 @@ const TrainingPage: React.FC = () => {
 
 	return (
 		<div>
+			<ResourceMonitor />
+
 			<div className="flex items-center justify-between mb-6">
 				<h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
 					Training Runs
