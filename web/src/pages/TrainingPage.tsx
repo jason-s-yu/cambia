@@ -1,10 +1,12 @@
 // src/pages/TrainingPage.tsx
-import React, { useEffect, useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { formatDistanceToNow, parseISO } from 'date-fns';
 import { useTrainingStore } from '@/stores/trainingStore';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
-import type { Run } from '@/types/training';
+import StatusBadge from '@/components/training/StatusBadge';
+import CreateRunModal from '@/components/training/CreateRunModal';
+import type { Run, ProcessStatus } from '@/types/training';
 
 const STATUS_OPTIONS = ['', 'running', 'stopped', 'completed', 'failed', 'created'];
 
@@ -15,6 +17,23 @@ const STATUS_BADGE: Record<string, string> = {
 	failed: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
 	created: 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300',
 };
+
+const PROCESS_STATUSES: ProcessStatus[] = [
+	'created', 'starting', 'running', 'stopping', 'stopped', 'crashed',
+];
+
+// Run.status carries the legacy run_db vocabulary (running/stopped/completed/
+// failed/created). Once a process.json exists for the run (tracked live in
+// the store's `processes` map, populated after create/start/stop/resume),
+// prefer its ProcessStatus rendered via the shared StatusBadge. Runs with no
+// live process entry yet (legacy rows, or a status outside the ProcessStatus
+// union) fall back to the original inline badge.
+function toProcessStatus(status: string): ProcessStatus | null {
+	if ((PROCESS_STATUSES as string[]).includes(status)) return status as ProcessStatus;
+	if (status === 'completed') return 'stopped';
+	if (status === 'failed') return 'crashed';
+	return null;
+}
 
 function statusBadge(status: string) {
 	const cls = STATUS_BADGE[status] ?? STATUS_BADGE.created;
@@ -27,7 +46,8 @@ function statusBadge(status: string) {
 
 const TrainingPage: React.FC = () => {
 	const navigate = useNavigate();
-	const { runs, filters, isLoading, fetchRuns, setFilter } = useTrainingStore();
+	const { runs, filters, isLoading, processes, fetchRuns, setFilter } = useTrainingStore();
+	const [isCreateOpen, setIsCreateOpen] = useState(false);
 
 	const algorithmOptions = useMemo(
 		() => [...new Set(runs.map((r) => r.algorithm))].sort(),
@@ -48,9 +68,23 @@ const TrainingPage: React.FC = () => {
 
 	return (
 		<div>
-			<h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-6">
-				Training Runs
-			</h1>
+			<div className="flex items-center justify-between mb-6">
+				<h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
+					Training Runs
+				</h1>
+				<button
+					onClick={() => setIsCreateOpen(true)}
+					className="px-3 py-1.5 rounded text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white transition-colors"
+				>
+					New run
+				</button>
+			</div>
+
+			<CreateRunModal
+				isOpen={isCreateOpen}
+				onClose={() => setIsCreateOpen(false)}
+				onCreated={(name) => navigate(`/training/${name}`)}
+			/>
 
 			{/* Filter bar */}
 			<div className="flex flex-wrap gap-4 mb-4">
@@ -112,7 +146,15 @@ const TrainingPage: React.FC = () => {
 												{run.algorithm}
 											</span>
 										</td>
-										<td className="py-3 px-4">{statusBadge(run.status)}</td>
+										<td className="py-3 px-4">
+											{processes[run.name] ? (
+												<StatusBadge status={processes[run.name].status} />
+											) : toProcessStatus(run.status) ? (
+												<StatusBadge status={toProcessStatus(run.status) as ProcessStatus} />
+											) : (
+												statusBadge(run.status)
+											)}
+										</td>
 										<td className="py-3 px-4 font-mono">
 											{run.best_metric_value != null
 												? `${(run.best_metric_value * 100).toFixed(1)}%`
