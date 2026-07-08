@@ -129,70 +129,36 @@ func MultiIterationGlicko2(players []models.User, scores []float64, iterations i
 	return players
 }
 
-// doGlickoUpdate is a helper that updates (mu, phi, sigma) vs an average "opponent" in one match
+// doGlickoUpdate is a helper that updates (mu, phi, sigma) vs an average "opponent" in one match.
+// It delegates to updateGlickoMulti so the variance, volatility, and rating math live in one place.
+// oppSigma is accepted for call-site symmetry but unused: the Glicko2 update depends only on the
+// opponent's mu and phi.
 func doGlickoUpdate(mu, phi, sigma, oppMu, oppPhi, oppSigma, score float64) glickoState {
-	gVal := g(oppPhi)
-	EVal := E(mu, oppMu, oppPhi)
-	v := 1.0 / (gVal * gVal * EVal * (1 - EVal))
-	delta := v * gVal * (score - EVal)
-
-	// volatility iteration
-	a := math.Log(sigma * sigma)
-	A := a
-	var B float64
-	if delta*delta > phi*phi+v {
-		B = math.Log(delta*delta - phi*phi - v)
-	} else {
-		k := 1.0
-		for f(a-k*Tau, phi, v, delta, A) < 0 {
-			k++
-		}
-		B = a - k*Tau
-	}
-	fA := func(x float64) float64 {
-		return f(x, phi, v, delta, A)
-	}
-
-	fB := fA(B)
-	for i := 0; i < 100; i++ {
-		fAVal := fA(A)
-		if math.Abs(fAVal) < Epsilon {
-			break
-		}
-		A1 := A
-		A = A1 - fAVal*(A1-B)/(fAVal-fB)
-		fB = fA(B)
-		if math.Abs(A-B) < Epsilon {
-			break
-		}
-	}
-	newSigma := math.Exp(A / 2)
-	phiStar := math.Sqrt(phi*phi + newSigma*newSigma)
-	phiPrime := 1.0 / math.Sqrt((1.0/(phiStar*phiStar))+(1.0/v))
-	muPrime := mu + phiPrime*phiPrime*gVal*(score-EVal)
-
-	return glickoState{
-		mu:    muPrime,
-		phi:   phiPrime,
-		sigma: newSigma,
-	}
+	_ = oppSigma
+	r := Glicko2Rating{Mu: mu, Phi: phi, Sigma: sigma}
+	opp := Glicko2Rating{Mu: oppMu, Phi: oppPhi, Sigma: oppSigma}
+	nr := updateGlickoMulti(r, []Glicko2Rating{opp}, []float64{score})
+	return glickoState{mu: nr.Mu, phi: nr.Phi, sigma: nr.Sigma}
 }
 
-// Additional convenience for 1v1 direct update, used by test
+// Update1v1 applies one Glicko2 rating-period update for a single decisive 1v1 result:
+// the winner scores 1 against the loser, the loser scores 0 against the winner. Both
+// updates read the pre-match opponent rating, and a fresh user (zero Phi1v1/Sigma1v1)
+// falls back to the baseline deviation and volatility via ratingFromUser.
 func Update1v1(winner, loser models.User) (models.User, models.User) {
-	// players := []models.User{winner, loser}
-	// winner => score=1, loser => score=0
-	scores := map[models.User]float64{
-		winner: 1.0,
-		loser:  0.0,
-	}
+	wR := ratingFromUser(winner)
+	lR := ratingFromUser(loser)
 
-	// transform to arrays
-	arr := make([]models.User, 2)
-	arr[0] = winner
-	arr[1] = loser
-	sarr := []float64{scores[winner], scores[loser]}
+	newW := updateGlicko(wR, lR, 1.0)
+	newL := updateGlicko(lR, wR, 0.0)
 
-	arr = MultiIterationGlicko2(arr, sarr, 10)
-	return arr[0], arr[1]
+	winner.Elo1v1 = int(math.Round(newW.ToElo()))
+	winner.Phi1v1 = newW.Phi * GlickoScale
+	winner.Sigma1v1 = newW.Sigma
+
+	loser.Elo1v1 = int(math.Round(newL.ToElo()))
+	loser.Phi1v1 = newL.Phi * GlickoScale
+	loser.Sigma1v1 = newL.Sigma
+
+	return winner, loser
 }

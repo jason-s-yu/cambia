@@ -47,6 +47,22 @@ func (r Glicko2Rating) ToElo() float64 {
 	return r.Mu*GlickoScale + DefaultMu
 }
 
+// ratingFromUser builds a Glicko2Rating from a user's stored 1v1 fields, substituting
+// the baseline deviation and volatility when a user has no prior rating (zero-valued
+// Phi1v1/Sigma1v1). Without this guard a fresh user would yield phi=0 or sigma=0, which
+// makes ln(sigma^2) and the deviation update undefined.
+func ratingFromUser(u models.User) Glicko2Rating {
+	phi := u.Phi1v1
+	if phi <= 0 {
+		phi = DefaultPhi
+	}
+	sigma := u.Sigma1v1
+	if sigma <= 0 {
+		sigma = 0.06
+	}
+	return NewGlicko2Rating(float64(u.Elo1v1), phi, sigma)
+}
+
 // SingleOrMultiPlayerGlicko2 applies a single-step Glicko2 update for a group of users
 // given their final scores in [0..1]. For multi-player, we approximate the "opponent rating"
 // as the average of all other players' Elos.
@@ -68,9 +84,7 @@ func SingleOrMultiPlayerGlicko2(allUsers []models.User, scores []float64) []mode
 
 	updated := make([]models.User, len(allUsers))
 	for i, u := range allUsers {
-		oldPhi := u.Phi1v1
-		oldSigma := u.Sigma1v1
-		r := NewGlicko2Rating(float64(u.Elo1v1), oldPhi, oldSigma)
+		r := ratingFromUser(u)
 
 		oppElo := (avgElo*float64(len(allUsers)) - float64(u.Elo1v1)) / float64(len(allUsers)-1)
 		oppR := NewGlicko2Rating(oppElo, DefaultPhi, 0.06)
@@ -86,54 +100,86 @@ func SingleOrMultiPlayerGlicko2(allUsers []models.User, scores []float64) []mode
 }
 
 // updateGlicko performs a single-match Glicko2 update with volatility for a user r
-// against an opponent rOpp, given the final score in [0..1].
+// against an opponent rOpp, given the final score in [0..1]. It is the one-opponent
+// case of updateGlickoMulti.
 func updateGlicko(r, rOpp Glicko2Rating, score float64) Glicko2Rating {
-	gVal := g(rOpp.Phi)
-	EVal := E(r.Mu, rOpp.Mu, rOpp.Phi)
+	return updateGlickoMulti(r, []Glicko2Rating{rOpp}, []float64{score})
+}
 
-	v := 1.0 / (gVal * gVal * EVal * (1 - EVal))
-	delta := v * gVal * (score - EVal)
-
-	a := math.Log(r.Sigma * r.Sigma)
-	A := a
-	var B float64
-	if delta*delta > r.Phi*r.Phi+v {
-		B = math.Log(delta*delta - r.Phi*r.Phi - v)
-	} else {
-		k := 1.0
-		for f(a-k*Tau, r.Phi, v, delta, A) < 0 {
-			k++
-		}
-		B = a - k*Tau
+// updateGlickoMulti applies a single Glicko2 rating-period update (Glickman steps 3-8)
+// for player r against a set of opponents with the given scores in [0..1]. Variance v
+// and the delta sum are accumulated across all opponents, then a single volatility,
+// deviation, and rating update is applied. With an empty opponent set the rating is
+// unchanged except that the deviation grows by the volatility (step 6 with no games).
+func updateGlickoMulti(r Glicko2Rating, opps []Glicko2Rating, scores []float64) Glicko2Rating {
+	if len(opps) == 0 {
+		phiStar := math.Sqrt(r.Phi*r.Phi + r.Sigma*r.Sigma)
+		return Glicko2Rating{Mu: r.Mu, Phi: phiStar, Sigma: r.Sigma}
 	}
 
-	fA := func(x float64) float64 {
-		return f(x, r.Phi, v, delta, A)
+	// Step 3 (variance) and step 4 (delta) accumulated over all opponents.
+	var invV, deltaSum float64
+	for j := range opps {
+		gj := g(opps[j].Phi)
+		Ej := E(r.Mu, opps[j].Mu, opps[j].Phi)
+		invV += gj * gj * Ej * (1 - Ej)
+		deltaSum += gj * (scores[j] - Ej)
 	}
+	v := 1.0 / invV
+	delta := v * deltaSum
 
-	fB := fA(B)
-	for i := 0; i < 100; i++ {
-		fAVal := fA(A)
-		if math.Abs(fAVal) < Epsilon {
-			break
-		}
-		A1 := A
-		A = A1 - fAVal*(A1-B)/(fAVal-fB)
-		fB = fA(B)
-		if math.Abs(A-B) < Epsilon {
-			break
-		}
-	}
-	newSigma := math.Exp(A / 2)
+	// Step 5: new volatility via the Illinois algorithm.
+	newSigma := glickoVolatility(r.Phi, v, delta, r.Sigma)
+
+	// Steps 6-7: pre-rating-period deviation, then new deviation.
 	phiStar := math.Sqrt(r.Phi*r.Phi + newSigma*newSigma)
 	phiPrime := 1.0 / math.Sqrt(1.0/(phiStar*phiStar)+1.0/v)
-	muPrime := r.Mu + phiPrime*phiPrime*gVal*(score-EVal)
+
+	// Step 8: new rating. mu' = mu + phi'^2 * sum_j g(phi_j) * (s_j - E_j).
+	muPrime := r.Mu + phiPrime*phiPrime*deltaSum
 
 	return Glicko2Rating{
 		Mu:    muPrime,
 		Phi:   phiPrime,
 		Sigma: newSigma,
 	}
+}
+
+// glickoVolatility solves for the new volatility sigma' using the Illinois algorithm
+// from the Glickman paper (step 5). The constant a = ln(sigma^2) is closed over so the
+// root-finder never mutates it; A and B bracket the root and the false-position estimate
+// C replaces one endpoint each iteration.
+func glickoVolatility(phi, v, delta, sigma float64) float64 {
+	a := math.Log(sigma * sigma)
+	fn := func(x float64) float64 {
+		return f(x, phi, v, delta, a)
+	}
+
+	A := a
+	var B float64
+	if delta*delta > phi*phi+v {
+		B = math.Log(delta*delta - phi*phi - v)
+	} else {
+		k := 1.0
+		for fn(a-k*Tau) < 0 {
+			k++
+		}
+		B = a - k*Tau
+	}
+
+	fA := fn(A)
+	fB := fn(B)
+	for math.Abs(B-A) > Epsilon {
+		C := A + (A-B)*fA/(fB-fA)
+		fC := fn(C)
+		if fC*fB <= 0 {
+			A, fA = B, fB
+		} else {
+			fA = fA / 2
+		}
+		B, fB = C, fC
+	}
+	return math.Exp(A / 2)
 }
 
 // g is the G(phi) factor from Glicko2, applying the standard formula 1/sqrt(1+3phi^2/pi^2).
