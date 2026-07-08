@@ -157,6 +157,7 @@ def collect_infosets(
 
     sampled: List[SampledInfoset] = []
     games_played = 0
+    failed_observe_transitions = 0
 
     while len(sampled) < num_infosets and games_played < max_games:
         games_played += 1
@@ -216,8 +217,24 @@ def collect_infosets(
             if hasattr(agent_wrapper, "observe_transition"):
                 try:
                     agent_wrapper.observe_transition(game_state, chosen_action, ap)
-                except Exception:  # JUSTIFIED: eval resilience
-                    pass
+                except Exception as exc:  # JUSTIFIED: eval resilience
+                    # L5 (cambia-248): a dropped frame here desyncs the
+                    # agent's token prefix from the true trajectory for the
+                    # REST of this game -- any further P0 samples taken this
+                    # game would be measured against a stale prefix. Count +
+                    # log it (previously silent) and abort this game's
+                    # measurement rather than keep sampling corrupted infosets.
+                    failed_observe_transitions += 1
+                    logger.warning(
+                        "collect_infosets: observe_transition failed at game "
+                        "%d turn %d (%s: %s); aborting this game's measurement "
+                        "to avoid sampling against a desynced prefix.",
+                        games_played,
+                        turn,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    break
 
             if len(sampled) >= num_infosets:
                 break
@@ -229,6 +246,12 @@ def collect_infosets(
             len(sampled),
             num_infosets,
             games_played,
+        )
+    if failed_observe_transitions:
+        logger.warning(
+            "collect_infosets: %d game(s) aborted early due to "
+            "observe_transition failures (see per-occurrence warnings above).",
+            failed_observe_transitions,
         )
     return sampled
 

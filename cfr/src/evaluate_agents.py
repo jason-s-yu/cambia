@@ -2357,11 +2357,20 @@ class PRTCFRAgentWrapper(NeuralAgentWrapper):
             None, action, game_state, acting_player, snap_results
         )
         if full_obs is None:
-            logger.error(
-                "PRTCFRAgent P%d: observation build failed for actor %d action %r",
-                self.player_id, acting_player, action,
+            # L5 (cambia-248): previously logged and swallowed here (a bare
+            # `return`), which silently froze this player's token prefix --
+            # every subsequent choose_action call this game would query a
+            # stream missing this frame, desynced from the true trajectory.
+            # Raise so both callers' existing per-turn/per-game exception
+            # handling (evaluate_agents.py's eval loop, lbr.py's
+            # collect_infosets) count it and abort this game's measurement
+            # instead of continuing on corrupted state.
+            msg = (
+                f"PRTCFRAgent P{self.player_id}: observation build failed for "
+                f"actor {acting_player} action {action!r}"
             )
-            return
+            logger.error(msg)
+            raise ObservationUpdateError(msg)
         self._obs_stream.append(_filter_observation(full_obs, self.player_id))
 
     def _encode_tokens(self) -> List[int]:

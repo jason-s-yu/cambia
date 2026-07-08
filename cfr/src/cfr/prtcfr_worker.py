@@ -378,6 +378,19 @@ def first_traverser_decision(node, traverser: int):
 #: a preference.
 PRODUCTION_SEQ_CAP: int = 12288
 
+#: Stride folding a game's own seed into its rollout CRN ``seed_base`` (L3,
+#: cambia-248 quality review): the bare per-decision counter used below
+#: (``rollout_counter * (m_rollouts + 1009)``) is identical for two different
+#: games at the same decision-index, so two concurrent games in one
+#: ``PRTCFRBatchedProductionWorker.generate`` chunk would draw the SAME
+#: rollout RNG stream -- a cross-game correlation that inflates batch-mean
+#: variance without biasing it (CRN pairing across the same game's siblings
+#: is the intended coupling; across DIFFERENT games it is not). Multiplying
+#: the game seed by this stride shifts each game's whole per-decision counter
+#: band (bounded by max_trajectory_steps * (m_rollouts + 1009), a few million
+#: at most for production settings) into its own disjoint range.
+_ROLLOUT_SEED_GAME_STRIDE: int = 100_000_003
+
 
 class GameDriver(Protocol):
     """Driver-agnostic seam the production sampler traverses through.
@@ -871,20 +884,28 @@ class PRTCFRProductionWorker:
         # boundary owned by cfr/src/cfr/omniscient.py); value_sink
         # implementations route it through ``compute_omniscient_features``.
         self.value_sink = value_sink
+        self._seed = seed
         self._rng = random.Random(seed)
         self._rollout_counter = 0
         self._added = 0
 
     def reseed(self, seed: int) -> None:
+        self._seed = seed
         self._rng = random.Random(seed)
         self._rollout_counter = 0
         self._added = 0
 
     def _next_seed_base(self) -> int:
         # Spread seed bases by more than m so replicate blocks of different
-        # nodes never overlap (collision would correlate unrelated estimates).
+        # nodes never overlap (collision would correlate unrelated estimates);
+        # fold in this game's own seed (L3) so the same decision-index in a
+        # DIFFERENT game never draws the same rollout CRN stream -- see
+        # _ROLLOUT_SEED_GAME_STRIDE.
         self._rollout_counter += 1
-        return self._rollout_counter * (self.m_rollouts + 1009)
+        return (
+            self._seed * _ROLLOUT_SEED_GAME_STRIDE
+            + self._rollout_counter * (self.m_rollouts + 1009)
+        )
 
     def traverse(
         self, driver: GameDriver, traverser: int, iteration: int, buf: ReservoirBuffer
@@ -1157,8 +1178,17 @@ def _run_batched_scheduler(
     the interleaving across generators changes only the TIMING of the shared
     forward, never any single generator's own instruction/RNG order, so the
     generation is bit-faithful to the sequential estimator per stream.
+
+    On a mid-tick exception (e.g. an OOM from ``backend.evaluate``), every
+    still-suspended task generator is force-closed before the exception
+    propagates: closing an in-flight ``_traverse_coro``/``_rollout_coro`` runs
+    its ``finally`` (``driver.close()`` / ``backend.drop()``) immediately
+    instead of waiting on refcount/GC timing, which can be delayed by the
+    exception's own traceback keeping the frames alive. Without this, a failed
+    chunk leaks the cloned Go driver handles those coroutines were holding.
     """
     runnable: List[_Task] = [_Task(g) for g in root_gens]
+    all_tasks: List[_Task] = list(runnable)  # every task ever scheduled, for cleanup
 
     def complete(task: _Task, value: Any) -> None:
         parent = task.parent
@@ -1169,45 +1199,57 @@ def _run_batched_scheduler(
                 parent.send_val = parent.join_results
                 runnable.append(parent)
 
-    while runnable:
-        pending: List[_Task] = []
-        # Drain: pump every runnable task (and any children it spawns this tick)
-        # to its next query / join / completion.
+    try:
         while runnable:
-            task = runnable.pop()
-            try:
-                y = task.gen.send(task.send_val)
-                task.send_val = None
-            except StopIteration as si:
-                complete(task, si.value)
-                continue
-            if type(y) is _Query:
-                task.send_val = y  # stash the query on the task for the batch
-                pending.append(task)
-            elif type(y) is _Join:
-                subs = y.subtasks
-                if not subs:
-                    task.send_val = []
-                    runnable.append(task)
+            pending: List[_Task] = []
+            # Drain: pump every runnable task (and any children it spawns this
+            # tick) to its next query / join / completion.
+            while runnable:
+                task = runnable.pop()
+                try:
+                    y = task.gen.send(task.send_val)
+                    task.send_val = None
+                except StopIteration as si:
+                    complete(task, si.value)
+                    continue
+                if type(y) is _Query:
+                    task.send_val = y  # stash the query on the task for the batch
+                    pending.append(task)
+                elif type(y) is _Join:
+                    subs = y.subtasks
+                    if not subs:
+                        task.send_val = []
+                        runnable.append(task)
+                    else:
+                        task.join_pending = len(subs)
+                        task.join_results = [None] * len(subs)
+                        for k, cg in enumerate(subs):
+                            child = _Task(cg, parent=task, idx=k)
+                            runnable.append(child)
+                            all_tasks.append(child)
+                        # task itself waits (not runnable) until all children finish
                 else:
-                    task.join_pending = len(subs)
-                    task.join_results = [None] * len(subs)
-                    for k, cg in enumerate(subs):
-                        runnable.append(_Task(cg, parent=task, idx=k))
-                    # task itself waits (not runnable) until all children finish
-            else:
-                raise TypeError(
-                    f"sampler coroutine yielded {type(y).__name__}, expected "
-                    f"_Query or _Join"
-                )
-        if not pending:
-            break
-        queries = [t.send_val for t in pending]
-        backend.evaluate(queries)
-        for t in pending:
-            q: _Query = t.send_val
-            t.send_val = q.result
-            runnable.append(t)
+                    raise TypeError(
+                        f"sampler coroutine yielded {type(y).__name__}, expected "
+                        f"_Query or _Join"
+                    )
+            if not pending:
+                break
+            queries = [t.send_val for t in pending]
+            backend.evaluate(queries)
+            for t in pending:
+                q: _Query = t.send_val
+                t.send_val = q.result
+                runnable.append(t)
+    except Exception:
+        # Force-close every task's generator (a no-op for already-exhausted
+        # ones) so abandoned driver clones and backend streams release now.
+        for task in all_tasks:
+            try:
+                task.gen.close()
+            except Exception:  # JUSTIFIED: cleanup must not mask the original error
+                pass
+        raise
 
 
 class IncrementalSigmaManager:
@@ -1415,23 +1457,33 @@ class PRTCFRBatchedProductionWorker:
                     buf=spec["buf"],
                     rng=random.Random(int(spec["seed"])),
                     rollout_counter=[0],
+                    game_seed=int(spec["seed"]),
                     backend=backend,
                     added=added,
                 )
             )
-        _run_batched_scheduler(gens, backend)
-        # Rollout streams self-drop (see _rollout_coro); free the per-game main
-        # streams too so a service/manager reused across chunks never leaks
-        # carried hidden state.
-        for stream in main_streams:
-            backend.drop(stream)
+        try:
+            _run_batched_scheduler(gens, backend)
+        finally:
+            # Always release the per-game main streams, including on a
+            # mid-chunk exception (e.g. backend.evaluate OOM): rollout streams
+            # self-drop (see _rollout_coro) and the scheduler force-closes any
+            # abandoned generators, but these main streams are owned here.
+            for stream in main_streams:
+                backend.drop(stream)
         return added
 
-    def _next_seed_base(self, rollout_counter: List[int]) -> int:
-        # Mirror PRTCFRProductionWorker._next_seed_base with a per-game counter
-        # so rollout CRN seeds are reproducible from the game seed alone.
+    def _next_seed_base(self, rollout_counter: List[int], game_seed: int) -> int:
+        # Mirror PRTCFRProductionWorker._next_seed_base exactly: fold in this
+        # game's own seed (L3) so two different games sharing a chunk never
+        # draw the same rollout CRN stream at the same decision-index (see
+        # _ROLLOUT_SEED_GAME_STRIDE). Must stay bit-identical to the sequential
+        # worker's formula for test_batched_scheduler_faithful_to_sequential_worker.
         rollout_counter[0] += 1
-        return rollout_counter[0] * (self.m_rollouts + 1009)
+        return (
+            game_seed * _ROLLOUT_SEED_GAME_STRIDE
+            + rollout_counter[0] * (self.m_rollouts + 1009)
+        )
 
     def _traverse_coro(
         self,
@@ -1443,6 +1495,7 @@ class PRTCFRBatchedProductionWorker:
         buf: ReservoirBuffer,
         rng: random.Random,
         rollout_counter: List[int],
+        game_seed: int,
         backend: SigmaBackend,
         added: Dict[int, int],
     ) -> Iterator:
@@ -1474,7 +1527,7 @@ class PRTCFRBatchedProductionWorker:
             # regret sample, then advance the trajectory via b_i (uniform).
             tokens_h = driver.tokens(traverser)
             sigma_node = yield _Query(stream, traverser, tokens_h, mask)
-            seed_base = self._next_seed_base(rollout_counter)
+            seed_base = self._next_seed_base(rollout_counter, game_seed)
 
             kept_actions: List[Any] = []
             rollout_subtasks: List[Iterator] = []

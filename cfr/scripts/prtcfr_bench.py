@@ -233,6 +233,9 @@ class Heartbeat:
         if now - self._last >= self.min_interval_s:
             self.force(label)
 
+    def elapsed(self) -> float:
+        return time.perf_counter() - self._t0
+
 
 def _cuda_warm_or_timeout(device: str, timeout_s: float = 20.0) -> None:
     """Fail fast if CUDA init / first allocation hangs, rather than let an
@@ -442,11 +445,93 @@ def build_bench_config(args: argparse.Namespace) -> PRTCFRConfig:
 
 
 # ---------------------------------------------------------------------------
+# Atomic output (L4, cambia-248 quality review): both observed X3 cells
+# died mid-run (OOM / external kill during a multi-hour generation) with NO
+# JSON at all, discarding the config/contention/timing data already
+# collected. ``_atomic_write_json`` never leaves a torn file at the target
+# path; ``_write_partial_cell_result`` is the try/finally dump a cell writes
+# on the way out when it fails, so a killed run still leaves a diagnosable
+# artifact instead of nothing.
+# ---------------------------------------------------------------------------
+
+
+def _atomic_write_json(path: str, obj: Dict[str, Any]) -> None:
+    """Write ``obj`` as JSON to ``path`` via a same-directory temp file plus
+    ``os.replace``, so a reader (or a process killed mid-write) never
+    observes a partially-written file at ``path`` -- either the previous
+    complete file is still there, or the new one is."""
+    out_dir = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(out_dir, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=out_dir, prefix=os.path.basename(path) + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2, default=str)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _write_partial_cell_result(
+    out_path: str,
+    mode: str,
+    cfg: PRTCFRConfig,
+    device: str,
+    hb: Heartbeat,
+    host_load_before: float,
+    gpu_pre: Optional[Dict[str, Any]],
+    contention_during: Optional[Dict[str, Any]],
+    exc: BaseException,
+) -> None:
+    """Best-effort dump of whatever a bench cell had measured before it died
+    (config, before-snapshot, contention samples collected so far, elapsed
+    wall time, the exception) -- written atomically to ``out_path`` so a
+    killed cell still leaves diagnosable output instead of nothing."""
+    partial = {
+        "mode": mode,
+        "status": "failed",
+        "error": {"type": type(exc).__name__, "message": str(exc)},
+        "elapsed_seconds": round(hb.elapsed(), 3),
+        "config": {
+            "k_games": cfg.k_games_per_iter,
+            "m_rollouts": cfg.m_rollouts,
+            "batch_size": cfg.batch_size,
+            "train_steps": cfg.train_steps,
+            "seq_cap": cfg.seq_cap,
+            "backend": cfg.backend,
+            "device": device,
+            "num_players": cfg.num_players,
+            "critic_enabled": cfg.critic_enabled,
+        },
+        "contention": {
+            "host_load1_before": host_load_before,
+            "gpu_before": gpu_pre,
+            "during_summary": contention_during,
+        },
+    }
+    _atomic_write_json(out_path, partial)
+    print(
+        f"[prtcfr-bench] cell FAILED after {hb.elapsed():.1f}s "
+        f"({type(exc).__name__}: {exc}); wrote partial result to {out_path}",
+        flush=True,
+    )
+
+
+# ---------------------------------------------------------------------------
 # One measured cell
 # ---------------------------------------------------------------------------
 
 
-def run_cell(args: argparse.Namespace, batch_size_override: Optional[int] = None) -> Dict[str, Any]:
+def run_cell(
+    args: argparse.Namespace,
+    batch_size_override: Optional[int] = None,
+    out_path: Optional[str] = None,
+) -> Dict[str, Any]:
     """Run exactly one PRT-CFR production iteration (gen + fit), instrumented.
 
     Returns a JSON-able dict: gen_seconds/fit_seconds (straight from the
@@ -501,6 +586,7 @@ def run_cell(args: argparse.Namespace, batch_size_override: Optional[int] = None
     host_load_before = os.getloadavg()[0]
     print(f"[prtcfr-bench] host load1 before run: {host_load_before:.2f}")
 
+    mon: Optional[ContentionMonitor] = None
     try:
         with contextlib.ExitStack() as stack:
             for cls in (GoEngineGameDriver, PythonEngineGameDriver):
@@ -529,6 +615,23 @@ def run_cell(args: argparse.Namespace, batch_size_override: Optional[int] = None
                 hb.force("gen+fit:start")
                 state = trainer.run_iteration(1)
                 hb.force("gen+fit:done")
+    except BaseException as exc:
+        # L4 (cambia-248): a mid-run death (OOM, external kill) previously
+        # lost every timing/contention sample this cell had already collected
+        # -- dump whatever is available now, atomically, before propagating.
+        if out_path:
+            _write_partial_cell_result(
+                out_path,
+                mode="gen_fit",
+                cfg=cfg,
+                device=device,
+                hb=hb,
+                host_load_before=host_load_before,
+                gpu_pre=gpu_pre,
+                contention_during=mon.summary() if mon is not None else None,
+                exc=exc,
+            )
+        raise
     finally:
         trainer.close()
 
@@ -606,14 +709,19 @@ def _is_oom(exc: BaseException) -> bool:
         return False
 
 
-def run_cell_with_oom_backoff(args: argparse.Namespace) -> Dict[str, Any]:
+def run_cell_with_oom_backoff(
+    args: argparse.Namespace, out_path: Optional[str] = None
+) -> Dict[str, Any]:
     """Run ``run_cell``, halving batch_size on CUDA OOM down to
-    ``--min-batch-size`` rather than crashing the bench (GPU protocol)."""
+    ``--min-batch-size`` rather than crashing the bench (GPU protocol).
+    ``out_path``, if given, is forwarded to every attempt so a mid-run death
+    (OOM retry exhaustion or any other exception) still leaves a partial
+    result on disk (see ``_write_partial_cell_result``)."""
     batch_size = args.batch_size
     attempt = 0
     while True:
         try:
-            return run_cell(args, batch_size_override=batch_size)
+            return run_cell(args, batch_size_override=batch_size, out_path=out_path)
         except Exception as e:  # noqa: BLE001 - re-raised below if not OOM
             if not _is_oom(e):
                 raise
@@ -675,7 +783,11 @@ def _replicate_reservoir_to_size(disk_reservoir: Any, target_size: int) -> None:
         needed -= take
 
 
-def run_fit_scale_probe(args: argparse.Namespace, seed_k_games: int = 16) -> Dict[str, Any]:
+def run_fit_scale_probe(
+    args: argparse.Namespace,
+    seed_k_games: int = 16,
+    out_path: Optional[str] = None,
+) -> Dict[str, Any]:
     """Measure fit_seconds at ``args.batch_size`` / ``args.train_steps`` (the
     real production values by default) against a reservoir seeded from
     ``seed_k_games`` real generated games and replicated up to batch scale.
@@ -697,6 +809,9 @@ def run_fit_scale_probe(args: argparse.Namespace, seed_k_games: int = 16) -> Dic
     _cuda_warm_or_timeout(device, timeout_s=args.cuda_init_timeout_s)
     hb.force("cuda-init:done")
 
+    pre_host_load = os.getloadavg()[0]
+    pre_gpu = contention_snapshot().get("gpu") if device.startswith("cuda") else None
+
     run_dir = args.run_dir or tempfile.mkdtemp(prefix="prtcfr_fitprobe_")
     os.makedirs(run_dir, exist_ok=True)
     db_path = os.path.join(run_dir, "cambia_runs_bench.db")
@@ -711,6 +826,7 @@ def run_fit_scale_probe(args: argparse.Namespace, seed_k_games: int = 16) -> Dic
         run_name=f"x3-fitprobe-{int(time.time())}",
     )
     hb.force("trainer-init:done")
+    mon: Optional[ContentionMonitor] = None
     try:
         print(f"[prtcfr-bench] fit-scale probe: seeding {seed_k_games} real games...")
         hb.force("seed-gen:start")
@@ -756,6 +872,22 @@ def run_fit_scale_probe(args: argparse.Namespace, seed_k_games: int = 16) -> Dic
                 hb.force("fit:done")
         host_after = os.getloadavg()[0]
         gpu_after = contention_snapshot().get("gpu")
+    except BaseException as exc:
+        # L4 (cambia-248): mirror run_cell's partial dump for the fit-scale
+        # probe path (its own seed-gen phase runs a full run_iteration too).
+        if out_path:
+            _write_partial_cell_result(
+                out_path,
+                mode="fit_scale_probe",
+                cfg=cfg,
+                device=device,
+                hb=hb,
+                host_load_before=pre_host_load,
+                gpu_pre=pre_gpu,
+                contention_during=mon.summary() if mon is not None else None,
+                exc=exc,
+            )
+        raise
     finally:
         trainer.close()
 
@@ -933,7 +1065,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not args.no_wait_for_clean_host:
         _wait_for_clean_host(args.max_host_load, args.host_wait_poll_s, args.host_wait_timeout_s)
     if args.fit_scale_probe:
-        result = run_fit_scale_probe(args, seed_k_games=args.seed_k_games)
+        result = run_fit_scale_probe(args, seed_k_games=args.seed_k_games, out_path=args.out)
         verdict = "PASS" if result["fit_seconds"] <= args.gate_fit_s else "FAIL"
         print(
             f"[fit-scale-probe] batch={result['config']['batch_size']} "
@@ -947,14 +1079,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"backward_opt_misc={result['profile']['backward_opt_misc_s']:.2f}s"
         )
     else:
-        result = run_cell_with_oom_backoff(args)
+        result = run_cell_with_oom_backoff(args, out_path=args.out)
         print(human_summary(result, args.gate_gen_s, args.gate_fit_s))
     if args.out:
-        out_dir = os.path.dirname(os.path.abspath(args.out))
-        if out_dir:
-            os.makedirs(out_dir, exist_ok=True)
-        with open(args.out, "w", encoding="utf-8") as f:
-            json.dump(result, f, indent=2, default=str)
+        # Success path: same atomic writer the partial-dump path uses (L4,
+        # cambia-248), so the final JSON is never left torn either.
+        _atomic_write_json(args.out, result)
         print(f"\n[prtcfr-bench] wrote {args.out}")
     return 0
 
