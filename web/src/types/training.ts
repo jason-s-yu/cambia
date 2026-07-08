@@ -7,6 +7,10 @@ export interface Run {
 	best_metric_iter: number | null;
 	created_at: string;
 	updated_at: string;
+	/** The Go-owned current-process-state record (runs/<name>/process.json),
+	 * present when the run has a supervised or dashboard-created process; absent
+	 * for an external run_db-only run. */
+	process?: ProcessState;
 }
 
 export interface RunDetail extends Run {

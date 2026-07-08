@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -326,6 +327,222 @@ func TestProcessGetState(t *testing.T) {
 	}
 	if st.Status != StatusCreated {
 		t.Errorf("status = %q, want created", st.Status)
+	}
+}
+
+// TestProcessLaunchConcurrencyCap is the hard-backstop regression for MED-2:
+// two goroutines racing Start on different created runs with cap 1 must not
+// both succeed. The check-then-launch happens atomically under m.mu, closing
+// the TOCTOU window a disk-scanning preflight check alone cannot.
+func TestProcessLaunchConcurrencyCap(t *testing.T) {
+	m, _ := newTestManager(t, longRunningStub)
+	m.SetMaxConcurrent(1)
+	createRun(t, m, "cap-a", "prt-cfr")
+	createRun(t, m, "cap-b", "prt-cfr")
+
+	names := []string{"cap-a", "cap-b"}
+	results := make([]error, len(names))
+	var wg sync.WaitGroup
+	wg.Add(len(names))
+	for i, n := range names {
+		i, n := i, n
+		go func() {
+			defer wg.Done()
+			_, err := m.Start(n, StartOpts{})
+			results[i] = err
+		}()
+	}
+	wg.Wait()
+
+	successes := 0
+	capBlocked := 0
+	for _, err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrConcurrencyCapReached):
+			capBlocked++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successes = %d, want 1 (results=%v)", successes, results)
+	}
+	if capBlocked != 1 {
+		t.Fatalf("cap-blocked = %d, want 1 (results=%v)", capBlocked, results)
+	}
+
+	// Clean up whichever run actually launched.
+	for _, n := range names {
+		if st, ok := m.GetState(n); ok && st.Status == StatusRunning {
+			_, _ = m.Stop(n, true)
+			waitForStatus(t, m, n, StatusStopped, 10*time.Second)
+		}
+	}
+}
+
+// TestProcessLaunchConcurrencyCapDisabled confirms max <= 0 disables the
+// manager-level backstop (the zero value from an unconfigured manager).
+func TestProcessLaunchConcurrencyCapDisabled(t *testing.T) {
+	m, _ := newTestManager(t, crashStub)
+	createRun(t, m, "nocap-a", "prt-cfr")
+	createRun(t, m, "nocap-b", "prt-cfr")
+
+	if _, err := m.Start("nocap-a", StartOpts{}); err != nil {
+		t.Fatalf("Start(nocap-a): %v", err)
+	}
+	if _, err := m.Start("nocap-b", StartOpts{}); err != nil {
+		t.Fatalf("Start(nocap-b): %v", err)
+	}
+	// Wait for both to be reaped before tempdir cleanup races the still-exiting
+	// child (crashStub exits immediately, but log-fd close is asynchronous).
+	waitForStatus(t, m, "nocap-a", StatusCrashed, 10*time.Second)
+	waitForStatus(t, m, "nocap-b", StatusCrashed, 10*time.Second)
+}
+
+// TestProcessReconcilePidReuseFalseAlive is the MED-3 regression: a process.json
+// recording a pid that is alive (passes the bare signal-0 probe) but whose
+// StartTicks does not match the pid's actual /proc/<pid>/stat starttime must be
+// reconciled to crashed, not left running. This simulates a pid the kernel
+// recycled for an unrelated process since this run's process exited, using our
+// own test-binary pid (guaranteed alive) with a deliberately wrong StartTicks.
+func TestProcessReconcilePidReuseFalseAlive(t *testing.T) {
+	m, runsDir := newTestManager(t, crashStub)
+
+	name := "reused-pid"
+	runDir := filepath.Join(runsDir, name)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeProcessState(runDir, &ProcessState{
+		Name: name, Status: StatusRunning, Algorithm: "prt-cfr",
+		PID: os.Getpid(), PGID: os.Getpid(), StartTicks: 1,
+		CreatedAt: nowRFC3339(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	m.Reconcile()
+
+	st, ok := m.GetState(name)
+	if !ok {
+		t.Fatal("state missing after reconcile")
+	}
+	if st.Status != StatusCrashed {
+		t.Errorf("status = %q, want crashed (starttime mismatch must not read as alive)", st.Status)
+	}
+}
+
+// TestProcessReconcileRealStarttimeMatches is the positive-path complement:
+// Reconcile must NOT flag a live run whose recorded StartTicks actually
+// matches the pid's current /proc/<pid>/stat starttime.
+func TestProcessReconcileRealStarttimeMatches(t *testing.T) {
+	m, runsDir := newTestManager(t, crashStub)
+
+	ticks, err := readProcStarttime(os.Getpid())
+	if err != nil {
+		t.Skipf("cannot read /proc/%d/stat on this host: %v", os.Getpid(), err)
+	}
+	boot, _ := readBootTime()
+
+	name := "real-starttime"
+	runDir := filepath.Join(runsDir, name)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeProcessState(runDir, &ProcessState{
+		Name: name, Status: StatusRunning, Algorithm: "prt-cfr",
+		PID: os.Getpid(), PGID: os.Getpid(), StartTicks: ticks, BootID: boot,
+		CreatedAt: nowRFC3339(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	m.Reconcile()
+
+	st, ok := m.GetState(name)
+	if !ok {
+		t.Fatal("state missing after reconcile")
+	}
+	if st.Status != StatusRunning {
+		t.Errorf("status = %q, want running (starttime matches, must not be reconciled away)", st.Status)
+	}
+}
+
+// TestProcessStopRefusesSignalOnStarttimeMismatch is the MED-3 regression for
+// Stop's untracked-run path: it must not signal a pid it can no longer
+// positively verify by starttime. killGroupFunc is swapped for a spy so the
+// test never sends a real signal to the test binary's own process group.
+func TestProcessStopRefusesSignalOnStarttimeMismatch(t *testing.T) {
+	m, runsDir := newTestManager(t, crashStub)
+
+	name := "stale-signal"
+	runDir := filepath.Join(runsDir, name)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeProcessState(runDir, &ProcessState{
+		Name: name, Status: StatusRunning, Algorithm: "prt-cfr",
+		PID: os.Getpid(), PGID: os.Getpid(), StartTicks: 1,
+		CreatedAt: nowRFC3339(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := killGroupFunc
+	signaled := false
+	killGroupFunc = func(pgid int, sig syscall.Signal) error {
+		signaled = true
+		return nil
+	}
+	t.Cleanup(func() { killGroupFunc = orig })
+
+	// Not tracked by this manager instance (never Start()ed here), so Stop
+	// takes the disk-state fallback path that reads pid/starttime off process.json.
+	if _, err := m.Stop(name, false); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if signaled {
+		t.Error("Stop signaled a pid it could not verify by starttime (pid-reuse guard failed)")
+	}
+}
+
+// TestProcessStopSignalsOnStarttimeMatch is the positive-path complement: Stop
+// must still signal a pid whose recorded starttime matches.
+func TestProcessStopSignalsOnStarttimeMatch(t *testing.T) {
+	m, runsDir := newTestManager(t, crashStub)
+
+	ticks, err := readProcStarttime(os.Getpid())
+	if err != nil {
+		t.Skipf("cannot read /proc/%d/stat on this host: %v", os.Getpid(), err)
+	}
+	boot, _ := readBootTime()
+
+	name := "verified-signal"
+	runDir := filepath.Join(runsDir, name)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeProcessState(runDir, &ProcessState{
+		Name: name, Status: StatusRunning, Algorithm: "prt-cfr",
+		PID: os.Getpid(), PGID: os.Getpid(), StartTicks: ticks, BootID: boot,
+		CreatedAt: nowRFC3339(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := killGroupFunc
+	signaled := false
+	killGroupFunc = func(pgid int, sig syscall.Signal) error {
+		signaled = true
+		return nil
+	}
+	t.Cleanup(func() { killGroupFunc = orig })
+
+	if _, err := m.Stop(name, false); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if !signaled {
+		t.Error("Stop did not signal a pid whose starttime matches")
 	}
 }
 

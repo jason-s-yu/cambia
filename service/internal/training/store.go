@@ -413,7 +413,7 @@ func runDirOf(runsDir, name string) string {
 func effectiveStatus(st *ProcessState) string {
 	switch st.Status {
 	case StatusRunning, StatusStarting, StatusStopping:
-		if !pidAlive(st.PID) {
+		if !pidAlive(st) {
 			return StatusCrashed
 		}
 	}
