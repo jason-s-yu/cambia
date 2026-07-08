@@ -254,7 +254,7 @@ func (h *ProcessHandlers) launchHandler(w http.ResponseWriter, r *http.Request, 
 		}
 		if !hasCheckpoint(h.runsDir, name) {
 			writeJSONError(w, http.StatusConflict, "no_resumable_checkpoint",
-				"no checkpoint found under runs/"+name+"/checkpoints/")
+				"no checkpoint found under runs/"+name+"/snapshots/prtcfr_checkpoint.pt")
 			return
 		}
 	} else {
@@ -377,19 +377,22 @@ func (h *ProcessHandlers) runCambia(args ...string) error {
 	return nil
 }
 
-// hasCheckpoint reports whether runs/<name>/checkpoints/ holds any checkpoint
-// file. Resume gates on this before spawning the trainer.
+// hasCheckpoint reports whether runs/<name>/ holds a resumable PRT-CFR
+// checkpoint. The PRT-CFR trainer writes its rolling checkpoint to
+// snapshots/prtcfr_checkpoint.pt and commits resume_state.json at the run-dir
+// root last, once the checkpoint and reservoir state are durable (see
+// prtcfr_trainer.py _save_resume_state). Resume gates on both files existing:
+// the checkpoint alone can be mid-write, and resume_state.json alone (without
+// its checkpoint) cannot be resumed from either.
 func hasCheckpoint(runsDir, name string) bool {
-	entries, err := os.ReadDir(filepath.Join(runsDir, name, "checkpoints"))
-	if err != nil {
+	runDir := filepath.Join(runsDir, name)
+	if _, err := os.Stat(filepath.Join(runDir, "snapshots", "prtcfr_checkpoint.pt")); err != nil {
 		return false
 	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			return true
-		}
+	if _, err := os.Stat(filepath.Join(runDir, "resume_state.json")); err != nil {
+		return false
 	}
-	return false
+	return true
 }
 
 // decodeCreateBody decodes a create request, preserving numeric override values

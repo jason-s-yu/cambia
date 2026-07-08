@@ -311,11 +311,16 @@ func TestHandleResumeWithCheckpoint(t *testing.T) {
 	f := newHandlerFixture(t)
 	mustCreate(t, f, "resume-ok")
 
-	ckptDir := filepath.Join(f.runsDir, "resume-ok", "checkpoints")
-	if err := os.MkdirAll(ckptDir, 0o755); err != nil {
+	// Real PRT-CFR resume artifacts: a rolling checkpoint under snapshots/ plus
+	// resume_state.json at the run-dir root (see prtcfr_trainer.py:345,1106,1178).
+	snapDir := filepath.Join(f.runsDir, "resume-ok", "snapshots")
+	if err := os.MkdirAll(snapDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(ckptDir, "prtcfr_checkpoint_iter_2.pt"), []byte("x"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(snapDir, "prtcfr_checkpoint.pt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.runsDir, "resume-ok", "resume_state.json"), []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -324,6 +329,35 @@ func TestHandleResumeWithCheckpoint(t *testing.T) {
 		t.Fatalf("status = %d, want 202: %s", w.Code, w.Body.String())
 	}
 	waitTerminal(t, f.mgr, "resume-ok")
+}
+
+// TestHandleResumeCheckpointsDirOnly is a regression test for the old (wrong)
+// resume gate, which checked runs/<name>/checkpoints/ for any file. The
+// PRT-CFR trainer never creates that directory: it writes its rolling
+// checkpoint to snapshots/prtcfr_checkpoint.pt and resume_state.json at the
+// run-dir root. A checkpoints/ dir with a file in it (the legacy layout) must
+// still 409, since the trainer's own resume path cannot use it.
+func TestHandleResumeCheckpointsDirOnly(t *testing.T) {
+	f := newHandlerFixture(t)
+	mustCreate(t, f, "resume-legacy-dir")
+
+	ckptDir := filepath.Join(f.runsDir, "resume-legacy-dir", "checkpoints")
+	if err := os.MkdirAll(ckptDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ckptDir, "prtcfr_checkpoint_iter_2.pt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	w := doReq(f.ph.HandleResume, http.MethodPost, "/training/runs/resume-legacy-dir/resume", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", w.Code, w.Body.String())
+	}
+	var body map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &body)
+	if body["error"] != "no_resumable_checkpoint" {
+		t.Errorf("error = %v, want no_resumable_checkpoint", body["error"])
+	}
 }
 
 // TestHandlersAuthGate confirms the wrapped mux rejects unauthenticated requests
