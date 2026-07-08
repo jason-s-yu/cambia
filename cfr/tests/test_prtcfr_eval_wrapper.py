@@ -424,3 +424,192 @@ def test_end_to_end_argmax_mode_smoke(tmp_path):
     finally:
         logging.disable(logging.NOTSET)
     assert res.get("Errors", 0) == 0
+
+
+# ---------------------------------------------------------------------------
+# cambia-249: lazy snapshot loading (LRU / load-once cache)
+# ---------------------------------------------------------------------------
+
+
+def test_lazy_loading_defers_net_construction_until_sampled(tmp_path):
+    """Snapshot files must not be read until their index is actually sampled
+    and queried: from_checkpoint() itself must not call torch.load/build a net
+    for any deployable snapshot."""
+    snapdir = _make_run_dir(tmp_path, [1, 2, 3, 4], best_iteration=None)
+    mix = PRTCFRMixture.from_checkpoint(str(snapdir / "prtcfr_snapshot_iter_4.pt"))
+    assert mix.iters == [1, 2, 3, 4]
+    assert not any(mix.is_loaded(i) for i in range(len(mix)))
+
+    mix.sample_episode(np.random.default_rng(0))
+    mix.active_net()
+    assert sum(mix.is_loaded(i) for i in range(len(mix))) == 1
+
+
+def test_lazy_mixture_sampling_distribution_matches_eager(tmp_path):
+    """SD-CFR sampling semantics (iters, weights, per-episode index sequence
+    under a fixed seed) are unaffected by deferring net construction: a lazy
+    mixture samples identically to one built with every net eagerly
+    materialized up front."""
+    snapdir = _make_run_dir(tmp_path, [1, 2, 3, 4], best_iteration=None)
+    lazy_mix = PRTCFRMixture.from_checkpoint(str(snapdir / "prtcfr_snapshot_iter_4.pt"))
+    eager_nets = [lazy_mix._resolve(i) for i in range(len(lazy_mix))]  # force-load all
+    eager_mix = PRTCFRMixture(
+        list(lazy_mix.iters), eager_nets, weighting=lazy_mix.weighting
+    )
+
+    assert lazy_mix.iters == eager_mix.iters
+    assert np.allclose(lazy_mix.weights, eager_mix.weights)
+
+    rng_a = np.random.default_rng(99)
+    rng_b = np.random.default_rng(99)
+    seq_lazy = [lazy_mix.sample_episode(rng_a) for _ in range(200)]
+    seq_eager = [eager_mix.sample_episode(rng_b) for _ in range(200)]
+    assert seq_lazy == seq_eager
+
+
+def test_lazy_cache_evicts_least_recently_used(tmp_path):
+    snapdir = _make_run_dir(tmp_path, [1, 2, 3, 4], best_iteration=None)
+    mix = PRTCFRMixture.from_checkpoint(
+        str(snapdir / "prtcfr_snapshot_iter_4.pt"), lazy_cache_size=2,
+    )
+    mix._resolve(0)
+    mix._resolve(1)
+    assert mix.is_loaded(0) and mix.is_loaded(1)
+    mix._resolve(2)  # over capacity: evicts idx 0 (least recently used)
+    assert not mix.is_loaded(0)
+    assert mix.is_loaded(1) and mix.is_loaded(2)
+
+
+# ---------------------------------------------------------------------------
+# cambia-249: incremental GRU cursor equivalence gate (eval-validity critical)
+# ---------------------------------------------------------------------------
+#
+# PRTCFRAgentWrapper.choose_action previously re-tokenized and re-ran the GRU
+# over the WHOLE accumulated observation prefix at every decision (O(n) per
+# query, O(n^2) per game). PRTCFRIncrementalCursor instead carries the raw GRU
+# hidden state across decisions and feeds only the newly-appended observation
+# frames. A silent divergence between the incremental and full-reencode paths
+# would poison mean_imp, so this must be checked against REAL seeded games
+# (not just synthetic token arrays) at every one of the tracked player's
+# decision points.
+
+
+def test_incremental_cursor_matches_full_reencode_across_seeded_games(tmp_path):
+    """Exact (bit-identical) equality does NOT hold here: PyTorch's CPU
+    pack_padded_sequence + GRU kernels are shape-sensitive in their floating-
+    point rounding, so splitting one long forward pass into several shorter
+    ``step_hidden`` calls (mathematically the same recurrence, chained via an
+    explicit h0) accumulates a few ULPs of float32 divergence per split point
+    versus a single one-shot forward -- observed max abs deviation ~1.5e-7 in
+    this repo's own measurement (single-precision epsilon is ~1.19e-7), well
+    below the 1e-5 tolerance this codebase already accepts for the same class
+    of comparison in
+    ``test_stream_replay_policy_equivalence_vs_inference_service`` (mixture
+    batch query vs PRTCFRInferenceService's register()+step() carry). This is
+    not a logic bug: the recurrence decomposition is exact in real-number
+    arithmetic; only CPU GEMM/kernel rounding order differs by call shape.
+    ``ATOL`` is set far tighter than that existing precedent (still ~30x the
+    observed max) so a REAL divergence (e.g. a token-stream construction bug)
+    would still fail this gate.
+    """
+    from src.evaluate_agents import get_agent
+    from src.config import load_config
+    from src.game.engine import CambiaGameState
+    from src.encoding import encode_action_mask
+
+    ATOL = 5e-6
+    snapdir = _make_run_dir(tmp_path, [1, 2], best_iteration=2)
+    cfg = load_config(_write_fast_config(tmp_path, max_turns=60))
+    agent = get_agent(
+        "prt_cfr", player_id=0, config=cfg,
+        checkpoint_path=str(snapdir / "prtcfr_snapshot_iter_2.pt"), device="cpu",
+    )
+
+    max_abs_dev = 0.0
+    n_compared = 0
+    mismatches = []
+    for seed in range(8):
+        game = CambiaGameState(house_rules=cfg.cambia_rules, seed=seed)
+        agent.initialize_state(game)
+        rng = random.Random(1000 + seed)
+        steps = 0
+        while not game.is_terminal() and steps < 300:
+            steps += 1
+            ap = game.get_acting_player()
+            if ap == -1:
+                break
+            legal = game.get_legal_actions()
+            if not legal:
+                break
+            legal_list = list(legal)
+            if ap == agent.player_id:
+                mask = encode_action_mask(legal_list)
+                # Reference: full stateless re-encode (unchanged pre-cambia-249
+                # path). Does not mutate cursor state, safe to call either side
+                # of the incremental query below.
+                probs_full = agent._mixture.strategy(agent._encode_tokens(), mask)
+                # Under test: the incremental cursor (this is exactly what
+                # choose_action calls internally).
+                probs_incremental = agent._strategy_for_mask(mask)
+                dev = float(np.abs(probs_incremental - probs_full).max())
+                max_abs_dev = max(max_abs_dev, dev)
+                n_compared += 1
+                if dev > ATOL:
+                    mismatches.append((seed, steps, dev))
+            action = rng.choice(legal_list)
+            game.apply_action(action)
+            agent.observe_transition(game, action, ap)
+
+    assert n_compared > 20, "too few decisions compared to trust this gate"
+    assert not mismatches, (
+        f"incremental vs full-reencode strategy mismatch at {len(mismatches)} "
+        f"decision(s) (seed, step, max_abs_dev)={mismatches[:5]}; "
+        f"overall max_abs_dev={max_abs_dev}"
+    )
+
+
+def test_incremental_cursor_falls_back_to_full_reencode_on_seq_cap_overflow(tmp_path):
+    """Once the accumulated body would exceed a (deliberately tiny) seq_cap,
+    the cursor must mark itself overflowed and the wrapper must keep serving
+    valid strategies via the full (truncating) stateless re-encode -- never
+    silently continue an invalidated incremental carry."""
+    from src.evaluate_agents import get_agent
+    from src.config import load_config
+    from src.game.engine import CambiaGameState
+    from src.encoding import encode_action_mask
+
+    snapdir = _make_run_dir(tmp_path, [1, 2], best_iteration=2)
+    cfg = load_config(_write_fast_config(tmp_path, max_turns=60))
+    agent = get_agent(
+        "prt_cfr", player_id=0, config=cfg,
+        checkpoint_path=str(snapdir / "prtcfr_snapshot_iter_2.pt"), device="cpu",
+    )
+    agent._seq_cap = 12  # force overflow almost immediately
+
+    game = CambiaGameState(house_rules=cfg.cambia_rules, seed=3)
+    agent.initialize_state(game)
+    agent._cursor.seq_cap = 12
+    rng = random.Random(42)
+    overflowed_seen = False
+    steps = 0
+    while not game.is_terminal() and steps < 150:
+        steps += 1
+        ap = game.get_acting_player()
+        if ap == -1:
+            break
+        legal = game.get_legal_actions()
+        if not legal:
+            break
+        legal_list = list(legal)
+        if ap == agent.player_id:
+            mask = encode_action_mask(legal_list)
+            probs = agent._strategy_for_mask(mask)  # must not raise post-overflow
+            assert probs.shape == (146,)
+            assert abs(probs[mask].sum() - 1.0) < 1e-6 or probs[mask].sum() == 0.0
+            if agent._cursor.overflowed:
+                overflowed_seen = True
+        action = rng.choice(legal_list)
+        game.apply_action(action)
+        agent.observe_transition(game, action, ap)
+
+    assert overflowed_seen

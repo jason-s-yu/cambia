@@ -178,16 +178,25 @@ class PRTCFRNet(nn.Module):
         nn.init.ones_(norm.weight)
         nn.init.zeros_(norm.bias)
 
-    def encode(self, tokens: torch.Tensor) -> torch.Tensor:
-        """Encode a (B, L) int token batch to a (B, hidden) sequence embedding.
+    def _embed_pack_gru(
+        self, tokens: torch.Tensor, h0: Optional[torch.Tensor]
+    ) -> torch.Tensor:
+        """Shared embed + pack + GRU-forward step: (B, L) tokens plus an optional
+        initial hidden state ``h0`` (num_layers, B, hidden; zero-init when None)
+        to the new raw (num_layers, B, hidden) hidden state (pre-LayerNorm).
 
         The GRU reads only the real (non-PAD) prefix of each row via
         pack_padded_sequence, so the top-layer final hidden state is taken AT THE
         LAST REAL TOKEN, not after the right-pad tail. Running the GRU over the long
         zero-embedding PAD tail (seq_cap 256 vs ~5-80 real tokens) drifts the hidden
         state toward a PAD-driven fixed point and washes out the real-prefix signal,
-        collapsing infoset discriminability; packing removes that failure. LayerNorm
-        follows.
+        collapsing infoset discriminability; packing removes that failure.
+
+        Passing ``h0`` from a prior call over ``tokens[0:k]`` and calling this again
+        with ``tokens[k:n]`` is the SAME recurrence as one call over the full
+        ``tokens[0:n]`` (h0=None) -- the incremental-encode identity ``step_hidden``
+        exposes publicly (see cambia-249, prtcfr_infer.PRTCFRInferenceService for the
+        production analogue).
         """
         if tokens.dtype != torch.long:
             tokens = tokens.long()
@@ -196,9 +205,53 @@ class PRTCFRNet(nn.Module):
         packed = nn.utils.rnn.pack_padded_sequence(
             emb, lengths.to("cpu"), batch_first=True, enforce_sorted=False
         )
-        _out, h_n = self.encoder["gru"](packed)  # h_n: (num_layers, B, hidden)
+        if h0 is None:
+            _out, h_n = self.encoder["gru"](packed)  # h_n: (num_layers, B, hidden)
+        else:
+            _out, h_n = self.encoder["gru"](packed, h0)
+        return h_n
+
+    def encode(self, tokens: torch.Tensor) -> torch.Tensor:
+        """Encode a (B, L) int token batch to a (B, hidden) sequence embedding.
+
+        Top-layer final hidden state (at each row's last real token) through
+        LayerNorm. See ``_embed_pack_gru`` for the shared embed+pack+GRU step.
+        """
+        h_n = self._embed_pack_gru(tokens, h0=None)
         top = h_n[-1]  # (B, hidden) top-layer hidden at each row's last real token
         return self.encoder["norm"](top)
+
+    def step_hidden(
+        self, tokens: torch.Tensor, h0: Optional[torch.Tensor]
+    ) -> torch.Tensor:
+        """Advance a raw (num_layers, B, hidden) hidden state by ``tokens`` (B, L),
+        WITHOUT LayerNorm (a read-time op, see ``advantages_from_hidden``).
+
+        ``h0=None`` starts from a zero hidden state (equivalent to ``register``
+        in prtcfr_infer.PRTCFRInferenceService); a non-None ``h0`` continues an
+        existing carry (equivalent to ``step``/``advance``). This is the public
+        incremental-encode primitive: callers that cache the returned hidden
+        state and feed only newly-appended tokens on each call avoid re-running
+        the GRU over the whole prefix at every query (cambia-249).
+        """
+        return self._embed_pack_gru(tokens, h0)
+
+    def advantages_from_hidden(self, top_hidden: torch.Tensor) -> torch.Tensor:
+        """Read-time advantage logits (B, 146) from an already-computed top-layer
+        raw hidden state (B, hidden): LayerNorm then head. LayerNorm is a
+        read-time op on the carried hidden (never cached), matching ``encode``'s
+        own LayerNorm placement.
+        """
+        return self.head(self.encoder["norm"](top_hidden))
+
+    def strategy_from_hidden(
+        self, top_hidden: torch.Tensor, mask: torch.Tensor
+    ) -> torch.Tensor:
+        """Regret-matched strategy (B, 146) from an already-computed top-layer
+        raw hidden state. Mirrors ``strategy_from_tokens`` but skips re-deriving
+        the hidden state from a full token batch."""
+        adv = self.advantages_from_hidden(top_hidden)
+        return _regret_match(adv, mask)
 
     def raw_advantages(
         self, tokens: torch.Tensor, mask: Optional[torch.Tensor] = None
