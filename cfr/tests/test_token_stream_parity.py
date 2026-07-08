@@ -113,7 +113,6 @@ if go_available:
     )
 
 _CAMBIA_IDX = 2
-_DISCARD_WITH_ABILITY_IDX = 4  # engine legal-gen gap (py-only); excluded from picks
 _SNAP_MIN = 97
 _FULL_SEEDS = list(range(40))
 
@@ -351,16 +350,9 @@ def _play_lockstep(seed: int, call_cambia_after: int = -1) -> _GameResult:
                 break
             go_set = _go_legal_set(eng)
             py_set = _py_legal_set(pygame)
-            # _DISCARD_WITH_ABILITY_IDX is a separate, pre-existing, already
-            # out-of-scope engine legal-gen gap (py-only ability-fizzle
-            # mismatch on the drawn card; unrelated to snap/reshuffle -- see
-            # the constant's comment). Excluded from the equality bar here,
-            # same as it is from action selection below.
-            go_cmp = go_set - {_DISCARD_WITH_ABILITY_IDX}
-            py_cmp = py_set - {_DISCARD_WITH_ABILITY_IDX}
-            assert go_cmp == py_cmp, (
+            assert go_set == py_set, (
                 f"seed {seed} step {step}: legal-action-set mismatch\n"
-                f"  go_only={sorted(go_cmp - py_cmp)}\n  py_only={sorted(py_cmp - go_cmp)}"
+                f"  go_only={sorted(go_set - py_set)}\n  py_only={sorted(py_set - go_set)}"
             )
             common = sorted(go_set & py_set)
             if not common:
@@ -381,9 +373,7 @@ def _play_lockstep(seed: int, call_cambia_after: int = -1) -> _GameResult:
                 elif _is_snap_only(set(common)):
                     action_idx = _SNAP_MIN if _SNAP_MIN in common else action_rng.choice(common)
                 else:
-                    pool = [
-                        c for c in common if c not in (_CAMBIA_IDX, _DISCARD_WITH_ABILITY_IDX)
-                    ]
+                    pool = [c for c in common if c != _CAMBIA_IDX]
                     if _DRAW_STOCKPILE_IDX in pool and action_rng.random() < 0.5:
                         action_idx = _DRAW_STOCKPILE_IDX
                     elif pool:
@@ -620,7 +610,7 @@ def test_state_save_restore_round_trip_tokens():
             if _is_snap_only(go_set) != bool(pygame.snap_phase_active):
                 break
             common = sorted(go_set & _py_legal_set(pygame))
-            pool = [c for c in common if c not in (_CAMBIA_IDX, _DISCARD_WITH_ABILITY_IDX)]
+            pool = [c for c in common if c != _CAMBIA_IDX]
             if not pool:
                 break
             idx = pool[0]

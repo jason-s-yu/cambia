@@ -107,10 +107,16 @@ class AbilityMixin:
             if isinstance(action_type, ActionDiscard):  # Post-Draw Choice
                 legal_actions.add(ActionDiscard(use_ability=False))
                 drawn_card = self.pending_action_data.get("drawn_card")
+                drawn_from_source = self.pending_action_data.get("drawn_from", "stockpile")
                 if drawn_card and card_has_discard_ability(drawn_card):
-                    # Check if ability *can* be used (e.g., non-empty hands for swap/peek)
+                    # RULES.md Sec 3B/4 + Go engine/legal.go legalPostDraw: the
+                    # immediate-discard ability is legal only when the card was
+                    # drawn from the stockpile. A discard-pile draw forbids it,
+                    # so start can_use False for that source (same drawn_from
+                    # provenance the AllowReplaceAbilities branch reads below).
+                    # Fizzle conditions below only ever clear can_use.
+                    can_use = drawn_from_source == "stockpile"
                     rank = drawn_card.rank
-                    can_use = True
                     if rank in [SEVEN, EIGHT] and player_hand_count == 0:
                         can_use = False
                     if rank in [NINE, TEN] and opponent_hand_count == 0:
@@ -379,6 +385,27 @@ class AbilityMixin:
                     return None
 
                 if isinstance(action, ActionDiscard):
+                    # Defense-in-depth for the source gate in
+                    # _get_legal_pending_actions: RULES.md Sec 3B/4 forbid firing
+                    # an ability from a discard-pile draw. This reads drawn_from
+                    # directly (independent of the legal-set computation), so even
+                    # a caller that bypassed the action mask cannot fire the
+                    # ability. Reject and wait per the illegal-pending-action
+                    # convention above rather than discarding with the ability.
+                    if (
+                        action.use_ability
+                        and card_has_discard_ability(drawn_card)
+                        and drawn_from_source != "stockpile"
+                    ):
+                        logger.warning(
+                            "P%d attempted ability discard of %s drawn from %s; "
+                            "abilities require a stockpile draw (RULES.md 3B/4). "
+                            "Rejecting; waiting for a valid action.",
+                            player,
+                            drawn_card,
+                            drawn_from_source,
+                        )
+                        return None
                     logger.debug(
                         "P%d discards drawn %s. Use ability: %s",
                         player,
