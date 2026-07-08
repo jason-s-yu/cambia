@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/jason-s-yu/cambia/service/internal/auth"
@@ -38,11 +39,13 @@ func main() {
 	}
 	go database.ConnectDBAsync()
 
-	// ADDED: Connect to Redis
+	// Connect to Redis. Non-fatal (CF#3): the dashboard and core server run
+	// without it; only the game-action historian queue degrades.
 	if err := cache.ConnectRedis(); err != nil {
-		log.Fatalf("Redis connection failed: %v", err)
+		log.Printf("Redis connection failed (non-fatal): %v", err)
+	} else {
+		log.Println("Redis connected successfully.")
 	}
-	log.Println("Redis connected successfully.")
 
 	logger := logrus.New()
 	logger.SetLevel(logrus.DebugLevel)
@@ -124,35 +127,92 @@ func main() {
 		handlers.ListQueuesHandler(srv),
 	)))
 
-	// Training dashboard routes
+	// Training dashboard routes. All /training/* and /ws/training/* endpoints
+	// are gated by RequireAuth (CF#1), logged by LogMiddleware.
 	runsDir := os.Getenv("CAMBIA_RUNS_DIR")
 	if runsDir == "" {
 		runsDir = "../cfr/runs"
+	}
+	cfrDir := os.Getenv("CAMBIA_CFR_DIR")
+	if cfrDir == "" {
+		cfrDir = "../cfr"
+	}
+	cambiaBin := os.Getenv("CAMBIA_BIN")
+	if cambiaBin == "" {
+		cambiaBin = "cambia"
+	}
+	maxConcurrent := 1
+	if v := os.Getenv("CAMBIA_MAX_CONCURRENT_RUNS"); v != "" {
+		if n, perr := strconv.Atoi(v); perr == nil && n > 0 {
+			maxConcurrent = n
+		}
 	}
 	trainingStore, err := training.NewTrainingStore(runsDir)
 	if err != nil {
 		log.Printf("Training store init failed (non-fatal): %v", err)
 	} else {
 		defer trainingStore.Close()
-		mux.Handle("/training/runs", middleware.LogMiddleware(logger)(http.HandlerFunc(trainingStore.HandleListRuns)))
-		mux.Handle("/training/runs/", middleware.LogMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
+		// authWrap composes the request logger over the JWT auth gate.
+		authWrap := func(h http.Handler) http.Handler {
+			return middleware.LogMiddleware(logger)(middleware.RequireAuth(h))
+		}
+
+		procMgr := training.NewProcessManager(runsDir, cfrDir, cambiaBin, trainingStore)
+		procMgr.Reconcile()
+		procHandlers := training.NewProcessHandlers(training.ProcessHandlersConfig{
+			Manager:       procMgr,
+			Store:         trainingStore,
+			CambiaBin:     cambiaBin,
+			CFRDir:        cfrDir,
+			RunsDir:       runsDir,
+			TemplateDir:   filepath.Join(cfrDir, "config"),
+			MaxConcurrent: maxConcurrent,
+		})
+
+		// GET list / POST create.
+		mux.Handle("/training/runs", authWrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				trainingStore.HandleListRuns(w, r)
+			case http.MethodPost:
+				procHandlers.HandleCreate(w, r)
+			default:
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			}
+		})))
+
+		// GET detail/metrics/checkpoints; POST start/stop/resume.
+		mux.Handle("/training/runs/", authWrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 			if len(parts) == 3 {
 				trainingStore.HandleGetRun(w, r)
-			} else if len(parts) == 4 {
+				return
+			}
+			if len(parts) == 4 {
 				switch parts[3] {
 				case "metrics":
 					trainingStore.HandleGetMetrics(w, r)
 				case "checkpoints":
 					trainingStore.HandleGetCheckpoints(w, r)
+				case "start":
+					procHandlers.HandleStart(w, r)
+				case "stop":
+					procHandlers.HandleStop(w, r)
+				case "resume":
+					procHandlers.HandleResume(w, r)
 				default:
 					http.NotFound(w, r)
 				}
-			} else {
-				http.NotFound(w, r)
+				return
 			}
+			http.NotFound(w, r)
 		})))
-		mux.Handle("/ws/training/", middleware.LogMiddleware(logger)(http.HandlerFunc(trainingStore.HandleLogStream)))
+
+		// GET config template listing.
+		mux.Handle("/training/config/templates", authWrap(http.HandlerFunc(procHandlers.HandleTemplates)))
+
+		mux.Handle("/ws/training/", authWrap(http.HandlerFunc(trainingStore.HandleLogStream)))
 	}
 
 	addr := ":8080"

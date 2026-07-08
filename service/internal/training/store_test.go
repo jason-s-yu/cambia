@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
-	"strconv"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -174,9 +173,13 @@ func TestListRuns(t *testing.T) {
 	if runs[1].Name != "test-run-1" {
 		t.Errorf("expected second run to be test-run-1, got %s", runs[1].Name)
 	}
-	// test-run-2 has status "running" but no PID file → "stopped".
-	if runs[0].Status != "stopped" {
-		t.Errorf("expected stopped (no PID), got %s", runs[0].Status)
+	// test-run-2 is "running" in run_db with no process.json; without a Go-owned
+	// current-state record its stored status is preserved (unsupervised run).
+	if runs[0].Status != "running" {
+		t.Errorf("expected running (no process.json overlay), got %s", runs[0].Status)
+	}
+	if runs[0].Process != nil {
+		t.Errorf("expected nil Process for a run without process.json, got %+v", runs[0].Process)
 	}
 }
 
@@ -297,48 +300,105 @@ func TestGetCheckpoints(t *testing.T) {
 	}
 }
 
-func TestCheckRunningWithPID(t *testing.T) {
-	store, tmpDir := setupTestDB(t)
-
-	runDir := filepath.Join(tmpDir, "test-run-1")
-	if err := os.MkdirAll(runDir, 0755); err != nil {
+// writeState writes a process.json for name under the store's runs dir.
+func writeState(t *testing.T, runsDir, name string, st *ProcessState) {
+	t.Helper()
+	runDir := filepath.Join(runsDir, name)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-
-	// Write our own PID — we know this process is alive.
-	pid := os.Getpid()
-	pidFile := filepath.Join(runDir, "train.pid")
-	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(pid)), 0644); err != nil {
+	if err := writeProcessState(runDir, st); err != nil {
 		t.Fatal(err)
-	}
-
-	if !store.checkRunning("test-run-1") {
-		t.Error("expected checkRunning to return true for our own PID")
 	}
 }
 
-func TestCheckRunningWithFakePID(t *testing.T) {
+func TestProcessStatusOverlayAliveRun(t *testing.T) {
 	store, tmpDir := setupTestDB(t)
 
-	runDir := filepath.Join(tmpDir, "test-run-1")
-	if err := os.MkdirAll(runDir, 0755); err != nil {
+	// process.json with our own (alive) pid overlays the run_db status and
+	// attaches the full ProcessState record.
+	writeState(t, tmpDir, "test-run-1", &ProcessState{
+		Name: "test-run-1", Status: StatusRunning, Algorithm: "os-mccfr",
+		PID: os.Getpid(), PGID: os.Getpid(), CreatedAt: nowRFC3339(),
+	})
+
+	detail, err := store.GetRun(context.Background(), "test-run-1")
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	// Write a PID that almost certainly doesn't exist.
-	pidFile := filepath.Join(runDir, "train.pid")
-	if err := os.WriteFile(pidFile, []byte("9999999"), 0644); err != nil {
-		t.Fatal(err)
+	if detail.Status != StatusRunning {
+		t.Errorf("status = %q, want running", detail.Status)
 	}
-
-	if store.checkRunning("test-run-1") {
-		t.Error("expected checkRunning to return false for fake PID")
+	if detail.Process == nil || detail.Process.PID != os.Getpid() {
+		t.Errorf("expected Process with our pid, got %+v", detail.Process)
 	}
 }
 
-func TestCheckRunningNoPIDFile(t *testing.T) {
+func TestProcessStatusOverlayDeadRun(t *testing.T) {
+	store, tmpDir := setupTestDB(t)
+
+	// A recorded-running run whose pid is dead reads back as crashed.
+	writeState(t, tmpDir, "test-run-1", &ProcessState{
+		Name: "test-run-1", Status: StatusRunning, Algorithm: "os-mccfr",
+		PID: 9999999, PGID: 9999999, CreatedAt: nowRFC3339(),
+	})
+
+	detail, err := store.GetRun(context.Background(), "test-run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Status != StatusCrashed {
+		t.Errorf("status = %q, want crashed (dead pid)", detail.Status)
+	}
+}
+
+func TestProcessStatusNoProcessJSON(t *testing.T) {
 	store, _ := setupTestDB(t)
-	if store.checkRunning("nonexistent-run") {
-		t.Error("expected checkRunning to return false for missing PID file")
+
+	// No process.json: run_db status ("completed") is preserved unchanged.
+	detail, err := store.GetRun(context.Background(), "test-run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Status != "completed" {
+		t.Errorf("status = %q, want completed (no overlay)", detail.Status)
+	}
+	if detail.Process != nil {
+		t.Errorf("expected nil Process, got %+v", detail.Process)
+	}
+}
+
+func TestListRunsMergesProcessOnly(t *testing.T) {
+	store, tmpDir := setupTestDB(t)
+
+	// A dashboard-created run that exists only as process.json (never registered
+	// in run_db) must appear in the merged list.
+	writeState(t, tmpDir, "created-only", &ProcessState{
+		Name: "created-only", Status: StatusCreated, Algorithm: "prt-cfr",
+		CreatedAt: nowRFC3339(),
+	})
+
+	if err := store.refreshCache(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	runs, err := store.ListRuns(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *Run
+	for i := range runs {
+		if runs[i].Name == "created-only" {
+			found = &runs[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("created-only not merged into list (%d runs)", len(runs))
+	}
+	if found.Status != StatusCreated {
+		t.Errorf("status = %q, want created", found.Status)
+	}
+	if found.Process == nil {
+		t.Error("expected Process attached to merged run")
 	}
 }
