@@ -32,6 +32,11 @@ type GameActionRecord struct {
 // ConnectRedis initializes the global Redis client with environment variables:
 //   - REDIS_ADDR (default "localhost:6379")
 //   - REDIS_DB (optional, default 0)
+//
+// It returns an error if the ping fails but is non-fatal by contract: the
+// caller decides whether to continue (CF#3, the dashboard runs without Redis).
+// PublishGameAction guards against an unset client so a degraded start does not
+// panic.
 func ConnectRedis() error {
 	addr := getEnv("REDIS_ADDR", "localhost:6379")
 	dbIdx := getEnvInt("REDIS_DB", 0)
@@ -52,6 +57,9 @@ func ConnectRedis() error {
 // PublishGameAction serializes the given record to JSON, then pushes it to the Redis queue.
 // This does not block the calling logic (other than a quick network send).
 func PublishGameAction(ctx context.Context, record GameActionRecord) error {
+	if Rdb == nil {
+		return fmt.Errorf("redis client not initialized")
+	}
 	data, err := json.Marshal(record)
 	if err != nil {
 		return fmt.Errorf("failed to marshal GameActionRecord: %w", err)

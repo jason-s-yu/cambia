@@ -9,10 +9,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
+	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -38,6 +37,10 @@ type Run struct {
 	BestMetricIter  *int     `json:"best_metric_iter"`
 	CreatedAt       string   `json:"created_at"`
 	UpdatedAt       string   `json:"updated_at"`
+	// Process is the Go-owned current-process-state record read from
+	// runs/<name>/process.json, or nil when the run has none (an external
+	// run_db-only run). It carries the live pid/pgid and lifecycle status.
+	Process *ProcessState `json:"process,omitempty"`
 }
 
 // RunDetail extends Run with configuration and metadata.
@@ -134,8 +137,8 @@ func (s *TrainingStore) Close() {
 	s.db.Close()
 }
 
-// refreshCache queries all runs and caches them, overriding the status with
-// a PID file check for runs that appear to be running.
+// refreshCache queries all runs and caches them, overlaying process.json
+// current state and merging in dashboard-created runs that have no run_db row.
 func (s *TrainingStore) refreshCache(ctx context.Context) error {
 	runs, err := s.queryRuns(ctx)
 	if err != nil {
@@ -170,15 +173,40 @@ func (s *TrainingStore) queryRuns(ctx context.Context) ([]Run, error) {
 		); err != nil {
 			return nil, err
 		}
-		// Override status with PID check.
-		if r.Status == "running" && !s.checkRunning(r.Name) {
-			r.Status = "stopped"
-		} else if r.Status != "running" && s.checkRunning(r.Name) {
-			r.Status = "running"
-		}
+		// Overlay the process.json current state (status + pid liveness).
+		s.applyProcessState(&r)
 		runs = append(runs, r)
 	}
-	return runs, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Merge dashboard-created runs that exist only as process.json (created but
+	// not yet registered in the run database by the trainer).
+	seen := make(map[string]bool, len(runs))
+	for i := range runs {
+		seen[runs[i].Name] = true
+	}
+	states, _ := scanProcessStates(s.runsDir)
+	for _, st := range states {
+		if seen[st.Name] {
+			continue
+		}
+		runs = append(runs, Run{
+			Name:      st.Name,
+			Algorithm: st.Algorithm,
+			Status:    effectiveStatus(st),
+			CreatedAt: st.CreatedAt,
+			UpdatedAt: st.CreatedAt,
+			Process:   st,
+		})
+	}
+
+	// RFC3339 timestamps sort lexically in chronological order; newest first.
+	sort.SliceStable(runs, func(i, j int) bool {
+		return runs[i].UpdatedAt > runs[j].UpdatedAt
+	})
+	return runs, nil
 }
 
 // ListRuns returns the cached run list.
@@ -211,7 +239,8 @@ func (s *TrainingStore) GetRun(ctx context.Context, name string) (*RunDetail, er
 		&notes, &tags,
 	)
 	if err == sql.ErrNoRows {
-		return nil, nil
+		// No run_db row yet: a dashboard-created run lives only in process.json.
+		return s.processOnlyDetail(name), nil
 	}
 	if err != nil {
 		return nil, err
@@ -223,11 +252,10 @@ func (s *TrainingStore) GetRun(ctx context.Context, name string) (*RunDetail, er
 		rd.Tags = tags.String
 	}
 
-	// Override status with PID check.
-	if rd.Status == "running" && !s.checkRunning(rd.Name) {
-		rd.Status = "stopped"
-	} else if rd.Status != "running" && s.checkRunning(rd.Name) {
-		rd.Status = "running"
+	// Overlay the process.json current state (status + pid liveness + record).
+	if st, ok := s.processStateFor(rd.Name); ok {
+		rd.Status = effectiveStatus(st)
+		rd.Process = st
 	}
 
 	// Fetch latest config snapshot.
@@ -373,20 +401,66 @@ func (s *TrainingStore) GetCheckpoints(ctx context.Context, runName string) ([]C
 	return cps, rows.Err()
 }
 
-// checkRunning checks if a training process is alive by reading its PID file.
-func (s *TrainingStore) checkRunning(runName string) bool {
-	pidFile := filepath.Join(s.runsDir, runName, "train.pid")
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		return false
+// runDirOf returns the run directory for name under runsDir.
+func runDirOf(runsDir, name string) string {
+	return filepath.Join(runsDir, name)
+}
+
+// effectiveStatus returns st.Status with pid liveness applied: a run recorded
+// as running/starting/stopping whose pid is no longer alive is reported as
+// crashed. This is the read-time view; Reconcile persists the same repair at
+// server start.
+func effectiveStatus(st *ProcessState) string {
+	switch st.Status {
+	case StatusRunning, StatusStarting, StatusStopping:
+		if !pidAlive(st.PID) {
+			return StatusCrashed
+		}
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	return st.Status
+}
+
+// processStateFor reads runs/<name>/process.json, returning the state and
+// whether it exists. process.json is the Go-owned current-state authority; it
+// replaces the legacy train.pid liveness probe.
+func (s *TrainingStore) processStateFor(name string) (*ProcessState, bool) {
+	st, err := readProcessState(runDirOf(s.runsDir, name))
 	if err != nil {
-		return false
+		return nil, false
 	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
+	return st, true
+}
+
+// applyProcessState overlays the process.json current state onto r: the
+// effective status plus the full ProcessState record. A run_db row with no
+// process.json keeps its stored status (externally launched, unsupervised).
+func (s *TrainingStore) applyProcessState(r *Run) {
+	if st, ok := s.processStateFor(r.Name); ok {
+		r.Status = effectiveStatus(st)
+		r.Process = st
 	}
-	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+// processOnlyDetail builds a RunDetail from process.json and the materialized
+// config.yaml for a run created through the dashboard but not yet registered in
+// the run database. It returns nil when no process.json exists.
+func (s *TrainingStore) processOnlyDetail(name string) *RunDetail {
+	st, ok := s.processStateFor(name)
+	if !ok {
+		return nil
+	}
+	rd := &RunDetail{
+		Run: Run{
+			Name:      st.Name,
+			Algorithm: st.Algorithm,
+			Status:    effectiveStatus(st),
+			CreatedAt: st.CreatedAt,
+			UpdatedAt: st.CreatedAt,
+			Process:   st,
+		},
+	}
+	if data, err := os.ReadFile(filepath.Join(runDirOf(s.runsDir, name), "config.yaml")); err == nil {
+		rd.ConfigYAML = string(data)
+	}
+	return rd
 }
