@@ -26,6 +26,12 @@ import type {
 
 const LOG_BUFFER_CAP = 5000;
 
+// Monotonic request-generation counter for fetchComparison. ComparePage fires
+// a new request on every selection change; a slow request for a superseded
+// selection must not overwrite the store with stale data once a newer
+// request has already landed.
+let comparisonRequestSeq = 0;
+
 /** Pulls a PreflightCheck[] out of a 409 preflight_failed body, if present. */
 function extractPreflightChecks(err: any): PreflightCheck[] | null {
 	const checks = err?.response?.data?.checks;
@@ -273,14 +279,17 @@ export const useTrainingStore = create<TrainingState & TrainingActions>()(
 		},
 
 		fetchComparison: async (names: string[]) => {
+			const seq = ++comparisonRequestSeq;
 			try {
 				const res = await api.get<ComparisonResponse>('/training/compare', {
 					params: { runs: names.join(',') },
 				});
+				if (seq !== comparisonRequestSeq) return; // superseded by a newer request
 				set((state) => {
 					state.comparison = res.data;
 				});
 			} catch (err: any) {
+				if (seq !== comparisonRequestSeq) return;
 				console.error('Failed to fetch comparison:', err);
 			}
 		},

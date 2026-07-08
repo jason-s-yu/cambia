@@ -139,6 +139,73 @@ func TestNameCollisionCheck(t *testing.T) {
 	}
 }
 
+// writeRunConfig writes runs/<name>/config.yaml with the given content.
+func writeRunConfig(t *testing.T, runsDir, name, content string) {
+	t.Helper()
+	dir := filepath.Join(runsDir, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResolveRunDeviceMissingRun(t *testing.T) {
+	if got := resolveRunDevice(t.TempDir(), "ghost"); got != "auto" {
+		t.Errorf("missing run: device = %q, want auto", got)
+	}
+}
+
+func TestResolveRunDeviceMissingField(t *testing.T) {
+	runsDir := t.TempDir()
+	writeRunConfig(t, runsDir, "no-device", "prt_cfr:\n  iterations: 2\n")
+	if got := resolveRunDevice(runsDir, "no-device"); got != "auto" {
+		t.Errorf("no device field: device = %q, want auto", got)
+	}
+}
+
+func TestResolveRunDevicePRTCFRSection(t *testing.T) {
+	runsDir := t.TempDir()
+	writeRunConfig(t, runsDir, "section-cpu", "prt_cfr:\n  iterations: 2\n  device: cpu\n")
+	if got := resolveRunDevice(runsDir, "section-cpu"); got != "cpu" {
+		t.Errorf("section device: got %q, want cpu", got)
+	}
+}
+
+func TestResolveRunDeviceRootLevel(t *testing.T) {
+	runsDir := t.TempDir()
+	writeRunConfig(t, runsDir, "root-cpu", "device: cpu\n")
+	if got := resolveRunDevice(runsDir, "root-cpu"); got != "cpu" {
+		t.Errorf("root device: got %q, want cpu", got)
+	}
+}
+
+func TestResolveRunDeviceSectionWinsOverRoot(t *testing.T) {
+	runsDir := t.TempDir()
+	writeRunConfig(t, runsDir, "mixed",
+		"device: cuda\nprt_cfr:\n  iterations: 2\n  device: cpu\n")
+	if got := resolveRunDevice(runsDir, "mixed"); got != "cpu" {
+		t.Errorf("mixed device: got %q, want cpu (section wins)", got)
+	}
+}
+
+func TestResolveRunDeviceCuda(t *testing.T) {
+	runsDir := t.TempDir()
+	writeRunConfig(t, runsDir, "cuda-run", "prt_cfr:\n  device: cuda\n")
+	if got := resolveRunDevice(runsDir, "cuda-run"); got != "cuda" {
+		t.Errorf("cuda device: got %q, want cuda", got)
+	}
+}
+
+func TestResolveRunDeviceExplicitAuto(t *testing.T) {
+	runsDir := t.TempDir()
+	writeRunConfig(t, runsDir, "auto-run", "prt_cfr:\n  device: auto\n")
+	if got := resolveRunDevice(runsDir, "auto-run"); got != "auto" {
+		t.Errorf("auto device: got %q, want auto", got)
+	}
+}
+
 func TestPreflightPassesForceMatrix(t *testing.T) {
 	okGPU := PreflightCheck{"gpu_vram", true, ""}
 	badGPU := PreflightCheck{"gpu_vram", false, ""}

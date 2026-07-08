@@ -95,6 +95,13 @@ func (m *EvalManager) SetMaxConcurrent(n int) {
 // redirected to runs/<name>/logs/eval_<id>.log, and launches a wait goroutine
 // that records the terminal status. It returns a snapshot of the job as it stood
 // at spawn (status running); callers observe later transitions via Jobs.
+//
+// The cap slot is reserved (m.running incremented) under m.mu before any
+// filesystem or process I/O runs, then released on any failure path; this
+// keeps the atomic cap check/reservation on the lock while letting
+// MkdirAll/OpenFile/cmd.Start (which touch only this call's unique per-id log
+// path) run unlocked, so concurrent triggers for different runs don't
+// serialize behind that I/O.
 func (m *EvalManager) Trigger(name string, opts EvalOpts) (*EvalJob, error) {
 	if err := validateName(name); err != nil {
 		return nil, err
@@ -114,16 +121,22 @@ func (m *EvalManager) Trigger(name string, opts EvalOpts) (*EvalJob, error) {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	// Atomic cap check + reservation: mirror ProcessManager.launch so two
 	// concurrent triggers cannot both pass a cap of 1.
 	if m.maxConcurrent > 0 && m.running >= m.maxConcurrent {
+		m.mu.Unlock()
 		return nil, ErrEvalCapReached
 	}
-
+	m.running++
 	m.counter++
 	id := fmt.Sprintf("%s-%d", time.Now().UTC().Format("20060102T150405"), m.counter)
+	m.mu.Unlock()
+
+	releaseSlot := func() {
+		m.mu.Lock()
+		m.running--
+		m.mu.Unlock()
+	}
 
 	target := "latest"
 	if opts.Epoch != nil {
@@ -132,11 +145,13 @@ func (m *EvalManager) Trigger(name string, opts EvalOpts) (*EvalJob, error) {
 
 	logDir := filepath.Join(runDir, "logs")
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		releaseSlot()
 		return nil, err
 	}
 	logPath := filepath.Join(logDir, "eval_"+id+".log")
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
+		releaseSlot()
 		return nil, err
 	}
 
@@ -179,14 +194,18 @@ func (m *EvalManager) Trigger(name string, opts EvalOpts) (*EvalJob, error) {
 		job.ExitCode = &code
 		job.Error = err.Error()
 		job.FinishedAt = nowRFC3339()
+		m.mu.Lock()
+		m.running-- // the reserved slot never actually ran
 		m.reg.add(name, job)
+		m.mu.Unlock()
 		return nil, fmt.Errorf("start eval %q: %w", name, err)
 	}
 	// The child holds its own dup of the log fd; drop the parent's copy.
 	logFile.Close()
 
-	m.running++
+	m.mu.Lock()
 	m.reg.add(name, job)
+	m.mu.Unlock()
 
 	snap := *job
 	go m.waitFor(job, cmd)
