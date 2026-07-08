@@ -2310,6 +2310,12 @@ class PRTCFRAgentWrapper(NeuralAgentWrapper):
         self._init_peeks: tuple = ()
         self._obs_stream: List = []
         self._overflow_warned = False
+        # Per-episode incremental GRU cursor (cambia-249): feeds only newly
+        # appended observation frames through the GRU at each decision instead
+        # of re-encoding the whole accumulated prefix. Rebuilt in
+        # initialize_state once the episode's snapshot is sampled.
+        self._cursor = None
+        self._cursor_obs_idx = 0
         logger.info(
             "PRTCFRAgent P%d loaded %d deployable snapshot(s) (iters=%s, weighting=%s)",
             self.player_id, len(self._mixture),
@@ -2324,6 +2330,8 @@ class PRTCFRAgentWrapper(NeuralAgentWrapper):
         Overrides the AgentState-building base: PRT-CFR conditions on the raw
         token stream, not a belief abstraction, so no ``AgentState`` is built.
         """
+        from src.cfr.prtcfr_mixture import PRTCFRIncrementalCursor
+
         self.agent_state = None
         self._init_hand = list(initial_game_state.players[self.player_id].hand)
         self._init_peeks = tuple(
@@ -2331,6 +2339,11 @@ class PRTCFRAgentWrapper(NeuralAgentWrapper):
         )
         self._obs_stream = []
         self._mixture.sample_episode(self._episode_rng)
+        # active_net() lazily loads this episode's sampled snapshot on first
+        # use (cambia-249); the cursor is fresh per episode since a new game
+        # may sample a different net.
+        self._cursor = PRTCFRIncrementalCursor(self._mixture.active_net(), self._seq_cap)
+        self._cursor_obs_idx = 0
 
     def update_state(self, observation):
         """No-op: the token stream is fed by ``observe_transition`` (every applied
@@ -2400,6 +2413,49 @@ class PRTCFRAgentWrapper(NeuralAgentWrapper):
                 strict=False,
             )
 
+    def _advance_cursor(self) -> None:
+        """Feed the incremental cursor only the BODY tokens appended since the
+        last call: the private init-peek prefix once (first call), then
+        ``observation_frames`` for each observation newly appended to
+        ``self._obs_stream`` (cambia-249 -- avoids re-tokenizing/re-encoding
+        the whole accumulated prefix on every decision)."""
+        from src.sequence_encoding import initial_peek_frames, observation_frames
+
+        cursor = self._cursor
+        delta: List[int] = []
+        if not cursor.registered:
+            delta.extend(initial_peek_frames(self._init_hand, self._init_peeks))
+        for obs in self._obs_stream[self._cursor_obs_idx :]:
+            delta.extend(observation_frames(obs, self.player_id))
+        cursor.advance(delta)
+        self._cursor_obs_idx = len(self._obs_stream)
+
+    def _strategy_for_mask(self, mask: np.ndarray) -> np.ndarray:
+        """Masked regret-matched strategy for the current token prefix.
+
+        Uses the per-episode incremental GRU cursor (O(1) amortized per
+        decision) unless it has overflowed the seq_cap budget, in which case
+        this falls back to the original full stateless re-encode (matching
+        ``NetProductionSigma``'s own keep-most-recent overflow tolerance) --
+        the pre-cambia-249 behavior, used for the rest of this game once
+        triggered.
+        """
+        cursor = self._cursor
+        if cursor is not None and not cursor.overflowed:
+            self._advance_cursor()
+            if not cursor.overflowed:
+                return cursor.query(mask)
+            if not self._overflow_warned:
+                logger.warning(
+                    "PRTCFRAgent P%d: incremental cursor over seq_cap=%d; "
+                    "falling back to full re-encode (keep-most-recent) for "
+                    "the remainder of this game.",
+                    self.player_id, self._seq_cap,
+                )
+                self._overflow_warned = True
+        tokens = self._encode_tokens()
+        return self._mixture.strategy(tokens, mask)
+
     def choose_action(self, game_state, legal_actions: Set[GameAction]) -> GameAction:
         """Query the episode's sampled snapshot with the engine token prefix."""
         from src.encoding import encode_action_mask, index_to_action
@@ -2411,9 +2467,8 @@ class PRTCFRAgentWrapper(NeuralAgentWrapper):
                 f"PRTCFRAgent P{self.player_id} cannot choose from empty legal actions."
             )
         try:
-            tokens = self._encode_tokens()
             mask = encode_action_mask(legal_list)  # (146,) bool
-            probs = self._mixture.strategy(tokens, mask)  # (146,) float64
+            probs = self._strategy_for_mask(mask)  # (146,) float64
         except Exception as e:  # JUSTIFIED: evaluation resilience
             logger.error("PRTCFRAgent P%d policy error: %s", self.player_id, e)
             return random.choice(legal_list)
