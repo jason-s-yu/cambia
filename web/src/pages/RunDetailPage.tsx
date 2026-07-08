@@ -10,9 +10,10 @@ import LogViewer from '@/components/training/LogViewer';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import StatusBadge from '@/components/training/StatusBadge';
 import ProcessControls from '@/components/training/ProcessControls';
+import EvalControls from '@/components/training/EvalControls';
 import type { ProcessStatus, ProcessState } from '@/types/training';
 
-type Tab = 'metrics' | 'checkpoints' | 'logs';
+type Tab = 'metrics' | 'checkpoints' | 'logs' | 'evaluate';
 
 const PROCESS_STATUSES: ProcessStatus[] = [
 	'created', 'starting', 'running', 'stopping', 'stopped', 'crashed',
@@ -98,6 +99,7 @@ const RunDetailPage: React.FC = () => {
 		{ key: 'metrics', label: 'Metrics' },
 		{ key: 'checkpoints', label: 'Checkpoints' },
 		{ key: 'logs', label: 'Logs' },
+		{ key: 'evaluate', label: 'Evaluate' },
 	];
 
 	return (
@@ -157,6 +159,9 @@ const RunDetailPage: React.FC = () => {
 			)}
 			{activeTab === 'logs' && (
 				<LogViewer connected={connected} />
+			)}
+			{activeTab === 'evaluate' && runName && (
+				<EvalControls runName={runName} />
 			)}
 		</div>
 	);
