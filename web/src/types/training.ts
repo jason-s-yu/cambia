@@ -107,3 +107,85 @@ export interface ResumeRunOptions {
 	force?: boolean;
 	min_free_vram_gb?: number;
 }
+
+export interface EvalJob {
+	id: string;
+	run: string;
+	status: 'queued' | 'running' | 'succeeded' | 'failed';
+	target: string;
+	device: 'cpu' | 'cuda';
+	games: number;
+	argmax: boolean;
+	log_path: string;
+	started_at?: string;
+	finished_at?: string;
+	exit_code?: number;
+	error?: string;
+	tail?: string[];
+}
+
+export interface TriggerEvalRequest {
+	epoch?: number;
+	device?: 'cpu' | 'cuda';
+	games?: number;
+	argmax?: boolean;
+	force?: boolean;
+	min_free_vram_gb?: number;
+	min_free_disk_gb?: number;
+}
+
+/** POST /training/runs/{name}/eval -> 202 response body. */
+export interface TriggerEvalResponse {
+	job: EvalJob;
+}
+
+/** GET /training/runs/{name}/eval -> 200 response body. */
+export interface EvalJobsResponse {
+	jobs: EvalJob[];
+}
+
+export interface GPUProc {
+	pid: number;
+	name: string;
+	mem_mb: number;
+}
+
+export interface GPUStat {
+	index: number;
+	name: string;
+	mem_total_mb: number;
+	mem_used_mb: number;
+	mem_free_mb: number;
+	util_pct: number;
+	temp_c: number;
+	processes?: GPUProc[];
+}
+
+export interface ResourceSnapshot {
+	timestamp: string;
+	cpu_pct: number;
+	per_core_pct?: number[];
+	load_avg: [number, number, number];
+	mem_total_mb: number;
+	mem_used_mb: number;
+	mem_avail_mb: number;
+	disk_total_gb: number;
+	disk_used_gb: number;
+	disk_free_gb: number;
+	gpus: GPUStat[];
+	gpu_available: boolean;
+}
+
+export interface RunComparison {
+	name: string;
+	algorithm: string;
+	best_metric_value?: number;
+	best_metric_iter?: number;
+	mean_imp: MeanImpPoint[];
+	final_baselines: EvalMetric[];
+}
+
+/** GET /training/compare?runs=a,b,c -> 200 response body. */
+export interface ComparisonResponse {
+	runs: RunComparison[];
+}

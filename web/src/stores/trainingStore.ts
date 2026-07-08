@@ -17,6 +17,11 @@ import type {
 	StartRunOptions,
 	StopRunOptions,
 	ResumeRunOptions,
+	EvalJob,
+	TriggerEvalRequest,
+	TriggerEvalResponse,
+	EvalJobsResponse,
+	ComparisonResponse,
 } from '@/types/training';
 
 const LOG_BUFFER_CAP = 5000;
@@ -39,6 +44,8 @@ interface TrainingState {
 	processes: Record<string, ProcessState>;
 	templates: string[];
 	preflight: PreflightCheck[] | null;
+	evalJobs: Record<string, EvalJob[]>;
+	comparison: ComparisonResponse | null;
 }
 
 interface TrainingActions {
@@ -56,6 +63,9 @@ interface TrainingActions {
 	stopRun: (name: string, opts?: StopRunOptions) => Promise<void>;
 	resumeRun: (name: string, opts?: ResumeRunOptions) => Promise<void>;
 	fetchTemplates: () => Promise<void>;
+	triggerEval: (name: string, req?: TriggerEvalRequest) => Promise<void>;
+	fetchEvalJobs: (name: string) => Promise<void>;
+	fetchComparison: (names: string[]) => Promise<void>;
 }
 
 export const useTrainingStore = create<TrainingState & TrainingActions>()(
@@ -71,6 +81,8 @@ export const useTrainingStore = create<TrainingState & TrainingActions>()(
 		processes: {},
 		templates: [],
 		preflight: null,
+		evalJobs: {},
+		comparison: null,
 
 		fetchRuns: async () => {
 			set((state) => { state.isLoading = true; });
@@ -227,6 +239,49 @@ export const useTrainingStore = create<TrainingState & TrainingActions>()(
 				});
 			} catch (err: any) {
 				console.error('Failed to fetch templates:', err);
+			}
+		},
+
+		triggerEval: async (name: string, req: TriggerEvalRequest = {}) => {
+			set((state) => { state.isLoading = true; });
+			try {
+				const res = await api.post<TriggerEvalResponse>(`/training/runs/${name}/eval`, req);
+				set((state) => {
+					const jobs = state.evalJobs[name] ?? [];
+					state.evalJobs[name] = [res.data.job, ...jobs];
+					state.preflight = null;
+					state.isLoading = false;
+				});
+			} catch (err: any) {
+				console.error(`Failed to trigger eval for ${name}:`, err);
+				set((state) => {
+					state.isLoading = false;
+					state.preflight = extractPreflightChecks(err);
+				});
+			}
+		},
+
+		fetchEvalJobs: async (name: string) => {
+			try {
+				const res = await api.get<EvalJobsResponse>(`/training/runs/${name}/eval`);
+				set((state) => {
+					state.evalJobs[name] = res.data.jobs;
+				});
+			} catch (err: any) {
+				console.error(`Failed to fetch eval jobs for ${name}:`, err);
+			}
+		},
+
+		fetchComparison: async (names: string[]) => {
+			try {
+				const res = await api.get<ComparisonResponse>('/training/compare', {
+					params: { runs: names.join(',') },
+				});
+				set((state) => {
+					state.comparison = res.data;
+				});
+			} catch (err: any) {
+				console.error('Failed to fetch comparison:', err);
 			}
 		},
 
