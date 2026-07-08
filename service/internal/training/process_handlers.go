@@ -230,7 +230,10 @@ func (h *ProcessHandlers) HandleResume(w http.ResponseWriter, r *http.Request) {
 	h.launchHandler(w, r, true)
 }
 
-// launchHandler is the shared start/resume path.
+// launchHandler is the shared start/resume path. The GPU VRAM preflight check
+// is skipped for a run whose materialized config.yaml resolves device=cpu (see
+// resolveRunDevice): a CPU-only run does not contend for VRAM, so a co-tenant
+// holding the card full must not block it.
 func (h *ProcessHandlers) launchHandler(w http.ResponseWriter, r *http.Request, resume bool) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -286,8 +289,19 @@ func (h *ProcessHandlers) launchHandler(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
+	// A run whose materialized config pins device=cpu never touches the GPU, so
+	// gpu_vram must not gate it: a co-tenant holding the card full would
+	// otherwise block a CPU-only run for no reason (see launchHandler doc).
+	// Missing/unparseable/"auto" device stays GPU-relevant and runs the real
+	// check.
+	var gpuCheck PreflightCheck
+	if resolveRunDevice(h.runsDir, name) == "cpu" {
+		gpuCheck = PreflightCheck{"gpu_vram", true, "device=cpu, GPU check skipped"}
+	} else {
+		gpuCheck = gpuVRAMCheck(minVRAM, h.gpuQuery)
+	}
 	checks := []PreflightCheck{
-		gpuVRAMCheck(minVRAM, h.gpuQuery),
+		gpuCheck,
 		diskSpaceCheck(h.runsDir, minDisk),
 		concurrencyCapCheck(h.runsDir, h.maxConcurrent),
 	}

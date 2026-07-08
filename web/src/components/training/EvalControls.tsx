@@ -76,14 +76,19 @@ const EvalControls: React.FC<EvalControlsProps> = ({ runName }) => {
 	}, [hasActiveJob, runName, fetchEvalJobs]);
 
 	useEffect(() => {
+		const next: Record<string, EvalJob['status']> = {};
 		for (const job of jobs) {
 			const prev = prevStatuses.current[job.id];
 			if (prev !== 'succeeded' && job.status === 'succeeded') {
 				fetchMetrics(runName);
 				fetchMeanImp(runName);
 			}
-			prevStatuses.current[job.id] = job.status;
+			next[job.id] = job.status;
 		}
+		// Replace rather than mutate in place, so ids evicted from the server's
+		// retained job history (maxEvalJobsPerRun) are pruned here too; otherwise
+		// this ref grows unbounded for a long-lived run detail view.
+		prevStatuses.current = next;
 	}, [jobs, runName, fetchMetrics, fetchMeanImp]);
 
 	const buildRequest = (overrides: Partial<TriggerEvalRequest> = {}): TriggerEvalRequest => {

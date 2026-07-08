@@ -320,6 +320,69 @@ func TestHandleStartForceOverride(t *testing.T) {
 	waitTerminal(t, f.mgr, "start-force")
 }
 
+// createWithYAML creates a run through the handler with a verbatim config
+// body, so the test controls the materialized config.yaml's device field
+// directly (mustCreate goes through the stub template, which always writes
+// device: cpu).
+func createWithYAML(t *testing.T, f *handlerFixture, name, yaml string) {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{"name": name, "yaml": yaml})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := doReq(f.ph.HandleCreate, http.MethodPost, "/training/runs", string(body))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create %q: status = %d, want 201: %s", name, w.Code, w.Body.String())
+	}
+}
+
+// TestHandleStartSkipsGPUCheckForCPUDevice is the regression test for the P3
+// e2e defect: a device=cpu run must not be blocked by gpu_vram even when the
+// GPU is fully held by a co-tenant (0 GiB free reported by nvidia-smi).
+func TestHandleStartSkipsGPUCheckForCPUDevice(t *testing.T) {
+	f := newHandlerFixture(t)
+	f.ph.gpuQuery = fakeQuery("0, 100, Fake GPU\n", nil) // nvidia-smi present, 0 GiB free
+	createWithYAML(t, f, "cpu-device-run", "prt_cfr:\n  device: cpu\n")
+
+	w := doReq(f.ph.HandleStart, http.MethodPost, "/training/runs/cpu-device-run/start", `{}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (device=cpu must skip gpu_vram): %s", w.Code, w.Body.String())
+	}
+	waitTerminal(t, f.mgr, "cpu-device-run")
+}
+
+// TestHandleStartChecksGPUForCudaDevice confirms a device=cuda run still runs
+// the real gpu_vram check (and blocks under a full GPU).
+func TestHandleStartChecksGPUForCudaDevice(t *testing.T) {
+	f := newHandlerFixture(t)
+	f.ph.gpuQuery = fakeQuery("0, 100, Fake GPU\n", nil)
+	createWithYAML(t, f, "cuda-device-run", "prt_cfr:\n  device: cuda\n")
+
+	w := doReq(f.ph.HandleStart, http.MethodPost, "/training/runs/cuda-device-run/start", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (device=cuda must run gpu_vram): %s", w.Code, w.Body.String())
+	}
+	var body map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &body)
+	if body["error"] != "preflight_failed" {
+		t.Errorf("error = %v, want preflight_failed", body["error"])
+	}
+}
+
+// TestHandleStartMissingDeviceStillChecksGPU confirms a config with no device
+// field at all (or an unrecognized/auto value) stays GPU-relevant rather than
+// silently skipping the check.
+func TestHandleStartMissingDeviceStillChecksGPU(t *testing.T) {
+	f := newHandlerFixture(t)
+	f.ph.gpuQuery = fakeQuery("0, 100, Fake GPU\n", nil)
+	createWithYAML(t, f, "no-device-run", "prt_cfr:\n  iterations: 2\n")
+
+	w := doReq(f.ph.HandleStart, http.MethodPost, "/training/runs/no-device-run/start", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (missing device must default to GPU-relevant): %s", w.Code, w.Body.String())
+	}
+}
+
 func TestHandleStartNotFound(t *testing.T) {
 	f := newHandlerFixture(t)
 	w := doReq(f.ph.HandleStart, http.MethodPost, "/training/runs/ghost/start", `{}`)

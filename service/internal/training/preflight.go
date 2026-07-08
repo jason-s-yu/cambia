@@ -3,7 +3,9 @@ package training
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -87,6 +89,65 @@ func gpuVRAMCheck(minGB float64, query gpuQueryFunc) PreflightCheck {
 		return PreflightCheck{name, true, fmt.Sprintf("%.1f GiB free on %s (need %.1f)", freeGB, gpuName, minGB)}
 	}
 	return PreflightCheck{name, false, fmt.Sprintf("only %.1f GiB free on %s (need %.1f)", freeGB, gpuName, minGB)}
+}
+
+// resolveRunDevice returns the training device configured for run name's
+// materialized runs/<name>/config.yaml, via a light line-based YAML scan (the
+// full Config schema is Python-side; Go only needs this one scalar). It
+// tolerates a root-level `device:` key and a `prt_cfr:` section's nested
+// `device:` key, with the section value winning when both are present (the
+// PRT-CFR trainer reads its own section). A missing file, missing key, or an
+// explicit "auto" all resolve to "auto" so callers treat the run as
+// GPU-relevant by default: only an explicit "cpu" is safe to skip the VRAM
+// check for.
+func resolveRunDevice(runsDir, name string) string {
+	data, err := os.ReadFile(filepath.Join(runDirOf(runsDir, name), "config.yaml"))
+	if err != nil {
+		return "auto"
+	}
+	var root, section string
+	inPRTCFR := false
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimRight(raw, "\r")
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		if indent == 0 {
+			inPRTCFR = trimmed == "prt_cfr:" || strings.HasPrefix(trimmed, "prt_cfr:")
+			if v, ok := yamlScalarField(trimmed, "device"); ok {
+				root = v
+			}
+			continue
+		}
+		if inPRTCFR {
+			if v, ok := yamlScalarField(trimmed, "device"); ok {
+				section = v
+			}
+		}
+	}
+	if section != "" {
+		return section
+	}
+	if root != "" {
+		return root
+	}
+	return "auto"
+}
+
+// yamlScalarField reports whether trimmed is a "key: value" line for key,
+// returning the trimmed, quote-stripped, comment-stripped value.
+func yamlScalarField(trimmed, key string) (string, bool) {
+	prefix := key + ":"
+	if !strings.HasPrefix(trimmed, prefix) {
+		return "", false
+	}
+	v := strings.TrimSpace(trimmed[len(prefix):])
+	if i := strings.Index(v, "#"); i >= 0 {
+		v = strings.TrimSpace(v[:i])
+	}
+	return strings.Trim(v, `"'`), true
 }
 
 // diskSpaceCheck passes when the filesystem backing path has at least minGB of

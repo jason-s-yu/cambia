@@ -21,9 +21,11 @@ type EvalJob struct {
 	Tail       []string `json:"tail,omitempty"` // last ~40 log lines, populated on GET only
 }
 
-// Eval job status constants.
+// Eval job status constants. "queued" is a wire-shape value the frontend
+// checks for (see EvalControls.tsx) but the Go side never assigns: Trigger
+// only ever creates a job already EvalRunning, so there is no Go constant for
+// it.
 const (
-	EvalQueued    = "queued"
 	EvalRunning   = "running"
 	EvalSucceeded = "succeeded"
 	EvalFailed    = "failed"
