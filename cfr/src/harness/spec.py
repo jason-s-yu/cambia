@@ -179,12 +179,16 @@ class JobSpec:
         # Kind-specific requirements: config drives train/evaluate/bench;
         # head-to-head needs both checkpoints; evaluate needs a target (the
         # checkpoint/run-dir it evaluates), forbidden for train.
-        if kind in ("train", "evaluate", "bench") and config is None:
+        # evaluate takes no config: run-dir mode reads the target's own
+        # config.yaml, and the runner never forwards --config for that kind.
+        if kind in ("train", "bench") and config is None:
             raise HarnessSpecError(f"kind {kind!r} requires a 'config' path")
         if kind == "head-to-head" and (checkpoint_a is None or checkpoint_b is None):
             raise HarnessSpecError("head-to-head requires checkpoint_a and checkpoint_b")
         if kind == "evaluate" and target is None:
-            raise HarnessSpecError("evaluate requires a 'target' path")
+            raise HarnessSpecError(
+                "evaluate requires a 'target': a runner-local run directory"
+            )
         if kind == "train" and target is not None:
             raise HarnessSpecError("target is not valid for kind='train'")
 

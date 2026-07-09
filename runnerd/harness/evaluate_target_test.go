@@ -241,7 +241,11 @@ func TestEvaluateArgvDirTargetUsesLatest(t *testing.T) {
 	}
 }
 
-func TestEvaluateArgvFileTargetDirectDefaultGames(t *testing.T) {
+// TestEvaluateFileTargetFailsJob asserts a checkpoint-file target never launches.
+// cli.py's file mode leaves agent_type at deep_cfr and only recovers a run dir
+// under checkpoints/, so a PRT-CFR snapshot would evaluate under the wrong agent
+// wrapper and report plausible, wrong numbers. The job fails instead.
+func TestEvaluateFileTargetFailsJob(t *testing.T) {
 	base := t.TempDir()
 	capture := filepath.Join(base, "capture.txt")
 	interp := writeCaptureInterp(t, base, capture)
@@ -267,24 +271,18 @@ func TestEvaluateArgvFileTargetDirectDefaultGames(t *testing.T) {
 		t.Fatalf("submit: got %d, want 201", resp.StatusCode)
 	}
 	resp.Body.Close()
-	r.waitForState("eval-file", procmgr.StatusStopped, 5*time.Second)
+	r.waitForState("eval-file", StateFailed, 5*time.Second)
 
-	data, err := os.ReadFile(capture)
-	if err != nil {
-		t.Fatalf("read capture (interpreter did not run): %v", err)
+	if _, err := os.ReadFile(capture); err == nil {
+		t.Error("interpreter ran for a file target; want the job failed before launch")
 	}
-	argv := captureField(t, string(data), "ARGV")
 
-	wantTarget, err := filepath.EvalSymlinks(targetFile)
-	if err != nil {
-		t.Fatal(err)
+	st, ok := r.pm.GetState("eval-file")
+	if !ok {
+		t.Fatal("no process state for eval-file")
 	}
-	wantArgv := "-m src.cli evaluate " + wantTarget + " --games 5000 --device cpu"
-	if argv != wantArgv {
-		t.Errorf("argv = %q, want %q (file target: no --latest, default games)", argv, wantArgv)
-	}
-	if strings.Contains(argv, "--config") {
-		t.Errorf("argv contains --config, want omitted for evaluate: %q", argv)
+	if !strings.Contains(st.LastError, "run directory") {
+		t.Errorf("LastError = %q, want it to explain the run-directory requirement", st.LastError)
 	}
 }
 

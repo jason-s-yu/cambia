@@ -276,10 +276,15 @@ func (d *Dispatcher) evaluateTargetArgv(spec JobSpec) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("target: %w", err)
 	}
-	argv := []string{targetAbs}
-	if info.IsDir() {
-		argv = append(argv, "--latest")
+	// Run-dir mode only. In file mode cli.py leaves agent_type at its deep_cfr
+	// default and only recovers a run dir when the file sits under checkpoints/,
+	// so a PRT-CFR snapshot target evaluates under the wrong agent wrapper and
+	// reports plausible, wrong numbers instead of failing. Run-dir mode derives
+	// config, algorithm, and agent type from the target's own config.yaml.
+	if !info.IsDir() {
+		return nil, fmt.Errorf("target %q: evaluate requires a run directory, not a checkpoint file (file mode misdetects agent type)", spec.Target)
 	}
+	argv := []string{targetAbs, "--latest"}
 	argv = append(argv, "--games", strconv.Itoa(spec.gamesOrDefault()), "--device", spec.device())
 	return argv, nil
 }
