@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 	_ "modernc.org/sqlite"
 )
 
@@ -301,13 +302,13 @@ func TestGetCheckpoints(t *testing.T) {
 }
 
 // writeState writes a process.json for name under the store's runs dir.
-func writeState(t *testing.T, runsDir, name string, st *ProcessState) {
+func writeState(t *testing.T, runsDir, name string, st *procmgr.ProcessState) {
 	t.Helper()
 	runDir := filepath.Join(runsDir, name)
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeProcessState(runDir, st); err != nil {
+	if err := procmgr.WriteProcessState(runDir, st); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -316,17 +317,17 @@ func TestProcessStatusOverlayAliveRun(t *testing.T) {
 	store, tmpDir := setupTestDB(t)
 
 	// process.json with our own (alive) pid overlays the run_db status and
-	// attaches the full ProcessState record.
-	writeState(t, tmpDir, "test-run-1", &ProcessState{
-		Name: "test-run-1", Status: StatusRunning, Algorithm: "os-mccfr",
-		PID: os.Getpid(), PGID: os.Getpid(), CreatedAt: nowRFC3339(),
+	// attaches the full procmgr.ProcessState record.
+	writeState(t, tmpDir, "test-run-1", &procmgr.ProcessState{
+		Name: "test-run-1", Status: procmgr.StatusRunning, Algorithm: "os-mccfr",
+		PID: os.Getpid(), PGID: os.Getpid(), CreatedAt: procmgr.NowRFC3339(),
 	})
 
 	detail, err := store.GetRun(context.Background(), "test-run-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if detail.Status != StatusRunning {
+	if detail.Status != procmgr.StatusRunning {
 		t.Errorf("status = %q, want running", detail.Status)
 	}
 	if detail.Process == nil || detail.Process.PID != os.Getpid() {
@@ -338,16 +339,16 @@ func TestProcessStatusOverlayDeadRun(t *testing.T) {
 	store, tmpDir := setupTestDB(t)
 
 	// A recorded-running run whose pid is dead reads back as crashed.
-	writeState(t, tmpDir, "test-run-1", &ProcessState{
-		Name: "test-run-1", Status: StatusRunning, Algorithm: "os-mccfr",
-		PID: 9999999, PGID: 9999999, CreatedAt: nowRFC3339(),
+	writeState(t, tmpDir, "test-run-1", &procmgr.ProcessState{
+		Name: "test-run-1", Status: procmgr.StatusRunning, Algorithm: "os-mccfr",
+		PID: 9999999, PGID: 9999999, CreatedAt: procmgr.NowRFC3339(),
 	})
 
 	detail, err := store.GetRun(context.Background(), "test-run-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if detail.Status != StatusCrashed {
+	if detail.Status != procmgr.StatusCrashed {
 		t.Errorf("status = %q, want crashed (dead pid)", detail.Status)
 	}
 }
@@ -373,9 +374,9 @@ func TestListRunsMergesProcessOnly(t *testing.T) {
 
 	// A dashboard-created run that exists only as process.json (never registered
 	// in run_db) must appear in the merged list.
-	writeState(t, tmpDir, "created-only", &ProcessState{
-		Name: "created-only", Status: StatusCreated, Algorithm: "prt-cfr",
-		CreatedAt: nowRFC3339(),
+	writeState(t, tmpDir, "created-only", &procmgr.ProcessState{
+		Name: "created-only", Status: procmgr.StatusCreated, Algorithm: "prt-cfr",
+		CreatedAt: procmgr.NowRFC3339(),
 	})
 
 	if err := store.refreshCache(context.Background()); err != nil {
@@ -395,7 +396,7 @@ func TestListRunsMergesProcessOnly(t *testing.T) {
 	if found == nil {
 		t.Fatalf("created-only not merged into list (%d runs)", len(runs))
 	}
-	if found.Status != StatusCreated {
+	if found.Status != procmgr.StatusCreated {
 		t.Errorf("status = %q, want created", found.Status)
 	}
 	if found.Process == nil {

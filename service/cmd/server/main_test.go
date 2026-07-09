@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 	"github.com/jason-s-yu/cambia/service/internal/auth"
 	"github.com/jason-s-yu/cambia/service/internal/middleware"
 	"github.com/jason-s-yu/cambia/service/internal/training"
@@ -57,7 +58,7 @@ func newTestTrainingMux(t *testing.T) *http.ServeMux {
 	}
 
 	cambiaBin := "cambia"
-	procMgr := training.NewProcessManager(runsDir, runsDir, cambiaBin, store)
+	procMgr := procmgr.NewProcessManager(runsDir, runsDir, cambiaBin, store, procmgr.TrainAlgorithms())
 	procHandlers := training.NewProcessHandlers(training.ProcessHandlersConfig{
 		Manager:   procMgr,
 		Store:     store,

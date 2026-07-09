@@ -1,4 +1,10 @@
-package training
+// Package procmgr supervises detached cambia subprocesses: it owns the
+// process.json current-state store, the spawn/stop/resume lifecycle, pid-reuse-
+// safe liveness checks, and the launch preflight gates. The host store (the
+// dashboard service's TrainingStore or runnerd's own) is injected through the
+// RunResolver interface, and the algorithm allowlist through a constructor table,
+// so the package depends on no concrete run store.
+package procmgr
 
 import (
 	"encoding/json"
@@ -53,10 +59,10 @@ const (
 	StatusCrashed  = "crashed"
 )
 
-// writeProcessState writes st to runDir/process.json atomically: it writes a
+// WriteProcessState writes st to runDir/process.json atomically: it writes a
 // temp file, fsyncs it, then renames over the destination (an atomic operation
 // on POSIX). The run directory is created if missing.
-func writeProcessState(runDir string, st *ProcessState) error {
+func WriteProcessState(runDir string, st *ProcessState) error {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		return err
 	}
@@ -94,8 +100,8 @@ func writeProcessState(runDir string, st *ProcessState) error {
 	return nil
 }
 
-// readProcessState reads and decodes runDir/process.json.
-func readProcessState(runDir string) (*ProcessState, error) {
+// ReadProcessState reads and decodes runDir/process.json.
+func ReadProcessState(runDir string) (*ProcessState, error) {
 	data, err := os.ReadFile(filepath.Join(runDir, processStateFile))
 	if err != nil {
 		return nil, err
@@ -107,10 +113,10 @@ func readProcessState(runDir string) (*ProcessState, error) {
 	return &st, nil
 }
 
-// scanProcessStates reads every runs/*/process.json under runsDir. Directories
+// ScanProcessStates reads every runs/*/process.json under runsDir. Directories
 // without a process.json (or with an unreadable one) are skipped. The error is
 // non-nil only if runsDir itself cannot be listed.
-func scanProcessStates(runsDir string) ([]*ProcessState, error) {
+func ScanProcessStates(runsDir string) ([]*ProcessState, error) {
 	entries, err := os.ReadDir(runsDir)
 	if err != nil {
 		return nil, err
@@ -120,7 +126,7 @@ func scanProcessStates(runsDir string) ([]*ProcessState, error) {
 		if !e.IsDir() {
 			continue
 		}
-		st, err := readProcessState(filepath.Join(runsDir, e.Name()))
+		st, err := ReadProcessState(filepath.Join(runsDir, e.Name()))
 		if err != nil {
 			continue
 		}
@@ -129,7 +135,7 @@ func scanProcessStates(runsDir string) ([]*ProcessState, error) {
 	return out, nil
 }
 
-// nowRFC3339 returns the current UTC time formatted as RFC3339.
-func nowRFC3339() string {
+// NowRFC3339 returns the current UTC time formatted as RFC3339.
+func NowRFC3339() string {
 	return time.Now().UTC().Format(time.RFC3339)
 }

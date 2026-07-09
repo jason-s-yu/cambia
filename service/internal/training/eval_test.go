@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 )
 
 // evalArgsEchoStub echoes its argument list to the log then exits 0. Used to
@@ -157,7 +159,7 @@ func TestEvalTriggerNoCheckpoint(t *testing.T) {
 func TestEvalTriggerInvalidName(t *testing.T) {
 	m, _ := newEvalManager(t, evalArgsEchoStub)
 	for _, name := range []string{"../evil", "a/b", "..", "e..vil"} {
-		if _, err := m.Trigger(name, EvalOpts{Device: "cpu"}); !errors.Is(err, ErrInvalidName) {
+		if _, err := m.Trigger(name, EvalOpts{Device: "cpu"}); !errors.Is(err, procmgr.ErrInvalidName) {
 			t.Errorf("Trigger(%q): err = %v, want ErrInvalidName", name, err)
 		}
 	}

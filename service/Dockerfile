@@ -5,9 +5,11 @@ RUN apk add --no-cache git
 
 WORKDIR /build
 
-# Copy go.work and both modules so workspace resolution works
+# Copy go.work and the workspace modules so resolution works. runnerd hosts the
+# procmgr package the training dashboard imports; the service build needs it.
 COPY go.work go.work
 COPY engine/ engine/
+COPY runnerd/ runnerd/
 COPY service/ service/
 
 # Download deps and build

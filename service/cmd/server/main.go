@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 	"github.com/jason-s-yu/cambia/service/internal/auth"
 	"github.com/jason-s-yu/cambia/service/internal/cache"
 	"github.com/jason-s-yu/cambia/service/internal/database"
@@ -173,7 +174,7 @@ func main() {
 			return middleware.LogMiddleware(logger)(middleware.RequireAuth(h))
 		}
 
-		procMgr := training.NewProcessManager(runsDir, cfrDir, cambiaBin, trainingStore)
+		procMgr := procmgr.NewProcessManager(runsDir, cfrDir, cambiaBin, trainingStore, procmgr.TrainAlgorithms())
 		procMgr.SetMaxConcurrent(maxConcurrent)
 		procMgr.Reconcile()
 		procHandlers := training.NewProcessHandlers(training.ProcessHandlersConfig{
