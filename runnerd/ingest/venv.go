@@ -75,8 +75,10 @@ func venvValid(python string) bool {
 // buildVenv runs the `uv lock --check` staleness preflight, then creates and
 // syncs the venv. The lock check runs in the worktree cfr dir BEFORE any venv
 // creation so a stale lock rejects before build work (design 3.3). uv sync uses
-// --frozen --locked --extra cpu with the target env pinned by both
-// UV_PROJECT_ENVIRONMENT and explicit --python.
+// --frozen --extra cpu with the target env pinned by both
+// UV_PROJECT_ENVIRONMENT and explicit --python; --frozen installs exactly from
+// the lock without re-resolving (staleness is the preflight's job; uv >= 0.5
+// rejects combining --frozen with --locked).
 func (m *Manager) buildVenv(ctx context.Context, worktreeDir, venvDir string) error {
 	cfrDir := filepath.Join(worktreeDir, "cfr")
 	uvEnv := []string{"UV_PROJECT_ENVIRONMENT=" + venvDir}
@@ -106,7 +108,7 @@ func (m *Manager) buildVenv(ctx context.Context, worktreeDir, venvDir string) er
 
 	if res, err := m.runner.Run(ctx, Command{
 		Name: "uv",
-		Args: []string{"sync", "--frozen", "--locked", "--extra", "cpu", "--python", filepath.Join(venvDir, "bin", "python")},
+		Args: []string{"sync", "--frozen", "--extra", "cpu", "--python", filepath.Join(venvDir, "bin", "python")},
 		Dir:  cfrDir,
 		Env:  uvEnv,
 	}); err != nil {
