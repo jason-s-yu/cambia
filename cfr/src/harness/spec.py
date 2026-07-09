@@ -87,6 +87,7 @@ class JobSpec:
     device: str = "cpu"
     checkpoint_a: Optional[str] = None
     checkpoint_b: Optional[str] = None
+    target: Optional[str] = None
     games: Optional[int] = None
     priority: str = "normal"
     force: bool = False
@@ -102,6 +103,7 @@ class JobSpec:
             "device",
             "checkpoint_a",
             "checkpoint_b",
+            "target",
             "games",
             "priority",
             "force",
@@ -147,6 +149,10 @@ class JobSpec:
         if checkpoint_b is not None:
             guard_relpath(checkpoint_b, "checkpoint_b")
 
+        target = raw.get("target")
+        if target is not None:
+            guard_relpath(target, "target")
+
         overrides = raw.get("overrides", {}) or {}
         if not isinstance(overrides, dict):
             raise HarnessSpecError("overrides must be a mapping of dotted keys")
@@ -171,11 +177,16 @@ class JobSpec:
             raise HarnessSpecError("resume is valid for train jobs only")
 
         # Kind-specific requirements: config drives train/evaluate/bench;
-        # head-to-head needs both checkpoints.
+        # head-to-head needs both checkpoints; evaluate needs a target (the
+        # checkpoint/run-dir it evaluates), forbidden for train.
         if kind in ("train", "evaluate", "bench") and config is None:
             raise HarnessSpecError(f"kind {kind!r} requires a 'config' path")
         if kind == "head-to-head" and (checkpoint_a is None or checkpoint_b is None):
             raise HarnessSpecError("head-to-head requires checkpoint_a and checkpoint_b")
+        if kind == "evaluate" and target is None:
+            raise HarnessSpecError("evaluate requires a 'target' path")
+        if kind == "train" and target is not None:
+            raise HarnessSpecError("target is not valid for kind='train'")
 
         return cls(
             kind=kind,
@@ -187,6 +198,7 @@ class JobSpec:
             device=device,
             checkpoint_a=checkpoint_a,
             checkpoint_b=checkpoint_b,
+            target=target,
             games=games,
             priority=priority,
             force=bool(raw.get("force", False)),
@@ -215,6 +227,8 @@ class JobSpec:
             payload["checkpoint_a"] = self.checkpoint_a
         if self.checkpoint_b is not None:
             payload["checkpoint_b"] = self.checkpoint_b
+        if self.target is not None:
+            payload["target"] = self.target
         if self.games is not None:
             payload["games"] = self.games
         return payload

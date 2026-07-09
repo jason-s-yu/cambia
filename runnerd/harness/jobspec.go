@@ -71,6 +71,7 @@ type JobSpec struct {
 	Device      string         `json:"device"`
 	CheckpointA string         `json:"checkpoint_a"`
 	CheckpointB string         `json:"checkpoint_b"`
+	Target      string         `json:"target"`
 	Games       int            `json:"games"`
 	Priority    string         `json:"priority"`
 	Force       bool           `json:"force"`
@@ -82,6 +83,23 @@ func (s *JobSpec) device() string {
 		return "cpu"
 	}
 	return s.Device
+}
+
+// gamesOrDefault returns the evaluate games count, defaulting to 5000 (the
+// run-dir-mode default cli.py falls back to, cfr/src/cli.py evaluate) when the
+// spec left it unset.
+func (s *JobSpec) gamesOrDefault() int {
+	if s.Games <= 0 {
+		return 5000
+	}
+	return s.Games
+}
+
+// targetForbidden reports whether the spec sets target on a kind that forbids
+// it (design 2.6: target selects what an evaluate job evaluates; train has no
+// use for it).
+func (s *JobSpec) targetForbidden() bool {
+	return s.Kind == KindTrain && s.Target != ""
 }
 
 // overridesStr renders the dotted-key overrides as a string map for the ingest
@@ -126,6 +144,19 @@ func (s *JobSpec) containedCheckpoints() []struct{ label, value string } {
 		{"checkpoint_a", s.CheckpointA},
 		{"checkpoint_b", s.CheckpointB},
 	}
+}
+
+// containedTarget returns the evaluate target field for the same
+// containment-resolve guard as containedCheckpoints (design 5.4): target
+// names a runner-local run dir or checkpoint file, so its containment base
+// (the runs dir) is known at submit time. An empty target on an evaluate spec
+// also fails Resolve's underlying empty-path check, so "required for
+// evaluate" is enforced through the same guard checkpoint_a/b already use.
+func (s *JobSpec) containedTarget() []struct{ label, value string } {
+	if s.Kind != KindEvaluate {
+		return nil
+	}
+	return []struct{ label, value string }{{"target", s.Target}}
 }
 
 // sortedKeys returns m's keys sorted, for deterministic override ordering.
