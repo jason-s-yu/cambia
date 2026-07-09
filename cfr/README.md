@@ -28,6 +28,9 @@ pip install -e ".[cpu]" --extra-index-url https://download.pytorch.org/whl/cpu
 
 # Or with uv, which follows cfr/uv.lock exactly:
 uv sync --extra gpu    # or --extra cpu
+
+# Serving-harness client (cambia harness submit/pull/watch against a remote runner):
+pip install -e ".[gpu,harness]" --extra-index-url https://download.pytorch.org/whl/cu128
 ```
 
 The editable install reads `pyproject.toml` and registers the `cambia` entry point. After this, the `cambia` command is available in the virtualenv. A plain `pip install -e .` still works but installs no torch; pick an extra (`[gpu]`/`[cpu]`) with the matching PyTorch index URL.
