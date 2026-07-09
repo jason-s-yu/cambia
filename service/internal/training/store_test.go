@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 	_ "modernc.org/sqlite"
@@ -28,8 +29,16 @@ CREATE TABLE IF NOT EXISTS runs (
     tags TEXT DEFAULT '[]',
     notes TEXT,
     parent_run_id INTEGER REFERENCES runs(id),
+    origin_host TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS harness_sync (
+    run_name TEXT PRIMARY KEY,
+    origin_host TEXT,
+    last_sync_at TEXT,
+    last_status TEXT
 );
 
 CREATE TABLE IF NOT EXISTS config_snapshots (
@@ -401,5 +410,170 @@ func TestListRunsMergesProcessOnly(t *testing.T) {
 	}
 	if found.Process == nil {
 		t.Error("expected Process attached to merged run")
+	}
+	// A dashboard-created local run carries no remote provenance.
+	if found.Host != "" {
+		t.Errorf("local created-only run has host %q, want empty", found.Host)
+	}
+	if found.Stale {
+		t.Error("local created-only run must not be stale")
+	}
+}
+
+// setupRemoteTestDB builds a store over a db holding one local run and one
+// remote run (origin_host=runner) with a harness_sync row at lastSyncAt.
+func setupRemoteTestDB(t *testing.T, lastSyncAt string) (*TrainingStore, string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "cambia_runs.db")
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(testDDL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO runs (name, algorithm, status, created_at, updated_at)
+		VALUES ('local-run', 'prt-cfr', 'running', '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO runs (name, algorithm, status, origin_host, created_at, updated_at)
+		VALUES ('v0.4-prtcfr-r12', 'prt-cfr', 'running', 'runner', '2026-07-08T00:00:00Z', '2026-07-08T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO harness_sync (run_name, origin_host, last_sync_at, last_status)
+		VALUES ('v0.4-prtcfr-r12', 'runner', ?, 'running')`, lastSyncAt); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	store, err := NewTrainingStore(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	return store, tmpDir
+}
+
+func nowUTC() string   { return time.Now().UTC().Format(time.RFC3339) }
+func staleUTC() string { return time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339) }
+
+func TestRemoteRunProvenanceFresh(t *testing.T) {
+	store, _ := setupRemoteTestDB(t, nowUTC())
+
+	detail, err := store.GetRun(context.Background(), "v0.4-prtcfr-r12")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Host != "runner" {
+		t.Errorf("host = %q, want runner", detail.Host)
+	}
+	if detail.LastSyncAt == nil {
+		t.Fatal("last_sync_at nil, want a timestamp")
+	}
+	if detail.Stale {
+		t.Error("fresh remote run flagged stale (last_sync_at within 3 intervals)")
+	}
+}
+
+func TestRemoteRunProvenanceStale(t *testing.T) {
+	store, _ := setupRemoteTestDB(t, staleUTC())
+
+	detail, err := store.GetRun(context.Background(), "v0.4-prtcfr-r12")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Host != "runner" {
+		t.Errorf("host = %q, want runner", detail.Host)
+	}
+	if !detail.Stale {
+		t.Error("remote run 10m past last sync not flagged stale (threshold is 3*60s)")
+	}
+}
+
+func TestLocalRunNoProvenance(t *testing.T) {
+	store, _ := setupRemoteTestDB(t, nowUTC())
+
+	detail, err := store.GetRun(context.Background(), "local-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Host != "" {
+		t.Errorf("local run host = %q, want empty", detail.Host)
+	}
+	if detail.LastSyncAt != nil {
+		t.Errorf("local run last_sync_at = %v, want nil", *detail.LastSyncAt)
+	}
+	if detail.Stale {
+		t.Error("local run must never be stale")
+	}
+}
+
+// TestRemoteRunShortCircuitsDeadPid is the dashboard-side half of the cross-host
+// pid-reuse guard: a synced remote run whose runner-written process.json records
+// a pid dead in the client's pid space must still render its synced status. The store
+// stamps Host from runs.origin_host so procmgr.EffectiveStatus short-circuits the
+// local probe.
+func TestRemoteRunShortCircuitsDeadPid(t *testing.T) {
+	store, tmpDir := setupRemoteTestDB(t, nowUTC())
+
+	// A runner-written process.json (Host empty) recording a pid that is not this
+	// host's process.
+	writeState(t, tmpDir, "v0.4-prtcfr-r12", &procmgr.ProcessState{
+		Name: "v0.4-prtcfr-r12", Status: procmgr.StatusRunning, Algorithm: "prt-cfr",
+		PID: 9999999, PGID: 9999999, CreatedAt: procmgr.NowRFC3339(),
+	})
+
+	detail, err := store.GetRun(context.Background(), "v0.4-prtcfr-r12")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Status != procmgr.StatusRunning {
+		t.Errorf("status = %q, want running (remote short-circuit, no local pid probe)", detail.Status)
+	}
+	if detail.Process == nil || detail.Process.Host != "runner" {
+		t.Errorf("expected process.json Host stamped to runner, got %+v", detail.Process)
+	}
+}
+
+func TestListRunsRemoteProvenance(t *testing.T) {
+	store, _ := setupRemoteTestDB(t, staleUTC())
+
+	runs, err := store.ListRuns(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var remote, local *Run
+	for i := range runs {
+		switch runs[i].Name {
+		case "v0.4-prtcfr-r12":
+			remote = &runs[i]
+		case "local-run":
+			local = &runs[i]
+		}
+	}
+	if remote == nil || local == nil {
+		t.Fatalf("expected both runs in list, got %d", len(runs))
+	}
+	if remote.Host != "runner" || !remote.Stale {
+		t.Errorf("remote run: host=%q stale=%v, want runner/true", remote.Host, remote.Stale)
+	}
+	if local.Host != "" || local.Stale {
+		t.Errorf("local run: host=%q stale=%v, want empty/false", local.Host, local.Stale)
+	}
+}
+
+func TestRemoteHostMethod(t *testing.T) {
+	store, _ := setupRemoteTestDB(t, nowUTC())
+	ctx := context.Background()
+
+	if got := store.RemoteHost(ctx, "v0.4-prtcfr-r12"); got != "runner" {
+		t.Errorf("RemoteHost(remote) = %q, want runner", got)
+	}
+	if got := store.RemoteHost(ctx, "local-run"); got != "" {
+		t.Errorf("RemoteHost(local) = %q, want empty", got)
+	}
+	if got := store.RemoteHost(ctx, "nonexistent"); got != "" {
+		t.Errorf("RemoteHost(nonexistent) = %q, want empty", got)
 	}
 }

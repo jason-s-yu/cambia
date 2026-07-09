@@ -23,7 +23,16 @@ const processStateFile = "process.json"
 // every state transition; a lost write leaves a stale status that reconciliation
 // repairs on the next server start via pid liveness.
 type ProcessState struct {
-	Name       string `json:"name"`
+	Name string `json:"name"`
+	// Host is the origin host of a run synced from another machine (the serving
+	// harness), empty for a local run. A local run's recorded pid lives in this
+	// host's pid space, so pidAlive can probe it; a non-empty Host marks a
+	// bounded-stale projection whose pid names a process on THAT host, so
+	// EffectiveStatus and Reconcile must return/keep the synced status verbatim
+	// and never run a local pid probe (a probe against a foreign pid is the
+	// cross-host pid-reuse bug). omitempty keeps pre-harness rows decoding to
+	// "" = local, the same compat-default style as StartTicks/BootID below.
+	Host       string `json:"host,omitempty"`
 	Status     string `json:"status"` // created|starting|running|stopping|stopped|crashed
 	Algorithm  string `json:"algorithm"`
 	PID        int    `json:"pid"`

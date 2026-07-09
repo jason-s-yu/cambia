@@ -9,6 +9,8 @@ import CheckpointTable from '@/components/training/CheckpointTable';
 import LogViewer from '@/components/training/LogViewer';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import StatusBadge from '@/components/training/StatusBadge';
+import HostBadge from '@/components/training/HostBadge';
+import SyncStatus from '@/components/training/SyncStatus';
 import ProcessControls from '@/components/training/ProcessControls';
 import EvalControls from '@/components/training/EvalControls';
 import type { ProcessStatus, ProcessState } from '@/types/training';
@@ -95,6 +97,11 @@ const RunDetailPage: React.FC = () => {
 	};
 	const processState = liveProcess ?? fallbackProcessState;
 
+	// A remote (serving-harness) run is read-only on this dashboard in v1: no
+	// start/stop/resume, since those are not proxied to the origin host. The host
+	// comes from the run detail or a stamped process record.
+	const isRemote = Boolean(run.host || processState.host);
+
 	const tabs: { key: Tab; label: string }[] = [
 		{ key: 'metrics', label: 'Metrics' },
 		{ key: 'checkpoints', label: 'Checkpoints' },
@@ -106,7 +113,7 @@ const RunDetailPage: React.FC = () => {
 		<div>
 			{/* Header */}
 			<div className="mb-6">
-				<div className="flex items-center gap-3 mb-2">
+				<div className="flex items-center gap-3 mb-2 flex-wrap">
 					<h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
 						{run.name}
 					</h1>
@@ -114,6 +121,8 @@ const RunDetailPage: React.FC = () => {
 						{run.algorithm}
 					</span>
 					<StatusBadge status={processState.status} />
+					<HostBadge host={run.host} />
+					<SyncStatus host={run.host} lastSyncAt={run.last_sync_at} stale={run.stale} />
 				</div>
 				<div className="text-sm text-gray-500 dark:text-gray-400 flex gap-4">
 					<span>Created {formatDistanceToNow(parseISO(run.created_at), { addSuffix: true })}</span>
@@ -123,12 +132,20 @@ const RunDetailPage: React.FC = () => {
 
 			{/* Process controls: mounted outside the tab switcher so start/stop/
 			    resume and any preflight-block panel stay visible regardless of
-			    the active tab. */}
+			    the active tab. A remote run is read-only in v1 (process control is
+			    not proxied to the origin host), so its action buttons are hidden. */}
 			<div className="mb-6 bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-				<ProcessControls
-					processState={processState}
-					onChanged={() => runName && fetchRunDetail(runName)}
-				/>
+				{isRemote ? (
+					<p className="text-sm text-gray-500 dark:text-gray-400">
+						Remote run on {run.host}: read-only on this dashboard. Process controls
+						(start, stop, resume) run on the origin host.
+					</p>
+				) : (
+					<ProcessControls
+						processState={processState}
+						onChanged={() => runName && fetchRunDetail(runName)}
+					/>
+				)}
 			</div>
 
 			{/* Tab bar */}

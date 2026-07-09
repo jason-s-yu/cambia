@@ -250,6 +250,9 @@ func (h *ProcessHandlers) launchHandler(w http.ResponseWriter, r *http.Request, 
 		writeJSONError(w, http.StatusBadRequest, "invalid_name", err.Error())
 		return
 	}
+	if h.refuseIfRemote(w, r, name) {
+		return
+	}
 	if _, ok := h.mgr.GetState(name); !ok {
 		writeJSONError(w, http.StatusNotFound, "not_found", "run not found")
 		return
@@ -341,6 +344,9 @@ func (h *ProcessHandlers) HandleStop(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid_name", err.Error())
 		return
 	}
+	if h.refuseIfRemote(w, r, name) {
+		return
+	}
 	if _, ok := h.mgr.GetState(name); !ok {
 		writeJSONError(w, http.StatusNotFound, "not_found", "run not found")
 		return
@@ -377,6 +383,25 @@ func (h *ProcessHandlers) HandleTemplates(w http.ResponseWriter, r *http.Request
 	}
 	sort.Strings(names)
 	writeJSON(w, http.StatusOK, names)
+}
+
+// refuseIfRemote writes a 409 and returns true when name is a remote
+// (serving-harness synced) run. Process control (start/stop/resume) is not
+// proxied to the origin host in v1, so the client treats remote runs as read-only
+// (design 4.5); a local pid probe or signal against a runner pid would be the
+// cross-host pid-reuse bug. A nil store (process management without a run store)
+// disables the check.
+func (h *ProcessHandlers) refuseIfRemote(w http.ResponseWriter, r *http.Request, name string) bool {
+	if h.store == nil {
+		return false
+	}
+	host := h.store.RemoteHost(r.Context(), name)
+	if host == "" {
+		return false
+	}
+	writeJSONError(w, http.StatusConflict, "remote_run_read_only",
+		fmt.Sprintf("run %q originates on host %q; process controls are read-only on this dashboard in v1 (remote stop/resume is v1.1)", name, host))
+	return true
 }
 
 // writeLaunchError maps procmgr.ProcessManager start/resume errors to status codes.

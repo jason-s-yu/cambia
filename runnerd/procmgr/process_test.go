@@ -277,6 +277,40 @@ func TestProcessReconcileLeavesTerminalAndLiveAlone(t *testing.T) {
 	}
 }
 
+// TestProcessReconcileSkipsRemoteRow is the cross-host pid-reuse guard for
+// startup reconciliation: a remote row (Host set) recorded running with a dead
+// local pid must be left untouched. Its liveness is the runner's authority,
+// refreshed by the pull loop; a local pidAlive probe against a foreign pid would
+// wrongly flip the row to crashed.
+func TestProcessReconcileSkipsRemoteRow(t *testing.T) {
+	m, runsDir := newTestManager(t, crashStub)
+
+	name := "v0.4-prtcfr-remote"
+	runDir := filepath.Join(runsDir, name)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteProcessState(runDir, &ProcessState{
+		Name: name, Host: "runner", Status: StatusRunning, Algorithm: "prt-cfr",
+		PID: 9999999, PGID: 9999999, CreatedAt: NowRFC3339(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	m.Reconcile()
+
+	st, ok := m.GetState(name)
+	if !ok {
+		t.Fatal("state missing after reconcile")
+	}
+	if st.Status != StatusRunning {
+		t.Errorf("remote row status = %q, want running (reconcile must skip remote rows)", st.Status)
+	}
+	if st.LastError != "" {
+		t.Errorf("remote row last_error = %q, want empty (never reconciled to crashed)", st.LastError)
+	}
+}
+
 func TestProcessStartUnsupportedAlgorithm(t *testing.T) {
 	m, _ := newTestManager(t, crashStub)
 	createRun(t, m, "run-badalgo", "es-mccfr")
