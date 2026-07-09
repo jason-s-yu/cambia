@@ -7,7 +7,6 @@ name = "cambia-cfr"
 version = "0.4.0"
 requires-python = ">=3.11"
 dependencies = [
-    "torch>=2.6",
     "numpy>=2.0",
     "cffi>=2.0",
     "pydantic>=2.0",
@@ -20,6 +19,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+cpu = ["torch>=2.6"]
+gpu = ["torch>=2.6"]
 rl = ["gymnasium>=1.0", "stable-baselines3>=2.4", "sb3-contrib>=2.4"]
 
 [project.scripts]
@@ -27,6 +28,30 @@ cambia = "src.cli:app"
 
 [tool.setuptools.packages.find]
 include = ["src", "src.*"]
+
+[tool.uv]
+conflicts = [
+    [
+        { extra = "cpu" },
+        { extra = "gpu" },
+    ],
+]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu128", extra = "gpu" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
 [tool.pytest.ini_options]
 filterwarnings = [
