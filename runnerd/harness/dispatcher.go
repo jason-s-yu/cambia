@@ -284,7 +284,12 @@ func (d *Dispatcher) launchOpts(j *job, prepared *ingestapi.Prepared) (procmgr.L
 			// Without an explicit name the trainer registers its run_db row
 			// under a config-derived default, decoupling the journal row from
 			// the run dir the reconciler replays (found live in M5 e2e).
+			// Without an explicit save path the trainer resolves runs/<name>
+			// against the worktree cwd, so resume_state.json and metrics.jsonl
+			// land in the worktree and die with its cleanup (also found live):
+			// the fixed-binary dashboard path always passes both.
 			argv = append(argv, "--run-name", j.spec.Name)
+			argv = append(argv, "--save-path", d.runDir(j.spec.Name))
 		}
 	}
 	if j.resume {

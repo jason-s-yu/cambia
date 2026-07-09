@@ -36,9 +36,14 @@ func (s *stagedEnv) Prepare(ctx context.Context, jobID, commit, kind, configRel 
 	if err := os.MkdirAll(filepath.Join(runDir, "logs"), 0o755); err != nil {
 		return nil, err
 	}
-	rendered := filepath.Join(runDir, "config.yaml")
-	if err := os.WriteFile(rendered, []byte("device: cpu\n"), 0o644); err != nil {
-		return nil, err
+	// Mirror real ingest: no configRel -> no rendered config and no
+	// runDir/config.yaml (evaluate jobs; caught the config-gate bug live).
+	rendered := ""
+	if configRel != "" {
+		rendered = filepath.Join(runDir, "config.yaml")
+		if err := os.WriteFile(rendered, []byte("device: cpu\n"), 0o644); err != nil {
+			return nil, err
+		}
 	}
 	return &ingestapi.Prepared{
 		WorktreeDir:    worktreeDir,

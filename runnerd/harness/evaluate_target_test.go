@@ -322,9 +322,10 @@ func TestTrainArgvUnchangedByEvaluateTarget(t *testing.T) {
 	argv := captureField(t, string(data), "ARGV")
 
 	rendered := filepath.Join(r.runsDir, "train-ok", "config.yaml")
-	wantArgv := "-m src.cli train prtcfr --config " + rendered + " --run-name train-ok"
+	wantArgv := "-m src.cli train prtcfr --config " + rendered +
+		" --run-name train-ok --save-path " + filepath.Join(r.runsDir, "train-ok")
 	if argv != wantArgv {
-		t.Errorf("argv = %q, want %q (train argv: rendered config + explicit run name)", argv, wantArgv)
+		t.Errorf("argv = %q, want %q (train argv: rendered config + explicit run identity)", argv, wantArgv)
 	}
 
 	// A train job journals into its own run dir (design 4.2 wire format).

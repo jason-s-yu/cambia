@@ -346,8 +346,14 @@ func (m *ProcessManager) launch(name string, opts StartOpts, lopts LaunchOpts, r
 	if err != nil {
 		absConfig = configPath
 	}
-	if _, err := os.Stat(absConfig); err != nil {
-		return nil, fmt.Errorf("%w: %s", ErrConfigMissing, absConfig)
+	// The config-exists gate belongs to the fixed-binary path, whose argv is
+	// built FROM the config. A parameterized launch (LaunchOpts.Python set)
+	// carries a complete argv and may legitimately have no per-run config:
+	// evaluate jobs render none by design (the target run dir has its own).
+	if lopts.Python == "" {
+		if _, err := os.Stat(absConfig); err != nil {
+			return nil, fmt.Errorf("%w: %s", ErrConfigMissing, absConfig)
+		}
 	}
 
 	absRunDir, err := filepath.Abs(runDir)
