@@ -24,6 +24,15 @@ import (
 // ErrNoPublicKey is returned by Load when the configured key path is empty.
 var ErrNoPublicKey = errors.New("no JWT public key path configured")
 
+// Audience is the required "aud" claim for a runnerd control-plane token. the client
+// mints tokens carrying this audience; Verify rejects any token that omits it or
+// carries a different one. This is the guard against key aliasing: if
+// RUNNERD_JWT_PUBKEY is ever pointed at the same ed25519 key the service uses
+// for user session JWTs, a user session token (audience-less, or a different
+// audience) still cannot drive a job launch or cancel, because it does not carry
+// aud == "cambia-runnerd".
+const Audience = "cambia-runnerd"
+
 // Verifier holds an ed25519 public key and verifies JWTs against it. It is
 // immutable after Load and safe for concurrent use.
 type Verifier struct {
@@ -56,16 +65,21 @@ func NewVerifier(pub ed25519.PublicKey) *Verifier {
 }
 
 // Verify parses and validates tokenString and returns its "sub" claim. It
-// mirrors session.go:101-127: the signing method must be Ed25519, the token must
-// be valid (jwt/v5 enforces the exp claim automatically when present), and "sub"
-// must be a present string claim. Any deviation returns an error and no subject.
+// mirrors session.go:101-127 (signing method Ed25519, valid token, present
+// string "sub") and adds one runnerd-specific requirement beyond the service
+// gate: the token must carry aud == Audience ("cambia-runnerd"). The audience is
+// enforced through golang-jwt's own validator (jwt.WithAudience), which fails
+// when the claim is absent or mismatched. This closes the key-aliasing hole: a
+// user session JWT signed with the same ed25519 key must not be accepted here,
+// and it will not be, because it does not carry this audience. Any deviation
+// returns an error and no subject.
 func (v *Verifier) Verify(tokenString string) (string, error) {
 	t, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodEd25519); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 		}
 		return v.pub, nil
-	})
+	}, jwt.WithAudience(Audience))
 	if err != nil {
 		return "", fmt.Errorf("jwt parse error: %w", err)
 	}

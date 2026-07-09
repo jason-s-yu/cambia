@@ -32,6 +32,40 @@ func TestRejectOwnedOverrides(t *testing.T) {
 	}
 }
 
+// TestRejectPathishOverrides covers the M5 broadening: any key whose leaf is
+// path-ish (a path suffix or an exact path leaf) is rejected even when it is not
+// one of the enumerated owned rails, while a normal non-path key still passes.
+func TestRejectPathishOverrides(t *testing.T) {
+	rejected := []string{
+		"persistence.some_new_dir",   // _dir suffix, not an enumerated rail
+		"logging.extra_dirs",         // _dirs suffix
+		"trainer.metrics_out",        // _out suffix
+		"trainer.summary_output",     // _output suffix
+		"io.results_file",            // _file suffix
+		"analysis.report_path",       // _path suffix
+		"output",                     // bare exact leaf
+		"nested.path",                // exact leaf "path"
+		"nested.dir",                 // exact leaf "dir"
+		"persistence.checkpoint_dir", // exact + suffix
+	}
+	for _, k := range rejected {
+		if err := rejectOwnedOverrides(map[string]string{k: "/tmp/evil"}); !errors.Is(err, ErrOwnedOverride) {
+			t.Fatalf("path-ish override %q not rejected (err=%v)", k, err)
+		}
+	}
+	accepted := []string{
+		"prt_cfr.iterations",
+		"prt_cfr.k_games",
+		"cfr_training.batch_size",
+		"analysis.report_period", // ends in "period", not path-ish
+	}
+	for _, k := range accepted {
+		if err := rejectOwnedOverrides(map[string]string{k: "8"}); err != nil {
+			t.Fatalf("legitimate override %q rejected: %v", k, err)
+		}
+	}
+}
+
 func TestRenderArgOrderRailsLast(t *testing.T) {
 	fc := newFakeControl()
 	m, fr := fakeManager(t, fc)
@@ -126,6 +160,59 @@ func TestGuardRelPath(t *testing.T) {
 		if _, err := guardRelPath(root, bad); !errors.Is(err, ErrPathEscape) {
 			t.Fatalf("guardRelPath(%q) = %v, want ErrPathEscape", bad, err)
 		}
+	}
+}
+
+// TestGuardRelPathSymlinkEscape covers the M4 symlink cases for the ingest
+// guard: a symlink inside root pointing outside root escapes (reject), one
+// pointing within root is contained (accept), a non-existent tail under root is
+// accepted, and a root that is itself a symlink resolves consistently (accept).
+func TestGuardRelPathSymlinkEscape(t *testing.T) {
+	tmp := t.TempDir()
+	root := filepath.Join(tmp, "root")
+	outside := filepath.Join(tmp, "outside")
+	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "sub"), filepath.Join(root, "inward")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Escape via a symlink to an existing outside dir: reject.
+	for _, rel := range []string{"escape", "escape/config.yaml"} {
+		if _, err := guardRelPath(root, rel); !errors.Is(err, ErrPathEscape) {
+			t.Fatalf("guardRelPath(%q) = %v, want ErrPathEscape", rel, err)
+		}
+	}
+	// Dangling symlink to a non-existent outside target: also reject.
+	if err := os.Symlink(filepath.Join(tmp, "gone", "x"), filepath.Join(root, "dangling")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := guardRelPath(root, "dangling"); !errors.Is(err, ErrPathEscape) {
+		t.Fatalf("guardRelPath(dangling) = %v, want ErrPathEscape", err)
+	}
+	// Symlink within root: accept.
+	if _, err := guardRelPath(root, "inward/config.yaml"); err != nil {
+		t.Fatalf("guardRelPath(inward/config.yaml) = %v, want nil", err)
+	}
+	// Non-existent tail under a real root: accept.
+	if _, err := guardRelPath(root, "cfr/config/new.yaml"); err != nil {
+		t.Fatalf("guardRelPath(non-existent) = %v, want nil", err)
+	}
+
+	// Root that is itself a symlink: accept, resolved consistently.
+	rootLink := filepath.Join(tmp, "rootlink")
+	if err := os.Symlink(root, rootLink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := guardRelPath(rootLink, "sub/config.yaml"); err != nil {
+		t.Fatalf("guardRelPath through symlinked root = %v, want nil", err)
 	}
 }
 

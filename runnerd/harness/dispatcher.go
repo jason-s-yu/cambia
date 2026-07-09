@@ -146,6 +146,13 @@ func (d *Dispatcher) dispatchLocked() {
 	}
 }
 
+// launchGateHook is a test seam invoked inside runJob after the launch options
+// are built and immediately before the launch critical section, with d.mu NOT
+// held. Production leaves it nil. A test sets it to inject a concurrent Cancel
+// at the exact check-then-launch boundary, making the cancel/launch race
+// deterministic. It mirrors procmgr's killGroupFunc seam.
+var launchGateHook func(name string)
+
 // runJob prepares, launches, and monitors one job. It is the only writer of the
 // preparing -> running/failed/canceled transitions.
 func (d *Dispatcher) runJob(j *job) {
@@ -180,13 +187,33 @@ func (d *Dispatcher) runJob(j *job) {
 	// venv interpreter, the pinned worktree cfr dir as cwd, the rendered config
 	// consumed verbatim, and the staged env (PYTHONPATH pin, LIBCAMBIA_PATH,
 	// src-containment shim). Job kind maps to its cambia subcommand via the same
-	// injected algos table as the fixed-binary path.
+	// injected algos table as the fixed-binary path. launchOpts (os.Stat for the
+	// evaluate target) runs here, outside the launch lock, so the critical
+	// section below stays minimal.
 	lopts, cerr := d.launchOpts(j, prepared)
 	if cerr != nil {
 		d.markTerminal(name, StateFailed, "launch config: "+cerr.Error())
 		return
 	}
 
+	if launchGateHook != nil {
+		launchGateHook(name)
+	}
+
+	// L7: close the cancel/launch race. A Cancel arriving between a bare
+	// canceled-check and StartWithOpts would otherwise be dropped and the job
+	// would run anyway. Hold d.mu across the final canceled-check, the launch,
+	// and the pending handoff so a concurrent Cancel is totally ordered against
+	// the launch commit: it either lands first (seen here -> abort before
+	// StartWithOpts) or after (job already removed from pending -> Cancel takes
+	// the running-job Stop path). procmgr never calls back into the dispatcher,
+	// so d.mu -> pm.mu is the single lock order with no inversion.
+	d.mu.Lock()
+	if j.canceled {
+		d.mu.Unlock()
+		d.markTerminal(name, StateCanceled, "canceled before launch")
+		return
+	}
 	var lerr error
 	if j.resume {
 		_, lerr = d.pm.ResumeWithOpts(name, procmgr.StartOpts{}, lopts)
@@ -194,12 +221,12 @@ func (d *Dispatcher) runJob(j *job) {
 		_, lerr = d.pm.StartWithOpts(name, procmgr.StartOpts{}, lopts)
 	}
 	if lerr != nil {
+		d.mu.Unlock()
 		d.markTerminal(name, StateFailed, "launch failed: "+lerr.Error())
 		return
 	}
-
-	// Launched: hand off from the in-memory pending set to process.json.
-	d.mu.Lock()
+	// Launched: hand off from the in-memory pending set to process.json under the
+	// same lock that guarded the launch, so a Cancel can never slip into the gap.
 	delete(d.pending, name)
 	launched = true
 	d.mu.Unlock()

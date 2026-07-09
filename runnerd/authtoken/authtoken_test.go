@@ -43,7 +43,7 @@ func TestLoadRawPublicKeyRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	tok := mintEdDSA(t, priv, jwt.MapClaims{"sub": "client-cli"})
+	tok := mintEdDSA(t, priv, jwt.MapClaims{"sub": "client-cli", "aud": Audience})
 	sub, err := v.Verify(tok)
 	if err != nil {
 		t.Fatalf("Verify valid token: %v", err)
@@ -86,10 +86,33 @@ func TestVerifyRejectsExpired(t *testing.T) {
 	v := NewVerifier(pub)
 	tok := mintEdDSA(t, priv, jwt.MapClaims{
 		"sub": "x",
+		"aud": Audience,
 		"exp": time.Now().Add(-time.Minute).Unix(),
 	})
 	if _, err := v.Verify(tok); err == nil {
 		t.Fatal("Verify should reject an expired token")
+	}
+}
+
+func TestVerifyRejectsMissingAudience(t *testing.T) {
+	pub, priv := genKeypair(t)
+	v := NewVerifier(pub)
+	// A validly signed token with a valid sub but no aud claim: it stands in for
+	// a service session JWT signed with an aliased key. It must be rejected so a
+	// user session cannot drive the control plane.
+	tok := mintEdDSA(t, priv, jwt.MapClaims{"sub": "some-user"})
+	if _, err := v.Verify(tok); err == nil {
+		t.Fatal("Verify should reject a token with no aud claim")
+	}
+}
+
+func TestVerifyRejectsWrongAudience(t *testing.T) {
+	pub, priv := genKeypair(t)
+	v := NewVerifier(pub)
+	// Correct signature and sub, but the audience targets a different service.
+	tok := mintEdDSA(t, priv, jwt.MapClaims{"sub": "some-user", "aud": "cambia-service"})
+	if _, err := v.Verify(tok); err == nil {
+		t.Fatal("Verify should reject a token with a mismatched aud claim")
 	}
 }
 
