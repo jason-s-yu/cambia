@@ -28,11 +28,23 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
+from src.harness.reconciler import (
+    _ALLOWED_STATUS,
+    ReconcilerValidationError,
+    _validate_run_name,
+)
 from src.harness.reconciler import replay as reconciler_replay
 from src.run_db import get_db, upsert_harness_sync
 
 RESERVOIR_DIRNAME = "reservoir"
 SNAPSHOTS_DIRNAME = "snapshots"
+
+# L10: the enum harness_sync.last_status is clamped to before an upsert. Reuses
+# the reconciler's canonical status set (design 2.3: run_db lifecycle values +
+# the runnerd job state machine) so the rule is not reforked, and adds the
+# ProcessState "starting" value that set omits, covering the full runnerd process
+# state machine.
+_KNOWN_SYNC_STATUSES: Set[str] = _ALLOWED_STATUS | {"starting"}
 
 # Terminal run states (design 2.3 terminal set + run_db lifecycle completions).
 # A run in one of these has no further artifact changes coming.
@@ -54,6 +66,40 @@ class PullError(Exception):
 
 def is_terminal(status: Optional[str]) -> bool:
     return bool(status) and status in TERMINAL_STATUSES
+
+
+# ---------------------------------------------------------------------------
+# Untrusted-input guards (design 5.7)
+# ---------------------------------------------------------------------------
+
+
+def is_valid_run_name(name: Any) -> bool:
+    """Whether `name` clears the canonical Go validateName rules. Reuses the
+    reconciler validator so the rule has a single source (H1 / design 5.7)."""
+    try:
+        _validate_run_name(name)
+        return True
+    except ReconcilerValidationError:
+        return False
+
+
+def _require_valid_run_name(name: Any) -> str:
+    """Raise PullError unless `name` clears the canonical validator. The last
+    gate before a runner-supplied name is joined into a local path or an rsync
+    argument (H1)."""
+    if not is_valid_run_name(name):
+        raise PullError(f"refusing unsafe run name {name!r}")
+    return name
+
+
+def sanitize_last_status(status: Optional[str]) -> Optional[str]:
+    """Clamp a synced run status to the known enum before it lands in
+    harness_sync (L10). A pulled run_db is untrusted (design 5.7), so its status
+    column can carry arbitrary text; anything outside the canonical set becomes
+    "unknown". None (no status observed yet) is preserved as absence."""
+    if status is None:
+        return None
+    return status if status in _KNOWN_SYNC_STATUSES else "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +249,7 @@ class RsyncRunner(Runner):
             args = [
                 self._rsync,
                 "-a",
+                "--safe-links",
                 "--ignore-missing-args",
                 f"{self._prefix()}{self._remote_base}/{run_name}/run_db.sqlite{suffix}",
                 str(local_run_dir / f"run_db.sqlite{suffix}"),
@@ -214,6 +261,7 @@ class RsyncRunner(Runner):
         args = [
             self._rsync,
             "-a",
+            "--safe-links",
             *filters,
             self._remote(run_name),
             str(local_run_dir) + "/",
@@ -226,6 +274,7 @@ class RsyncRunner(Runner):
         args = [
             self._rsync,
             "-a",
+            "--safe-links",
             str(local_run_dir).rstrip("/") + "/",
             self._remote(run_name),
         ]
@@ -264,6 +313,11 @@ class PullCoordinator:
         self.sleep_fn = sleep_fn
 
     def local_run_dir(self, run_name: str) -> Path:
+        # H1: the chokepoint where a run name becomes a local path. Every pull /
+        # push path routes through here, so validating once guards pull_once,
+        # pull_with_retry, and push_run against a runner-supplied traversal name,
+        # independent of which caller (watch, cli pull, cli push-run) supplied it.
+        _require_valid_run_name(run_name)
         return self.local_runs_dir / run_name
 
     def pull_once(self, run_name: str, all_checkpoints: bool = False) -> Optional[str]:
@@ -282,7 +336,9 @@ class PullCoordinator:
         # Replay into the authoritative db, then record freshness.
         self.replay_fn(local_dir, self.dest, self.origin_host)
         status = read_run_status(db_path, run_name)
-        upsert_harness_sync(self.dest, run_name, self.origin_host, status)
+        upsert_harness_sync(
+            self.dest, run_name, self.origin_host, sanitize_last_status(status)
+        )
         return status
 
     def pull_with_retry(
@@ -358,6 +414,11 @@ def watch(
             name = job.get("name")
             status = job.get("status")
             if not name:
+                continue
+            if not is_valid_run_name(name):
+                # H1: a hostile job name never reaches the pull set, a local
+                # path, or an rsync argument. Skip loudly, keep watching.
+                log(f"skipping job with unsafe name {name!r}")
                 continue
             entry = active.setdefault(name, {"terminal_seen": False})
             if is_terminal(status) and not entry["terminal_seen"]:

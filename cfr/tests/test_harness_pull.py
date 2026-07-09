@@ -28,7 +28,9 @@ from src.harness.pull import (
     build_pull_filters,
     derive_include_set,
     is_terminal,
+    is_valid_run_name,
     read_run_status,
+    sanitize_last_status,
 )
 
 _RETAINED = (5, 10)
@@ -445,3 +447,156 @@ def test_rsync_all_checkpoints_pulls_everything_but_reservoir(tmp_path):
     assert (snaps / _ckpt_name(1)).exists()  # non-retained now included
     assert (snaps / _ckpt_name(5)).exists()
     assert not (local_dir / "reservoir").exists()  # reservoir still excluded
+
+
+# ---------------------------------------------------------------------------
+# H1: hostile runner-supplied names never reach the filesystem or rsync
+# ---------------------------------------------------------------------------
+
+_HOSTILE_NAMES = [
+    "../../etc/passwd",
+    "..",
+    ".",
+    "/abs/path",
+    "a/b",
+    "run;rm -rf x",
+    "run name",
+    "run\x00null",
+    "",
+]
+
+
+def test_is_valid_run_name_matches_reconciler_rules():
+    for good in ("v0.4-prtcfr-r1", "myrun", "a.b_c-1"):
+        assert is_valid_run_name(good)
+    for bad in _HOSTILE_NAMES:
+        assert not is_valid_run_name(bad)
+    assert not is_valid_run_name(None)
+
+
+@pytest.mark.parametrize("bad", _HOSTILE_NAMES)
+def test_coordinator_rejects_hostile_name_before_fs_touch(tmp_path, bad):
+    """local_run_dir is the chokepoint: an unsafe name raises before any pull,
+    push, or filesystem access (H1). No local dir is created for the bad name."""
+    dest = _dest_db(tmp_path)
+    runner = FakeRunner(tmp_path / "remote")
+    coord = PullCoordinator(
+        runner=runner,
+        local_runs_dir=tmp_path / "local",
+        dest_conn=dest,
+        origin_host="runner",
+    )
+    with pytest.raises(PullError):
+        coord.pull_once(bad)
+    with pytest.raises(PullError):
+        coord.pull_with_retry(bad, attempts=1)
+    with pytest.raises(PullError):
+        coord.push_run(bad)
+    # The runner was never invoked and no directory was created.
+    assert runner.calls == []
+    assert not (tmp_path / "local").exists() or list((tmp_path / "local").iterdir()) == []
+    dest.close()
+
+
+def test_watch_skips_hostile_names(tmp_path):
+    """A hostile name in the job list is skipped + logged; a sibling good run in
+    the same tick is still pulled (H1 at the watch ingress)."""
+    _build_remote_run(tmp_path / "remote", status="completed")
+    dest = _dest_db(tmp_path)
+    runner = FakeRunner(tmp_path / "remote")
+    coord = PullCoordinator(
+        runner=runner,
+        local_runs_dir=tmp_path / "local",
+        dest_conn=dest,
+        origin_host="runner",
+        sleep_fn=lambda s: None,
+    )
+    events = []
+    pullmod.watch(
+        coord,
+        job_lister=lambda: [
+            {"name": "../../etc/passwd", "status": "completed"},
+            {"name": "v0.4-prtcfr-r1", "status": "completed"},
+        ],
+        interval_seconds=0,
+        on_event=events.append,
+        max_ticks=1,
+    )
+    # The hostile name was skipped loudly and never became a pull.
+    assert any("unsafe name" in e and "etc/passwd" in e for e in events)
+    assert not (tmp_path / "local" / "etc").exists()
+    assert ("pull_db", "../../etc/passwd") not in [(c[0], c[1]) for c in runner.calls]
+    # The good sibling still reconciled.
+    hs = dest.execute(
+        "SELECT last_status FROM harness_sync WHERE run_name=?", ("v0.4-prtcfr-r1",)
+    ).fetchone()
+    assert hs is not None and hs["last_status"] == "completed"
+    dest.close()
+
+
+# ---------------------------------------------------------------------------
+# L8: every rsync invocation carries --safe-links (both directions)
+# ---------------------------------------------------------------------------
+
+
+def test_rsync_argv_includes_safe_links(tmp_path, monkeypatch):
+    captured = []
+
+    def fake_run(self, args):
+        captured.append(list(args))
+
+    monkeypatch.setattr(RsyncRunner, "_run", fake_run)
+    runner = RsyncRunner(ssh_alias="runner", runner_runs_dir="/remote/runs")
+    local = tmp_path / "run1"
+
+    runner.pull_db("run1", local)  # 3 argv (db + -wal + -shm)
+    runner.pull_run("run1", local, ["--exclude=/reservoir/"])  # down
+    runner.push_run("run1", local)  # up
+
+    assert len(captured) == 5
+    for args in captured:
+        assert "--safe-links" in args
+
+
+# ---------------------------------------------------------------------------
+# L10: last_status is clamped to the known enum before harness_sync upsert
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_last_status():
+    # Known run_db lifecycle + runnerd process states pass through.
+    for known in ("running", "completed", "queued", "preparing", "starting", "crashed"):
+        assert sanitize_last_status(known) == known
+    # Anything else is clamped to "unknown".
+    for bad in ("pwned; DROP TABLE runs", "weird", "RUNNING", "1"):
+        assert sanitize_last_status(bad) == "unknown"
+    # None (no status observed yet) is preserved as absence.
+    assert sanitize_last_status(None) is None
+
+
+def test_pull_once_sanitizes_unknown_status_into_harness_sync(tmp_path, monkeypatch):
+    """A pulled db whose status is garbage stores 'unknown' in harness_sync,
+    never the raw text (L10). Replay is stubbed and read_run_status forced to an
+    unknown value so the untrusted status reaches the upsert path unfiltered."""
+    _build_remote_run(tmp_path / "remote", status="running")
+    dest = _dest_db(tmp_path)
+    runner = FakeRunner(tmp_path / "remote")
+    coord = PullCoordinator(
+        runner=runner,
+        local_runs_dir=tmp_path / "local",
+        dest_conn=dest,
+        origin_host="runner",
+        replay_fn=lambda *a: {"runs": 0, "checkpoints": 0, "evals": 0},
+    )
+    monkeypatch.setattr(
+        pullmod, "read_run_status", lambda db_path, run_name: "totally-bogus"
+    )
+    status = coord.pull_once("v0.4-prtcfr-r1")
+    # pull_once returns the raw observed status ...
+    assert status == "totally-bogus"
+    # ... but harness_sync only ever holds a known enum value or "unknown".
+    hs = dest.execute(
+        "SELECT last_status FROM harness_sync WHERE run_name=?", ("v0.4-prtcfr-r1",)
+    ).fetchone()
+    assert hs["last_status"] == "unknown"
+    dest.close()
