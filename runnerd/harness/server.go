@@ -145,12 +145,20 @@ func (s *Server) requireBearer(next http.Handler) http.Handler {
 }
 
 // checkOrigin enforces the single configured allowed WS origin (design 5.3),
-// exact match, never wildcard. An unset allowed origin fails closed.
+// exact match, never wildcard. The Origin header is a browser artifact: a
+// request without one comes from a non-browser client (the CLI) and is
+// admitted on Bearer auth alone, which is the CSWSH threat model; a request
+// that carries one must match exactly, and an unset allowed origin fails
+// closed for any browser-originated request.
 func (s *Server) checkOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
 	if s.allowedOrigin == "" {
 		return false
 	}
-	return r.Header.Get("Origin") == s.allowedOrigin
+	return origin == s.allowedOrigin
 }
 
 // originHostPattern extracts the host of the configured origin for the

@@ -21,7 +21,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/jason-s-yu/cambia/runnerd/ingest/internal/ingestapi"
+	"github.com/jason-s-yu/cambia/runnerd/ingestapi"
 )
 
 // goToolchainPin is the GOTOOLCHAIN value forced for every libcambia build so a

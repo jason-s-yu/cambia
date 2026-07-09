@@ -11,11 +11,13 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"syscall"
 
 	"github.com/jason-s-yu/cambia/runnerd/authtoken"
 	"github.com/jason-s-yu/cambia/runnerd/harness"
+	"github.com/jason-s-yu/cambia/runnerd/ingest"
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 )
 
@@ -24,6 +26,7 @@ func main() {
 		"control-plane listen address (dev default 127.0.0.1:8090; prod binds the runner LAN address)")
 	flag.Parse()
 
+	baseDir := envOr("RUNNERD_BASE_DIR", "/srv/cambia")
 	runsDir := envOr("RUNNERD_RUNS_DIR", "/srv/cambia/runs")
 	cfrDir := envOr("RUNNERD_CFR_DIR", "/srv/cambia/cfr")
 	cambiaBin := envOr("RUNNERD_CAMBIA_BIN", "cambia")
@@ -83,10 +86,12 @@ func main() {
 	pm := procmgr.NewProcessManager(runsDir, cfrDir, cambiaBin, harness.NewRunResolver(runsDir), harness.HarnessAlgorithms())
 	pm.SetMaxConcurrent(maxJobs)
 
-	// M2 wires the stub Environment: without the M3 ingest pipeline the daemon
-	// cannot stage a real job, so a submitted job fails honestly. Queue, state
-	// machine, API, and reconcile are fully operable against it.
-	disp := harness.NewDispatcher(pm, harness.StubEnvironment{}, runsDir, maxJobs, maxQueue, 0)
+	env := ingest.New(ingest.Config{
+		BaseDir:  baseDir,
+		RunsDir:  runsDir,
+		CoresCap: runtime.NumCPU() - 2,
+	})
+	disp := harness.NewDispatcher(pm, env, runsDir, maxJobs, maxQueue, 0)
 
 	// Reconcile-then-report: never auto-launch (design 2.3/6).
 	disp.Reconcile()
