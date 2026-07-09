@@ -286,6 +286,26 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
 
     sys.modules["src.config"] = _config_stub
 
+# --- Stub out src.evaluate_agents (heavy numpy/torch/engine chain) ---
+# run_db imports MEAN_IMP_BASELINES from evaluate_agents at module load, which
+# otherwise pulls in the whole training stack. Try the real module first; only
+# fall back to a constant-only stub when the heavy deps are unavailable (e.g. a
+# minimal isolated test venv). In a full env this is a no-op.
+if "src.evaluate_agents" not in sys.modules:
+    try:
+        import src.evaluate_agents  # noqa: F401
+    except Exception:
+        _ea_stub = types.ModuleType("src.evaluate_agents")
+        # Mirror the canonical MEAN_IMP_BASELINES (evaluate_agents.py).
+        _ea_stub.MEAN_IMP_BASELINES = (
+            "random_no_cambia",
+            "random_late_cambia",
+            "imperfect_greedy",
+            "memory_heuristic",
+            "aggressive_snap",
+        )
+        sys.modules["src.evaluate_agents"] = _ea_stub
+
 # ---------------------------------------------------------------------------
 # Deterministic seeds fixture
 # ---------------------------------------------------------------------------

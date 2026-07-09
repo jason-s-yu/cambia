@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS runs (
     house_rules_hash TEXT,
     config_schema_version INTEGER DEFAULT 1,
     engine_commit_hash TEXT,
+    origin_host TEXT,
     best_metric_name TEXT,
     best_metric_value REAL,
     best_metric_iter INTEGER,
@@ -199,6 +200,12 @@ def get_db(db_path: Optional[str] = None) -> sqlite3.Connection:
 # without dropping data. CREATE TABLE IF NOT EXISTS never alters an existing table,
 # so new columns must be added here too (the DDL above carries them for fresh DBs).
 _COLUMN_MIGRATIONS: Dict[str, list] = {
+    "runs": [
+        # NULL = local run; a non-NULL value records the origin host of a run
+        # ingested by the serving-harness reconciler (design 4.3). Registered here
+        # so databases created before this column gain it without a rebuild.
+        ("origin_host", "TEXT"),
+    ],
     "eval_results": [
         ("seat_balanced", "INTEGER DEFAULT 0"),
         ("selection_mode", "TEXT"),
@@ -372,11 +379,22 @@ def upsert_run(
     tags: Optional[list] = None,
     notes: Optional[str] = None,
     parent_run_id: Optional[int] = None,
+    engine_commit_hash: Optional[str] = None,
+    origin_host: Optional[str] = None,
 ) -> int:
     """
     Insert or update a run record.
 
-    On conflict (same name), updates algorithm, status, config hashes, and updated_at.
+    On conflict (same name), updates algorithm, status, config hashes, origin_host,
+    and updated_at.
+
+    Args:
+        engine_commit_hash: If None (default), the current checkout's short HEAD is
+            stamped via _get_engine_commit(). If provided, it is stored verbatim so
+            the serving-harness reconciler can preserve the runner-recorded commit
+            instead of re-stamping the client's HEAD (design 4.2).
+        origin_host: NULL/None (default) for a local run; the reconciler passes the
+            source host so remote-ingested runs are distinguishable (design 4.3).
 
     Returns:
         run_id (integer primary key).
@@ -384,25 +402,28 @@ def upsert_run(
     now = _now()
     cfg_hash = config_hash(config_yaml) if config_yaml else None
     hr_hash = house_rules_hash(config_dict) if config_dict else None
-    engine_commit = _get_engine_commit()
+    engine_commit = (
+        engine_commit_hash if engine_commit_hash is not None else _get_engine_commit()
+    )
     tags_json = json.dumps(tags or [])
 
     cur = db.execute(
         """
         INSERT INTO runs (name, algorithm, status, config_hash, house_rules_hash,
-                          engine_commit_hash, tags, notes, parent_run_id,
+                          engine_commit_hash, origin_host, tags, notes, parent_run_id,
                           created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(name) DO UPDATE SET
             algorithm=excluded.algorithm,
             status=excluded.status,
             config_hash=excluded.config_hash,
             house_rules_hash=excluded.house_rules_hash,
             engine_commit_hash=excluded.engine_commit_hash,
+            origin_host=excluded.origin_host,
             updated_at=excluded.updated_at
         """,
         (name, algorithm, status, cfg_hash, hr_hash,
-         engine_commit, tags_json, notes, parent_run_id, now, now),
+         engine_commit, origin_host, tags_json, notes, parent_run_id, now, now),
     )
     db.commit()
 
