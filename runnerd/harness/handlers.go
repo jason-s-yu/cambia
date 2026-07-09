@@ -1,0 +1,232 @@
+package harness
+
+import (
+	"encoding/json"
+	"errors"
+	"math"
+	"net/http"
+	"os"
+	"path/filepath"
+
+	"github.com/jason-s-yu/cambia/runnerd/pathguard"
+	"github.com/jason-s-yu/cambia/runnerd/procmgr"
+)
+
+// handleCreateJob is POST /harness/jobs. It runs the design 2.6 validation order
+// (validateName -> collision -> kind allowlist -> path guards -> preflights ->
+// render gate), then admits and enqueues the job. Status mapping: 201 accepted,
+// 409 name collision, 400 invalid name/kind/path, 412 preflight failure (per
+// check), 429 queue full.
+func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
+	var spec JobSpec
+	if err := decodeJSON(r, &spec); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_body", err.Error())
+		return
+	}
+
+	// 1. validateName
+	if err := procmgr.ValidateName(spec.Name); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_name", err.Error())
+		return
+	}
+	// 2. name collision (procmgr.Create re-checks atomically under lock)
+	if c := procmgr.NameCollisionCheck(s.runsDir, spec.Name); !c.OK {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":  "name_collision",
+			"checks": []procmgr.PreflightCheck{c},
+		})
+		return
+	}
+	// 3. kind allowlist
+	if _, ok := s.algos[spec.Kind]; !ok {
+		writeJSONError(w, http.StatusBadRequest, "invalid_kind", "kind not in allowlist: "+spec.Kind)
+		return
+	}
+	// 4. path guards (config, checkpoints)
+	for _, p := range spec.guardedPaths() {
+		if err := pathguard.CheckRel(p.value); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_path", p.label+": "+err.Error())
+			return
+		}
+	}
+	// 5. preflights (disk, RAM; gpu skipped for cpu) under the runner force matrix
+	checks := s.submitPreflights(&spec)
+	if ok, failed := preflightPasses(checks, spec.Force); !ok {
+		writeJSON(w, http.StatusPreconditionFailed, map[string]any{
+			"error":    "preflight_failed",
+			"checks":   failed,
+			"override": "force (gpu_vram only; disk/ram floors are operator-set)",
+		})
+		return
+	}
+	// 6. render gate (M2 stub)
+	if err := s.renderGate(&spec); err != nil {
+		writeJSONError(w, http.StatusUnprocessableEntity, "render_failed", err.Error())
+		return
+	}
+
+	view, err := s.disp.Submit(spec)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrQueueFull):
+			writeJSONError(w, http.StatusTooManyRequests, "queue_full", err.Error())
+		case errors.Is(err, procmgr.ErrNameCollision):
+			writeJSONError(w, http.StatusConflict, "name_collision", err.Error())
+		case errors.Is(err, procmgr.ErrInvalidName):
+			writeJSONError(w, http.StatusBadRequest, "invalid_name", err.Error())
+		default:
+			writeJSONError(w, http.StatusInternalServerError, "submit_failed", err.Error())
+		}
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"job_id":    view.JobID,
+		"state":     view.State,
+		"queue_pos": view.QueuePos,
+	})
+}
+
+// submitPreflights builds the admission preflight checks. gpu_vram is skipped
+// for a cpu job (the runner is cpu-only in v1); disk and RAM floors always apply.
+func (s *Server) submitPreflights(spec *JobSpec) []procmgr.PreflightCheck {
+	var checks []procmgr.PreflightCheck
+	if spec.device() == "cpu" {
+		checks = append(checks, procmgr.PreflightCheck{Name: "gpu_vram", OK: true, Detail: "device=cpu, GPU check skipped"})
+	} else {
+		checks = append(checks, procmgr.GPUVRAMCheck(s.minVRAMGB, s.gpuQuery))
+	}
+	checks = append(checks, procmgr.DiskSpaceCheck(s.runsDir, s.minDiskGB))
+	checks = append(checks, MinFreeRAMCheck(s.minRAMGB, s.ramQuery))
+	return checks
+}
+
+// renderGate is the M2 stub of the config render+validate gate (design 3.4). In
+// M3 it runs `cambia config render ... -o runDir/config.yaml` then `cambia
+// config validate` inside Prepare. In M2 the config is not materialized until
+// ingest, so there is nothing to render yet.
+func (s *Server) renderGate(spec *JobSpec) error { return nil }
+
+// handleListJobs is GET /harness/jobs.
+func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": s.disp.List()})
+}
+
+// handleGetJob is GET /harness/jobs/{id}: full view + resolved sha + env.json
+// summary (env.json is written by M3 ingest; absent in M2).
+func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := procmgr.ValidateName(id); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_name", err.Error())
+		return
+	}
+	view, ok := s.disp.resolveView(id)
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, "not_found", "job not found")
+		return
+	}
+	resp := map[string]any{"job": view, "resolved_sha": view.Commit}
+	if env := readEnvJSON(s.runsDir, id); env != nil {
+		resp["env"] = env
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleDeleteJob is DELETE /harness/jobs/{id}. ?purge=true removes a terminal
+// job's run dir (refused for a non-terminal job); otherwise it cancels: a queued
+// job is dropped, a running job is stopped (?force = SIGKILL, else SIGINT + 30s
+// grace).
+func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := procmgr.ValidateName(id); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_name", err.Error())
+		return
+	}
+	q := r.URL.Query()
+	if q.Get("purge") == "true" {
+		switch err := s.disp.Purge(id); {
+		case err == nil:
+			writeJSON(w, http.StatusOK, map[string]any{"job_id": id, "purged": true})
+		case errors.Is(err, ErrNotTerminal):
+			writeJSONError(w, http.StatusConflict, "not_terminal", "purge refuses a non-terminal job")
+		case errors.Is(err, ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "not_found", "job not found")
+		default:
+			writeJSONError(w, http.StatusInternalServerError, "purge_failed", err.Error())
+		}
+		return
+	}
+
+	force := q.Get("force") == "true"
+	if _, err := s.disp.Cancel(id, force); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeJSONError(w, http.StatusNotFound, "not_found", "job not found")
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, "cancel_failed", err.Error())
+		return
+	}
+	view, _ := s.disp.resolveView(id)
+	writeJSON(w, http.StatusOK, map[string]any{"job": view})
+}
+
+// handleResumeJob is POST /harness/jobs/{id}/resume: gate on the PRT-CFR resume
+// contract, then re-enqueue as a resume launch.
+func (s *Server) handleResumeJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := procmgr.ValidateName(id); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_name", err.Error())
+		return
+	}
+	view, err := s.disp.Resume(id)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "not_found", "job not found")
+		case errors.Is(err, ErrNoResumableState):
+			writeJSONError(w, http.StatusConflict, "no_resumable_state",
+				"resume requires runs/"+id+"/snapshots/prtcfr_checkpoint.pt and resume_state.json")
+		case errors.Is(err, ErrAlreadyQueued):
+			writeJSONError(w, http.StatusConflict, "already_queued", err.Error())
+		case errors.Is(err, ErrQueueFull):
+			writeJSONError(w, http.StatusTooManyRequests, "queue_full", err.Error())
+		default:
+			writeJSONError(w, http.StatusInternalServerError, "resume_failed", err.Error())
+		}
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"job_id":    view.JobID,
+		"state":     view.State,
+		"queue_pos": view.QueuePos,
+	})
+}
+
+// handleHealth is GET /harness/health.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	snap := s.disp.Snapshot()
+	freeRAM, _ := s.ramQuery()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"reconciled_at": snap.ReconciledAt,
+		"jobs_running":  snap.JobsRunning,
+		"queue_depth":   snap.QueueDepth,
+		"free_ram_gb":   round1(freeRAM),
+		"free_disk_gb":  round1(diskFreeGB(s.runsDir)),
+	})
+}
+
+// readEnvJSON reads runs/<name>/env.json as a raw map (M3 provenance record),
+// returning nil when absent or unparseable.
+func readEnvJSON(runsDir, name string) map[string]any {
+	data, err := os.ReadFile(filepath.Join(runsDir, name, "env.json"))
+	if err != nil {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil
+	}
+	return m
+}
+
+// round1 rounds to one decimal place for the health payload.
+func round1(v float64) float64 { return math.Round(v*10) / 10 }
