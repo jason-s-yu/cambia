@@ -3447,5 +3447,14 @@ def runs_backfill(
     raise typer.Exit(result.returncode)
 
 
+# Serving-harness control plane (cambia-256). The sub-app lives in
+# src.harness.cli; its heavy deps (websockets/pyjwt/cryptography) are imported
+# lazily inside each command, so registering it here does not pull them into the
+# base CLI import.
+from src.harness.cli import harness_app  # noqa: E402
+
+app.add_typer(harness_app, name="harness")
+
+
 if __name__ == "__main__":
     app()
