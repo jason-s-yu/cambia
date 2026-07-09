@@ -230,10 +230,22 @@ func (m *Manager) Cleanup(jobID string, keepForDebug bool) error {
 		return m.markDebugTTL(worktreeDir)
 	}
 	ctx := context.Background()
-	if err := m.removeWorktree(ctx, worktreeDir); err != nil {
+	// The job ref is deliberately NOT deleted here: its lifetime is the run
+	// dir's, not the worktree's. Resume re-runs Prepare, whose receipt check
+	// needs the ref, and the mirror's pruning gc would otherwise collect the
+	// pinned commit. PurgeRef (run-dir purge) and StartupSweep (ref with no
+	// run dir) own ref deletion.
+	return m.removeWorktree(ctx, worktreeDir)
+}
+
+// PurgeRef deletes a job's mirror ref. Called when the run dir is purged: the
+// ref pins the job's commit against mirror gc for exactly as long as the run
+// (and thus a possible resume) exists.
+func (m *Manager) PurgeRef(jobID string) error {
+	if err := validateJobID(jobID); err != nil {
 		return err
 	}
-	return m.deleteJobRef(ctx, jobID)
+	return m.deleteJobRef(context.Background(), jobID)
 }
 
 // StartupSweep reconciles ingest state after a daemon restart. It prunes every
@@ -271,9 +283,25 @@ func (m *Manager) StartupSweep(liveJobIDs []string) error {
 		if err := m.removeWorktree(ctx, m.worktreePath(jobID)); err != nil && firstErr == nil {
 			firstErr = err
 		}
-		if err := m.deleteJobRef(ctx, jobID); err != nil && firstErr == nil {
-			firstErr = err
+	}
+
+	// Reap job refs by run-dir lifetime, independent of worktree state: a ref
+	// whose run dir still exists pins a resumable run's commit against the gc
+	// below; one without a run dir (purged while the daemon was down) is dead.
+	if refs, err := m.listJobRefs(ctx); err == nil {
+		for _, jobID := range refs {
+			if live[jobID] {
+				continue
+			}
+			if _, statErr := os.Stat(m.runDir(jobID)); statErr == nil {
+				continue
+			}
+			if err := m.deleteJobRef(ctx, jobID); err != nil && firstErr == nil {
+				firstErr = err
+			}
 		}
+	} else if firstErr == nil {
+		firstErr = err
 	}
 
 	// Prune dangling worktree admin entries, then pruning gc on the mirror.

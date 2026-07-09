@@ -432,6 +432,8 @@ func (d *Dispatcher) Purge(name string) error {
 	if err := os.RemoveAll(d.runDir(name)); err != nil {
 		return err
 	}
+	// The run dir is gone, so the pinned commit no longer needs its gc anchor.
+	_ = d.env.PurgeRef(name)
 	d.broadcast()
 	return nil
 }

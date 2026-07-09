@@ -56,6 +56,7 @@ func (s *stagedEnv) Prepare(ctx context.Context, jobID, commit, kind, configRel 
 }
 
 func (s *stagedEnv) Cleanup(string, bool) error  { return nil }
+func (s *stagedEnv) PurgeRef(string) error       { return nil }
 func (s *stagedEnv) StartupSweep([]string) error { return nil }
 
 // writeCaptureInterp writes a fake interpreter that records its argv, physical

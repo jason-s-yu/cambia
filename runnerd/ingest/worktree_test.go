@@ -35,7 +35,7 @@ func TestAddWorktreeChecksOutSha(t *testing.T) {
 	}
 }
 
-func TestCleanupSyncedRemovesWorktreeAndRef(t *testing.T) {
+func TestCleanupSyncedRemovesWorktreeKeepsRef(t *testing.T) {
 	m, _ := testManager(t, ExecRunner{})
 	wd, _ := stageWorktree(t, m, "job-b")
 
@@ -45,8 +45,18 @@ func TestCleanupSyncedRemovesWorktreeAndRef(t *testing.T) {
 	if _, err := os.Stat(wd); !os.IsNotExist(err) {
 		t.Fatalf("worktree not removed: %v", err)
 	}
-	if _, err := m.git(context.Background(), "rev-parse", "--verify", "--quiet", jobRef("job-b")); err == nil {
-		t.Fatal("job ref not deleted")
+	// The ref survives worktree cleanup: it pins the commit against mirror gc
+	// for as long as the run dir (and thus a possible resume) exists.
+	if out, err := m.git(context.Background(), "rev-parse", "--verify", "--quiet", jobRef("job-b")); err != nil || out == "" {
+		t.Fatalf("job ref deleted on cleanup; resume would fail its receipt check: %v", err)
+	}
+
+	// PurgeRef (run-dir purge) is the deleter.
+	if err := m.PurgeRef("job-b"); err != nil {
+		t.Fatalf("PurgeRef: %v", err)
+	}
+	if out, _ := m.git(context.Background(), "rev-parse", "--verify", "--quiet", jobRef("job-b")); out != "" {
+		t.Fatal("job ref not deleted by PurgeRef")
 	}
 }
 

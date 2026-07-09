@@ -8,8 +8,9 @@ import (
 )
 
 // jobRef returns the job-scoped ref name for jobID (design 3.1). A job ref never
-// pre-exists across jobs; it is created by the submit-time push and deleted on
-// cleanup.
+// pre-exists across jobs; it is created by the submit-time push and lives as
+// long as the run dir (deleted on purge, or by the startup sweep once the run
+// dir is gone), pinning the job's commit against mirror gc for resume.
 func jobRef(jobID string) string {
 	return "refs/harness/" + jobID
 }
@@ -103,8 +104,24 @@ func (m *Manager) BundleFetch(ctx context.Context, jobID, bundlePath string) err
 	return nil
 }
 
+// listJobRefs returns the job ids of every refs/harness/* ref in the mirror.
+func (m *Manager) listJobRefs(ctx context.Context) ([]string, error) {
+	out, err := m.git(ctx, "for-each-ref", "--format=%(refname)", "refs/harness/")
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for _, line := range strings.Split(out, "\n") {
+		if id := strings.TrimPrefix(line, "refs/harness/"); id != "" && id != line {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
 // deleteJobRef removes the job-scoped ref (idempotent: a missing ref is not an
-// error). Used on terminal cleanup and startup sweep.
+// error). Ref lifetime follows the run dir: PurgeRef and the startup sweep's
+// run-dir-absence check are the only deleters.
 func (m *Manager) deleteJobRef(ctx context.Context, jobID string) error {
 	ref := jobRef(jobID)
 	// A missing ref makes update-ref -d fail; treat "already gone" as success.

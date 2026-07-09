@@ -22,11 +22,16 @@ type Environment interface {
 	// the staged paths, or an error the dispatcher records as a job failure. The
 	// context is canceled if the job is canceled mid-prepare.
 	Prepare(ctx context.Context, jobID, commit, kind, configRel string, overrides map[string]string) (*ingestapi.Prepared, error)
-	// Cleanup releases a terminal job's staged resources (worktree, job ref). It
-	// keeps them for a debug TTL when keepForDebug is set (e.g. a crash).
+	// Cleanup releases a terminal job's worktree. It keeps it for a debug TTL
+	// when keepForDebug is set (e.g. a crash). The job's mirror ref is NOT
+	// released here: it lives as long as the run dir so a resume can
+	// re-prepare from the pinned commit (see PurgeRef).
 	Cleanup(jobID string, keepForDebug bool) error
+	// PurgeRef deletes the job's mirror ref when its run dir is purged.
+	PurgeRef(jobID string) error
 	// StartupSweep reconciles staged resources at daemon start: anything staged
-	// for a job not in liveJobIDs and not in a debug TTL is pruned.
+	// for a job not in liveJobIDs and not in a debug TTL is pruned; job refs
+	// without a run dir are reaped.
 	StartupSweep(liveJobIDs []string) error
 }
 
@@ -49,6 +54,9 @@ func (StubEnvironment) Prepare(context.Context, string, string, string, string, 
 
 // Cleanup is a no-op in the stub.
 func (StubEnvironment) Cleanup(string, bool) error { return nil }
+
+// PurgeRef is a no-op in the stub.
+func (StubEnvironment) PurgeRef(string) error { return nil }
 
 // StartupSweep is a no-op in the stub.
 func (StubEnvironment) StartupSweep([]string) error { return nil }

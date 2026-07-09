@@ -30,9 +30,10 @@ type fakeEnv struct {
 	prepareErr error
 	block      chan struct{} // if non-nil, Prepare waits on it (or ctx) before returning
 
-	mu       sync.Mutex
-	cleanups []string
-	sweeps   [][]string
+	mu         sync.Mutex
+	cleanups   []string
+	purgedRefs []string
+	sweeps     [][]string
 }
 
 func (f *fakeEnv) Prepare(ctx context.Context, jobID, commit, kind, configRel string, overrides map[string]string) (*ingestapi.Prepared, error) {
@@ -61,6 +62,13 @@ func (f *fakeEnv) Cleanup(jobID string, keepForDebug bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.cleanups = append(f.cleanups, jobID)
+	return nil
+}
+
+func (f *fakeEnv) PurgeRef(jobID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.purgedRefs = append(f.purgedRefs, jobID)
 	return nil
 }
 
