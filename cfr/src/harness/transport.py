@@ -39,6 +39,9 @@ MAX_TOKEN_TTL_SECONDS = 3600
 # against the runner control plane.
 TOKEN_AUDIENCE = "cambia-runnerd"
 
+# nbf backdate absorbing small mint-host/runner clock skew (see mint_token).
+NBF_BACKDATE_SECONDS = 30
+
 
 class TransportError(Exception):
     """Base class for transport-layer failures."""
@@ -111,11 +114,15 @@ def mint_token(
         )
     issued = now or datetime.now(timezone.utc)
     exp = issued + timedelta(seconds=ttl_seconds)
+    # nbf is backdated so a runner whose clock trails the mint host by a few
+    # seconds (WSL2 drift, container hosts) does not reject a fresh token;
+    # jwt validators check nbf with zero leeway by default.
+    nbf = issued - timedelta(seconds=NBF_BACKDATE_SECONDS)
     claims = {
         "sub": subject,
         "aud": TOKEN_AUDIENCE,
         "iat": int(issued.timestamp()),
-        "nbf": int(issued.timestamp()),
+        "nbf": int(nbf.timestamp()),
         "exp": int(exp.timestamp()),
     }
     return jwt.encode(claims, private_key, algorithm="EdDSA")

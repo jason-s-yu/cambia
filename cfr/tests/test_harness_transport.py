@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from src.harness.transport import (
+    NBF_BACKDATE_SECONDS,
     TOKEN_AUDIENCE,
     CertificatePinError,
     ControlPlaneTransport,
@@ -98,7 +99,11 @@ def test_mint_token_claim_shape(tmp_path):
     assert decoded["sub"] == "cambia-harness"
     assert decoded["aud"] == TOKEN_AUDIENCE
     assert decoded["iat"] == int(now.timestamp())
-    assert decoded["nbf"] == int(now.timestamp())
+    # nbf is backdated by the clock-skew guard so a runner whose clock trails
+    # the mint host still accepts a fresh token.
+    assert decoded["nbf"] == int(
+        (now - timedelta(seconds=NBF_BACKDATE_SECONDS)).timestamp()
+    )
     assert decoded["exp"] == int((now + timedelta(seconds=900)).timestamp())
     # EdDSA header
     header = jwt.get_unverified_header(token)

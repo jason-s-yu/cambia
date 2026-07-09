@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -32,6 +33,12 @@ var ErrNoPublicKey = errors.New("no JWT public key path configured")
 // audience) still cannot drive a job launch or cancel, because it does not carry
 // aud == "cambia-runnerd".
 const Audience = "cambia-runnerd"
+
+// ClockSkewLeeway is applied to exp/nbf/iat validation so a mint host and
+// runner whose clocks disagree by a few seconds (WSL2 drift, container hosts)
+// do not spuriously reject fresh tokens. The client mint additionally backdates
+// nbf; the two guards are independent halves of the same skew tolerance.
+const ClockSkewLeeway = 30 * time.Second
 
 // Verifier holds an ed25519 public key and verifies JWTs against it. It is
 // immutable after Load and safe for concurrent use.
@@ -79,7 +86,7 @@ func (v *Verifier) Verify(tokenString string) (string, error) {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 		}
 		return v.pub, nil
-	}, jwt.WithAudience(Audience))
+	}, jwt.WithAudience(Audience), jwt.WithLeeway(ClockSkewLeeway))
 	if err != nil {
 		return "", fmt.Errorf("jwt parse error: %w", err)
 	}
