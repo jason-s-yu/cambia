@@ -469,3 +469,21 @@ def test_cli_smoke_direct_call(tmp_path, monkeypatch):
     assert (run_dir / "snapshots" / "prtcfr_snapshot_iter_2.pt").exists()
     rows = (run_dir / "metrics.jsonl").read_text().strip().splitlines()
     assert len(rows) == 2
+
+
+def test_init_run_db_honors_cambia_run_db_env(tmp_path, monkeypatch):
+    """CAMBIA_RUN_DB redirects the trainer's journal to the per-run-dir
+    run_db.sqlite the serving harness syncs (design 4.2); without it the
+    runs-dir sibling default is unchanged."""
+    from src.cfr.prtcfr_trainer import PRTCFRProductionTrainer
+
+    run_dir = tmp_path / "runs" / "env-run"
+    run_dir.mkdir(parents=True)
+    journal = run_dir / "run_db.sqlite"
+    monkeypatch.setenv("CAMBIA_RUN_DB", str(journal))
+
+    trainer = object.__new__(PRTCFRProductionTrainer)
+    trainer.run_dir = str(run_dir)
+    trainer._init_run_db(None, "env-run", None, None)
+    assert journal.exists()
+    assert not (tmp_path / "runs" / "cambia_runs.db").exists()

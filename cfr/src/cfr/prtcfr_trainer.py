@@ -1072,7 +1072,10 @@ class PRTCFRProductionTrainer:
             return
         try:
             if db_path is None:
-                db_path = os.path.join(
+                # CAMBIA_RUN_DB (serving harness, design 4.2) redirects the
+                # journal to the per-run-dir run_db.sqlite the pull loop
+                # syncs; otherwise the local default is the runs-dir sibling.
+                db_path = os.environ.get("CAMBIA_RUN_DB") or os.path.join(
                     os.path.dirname(os.path.abspath(self.run_dir)), "cambia_runs.db"
                 )
             self._db_conn = _run_db.get_db(db_path)

@@ -129,7 +129,9 @@ class SoGTrainer:
                     "strategy/sog_checkpoint.pt",
                 ) if _persistence is not None else "strategy/sog_checkpoint.pt"
                 save_dir = os.path.dirname(ckpt_path) if os.path.dirname(ckpt_path) else "."
-                db_path = str(Path(save_dir).parent.parent / "cambia_runs.db")
+                db_path = os.environ.get("CAMBIA_RUN_DB") or str(
+                    Path(save_dir).parent.parent / "cambia_runs.db"
+                )
                 self._db_conn = _run_db.get_db(db_path)
                 run_name = Path(save_dir).parent.name if Path(save_dir).name == "checkpoints" else Path(save_dir).name
                 config_yaml = None
