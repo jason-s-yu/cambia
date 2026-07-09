@@ -110,7 +110,10 @@ func (m *Manager) buildVenv(ctx context.Context, worktreeDir, venvDir string) er
 
 	if res, err := m.runner.Run(ctx, Command{
 		Name: "uv",
-		Args: []string{"venv", venvDir, "--python", m.cfg.PythonBin},
+		// --clear replaces any stale tree at the target (uv refuses an
+		// existing dir otherwise), so a rebuild over a receipt-less remnant
+		// is self-healing.
+		Args: []string{"venv", venvDir, "--clear", "--python", m.cfg.PythonBin},
 		Dir:  cfrDir,
 		Env:  uvEnv,
 	}); err != nil {
