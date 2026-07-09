@@ -48,7 +48,8 @@ echo "== stage 4: systemd unit (sudo on runner)"
 ssh "$RUNNER_SSH" 'sudo install -o root -g root -m 644 /tmp/cambia-runnerd.service /etc/systemd/system/cambia-runnerd.service \
   && rm -f /tmp/cambia-runnerd.service \
   && sudo systemctl daemon-reload \
-  && sudo systemctl enable --now cambia-runnerd \
+  && sudo systemctl enable cambia-runnerd \
+  && sudo systemctl restart cambia-runnerd \
   && sleep 2 && sudo systemctl --no-pager --lines=5 status cambia-runnerd'
 
 echo "== stage 5: acceptance probes"
