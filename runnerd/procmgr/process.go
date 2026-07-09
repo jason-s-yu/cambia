@@ -109,7 +109,33 @@ type CreateRequest struct {
 type StartOpts struct {
 	// ExtraArgs are appended verbatim to the spawn argument list. Preflight
 	// options (force, VRAM/disk thresholds) live in the HTTP layer, not here.
+	// ExtraArgs apply to the fixed-binary path only; the parameterized launch
+	// (see LaunchOpts) carries its full argv in LaunchOpts.Argv.
 	ExtraArgs []string
+}
+
+// LaunchOpts parameterizes a launch against an externally staged execution
+// environment, overriding the manager's constructor-fixed cambia binary and cfr
+// dir. The zero value selects the legacy fixed-binary launch and is byte-for-byte
+// the prior behavior, so the dashboard's fixed-binary callers are unaffected.
+// A non-empty Python selects the parameterized path: the runnerd dispatcher fills
+// it from the ingest-staged Prepared so a job runs from its per-lock venv and
+// pinned worktree (design 2.7).
+type LaunchOpts struct {
+	// Python is the interpreter path to exec (the per-lock venv interpreter).
+	// Empty selects the fixed-binary launch through the manager's cambiaBin.
+	Python string
+	// Argv is the full argument vector passed to Python (e.g. -m src.cli train
+	// prtcfr --config <rendered>). The caller owns argv, including any --resume;
+	// ignored on the fixed-binary path.
+	Argv []string
+	// Cwd is the child working directory (the staged worktree cfr dir). Empty
+	// falls back to the manager's cfrDir. Ignored on the fixed-binary path.
+	Cwd string
+	// Env is extra KEY=VALUE entries appended to the inherited os.Environ() for
+	// the child (PYTHONPATH pin, LIBCAMBIA_PATH, src-containment shim). Applied
+	// only on the parameterized path.
+	Env []string
 }
 
 // managedProc is the in-memory handle for a subprocess this server instance
@@ -250,19 +276,37 @@ func (m *ProcessManager) Create(req CreateRequest) (*ProcessState, error) {
 	return st, nil
 }
 
-// Start spawns the training subprocess for a created run.
+// Start spawns the training subprocess for a created run via the fixed-binary
+// launch (the manager's cambiaBin run from cfrDir).
 func (m *ProcessManager) Start(name string, opts StartOpts) (*ProcessState, error) {
-	return m.launch(name, opts, false)
+	return m.launch(name, opts, LaunchOpts{}, false)
 }
 
 // Resume spawns the training subprocess with --resume; the caller gates
-// resumability (checkpoint presence).
+// resumability (checkpoint presence). Uses the fixed-binary launch.
 func (m *ProcessManager) Resume(name string, opts StartOpts) (*ProcessState, error) {
-	return m.launch(name, opts, true)
+	return m.launch(name, opts, LaunchOpts{}, true)
 }
 
-// launch is the shared spawn path for Start and Resume.
-func (m *ProcessManager) launch(name string, opts StartOpts, resume bool) (*ProcessState, error) {
+// StartWithOpts spawns the training subprocess for a created run with an explicit
+// launch configuration. A zero LaunchOpts is identical to Start (fixed-binary
+// path); a LaunchOpts with Python set launches the ingest-staged interpreter,
+// argv, cwd, and env instead of the constructor-fixed binary (design 2.7). All
+// supervision (process group, pid-reuse stamping, process.json, stop/kill,
+// concurrency gate) is applied identically regardless of which path is taken.
+func (m *ProcessManager) StartWithOpts(name string, opts StartOpts, lopts LaunchOpts) (*ProcessState, error) {
+	return m.launch(name, opts, lopts, false)
+}
+
+// ResumeWithOpts is StartWithOpts with fixed-binary --resume semantics. On the
+// parameterized path (Python set) the caller bakes any resume flag into
+// LaunchOpts.Argv, so the resume bool only affects the fixed-binary path.
+func (m *ProcessManager) ResumeWithOpts(name string, opts StartOpts, lopts LaunchOpts) (*ProcessState, error) {
+	return m.launch(name, opts, lopts, true)
+}
+
+// launch is the shared spawn path for Start/Resume and their WithOpts variants.
+func (m *ProcessManager) launch(name string, opts StartOpts, lopts LaunchOpts, resume bool) (*ProcessState, error) {
 	if err := ValidateName(name); err != nil {
 		return nil, err
 	}
@@ -311,17 +355,10 @@ func (m *ProcessManager) launch(name string, opts StartOpts, resume bool) (*Proc
 		absRunDir = runDir
 	}
 
-	sub, err := m.AlgoSubcommand(st.Algorithm)
+	cmd, err := m.buildCmd(name, opts, lopts, resume, absConfig, absRunDir, st.Algorithm)
 	if err != nil {
 		return nil, err
 	}
-	args := make([]string, 0, len(sub)+8+len(opts.ExtraArgs))
-	args = append(args, sub...)
-	args = append(args, "--config", absConfig, "--run-name", name, "--save-path", absRunDir)
-	if resume {
-		args = append(args, "--resume")
-	}
-	args = append(args, opts.ExtraArgs...)
 
 	logDir := filepath.Join(runDir, "logs")
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
@@ -333,8 +370,6 @@ func (m *ProcessManager) launch(name string, opts StartOpts, resume bool) (*Proc
 		return nil, err
 	}
 
-	cmd := exec.Command(m.cambiaBin, args...)
-	cmd.Dir = m.cfrDir
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -383,6 +418,43 @@ func (m *ProcessManager) launch(name string, opts StartOpts, resume bool) (*Proc
 	go m.waitFor(p)
 
 	return ReadProcessState(runDir)
+}
+
+// buildCmd constructs the child command for a launch, branching on LaunchOpts.
+// A zero LaunchOpts is the fixed-binary path: cambiaBin run from cfrDir with the
+// algorithm's subcommand plus --config/--run-name/--save-path (and --resume when
+// resuming) and any StartOpts.ExtraArgs. A LaunchOpts with Python set is the
+// ingest-parameterized path (design 2.7): the staged interpreter run from the
+// staged cwd with the caller-supplied argv verbatim and the staged env appended
+// to the inherited environment. The shared supervision applied by launch (process
+// group, pid-reuse stamping, process.json, stop/kill) is identical for both.
+func (m *ProcessManager) buildCmd(name string, opts StartOpts, lopts LaunchOpts, resume bool, absConfig, absRunDir, algo string) (*exec.Cmd, error) {
+	if lopts.Python != "" {
+		cmd := exec.Command(lopts.Python, lopts.Argv...)
+		if lopts.Cwd != "" {
+			cmd.Dir = lopts.Cwd
+		} else {
+			cmd.Dir = m.cfrDir
+		}
+		cmd.Env = append(os.Environ(), lopts.Env...)
+		return cmd, nil
+	}
+
+	sub, err := m.AlgoSubcommand(algo)
+	if err != nil {
+		return nil, err
+	}
+	args := make([]string, 0, len(sub)+8+len(opts.ExtraArgs))
+	args = append(args, sub...)
+	args = append(args, "--config", absConfig, "--run-name", name, "--save-path", absRunDir)
+	if resume {
+		args = append(args, "--resume")
+	}
+	args = append(args, opts.ExtraArgs...)
+
+	cmd := exec.Command(m.cambiaBin, args...)
+	cmd.Dir = m.cfrDir
+	return cmd, nil
 }
 
 // waitFor blocks on the subprocess exit, then records the terminal state.

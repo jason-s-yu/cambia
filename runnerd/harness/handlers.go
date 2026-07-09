@@ -42,9 +42,18 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid_kind", "kind not in allowlist: "+spec.Kind)
 		return
 	}
-	// 4. path guards (config, checkpoints)
+	// 4. path guards (config, checkpoints): lexical shape (reject absolute + ..).
 	for _, p := range spec.guardedPaths() {
 		if err := pathguard.CheckRel(p.value); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_path", p.label+": "+err.Error())
+			return
+		}
+	}
+	// 4b. checkpoint containment (design 5.4): head-to-head checkpoints must
+	// resolve inside the runner runs dir. config containment is deferred to
+	// ingest render, where the worktree base is staged.
+	for _, p := range spec.containedCheckpoints() {
+		if _, err := pathguard.Resolve(s.runsDir, p.value); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid_path", p.label+": "+err.Error())
 			return
 		}

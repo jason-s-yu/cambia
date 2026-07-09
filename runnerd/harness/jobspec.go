@@ -98,27 +98,34 @@ func (s *JobSpec) overridesStr() map[string]string {
 	return out
 }
 
-// guardedPaths returns the spec's file-path fields that require path guarding,
-// keyed by kind. config is guarded for train/evaluate/bench; the two checkpoints
-// for head-to-head. The handler runs these through pathguard.CheckRel in the
-// design 2.6 validation order (after the name-collision check).
+// guardedPaths returns the spec's config path (any kind, when set) for the
+// lexical CheckRel guard in the design 2.6 validation order (after the kind
+// allowlist). Its containment base (the job worktree) is not staged until ingest
+// render, so config gets only the lexical guard at submit. Checkpoints are
+// guarded by containedCheckpoints + pathguard.Resolve, which layers containment
+// over the same lexical check against the already-known runs dir.
 func (s *JobSpec) guardedPaths() []struct{ label, value string } {
-	var out []struct{ label, value string }
-	switch s.Kind {
-	case KindHeadToHead:
-		out = append(out,
-			struct{ label, value string }{"checkpoint_a", s.CheckpointA},
-			struct{ label, value string }{"checkpoint_b", s.CheckpointB},
-		)
-		if s.Config != "" {
-			out = append(out, struct{ label, value string }{"config", s.Config})
-		}
-	default:
-		if s.Config != "" {
-			out = append(out, struct{ label, value string }{"config", s.Config})
-		}
+	if s.Config == "" {
+		return nil
 	}
-	return out
+	return []struct{ label, value string }{{"config", s.Config}}
+}
+
+// containedCheckpoints returns the head-to-head checkpoint spec fields that must
+// resolve inside the runner runs dir (design 5.4). It is the containment half of
+// the guard, layered over the lexical CheckRel in guardedPaths: checkpoints name
+// existing staged run dirs under runsDir, so their containment base is known at
+// submit time. config is not returned here because at submit its containment base
+// (the job worktree) is not yet staged; config keeps the lexical guard only until
+// ingest render.
+func (s *JobSpec) containedCheckpoints() []struct{ label, value string } {
+	if s.Kind != KindHeadToHead {
+		return nil
+	}
+	return []struct{ label, value string }{
+		{"checkpoint_a", s.CheckpointA},
+		{"checkpoint_b", s.CheckpointB},
+	}
 }
 
 // sortedKeys returns m's keys sorted, for deterministic override ordering.
