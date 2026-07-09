@@ -64,6 +64,7 @@ func writeCaptureInterp(t *testing.T, dir, capturePath string) string {
 		"  echo \"CWD: $(pwd -P)\"\n" +
 		"  echo \"MARKER: ${CAMBIA_LAUNCH_MARKER}\"\n" +
 		"  echo \"LIBCAMBIA_PATH: ${LIBCAMBIA_PATH}\"\n" +
+		"  echo \"CAMBIA_RUN_DB: ${CAMBIA_RUN_DB}\"\n" +
 		"} > \"" + capturePath + "\"\nexit 0\n"
 	if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
 		t.Fatal(err)

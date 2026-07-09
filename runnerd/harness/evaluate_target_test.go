@@ -239,6 +239,14 @@ func TestEvaluateArgvDirTargetUsesLatest(t *testing.T) {
 	if argv != wantArgv {
 		t.Errorf("argv = %q, want %q", argv, wantArgv)
 	}
+
+	// The eval job's run_db journal is the EVALUATED run's, not its own: eval
+	// rows must land in the target's run_db.sqlite so they sync with that run
+	// (design 4.2).
+	wantDB := filepath.Join(r.runsDir, "prior-run", "run_db.sqlite")
+	if got := captureField(t, string(data), "CAMBIA_RUN_DB"); got != wantDB {
+		t.Errorf("CAMBIA_RUN_DB = %q, want %q", got, wantDB)
+	}
 }
 
 // TestEvaluateFileTargetFailsJob asserts a checkpoint-file target never launches.
@@ -314,8 +322,14 @@ func TestTrainArgvUnchangedByEvaluateTarget(t *testing.T) {
 	argv := captureField(t, string(data), "ARGV")
 
 	rendered := filepath.Join(r.runsDir, "train-ok", "config.yaml")
-	wantArgv := "-m src.cli train prtcfr --config " + rendered
+	wantArgv := "-m src.cli train prtcfr --config " + rendered + " --run-name train-ok"
 	if argv != wantArgv {
-		t.Errorf("argv = %q, want %q (train argv must stay unchanged)", argv, wantArgv)
+		t.Errorf("argv = %q, want %q (train argv: rendered config + explicit run name)", argv, wantArgv)
+	}
+
+	// A train job journals into its own run dir (design 4.2 wire format).
+	wantDB := filepath.Join(r.runsDir, "train-ok", "run_db.sqlite")
+	if got := captureField(t, string(data), "CAMBIA_RUN_DB"); got != wantDB {
+		t.Errorf("CAMBIA_RUN_DB = %q, want %q", got, wantDB)
 	}
 }

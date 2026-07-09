@@ -10,7 +10,6 @@ from src.run_db import (
     infer_algorithm,
 )
 
-
 # --- infer_algorithm: checkpoint_keys detection ---
 
 
@@ -113,3 +112,21 @@ def test_algo_to_checkpoint_prefix_ppo_matches_e2_trainer_save_naming():
     assert algo_to_checkpoint_prefix("ppo") == "ppo_model"
     assert "ppo_model_steps_1000.zip".startswith(ALGO_TO_CHECKPOINT_PREFIX["ppo"])
     assert "ppo_model_eval_1000.zip".startswith(ALGO_TO_CHECKPOINT_PREFIX["ppo"])
+
+
+def test_get_db_honors_cambia_run_db_env(tmp_path, monkeypatch):
+    """CAMBIA_RUN_DB points get_db's default at the per-run journal the serving
+    harness syncs (design 4.2); an explicit db_path argument still wins."""
+    from src.run_db import get_db
+
+    journal = tmp_path / "runs" / "some-run" / "run_db.sqlite"
+    monkeypatch.setenv("CAMBIA_RUN_DB", str(journal))
+    db = get_db()
+    db.execute("SELECT 1")
+    db.close()
+    assert journal.exists()
+
+    explicit = tmp_path / "explicit.db"
+    db = get_db(str(explicit))
+    db.close()
+    assert explicit.exists()

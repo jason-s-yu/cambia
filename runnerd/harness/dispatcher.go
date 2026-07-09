@@ -258,6 +258,10 @@ func (d *Dispatcher) launchOpts(j *job, prepared *ingestapi.Prepared) (procmgr.L
 	argv := make([]string, 0, len(sub)+8)
 	argv = append(argv, "-m", "src.cli")
 	argv = append(argv, sub...)
+	// journalRun is the run whose per-run-dir run_db.sqlite this job writes:
+	// the job's own run for train, the evaluated run for evaluate (eval rows
+	// must join the evaluated run's journal so they sync with it, design 4.2).
+	journalRun := j.spec.Name
 	if j.spec.Kind == KindEvaluate {
 		// `cambia evaluate` takes a positional checkpoint/run-dir target, not
 		// --config (spec-review finding #1): --config is omitted entirely,
@@ -268,6 +272,7 @@ func (d *Dispatcher) launchOpts(j *job, prepared *ingestapi.Prepared) (procmgr.L
 			return procmgr.LaunchOpts{}, terr
 		}
 		argv = append(argv, targetArgv...)
+		journalRun = j.spec.Target
 	} else {
 		// The rendered config is consumed verbatim (design 2.7). A kind that ingest
 		// renders no config for (Prepare leaves RenderedConfig empty) gets no --config
@@ -275,15 +280,26 @@ func (d *Dispatcher) launchOpts(j *job, prepared *ingestapi.Prepared) (procmgr.L
 		if prepared.RenderedConfig != "" {
 			argv = append(argv, "--config", prepared.RenderedConfig)
 		}
+		if j.spec.Kind == KindTrain {
+			// Without an explicit name the trainer registers its run_db row
+			// under a config-derived default, decoupling the journal row from
+			// the run dir the reconciler replays (found live in M5 e2e).
+			argv = append(argv, "--run-name", j.spec.Name)
+		}
 	}
 	if j.resume {
 		argv = append(argv, "--resume")
 	}
+	// CAMBIA_RUN_DB points every run_db write of the job process (run
+	// registration, checkpoints, eval persist) at the per-run journal the pull
+	// loop syncs (design 4.2: runs/<name>/run_db.sqlite IS the wire format).
+	env := append([]string(nil), prepared.Env...)
+	env = append(env, "CAMBIA_RUN_DB="+filepath.Join(d.runsDir, journalRun, "run_db.sqlite"))
 	return procmgr.LaunchOpts{
 		Python: prepared.VenvPython,
 		Argv:   argv,
 		Cwd:    filepath.Join(prepared.WorktreeDir, "cfr"),
-		Env:    prepared.Env,
+		Env:    env,
 	}, nil
 }
 

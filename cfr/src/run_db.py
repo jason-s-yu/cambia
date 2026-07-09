@@ -27,6 +27,21 @@ from src.evaluate_agents import MEAN_IMP_BASELINES  # canonical source
 
 _DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "runs" / "cambia_runs.db"
 
+
+def _default_db_path() -> Path:
+    """Resolve the default db path, honoring the CAMBIA_RUN_DB env override.
+
+    The serving harness stages CAMBIA_RUN_DB=<run_dir>/run_db.sqlite into every
+    job process so run registration, checkpoints, and eval persists land in the
+    per-run journal the pull loop syncs (design 4.2 wire format). Read at call
+    time, not import time, so supervisors set it per process. Absent the
+    override (local dashboard, the client CLI) the central cfr/runs/cambia_runs.db
+    is unchanged.
+    """
+    env = os.environ.get("CAMBIA_RUN_DB")
+    return Path(env) if env else _DEFAULT_DB_PATH
+
+
 ALGO_TO_AGENT_TYPE: Dict[str, str] = {
     "rebel": "rebel",
     "os-mccfr": "deep_cfr",
@@ -76,6 +91,7 @@ def algo_to_agent_type(algorithm: str) -> str:
 def algo_to_checkpoint_prefix(algorithm: str) -> str:
     """Map algorithm name to checkpoint filename prefix. Falls back to 'deep_cfr_checkpoint'."""
     return ALGO_TO_CHECKPOINT_PREFIX.get(algorithm, "deep_cfr_checkpoint")
+
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -187,7 +203,7 @@ def get_db(db_path: Optional[str] = None) -> sqlite3.Connection:
     Returns:
         sqlite3.Connection with row_factory=sqlite3.Row.
     """
-    path = Path(db_path) if db_path else _DEFAULT_DB_PATH
+    path = Path(db_path) if db_path else _default_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
 
     conn = sqlite3.connect(str(path), check_same_thread=False)
@@ -322,6 +338,7 @@ def infer_algorithm(
             return "desca"
     if checkpoint_filename:
         import os as _os
+
         basename = _os.path.basename(checkpoint_filename)
         if basename.startswith("desca_search_checkpoint"):
             return "desca-search"
@@ -345,6 +362,7 @@ def infer_algorithm(
         return "rebel"
     if checkpoint_filename:
         import os
+
         basename = os.path.basename(checkpoint_filename)
         if basename.startswith("rebel_checkpoint"):
             return "rebel"
@@ -367,7 +385,9 @@ def _get_engine_commit() -> Optional[str]:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode == 0:
             return result.stdout.strip()
@@ -429,8 +449,20 @@ def upsert_run(
             origin_host=excluded.origin_host,
             updated_at=excluded.updated_at
         """,
-        (name, algorithm, status, cfg_hash, hr_hash,
-         engine_commit, origin_host, tags_json, notes, parent_run_id, now, now),
+        (
+            name,
+            algorithm,
+            status,
+            cfg_hash,
+            hr_hash,
+            engine_commit,
+            origin_host,
+            tags_json,
+            notes,
+            parent_run_id,
+            now,
+            now,
+        ),
     )
     db.commit()
 
@@ -570,7 +602,9 @@ def mark_best_checkpoint(
     db.commit()
 
     # Create best.pt symlink
-    row = db.execute("SELECT file_path FROM checkpoints WHERE id=?", (ckpt_id,)).fetchone()
+    row = db.execute(
+        "SELECT file_path FROM checkpoints WHERE id=?", (ckpt_id,)
+    ).fetchone()
     if row and row["file_path"]:
         ckpt_path = Path(row["file_path"])
         if ckpt_path.exists():
@@ -915,16 +949,16 @@ def mark_stale_running_runs(
     Returns the number of runs updated.
     """
     cutoff_epoch = datetime.now(timezone.utc).timestamp() - max_age_hours * 3600.0
-    rows = db.execute(
-        "SELECT id, updated_at FROM runs WHERE status='running'"
-    ).fetchall()
+    rows = db.execute("SELECT id, updated_at FROM runs WHERE status='running'").fetchall()
     updated = 0
     for row in rows:
         ts = row["updated_at"]
         try:
-            row_epoch = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(
-                tzinfo=timezone.utc
-            ).timestamp()
+            row_epoch = (
+                datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
+                .replace(tzinfo=timezone.utc)
+                .timestamp()
+            )
         except (TypeError, ValueError):
             # Unparseable timestamp -> treat as stale so it does not linger forever.
             row_epoch = 0.0
@@ -974,9 +1008,7 @@ def apply_checkpoint_retention(
     dropped = 0
     for r in rows:
         retained = 1 if r["id"] in keep_ids else 0
-        db.execute(
-            "UPDATE checkpoints SET is_retained=? WHERE id=?", (retained, r["id"])
-        )
+        db.execute("UPDATE checkpoints SET is_retained=? WHERE id=?", (retained, r["id"]))
         if retained == 0:
             dropped += 1
     db.commit()
