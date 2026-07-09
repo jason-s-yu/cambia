@@ -64,6 +64,7 @@ func ok(stdout string) (Result, error, bool) {
 // state via the returned *fakeControl.
 type fakeControl struct {
 	lockCheckFails bool
+	syncFails      bool
 	pyMinor        string
 	pyVersion      string
 	pipFreeze      string
@@ -109,6 +110,9 @@ func (fc *fakeControl) handleUV(c Command) (Result, error, bool) {
 		return ok("")
 	}
 	if len(c.Args) >= 1 && c.Args[0] == "sync" {
+		if fc.syncFails {
+			return Result{Stderr: []byte("sync failed")}, exec.ErrNotFound, true
+		}
 		return ok("")
 	}
 	if len(c.Args) >= 2 && c.Args[0] == "pip" && c.Args[1] == "freeze" {

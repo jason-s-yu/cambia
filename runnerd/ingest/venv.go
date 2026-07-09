@@ -64,9 +64,20 @@ func venvCacheKey(lockSha, pyMinor, platform string) string {
 	return fmt.Sprintf("%s-py%s-%s", lockSha, pyMinor, platform)
 }
 
-// venvValid reports whether a venv python interpreter is present.
+// venvReceiptName marks a venv whose uv sync completed. A cache hit requires
+// it: bin/python alone exists as soon as `uv venv` runs, so a build that died
+// between venv creation and sync completion would otherwise poison the cache
+// as a permanently-reused empty env.
+const venvReceiptName = ".cambia-venv-ok"
+
+// venvValid reports whether a venv is complete: interpreter present AND the
+// post-sync receipt written.
 func venvValid(python string) bool {
 	if _, err := os.Stat(python); err != nil {
+		return false
+	}
+	receipt := filepath.Join(filepath.Dir(filepath.Dir(python)), venvReceiptName)
+	if _, err := os.Stat(receipt); err != nil {
 		return false
 	}
 	return true
@@ -103,6 +114,7 @@ func (m *Manager) buildVenv(ctx context.Context, worktreeDir, venvDir string) er
 		Dir:  cfrDir,
 		Env:  uvEnv,
 	}); err != nil {
+		os.RemoveAll(venvDir)
 		return fmt.Errorf("uv venv: %w: %s", err, strings.TrimSpace(string(res.Stderr)))
 	}
 
@@ -112,7 +124,16 @@ func (m *Manager) buildVenv(ctx context.Context, worktreeDir, venvDir string) er
 		Dir:  cfrDir,
 		Env:  uvEnv,
 	}); err != nil {
+		// Never leave a created-but-unsynced venv behind: bin/python already
+		// exists, and a stale tree here would satisfy a naive existence probe.
+		os.RemoveAll(venvDir)
 		return fmt.Errorf("uv sync: %w: %s", err, strings.TrimSpace(string(res.Stderr)))
+	}
+
+	// Receipt last: only a fully-synced venv is ever treated as a cache hit.
+	if err := os.WriteFile(filepath.Join(venvDir, venvReceiptName), []byte("ok\n"), 0o644); err != nil {
+		os.RemoveAll(venvDir)
+		return fmt.Errorf("venv receipt: %w", err)
 	}
 	return nil
 }

@@ -77,6 +77,57 @@ func TestEnsureVenvHitMiss(t *testing.T) {
 	}
 }
 
+func TestEnsureVenvReceiptGuardsPoisonedCache(t *testing.T) {
+	fc := newFakeControl()
+	m, fr := fakeManager(t, fc)
+	_, sha := sourceRepoInMirror(t, m, "job-vr", "lock-content-R")
+	wd := m.worktreePath("job-vr")
+	if err := m.addWorktree(context.Background(), wd, sha); err != nil {
+		t.Fatal(err)
+	}
+
+	// A sync failure must not leave the created venv behind: bin/python exists
+	// as soon as `uv venv` runs and would satisfy a bare existence probe.
+	fc.syncFails = true
+	if _, err := m.ensureVenv(context.Background(), sha, wd); err == nil {
+		t.Fatal("expected ensureVenv to fail on uv sync")
+	}
+	var venvDir string
+	for _, c := range fr.callsFor("uv") {
+		if len(c.Args) >= 2 && c.Args[0] == "venv" {
+			venvDir = c.Args[1]
+		}
+	}
+	if venvDir == "" {
+		t.Fatal("no uv venv call recorded")
+	}
+	if _, err := os.Stat(venvDir); !os.IsNotExist(err) {
+		t.Fatalf("failed-sync venv dir still present at %s", venvDir)
+	}
+
+	// Recovery: the next ensureVenv rebuilds and writes the receipt.
+	fc.syncFails = false
+	v, err := m.ensureVenv(context.Background(), sha, wd)
+	if err != nil {
+		t.Fatalf("rebuild after failed sync: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(v.dir, venvReceiptName)); err != nil {
+		t.Fatalf("receipt missing after successful build: %v", err)
+	}
+
+	// A dir with bin/python but no receipt is a miss, never a hit.
+	if err := os.Remove(filepath.Join(v.dir, venvReceiptName)); err != nil {
+		t.Fatal(err)
+	}
+	before := len(fr.callsFor("uv"))
+	if _, err := m.ensureVenv(context.Background(), sha, wd); err != nil {
+		t.Fatalf("ensureVenv after receipt removal: %v", err)
+	}
+	if got := len(fr.callsFor("uv")); got <= before {
+		t.Fatal("receipt-less venv treated as cache hit; expected rebuild")
+	}
+}
+
 func TestEnsureVenvStaleLockRefused(t *testing.T) {
 	fc := newFakeControl()
 	fc.lockCheckFails = true
