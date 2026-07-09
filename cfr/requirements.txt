@@ -1,11 +1,122 @@
-# Core dependencies
-torch>=2.6        # CUDA and CPU support included; for Intel Arc/XPU also install intel_extension_for_pytorch
-numpy>=2.0
-cffi>=2.0
-pydantic>=2.0
-PyYAML>=6.0
-joblib>=1.3
-tqdm>=4.65
-psutil>=5.9
-rich>=13.0
-typer[all]>=0.9
+# Generated from uv.lock via:
+#   uv export --frozen --extra gpu --no-hashes --no-emit-project
+# Pins the gpu extra (CUDA 12.8 family, matching local dev). For a CPU-only
+# install, run `uv export --frozen --extra cpu --no-hashes --no-emit-project`
+# instead, or prefer `uv sync --extra cpu` / `uv sync --extra gpu` directly.
+# Do not hand-edit; regenerate after `cfr/uv.lock` changes.
+--extra-index-url https://download.pytorch.org/whl/cu128
+annotated-doc==0.0.4
+    # via typer
+annotated-types==0.7.0
+    # via pydantic
+cffi==2.1.0
+    # via cambia-cfr
+colorama==0.4.6 ; sys_platform == 'win32'
+    # via
+    #   tqdm
+    #   typer
+cuda-bindings==12.9.7 ; sys_platform == 'linux'
+    # via torch
+cuda-pathfinder==1.5.6 ; sys_platform == 'linux'
+    # via cuda-bindings
+cuda-toolkit==12.8.1 ; sys_platform == 'linux'
+    # via torch
+filelock==3.29.7
+    # via torch
+fsspec==2026.6.0
+    # via torch
+jinja2==3.1.6
+    # via torch
+joblib==1.5.3
+    # via cambia-cfr
+markdown-it-py==4.2.0
+    # via rich
+markupsafe==3.0.3
+    # via jinja2
+mdurl==0.1.2
+    # via markdown-it-py
+mpmath==1.3.0
+    # via sympy
+networkx==3.6.1
+    # via torch
+numpy==2.4.6 ; python_full_version < '3.12'
+    # via cambia-cfr
+numpy==2.5.1 ; python_full_version >= '3.12'
+    # via cambia-cfr
+nvidia-cublas-cu12==12.8.4.1 ; sys_platform == 'linux'
+    # via
+    #   cuda-toolkit
+    #   nvidia-cudnn-cu12
+    #   nvidia-cusolver-cu12
+nvidia-cuda-cupti-cu12==12.8.90 ; sys_platform == 'linux'
+    # via cuda-toolkit
+nvidia-cuda-nvrtc-cu12==12.8.93 ; sys_platform == 'linux'
+    # via cuda-toolkit
+nvidia-cuda-runtime-cu12==12.8.90 ; sys_platform == 'linux'
+    # via cuda-toolkit
+nvidia-cudnn-cu12==9.19.0.56 ; sys_platform == 'linux'
+    # via torch
+nvidia-cufft-cu12==11.3.3.83 ; sys_platform == 'linux'
+    # via cuda-toolkit
+nvidia-cufile-cu12==1.13.1.3 ; sys_platform == 'linux'
+    # via cuda-toolkit
+nvidia-curand-cu12==10.3.9.90 ; sys_platform == 'linux'
+    # via cuda-toolkit
+nvidia-cusolver-cu12==11.7.3.90 ; sys_platform == 'linux'
+    # via cuda-toolkit
+nvidia-cusparse-cu12==12.5.8.93 ; sys_platform == 'linux'
+    # via
+    #   cuda-toolkit
+    #   nvidia-cusolver-cu12
+nvidia-cusparselt-cu12==0.7.1 ; sys_platform == 'linux'
+    # via torch
+nvidia-nccl-cu12==2.28.9 ; sys_platform == 'linux'
+    # via torch
+nvidia-nvjitlink-cu12==12.8.93 ; sys_platform == 'linux'
+    # via
+    #   cuda-toolkit
+    #   nvidia-cufft-cu12
+    #   nvidia-cusolver-cu12
+    #   nvidia-cusparse-cu12
+nvidia-nvshmem-cu12==3.4.5 ; sys_platform == 'linux'
+    # via torch
+nvidia-nvtx-cu12==12.8.90 ; sys_platform == 'linux'
+    # via cuda-toolkit
+psutil==7.2.2
+    # via cambia-cfr
+pycparser==3.0 ; implementation_name != 'PyPy'
+    # via cffi
+pydantic==2.13.4
+    # via cambia-cfr
+pydantic-core==2.46.4
+    # via pydantic
+pygments==2.20.0
+    # via rich
+pyyaml==6.0.3
+    # via cambia-cfr
+rich==15.0.0
+    # via
+    #   cambia-cfr
+    #   typer
+setuptools==81.0.0
+    # via torch
+shellingham==1.5.4
+    # via typer
+sympy==1.14.0
+    # via torch
+torch==2.11.0+cu128
+    # via cambia-cfr
+tqdm==4.68.4
+    # via cambia-cfr
+triton==3.6.0 ; sys_platform == 'linux'
+    # via torch
+typer==0.26.8
+    # via cambia-cfr
+typing-extensions==4.16.0
+    # via
+    #   pydantic
+    #   pydantic-core
+    #   torch
+    #   typing-inspection
+typing-inspection==0.4.2
+    # via pydantic
