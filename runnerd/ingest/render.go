@@ -24,6 +24,26 @@ var ownedLeafKeys = map[string]bool{
 	"snapshot_dir":               true,
 }
 
+// pathishSuffixes are leaf suffixes that mark a config key as naming a
+// filesystem location. The explicit ownedLeafKeys set names only 7 leaves, but
+// any key whose leaf ends in one of these suffixes also redirects where a job
+// writes (or reads), so a submitter override targeting one could escape its run
+// dir. Rejecting the whole pattern, not just the enumerated leaves, closes that
+// gap (design 5.5, broadened).
+var pathishSuffixes = []string{"_path", "_dir", "_dirs", "_file", "_out", "_output"}
+
+// pathishExact are bare leaf keys (no path-ish suffix) that still name a
+// filesystem location. save_path/checkpoint_dir/log_dir already match a suffix
+// above; they are listed for documentation and defense in depth.
+var pathishExact = map[string]bool{
+	"path":           true,
+	"dir":            true,
+	"output":         true,
+	"save_path":      true,
+	"checkpoint_dir": true,
+	"log_dir":        true,
+}
+
 // leafOf returns the last dotted segment of a config key.
 func leafOf(key string) string {
 	if i := strings.LastIndex(key, "."); i >= 0 {
@@ -32,18 +52,39 @@ func leafOf(key string) string {
 	return key
 }
 
-// isOwnedKey reports whether key targets a harness-owned config field.
+// isOwnedKey reports whether key targets an explicitly harness-owned config
+// field (the enumerated rails).
 func isOwnedKey(key string) bool {
 	return ownedLeafKeys[leafOf(strings.TrimSpace(key))]
 }
 
+// isPathishKey reports whether key's leaf names a filesystem location by an
+// exact match or a path-ish suffix. Such a key is refused even when it is not an
+// enumerated rail, so a submitter cannot redirect writes outside the run dir
+// through a config key the explicit list happens not to name.
+func isPathishKey(key string) bool {
+	leaf := leafOf(strings.TrimSpace(key))
+	if pathishExact[leaf] {
+		return true
+	}
+	for _, sfx := range pathishSuffixes {
+		if strings.HasSuffix(leaf, sfx) {
+			return true
+		}
+	}
+	return false
+}
+
 // rejectOwnedOverrides fails when any submitter override targets a harness-owned
-// key (design 5.5): rails must not be silently clobbered, so the request is
-// refused rather than overridden late.
+// key or any path-ish key (design 5.5): rails and output/path locations must not
+// be silently clobbered, so the request is refused rather than overridden late.
+// Non-rejected keys are still governed by the rails-last render ordering
+// (railOverrides is appended after user overrides), so a rail always wins its
+// own leaf even when a similarly named non-path key slips through.
 func rejectOwnedOverrides(overrides map[string]string) error {
 	var bad []string
 	for k := range overrides {
-		if isOwnedKey(k) {
+		if isOwnedKey(k) || isPathishKey(k) {
 			bad = append(bad, k)
 		}
 	}

@@ -1,7 +1,7 @@
 package harness
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -17,6 +17,17 @@ import (
 
 // logBackfillLines is the number of trailing log lines sent before streaming.
 const logBackfillLines = 200
+
+// wsHandlerDone and logWatcherHook are test seams (nil in production, mirroring
+// procmgr's killGroupFunc). wsHandlerDone fires from a defer registered so it
+// runs last, after the watcher and connection are closed, letting a test assert
+// via a done-channel that a WS handler goroutine actually returns on client
+// disconnect. logWatcherHook captures the log handler's fsnotify watcher so a
+// test can assert the watcher (and its inotify fd) is closed on disconnect.
+var (
+	wsHandlerDone  func(handler string)
+	logWatcherHook func(w *fsnotify.Watcher)
+)
 
 // wsEnvelope is the WebSocket message envelope.
 type wsEnvelope struct {
@@ -48,10 +59,20 @@ func (s *Server) handleQueueWS(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	defer func() {
+		if wsHandlerDone != nil {
+			wsHandlerDone("queue")
+		}
+	}()
 	defer c.CloseNow()
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	// Drain control frames so a client close/disconnect is noticed: CloseRead
+	// actively reads (responding to ping/pong/close) and cancels the returned
+	// context when the peer goes away. Without it a dead client would leak this
+	// goroutine and its subscription until process exit.
+	ctx = c.CloseRead(ctx)
 
 	ch, unsub := s.disp.Subscribe()
 	defer unsub()
@@ -92,10 +113,20 @@ func (s *Server) handleLogsWS(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	defer func() {
+		if wsHandlerDone != nil {
+			wsHandlerDone("logs")
+		}
+	}()
 	defer c.CloseNow()
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	// Drain control frames so a client close/disconnect cancels ctx; otherwise a
+	// dead client would leak this goroutine plus the fsnotify watcher and its fd
+	// until inotify exhaustion. watcher.Close() and c.CloseNow() are deferred
+	// below, so the cancelled loop releases both.
+	ctx = c.CloseRead(ctx)
 
 	lines, offset, err := readLastNLines(logPath, logBackfillLines)
 	if err != nil {
@@ -115,6 +146,9 @@ func (s *Server) handleLogsWS(w http.ResponseWriter, r *http.Request) {
 	if err := watcher.Add(logPath); err != nil {
 		c.Close(websocket.StatusInternalError, "failed to watch log")
 		return
+	}
+	if logWatcherHook != nil {
+		logWatcherHook(watcher)
 	}
 
 	for {
@@ -172,32 +206,35 @@ func writeWS(ctx context.Context, c *websocket.Conn, msg wsEnvelope) error {
 	return c.Write(ctx, websocket.MessageText, data)
 }
 
-// readLastNLines returns the last n lines of a file and the byte offset at EOF.
+// readLastNLines returns the last n complete lines of a file and the byte offset
+// of the first byte after the last newline. A trailing partial line (no final
+// newline) is deliberately not returned and not counted in the offset: it is
+// streamed later by readNewLines once its newline arrives, which keeps the
+// backfill/stream handoff on a line boundary so a mid-line write is never split.
 func readLastNLines(path string, n int) ([]string, int64, error) {
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return []string{}, 0, err
 	}
-	defer f.Close()
-
-	var all []string
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
-		all = append(all, sc.Text())
+	lastNL := bytes.LastIndexByte(data, '\n')
+	if lastNL < 0 {
+		// No complete line yet: nothing to backfill, offset stays at 0 so the
+		// partial line streams in full once its newline lands.
+		return []string{}, 0, nil
 	}
-	if err := sc.Err(); err != nil {
-		return nil, 0, err
+	lines := splitLines(data[:lastNL+1])
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
 	}
-	offset, _ := f.Seek(0, io.SeekEnd)
-	if len(all) > n {
-		all = all[len(all)-n:]
-	}
-	return all, offset, nil
+	return lines, int64(lastNL + 1), nil
 }
 
-// readNewLines reads lines from offset to EOF, tracking the new offset manually
-// (bufio.Scanner buffers ahead of what it returns).
+// readNewLines reads complete lines from offset to EOF and returns them with the
+// advanced offset. Only bytes belonging to a newline-terminated line are
+// consumed: a partial trailing line (no newline yet) is left unconsumed so the
+// next call re-reads it and emits the whole line exactly once when the newline
+// arrives. The offset advances by the true consumed byte count (line bytes plus
+// the one newline), never over-counting a final unterminated line.
 func readNewLines(path string, offset int64) ([]string, int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -207,13 +244,27 @@ func readNewLines(path string, offset int64) ([]string, int64, error) {
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
 		return nil, offset, err
 	}
-	var lines []string
-	newOffset := offset
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
-		lines = append(lines, sc.Text())
-		newOffset += int64(len(sc.Bytes())) + 1
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, offset, err
 	}
-	return lines, newOffset, sc.Err()
+	lastNL := bytes.LastIndexByte(data, '\n')
+	if lastNL < 0 {
+		return nil, offset, nil // only a partial line so far; consume nothing
+	}
+	lines := splitLines(data[:lastNL+1])
+	return lines, offset + int64(lastNL) + 1, nil
+}
+
+// splitLines splits a newline-terminated byte slice into lines, stripping a
+// trailing carriage return per line to match bufio.ScanLines' CRLF handling.
+// The input must end in '\n'; the final empty field that '\n'-splitting would
+// otherwise produce is dropped.
+func splitLines(data []byte) []string {
+	body := data[:len(data)-1] // drop the trailing '\n'
+	out := make([]string, 0, bytes.Count(body, []byte{'\n'})+1)
+	for _, ln := range bytes.Split(body, []byte{'\n'}) {
+		out = append(out, string(bytes.TrimSuffix(ln, []byte{'\r'})))
+	}
+	return out
 }

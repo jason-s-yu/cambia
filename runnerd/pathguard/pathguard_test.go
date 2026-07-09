@@ -2,6 +2,7 @@ package pathguard
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -79,5 +80,95 @@ func TestResolveBaseItself(t *testing.T) {
 	}
 	if got != filepath.Clean("/srv/cambia/x") {
 		t.Fatalf("Resolve(.) = %q", got)
+	}
+}
+
+// TestResolveSymlinkInsideBaseEscapes covers the M4 case a lexical guard misses:
+// a symlink planted inside the base that points outside it. The lexical join
+// stays under base, but the resolved target does not, so Resolve must reject.
+func TestResolveSymlinkInsideBaseEscapes(t *testing.T) {
+	tmp := t.TempDir()
+	base := filepath.Join(tmp, "base")
+	outside := filepath.Join(tmp, "outside")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(base, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "secret.yaml"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{"link", "link/secret.yaml"} {
+		if _, err := Resolve(base, rel); !errors.Is(err, ErrEscapesBase) {
+			t.Fatalf("Resolve(%q) = %v, want ErrEscapesBase", rel, err)
+		}
+	}
+
+	// A dangling symlink to a non-existent outside target must also be rejected:
+	// the link target does not exist, but a write through it would still escape.
+	if err := os.Symlink(filepath.Join(tmp, "nope", "x"), filepath.Join(base, "dangling")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Resolve(base, "dangling"); !errors.Is(err, ErrEscapesBase) {
+		t.Fatalf("Resolve(dangling) = %v, want ErrEscapesBase", err)
+	}
+}
+
+// TestResolveSymlinkInsideBaseContained accepts a symlink inside base that
+// points to another location within base.
+func TestResolveSymlinkInsideBaseContained(t *testing.T) {
+	tmp := t.TempDir()
+	base := filepath.Join(tmp, "base")
+	sub := filepath.Join(base, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(sub, filepath.Join(base, "link")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Resolve(base, "link/config.yaml")
+	if err != nil {
+		t.Fatalf("Resolve(link/config.yaml) = %v, want nil", err)
+	}
+	if got != filepath.Join(base, "link", "config.yaml") {
+		t.Fatalf("Resolve returned %q, want the lexical in-base path", got)
+	}
+}
+
+// TestResolveNonExistentUnderBase accepts a path that does not yet exist under a
+// real base (the common case: a config or checkpoint not yet written).
+func TestResolveNonExistentUnderBase(t *testing.T) {
+	base := t.TempDir()
+	got, err := Resolve(base, "runs/job/config.yaml")
+	if err != nil {
+		t.Fatalf("Resolve non-existent = %v, want nil", err)
+	}
+	if got != filepath.Join(base, "runs", "job", "config.yaml") {
+		t.Fatalf("Resolve returned %q", got)
+	}
+}
+
+// TestResolveBaseIsSymlink accepts a base that is itself a symlink: base and
+// candidate resolve through the same link, so containment holds consistently.
+func TestResolveBaseIsSymlink(t *testing.T) {
+	tmp := t.TempDir()
+	real := filepath.Join(tmp, "real")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	baseLink := filepath.Join(tmp, "baselink")
+	if err := os.Symlink(real, baseLink); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Resolve(baseLink, "config.yaml")
+	if err != nil {
+		t.Fatalf("Resolve through symlinked base = %v, want nil", err)
+	}
+	if got != filepath.Join(baseLink, "config.yaml") {
+		t.Fatalf("Resolve returned %q", got)
 	}
 }

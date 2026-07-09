@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/jason-s-yu/cambia/runnerd/pathguard"
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 )
 
@@ -73,6 +74,21 @@ func guardRelPath(root, rel string) (string, error) {
 	rootPrefix := absRoot + string(filepath.Separator)
 	if joined != absRoot && !strings.HasPrefix(joined, rootPrefix) {
 		return "", fmt.Errorf("%w: %q resolves outside %q", ErrPathEscape, rel, absRoot)
+	}
+	// Symlink containment: the lexical check above cannot see a symlink planted
+	// inside the (submitter-controlled) worktree that points outside root.
+	// Resolve symlinks on both sides and re-check against the resolved root so
+	// such a link cannot launder an escape past the lexical guard (design 5.4).
+	rRoot, err := pathguard.ResolveForContainment(absRoot)
+	if err != nil {
+		return "", fmt.Errorf("%w: resolve root %q: %v", ErrPathEscape, absRoot, err)
+	}
+	rJoined, err := pathguard.ResolveForContainment(joined)
+	if err != nil {
+		return "", fmt.Errorf("%w: resolve %q: %v", ErrPathEscape, joined, err)
+	}
+	if rJoined != rRoot && !strings.HasPrefix(rJoined, rRoot+string(filepath.Separator)) {
+		return "", fmt.Errorf("%w: %q resolves to %q, outside %q", ErrPathEscape, rel, rJoined, rRoot)
 	}
 	return joined, nil
 }

@@ -226,10 +226,12 @@ func genOther(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey, error) {
 	return ed25519.GenerateKey(nil)
 }
 
-// mintToken signs an EdDSA JWT with priv, as the client's CLI would.
+// mintToken signs an EdDSA JWT with priv, as the client's CLI would: it carries the
+// runnerd audience so the Verifier (which now requires aud == cambia-runnerd)
+// accepts it.
 func mintToken(t *testing.T, priv ed25519.PrivateKey, sub string, exp time.Duration) string {
 	t.Helper()
-	claims := jwt.MapClaims{"sub": sub}
+	claims := jwt.MapClaims{"sub": sub, "aud": authtoken.Audience}
 	if exp != 0 {
 		claims["exp"] = time.Now().Add(exp).Unix()
 	}
