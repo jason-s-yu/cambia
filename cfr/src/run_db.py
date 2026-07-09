@@ -160,6 +160,13 @@ CREATE TABLE IF NOT EXISTS head_to_head (
     UNIQUE(run_id, iter_a, iter_b, label)
 );
 
+CREATE TABLE IF NOT EXISTS harness_sync (
+    run_name TEXT PRIMARY KEY,
+    origin_host TEXT,
+    last_sync_at TEXT,
+    last_status TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_runs_name ON runs(name);
 CREATE INDEX IF NOT EXISTS idx_checkpoints_run_iter ON checkpoints(run_id, iteration);
 CREATE INDEX IF NOT EXISTS idx_eval_results_run_iter ON eval_results(run_id, iteration);
@@ -452,6 +459,42 @@ def update_run_status(db: sqlite3.Connection, run_id: int, status: str) -> None:
     db.execute(
         "UPDATE runs SET status=?, updated_at=? WHERE id=?",
         (status, _now(), run_id),
+    )
+    db.commit()
+
+
+def upsert_harness_sync(
+    db: sqlite3.Connection,
+    run_name: str,
+    origin_host: str,
+    last_status: Optional[str],
+    last_sync_at: Optional[str] = None,
+) -> None:
+    """Record the last successful serving-harness pull for a remote run.
+
+    This is the current-state store for pull freshness (design 4.5, data
+    architecture rule 1): the dashboard reads last_sync_at here to render per-run
+    staleness ("stale, last synced HH:MM") independent of the global reconciler
+    heartbeat. Keyed by run_name (one live remote run per name in v1), upserted
+    by the pull loop after each successful replay.
+
+    Args:
+        run_name: the remote run's name (also its run dir under runs/).
+        origin_host: the source host the run was pulled from (e.g. "runner").
+        last_status: the run status observed in the synced run_db at pull time.
+        last_sync_at: ISO-8601 UTC timestamp; defaults to now.
+    """
+    ts = last_sync_at if last_sync_at is not None else _now()
+    db.execute(
+        """
+        INSERT INTO harness_sync (run_name, origin_host, last_sync_at, last_status)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(run_name) DO UPDATE SET
+            origin_host=excluded.origin_host,
+            last_sync_at=excluded.last_sync_at,
+            last_status=excluded.last_status
+        """,
+        (run_name, origin_host, ts, last_status),
     )
     db.commit()
 
