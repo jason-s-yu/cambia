@@ -249,6 +249,14 @@ func runDirOf(runsDir, name string) string {
 // crashed. This is the read-time view; Reconcile persists the same repair at
 // server start.
 func EffectiveStatus(st *ProcessState) string {
+	// A remote row (Host set) is a bounded-stale projection synced from another
+	// host. Its recorded pid names a process in THAT host's pid space, so a local
+	// pidAlive probe would test an unrelated pid here (the cross-host pid-reuse
+	// bug). Short-circuit before any probe and return the synced status verbatim;
+	// freshness is surfaced separately via last_sync_at, not local liveness.
+	if st.Host != "" {
+		return st.Status
+	}
 	switch st.Status {
 	case StatusRunning, StatusStarting, StatusStopping:
 		if !pidAlive(st) {

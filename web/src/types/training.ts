@@ -11,6 +11,15 @@ export interface Run {
 	 * present when the run has a supervised or dashboard-created process; absent
 	 * for an external run_db-only run. */
 	process?: ProcessState;
+	/** Origin host of a remote (serving-harness) run; absent for a local run.
+	 * A remote run renders read-only on this dashboard in v1. */
+	host?: string;
+	/** RFC3339 timestamp of the last successful pull for a remote run; absent
+	 * for a local run or a remote run never yet synced. */
+	last_sync_at?: string;
+	/** True when a remote run's synced projection is older than 3 sync intervals
+	 * (bounded-stale threshold). Always false for a local run. */
+	stale?: boolean;
 }
 
 export interface RunDetail extends Run {
@@ -59,6 +68,10 @@ export interface ProcessState {
 	finished_at?: string;
 	exit_code?: number;
 	last_error?: string;
+	/** Origin host for a remote (serving-harness) run; empty/absent for a local
+	 * run. Stamped by the dashboard store so a remote run's status renders as a
+	 * bounded-stale projection rather than a local pid probe. */
+	host?: string;
 }
 
 export interface PreflightCheck {

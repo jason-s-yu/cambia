@@ -565,6 +565,13 @@ func (m *ProcessManager) Reconcile() {
 		return
 	}
 	for _, st := range states {
+		// A remote row is a bounded-stale projection of another host's process.json.
+		// Its pid lives in a different pid space; a local pidAlive probe is the
+		// cross-host pid-reuse bug. Never flip a remote row to crashed: its
+		// liveness is owned by the runner and refreshed by the pull loop.
+		if st.Host != "" {
+			continue
+		}
 		switch st.Status {
 		case StatusRunning, StatusStarting, StatusStopping:
 			if pidAlive(st) {

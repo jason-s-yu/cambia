@@ -233,3 +233,33 @@ func TestPreflightPassesForceMatrix(t *testing.T) {
 		}
 	}
 }
+
+// TestEffectiveStatusRemoteShortCircuit is the cross-host pid-reuse guard for
+// the read-time status view: a remote row (Host set) whose recorded pid is dead
+// in THIS host's pid space must still report its synced status verbatim, never
+// crashed. Without the Host short-circuit, the dead-pid probe would flip a live
+// remote run to crashed on the dashboard.
+func TestEffectiveStatusRemoteShortCircuit(t *testing.T) {
+	remote := &ProcessState{
+		Name: "v0.4-prtcfr-r12", Host: "runner", Status: StatusRunning,
+		PID: 9999999, PGID: 9999999, CreatedAt: NowRFC3339(),
+	}
+	if got := EffectiveStatus(remote); got != StatusRunning {
+		t.Errorf("remote running row: EffectiveStatus = %q, want running (Host short-circuit)", got)
+	}
+
+	remote.Status = StatusStopping
+	if got := EffectiveStatus(remote); got != StatusStopping {
+		t.Errorf("remote stopping row: EffectiveStatus = %q, want stopping (no local probe)", got)
+	}
+
+	// The same dead pid on a LOCAL row (Host empty) must still resolve to crashed:
+	// the short-circuit is scoped to remote rows only.
+	local := &ProcessState{
+		Name: "local-run", Status: StatusRunning,
+		PID: 9999999, PGID: 9999999, CreatedAt: NowRFC3339(),
+	}
+	if got := EffectiveStatus(local); got != StatusCrashed {
+		t.Errorf("local dead-pid row: EffectiveStatus = %q, want crashed", got)
+	}
+}

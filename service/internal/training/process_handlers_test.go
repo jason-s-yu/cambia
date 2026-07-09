@@ -468,6 +468,52 @@ func TestHandleResumeCheckpointsDirOnly(t *testing.T) {
 	}
 }
 
+// markRemote writes a process.json carrying a Host so the store's RemoteHost
+// resolves the run as remote (serving-harness synced). Remote runs are read-only
+// on this dashboard in v1.
+func markRemote(t *testing.T, f *handlerFixture, name string) {
+	t.Helper()
+	writeState(t, f.runsDir, name, &procmgr.ProcessState{
+		Name: name, Host: "runner", Status: procmgr.StatusRunning, Algorithm: "prt-cfr",
+		PID: 9999999, PGID: 9999999, CreatedAt: procmgr.NowRFC3339(),
+	})
+}
+
+// assertRemoteRefused confirms a process-control handler 409s a remote run with
+// the read-only error code.
+func assertRemoteRefused(t *testing.T, w *httptest.ResponseRecorder) {
+	t.Helper()
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", w.Code, w.Body.String())
+	}
+	var body map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &body)
+	if body["error"] != "remote_run_read_only" {
+		t.Errorf("error = %v, want remote_run_read_only", body["error"])
+	}
+}
+
+func TestHandleStartRemoteRefused(t *testing.T) {
+	f := newHandlerFixture(t)
+	markRemote(t, f, "remote-start")
+	w := doReq(f.ph.HandleStart, http.MethodPost, "/training/runs/remote-start/start", `{}`)
+	assertRemoteRefused(t, w)
+}
+
+func TestHandleStopRemoteRefused(t *testing.T) {
+	f := newHandlerFixture(t)
+	markRemote(t, f, "remote-stop")
+	w := doReq(f.ph.HandleStop, http.MethodPost, "/training/runs/remote-stop/stop", `{}`)
+	assertRemoteRefused(t, w)
+}
+
+func TestHandleResumeRemoteRefused(t *testing.T) {
+	f := newHandlerFixture(t)
+	markRemote(t, f, "remote-resume")
+	w := doReq(f.ph.HandleResume, http.MethodPost, "/training/runs/remote-resume/resume", `{}`)
+	assertRemoteRefused(t, w)
+}
+
 // TestHandlersAuthGate confirms the wrapped mux rejects unauthenticated requests
 // and passes authenticated ones through to the handler.
 func TestHandlersAuthGate(t *testing.T) {

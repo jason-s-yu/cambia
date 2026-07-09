@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -47,6 +48,19 @@ type Run struct {
 	// runs/<name>/process.json, or nil when the run has none (an external
 	// run_db-only run). It carries the live pid/pgid and lifecycle status.
 	Process *procmgr.ProcessState `json:"process,omitempty"`
+	// Host is the origin host of a remote (serving-harness) run, empty for a
+	// local run. It comes from the run's process.json Host field or, on the client,
+	// the runs.origin_host column / harness_sync row stamped by the reconciler.
+	// A non-empty Host marks the run read-only on this dashboard in v1.
+	Host string `json:"host,omitempty"`
+	// LastSyncAt is the RFC3339 timestamp of the last successful pull for a
+	// remote run (harness_sync.last_sync_at). Nil for a local run or a remote
+	// run never yet synced.
+	LastSyncAt *string `json:"last_sync_at,omitempty"`
+	// Stale reports whether a remote run's synced projection is older than
+	// 3 sync intervals (the bounded-stale threshold). Always false for a local
+	// run and for a remote run whose last_sync_at is unknown/unparseable.
+	Stale bool `json:"stale"`
 }
 
 // RunDetail extends Run with configuration and metadata.
@@ -86,6 +100,12 @@ type Checkpoint struct {
 	IsBest        bool   `json:"is_best"`
 }
 
+// defaultSyncIntervalSec is the pull interval assumed when CAMBIA_SYNC_INTERVAL_SEC
+// is unset or invalid. The reconciler pulls live remote runs on this cadence
+// (design 4.1); a remote run is flagged stale once its last_sync_at is older
+// than 3 intervals (design 4.5).
+const defaultSyncIntervalSec = 60
+
 // TrainingStore provides read-only access to the CFR run database.
 type TrainingStore struct {
 	runsDir    string
@@ -93,6 +113,16 @@ type TrainingStore struct {
 	mu         sync.RWMutex
 	cachedRuns []Run
 	cancel     context.CancelFunc
+	// syncIntervalSec is the pull cadence used to compute the bounded-stale
+	// threshold (3 * interval). Read once from CAMBIA_SYNC_INTERVAL_SEC.
+	syncIntervalSec int
+	// hasOriginHost and hasHarnessSync record whether the opened db carries the
+	// serving-harness schema (runs.origin_host column and the harness_sync
+	// table). An older local-only db predating those additions is read without
+	// them rather than failing every query (design failure mode: stale/degraded,
+	// never wrong-but-confident).
+	hasOriginHost  bool
+	hasHarnessSync bool
 }
 
 // NewTrainingStore opens the SQLite run database in read-only mode and starts
@@ -112,10 +142,12 @@ func NewTrainingStore(runsDir string) (*TrainingStore, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &TrainingStore{
-		runsDir: runsDir,
-		db:      db,
-		cancel:  cancel,
+		runsDir:         runsDir,
+		db:              db,
+		cancel:          cancel,
+		syncIntervalSec: syncIntervalFromEnv(),
 	}
+	s.detectHarnessSchema(ctx)
 
 	// Initial cache load.
 	_ = s.refreshCache(ctx)
@@ -143,6 +175,173 @@ func (s *TrainingStore) Close() {
 	s.db.Close()
 }
 
+// syncIntervalFromEnv reads CAMBIA_SYNC_INTERVAL_SEC with the same defensive
+// parsing as the dashboard's other env rails (main.go): a missing, non-numeric,
+// or non-positive value falls back to defaultSyncIntervalSec.
+func syncIntervalFromEnv() int {
+	if v := os.Getenv("CAMBIA_SYNC_INTERVAL_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultSyncIntervalSec
+}
+
+// detectHarnessSchema probes for the serving-harness additions (runs.origin_host
+// column and the harness_sync table) so remote-provenance queries are only
+// issued against a db that carries them. A db predating those additions is
+// served as local-only rather than 500ing every list/detail request.
+func (s *TrainingStore) detectHarnessSchema(ctx context.Context) {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(runs)`)
+	if err == nil {
+		for rows.Next() {
+			var cid int
+			var name, ctype string
+			var notnull, pk int
+			var dflt sql.NullString
+			if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+				continue
+			}
+			if name == "origin_host" {
+				s.hasOriginHost = true
+			}
+		}
+		rows.Close()
+	}
+	var tbl string
+	err = s.db.QueryRowContext(ctx,
+		`SELECT name FROM sqlite_master WHERE type='table' AND name='harness_sync'`).Scan(&tbl)
+	s.hasHarnessSync = err == nil && tbl == "harness_sync"
+}
+
+// syncRow is a run's serving-harness pull record from the harness_sync table.
+type syncRow struct {
+	originHost string
+	lastSyncAt *string
+}
+
+// harnessSyncFor returns the harness_sync record for one run, or nil when the
+// table is absent or has no row for name. It is the current-state store for pull
+// freshness (design 4.5), opened read-only through the same db as everything
+// else.
+func (s *TrainingStore) harnessSyncFor(ctx context.Context, name string) *syncRow {
+	if !s.hasHarnessSync {
+		return nil
+	}
+	var host sql.NullString
+	var ts sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT origin_host, last_sync_at FROM harness_sync WHERE run_name = ?`, name).Scan(&host, &ts)
+	if err != nil {
+		return nil
+	}
+	row := &syncRow{}
+	if host.Valid {
+		row.originHost = host.String
+	}
+	if ts.Valid {
+		v := ts.String
+		row.lastSyncAt = &v
+	}
+	return row
+}
+
+// harnessSyncMap loads every harness_sync row into a name-keyed map for the run
+// list overlay. Returns an empty map when the table is absent.
+func (s *TrainingStore) harnessSyncMap(ctx context.Context) map[string]*syncRow {
+	out := make(map[string]*syncRow)
+	if !s.hasHarnessSync {
+		return out
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT run_name, origin_host, last_sync_at FROM harness_sync`)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		var host, ts sql.NullString
+		if err := rows.Scan(&name, &host, &ts); err != nil {
+			continue
+		}
+		row := &syncRow{}
+		if host.Valid {
+			row.originHost = host.String
+		}
+		if ts.Valid {
+			v := ts.String
+			row.lastSyncAt = &v
+		}
+		out[name] = row
+	}
+	return out
+}
+
+// isStale reports whether lastSyncAt (RFC3339) is older than 3 sync intervals.
+// An unparseable timestamp returns false: the dashboard degrades to "fresh
+// unknown" rather than asserting staleness it cannot substantiate.
+func (s *TrainingStore) isStale(lastSyncAt string) bool {
+	t, err := time.Parse(time.RFC3339, lastSyncAt)
+	if err != nil {
+		return false
+	}
+	threshold := time.Duration(3*s.syncIntervalSec) * time.Second
+	return time.Since(t) > threshold
+}
+
+// applyRemoteProvenance sets r.Host, r.LastSyncAt, and r.Stale from the run's
+// process.json Host, the runs.origin_host column (dbOriginHost), and the
+// harness_sync row (sr). When the run is remote it also stamps Host onto the
+// ProcessState BEFORE any EffectiveStatus call so procmgr short-circuits the
+// local pid probe (a the client probe against a runner pid is the cross-host
+// pid-reuse bug). Callers must invoke this before deriving r.Status from the
+// process state. A local run (no host from any source) is left untouched.
+func (s *TrainingStore) applyRemoteProvenance(r *Run, dbOriginHost string, sr *syncRow) {
+	host := ""
+	switch {
+	case r.Process != nil && r.Process.Host != "":
+		host = r.Process.Host
+	case dbOriginHost != "":
+		host = dbOriginHost
+	case sr != nil && sr.originHost != "":
+		host = sr.originHost
+	}
+	if host == "" {
+		return
+	}
+	r.Host = host
+	if r.Process != nil {
+		r.Process.Host = host
+	}
+	if sr != nil && sr.lastSyncAt != nil {
+		r.LastSyncAt = sr.lastSyncAt
+		r.Stale = s.isStale(*sr.lastSyncAt)
+	}
+}
+
+// RemoteHost returns the origin host of a run when it is remote (serving-harness
+// synced), or "" for a local run. It is the authority the process handlers use
+// to refuse start/stop/resume on remote runs (read-only on this dashboard in
+// v1): a run is remote if its process.json carries a Host, or the runs.origin_host
+// column / harness_sync row records an origin host.
+func (s *TrainingStore) RemoteHost(ctx context.Context, name string) string {
+	if st, ok := s.processStateFor(name); ok && st.Host != "" {
+		return st.Host
+	}
+	if s.hasOriginHost {
+		var host sql.NullString
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT origin_host FROM runs WHERE name = ?`, name).Scan(&host); err == nil && host.Valid && host.String != "" {
+			return host.String
+		}
+	}
+	if sr := s.harnessSyncFor(ctx, name); sr != nil && sr.originHost != "" {
+		return sr.originHost
+	}
+	return ""
+}
+
 // refreshCache queries all runs and caches them, overlaying process.json
 // current state and merging in dashboard-created runs that have no run_db row.
 func (s *TrainingStore) refreshCache(ctx context.Context) error {
@@ -157,30 +356,38 @@ func (s *TrainingStore) refreshCache(ctx context.Context) error {
 }
 
 func (s *TrainingStore) queryRuns(ctx context.Context) ([]Run, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	originSel := "NULL AS origin_host"
+	if s.hasOriginHost {
+		originSel = "origin_host"
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT id, name, algorithm, status,
 		       best_metric_value, best_metric_iter,
-		       created_at, updated_at
+		       created_at, updated_at, %s
 		FROM runs
 		ORDER BY updated_at DESC
-	`)
+	`, originSel))
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
+	syncMap := s.harnessSyncMap(ctx)
+
 	var runs []Run
 	for rows.Next() {
 		var r Run
+		var originHost sql.NullString
 		if err := rows.Scan(
 			&r.ID, &r.Name, &r.Algorithm, &r.Status,
 			&r.BestMetricValue, &r.BestMetricIter,
-			&r.CreatedAt, &r.UpdatedAt,
+			&r.CreatedAt, &r.UpdatedAt, &originHost,
 		); err != nil {
 			return nil, err
 		}
-		// Overlay the process.json current state (status + pid liveness).
-		s.applyProcessState(&r)
+		// Overlay the process.json current state (status + pid liveness) and the
+		// remote provenance (host + staleness).
+		s.applyProcessState(&r, nullString(originHost), syncMap[r.Name])
 		runs = append(runs, r)
 	}
 	if err := rows.Err(); err != nil {
@@ -198,14 +405,18 @@ func (s *TrainingStore) queryRuns(ctx context.Context) ([]Run, error) {
 		if seen[st.Name] {
 			continue
 		}
-		runs = append(runs, Run{
+		run := Run{
 			Name:      st.Name,
 			Algorithm: st.Algorithm,
-			Status:    procmgr.EffectiveStatus(st),
 			CreatedAt: st.CreatedAt,
 			UpdatedAt: st.CreatedAt,
 			Process:   st,
-		})
+		}
+		// Stamp remote provenance (host) before EffectiveStatus so a synced
+		// remote run short-circuits the local pid probe.
+		s.applyRemoteProvenance(&run, "", syncMap[st.Name])
+		run.Status = procmgr.EffectiveStatus(st)
+		runs = append(runs, run)
 	}
 
 	// RFC3339 timestamps sort lexically in chronological order; newest first.
@@ -230,23 +441,27 @@ func (s *TrainingStore) ListRuns(ctx context.Context) ([]Run, error) {
 // GetRun returns detail for a single run by name, including the latest config snapshot.
 func (s *TrainingStore) GetRun(ctx context.Context, name string) (*RunDetail, error) {
 	var rd RunDetail
-	var notes, tags sql.NullString
-	err := s.db.QueryRowContext(ctx, `
+	var notes, tags, originHost sql.NullString
+	originSel := "NULL AS origin_host"
+	if s.hasOriginHost {
+		originSel = "r.origin_host"
+	}
+	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT r.id, r.name, r.algorithm, r.status,
 		       r.best_metric_value, r.best_metric_iter,
 		       r.created_at, r.updated_at,
-		       r.notes, r.tags
+		       r.notes, r.tags, %s
 		FROM runs r
 		WHERE r.name = ?
-	`, name).Scan(
+	`, originSel), name).Scan(
 		&rd.ID, &rd.Name, &rd.Algorithm, &rd.Status,
 		&rd.BestMetricValue, &rd.BestMetricIter,
 		&rd.CreatedAt, &rd.UpdatedAt,
-		&notes, &tags,
+		&notes, &tags, &originHost,
 	)
 	if err == sql.ErrNoRows {
 		// No run_db row yet: a dashboard-created run lives only in process.json.
-		return s.processOnlyDetail(name), nil
+		return s.processOnlyDetail(ctx, name), nil
 	}
 	if err != nil {
 		return nil, err
@@ -258,10 +473,16 @@ func (s *TrainingStore) GetRun(ctx context.Context, name string) (*RunDetail, er
 		rd.Tags = tags.String
 	}
 
-	// Overlay the process.json current state (status + pid liveness + record).
+	// Overlay the process.json current state (status + pid liveness + record)
+	// and the remote provenance (host + staleness). Host is stamped before
+	// EffectiveStatus so a remote run short-circuits the local pid probe.
+	sr := s.harnessSyncFor(ctx, rd.Name)
 	if st, ok := s.processStateFor(rd.Name); ok {
-		rd.Status = procmgr.EffectiveStatus(st)
 		rd.Process = st
+		s.applyRemoteProvenance(&rd.Run, nullString(originHost), sr)
+		rd.Status = procmgr.EffectiveStatus(st)
+	} else {
+		s.applyRemoteProvenance(&rd.Run, nullString(originHost), sr)
 	}
 
 	// Fetch latest config snapshot.
@@ -433,19 +654,25 @@ func (s *TrainingStore) processStateFor(name string) (*procmgr.ProcessState, boo
 }
 
 // applyProcessState overlays the process.json current state onto r: the
-// effective status plus the full ProcessState record. A run_db row with no
-// process.json keeps its stored status (externally launched, unsupervised).
-func (s *TrainingStore) applyProcessState(r *Run) {
+// effective status plus the full ProcessState record, and the remote provenance
+// (host + staleness) derived from dbOriginHost and sr. Host is stamped onto the
+// process state before EffectiveStatus so a remote run short-circuits the local
+// pid probe. A run_db row with no process.json keeps its stored status
+// (externally launched, unsupervised) but still records remote provenance.
+func (s *TrainingStore) applyProcessState(r *Run, dbOriginHost string, sr *syncRow) {
 	if st, ok := s.processStateFor(r.Name); ok {
-		r.Status = procmgr.EffectiveStatus(st)
 		r.Process = st
+		s.applyRemoteProvenance(r, dbOriginHost, sr)
+		r.Status = procmgr.EffectiveStatus(st)
+		return
 	}
+	s.applyRemoteProvenance(r, dbOriginHost, sr)
 }
 
 // processOnlyDetail builds a RunDetail from process.json and the materialized
 // config.yaml for a run created through the dashboard but not yet registered in
 // the run database. It returns nil when no process.json exists.
-func (s *TrainingStore) processOnlyDetail(name string) *RunDetail {
+func (s *TrainingStore) processOnlyDetail(ctx context.Context, name string) *RunDetail {
 	st, ok := s.processStateFor(name)
 	if !ok {
 		return nil
@@ -454,14 +681,25 @@ func (s *TrainingStore) processOnlyDetail(name string) *RunDetail {
 		Run: Run{
 			Name:      st.Name,
 			Algorithm: st.Algorithm,
-			Status:    procmgr.EffectiveStatus(st),
 			CreatedAt: st.CreatedAt,
 			UpdatedAt: st.CreatedAt,
 			Process:   st,
 		},
 	}
+	// Stamp remote provenance (host) before EffectiveStatus so a synced remote
+	// run short-circuits the local pid probe.
+	s.applyRemoteProvenance(&rd.Run, "", s.harnessSyncFor(ctx, name))
+	rd.Status = procmgr.EffectiveStatus(st)
 	if data, err := os.ReadFile(filepath.Join(s.RunDir(name), "config.yaml")); err == nil {
 		rd.ConfigYAML = string(data)
 	}
 	return rd
+}
+
+// nullString unwraps a sql.NullString to its string, or "" when NULL.
+func nullString(ns sql.NullString) string {
+	if ns.Valid {
+		return ns.String
+	}
+	return ""
 }

@@ -5,6 +5,8 @@ import { formatDistanceToNow, parseISO } from 'date-fns';
 import { useTrainingStore } from '@/stores/trainingStore';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import StatusBadge from '@/components/training/StatusBadge';
+import HostBadge from '@/components/training/HostBadge';
+import SyncStatus from '@/components/training/SyncStatus';
 import CreateRunModal from '@/components/training/CreateRunModal';
 import ResourceMonitor from '@/components/training/ResourceMonitor';
 import type { Run, ProcessStatus } from '@/types/training';
@@ -143,20 +145,28 @@ const TrainingPage: React.FC = () => {
 										onClick={() => navigate(`/training/${run.name}`)}
 										className="border-b border-gray-100 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-750 cursor-pointer transition-colors text-gray-800 dark:text-gray-200"
 									>
-										<td className="py-3 px-4 font-medium">{run.name}</td>
+										<td className="py-3 px-4 font-medium">
+											<div className="flex items-center gap-2">
+												<span>{run.name}</span>
+												<HostBadge host={run.host} />
+											</div>
+										</td>
 										<td className="py-3 px-4">
 											<span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-indigo-100 text-indigo-800 dark:bg-indigo-900 dark:text-indigo-200">
 												{run.algorithm}
 											</span>
 										</td>
 										<td className="py-3 px-4">
-											{processes[run.name] ? (
-												<StatusBadge status={processes[run.name].status} />
-											) : toProcessStatus(run.status) ? (
-												<StatusBadge status={toProcessStatus(run.status) as ProcessStatus} />
-											) : (
-												statusBadge(run.status)
-											)}
+											<div className="flex flex-col gap-1">
+												{processes[run.name] ? (
+													<StatusBadge status={processes[run.name].status} />
+												) : toProcessStatus(run.status) ? (
+													<StatusBadge status={toProcessStatus(run.status) as ProcessStatus} />
+												) : (
+													statusBadge(run.status)
+												)}
+												<SyncStatus host={run.host} lastSyncAt={run.last_sync_at} stale={run.stale} />
+											</div>
 										</td>
 										<td className="py-3 px-4 font-mono">
 											{run.best_metric_value != null
