@@ -600,3 +600,47 @@ def test_pull_once_sanitizes_unknown_status_into_harness_sync(tmp_path, monkeypa
     ).fetchone()
     assert hs["last_status"] == "unknown"
     dest.close()
+
+
+def test_watch_reads_runnerd_job_view_fields(tmp_path, monkeypatch):
+    """watch() must key off the fields runnerd actually emits.
+
+    runnerd's JobView marshals job_id/state (runnerd/harness/views.go); an
+    earlier revision read name/status, so the pull loop silently saw zero jobs
+    against the real control plane. Both shapes are accepted.
+    """
+    dest = _dest_db(tmp_path)
+    _build_remote_run(tmp_path / "remote", status="completed")
+    runner = FakeRunner(tmp_path / "remote")
+    coord = PullCoordinator(
+        runner=runner,
+        local_runs_dir=tmp_path / "local",
+        dest_conn=dest,
+        origin_host="runner",
+        replay_fn=lambda *a: {"runs": 1, "checkpoints": 0, "evals": 0},
+    )
+    pulled = []
+    orig_pull_once = coord.pull_once
+
+    def counting_pull_once(name, all_checkpoints=False):
+        pulled.append(name)
+        return orig_pull_once(name, all_checkpoints)
+
+    coord.pull_once = counting_pull_once
+    pullmod.watch(
+        coordinator=coord,
+        job_lister=lambda: [{"job_id": "v0.4-prtcfr-r1", "state": "completed"}],
+        interval_seconds=0,
+        max_ticks=1,
+    )
+    assert pulled == ["v0.4-prtcfr-r1"], "watch ignored runnerd's job_id/state view"
+    dest.close()
+
+
+def test_go_job_view_field_names_match_watch_contract():
+    """Pin the cross-language contract: the Go JobView json tags this loop
+    reads must not drift without this test failing."""
+    views = Path(__file__).resolve().parents[2] / "runnerd" / "harness" / "views.go"
+    src = views.read_text()
+    assert 'json:"job_id"' in src
+    assert 'json:"state"' in src

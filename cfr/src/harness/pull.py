@@ -389,8 +389,10 @@ def watch(
 
     Args:
         coordinator: the pull/replay orchestrator.
-        job_lister: returns [{"name", "status"}, ...] from the control plane;
-            the source of live runs and terminal transitions.
+        job_lister: returns the control plane's job views, the source of live
+            runs and terminal transitions. runnerd emits {"job_id", "state"}
+            (runnerd/harness/views.go JobView); {"name", "status"} is accepted
+            as an alias so a fake lister in tests can use either shape.
         interval_seconds: periodic-pull cadence (default 60s).
         stop: optional predicate to break the loop (e.g. a signal flag).
         max_ticks: optional cap on iterations (tests inject a small value).
@@ -411,8 +413,8 @@ def watch(
             jobs = []
 
         for job in jobs:
-            name = job.get("name")
-            status = job.get("status")
+            name = job.get("job_id") or job.get("name")
+            status = job.get("state") or job.get("status")
             if not name:
                 continue
             if not is_valid_run_name(name):

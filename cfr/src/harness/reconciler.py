@@ -48,7 +48,6 @@ from src.run_db import (
     upsert_run,
 )
 
-
 # ---------------------------------------------------------------------------
 # Typed errors
 # ---------------------------------------------------------------------------
@@ -92,6 +91,9 @@ _ALLOWED_STATUS: Set[str] = {
     "created",
     "queued",
     "preparing",
+    # procmgr writes "starting" (runnerd/procmgr/state.go); a run synced mid
+    # launch carries it, and rejecting it would fail an otherwise valid replay.
+    "starting",
     "running",
     "stopping",
     "stopped",
@@ -464,11 +466,15 @@ def _read_evals(src: sqlite3.Connection, src_run_id: Any) -> List[Dict[str, Any]
             "selection_mode": _str_or_none(
                 e.get("selection_mode"), "eval.selection_mode", _MAX_SHORT_STR_LEN
             ),
-            "crn_seed": _str_or_none(e.get("crn_seed"), "eval.crn_seed", _MAX_SHORT_STR_LEN),
+            "crn_seed": _str_or_none(
+                e.get("crn_seed"), "eval.crn_seed", _MAX_SHORT_STR_LEN
+            ),
             "seat_scheme": _str_or_none(
                 e.get("seat_scheme"), "eval.seat_scheme", _MAX_SHORT_STR_LEN
             ),
-            "timestamp": _str_or_none(e.get("timestamp"), "eval.timestamp", _MAX_SHORT_STR_LEN),
+            "timestamp": _str_or_none(
+                e.get("timestamp"), "eval.timestamp", _MAX_SHORT_STR_LEN
+            ),
         }
         out.append(row_dict)
     return out
