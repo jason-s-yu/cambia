@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jason-s-yu/cambia/runnerd/ingestapi"
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 )
 
@@ -172,16 +173,22 @@ func (d *Dispatcher) runJob(j *job) {
 		d.markTerminal(name, StateFailed, "prepare failed: "+err.Error())
 		return
 	}
-	// M2: procmgr launches with its constructor-fixed cambia binary and cfr
-	// dir. prepared's per-job venv/libcambia/worktree fields are consumed by the
-	// M3 launch parameterization; here only its existence gates the launch.
-	_ = prepared
+	// M3: launch from the ingest-staged environment (design 2.7) - the per-lock
+	// venv interpreter, the pinned worktree cfr dir as cwd, the rendered config
+	// consumed verbatim, and the staged env (PYTHONPATH pin, LIBCAMBIA_PATH,
+	// src-containment shim). Job kind maps to its cambia subcommand via the same
+	// injected algos table as the fixed-binary path.
+	lopts, cerr := d.launchOpts(j, prepared)
+	if cerr != nil {
+		d.markTerminal(name, StateFailed, "launch config: "+cerr.Error())
+		return
+	}
 
 	var lerr error
 	if j.resume {
-		_, lerr = d.pm.Resume(name, procmgr.StartOpts{})
+		_, lerr = d.pm.ResumeWithOpts(name, procmgr.StartOpts{}, lopts)
 	} else {
-		_, lerr = d.pm.Start(name, procmgr.StartOpts{})
+		_, lerr = d.pm.StartWithOpts(name, procmgr.StartOpts{}, lopts)
 	}
 	if lerr != nil {
 		d.markTerminal(name, StateFailed, "launch failed: "+lerr.Error())
@@ -202,6 +209,40 @@ func (d *Dispatcher) runJob(j *job) {
 	d.dispatchLocked()
 	d.mu.Unlock()
 	d.broadcast()
+}
+
+// launchOpts builds the parameterized procmgr launch from the ingest-staged
+// Prepared (design 2.7). When the environment did not stage a venv interpreter
+// (Prepared.VenvPython empty, e.g. a stub), it returns a zero LaunchOpts so
+// procmgr takes the fixed-binary path unchanged. The subcommand for the argv is
+// resolved from the job kind through the same algos table the fixed-binary path
+// uses; an unregistered kind fails the job rather than launching.
+func (d *Dispatcher) launchOpts(j *job, prepared *ingestapi.Prepared) (procmgr.LaunchOpts, error) {
+	if prepared == nil || prepared.VenvPython == "" {
+		return procmgr.LaunchOpts{}, nil
+	}
+	sub, err := d.pm.AlgoSubcommand(j.spec.Kind)
+	if err != nil {
+		return procmgr.LaunchOpts{}, err
+	}
+	argv := make([]string, 0, len(sub)+5)
+	argv = append(argv, "-m", "src.cli")
+	argv = append(argv, sub...)
+	// The rendered config is consumed verbatim (design 2.7). A kind that ingest
+	// renders no config for (Prepare leaves RenderedConfig empty) gets no --config
+	// rather than an empty-valued flag.
+	if prepared.RenderedConfig != "" {
+		argv = append(argv, "--config", prepared.RenderedConfig)
+	}
+	if j.resume {
+		argv = append(argv, "--resume")
+	}
+	return procmgr.LaunchOpts{
+		Python: prepared.VenvPython,
+		Argv:   argv,
+		Cwd:    filepath.Join(prepared.WorktreeDir, "cfr"),
+		Env:    prepared.Env,
+	}, nil
 }
 
 // monitor polls process.json until the run reaches a procmgr terminal status,
