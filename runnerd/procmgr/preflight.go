@@ -1,4 +1,4 @@
-package training
+package procmgr
 
 import (
 	"errors"
@@ -40,26 +40,26 @@ const (
 	DefaultMinDiskGB = 5.0
 )
 
-// gpuQueryFunc returns the raw CSV output of an nvidia-smi VRAM query. It is a
+// GPUQueryFunc returns the raw CSV output of an nvidia-smi VRAM query. It is a
 // seam so tests can inject fake output (or an exec.ErrNotFound to simulate a
 // CPU host) without touching a real GPU.
-type gpuQueryFunc func() (string, error)
+type GPUQueryFunc func() (string, error)
 
-// defaultGPUQuery runs nvidia-smi for per-GPU free memory, utilization, and
+// DefaultGPUQuery runs nvidia-smi for per-GPU free memory, utilization, and
 // name. A missing binary yields an *exec.Error wrapping exec.ErrNotFound, which
-// gpuVRAMCheck treats as a CPU host rather than a failure.
-func defaultGPUQuery() (string, error) {
+// GPUVRAMCheck treats as a CPU host rather than a failure.
+func DefaultGPUQuery() (string, error) {
 	out, err := exec.Command("nvidia-smi",
 		"--query-gpu=memory.free,utilization.gpu,name",
 		"--format=csv,noheader,nounits").Output()
 	return string(out), err
 }
 
-// gpuVRAMCheck passes when the first GPU reports at least minGB free, when no
+// GPUVRAMCheck passes when the first GPU reports at least minGB free, when no
 // VRAM is required (minGB <= 0), or when nvidia-smi is absent (CPU host). A
 // present-but-failing nvidia-smi is a hard block so a misconfigured GPU host
 // does not silently launch under contention.
-func gpuVRAMCheck(minGB float64, query gpuQueryFunc) PreflightCheck {
+func GPUVRAMCheck(minGB float64, query GPUQueryFunc) PreflightCheck {
 	const name = "gpu_vram"
 	if minGB <= 0 {
 		return PreflightCheck{name, true, "no VRAM requirement"}
@@ -91,7 +91,7 @@ func gpuVRAMCheck(minGB float64, query gpuQueryFunc) PreflightCheck {
 	return PreflightCheck{name, false, fmt.Sprintf("only %.1f GiB free on %s (need %.1f)", freeGB, gpuName, minGB)}
 }
 
-// resolveRunDevice returns the training device configured for run name's
+// ResolveRunDevice returns the training device configured for run name's
 // materialized runs/<name>/config.yaml, via a light line-based YAML scan (the
 // full Config schema is Python-side; Go only needs this one scalar). It
 // tolerates a root-level `device:` key and a `prt_cfr:` section's nested
@@ -100,7 +100,7 @@ func gpuVRAMCheck(minGB float64, query gpuQueryFunc) PreflightCheck {
 // explicit "auto" all resolve to "auto" so callers treat the run as
 // GPU-relevant by default: only an explicit "cpu" is safe to skip the VRAM
 // check for.
-func resolveRunDevice(runsDir, name string) string {
+func ResolveRunDevice(runsDir, name string) string {
 	data, err := os.ReadFile(filepath.Join(runDirOf(runsDir, name), "config.yaml"))
 	if err != nil {
 		return "auto"
@@ -150,10 +150,10 @@ func yamlScalarField(trimmed, key string) (string, bool) {
 	return strings.Trim(v, `"'`), true
 }
 
-// diskSpaceCheck passes when the filesystem backing path has at least minGB of
+// DiskSpaceCheck passes when the filesystem backing path has at least minGB of
 // space available to an unprivileged writer, or when no disk is required
 // (minGB <= 0).
-func diskSpaceCheck(path string, minGB float64) PreflightCheck {
+func DiskSpaceCheck(path string, minGB float64) PreflightCheck {
 	const name = "disk_space"
 	if minGB <= 0 {
 		return PreflightCheck{name, true, "no disk requirement"}
@@ -170,29 +170,29 @@ func diskSpaceCheck(path string, minGB float64) PreflightCheck {
 	return PreflightCheck{name, false, fmt.Sprintf("only %.1f GiB free (need %.1f)", freeGB, minGB)}
 }
 
-// nameCollisionCheck fails when a run of that name already has a process.json.
+// NameCollisionCheck fails when a run of that name already has a process.json.
 // It is not force-overridable: reusing a name would clobber another run's
 // current-state store. Bare name validation is enforced separately by
-// validateName before any path is constructed.
-func nameCollisionCheck(runsDir, name string) PreflightCheck {
-	if _, err := readProcessState(runDirOf(runsDir, name)); err == nil {
+// ValidateName before any path is constructed.
+func NameCollisionCheck(runsDir, name string) PreflightCheck {
+	if _, err := ReadProcessState(runDirOf(runsDir, name)); err == nil {
 		return PreflightCheck{"name_collision", false, fmt.Sprintf("a run named %q already exists", name)}
 	}
 	return PreflightCheck{"name_collision", true, "name available"}
 }
 
-// concurrencyCapCheck fails when the count of live runs (running, starting, or
+// ConcurrencyCapCheck fails when the count of live runs (running, starting, or
 // stopping with an alive pid) is already at or above max. max <= 0 disables the
 // cap.
-func concurrencyCapCheck(runsDir string, max int) PreflightCheck {
+func ConcurrencyCapCheck(runsDir string, max int) PreflightCheck {
 	const name = "concurrency_cap"
 	if max <= 0 {
 		return PreflightCheck{name, true, "no concurrency cap"}
 	}
-	states, _ := scanProcessStates(runsDir)
+	states, _ := ScanProcessStates(runsDir)
 	running := 0
 	for _, st := range states {
-		switch effectiveStatus(st) {
+		switch EffectiveStatus(st) {
 		case StatusRunning, StatusStarting, StatusStopping:
 			running++
 		}
@@ -203,11 +203,11 @@ func concurrencyCapCheck(runsDir string, max int) PreflightCheck {
 	return PreflightCheck{name, true, fmt.Sprintf("%d live runs (cap %d)", running, max)}
 }
 
-// preflightPasses reports whether the checks permit the action. It passes when
+// PreflightPasses reports whether the checks permit the action. It passes when
 // every check is ok, or when force is set and every failing check is
 // overridable. The second return value is the list of failing checks (nil when
 // all pass), for the 409 preflight_failed body.
-func preflightPasses(checks []PreflightCheck, force bool) (bool, []PreflightCheck) {
+func PreflightPasses(checks []PreflightCheck, force bool) (bool, []PreflightCheck) {
 	var failed []PreflightCheck
 	for _, c := range checks {
 		if !c.OK {
@@ -236,4 +236,24 @@ func firstNonEmptyLine(s string) string {
 		}
 	}
 	return ""
+}
+
+// runDirOf returns the run directory for name under runsDir. Callers must have
+// validated name first.
+func runDirOf(runsDir, name string) string {
+	return filepath.Join(runsDir, name)
+}
+
+// EffectiveStatus returns st.Status with pid liveness applied: a run recorded
+// as running/starting/stopping whose pid is no longer alive is reported as
+// crashed. This is the read-time view; Reconcile persists the same repair at
+// server start.
+func EffectiveStatus(st *ProcessState) string {
+	switch st.Status {
+	case StatusRunning, StatusStarting, StatusStopping:
+		if !pidAlive(st) {
+			return StatusCrashed
+		}
+	}
+	return st.Status
 }

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 )
 
 // Sentinel errors returned by EvalManager.Trigger so the HTTP layer can map them
@@ -20,7 +22,7 @@ var (
 	ErrNoCheckpoint = errors.New("no evaluable checkpoint")
 	// ErrEvalCapReached is returned when the manager is already running its
 	// configured maximum number of concurrent evals. Maps to 409. This cap is
-	// EvalManager-internal and independent of the training ProcessManager cap.
+	// EvalManager-internal and independent of the training procmgr.ProcessManager cap.
 	ErrEvalCapReached = errors.New("eval concurrency cap reached")
 )
 
@@ -28,7 +30,7 @@ const (
 	// evalTailLines is how many trailing log lines Jobs() attaches to each job.
 	evalTailLines = 40
 	// defaultMaxConcurrentEvals is the manager's cap before SetMaxConcurrent is
-	// called. Unlike ProcessManager (which defaults its backstop off), eval
+	// called. Unlike procmgr.ProcessManager (which defaults its backstop off), eval
 	// defaults to one at a time: a cuda eval contends for the GPU and even a cpu
 	// eval competes for run_db and host cores, so serial is the safe default.
 	defaultMaxConcurrentEvals = 1
@@ -103,7 +105,7 @@ func (m *EvalManager) SetMaxConcurrent(n int) {
 // path) run unlocked, so concurrent triggers for different runs don't
 // serialize behind that I/O.
 func (m *EvalManager) Trigger(name string, opts EvalOpts) (*EvalJob, error) {
-	if err := validateName(name); err != nil {
+	if err := procmgr.ValidateName(name); err != nil {
 		return nil, err
 	}
 	runDir := filepath.Join(m.runsDir, name)
@@ -121,7 +123,7 @@ func (m *EvalManager) Trigger(name string, opts EvalOpts) (*EvalJob, error) {
 	}
 
 	m.mu.Lock()
-	// Atomic cap check + reservation: mirror ProcessManager.launch so two
+	// Atomic cap check + reservation: mirror procmgr.ProcessManager.launch so two
 	// concurrent triggers cannot both pass a cap of 1.
 	if m.maxConcurrent > 0 && m.running >= m.maxConcurrent {
 		m.mu.Unlock()
@@ -184,7 +186,7 @@ func (m *EvalManager) Trigger(name string, opts EvalOpts) (*EvalJob, error) {
 		Games:     games,
 		Argmax:    opts.Argmax,
 		LogPath:   logPath,
-		StartedAt: nowRFC3339(),
+		StartedAt: procmgr.NowRFC3339(),
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -193,7 +195,7 @@ func (m *EvalManager) Trigger(name string, opts EvalOpts) (*EvalJob, error) {
 		job.Status = EvalFailed
 		job.ExitCode = &code
 		job.Error = err.Error()
-		job.FinishedAt = nowRFC3339()
+		job.FinishedAt = procmgr.NowRFC3339()
 		m.mu.Lock()
 		m.running-- // the reserved slot never actually ran
 		m.reg.add(name, job)
@@ -216,13 +218,13 @@ func (m *EvalManager) Trigger(name string, opts EvalOpts) (*EvalJob, error) {
 // under m.mu and frees the concurrency slot.
 func (m *EvalManager) waitFor(job *EvalJob, cmd *exec.Cmd) {
 	err := cmd.Wait()
-	code := exitCodeFromErr(err)
+	code := procmgr.ExitCodeFromErr(err)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	job.ExitCode = &code
-	job.FinishedAt = nowRFC3339()
+	job.FinishedAt = procmgr.NowRFC3339()
 	if code == 0 {
 		job.Status = EvalSucceeded
 	} else {

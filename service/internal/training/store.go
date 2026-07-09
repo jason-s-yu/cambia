@@ -14,8 +14,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 	_ "modernc.org/sqlite"
 )
+
+// TrainingStore implements procmgr.RunResolver: the process layer reads the run
+// directory layout and pid-liveness-aware status through this interface rather
+// than importing the store type directly.
+var _ procmgr.RunResolver = (*TrainingStore)(nil)
 
 // meanImpBaselines is the canonical set of baselines used to compute mean_imp.
 // Must match MEAN_IMP_BASELINES in cfr/src/evaluate_agents.py.
@@ -40,7 +46,7 @@ type Run struct {
 	// Process is the Go-owned current-process-state record read from
 	// runs/<name>/process.json, or nil when the run has none (an external
 	// run_db-only run). It carries the live pid/pgid and lifecycle status.
-	Process *ProcessState `json:"process,omitempty"`
+	Process *procmgr.ProcessState `json:"process,omitempty"`
 }
 
 // RunDetail extends Run with configuration and metadata.
@@ -187,7 +193,7 @@ func (s *TrainingStore) queryRuns(ctx context.Context) ([]Run, error) {
 	for i := range runs {
 		seen[runs[i].Name] = true
 	}
-	states, _ := scanProcessStates(s.runsDir)
+	states, _ := procmgr.ScanProcessStates(s.runsDir)
 	for _, st := range states {
 		if seen[st.Name] {
 			continue
@@ -195,7 +201,7 @@ func (s *TrainingStore) queryRuns(ctx context.Context) ([]Run, error) {
 		runs = append(runs, Run{
 			Name:      st.Name,
 			Algorithm: st.Algorithm,
-			Status:    effectiveStatus(st),
+			Status:    procmgr.EffectiveStatus(st),
 			CreatedAt: st.CreatedAt,
 			UpdatedAt: st.CreatedAt,
 			Process:   st,
@@ -254,7 +260,7 @@ func (s *TrainingStore) GetRun(ctx context.Context, name string) (*RunDetail, er
 
 	// Overlay the process.json current state (status + pid liveness + record).
 	if st, ok := s.processStateFor(rd.Name); ok {
-		rd.Status = effectiveStatus(st)
+		rd.Status = procmgr.EffectiveStatus(st)
 		rd.Process = st
 	}
 
@@ -401,30 +407,25 @@ func (s *TrainingStore) GetCheckpoints(ctx context.Context, runName string) ([]C
 	return cps, rows.Err()
 }
 
-// runDirOf returns the run directory for name under runsDir.
-func runDirOf(runsDir, name string) string {
-	return filepath.Join(runsDir, name)
+// RunDir returns the run directory for name under the store's runs root. It is
+// the procmgr.RunResolver hook the process layer uses instead of importing the
+// store's path logic.
+func (s *TrainingStore) RunDir(name string) string {
+	return filepath.Join(s.runsDir, name)
 }
 
-// effectiveStatus returns st.Status with pid liveness applied: a run recorded
-// as running/starting/stopping whose pid is no longer alive is reported as
-// crashed. This is the read-time view; Reconcile persists the same repair at
-// server start.
-func effectiveStatus(st *ProcessState) string {
-	switch st.Status {
-	case StatusRunning, StatusStarting, StatusStopping:
-		if !pidAlive(st) {
-			return StatusCrashed
-		}
-	}
-	return st.Status
+// EffectiveStatus returns st.Status with pid liveness applied, delegating to the
+// procmgr helper. It is the procmgr.RunResolver hook: a run recorded as
+// running/starting/stopping whose pid is no longer alive reports as crashed.
+func (s *TrainingStore) EffectiveStatus(st *procmgr.ProcessState) string {
+	return procmgr.EffectiveStatus(st)
 }
 
 // processStateFor reads runs/<name>/process.json, returning the state and
 // whether it exists. process.json is the Go-owned current-state authority; it
 // replaces the legacy train.pid liveness probe.
-func (s *TrainingStore) processStateFor(name string) (*ProcessState, bool) {
-	st, err := readProcessState(runDirOf(s.runsDir, name))
+func (s *TrainingStore) processStateFor(name string) (*procmgr.ProcessState, bool) {
+	st, err := procmgr.ReadProcessState(s.RunDir(name))
 	if err != nil {
 		return nil, false
 	}
@@ -436,7 +437,7 @@ func (s *TrainingStore) processStateFor(name string) (*ProcessState, bool) {
 // process.json keeps its stored status (externally launched, unsupervised).
 func (s *TrainingStore) applyProcessState(r *Run) {
 	if st, ok := s.processStateFor(r.Name); ok {
-		r.Status = effectiveStatus(st)
+		r.Status = procmgr.EffectiveStatus(st)
 		r.Process = st
 	}
 }
@@ -453,13 +454,13 @@ func (s *TrainingStore) processOnlyDetail(name string) *RunDetail {
 		Run: Run{
 			Name:      st.Name,
 			Algorithm: st.Algorithm,
-			Status:    effectiveStatus(st),
+			Status:    procmgr.EffectiveStatus(st),
 			CreatedAt: st.CreatedAt,
 			UpdatedAt: st.CreatedAt,
 			Process:   st,
 		},
 	}
-	if data, err := os.ReadFile(filepath.Join(runDirOf(s.runsDir, name), "config.yaml")); err == nil {
+	if data, err := os.ReadFile(filepath.Join(s.RunDir(name), "config.yaml")); err == nil {
 		rd.ConfigYAML = string(data)
 	}
 	return rd

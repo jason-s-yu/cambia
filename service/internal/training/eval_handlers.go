@@ -4,6 +4,8 @@ import (
 	"errors"
 	"net/http"
 	"path/filepath"
+
+	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 )
 
 // EvalHandlers serves the eval HTTP surface: POST trigger (with cuda preflight
@@ -19,11 +21,11 @@ type EvalHandlers struct {
 
 	// gpuQuery is the nvidia-smi seam; tests replace it so preflight never
 	// depends on live VRAM or touches the GPU. Mirrors ProcessHandlers.
-	gpuQuery gpuQueryFunc
+	gpuQuery procmgr.GPUQueryFunc
 }
 
 // EvalHandlersConfig configures NewEvalHandlers. Zero-value MinVRAMGB/MinDiskGB
-// fall back to DefaultMinVRAMGB/DefaultMinDiskGB, so the safety rails are on by
+// fall back to procmgr.DefaultMinVRAMGB/procmgr.DefaultMinDiskGB, so the safety rails are on by
 // default rather than silently disabled by an unset field.
 type EvalHandlersConfig struct {
 	Manager   *EvalManager
@@ -36,18 +38,18 @@ type EvalHandlersConfig struct {
 func NewEvalHandlers(cfg EvalHandlersConfig) *EvalHandlers {
 	minVRAM := cfg.MinVRAMGB
 	if minVRAM <= 0 {
-		minVRAM = DefaultMinVRAMGB
+		minVRAM = procmgr.DefaultMinVRAMGB
 	}
 	minDisk := cfg.MinDiskGB
 	if minDisk <= 0 {
-		minDisk = DefaultMinDiskGB
+		minDisk = procmgr.DefaultMinDiskGB
 	}
 	return &EvalHandlers{
 		mgr:       cfg.Manager,
 		runsDir:   cfg.RunsDir,
 		minVRAMGB: minVRAM,
 		minDiskGB: minDisk,
-		gpuQuery:  defaultGPUQuery,
+		gpuQuery:  procmgr.DefaultGPUQuery,
 	}
 }
 
@@ -76,7 +78,7 @@ func (h *EvalHandlers) HandleTrigger(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid_name", "missing run name")
 		return
 	}
-	if err := validateName(name); err != nil {
+	if err := procmgr.ValidateName(name); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid_name", err.Error())
 		return
 	}
@@ -109,11 +111,11 @@ func (h *EvalHandlers) HandleTrigger(w http.ResponseWriter, r *http.Request) {
 		minDisk = *req.MinFreeDiskGB
 	}
 
-	checks := []PreflightCheck{diskSpaceCheck(h.runsDir, minDisk)}
+	checks := []procmgr.PreflightCheck{procmgr.DiskSpaceCheck(h.runsDir, minDisk)}
 	if device == "cuda" {
-		checks = append(checks, gpuVRAMCheck(minVRAM, h.gpuQuery))
+		checks = append(checks, procmgr.GPUVRAMCheck(minVRAM, h.gpuQuery))
 	}
-	if ok, failed := preflightPasses(checks, req.Force); !ok {
+	if ok, failed := procmgr.PreflightPasses(checks, req.Force); !ok {
 		writePreflightFailed(w, failed)
 		return
 	}
@@ -130,7 +132,7 @@ func (h *EvalHandlers) HandleTrigger(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusNotFound, "no_checkpoint", err.Error())
 		case errors.Is(err, ErrEvalCapReached):
 			writeJSONError(w, http.StatusConflict, "eval_cap_reached", err.Error())
-		case errors.Is(err, ErrInvalidName):
+		case errors.Is(err, procmgr.ErrInvalidName):
 			writeJSONError(w, http.StatusBadRequest, "invalid_name", err.Error())
 		default:
 			writeJSONError(w, http.StatusInternalServerError, "eval_failed", err.Error())
@@ -151,7 +153,7 @@ func (h *EvalHandlers) HandleList(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid_name", "missing run name")
 		return
 	}
-	if err := validateName(name); err != nil {
+	if err := procmgr.ValidateName(name); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid_name", err.Error())
 		return
 	}

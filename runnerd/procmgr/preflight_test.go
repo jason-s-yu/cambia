@@ -1,4 +1,4 @@
-package training
+package procmgr
 
 import (
 	"errors"
@@ -8,14 +8,14 @@ import (
 	"testing"
 )
 
-// fakeQuery builds a gpuQueryFunc returning canned output or an error.
-func fakeQuery(out string, err error) gpuQueryFunc {
+// fakeQuery builds a GPUQueryFunc returning canned output or an error.
+func fakeQuery(out string, err error) GPUQueryFunc {
 	return func() (string, error) { return out, err }
 }
 
 func TestGPUVRAMCheckNoNvidiaSmi(t *testing.T) {
 	// A CPU host (nvidia-smi absent) passes regardless of the requirement.
-	c := gpuVRAMCheck(8.0, fakeQuery("", exec.ErrNotFound))
+	c := GPUVRAMCheck(8.0, fakeQuery("", exec.ErrNotFound))
 	if !c.OK {
 		t.Errorf("no-nvidia-smi should pass, got %+v", c)
 	}
@@ -26,7 +26,7 @@ func TestGPUVRAMCheckNoNvidiaSmi(t *testing.T) {
 
 func TestGPUVRAMCheckNoRequirement(t *testing.T) {
 	// minGB <= 0 never queries and always passes.
-	c := gpuVRAMCheck(0, fakeQuery("", errors.New("should not be called")))
+	c := GPUVRAMCheck(0, fakeQuery("", errors.New("should not be called")))
 	if !c.OK {
 		t.Errorf("zero requirement should pass, got %+v", c)
 	}
@@ -34,7 +34,7 @@ func TestGPUVRAMCheckNoRequirement(t *testing.T) {
 
 func TestGPUVRAMCheckBelowThreshold(t *testing.T) {
 	// 512 MiB free, need 1 GiB -> block.
-	c := gpuVRAMCheck(1.0, fakeQuery("512, 30, Fake GPU\n", nil))
+	c := GPUVRAMCheck(1.0, fakeQuery("512, 30, Fake GPU\n", nil))
 	if c.OK {
 		t.Errorf("512 MiB free vs 1 GiB requirement should block, got %+v", c)
 	}
@@ -42,7 +42,7 @@ func TestGPUVRAMCheckBelowThreshold(t *testing.T) {
 
 func TestGPUVRAMCheckAboveThreshold(t *testing.T) {
 	// 8192 MiB free, need 1 GiB -> pass.
-	c := gpuVRAMCheck(1.0, fakeQuery("8192, 30, Fake GPU\n", nil))
+	c := GPUVRAMCheck(1.0, fakeQuery("8192, 30, Fake GPU\n", nil))
 	if !c.OK {
 		t.Errorf("8 GiB free vs 1 GiB requirement should pass, got %+v", c)
 	}
@@ -50,14 +50,14 @@ func TestGPUVRAMCheckAboveThreshold(t *testing.T) {
 
 func TestGPUVRAMCheckNvidiaSmiFails(t *testing.T) {
 	// nvidia-smi present but errored (not ErrNotFound) -> hard block.
-	c := gpuVRAMCheck(1.0, fakeQuery("", errors.New("driver error")))
+	c := GPUVRAMCheck(1.0, fakeQuery("", errors.New("driver error")))
 	if c.OK {
 		t.Errorf("failing nvidia-smi should block, got %+v", c)
 	}
 }
 
 func TestDiskSpaceCheckNoRequirement(t *testing.T) {
-	c := diskSpaceCheck(t.TempDir(), 0)
+	c := DiskSpaceCheck(t.TempDir(), 0)
 	if !c.OK {
 		t.Errorf("zero requirement should pass, got %+v", c)
 	}
@@ -65,7 +65,7 @@ func TestDiskSpaceCheckNoRequirement(t *testing.T) {
 
 func TestDiskSpaceCheckImpossibleRequirement(t *testing.T) {
 	// No real filesystem has 1e9 GiB free.
-	c := diskSpaceCheck(t.TempDir(), 1e9)
+	c := DiskSpaceCheck(t.TempDir(), 1e9)
 	if c.OK {
 		t.Errorf("impossible disk requirement should block, got %+v", c)
 	}
@@ -82,21 +82,21 @@ func TestConcurrencyCapCheck(t *testing.T) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := writeProcessState(dir, &ProcessState{
+		if err := WriteProcessState(dir, &ProcessState{
 			Name: n, Status: StatusRunning, PID: os.Getpid(), PGID: os.Getpid(),
-			CreatedAt: nowRFC3339(),
+			CreatedAt: NowRFC3339(),
 		}); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	if c := concurrencyCapCheck(runsDir, 0); !c.OK {
+	if c := ConcurrencyCapCheck(runsDir, 0); !c.OK {
 		t.Errorf("cap 0 (disabled) should pass, got %+v", c)
 	}
-	if c := concurrencyCapCheck(runsDir, 1); c.OK {
+	if c := ConcurrencyCapCheck(runsDir, 1); c.OK {
 		t.Errorf("2 live runs at cap 1 should block, got %+v", c)
 	}
-	if c := concurrencyCapCheck(runsDir, 5); !c.OK {
+	if c := ConcurrencyCapCheck(runsDir, 5); !c.OK {
 		t.Errorf("2 live runs under cap 5 should pass, got %+v", c)
 	}
 }
@@ -107,21 +107,21 @@ func TestConcurrencyCapIgnoresDeadRuns(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Recorded running but pid is dead -> effectiveStatus is crashed, not counted.
-	if err := writeProcessState(dir, &ProcessState{
+	// Recorded running but pid is dead -> EffectiveStatus is crashed, not counted.
+	if err := WriteProcessState(dir, &ProcessState{
 		Name: "dead", Status: StatusRunning, PID: 9999999, PGID: 9999999,
-		CreatedAt: nowRFC3339(),
+		CreatedAt: NowRFC3339(),
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if c := concurrencyCapCheck(runsDir, 1); !c.OK {
+	if c := ConcurrencyCapCheck(runsDir, 1); !c.OK {
 		t.Errorf("a dead run must not count toward the cap, got %+v", c)
 	}
 }
 
 func TestNameCollisionCheck(t *testing.T) {
 	runsDir := t.TempDir()
-	if c := nameCollisionCheck(runsDir, "fresh"); !c.OK {
+	if c := NameCollisionCheck(runsDir, "fresh"); !c.OK {
 		t.Errorf("fresh name should be available, got %+v", c)
 	}
 
@@ -129,12 +129,12 @@ func TestNameCollisionCheck(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeProcessState(dir, &ProcessState{
-		Name: "taken", Status: StatusCreated, CreatedAt: nowRFC3339(),
+	if err := WriteProcessState(dir, &ProcessState{
+		Name: "taken", Status: StatusCreated, CreatedAt: NowRFC3339(),
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if c := nameCollisionCheck(runsDir, "taken"); c.OK {
+	if c := NameCollisionCheck(runsDir, "taken"); c.OK {
 		t.Errorf("existing process.json should collide, got %+v", c)
 	}
 }
@@ -152,7 +152,7 @@ func writeRunConfig(t *testing.T, runsDir, name, content string) {
 }
 
 func TestResolveRunDeviceMissingRun(t *testing.T) {
-	if got := resolveRunDevice(t.TempDir(), "ghost"); got != "auto" {
+	if got := ResolveRunDevice(t.TempDir(), "ghost"); got != "auto" {
 		t.Errorf("missing run: device = %q, want auto", got)
 	}
 }
@@ -160,7 +160,7 @@ func TestResolveRunDeviceMissingRun(t *testing.T) {
 func TestResolveRunDeviceMissingField(t *testing.T) {
 	runsDir := t.TempDir()
 	writeRunConfig(t, runsDir, "no-device", "prt_cfr:\n  iterations: 2\n")
-	if got := resolveRunDevice(runsDir, "no-device"); got != "auto" {
+	if got := ResolveRunDevice(runsDir, "no-device"); got != "auto" {
 		t.Errorf("no device field: device = %q, want auto", got)
 	}
 }
@@ -168,7 +168,7 @@ func TestResolveRunDeviceMissingField(t *testing.T) {
 func TestResolveRunDevicePRTCFRSection(t *testing.T) {
 	runsDir := t.TempDir()
 	writeRunConfig(t, runsDir, "section-cpu", "prt_cfr:\n  iterations: 2\n  device: cpu\n")
-	if got := resolveRunDevice(runsDir, "section-cpu"); got != "cpu" {
+	if got := ResolveRunDevice(runsDir, "section-cpu"); got != "cpu" {
 		t.Errorf("section device: got %q, want cpu", got)
 	}
 }
@@ -176,7 +176,7 @@ func TestResolveRunDevicePRTCFRSection(t *testing.T) {
 func TestResolveRunDeviceRootLevel(t *testing.T) {
 	runsDir := t.TempDir()
 	writeRunConfig(t, runsDir, "root-cpu", "device: cpu\n")
-	if got := resolveRunDevice(runsDir, "root-cpu"); got != "cpu" {
+	if got := ResolveRunDevice(runsDir, "root-cpu"); got != "cpu" {
 		t.Errorf("root device: got %q, want cpu", got)
 	}
 }
@@ -185,7 +185,7 @@ func TestResolveRunDeviceSectionWinsOverRoot(t *testing.T) {
 	runsDir := t.TempDir()
 	writeRunConfig(t, runsDir, "mixed",
 		"device: cuda\nprt_cfr:\n  iterations: 2\n  device: cpu\n")
-	if got := resolveRunDevice(runsDir, "mixed"); got != "cpu" {
+	if got := ResolveRunDevice(runsDir, "mixed"); got != "cpu" {
 		t.Errorf("mixed device: got %q, want cpu (section wins)", got)
 	}
 }
@@ -193,7 +193,7 @@ func TestResolveRunDeviceSectionWinsOverRoot(t *testing.T) {
 func TestResolveRunDeviceCuda(t *testing.T) {
 	runsDir := t.TempDir()
 	writeRunConfig(t, runsDir, "cuda-run", "prt_cfr:\n  device: cuda\n")
-	if got := resolveRunDevice(runsDir, "cuda-run"); got != "cuda" {
+	if got := ResolveRunDevice(runsDir, "cuda-run"); got != "cuda" {
 		t.Errorf("cuda device: got %q, want cuda", got)
 	}
 }
@@ -201,7 +201,7 @@ func TestResolveRunDeviceCuda(t *testing.T) {
 func TestResolveRunDeviceExplicitAuto(t *testing.T) {
 	runsDir := t.TempDir()
 	writeRunConfig(t, runsDir, "auto-run", "prt_cfr:\n  device: auto\n")
-	if got := resolveRunDevice(runsDir, "auto-run"); got != "auto" {
+	if got := ResolveRunDevice(runsDir, "auto-run"); got != "auto" {
 		t.Errorf("auto device: got %q, want auto", got)
 	}
 }
@@ -227,7 +227,7 @@ func TestPreflightPassesForceMatrix(t *testing.T) {
 		{"mixed with force blocked by name", []PreflightCheck{badGPU, badName}, true, false},
 	}
 	for _, tc := range cases {
-		got, failed := preflightPasses(tc.checks, tc.force)
+		got, failed := PreflightPasses(tc.checks, tc.force)
 		if got != tc.want {
 			t.Errorf("%s: passes = %v, want %v (failed=%+v)", tc.desc, got, tc.want, failed)
 		}

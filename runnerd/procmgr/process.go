@@ -1,4 +1,4 @@
-package training
+package procmgr
 
 import (
 	"errors"
@@ -46,18 +46,18 @@ var (
 	// ErrConcurrencyCapReached is the hard backstop returned by launch when the
 	// in-flight count this manager itself is supervising is already at the
 	// configured cap. It is checked and incremented atomically under m.mu, so
-	// it closes the TOCTOU window the disk-scanning preflight concurrencyCapCheck
+	// it closes the TOCTOU window the disk-scanning preflight ConcurrencyCapCheck
 	// cannot: two concurrent launches racing the same disk snapshot.
 	ErrConcurrencyCapReached = errors.New("concurrency cap reached")
 )
 
 // runNameRe is the strict run-name allowlist. Combined with the explicit ".."
-// and "/" reject in validateName it forms the path-traversal guard.
+// and "/" reject in ValidateName it forms the path-traversal guard.
 var runNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
-// validateName enforces the run-name allowlist and rejects any name containing
+// ValidateName enforces the run-name allowlist and rejects any name containing
 // ".." or a path separator before any filesystem operation touches it.
-func validateName(name string) error {
+func ValidateName(name string) error {
 	if strings.Contains(name, "..") || strings.Contains(name, "/") {
 		return fmt.Errorf("%w: %q contains a path separator or ..", ErrInvalidName, name)
 	}
@@ -67,13 +67,28 @@ func validateName(name string) error {
 	return nil
 }
 
-// algoSubcommand maps an algorithm identifier to the cambia CLI subcommand.
-func algoSubcommand(algo string) ([]string, error) {
-	switch algo {
-	case "prt-cfr", "prtcfr":
-		return []string{"train", "prtcfr"}, nil
-	default:
-		return nil, fmt.Errorf("%w: %q", ErrUnsupportedAlgorithm, algo)
+// RunResolver supplies the run-directory layout and the pid-liveness-aware
+// status view that a ProcessManager's host provides. It severs the manager's
+// dependency on any concrete run store: the dashboard service injects its
+// TrainingStore and runnerd injects its own thin store, each implementing these
+// two methods. The manager holds the resolver for host-directed lookups; the
+// supervisor's own launch/stop path uses its runsDir directly.
+type RunResolver interface {
+	// RunDir returns the run directory for a validated run name.
+	RunDir(name string) string
+	// EffectiveStatus returns st.Status with pid liveness applied.
+	EffectiveStatus(st *ProcessState) string
+}
+
+// TrainAlgorithms returns the train-only algorithm to cambia-subcommand
+// allowlist the dashboard service registers with a ProcessManager: PRT-CFR
+// under both its canonical id and its no-dash alias. Callers own the table;
+// runnerd registers its own (super)set of job kinds. A fresh map is returned on
+// every call so callers cannot mutate a shared instance.
+func TrainAlgorithms() map[string][]string {
+	return map[string][]string{
+		"prt-cfr": {"train", "prtcfr"},
+		"prtcfr":  {"train", "prtcfr"},
 	}
 }
 
@@ -115,9 +130,15 @@ type ProcessManager struct {
 	runsDir   string
 	cfrDir    string
 	cambiaBin string
-	// store is reserved for run_db name-collision checks performed by the S1T7
-	// HTTP wiring; the supervisor itself does not read it.
-	store *TrainingStore
+	// resolver is the injected host store (dashboard TrainingStore or runnerd's
+	// own). It severs the type dependency the old *TrainingStore field created;
+	// the supervisor itself does not read it in this milestone, reserving it for
+	// host-directed lookups. May be nil.
+	resolver RunResolver
+	// algos is the injected algorithm to cambia-subcommand allowlist. A launch
+	// for an unregistered algorithm returns ErrUnsupportedAlgorithm; callers pick
+	// which job kinds this manager will spawn (see TrainAlgorithms).
+	algos map[string][]string
 
 	mu            sync.Mutex
 	procs         map[string]*managedProc
@@ -126,28 +147,54 @@ type ProcessManager struct {
 
 // NewProcessManager constructs a ProcessManager. runsDir is the runs root,
 // cfrDir is the working directory for spawned subprocesses, cambiaBin is the
-// cambia executable, and store is the read-only run database (may be nil).
+// cambia executable, resolver is the injected host store (may be nil), and algos
+// is the algorithm to cambia-subcommand allowlist (see TrainAlgorithms).
 // maxConcurrent defaults to 0 (disabled); call SetMaxConcurrent to enable the
 // hard-backstop cap.
-func NewProcessManager(runsDir, cfrDir, cambiaBin string, store *TrainingStore) *ProcessManager {
+func NewProcessManager(runsDir, cfrDir, cambiaBin string, resolver RunResolver, algos map[string][]string) *ProcessManager {
 	return &ProcessManager{
 		runsDir:   runsDir,
 		cfrDir:    cfrDir,
 		cambiaBin: cambiaBin,
-		store:     store,
+		resolver:  resolver,
+		algos:     algos,
 		procs:     make(map[string]*managedProc),
 	}
+}
+
+// AlgoSubcommand maps an algorithm identifier to its cambia CLI subcommand via
+// the constructor-injected allowlist. An unregistered algorithm is rejected with
+// ErrUnsupportedAlgorithm (the reject-unknown discipline is unchanged; only the
+// table is now injected rather than hardcoded).
+func (m *ProcessManager) AlgoSubcommand(algo string) ([]string, error) {
+	sub, ok := m.algos[algo]
+	if !ok {
+		return nil, fmt.Errorf("%w: %q", ErrUnsupportedAlgorithm, algo)
+	}
+	return sub, nil
 }
 
 // SetMaxConcurrent sets the hard-backstop cap on processes this manager
 // instance is actively supervising (len(m.procs)). max <= 0 disables it. This
 // is the authority enforced atomically under m.mu inside launch; the disk-
-// scanning preflight concurrencyCapCheck is the advisory, user-facing 409 and
+// scanning preflight ConcurrencyCapCheck is the advisory, user-facing 409 and
 // cannot by itself close the race between two concurrent launch calls.
 func (m *ProcessManager) SetMaxConcurrent(max int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.maxConcurrent = max
+}
+
+// KillAll force-terminates every process group this manager is currently
+// supervising with SIGKILL and no grace period. It is the abrupt-shutdown path;
+// callers wanting a graceful stop use Stop per run. Safe to call when no
+// processes are live. The wait goroutines still record each terminal state.
+func (m *ProcessManager) KillAll() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, p := range m.procs {
+		_ = killGroupFunc(p.pgid, syscall.SIGKILL)
+	}
 }
 
 // runDir returns the absolute-or-relative run directory for name. Callers must
@@ -160,7 +207,7 @@ func (m *ProcessManager) runDir(name string) string {
 // makes runs/<name>/logs/, materializes the config into runs/<name>/config.yaml,
 // and writes process.json with status "created".
 func (m *ProcessManager) Create(req CreateRequest) (*ProcessState, error) {
-	if err := validateName(req.Name); err != nil {
+	if err := ValidateName(req.Name); err != nil {
 		return nil, err
 	}
 
@@ -195,9 +242,9 @@ func (m *ProcessManager) Create(req CreateRequest) (*ProcessState, error) {
 		Status:     StatusCreated,
 		Algorithm:  req.Algorithm,
 		ConfigPath: absConfig,
-		CreatedAt:  nowRFC3339(),
+		CreatedAt:  NowRFC3339(),
 	}
-	if err := writeProcessState(runDir, st); err != nil {
+	if err := WriteProcessState(runDir, st); err != nil {
 		return nil, err
 	}
 	return st, nil
@@ -216,7 +263,7 @@ func (m *ProcessManager) Resume(name string, opts StartOpts) (*ProcessState, err
 
 // launch is the shared spawn path for Start and Resume.
 func (m *ProcessManager) launch(name string, opts StartOpts, resume bool) (*ProcessState, error) {
-	if err := validateName(name); err != nil {
+	if err := ValidateName(name); err != nil {
 		return nil, err
 	}
 
@@ -235,7 +282,7 @@ func (m *ProcessManager) launch(name string, opts StartOpts, resume bool) (*Proc
 	}
 
 	runDir := m.runDir(name)
-	st, err := readProcessState(runDir)
+	st, err := ReadProcessState(runDir)
 	if err != nil {
 		return nil, fmt.Errorf("read process state for %q: %w", name, err)
 	}
@@ -264,7 +311,7 @@ func (m *ProcessManager) launch(name string, opts StartOpts, resume bool) (*Proc
 		absRunDir = runDir
 	}
 
-	sub, err := algoSubcommand(st.Algorithm)
+	sub, err := m.AlgoSubcommand(st.Algorithm)
 	if err != nil {
 		return nil, err
 	}
@@ -325,7 +372,7 @@ func (m *ProcessManager) launch(name string, opts StartOpts, resume bool) (*Proc
 		s.Status = StatusRunning
 		s.PID = pid
 		s.PGID = pgid
-		s.StartedAt = nowRFC3339()
+		s.StartedAt = NowRFC3339()
 		s.FinishedAt = ""
 		s.ExitCode = nil
 		s.LastError = ""
@@ -335,7 +382,7 @@ func (m *ProcessManager) launch(name string, opts StartOpts, resume bool) (*Proc
 
 	go m.waitFor(p)
 
-	return readProcessState(runDir)
+	return ReadProcessState(runDir)
 }
 
 // waitFor blocks on the subprocess exit, then records the terminal state.
@@ -349,10 +396,10 @@ func (m *ProcessManager) waitFor(p *managedProc) {
 		p.killTimer.Stop()
 	}
 
-	code := exitCodeFromErr(err)
+	code := ExitCodeFromErr(err)
 	_ = m.mutateStateLocked(p.name, func(st *ProcessState) {
 		st.ExitCode = &code
-		st.FinishedAt = nowRFC3339()
+		st.FinishedAt = NowRFC3339()
 		if p.stopRequested || code == 0 {
 			st.Status = StatusStopped
 		} else {
@@ -369,7 +416,7 @@ func (m *ProcessManager) waitFor(p *managedProc) {
 // SIGKILL after stopGracePeriod. force sends SIGKILL immediately. The stop is
 // recorded so the wait goroutine reports "stopped" rather than "crashed".
 func (m *ProcessManager) Stop(name string, force bool) (*ProcessState, error) {
-	if err := validateName(name); err != nil {
+	if err := ValidateName(name); err != nil {
 		return nil, err
 	}
 
@@ -381,7 +428,7 @@ func (m *ProcessManager) Stop(name string, force bool) (*ProcessState, error) {
 		// Not supervised by this instance: it already exited (terminal state on
 		// disk) or was never started. Return the on-disk state; if a stale live
 		// pid is recorded, signal its group best-effort.
-		st, err := readProcessState(m.runDir(name))
+		st, err := ReadProcessState(m.runDir(name))
 		if err != nil {
 			return nil, fmt.Errorf("read process state for %q: %w", name, err)
 		}
@@ -417,7 +464,7 @@ func (m *ProcessManager) Stop(name string, force bool) (*ProcessState, error) {
 			// reaped, or -- under enough pid churn -- pgid may have been
 			// recycled for an unrelated process group. Only SIGKILL a pid we
 			// can still positively identify as this run's.
-			st, err := readProcessState(runDir)
+			st, err := ReadProcessState(runDir)
 			if err != nil || !pidAlive(st) {
 				return
 			}
@@ -425,12 +472,12 @@ func (m *ProcessManager) Stop(name string, force bool) (*ProcessState, error) {
 		})
 	}
 
-	return readProcessState(m.runDir(name))
+	return ReadProcessState(m.runDir(name))
 }
 
 // GetState returns the on-disk process state for name and whether it was found.
 func (m *ProcessManager) GetState(name string) (*ProcessState, bool) {
-	st, err := readProcessState(m.runDir(name))
+	st, err := ReadProcessState(m.runDir(name))
 	if err != nil {
 		return nil, false
 	}
@@ -441,7 +488,7 @@ func (m *ProcessManager) GetState(name string) (*ProcessState, bool) {
 // starting, or stopping whose recorded pid is no longer alive is flipped to
 // crashed. It never spawns; it only repairs stale state.
 func (m *ProcessManager) Reconcile() {
-	states, err := scanProcessStates(m.runsDir)
+	states, err := ScanProcessStates(m.runsDir)
 	if err != nil {
 		return
 	}
@@ -454,9 +501,9 @@ func (m *ProcessManager) Reconcile() {
 			st.Status = StatusCrashed
 			st.LastError = "reconciled: process not alive at server start"
 			if st.FinishedAt == "" {
-				st.FinishedAt = nowRFC3339()
+				st.FinishedAt = NowRFC3339()
 			}
-			_ = writeProcessState(m.runDir(st.Name), st)
+			_ = WriteProcessState(m.runDir(st.Name), st)
 		}
 	}
 }
@@ -465,12 +512,12 @@ func (m *ProcessManager) Reconcile() {
 // state for name. Callers must hold m.mu.
 func (m *ProcessManager) mutateStateLocked(name string, fn func(*ProcessState)) error {
 	runDir := m.runDir(name)
-	st, err := readProcessState(runDir)
+	st, err := ReadProcessState(runDir)
 	if err != nil {
 		return err
 	}
 	fn(st)
-	return writeProcessState(runDir, st)
+	return WriteProcessState(runDir, st)
 }
 
 // pidAlive reports whether st's pid names a live process that is plausibly
@@ -553,10 +600,10 @@ func readBootTime() (int64, error) {
 	return 0, fmt.Errorf("btime not found in /proc/stat")
 }
 
-// exitCodeFromErr extracts the exit code from a cmd.Wait error: 0 for nil, the
+// ExitCodeFromErr extracts the exit code from a cmd.Wait error: 0 for nil, the
 // process exit code for an ExitError (-1 when terminated by a signal), and -1
 // for any other error.
-func exitCodeFromErr(err error) int {
+func ExitCodeFromErr(err error) int {
 	if err == nil {
 		return 0
 	}

@@ -1,4 +1,4 @@
-package training
+package procmgr
 
 import (
 	"errors"
@@ -38,14 +38,8 @@ func newTestManager(t *testing.T, stubBody string) (*ProcessManager, string) {
 		t.Fatal(err)
 	}
 
-	m := NewProcessManager(runsDir, cfrDir, stub, nil)
-	t.Cleanup(func() {
-		m.mu.Lock()
-		for _, p := range m.procs {
-			_ = syscall.Kill(-p.pgid, syscall.SIGKILL)
-		}
-		m.mu.Unlock()
-	})
+	m := NewProcessManager(runsDir, cfrDir, stub, nil, TrainAlgorithms())
+	t.Cleanup(func() { m.KillAll() })
 	return m, runsDir
 }
 
@@ -220,13 +214,13 @@ func TestProcessReconcileStaleRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Fake a running run whose pid is dead.
-	if err := writeProcessState(runDir, &ProcessState{
+	if err := WriteProcessState(runDir, &ProcessState{
 		Name:      name,
 		Status:    StatusRunning,
 		Algorithm: "prt-cfr",
 		PID:       9999999,
 		PGID:      9999999,
-		CreatedAt: nowRFC3339(),
+		CreatedAt: NowRFC3339(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -254,9 +248,9 @@ func TestProcessReconcileLeavesTerminalAndLiveAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	code := 0
-	if err := writeProcessState(stoppedDir, &ProcessState{
+	if err := WriteProcessState(stoppedDir, &ProcessState{
 		Name: "already-stopped", Status: StatusStopped, PID: 9999999,
-		ExitCode: &code, CreatedAt: nowRFC3339(),
+		ExitCode: &code, CreatedAt: NowRFC3339(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -266,9 +260,9 @@ func TestProcessReconcileLeavesTerminalAndLiveAlone(t *testing.T) {
 	if err := os.MkdirAll(liveDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeProcessState(liveDir, &ProcessState{
+	if err := WriteProcessState(liveDir, &ProcessState{
 		Name: "live-run", Status: StatusRunning, PID: os.Getpid(),
-		PGID: os.Getpid(), CreatedAt: nowRFC3339(),
+		PGID: os.Getpid(), CreatedAt: NowRFC3339(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -301,9 +295,9 @@ func TestProcessStartMissingConfig(t *testing.T) {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeProcessState(runDir, &ProcessState{
+	if err := WriteProcessState(runDir, &ProcessState{
 		Name: name, Status: StatusCreated, Algorithm: "prt-cfr",
-		ConfigPath: filepath.Join(runDir, "config.yaml"), CreatedAt: nowRFC3339(),
+		ConfigPath: filepath.Join(runDir, "config.yaml"), CreatedAt: NowRFC3339(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -413,10 +407,10 @@ func TestProcessReconcilePidReuseFalseAlive(t *testing.T) {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeProcessState(runDir, &ProcessState{
+	if err := WriteProcessState(runDir, &ProcessState{
 		Name: name, Status: StatusRunning, Algorithm: "prt-cfr",
 		PID: os.Getpid(), PGID: os.Getpid(), StartTicks: 1,
-		CreatedAt: nowRFC3339(),
+		CreatedAt: NowRFC3339(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -449,10 +443,10 @@ func TestProcessReconcileRealStarttimeMatches(t *testing.T) {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeProcessState(runDir, &ProcessState{
+	if err := WriteProcessState(runDir, &ProcessState{
 		Name: name, Status: StatusRunning, Algorithm: "prt-cfr",
 		PID: os.Getpid(), PGID: os.Getpid(), StartTicks: ticks, BootID: boot,
-		CreatedAt: nowRFC3339(),
+		CreatedAt: NowRFC3339(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -480,10 +474,10 @@ func TestProcessStopRefusesSignalOnStarttimeMismatch(t *testing.T) {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeProcessState(runDir, &ProcessState{
+	if err := WriteProcessState(runDir, &ProcessState{
 		Name: name, Status: StatusRunning, Algorithm: "prt-cfr",
 		PID: os.Getpid(), PGID: os.Getpid(), StartTicks: 1,
-		CreatedAt: nowRFC3339(),
+		CreatedAt: NowRFC3339(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -522,10 +516,10 @@ func TestProcessStopSignalsOnStarttimeMatch(t *testing.T) {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeProcessState(runDir, &ProcessState{
+	if err := WriteProcessState(runDir, &ProcessState{
 		Name: name, Status: StatusRunning, Algorithm: "prt-cfr",
 		PID: os.Getpid(), PGID: os.Getpid(), StartTicks: ticks, BootID: boot,
-		CreatedAt: nowRFC3339(),
+		CreatedAt: NowRFC3339(),
 	}); err != nil {
 		t.Fatal(err)
 	}

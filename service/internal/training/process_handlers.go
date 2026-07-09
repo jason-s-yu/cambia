@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 )
 
 // defaultAlgorithm is used when a create request omits the algorithm.
@@ -22,11 +24,11 @@ const defaultAlgorithm = "prt-cfr"
 const templatePrefix = "prtcfr"
 
 // ProcessHandlers serves the process-management HTTP surface: create, start,
-// stop, resume, and the config template listing. It composes the ProcessManager
+// stop, resume, and the config template listing. It composes the procmgr.ProcessManager
 // (lifecycle) with the TrainingStore (run detail) and shells to the cambia CLI
 // for config composition (Go never merges YAML).
 type ProcessHandlers struct {
-	mgr   *ProcessManager
+	mgr   *procmgr.ProcessManager
 	store *TrainingStore
 
 	cambiaBin   string
@@ -40,12 +42,12 @@ type ProcessHandlers struct {
 
 	// gpuQuery is the nvidia-smi seam; tests replace it so preflight never
 	// depends on live VRAM or touches the GPU.
-	gpuQuery gpuQueryFunc
+	gpuQuery procmgr.GPUQueryFunc
 }
 
 // ProcessHandlersConfig configures NewProcessHandlers.
 type ProcessHandlersConfig struct {
-	Manager       *ProcessManager
+	Manager       *procmgr.ProcessManager
 	Store         *TrainingStore
 	CambiaBin     string
 	CFRDir        string
@@ -58,16 +60,16 @@ type ProcessHandlersConfig struct {
 
 // NewProcessHandlers builds the handler set. gpuQuery defaults to nvidia-smi.
 // A non-positive MinVRAMGB/MinDiskGB in cfg (including the zero value of an
-// unset field) falls back to DefaultMinVRAMGB/DefaultMinDiskGB: the safety
+// unset field) falls back to procmgr.DefaultMinVRAMGB/procmgr.DefaultMinDiskGB: the safety
 // rails are on by default, not silently disabled by an unconfigured caller.
 func NewProcessHandlers(cfg ProcessHandlersConfig) *ProcessHandlers {
 	minVRAM := cfg.MinVRAMGB
 	if minVRAM <= 0 {
-		minVRAM = DefaultMinVRAMGB
+		minVRAM = procmgr.DefaultMinVRAMGB
 	}
 	minDisk := cfg.MinDiskGB
 	if minDisk <= 0 {
-		minDisk = DefaultMinDiskGB
+		minDisk = procmgr.DefaultMinDiskGB
 	}
 	return &ProcessHandlers{
 		mgr:           cfg.Manager,
@@ -79,7 +81,7 @@ func NewProcessHandlers(cfg ProcessHandlersConfig) *ProcessHandlers {
 		maxConcurrent: cfg.MaxConcurrent,
 		minVRAMGB:     minVRAM,
 		minDiskGB:     minDisk,
-		gpuQuery:      defaultGPUQuery,
+		gpuQuery:      procmgr.DefaultGPUQuery,
 	}
 }
 
@@ -125,7 +127,7 @@ func (h *ProcessHandlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := validateName(req.Name); err != nil {
+	if err := procmgr.ValidateName(req.Name); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid_name", err.Error())
 		return
 	}
@@ -133,14 +135,14 @@ func (h *ProcessHandlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	if algo == "" {
 		algo = defaultAlgorithm
 	}
-	if _, err := algoSubcommand(algo); err != nil {
+	if _, err := h.mgr.AlgoSubcommand(algo); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "unsupported_algorithm", err.Error())
 		return
 	}
 
 	// Early, race-safe-backed collision check for a clean 409 before doing any
 	// render work. Create re-checks under its lock as the authority.
-	if c := nameCollisionCheck(h.runsDir, req.Name); !c.OK {
+	if c := procmgr.NameCollisionCheck(h.runsDir, req.Name); !c.OK {
 		writeCollision(w, c)
 		return
 	}
@@ -152,12 +154,12 @@ func (h *ProcessHandlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	defer cleanup()
 
-	st, err := h.mgr.Create(CreateRequest{Name: req.Name, Algorithm: algo, ConfigPath: tmpPath})
+	st, err := h.mgr.Create(procmgr.CreateRequest{Name: req.Name, Algorithm: algo, ConfigPath: tmpPath})
 	if err != nil {
 		switch {
-		case errors.Is(err, ErrNameCollision):
-			writeCollision(w, PreflightCheck{"name_collision", false, err.Error()})
-		case errors.Is(err, ErrInvalidName):
+		case errors.Is(err, procmgr.ErrNameCollision):
+			writeCollision(w, procmgr.PreflightCheck{Name: "name_collision", OK: false, Detail: err.Error()})
+		case errors.Is(err, procmgr.ErrInvalidName):
 			writeJSONError(w, http.StatusBadRequest, "invalid_name", err.Error())
 		default:
 			writeJSONError(w, http.StatusInternalServerError, "create_failed", err.Error())
@@ -232,7 +234,7 @@ func (h *ProcessHandlers) HandleResume(w http.ResponseWriter, r *http.Request) {
 
 // launchHandler is the shared start/resume path. The GPU VRAM preflight check
 // is skipped for a run whose materialized config.yaml resolves device=cpu (see
-// resolveRunDevice): a CPU-only run does not contend for VRAM, so a co-tenant
+// procmgr.ResolveRunDevice): a CPU-only run does not contend for VRAM, so a co-tenant
 // holding the card full must not block it.
 func (h *ProcessHandlers) launchHandler(w http.ResponseWriter, r *http.Request, resume bool) {
 	if r.Method != http.MethodPost {
@@ -244,7 +246,7 @@ func (h *ProcessHandlers) launchHandler(w http.ResponseWriter, r *http.Request, 
 		writeJSONError(w, http.StatusBadRequest, "invalid_name", "missing run name")
 		return
 	}
-	if err := validateName(name); err != nil {
+	if err := procmgr.ValidateName(name); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid_name", err.Error())
 		return
 	}
@@ -294,28 +296,28 @@ func (h *ProcessHandlers) launchHandler(w http.ResponseWriter, r *http.Request, 
 	// otherwise block a CPU-only run for no reason (see launchHandler doc).
 	// Missing/unparseable/"auto" device stays GPU-relevant and runs the real
 	// check.
-	var gpuCheck PreflightCheck
-	if resolveRunDevice(h.runsDir, name) == "cpu" {
-		gpuCheck = PreflightCheck{"gpu_vram", true, "device=cpu, GPU check skipped"}
+	var gpuCheck procmgr.PreflightCheck
+	if procmgr.ResolveRunDevice(h.runsDir, name) == "cpu" {
+		gpuCheck = procmgr.PreflightCheck{Name: "gpu_vram", OK: true, Detail: "device=cpu, GPU check skipped"}
 	} else {
-		gpuCheck = gpuVRAMCheck(minVRAM, h.gpuQuery)
+		gpuCheck = procmgr.GPUVRAMCheck(minVRAM, h.gpuQuery)
 	}
-	checks := []PreflightCheck{
+	checks := []procmgr.PreflightCheck{
 		gpuCheck,
-		diskSpaceCheck(h.runsDir, minDisk),
-		concurrencyCapCheck(h.runsDir, h.maxConcurrent),
+		procmgr.DiskSpaceCheck(h.runsDir, minDisk),
+		procmgr.ConcurrencyCapCheck(h.runsDir, h.maxConcurrent),
 	}
-	if ok, failed := preflightPasses(checks, force); !ok {
+	if ok, failed := procmgr.PreflightPasses(checks, force); !ok {
 		writePreflightFailed(w, failed)
 		return
 	}
 
-	var st *ProcessState
+	var st *procmgr.ProcessState
 	var err error
 	if resume {
-		st, err = h.mgr.Resume(name, StartOpts{})
+		st, err = h.mgr.Resume(name, procmgr.StartOpts{})
 	} else {
-		st, err = h.mgr.Start(name, StartOpts{})
+		st, err = h.mgr.Start(name, procmgr.StartOpts{})
 	}
 	if err != nil {
 		h.writeLaunchError(w, err)
@@ -335,7 +337,7 @@ func (h *ProcessHandlers) HandleStop(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid_name", "missing run name")
 		return
 	}
-	if err := validateName(name); err != nil {
+	if err := procmgr.ValidateName(name); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid_name", err.Error())
 		return
 	}
@@ -377,18 +379,18 @@ func (h *ProcessHandlers) HandleTemplates(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, names)
 }
 
-// writeLaunchError maps ProcessManager start/resume errors to status codes.
+// writeLaunchError maps procmgr.ProcessManager start/resume errors to status codes.
 func (h *ProcessHandlers) writeLaunchError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, ErrAlreadyRunning):
+	case errors.Is(err, procmgr.ErrAlreadyRunning):
 		writeJSONError(w, http.StatusConflict, "already_running", err.Error())
-	case errors.Is(err, ErrConcurrencyCapReached):
+	case errors.Is(err, procmgr.ErrConcurrencyCapReached):
 		writeJSONError(w, http.StatusConflict, "concurrency_cap_reached", err.Error())
-	case errors.Is(err, ErrConfigMissing):
+	case errors.Is(err, procmgr.ErrConfigMissing):
 		writeJSONError(w, http.StatusBadRequest, "config_missing", err.Error())
-	case errors.Is(err, ErrUnsupportedAlgorithm):
+	case errors.Is(err, procmgr.ErrUnsupportedAlgorithm):
 		writeJSONError(w, http.StatusBadRequest, "unsupported_algorithm", err.Error())
-	case errors.Is(err, ErrInvalidName):
+	case errors.Is(err, procmgr.ErrInvalidName):
 		writeJSONError(w, http.StatusBadRequest, "invalid_name", err.Error())
 	default:
 		writeJSONError(w, http.StatusInternalServerError, "launch_failed", err.Error())
@@ -487,7 +489,7 @@ func writeJSONError(w http.ResponseWriter, status int, code, detail string) {
 
 // writePreflightFailed writes the 409 preflight_failed body per the pinned HTTP
 // surface: the failing checks plus the override keyword.
-func writePreflightFailed(w http.ResponseWriter, failed []PreflightCheck) {
+func writePreflightFailed(w http.ResponseWriter, failed []procmgr.PreflightCheck) {
 	writeJSON(w, http.StatusConflict, map[string]any{
 		"error":    "preflight_failed",
 		"checks":   failed,
@@ -496,9 +498,9 @@ func writePreflightFailed(w http.ResponseWriter, failed []PreflightCheck) {
 }
 
 // writeCollision writes the 409 name-collision body.
-func writeCollision(w http.ResponseWriter, c PreflightCheck) {
+func writeCollision(w http.ResponseWriter, c procmgr.PreflightCheck) {
 	writeJSON(w, http.StatusConflict, map[string]any{
 		"error":  "collision",
-		"checks": []PreflightCheck{c},
+		"checks": []procmgr.PreflightCheck{c},
 	})
 }

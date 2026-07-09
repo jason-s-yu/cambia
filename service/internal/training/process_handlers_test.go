@@ -9,14 +9,21 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
+	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 	"github.com/jason-s-yu/cambia/service/internal/auth"
 	"github.com/jason-s-yu/cambia/service/internal/middleware"
 	"github.com/sirupsen/logrus"
 )
+
+// fakeQuery builds a procmgr.GPUQueryFunc returning canned output or an error.
+// It is the training-side GPU seam for handler tests, mirroring the procmgr
+// package's own test helper.
+func fakeQuery(out string, err error) procmgr.GPUQueryFunc {
+	return func() (string, error) { return out, err }
+}
 
 // cambiaStub emulates the cambia CLI for handler tests. `config render` writes a
 // valid tiny config unless a --set value contains BADVALUE; `config validate`
@@ -50,7 +57,7 @@ exit 0
 type handlerFixture struct {
 	ph          *ProcessHandlers
 	store       *TrainingStore
-	mgr         *ProcessManager
+	mgr         *procmgr.ProcessManager
 	runsDir     string
 	templateDir string
 }
@@ -75,7 +82,7 @@ func newHandlerFixture(t *testing.T) *handlerFixture {
 		t.Fatal(err)
 	}
 
-	mgr := NewProcessManager(runsDir, cfrDir, stub, store)
+	mgr := procmgr.NewProcessManager(runsDir, cfrDir, stub, store, procmgr.TrainAlgorithms())
 	ph := NewProcessHandlers(ProcessHandlersConfig{
 		Manager:       mgr,
 		Store:         store,
@@ -87,13 +94,7 @@ func newHandlerFixture(t *testing.T) *handlerFixture {
 	})
 	ph.gpuQuery = fakeQuery("", exec.ErrNotFound) // CPU host
 
-	t.Cleanup(func() {
-		mgr.mu.Lock()
-		for _, p := range mgr.procs {
-			_ = syscall.Kill(-p.pgid, syscall.SIGKILL)
-		}
-		mgr.mu.Unlock()
-	})
+	t.Cleanup(func() { mgr.KillAll() })
 	return &handlerFixture{ph: ph, store: store, mgr: mgr, runsDir: runsDir, templateDir: templateDir}
 }
 
@@ -106,8 +107,8 @@ func doReq(h http.HandlerFunc, method, path, body string) *httptest.ResponseReco
 }
 
 type createResp struct {
-	Run     *RunDetail    `json:"run"`
-	Process *ProcessState `json:"process"`
+	Run     *RunDetail            `json:"run"`
+	Process *procmgr.ProcessState `json:"process"`
 }
 
 func TestHandleCreateSuccess(t *testing.T) {
@@ -122,7 +123,7 @@ func TestHandleCreateSuccess(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if resp.Process == nil || resp.Process.Status != StatusCreated {
+	if resp.Process == nil || resp.Process.Status != procmgr.StatusCreated {
 		t.Errorf("process = %+v, want status created", resp.Process)
 	}
 	if resp.Run == nil || resp.Run.Name != "new-run" {
@@ -222,11 +223,11 @@ func TestHandleCreateInvalidConfigValidate(t *testing.T) {
 // silently disable the GPU/disk preflight checks (F1).
 func TestNewProcessHandlersDefaultsPreflightOn(t *testing.T) {
 	h := NewProcessHandlers(ProcessHandlersConfig{})
-	if h.minVRAMGB != DefaultMinVRAMGB {
-		t.Errorf("minVRAMGB = %v, want default %v", h.minVRAMGB, DefaultMinVRAMGB)
+	if h.minVRAMGB != procmgr.DefaultMinVRAMGB {
+		t.Errorf("minVRAMGB = %v, want default %v", h.minVRAMGB, procmgr.DefaultMinVRAMGB)
 	}
-	if h.minDiskGB != DefaultMinDiskGB {
-		t.Errorf("minDiskGB = %v, want default %v", h.minDiskGB, DefaultMinDiskGB)
+	if h.minDiskGB != procmgr.DefaultMinDiskGB {
+		t.Errorf("minDiskGB = %v, want default %v", h.minDiskGB, procmgr.DefaultMinDiskGB)
 	}
 }
 
@@ -503,13 +504,13 @@ func TestHandlersAuthGate(t *testing.T) {
 // immediately, so a spawned run settles fast; waiting guarantees the child is
 // reaped (and done writing its log) before t.TempDir cleanup runs RemoveAll,
 // which would otherwise race the still-exiting process.
-func waitTerminal(t *testing.T, mgr *ProcessManager, name string) {
+func waitTerminal(t *testing.T, mgr *procmgr.ProcessManager, name string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if st, ok := mgr.GetState(name); ok {
 			switch st.Status {
-			case StatusStopped, StatusCrashed:
+			case procmgr.StatusStopped, procmgr.StatusCrashed:
 				return
 			}
 		}
