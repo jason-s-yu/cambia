@@ -402,7 +402,7 @@ def upsert_run(
     algorithm: Optional[str] = None,
     config_yaml: Optional[str] = None,
     config_dict: Optional[Dict[str, Any]] = None,
-    status: str = "created",
+    status: Optional[str] = "created",
     tags: Optional[list] = None,
     notes: Optional[str] = None,
     parent_run_id: Optional[int] = None,
@@ -422,6 +422,10 @@ def upsert_run(
             instead of re-stamping the client's HEAD (design 4.2).
         origin_host: NULL/None (default) for a local run; the reconciler passes the
             source host so remote-ingested runs are distinguishable (design 4.3).
+        status: None means "do not touch lifecycle status": an existing row keeps
+            its status, a fresh insert gets 'created'. Callers that merely attach
+            data to a run (eval persistence) use this so evaluating a completed
+            run cannot regress it to running.
 
     Returns:
         run_id (integer primary key).
@@ -439,10 +443,10 @@ def upsert_run(
         INSERT INTO runs (name, algorithm, status, config_hash, house_rules_hash,
                           engine_commit_hash, origin_host, tags, notes, parent_run_id,
                           created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, COALESCE(?, 'created'), ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(name) DO UPDATE SET
             algorithm=excluded.algorithm,
-            status=excluded.status,
+            status=COALESCE(?, runs.status),
             config_hash=excluded.config_hash,
             house_rules_hash=excluded.house_rules_hash,
             engine_commit_hash=excluded.engine_commit_hash,
@@ -462,6 +466,7 @@ def upsert_run(
             parent_run_id,
             now,
             now,
+            status,
         ),
     )
     db.commit()

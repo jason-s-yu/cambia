@@ -3675,7 +3675,9 @@ def persist_eval_results(
                 algorithm=algorithm,
                 config_yaml=yaml_text,
                 config_dict=config_dict,
-                status="running",
+                # Eval persistence attaches data to a run; it must not touch
+                # lifecycle status (a completed run would regress to running).
+                status=None,
             )
             ckpt_id = None
             if checkpoint_path:

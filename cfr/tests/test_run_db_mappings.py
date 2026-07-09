@@ -130,3 +130,20 @@ def test_get_db_honors_cambia_run_db_env(tmp_path, monkeypatch):
     db = get_db(str(explicit))
     db.close()
     assert explicit.exists()
+
+
+def test_upsert_run_status_none_preserves_existing(tmp_path):
+    """status=None attaches data without touching lifecycle status: an existing
+    row keeps its status, a fresh insert lands on 'created'."""
+    from src.run_db import get_db, upsert_run
+
+    db = get_db(str(tmp_path / "t.db"))
+    upsert_run(db, name="r1", algorithm="prt-cfr", status="completed")
+    upsert_run(db, name="r1", algorithm="prt-cfr", status=None)
+    row = db.execute("SELECT status FROM runs WHERE name='r1'").fetchone()
+    assert row["status"] == "completed"
+
+    upsert_run(db, name="r2", algorithm="prt-cfr", status=None)
+    row = db.execute("SELECT status FROM runs WHERE name='r2'").fetchone()
+    assert row["status"] == "created"
+    db.close()
