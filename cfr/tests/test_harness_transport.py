@@ -2,9 +2,11 @@
 tests/test_harness_transport.py
 
 Transport-layer coverage (cambia-256, design 5.1/5.2):
-  - JWT mint claim/expiry shape (EdDSA, sub/iat/nbf/exp, TTL cap)
+  - JWT mint claim/expiry shape (EdDSA, sub/aud/iat/nbf/exp, TTL cap)
   - TLS fingerprint pinning against a real localhost TLS server: correct fp
     accepted, wrong fp refused, plaintext refused.
+  - WS log-stream pin-before-auth: the Bearer token never leaves the socket on a
+    wrong-fingerprint peer (H2).
 """
 
 from datetime import datetime, timedelta, timezone
@@ -12,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from src.harness.transport import (
+    TOKEN_AUDIENCE,
     CertificatePinError,
     ControlPlaneTransport,
     InsecureSchemeError,
@@ -19,8 +22,13 @@ from src.harness.transport import (
     load_ed25519_private_key,
     mint_token,
     normalize_fingerprint,
+    open_log_stream,
 )
-from tests.harness_tls_util import RecordingServer, make_self_signed
+from tests.harness_tls_util import (
+    RecordingServer,
+    RecordingTLSSocketServer,
+    make_self_signed,
+)
 
 # ---------------------------------------------------------------------------
 # JWT mint (design 5.2)
@@ -81,15 +89,39 @@ def test_mint_token_claim_shape(tmp_path):
     # verify_exp disabled: the fixed `now` may predate the wall clock; this test
     # asserts claim SHAPE, not liveness (expiry is covered separately).
     decoded = jwt.decode(
-        token, _pubkey_pem(key), algorithms=["EdDSA"], options={"verify_exp": False}
+        token,
+        _pubkey_pem(key),
+        algorithms=["EdDSA"],
+        audience=TOKEN_AUDIENCE,
+        options={"verify_exp": False},
     )
     assert decoded["sub"] == "cambia-harness"
+    assert decoded["aud"] == TOKEN_AUDIENCE
     assert decoded["iat"] == int(now.timestamp())
     assert decoded["nbf"] == int(now.timestamp())
     assert decoded["exp"] == int((now + timedelta(seconds=900)).timestamp())
     # EdDSA header
     header = jwt.get_unverified_header(token)
     assert header["alg"] == "EdDSA"
+
+
+def test_mint_token_audience_claim(tmp_path):
+    """M3 (mint half): every token carries aud=cambia-runnerd. A verifier that
+    checks the audience rejects a token minted for a different one."""
+    import jwt
+
+    key, path = _new_ed25519(tmp_path, "pem")
+    loaded = load_ed25519_private_key(path)
+    token = mint_token(loaded, subject="s", ttl_seconds=60)
+
+    decoded = jwt.decode(
+        token, _pubkey_pem(key), algorithms=["EdDSA"], audience=TOKEN_AUDIENCE
+    )
+    assert decoded["aud"] == TOKEN_AUDIENCE
+    with pytest.raises(jwt.InvalidAudienceError):
+        jwt.decode(
+            token, _pubkey_pem(key), algorithms=["EdDSA"], audience="some-other-service"
+        )
 
 
 def test_mint_token_expiry_enforced(tmp_path):
@@ -100,7 +132,7 @@ def test_mint_token_expiry_enforced(tmp_path):
     past = datetime.now(timezone.utc) - timedelta(hours=2)
     token = mint_token(loaded, subject="s", ttl_seconds=60, now=past)
     with pytest.raises(jwt.ExpiredSignatureError):
-        jwt.decode(token, _pubkey_pem(key), algorithms=["EdDSA"])
+        jwt.decode(token, _pubkey_pem(key), algorithms=["EdDSA"], audience=TOKEN_AUDIENCE)
 
 
 def test_mint_token_ttl_capped(tmp_path):
@@ -122,7 +154,9 @@ def test_load_key_formats_produce_same_signing_key(tmp_path, layout):
     loaded = load_ed25519_private_key(path)
     token = mint_token(loaded, subject="s", ttl_seconds=60)
     # The original key's public half must verify a token the loaded key signed.
-    decoded = jwt.decode(token, _pubkey_pem(key), algorithms=["EdDSA"])
+    decoded = jwt.decode(
+        token, _pubkey_pem(key), algorithms=["EdDSA"], audience=TOKEN_AUDIENCE
+    )
     assert decoded["sub"] == "s"
 
 
@@ -184,3 +218,44 @@ def test_normalize_fingerprint():
         normalize_fingerprint("tooshort")
     with pytest.raises(TransportError):
         normalize_fingerprint("zz" * 32)
+
+
+# ---------------------------------------------------------------------------
+# WS log-stream pin-before-auth (H2, design 5.1)
+# ---------------------------------------------------------------------------
+
+
+def test_ws_pin_mismatch_sends_no_upgrade(tmp_path):
+    """A wrong-fingerprint peer must be rejected AFTER the TLS handshake but
+    BEFORE the WS upgrade (which carries the Bearer). The recording server proves
+    the handshake completed yet zero application bytes arrived, so the token
+    never left the client."""
+    cert, key, _fp = make_self_signed(tmp_path)
+    wrong = "cd" * 32  # valid-shaped fingerprint, not the server's cert
+    with RecordingTLSSocketServer(cert, key) as srv:
+        with pytest.raises(CertificatePinError):
+            open_log_stream(
+                srv.base_url, wrong, token="super-secret-bearer", job_id="job1"
+            )
+    # TLS completed (the client had to read the peer cert to check the pin) but
+    # the client refused to send the upgrade request -> no Bearer on the wire.
+    assert srv.handshake_ok.is_set()
+    assert srv.received == []
+
+
+def test_ws_pin_match_sends_upgrade_with_bearer(tmp_path):
+    """On a matching pin the client proceeds to the WS upgrade, sending it over
+    the already-verified TLS channel. The server replies with a non-101 so the
+    handshake fails fast; we only assert the upgrade (with the Bearer) was
+    transmitted after the pin passed."""
+    cert, key, fp = make_self_signed(tmp_path)
+    resp = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    with RecordingTLSSocketServer(cert, key, respond=resp) as srv:
+        with pytest.raises(Exception) as exc:
+            open_log_stream(srv.base_url, fp, token="super-secret-bearer", job_id="job1")
+        # It failed on the WS handshake, NOT on the pin (the pin matched).
+        assert not isinstance(exc.value, CertificatePinError)
+    assert srv.handshake_ok.is_set()
+    sent = b"".join(srv.received)
+    assert b"GET /ws/harness/jobs/job1/logs" in sent
+    assert b"Authorization: Bearer super-secret-bearer" in sent

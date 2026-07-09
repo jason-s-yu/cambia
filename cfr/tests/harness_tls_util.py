@@ -8,6 +8,7 @@ binds 127.0.0.1 on an ephemeral port.
 
 import hashlib
 import json
+import socket
 import ssl
 import threading
 from datetime import datetime, timedelta, timezone
@@ -130,3 +131,81 @@ class RecordingServer:
     def base_url(self) -> str:
         scheme = "https" if isinstance(self._server.socket, ssl.SSLSocket) else "http"
         return f"{scheme}://127.0.0.1:{self.port}"
+
+
+class RecordingTLSSocketServer:
+    """A threaded TLS server that completes the TLS handshake, then records any
+    application bytes the client sends before it closes.
+
+    Used to prove the WS log-stream pin check runs before the upgrade request:
+    on a wrong-fingerprint connection the client verifies the peer cert and
+    closes with zero application bytes, so `received` stays empty even though the
+    TLS handshake (needed to read the peer cert) completed.
+    """
+
+    def __init__(
+        self,
+        cert_path: str,
+        key_path: str,
+        respond: Optional[bytes] = None,
+    ):
+        self.received: List[bytes] = []
+        self.handshake_ok = threading.Event()
+        self._respond = respond
+
+        self._listen = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listen.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listen.bind(("127.0.0.1", 0))
+        self._listen.listen(1)
+        self.port = self._listen.getsockname()[1]
+
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(cert_path, key_path)
+        self._ctx = ctx
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+
+    def _serve(self) -> None:
+        try:
+            raw, _ = self._listen.accept()
+        except OSError:
+            return
+        try:
+            tls = self._ctx.wrap_socket(raw, server_side=True)
+        except (ssl.SSLError, OSError):
+            raw.close()
+            return
+        self.handshake_ok.set()
+        try:
+            tls.settimeout(2.0)
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                chunk = tls.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+            if buf:
+                self.received.append(buf)
+                if self._respond is not None:
+                    tls.sendall(self._respond)
+        except (ssl.SSLError, OSError, TimeoutError):
+            pass
+        finally:
+            try:
+                tls.close()
+            except OSError:
+                pass
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            self._listen.close()
+        except OSError:
+            pass
+        self._thread.join(timeout=5)
+
+    @property
+    def base_url(self) -> str:
+        return f"https://127.0.0.1:{self.port}"

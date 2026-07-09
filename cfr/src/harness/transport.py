@@ -14,14 +14,15 @@ cert is tighter than trusting a CA that could issue others.
 JWT (5.2): short-lived EdDSA tokens are minted per invocation from the ed25519
 private key at a client-local path. The private key never leaves the client and tokens
 are never persisted. The runner loads only the public half and verifies exactly
-as the Go auth package (SigningMethodEdDSA, "sub" required). Claims: sub, iat,
-nbf, exp; exp is bounded by the config TTL (<= 1h).
+as the Go auth package (SigningMethodEdDSA, "sub" required). Claims: sub, aud,
+iat, nbf, exp; exp is bounded by the config TTL (<= 1h).
 """
 
 import hashlib
 import hmac
 import http.client
 import json
+import socket
 import ssl
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -31,6 +32,12 @@ from urllib.parse import urlparse
 # Hard ceiling mirrored from config._MAX_TOKEN_TTL_SECONDS (design 5.2). Kept
 # here too so mint_token is safe even if called with a raw ttl.
 MAX_TOKEN_TTL_SECONDS = 3600
+
+# Audience claim stamped onto every minted token (design 5.2). The Go verify half
+# currently ignores unknown claims, so binding it now is forward-compatible: once
+# runnerd checks aud, a token minted for another audience cannot be replayed
+# against the runner control plane.
+TOKEN_AUDIENCE = "cambia-runnerd"
 
 
 class TransportError(Exception):
@@ -106,6 +113,7 @@ def mint_token(
     exp = issued + timedelta(seconds=ttl_seconds)
     claims = {
         "sub": subject,
+        "aud": TOKEN_AUDIENCE,
         "iat": int(issued.timestamp()),
         "nbf": int(issued.timestamp()),
         "exp": int(exp.timestamp()),
@@ -233,12 +241,23 @@ def open_log_stream(
     token: str,
     job_id: str,
     origin: Optional[str] = None,
+    timeout: float = 30.0,
 ):
     """Open a pinned wss connection to /ws/harness/jobs/{id}/logs.
 
     Returns a websockets sync ClientConnection; the caller iterates messages and
-    closes it. The peer cert fingerprint is verified against the pin immediately
-    after connect, before any frames are read.
+    closes it.
+
+    Pin-before-auth (design 5.1): the Bearer token rides in the WS upgrade
+    request, so the peer cert fingerprint MUST be verified before that request
+    leaves the socket. websockets' connect() performs the TLS handshake and the
+    upgrade in one step, giving no hook between them, so the TLS connection is
+    established and pinned HERE first (mirroring the HTTPS path's connect->verify
+    order). Only once the pin matches is the verified TLS socket handed to
+    websockets over a ws:// URI: with a plain-ws URI websockets treats the socket
+    as an already-connected transport and does not wrap it in TLS a second time,
+    so the upgrade (and the token) still rides the pinned TLS channel. A pin
+    mismatch closes the socket with zero application bytes sent.
     """
     from websockets.sync.client import connect as ws_connect
 
@@ -248,18 +267,34 @@ def open_log_stream(
     pinned = normalize_fingerprint(fingerprint)
     host = parsed.hostname
     port = parsed.port or 443
-    ws_url = f"wss://{host}:{port}/ws/harness/jobs/{job_id}/logs"
-    headers = {"Authorization": f"Bearer {token}"}
-    conn = ws_connect(
-        ws_url,
-        ssl=_pinned_ssl_context(),
-        additional_headers=headers,
-        origin=origin,
-    )
+
+    # 1. TCP connect, 2. TLS handshake, 3. verify the pin -- all before a single
+    # byte of the WS upgrade is written.
+    raw = socket.create_connection((host, port), timeout=timeout)
     try:
-        sock = conn.socket  # ssl-wrapped socket for a wss connection
-        _verify_peer(sock, pinned)
+        tls = _pinned_ssl_context().wrap_socket(raw, server_hostname=host)
     except Exception:
-        conn.close()
+        raw.close()
         raise
-    return conn
+    try:
+        _verify_peer(tls, pinned)
+    except Exception:
+        tls.close()
+        raise
+
+    # Hand the verified TLS socket to websockets. A ws:// (not wss://) URI keeps
+    # websockets from re-wrapping the already-encrypted socket; the bytes still
+    # travel the pinned TLS channel established above.
+    tls.settimeout(None)
+    ws_url = f"ws://{host}:{port}/ws/harness/jobs/{job_id}/logs"
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        return ws_connect(
+            ws_url,
+            sock=tls,
+            additional_headers=headers,
+            origin=origin,
+        )
+    except Exception:
+        tls.close()
+        raise

@@ -370,7 +370,7 @@ def watch_cmd(
 ):
     """Run the foreground pull loop: periodic delta pulls + reconcile (design 4.1)."""
     from src.harness.client import HarnessAPIError
-    from src.harness.pull import watch
+    from src.harness.pull import is_valid_run_name, watch
 
     cfg = _load_cfg(config)
     client = _build_client(cfg)
@@ -378,10 +378,25 @@ def watch_cmd(
     tick = interval if interval is not None else cfg.sync.interval_seconds
 
     def job_lister():
+        # H1: names arrive here from the untrusted control plane. Drop any whose
+        # name fails the canonical validator before they reach the pull loop, and
+        # warn loudly; the pull coordinator re-checks as a hard backstop.
         try:
-            return client.list_jobs()
+            jobs = client.list_jobs()
         except HarnessAPIError:
             return []
+        safe = []
+        for job in jobs:
+            name = job.get("name") if isinstance(job, dict) else None
+            if name is not None and not is_valid_run_name(name):
+                typer.secho(
+                    f"warning: skipping job with unsafe name {name!r}",
+                    fg=typer.colors.YELLOW,
+                    err=True,
+                )
+                continue
+            safe.append(job)
+        return safe
 
     typer.echo(
         f"watching {cfg.data_plane.origin_host} every {tick}s "
