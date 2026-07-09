@@ -3,12 +3,15 @@ package harness
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/jason-s-yu/cambia/runnerd/ingestapi"
+	"github.com/jason-s-yu/cambia/runnerd/pathguard"
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 )
 
@@ -225,14 +228,26 @@ func (d *Dispatcher) launchOpts(j *job, prepared *ingestapi.Prepared) (procmgr.L
 	if err != nil {
 		return procmgr.LaunchOpts{}, err
 	}
-	argv := make([]string, 0, len(sub)+5)
+	argv := make([]string, 0, len(sub)+8)
 	argv = append(argv, "-m", "src.cli")
 	argv = append(argv, sub...)
-	// The rendered config is consumed verbatim (design 2.7). A kind that ingest
-	// renders no config for (Prepare leaves RenderedConfig empty) gets no --config
-	// rather than an empty-valued flag.
-	if prepared.RenderedConfig != "" {
-		argv = append(argv, "--config", prepared.RenderedConfig)
+	if j.spec.Kind == KindEvaluate {
+		// `cambia evaluate` takes a positional checkpoint/run-dir target, not
+		// --config (spec-review finding #1): --config is omitted entirely,
+		// since run-dir mode auto-detects config.yaml from the target's own
+		// run dir (cfr/src/cli.py evaluate).
+		targetArgv, terr := d.evaluateTargetArgv(j.spec)
+		if terr != nil {
+			return procmgr.LaunchOpts{}, terr
+		}
+		argv = append(argv, targetArgv...)
+	} else {
+		// The rendered config is consumed verbatim (design 2.7). A kind that ingest
+		// renders no config for (Prepare leaves RenderedConfig empty) gets no --config
+		// rather than an empty-valued flag.
+		if prepared.RenderedConfig != "" {
+			argv = append(argv, "--config", prepared.RenderedConfig)
+		}
 	}
 	if j.resume {
 		argv = append(argv, "--resume")
@@ -243,6 +258,30 @@ func (d *Dispatcher) launchOpts(j *job, prepared *ingestapi.Prepared) (procmgr.L
 		Cwd:    filepath.Join(prepared.WorktreeDir, "cfr"),
 		Env:    prepared.Env,
 	}, nil
+}
+
+// evaluateTargetArgv builds the evaluate-only argv tail: the resolved target
+// (the positional checkpoint/run-dir argument `cambia evaluate` requires),
+// --latest when target is a run directory (run-dir mode requires --latest or
+// --epoch; the harness always wants the newest checkpoint), --games, and
+// --device. Target was already lexically guarded and containment-checked at
+// submit (handlers.go step 4b); it is re-resolved here since launch happens
+// in a later goroutine against the persisted spec.
+func (d *Dispatcher) evaluateTargetArgv(spec JobSpec) ([]string, error) {
+	targetAbs, err := pathguard.Resolve(d.runsDir, spec.Target)
+	if err != nil {
+		return nil, fmt.Errorf("target: %w", err)
+	}
+	info, err := os.Stat(targetAbs)
+	if err != nil {
+		return nil, fmt.Errorf("target: %w", err)
+	}
+	argv := []string{targetAbs}
+	if info.IsDir() {
+		argv = append(argv, "--latest")
+	}
+	argv = append(argv, "--games", strconv.Itoa(spec.gamesOrDefault()), "--device", spec.device())
+	return argv, nil
 }
 
 // monitor polls process.json until the run reaches a procmgr terminal status,

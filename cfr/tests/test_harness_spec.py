@@ -144,7 +144,74 @@ def test_parse_head_to_head_requires_two_checkpoints():
 
 def test_parse_rejects_nonpositive_games():
     with pytest.raises(HarnessSpecError):
-        JobSpec.parse({"kind": "evaluate", "name": "e", "config": "c.yaml", "games": 0})
+        JobSpec.parse(
+            {
+                "kind": "evaluate",
+                "name": "e",
+                "config": "c.yaml",
+                "target": "prior-run",
+                "games": 0,
+            }
+        )
+
+
+# ---------------------------------------------------------------------------
+# target field (cambia-256 review fix: evaluate requires it, train forbids it)
+# ---------------------------------------------------------------------------
+
+
+def _eval_spec(**over):
+    base = {
+        "kind": "evaluate",
+        "name": "eval-1",
+        "config": "cfr/config/prtcfr_prod.yaml",
+        "target": "v0.4-prtcfr-r12",
+    }
+    base.update(over)
+    return base
+
+
+def test_parse_evaluate_requires_target():
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse({"kind": "evaluate", "name": "e1", "config": "cfr/config/x.yaml"})
+
+
+def test_parse_evaluate_accepts_dir_and_file_targets():
+    spec = JobSpec.parse(_eval_spec(target="v0.4-prtcfr-r12"))
+    assert spec.target == "v0.4-prtcfr-r12"
+
+    spec2 = JobSpec.parse(
+        _eval_spec(target="v0.4-prtcfr-r12/snapshots/prtcfr_checkpoint_100.pt")
+    )
+    assert spec2.target == "v0.4-prtcfr-r12/snapshots/prtcfr_checkpoint_100.pt"
+
+
+def test_parse_train_forbids_target():
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_train_spec(target="v0.4-prtcfr-r12"))
+
+
+def test_parse_rejects_absolute_target():
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_eval_spec(target="/etc/passwd"))
+
+
+def test_parse_rejects_traversal_target():
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_eval_spec(target="../../secret.pt"))
+
+
+def test_to_payload_includes_target_for_evaluate():
+    spec = JobSpec.parse(_eval_spec(games=5000))
+    payload = spec.to_payload("f" * 40)
+    assert payload["target"] == "v0.4-prtcfr-r12"
+    assert payload["kind"] == "evaluate"
+
+
+def test_to_payload_omits_target_when_unset():
+    spec = JobSpec.parse(_train_spec())
+    payload = spec.to_payload("f" * 40)
+    assert "target" not in payload
 
 
 def test_parse_overrides_must_be_mapping():

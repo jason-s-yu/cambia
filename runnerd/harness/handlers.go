@@ -42,6 +42,12 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid_kind", "kind not in allowlist: "+spec.Kind)
 		return
 	}
+	// 3b. target kind-scoping (design 2.6): evaluate-only field, forbidden for
+	// train. Evaluate's requiredness is enforced below, in the containment loop.
+	if spec.targetForbidden() {
+		writeJSONError(w, http.StatusBadRequest, "invalid_target", "target is not valid for kind=train")
+		return
+	}
 	// 4. path guards (config, checkpoints): lexical shape (reject absolute + ..).
 	for _, p := range spec.guardedPaths() {
 		if err := pathguard.CheckRel(p.value); err != nil {
@@ -49,10 +55,11 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// 4b. checkpoint containment (design 5.4): head-to-head checkpoints must
-	// resolve inside the runner runs dir. config containment is deferred to
-	// ingest render, where the worktree base is staged.
-	for _, p := range spec.containedCheckpoints() {
+	// 4b. checkpoint + target containment (design 5.4): head-to-head
+	// checkpoints and an evaluate target must resolve inside the runner runs
+	// dir. config containment is deferred to ingest render, where the worktree
+	// base is staged.
+	for _, p := range append(spec.containedCheckpoints(), spec.containedTarget()...) {
 		if _, err := pathguard.Resolve(s.runsDir, p.value); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid_path", p.label+": "+err.Error())
 			return
