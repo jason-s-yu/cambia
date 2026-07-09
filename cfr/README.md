@@ -17,16 +17,20 @@ Requires Python 3.11+. The project uses [pyenv](https://github.com/pyenv/pyenv) 
 pyenv virtualenv 3.13 cfr
 pyenv activate cfr
 
-# Install dependencies
-pip install torch numpy cffi pydantic pyyaml joblib tqdm psutil rich "typer[all]"
-# Or alternatively:
+# Install dependencies (pinned from cfr/uv.lock; includes CUDA torch)
 pip install -r requirements.txt
 
-# Install the project in editable mode (registers the `cambia` CLI command)
-pip install -e .
+# Install the project in editable mode (registers the `cambia` CLI command).
+# torch lives in the cpu/gpu extras, not base dependencies:
+pip install -e ".[gpu]" --extra-index-url https://download.pytorch.org/whl/cu128
+# CPU-only machines:
+pip install -e ".[cpu]" --extra-index-url https://download.pytorch.org/whl/cpu
+
+# Or with uv, which follows cfr/uv.lock exactly:
+uv sync --extra gpu    # or --extra cpu
 ```
 
-The editable install (`pip install -e .`) reads `pyproject.toml` and registers the `cambia` entry point. After this, the `cambia` command is available in the virtualenv.
+The editable install reads `pyproject.toml` and registers the `cambia` entry point. After this, the `cambia` command is available in the virtualenv. A plain `pip install -e .` still works but installs no torch; pick an extra (`[gpu]`/`[cpu]`) with the matching PyTorch index URL.
 
 ### Device-specific setup
 
