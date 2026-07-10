@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,14 +16,14 @@ func TestAuthRequiredOnEveryRoute(t *testing.T) {
 	r := newRig(t, rigConfig{})
 
 	// Missing token -> 401.
-	resp := r.doTok(http.MethodGet, "/harness/health", nil, "")
+	resp := r.doTok(http.MethodGet, "/harness/jobs", nil, "")
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("no token: got %d, want 401", resp.StatusCode)
 	}
 	resp.Body.Close()
 
 	// Bad token -> 401.
-	resp = r.doTok(http.MethodGet, "/harness/health", nil, "garbage.token.value")
+	resp = r.doTok(http.MethodGet, "/harness/jobs", nil, "garbage.token.value")
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("bad token: got %d, want 401", resp.StatusCode)
 	}
@@ -31,18 +32,41 @@ func TestAuthRequiredOnEveryRoute(t *testing.T) {
 	// Token signed by a different key -> 401.
 	_, otherPriv, _ := genOther(t)
 	other := mintToken(t, otherPriv, "x", 0)
-	resp = r.doTok(http.MethodGet, "/harness/health", nil, other)
+	resp = r.doTok(http.MethodGet, "/harness/jobs", nil, other)
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("foreign token: got %d, want 401", resp.StatusCode)
 	}
 	resp.Body.Close()
 
 	// Valid token -> 200.
-	resp = r.do(http.MethodGet, "/harness/health", nil)
+	resp = r.do(http.MethodGet, "/harness/jobs", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("valid token: got %d, want 200", resp.StatusCode)
 	}
 	resp.Body.Close()
+}
+
+// TestHealthIsTokenFree pins the one deliberate exception to bearer-on-every-
+// route: GET /harness/health serves read-only counters without a token (LAN
+// monitoring consumer; cambia-330/network-552). Everything else stays gated —
+// see TestAuthRequiredOnEveryRoute.
+func TestHealthIsTokenFree(t *testing.T) {
+	r := newRig(t, rigConfig{})
+
+	resp := r.doTok(http.MethodGet, "/harness/health", nil, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("token-free health: got %d, want 200", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode health body: %v", err)
+	}
+	resp.Body.Close()
+	for _, k := range []string{"reconciled_at", "jobs_running", "queue_depth", "free_ram_gb", "free_disk_gb"} {
+		if _, ok := body[k]; !ok {
+			t.Fatalf("health body missing key %q: %v", k, body)
+		}
+	}
 }
 
 func TestSubmitInvalidNameAndKind(t *testing.T) {

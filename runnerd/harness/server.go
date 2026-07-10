@@ -135,8 +135,10 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 }
 
 // Handler returns the routed control-plane handler with Bearer auth on every
-// route. Routes use go1.22+ method+path patterns; {id} is the validated run
-// name.
+// route except GET /harness/health, which serves read-only capacity counters
+// token-free for LAN monitoring (engelbart tile; cambia-330/network-552 —
+// reachability is already LAN-scoped by the host firewall). Routes use
+// go1.22+ method+path patterns; {id} is the validated run name.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	a := s.requireBearer
@@ -147,7 +149,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /harness/jobs/{id}", a(http.HandlerFunc(s.handleDeleteJob)))
 	mux.Handle("POST /harness/jobs/{id}/resume", a(http.HandlerFunc(s.handleResumeJob)))
 	mux.Handle("GET /harness/jobs/{id}/artifacts", a(http.HandlerFunc(s.handleArtifacts)))
-	mux.Handle("GET /harness/health", a(http.HandlerFunc(s.handleHealth)))
+	mux.Handle("GET /harness/health", http.HandlerFunc(s.handleHealth))
 
 	mux.Handle("GET /ws/harness/queue", a(http.HandlerFunc(s.handleQueueWS)))
 	mux.Handle("GET /ws/harness/jobs/{id}/logs", a(http.HandlerFunc(s.handleLogsWS)))
