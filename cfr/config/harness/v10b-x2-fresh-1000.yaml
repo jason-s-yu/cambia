@@ -1,0 +1,26 @@
+# cfr/config/harness/v10b-x2-fresh-1000.yaml
+#
+# STAGED, NOT SUBMITTED: fork (b) of the X2 continuation decision (see the
+# decision brief on cambia-225, 2026-07-10). A fresh, fully instrumented
+# N=1000 tiny-gate run on the nash xpu: harness-native persistence
+# (resume_state.json + reservoir journal every iteration), so unlike the
+# v0.4-s1w11-x2-revalidation source run its state is never unrecoverable and
+# the plateau rule rides the run's OWN trajectory from iter 1.
+#
+# Cost: ~1000 iters at ~13.6 min/iter on the A310 = ~9.4 days wall clock,
+# resume-safe across restarts. Submission requires the user's fork ruling.
+
+kind: train
+name: v0.4-x2-fresh-1000-xpu
+config: cfr/config/x2_tiny_gate.yaml
+device: xpu
+
+overrides:
+  prt_cfr.iterations: 1000
+  # The ruled stop rule rides the whole run: stop once trailing-50-iter
+  # relative improvement drops below 0.5% per 10-iter step.
+  prt_cfr.stability_stop_mode: plateau
+
+resume: false
+priority: normal
+force: false
