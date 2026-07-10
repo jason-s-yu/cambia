@@ -1,19 +1,26 @@
 #!/usr/bin/env bash
-# One-paste deploy of the cambia serving harness onto the runner host.
-# Run from the client workstation as the operator. Stages 1 and 4 use sudo ON THE RUNNER HOST (the operator is
-# NOPASSWD there); nothing runs privileged on the client workstation.
+# scripts/deploy-runnerd.sh: one-paste deploy of the cambia serving harness
+# runner daemon (cambia-runnerd) onto a runner host.
+#
+# Run from the client workstation. Stages 1 and 4 use sudo ON the runner host
+# (the account behind RUNNER_SSH must have passwordless sudo there); nothing
+# runs privileged on the client workstation.
 #
 # Required env:
+#   - RUNNER_SSH: ssh target for the runner host, e.g. an ssh-config alias or
+#     user@host.
 #   - RUNNER_HOST: the runner host IP or hostname (used for the TLS cert
-#     subjectAltName and the acceptance-probe URL).
+#     subjectAltName and the acceptance-probe URL). May be the same value as
+#     RUNNER_SSH's host, or different if ssh reaches it by alias.
 #
-# Prereqs (already done if the autoiterate window staged them):
+# Prereqs:
 #   - runnerd binary at $RUNNERD_BIN (built in-script if unset; static, CGO_ENABLED=0)
-#   - JWT public key at ~/.config/cambia/jwt_ed25519.pub (raw 32-byte ed25519)
+#   - JWT public key at ~/.config/cambia/jwt_ed25519.pub (raw 32-byte ed25519;
+#     see docs/serving-harness/keys-and-tls.md)
 #   - repo checkout at $REPO with runnerd/deploy/cambia-runnerd.service
 set -euo pipefail
 
-RUNNER_SSH=${RUNNER_SSH:-runner}
+RUNNER_SSH=${RUNNER_SSH:?set RUNNER_SSH to the ssh target for the runner host, e.g. RUNNER_SSH=user@192.0.2.10 or an ssh-config alias}
 REPO=${REPO:-$HOME/dev/cambia}
 JWT_PUB=${JWT_PUB:-$HOME/.config/cambia/jwt_ed25519.pub}
 RUNNER_HOST=${RUNNER_HOST:?set RUNNER_HOST to the runner host IP or hostname, e.g. RUNNER_HOST=192.0.2.10}
@@ -25,7 +32,7 @@ if [ -z "${RUNNERD_BIN:-}" ]; then
   RUNNERD_BIN="$RUNNERD_BUILD_DIR/cambia-runnerd"
 fi
 
-echo "== stage 1: /srv/cambia layout (sudo on runner)"
+echo "== stage 1: /srv/cambia layout (sudo on the runner host)"
 ssh "$RUNNER_SSH" 'sudo mkdir -p /srv/cambia && sudo chown cambia:cambia /srv/cambia'
 
 echo "== stage 2: unprivileged layout, mirror, TLS cert (as cambia)"
@@ -55,7 +62,7 @@ ssh "$RUNNER_SSH" 'sudo install -o cambia -g cambia -m 644 /tmp/jwt_ed25519.pub 
   && sudo install -o root -g root -m 755 /tmp/cambia-runnerd /usr/local/bin/cambia-runnerd \
   && rm -f /tmp/jwt_ed25519.pub /tmp/cambia-runnerd'
 
-echo "== stage 4: systemd unit (sudo on runner)"
+echo "== stage 4: systemd unit (sudo on the runner host)"
 ssh "$RUNNER_SSH" 'sudo install -o root -g root -m 644 /tmp/cambia-runnerd.service /etc/systemd/system/cambia-runnerd.service \
   && rm -f /tmp/cambia-runnerd.service \
   && sudo systemctl daemon-reload \
