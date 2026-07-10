@@ -9,6 +9,7 @@ import (
 )
 
 func TestWriteEnvJSONCompleteness(t *testing.T) {
+	t.Setenv(originHostEnvVar, "testhost")
 	fc := newFakeControl()
 	m, _ := fakeManager(t, fc)
 	runDir := filepath.Join(t.TempDir(), "runs", "job-e")
@@ -61,8 +62,8 @@ func TestWriteEnvJSONCompleteness(t *testing.T) {
 		}
 	}
 
-	if rec.OriginHost != "runner" {
-		t.Errorf("origin_host = %q, want runner", rec.OriginHost)
+	if rec.OriginHost != "testhost" {
+		t.Errorf("origin_host = %q, want testhost", rec.OriginHost)
 	}
 	if rec.GoToolchainPinned != goToolchainPin {
 		t.Errorf("go_toolchain_pinned = %q, want %q", rec.GoToolchainPinned, goToolchainPin)

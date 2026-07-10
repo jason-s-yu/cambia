@@ -13,8 +13,18 @@ import (
 // process.json in the run dir (design 3.6).
 const envJSONFile = "env.json"
 
-// originHost is the fixed origin recorded in provenance (design 3.6).
-const originHost = "runner"
+// originHostEnvVar overrides the host recorded in provenance (design 3.6).
+const originHostEnvVar = "RUNNERD_ORIGIN_HOST"
+
+// resolveOriginHost returns the host recorded in provenance: originHostEnvVar
+// if set, else the local hostname (design 3.6).
+func resolveOriginHost() string {
+	if h := os.Getenv(originHostEnvVar); h != "" {
+		return h
+	}
+	h, _ := os.Hostname()
+	return h
+}
 
 // sitecustomizeName is the shim module that asserts the imported src package
 // resolves under the pinned worktree (cambia-240 class).
@@ -130,7 +140,7 @@ func (m *Manager) writeEnvJSON(ctx context.Context, runDir, venvPython string, p
 
 	rec := envRecord{
 		JobID:             prov.JobID,
-		OriginHost:        originHost,
+		OriginHost:        resolveOriginHost(),
 		Commit:            prov.Commit,
 		EngineTreeSha:     prov.EngineTreeSha,
 		LibcambiaSha256:   prov.LibcambiaSha,
