@@ -62,10 +62,18 @@ func TestHealthIsTokenFree(t *testing.T) {
 		t.Fatalf("decode health body: %v", err)
 	}
 	resp.Body.Close()
-	for _, k := range []string{"reconciled_at", "jobs_running", "queue_depth", "free_ram_gb", "free_disk_gb"} {
+	// EXACTLY these keys and nothing else: the route is token-free, so any new
+	// field is exposed unauthenticated — a regression to writeJSON(w, 200, snap)
+	// would leak queue/active JobViews (job IDs, commits, configs) while a
+	// presence-only check stayed green.
+	want := []string{"reconciled_at", "jobs_running", "queue_depth", "free_ram_gb", "free_disk_gb"}
+	for _, k := range want {
 		if _, ok := body[k]; !ok {
 			t.Fatalf("health body missing key %q: %v", k, body)
 		}
+	}
+	if len(body) != len(want) {
+		t.Fatalf("token-free health body must carry exactly %d counter keys, got %d: %v", len(want), len(body), body)
 	}
 }
 
