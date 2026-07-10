@@ -1,0 +1,105 @@
+# cfr/config/harness-spec.example.yaml
+#
+# Example job spec for `cambia harness submit <this-file>`. A spec file
+# describes exactly ONE job. This file shows two variants: a train job (active
+# below) and an evaluate job (commented out further down) -- copy whichever
+# kind you need into your own spec file and adjust it.
+#
+# Client-side validation happens before submit (src/harness/spec.py) so a bad
+# spec fails fast locally; the runner re-validates and re-guards everything
+# server-side regardless. Unknown keys are rejected, so a typo'd field name
+# fails loudly instead of being silently ignored.
+
+# ---------------------------------------------------------------------------
+# train example (active)
+# ---------------------------------------------------------------------------
+
+# Job kind. One of: train, evaluate, head-to-head, bench.
+# v1 only registers the prtcfr algorithm for train jobs (kind: train always
+# resolves to `cambia train prtcfr` on the runner).
+kind: train
+
+# Job/run name. Becomes the run directory name on the runner and the job id
+# used by status/logs/cancel/resume/pull. Must match
+# ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ (leading alphanumeric, then
+# letters/digits/dot/underscore/dash, 128 chars max); no path separators or
+# ".." segments anywhere in the name.
+name: prtcfr-run-001
+
+# Repo-relative path to the training config YAML. Required for kind: train and
+# kind: bench; forbidden for kind: evaluate (see below). Must not be an
+# absolute path and must not contain a ".." segment -- the runner re-resolves
+# it inside the pinned worktree and rejects anything that would escape it.
+config: config/production_train.yaml
+
+# Optional: pin an exact 40-hex commit sha. `cambia harness submit` normally
+# resolves the commit from your clean working tree's HEAD and fills this in
+# for you. If you set it explicitly, it must match HEAD or the submit fails
+# fast locally, so run_db never records a commit that isn't what actually ran.
+# commit: <40-hex-sha>
+
+# Optional: dotted-key config overrides, applied on top of `config` at render
+# time. Keys are dot-separated paths into the config tree; values may be
+# strings, numbers, or booleans.
+overrides:
+  deep_cfr.traversals_per_step: 500
+
+# Optional, train only: resume from this run's existing rolling checkpoint
+# instead of starting fresh. Requires the run to already have both
+# snapshots/prtcfr_checkpoint.pt and resume_state.json on the runner. To
+# resume an already-submitted job by id instead, use `cambia harness resume
+# <job_id>` rather than resubmitting a spec with this flag set.
+resume: false
+
+# Compute device the job runs on. v1 runner hosts are CPU-only: any value
+# other than "cpu" is rejected before the spec is ever submitted.
+device: cpu
+
+# Scheduling priority. Currently informational (the queue is a plain FIFO);
+# any non-empty string is accepted.
+priority: normal
+
+# Force an admission preflight past a failing check. Only the gpu_vram check
+# is forceable in v1 (and it never fails on a cpu job, since it's skipped
+# entirely). Disk-space and RAM floors are operator-set on the runner and are
+# never forceable over the API, with or without force: true.
+force: false
+
+# ---------------------------------------------------------------------------
+# evaluate example (inactive -- everything below is commented out). To use it,
+# comment out or delete the train fields above and uncomment this block.
+# ---------------------------------------------------------------------------
+#
+# kind: evaluate
+# name: eval-prtcfr-run-001
+#
+# # IMPORTANT: target must be a RUN DIRECTORY, not a checkpoint file. Run-dir
+# # mode auto-detects the algorithm, agent type, and checkpoint prefix from the
+# # target run's own config.yaml and evaluates its latest checkpoint. Pointing
+# # target at a bare checkpoint file does NOT error -- it silently falls back
+# # to agent_type=deep_cfr and misses the run's snapshots/ directory entirely,
+# # which produces plausible-looking but WRONG evaluation numbers. Always
+# # target the run directory itself (a runner-local run name, e.g. the `name`
+# # of a completed train job), never a .pt file directly.
+# target: prtcfr-run-001
+#
+# # Number of games to play per evaluation baseline. Defaults to 5000 when
+# # omitted (the same default `cambia evaluate` uses in run-dir mode).
+# games: 5000
+#
+# device: cpu
+# priority: normal
+# force: false
+#
+# # evaluate takes no `config`: run-dir mode reads the target run's own
+# # config.yaml, so setting `config` here would be rejected as inapplicable.
+# # evaluate also forbids `resume` (train-only) and, unlike train, REQUIRES
+# # `target` in place of `config`.
+
+# ---------------------------------------------------------------------------
+# Other kinds not exemplified above:
+#   head-to-head -- requires checkpoint_a and checkpoint_b, each a
+#     runner-local checkpoint path under the same containment guard as
+#     evaluate's target.
+#   bench -- requires `config`, same as train.
+# ---------------------------------------------------------------------------

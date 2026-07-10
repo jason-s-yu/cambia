@@ -396,6 +396,21 @@ Key test files:
 - `test_cross_engine_samples.py` -- cross-engine parity (Python vs Go) at every decision point
 - `test_sog_search.py`, `test_sog_worker.py`, `test_sog_trainer.py` -- SoG pipeline tests (CPU-heavy, use Go FFI)
 
+## Serving Harness
+
+Train or evaluate jobs can run on a remote runner host instead of locally. `cambia harness submit <spec.yaml>` requires a clean working tree, pins HEAD, pushes it to the runner's git mirror, and submits the job to a bounded FIFO queue on the runner daemon (`runnerd`). The runner stages an isolated worktree, Python virtualenv, and `libcambia.so` build, launches the job, and exposes status and logs over a TLS + Bearer-JWT control plane. Artifacts and `run_db` rows reconcile back locally via `cambia harness pull <job>` (one-shot) or `cambia harness watch` (periodic).
+
+```bash
+# Install the client
+pip install -e ".[gpu,harness]" --extra-index-url https://download.pytorch.org/whl/cu128
+
+# Verbs: submit, status, list-remote, logs [-f], cancel [--force|--purge], resume, pull, push-run, watch
+cambia harness submit my_job.yaml
+cambia harness watch
+```
+
+Connection settings (runner URL, TLS pin, signing key, sync target) live in `~/.config/cambia/harness.yaml`, templated at `config/harness.example.yaml`. Job specs are YAML files matching `config/harness-spec.example.yaml`. See [../runnerd/README.md](../runnerd/README.md) for running the runner daemon and [../docs/serving-harness/architecture.md](../docs/serving-harness/architecture.md) for the full design.
+
 ## Dependencies
 
 - `numpy` -- array operations
