@@ -31,7 +31,7 @@ class HarnessConfigError(Exception):
 
 @dataclass
 class RunnerConfig:
-    url: str  # https://192.0.2.10:8090
+    url: str  # https://<runner-host>:8090
     cert_fingerprint: str  # sha256 hex of the runner's self-signed cert (5.1)
 
 

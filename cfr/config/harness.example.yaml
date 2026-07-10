@@ -6,6 +6,7 @@
 
 runner:
   # runnerd control-plane base URL (HTTPS only; plaintext is refused).
+  # Replace with your runner host.
   url: https://192.0.2.10:8090
   # SHA256 fingerprint of the runner's self-signed TLS cert (design 5.1). Get it
   # with: openssl s_client -connect 192.0.2.10:8090 </dev/null 2>/dev/null \
