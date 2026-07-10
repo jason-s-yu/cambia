@@ -12,10 +12,10 @@ handshake). A CA-bundle path is deliberately not used: pinning one self-signed
 cert is tighter than trusting a CA that could issue others.
 
 JWT (5.2): short-lived EdDSA tokens are minted per invocation from the ed25519
-private key at a client-local path. The private key never leaves the client and tokens
-are never persisted. The runner loads only the public half and verifies exactly
-as the Go auth package (SigningMethodEdDSA, "sub" required). Claims: sub, aud,
-iat, nbf, exp; exp is bounded by the config TTL (<= 1h).
+private key at a client-local path. The private key never leaves the client and
+tokens are never persisted. The runner loads only the public half and verifies
+exactly as the Go auth package (SigningMethodEdDSA, "sub" required). Claims:
+sub, aud, iat, nbf, exp; exp is bounded by the config TTL (<= 1h).
 """
 
 import hashlib

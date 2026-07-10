@@ -2,7 +2,8 @@
 src/harness
 
 Client-side serving-harness support (cambia-256). The reconciler ingests a
-runner's synced run_db.sqlite into the client's authoritative cfr/runs/cambia_runs.db;
+runner's synced run_db.sqlite into the client's authoritative
+cfr/runs/cambia_runs.db;
 the `harness` CLI (submit/status/logs/cancel/resume/pull/push-run/watch) drives
 the runner's control plane and the ssh/rsync data plane. The Go runnerd lives
 outside this package.

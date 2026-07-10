@@ -1,6 +1,7 @@
 # Client-side serving-harness config (cambia-256, design 5.1/5.2).
 #
-# Copy to ~/.config/cambia/harness.yaml (the documented default) and fill in.
+# Copy to ~/.config/cambia/harness.yaml (the documented default) and fill in,
+# or run `cambia harness init` to generate the key pair and this file at once.
 # Resolution order: CLI --config > $CAMBIA_HARNESS_CONFIG > ~/.config/cambia/harness.yaml
 # > cfr/config/harness.yaml. This example file is a template, not a live config.
 
@@ -15,10 +16,11 @@ runner:
   cert_fingerprint: "AA:BB:CC:DD:...:64-hex-chars"
 
 auth:
-  # ed25519 PRIVATE key, the client-only, chmod 0600. Never synced to the runner; the
-  # runner holds only the public half (design 5.2). Accepts PEM, or a 32-byte
-  # seed, or a 64-byte Go ed25519.PrivateKey.
-  private_key_path: ~/.config/cambia/keys/jwt_ed25519
+  # ed25519 PRIVATE key, client-only, chmod 0600. Never synced to the runner;
+  # the runner holds only the public half (design 5.2). Accepts PEM, or a
+  # 32-byte seed, or a 64-byte Go ed25519.PrivateKey. `cambia harness init`
+  # writes this path (raw 32-byte seed) automatically.
+  private_key_path: ~/.config/cambia/jwt_ed25519
   # JWT "sub" claim (the runner requires a non-empty sub).
   subject: cambia-harness
   # Token lifetime; minted fresh per invocation, never persisted. Max 3600.
@@ -29,8 +31,8 @@ data_plane:
   ssh_alias: runner
   # runnerd runsDir on the remote host.
   runner_runs_dir: /srv/cambia/runs
-  # git mirror remote for `harness submit` commit pushes.
-  mirror_remote_name: runner-mirror
+  # git mirror remote URL for `harness submit` commit pushes (pushed to
+  # directly; not a named git remote).
   mirror_remote_url: cambia@runner:/srv/cambia/mirror.git
   # origin_host stamped onto reconciled runs (defaults to ssh_alias).
   origin_host: runner

@@ -1,10 +1,10 @@
 """
 src/harness/spec.py
 
-Job-spec parsing and client-side validation for the client `harness` CLI
+Job-spec parsing and client-side validation for the `cambia harness` CLI
 (cambia-256, design 2.6). The runner runs the authoritative preflight; this
-first pass fails fast on the client so a bad spec never reaches the control plane or
-consumes a mirror push.
+first pass fails fast on the client so a bad spec never reaches the control
+plane or consumes a mirror push.
 
 Name validation mirrors the Go ValidateName the runner enforces
 (runnerd/procmgr/process.go): allowlist `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`

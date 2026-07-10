@@ -519,8 +519,8 @@ def replay(
         synced_run_dir: local directory holding the pulled run (the synced run
             dir); must contain run_db.sqlite and is the root for checkpoint path
             re-derivation.
-        dest_db: path to the client's cambia_runs.db, or an already-open connection
-            (from get_db, so the origin_host migration is applied).
+        dest_db: path to the client's cambia_runs.db, or an already-open
+            connection (from get_db, so the origin_host migration is applied).
         origin_host: the source host stamped onto every replayed run
             (e.g. "runner"); must be a non-empty safe identifier.
 

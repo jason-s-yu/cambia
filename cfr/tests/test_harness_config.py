@@ -21,7 +21,6 @@ _GOOD = {
     "data_plane": {
         "ssh_alias": "runner",
         "runner_runs_dir": "/srv/cambia/runs",
-        "mirror_remote_name": "runner-mirror",
         "mirror_remote_url": "cambia@runner:/srv/cambia/mirror.git",
     },
     "sync": {"interval_seconds": 60, "local_runs_dir": "runs"},

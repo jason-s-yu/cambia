@@ -1,10 +1,10 @@
 """
 src/harness/cli.py
 
-Client-side `cambia harness` sub-app (cambia-256, design 2.5). Verbs: submit,
-status, list-remote, logs, cancel, resume, pull, push-run, watch. The data plane
-is ssh/rsync + git push; the control plane is the TLS-pinned, JWT-authed runnerd
-API.
+Client-side `cambia harness` sub-app (cambia-256, design 2.5). Verbs: init,
+submit, status, list-remote, logs, cancel, resume, pull, push-run, watch. The
+data plane is ssh/rsync + git push; the control plane is the TLS-pinned,
+JWT-authed runnerd API.
 """
 
 import subprocess
@@ -14,7 +14,7 @@ from typing import List, Optional
 import typer
 
 harness_app = typer.Typer(
-    help="Serving-harness control (submit/status/logs/pull) for the remote runner",
+    help="Serving-harness control (init/submit/status/logs/pull) for the remote runner",
     no_args_is_help=True,
 )
 
@@ -95,6 +95,60 @@ def _repo_root() -> Path:
 
 def _is_dirty(repo: Path) -> bool:
     return bool(_git(["status", "--porcelain"], repo))
+
+
+# ---------------------------------------------------------------------------
+# init (first-time client bootstrap: keypair + config scaffold)
+# ---------------------------------------------------------------------------
+
+
+@harness_app.command("init")
+def init_cmd(
+    runner_url: Optional[str] = typer.Option(
+        None, "--runner-url", help="runnerd control-plane URL (placeholder if omitted)"
+    ),
+    ssh_target: Optional[str] = typer.Option(
+        None,
+        "--ssh-target",
+        help="ssh alias for the runner (fills ssh_alias and origin_host; placeholder if omitted)",
+    ),
+    mirror_url: Optional[str] = typer.Option(
+        None, "--mirror-url", help="git mirror remote URL (placeholder if omitted)"
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Overwrite an existing key pair or harness.yaml"
+    ),
+):
+    """Bootstrap a first-time client: generate the ed25519 signing key pair and
+    scaffold ~/.config/cambia/harness.yaml. Non-interactive; flags only."""
+    from src.harness.bootstrap import BootstrapError, run_init
+
+    try:
+        result = run_init(
+            runner_url=runner_url,
+            ssh_target=ssh_target,
+            mirror_url=mirror_url,
+            force=force,
+        )
+    except BootstrapError as exc:
+        _fail(str(exc))
+
+    typer.secho("harness init complete:", fg=typer.colors.GREEN)
+    typer.echo(f"  private key: {result.private_key_path} (0600)")
+    typer.echo(f"  public key:  {result.public_key_path}")
+    typer.echo(f"  config:      {result.config_path}")
+    typer.echo("")
+    typer.echo("Next steps:")
+    typer.echo(f"  1. Ship the public key to the runner: {result.public_key_path}")
+    typer.echo(
+        "     (see docs/serving-harness/deploy.md and docs/serving-harness/keys-and-tls.md)"
+    )
+    typer.echo("  2. Fetch the runner's TLS fingerprint and pin it in the config:")
+    typer.echo(
+        "     openssl s_client -connect <runner-host>:8090 </dev/null 2>/dev/null "
+        "| openssl x509 -fingerprint -sha256 -noout"
+    )
+    typer.echo(f"  3. Fill in any remaining placeholders in {result.config_path}.")
 
 
 # ---------------------------------------------------------------------------

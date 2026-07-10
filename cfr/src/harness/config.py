@@ -3,8 +3,8 @@ src/harness/config.py
 
 Client-side harness config (cambia-256, design 5.1/5.2). Holds the runner control
 plane URL, its pinned self-signed TLS SHA256 fingerprint, the ed25519 signing
-key path (private half never leaves the client), the git mirror remote, the ssh/rsync
-data-plane target, and the pull interval.
+key path (private half never leaves the client), the git mirror remote, the
+ssh/rsync data-plane target, and the pull interval.
 
 Resolution order (first that exists wins):
   1. an explicit path (CLI --config / load(path=...))
@@ -37,7 +37,7 @@ class RunnerConfig:
 
 @dataclass
 class AuthConfig:
-    private_key_path: str  # ed25519 private key, the client-only 0600 (5.2)
+    private_key_path: str  # ed25519 private key, client-only 0600 (5.2)
     subject: str = "cambia-harness"  # JWT sub claim
     token_ttl_seconds: int = 900  # <= 3600
 
@@ -46,7 +46,6 @@ class AuthConfig:
 class DataPlaneConfig:
     ssh_alias: str  # rsync/ssh target, e.g. "runner"
     runner_runs_dir: str  # remote runsDir, e.g. /srv/cambia/runs
-    mirror_remote_name: str  # git remote name, e.g. "runner-mirror"
     mirror_remote_url: str  # e.g. cambia@runner:/srv/cambia/mirror.git
     origin_host: str  # stamped onto reconciled runs, e.g. "runner"
 
@@ -168,7 +167,6 @@ def from_dict(data: dict, source_path: Optional[str] = None) -> HarnessConfig:
     dp_cfg = DataPlaneConfig(
         ssh_alias=_require(data_plane, "ssh_alias", "data_plane"),
         runner_runs_dir=_require(data_plane, "runner_runs_dir", "data_plane"),
-        mirror_remote_name=_require(data_plane, "mirror_remote_name", "data_plane"),
         mirror_remote_url=_require(data_plane, "mirror_remote_url", "data_plane"),
         origin_host=data_plane.get("origin_host")
         or _require(data_plane, "ssh_alias", "data_plane"),

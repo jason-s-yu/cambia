@@ -404,7 +404,7 @@ Train or evaluate jobs can run on a remote runner host instead of locally. `camb
 # Install the client
 pip install -e ".[gpu,harness]" --extra-index-url https://download.pytorch.org/whl/cu128
 
-# Verbs: submit, status, list-remote, logs [-f], cancel [--force|--purge], resume, pull, push-run, watch
+# Verbs: init, submit, status, list-remote, logs [-f], cancel [--force|--purge], resume, pull, push-run, watch
 cambia harness submit my_job.yaml
 cambia harness watch
 ```
