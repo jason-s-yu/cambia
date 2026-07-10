@@ -6,6 +6,8 @@ import LoadingSpinner from '@/components/common/LoadingSpinner';
 import ErrorMessage from '@/components/common/ErrorMessage';
 import Button from '../common/Button';
 import { joinLobby } from '@/services/lobbyService';
+import type { AxiosError } from 'axios';
+import type { ApiErrorResponse } from '@/types';
 
 const LobbyList: React.FC = () => {
 	const { lobbies, isLoading, error, fetchLobbies, clearError } = useLobbyListStore();
@@ -26,8 +28,9 @@ const LobbyList: React.FC = () => {
 		try {
 			await joinLobby(lobbyId);
 			navigate(`/lobby/${lobbyId}`);
-		} catch (err: any) {
-			setJoinError(err.response?.data?.message || err.message || 'Failed to join lobby.');
+		} catch (err) {
+			const error = err as AxiosError<ApiErrorResponse>;
+			setJoinError(error.response?.data?.message || error.message || 'Failed to join lobby.');
 		}
 	};
 

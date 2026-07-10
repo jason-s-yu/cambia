@@ -39,7 +39,6 @@ export function useSocket(lobbyId: string | null | undefined) {
 	const userId = useAuthStore((state) => state.user?.id);
 
 	const lobbyActions = useCurrentLobbyStore();
-	const gameActions = useGameStore();
 
 	const connectWebSocket = useCallback((targetLobbyId: string) => {
 		if (!targetLobbyId || !userId) {
@@ -98,7 +97,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 		let socket: WebSocket;
 		try {
 			socket = new WebSocket(`${WS_URL}/ws/${targetLobbyId}`, 'cambia');
-		} catch (error) {
+		} catch {
 			lobbyActions.setError('Failed to initialize connection.');
 			lobbyActions.setLoading(false);
 			isConnecting.current = false;
@@ -228,7 +227,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 			}
 		};
 
-	}, [userId, lobbyActions, gameActions]);
+	}, [userId, lobbyActions]);
 
 	// Connect/disconnect based on lobbyId prop
 	useEffect(() => {
@@ -273,7 +272,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 	}, [lobbyId, connectWebSocket, lobbyActions]);
 
 	/** Send a message over the WS. Injects last_seq automatically. */
-	const sendMessage = useCallback((message: { type: string; body?: any; [key: string]: any }) => {
+	const sendMessage = useCallback((message: { type: string; body?: unknown }) => {
 		if (!managedLobbyId.current || ws.current?.readyState !== WebSocket.OPEN) {
 			console.warn('[useSocket] sendMessage prevented: not connected.');
 			return;
