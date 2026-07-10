@@ -232,6 +232,9 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         critic_batch_size: int = 512
         critic_lr: float = 1.0e-3
         critic_held_out_fraction: float = 0.1
+        # In-loop X4 battery (Phase 2 S2W1).
+        battery_lbr_games: int = 64
+        battery_lbr_depth: int = 8
         seed: int = 0
         device: str = "cuda"
         # Tiny-gate + full-state warm-start (cambia-334).

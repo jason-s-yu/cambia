@@ -577,6 +577,16 @@ class PRTCFRConfig(_CambiaBaseModel):
     critic_lr: float = 1.0e-3
     critic_held_out_fraction: float = 0.1
 
+    # --- In-loop X4 battery (Phase 2 S2W1): Tier-A LBR fast lane. ---
+    # Read only by build_production_battery_eval_fn (the trainer's in-loop
+    # stability trend); the tiny trainer never touches these. Small fast-lane
+    # sizes so the every-N-iters battery stays a small fraction of gen+fit; a
+    # production run tunes them per device (see the S2 budget-branch note).
+    # battery_lbr_games -> Tier-A sampled_lbr num_infosets (P0 infosets sampled);
+    # battery_lbr_depth  -> br_rollouts_per_infoset (BR-estimate rollouts/action).
+    battery_lbr_games: int = 64
+    battery_lbr_depth: int = 8
+
     seed: int = 0
     # "cpu" | "cuda" | "xpu" (Intel Arc via torch's xpu backend) | "auto"
     # (resolved at CLI launch: cuda -> xpu -> cpu; see cli.py train_prtcfr).
