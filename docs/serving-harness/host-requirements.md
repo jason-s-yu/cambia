@@ -42,7 +42,7 @@ system.
 | `uv` | per-job Python virtualenv creation and dependency sync (`uv venv`, `uv sync --frozen`, `uv lock --check`) | Hard |
 | A Go toolchain satisfying `go1.26.0` | building the native engine library (`libcambia.so`) per job | Hard |
 | A C compiler (`cc`/`gcc`) | the engine build is `CGO_ENABLED=1`; `go build -buildmode=c-shared` needs a working cgo toolchain | Hard |
-| `python3` (or whatever interpreter `RUNNERD_PYTHON_BIN`-equivalent config points at) | the interpreter `uv venv --python` targets when building a job's environment | Soft -- if a compatible interpreter (>=3.11) isn't already present, `uv` will download and manage its own unless it's explicitly configured not to; see [section 5](#5-network-surface) |
+| `python3` (or whatever interpreter `RUNNERD_PYTHON_BIN`-equivalent config points at) | the interpreter `uv venv --python` targets when building a job's environment | Soft -- if a compatible interpreter (>=3.11) isn't already present, `uv` will download and manage its own unless it's explicitly configured not to; see [section 4](#4-network-surface) |
 | `openssl` | generating the self-signed TLS cert and computing its fingerprint at deploy time (see [keys-and-tls.md](keys-and-tls.md)) | Hard, but only at deploy/rotation time, not at daemon runtime |
 | `sshd` reachable from the client workstation | data-plane transport: the client pushes commits via `git push` over ssh and pulls results back via `rsync` over ssh | Hard |
 | `rsync` | the data-plane pull side; standard `rsync`-over-`ssh` requires the binary on both ends | Hard |
@@ -59,7 +59,7 @@ system Go version cannot silently change what compiler produced the
 artifact. If the host's `go` binary is not exactly that version, Go's
 toolchain manager will attempt to fetch `go1.26.0` on first use (module
 cache permitting, or over the network -- see
-[section 5](#5-network-surface)). Pre-installing `go1.26.0` directly avoids
+[section 4](#4-network-surface)). Pre-installing `go1.26.0` directly avoids
 that fetch on the first job.
 
 ## 3. Dedicated user and base directory
@@ -128,6 +128,33 @@ CPU count matters for throughput, not admission: the daemon does not gate
 on core count, but it does clamp each job's internal worker count to
 `(host cores - 2)` so the daemon and host stay responsive under load. More
 cores means more throughput per concurrent job, not a requirement floor.
+
+## Optional: GPU support
+
+By default a runner only accepts `device: cpu` jobs. Accepting `cuda` or
+`xpu` jobs needs two things: the host has to provide the prerequisites
+below, and the operator has to extend `RUNNERD_ALLOWED_DEVICES`
+(comma-separated, default `cpu`) to include the device. A job submitted
+with a `device` outside the runner's advertised list is rejected at
+validation (`device_unsupported`) before it ever reaches the queue, and
+that rejection is not forceable.
+
+**NVIDIA (`cuda`).** A driver with `nvidia-smi` visible to the daemon's
+unprivileged user. This is what the free-VRAM preflight shells out to; a
+`cuda` job cannot pass preflight without it, even once the device is
+allowlisted.
+
+**Intel (`xpu`).** A `/dev/dri` render node accessible to the daemon's
+user, plus the Intel compute runtime (the level-zero loader and an OpenCL
+ICD) so torch's XPU backend can enumerate the device. For a containerized
+runner this means passing the render node into the container with its
+group permissions mapped through, not just bind-mounting the device file.
+The free-VRAM preflight uses `xpu-smi` when it's present; render-node
+presence alone admits the job if it isn't.
+
+The RAM and disk floors in [section 5](#5-sizing-guidance) are unchanged
+by any of this: GPU support adds a capability and preflight check, not a
+different sizing regime.
 
 ## 6. Summary: what happens if a requirement is missing
 

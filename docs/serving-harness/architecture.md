@@ -80,7 +80,10 @@ process" goes through several caching and staging layers on the runner:
 - **Python environment cache (uv).** Virtual environments are keyed by a hash of
   the dependency lock file plus interpreter and platform, and reused across any
   jobs that share that exact lock: a job never touches the network to reinstall
-  dependencies it already has cached. Jobs never use an editable install; the
+  dependencies it already has cached. Each device maps to its own dependency
+  extra (`cpu`, `cuda`, or `xpu`, each pulling from its own wheel index) that
+  is part of the cache key, so a `cpu` job and a `cuda` or `xpu` job never
+  share a venv even against the same lock file. Jobs never use an editable install; the
   first-party Python package is made importable via `PYTHONPATH` pointed at the
   pinned worktree, with an interpreter-startup guard that hard-fails a job if
   its import of that package would resolve outside the pinned worktree (guarding
@@ -147,8 +150,13 @@ check (a job name can never be silently reused while another run of that name
 exists), then the kind allowlist, then per-kind field scoping (for example, an
 `evaluate` job requires a target and a `train` job forbids one), then path
 guards on every spec field that names a file (see Security below), then
-resource preflights (disk space, free memory, and any device-specific checks),
-and finally config render and validation.
+resource preflights (disk space, free memory, a device-capability check against
+the runner's advertised device list, and a device-aware GPU preflight for
+non-`cpu` jobs), and finally config render and validation. A job whose `device`
+isn't in the runner's advertised list is rejected outright (`device_unsupported`,
+never queued, not forceable); the GPU preflight itself is backend-specific -- a
+free-VRAM check via `nvidia-smi` for `cuda`, via `xpu-smi` when present for
+`xpu` -- and is skipped entirely for `cpu` jobs.
 
 ## 5. Artifact return and reconciliation
 

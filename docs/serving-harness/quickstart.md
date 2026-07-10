@@ -95,6 +95,10 @@ cp cfr/config/harness-spec.example.yaml my_job.yaml
 cambia harness submit my_job.yaml
 ```
 
+(The spec's `device` defaults to `cpu`. `cuda` and `xpu` only work if the
+runner advertises support for them -- see
+[host-requirements.md's GPU section](host-requirements.md#optional-gpu-support).)
+
 `submit` requires a clean working tree: it pins your HEAD commit, pushes it
 to the runner's git mirror, then submits the job referencing that commit, so
 `run_db` always records exactly what ran. Check on it with:
