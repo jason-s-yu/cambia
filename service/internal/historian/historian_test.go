@@ -14,9 +14,13 @@ import (
 // For demonstration, we'll do a minimal test that writes one action to Redis
 // and ensures we can parse it. A deeper test would require a running Redis + DB instance.
 func TestBasicHistorianFlow(t *testing.T) {
+	if !redisAvailable {
+		t.Skip("skipping: no Redis reachable via REDIS_ADDR (default localhost:6379); set REDIS_ADDR to point at a running dev Redis to run this test")
+	}
+
 	// (Optional) start a real or mock Redis
 	rdb := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379", // must have a real local redis for full integration
+		Addr: redisAddr, // resolved in TestMain from REDIS_ADDR, default localhost:6379
 	})
 	defer rdb.Close()
 
