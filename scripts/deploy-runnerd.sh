@@ -3,22 +3,33 @@
 # Run from the client workstation as the operator. Stages 1 and 4 use sudo ON THE RUNNER HOST (the operator is
 # NOPASSWD there); nothing runs privileged on the client workstation.
 #
+# Required env:
+#   - RUNNER_HOST: the runner host IP or hostname (used for the TLS cert
+#     subjectAltName and the acceptance-probe URL).
+#
 # Prereqs (already done if the autoiterate window staged them):
-#   - runnerd binary at $RUNNERD_BIN (static, CGO_ENABLED=0)
+#   - runnerd binary at $RUNNERD_BIN (built in-script if unset; static, CGO_ENABLED=0)
 #   - JWT public key at ~/.config/cambia/jwt_ed25519.pub (raw 32-byte ed25519)
 #   - repo checkout at $REPO with runnerd/deploy/cambia-runnerd.service
 set -euo pipefail
 
 RUNNER_SSH=${RUNNER_SSH:-runner}
 REPO=${REPO:-$HOME/dev/cambia}
-RUNNERD_BIN=${RUNNERD_BIN:-/tmp/cambia-build/cambia-runnerd}
 JWT_PUB=${JWT_PUB:-$HOME/.config/cambia/jwt_ed25519.pub}
+RUNNER_HOST=${RUNNER_HOST:?set RUNNER_HOST to the runner host IP or hostname, e.g. RUNNER_HOST=192.0.2.10}
+
+if [ -z "${RUNNERD_BIN:-}" ]; then
+  echo "== stage 0: building cambia-runnerd (RUNNERD_BIN unset)"
+  RUNNERD_BUILD_DIR=$(mktemp -d)
+  (cd "$REPO/runnerd" && CGO_ENABLED=0 go build -o "$RUNNERD_BUILD_DIR/cambia-runnerd" ./cmd/runnerd)
+  RUNNERD_BIN="$RUNNERD_BUILD_DIR/cambia-runnerd"
+fi
 
 echo "== stage 1: /srv/cambia layout (sudo on runner)"
 ssh "$RUNNER_SSH" 'sudo mkdir -p /srv/cambia && sudo chown cambia:cambia /srv/cambia'
 
 echo "== stage 2: unprivileged layout, mirror, TLS cert (as cambia)"
-ssh "$RUNNER_SSH" 'sudo -u cambia bash -s' <<'EOS'
+ssh "$RUNNER_SSH" 'sudo -u cambia bash -s' <<EOS
 set -euo pipefail
 cd /srv/cambia
 mkdir -p keys runs
@@ -29,7 +40,7 @@ fi
 if [ ! -f keys/tls.key ]; then
   openssl req -x509 -newkey ed25519 -keyout keys/tls.key -out keys/tls.crt \
     -days 825 -nodes -subj "/CN=cambia-runnerd" \
-    -addext "subjectAltName=IP:192.0.2.10" 2>/dev/null
+    -addext "subjectAltName=IP:${RUNNER_HOST}" 2>/dev/null
   chmod 600 keys/tls.key
 fi
 echo "TLS cert SHA256 fingerprint:"
@@ -54,6 +65,6 @@ ssh "$RUNNER_SSH" 'sudo install -o root -g root -m 644 /tmp/cambia-runnerd.servi
 
 echo "== stage 5: acceptance probes"
 # TLS handshake succeeds and an unauthenticated request is refused with 401.
-code=$(curl -sk -o /dev/null -w '%{http_code}' https://192.0.2.10:8090/harness/health || true)
+code=$(curl -sk -o /dev/null -w '%{http_code}' "https://${RUNNER_HOST}:8090/harness/health" || true)
 echo "unauthenticated /harness/health -> HTTP $code (expect 401)"
 [ "$code" = "401" ] && echo "DEPLOY OK" || { echo "DEPLOY CHECK FAILED"; exit 1; }
