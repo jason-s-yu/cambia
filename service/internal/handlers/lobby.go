@@ -178,10 +178,27 @@ func ListLobbiesHandler(gs *GameServer) http.HandlerFunc {
 			lob.Mu.Lock() // Lock lobby to safely read its current state.
 			count := lob.JoinedCount()
 			gameMode := lob.GameMode
-			// Create a safe copy of the lobby data for the response.
-			lobbyCopy := *lob
-			lobbyCopy.Users = nil
-			lobbyCopy.ReadyStates = nil
+			// Copy only the fields the response needs. Users, ReadyStates,
+			// GameInstanceCreated, CountdownTimer, and OnEmpty are left at
+			// their zero value: the JSON encoding already ignores them via
+			// `json:"-"`, and skipping them avoids copying lob.Mu (assigning
+			// a sync.Mutex trips go vet's copylocks check and would leave
+			// lobbyCopy holding a copy of the source lock).
+			lobbyCopy := lobby.Lobby{
+				ID:            lob.ID,
+				HostUserID:    lob.HostUserID,
+				Type:          lob.Type,
+				GameMode:      lob.GameMode,
+				GameID:        lob.GameID,
+				InGame:        lob.InGame,
+				HouseRules:    lob.HouseRules,
+				Circuit:       lob.Circuit,
+				LobbySettings: lob.LobbySettings,
+				Visibility:    lob.Visibility,
+				Mode:          lob.Mode,
+				QueueID:       lob.QueueID,
+				Searching:     lob.Searching,
+			}
 			lob.Mu.Unlock() // Unlock after reading.
 
 			// Determine max players based on game mode.
