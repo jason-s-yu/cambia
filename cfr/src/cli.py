@@ -1583,16 +1583,16 @@ def train_prtcfr(
             raise typer.Exit(1)
         prt_cfg.backend = _b
 
-    # Resolve device: CLI > config > cpu. Resolve "auto" concretely.
+    # Resolve device: CLI > config > cpu. Resolve "auto" concretely (cuda ->
+    # xpu -> cpu) and validate an explicit "xpu" request against availability.
+    from .cfr.deep_trainer import _resolve_device
+
     _raw_device = device or getattr(prt_cfg, "device", None) or "cpu"
-    if _raw_device == "auto":
-        try:
-            import torch as _torch
-            _device = "cuda" if _torch.cuda.is_available() else "cpu"
-        except Exception:
-            _device = "cpu"
-    else:
-        _device = _raw_device
+    try:
+        _device = _resolve_device(_raw_device)
+    except RuntimeError as _e:
+        print(f"ERROR: {_e}", file=sys.stderr)
+        raise typer.Exit(1)
     prt_cfg.device = _device
 
     # Run directory: --save-path > runs/<run-name>.

@@ -315,6 +315,8 @@ class DeepCfrConfig(_CambiaBaseModel):
     advantage_buffer_capacity: int = 2_000_000
     strategy_buffer_capacity: int = 2_000_000
     save_interval: int = 10
+    # "auto" | "cpu" | "cuda" | "xpu" (Intel Arc via torch's xpu backend, no
+    # IPEX). "auto" resolves at trainer init: cuda -> xpu -> cpu.
     device: str = "auto"
     sampling_method: str = "outcome"
     exploration_epsilon: float = 0.6
@@ -566,6 +568,8 @@ class PRTCFRConfig(_CambiaBaseModel):
     critic_held_out_fraction: float = 0.1
 
     seed: int = 0
+    # "cpu" | "cuda" | "xpu" (Intel Arc via torch's xpu backend) | "auto"
+    # (resolved at CLI launch: cuda -> xpu -> cpu; see cli.py train_prtcfr).
     device: str = "cuda"
 
 

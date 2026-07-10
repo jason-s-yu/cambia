@@ -303,13 +303,14 @@ def _resolve_device(device: str) -> str:
     if device == "xpu":
         if not hasattr(torch, "xpu"):
             raise RuntimeError(
-                "Device 'xpu' requested but intel_extension_for_pytorch is not installed. "
-                "Install it with: pip install intel_extension_for_pytorch"
+                "Device 'xpu' requested but this torch build has no xpu backend. "
+                "Install the xpu extra: uv sync --extra xpu (or pip install torch "
+                "--index-url https://download.pytorch.org/whl/xpu)."
             )
         if not torch.xpu.is_available():
             raise RuntimeError(
                 "Device 'xpu' requested but no XPU device is available. "
-                "Ensure an Intel Arc GPU is present and IPEX is installed correctly."
+                "Ensure an Intel Arc GPU and its driver are present."
             )
     return device
 

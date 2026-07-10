@@ -51,8 +51,12 @@ overrides:
 # <job_id>` rather than resubmitting a spec with this flag set.
 resume: false
 
-# Compute device the job runs on. v1 runner hosts are CPU-only: any value
-# other than "cpu" is rejected before the spec is ever submitted.
+# Compute device the job runs on. One of: cpu, cuda, xpu. This client-side
+# check is permissive within that set; the runner separately requires the
+# device to be in its RUNNERD_ALLOWED_DEVICES capability list or the job is
+# rejected at submit. v1 deployed runners are cpu-only until GPU passthrough
+# lands, so "cuda"/"xpu" pass client validation but are still rejected by
+# every currently deployed runner.
 device: cpu
 
 # Scheduling priority. Currently informational (the queue is a plain FIFO);
@@ -87,7 +91,7 @@ force: false
 # # omitted (the same default `cambia evaluate` uses in run-dir mode).
 # games: 5000
 #
-# device: cpu
+# device: cpu  # cpu | cuda | xpu, same runner allowlist caveat as above
 # priority: normal
 # force: false
 #

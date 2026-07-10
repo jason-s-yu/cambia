@@ -94,6 +94,54 @@ class TestResolveDevice:
         assert isinstance(result, str)
         assert result in ("cpu", "cuda", "xpu")
 
+    def test_auto_resolves_to_cuda_on_this_host(self):
+        # This host has a CUDA device (cambia-329 spawn context); "auto" must
+        # prefer it ahead of xpu/cpu.
+        import torch
+        from src.cfr.deep_trainer import _resolve_device
+        assert torch.cuda.is_available()
+        assert _resolve_device("auto") == "cuda"
+
+    def test_auto_prefers_cuda_over_xpu(self, monkeypatch):
+        import torch
+        import src.cfr.deep_trainer as deep_trainer
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.xpu, "is_available", lambda: True)
+        assert deep_trainer._resolve_device("auto") == "cuda"
+
+    def test_auto_falls_back_to_xpu_without_cuda(self, monkeypatch):
+        import torch
+        import src.cfr.deep_trainer as deep_trainer
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        monkeypatch.setattr(torch.xpu, "is_available", lambda: True)
+        assert deep_trainer._resolve_device("auto") == "xpu"
+
+    def test_auto_falls_back_to_cpu_without_cuda_or_xpu(self, monkeypatch):
+        import torch
+        import src.cfr.deep_trainer as deep_trainer
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        monkeypatch.setattr(torch.xpu, "is_available", lambda: False)
+        assert deep_trainer._resolve_device("auto") == "cpu"
+
+    def test_explicit_xpu_raises_when_unavailable(self, monkeypatch):
+        import torch
+        import src.cfr.deep_trainer as deep_trainer
+        monkeypatch.setattr(torch.xpu, "is_available", lambda: False)
+        with pytest.raises(RuntimeError, match="no XPU device is available"):
+            deep_trainer._resolve_device("xpu")
+
+    def test_xpu_unavailable_error_does_not_mention_ipex(self, monkeypatch):
+        # Stock torch xpu wheels (uv sync --extra xpu) provide the xpu
+        # backend directly; IPEX is a separate, unrelated optimization
+        # library and should not appear in the remediation message.
+        import torch
+        import src.cfr.deep_trainer as deep_trainer
+        monkeypatch.setattr(torch.xpu, "is_available", lambda: False)
+        with pytest.raises(RuntimeError) as exc_info:
+            deep_trainer._resolve_device("xpu")
+        assert "intel_extension_for_pytorch" not in str(exc_info.value)
+        assert "IPEX" not in str(exc_info.value)
+
 
 # ---------------------------------------------------------------------------
 # Tests: config.py DeepCfrConfig (source-level, not stub)
@@ -295,6 +343,24 @@ class TestResolveDeviceSource:
     def test_auto_branch_in_source(self):
         source = _read_source("cfr/deep_trainer.py")
         assert 'device == "auto"' in source
+
+
+class TestCliPrtcfrDeviceResolution:
+    """cambia-329: cli.py's `train prtcfr` command's device resolution must
+    reuse deep_trainer._resolve_device (cuda -> xpu -> cpu) instead of the
+    cuda-only special case it used to inline, which silently dropped an
+    xpu-capable host to cpu on device: auto.
+    """
+
+    def test_train_prtcfr_uses_shared_resolve_device(self):
+        source = _read_source("cli.py")
+        assert "from .cfr.deep_trainer import _resolve_device" in source
+
+    def test_train_prtcfr_no_cuda_only_auto_special_case(self):
+        # The old bug: `_device = "cuda" if _torch.cuda.is_available() else
+        # "cpu"` inside train_prtcfr, which never considered xpu.
+        source = _read_source("cli.py")
+        assert '"cuda" if _torch.cuda.is_available() else "cpu"' not in source
 
 
 # ---------------------------------------------------------------------------

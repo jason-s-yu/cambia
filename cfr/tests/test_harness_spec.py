@@ -10,6 +10,7 @@ import subprocess
 import pytest
 
 from src.harness.spec import (
+    ALLOWED_DEVICES,
     ALLOWED_KINDS,
     HarnessSpecError,
     JobSpec,
@@ -114,9 +115,20 @@ def test_parse_commit_shape():
         JobSpec.parse(_train_spec(commit="deadbeef"))  # not 40 hex
 
 
-def test_parse_device_must_be_cpu():
+def test_parse_device_allowlist_exact():
+    assert set(ALLOWED_DEVICES) == {"cpu", "cuda", "xpu"}
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda", "xpu"])
+def test_parse_device_accepts_allowlisted(device):
+    spec = JobSpec.parse(_train_spec(device=device))
+    assert spec.device == device
+
+
+@pytest.mark.parametrize("device", ["rocm", "mps", "CUDA", "cuda:0", ""])
+def test_parse_device_rejects_non_allowlisted(device):
     with pytest.raises(HarnessSpecError):
-        JobSpec.parse(_train_spec(device="cuda"))
+        JobSpec.parse(_train_spec(device=device))
 
 
 def test_parse_resume_train_only():

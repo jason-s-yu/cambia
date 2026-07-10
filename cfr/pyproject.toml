@@ -21,6 +21,12 @@ dependencies = [
 [project.optional-dependencies]
 cpu = ["torch>=2.6"]
 gpu = ["torch>=2.6"]
+# torch>=2.10 (not the shared >=2.6 floor other extras use): the xpu wheel
+# build depends on Intel's triton fork under an exact-version pin that
+# changed name from pytorch-triton-xpu to triton-xpu at torch 2.10; pinning
+# the floor there keeps resolution on the current name instead of walking
+# back through releases that need the retired package name too.
+xpu = ["torch>=2.10", "triton-xpu"]
 rl = ["gymnasium>=1.0", "stable-baselines3>=2.4", "sb3-contrib>=2.4"]
 # Client-side serving-harness CLI + pull/reconcile loop (cambia-256). Kept out of
 # the base deps: only the `cambia harness` subcommand and the pull loop import
@@ -38,6 +44,7 @@ conflicts = [
     [
         { extra = "cpu" },
         { extra = "gpu" },
+        { extra = "xpu" },
     ],
 ]
 
@@ -45,7 +52,13 @@ conflicts = [
 torch = [
     { index = "pytorch-cpu", extra = "cpu" },
     { index = "pytorch-cu128", extra = "gpu" },
+    { index = "pytorch-xpu", extra = "xpu" },
 ]
+# torch's xpu build pulls in Intel's triton fork, published only on this
+# index (not PyPI); `tool.uv.sources` only routes packages declared as direct
+# extra dependencies (see the `xpu` extra above), not arbitrary transitive
+# ones, so triton-xpu needs the same explicit routing torch gets.
+triton-xpu = [{ index = "pytorch-xpu", extra = "xpu" }]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
@@ -55,6 +68,11 @@ explicit = true
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-xpu"
+url = "https://download.pytorch.org/whl/xpu"
 explicit = true
 
 [tool.pytest.ini_options]

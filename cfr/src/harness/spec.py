@@ -21,6 +21,12 @@ from typing import Any, Dict, List, Optional
 # `prtcfr` algorithm in v1; that is a runner-side preflight, not a client check.
 ALLOWED_KINDS = ("train", "evaluate", "head-to-head", "bench")
 
+# Device allowlist (cambia-329). The client stays permissive within this set;
+# the runner enforces its own RUNNERD_ALLOWED_DEVICES capability list against
+# whatever hosts are actually deployed, which is a runner-side preflight, not
+# a client check.
+ALLOWED_DEVICES = ("cpu", "cuda", "xpu")
+
 # Mirror of the Go runNameRe: leading alphanumeric, then up to 127 more chars
 # from [A-Za-z0-9._-]; 128 max. Combined with the explicit ".."/"/" reject it is
 # the path-traversal guard the run name gets before any directory join.
@@ -160,8 +166,10 @@ class JobSpec:
             raise HarnessSpecError("override keys must be non-empty strings")
 
         device = raw.get("device", "cpu")
-        if device != "cpu":
-            raise HarnessSpecError(f"device must be 'cpu' in v1, got {device!r}")
+        if device not in ALLOWED_DEVICES:
+            raise HarnessSpecError(
+                f"device must be one of {list(ALLOWED_DEVICES)}, got {device!r}"
+            )
 
         priority = raw.get("priority", "normal")
         if not isinstance(priority, str) or not priority:
