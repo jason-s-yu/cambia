@@ -1621,6 +1621,58 @@ def train_prtcfr(
             print(f"ERROR: {_e}", file=sys.stderr)
             raise typer.Exit(1)
 
+    _iters = iterations if iterations is not None else prt_cfg.iterations
+
+    # Tiny-gate branch: the X2 NashConv gate on the tiny {A,6} 2-card tree. Routes
+    # to PRTCFRTinyTrainer with the ground-truth exploitability eval_fn wired to
+    # the stability controller, honoring the same run-dir / run_db / warm_start
+    # conventions as the production path.
+    if getattr(prt_cfg, "tiny_gate", False):
+        from .cfr.prtcfr_trainer import (
+            PRTCFRTinyTrainer,
+            build_tiny_nashconv_eval_fn,
+        )
+        from tools.tiny_solver import build_tree as _build_tree
+
+        _root, _isets, _nnodes, _aborted = _build_tree(
+            cfg, 5, 0, 2_000_000, enumerate_draws=True, perfect_recall=True,
+            tokenize=True, seq_cap=prt_cfg.seq_cap,
+        )
+        if _aborted:
+            print(
+                f"ERROR: tiny tree truncated (aborted_deals={_aborted}).",
+                file=sys.stderr,
+            )
+            raise typer.Exit(1)
+        _eval_fn = build_tiny_nashconv_eval_fn(
+            _root, device=_device, seq_cap=prt_cfg.seq_cap
+        )
+        _tiny = PRTCFRTinyTrainer(
+            _root,
+            prt_cfg,
+            run_dir=str(_run_dir),
+            run_name=_name,
+            config_yaml=_config_yaml,
+            config_dict=_config_dict,
+            warm_start_path=getattr(prt_cfg, "warm_start_path", None),
+            eval_fn=_eval_fn,
+        )
+        try:
+            _tiny.train(iterations=_iters, resume=resume)
+        except KeyboardInterrupt:
+            print(
+                "\nInterrupted. The last completed iteration's snapshot + rolling "
+                "checkpoint + resume_state.json are on disk.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(0)
+        except Exception as e:
+            print(f"FATAL: Error during PRT-CFR tiny-gate training: {e}", file=sys.stderr)
+            raise typer.Exit(1)
+        finally:
+            _tiny.close()
+        return
+
     from .cfr.prtcfr_trainer import PRTCFRProductionTrainer
 
     trainer = PRTCFRProductionTrainer(
@@ -1630,8 +1682,6 @@ def train_prtcfr(
         config_yaml=_config_yaml,
         config_dict=_config_dict,
     )
-
-    _iters = iterations if iterations is not None else prt_cfg.iterations
 
     # Thread --resume into trainer.train(resume=...) only if the trainer
     # actually accepts it. Guards against a hard TypeError while the trainer

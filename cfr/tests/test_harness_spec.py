@@ -226,6 +226,41 @@ def test_to_payload_omits_target_when_unset():
     assert "target" not in payload
 
 
+# ---------------------------------------------------------------------------
+# warm_start field (cambia-334): train-only, same path guards as target/config
+# ---------------------------------------------------------------------------
+
+
+def test_parse_warm_start_accepts_train():
+    spec = JobSpec.parse(
+        _train_spec(warm_start="v0.4-x2-530/snapshots/prtcfr_snapshot_iter_530.pt")
+    )
+    assert spec.warm_start == "v0.4-x2-530/snapshots/prtcfr_snapshot_iter_530.pt"
+
+
+def test_parse_warm_start_train_only():
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_eval_spec(warm_start="prior-run/resume_state.json"))
+
+
+@pytest.mark.parametrize("bad", ["/etc/passwd", "../secret/x.pt", "a/../b.pt"])
+def test_parse_warm_start_rejects_unsafe_path(bad):
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_train_spec(warm_start=bad))
+
+
+def test_to_payload_includes_warm_start_when_set():
+    spec = JobSpec.parse(_train_spec(warm_start="prior/resume_state.json"))
+    payload = spec.to_payload("f" * 40)
+    assert payload["warm_start"] == "prior/resume_state.json"
+
+
+def test_to_payload_omits_warm_start_when_unset():
+    spec = JobSpec.parse(_train_spec())
+    payload = spec.to_payload("f" * 40)
+    assert "warm_start" not in payload
+
+
 def test_parse_overrides_must_be_mapping():
     with pytest.raises(HarnessSpecError):
         JobSpec.parse(_train_spec(overrides=["a=b"]))

@@ -572,6 +572,18 @@ class PRTCFRConfig(_CambiaBaseModel):
     # (resolved at CLI launch: cuda -> xpu -> cpu; see cli.py train_prtcfr).
     device: str = "cuda"
 
+    # --- Tiny-gate trainer (X2 NashConv gate). ---
+    # True routes cli.train_prtcfr to PRTCFRTinyTrainer (the tiny_solver
+    # ground-truth NashConv gate) instead of PRTCFRProductionTrainer. Default
+    # False leaves every existing config on the production full-game path.
+    tiny_gate: bool = False
+    # Full-state warm-start source for a NEW run: a resume_state.json (or its
+    # run dir) for a bit-exact continuation, or a legacy snapshot/checkpoint .pt
+    # for net + iteration only. Distinct from ``warm_start`` (the per-iteration
+    # refit-init policy). None starts fresh. The serving harness surfaces its
+    # spec ``warm_start`` field here as an absolute path render rail.
+    warm_start_path: Optional[str] = None
+
 
 # --- Baseline Agent Configuration ---
 

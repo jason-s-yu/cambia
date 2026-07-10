@@ -51,6 +51,15 @@ overrides:
 # <job_id>` rather than resubmitting a spec with this flag set.
 resume: false
 
+# Optional, train only: warm-start a NEW run from another run's saved state.
+# A path RELATIVE TO THE RUNS DIR (no absolute path, no ".." segment; the runner
+# containment-guards it and surfaces it to the job as prt_cfr.warm_start_path).
+# Point it at a run's resume_state.json (or its run dir) for a bit-exact
+# continuation, or at a snapshot .pt for net + iteration only. Only the tiny-gate
+# (prt_cfr.tiny_gate) trainer consumes it in v1. Distinct from `resume`, which
+# continues THIS run in place.
+# warm_start: v0.4-x2-530/snapshots/prtcfr_snapshot_iter_530.pt
+
 # Compute device the job runs on. One of: cpu, cuda, xpu. This client-side
 # check is permissive within that set; the runner separately requires the
 # device to be in its RUNNERD_ALLOWED_DEVICES capability list or the job is

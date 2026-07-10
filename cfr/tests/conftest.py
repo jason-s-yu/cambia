@@ -234,6 +234,9 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         critic_held_out_fraction: float = 0.1
         seed: int = 0
         device: str = "cuda"
+        # Tiny-gate + full-state warm-start (cambia-334).
+        tiny_gate: bool = False
+        warm_start_path: object = None
 
     def _load_config(path: str):
         """Stub load_config: delegate to the real load_config implementation."""

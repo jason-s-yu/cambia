@@ -29,10 +29,14 @@ so the worker's per-node sigma lookup is O(1) and exactly the fixed sigma^t.
 
 from __future__ import annotations
 
+import glob
 import json
 import logging
 import math
 import os
+import random
+import re
+import shutil
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -260,21 +264,136 @@ def _fit_from_scratch(
     return total_loss / max(steps, 1)
 
 
+# ---------------------------------------------------------------------------
+# Tiny-gate full-state persistence (bit-exact warm-start / resume).
+# ---------------------------------------------------------------------------
+#
+# The tiny trainer's cross-iteration state, and where each piece is captured so
+# a fresh trainer can continue iteration (j+1) exactly as an uninterrupted run
+# would:
+#   - net weights -> the rolling checkpoint prtcfr_checkpoint.pt (Phase-1 dict).
+#   - reservoir contents + seen_count -> <run_dir>/reservoir.npz (ReservoirBuffer
+#     .save/.load; the in-RAM buffer has no dedicated RNG, so nothing else there).
+#   - BestSnapshotController fields -> resume_state.json (via _controller_to_dict).
+#   - GLOBAL RNG -> resume_state.json. The fit consumes numpy (np.random.choice
+#     in ReservoirBuffer.sample_batch) and torch (GRU inter-layer dropout, plus
+#     net init on from-scratch/reanchor) every iteration; buffer.add draws python
+#     `random` only at capacity. The worker seeds its OWN random.Random per t, so
+#     it needs no capture. All three global streams + the accelerator RNG are
+#     stored so the refit stream is reproduced bit-for-bit.
+#   - iteration counter + written-snapshot list -> resume_state.json.
+# The peak LR and the per-iteration optimizer/scheduler are pure functions of t,
+# self.iterations, and the schedule (both are rebuilt each iteration), so they
+# carry no state beyond the iteration counter and the requested total.
+
+TINY_RESUME_SCHEMA_VERSION = 1
+
+
+def _global_rng_save() -> Dict[str, Any]:
+    """Capture the process-global numpy + python `random` + torch RNG streams.
+
+    JSON-safe. numpy's MT19937 key array and python's internal-state tuple are
+    stored as plain int lists; torch's CPU generator state as a hex byte string.
+    The accelerator (cuda or xpu) RNG is captured separately via _accel_rng_save.
+    """
+    np_state = np.random.get_state()
+    py_state = random.getstate()
+    return {
+        "numpy_rng": [
+            np_state[0],
+            [int(x) for x in np_state[1]],
+            int(np_state[2]),
+            int(np_state[3]),
+            float(np_state[4]),
+        ],
+        "python_rng": [
+            int(py_state[0]),
+            [int(x) for x in py_state[1]],
+            None if py_state[2] is None else float(py_state[2]),
+        ],
+        "torch_rng": torch.random.get_rng_state().numpy().tobytes().hex(),
+    }
+
+
+def _global_rng_restore(state: Dict[str, Any]) -> None:
+    """Restore the streams captured by _global_rng_save, then the accelerator RNG.
+
+    Restored LAST in the load path so any RNG the load itself might touch does
+    not leak into the resumed stream.
+    """
+    np_rng = state.get("numpy_rng")
+    if np_rng is not None:
+        np.random.set_state(
+            (
+                np_rng[0],
+                np.array(np_rng[1], dtype=np.uint32),
+                int(np_rng[2]),
+                int(np_rng[3]),
+                float(np_rng[4]),
+            )
+        )
+    py_rng = state.get("python_rng")
+    if py_rng is not None:
+        random.setstate((int(py_rng[0]), tuple(int(x) for x in py_rng[1]), py_rng[2]))
+    torch_hex = state.get("torch_rng")
+    if torch_hex is not None:
+        torch_bytes = np.frombuffer(bytes.fromhex(torch_hex), dtype=np.uint8).copy()
+        torch.random.set_rng_state(torch.from_numpy(torch_bytes))
+    _accel_rng_restore(state)
+
+
 class PRTCFRTinyTrainer:
-    """Drives PRT-CFR training on the tiny_solver tree to produce X2 snapshots."""
+    """Drives PRT-CFR training on the tiny_solver tree to produce X2 snapshots.
+
+    Two operating modes, chosen at construction:
+      - Legacy (only ``snapshot_dir`` given): snapshots + rolling checkpoint go
+        to ``snapshot_dir``; no run_db, no resume_state.json, no reservoir save.
+        Byte-for-byte the original behavior the X2 tests and the scratch driver
+        depend on.
+      - Run-dir (``run_dir`` given): the harness-runnable path. Snapshots ->
+        ``<run_dir>/snapshots``; the production-format resume_state.json +
+        reservoir.npz are written every iteration so ``--resume`` and
+        ``warm_start_path`` continuations hold; run_db journaling activates when
+        ``run_name`` is supplied.
+    """
 
     def __init__(
         self,
         root,
         config,
-        snapshot_dir: str,
+        snapshot_dir: Optional[str] = None,
         net_factory: Optional[Callable[[], PRTCFRNet]] = None,
         eval_fn: Optional[Callable[["PRTCFRTinyTrainer", int], float]] = None,
+        run_dir: Optional[str] = None,
+        run_name: Optional[str] = None,
+        db_path: Optional[str] = None,
+        config_yaml: Optional[str] = None,
+        config_dict: Optional[dict] = None,
+        warm_start_path: Optional[str] = None,
     ):
         self.root = root
         self.config = config
+        # Run-dir mode (harness-runnable) vs legacy snapshot-dir mode. When
+        # run_dir is given, snapshots default to <run_dir>/snapshots and the
+        # resume_state.json / reservoir.npz / run_db machinery activates.
+        self.run_dir = run_dir
+        if snapshot_dir is None:
+            if run_dir is None:
+                raise ValueError("PRTCFRTinyTrainer needs snapshot_dir or run_dir")
+            snapshot_dir = os.path.join(run_dir, "snapshots")
         self.snapshot_dir = snapshot_dir
         os.makedirs(snapshot_dir, exist_ok=True)
+        if run_dir is not None:
+            os.makedirs(run_dir, exist_ok=True)
+        # Persistence (resume_state.json + reservoir.npz every iteration) is a
+        # run-dir feature; legacy snapshot-dir-only construction stays side-effect
+        # identical to the original trainer.
+        self._persist_resume = run_dir is not None
+        self.warm_start_path = (
+            warm_start_path
+            if warm_start_path is not None
+            else getattr(config, "warm_start_path", None)
+        )
 
         self.seq_cap = int(getattr(config, "seq_cap", SEQ_CAP))
         self.m_rollouts = int(getattr(config, "m_rollouts", 4))
@@ -341,6 +460,15 @@ class PRTCFRTinyTrainer:
         # Current net (refit each iteration). Initialized once; re-created per
         # iteration inside train() so iteration 1's sigma uses a fresh init.
         self.net: Optional[PRTCFRNet] = None
+        # Iterations whose snapshot is on disk (drives the deployable manifest);
+        # restored on resume/warm-start so the SD-CFR window survives.
+        self._written_iters: List[int] = []
+
+        # run_db journaling (run-dir mode with a run_name only; never fatal).
+        self._db_conn = None
+        self._db_run_id: Optional[int] = None
+        if self._persist_resume and run_name is not None:
+            self._init_run_db(db_path, run_name, config_yaml, config_dict)
 
     def snapshot_path(self, t: int) -> str:
         return os.path.join(self.snapshot_dir, f"prtcfr_snapshot_iter_{t}.pt")
@@ -386,6 +514,270 @@ class PRTCFRTinyTrainer:
             },
             self.checkpoint_path(),
         )
+
+    # -- run_db journaling (run-dir mode) -----------------------------------
+
+    def _init_run_db(self, db_path, run_name, config_yaml, config_dict) -> None:
+        """Register the run, mirroring PRTCFRProductionTrainer._init_run_db so
+        tiny-gate runs journal identically (CAMBIA_RUN_DB honored)."""
+        try:
+            from .. import run_db as _run_db
+        except Exception:  # pragma: no cover - run_db optional
+            return
+        try:
+            if db_path is None:
+                db_path = os.environ.get("CAMBIA_RUN_DB") or os.path.join(
+                    os.path.dirname(os.path.abspath(self.run_dir)), "cambia_runs.db"
+                )
+            self._db_conn = _run_db.get_db(db_path)
+            algorithm = "prt-cfr"
+            if config_dict:
+                try:
+                    algorithm = _run_db.infer_algorithm(config_dict)
+                except Exception:
+                    algorithm = "prt-cfr"
+            self._db_run_id = _run_db.upsert_run(
+                self._db_conn,
+                name=run_name,
+                algorithm=algorithm,
+                config_yaml=config_yaml,
+                config_dict=config_dict,
+                status="running",
+            )
+            logger.info(
+                "[prtcfr-tiny] run_db: registered '%s' (id=%s)",
+                run_name, self._db_run_id,
+            )
+        except Exception as e:  # pragma: no cover - never fatal
+            logger.debug("[prtcfr-tiny] run_db init failed (non-fatal): %s", e)
+            self._db_conn = None
+            self._db_run_id = None
+
+    def _register_checkpoint_in_db(self, t: int, path: str) -> None:
+        if self._db_conn is None or self._db_run_id is None:
+            return
+        try:
+            from .. import run_db as _run_db
+
+            _run_db.register_checkpoint(self._db_conn, self._db_run_id, t, path)
+        except Exception as e:  # pragma: no cover - never fatal
+            logger.debug("[prtcfr-tiny] register_checkpoint failed (non-fatal): %s", e)
+
+    def _record_nashconv_in_db(self, t: int, value: float) -> None:
+        """Journal one per-eval NashConv as a reconcile-visible eval_results row.
+
+        Uses the ``nashconv`` baseline: the reconciler replays eval_results, and
+        recompute_best_metric aggregates only MEAN_IMP_BASELINES, so a nashconv
+        row is synced to the hub yet never pollutes mean_imp. The exploitability
+        value rides in win_rate (the generic numeric slot); on the tiny tree it
+        is well inside [0, 1]."""
+        if self._db_conn is None or self._db_run_id is None:
+            return
+        try:
+            from .. import run_db as _run_db
+
+            _run_db.insert_eval_result(
+                self._db_conn,
+                self._db_run_id,
+                None,
+                {"iteration": int(t), "baseline": "nashconv", "win_rate": float(value)},
+            )
+        except Exception as e:  # pragma: no cover - never fatal
+            logger.debug("[prtcfr-tiny] nashconv journal failed (non-fatal): %s", e)
+
+    def _update_db_status(self, status: str) -> None:
+        if self._db_conn is None or self._db_run_id is None:
+            return
+        try:
+            from .. import run_db as _run_db
+
+            _run_db.update_run_status(self._db_conn, self._db_run_id, status)
+        except Exception:  # pragma: no cover
+            pass
+
+    def close(self) -> None:
+        """Close the run_db connection (idempotent)."""
+        if self._db_conn is not None:
+            try:
+                self._db_conn.close()
+            except Exception:  # pragma: no cover
+                pass
+            self._db_conn = None
+
+    # -- full-state persistence (bit-exact resume / warm-start) -------------
+
+    def resume_state_path(self) -> str:
+        base = self.run_dir if self.run_dir is not None else self.snapshot_dir
+        return os.path.join(base, "resume_state.json")
+
+    def reservoir_path(self) -> str:
+        base = self.run_dir if self.run_dir is not None else self.snapshot_dir
+        return os.path.join(base, "reservoir.npz")
+
+    def _save_reservoir(self) -> None:
+        # ReservoirBuffer.save appends .npz; strip it so we do not get .npz.npz.
+        path = self.reservoir_path()
+        stem = path[:-4] if path.endswith(".npz") else path
+        self.buffer.save(stem)
+
+    def _save_resume_state(self, t: int) -> None:
+        """Persist the iteration-``t`` resume point (written each iteration).
+
+        Captured AFTER the snapshot/checkpoint + reservoir save, so the on-disk
+        reservoir and these RNG states are all as of the end of iteration ``t``.
+        Written via temp file + atomic rename so an interruption mid-write never
+        leaves a torn resume_state.json. ``total_iterations`` records the horizon
+        the global LR schedule spanned; a continuation that keeps it (and the
+        schedule) identical is bit-exact, one that changes it (the ruled 530->1000
+        flat-lr extension) is an intentional schedule change, not bit-exact."""
+        state = {
+            "schema": TINY_RESUME_SCHEMA_VERSION,
+            "iteration": int(t),
+            "total_iterations": int(self.iterations),
+            "snapshots": [int(i) for i in self._written_iters],
+            "controller": (
+                _controller_to_dict(self.controller)
+                if self.controller is not None
+                else None
+            ),
+        }
+        state.update(_global_rng_save())
+        state.update(_accel_rng_save(self.device))
+        path = self.resume_state_path()
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh)
+        os.replace(tmp, path)
+
+    def _restore_net_from_checkpoint(self, ckpt_path: str) -> int:
+        """Load net weights from a rolling checkpoint or per-iteration snapshot.
+
+        Both formats carry ``encoder_state_dict``/``head_state_dict``/
+        ``iteration``; the rolling checkpoint adds ``config``. Returns the stored
+        iteration."""
+        if self.net is None:
+            self.net = self._net_factory()
+        payload = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        self.net.load_encoder_head(
+            payload["encoder_state_dict"], payload["head_state_dict"]
+        )
+        return int(payload.get("iteration", 0))
+
+    def _load_full_state(self, resume_state_file: str, checkpoint_file: str,
+                         reservoir_file: Optional[str]) -> int:
+        """Bit-exact restore: net + reservoir + RNG + controller + counter.
+
+        Returns the last completed iteration; the loop resumes at it+1. RNG is
+        restored LAST so nothing the load touches leaks into the resumed stream."""
+        with open(resume_state_file, "r", encoding="utf-8") as fh:
+            state = json.load(fh)
+        schema = int(state.get("schema", 0))
+        if schema != TINY_RESUME_SCHEMA_VERSION:
+            raise PRTCFRResumeError(
+                f"cannot resume: resume_state.json schema {schema} != expected "
+                f"{TINY_RESUME_SCHEMA_VERSION}"
+            )
+        ckpt_iter = self._restore_net_from_checkpoint(checkpoint_file)
+        rs_iter = int(state["iteration"])
+        if ckpt_iter != rs_iter:
+            raise PRTCFRResumeError(
+                f"cannot resume: rolling checkpoint iteration {ckpt_iter} != "
+                f"resume_state iteration {rs_iter} (interrupted between the "
+                f"checkpoint save and the resume_state commit; discard the "
+                f"partial iteration before resuming)"
+            )
+        if reservoir_file and os.path.exists(reservoir_file):
+            self.buffer.load(reservoir_file)
+        if self.controller is not None and state.get("controller") is not None:
+            self.controller = _controller_from_dict(state["controller"])
+        self._written_iters = [int(i) for i in state.get("snapshots", [])]
+        _global_rng_restore(state)
+        logger.info(
+            "[prtcfr-tiny] full-state restore from iter=%d: buffer=%d snapshots=%s",
+            rs_iter, len(self.buffer), self._written_iters,
+        )
+        return rs_iter
+
+    def _resolve_warm_start(self, path: str):
+        """Classify a warm_start_path into (mode, files).
+
+        mode "full" -> (resume_state.json, rolling checkpoint, reservoir.npz) for
+        a bit-exact continuation; mode "net" -> a bare .pt for net + iteration
+        only (the legacy iter-530 snapshot case: it carries encoder/head/iteration
+        and NOTHING else, so the reservoir starts empty and RNG seeds from the
+        ambient stream -- NOT bit-exact)."""
+        if os.path.isdir(path):
+            rs = os.path.join(path, "resume_state.json")
+            ckpt = os.path.join(path, "snapshots", "prtcfr_checkpoint.pt")
+            if not os.path.exists(ckpt):
+                ckpt = os.path.join(path, "prtcfr_checkpoint.pt")
+            if os.path.exists(rs) and os.path.exists(ckpt):
+                res = os.path.join(path, "reservoir.npz")
+                return "full", (rs, ckpt, res if os.path.exists(res) else None)
+            if os.path.exists(ckpt):
+                return "net", (ckpt,)
+            raise PRTCFRResumeError(
+                f"warm_start_path dir {path!r} has no resume_state.json+checkpoint "
+                f"and no rolling checkpoint"
+            )
+        if os.path.basename(path) == "resume_state.json":
+            base = os.path.dirname(path)
+            ckpt = os.path.join(base, "snapshots", "prtcfr_checkpoint.pt")
+            if not os.path.exists(ckpt):
+                ckpt = os.path.join(base, "prtcfr_checkpoint.pt")
+            res = os.path.join(base, "reservoir.npz")
+            return "full", (path, ckpt, res if os.path.exists(res) else None)
+        # A bare .pt (per-iteration snapshot or rolling checkpoint): net + iter.
+        return "net", (path,)
+
+    def _import_prior_snapshots(self, src_dir: str, upto_t: int) -> List[int]:
+        """Copy prtcfr_snapshot_iter_{i}.pt (i <= upto_t) from a source snapshot
+        dir into this run's snapshot dir when they are not already there, so the
+        continuation's SD-CFR average spans [1 .. N], not just the new iters.
+        Returns the sorted iters now present (source + already-local)."""
+        present = set()
+        pat = re.compile(r"prtcfr_snapshot_iter_(\d+)\.pt$")
+        if os.path.abspath(src_dir) != os.path.abspath(self.snapshot_dir):
+            for fp in glob.glob(os.path.join(src_dir, "prtcfr_snapshot_iter_*.pt")):
+                m = pat.search(os.path.basename(fp))
+                if not m:
+                    continue
+                it = int(m.group(1))
+                if it > upto_t:
+                    continue
+                dst = self.snapshot_path(it)
+                if not os.path.exists(dst):
+                    shutil.copy2(fp, dst)
+                present.add(it)
+        for fp in glob.glob(os.path.join(self.snapshot_dir, "prtcfr_snapshot_iter_*.pt")):
+            m = pat.search(os.path.basename(fp))
+            if m and int(m.group(1)) <= upto_t:
+                present.add(int(m.group(1)))
+        return sorted(present)
+
+    def _warm_start_from_path(self) -> int:
+        """Seed a fresh run from warm_start_path. Returns the iteration to
+        continue AFTER (loop starts at it+1)."""
+        mode, files = self._resolve_warm_start(self.warm_start_path)
+        if mode == "full":
+            rs, ckpt, res = files
+            last_t = self._load_full_state(rs, ckpt, res)
+            self._import_prior_snapshots(os.path.dirname(ckpt), last_t)
+            logger.info("[prtcfr-tiny] warm-start (full) from %s at iter=%d", rs, last_t)
+            return last_t
+        (ckpt,) = files
+        last_t = self._restore_net_from_checkpoint(ckpt)
+        self._written_iters = self._import_prior_snapshots(
+            os.path.dirname(ckpt), last_t
+        )
+        logger.warning(
+            "[prtcfr-tiny] warm-start (net-only) from %s at iter=%d: net weights "
+            "+ prior snapshots imported, but the reservoir starts EMPTY and RNG is "
+            "the ambient stream -- NOT a bit-exact continuation (the source carries "
+            "net weights + iteration only)",
+            ckpt, last_t,
+        )
+        return last_t
 
     def run_iteration(self, t: int) -> PRTCFRTrainState:
         """One PRT-CFR iteration: traverse under sigma^t, accumulate samples,
@@ -446,6 +838,9 @@ class PRTCFRTinyTrainer:
 
         snap = self._save_snapshot(t)
         self._save_checkpoint(t)
+        if self._persist_resume:
+            self._register_checkpoint_in_db(t, snap)
+            self._save_reservoir()
         return PRTCFRTrainState(
             iteration=t,
             samples_added=added,
@@ -457,7 +852,9 @@ class PRTCFRTinyTrainer:
     def _stability_check_due(self, t: int, n: int) -> bool:
         return t == 1 or t % self.stability_eval_every == 0 or t == n
 
-    def train(self, iterations: Optional[int] = None) -> List[PRTCFRTrainState]:
+    def train(
+        self, iterations: Optional[int] = None, resume: bool = False
+    ) -> List[PRTCFRTrainState]:
         """Run ``iterations`` (default config.iterations) PRT-CFR iterations.
 
         With ``stability_enabled`` and an ``eval_fn``, the trend metric is scored
@@ -466,55 +863,89 @@ class PRTCFRTinyTrainer:
         the metric has risen past the tolerance band for ``patience`` checks. The
         deployable snapshot set pins to ``[1 .. best_iteration]`` so the served
         SD-CFR average excludes the diverged tail regardless.
+
+        Continuation (run-dir mode only): ``resume=True`` reloads this run's own
+        resume_state.json + rolling checkpoint + reservoir.npz and continues in
+        place at ``t+1`` (harness SIGKILL/restart semantics). Otherwise, a
+        ``warm_start_path`` on the config seeds a fresh run from ANOTHER run's
+        saved state -- full (bit-exact) when it points at a resume_state.json/run
+        dir, net + iteration only when it points at a bare snapshot .pt. In run-dir
+        mode resume_state.json + reservoir.npz are written every iteration.
         """
         n = iterations if iterations is not None else self.iterations
         # The global LR schedule spans the run actually requested.
         self.iterations = n
-        history: List[PRTCFRTrainState] = []
-        written_iters: List[int] = []
-        for t in range(1, n + 1):
-            st = self.run_iteration(t)
-            history.append(st)
-            written_iters.append(t)
-            logger.info(
-                "[prtcfr] iter=%d samples+=%d buffer=%d fit_loss=%.5f snapshot=%s",
-                st.iteration, st.samples_added, st.buffer_size, st.fit_loss,
-                os.path.basename(st.snapshot_path),
-            )
 
-            if not self.stability_enabled or self.controller is None:
-                continue
-            if not self._stability_check_due(t, n):
-                continue
-            if self.eval_fn is None:
-                # No trend metric available: keep the whole set deployable.
-                write_deployable_manifest(
-                    self.snapshot_dir, self.controller, written_iters,
-                    metric_name=self.stability_metric_name, stopped_early=False,
+        start_t = 1
+        if resume:
+            if not self._persist_resume:
+                raise PRTCFRResumeError("resume requires run-dir mode")
+            rs = self.resume_state_path()
+            ckpt = self.checkpoint_path()
+            if not os.path.exists(rs) or not os.path.exists(ckpt):
+                raise PRTCFRResumeError(
+                    f"cannot resume: missing {rs} or {ckpt}"
                 )
-                continue
-            metric = float(self.eval_fn(self, t))
-            decision = self.controller.update(t, metric)
-            logger.info(
-                "[prtcfr] stability iter=%d %s=%.5f best_iter=%d best=%.5f "
-                "worse_streak=%d stop=%s",
-                t, self.stability_metric_name, metric, decision.best_iteration,
-                decision.best_metric, decision.num_worse_since_best,
-                decision.should_stop,
-            )
-            write_deployable_manifest(
-                self.snapshot_dir, self.controller, written_iters,
-                metric_name=self.stability_metric_name,
-                stopped_early=decision.should_stop,
-            )
-            if decision.should_stop:
+            last_t = self._load_full_state(rs, ckpt, self.reservoir_path())
+            start_t = last_t + 1
+        elif self.warm_start_path:
+            start_t = self._warm_start_from_path() + 1
+
+        history: List[PRTCFRTrainState] = []
+        try:
+            for t in range(start_t, n + 1):
+                st = self.run_iteration(t)
+                history.append(st)
+                self._written_iters.append(t)
+                if self._persist_resume:
+                    self._save_resume_state(t)
                 logger.info(
-                    "[prtcfr] early-stop at iter=%d; deployable window pinned to "
-                    "[1..%d] (%s=%.5f)",
-                    t, decision.best_iteration, self.stability_metric_name,
-                    decision.best_metric,
+                    "[prtcfr] iter=%d samples+=%d buffer=%d fit_loss=%.5f snapshot=%s",
+                    st.iteration, st.samples_added, st.buffer_size, st.fit_loss,
+                    os.path.basename(st.snapshot_path),
                 )
-                break
+
+                if not self.stability_enabled or self.controller is None:
+                    continue
+                if not self._stability_check_due(t, n):
+                    continue
+                if self.eval_fn is None:
+                    # No trend metric available: keep the whole set deployable.
+                    write_deployable_manifest(
+                        self.snapshot_dir, self.controller, self._written_iters,
+                        metric_name=self.stability_metric_name, stopped_early=False,
+                    )
+                    continue
+                metric = float(self.eval_fn(self, t))
+                self._record_nashconv_in_db(t, metric)
+                decision = self.controller.update(t, metric)
+                logger.info(
+                    "[prtcfr] stability iter=%d %s=%.5f best_iter=%d best=%.5f "
+                    "worse_streak=%d stop=%s",
+                    t, self.stability_metric_name, metric, decision.best_iteration,
+                    decision.best_metric, decision.num_worse_since_best,
+                    decision.should_stop,
+                )
+                write_deployable_manifest(
+                    self.snapshot_dir, self.controller, self._written_iters,
+                    metric_name=self.stability_metric_name,
+                    stopped_early=decision.should_stop,
+                )
+                if decision.should_stop:
+                    logger.info(
+                        "[prtcfr] early-stop at iter=%d; deployable window pinned to "
+                        "[1..%d] (%s=%.5f)",
+                        t, decision.best_iteration, self.stability_metric_name,
+                        decision.best_metric,
+                    )
+                    break
+        except KeyboardInterrupt:
+            self._update_db_status("interrupted")
+            raise
+        except Exception:
+            self._update_db_status("failed")
+            raise
+        self._update_db_status("completed")
         return history
 
 
@@ -574,6 +1005,42 @@ def train_tiny_prtcfr(
 
     trainer = PRTCFRTinyTrainer(root, prt_cfg, snapshot_dir)
     return trainer.train(iterations=iterations)
+
+
+def build_tiny_nashconv_eval_fn(
+    root,
+    device: str = "cpu",
+    seq_cap: int = SEQ_CAP,
+    chunk_size: int = 2048,
+) -> Callable[["PRTCFRTinyTrainer", int], float]:
+    """Ground-truth NashConv eval_fn for the tiny gate's stability controller.
+
+    Returns ``eval_fn(trainer, t) -> nashconv`` scoring the SD-CFR linear-weighted
+    average of the snapshots on disk in ``trainer.snapshot_dir``. A single
+    IncrementalPolicyAccumulator is reused across calls: each snapshot is folded
+    in ONCE ever (linear over the horizon, not quadratic), matching the technique
+    the S1W11 launcher prototyped. The metric is exploitability on the tiny
+    perfect-recall tree, the X2 gate's arbiter."""
+    from .prtcfr_eval import IncrementalPolicyAccumulator, _load_net, discover_snapshots
+    from tools.tiny_solver import exploitability
+
+    acc = IncrementalPolicyAccumulator(
+        root, weighting="linear", seq_cap=seq_cap, chunk_size=chunk_size
+    )
+    seen: set = set()
+
+    def eval_fn(trainer: "PRTCFRTinyTrainer", t: int) -> float:
+        new = []
+        for it, fp in discover_snapshots(trainer.snapshot_dir):
+            if it > t or it in seen:
+                continue
+            seen.add(it)
+            new.append((it, _load_net(fp, device=device)))
+        acc.accumulate(sorted(new, key=lambda p: p[0]))
+        nashconv, _components = exploitability(root, acc.policy())
+        return float(nashconv)
+
+    return eval_fn
 
 
 # ===========================================================================

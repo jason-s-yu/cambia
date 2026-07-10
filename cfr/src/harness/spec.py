@@ -97,6 +97,7 @@ class JobSpec:
     games: Optional[int] = None
     priority: str = "normal"
     force: bool = False
+    warm_start: Optional[str] = None
 
     _KNOWN_KEYS = frozenset(
         {
@@ -113,6 +114,7 @@ class JobSpec:
             "games",
             "priority",
             "force",
+            "warm_start",
         }
     )
 
@@ -159,6 +161,10 @@ class JobSpec:
         if target is not None:
             guard_relpath(target, "target")
 
+        warm_start = raw.get("warm_start")
+        if warm_start is not None:
+            guard_relpath(warm_start, "warm_start")
+
         overrides = raw.get("overrides", {}) or {}
         if not isinstance(overrides, dict):
             raise HarnessSpecError("overrides must be a mapping of dotted keys")
@@ -183,6 +189,9 @@ class JobSpec:
         resume = bool(raw.get("resume", False))
         if resume and kind != "train":
             raise HarnessSpecError("resume is valid for train jobs only")
+
+        if warm_start is not None and kind != "train":
+            raise HarnessSpecError("warm_start is valid for train jobs only")
 
         # Kind-specific requirements: config drives train/evaluate/bench;
         # head-to-head needs both checkpoints; evaluate needs a target (the
@@ -214,6 +223,7 @@ class JobSpec:
             games=games,
             priority=priority,
             force=bool(raw.get("force", False)),
+            warm_start=warm_start,
         )
 
     def to_payload(self, commit: str) -> Dict[str, Any]:
@@ -243,6 +253,8 @@ class JobSpec:
             payload["target"] = self.target
         if self.games is not None:
             payload["games"] = self.games
+        if self.warm_start is not None:
+            payload["warm_start"] = self.warm_start
         return payload
 
 

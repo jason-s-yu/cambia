@@ -1,0 +1,66 @@
+# X2 tiny-game NashConv gate (cambia-334). Harness-runnable form of the S1W11
+# X2 revalidation that cfr/scratch/prtcfr_x2_s1w11_gpu.py drove by hand.
+#
+# Runs PRT-CFR on the tiny {A,6} 2-card perfect-recall tree (inherited from
+# tiny_2card_plateau.yaml: deck {A,6}, 2 cards/hand, 3 engine turns, K=5 deals,
+# seed0=0) and scores the SD-CFR average's exact NashConv (tiny_solver ground
+# truth) at the stability cadence. tiny_gate: true routes `cambia train prtcfr`
+# to PRTCFRTinyTrainer.
+#
+# Submit on the serving harness with a spec whose `config` points here; a
+# warm-start continuation adds a `warm_start` path (see the continuation
+# override note below).
+
+_base: tiny_2card_plateau.yaml
+
+# run_db algorithm tag (base declares `tabular`; this is the prtcfr gate).
+algorithm: prtcfr
+
+prt_cfr:
+  # Tiny-gate routing.
+  tiny_gate: true
+
+  # --- S1W1-stabilized tiny X2 knobs (reproduce the scratch launcher). ---
+  train_steps_per_iter: 2000
+  lr: 1.0e-3
+  lr_min: 1.0e-5
+  lr_schedule: global_cosine     # per-iteration peak decays lr -> lr_min over the run
+  m_rollouts: 1
+  k_games_per_iter: 80
+  seq_cap: 256
+  warm_start: true               # refit-init policy: fine-tune the prior iterate
+  iterations: 530                # the S1W11 coverage-scaled budget
+  device: auto                   # resolved at launch: cuda -> xpu -> cpu
+
+  # --- Stability controller: the ruled X2 stop rule. ---
+  # Ruling (chief rec on cambia-225): eval NashConv every 10 iters; stop once the
+  # metric has stopped improving over a 50-iter window (<0.5% per 10-iter step).
+  # Mapping onto BestSnapshotController's fields:
+  #   stability_eval_every: 10   -> the 10-iter eval cadence (50 iters = 5 evals).
+  #   stability_patience: 5      -> the 50-iter window (5 consecutive evals).
+  #   stability_rel_tolerance: 0.005 -> the 0.5%/step band.
+  #   stability_metric_mode: min, stability_metric_name: nashconv.
+  # CAVEAT: the controller is a DIVERGENCE detector -- it counts consecutive
+  # evals whose NashConv rose more than 0.5% above the best-so-far and stops after
+  # 5 such (a sustained 50-iter worsening), then pins the deployable window to
+  # [1 .. best_iteration]. That captures the protective side of the ruling (drop
+  # the diverged warm-start tail) but not a pure "improvement <0.5% but still
+  # falling" plateau-stop, which the current controller cannot express without a
+  # code change. See the W1 report note.
+  stability_enabled: true
+  stability_eval_every: 10
+  stability_patience: 5
+  stability_rel_tolerance: 0.005
+  stability_min_iters: 10
+  stability_metric_mode: min
+  stability_metric_name: nashconv
+
+# Continuation to N=1000 at flat lr (the ruled extension): submit a new job whose
+# `warm_start` points at the prior run's resume_state.json / run dir (bit-exact)
+# or a snapshot .pt (net + iteration only), with these config overrides:
+#   prt_cfr.iterations: 1000
+#   prt_cfr.lr: 1.0e-5          # == lr_min, so global_cosine holds the peak flat
+#   prt_cfr.lr_schedule: global_cosine
+# (lr == lr_min makes _peak_lr_for_iter return lr_min every iteration, i.e. a flat
+# Robbins-Monro tail; changing iterations/schedule is an intentional non-bit-exact
+# schedule change, distinct from a same-N resume.)
