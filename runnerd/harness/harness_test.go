@@ -36,7 +36,7 @@ type fakeEnv struct {
 	sweeps     [][]string
 }
 
-func (f *fakeEnv) Prepare(ctx context.Context, jobID, commit, kind, configRel, device string, overrides map[string]string) (*ingestapi.Prepared, error) {
+func (f *fakeEnv) Prepare(ctx context.Context, jobID, commit, kind, configRel, device, warmStart string, overrides map[string]string) (*ingestapi.Prepared, error) {
 	if f.block != nil {
 		select {
 		case <-ctx.Done():

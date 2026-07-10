@@ -20,6 +20,7 @@ func TestRejectOwnedOverrides(t *testing.T) {
 		"persistence.agent_data_save_path",
 		"prt_cfr.reservoir_dir",
 		"prt_cfr.snapshot_dir",
+		"prt_cfr.warm_start_path",
 	}
 	for _, k := range owned {
 		if err := rejectOwnedOverrides(map[string]string{k: "x"}); !errors.Is(err, ErrOwnedOverride) {
@@ -84,7 +85,7 @@ func TestRenderArgOrderRailsLast(t *testing.T) {
 		"prt_cfr.iterations": "500",
 		"prt_cfr.k_games":    "8",
 	}
-	out, err := m.renderConfig(context.Background(), wd, runDir, filepath.Join(wd, "venv", "bin", "python"), "train", "cfr/config/prtcfr.yaml", "cpu", overrides)
+	out, err := m.renderConfig(context.Background(), wd, runDir, filepath.Join(wd, "venv", "bin", "python"), "train", "cfr/config/prtcfr.yaml", "cpu", "", overrides)
 	if err != nil {
 		t.Fatalf("renderConfig: %v", err)
 	}
@@ -221,7 +222,7 @@ func TestRenderConfigPathGuardRejectsEscape(t *testing.T) {
 	m, _ := fakeManager(t, fc)
 	wd := t.TempDir()
 	runDir := t.TempDir()
-	_, err := m.renderConfig(context.Background(), wd, runDir, "python", "train", "../../etc/passwd", "cpu", nil)
+	_, err := m.renderConfig(context.Background(), wd, runDir, "python", "train", "../../etc/passwd", "cpu", "", nil)
 	if !errors.Is(err, ErrPathEscape) {
 		t.Fatalf("want ErrPathEscape, got %v", err)
 	}
@@ -229,7 +230,7 @@ func TestRenderConfigPathGuardRejectsEscape(t *testing.T) {
 
 func TestRailOverridesWorkerCapDisabledWhenZero(t *testing.T) {
 	m := New(Config{BaseDir: t.TempDir(), RunsDir: t.TempDir(), CoresCap: 0})
-	rails := m.railOverrides("train", "/runs/x", "cpu")
+	rails := m.railOverrides("train", "/runs/x", "cpu", "")
 	for _, r := range rails {
 		if strings.HasPrefix(r, "cfr_training.num_workers") {
 			t.Fatalf("worker rail emitted with CoresCap=0: %v", rails)
@@ -243,11 +244,37 @@ func TestRailOverridesWorkerCapDisabledWhenZero(t *testing.T) {
 func TestRailOverridesDeviceValue(t *testing.T) {
 	m := New(Config{BaseDir: t.TempDir(), RunsDir: t.TempDir(), CoresCap: 0})
 
-	trainRails := m.railOverrides("train", "/runs/x", "cuda")
+	trainRails := m.railOverrides("train", "/runs/x", "cuda", "")
 	assertContains(t, trainRails, "prt_cfr.device=cuda")
 
-	evalRails := m.railOverrides("evaluate", "/runs/x", "xpu")
+	evalRails := m.railOverrides("evaluate", "/runs/x", "xpu", "")
 	assertContains(t, evalRails, "deep_cfr.device=xpu")
+}
+
+// TestRailOverridesWarmStartPath covers cambia-334: the warm_start rail is
+// emitted only for a train job carrying an already-resolved warm_start path,
+// and omitted otherwise (absent warm_start, or a non-train kind -- defense in
+// depth, since warm_start is kind-scoped to train before it ever reaches
+// render).
+func TestRailOverridesWarmStartPath(t *testing.T) {
+	m := New(Config{BaseDir: t.TempDir(), RunsDir: t.TempDir(), CoresCap: 0})
+
+	withWarmStart := m.railOverrides("train", "/runs/x", "cpu", "/runs/prior-run/snapshots/prtcfr_snapshot_iter_530.pt")
+	assertContains(t, withWarmStart, "prt_cfr.warm_start_path=/runs/prior-run/snapshots/prtcfr_snapshot_iter_530.pt")
+
+	noWarmStart := m.railOverrides("train", "/runs/x", "cpu", "")
+	for _, r := range noWarmStart {
+		if strings.HasPrefix(r, "prt_cfr.warm_start_path") {
+			t.Fatalf("warm_start rail emitted with no warm_start: %v", noWarmStart)
+		}
+	}
+
+	evalRails := m.railOverrides("evaluate", "/runs/x", "cpu", "/runs/prior-run/snapshots/x.pt")
+	for _, r := range evalRails {
+		if strings.HasPrefix(r, "prt_cfr.warm_start_path") {
+			t.Fatalf("warm_start rail emitted for non-train kind: %v", evalRails)
+		}
+	}
 }
 
 func contains(ss []string, want string) bool {

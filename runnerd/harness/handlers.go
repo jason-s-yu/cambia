@@ -49,6 +49,13 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid_target", "target is not valid for kind=train")
 		return
 	}
+	// 3b'. warm_start kind-scoping (design cambia-334): train-only field, like
+	// target is evaluate-only. warm_start is optional even for train, so there
+	// is no required-ness check here (unlike target for evaluate below).
+	if spec.warmStartForbidden() {
+		writeJSONError(w, http.StatusBadRequest, "invalid_warm_start", "warm_start is only valid for kind=train")
+		return
+	}
 	// 3c. device shape validation: device must be one of cpu/cuda/xpu.
 	if !spec.deviceValid() {
 		writeJSONError(w, http.StatusBadRequest, "invalid_device", "device not supported: "+spec.device())
@@ -75,6 +82,22 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	for _, p := range append(spec.containedCheckpoints(), spec.containedTarget()...) {
 		if _, err := pathguard.Resolve(s.runsDir, p.value); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid_path", p.label+": "+err.Error())
+			return
+		}
+	}
+	// 4c. warm_start containment + existence (design cambia-334): a train job's
+	// warm_start must resolve inside the runs directory (same containment path
+	// as checkpoints/target above), and the referenced snapshot must actually
+	// exist -- a submit-time failure beats a job that launches and only then
+	// dies in prepare.
+	for _, p := range spec.containedWarmStart() {
+		resolved, err := pathguard.Resolve(s.runsDir, p.value)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_path", p.label+": "+err.Error())
+			return
+		}
+		if _, err := os.Stat(resolved); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "warm_start_not_found", p.label+": "+resolved)
 			return
 		}
 	}

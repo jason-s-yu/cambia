@@ -75,6 +75,11 @@ type JobSpec struct {
 	Games       int            `json:"games"`
 	Priority    string         `json:"priority"`
 	Force       bool           `json:"force"`
+	// WarmStart optionally names another run's staged snapshot (relative to the
+	// runs dir, e.g. "prior-run/snapshots/prtcfr_snapshot_iter_530.pt") a train
+	// job initializes from (design cambia-334). Empty means no warm start. Valid
+	// only for kind=train; see warmStartForbidden.
+	WarmStart string `json:"warm_start"`
 }
 
 // device returns the resolved device, defaulting to cpu (the v1 baseline; cuda
@@ -119,6 +124,14 @@ func (s *JobSpec) targetForbidden() bool {
 	return s.Kind == KindTrain && s.Target != ""
 }
 
+// warmStartForbidden reports whether the spec sets warm_start on a kind that
+// forbids it (design cambia-334): warm_start initializes a train job from
+// another run's staged snapshot; evaluate, head-to-head, and bench have no use
+// for it.
+func (s *JobSpec) warmStartForbidden() bool {
+	return s.Kind != KindTrain && s.WarmStart != ""
+}
+
 // overridesStr renders the dotted-key overrides as a string map for the ingest
 // Prepare call (which renders them into the config). Numeric values from a
 // json.Number decode stringify without a trailing ".0".
@@ -133,17 +146,25 @@ func (s *JobSpec) overridesStr() map[string]string {
 	return out
 }
 
-// guardedPaths returns the spec's config path (any kind, when set) for the
-// lexical CheckRel guard in the design 2.6 validation order (after the kind
-// allowlist). Its containment base (the job worktree) is not staged until ingest
-// render, so config gets only the lexical guard at submit. Checkpoints are
-// guarded by containedCheckpoints + pathguard.Resolve, which layers containment
-// over the same lexical check against the already-known runs dir.
+// guardedPaths returns the spec's config path (any kind, when set) and a train
+// job's warm_start (when set) for the lexical CheckRel guard in the design 2.6
+// validation order (after the kind allowlist). Config's containment base (the
+// job worktree) is not staged until ingest render, so config gets only the
+// lexical guard at submit. warm_start's containment base (the runs dir) is
+// already known at submit, so it also goes through containedWarmStart below;
+// listing it here too just fails it fast with the same invalid_path code
+// before the containment step runs. Checkpoints and target are guarded by
+// their contained* helpers + pathguard.Resolve, which layers containment over
+// the same lexical check against the already-known runs dir.
 func (s *JobSpec) guardedPaths() []struct{ label, value string } {
-	if s.Config == "" {
-		return nil
+	var paths []struct{ label, value string }
+	if s.Config != "" {
+		paths = append(paths, struct{ label, value string }{"config", s.Config})
 	}
-	return []struct{ label, value string }{{"config", s.Config}}
+	if s.WarmStart != "" {
+		paths = append(paths, struct{ label, value string }{"warm_start", s.WarmStart})
+	}
+	return paths
 }
 
 // containedCheckpoints returns the head-to-head checkpoint spec fields that must
@@ -174,6 +195,20 @@ func (s *JobSpec) containedTarget() []struct{ label, value string } {
 		return nil
 	}
 	return []struct{ label, value string }{{"target", s.Target}}
+}
+
+// containedWarmStart returns the train-only warm_start spec field for the same
+// containment-resolve guard as containedCheckpoints/containedTarget (design
+// 5.4, cambia-334): warm_start names another run's staged snapshot file, so
+// its containment base (the runs dir) is known at submit time. It is
+// optional: an empty warm_start (or a non-train kind, already rejected by
+// warmStartForbidden before this runs) adds no entry, unlike containedTarget's
+// implicit required-ness for evaluate.
+func (s *JobSpec) containedWarmStart() []struct{ label, value string } {
+	if s.Kind != KindTrain || s.WarmStart == "" {
+		return nil
+	}
+	return []struct{ label, value string }{{"warm_start", s.WarmStart}}
 }
 
 // sortedKeys returns m's keys sorted, for deterministic override ordering.

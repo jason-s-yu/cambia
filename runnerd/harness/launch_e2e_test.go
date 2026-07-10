@@ -26,7 +26,7 @@ type stagedEnv struct {
 	env     []string
 }
 
-func (s *stagedEnv) Prepare(ctx context.Context, jobID, commit, kind, configRel, device string, overrides map[string]string) (*ingestapi.Prepared, error) {
+func (s *stagedEnv) Prepare(ctx context.Context, jobID, commit, kind, configRel, device, warmStart string, overrides map[string]string) (*ingestapi.Prepared, error) {
 	worktreeDir := filepath.Join(s.baseDir, "worktrees", jobID)
 	cfrDir := filepath.Join(worktreeDir, "cfr")
 	if err := os.MkdirAll(cfrDir, 0o755); err != nil {

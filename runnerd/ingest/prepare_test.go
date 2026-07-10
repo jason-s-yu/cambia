@@ -24,6 +24,7 @@ func TestPrepareEndToEnd(t *testing.T) {
 		"train",
 		"cfr/config/prtcfr.yaml",
 		"cpu",
+		"",
 		map[string]string{"prt_cfr.iterations": "10"},
 	)
 	if err != nil {
@@ -120,7 +121,7 @@ func TestPrepareThreadsDeviceToProvenanceRailsAndVenv(t *testing.T) {
 	src, sha := sourceRepo(t, "lock-device")
 	pushJobRef(t, m, src, sha, "job-device")
 
-	prep, err := m.Prepare(context.Background(), "job-device", sha, "train", "cfr/config/prtcfr.yaml", "cuda", nil)
+	prep, err := m.Prepare(context.Background(), "job-device", sha, "train", "cfr/config/prtcfr.yaml", "cuda", "", nil)
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
@@ -169,7 +170,7 @@ func TestPrepareRejectsOwnedOverride(t *testing.T) {
 	src, sha := sourceRepo(t, "lock")
 	pushJobRef(t, m, src, sha, "job-o")
 
-	_, err := m.Prepare(context.Background(), "job-o", sha, "train", "cfr/config/x.yaml", "cpu",
+	_, err := m.Prepare(context.Background(), "job-o", sha, "train", "cfr/config/x.yaml", "cpu", "",
 		map[string]string{"cfr_training.num_workers": "20"})
 	if !errors.Is(err, ErrOwnedOverride) {
 		t.Fatalf("want ErrOwnedOverride, got %v", err)
@@ -183,7 +184,7 @@ func TestPrepareRejectsReceiptMismatch(t *testing.T) {
 	pushJobRef(t, m, src, sha, "job-m")
 
 	other := strings.Repeat("b", 40)
-	_, err := m.Prepare(context.Background(), "job-m", other, "train", "cfr/config/x.yaml", "cpu", nil)
+	_, err := m.Prepare(context.Background(), "job-m", other, "train", "cfr/config/x.yaml", "cpu", "", nil)
 	if !errors.Is(err, ErrReceiptMismatch) {
 		t.Fatalf("want ErrReceiptMismatch, got %v", err)
 	}
@@ -192,8 +193,62 @@ func TestPrepareRejectsReceiptMismatch(t *testing.T) {
 func TestPrepareRejectsBadJobID(t *testing.T) {
 	fc := newFakeControl()
 	m, _ := fakeManager(t, fc)
-	_, err := m.Prepare(context.Background(), "../evil", strings.Repeat("a", 40), "train", "c.yaml", "cpu", nil)
+	_, err := m.Prepare(context.Background(), "../evil", strings.Repeat("a", 40), "train", "c.yaml", "cpu", "", nil)
 	if err == nil {
 		t.Fatal("expected invalid job id rejection")
+	}
+}
+
+// TestPrepareWarmStartRail covers cambia-334 end-to-end: a train job's
+// warm_start (spec-relative to the runs dir, matching how a submitted
+// JobSpec.WarmStart is shaped) resolves to an absolute path and is threaded
+// into the rendered config as the prt_cfr.warm_start_path rail.
+func TestPrepareWarmStartRail(t *testing.T) {
+	fc := newFakeControl()
+	m, fr := fakeManager(t, fc)
+	src, sha := sourceRepo(t, "lock-warm")
+	pushJobRef(t, m, src, sha, "job-warm")
+
+	priorSnapshot := filepath.Join(m.cfg.RunsDir, "prior-run", "snapshots", "prtcfr_snapshot_iter_530.pt")
+	if err := os.MkdirAll(filepath.Dir(priorSnapshot), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(priorSnapshot, []byte("snap"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := m.Prepare(context.Background(), "job-warm", sha, "train", "cfr/config/prtcfr.yaml", "cpu",
+		"prior-run/snapshots/prtcfr_snapshot_iter_530.pt", nil)
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+
+	var renderArgs []string
+	for _, c := range fr.calls {
+		if strings.HasSuffix(c.Name, "/bin/python") && contains(c.Args, "render") {
+			renderArgs = c.Args
+			break
+		}
+	}
+	if renderArgs == nil {
+		t.Fatal("no render invocation recorded")
+	}
+	assertContains(t, extractSets(renderArgs), "prt_cfr.warm_start_path="+priorSnapshot)
+}
+
+// TestPrepareRejectsWarmStartEscape covers the containment re-resolve inside
+// Prepare (defense in depth alongside the submit-time guard in handlers.go,
+// the same reasoning as the dispatcher's re-resolve of an evaluate target at
+// launch): a warm_start that escapes the runs dir fails Prepare.
+func TestPrepareRejectsWarmStartEscape(t *testing.T) {
+	fc := newFakeControl()
+	m, _ := fakeManager(t, fc)
+	src, sha := sourceRepo(t, "lock-warm-escape")
+	pushJobRef(t, m, src, sha, "job-warm-escape")
+
+	_, err := m.Prepare(context.Background(), "job-warm-escape", sha, "train", "cfr/config/prtcfr.yaml", "cpu",
+		"../../etc/passwd", nil)
+	if err == nil {
+		t.Fatal("expected warm_start containment escape to fail Prepare")
 	}
 }

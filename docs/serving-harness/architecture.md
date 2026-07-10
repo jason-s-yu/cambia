@@ -148,7 +148,10 @@ live run's data can never be reclaimed out from under it.
 **Validation order at submit.** Name well-formedness, then a name-collision
 check (a job name can never be silently reused while another run of that name
 exists), then the kind allowlist, then per-kind field scoping (for example, an
-`evaluate` job requires a target and a `train` job forbids one), then path
+`evaluate` job requires a target and a `train` job forbids one; conversely, a
+`train` job may optionally carry a `warm_start` referencing another run's
+staged snapshot, which `evaluate`/`head-to-head`/`bench` forbid, and which is
+containment-guarded the same way the evaluate target is), then path
 guards on every spec field that names a file (see Security below), then
 resource preflights (disk space, free memory, a device-capability check against
 the runner's advertised device list, and a device-aware GPU preflight for

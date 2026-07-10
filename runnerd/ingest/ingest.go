@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/jason-s-yu/cambia/runnerd/ingestapi"
+	"github.com/jason-s-yu/cambia/runnerd/pathguard"
 )
 
 // goToolchainPin is the GOTOOLCHAIN value forced for every libcambia build so a
@@ -135,10 +136,15 @@ func New(cfg Config) *Manager {
 //
 // device selects the uv sync extra (cpu/gpu/xpu) and the rendered config's
 // device rail (cambia-329); an empty device defaults to cpu, matching
-// JobSpec.device(). overrides are the submitter's dotted-key config
-// overrides; any targeting a harness-owned key is rejected before render.
-// Rails are appended AFTER the user overrides so they win last-write.
-func (m *Manager) Prepare(ctx context.Context, jobID, commit, kind, configRel, device string, overrides map[string]string) (*ingestapi.Prepared, error) {
+// JobSpec.device(). warmStart is a train job's optional runs-dir-relative
+// snapshot reference (design cambia-334); it is re-resolved against RunsDir
+// here (defense in depth alongside the submit-time guard in handlers.go,
+// mirroring how the dispatcher re-resolves an evaluate target at launch) and
+// threaded into the rendered config as the prt_cfr.warm_start_path rail.
+// overrides are the submitter's dotted-key config overrides; any targeting a
+// harness-owned key is rejected before render. Rails are appended AFTER the
+// user overrides so they win last-write.
+func (m *Manager) Prepare(ctx context.Context, jobID, commit, kind, configRel, device, warmStart string, overrides map[string]string) (*ingestapi.Prepared, error) {
 	if device == "" {
 		device = "cpu"
 	}
@@ -180,9 +186,18 @@ func (m *Manager) Prepare(ctx context.Context, jobID, commit, kind, configRel, d
 		return nil, fmt.Errorf("libcambia: %w", err)
 	}
 
+	warmStartPath := ""
+	if warmStart != "" {
+		resolved, werr := pathguard.Resolve(m.cfg.RunsDir, warmStart)
+		if werr != nil {
+			return nil, fmt.Errorf("warm_start: %w", werr)
+		}
+		warmStartPath = resolved
+	}
+
 	renderedConfig := ""
 	if configRel != "" {
-		renderedConfig, err = m.renderConfig(ctx, worktreeDir, runDir, venv.python, kind, configRel, device, overrides)
+		renderedConfig, err = m.renderConfig(ctx, worktreeDir, runDir, venv.python, kind, configRel, device, warmStartPath, overrides)
 		if err != nil {
 			return nil, fmt.Errorf("config render: %w", err)
 		}

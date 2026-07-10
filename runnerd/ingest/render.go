@@ -11,9 +11,11 @@ import (
 
 // ownedLeafKeys is the set of dotted-key leaf segments the harness owns and a
 // submitter may not override (design 5.5): the device, the job-internal worker /
-// process-pool counts, and the save/run paths. A submitter override whose final
-// segment is in this set is rejected before render; the harness sets these itself
-// as rails-last overrides.
+// process-pool counts, the save/run paths, and warm_start_path (design
+// cambia-334; already caught by the pathishSuffixes "_path" check below, listed
+// here too for the same explicit-documentation reason as pathishExact). A
+// submitter override whose final segment is in this set is rejected before
+// render; the harness sets these itself as rails-last overrides.
 var ownedLeafKeys = map[string]bool{
 	"device":                     true,
 	"num_workers":                true,
@@ -22,6 +24,7 @@ var ownedLeafKeys = map[string]bool{
 	"agent_data_save_path":       true,
 	"reservoir_dir":              true,
 	"snapshot_dir":               true,
+	"warm_start_path":            true,
 }
 
 // pathishSuffixes are leaf suffixes that mark a config key as naming a
@@ -102,8 +105,11 @@ func rejectOwnedOverrides(overrides map[string]string) error {
 // still cannot set device via overrides -- rejectOwnedOverrides refuses it --
 // only via the spec's device field). CoresCap <= 0 omits the worker rails.
 // Train jobs get the full PRT-CFR rail set (device, worker counts, save/run
-// paths); other kinds get the device and worker rails only.
-func (m *Manager) railOverrides(kind, runDir, device string) []string {
+// paths); other kinds get the device and worker rails only. warmStartPath is
+// the already-resolved absolute snapshot path for a train job's optional
+// warm_start (design cambia-334); empty omits the rail entirely, and it is
+// only ever considered for kind=train (warm_start is kind-scoped at submit).
+func (m *Manager) railOverrides(kind, runDir, device, warmStartPath string) []string {
 	var rails []string
 	if kind == "train" {
 		rails = append(rails, "prt_cfr.device="+device)
@@ -123,6 +129,9 @@ func (m *Manager) railOverrides(kind, runDir, device string) []string {
 			"prt_cfr.reservoir_dir="+filepath.Join(runDir, "reservoir"),
 			"prt_cfr.snapshot_dir="+filepath.Join(runDir, "snapshots"),
 		)
+		if warmStartPath != "" {
+			rails = append(rails, "prt_cfr.warm_start_path="+warmStartPath)
+		}
 	}
 	return rails
 }
@@ -130,8 +139,10 @@ func (m *Manager) railOverrides(kind, runDir, device string) []string {
 // renderConfig materializes runDir/config.yaml from the submitter's base config
 // under the worktree, then validates it as a hard gate (design 3.4). The render
 // argument order is: user overrides (sorted for determinism) first, harness rails
-// last. It returns the absolute rendered config path.
-func (m *Manager) renderConfig(ctx context.Context, worktreeDir, runDir, venvPython, kind, configRel, device string, overrides map[string]string) (string, error) {
+// last. warmStartPath is the already-resolved absolute snapshot path threaded
+// into railOverrides (empty when the job has no warm_start). It returns the
+// absolute rendered config path.
+func (m *Manager) renderConfig(ctx context.Context, worktreeDir, runDir, venvPython, kind, configRel, device, warmStartPath string, overrides map[string]string) (string, error) {
 	// Path guard: config is repo-relative at the pinned commit, inside the
 	// worktree (design 5.4).
 	configAbs, err := guardRelPath(worktreeDir, configRel)
@@ -152,7 +163,7 @@ func (m *Manager) renderConfig(ctx context.Context, worktreeDir, runDir, venvPyt
 		args = append(args, "--set", k+"="+overrides[k])
 	}
 	// Harness rails appended AFTER user overrides so they win last-write.
-	for _, r := range m.railOverrides(kind, runDir, device) {
+	for _, r := range m.railOverrides(kind, runDir, device, warmStartPath) {
 		args = append(args, "--set", r)
 	}
 	args = append(args, "-o", outPath)
