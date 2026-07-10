@@ -95,17 +95,20 @@ func rejectOwnedOverrides(overrides map[string]string) error {
 	return nil
 }
 
-// railOverrides returns the harness rail overrides in deterministic order for the
-// given kind. Rails are appended AFTER user overrides in the render command so
-// they win last-write (design 5.5). CoresCap <= 0 omits the worker rails. Train
-// jobs get the full PRT-CFR rail set (device, worker counts, save/run paths);
-// other kinds get the device and worker rails only.
-func (m *Manager) railOverrides(kind, runDir string) []string {
+// railOverrides returns the harness rail overrides in deterministic order for
+// the given kind and device. Rails are appended AFTER user overrides in the
+// render command so they win last-write (design 5.5). The device rail value is
+// the job's own device (cambia-329): the rail stays harness-owned (a submitter
+// still cannot set device via overrides -- rejectOwnedOverrides refuses it --
+// only via the spec's device field). CoresCap <= 0 omits the worker rails.
+// Train jobs get the full PRT-CFR rail set (device, worker counts, save/run
+// paths); other kinds get the device and worker rails only.
+func (m *Manager) railOverrides(kind, runDir, device string) []string {
 	var rails []string
 	if kind == "train" {
-		rails = append(rails, "prt_cfr.device=cpu")
+		rails = append(rails, "prt_cfr.device="+device)
 	} else {
-		rails = append(rails, "deep_cfr.device=cpu")
+		rails = append(rails, "deep_cfr.device="+device)
 	}
 	if m.cfg.CoresCap > 0 {
 		workers := strconv.Itoa(m.cfg.CoresCap)
@@ -128,7 +131,7 @@ func (m *Manager) railOverrides(kind, runDir string) []string {
 // under the worktree, then validates it as a hard gate (design 3.4). The render
 // argument order is: user overrides (sorted for determinism) first, harness rails
 // last. It returns the absolute rendered config path.
-func (m *Manager) renderConfig(ctx context.Context, worktreeDir, runDir, venvPython, kind, configRel string, overrides map[string]string) (string, error) {
+func (m *Manager) renderConfig(ctx context.Context, worktreeDir, runDir, venvPython, kind, configRel, device string, overrides map[string]string) (string, error) {
 	// Path guard: config is repo-relative at the pinned commit, inside the
 	// worktree (design 5.4).
 	configAbs, err := guardRelPath(worktreeDir, configRel)
@@ -149,7 +152,7 @@ func (m *Manager) renderConfig(ctx context.Context, worktreeDir, runDir, venvPyt
 		args = append(args, "--set", k+"="+overrides[k])
 	}
 	// Harness rails appended AFTER user overrides so they win last-write.
-	for _, r := range m.railOverrides(kind, runDir) {
+	for _, r := range m.railOverrides(kind, runDir, device) {
 		args = append(args, "--set", r)
 	}
 	args = append(args, "-o", outPath)

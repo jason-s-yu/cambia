@@ -84,7 +84,7 @@ func TestRenderArgOrderRailsLast(t *testing.T) {
 		"prt_cfr.iterations": "500",
 		"prt_cfr.k_games":    "8",
 	}
-	out, err := m.renderConfig(context.Background(), wd, runDir, filepath.Join(wd, "venv", "bin", "python"), "train", "cfr/config/prtcfr.yaml", overrides)
+	out, err := m.renderConfig(context.Background(), wd, runDir, filepath.Join(wd, "venv", "bin", "python"), "train", "cfr/config/prtcfr.yaml", "cpu", overrides)
 	if err != nil {
 		t.Fatalf("renderConfig: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestRenderConfigPathGuardRejectsEscape(t *testing.T) {
 	m, _ := fakeManager(t, fc)
 	wd := t.TempDir()
 	runDir := t.TempDir()
-	_, err := m.renderConfig(context.Background(), wd, runDir, "python", "train", "../../etc/passwd", nil)
+	_, err := m.renderConfig(context.Background(), wd, runDir, "python", "train", "../../etc/passwd", "cpu", nil)
 	if !errors.Is(err, ErrPathEscape) {
 		t.Fatalf("want ErrPathEscape, got %v", err)
 	}
@@ -229,12 +229,25 @@ func TestRenderConfigPathGuardRejectsEscape(t *testing.T) {
 
 func TestRailOverridesWorkerCapDisabledWhenZero(t *testing.T) {
 	m := New(Config{BaseDir: t.TempDir(), RunsDir: t.TempDir(), CoresCap: 0})
-	rails := m.railOverrides("train", "/runs/x")
+	rails := m.railOverrides("train", "/runs/x", "cpu")
 	for _, r := range rails {
 		if strings.HasPrefix(r, "cfr_training.num_workers") {
 			t.Fatalf("worker rail emitted with CoresCap=0: %v", rails)
 		}
 	}
+}
+
+// TestRailOverridesDeviceValue covers cambia-329: the device rail carries the
+// job's own device, for both train (prt_cfr.device) and non-train
+// (deep_cfr.device) kinds.
+func TestRailOverridesDeviceValue(t *testing.T) {
+	m := New(Config{BaseDir: t.TempDir(), RunsDir: t.TempDir(), CoresCap: 0})
+
+	trainRails := m.railOverrides("train", "/runs/x", "cuda")
+	assertContains(t, trainRails, "prt_cfr.device=cuda")
+
+	evalRails := m.railOverrides("evaluate", "/runs/x", "xpu")
+	assertContains(t, evalRails, "deep_cfr.device=xpu")
 }
 
 func contains(ss []string, want string) bool {

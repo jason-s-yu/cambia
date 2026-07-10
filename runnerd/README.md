@@ -49,6 +49,7 @@ Four environment variables are required; the daemon exits immediately if any is 
 | `RUNNERD_MAX_QUEUE_DEPTH` | no | `128` | queue depth cap; `POST /harness/jobs` returns 429 once reached |
 | `RUNNERD_MIN_FREE_RAM_GB` | no | `8.0` | admission preflight floor for available RAM |
 | `RUNNERD_MIN_FREE_DISK_GB` | no | `20.0` | admission preflight floor for free disk on the runs directory's filesystem |
+| `RUNNERD_ALLOWED_DEVICES` | no | `cpu` | comma-separated device capability gate (`cpu`, `cuda`, `xpu`); a job whose device is not in this set is rejected at submit as `device_unsupported`, not forceable |
 | `RUNNERD_ORIGIN_HOST` | no | the daemon's hostname | overrides the `origin_host` value stamped into each job's `env.json` provenance record |
 
 ## TLS and authentication
@@ -87,11 +88,15 @@ Notable settings baked into the unit: `KillMode=mixed` and `TimeoutStopSec=35` b
 
 ## Queue, admission, and state machine
 
-Submission runs a fixed validation order: name shape -> name collision -> kind allowlist (`train`, `evaluate`, `head-to-head`, `bench`; v1 `train` only launches the `prtcfr` algorithm) -> lexical path guards on `config`/`checkpoint_*`/`target` (reject absolute paths and `..` segments) -> containment guards (checkpoints and an evaluate target must resolve inside the runs directory) -> resource preflights (disk, RAM, and GPU VRAM when `device != cpu`).
+Submission runs a fixed validation order: name shape -> name collision -> kind allowlist (`train`, `evaluate`, `head-to-head`, `bench`; v1 `train` only launches the `prtcfr` algorithm) -> device shape (`cpu`, `cuda`, or `xpu`) -> device capability gate (`RUNNERD_ALLOWED_DEVICES`) -> lexical path guards on `config`/`checkpoint_*`/`target` (reject absolute paths and `..` segments) -> containment guards (checkpoints and an evaluate target must resolve inside the runs directory) -> resource preflights (disk, RAM, and a device-routed GPU check).
+
+The device-routed preflight: `cpu` skips the GPU check entirely; `cuda` runs the existing `nvidia-smi` VRAM check; `xpu` hard-requires an Intel GPU render node (`/dev/dri/renderD*`) and, when the `xpu-smi` binary is present, additionally checks free VRAM against the same floor -- absent `xpu-smi`, the render-node pass alone stands in and the result notes the VRAM floor as unverifiable. The render-node check is reported as `xpu_render_node`, a name outside the force matrix, so it can never be bypassed with `force=true`.
 
 Job state is split across two owners: `queued` and `preparing` are runnerd-level and held only in memory, so a daemon restart loses them and they get swept as orphans on reconcile. `running`, `stopped`, and `crashed` live in each job's `process.json` and survive a restart. `canceled` and `failed` are runnerd-level but persisted into `process.json` so they also survive a restart.
 
-`force` (set via the job spec, surfaced by the client's `--force`) can only override the `gpu_vram` preflight. Disk-space and RAM floors are operator-set via the environment variables above and are never forceable over the API.
+`force` (set via the job spec, surfaced by the client's `--force`) can only override the `gpu_vram` preflight. Disk-space and RAM floors, and the device capability gate, are operator-set via the environment variables above and are never forceable over the API.
+
+Each job's per-lock `uv` venv is additionally keyed by its device: a `cuda` or `xpu` job installs the matching `gpu`/`xpu` dependency extra into its own cached venv (suffixed `-gpu`/`-xpu`), while a `cpu` job's cache key is unchanged from before device support.
 
 ## Purge and resume
 

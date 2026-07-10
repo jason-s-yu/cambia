@@ -170,7 +170,7 @@ func (d *Dispatcher) runJob(j *job) {
 		d.broadcast()
 	}()
 
-	prepared, err := d.env.Prepare(j.ctx, name, j.spec.Commit, j.spec.Kind, j.spec.Config, j.spec.overridesStr())
+	prepared, err := d.env.Prepare(j.ctx, name, j.spec.Commit, j.spec.Kind, j.spec.Config, j.spec.device(), j.spec.overridesStr())
 
 	d.mu.Lock()
 	canceled := j.canceled

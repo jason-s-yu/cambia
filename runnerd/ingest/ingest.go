@@ -129,13 +129,19 @@ func New(cfg Config) *Manager {
 
 // Prepare stages jobID at the pinned commit and returns its launch context. The
 // pipeline: ensure mirror -> receipt-check the pushed ref -> add detached
-// worktree -> preflight+build (or reuse) the per-lock venv -> build (or reuse)
-// libcambia -> render the rails-applied config (train kinds) -> write env.json.
+// worktree -> preflight+build (or reuse) the per-lock, per-device venv ->
+// build (or reuse) libcambia -> render the rails-applied config (train kinds)
+// -> write env.json.
 //
-// overrides are the submitter's dotted-key config overrides; any targeting a
-// harness-owned key is rejected before render. Rails are appended AFTER the
-// user overrides so they win last-write.
-func (m *Manager) Prepare(ctx context.Context, jobID, commit, kind, configRel string, overrides map[string]string) (*ingestapi.Prepared, error) {
+// device selects the uv sync extra (cpu/gpu/xpu) and the rendered config's
+// device rail (cambia-329); an empty device defaults to cpu, matching
+// JobSpec.device(). overrides are the submitter's dotted-key config
+// overrides; any targeting a harness-owned key is rejected before render.
+// Rails are appended AFTER the user overrides so they win last-write.
+func (m *Manager) Prepare(ctx context.Context, jobID, commit, kind, configRel, device string, overrides map[string]string) (*ingestapi.Prepared, error) {
+	if device == "" {
+		device = "cpu"
+	}
 	if err := validateJobID(jobID); err != nil {
 		return nil, err
 	}
@@ -164,7 +170,7 @@ func (m *Manager) Prepare(ctx context.Context, jobID, commit, kind, configRel st
 		return nil, fmt.Errorf("create run dir: %w", err)
 	}
 
-	venv, err := m.ensureVenv(ctx, commit, worktreeDir)
+	venv, err := m.ensureVenv(ctx, commit, worktreeDir, device)
 	if err != nil {
 		return nil, fmt.Errorf("venv: %w", err)
 	}
@@ -176,7 +182,7 @@ func (m *Manager) Prepare(ctx context.Context, jobID, commit, kind, configRel st
 
 	renderedConfig := ""
 	if configRel != "" {
-		renderedConfig, err = m.renderConfig(ctx, worktreeDir, runDir, venv.python, kind, configRel, overrides)
+		renderedConfig, err = m.renderConfig(ctx, worktreeDir, runDir, venv.python, kind, configRel, device, overrides)
 		if err != nil {
 			return nil, fmt.Errorf("config render: %w", err)
 		}
@@ -195,7 +201,7 @@ func (m *Manager) Prepare(ctx context.Context, jobID, commit, kind, configRel st
 		UVLockSha:     venv.lockSha256,
 		VenvCacheKey:  venv.key,
 		PlatformTag:   platformTag(),
-		Device:        "cpu",
+		Device:        device,
 	}
 	if err := m.writeEnvJSON(ctx, runDir, venv.python, prov); err != nil {
 		return nil, fmt.Errorf("env.json: %w", err)

@@ -77,12 +77,29 @@ type JobSpec struct {
 	Force       bool           `json:"force"`
 }
 
-// device returns the resolved device, defaulting to cpu (v1 is cpu-only).
+// device returns the resolved device, defaulting to cpu (the v1 baseline; cuda
+// and xpu are opt-in per runner via the capability gate below).
 func (s *JobSpec) device() string {
 	if s.Device == "" {
 		return "cpu"
 	}
 	return s.Device
+}
+
+// validDevices is the runner-supported device set. Anything else fails the
+// shape check in handleCreateJob before the per-runner capability gate
+// (Server.allowedDevices) even runs.
+var validDevices = map[string]bool{
+	"cpu":  true,
+	"cuda": true,
+	"xpu":  true,
+}
+
+// deviceValid reports whether the spec's resolved device is one of the
+// runner-supported values. This is shape validation only; whether the value is
+// enabled on THIS runner is the separate capability gate.
+func (s *JobSpec) deviceValid() bool {
+	return validDevices[s.device()]
 }
 
 // gamesOrDefault returns the evaluate games count, defaulting to 5000 (the

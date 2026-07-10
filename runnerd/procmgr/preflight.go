@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -89,6 +90,89 @@ func GPUVRAMCheck(minGB float64, query GPUQueryFunc) PreflightCheck {
 		return PreflightCheck{name, true, fmt.Sprintf("%.1f GiB free on %s (need %.1f)", freeGB, gpuName, minGB)}
 	}
 	return PreflightCheck{name, false, fmt.Sprintf("only %.1f GiB free on %s (need %.1f)", freeGB, gpuName, minGB)}
+}
+
+// RenderNodeGlobFunc lists Intel GPU render node device paths under /dev/dri
+// (design cambia-329). It is a seam so tests inject fake results without
+// touching real devices.
+type RenderNodeGlobFunc func() ([]string, error)
+
+// DefaultRenderNodeGlob globs /dev/dri/renderD* for a real Intel Arc render
+// node.
+func DefaultRenderNodeGlob() ([]string, error) {
+	return filepath.Glob("/dev/dri/renderD*")
+}
+
+// XPUQueryFunc returns the raw output of an xpu-smi free-memory query. It
+// mirrors GPUQueryFunc: a seam so tests inject fake output (or
+// exec.ErrNotFound to simulate an absent xpu-smi binary) without touching a
+// real device.
+type XPUQueryFunc func() (string, error)
+
+// xpuFreeMiBPattern extracts the first numeric token following a "free"
+// marker (case-insensitive) from xpu-smi output, tolerating both a simple
+// tabular/CSV shape and JSON key ordering (e.g. `"memory_free_mib": 8192` or
+// `Memory Free (MiB): 8192`).
+var xpuFreeMiBPattern = regexp.MustCompile(`(?i)free[^0-9]*([0-9]+(?:\.[0-9]+)?)`)
+
+// DefaultXPUQuery runs xpu-smi's per-device memory query for device 0 and
+// returns raw output for XPUChecks to parse against xpuFreeMiBPattern. NOTE:
+// unverified against real Intel Arc hardware -- no XPU host is reachable as of
+// this writing. Confirm the command and the parsing pattern together against a
+// real xpu-smi install before trusting the VRAM number in production; the
+// render-node check in XPUChecks is the load-bearing hard requirement and does
+// not depend on this.
+func DefaultXPUQuery() (string, error) {
+	out, err := exec.Command("xpu-smi", "stats", "-d", "0", "-j").Output()
+	return string(out), err
+}
+
+// XPUChecks builds the xpu-device preflight (design cambia-329, restructured
+// per-device from GPUVRAMCheck). A real Intel GPU render node is hard-required
+// and reported under its own name (xpu_render_node), distinct from gpu_vram,
+// so it sits outside the runner force matrix (harness/preflight.go's
+// runnerOverridable names gpu_vram only) and can never be bypassed with
+// force=true. When a render node is present and xpu-smi's VRAM query
+// succeeds, the result is folded into a gpu_vram check with the given minGB
+// floor, forceable exactly like the cuda path. When xpu-smi is absent, only
+// the render-node check is returned; submitPreflights fills the missing
+// gpu_vram slot with a passing, "unverifiable" note.
+func XPUChecks(minGB float64, renderNode RenderNodeGlobFunc, query XPUQueryFunc) []PreflightCheck {
+	const renderName = "xpu_render_node"
+	nodes, err := renderNode()
+	if err != nil {
+		return []PreflightCheck{{renderName, false, fmt.Sprintf("render node probe failed: %v", err)}}
+	}
+	if len(nodes) == 0 {
+		return []PreflightCheck{{renderName, false, "no Intel GPU render node found under /dev/dri/renderD*"}}
+	}
+	checks := []PreflightCheck{{renderName, true, fmt.Sprintf("render node present (%s)", nodes[0])}}
+
+	const vramName = "gpu_vram"
+	if minGB <= 0 {
+		return append(checks, PreflightCheck{vramName, true, "no VRAM requirement"})
+	}
+
+	out, qerr := query()
+	if qerr != nil {
+		if errors.Is(qerr, exec.ErrNotFound) {
+			return append(checks, PreflightCheck{vramName, true, "no xpu-smi; VRAM floor unverifiable"})
+		}
+		return append(checks, PreflightCheck{vramName, false, fmt.Sprintf("xpu-smi failed: %v", qerr)})
+	}
+	m := xpuFreeMiBPattern.FindStringSubmatch(out)
+	if m == nil {
+		return append(checks, PreflightCheck{vramName, false, "unparseable xpu-smi output (no free-memory field found)"})
+	}
+	freeMB, perr := strconv.ParseFloat(m[1], 64)
+	if perr != nil {
+		return append(checks, PreflightCheck{vramName, false, fmt.Sprintf("unparseable free-memory value %q", m[1])})
+	}
+	freeGB := freeMB / 1024.0
+	if freeGB >= minGB {
+		return append(checks, PreflightCheck{vramName, true, fmt.Sprintf("%.1f GiB free (need %.1f)", freeGB, minGB)})
+	}
+	return append(checks, PreflightCheck{vramName, false, fmt.Sprintf("only %.1f GiB free (need %.1f)", freeGB, minGB)})
 }
 
 // ResolveRunDevice returns the training device configured for run name's

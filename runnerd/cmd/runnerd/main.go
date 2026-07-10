@@ -12,7 +12,9 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"sort"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/jason-s-yu/cambia/runnerd/authtoken"
@@ -63,6 +65,7 @@ func main() {
 			minDisk = f
 		}
 	}
+	allowedDevices := harness.ParseAllowedDevices(envOr("RUNNERD_ALLOWED_DEVICES", "cpu"))
 
 	if pubKeyPath == "" {
 		log.Fatal("RUNNERD_JWT_PUBKEY is required (verify-only ed25519 public key)")
@@ -97,13 +100,14 @@ func main() {
 	disp.Reconcile()
 
 	srv, err := harness.NewServer(harness.ServerConfig{
-		Dispatcher:    disp,
-		Verifier:      verifier,
-		RunsDir:       runsDir,
-		AllowedOrigin: allowedOrigin,
-		MinFreeRAMGB:  minRAM,
-		MinFreeDiskGB: minDisk,
-		Algos:         harness.HarnessAlgorithms(),
+		Dispatcher:     disp,
+		Verifier:       verifier,
+		RunsDir:        runsDir,
+		AllowedOrigin:  allowedOrigin,
+		MinFreeRAMGB:   minRAM,
+		MinFreeDiskGB:  minDisk,
+		Algos:          harness.HarnessAlgorithms(),
+		AllowedDevices: allowedDevices,
 	})
 	if err != nil {
 		log.Fatalf("build server: %v", err)
@@ -121,7 +125,7 @@ func main() {
 		os.Exit(0)
 	}()
 
-	log.Printf("runnerd serving HTTPS on %s (runs=%s, max_jobs=%d, queue=%d)", *listen, runsDir, maxJobs, maxQueue)
+	log.Printf("runnerd serving HTTPS on %s (runs=%s, max_jobs=%d, queue=%d, devices=%s)", *listen, runsDir, maxJobs, maxQueue, sortedDeviceList(allowedDevices))
 	if err := srv.ListenAndServeTLS(*listen, tlsCert, tlsKey); err != nil {
 		log.Fatalf("serve: %v", err)
 	}
@@ -133,4 +137,15 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// sortedDeviceList renders an allowed-devices set as a stable, comma-joined
+// string for the startup log line.
+func sortedDeviceList(devices map[string]bool) string {
+	names := make([]string, 0, len(devices))
+	for d := range devices {
+		names = append(names, d)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ",")
 }

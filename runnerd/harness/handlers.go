@@ -12,10 +12,11 @@ import (
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 )
 
-// handleCreateJob is POST /harness/jobs. It runs the design 2.6 validation order
-// (validateName -> collision -> kind allowlist -> path guards -> preflights ->
-// render gate), then admits and enqueues the job. Status mapping: 201 accepted,
-// 409 name collision, 400 invalid name/kind/path, 412 preflight failure (per
+// handleCreateJob is POST /harness/jobs. It runs the design 2.6 validation
+// order (validateName -> collision -> kind allowlist -> device shape ->
+// device capability gate -> path guards -> preflights -> render gate), then
+// admits and enqueues the job. Status mapping: 201 accepted, 409 name
+// collision, 400 invalid name/kind/device/path, 412 preflight failure (per
 // check), 429 queue full.
 func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	var spec JobSpec
@@ -46,6 +47,18 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	// train. Evaluate's requiredness is enforced below, in the containment loop.
 	if spec.targetForbidden() {
 		writeJSONError(w, http.StatusBadRequest, "invalid_target", "target is not valid for kind=train")
+		return
+	}
+	// 3c. device shape validation: device must be one of cpu/cuda/xpu.
+	if !spec.deviceValid() {
+		writeJSONError(w, http.StatusBadRequest, "invalid_device", "device not supported: "+spec.device())
+		return
+	}
+	// 3d. device capability gate (design cambia-329): device must be enabled on
+	// this runner via RUNNERD_ALLOWED_DEVICES. Not forceable -- a captured
+	// token cannot ask a cpu-only runner to admit a GPU job.
+	if !s.allowedDevices[spec.device()] {
+		writeJSONError(w, http.StatusBadRequest, "device_unsupported", "device not enabled on this runner: "+spec.device())
 		return
 	}
 	// 4. path guards (config, checkpoints): lexical shape (reject absolute + ..).
@@ -102,14 +115,19 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// submitPreflights builds the admission preflight checks. gpu_vram is skipped
-// for a cpu job (the runner is cpu-only in v1); disk and RAM floors always apply.
+// submitPreflights builds the admission preflight checks, routed by the job's
+// device (design cambia-329): cpu skips the GPU check entirely; cuda runs the
+// existing nvidia-smi VRAM check; xpu runs the render-node + xpu-smi VRAM
+// check (procmgr.XPUChecks). Disk and RAM floors always apply.
 func (s *Server) submitPreflights(spec *JobSpec) []procmgr.PreflightCheck {
 	var checks []procmgr.PreflightCheck
-	if spec.device() == "cpu" {
-		checks = append(checks, procmgr.PreflightCheck{Name: "gpu_vram", OK: true, Detail: "device=cpu, GPU check skipped"})
-	} else {
+	switch spec.device() {
+	case "cuda":
 		checks = append(checks, procmgr.GPUVRAMCheck(s.minVRAMGB, s.gpuQuery))
+	case "xpu":
+		checks = append(checks, procmgr.XPUChecks(s.minVRAMGB, s.renderNodeGlob, s.xpuQuery)...)
+	default: // cpu
+		checks = append(checks, procmgr.PreflightCheck{Name: "gpu_vram", OK: true, Detail: "device=cpu, GPU check skipped"})
 	}
 	checks = append(checks, procmgr.DiskSpaceCheck(s.runsDir, s.minDiskGB))
 	checks = append(checks, MinFreeRAMCheck(s.minRAMGB, s.ramQuery))

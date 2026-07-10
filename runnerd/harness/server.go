@@ -28,24 +28,51 @@ type ServerConfig struct {
 	MinFreeRAMGB  float64
 	MinFreeDiskGB float64
 	Algos         map[string][]string // kind allowlist (design 2.6)
-	// GPUQuery/RAMQuery are seams so tests inject preflight inputs without
-	// touching real hardware.
-	GPUQuery procmgr.GPUQueryFunc
-	RAMQuery RAMQueryFunc
+	// AllowedDevices is the per-runner device capability gate (cambia-329):
+	// a job whose device is not a key here is rejected at submit as
+	// device_unsupported, not forceable. Defaults to cpu-only.
+	AllowedDevices map[string]bool
+	// GPUQuery/RAMQuery/RenderNodeGlob/XPUQuery are seams so tests inject
+	// preflight inputs without touching real hardware.
+	GPUQuery       procmgr.GPUQueryFunc
+	RAMQuery       RAMQueryFunc
+	RenderNodeGlob procmgr.RenderNodeGlobFunc
+	XPUQuery       procmgr.XPUQueryFunc
+}
+
+// ParseAllowedDevices parses a comma-separated RUNNERD_ALLOWED_DEVICES value
+// into the capability-gate set (cambia-329). Blank segments are dropped; a
+// wholly blank or empty input defaults to cpu-only, matching the v1 cpu-only
+// runner behavior when the env var is unset.
+func ParseAllowedDevices(raw string) map[string]bool {
+	out := map[string]bool{}
+	for _, d := range strings.Split(raw, ",") {
+		d = strings.TrimSpace(d)
+		if d != "" {
+			out[d] = true
+		}
+	}
+	if len(out) == 0 {
+		out["cpu"] = true
+	}
+	return out
 }
 
 // Server serves the control-plane API for a Dispatcher.
 type Server struct {
-	disp          *Dispatcher
-	verifier      *authtoken.Verifier
-	runsDir       string
-	allowedOrigin string
-	minRAMGB      float64
-	minDiskGB     float64
-	minVRAMGB     float64
-	algos         map[string][]string
-	gpuQuery      procmgr.GPUQueryFunc
-	ramQuery      RAMQueryFunc
+	disp           *Dispatcher
+	verifier       *authtoken.Verifier
+	runsDir        string
+	allowedOrigin  string
+	minRAMGB       float64
+	minDiskGB      float64
+	minVRAMGB      float64
+	algos          map[string][]string
+	allowedDevices map[string]bool
+	gpuQuery       procmgr.GPUQueryFunc
+	ramQuery       RAMQueryFunc
+	renderNodeGlob procmgr.RenderNodeGlobFunc
+	xpuQuery       procmgr.XPUQueryFunc
 }
 
 // NewServer builds the control-plane server. It fills preflight floors and the
@@ -78,17 +105,32 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if rq == nil {
 		rq = DefaultRAMQuery
 	}
+	devices := cfg.AllowedDevices
+	if len(devices) == 0 {
+		devices = map[string]bool{"cpu": true}
+	}
+	rng := cfg.RenderNodeGlob
+	if rng == nil {
+		rng = procmgr.DefaultRenderNodeGlob
+	}
+	xq := cfg.XPUQuery
+	if xq == nil {
+		xq = procmgr.DefaultXPUQuery
+	}
 	return &Server{
-		disp:          cfg.Dispatcher,
-		verifier:      cfg.Verifier,
-		runsDir:       cfg.RunsDir,
-		allowedOrigin: cfg.AllowedOrigin,
-		minRAMGB:      minRAM,
-		minDiskGB:     minDisk,
-		minVRAMGB:     procmgr.DefaultMinVRAMGB,
-		algos:         algos,
-		gpuQuery:      gq,
-		ramQuery:      rq,
+		disp:           cfg.Dispatcher,
+		verifier:       cfg.Verifier,
+		runsDir:        cfg.RunsDir,
+		allowedOrigin:  cfg.AllowedOrigin,
+		minRAMGB:       minRAM,
+		minDiskGB:      minDisk,
+		minVRAMGB:      procmgr.DefaultMinVRAMGB,
+		algos:          algos,
+		allowedDevices: devices,
+		gpuQuery:       gq,
+		ramQuery:       rq,
+		renderNodeGlob: rng,
+		xpuQuery:       xq,
 	}, nil
 }
 

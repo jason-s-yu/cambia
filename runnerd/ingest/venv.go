@@ -18,17 +18,18 @@ type venvResult struct {
 	pyMinor    string // e.g. "3.11"
 }
 
-// ensureVenv resolves the per-lock uv venv for the pinned commit, building it on
-// a cache miss and reusing it on a hit (design 3.3). The cache key is
-// sha256(cfr/uv.lock blob content) ++ python-minor ++ platform tag, so jobs on
-// the same lock, interpreter, and platform share one venv and cfr-only commits
-// that leave the lock untouched are hits.
+// ensureVenv resolves the per-lock, per-device uv venv for the pinned commit,
+// building it on a cache miss and reusing it on a hit (design 3.3, extended by
+// cambia-329 for device). The cache key is sha256(cfr/uv.lock blob content) ++
+// python-minor ++ platform tag ++ device extra (cpu omitted, see
+// venvCacheKey), so jobs on the same lock, interpreter, platform, and device
+// share one venv and cfr-only commits that leave the lock untouched are hits.
 //
 // ABSOLUTE RULES enforced here: the venv is addressed only by explicit path plus
 // UV_PROJECT_ENVIRONMENT and --python; uv is never invoked with --active; no
 // ambient environment (~/.pyenv, user site) is touched; no editable install is
 // performed (job src arrives via PYTHONPATH).
-func (m *Manager) ensureVenv(ctx context.Context, commit, worktreeDir string) (venvResult, error) {
+func (m *Manager) ensureVenv(ctx context.Context, commit, worktreeDir, device string) (venvResult, error) {
 	lockContent, err := m.gitRaw(ctx, "cat-file", "blob", commit+":cfr/uv.lock")
 	if err != nil {
 		return venvResult{}, fmt.Errorf("read uv.lock blob: %w", err)
@@ -40,7 +41,8 @@ func (m *Manager) ensureVenv(ctx context.Context, commit, worktreeDir string) (v
 		return venvResult{}, err
 	}
 
-	key := venvCacheKey(lockSha, pyMinor, platformTag())
+	extra := deviceExtra(device)
+	key := venvCacheKey(lockSha, pyMinor, platformTag(), extra)
 	dir := filepath.Join(m.venvsDir, key)
 	python := filepath.Join(dir, "bin", "python")
 
@@ -51,17 +53,40 @@ func (m *Manager) ensureVenv(ctx context.Context, commit, worktreeDir string) (v
 		return res, nil
 	}
 
-	if err := m.buildVenv(ctx, worktreeDir, dir); err != nil {
+	if err := m.buildVenv(ctx, worktreeDir, dir, extra); err != nil {
 		return venvResult{}, err
 	}
 	touch(dir, m.now())
 	return res, nil
 }
 
+// deviceExtra maps a job device to the uv dependency-group extra it installs
+// (cfr/pyproject.toml's cpu/gpu/xpu extras, mutually exclusive per
+// [tool.uv].conflicts). An empty or unrecognized device defaults to cpu,
+// matching JobSpec.device()'s default.
+func deviceExtra(device string) string {
+	switch device {
+	case "cuda":
+		return "gpu"
+	case "xpu":
+		return "xpu"
+	default:
+		return "cpu"
+	}
+}
+
 // venvCacheKey composes the readable, stable cache key from the lock content
-// hash, python minor, and platform tag.
-func venvCacheKey(lockSha, pyMinor, platform string) string {
-	return fmt.Sprintf("%s-py%s-%s", lockSha, pyMinor, platform)
+// hash, python minor, platform tag, and device extra. The cpu extra keeps the
+// EXACT pre-device-support key format (sha-pyX.Y-platform) so venvs already
+// warm on a live runner stay valid cache hits; any other extra appends
+// "-<extra>" so a cuda or xpu venv never collides with a cpu venv sharing the
+// same lock, interpreter, and platform.
+func venvCacheKey(lockSha, pyMinor, platform, extra string) string {
+	key := fmt.Sprintf("%s-py%s-%s", lockSha, pyMinor, platform)
+	if extra != "cpu" {
+		key += "-" + extra
+	}
+	return key
 }
 
 // venvReceiptName marks a venv whose uv sync completed. A cache hit requires
@@ -86,11 +111,12 @@ func venvValid(python string) bool {
 // buildVenv runs the `uv lock --check` staleness preflight, then creates and
 // syncs the venv. The lock check runs in the worktree cfr dir BEFORE any venv
 // creation so a stale lock rejects before build work (design 3.3). uv sync uses
-// --frozen --extra cpu with the target env pinned by both
-// UV_PROJECT_ENVIRONMENT and explicit --python; --frozen installs exactly from
-// the lock without re-resolving (staleness is the preflight's job; uv >= 0.5
-// rejects combining --frozen with --locked).
-func (m *Manager) buildVenv(ctx context.Context, worktreeDir, venvDir string) error {
+// --frozen --extra <extra> (cpu/gpu/xpu, selected by the job's device via
+// deviceExtra) with the target env pinned by both UV_PROJECT_ENVIRONMENT and
+// explicit --python; --frozen installs exactly from the lock without
+// re-resolving (staleness is the preflight's job; uv >= 0.5 rejects combining
+// --frozen with --locked).
+func (m *Manager) buildVenv(ctx context.Context, worktreeDir, venvDir, extra string) error {
 	cfrDir := filepath.Join(worktreeDir, "cfr")
 	uvEnv := []string{"UV_PROJECT_ENVIRONMENT=" + venvDir}
 
@@ -123,7 +149,7 @@ func (m *Manager) buildVenv(ctx context.Context, worktreeDir, venvDir string) er
 
 	if res, err := m.runner.Run(ctx, Command{
 		Name: "uv",
-		Args: []string{"sync", "--frozen", "--extra", "cpu", "--python", filepath.Join(venvDir, "bin", "python")},
+		Args: []string{"sync", "--frozen", "--extra", extra, "--python", filepath.Join(venvDir, "bin", "python")},
 		Dir:  cfrDir,
 		Env:  uvEnv,
 	}); err != nil {

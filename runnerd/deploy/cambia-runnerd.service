@@ -12,6 +12,9 @@ Environment=RUNNERD_RUNS_DIR=/srv/cambia/runs
 Environment=RUNNERD_MAX_CONCURRENT_JOBS=1
 Environment=RUNNERD_MIN_FREE_RAM_GB=8
 Environment=RUNNERD_MIN_FREE_DISK_GB=20
+# Device capability gate (comma-separated: cpu, cuda, xpu). Uncomment and add
+# a device only once this host actually has the matching GPU driver stack.
+#Environment=RUNNERD_ALLOWED_DEVICES=cpu
 Environment=RUNNERD_JWT_PUBKEY=/srv/cambia/keys/jwt_ed25519.pub
 Environment=RUNNERD_TLS_CERT=/srv/cambia/keys/tls.crt
 Environment=RUNNERD_TLS_KEY=/srv/cambia/keys/tls.key

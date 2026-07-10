@@ -36,7 +36,7 @@ type fakeEnv struct {
 	sweeps     [][]string
 }
 
-func (f *fakeEnv) Prepare(ctx context.Context, jobID, commit, kind, configRel string, overrides map[string]string) (*ingestapi.Prepared, error) {
+func (f *fakeEnv) Prepare(ctx context.Context, jobID, commit, kind, configRel, device string, overrides map[string]string) (*ingestapi.Prepared, error) {
 	if f.block != nil {
 		select {
 		case <-ctx.Done():
@@ -103,16 +103,19 @@ func writeFakeCambia(t *testing.T) string {
 }
 
 type rigConfig struct {
-	maxJobs   int
-	maxQueue  int
-	poll      time.Duration
-	env       Environment
-	algos     map[string][]string
-	origin    string
-	minRAMGB  float64
-	minDiskGB float64
-	ramQuery  RAMQueryFunc
-	gpuQuery  procmgr.GPUQueryFunc
+	maxJobs        int
+	maxQueue       int
+	poll           time.Duration
+	env            Environment
+	algos          map[string][]string
+	origin         string
+	minRAMGB       float64
+	minDiskGB      float64
+	ramQuery       RAMQueryFunc
+	gpuQuery       procmgr.GPUQueryFunc
+	allowedDevices map[string]bool
+	renderNodeGlob procmgr.RenderNodeGlobFunc
+	xpuQuery       procmgr.XPUQueryFunc
 }
 
 type testRig struct {
@@ -162,6 +165,12 @@ func newRig(t *testing.T, cfg rigConfig) *testRig {
 	if cfg.gpuQuery == nil {
 		cfg.gpuQuery = procmgr.DefaultGPUQuery
 	}
+	if cfg.renderNodeGlob == nil {
+		cfg.renderNodeGlob = procmgr.DefaultRenderNodeGlob
+	}
+	if cfg.xpuQuery == nil {
+		cfg.xpuQuery = procmgr.DefaultXPUQuery
+	}
 
 	fe, _ := cfg.env.(*fakeEnv)
 	if cfg.env == nil {
@@ -180,15 +189,18 @@ func newRig(t *testing.T, cfg rigConfig) *testRig {
 	disp := NewDispatcher(pm, cfg.env, runsDir, cfg.maxJobs, cfg.maxQueue, cfg.poll)
 
 	srv, err := NewServer(ServerConfig{
-		Dispatcher:    disp,
-		Verifier:      verifier,
-		RunsDir:       runsDir,
-		AllowedOrigin: cfg.origin,
-		MinFreeRAMGB:  cfg.minRAMGB,
-		MinFreeDiskGB: cfg.minDiskGB,
-		Algos:         cfg.algos,
-		GPUQuery:      cfg.gpuQuery,
-		RAMQuery:      cfg.ramQuery,
+		Dispatcher:     disp,
+		Verifier:       verifier,
+		RunsDir:        runsDir,
+		AllowedOrigin:  cfg.origin,
+		MinFreeRAMGB:   cfg.minRAMGB,
+		MinFreeDiskGB:  cfg.minDiskGB,
+		Algos:          cfg.algos,
+		AllowedDevices: cfg.allowedDevices,
+		GPUQuery:       cfg.gpuQuery,
+		RAMQuery:       cfg.ramQuery,
+		RenderNodeGlob: cfg.renderNodeGlob,
+		XPUQuery:       cfg.xpuQuery,
 	})
 	if err != nil {
 		t.Fatal(err)

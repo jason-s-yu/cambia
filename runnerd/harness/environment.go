@@ -18,10 +18,11 @@ import (
 // fake (tests).
 type Environment interface {
 	// Prepare stages the execution environment for jobID at the pinned commit:
-	// checkout, venv, libcambia, and the rendered+validated config. It returns
-	// the staged paths, or an error the dispatcher records as a job failure. The
-	// context is canceled if the job is canceled mid-prepare.
-	Prepare(ctx context.Context, jobID, commit, kind, configRel string, overrides map[string]string) (*ingestapi.Prepared, error)
+	// checkout, the device-appropriate venv, libcambia, and the
+	// rendered+validated config. It returns the staged paths, or an error the
+	// dispatcher records as a job failure. The context is canceled if the job
+	// is canceled mid-prepare.
+	Prepare(ctx context.Context, jobID, commit, kind, configRel, device string, overrides map[string]string) (*ingestapi.Prepared, error)
 	// Cleanup releases a terminal job's worktree. It keeps it for a debug TTL
 	// when keepForDebug is set (e.g. a crash). The job's mirror ref is NOT
 	// released here: it lives as long as the run dir so a resume can
@@ -48,7 +49,7 @@ var ErrIngestNotWired = errors.New("ingest pipeline not wired (milestone M3)")
 type StubEnvironment struct{}
 
 // Prepare fails closed with ErrIngestNotWired.
-func (StubEnvironment) Prepare(context.Context, string, string, string, string, map[string]string) (*ingestapi.Prepared, error) {
+func (StubEnvironment) Prepare(context.Context, string, string, string, string, string, map[string]string) (*ingestapi.Prepared, error) {
 	return nil, ErrIngestNotWired
 }
 

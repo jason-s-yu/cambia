@@ -56,6 +56,104 @@ func TestGPUVRAMCheckNvidiaSmiFails(t *testing.T) {
 	}
 }
 
+// fakeRenderNode builds a RenderNodeGlobFunc returning canned nodes or an
+// error.
+func fakeRenderNode(nodes []string, err error) RenderNodeGlobFunc {
+	return func() ([]string, error) { return nodes, err }
+}
+
+// fakeXPUQuery builds an XPUQueryFunc returning canned output or an error.
+func fakeXPUQuery(out string, err error) XPUQueryFunc {
+	return func() (string, error) { return out, err }
+}
+
+func TestXPUChecksNoRenderNode(t *testing.T) {
+	checks := XPUChecks(8.0, fakeRenderNode(nil, nil), fakeXPUQuery("", nil))
+	if len(checks) != 1 {
+		t.Fatalf("expected 1 check (no gpu_vram slot without a render node), got %+v", checks)
+	}
+	c := checks[0]
+	if c.Name != "xpu_render_node" || c.OK {
+		t.Errorf("no render node: got %+v, want failing xpu_render_node", c)
+	}
+}
+
+func TestXPUChecksRenderNodeProbeError(t *testing.T) {
+	checks := XPUChecks(8.0, fakeRenderNode(nil, errors.New("glob failed")), fakeXPUQuery("", nil))
+	if len(checks) != 1 || checks[0].Name != "xpu_render_node" || checks[0].OK {
+		t.Errorf("render node probe error: got %+v, want failing xpu_render_node", checks)
+	}
+}
+
+func TestXPUChecksNotForceable(t *testing.T) {
+	// xpu_render_node must sit outside the runner force matrix (harness's
+	// runnerOverridable names gpu_vram only) -- this is a procmgr-level
+	// sanity check that the name itself is distinct from gpu_vram.
+	checks := XPUChecks(8.0, fakeRenderNode(nil, nil), fakeXPUQuery("", nil))
+	for _, c := range checks {
+		if c.Name == "gpu_vram" {
+			t.Errorf("render-node failure must not be reported as gpu_vram: %+v", c)
+		}
+	}
+}
+
+func TestXPUChecksNoRequirement(t *testing.T) {
+	// minGB <= 0: render node still required, but no VRAM query is issued.
+	checks := XPUChecks(0, fakeRenderNode([]string{"/dev/dri/renderD128"}, nil), fakeXPUQuery("", errors.New("should not be called")))
+	if len(checks) != 2 {
+		t.Fatalf("expected render-node + gpu_vram checks, got %+v", checks)
+	}
+	if !checks[0].OK || checks[0].Name != "xpu_render_node" {
+		t.Errorf("render node = %+v, want ok", checks[0])
+	}
+	if !checks[1].OK || checks[1].Name != "gpu_vram" {
+		t.Errorf("gpu_vram = %+v, want ok (no requirement)", checks[1])
+	}
+}
+
+func TestXPUChecksNoXPUSmiUnverifiable(t *testing.T) {
+	checks := XPUChecks(8.0, fakeRenderNode([]string{"/dev/dri/renderD128"}, nil), fakeXPUQuery("", exec.ErrNotFound))
+	if len(checks) != 2 {
+		t.Fatalf("expected render-node + gpu_vram checks, got %+v", checks)
+	}
+	c := checks[1]
+	if c.Name != "gpu_vram" || !c.OK {
+		t.Errorf("absent xpu-smi should pass as unverifiable, got %+v", c)
+	}
+}
+
+func TestXPUChecksXPUSmiFails(t *testing.T) {
+	checks := XPUChecks(8.0, fakeRenderNode([]string{"/dev/dri/renderD128"}, nil), fakeXPUQuery("", errors.New("driver error")))
+	c := checks[1]
+	if c.Name != "gpu_vram" || c.OK {
+		t.Errorf("failing xpu-smi (present but erroring) should block, got %+v", c)
+	}
+}
+
+func TestXPUChecksBelowThreshold(t *testing.T) {
+	checks := XPUChecks(1.0, fakeRenderNode([]string{"/dev/dri/renderD128"}, nil), fakeXPUQuery("free: 512 MiB", nil))
+	c := checks[1]
+	if c.OK {
+		t.Errorf("512 MiB free vs 1 GiB requirement should block, got %+v", c)
+	}
+}
+
+func TestXPUChecksAboveThreshold(t *testing.T) {
+	checks := XPUChecks(1.0, fakeRenderNode([]string{"/dev/dri/renderD128"}, nil), fakeXPUQuery("free: 8192 MiB", nil))
+	c := checks[1]
+	if !c.OK {
+		t.Errorf("8 GiB free vs 1 GiB requirement should pass, got %+v", c)
+	}
+}
+
+func TestXPUChecksUnparseableOutput(t *testing.T) {
+	checks := XPUChecks(1.0, fakeRenderNode([]string{"/dev/dri/renderD128"}, nil), fakeXPUQuery("garbage output with no marker", nil))
+	c := checks[1]
+	if c.Name != "gpu_vram" || c.OK {
+		t.Errorf("unparseable xpu-smi output should block, got %+v", c)
+	}
+}
+
 func TestDiskSpaceCheckNoRequirement(t *testing.T) {
 	c := DiskSpaceCheck(t.TempDir(), 0)
 	if !c.OK {
