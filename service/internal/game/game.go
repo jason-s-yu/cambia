@@ -505,7 +505,7 @@ func (g *CambiaGame) HandleReconnect(playerID uuid.UUID, conn *websocket.Conn) {
 			}
 			g.Players[i].Connected = true
 			g.Players[i].Conn = conn
-			g.Players[i].User = g.Players[i].User // Assume User struct is still valid.
+			// The existing User struct is kept as-is on reconnect.
 			g.lastSeen[playerID] = time.Now()
 			found = true
 
