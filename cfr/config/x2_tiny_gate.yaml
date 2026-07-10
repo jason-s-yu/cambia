@@ -40,13 +40,15 @@ prt_cfr:
   #   stability_patience: 5      -> the 50-iter window (5 consecutive evals).
   #   stability_rel_tolerance: 0.005 -> the 0.5%/step band.
   #   stability_metric_mode: min, stability_metric_name: nashconv.
-  # CAVEAT: the controller is a DIVERGENCE detector -- it counts consecutive
-  # evals whose NashConv rose more than 0.5% above the best-so-far and stops after
-  # 5 such (a sustained 50-iter worsening), then pins the deployable window to
-  # [1 .. best_iteration]. That captures the protective side of the ruling (drop
-  # the diverged warm-start tail) but not a pure "improvement <0.5% but still
-  # falling" plateau-stop, which the current controller cannot express without a
-  # code change. See the W1 report note.
+  # Stop-rule modes (cambia-341): stability_stop_mode selects "divergence"
+  # (default here: consecutive worse-than-tolerance evals; drops a diverged
+  # warm-start tail) or "plateau" (the literal ruled rule: stop once the
+  # trailing-50-iter relative improvement falls below 0.5% per 10-iter step;
+  # a worsening trajectory also fires it). This base keeps divergence mode for
+  # fresh gate runs; the ruled N=1000 continuation enables the plateau rule via
+  # a spec override:
+  #   prt_cfr.stability_stop_mode: plateau
+  # (plateau window/step/threshold default to 50/10/0.005, matching the ruling.)
   stability_enabled: true
   stability_eval_every: 10
   stability_patience: 5
