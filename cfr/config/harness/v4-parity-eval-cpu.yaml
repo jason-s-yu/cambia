@@ -1,0 +1,56 @@
+# cfr/config/harness/v4-parity-eval-cpu.yaml
+#
+# V4 (cambia-336): xpu-vs-cpu eval parity. Cross-device tolerance proposal,
+# sibling of cambia-262's 5e-6 CPU-only ruling (the PRT-CFR eval wrapper's
+# incremental GRU cursor + lazy snapshots tolerance). That ruling never
+# measured a CPU-vs-XPU delta; this pair of specs (cpu + xpu, same target,
+# same games) is the paired measurement V4 needs to propose a cross-device
+# tolerance bound.
+#
+# This CPU leg and its XPU sibling (v4-parity-eval-xpu.yaml) target the SAME
+# run and the SAME game count, so the two jobs' per-baseline win rates are a
+# paired comparison (identical opponent sequence modulo device-dependent
+# nondeterminism) rather than two independent noisy samples. Submit both
+# back-to-back through nash's single FIFO slot; do not change `target` or
+# `games` between the two files or the pairing breaks.
+#
+# V4 target selection (recon done in this spec-drafting pass): prod-full-333
+# (os-mccfr / DeepCFRAgentWrapper, deep_cfr_checkpoint prefix), a finished
+# full-game (54-card standard deck, not the tiny {A,6} X2-gate research
+# variant) production run with real retained checkpoint weights (unlike the
+# _archive/ copies of comparable runs, which have had their .pt files pruned
+# down to profiling metadata only). Its latest checkpoint (iter 1075) has only
+# the pre-2026-02-27 3-baseline eval (random, greedy) plus a 10-game harness
+# smoke-test row for the 5-baseline set -- never a real 5000-game mean_imp(5)
+# pass. run-dir mode auto-detects algorithm/agent-type/checkpoint-prefix from
+# the run's own config.yaml, so no `config` field is needed or valid here.
+#
+# The run dir is LOCAL ONLY (cfr/runs/prod-full-333/) as of this drafting
+# pass -- it predates the harness and was never pushed to nash. @chief must
+# push it up before submitting either V4 spec:
+#   cd cfr && cambia harness push-run prod-full-333
+#
+# Submit with: cambia harness submit cfr/config/harness/v4-parity-eval-cpu.yaml
+
+kind: evaluate
+
+name: v4-parity-eval-cpu
+
+# RUN-DIR MODE ONLY. Never a bare checkpoint file: that silently falls back to
+# agent_type=deep_cfr with the run's snapshots/checkpoints ignored, producing
+# plausible but wrong numbers. `target` is the run name on the runner, which
+# must equal the pushed run's directory name.
+target: prod-full-333
+
+# mean_imp(5) plays 5000 games per baseline; pinned explicitly even though it
+# is also run-dir mode's default, so this spec's paired count with the xpu
+# sibling is visible without cross-referencing the CLI default.
+games: 5000
+
+device: cpu
+
+priority: normal
+force: false
+
+# No `config` (run-dir mode reads target's own config.yaml). No `resume`
+# (train-only). No `warm_start` (train-only).

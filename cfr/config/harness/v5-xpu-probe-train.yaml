@@ -1,0 +1,57 @@
+# cfr/config/harness/v5-xpu-probe-train.yaml
+#
+# V5 (cambia-337): xpu throughput characterization. Measures per-iteration
+# wall clock (generation + regret fit) for PRT-CFR at production K/m on nash's
+# A310 xpu, feeding the A310 role decision that the X4 pilot's budget note
+# (.docs/v0.4/phase2-throughput-pilot/x4-budget-branch.md) is gated on: train-
+# offload role (X4's train job runs on device: xpu) vs eval-only role (X4's
+# train job stays on device: cpu, A310 reserved for the eval battery).
+#
+# metrics.jsonl rows written per iteration by the trainer include
+# gen_seconds and fit_seconds; those two fields are the measurement this job
+# exists to produce. No custom instrumentation needed beyond letting the
+# run complete (or be cancelled) and reading its metrics.jsonl.
+#
+# The cpu comparison leg (v5-cpu-probe-train.yaml) is the IDENTICAL spec
+# with only `name` and `device` changed, so the two runs' per-iter numbers are
+# directly comparable without a config diff to account for.
+#
+# COST WARNING: 5 iterations at the full published-envelope K=8192/m=4 budget
+# on an entry-level A310 may take hours. Precedent (x4-budget-branch.md): even
+# on the far stronger RTX PRO 6000 (pangu), the best observed sustained rate
+# under co-tenancy was ~78 game-events/s, needing roughly 1.5-2 hours of
+# generation ALONE per iteration at this K/m; the A310 is weaker, so this
+# probe's per-iter wall clock could be substantially longer. @chief may
+# cancel this job after >= 2 completed iterations -- that already yields the
+# per-iter gen_seconds/fit_seconds numbers V5 needs; the remaining 3
+# iterations are redundant confirmation, not required signal.
+#
+# Submit with: cambia harness submit cfr/config/harness/v5-xpu-probe-train.yaml
+
+kind: train
+
+name: v5-xpu-throughput-probe
+
+config: cfr/config/prtcfr_production.yaml
+
+device: xpu
+
+# Only the knobs V5 needs to pin are overridden here. iterations is cut from
+# the production 300 down to a 5-iteration probe; k_games_per_iter and
+# m_rollouts are held AT the production published-envelope values (not
+# reduced) so the measured per-iter wall clock reflects the real X4 budget,
+# not a cheaper stand-in. stability_metric_name is deliberately NOT
+# overridden here -- it stays at the production config's default (nashconv);
+# this probe is a throughput measurement, not a quality gate, so the X4
+# pilot's tier_a_lbr override does not apply.
+overrides:
+  prt_cfr.iterations: 5
+  prt_cfr.k_games_per_iter: 8192
+  prt_cfr.m_rollouts: 4
+
+resume: false
+priority: normal
+force: false
+
+# No warm_start: this probe starts from a fresh net, matching how the X4
+# pilot itself would start.
