@@ -402,6 +402,141 @@ def test_push_run_refuses_missing_dir(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# push-run ownership transfer + pull-back round trip (cambia-338, design 4.3)
+# ---------------------------------------------------------------------------
+
+_ROUND_TRIP_NAME = "v0.4-prtcfr-r1"
+
+
+def _seed_local_run(dest, name=_ROUND_TRIP_NAME):
+    """Register a client-local run (origin_host NULL) in the authoritative db."""
+    run_db.upsert_run(dest, name=name, algorithm="prt-cfr", status="completed")
+
+
+def _local_run_dir(tmp_path, name=_ROUND_TRIP_NAME):
+    local = tmp_path / "local" / name
+    local.mkdir(parents=True)
+    (local / "run_db.sqlite").write_bytes(b"db")
+    return local
+
+
+def _origin_host_of(dest, name=_ROUND_TRIP_NAME):
+    return dest.execute(
+        "SELECT origin_host FROM runs WHERE name=?", (name,)
+    ).fetchone()["origin_host"]
+
+
+def test_push_run_marks_origin_host(tmp_path):
+    dest = _dest_db(tmp_path)
+    _seed_local_run(dest)
+    _local_run_dir(tmp_path)
+    coord = PullCoordinator(
+        runner=FakeRunner(tmp_path / "remote"),
+        local_runs_dir=tmp_path / "local",
+        dest_conn=dest,
+        origin_host="runner",
+    )
+    assert _origin_host_of(dest) is None  # local before push
+    coord.push_run(_ROUND_TRIP_NAME)
+    assert _origin_host_of(dest) == "runner"  # ownership transferred
+    dest.close()
+
+
+def test_push_run_marks_only_after_rsync_success(tmp_path):
+    """A failed push leaves origin_host NULL: a run that did not reach the runner
+    is never marked, so the mark is not decoupled from a real transfer."""
+
+    class FailingPush(FakeRunner):
+        def push_run(self, run_name, local_run_dir):
+            raise PullError("simulated push failure")
+
+    dest = _dest_db(tmp_path)
+    _seed_local_run(dest)
+    _local_run_dir(tmp_path)
+    coord = PullCoordinator(
+        runner=FailingPush(tmp_path / "remote"),
+        local_runs_dir=tmp_path / "local",
+        dest_conn=dest,
+        origin_host="runner",
+    )
+    with pytest.raises(PullError):
+        coord.push_run(_ROUND_TRIP_NAME)
+    assert _origin_host_of(dest) is None  # unmarked
+    dest.close()
+
+
+def test_push_run_idempotent_repush(tmp_path):
+    dest = _dest_db(tmp_path)
+    _seed_local_run(dest)
+    _local_run_dir(tmp_path)
+    coord = PullCoordinator(
+        runner=FakeRunner(tmp_path / "remote"),
+        local_runs_dir=tmp_path / "local",
+        dest_conn=dest,
+        origin_host="runner",
+    )
+    coord.push_run(_ROUND_TRIP_NAME)
+    coord.push_run(_ROUND_TRIP_NAME)  # re-push: same host re-stamped, no error
+    assert _origin_host_of(dest) == "runner"
+    dest.close()
+
+
+def test_push_run_no_db_row_is_noop(tmp_path):
+    """A run dir with no run_db row: nothing for the guard to collide with, so the
+    mark is a no-op and the push still succeeds."""
+    dest = _dest_db(tmp_path)
+    local = tmp_path / "local" / "orphan"
+    local.mkdir(parents=True)
+    coord = PullCoordinator(
+        runner=FakeRunner(tmp_path / "remote"),
+        local_runs_dir=tmp_path / "local",
+        dest_conn=dest,
+        origin_host="runner",
+    )
+    coord.push_run("orphan")  # must not raise
+    assert dest.execute("SELECT COUNT(*) c FROM runs").fetchone()["c"] == 0
+    dest.close()
+
+
+def test_push_then_pull_round_trip_reconciles(tmp_path):
+    """The cambia-338 round trip: a local run pushed up, then pulled back after a
+    remote evaluate, reconciles (the guard accepts the marked owner)."""
+    from src.harness.reconciler import replay
+
+    dest = _dest_db(tmp_path)
+    _seed_local_run(dest)  # origin_host NULL initially
+    _local_run_dir(tmp_path)
+    coord = PullCoordinator(
+        runner=FakeRunner(tmp_path / "remote"),
+        local_runs_dir=tmp_path / "local",
+        dest_conn=dest,
+        origin_host="runner",
+    )
+    coord.push_run(_ROUND_TRIP_NAME)  # ownership -> runner
+
+    # Runner evaluates, then the client pulls the run back and reconciles it.
+    remote = _build_remote_run(tmp_path / "remote")  # same name
+    summary = replay(remote, dest, origin_host="runner")
+    assert summary["runs"] == 1  # no ReconcilerCollisionError
+    assert _origin_host_of(dest) == "runner"
+    dest.close()
+
+
+def test_never_pushed_same_name_still_refused(tmp_path):
+    """The true collision case: a local run never pushed (origin_host NULL) still
+    refuses a same-name pull."""
+    from src.harness.reconciler import ReconcilerCollisionError, replay
+
+    dest = _dest_db(tmp_path)
+    _seed_local_run(dest)  # origin_host NULL, never pushed
+    remote = _build_remote_run(tmp_path / "remote")
+    with pytest.raises(ReconcilerCollisionError):
+        replay(remote, dest, origin_host="runner")
+    assert _origin_host_of(dest) is None  # local run untouched
+    dest.close()
+
+
+# ---------------------------------------------------------------------------
 # Real-rsync integration: reservoir + non-retained exclusion proven end-to-end
 # ---------------------------------------------------------------------------
 

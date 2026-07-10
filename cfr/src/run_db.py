@@ -500,6 +500,46 @@ def update_run_status(db: sqlite3.Connection, run_id: int, status: str) -> None:
     db.commit()
 
 
+def mark_run_pushed(
+    db: sqlite3.Connection, run_name: str, origin_host: str
+) -> int:
+    """Transfer local ownership of a run to a remote host after a successful push.
+
+    `cambia harness push-run` rsyncs a client-local run dir up to the runner so the
+    runner can resume/evaluate it. Once the push succeeds the runner holds the live
+    copy, so origin_host, the single ownership authority (design 4.3), must point at
+    that host. Marking the row makes three consumers agree that the runner now owns
+    the run:
+
+      - the reconciler collision guard accepts a later pull of this run from that
+        host (its existing==origin_host idempotent branch) instead of refusing it as
+        a local-name collision (the round-trip bug, cambia-338);
+      - the dashboard renders the run as remote (Host badge + pull staleness);
+      - the process handlers refuse a local start/resume on it (read-only in v1), so
+        the run is never forked into two live copies with the same name.
+
+    This is a targeted single-column UPDATE, NOT upsert_run: upsert_run would
+    re-stamp engine_commit_hash to the client's HEAD and reset algorithm, corrupting
+    the pushed run's provenance. Only origin_host and updated_at move here; every
+    other column is preserved. The write is one committed statement, done by the
+    caller ONLY after the rsync (and any receipt checks) succeed, so a run that
+    failed to push is never marked. Re-marking with the same host is a no-op, so a
+    re-push is idempotent.
+
+    A no-op returning 0 when no local run row carries the name (a run dir with no
+    run_db row has nothing for the guard to collide with, so nothing to transfer).
+
+    Returns:
+        Number of run rows updated (0 or 1).
+    """
+    cur = db.execute(
+        "UPDATE runs SET origin_host=?, updated_at=? WHERE name=?",
+        (origin_host, _now(), run_name),
+    )
+    db.commit()
+    return cur.rowcount
+
+
 def upsert_harness_sync(
     db: sqlite3.Connection,
     run_name: str,

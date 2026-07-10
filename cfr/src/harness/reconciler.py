@@ -486,6 +486,12 @@ def _read_evals(src: sqlite3.Connection, src_run_id: Any) -> List[Dict[str, Any]
 
 
 def _guard_collision(dest: sqlite3.Connection, name: str, origin_host: str) -> None:
+    # origin_host is the single ownership authority (design 4.3). A non-NULL value
+    # arrives from one of two paths that both mean "the runner owns this run": a
+    # prior reconcile of a runner-authored run, or `cambia harness push-run` marking
+    # a client-local run it pushed up (mark_run_pushed). The guard treats both the
+    # same: a matching host is an accepted owner; only a NULL host (a never-pushed
+    # local run) is a true collision.
     row = dest.execute("SELECT origin_host FROM runs WHERE name=?", (name,)).fetchone()
     if row is None:
         return  # new name, safe to insert
@@ -493,14 +499,16 @@ def _guard_collision(dest: sqlite3.Connection, name: str, origin_host: str) -> N
     if existing is None:
         raise ReconcilerCollisionError(
             f"run '{name}' already exists as a local run (origin_host IS NULL); "
-            "same-name cross-host runs are unsupported in v1"
+            "same-name cross-host runs are unsupported in v1 (push-run it first to "
+            "transfer ownership before pulling it back)"
         )
     if existing != origin_host:
         raise ReconcilerCollisionError(
             f"run '{name}' already exists with origin_host {existing!r} != "
             f"{origin_host!r}; same-name cross-host runs are unsupported in v1"
         )
-    # existing == origin_host -> idempotent re-replay of the same remote run.
+    # existing == origin_host -> idempotent re-replay of a run this host owns
+    # (reconciled earlier, or pushed up from here by push-run then pulled back).
 
 
 # ---------------------------------------------------------------------------

@@ -181,6 +181,15 @@ to replay a pulled run name that collides with an existing local (non-remote)
 run of the same name, since same-named runs originating on different hosts are
 not supported.
 
+The origin field is the single ownership authority, and `harness push-run`
+respects it: pushing a client-local run up to the runner for a remote resume or
+evaluate stamps that run's origin to the runner once the transfer succeeds. The
+runner now holds the live copy, so a later pull of the same run reconciles
+(the guard sees a matching owner, not a local collision), the dashboard renders
+it read-only, and a local start/resume on it is refused. A run that was never
+pushed keeps a null origin and is still refused, so the guard only accepts a
+same-name pull for a run the client actually handed to the runner.
+
 **Dashboard integration.** Synced remote runs render read-only in the existing
 run dashboard, alongside local runs, distinguished by an origin field rather
 than by any special directory layout. Liveness for a remote run is always

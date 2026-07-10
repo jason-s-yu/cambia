@@ -34,7 +34,7 @@ from src.harness.reconciler import (
     _validate_run_name,
 )
 from src.harness.reconciler import replay as reconciler_replay
-from src.run_db import get_db, upsert_harness_sync
+from src.run_db import get_db, mark_run_pushed, upsert_harness_sync
 
 RESERVOIR_DIRNAME = "reservoir"
 SNAPSHOTS_DIRNAME = "snapshots"
@@ -364,11 +364,22 @@ class PullCoordinator:
         )
 
     def push_run(self, run_name: str) -> None:
-        """Push a client-local run dir up for remote resume (design 2.5)."""
+        """Push a client-local run dir up for remote resume (design 2.5).
+
+        On a successful push, ownership transfers to the runner: the local row's
+        origin_host is stamped to this coordinator's origin_host (design 4.3). That
+        single-authority mark lets a later pull-back reconcile (the reconciler guard
+        accepts the matching host instead of refusing a local-name collision, the
+        cambia-338 round-trip bug), renders the run remote/read-only on the
+        dashboard, and blocks a local resume that would fork the run. The mark runs
+        ONLY after runner.push_run returns, so a failed rsync never marks the row; a
+        re-push re-stamps the same host and is idempotent.
+        """
         local_dir = self.local_run_dir(run_name)
         if not local_dir.is_dir():
             raise PullError(f"no local run dir to push: {local_dir}")
         self.runner.push_run(run_name, local_dir)
+        mark_run_pushed(self.dest, run_name, self.origin_host)
 
 
 # ---------------------------------------------------------------------------

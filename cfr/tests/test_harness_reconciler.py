@@ -235,6 +235,85 @@ def test_upsert_run_engine_commit_verbatim_and_origin_host(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# mark_run_pushed: ownership transfer on push (cambia-338, design 4.3)
+# ---------------------------------------------------------------------------
+
+
+def test_mark_run_pushed_transfers_ownership_preserving_provenance(tmp_path):
+    db = _open_dest(str(tmp_path / "m.db"))
+    try:
+        run_db.upsert_run(
+            db,
+            name="pushme",
+            algorithm="prt-cfr",
+            engine_commit_hash="cafef00d",
+        )
+        before = db.execute(
+            "SELECT origin_host, algorithm, engine_commit_hash FROM runs "
+            "WHERE name='pushme'"
+        ).fetchone()
+        assert before["origin_host"] is None  # local run
+
+        n = run_db.mark_run_pushed(db, "pushme", "runner")
+        assert n == 1
+
+        after = db.execute(
+            "SELECT origin_host, algorithm, engine_commit_hash FROM runs "
+            "WHERE name='pushme'"
+        ).fetchone()
+        assert after["origin_host"] == "runner"  # ownership transferred
+        # A targeted UPDATE, not upsert_run: algorithm + engine_commit_hash are
+        # preserved verbatim (upsert_run would re-stamp both).
+        assert after["algorithm"] == "prt-cfr"
+        assert after["engine_commit_hash"] == "cafef00d"
+    finally:
+        db.close()
+
+
+def test_mark_run_pushed_idempotent_and_noop_when_absent(tmp_path):
+    db = _open_dest(str(tmp_path / "m.db"))
+    try:
+        # No such run row: a no-op returning 0.
+        assert run_db.mark_run_pushed(db, "ghost", "runner") == 0
+
+        run_db.upsert_run(db, name="pushme", algorithm="prt-cfr")
+        assert run_db.mark_run_pushed(db, "pushme", "runner") == 1
+        # Re-marking the same host stays idempotent (a re-push).
+        assert run_db.mark_run_pushed(db, "pushme", "runner") == 1
+        row = db.execute(
+            "SELECT origin_host FROM runs WHERE name='pushme'"
+        ).fetchone()
+        assert row["origin_host"] == "runner"
+    finally:
+        db.close()
+
+
+def test_pushed_row_then_pull_reconciles_but_unpushed_refused(tmp_path):
+    # The round trip: a local run marked pushed reconciles a same-name pull from
+    # that host; a never-pushed local run of the same name still refuses.
+    dest_path = _dest_path(tmp_path)
+    dest = _open_dest(dest_path)
+    try:
+        run_db.upsert_run(dest, name="v0.4-prtcfr-r1", algorithm="prt-cfr")
+
+        run_dir = _build_full_run(tmp_path / "runs" / "v0.4-prtcfr-r1")
+        # Never pushed (origin_host NULL) -> still a hard collision.
+        with pytest.raises(ReconcilerCollisionError):
+            replay(run_dir, dest, origin_host="runner")
+
+        # Push transfers ownership; the same pull now reconciles.
+        run_db.mark_run_pushed(dest, "v0.4-prtcfr-r1", "runner")
+        summary = replay(run_dir, dest, origin_host="runner")
+        assert summary["runs"] == 1
+        row = dest.execute(
+            "SELECT origin_host FROM runs WHERE name='v0.4-prtcfr-r1'"
+        ).fetchone()
+        assert row["origin_host"] == "runner"
+    finally:
+        dest.close()
+
+
+# ---------------------------------------------------------------------------
 # Happy path
 # ---------------------------------------------------------------------------
 
