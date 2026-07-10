@@ -71,7 +71,11 @@ ssh "$RUNNER_SSH" 'sudo install -o root -g root -m 644 /tmp/cambia-runnerd.servi
   && sleep 2 && sudo systemctl --no-pager --lines=5 status cambia-runnerd'
 
 echo "== stage 5: acceptance probes"
-# TLS handshake succeeds and an unauthenticated request is refused with 401.
-code=$(curl -sk -o /dev/null -w '%{http_code}' "https://${RUNNER_HOST}:8090/harness/health" || true)
-echo "unauthenticated /harness/health -> HTTP $code (expect 401)"
-[ "$code" = "401" ] && echo "DEPLOY OK" || { echo "DEPLOY CHECK FAILED"; exit 1; }
+# TLS handshake succeeds; /harness/health is the one token-free route
+# (read-only counters for LAN monitoring, cambia-330/network-552) and every
+# other route refuses an unauthenticated request with 401.
+hcode=$(curl -sk -o /dev/null -w '%{http_code}' "https://${RUNNER_HOST}:8090/harness/health" || true)
+jcode=$(curl -sk -o /dev/null -w '%{http_code}' "https://${RUNNER_HOST}:8090/harness/jobs" || true)
+echo "unauthenticated /harness/health -> HTTP $hcode (expect 200)"
+echo "unauthenticated /harness/jobs   -> HTTP $jcode (expect 401)"
+[ "$hcode" = "200" ] && [ "$jcode" = "401" ] && echo "DEPLOY OK" || { echo "DEPLOY CHECK FAILED"; exit 1; }
