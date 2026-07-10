@@ -1,0 +1,33 @@
+# cfr/config/harness/v10-x2-ext-xpu.yaml
+#
+# V10 (cambia-348): the ruled X2 N=1000 continuation, resubmitted on the nash
+# A310 xpu after the lossless CPU halt of v0.4-x2-ext-1000 (cambia-347) and the
+# V3 first-light PASS (cambia-335). Mirrors the ext-1000 jobspec exactly, plus
+# the plateau stop rule the ruling asked for (landed with cambia-341, so this
+# submit pins a master that carries it; see the continuation note in
+# cfr/config/x2_tiny_gate.yaml).
+#
+# Warm start: net-only from the S1W11 revalidation run's iter-530 snapshot
+# (runner-local, pushed for the original continuation launch). The reservoir
+# refills; NashConv journals every 10 iters (base stability_eval_every).
+
+kind: train
+name: v0.4-x2-ext-1000-xpu
+config: cfr/config/x2_tiny_gate.yaml
+device: xpu
+
+warm_start: v0.4-s1w11-x2-revalidation/snapshots/prtcfr_snapshot_iter_530.pt
+
+overrides:
+  prt_cfr.iterations: 1000
+  # Flat lr: peak pinned to the base lr_min floor, so the global cosine is a
+  # constant 1e-5 (the ruled flat-lr extension).
+  prt_cfr.lr: 1.0e-5
+  prt_cfr.lr_schedule: global_cosine
+  # The ruled stop rule (chief rec on cambia-225): stop once trailing-50-iter
+  # relative improvement drops below 0.5% per 10-iter step.
+  prt_cfr.stability_stop_mode: plateau
+
+resume: false
+priority: normal
+force: false
