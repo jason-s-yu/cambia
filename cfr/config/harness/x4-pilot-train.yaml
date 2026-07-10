@@ -1,0 +1,57 @@
+# cfr/config/harness/x4-pilot-train.yaml
+#
+# X4 300-iteration full-game PRT-CFR pilot, run as a harness train job on nash
+# (Phase 2 Sprint 2, S2W2; see .docs/v0.4/phase2-throughput-pilot/sprint-2-plan.md
+# and the budget branches in .docs/v0.4/phase2-throughput-pilot/x4-budget-branch.md).
+# Submit with: cambia harness submit cfr/config/harness/x4-pilot-train.yaml
+#
+# Client-side validation (src/harness/spec.py) runs before submit; the runner
+# re-validates and re-guards server-side. Unknown keys are rejected.
+
+# Train job. The runner resolves kind: train to `cambia train prtcfr`.
+kind: train
+
+# Placeholder run name; becomes the run directory on the runner and the job id.
+# @chief sets the final run name at submit time. The eval spec
+# (x4-meanimp-eval.yaml) `target` must equal whatever name is used here.
+name: v0.4-x4-pilot
+
+# Production PRT-CFR config: SD-CFR snapshot mixture, disk-backed reservoirs,
+# global-cosine peak-LR decay, plateau-stop stability controller (cambia-341).
+config: cfr/config/prtcfr_production.yaml
+
+# Compute device. Placeholder cpu; V5 (cambia-337, the A310 role decision) rules
+# the final device. Train-offload role -> xpu; eval-only role -> cpu on nash with
+# the A310 reserved for the eval battery. The runner injects this device as the
+# prt_cfr.device render rail, overriding the config's device default, so no
+# prt_cfr.device override is needed here.
+device: cpu
+
+# Dotted-key overrides applied on top of `config` at render time.
+#
+# The three budget knobs below are S2W2-GATED: they carry the full-branch values
+# pending the @chief + user sign-off ruled in x4-budget-branch.md. They are
+# pinned in the SPEC (not edited into the shared production config, which X5 also
+# consumes) so a C2-contingency reduction of m or K can be made by editing this
+# file alone. The first ~10 pilot iters are a throughput probe checked against
+# the budget note before committing to the full 300; a reduction of m or K is
+# valid ONLY with the X2-grid C2 measured-noise-cost run plus user sign-off.
+#
+# stability_metric_name switches the in-loop stability trend from the tiny-gate
+# NashConv default to the X4 Tier-A LBR fast lane (S2W1 battery). This override
+# is load-bearing: the production config default is nashconv.
+overrides:
+  prt_cfr.k_games_per_iter: 8192          # S2W2-gated (full branch)
+  prt_cfr.m_rollouts: 4                   # S2W2-gated (C2 contingency may reduce)
+  prt_cfr.iterations: 300                 # S2W2-gated (full-branch pilot length)
+  prt_cfr.stability_metric_name: tier_a_lbr
+
+# The pilot starts from a FRESH net: no warm_start. Note that prt_cfr.warm_start
+# is true in the production config, but that is the WITHIN-run iteration schedule
+# (carry the iterate across per-iteration fits), NOT a cross-run warm start. The
+# harness `warm_start` field seeds a NEW run from another run's saved state and is
+# deliberately omitted here.
+
+resume: false
+priority: normal
+force: false
