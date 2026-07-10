@@ -1,0 +1,38 @@
+# cfr/config/harness/v5-cpu-probe-train.yaml
+#
+# V5 (cambia-337): xpu throughput characterization, CPU comparison leg.
+# IDENTICAL to v5-xpu-probe-train.yaml except `name` and `device` -- see that
+# file for the full rationale (A310 role decision, x4-budget-branch.md gate,
+# metrics.jsonl gen_seconds/fit_seconds as the measurement this job produces).
+# Running both legs gives a direct per-iter xpu-vs-cpu wall-clock comparison
+# with no other config difference to control for.
+#
+# COST WARNING: same as the xpu leg -- 5 iterations at full production K=8192,
+# m=4 may take hours depending on nash's CPU throughput under contention.
+# @chief may cancel after >= 2 completed iterations; that already yields the
+# per-iter numbers V5 needs.
+#
+# Submit with: cambia harness submit cfr/config/harness/v5-cpu-probe-train.yaml
+
+kind: train
+
+name: v5-cpu-throughput-probe
+
+config: cfr/config/prtcfr_production.yaml
+
+device: cpu
+
+# See v5-xpu-probe-train.yaml: K/m held at production values (not reduced),
+# iterations cut to a 5-iter probe, stability_metric_name left at the
+# production default (nashconv) since this is a throughput measurement, not a
+# quality gate.
+overrides:
+  prt_cfr.iterations: 5
+  prt_cfr.k_games_per_iter: 8192
+  prt_cfr.m_rollouts: 4
+
+resume: false
+priority: normal
+force: false
+
+# No warm_start: fresh net, matching how the X4 pilot itself would start.
