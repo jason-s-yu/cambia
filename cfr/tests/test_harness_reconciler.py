@@ -568,6 +568,55 @@ def test_adversarial_nonfinite_numeric_rejected(tmp_path):
         replay(run_dir, _dest_path(tmp_path), origin_host="runner")
 
 
+# ---------------------------------------------------------------------------
+# Stability-metric journal rows (cambia-363)
+# ---------------------------------------------------------------------------
+
+
+def test_stability_metric_row_above_one_reconciles_clean(tmp_path):
+    """Exact NashConv on the tiny gate routinely exceeds 1.0 (live-fire value
+    1.2581860616518317, cambia-363); the reconciler must not reject a
+    stability-metric journal row (baseline == STABILITY_NASHCONV_BASELINE) on
+    the win_rate 0..1 bound, since it carries a metric value, not a
+    probability."""
+    run_dir = tmp_path / "runs" / "v0.4-prtcfr-r1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    conn = _new_source(run_dir / "run_db.sqlite")
+    rid = _insert_run(conn)
+    _insert_eval(
+        conn, rid, 10, run_db.STABILITY_NASHCONV_BASELINE, win_rate=1.2581860616518317
+    )
+    conn.close()
+
+    summary = replay(run_dir, _dest_path(tmp_path), origin_host="runner")
+    assert summary["evals"] == 1
+
+    dest = _open_dest(_dest_path(tmp_path))
+    try:
+        row = dest.execute(
+            "SELECT baseline, win_rate FROM eval_results WHERE baseline=?",
+            (run_db.STABILITY_NASHCONV_BASELINE,),
+        ).fetchone()
+    finally:
+        dest.close()
+    assert row["baseline"] == "nashconv"
+    assert row["win_rate"] == pytest.approx(1.2581860616518317)
+
+
+def test_real_baseline_win_rate_above_one_still_rejected(tmp_path):
+    """The stability-metric exemption (cambia-363) is scoped to
+    STABILITY_METRIC_BASELINES only: a genuine agent win-rate row (e.g.
+    random_no_cambia) with the same out-of-range value must still reject."""
+    run_dir = tmp_path / "runs" / "v0.4-prtcfr-r1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    conn = _new_source(run_dir / "run_db.sqlite")
+    rid = _insert_run(conn)
+    _insert_eval(conn, rid, 10, "random_no_cambia", win_rate=1.26)
+    conn.close()
+    with pytest.raises(ReconcilerValidationError):
+        replay(run_dir, _dest_path(tmp_path), origin_host="runner")
+
+
 def test_adversarial_negative_checkpoint_iteration_rejected(tmp_path):
     run_dir = tmp_path / "runs" / "v0.4-prtcfr-r1"
     run_dir.mkdir(parents=True, exist_ok=True)

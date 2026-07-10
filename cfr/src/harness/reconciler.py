@@ -41,6 +41,7 @@ from typing import Any, Dict, List, Optional, Set, Union
 
 from src.run_db import (
     ALGO_TO_AGENT_TYPE,
+    STABILITY_METRIC_BASELINES,
     algo_to_checkpoint_prefix,
     get_db,
     insert_eval_result,
@@ -439,10 +440,20 @@ def _read_evals(src: sqlite3.Connection, src_run_id: Any) -> List[Dict[str, Any]
         baseline = _str_or_none(e.get("baseline"), "eval.baseline", _MAX_BASELINE_LEN)
         if not baseline:
             raise ReconcilerValidationError("eval.baseline is empty or NULL")
+        # Stability-metric journal rows (e.g. "nashconv", written by the tiny
+        # gate's _record_nashconv_in_db) ride the exact metric value in
+        # win_rate but are not a win probability -- exact NashConv on the
+        # tiny tree routinely exceeds 1.0. Bound them as finite/non-negative
+        # instead of the genuine win-rate [0, 1] bound; every other baseline
+        # (real agent win rates, incl. MEAN_IMP_BASELINES) keeps the strict bound.
+        if baseline in STABILITY_METRIC_BASELINES:
+            win_rate = _num_or_none(e.get("win_rate"), "eval.win_rate", lo=0.0)
+        else:
+            win_rate = _prob_or_none(e.get("win_rate"), "eval.win_rate")
         row_dict = {
             "iteration": iteration,
             "baseline": baseline,
-            "win_rate": _prob_or_none(e.get("win_rate"), "eval.win_rate"),
+            "win_rate": win_rate,
             "ci_low": _prob_or_none(e.get("ci_low"), "eval.ci_low"),
             "ci_high": _prob_or_none(e.get("ci_high"), "eval.ci_high"),
             "games_played": _int_or_none(e.get("games_played"), "eval.games_played"),
