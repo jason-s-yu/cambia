@@ -241,7 +241,7 @@ func TestPreflightPassesForceMatrix(t *testing.T) {
 // remote run to crashed on the dashboard.
 func TestEffectiveStatusRemoteShortCircuit(t *testing.T) {
 	remote := &ProcessState{
-		Name: "v0.4-prtcfr-r12", Host: "runner", Status: StatusRunning,
+		Name: "v0.4-prtcfr-r12", Host: "runner1", Status: StatusRunning,
 		PID: 9999999, PGID: 9999999, CreatedAt: NowRFC3339(),
 	}
 	if got := EffectiveStatus(remote); got != StatusRunning {

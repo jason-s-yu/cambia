@@ -35,7 +35,7 @@ def _default_db_path() -> Path:
     job process so run registration, checkpoints, and eval persists land in the
     per-run journal the pull loop syncs (design 4.2 wire format). Read at call
     time, not import time, so supervisors set it per process. Absent the
-    override (local dashboard, the client CLI) the central cfr/runs/cambia_runs.db
+    override (local dashboard, client CLI) the central cfr/runs/cambia_runs.db
     is unchanged.
     """
     env = os.environ.get("CAMBIA_RUN_DB")
@@ -517,7 +517,7 @@ def upsert_harness_sync(
 
     Args:
         run_name: the remote run's name (also its run dir under runs/).
-        origin_host: the source host the run was pulled from (e.g. "runner").
+        origin_host: the source host the run was pulled from (e.g. "runner1").
         last_status: the run status observed in the synced run_db at pull time.
         last_sync_at: ISO-8601 UTC timestamp; defaults to now.
     """

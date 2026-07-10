@@ -49,8 +49,8 @@ type Run struct {
 	// run_db-only run). It carries the live pid/pgid and lifecycle status.
 	Process *procmgr.ProcessState `json:"process,omitempty"`
 	// Host is the origin host of a remote (serving-harness) run, empty for a
-	// local run. It comes from the run's process.json Host field or, on the client,
-	// the runs.origin_host column / harness_sync row stamped by the reconciler.
+	// local run. It comes from the run's process.json Host field or, on the
+	// client, the runs.origin_host column / harness_sync row stamped by the reconciler.
 	// A non-empty Host marks the run read-only on this dashboard in v1.
 	Host string `json:"host,omitempty"`
 	// LastSyncAt is the RFC3339 timestamp of the last successful pull for a
@@ -294,7 +294,7 @@ func (s *TrainingStore) isStale(lastSyncAt string) bool {
 // process.json Host, the runs.origin_host column (dbOriginHost), and the
 // harness_sync row (sr). When the run is remote it also stamps Host onto the
 // ProcessState BEFORE any EffectiveStatus call so procmgr short-circuits the
-// local pid probe (a the client probe against a runner pid is the cross-host
+// local pid probe (a client probe against a runner pid is the cross-host
 // pid-reuse bug). Callers must invoke this before deriving r.Status from the
 // process state. A local run (no host from any source) is left untouched.
 func (s *TrainingStore) applyRemoteProvenance(r *Run, dbOriginHost string, sr *syncRow) {

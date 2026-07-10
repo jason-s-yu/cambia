@@ -9,8 +9,8 @@ import (
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 )
 
-// Default preflight floors (design 6). Higher than the dashboard's because the runner
-// is a dedicated single-tenant serving host, not a shared dev box: DiskReservoir
+// Default preflight floors (design 6). Higher than the dashboard's because the
+// runner is a dedicated single-tenant serving host, not a shared dev box: DiskReservoir
 // growth (~16G per player pool) drives the 20G disk floor.
 const (
 	DefaultMinFreeRAMGB  = 8.0

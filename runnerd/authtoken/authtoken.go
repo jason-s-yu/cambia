@@ -25,8 +25,8 @@ import (
 // ErrNoPublicKey is returned by Load when the configured key path is empty.
 var ErrNoPublicKey = errors.New("no JWT public key path configured")
 
-// Audience is the required "aud" claim for a runnerd control-plane token. the client
-// mints tokens carrying this audience; Verify rejects any token that omits it or
+// Audience is the required "aud" claim for a runnerd control-plane token. The
+// client mints tokens carrying this audience; Verify rejects any token that omits it or
 // carries a different one. This is the guard against key aliasing: if
 // RUNNERD_JWT_PUBKEY is ever pointed at the same ed25519 key the service uses
 // for user session JWTs, a user session token (audience-less, or a different
@@ -48,7 +48,7 @@ type Verifier struct {
 
 // Load reads the raw ed25519 public key bytes from pubPath and returns a
 // Verifier. The on-disk format matches auth.InitAndSave / auth.InitFromPath: the
-// raw 32-byte ed25519 public key written verbatim (not PEM/DER), so the the client
+// raw 32-byte ed25519 public key written verbatim (not PEM/DER), so the client
 // side and runnerd read the same file shape.
 func Load(pubPath string) (*Verifier, error) {
 	if pubPath == "" {

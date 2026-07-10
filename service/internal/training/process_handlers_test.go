@@ -474,7 +474,7 @@ func TestHandleResumeCheckpointsDirOnly(t *testing.T) {
 func markRemote(t *testing.T, f *handlerFixture, name string) {
 	t.Helper()
 	writeState(t, f.runsDir, name, &procmgr.ProcessState{
-		Name: name, Host: "runner", Status: procmgr.StatusRunning, Algorithm: "prt-cfr",
+		Name: name, Host: "runner1", Status: procmgr.StatusRunning, Algorithm: "prt-cfr",
 		PID: 9999999, PGID: 9999999, CreatedAt: procmgr.NowRFC3339(),
 	})
 }

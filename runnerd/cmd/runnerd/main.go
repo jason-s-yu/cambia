@@ -23,7 +23,7 @@ import (
 
 func main() {
 	listen := flag.String("listen", envOr("RUNNERD_LISTEN", "127.0.0.1:8090"),
-		"control-plane listen address (dev default 127.0.0.1:8090; prod binds the runner LAN address)")
+		"control-plane listen address (dev default 127.0.0.1:8090; prod binds the runner's LAN address)")
 	flag.Parse()
 
 	baseDir := envOr("RUNNERD_BASE_DIR", "/srv/cambia")

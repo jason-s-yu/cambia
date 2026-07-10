@@ -291,7 +291,7 @@ func TestProcessReconcileSkipsRemoteRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := WriteProcessState(runDir, &ProcessState{
-		Name: name, Host: "runner", Status: StatusRunning, Algorithm: "prt-cfr",
+		Name: name, Host: "runner1", Status: StatusRunning, Algorithm: "prt-cfr",
 		PID: 9999999, PGID: 9999999, CreatedAt: NowRFC3339(),
 	}); err != nil {
 		t.Fatal(err)
