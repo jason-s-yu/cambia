@@ -37,7 +37,7 @@ def _extract_detail(payload: Any) -> Any:
 def _map_error(status: int, payload: Any) -> HarnessAPIError:
     detail = _extract_detail(payload)
     known = {
-        400: "invalid job spec (name or kind rejected by the runner)",
+        400: "invalid job spec (rejected by the runner)",
         409: "name collision: a job with this name already exists (never forceable)",
         412: "preflight failed on the runner",
         429: "runner at concurrency cap; retry when a slot frees",
