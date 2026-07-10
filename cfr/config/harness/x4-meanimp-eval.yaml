@@ -1,0 +1,41 @@
+# cfr/config/harness/x4-meanimp-eval.yaml
+#
+# Post-pilot mean_imp(5) floor evaluation of the X4 pilot run, as a harness
+# evaluate job on nash (Phase 2 Sprint 2, S2W5; see
+# .docs/v0.4/phase2-throughput-pilot/sprint-2-plan.md). Submit with:
+#   cambia harness submit cfr/config/harness/x4-meanimp-eval.yaml
+# after the pilot (x4-pilot-train.yaml) completes and frees nash's single FIFO
+# slot. mean_imp(5) is an informational per-baseline CRN floor; it gates nothing
+# per protocol.md. AC2 is decided from the pilot's in-loop metrics.jsonl.
+
+# Evaluate job. The runner resolves kind: evaluate to `cambia evaluate`.
+kind: evaluate
+
+# Eval job name (this job's id), distinct from the run it evaluates.
+name: v0.4-x4-meanimp-eval
+
+# RUN-DIR MODE ONLY. `target` is the pilot RUN NAME, never a .pt checkpoint file:
+# a file target does not error, it silently falls back to agent_type=deep_cfr,
+# misses the run's snapshots/ directory, and emits plausible but WRONG numbers.
+# Run-dir mode auto-detects algorithm (prt-cfr), agent type (the PRTCFRAgentWrapper
+# SD-CFR snapshot mixture), and checkpoint prefix from the run's own config.yaml,
+# and scores the deployable snapshot mixture. MUST equal the `name` set in
+# x4-pilot-train.yaml at submit.
+target: v0.4-x4-pilot
+
+# Games per baseline. mean_imp(5) scores 5 baselines. Run-dir mode already
+# defaults to 5000; pinned here explicitly.
+games: 5000
+
+# Compute device. Placeholder cpu; V5 (cambia-337) rules the final device. If the
+# eval runs on xpu, V4 cross-device tolerance (cambia-336) must be ratified before
+# the numbers are gate-authoritative; until then they are flagged provisional in
+# the S2W5 verdict.
+device: cpu
+
+priority: normal
+force: false
+
+# No `config`: run-dir mode reads the target run's own config.yaml. No `resume`
+# (train-only). No `warm_start`. No `target` on the train spec, no `config`/`resume`
+# here: the two specs stay in their own field scopes.
