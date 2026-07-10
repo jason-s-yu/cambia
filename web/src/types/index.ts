@@ -31,6 +31,7 @@ export interface LobbyStatus {
 export interface HouseRules {
   allowDrawFromDiscardPile: boolean;
   allowReplaceAbilities: boolean;
+  allowOpponentSnapping?: boolean;
   snapRace: boolean;
   forfeitOnDisconnect: boolean;
   penaltyDrawCount: number;

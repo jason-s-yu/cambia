@@ -83,7 +83,7 @@ export const useAuthStore = create<AuthState>()(
 		logout: async () => {
 			try {
 				await logoutUser();
-			} catch (e) {
+			} catch {
 				// Best-effort — clear local state regardless
 			}
 			set({ isAuthenticated: false, user: null, error: null, isLoading: false });

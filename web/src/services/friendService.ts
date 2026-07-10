@@ -1,5 +1,6 @@
 import api from '@/lib/axios';
-import type { FriendRelationship } from '@/types'; // Import from central types
+import type { AxiosError } from 'axios';
+import type { ApiErrorResponse, FriendRelationship } from '@/types'; // Import from central types
 
 /**
  * Fetches the list of friend relationships for the authenticated user.
@@ -10,8 +11,9 @@ export const listFriends = async (): Promise<FriendRelationship[]> => {
 	try {
 		const response = await api.get<FriendRelationship[]>('/friends/list');
 		return response.data;
-	} catch (error: any) {
-		console.error('List Friends API call failed:', error.response?.data || error.message);
+	} catch (error) {
+		const err = error as AxiosError<ApiErrorResponse>;
+		console.error('List Friends API call failed:', err.response?.data || err.message);
 		throw error; // Re-throw for UI error handling
 	}
 };
@@ -24,8 +26,9 @@ export const listFriends = async (): Promise<FriendRelationship[]> => {
 export const addFriend = async (friendId: string): Promise<void> => {
 	try {
 		await api.post('/friends/add', { friend_id: friendId });
-	} catch (error: any) {
-		console.error('Add Friend API call failed:', error.response?.data || error.message);
+	} catch (error) {
+		const err = error as AxiosError<ApiErrorResponse>;
+		console.error('Add Friend API call failed:', err.response?.data || err.message);
 		throw error; // Re-throw for UI error handling
 	}
 };
@@ -38,8 +41,9 @@ export const addFriend = async (friendId: string): Promise<void> => {
 export const acceptFriend = async (friendId: string): Promise<void> => {
 	try {
 		await api.post('/friends/accept', { friend_id: friendId });
-	} catch (error: any) {
-		console.error('Accept Friend API call failed:', error.response?.data || error.message);
+	} catch (error) {
+		const err = error as AxiosError<ApiErrorResponse>;
+		console.error('Accept Friend API call failed:', err.response?.data || err.message);
 		throw error; // Re-throw for UI error handling
 	}
 };
@@ -52,8 +56,9 @@ export const acceptFriend = async (friendId: string): Promise<void> => {
 export const removeFriend = async (friendId: string): Promise<void> => {
 	try {
 		await api.post('/friends/remove', { friend_id: friendId });
-	} catch (error: any) {
-		console.error('Remove Friend API call failed:', error.response?.data || error.message);
+	} catch (error) {
+		const err = error as AxiosError<ApiErrorResponse>;
+		console.error('Remove Friend API call failed:', err.response?.data || err.message);
 		throw error; // Re-throw for UI error handling
 	}
 };

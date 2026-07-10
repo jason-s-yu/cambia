@@ -22,8 +22,8 @@ const FriendsPanel: React.FC = () => {
       const data = await listFriends();
       // TODO: Map usernames based on currentUserId and friend IDs if needed
       setFriends(data);
-    } catch (err: any) {
-      setError(err.message || 'Failed to load friends list.');
+    } catch (err) {
+      setError((err instanceof Error && err.message) || 'Failed to load friends list.');
     } finally {
       setIsLoading(false);
     }
@@ -41,8 +41,8 @@ const FriendsPanel: React.FC = () => {
          await addFriend(addFriendId);
          setAddFriendId('');
          fetchFriendsList(); // Refetch for now
-     } catch (err: any) {
-         setError(err.message || 'Failed to send friend request.');
+     } catch (err) {
+         setError((err instanceof Error && err.message) || 'Failed to send friend request.');
      }
   };
 
@@ -51,8 +51,8 @@ const FriendsPanel: React.FC = () => {
      try {
          await acceptFriend(friendId);
          fetchFriendsList();
-     } catch (err: any) {
-         setError(err.message || 'Failed to accept friend request.');
+     } catch (err) {
+         setError((err instanceof Error && err.message) || 'Failed to accept friend request.');
      }
   };
 
@@ -61,8 +61,8 @@ const FriendsPanel: React.FC = () => {
      try {
          await removeFriend(friendId);
          fetchFriendsList();
-     } catch (err: any) {
-         setError(err.message || 'Failed to remove friend.');
+     } catch (err) {
+         setError((err instanceof Error && err.message) || 'Failed to remove friend.');
      }
   };
 

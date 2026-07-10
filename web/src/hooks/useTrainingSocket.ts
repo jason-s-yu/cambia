@@ -77,7 +77,7 @@ export function useTrainingSocket(runName: string | undefined) {
 		socket.onerror = () => {
 			// onclose will fire after this
 		};
-	}, []); // eslint-disable-line react-hooks/exhaustive-deps
+	}, []);
 
 	useEffect(() => {
 		// Cleanup previous connection on runName change

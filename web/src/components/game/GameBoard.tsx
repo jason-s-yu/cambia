@@ -96,7 +96,7 @@ const GameBoard: React.FC<GameBoardProps> = ({ gameState, sendMessage }) => {
 
 		if (isMyTurn && pendingAction === null) {
 			if (
-				(gameState.houseRules as any).allowDrawFromDiscardPile &&
+				gameState.houseRules.allowDrawFromDiscardPile &&
 				gameState.discardTop
 			) {
 				sendMessage(drawDiscardPileAction());
@@ -155,7 +155,7 @@ const GameBoard: React.FC<GameBoardProps> = ({ gameState, sendMessage }) => {
 			}
 
 			if (selectedIdx !== null && pendingAction === null) {
-				const allowOpponentSnapping = (gameState.houseRules as any).allowOpponentSnapping ?? true;
+				const allowOpponentSnapping = gameState.houseRules.allowOpponentSnapping ?? true;
 				if (allowOpponentSnapping) {
 					const selectedCard = selfState?.revealedHand?.[selectedIdx];
 					if (selectedCard) {
@@ -204,7 +204,7 @@ const GameBoard: React.FC<GameBoardProps> = ({ gameState, sendMessage }) => {
 	const discardInteractive =
 		(isMyTurn &&
 			pendingAction === null &&
-			!!(gameState.houseRules as any).allowDrawFromDiscardPile &&
+			!!gameState.houseRules.allowDrawFromDiscardPile &&
 			!!gameState.discardTop) ||
 		pendingAction === 'discard_replace' ||
 		(selectedIdx !== null && pendingAction === null);
