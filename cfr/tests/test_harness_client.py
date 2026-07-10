@@ -107,6 +107,34 @@ def test_preflight_detail_carried(tmp_path):
     assert "min_free_ram" in str(exc.value)
 
 
+def test_preflight_error_label_and_checks_both_rendered(tmp_path):
+    # The runnerd 412 body carries an error label AND the failed checks; the
+    # message must include both, not just the opaque label (live-fire find:
+    # the first-key extraction dropped the checks when "error" was present).
+    cert, key, fp = make_self_signed(tmp_path)
+    routes = {
+        ("POST", "/harness/jobs"): (
+            412,
+            {
+                "error": "preflight_failed",
+                "checks": [
+                    {"name": "xpu_render_node", "ok": False, "detail": "no node"}
+                ],
+                "override": "force (gpu_vram only)",
+            },
+        )
+    }
+    with RecordingServer(cert, key, routes) as srv:
+        client = _client(srv, fp)
+        with pytest.raises(HarnessAPIError) as exc:
+            client.submit({"kind": "train", "name": "r1"})
+    assert exc.value.status == 412
+    msg = str(exc.value)
+    assert "preflight_failed" in msg
+    assert "xpu_render_node" in msg
+    assert "no node" in msg
+
+
 def test_health(tmp_path):
     cert, key, fp = make_self_signed(tmp_path)
     routes = {("GET", "/harness/health"): (200, {"queue_depth": 0, "jobs_running": 1})}

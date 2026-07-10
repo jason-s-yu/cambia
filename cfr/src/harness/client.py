@@ -28,9 +28,25 @@ class HarnessAPIError(Exception):
 
 def _extract_detail(payload: Any) -> Any:
     if isinstance(payload, dict):
-        for key in ("detail", "error", "message", "checks"):
-            if key in payload:
-                return payload[key]
+        parts = []
+        for key in ("detail", "error", "message"):
+            if payload.get(key) not in (None, ""):
+                parts.append(str(payload[key]))
+                break
+        # A preflight 412 carries the failed checks as {name, ok, detail}
+        # rows alongside the error label; render them or the caller only
+        # sees an opaque "preflight_failed".
+        checks = payload.get("checks")
+        if isinstance(checks, list):
+            rendered = "; ".join(
+                f"{c.get('name', '?')}: {c.get('detail', '')}".rstrip(": ")
+                for c in checks
+                if isinstance(c, dict)
+            )
+            if rendered:
+                parts.append(f"[{rendered}]")
+        if parts:
+            return " ".join(parts)
     return payload
 
 
