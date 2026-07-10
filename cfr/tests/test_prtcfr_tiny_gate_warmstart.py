@@ -36,8 +36,9 @@ from tools.tiny_solver import build_tree, exploitability
 _SEQ_CAP = 32
 _SEED = 12345
 _N = 6
-_J = 3  # non-eval-due (eval_every=2 -> due at 1,2,4,6), so resume_state(j) is
-# captured with no pending controller update at j.
+_J = 4  # EVAL-DUE (eval_every=2 -> due at 1,2,4,6): resume_state(j) must carry
+# iteration j's OWN controller update (cambia-341 regression coverage), not
+# just the update from the last-due iteration before it.
 
 
 @pytest.fixture(scope="module")

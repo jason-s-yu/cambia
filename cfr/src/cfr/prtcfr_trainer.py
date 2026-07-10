@@ -436,6 +436,16 @@ class PRTCFRTinyTrainer:
         self.stability_metric_name = str(
             getattr(config, "stability_metric_name", "nashconv")
         )
+        self.stability_stop_mode = str(getattr(config, "stability_stop_mode", "divergence"))
+        self.stability_plateau_window_iters = int(
+            getattr(config, "stability_plateau_window_iters", 50)
+        )
+        self.stability_plateau_step_iters = int(
+            getattr(config, "stability_plateau_step_iters", 10)
+        )
+        self.stability_plateau_rel_improvement = float(
+            getattr(config, "stability_plateau_rel_improvement", 0.005)
+        )
         self.eval_fn = eval_fn
         self.controller: Optional[BestSnapshotController] = None
         if self.stability_enabled:
@@ -444,6 +454,10 @@ class PRTCFRTinyTrainer:
                 patience=self.stability_patience,
                 min_iters=self.stability_min_iters,
                 mode=self.stability_metric_mode,
+                stop_mode=self.stability_stop_mode,
+                plateau_window_iters=self.stability_plateau_window_iters,
+                plateau_step_iters=self.stability_plateau_step_iters,
+                plateau_rel_improvement=self.stability_plateau_rel_improvement,
             )
 
         self._net_factory = net_factory or (
@@ -623,13 +637,21 @@ class PRTCFRTinyTrainer:
     def _save_resume_state(self, t: int) -> None:
         """Persist the iteration-``t`` resume point (written each iteration).
 
-        Captured AFTER the snapshot/checkpoint + reservoir save, so the on-disk
-        reservoir and these RNG states are all as of the end of iteration ``t``.
-        Written via temp file + atomic rename so an interruption mid-write never
-        leaves a torn resume_state.json. ``total_iterations`` records the horizon
-        the global LR schedule spanned; a continuation that keeps it (and the
-        schedule) identical is bit-exact, one that changes it (the ruled 530->1000
-        flat-lr extension) is an intentional schedule change, not bit-exact."""
+        Captured AFTER the snapshot/checkpoint + reservoir save AND iteration
+        ``t``'s own stability check (cambia-341: ``train()`` runs the stability
+        block before calling this), so the on-disk reservoir, RNG, and
+        controller state are all as of the FULL end of iteration ``t`` --
+        including any ``controller.update`` iteration ``t`` itself triggered.
+        Saving before that update (the pre-cambia-341 order) meant a resume at
+        an eval-due iteration silently dropped that iteration's own controller
+        update: the next iteration's save would eventually pick it up in
+        memory, but a resume or a run ending on an eval-due iteration lost it
+        for good. Written via temp file + atomic rename so an interruption
+        mid-write never leaves a torn resume_state.json. ``total_iterations``
+        records the horizon the global LR schedule spanned; a continuation
+        that keeps it (and the schedule) identical is bit-exact, one that
+        changes it (the ruled 530->1000 flat-lr extension) is an intentional
+        schedule change, not bit-exact."""
         state = {
             "schema": TINY_RESUME_SCHEMA_VERSION,
             "iteration": int(t),
@@ -897,47 +919,54 @@ class PRTCFRTinyTrainer:
                 st = self.run_iteration(t)
                 history.append(st)
                 self._written_iters.append(t)
-                if self._persist_resume:
-                    self._save_resume_state(t)
                 logger.info(
                     "[prtcfr] iter=%d samples+=%d buffer=%d fit_loss=%.5f snapshot=%s",
                     st.iteration, st.samples_added, st.buffer_size, st.fit_loss,
                     os.path.basename(st.snapshot_path),
                 )
 
-                if not self.stability_enabled or self.controller is None:
-                    continue
-                if not self._stability_check_due(t, n):
-                    continue
-                if self.eval_fn is None:
-                    # No trend metric available: keep the whole set deployable.
-                    write_deployable_manifest(
-                        self.snapshot_dir, self.controller, self._written_iters,
-                        metric_name=self.stability_metric_name, stopped_early=False,
-                    )
-                    continue
-                metric = float(self.eval_fn(self, t))
-                self._record_nashconv_in_db(t, metric)
-                decision = self.controller.update(t, metric)
-                logger.info(
-                    "[prtcfr] stability iter=%d %s=%.5f best_iter=%d best=%.5f "
-                    "worse_streak=%d stop=%s",
-                    t, self.stability_metric_name, metric, decision.best_iteration,
-                    decision.best_metric, decision.num_worse_since_best,
-                    decision.should_stop,
-                )
-                write_deployable_manifest(
-                    self.snapshot_dir, self.controller, self._written_iters,
-                    metric_name=self.stability_metric_name,
-                    stopped_early=decision.should_stop,
-                )
-                if decision.should_stop:
-                    logger.info(
-                        "[prtcfr] early-stop at iter=%d; deployable window pinned to "
-                        "[1..%d] (%s=%.5f)",
-                        t, decision.best_iteration, self.stability_metric_name,
-                        decision.best_metric,
-                    )
+                # Stability check BEFORE the resume_state commit (cambia-341):
+                # see _save_resume_state's docstring. Any controller update for
+                # iteration t must land in-memory before t's resume_state.json
+                # is written, or a resume at t never sees t's own update.
+                stop_early = False
+                if self.stability_enabled and self.controller is not None and (
+                    self._stability_check_due(t, n)
+                ):
+                    if self.eval_fn is None:
+                        # No trend metric available: keep the whole set deployable.
+                        write_deployable_manifest(
+                            self.snapshot_dir, self.controller, self._written_iters,
+                            metric_name=self.stability_metric_name, stopped_early=False,
+                        )
+                    else:
+                        metric = float(self.eval_fn(self, t))
+                        self._record_nashconv_in_db(t, metric)
+                        decision = self.controller.update(t, metric)
+                        logger.info(
+                            "[prtcfr] stability iter=%d %s=%.5f best_iter=%d best=%.5f "
+                            "worse_streak=%d stop=%s",
+                            t, self.stability_metric_name, metric, decision.best_iteration,
+                            decision.best_metric, decision.num_worse_since_best,
+                            decision.should_stop,
+                        )
+                        write_deployable_manifest(
+                            self.snapshot_dir, self.controller, self._written_iters,
+                            metric_name=self.stability_metric_name,
+                            stopped_early=decision.should_stop,
+                        )
+                        if decision.should_stop:
+                            logger.info(
+                                "[prtcfr] early-stop at iter=%d; deployable window "
+                                "pinned to [1..%d] (%s=%.5f)",
+                                t, decision.best_iteration, self.stability_metric_name,
+                                decision.best_metric,
+                            )
+                            stop_early = True
+
+                if self._persist_resume:
+                    self._save_resume_state(t)
+                if stop_early:
                     break
         except KeyboardInterrupt:
             self._update_db_status("interrupted")
@@ -1290,6 +1319,10 @@ def _controller_to_dict(controller: BestSnapshotController) -> dict:
         "patience": controller.patience,
         "min_iters": controller.min_iters,
         "mode": controller.mode,
+        "stop_mode": controller.stop_mode,
+        "plateau_window_iters": controller.plateau_window_iters,
+        "plateau_step_iters": controller.plateau_step_iters,
+        "plateau_rel_improvement": controller.plateau_rel_improvement,
         "best_iteration": controller.best_iteration,
         "best_metric": bm if math.isfinite(bm) else None,
         "num_worse_since_best": controller.num_worse_since_best,
@@ -1299,12 +1332,21 @@ def _controller_to_dict(controller: BestSnapshotController) -> dict:
 
 
 def _controller_from_dict(d: dict) -> BestSnapshotController:
-    """Rebuild a BestSnapshotController from ``_controller_to_dict`` output."""
+    """Rebuild a BestSnapshotController from ``_controller_to_dict`` output.
+
+    ``stop_mode``/``plateau_*`` default to the class's divergence-mode
+    defaults via ``.get`` so a resume_state.json written before cambia-341
+    (no plateau fields) restores as divergence mode unchanged.
+    """
     c = BestSnapshotController(
         rel_tolerance=float(d["rel_tolerance"]),
         patience=int(d["patience"]),
         min_iters=int(d["min_iters"]),
         mode=str(d["mode"]),
+        stop_mode=str(d.get("stop_mode", "divergence")),
+        plateau_window_iters=int(d.get("plateau_window_iters", 50)),
+        plateau_step_iters=int(d.get("plateau_step_iters", 10)),
+        plateau_rel_improvement=float(d.get("plateau_rel_improvement", 0.005)),
     )
     # __post_init__ set best_metric to the mode's inf sentinel; a stored None
     # means "no best yet" (keep that sentinel), else restore the saved value.
@@ -1471,6 +1513,16 @@ class PRTCFRProductionTrainer:
         self.stability_metric_name = str(
             getattr(config, "stability_metric_name", "nashconv")
         )
+        self.stability_stop_mode = str(getattr(config, "stability_stop_mode", "divergence"))
+        self.stability_plateau_window_iters = int(
+            getattr(config, "stability_plateau_window_iters", 50)
+        )
+        self.stability_plateau_step_iters = int(
+            getattr(config, "stability_plateau_step_iters", 10)
+        )
+        self.stability_plateau_rel_improvement = float(
+            getattr(config, "stability_plateau_rel_improvement", 0.005)
+        )
         self.eval_fn = eval_fn
         self.controller: Optional[BestSnapshotController] = None
         if self.stability_enabled:
@@ -1479,6 +1531,10 @@ class PRTCFRProductionTrainer:
                 patience=self.stability_patience,
                 min_iters=self.stability_min_iters,
                 mode=self.stability_metric_mode,
+                stop_mode=self.stability_stop_mode,
+                plateau_window_iters=self.stability_plateau_window_iters,
+                plateau_step_iters=self.stability_plateau_step_iters,
+                plateau_rel_improvement=self.stability_plateau_rel_improvement,
             )
 
         # Directory layout.
@@ -1715,10 +1771,17 @@ class PRTCFRProductionTrainer:
     def _save_resume_state(self, t: int) -> None:
         """Persist the iteration-``t`` resume point (written each iteration).
 
-        Captured AFTER the iteration's snapshot/checkpoint + reservoir save, so
-        the on-disk reservoir RNG state and these RNG states are all as of the
-        end of iteration ``t``. Written via a temp file + atomic rename so an
-        interruption mid-write never leaves a torn resume_state.json.
+        Captured AFTER the iteration's snapshot/checkpoint + reservoir save AND
+        iteration ``t``'s own stability check (cambia-341: ``train()`` runs the
+        stability block before calling this), so the on-disk reservoir, RNG,
+        and controller state are all as of the FULL end of iteration ``t`` --
+        including any ``controller.update`` iteration ``t`` itself triggered.
+        Saving before that update (the pre-cambia-341 order) meant a resume at
+        an eval-due iteration silently dropped that iteration's own controller
+        update: the next iteration's save would eventually pick it up in
+        memory, but a resume or a run ending on an eval-due iteration lost it
+        for good. Written via a temp file + atomic rename so an interruption
+        mid-write never leaves a torn resume_state.json.
 
         ``torch_cuda_rng``/``torch_xpu_rng`` is populated only when this
         trainer's device matches that accelerator and it is available; it is
@@ -2051,7 +2114,6 @@ class PRTCFRProductionTrainer:
                 self._history.append(st)
                 self._written_iters.append(t)
                 self._write_metrics_row(st)
-                self._save_resume_state(t)
                 logger.info(
                     "[prtcfr-prod] iter=%d added=%s buffers=%s fit_loss=%.5f "
                     "peak_lr=%.2e critic_mse=%.4f/%.4f gen=%.1fs fit=%.1fs",
@@ -2060,35 +2122,43 @@ class PRTCFRProductionTrainer:
                     st.critic_constant_baseline_mse, st.gen_seconds, st.fit_seconds,
                 )
 
-                if not self.stability_enabled or self.controller is None:
-                    continue
-                if not self._stability_check_due(t, n):
-                    continue
-                if self.eval_fn is None:
-                    write_deployable_manifest(
-                        self.snapshot_dir, self.controller, self._written_iters,
-                        metric_name=self.stability_metric_name, stopped_early=False,
-                    )
-                    continue
-                metric = float(self.eval_fn(self, t))
-                decision = self.controller.update(t, metric)
-                logger.info(
-                    "[prtcfr-prod] stability iter=%d %s=%.5f best_iter=%d best=%.5f "
-                    "worse_streak=%d stop=%s",
-                    t, self.stability_metric_name, metric, decision.best_iteration,
-                    decision.best_metric, decision.num_worse_since_best,
-                    decision.should_stop,
-                )
-                write_deployable_manifest(
-                    self.snapshot_dir, self.controller, self._written_iters,
-                    metric_name=self.stability_metric_name,
-                    stopped_early=decision.should_stop,
-                )
-                if decision.should_stop:
-                    logger.info(
-                        "[prtcfr-prod] early-stop at iter=%d; deployable window "
-                        "pinned to [1..%d]", t, decision.best_iteration,
-                    )
+                # Stability check BEFORE the resume_state commit (cambia-341):
+                # see _save_resume_state's docstring. Any controller update for
+                # iteration t must land in-memory before t's resume_state.json
+                # is written, or a resume at t never sees t's own update.
+                stop_early = False
+                if self.stability_enabled and self.controller is not None and (
+                    self._stability_check_due(t, n)
+                ):
+                    if self.eval_fn is None:
+                        write_deployable_manifest(
+                            self.snapshot_dir, self.controller, self._written_iters,
+                            metric_name=self.stability_metric_name, stopped_early=False,
+                        )
+                    else:
+                        metric = float(self.eval_fn(self, t))
+                        decision = self.controller.update(t, metric)
+                        logger.info(
+                            "[prtcfr-prod] stability iter=%d %s=%.5f best_iter=%d "
+                            "best=%.5f worse_streak=%d stop=%s",
+                            t, self.stability_metric_name, metric, decision.best_iteration,
+                            decision.best_metric, decision.num_worse_since_best,
+                            decision.should_stop,
+                        )
+                        write_deployable_manifest(
+                            self.snapshot_dir, self.controller, self._written_iters,
+                            metric_name=self.stability_metric_name,
+                            stopped_early=decision.should_stop,
+                        )
+                        if decision.should_stop:
+                            logger.info(
+                                "[prtcfr-prod] early-stop at iter=%d; deployable "
+                                "window pinned to [1..%d]", t, decision.best_iteration,
+                            )
+                            stop_early = True
+
+                self._save_resume_state(t)
+                if stop_early:
                     break
         except KeyboardInterrupt:
             # Do NOT save_reservoirs() here. The last COMPLETED iteration's

@@ -202,6 +202,45 @@ def test_x2_plumbing_multi_snapshot_average():
     assert all(np.isfinite(x) for x in components)
 
 
+def test_load_net_infers_dims_from_custom_checkpoint(tmp_path):
+    """_load_net must not hardcode production net dims (cambia-341): a
+    checkpoint trained at custom (e.g. tiny-config) GRU dims has to load back
+    at those same dims, read from the saved tensors, not PRTCFRNet's
+    production-default constructor args -- the tiny-gate warm-start
+    equivalence config trains at embed=16/hidden=32, well off the
+    embed=64/hidden=256 production defaults, and would fail to load under the
+    old hardcoded-default behavior."""
+    if _USING_STUB:
+        pytest.skip(
+            "src.cfr.prtcfr_net not landed; the stub net has no fixed dims "
+            "contract to assert against"
+        )
+    import torch
+
+    torch.manual_seed(0)
+    custom = PRTCFRNet(
+        embed_dim=8, hidden_dim=12, num_layers=1, head_hidden_dim=10, device="cpu",
+    )
+    path = str(tmp_path / "prtcfr_snapshot_iter_1.pt")
+    torch.save(
+        {
+            "encoder_state_dict": custom.encoder_state_dict(),
+            "head_state_dict": custom.head_state_dict(),
+            "iteration": 1,
+        },
+        path,
+    )
+    loaded = prtcfr_eval._load_net(path, device="cpu")
+    assert loaded.embed_dim == 8
+    assert loaded.hidden_dim == 12
+    assert loaded.num_layers == 1
+    assert loaded.head_hidden_dim == 10
+    for k, v in custom.encoder_state_dict().items():
+        assert torch.equal(loaded.encoder_state_dict()[k], v)
+    for k, v in custom.head_state_dict().items():
+        assert torch.equal(loaded.head_state_dict()[k], v)
+
+
 def test_incremental_policy_matches_materialize_policy_small_tree():
     """Equivalence gate: materialize_policy_incremental (chunked, additive
     src code) reproduces materialize_policy (the single-batch reference)

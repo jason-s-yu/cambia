@@ -27,6 +27,20 @@ gate reproduces byte-for-byte when disabled:
 Neither guard changes the training dynamics; they select which snapshots the
 average serves. The optimizer-side fix for the blow-up itself (LR floor / no
 per-iteration restart) is applied in the trainer's fit path, separately gated.
+
+``BestSnapshotController.stop_mode`` selects the early-stop rule:
+
+  - ``"divergence"`` (default) -- the ``patience``-consecutive-worse-than-
+    tolerance rule described above. Byte-for-byte the original (only) rule;
+    every existing caller that does not set ``stop_mode`` is unaffected.
+  - ``"plateau"`` -- stops once the metric's relative improvement over the
+    trailing ``plateau_window_iters`` iterations, normalized to a rate per
+    ``plateau_step_iters``, drops below ``plateau_rel_improvement``. Intended
+    for future gate runs that plateau without diverging (cambia-341): the
+    divergence rule never fires on a trajectory that flattens instead of
+    turning back up, so a run with no floor in its trajectory fit can run to
+    the iteration budget with no early-stop signal. Config-gated and additive;
+    it does not change ``"divergence"`` mode's behavior.
 """
 
 from __future__ import annotations
@@ -77,6 +91,14 @@ class BestSnapshotController:
     min_iters: int = 1
     mode: str = "min"
 
+    # Early-stop rule selector. "divergence" (default) is the patience/tolerance
+    # rule above; "plateau" is the trailing-window relative-improvement rule
+    # (see module docstring). Additive: "divergence" behavior is unchanged.
+    stop_mode: str = "divergence"
+    plateau_window_iters: int = 50
+    plateau_step_iters: int = 10
+    plateau_rel_improvement: float = 0.005
+
     best_iteration: int = 0
     best_metric: float = math.inf
     num_worse_since_best: int = 0
@@ -86,6 +108,10 @@ class BestSnapshotController:
     def __post_init__(self) -> None:
         if self.mode not in ("min", "max"):
             raise ValueError(f"mode must be 'min' or 'max', got {self.mode!r}")
+        if self.stop_mode not in ("divergence", "plateau"):
+            raise ValueError(
+                f"stop_mode must be 'divergence' or 'plateau', got {self.stop_mode!r}"
+            )
         if self.mode == "max":
             self.best_metric = -math.inf
 
@@ -120,11 +146,11 @@ class BestSnapshotController:
             # divergence step. Reset the streak so only a SUSTAINED rise trips it.
             self.num_worse_since_best = 0
 
-        should_stop = (
-            not self.stopped
-            and iteration >= self.min_iters
-            and self.num_worse_since_best >= self.patience
-        )
+        if self.stop_mode == "plateau":
+            trigger = self._plateau_triggered(iteration)
+        else:
+            trigger = self.num_worse_since_best >= self.patience
+        should_stop = not self.stopped and iteration >= self.min_iters and trigger
         if should_stop:
             self.stopped = True
 
@@ -137,6 +163,43 @@ class BestSnapshotController:
             should_stop=should_stop,
             num_worse_since_best=self.num_worse_since_best,
         )
+
+    def _plateau_triggered(self, iteration: int) -> bool:
+        """True when the trailing-window relative improvement rate has
+        dropped below ``plateau_rel_improvement``.
+
+        Reference point: the latest recorded check at or before ``iteration -
+        plateau_window_iters`` (the history is append-ordered by increasing
+        iteration, so the last qualifying entry scanned is the closest one not
+        exceeding the window). Returns False until such a reference exists --
+        a run younger than the window never plateau-stops. The relative
+        improvement over ``[ref_iteration, iteration]`` is normalized to a
+        rate per ``plateau_step_iters`` (matching the eval cadence the window
+        was sized against, e.g. 50 iters / 10-iter eval steps = 5 steps) so
+        the threshold reads as "0.5% per 10-iteration step" regardless of how
+        many checks actually landed inside the window.
+        """
+        threshold_iter = iteration - self.plateau_window_iters
+        ref: Optional[Dict[str, float]] = None
+        for entry in self.history:
+            if entry["iteration"] <= threshold_iter:
+                ref = entry
+            else:
+                break
+        if ref is None:
+            return False
+        elapsed = iteration - ref["iteration"]
+        if elapsed <= 0 or self.plateau_step_iters <= 0:
+            return False
+        ref_metric = ref["metric"]
+        if abs(ref_metric) < 1e-12:
+            return False
+        if self.mode == "min":
+            rel_improvement = (ref_metric - self.history[-1]["metric"]) / abs(ref_metric)
+        else:
+            rel_improvement = (self.history[-1]["metric"] - ref_metric) / abs(ref_metric)
+        rate = rel_improvement / (elapsed / self.plateau_step_iters)
+        return rate < self.plateau_rel_improvement
 
     def deployable_iters(self, all_iters: List[int]) -> List[int]:
         """Snapshots to serve: those at or before ``best_iteration``.
@@ -168,6 +231,7 @@ def write_deployable_manifest(
         "deployable_iters": deployable,
         "all_iters": sorted(all_iters),
         "stopped_early": bool(stopped_early),
+        "stop_mode": controller.stop_mode,
         "rel_tolerance": controller.rel_tolerance,
         "patience": controller.patience,
         "checks": controller.history,

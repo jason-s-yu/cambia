@@ -119,6 +119,67 @@ def test_controller_pins_original_x2_trajectory():
 
 
 # ---------------------------------------------------------------------------
+# Plateau-stop mode (cambia-341): trailing-window relative-improvement rate
+# below 0.5% per 10-iteration eval step, vs. the default divergence-only rule.
+# ---------------------------------------------------------------------------
+
+# A trajectory that descends through iter 50 then goes exactly flat: the
+# canonical plateau (no divergence -- the metric never rises above the flat
+# value, so the default divergence rule must never stop on it; see
+# test_plateau_mode_default_config_never_engages_plateau_mode below).
+_FLAT_AFTER_50_TRAJ = [
+    (10, 0.50), (20, 0.30), (30, 0.20), (40, 0.15), (50, 0.10),
+    (60, 0.10), (70, 0.10), (80, 0.10), (90, 0.10), (100, 0.10),
+]
+
+
+def test_plateau_mode_stops_on_flattened_trajectory():
+    c = BestSnapshotController(
+        mode="min", stop_mode="plateau", min_iters=1,
+        plateau_window_iters=50, plateau_step_iters=10, plateau_rel_improvement=0.005,
+    )
+    stop_at = None
+    for it, m in _FLAT_AFTER_50_TRAJ:
+        d = c.update(it, m)
+        if d.should_stop and stop_at is None:
+            stop_at = it
+    # Window fills at t=60 (threshold=10) but the reference is still in the
+    # descending region through t=90; the reference first lands entirely
+    # inside the flat region at t=100 (threshold=50 -> ref is the t=50 point,
+    # already 0.10), where the trailing-window rate is exactly 0.
+    assert stop_at == 100
+
+
+def test_plateau_mode_does_not_stop_while_still_descending():
+    # 5%-per-10-iter-step geometric decay: rate stays ~4.5%/step, well above
+    # the 0.5%/step threshold, for the whole run.
+    traj = [(t, 1.0 * (0.95 ** (t / 10))) for t in range(10, 310, 10)]
+    c = BestSnapshotController(
+        mode="min", stop_mode="plateau", min_iters=1,
+        plateau_window_iters=50, plateau_step_iters=10, plateau_rel_improvement=0.005,
+    )
+    for it, m in traj:
+        d = c.update(it, m)
+        assert d.should_stop is False, f"unexpected plateau stop at iter {it}"
+    assert not c.stopped
+
+
+def test_plateau_mode_default_config_never_engages_plateau_mode():
+    """The SAME flat-after-50 trajectory that trips plateau mode must NOT stop
+    a default (stop_mode="divergence") controller: a tie with best is within
+    the tolerance band, not a divergence, so the patience streak never
+    accrues. Plateau mode is strictly additive/opt-in."""
+    c = BestSnapshotController(mode="min")  # stop_mode defaults to "divergence"
+    assert c.stop_mode == "divergence"
+    for it, m in _FLAT_AFTER_50_TRAJ:
+        d = c.update(it, m)
+        assert d.should_stop is False
+    assert not c.stopped
+    assert c.best_iteration == 50
+    assert c.best_metric == pytest.approx(0.10)
+
+
+# ---------------------------------------------------------------------------
 # Deployable manifest
 # ---------------------------------------------------------------------------
 
@@ -285,3 +346,32 @@ def test_stability_controller_drives_and_writes_manifest(tiny_tree, tmp_path):
     assert man["best_iteration"] == 2
     assert man["stopped_early"] is True
     assert max(man["deployable_iters"]) == 2
+
+
+def test_stability_plateau_mode_drives_trainer_and_writes_manifest(tiny_tree, tmp_path):
+    """End-to-end plumbing: config.stability_stop_mode="plateau" reaches the
+    controller through PRTCFRTinyTrainer and early-stops on a flattened (not
+    diverging) metric trend -- the case the default divergence rule misses."""
+    # descends then goes exactly flat from iter 4 onward.
+    metric_by_iter = {1: 0.5, 2: 0.3, 3: 0.2, 4: 0.15, 5: 0.15, 6: 0.15, 7: 0.15, 8: 0.15}
+
+    def eval_fn(_trainer, t):
+        return metric_by_iter[t]
+
+    cfg = _fast_ns(
+        stability_enabled=True, stability_eval_every=1, stability_min_iters=1,
+        stability_stop_mode="plateau", stability_plateau_window_iters=3,
+        stability_plateau_step_iters=1, stability_plateau_rel_improvement=0.005,
+    )
+    snap_dir = str(tmp_path / "snaps")
+    trainer = PRTCFRTinyTrainer(tiny_tree, cfg, snap_dir, eval_fn=eval_fn)
+    assert trainer.controller.stop_mode == "plateau"
+    hist = trainer.train(iterations=8)
+    # Flat from iter 4; the window (3 iters back) first sits entirely in the
+    # flat region at iter 7, where the trailing rate is exactly 0.
+    assert [s.iteration for s in hist] == [1, 2, 3, 4, 5, 6, 7]
+    man = read_deployable_manifest(snap_dir)
+    assert man is not None
+    assert man["stop_mode"] == "plateau"
+    assert man["stopped_early"] is True
+    assert man["best_iteration"] == 4

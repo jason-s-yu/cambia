@@ -79,6 +79,17 @@ except Exception:  # noqa: BLE001 - core may be unwritten during parallel dev
     PRTCFRNet = None  # type: ignore[assignment]
     tiny_node_to_tokens = None  # type: ignore[assignment]
 
+# Snapshot-shape architecture inference (cambia-341): the pinned checkpoint
+# format carries no net-dims config, so a checkpoint trained with non-default
+# GRU dims (e.g. a tiny-config gate run's shrunk net) must not be loaded
+# against PRTCFRNet's production-default constructor args -- the shapes would
+# mismatch and load_state_dict would raise. prtcfr_mixture already solved this
+# for the full-game eval mixture (X4); reused here rather than re-derived.
+try:  # pragma: no cover - same tolerant-import posture as PRTCFRNet above
+    from src.cfr.prtcfr_mixture import _build_net_from_state
+except Exception:  # noqa: BLE001
+    _build_net_from_state = None  # type: ignore[assignment]
+
 from src.config import load_config
 from src.encoding import NUM_ACTIONS, action_to_index, encode_action_mask
 from src.sequence_encoding import PAD_ID, SEQ_CAP
@@ -205,6 +216,14 @@ def _load_net(filepath: str, device: str = "cpu") -> Any:
     iteration}`` (prtcfr_net docstring); loaded via ``PRTCFRNet.load_encoder_head``.
     A whole-module pickle or a plain combined state_dict are also accepted as
     fallbacks. This is the only place that touches checkpoint internals.
+
+    Net dims (embed/hidden/layers/head-hidden) are read back from the loaded
+    tensor shapes (cambia-341), not the module's production defaults: a
+    checkpoint trained with non-default GRU dims (e.g. a tiny-gate config's
+    shrunk net) would otherwise mismatch PRTCFRNet's default-arg constructor
+    and ``load_state_dict``/``load_encoder_head`` would raise. This makes
+    ``_load_net`` correct for any net width the checkpoint was actually
+    trained at, independent of any config file.
     """
     import torch
 
@@ -217,6 +236,13 @@ def _load_net(filepath: str, device: str = "cpu") -> Any:
 
     # Pinned format: split encoder/head state dicts.
     if isinstance(obj, dict) and "encoder_state_dict" in obj and "head_state_dict" in obj:
+        if _build_net_from_state is not None:
+            return _build_net_from_state(
+                obj["encoder_state_dict"], obj["head_state_dict"], device
+            )
+        # Mixture helper unavailable (defensive; e.g. a stubbed core during
+        # parallel dev that lacks _regret_match) -- fall back to the module's
+        # production-default dims, the pre-cambia-341 behavior.
         net = PRTCFRNet(device=device)
         net.load_encoder_head(obj["encoder_state_dict"], obj["head_state_dict"])
         net.eval()
@@ -227,13 +253,23 @@ def _load_net(filepath: str, device: str = "cpu") -> Any:
         obj.eval()
         return obj
 
-    # Combined / wrapped state_dict.
+    # Combined / wrapped state_dict (whole-net ``PRTCFRNet.state_dict()``,
+    # "encoder.*"/"head.*" prefixed keys).
     state_dict = obj
     if isinstance(obj, dict) and not _looks_like_state_dict(obj):
         for key in ("model_state_dict", "state_dict", "net", "policy_state_dict"):
             if key in obj and isinstance(obj[key], dict):
                 state_dict = obj[key]
                 break
+    if _build_net_from_state is not None:
+        encoder_sd = {
+            k[len("encoder."):]: v for k, v in state_dict.items() if k.startswith("encoder.")
+        }
+        head_sd = {
+            k[len("head."):]: v for k, v in state_dict.items() if k.startswith("head.")
+        }
+        if encoder_sd and head_sd:
+            return _build_net_from_state(encoder_sd, head_sd, device)
     net = PRTCFRNet(device=device)
     net.load_state_dict(state_dict)
     net.eval()

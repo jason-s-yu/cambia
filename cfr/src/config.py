@@ -529,6 +529,16 @@ class PRTCFRConfig(_CambiaBaseModel):
     stability_min_iters: int = 10
     stability_metric_mode: str = "min"
     stability_metric_name: str = "nashconv"
+    # Early-stop rule (cambia-341). "divergence" (default) is the patience/
+    # tolerance rule above and reproduces every existing run byte-for-byte;
+    # "plateau" stops on trailing-window relative-improvement stagnation
+    # instead (for future gate runs that flatten without diverging -- see
+    # prtcfr_stability module docstring). Additive: switching stop_mode does
+    # not change the other stability_* fields' meaning.
+    stability_stop_mode: str = "divergence"  # "divergence" | "plateau"
+    stability_plateau_window_iters: int = 50
+    stability_plateau_step_iters: int = 10
+    stability_plateau_rel_improvement: float = 0.005
 
     # --- Production trainer (Phase 2 S1W5): full-game PRT-CFR. ---
     # Read only by PRTCFRProductionTrainer (the tiny trainer never touches
