@@ -44,6 +44,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 
+from ..constants import ActionCallCambia
 from ..encoding import NUM_ACTIONS, action_to_index, encode_action_mask
 from ..reservoir import ColumnarBatch, ReservoirBuffer, ReservoirSample
 from ..sequence_encoding import PAD_ID, SEQ_CAP
@@ -212,6 +213,7 @@ def _fit_from_scratch(
     weight_decay: float = 0.0,
     grad_clip: float = 1.0,
     lr_min: float = 0.0,
+    violation_box: Optional[List[int]] = None,
 ) -> float:
     """Refit ``net`` (already freshly initialized) on the reservoir.
 
@@ -219,6 +221,12 @@ def _fit_from_scratch(
     cosine-decayed lr across ``num_steps`` (floored at ``lr_min``, default 0.0 =
     the original decay-to-zero). Gradient clip applied LAST. Returns the mean
     weighted loss over executed steps.
+
+    ``violation_box`` (optional single-element ``[int]``): when supplied, each
+    fit step whose PRE-clip total grad norm exceeds ``grad_clip`` increments
+    ``violation_box[0]`` (the AC2 grad-norm-violation counter, S2W1). Default
+    None leaves the counter untouched, so the tiny trainer's call site is
+    byte-for-byte unchanged.
     """
     if len(buf) == 0:
         return 0.0
@@ -254,7 +262,11 @@ def _fit_from_scratch(
 
         loss.backward()
         # Clip applied LAST, immediately before the optimizer step.
-        torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=grad_clip)
+        # clip_grad_norm_ returns the PRE-clip total norm; a value above
+        # grad_clip means clipping fired -> one AC2 grad-norm violation.
+        total_norm = torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=grad_clip)
+        if violation_box is not None and float(total_norm) > grad_clip:
+            violation_box[0] += 1
         optimizer.step()
         scheduler.step()
 
@@ -1424,6 +1436,71 @@ class PRTCFRProductionTrainState:
     gen_seconds: float
     fit_seconds: float
     snapshot_path: str
+    # AC2 in-loop battery quantities (S2W1). Additive; existing consumers/tests
+    # read the row by name, so these trail the pre-existing fields and default
+    # to no-op values for any construction that omits them.
+    #   t1_cambia_rate      : fraction of this iteration's K generation games
+    #                         whose FIRST applied decision is a Cambia call.
+    #   tier_a_lbr          : Tier-A LBR fast-lane exploitability of the SD-CFR
+    #                         mixture over snapshots [1..t]; NaN off the battery
+    #                         cadence (only scored when eval_fn runs).
+    #   grad_norm_violations: fit steps whose pre-clip grad norm exceeded
+    #                         grad_clip, summed over this iteration's fit.
+    t1_cambia_rate: float = float("nan")
+    tier_a_lbr: float = float("nan")
+    grad_norm_violations: int = 0
+
+
+# Global action index of ActionCallCambia in the 146-action space. Turn-1
+# Cambia = this action being the first decision applied in a generation game.
+_CALL_CAMBIA_INDEX = action_to_index(ActionCallCambia())
+
+
+class _GenTurn1Observer:
+    """Transparent GameDriver wrapper that taps the FIRST applied main-trajectory
+    action of one generation game (turn-1 Cambia detection, S2W1).
+
+    The production worker advances the real trajectory by calling ``apply`` on
+    THIS top-level driver, while pricing rollouts and per-action children run on
+    ``clone()``s. ``clone()`` therefore returns the INNER driver's clone
+    (unwrapped) so only the single real trajectory is observed, never the
+    rollout copies. Every other attribute (``tokens``/``current_player``/
+    ``is_terminal``/``legal_actions``/``close``/``.engine``/``.game`` for the
+    critic value-sink) delegates to the inner driver, so the wrap is behaviorally
+    invisible to the sampler and the critic tap.
+    """
+
+    __slots__ = ("_inner", "_stats", "_recorded")
+
+    def __init__(self, inner, stats: Dict[str, int]):
+        self._inner = inner
+        self._stats = stats
+        self._recorded = False
+        stats["games"] += 1
+
+    def apply(self, action) -> bool:
+        ok = self._inner.apply(action)
+        if ok and not self._recorded:
+            # First decision that actually advanced the game: the game's turn-1
+            # move. Count it iff it is the Cambia call.
+            self._recorded = True
+            idx = int(action) if isinstance(action, (int, np.integer)) else action_to_index(action)
+            if idx == _CALL_CAMBIA_INDEX:
+                self._stats["t1_cambia"] += 1
+        return ok
+
+    def clone(self):
+        # Unwrapped: rollout / child-pricing clones must NOT be observed.
+        return self._inner.clone()
+
+    def close(self) -> None:
+        self._inner.close()
+
+    def __getattr__(self, name):
+        # Delegate everything not overridden above to the wrapped driver
+        # (tokens, current_player, is_terminal, legal_actions, utility, and the
+        # critic value-sink's .engine/.game/_get_all_cards_unsafe probes).
+        return getattr(self._inner, name)
 
 
 class PRTCFRProductionTrainer:
@@ -1589,6 +1666,14 @@ class PRTCFRProductionTrainer:
         self.net: Optional[PRTCFRNet] = None
         self._history: List[PRTCFRProductionTrainState] = []
         self._written_iters: List[int] = []
+
+        # AC2 battery stash (S2W1). Written each iteration for the metrics row:
+        # t1_cambia_rate by the generation tap; tier_a_lbr by the battery eval_fn
+        # at the stability cadence (NaN off-cadence). Public attrs so the eval_fn
+        # can stash onto the trainer per the pinned S2W1 interface.
+        self.t1_cambia_rate: float = float("nan")
+        self.tier_a_lbr: float = float("nan")
+        self._gen_stats: Dict[str, int] = {"games": 0, "t1_cambia": 0}
 
         # run_db registration (optional, never fatal).
         self._db_conn = None
@@ -1920,7 +2005,7 @@ class PRTCFRProductionTrainer:
         for k in range(self.k_games):
             traverser = (t + k) % self.num_players
             game_seed = self.seed + t * 1_000_003 + k
-            driver = self._driver_factory(game_seed)
+            driver = _GenTurn1Observer(self._driver_factory(game_seed), self._gen_stats)
             try:
                 n = worker.traverse(driver, traverser, t, self.reservoirs[traverser])
                 added[traverser] += n
@@ -1957,7 +2042,7 @@ class PRTCFRProductionTrainer:
                 traverser = (t + k) % self.num_players
                 game_seed = self.seed + t * 1_000_003 + k
                 rng_seed = self.seed + t * 7_000_003 + k * 2_000_029
-                driver = self._driver_factory(game_seed)
+                driver = _GenTurn1Observer(self._driver_factory(game_seed), self._gen_stats)
                 specs.append(
                     {
                         "seed": rng_seed,
@@ -1989,12 +2074,19 @@ class PRTCFRProductionTrainer:
         value_sink = self._make_value_sink()
 
         added = {p: 0 for p in range(self.num_players)}
+        # Reset the turn-1 Cambia tap for this iteration's own K games; the
+        # generation drivers are wrapped in _GenTurn1Observer, which fills it.
+        self._gen_stats = {"games": 0, "t1_cambia": 0}
         gen_start = time.perf_counter()
         if self.gen_batched:
             self._generate_batched(t, added, value_sink)
         else:
             self._generate_sequential(t, added, value_sink)
         gen_seconds = time.perf_counter() - gen_start
+        games = self._gen_stats["games"]
+        self.t1_cambia_rate = (
+            self._gen_stats["t1_cambia"] / games if games > 0 else float("nan")
+        )
 
         # Refit the SHARED net on both reservoirs. From-scratch re-init when
         # warm_start is off or a periodic re-anchor fires; else fine-tune the
@@ -2009,6 +2101,7 @@ class PRTCFRProductionTrainer:
             [self.reservoirs[p] for p in range(self.num_players)], rng=self._fit_rng
         )
         fit_start = time.perf_counter()
+        grad_viol = [0]
         loss = _fit_from_scratch(
             self.net,
             sampler,
@@ -2018,6 +2111,7 @@ class PRTCFRProductionTrainer:
             weight_decay=self.weight_decay,
             grad_clip=self.grad_clip,
             lr_min=self.lr_min,
+            violation_box=grad_viol,
         )
         fit_seconds = time.perf_counter() - fit_start
 
@@ -2052,6 +2146,11 @@ class PRTCFRProductionTrainer:
             gen_seconds=gen_seconds,
             fit_seconds=fit_seconds,
             snapshot_path=snap,
+            t1_cambia_rate=self.t1_cambia_rate,
+            grad_norm_violations=grad_viol[0],
+            # tier_a_lbr is scored by the battery eval_fn at the stability
+            # cadence (train() sets st.tier_a_lbr from its return); NaN here.
+            tier_a_lbr=float("nan"),
         )
 
     def _write_metrics_row(self, st: PRTCFRProductionTrainState) -> None:
@@ -2066,6 +2165,11 @@ class PRTCFRProductionTrainer:
             "critic_ratio": _json_num(st.critic_ratio),
             "gen_seconds": _json_num(st.gen_seconds),
             "fit_seconds": _json_num(st.fit_seconds),
+            # AC2 in-loop battery fields (S2W1). tier_a_lbr is null off the
+            # battery cadence; t1_cambia_rate/grad_norm_violations are per-iter.
+            "t1_cambia_rate": _json_num(st.t1_cambia_rate),
+            "tier_a_lbr": _json_num(st.tier_a_lbr),
+            "grad_norm_violations": int(st.grad_norm_violations),
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
         with open(self.metrics_path, "a", encoding="utf-8") as fh:
@@ -2113,7 +2217,6 @@ class PRTCFRProductionTrainer:
                 st = self.run_iteration(t)
                 self._history.append(st)
                 self._written_iters.append(t)
-                self._write_metrics_row(st)
                 logger.info(
                     "[prtcfr-prod] iter=%d added=%s buffers=%s fit_loss=%.5f "
                     "peak_lr=%.2e critic_mse=%.4f/%.4f gen=%.1fs fit=%.1fs",
@@ -2137,6 +2240,9 @@ class PRTCFRProductionTrainer:
                         )
                     else:
                         metric = float(self.eval_fn(self, t))
+                        # The battery eval_fn returns the Tier-A LBR and stashes
+                        # it on the trainer; record it in this iteration's row.
+                        st.tier_a_lbr = metric
                         decision = self.controller.update(t, metric)
                         logger.info(
                             "[prtcfr-prod] stability iter=%d %s=%.5f best_iter=%d "
@@ -2157,6 +2263,11 @@ class PRTCFRProductionTrainer:
                             )
                             stop_early = True
 
+                # Metrics row is written AFTER the stability block so the same
+                # row carries this iteration's tier_a_lbr (scored by the battery
+                # eval_fn just above); it commits alongside resume_state, whose
+                # cambia-341 ordering the row now shares.
+                self._write_metrics_row(st)
                 self._save_resume_state(t)
                 if stop_early:
                     break
