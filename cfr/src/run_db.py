@@ -25,6 +25,17 @@ from typing import Any, Dict, Optional
 
 from src.evaluate_agents import MEAN_IMP_BASELINES  # canonical source
 
+# Baseline name used for stability-metric journal rows (e.g. exact NashConv on
+# the PRT-CFR tiny gate, written by PRTCFRTinyTrainer._record_nashconv_in_db).
+# These rows ride in eval_results.win_rate (the generic numeric slot) but hold
+# a metric value, not a win probability, so they are not bounded to [0, 1] --
+# the harness reconciler validates them against STABILITY_METRIC_BASELINES
+# instead of the normal win_rate 0..1 bound. Genuine win-rate rows (baseline
+# names from evaluate_agents.AGENT_REGISTRY, e.g. MEAN_IMP_BASELINES) keep the
+# probability bound.
+STABILITY_NASHCONV_BASELINE = "nashconv"
+STABILITY_METRIC_BASELINES: frozenset = frozenset({STABILITY_NASHCONV_BASELINE})
+
 _DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "runs" / "cambia_runs.db"
 
 

@@ -594,7 +594,11 @@ class PRTCFRTinyTrainer:
                 self._db_conn,
                 self._db_run_id,
                 None,
-                {"iteration": int(t), "baseline": "nashconv", "win_rate": float(value)},
+                {
+                    "iteration": int(t),
+                    "baseline": _run_db.STABILITY_NASHCONV_BASELINE,
+                    "win_rate": float(value),
+                },
             )
         except Exception as e:  # pragma: no cover - never fatal
             logger.debug("[prtcfr-tiny] nashconv journal failed (non-fatal): %s", e)
