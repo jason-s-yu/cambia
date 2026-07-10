@@ -30,7 +30,7 @@ name: prtcfr-run-001
 # kind: bench; forbidden for kind: evaluate (see below). Must not be an
 # absolute path and must not contain a ".." segment -- the runner re-resolves
 # it inside the pinned worktree and rejects anything that would escape it.
-config: config/production_train.yaml
+config: cfr/config/production_train.yaml
 
 # Optional: pin an exact 40-hex commit sha. `cambia harness submit` normally
 # resolves the commit from your clean working tree's HEAD and fills this in
