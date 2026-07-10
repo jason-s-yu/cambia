@@ -17,13 +17,17 @@ go.work.sum
 .idea/
 
 # Local dev environment
-.codebridge/*
-!.codebridge/config.yaml
+.codebridge/
 .docker/
 certs/
 docs-gen/
 .docs/
 sync-generated.sh
+
+# Internal-only serving-harness design docs (public replacement lives at
+# docs/serving-harness/); already covered by .docs/ above, listed explicitly
+# for clarity given the redaction policy that untracked these.
+.docs/serving-harness/
 
 # Local-only CFR research/analysis docs (kept in working tree, unpublished)
 cfr/docs/baseline_analysis.md
