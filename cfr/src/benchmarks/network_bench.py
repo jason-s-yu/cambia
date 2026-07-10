@@ -19,6 +19,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+from ..cfr import gpu_safety
+from ..cfr.deep_trainer import _resolve_device
 from ..encoding import INPUT_DIM, NUM_ACTIONS
 from ..networks import AdvantageNetwork, StrategyNetwork
 from .runner import BenchmarkResult
@@ -32,6 +34,54 @@ try:
 except ImportError:
     HAS_PSUTIL = False
     logger.warning("psutil not available, CPU memory profiling disabled")
+
+
+def _accel_kind(device: str) -> Optional[str]:
+    """Return the accelerator kind ('cuda' or 'xpu') named by device, else None."""
+    kind = device.split(":")[0]
+    return kind if kind in ("cuda", "xpu") else None
+
+
+def _sync(device: str) -> None:
+    """Synchronize the accelerator stream for device; no-op on cpu."""
+    kind = _accel_kind(device)
+    if kind == "cuda":
+        torch.cuda.synchronize()
+    elif kind == "xpu":
+        torch.xpu.synchronize()
+
+
+def _reset_peak_memory(device: str) -> None:
+    """Reset peak-memory tracking for device; no-op on cpu."""
+    kind = _accel_kind(device)
+    if kind == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+    elif kind == "xpu" and hasattr(torch.xpu, "reset_peak_memory_stats"):
+        torch.xpu.reset_peak_memory_stats()
+
+
+def _peak_memory_mb(device: str) -> Optional[float]:
+    """Peak accelerator memory in MB for device, or None off-accelerator."""
+    kind = _accel_kind(device)
+    if kind == "cuda":
+        return torch.cuda.max_memory_allocated() / (1024 ** 2)
+    if kind == "xpu" and hasattr(torch.xpu, "max_memory_allocated"):
+        return torch.xpu.max_memory_allocated() / (1024 ** 2)
+    return None
+
+
+def _accel_device_name(device: str) -> Optional[str]:
+    """Human-readable accelerator name for device, or None off-accelerator."""
+    kind = _accel_kind(device)
+    if kind == "cuda":
+        return torch.cuda.get_device_name(0)
+    if kind == "xpu" and hasattr(torch.xpu, "get_device_name"):
+        return torch.xpu.get_device_name()
+    return None
+
+
+def _any_accel_available() -> bool:
+    return gpu_safety.accel_available("cuda") or gpu_safety.accel_available("xpu")
 
 
 def _generate_batch(batch_size: int, device: str) -> tuple:
@@ -102,8 +152,7 @@ def benchmark_forward_pass(
                 _ = network(features, action_mask)
 
             # Synchronize for accurate timing on GPU
-            if device == "cuda":
-                torch.cuda.synchronize()
+            _sync(device)
 
             # Timed runs
             durations = []
@@ -111,8 +160,7 @@ def benchmark_forward_pass(
                 start = time.perf_counter()
                 _ = network(features, action_mask)
 
-                if device == "cuda":
-                    torch.cuda.synchronize()
+                _sync(device)
 
                 end = time.perf_counter()
                 durations.append(end - start)
@@ -223,8 +271,7 @@ def benchmark_backward_pass(
             optimizer.step()
 
         # Synchronize for accurate timing on GPU
-        if device == "cuda":
-            torch.cuda.synchronize()
+        _sync(device)
 
         # Timed runs
         durations = []
@@ -242,8 +289,7 @@ def benchmark_backward_pass(
             nn.utils.clip_grad_norm_(network.parameters(), max_norm=1.0)
             optimizer.step()
 
-            if device == "cuda":
-                torch.cuda.synchronize()
+            _sync(device)
 
             end = time.perf_counter()
             durations.append(end - start)
@@ -287,16 +333,21 @@ def benchmark_backward_pass(
 def benchmark_gpu_vs_cpu(
     batch_sizes: Optional[List[int]] = None,
     num_iters: int = 50,
+    device: Optional[str] = None,
 ) -> BenchmarkResult:
     """
-    Compare GPU vs CPU performance for forward and backward passes.
+    Compare accelerator vs CPU performance for forward and backward passes.
 
-    Runs both forward and backward benchmarks on CPU and GPU (if available),
-    then computes speedup ratios.
+    Runs both forward and backward benchmarks on CPU and the accelerator (if
+    available), then computes speedup ratios.
 
     Args:
         batch_sizes: List of batch sizes to test
         num_iters: Number of iterations per test
+        device: Accelerator device to compare against cpu. Defaults to the
+            shared auto-resolution order (cuda -> xpu -> cpu); if resolution
+            lands on cpu, no accelerator is available and the comparison is
+            skipped.
 
     Returns:
         BenchmarkResult with comparison metrics and speedup ratios
@@ -304,16 +355,17 @@ def benchmark_gpu_vs_cpu(
     if batch_sizes is None:
         batch_sizes = [1024, 2048, 4096]
 
-    logger.info("Running GPU vs CPU comparison")
+    logger.info("Running accelerator vs CPU comparison")
 
-    if not torch.cuda.is_available():
-        logger.warning("CUDA not available, skipping GPU comparison")
+    accel_device = device or _resolve_device("auto")
+    if _accel_kind(accel_device) is None:
+        logger.warning("No accelerator available, skipping GPU comparison")
         return BenchmarkResult(
             name="gpu_vs_cpu",
             config={"batch_sizes": batch_sizes},
             timings={},
-            metrics={"error": "CUDA not available"},
-            metadata={"cuda_available": False},
+            metrics={"error": "no accelerator available"},
+            metadata={"accel_available": False},
         )
 
     # Run CPU benchmarks
@@ -328,14 +380,14 @@ def benchmark_gpu_vs_cpu(
         num_iters=num_iters,
     )
 
-    # Run GPU benchmarks
+    # Run accelerator benchmarks
     gpu_forward = benchmark_forward_pass(
-        device="cuda",
+        device=accel_device,
         batch_sizes=batch_sizes,
         num_iters=num_iters,
     )
     gpu_backward = benchmark_backward_pass(
-        device="cuda",
+        device=accel_device,
         batch_sizes=batch_sizes,
         num_iters=num_iters,
     )
@@ -372,8 +424,8 @@ def benchmark_gpu_vs_cpu(
         timings={},
         metrics=metrics,
         metadata={
-            "cuda_available": True,
-            "cuda_device_name": torch.cuda.get_device_name(0),
+            "accel_available": True,
+            "accel_device_name": _accel_device_name(accel_device),
         },
     )
 
@@ -428,8 +480,8 @@ def benchmark_batch_size_sweep(
             weights = weights / weights.mean()
 
             # Reset memory tracking
-            if device == "cuda":
-                torch.cuda.reset_peak_memory_stats()
+            if _accel_kind(device) is not None:
+                _reset_peak_memory(device)
             elif HAS_PSUTIL:
                 process = psutil.Process()
                 mem_before = process.memory_info().rss
@@ -448,8 +500,7 @@ def benchmark_batch_size_sweep(
                 optimizer.step()
 
             # Synchronize
-            if device == "cuda":
-                torch.cuda.synchronize()
+            _sync(device)
 
             # Timed run
             num_iters = 50
@@ -467,8 +518,7 @@ def benchmark_batch_size_sweep(
                 nn.utils.clip_grad_norm_(network.parameters(), max_norm=1.0)
                 optimizer.step()
 
-            if device == "cuda":
-                torch.cuda.synchronize()
+            _sync(device)
 
             end = time.perf_counter()
             avg_duration = (end - start) / num_iters
@@ -478,8 +528,8 @@ def benchmark_batch_size_sweep(
             metrics[f"batch_{batch_size}_throughput"] = throughput
 
             # Measure memory
-            if device == "cuda":
-                peak_memory_mb = torch.cuda.max_memory_allocated() / (1024 ** 2)
+            peak_memory_mb = _peak_memory_mb(device)
+            if peak_memory_mb is not None:
                 metrics[f"batch_{batch_size}_memory_mb"] = peak_memory_mb
                 logger.info(
                     "Batch %d: %.2f samples/s, %.2f MB GPU memory",
@@ -579,8 +629,8 @@ def benchmark_network_performance(
     for k, v in sweep.metrics.items():
         all_metrics[f"sweep_{k}"] = v
 
-    # GPU vs CPU comparison (only if GPU available)
-    if torch.cuda.is_available() and device != "cpu":
+    # Accelerator vs CPU comparison (only if an accelerator is available)
+    if _any_accel_available() and device != "cpu":
         try:
             comparison = benchmark_gpu_vs_cpu(batch_sizes=[1024, 2048, 4096])
             for k, v in comparison.metrics.items():
@@ -599,7 +649,7 @@ def benchmark_network_performance(
         metrics=all_metrics,
         metadata={
             "device": device,
-            "cuda_available": torch.cuda.is_available(),
+            "accel_available": _any_accel_available(),
             "network_params": sum(p.numel() for p in AdvantageNetwork().parameters()),
         },
     )

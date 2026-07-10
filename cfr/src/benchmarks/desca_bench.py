@@ -11,7 +11,7 @@ Measures wall-clock time for one full DESCA iteration broken into components:
   - dtype comparison: float32 vs bf16 (on supported hardware)
 
 Usage:
-    python -m src.benchmarks.desca_bench [--device cpu|cuda|mps] [--runs-dir PATH]
+    python -m src.benchmarks.desca_bench [--device auto|cpu|cuda|mps|xpu] [--runs-dir PATH]
 
 Output:
     Prints timing table to stdout.
@@ -535,19 +535,29 @@ def _write_notes(notes_path: Path, lines: List[str]) -> None:
 # ---------------------------------------------------------------------------
 
 def run_desca_bench(
-    device_str: str = "cpu",
+    device_str: str = "auto",
     runs_dir: str = "runs",
     hidden_dim: int = 512,
     n_trav_reps: int = 3,
     sgd_steps: int = 500,
     batch_size: int = 256,
 ) -> None:
-    """Run the full DESCA XPU benchmark and write NOTES.md."""
+    """Run the full DESCA XPU benchmark and write NOTES.md.
+
+    device_str: "auto" resolves via the shared cuda -> xpu -> cpu order (see
+    src.cfr.deep_trainer._resolve_device); mps has no auto-detection support
+    upstream (torch.backends.mps has no is_available fast-path used here), so
+    it must be requested explicitly.
+    """
     from src.desca_networks import RegretNetwork, AvgStrategyNetwork, HistoryValueNetwork
     from src.action_abstraction import NUM_ABSTRACT_ACTIONS_2P
     from src.constants import EP_PBS_V2_INPUT_DIM
+    from src.cfr.deep_trainer import _resolve_device
 
-    device = torch.device(device_str)
+    resolved_device_str = (
+        _resolve_device(device_str) if device_str == "auto" else device_str
+    )
+    device = torch.device(resolved_device_str)
     dev_label = _device_info(device)
     env_factory = _make_env_factory(seed_base=0)
 
@@ -712,8 +722,8 @@ if __name__ == "__main__":
         sys.path.insert(0, str(cfr_root))
 
     parser = argparse.ArgumentParser(description="DESCA XPU benchmark")
-    parser.add_argument("--device", default="cpu", choices=["cpu", "cuda", "mps", "xpu"],
-                        help="Compute device")
+    parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps", "xpu"],
+                        help="Compute device: auto resolves cuda -> xpu -> cpu")
     parser.add_argument("--runs-dir", default="runs",
                         help="Path to cfr/runs/ directory for NOTES.md output")
     parser.add_argument("--hidden-dim", type=int, default=512,

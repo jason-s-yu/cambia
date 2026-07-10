@@ -17,6 +17,7 @@ from ..config import load_config
 from ..encoding import INPUT_DIM, NUM_ACTIONS
 from ..networks import AdvantageNetwork, StrategyNetwork
 from ..reservoir import ReservoirBuffer
+from ..cfr import gpu_safety
 from ..cfr.deep_worker import run_deep_cfr_worker
 from .runner import BenchmarkResult
 
@@ -285,6 +286,7 @@ def benchmark_e2e(
         },
         metadata={
             "device": device,
-            "cuda_available": torch.cuda.is_available(),
+            "accel_available": gpu_safety.accel_available("cuda")
+            or gpu_safety.accel_available("xpu"),
         },
     )

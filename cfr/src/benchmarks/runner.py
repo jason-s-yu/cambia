@@ -16,6 +16,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 import torch
 
+from ..cfr import gpu_safety
+from ..cfr.deep_trainer import _resolve_device
 from .reporting import print_result, save_summary
 
 logger = logging.getLogger(__name__)
@@ -70,7 +72,7 @@ class BenchmarkSuite:
     Usage:
         suite = BenchmarkSuite(notes="baseline before columnar buffer refactor")
         suite.register(my_benchmark_fn)
-        results = suite.run_all(output_dir="/workspace/benchmarks", device="cuda")
+        results = suite.run_all(output_dir="/workspace/benchmarks", device="auto")
     """
 
     def __init__(self, notes: str = ""):
@@ -120,9 +122,11 @@ class BenchmarkSuite:
         if name not in self.benchmarks:
             raise KeyError(f"Benchmark '{name}' not registered. Available: {list(self.benchmarks.keys())}")
 
-        # Determine device
-        if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+        # Determine device: resolve "auto" (and an unset device) through the
+        # shared resolver, matching the cuda -> xpu -> cpu order the rest of
+        # the CFR pipeline uses instead of a bespoke cuda-only auto-detect.
+        if device is None or device == "auto":
+            device = _resolve_device("auto")
 
         logger.info("Running benchmark: %s (device=%s)", name, device)
 
@@ -138,10 +142,19 @@ class BenchmarkSuite:
         # Add system metadata if not already present
         if "device" not in result.metadata:
             result.metadata["device"] = device
-        if "cuda_available" not in result.metadata:
-            result.metadata["cuda_available"] = torch.cuda.is_available()
-        if device == "cuda" and torch.cuda.is_available():
-            result.metadata["cuda_device_name"] = torch.cuda.get_device_name(0)
+        accel_kind = device.split(":")[0]
+        if "accel_available" not in result.metadata:
+            result.metadata["accel_available"] = (
+                gpu_safety.accel_available("cuda") or gpu_safety.accel_available("xpu")
+            )
+        if accel_kind == "cuda" and gpu_safety.accel_available("cuda"):
+            result.metadata["accel_device_name"] = torch.cuda.get_device_name(0)
+        elif (
+            accel_kind == "xpu"
+            and gpu_safety.accel_available("xpu")
+            and hasattr(torch.xpu, "get_device_name")
+        ):
+            result.metadata["accel_device_name"] = torch.xpu.get_device_name()
 
         # Print to console
         print_result(result)

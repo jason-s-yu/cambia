@@ -428,11 +428,62 @@ _ALLOWED_CUDA_SUBSTRINGS = {
         "cuda_rng and torch.cuda.is_available()",
         "for s in cuda_rng",
     ],
+    # cambia-342: cfr/src/benchmarks dev-tooling surface. These benchmarks
+    # were deliberately skipped by the cambia-329 sweep; this closes that gap
+    # so a reintroduced cuda-only default/dispatch fails loudly here too.
+    "benchmarks/__init__.py": [],
+    "benchmarks/memory_bench.py": [],
+    "benchmarks/reporting.py": [],
+    "benchmarks/worker_scaling.py": [],
+    "benchmarks/desca_bench.py": [
+        "auto|cpu|cuda|mps|xpu",
+        'device.type == "cuda"',
+        "torch.cuda.get_device_properties",
+        "torch.cuda.synchronize()",
+        "torch.cuda.is_bf16_supported()",
+        "cuda -> xpu -> cpu",
+        '"auto", "cpu", "cuda", "mps", "xpu"',
+        "CUDA tensor cores",
+        "on CUDA",
+    ],
+    "benchmarks/e2e_bench.py": [
+        '"cpu" or "cuda"',
+        'accel_available("cuda")',
+    ],
+    "benchmarks/es_bench.py": [
+        "cpu/cuda",
+    ],
+    "benchmarks/traversal_bench.py": [
+        "cpu/cuda",
+    ],
+    "benchmarks/network_bench.py": [
+        "'cuda' or 'xpu'",
+        '("cuda", "xpu")',
+        'kind == "cuda"',
+        "torch.cuda.synchronize()",
+        "torch.cuda.reset_peak_memory_stats()",
+        "torch.cuda.max_memory_allocated()",
+        "torch.cuda.get_device_name(0)",
+        'accel_available("cuda")',
+        '"cpu" or "cuda"',
+        "cuda -> xpu -> cpu",
+        '"cpu", "cuda", or "both"',
+    ],
+    "benchmarks/runner.py": [
+        '"cpu", "cuda", etc.',
+        "cuda -> xpu -> cpu",
+        "cuda-only auto-detect",
+        'accel_available("cuda")',
+        'accel_kind == "cuda"',
+        "torch.cuda.get_device_name(0)",
+    ],
 }
 
 # cli.py: scope the check to the reachable train_deep/train_desca/train_prtcfr
-# command bodies rather than the whole file (benchmark commands are a
-# separate, out-of-scope dev-tooling surface -- see the audit report).
+# command bodies rather than the whole file. The cli.py benchmark_* typer
+# command wiring itself stays out of scope here; the benchmarks/*.py library
+# code it dispatches into is covered separately (see _ALLOWED_CUDA_SUBSTRINGS
+# above, cambia-342).
 _CLI_ALLOWED_CUDA_SUBSTRINGS = [
     "auto, cpu, cuda, xpu",
     "cuda -> xpu",
