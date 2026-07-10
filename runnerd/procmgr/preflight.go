@@ -97,10 +97,22 @@ func GPUVRAMCheck(minGB float64, query GPUQueryFunc) PreflightCheck {
 // touching real devices.
 type RenderNodeGlobFunc func() ([]string, error)
 
-// DefaultRenderNodeGlob globs /dev/dri/renderD* for a real Intel Arc render
-// node.
+// DefaultRenderNodeGlob lists real Intel Arc render nodes. It accepts both
+// device-node shapes seen in deployment: the conventional /dev/dri/renderD<N>
+// name, and /dev/dri/by-path/pci-*-render, which is where a Proxmox `dev0:`
+// LXC device passthrough mounts the node when given a by-path source (the
+// compute runtime's device discovery scans by-path too, so the node is fully
+// usable there).
 func DefaultRenderNodeGlob() ([]string, error) {
-	return filepath.Glob("/dev/dri/renderD*")
+	nodes, err := filepath.Glob("/dev/dri/renderD*")
+	if err != nil {
+		return nil, err
+	}
+	byPath, err := filepath.Glob("/dev/dri/by-path/*-render")
+	if err != nil {
+		return nil, err
+	}
+	return append(nodes, byPath...), nil
 }
 
 // XPUQueryFunc returns the raw output of an xpu-smi free-memory query. It
@@ -144,7 +156,7 @@ func XPUChecks(minGB float64, renderNode RenderNodeGlobFunc, query XPUQueryFunc)
 		return []PreflightCheck{{renderName, false, fmt.Sprintf("render node probe failed: %v", err)}}
 	}
 	if len(nodes) == 0 {
-		return []PreflightCheck{{renderName, false, "no Intel GPU render node found under /dev/dri/renderD*"}}
+		return []PreflightCheck{{renderName, false, "no Intel GPU render node found under /dev/dri/renderD* or /dev/dri/by-path/*-render"}}
 	}
 	checks := []PreflightCheck{{renderName, true, fmt.Sprintf("render node present (%s)", nodes[0])}}
 
