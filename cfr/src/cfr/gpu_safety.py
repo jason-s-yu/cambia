@@ -10,7 +10,13 @@ what makes repeated allocations fast; these helpers add only one-time startup
 checks and rare-path (OOM) recovery, so steady-state throughput is unchanged.
 `cap_process_vram` sets a ceiling, not a reservation: the allocator still grows
 lazily and keeps its fast freed-block cache. Every function no-ops gracefully
-when CUDA is unavailable, so CPU-only runs and tests import and call them freely.
+when the target accelerator is unavailable, so CPU-only runs and tests import
+and call them freely.
+
+cuda and xpu (Intel Arc) expose near-identical memory/allocator APIs
+(mem_get_info, set_per_process_memory_fraction, empty_cache), so every helper
+below takes a ``device_type`` ("cuda" by default, for backward compat) and
+dispatches to the matching ``torch.cuda``/``torch.xpu`` submodule.
 """
 
 from __future__ import annotations
@@ -20,33 +26,50 @@ import functools
 import logging
 import os
 import time
-from typing import Callable, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 _GB = 1024 ** 3
 
 
-def cuda_available() -> bool:
+def _accel_module(device_type: str) -> Optional[Any]:
+    """Return the ``torch.cuda``/``torch.xpu`` submodule for ``device_type``.
+
+    None when ``device_type`` isn't an accelerator, the submodule doesn't
+    exist on this torch build, or the accelerator isn't available.
+    """
     try:
         import torch
-
-        return bool(torch.cuda.is_available())
     except Exception:
-        return False
+        return None
+    if device_type == "cuda":
+        return torch.cuda if torch.cuda.is_available() else None
+    if device_type == "xpu":
+        return torch.xpu if hasattr(torch, "xpu") and torch.xpu.is_available() else None
+    return None
 
 
-def cuda_mem_info(device: Optional[int] = None) -> Optional[Tuple[int, int]]:
+def accel_available(device_type: str = "cuda") -> bool:
+    return _accel_module(device_type) is not None
+
+
+def cuda_available() -> bool:
+    return accel_available("cuda")
+
+
+def cuda_mem_info(
+    device: Optional[int] = None, device_type: str = "cuda"
+) -> Optional[Tuple[int, int]]:
     """(free_bytes, total_bytes) for ``device`` (current device if None).
 
-    Returns None when CUDA is unavailable.
+    Returns None when ``device_type``'s accelerator is unavailable.
     """
-    if not cuda_available():
+    mod = _accel_module(device_type)
+    if mod is None:
         return None
-    import torch
-
-    dev = torch.cuda.current_device() if device is None else device
-    return torch.cuda.mem_get_info(dev)
+    dev = mod.current_device() if device is None else device
+    return mod.mem_get_info(dev)
 
 
 def require_free_vram(
@@ -55,22 +78,23 @@ def require_free_vram(
     wait_s: float = 120.0,
     poll_s: float = 3.0,
     label: str = "",
+    device_type: str = "cuda",
 ) -> None:
     """Block until at least ``need_gb`` is free on the device, else raise.
 
     Handles realtime contention: if a peer process is transiently holding VRAM,
     wait up to ``wait_s`` for it to release before giving up, instead of starting
-    a run that will OOM partway. No-op when CUDA is unavailable. Raises
-    RuntimeError with a free/total/need breakdown if the budget is not met in
-    ``wait_s``.
+    a run that will OOM partway. No-op when ``device_type``'s accelerator is
+    unavailable. Raises RuntimeError with a free/total/need breakdown if the
+    budget is not met in ``wait_s``.
     """
-    if not cuda_available():
+    if not accel_available(device_type):
         return
     need = int(need_gb * _GB)
     waited = 0.0
     tag = f"[{label}] " if label else ""
     while True:
-        free, total = cuda_mem_info(device)  # type: ignore[misc]
+        free, total = cuda_mem_info(device, device_type)  # type: ignore[misc]
         if free >= need:
             if waited > 0:
                 logger.info(
@@ -93,32 +117,36 @@ def require_free_vram(
         waited += poll_s
 
 
-def cap_process_vram(cap_gb: float, device: Optional[int] = None) -> None:
+def cap_process_vram(
+    cap_gb: float, device: Optional[int] = None, device_type: str = "cuda"
+) -> None:
     """Cap this process's VRAM at ``cap_gb`` via the caching-allocator fraction.
 
     A ceiling, not a reservation: the caching allocator still grows lazily and
     keeps its freed-block cache, so throughput is unchanged as long as ``cap_gb``
     exceeds the working set. It only prevents this job from growing without bound
-    and starving peers. No-op when CUDA is unavailable.
+    and starving peers. No-op when ``device_type``'s accelerator is unavailable.
     """
-    if not cuda_available():
+    mod = _accel_module(device_type)
+    if mod is None:
         return
-    import torch
-
-    dev = torch.cuda.current_device() if device is None else device
-    _free, total = torch.cuda.mem_get_info(dev)
+    dev = mod.current_device() if device is None else device
+    _free, total = mod.mem_get_info(dev)
     frac = max(0.0, min(1.0, (cap_gb * _GB) / total))
-    torch.cuda.set_per_process_memory_fraction(frac, dev)
+    mod.set_per_process_memory_fraction(frac, dev)
     logger.info(
-        "VRAM cap: %.1fGB (%.1f%% of %.1fGB) on cuda:%d",
-        cap_gb, frac * 100, total / _GB, dev,
+        "VRAM cap: %.1fGB (%.1f%% of %.1fGB) on %s:%d",
+        cap_gb, frac * 100, total / _GB, device_type, dev,
     )
 
 
 def oom_retry(
-    retries: int = 2, backoff_s: float = 5.0, device: Optional[int] = None
+    retries: int = 2,
+    backoff_s: float = 5.0,
+    device: Optional[int] = None,
+    device_type: str = "cuda",
 ) -> Callable:
-    """Decorator: retry a callable on CUDA OOM after empty_cache + backoff.
+    """Decorator: retry a callable on accelerator OOM after empty_cache + backoff.
 
     For the realtime case where a peer spawns mid-run and momentarily exhausts
     VRAM. Frees our cached blocks, waits, and retries up to ``retries`` times;
@@ -126,12 +154,18 @@ def oom_retry(
     on the OOM path only, so it never touches the steady-state hot loop. The
     wrapped callable is re-invoked from the top on retry, so wrap an idempotent
     unit (an eval pass, a single train step), not a stateful accumulator.
+
+    Catches ``torch.OutOfMemoryError``, the single top-level exception torch
+    raises for both cuda and xpu allocator OOMs (``torch.cuda.OutOfMemoryError``
+    is the same class object), so this retries correctly regardless of which
+    accelerator ``device_type`` names.
     """
 
     def deco(fn: Callable) -> Callable:
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
-            if not cuda_available():
+            mod = _accel_module(device_type)
+            if mod is None:
                 return fn(*args, **kwargs)
             import torch
 
@@ -139,25 +173,25 @@ def oom_retry(
             while True:
                 try:
                     return fn(*args, **kwargs)
-                except torch.cuda.OutOfMemoryError as exc:
+                except torch.OutOfMemoryError as exc:
                     if attempt >= retries:
-                        info = cuda_mem_info(device)
+                        info = cuda_mem_info(device, device_type)
                         extra = (
                             f" free={info[0] / _GB:.1f}GB total={info[1] / _GB:.1f}GB"
                             if info
                             else ""
                         )
                         raise RuntimeError(
-                            f"CUDA OOM in {fn.__name__} after {retries} retries"
-                            f"{extra}. A co-resident process likely grabbed VRAM "
-                            f"mid-run."
+                            f"{device_type} OOM in {fn.__name__} after {retries} "
+                            f"retries{extra}. A co-resident process likely grabbed "
+                            f"VRAM mid-run."
                         ) from exc
                     attempt += 1
                     logger.warning(
-                        "CUDA OOM in %s; empty_cache + retry %d/%d after %.0fs",
-                        fn.__name__, attempt, retries, backoff_s,
+                        "%s OOM in %s; empty_cache + retry %d/%d after %.0fs",
+                        device_type, fn.__name__, attempt, retries, backoff_s,
                     )
-                    torch.cuda.empty_cache()
+                    mod.empty_cache()
                     time.sleep(backoff_s)
 
         return wrapper

@@ -124,7 +124,7 @@ class PRTCFRNet(nn.Module):
         num_actions: int = NUM_ACTIONS,
         dropout: float = GRU_DROPOUT,
         pad_id: int = PAD_ID,
-        device: Optional[str] = "cuda",
+        device: Optional[str] = None,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -324,7 +324,7 @@ def build_prtcfr_net(config=None, device: Optional[str] = None) -> PRTCFRNet:
     def g(name, default):
         return getattr(config, name, default) if config is not None else default
 
-    dev = device if device is not None else g("device", "cuda")
+    dev = device if device is not None else g("device", None)
     return PRTCFRNet(
         vocab_size=g("gru_vocab_size", GRU_VOCAB_SIZE),
         embed_dim=g("gru_embed_dim", GRU_EMBED_DIM),

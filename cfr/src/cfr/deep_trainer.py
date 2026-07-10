@@ -1120,7 +1120,11 @@ class DeepCFRTrainer:
             total_loss += weighted_loss.item()
             actual_steps += 1
 
-        if self.device.type == "cuda":
+        if self.device.type != "cpu":
+            # Pinned-memory prefetch + non_blocking H2D copies: cuda supports
+            # this natively; xpu's caching allocator also honors pin_memory()
+            # and non_blocking transfers in recent torch, so route both
+            # accelerator types through the async path.
             prefetch_queue = queue.Queue(maxsize=2)
             prefetch_thread = threading.Thread(
                 target=self._prefetch_batches,
@@ -1307,6 +1311,8 @@ class DeepCFRTrainer:
                     _prof_activities = [_torch_profiler.ProfilerActivity.CPU]
                     if self.device.type == "cuda":
                         _prof_activities.append(_torch_profiler.ProfilerActivity.CUDA)
+                    elif self.device.type == "xpu":
+                        _prof_activities.append(_torch_profiler.ProfilerActivity.XPU)
                     _prof = _torch_profiler.profile(
                         activities=_prof_activities,
                         record_shapes=True,

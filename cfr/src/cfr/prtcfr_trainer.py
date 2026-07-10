@@ -288,7 +288,11 @@ class PRTCFRTinyTrainer:
         self.train_steps = int(getattr(config, "train_steps_per_iter", 256))
         self.warm_start = bool(getattr(config, "warm_start", False))
         self.seed = int(getattr(config, "seed", 0))
-        self.device = getattr(config, "device", "cuda")
+        # "cpu" is the safe universal fallback for a config object that lacks
+        # a device attribute entirely (duck-typed test configs); the real
+        # production path always sets config.device via _resolve_device
+        # before constructing this trainer, so this default is not hit there.
+        self.device = getattr(config, "device", "cpu")
 
         # --- Late-training stability (all config-gated, defaults reproduce the
         # Phase 1 gate byte-for-byte). ---
@@ -847,6 +851,55 @@ def _controller_from_dict(d: dict) -> BestSnapshotController:
     return c
 
 
+def _accel_rng_save(device: Any) -> Dict[str, List[str]]:
+    """Capture the accelerator RNG state (cuda or xpu) for resume_state.json.
+
+    Returns an empty dict for cpu devices or when the matching backend is
+    unavailable, so a CPU-trained run's resume_state.json carries no
+    accelerator RNG key at all -- the omission (not a null), matching the
+    pre-xpu CUDA-only behavior this generalizes.
+    """
+    kind = str(device).split(":")[0]
+    if kind == "cuda" and torch.cuda.is_available():
+        return {
+            "torch_cuda_rng": [
+                s.numpy().tobytes().hex() for s in torch.cuda.get_rng_state_all()
+            ]
+        }
+    if kind == "xpu" and hasattr(torch, "xpu") and torch.xpu.is_available():
+        return {
+            "torch_xpu_rng": [
+                s.numpy().tobytes().hex() for s in torch.xpu.get_rng_state_all()
+            ]
+        }
+    return {}
+
+
+def _accel_rng_restore(state: dict) -> None:
+    """Restore accelerator RNG state saved by ``_accel_rng_save``, if present.
+
+    A resume_state.json written by a CPU run, or a pre-xpu-RNG version of this
+    trainer, simply has neither key: restore is CPU-only in that case, which
+    is the documented backward-compatible fallback, not an error.
+    """
+    cuda_rng = state.get("torch_cuda_rng")
+    if cuda_rng and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(
+            [
+                torch.from_numpy(np.frombuffer(bytes.fromhex(s), dtype=np.uint8).copy())
+                for s in cuda_rng
+            ]
+        )
+    xpu_rng = state.get("torch_xpu_rng")
+    if xpu_rng and hasattr(torch, "xpu") and torch.xpu.is_available():
+        torch.xpu.set_rng_state_all(
+            [
+                torch.from_numpy(np.frombuffer(bytes.fromhex(s), dtype=np.uint8).copy())
+                for s in xpu_rng
+            ]
+        )
+
+
 @dataclass
 class PRTCFRProductionTrainState:
     """Per-iteration record (returned for logging/tests; one metrics.jsonl row)."""
@@ -926,7 +979,11 @@ class PRTCFRProductionTrainer:
         self.max_trajectory_steps = int(getattr(config, "max_trajectory_steps", 4000))
         self.backend = str(getattr(config, "backend", "go"))
         self.seed = int(getattr(config, "seed", 0))
-        self.device = getattr(config, "device", "cuda")
+        # "cpu" is the safe universal fallback for a config object that lacks
+        # a device attribute entirely (duck-typed test configs); the real
+        # production path always sets config.device via _resolve_device
+        # before constructing this trainer, so this default is not hit there.
+        self.device = getattr(config, "device", "cpu")
         self.reservoir_capacity = int(getattr(config, "reservoir_capacity", 20_000_000))
         # Batched incremental generation (S1W15, the X3 gen remedy).
         self.gen_batched = bool(getattr(config, "gen_batched", True))
@@ -1196,9 +1253,10 @@ class PRTCFRProductionTrainer:
         end of iteration ``t``. Written via a temp file + atomic rename so an
         interruption mid-write never leaves a torn resume_state.json.
 
-        ``torch_cuda_rng`` is populated only when this trainer's device is CUDA
-        and CUDA is available; it is omitted (not merely null) otherwise, so a
-        CPU-trained run's resume_state.json carries no CUDA key at all. Older
+        ``torch_cuda_rng``/``torch_xpu_rng`` is populated only when this
+        trainer's device matches that accelerator and it is available; it is
+        omitted (not merely null) otherwise, so a CPU-trained run's
+        resume_state.json carries no accelerator RNG key at all. Older
         resume_state.json files written before this field existed simply lack
         the key, which ``_load_resume_state`` treats as "nothing to restore"
         (CPU-only restore, backward compatible).
@@ -1215,10 +1273,7 @@ class PRTCFRProductionTrainer:
                 else None
             ),
         }
-        if str(self.device).startswith("cuda") and torch.cuda.is_available():
-            state["torch_cuda_rng"] = [
-                s.numpy().tobytes().hex() for s in torch.cuda.get_rng_state_all()
-            ]
+        state.update(_accel_rng_save(self.device))
         path = self.resume_state_path()
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -1282,23 +1337,18 @@ class PRTCFRProductionTrainer:
             self.reservoirs[p].load()
 
         # 3. RNG: the fit-side numpy Generator + the torch global (CPU) RNG,
-        # plus the CUDA RNG when this resume_state.json carries it. A
-        # resume_state.json written by a CPU run (or by a pre-CUDA-RNG version
-        # of this trainer) simply has no "torch_cuda_rng" key: restore is
-        # CPU-only in that case, which is the documented backward-compatible
-        # fallback, not an error.
+        # plus the accelerator RNG (cuda or xpu) when this resume_state.json
+        # carries it. A resume_state.json written by a CPU run (or by a
+        # pre-accelerator-RNG version of this trainer) simply has neither
+        # "torch_cuda_rng" nor "torch_xpu_rng" key: restore is CPU-only in
+        # that case, which is the documented backward-compatible fallback,
+        # not an error.
         self._fit_rng.bit_generator.state = state["numpy_rng"]
         torch_bytes = np.frombuffer(
             bytes.fromhex(state["torch_rng"]), dtype=np.uint8
         ).copy()
         torch.random.set_rng_state(torch.from_numpy(torch_bytes))
-        cuda_rng = state.get("torch_cuda_rng")
-        if cuda_rng and torch.cuda.is_available():
-            cuda_states = [
-                torch.from_numpy(np.frombuffer(bytes.fromhex(s), dtype=np.uint8).copy())
-                for s in cuda_rng
-            ]
-            torch.cuda.set_rng_state_all(cuda_states)
+        _accel_rng_restore(state)
 
         # 4. Controller + the written-snapshot list (drives the deployable
         # manifest). ``self._history`` stays empty: train() returns only the

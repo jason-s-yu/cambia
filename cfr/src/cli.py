@@ -197,13 +197,13 @@ def train_deep(
     amp: Optional[bool] = typer.Option(
         None,
         "--amp/--no-amp",
-        help="Enable/disable automatic mixed precision (AMP) on CUDA",
+        help="Enable/disable automatic mixed precision (AMP) on CUDA/XPU",
         rich_help_panel="Deep CFR Overrides",
     ),
     compile: Optional[bool] = typer.Option(
         None,
         "--compile/--no-compile",
-        help="Enable/disable torch.compile on CUDA",
+        help="Enable/disable torch.compile on CUDA/XPU",
         rich_help_panel="Deep CFR Overrides",
     ),
     headless: bool = typer.Option(
@@ -1383,21 +1383,17 @@ def train_desca(
     if iterations is not None:
         desca_cfg.iterations = iterations
 
-    # Resolve device: CLI > "cpu". Avoid "auto" - resolve it concretely here.
+    # Resolve device: CLI > config > "cpu". Reuses the shared cuda -> xpu ->
+    # cpu resolver instead of forking a separate cuda-only auto-detect (the
+    # inline version here used to silently drop an xpu-capable host to cpu).
+    from .cfr.deep_trainer import _resolve_device
+
     _raw_device = device or getattr(getattr(cfg, "deep_cfr", None), "device", None) or "cpu"
-    if _raw_device == "auto":
-        try:
-            import torch as _torch
-            if _torch.cuda.is_available():
-                _device = "cuda"
-            elif hasattr(_torch, "xpu") and _torch.xpu.is_available():
-                _device = "xpu"
-            else:
-                _device = "cpu"
-        except Exception:
-            _device = "cpu"
-    else:
-        _device = _raw_device
+    try:
+        _device = _resolve_device(_raw_device)
+    except RuntimeError as _e:
+        print(f"ERROR: {_e}", file=sys.stderr)
+        raise typer.Exit(1)
 
     try:
         from .desca_networks import (
@@ -1526,7 +1522,7 @@ def train_prtcfr(
     device: Optional[str] = typer.Option(
         None,
         "--device",
-        help="Training device: auto, cpu, cuda (default: config prt_cfr.device)",
+        help="Training device: auto, cpu, cuda, xpu (default: config prt_cfr.device)",
     ),
     backend: Optional[str] = typer.Option(
         None,
@@ -1615,10 +1611,12 @@ def train_prtcfr(
     except Exception as _e:
         print(f"WARNING: could not materialize config.yaml: {_e}", file=sys.stderr)
 
-    # GPU failsafes for the run path (no-ops on CPU; keeps the caching allocator).
-    if _device.startswith("cuda") and gpu_safety.cuda_available():
+    # GPU/XPU failsafes for the run path (no-ops on CPU; keeps the caching
+    # allocator). _device may carry an index suffix (e.g. "cuda:0").
+    _accel_type = _device.split(":")[0]
+    if _accel_type in ("cuda", "xpu") and gpu_safety.accel_available(_accel_type):
         try:
-            gpu_safety.require_free_vram(2.0, label="prtcfr")
+            gpu_safety.require_free_vram(2.0, label="prtcfr", device_type=_accel_type)
         except RuntimeError as _e:
             print(f"ERROR: {_e}", file=sys.stderr)
             raise typer.Exit(1)

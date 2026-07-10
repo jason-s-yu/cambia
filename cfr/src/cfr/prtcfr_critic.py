@@ -409,7 +409,7 @@ class PRTCFRCriticNet(nn.Module):
         head_hidden_dim: int = CRITIC_HEAD_HIDDEN_DIM,
         dropout: float = CRITIC_GRU_DROPOUT,
         pad_id: int = PAD_ID,
-        device: Optional[str] = "cuda",
+        device: Optional[str] = None,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -498,7 +498,7 @@ def build_prtcfr_critic_net(
     def g(name, default):
         return getattr(config, name, default) if config is not None else default
 
-    dev = device if device is not None else g("critic_device", g("device", "cuda"))
+    dev = device if device is not None else g("critic_device", g("device", None))
     return PRTCFRCriticNet(
         vocab_size=g("critic_vocab_size", VOCAB_SIZE),
         embed_dim=g("critic_gru_embed_dim", CRITIC_GRU_EMBED_DIM),
