@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/jason-s-yu/cambia/service/internal/cache"
 	"github.com/jason-s-yu/cambia/service/internal/database"
 	"github.com/jason-s-yu/cambia/service/internal/handlers"
+	"github.com/jason-s-yu/cambia/service/internal/harnessproxy"
 	"github.com/jason-s-yu/cambia/service/internal/hub"
 	"github.com/jason-s-yu/cambia/service/internal/matchmaking"
 	"github.com/jason-s-yu/cambia/service/internal/middleware"
@@ -188,6 +190,23 @@ func main() {
 			MinVRAMGB:     minVRAMGB,
 			MinDiskGB:     minDiskGB,
 		})
+
+		// Harness control-plane proxy (cambia-295 v1.1): loaded from the
+		// host-local harness config. Absent config -> nil client -> remote runs
+		// stay read-only (409) and log tails use the synced file (exact v1
+		// behavior). A present-but-invalid config or a client-init failure is
+		// logged and treated as absent, never fatal.
+		if hcfg, herr := harnessproxy.LoadConfig(); herr == nil {
+			if client, cerr := harnessproxy.New(hcfg); cerr == nil {
+				trainingStore.SetHarnessProxy(client)
+				procHandlers.SetHarnessProxy(client)
+				log.Printf("Harness proxy enabled: runner=%s origin=%s", hcfg.RunnerURL, hcfg.OriginHost)
+			} else {
+				log.Printf("Harness proxy config found but client init failed (remote runs read-only): %v", cerr)
+			}
+		} else if !errors.Is(herr, harnessproxy.ErrNoConfig) {
+			log.Printf("Harness proxy config error (remote runs read-only): %v", herr)
+		}
 
 		// Eval subsystem: a supervised `cambia evaluate` child with its own
 		// in-memory job registry and concurrency cap (default 1), separate from the

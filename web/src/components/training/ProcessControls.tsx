@@ -2,19 +2,29 @@
 import React, { useState } from 'react';
 import { useTrainingStore } from '@/stores/trainingStore';
 import type { ProcessState } from '@/types/training';
+import Modal from '@/components/common/Modal';
 
 type LastAction = 'start' | 'stop' | 'resume' | null;
 
 interface ProcessControlsProps {
 	processState: ProcessState;
 	onChanged?: () => void;
+	/** True when this run is a remote (serving-harness) run controllable via the
+	 * dashboard's harness proxy: start/stop/resume are forwarded to the runner and
+	 * the dashboard reflects the result on the next sync, so the controls show a
+	 * "requested / pending sync" note instead of an immediate state flip. */
+	remote?: boolean;
 }
 
-const ProcessControls: React.FC<ProcessControlsProps> = ({ processState, onChanged }) => {
-	const { startRun, stopRun, resumeRun, preflight, processes } = useTrainingStore();
+const ProcessControls: React.FC<ProcessControlsProps> = ({ processState, onChanged, remote = false }) => {
+	const { startRun, stopRun, resumeRun, preflight, processes, actionError } = useTrainingStore();
 	const [force, setForce] = useState(false);
 	const [lastAction, setLastAction] = useState<LastAction>(null);
 	const [isBusy, setIsBusy] = useState(false);
+	// A stop is destructive (it can cancel a multi-day training run, local or
+	// remote), so it is gated behind an explicit confirmation. pendingStopForce
+	// carries the force flag the confirmed stop will use (null = modal closed).
+	const [pendingStopForce, setPendingStopForce] = useState<boolean | null>(null);
 
 	// The store keeps a live process map keyed by name, updated in place after
 	// every start/stop/resume response; prefer it over the possibly-stale prop
@@ -33,14 +43,23 @@ const ProcessControls: React.FC<ProcessControlsProps> = ({ processState, onChang
 	};
 
 	const handleStart = () => runAction('start', () => startRun(live.name, { force }));
-	const handleStop = () => runAction('stop', () => stopRun(live.name, { force }));
 	const handleResume = () => runAction('resume', () => resumeRun(live.name, { force }));
 
+	// Stop routes through the confirmation modal (both local and remote); the
+	// confirmed stop uses pendingStopForce.
+	const requestStop = (stopForce: boolean) => setPendingStopForce(stopForce);
+	const cancelStop = () => setPendingStopForce(null);
+	const confirmStop = () => {
+		const f = pendingStopForce ?? false;
+		setPendingStopForce(null);
+		setForce(f);
+		runAction('stop', () => stopRun(live.name, { force: f }));
+	};
+
 	const handleRetryWithForce = () => {
-		setForce(true);
-		if (lastAction === 'start') runAction('start', () => startRun(live.name, { force: true }));
-		else if (lastAction === 'resume') runAction('resume', () => resumeRun(live.name, { force: true }));
-		else if (lastAction === 'stop') runAction('stop', () => stopRun(live.name, { force: true }));
+		if (lastAction === 'start') { setForce(true); runAction('start', () => startRun(live.name, { force: true })); }
+		else if (lastAction === 'resume') { setForce(true); runAction('resume', () => resumeRun(live.name, { force: true })); }
+		else if (lastAction === 'stop') { requestStop(true); }
 	};
 
 	const canStart = live.status === 'created';
@@ -50,8 +69,15 @@ const ProcessControls: React.FC<ProcessControlsProps> = ({ processState, onChang
 
 	return (
 		<div className="space-y-3">
+			{remote && (
+				<p className="text-xs text-purple-700 dark:text-purple-300">
+					Remote run: actions are forwarded to the origin host. This dashboard
+					reflects the result on the next sync (~60s).
+				</p>
+			)}
+
 			<div className="flex flex-wrap items-center gap-3">
-				{canStart && (
+				{canStart && !remote && (
 					<button
 						onClick={handleStart}
 						disabled={isBusy}
@@ -62,7 +88,7 @@ const ProcessControls: React.FC<ProcessControlsProps> = ({ processState, onChang
 				)}
 				{canStop && (
 					<button
-						onClick={handleStop}
+						onClick={() => requestStop(force)}
 						disabled={isBusy}
 						className="px-3 py-1.5 rounded text-sm font-medium bg-red-600 hover:bg-red-700 text-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
 					>
@@ -95,6 +121,12 @@ const ProcessControls: React.FC<ProcessControlsProps> = ({ processState, onChang
 				</label>
 			</div>
 
+			{actionError && (
+				<div className="border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950 rounded-md p-2 text-sm text-red-700 dark:text-red-300">
+					{actionError}
+				</div>
+			)}
+
 			{preflight && preflight.length > 0 && (
 				<div className="border border-gray-200 dark:border-gray-700 rounded-md p-3 space-y-2">
 					<h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300">
@@ -125,6 +157,29 @@ const ProcessControls: React.FC<ProcessControlsProps> = ({ processState, onChang
 					)}
 				</div>
 			)}
+
+			<Modal isOpen={pendingStopForce !== null} onClose={cancelStop} title="Stop this run?">
+				<p className="text-sm text-gray-600 dark:text-gray-300">
+					{remote
+						? `This forwards a ${pendingStopForce ? 'force-kill (SIGKILL)' : 'graceful stop (SIGINT)'} to the origin host and interrupts the training run.`
+						: `This ${pendingStopForce ? 'force-kills (SIGKILL)' : 'gracefully stops (SIGINT)'} the training process.`}
+					{' '}It can interrupt a multi-day run. Resuming continues from the last checkpoint.
+				</p>
+				<div className="mt-5 flex justify-end gap-2">
+					<button
+						onClick={cancelStop}
+						className="px-3 py-1.5 rounded text-sm font-medium bg-gray-200 hover:bg-gray-300 text-gray-800 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-gray-100 transition-colors"
+					>
+						Cancel
+					</button>
+					<button
+						onClick={confirmStop}
+						className="px-3 py-1.5 rounded text-sm font-medium bg-red-600 hover:bg-red-700 text-white transition-colors"
+					>
+						{pendingStopForce ? 'Force stop' : 'Stop'}
+					</button>
+				</div>
+			</Modal>
 		</div>
 	);
 };

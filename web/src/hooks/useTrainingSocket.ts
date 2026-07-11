@@ -48,6 +48,11 @@ export function useTrainingSocket(runName: string | undefined) {
 					useTrainingStore.getState().appendLogLine(msg.data.line);
 				} else if (msg.type === 'log_backfill' && Array.isArray(msg.data?.lines)) {
 					useTrainingStore.getState().appendLogBackfill(msg.data.lines);
+				} else if (msg.type === 'log_notice' && msg.data?.message != null) {
+					// The server sends log_notice when a remote run's runner is
+					// unreachable and it has fallen back to the last synced log. Surface
+					// it inline so the tail is not mistaken for live runner output.
+					useTrainingStore.getState().appendLogLine(`[dashboard] ${msg.data.message}`);
 				}
 			} catch {
 				// Ignore parse errors
