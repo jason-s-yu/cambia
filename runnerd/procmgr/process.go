@@ -380,6 +380,19 @@ func (m *ProcessManager) launch(name string, opts StartOpts, lopts LaunchOpts, r
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
+	// Persist `starting` before the fork (cambia-352 queue-persistence
+	// idempotency): once a child is forked the row is at least `starting`, so a
+	// `created` row provably never spawned a process and the dispatcher can
+	// re-enqueue it on restart without risking a double-run. A crash between here
+	// and the running write below leaves `starting`, which Reconcile flips to
+	// crashed via pid liveness (PID is still the pre-launch value), exactly as a
+	// running row.
+	st.Status = StatusStarting
+	if err := WriteProcessState(runDir, st); err != nil {
+		logFile.Close()
+		return nil, err
+	}
+
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
 		return nil, fmt.Errorf("start %q: %w", name, err)

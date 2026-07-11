@@ -13,6 +13,7 @@ type JobView struct {
 	Commit     string `json:"commit,omitempty"`
 	Config     string `json:"config,omitempty"`
 	Resume     bool   `json:"resume,omitempty"`
+	After      string `json:"after,omitempty"`
 	PID        int    `json:"pid,omitempty"`
 	ExitCode   *int   `json:"exit_code,omitempty"`
 	LastError  string `json:"last_error,omitempty"`
@@ -47,6 +48,7 @@ func (d *Dispatcher) pendingViewLocked(name string) JobView {
 		Commit:    j.spec.Commit,
 		Config:    j.spec.Config,
 		Resume:    j.resume,
+		After:     j.spec.After,
 		CreatedAt: j.submitAt,
 	}
 	if j.state == StateQueued {
@@ -100,6 +102,7 @@ func (d *Dispatcher) resolveView(name string) (JobView, bool) {
 		v.Config = spec.Config
 		v.Priority = spec.Priority
 		v.Resume = spec.Resume
+		v.After = spec.After
 	}
 	if pending {
 		v.State = pendingState

@@ -165,15 +165,43 @@ def submit(
     force: bool = typer.Option(
         False, "--force", help="Set spec.force (only gpu_vram is forceable in v1)"
     ),
+    after: Optional[str] = typer.Option(
+        None, "--after", help="Gate this job on another job id finishing first (cambia-352)"
+    ),
+    on_failure: Optional[str] = typer.Option(
+        None,
+        "--on-failure",
+        help="Parent-failure policy: skip (default) | run | fail. Requires --after.",
+    ),
     config: Optional[str] = _CONFIG_OPT,
 ):
     """Push the pinned commit to the runner mirror and submit a job."""
     from src.harness.client import HarnessAPIError
-    from src.harness.spec import HarnessSpecError, parse_spec_file
+    from src.harness.spec import HarnessSpecError, JobSpec, parse_spec_file
 
     cfg = _load_cfg(config)
+    # isinstance(str) rather than `is not None`: a direct call (tests) leaves an
+    # unpassed typer Option as its OptionInfo sentinel, which must count as "not
+    # provided" just like a real CLI invocation's None default.
+    after_flag = after if isinstance(after, str) else None
+    on_failure_flag = on_failure if isinstance(on_failure, str) else None
     try:
-        spec = parse_spec_file(str(spec_file))
+        if after_flag is not None or on_failure_flag is not None:
+            # CLI flags override the spec-file keys for the dependency gate; re-parse
+            # the raw mapping with them applied so the same validation runs.
+            import yaml
+
+            with open(spec_file, "r", encoding="utf-8") as fh:
+                raw = yaml.safe_load(fh)
+            if raw is None:
+                raise HarnessSpecError(f"spec file is empty: {spec_file}")
+            if after_flag is not None:
+                raw["after"] = after_flag
+            if on_failure_flag is not None:
+                raw["on_failure"] = on_failure_flag
+            spec = JobSpec.parse(raw)
+        else:
+            spec = parse_spec_file(str(spec_file))
     except (HarnessSpecError, OSError) as exc:
         _fail(f"invalid spec: {exc}")
 

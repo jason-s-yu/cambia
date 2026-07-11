@@ -79,6 +79,23 @@ priority: normal
 # never forceable over the API, with or without force: true.
 force: false
 
+# Optional, any kind: cross-job sequencing (cambia-352). `after` names ONE
+# already-submitted job (its parent) that must finish before this job launches;
+# the parent must already exist on the runner at submit time (a terminal parent
+# is fine, its outcome is resolved at dispatch), and it cannot be this job
+# itself. A parent that exits cleanly ALWAYS runs the dependent. `on_failure`
+# governs only the failure branch (parent crashed/failed/canceled/skipped, a
+# graceful-stop with a nonzero exit, or a purged parent):
+#   skip (default) -- mark this job `skipped` and never run it
+#   run            -- launch it anyway
+#   fail           -- mark this job `failed`
+# The queue is a first-ready scan: a job whose parent has not finished yet waits
+# without blocking later ready jobs. Both keys can also be passed as
+# `--after`/`--on-failure` flags to `cambia harness submit`, which override the
+# spec-file values.
+# after: some-earlier-job
+# on_failure: skip
+
 # ---------------------------------------------------------------------------
 # evaluate example (inactive -- everything below is commented out). To use it,
 # comment out or delete the train fields above and uncomment this block.

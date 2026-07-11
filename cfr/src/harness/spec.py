@@ -27,6 +27,11 @@ ALLOWED_KINDS = ("train", "evaluate", "head-to-head", "bench")
 # a client check.
 ALLOWED_DEVICES = ("cpu", "cuda", "xpu")
 
+# on_failure policies for an `after` dependency (cambia-352). They govern only
+# the parent-failure branch; a parent success always runs the dependent. skip is
+# the default. Allowed on every kind.
+ON_FAILURE_POLICIES = ("skip", "run", "fail")
+
 # Mirror of the Go runNameRe: leading alphanumeric, then up to 127 more chars
 # from [A-Za-z0-9._-]; 128 max. Combined with the explicit ".."/"/" reject it is
 # the path-traversal guard the run name gets before any directory join.
@@ -98,6 +103,8 @@ class JobSpec:
     priority: str = "normal"
     force: bool = False
     warm_start: Optional[str] = None
+    after: Optional[str] = None
+    on_failure: str = "skip"
 
     _KNOWN_KEYS = frozenset(
         {
@@ -115,6 +122,8 @@ class JobSpec:
             "priority",
             "force",
             "warm_start",
+            "after",
+            "on_failure",
         }
     )
 
@@ -216,6 +225,22 @@ class JobSpec:
         if kind == "train" and target is not None:
             raise HarnessSpecError("target is not valid for kind='train'")
 
+        # Cross-job dependency (cambia-352): after names a single parent job
+        # (same name rules as the job itself); a self-reference is rejected. The
+        # runner re-checks that the parent exists. on_failure governs only the
+        # failure branch. Both are allowed on every kind.
+        after = raw.get("after")
+        if after is not None:
+            validate_name(after)
+            if after == name:
+                raise HarnessSpecError("after must not reference the job itself")
+
+        on_failure = raw.get("on_failure", "skip")
+        if on_failure not in ON_FAILURE_POLICIES:
+            raise HarnessSpecError(
+                f"on_failure must be one of {list(ON_FAILURE_POLICIES)}, got {on_failure!r}"
+            )
+
         return cls(
             kind=kind,
             name=name,
@@ -231,6 +256,8 @@ class JobSpec:
             priority=priority,
             force=bool(raw.get("force", False)),
             warm_start=warm_start,
+            after=after,
+            on_failure=on_failure,
         )
 
     def to_payload(self, commit: str) -> Dict[str, Any]:
@@ -262,6 +289,10 @@ class JobSpec:
             payload["games"] = self.games
         if self.warm_start is not None:
             payload["warm_start"] = self.warm_start
+        # on_failure is inert without after, so both travel together.
+        if self.after is not None:
+            payload["after"] = self.after
+            payload["on_failure"] = self.on_failure
         return payload
 
 

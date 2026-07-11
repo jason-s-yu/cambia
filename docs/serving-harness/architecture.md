@@ -115,35 +115,67 @@ processing happens.
 
 **Queue.** Submissions enter a bounded, in-memory FIFO queue; a submission past
 the configured depth cap is rejected outright rather than silently queued
-forever. A dispatcher admits queued jobs up to a concurrency cap and launches
-them in submission order. Because the queue is in-memory, a daemon restart
-clears it: jobs that were only queued (never launched) are not silently
-resumed; see the reconciliation sweep below.
+forever. A dispatcher admits queued jobs up to a concurrency cap. The scan is
+first-ready, not strict head-of-line FIFO: jobs are considered in submission
+order, but a job whose cross-job dependency (see below) has not yet resolved is
+skipped over so a later ready job is not blocked behind it. A ready job that
+finds no free concurrency slot keeps its place; the relative order of the jobs
+that stay queued is preserved. Every admitted job already has its process
+record and job spec on disk before it is enqueued, so the queue itself is
+reconstructed from disk on restart rather than lost; see startup reconciliation.
 
 **State machine.** A job is admitted to disk immediately on submission, then
 moves through preparing (worktree checkout, environment and build cache
 resolution, config render) to running, and from there to one of several
-terminal states: stopped (clean exit), crashed, canceled, or failed. Resuming a
-job always produces a new launch rather than reopening the old one; a terminal
-job's identity persists so its history stays attributable, but its execution
-does not restart in place.
+terminal states: stopped (clean exit), crashed, canceled, failed, or skipped
+(a dependent whose parent did not succeed and whose failure policy is skip).
+Resuming a job always produces a new launch rather than reopening the old one; a
+terminal job's identity persists so its history stays attributable, but its
+execution does not restart in place.
 
-**Startup reconciliation.** On daemon restart, a sweep closes the crash window
-left by an ungraceful shutdown: any job that was mid-transition with no live
-process behind it is resolved to crashed, and any job that was still preparing
-(with, by construction, an empty queue at startup) is resolved to failed. The
-same sweep reclaims that job's worktree and any cache references it held. The
-daemon never auto-resumes a job on its own; resuming is always an explicit,
-operator-initiated action.
+**Startup reconciliation.** On daemon restart, a sweep first closes the crash
+window left by an ungraceful shutdown: any job that was mid-transition (starting,
+running, stopping) with no live process behind it is resolved to crashed. The
+launch path persists a `starting` marker before it forks, so a `created` record
+provably never spawned a process and is safe to re-run. The sweep then rebuilds
+the queue: every `created` job whose job spec is still readable is re-enqueued in
+its persisted submission order and prepared from scratch, while a `created` job
+whose spec is missing or corrupt is an incomplete admission and is failed
+(handled per file, so one bad record does not sink the others). Live jobs hand
+their worktree and cache references to the ingest startup sweep as before. The
+daemon never auto-*resumes* a job (resume stays an explicit operator action),
+but it does restore jobs that were only queued at the crash, since those never
+ran and re-running them is safe.
 
 **Resume.** Resuming is gated strictly on the presence of the training
 algorithm's own resume-state record and a checkpoint actually on disk for that
 run: nothing is inferred or assumed; a job is either resumable or it isn't, and
-the API says so.
+the API says so. A resumed job ignores its own `after` dependency, since it
+already cleared that gate on its first launch; resuming is an explicit operator
+action, not a re-evaluation of the gate.
+
+**Cross-job sequencing (`after`).** A job may name a single parent job it depends
+on via `after`, with an `on_failure` policy of skip (default), run, or fail. The
+parent must already exist at submit time, so cycles are structurally impossible
+(a parent exists strictly before its child) and a job cannot depend on itself.
+The gate is evaluated at the launch slot, against the parent's current state,
+every dispatch: while the parent is non-terminal the dependent waits; a clean
+parent exit always launches it; a parent failure (crashed, failed, canceled,
+skipped, a graceful-stop with a nonzero exit, or a run directory purged out from
+under it) takes the `on_failure` branch, which skips (a new `skipped` terminal),
+fails, or runs the dependent. Because the parent's live state is re-read each
+time, a parent that is resumed (and so leaves its terminal state) makes a
+still-waiting dependent wait again until the parent finishes anew. Re-arming is
+emergent: the dispatch scan already runs on every terminal transition and on
+submit, so a dependent resolves as soon as its parent settles.
 
 **Purge.** A terminal job's run directory can be explicitly purged to free its
 name for reuse. Purge refuses to act on any job that is not yet terminal, so a
-live run's data can never be reclaimed out from under it.
+live run's data can never be reclaimed out from under it. It also refuses a
+parent that still has queued dependents unless the caller opts into cascade,
+which marks those dependents skipped before removing the parent; the gate's
+dir-gone failure branch is the backstop for any dependent that races in after
+the check.
 
 **Validation order at submit.** Name well-formedness, then a name-collision
 check (a job name can never be silently reused while another run of that name
@@ -151,7 +183,9 @@ exists), then the kind allowlist, then per-kind field scoping (for example, an
 `evaluate` job requires a target and a `train` job forbids one; conversely, a
 `train` job may optionally carry a `warm_start` referencing another run's
 staged snapshot, which `evaluate`/`head-to-head`/`bench` forbid, and which is
-containment-guarded the same way the evaluate target is), then path
+containment-guarded the same way the evaluate target is), then the cross-job
+dependency check (a well-formed `after` parent name that is neither the job
+itself nor a missing job, and a valid `on_failure` policy), then path
 guards on every spec field that names a file (see Security below), then
 resource preflights (disk space, free memory, a device-capability check against
 the runner's advertised device list, and a device-aware GPU preflight for
