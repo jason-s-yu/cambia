@@ -602,7 +602,22 @@ class PRTCFRConfig(_CambiaBaseModel):
     # for net + iteration only. Distinct from ``warm_start`` (the per-iteration
     # refit-init policy). None starts fresh. The serving harness surfaces its
     # spec ``warm_start`` field here as an absolute path render rail.
+    #
+    # Semantics (cambia-374): a bare .pt carries net weights + iteration only,
+    # so warm-starting from one restarts the reservoir EMPTY and fine-tunes the
+    # imported net on regret targets from a tiny immature buffer -- a fresh run
+    # with a net prior, NOT a continuation. Measured effect: ~0.2-NashConv
+    # snapshots that dominate the linear SD-CFR mixture. Full mode (a run dir
+    # or its resume_state.json) restores net + reservoir and is the only
+    # state-faithful continuation path; verdict/ruled continuations must use
+    # it. warm_start_net_only_ok gates the net-only path explicitly.
     warm_start_path: Optional[str] = None
+    # Explicit opt-in required to warm-start from a bare .pt (see warm_start_path
+    # above). False (default): _resolve_warm_start raises when the path
+    # classifies as net-only, naming the fix (point at the run dir) instead of
+    # silently producing a fresh-run-with-net-prior snapshot lineage. Full-mode
+    # warm start and --resume are never affected by this flag.
+    warm_start_net_only_ok: bool = False
 
 
 # --- Baseline Agent Configuration ---

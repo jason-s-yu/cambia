@@ -240,6 +240,8 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         # Tiny-gate + full-state warm-start (cambia-334).
         tiny_gate: bool = False
         warm_start_path: object = None
+        # Net-only warm-start guard opt-in (cambia-374).
+        warm_start_net_only_ok: bool = False
 
     def _load_config(path: str):
         """Stub load_config: delegate to the real load_config implementation."""

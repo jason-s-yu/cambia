@@ -58,6 +58,11 @@ resume: false
 # continuation, or at a snapshot .pt for net + iteration only. Only the tiny-gate
 # (prt_cfr.tiny_gate) trainer consumes it in v1. Distinct from `resume`, which
 # continues THIS run in place.
+#
+# A snapshot-.pt target is a fresh run with a net prior, not a continuation
+# (cambia-374): the reservoir restarts empty, so the trainer raises unless the
+# config also sets `prt_cfr.warm_start_net_only_ok: true` via `overrides`.
+# Prefer a run dir / resume_state.json target for verdict/ruled continuations.
 # warm_start: v0.4-x2-530/snapshots/prtcfr_snapshot_iter_530.pt
 
 # Compute device the job runs on. One of: cpu, cuda, xpu. This client-side
