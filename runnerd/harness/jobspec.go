@@ -19,6 +19,19 @@ const (
 	StatePreparing = "preparing"
 	StateCanceled  = "canceled"
 	StateFailed    = "failed"
+	// StateSkipped is the terminal state of a dependent whose parent reached a
+	// non-success terminal and whose on_failure policy is skip (cambia-352). A
+	// sibling ticket's state enum carries the same name; keep it exact.
+	StateSkipped = "skipped"
+)
+
+// on_failure policies (cambia-352). They govern only the parent-failure branch
+// of an `after` dependency: a parent success always runs the dependent. skip is
+// the default (an empty on_failure).
+const (
+	OnFailureSkip = "skip"
+	OnFailureRun  = "run"
+	OnFailureFail = "fail"
 )
 
 // terminalStates is the set of states from which a job does not transition
@@ -27,6 +40,7 @@ const (
 var terminalStates = map[string]bool{
 	StateCanceled:         true,
 	StateFailed:           true,
+	StateSkipped:          true,
 	procmgr.StatusStopped: true,
 	procmgr.StatusCrashed: true,
 }
@@ -84,6 +98,40 @@ type JobSpec struct {
 	// job initializes from (design cambia-334). Empty means no warm start. Valid
 	// only for kind=train; see warmStartForbidden.
 	WarmStart string `json:"warm_start"`
+	// After optionally gates this job on another job (its single parent) finishing
+	// first (cambia-352). Empty means no dependency; allowed on every kind. A
+	// parent success always runs the dependent; OnFailure governs only the
+	// parent-failure branch. The parent must exist at submit (validated in the
+	// handler); the gate resolves the parent's outcome at dispatch time.
+	After string `json:"after,omitempty"`
+	// OnFailure selects the failure-branch behavior when After's parent reaches a
+	// non-success terminal (crashed/failed/canceled/skipped, a graceful-stop with
+	// a nonzero exit, or a purged run dir): skip (default) marks this job
+	// StateSkipped, run launches it anyway, fail marks it StateFailed. Empty means
+	// skip. Inert without After.
+	OnFailure string `json:"on_failure,omitempty"`
+	// SubmitSeq is the server-assigned monotonic admission sequence, persisted in
+	// jobspec.json so the FIFO order can be rebuilt after a daemon restart (queue
+	// persistence). Assigned by Submit; never supplied by the client.
+	SubmitSeq int64 `json:"submit_seq,omitempty"`
+}
+
+// onFailureOrDefault returns the spec's on_failure policy, defaulting to skip.
+func (s *JobSpec) onFailureOrDefault() string {
+	if s.OnFailure == "" {
+		return OnFailureSkip
+	}
+	return s.OnFailure
+}
+
+// onFailureValid reports whether on_failure is empty (default skip) or one of
+// the three policy values. Shape validation only.
+func (s *JobSpec) onFailureValid() bool {
+	switch s.OnFailure {
+	case "", OnFailureSkip, OnFailureRun, OnFailureFail:
+		return true
+	}
+	return false
 }
 
 // device returns the resolved device, defaulting to cpu (the v1 baseline; cuda

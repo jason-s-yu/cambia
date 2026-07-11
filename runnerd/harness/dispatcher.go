@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -31,6 +32,10 @@ var (
 	// ErrAlreadyQueued is returned by Resume when a job of that name is already
 	// queued or preparing.
 	ErrAlreadyQueued = errors.New("job already queued")
+	// ErrHasDependents is returned by Purge when a terminal parent still has
+	// queued dependents (cambia-352); the operator must pass cascade to skip them
+	// or wait for the gate to resolve.
+	ErrHasDependents = errors.New("job has queued dependents")
 )
 
 // job is the in-memory handle for a queued or preparing job. Once launched it is
@@ -63,6 +68,10 @@ type Dispatcher struct {
 	active       int             // preparing + running slots this daemon drives
 	subs         map[chan QueueSnapshot]struct{}
 	reconciledAt string
+	// nextSeq is the next submit sequence to assign (cambia-352). It is seeded to
+	// max(persisted submit_seq)+1 at Reconcile so restarts never reuse a seq, and
+	// increments under d.mu on every Submit.
+	nextSeq int64
 }
 
 // NewDispatcher builds a Dispatcher. maxJobs is the concurrency cap (<=0
@@ -87,22 +96,28 @@ func NewDispatcher(pm *procmgr.ProcessManager, env Environment, runsDir string, 
 		poll:     poll,
 		pending:  make(map[string]*job),
 		subs:     make(map[chan QueueSnapshot]struct{}),
+		nextSeq:  1,
 	}
 }
 
 func (d *Dispatcher) runDir(name string) string { return filepath.Join(d.runsDir, name) }
 
-// Submit admits a validated spec: it writes process.json (Status=created) and
-// jobspec.json, enqueues the job, and kicks the dispatcher. The caller has
+// Submit admits a validated spec: it claims the name via procmgr.Create (which
+// writes process.json Status=created), records jobspec.json (with the assigned
+// submit_seq), enqueues the job, and kicks the dispatcher. The caller has
 // already run name/kind/path validation and the resource preflights; procmgr's
-// Create re-checks the name collision atomically. Returns the job's view (queued
-// or already preparing if a slot was free).
+// Create re-checks the name collision atomically. process.json is written before
+// jobspec.json so the atomic name claim (and thus name-collision detection) is
+// unchanged; a daemon crash in the tiny gap leaves a `created` row with no spec,
+// which Reconcile fails as an incomplete admission. Returns the job's view.
 func (d *Dispatcher) Submit(spec JobSpec) (JobView, error) {
 	d.mu.Lock()
 	if len(d.queue) >= d.maxQueue {
 		d.mu.Unlock()
 		return JobView{}, ErrQueueFull
 	}
+	spec.SubmitSeq = d.nextSeq
+	d.nextSeq++
 	d.mu.Unlock()
 
 	st, err := d.pm.Create(procmgr.CreateRequest{Name: spec.Name, Algorithm: spec.Kind})
@@ -119,19 +134,41 @@ func (d *Dispatcher) Submit(spec JobSpec) (JobView, error) {
 	d.pending[spec.Name] = j
 	d.queue = append(d.queue, spec.Name)
 	d.dispatchLocked()
-	view := d.pendingViewLocked(spec.Name)
 	d.mu.Unlock()
 
 	d.broadcast()
+	// Resolve the view after unlocking: dispatchLocked may have already launched
+	// the job (a free slot) or gate-resolved it (a parent already terminal, so
+	// the dependent goes straight to skipped/failed/running), and resolveView
+	// reflects that from process.json + the in-memory state.
+	view, _ := d.resolveView(spec.Name)
 	return view, nil
 }
 
-// dispatchLocked launches queued jobs while a slot is free. Callers hold d.mu.
-// It never blocks: the prepare+launch+monitor work runs in a per-job goroutine.
+// gateDecision is the dispatch verdict for a queued job after its `after`
+// dependency (cambia-352) is evaluated against the parent's current state.
+type gateDecision int
+
+const (
+	gateLaunch  gateDecision = iota // ready to run (no parent, parent succeeded, or on_failure=run)
+	gateBlocked                     // parent not yet terminal; keep queued, do not head-of-line block
+	gateSkip                        // parent failed and on_failure=skip -> mark skipped
+	gateFail                        // parent failed and on_failure=fail -> mark failed
+)
+
+// dispatchLocked scans the queue in submit_seq order and, for each queued job,
+// evaluates its dependency gate against the parent's current state. Ready jobs
+// launch while a slot is free; a job whose parent has not yet reached a terminal
+// stays queued but does NOT block later ready jobs (a first-ready scan, a
+// documented deviation from strict FIFO); a job whose parent failed is resolved
+// to skipped/failed per its on_failure policy without consuming a slot. Callers
+// hold d.mu. The prepare+launch+monitor work runs in a per-job goroutine; the
+// bounded parent process.json reads happen under d.mu. Skip/fail transitions are
+// persisted inline (filesystem only, no broadcast, no d.mu re-entry); the
+// caller's post-unlock broadcast publishes them.
 func (d *Dispatcher) dispatchLocked() {
-	for (d.maxJobs <= 0 || d.active < d.maxJobs) && len(d.queue) > 0 {
-		id := d.queue[0]
-		d.queue = d.queue[1:]
+	var next []string
+	for _, id := range d.queue {
 		j := d.pending[id]
 		if j == nil {
 			continue
@@ -140,10 +177,115 @@ func (d *Dispatcher) dispatchLocked() {
 			delete(d.pending, id)
 			continue
 		}
-		j.state = StatePreparing
-		d.active++
-		go d.runJob(j)
+		switch d.gateDecisionLocked(j) {
+		case gateBlocked:
+			next = append(next, id) // parent still pending: wait, without blocking others
+		case gateSkip:
+			delete(d.pending, id)
+			j.cancel()
+			d.writeGateTerminalLocked(id, StateSkipped, "parent "+j.spec.After+" did not succeed (on_failure=skip)")
+		case gateFail:
+			delete(d.pending, id)
+			j.cancel()
+			d.writeGateTerminalLocked(id, StateFailed, "parent "+j.spec.After+" did not succeed (on_failure=fail)")
+		case gateLaunch:
+			if d.maxJobs > 0 && d.active >= d.maxJobs {
+				next = append(next, id) // ready but no free slot: keep in place
+				continue
+			}
+			j.state = StatePreparing
+			d.active++
+			go d.runJob(j)
+		}
 	}
+	d.queue = next
+}
+
+// gateDecisionLocked resolves whether a queued job may launch, from its `after`
+// parent's current effective state (cambia-352). Callers hold d.mu. A job with
+// no parent, or a resume launch (a resumed dependent ignores its own after,
+// design 2.3), always launches. The parent read is a single bounded
+// ReadProcessState under d.mu.
+func (d *Dispatcher) gateDecisionLocked(j *job) gateDecision {
+	if j.resume || j.spec.After == "" {
+		return gateLaunch
+	}
+	parent := j.spec.After
+	st, err := procmgr.ReadProcessState(d.runDir(parent))
+	if err != nil {
+		// Parent run dir gone (e.g. purged out from under a waiting dependent):
+		// treat as a non-success terminal so the dependent is never stranded.
+		return d.gateFailureLocked(j)
+	}
+	pstate := d.effectiveStateLocked(parent, st)
+	if !isTerminal(pstate) {
+		return gateBlocked // parent queued/preparing/running/starting/stopping
+	}
+	if pstate == procmgr.StatusStopped && exitCodeIsZero(st) {
+		return gateLaunch // clean exit: parent success always runs the dependent
+	}
+	// crashed / failed / canceled / skipped / a graceful-stop with a nonzero exit.
+	return d.gateFailureLocked(j)
+}
+
+// gateFailureLocked maps a job's on_failure policy to its parent-failure verdict.
+func (d *Dispatcher) gateFailureLocked(j *job) gateDecision {
+	switch j.spec.onFailureOrDefault() {
+	case OnFailureRun:
+		return gateLaunch
+	case OnFailureFail:
+		return gateFail
+	default: // OnFailureSkip
+		return gateSkip
+	}
+}
+
+// exitCodeIsZero reports whether st recorded a clean (zero) process exit.
+func exitCodeIsZero(st *procmgr.ProcessState) bool {
+	return st != nil && st.ExitCode != nil && *st.ExitCode == 0
+}
+
+// writeGateTerminalLocked persists a gate-resolved terminal state (skipped or
+// failed) for a queued dependent whose parent did not succeed. Callers hold
+// d.mu; it does filesystem I/O only (no broadcast, no d.mu re-entry) so the
+// caller's post-unlock broadcast publishes it. The job never left the queue for
+// prepare, so no staged resources need cleanup.
+func (d *Dispatcher) writeGateTerminalLocked(name, state, lastErr string) {
+	runDir := d.runDir(name)
+	st, err := procmgr.ReadProcessState(runDir)
+	if err != nil {
+		st = &procmgr.ProcessState{Name: name}
+	}
+	st.Status = state
+	st.LastError = lastErr
+	if st.FinishedAt == "" {
+		st.FinishedAt = procmgr.NowRFC3339()
+	}
+	_ = procmgr.WriteProcessState(runDir, st)
+}
+
+// reDispatch re-runs the dispatch scan after an external terminal transition (a
+// parent canceled while queued, a parent purged) that did not itself flow
+// through runJob's slot-release dispatch. It re-arms any dependent whose gate
+// now resolves, and broadcasts the result.
+func (d *Dispatcher) reDispatch() {
+	d.mu.Lock()
+	d.dispatchLocked()
+	d.mu.Unlock()
+	d.broadcast()
+}
+
+// pendingDependentsLocked returns the names of jobs still QUEUED (gate unresolved)
+// whose parent is `parent`. Preparing/running dependents already passed the gate
+// and no longer need the parent, so they do not count. Callers hold d.mu.
+func (d *Dispatcher) pendingDependentsLocked(parent string) []string {
+	var out []string
+	for name, j := range d.pending {
+		if j.state == StateQueued && j.spec.After == parent {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // launchGateHook is a test seam invoked inside runJob after the launch options
@@ -449,6 +591,10 @@ func (d *Dispatcher) Cancel(name string, force bool) (*procmgr.ProcessState, err
 			delete(d.pending, name)
 			d.mu.Unlock()
 			d.markTerminal(name, StateCanceled, "canceled while queued")
+			// A canceled parent is a non-success terminal: re-arm any dependent
+			// that was waiting on it (this cancel path does not flow through
+			// runJob's slot-release dispatch).
+			d.reDispatch()
 			return procmgr.ReadProcessState(d.runDir(name))
 		}
 		// preparing
@@ -469,8 +615,12 @@ func (d *Dispatcher) Cancel(name string, force bool) (*procmgr.ProcessState, err
 }
 
 // Purge removes a terminal job's run dir to free its name. It refuses a
-// non-terminal job.
-func (d *Dispatcher) Purge(name string) error {
+// non-terminal job. If the job still has queued dependents (cambia-352) it
+// returns ErrHasDependents unless cascade is set, in which case those dependents
+// are marked skipped before the parent dir is removed so the purge cannot strand
+// a waiting job. The gate's dir-gone failure branch is the backstop for any
+// dependent that races in after the guard.
+func (d *Dispatcher) Purge(name string, cascade bool) error {
 	if err := procmgr.ValidateName(name); err != nil {
 		return err
 	}
@@ -482,6 +632,19 @@ func (d *Dispatcher) Purge(name string) error {
 		return ErrNotTerminal
 	}
 	d.mu.Lock()
+	dependents := d.pendingDependentsLocked(name)
+	if len(dependents) > 0 && !cascade {
+		d.mu.Unlock()
+		return ErrHasDependents
+	}
+	for _, dep := range dependents {
+		if j := d.pending[dep]; j != nil {
+			j.cancel()
+		}
+		d.removeFromQueueLocked(dep)
+		delete(d.pending, dep)
+		d.writeGateTerminalLocked(dep, StateSkipped, "parent "+name+" purged (cascade)")
+	}
 	d.removeFromQueueLocked(name)
 	delete(d.pending, name)
 	d.mu.Unlock()
@@ -490,7 +653,9 @@ func (d *Dispatcher) Purge(name string) error {
 	}
 	// The run dir is gone, so the pinned commit no longer needs its gc anchor.
 	_ = d.env.PurgeRef(name)
-	d.broadcast()
+	// Re-arm any transitive dependent (a grandchild whose parent was just
+	// cascade-skipped) now that the states have changed; reDispatch broadcasts.
+	d.reDispatch()
 	return nil
 }
 
@@ -540,29 +705,45 @@ func (d *Dispatcher) Resume(name string) (JobView, error) {
 	return view, nil
 }
 
-// Reconcile runs at daemon start (queue empty): the procmgr sweep flips
-// running/starting/stopping with a dead pid to crashed, then the orphan sweep
-// flips created rows with no live process and no queue entry to failed. Finally
-// it hands the live job ids to the ingest StartupSweep. It never launches.
+// Reconcile runs at daemon start: the procmgr sweep flips running/starting/
+// stopping with a dead pid to crashed, then the queue-persistence sweep rebuilds
+// the FIFO (cambia-352). A `created` row provably never forked (launch writes
+// `starting` before cmd.Start), so it is safe to re-enqueue: every `created` job
+// with a readable jobspec.json is re-queued in submit_seq order and re-prepared
+// from scratch; a `created` row whose spec is missing or corrupt is an aborted
+// admission and is failed (per-file isolated). The submit_seq counter is seeded
+// past every persisted spec so post-restart submits never reuse a seq. Live job
+// ids are handed to the ingest StartupSweep. Reconcile itself never forks; the
+// re-enqueued jobs launch through the normal dispatch scan (dependency-gated).
 func (d *Dispatcher) Reconcile() {
 	d.pm.Reconcile()
 
 	states, _ := procmgr.ScanProcessStates(d.runsDir)
 	var live []string
+	var reenq []*job
+	var maxSeq int64
 	for _, st := range states {
+		// Seed the submit_seq high-water mark from every persisted spec (not just
+		// created rows) so a new submit after restart never collides with a seq a
+		// still-created job carries.
+		if spec := readJobSpec(d.runDir(st.Name)); spec != nil && spec.SubmitSeq > maxSeq {
+			maxSeq = spec.SubmitSeq
+		}
 		if st.Status == procmgr.StatusCreated {
-			d.mu.Lock()
-			_, queued := d.pending[st.Name]
-			d.mu.Unlock()
-			if !queued {
+			spec := readJobSpec(d.runDir(st.Name))
+			if spec == nil {
+				// created row with no readable spec: admission aborted mid-write.
 				st.Status = StateFailed
-				st.LastError = "orphaned by daemon restart"
+				st.LastError = "incomplete admission: jobspec.json missing or corrupt"
 				if st.FinishedAt == "" {
 					st.FinishedAt = procmgr.NowRFC3339()
 				}
 				_ = procmgr.WriteProcessState(d.runDir(st.Name), st)
 				continue
 			}
+			ctx, cancel := context.WithCancel(context.Background())
+			reenq = append(reenq, &job{spec: *spec, state: StateQueued, submitAt: st.CreatedAt, ctx: ctx, cancel: cancel})
+			continue
 		}
 		switch procmgr.EffectiveStatus(st) {
 		case procmgr.StatusRunning, procmgr.StatusStopping:
@@ -571,7 +752,22 @@ func (d *Dispatcher) Reconcile() {
 	}
 	_ = d.env.StartupSweep(live)
 
+	// Restore FIFO order from the persisted submit_seq.
+	sort.Slice(reenq, func(i, j int) bool { return reenq[i].spec.SubmitSeq < reenq[j].spec.SubmitSeq })
+
 	d.mu.Lock()
+	if maxSeq+1 > d.nextSeq {
+		d.nextSeq = maxSeq + 1
+	}
+	for _, j := range reenq {
+		if _, exists := d.pending[j.spec.Name]; exists {
+			j.cancel()
+			continue
+		}
+		d.pending[j.spec.Name] = j
+		d.queue = append(d.queue, j.spec.Name)
+	}
+	d.dispatchLocked()
 	d.reconciledAt = procmgr.NowRFC3339()
 	d.mu.Unlock()
 	d.broadcast()
@@ -599,12 +795,17 @@ func (d *Dispatcher) queuePosLocked(name string) int {
 }
 
 // effectiveState overlays the in-memory runnerd state on process.json. Callers
-// pass the already-read process.json state.
+// pass the already-read process.json state and must NOT hold d.mu.
 func (d *Dispatcher) effectiveState(name string, st *procmgr.ProcessState) string {
 	d.mu.Lock()
-	j, pending := d.pending[name]
-	d.mu.Unlock()
-	if pending {
+	defer d.mu.Unlock()
+	return d.effectiveStateLocked(name, st)
+}
+
+// effectiveStateLocked is effectiveState for callers that already hold d.mu (the
+// dependency gate reads a parent's effective state from inside dispatchLocked).
+func (d *Dispatcher) effectiveStateLocked(name string, st *procmgr.ProcessState) string {
+	if j, pending := d.pending[name]; pending {
 		return j.state
 	}
 	if st == nil {

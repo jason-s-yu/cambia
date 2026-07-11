@@ -285,6 +285,60 @@ def test_to_payload_omits_warm_start_when_unset():
     assert "warm_start" not in payload
 
 
+# ---------------------------------------------------------------------------
+# after / on_failure dependency fields (cambia-352): allowed on every kind, same
+# name rules as the job, self-reference rejected, on_failure enum-checked.
+# ---------------------------------------------------------------------------
+
+
+def test_parse_after_accepts_valid_parent():
+    spec = JobSpec.parse(_train_spec(after="v0.4-prtcfr-r0"))
+    assert spec.after == "v0.4-prtcfr-r0"
+    # on_failure defaults to skip.
+    assert spec.on_failure == "skip"
+
+
+def test_parse_after_allowed_on_every_kind():
+    spec = JobSpec.parse(_eval_spec(after="prior-run"))
+    assert spec.after == "prior-run"
+
+
+@pytest.mark.parametrize("bad", ["../evil", "a/b", "a..b", "", "-lead", "x" * 129])
+def test_parse_after_rejects_bad_name(bad):
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_train_spec(after=bad))
+
+
+def test_parse_after_rejects_self_reference():
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_train_spec(name="r1", after="r1"))
+
+
+@pytest.mark.parametrize("policy", ["skip", "run", "fail"])
+def test_parse_on_failure_accepts_policies(policy):
+    spec = JobSpec.parse(_train_spec(after="parent", on_failure=policy))
+    assert spec.on_failure == policy
+
+
+@pytest.mark.parametrize("bad", ["explode", "SKIP", "", "retry"])
+def test_parse_on_failure_rejects_bad_policy(bad):
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_train_spec(after="parent", on_failure=bad))
+
+
+def test_to_payload_bundles_after_and_on_failure():
+    spec = JobSpec.parse(_train_spec(after="parent", on_failure="run"))
+    payload = spec.to_payload("f" * 40)
+    assert payload["after"] == "parent"
+    assert payload["on_failure"] == "run"
+
+
+def test_to_payload_omits_after_when_unset():
+    payload = JobSpec.parse(_train_spec()).to_payload("f" * 40)
+    assert "after" not in payload
+    assert "on_failure" not in payload
+
+
 def test_parse_overrides_must_be_mapping():
     with pytest.raises(HarnessSpecError):
         JobSpec.parse(_train_spec(overrides=["a=b"]))
@@ -408,6 +462,41 @@ def test_submit_clean_tree_pushes_and_posts(tmp_path, monkeypatch):
     assert posted["payload"]["kind"] == "train"
     # commit stamped as the 40-hex HEAD sha
     assert len(posted["payload"]["commit"]) == 40
+
+
+def test_submit_after_flag_overrides_and_posts(tmp_path, monkeypatch):
+    # The --after/--on-failure CLI flags override the spec file and reach the
+    # posted payload (cambia-352).
+    import src.harness.cli as cli
+
+    repo = _init_repo(tmp_path)  # clean
+
+    monkeypatch.setattr(cli, "_load_cfg", lambda c: _FakeCfg())
+    monkeypatch.setattr(cli, "_repo_root", lambda: repo)
+
+    real_git = cli._git
+    monkeypatch.setattr(
+        cli, "_git", lambda a, cwd: "" if a[:1] == ["push"] else real_git(a, cwd)
+    )
+
+    posted = {}
+
+    class FakeClient:
+        def submit(self, payload, force=False):
+            posted["payload"] = payload
+            return {"job_id": payload["name"], "state": "queued", "queue_pos": 0}
+
+    monkeypatch.setattr(cli, "_build_client", lambda cfg: FakeClient())
+
+    spec_file = tmp_path / "job.yaml"
+    spec_file.write_text("kind: train\nname: r2\nconfig: cfr/config/x.yaml\n")
+
+    cli.submit(
+        spec_file=spec_file, force=False, after="parent-run", on_failure="run", config=None
+    )
+
+    assert posted["payload"]["after"] == "parent-run"
+    assert posted["payload"]["on_failure"] == "run"
 
 
 class _FakeCfg:

@@ -102,6 +102,53 @@ func TestSubmitInvalidNameAndKind(t *testing.T) {
 	resp.Body.Close()
 }
 
+// TestSubmitAfterValidation covers the cambia-352 dependency admission checks:
+// an unknown parent, a self-reference, and a bad on_failure are all rejected;
+// a terminal parent is accepted (the gate resolves its outcome at dispatch).
+func TestSubmitAfterValidation(t *testing.T) {
+	r := newRig(t, rigConfig{maxJobs: 2})
+
+	// Unknown parent -> 400 after_not_found.
+	spec := baseSpec("child-unknown", "fake")
+	spec["after"] = "no-such-parent"
+	resp := r.do(http.MethodPost, "/harness/jobs", spec)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("after unknown parent: got %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Self-reference -> 400 invalid_after.
+	spec = baseSpec("self-ref", "fake")
+	spec["after"] = "self-ref"
+	resp = r.do(http.MethodPost, "/harness/jobs", spec)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("after self-reference: got %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Bad on_failure -> 400 invalid_on_failure.
+	spec = baseSpec("bad-onfail", "fake")
+	spec["on_failure"] = "explode"
+	resp = r.do(http.MethodPost, "/harness/jobs", spec)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("bad on_failure: got %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Terminal parent is allowed (accepted, gate resolves at dispatch).
+	if err := procmgr.WriteProcessState(filepath.Join(r.runsDir, "term-parent"),
+		&procmgr.ProcessState{Name: "term-parent", Status: procmgr.StatusStopped}); err != nil {
+		t.Fatal(err)
+	}
+	spec = baseSpec("child-ok", "fake")
+	spec["after"] = "term-parent"
+	resp = r.do(http.MethodPost, "/harness/jobs", spec)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("after terminal parent: got %d, want 201", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
 func TestSubmitNameCollision(t *testing.T) {
 	r := newRig(t, rigConfig{maxJobs: 2})
 

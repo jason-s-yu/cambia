@@ -68,6 +68,29 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "device_unsupported", "device not enabled on this runner: "+spec.device())
 		return
 	}
+	// 3e. cross-job dependency (cambia-352): after names a single parent job that
+	// must already exist; a terminal parent is allowed (the gate resolves its
+	// outcome at dispatch). Self-reference is rejected; cycles are structurally
+	// impossible since a parent must exist strictly before its child. on_failure
+	// governs only the parent-failure branch.
+	if spec.After != "" {
+		if err := procmgr.ValidateName(spec.After); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_after", err.Error())
+			return
+		}
+		if spec.After == spec.Name {
+			writeJSONError(w, http.StatusBadRequest, "invalid_after", "after must not reference the job itself")
+			return
+		}
+		if _, err := procmgr.ReadProcessState(filepath.Join(s.runsDir, spec.After)); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "after_not_found", "parent job not found: "+spec.After)
+			return
+		}
+	}
+	if !spec.onFailureValid() {
+		writeJSONError(w, http.StatusBadRequest, "invalid_on_failure", "on_failure must be one of skip|run|fail")
+		return
+	}
 	// 4. path guards (config, checkpoints): lexical shape (reject absolute + ..).
 	for _, p := range spec.guardedPaths() {
 		if err := pathguard.CheckRel(p.value); err != nil {
@@ -200,11 +223,15 @@ func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	if q.Get("purge") == "true" {
-		switch err := s.disp.Purge(id); {
+		cascade := q.Get("cascade") == "true"
+		switch err := s.disp.Purge(id, cascade); {
 		case err == nil:
 			writeJSON(w, http.StatusOK, map[string]any{"job_id": id, "purged": true})
 		case errors.Is(err, ErrNotTerminal):
 			writeJSONError(w, http.StatusConflict, "not_terminal", "purge refuses a non-terminal job")
+		case errors.Is(err, ErrHasDependents):
+			writeJSONError(w, http.StatusConflict, "has_dependents",
+				"purge refused: job has queued dependents (retry with cascade=true to skip them)")
 		case errors.Is(err, ErrNotFound):
 			writeJSONError(w, http.StatusNotFound, "not_found", "job not found")
 		default:
