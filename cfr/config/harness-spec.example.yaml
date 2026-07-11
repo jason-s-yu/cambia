@@ -26,10 +26,11 @@ kind: train
 # ".." segments anywhere in the name.
 name: prtcfr-run-001
 
-# Repo-relative path to the training config YAML. Required for kind: train and
-# kind: bench; forbidden for kind: evaluate (see below). Must not be an
-# absolute path and must not contain a ".." segment -- the runner re-resolves
-# it inside the pinned worktree and rejects anything that would escape it.
+# Repo-relative path to the training config YAML. Required for kind: train,
+# kind: bench, and kind: head-to-head; forbidden for kind: evaluate (see
+# below). Must not be an absolute path and must not contain a ".." segment --
+# the runner re-resolves it inside the pinned worktree and rejects anything
+# that would escape it.
 config: cfr/config/production_train.yaml
 
 # Optional: pin an exact 40-hex commit sha. `cambia harness submit` normally
@@ -111,8 +112,12 @@ force: false
 
 # ---------------------------------------------------------------------------
 # Other kinds not exemplified above:
-#   head-to-head -- requires checkpoint_a and checkpoint_b, each a
-#     runner-local checkpoint path under the same containment guard as
-#     evaluate's target.
-#   bench -- requires `config`, same as train.
+#   head-to-head -- requires `config` (unlike evaluate, it has no run
+#     directory to derive rules/agent type from) plus checkpoint_a and
+#     checkpoint_b, each a runner-local checkpoint path under the same
+#     containment guard as evaluate's target. games defaults to 5000 when
+#     omitted (the runner's shared default, not `cambia head-to-head`'s own
+#     bare-CLI default of 2000 -- the runner always passes --games explicitly).
+#   bench -- requires `config`, same as train. Runs `cambia benchmark all`;
+#     --output-dir is pointed at the job's own run directory.
 # ---------------------------------------------------------------------------

@@ -141,17 +141,41 @@ def test_parse_resume_train_only():
 
 def test_parse_head_to_head_requires_two_checkpoints():
     with pytest.raises(HarnessSpecError):
-        JobSpec.parse({"kind": "head-to-head", "name": "h1", "checkpoint_a": "a.pt"})
+        JobSpec.parse(
+            {
+                "kind": "head-to-head",
+                "name": "h1",
+                "config": "cfr/config/prtcfr_prod.yaml",
+                "checkpoint_a": "a.pt",
+            }
+        )
     spec = JobSpec.parse(
         {
             "kind": "head-to-head",
             "name": "h1",
+            "config": "cfr/config/prtcfr_prod.yaml",
             "checkpoint_a": "snapshots/a.pt",
             "checkpoint_b": "snapshots/b.pt",
             "games": 5000,
         }
     )
     assert spec.games == 5000
+
+
+def test_parse_head_to_head_requires_config():
+    # Unlike evaluate's run-dir mode, `cambia head-to-head` takes two bare
+    # checkpoint files with no run dir to derive rules/agent type from, so it
+    # hard-requires --config (cambia-295 item 1 contract: config is required
+    # for kind=head-to-head, same as train/bench).
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(
+            {
+                "kind": "head-to-head",
+                "name": "h1",
+                "checkpoint_a": "snapshots/a.pt",
+                "checkpoint_b": "snapshots/b.pt",
+            }
+        )
 
 
 def test_parse_rejects_nonpositive_games():

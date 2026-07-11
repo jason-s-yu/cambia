@@ -49,12 +49,16 @@ const (
 // (the dashboard registers only TrainAlgorithms). A fresh map is returned per
 // call so callers cannot mutate a shared instance. kind=train resolves to
 // `cambia train prtcfr`, encoding the v1 prtcfr-only train allowlist.
+// kind=bench resolves to `cambia benchmark all`: cli.py registers the perf
+// benchmarks under a `benchmark` typer group (`all`/`network`/`traversal`/...),
+// not a top-level `bench` command, and the job spec carries no field to select
+// a specific sub-benchmark, so "all" is the only well-defined target.
 func HarnessAlgorithms() map[string][]string {
 	return map[string][]string{
 		KindTrain:      {"train", "prtcfr"},
 		KindEvaluate:   {"evaluate"},
 		KindHeadToHead: {"head-to-head"},
-		KindBench:      {"bench"},
+		KindBench:      {"benchmark", "all"},
 	}
 }
 
@@ -107,9 +111,11 @@ func (s *JobSpec) deviceValid() bool {
 	return validDevices[s.device()]
 }
 
-// gamesOrDefault returns the evaluate games count, defaulting to 5000 (the
-// run-dir-mode default cli.py falls back to, cfr/src/cli.py evaluate) when the
-// spec left it unset.
+// gamesOrDefault returns the evaluate/head-to-head games count, defaulting to
+// 5000 (the run-dir-mode default cli.py falls back to, cfr/src/cli.py
+// evaluate) when the spec left it unset. head-to-head's own bare-CLI default
+// is 2000, but the runner always passes --games explicitly, so this default
+// governs both kinds.
 func (s *JobSpec) gamesOrDefault() int {
 	if s.Games <= 0 {
 		return 5000

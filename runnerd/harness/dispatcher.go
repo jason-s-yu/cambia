@@ -255,14 +255,18 @@ func (d *Dispatcher) launchOpts(j *job, prepared *ingestapi.Prepared) (procmgr.L
 	if err != nil {
 		return procmgr.LaunchOpts{}, err
 	}
-	argv := make([]string, 0, len(sub)+8)
+	argv := make([]string, 0, len(sub)+10)
 	argv = append(argv, "-m", "src.cli")
 	argv = append(argv, sub...)
 	// journalRun is the run whose per-run-dir run_db.sqlite this job writes:
-	// the job's own run for train, the evaluated run for evaluate (eval rows
-	// must join the evaluated run's journal so they sync with it, design 4.2).
+	// the job's own run for train/head-to-head/bench, the evaluated run for
+	// evaluate (eval rows must join the evaluated run's journal so they sync
+	// with it, design 4.2). head-to-head and bench never write run_db rows of
+	// their own (cli.py's head_to_head and benchmark commands do not call
+	// run_db), so the default is inert for them beyond a harmless env var.
 	journalRun := j.spec.Name
-	if j.spec.Kind == KindEvaluate {
+	switch j.spec.Kind {
+	case KindEvaluate:
 		// `cambia evaluate` takes a positional checkpoint/run-dir target, not
 		// --config (spec-review finding #1): --config is omitted entirely,
 		// since run-dir mode auto-detects config.yaml from the target's own
@@ -273,10 +277,36 @@ func (d *Dispatcher) launchOpts(j *job, prepared *ingestapi.Prepared) (procmgr.L
 		}
 		argv = append(argv, targetArgv...)
 		journalRun = j.spec.Target
-	} else {
-		// The rendered config is consumed verbatim (design 2.7). A kind that ingest
-		// renders no config for (Prepare leaves RenderedConfig empty) gets no --config
-		// rather than an empty-valued flag.
+	case KindHeadToHead:
+		// `cambia head-to-head` has no run-dir mode: it takes two bare
+		// checkpoint files with no config of their own, so unlike evaluate it
+		// genuinely needs --config (client-side spec.py requires it for this
+		// kind, cambia-295 item 1 contract change).
+		if prepared.RenderedConfig != "" {
+			argv = append(argv, "--config", prepared.RenderedConfig)
+		}
+		h2hArgv, herr := d.headToHeadArgv(j.spec)
+		if herr != nil {
+			return procmgr.LaunchOpts{}, herr
+		}
+		argv = append(argv, h2hArgv...)
+	case KindBench:
+		// `cambia benchmark all` takes --config, --device, and --output-dir as
+		// plain CLI flags -- none of them sourced from the rendered config's
+		// device rail the way train's device is. --output-dir is pointed at
+		// the job's own run dir (mirroring train's --save-path) so results
+		// land under runs/<name>/ instead of the CLI's container-only default.
+		if prepared.RenderedConfig != "" {
+			argv = append(argv, "--config", prepared.RenderedConfig)
+		}
+		argv = append(argv, "--output-dir", d.runDir(j.spec.Name))
+		argv = append(argv, "--device", j.spec.device())
+	default:
+		// train (and any test-injected kind that isn't evaluate/head-to-head/
+		// bench, e.g. harness_test.go's "fake"): the rendered config is
+		// consumed verbatim (design 2.7). A kind that ingest renders no config
+		// for (Prepare leaves RenderedConfig empty) gets no --config rather
+		// than an empty-valued flag.
 		if prepared.RenderedConfig != "" {
 			argv = append(argv, "--config", prepared.RenderedConfig)
 		}
@@ -335,6 +365,32 @@ func (d *Dispatcher) evaluateTargetArgv(spec JobSpec) ([]string, error) {
 	argv := []string{targetAbs, "--latest"}
 	argv = append(argv, "--games", strconv.Itoa(spec.gamesOrDefault()), "--device", spec.device())
 	return argv, nil
+}
+
+// headToHeadArgv builds the head-to-head argv tail: --checkpoint-a/-b (each
+// re-resolved through the same runs-dir containment guard checkpoint_a/b
+// already got at submit, handlers.go step 4b -- launch happens in a later
+// goroutine against the persisted spec, so it is re-resolved here exactly as
+// evaluateTargetArgv re-resolves target), --games, and --device. Unlike
+// evaluate's target, checkpoints have no dir-vs-file ambiguity to guard
+// against: `cambia head-to-head` declares both as typer Path(exists=True), so
+// a missing or unresolvable checkpoint fails the job at launch with a clear
+// CLI error rather than silently misinterpreting it.
+func (d *Dispatcher) headToHeadArgv(spec JobSpec) ([]string, error) {
+	a, err := pathguard.Resolve(d.runsDir, spec.CheckpointA)
+	if err != nil {
+		return nil, fmt.Errorf("checkpoint_a: %w", err)
+	}
+	b, err := pathguard.Resolve(d.runsDir, spec.CheckpointB)
+	if err != nil {
+		return nil, fmt.Errorf("checkpoint_b: %w", err)
+	}
+	return []string{
+		"--checkpoint-a", a,
+		"--checkpoint-b", b,
+		"--games", strconv.Itoa(spec.gamesOrDefault()),
+		"--device", spec.device(),
+	}, nil
 }
 
 // monitor polls process.json until the run reaches a procmgr terminal status,

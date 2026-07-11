@@ -193,12 +193,19 @@ class JobSpec:
         if warm_start is not None and kind != "train":
             raise HarnessSpecError("warm_start is valid for train jobs only")
 
-        # Kind-specific requirements: config drives train/evaluate/bench;
-        # head-to-head needs both checkpoints; evaluate needs a target (the
-        # checkpoint/run-dir it evaluates), forbidden for train.
+        # Kind-specific requirements: config drives train/bench/head-to-head;
+        # head-to-head also needs both checkpoints; evaluate needs a target
+        # (the checkpoint/run-dir it evaluates) instead of config, forbidden
+        # for train.
         # evaluate takes no config: run-dir mode reads the target's own
         # config.yaml, and the runner never forwards --config for that kind.
-        if kind in ("train", "bench") and config is None:
+        # head-to-head takes two bare checkpoint files with no run dir of
+        # their own to derive rules/agent type from (unlike evaluate's
+        # run-dir mode), so `cambia head-to-head` hard-requires --config;
+        # config is required here too rather than left to the CLI's exists=True
+        # default, which resolves against the job's staged worktree cwd and is
+        # never a config that matches the submitted checkpoints.
+        if kind in ("train", "bench", "head-to-head") and config is None:
             raise HarnessSpecError(f"kind {kind!r} requires a 'config' path")
         if kind == "head-to-head" and (checkpoint_a is None or checkpoint_b is None):
             raise HarnessSpecError("head-to-head requires checkpoint_a and checkpoint_b")
