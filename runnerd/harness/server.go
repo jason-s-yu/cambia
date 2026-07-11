@@ -149,6 +149,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /harness/jobs/{id}", a(http.HandlerFunc(s.handleDeleteJob)))
 	mux.Handle("POST /harness/jobs/{id}/resume", a(http.HandlerFunc(s.handleResumeJob)))
 	mux.Handle("GET /harness/jobs/{id}/artifacts", a(http.HandlerFunc(s.handleArtifacts)))
+	mux.Handle("POST /harness/jobs/{id}/rundb-checkpoint", a(http.HandlerFunc(s.handleRunDBCheckpoint)))
 	mux.Handle("GET /harness/health", http.HandlerFunc(s.handleHealth))
 
 	mux.Handle("GET /ws/harness/queue", a(http.HandlerFunc(s.handleQueueWS)))

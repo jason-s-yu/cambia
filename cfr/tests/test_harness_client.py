@@ -135,6 +135,37 @@ def test_preflight_error_label_and_checks_both_rendered(tmp_path):
     assert "no node" in msg
 
 
+def test_rundb_checkpoint_success(tmp_path):
+    cert, key, fp = make_self_signed(tmp_path)
+    routes = {
+        ("POST", "/harness/jobs/r1/rundb-checkpoint"): (
+            200,
+            {"job_id": "r1", "busy": 0, "log_frames": 0, "checkpointed": 3},
+        )
+    }
+    with RecordingServer(cert, key, routes) as srv:
+        client = _client(srv, fp)
+        resp = client.rundb_checkpoint("r1")
+    assert resp["job_id"] == "r1"
+    assert resp["checkpointed"] == 3
+    req = srv.requests[-1]
+    assert req["method"] == "POST"
+    assert req["path"] == "/harness/jobs/r1/rundb-checkpoint"
+    assert req["headers"].get("Authorization") == "Bearer minted-token"
+
+
+def test_rundb_checkpoint_404_raises(tmp_path):
+    cert, key, fp = make_self_signed(tmp_path)
+    routes = {
+        ("POST", "/harness/jobs/r1/rundb-checkpoint"): (404, {"error": "not_found"})
+    }
+    with RecordingServer(cert, key, routes) as srv:
+        client = _client(srv, fp)
+        with pytest.raises(HarnessAPIError) as exc:
+            client.rundb_checkpoint("r1")
+    assert exc.value.status == 404
+
+
 def test_health(tmp_path):
     cert, key, fp = make_self_signed(tmp_path)
     routes = {("GET", "/harness/health"): (200, {"queue_depth": 0, "jobs_running": 1})}
