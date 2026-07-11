@@ -5,6 +5,11 @@ Pull loop and reconcile orchestration for the `cambia harness watch` command
 (cambia-256, design 4.1 / 4.4). The client pulls; the runner never pushes.
 
 Per run, per tick:
+  0. best-effort: ask the runner to WAL-checkpoint run_db.sqlite (cambia-295
+     item 5), so the main db file is current before it is rsynced. Skipped
+     silently when no checkpoint_client is wired, and never fails the pull on
+     a 404/405 (older daemon) or any other error -- the -wal/-shm copy below
+     remains the fallback to a consistent read.
   1. rsync the runner's run_db.sqlite down (phase 1); it is the reconciliation
      wire format (design 4.2) and says which checkpoints are retained.
   2. derive the include set from its retained-checkpoint rows (design 4.4);
@@ -21,6 +26,7 @@ until its SYNCED status is itself terminal, so a single dropped final pull canno
 freeze a dead run at "running".
 """
 
+import logging
 import os
 import sqlite3
 import subprocess
@@ -35,6 +41,8 @@ from src.harness.reconciler import (
 )
 from src.harness.reconciler import replay as reconciler_replay
 from src.run_db import get_db, mark_run_pushed, upsert_harness_sync
+
+logger = logging.getLogger(__name__)
 
 RESERVOIR_DIRNAME = "reservoir"
 SNAPSHOTS_DIRNAME = "snapshots"
@@ -304,6 +312,7 @@ class PullCoordinator:
             [Path, sqlite3.Connection, str], Dict[str, int]
         ] = reconciler_replay,
         sleep_fn: Callable[[float], None] = time.sleep,
+        checkpoint_client: Optional[Any] = None,
     ):
         self.runner = runner
         self.local_runs_dir = Path(local_runs_dir)
@@ -311,6 +320,36 @@ class PullCoordinator:
         self.origin_host = origin_host
         self.replay_fn = replay_fn
         self.sleep_fn = sleep_fn
+        # Best-effort control-plane WAL-checkpoint request (cambia-295 item 5):
+        # any object exposing rundb_checkpoint(job_id), i.e. a HarnessClient.
+        # None (the default) skips the request entirely -- callers that never
+        # wired a control-plane client (or tests exercising the rsync path in
+        # isolation) keep the old -wal/-shm-copy-only behavior.
+        self.checkpoint_client = checkpoint_client
+
+    def _request_checkpoint(self, run_name: str) -> None:
+        """Ask the runner to fold run_db.sqlite's WAL into the main file before
+        it is pulled. Best-effort (design cambia-295 item 5): a 404/405 (an
+        older daemon without the route, or no run_db written yet) or any other
+        failure is logged once and never blocks the pull -- the -wal/-shm copy
+        in Runner.pull_db remains the fallback path to a consistent read."""
+        if self.checkpoint_client is None:
+            return
+        from src.harness.client import HarnessAPIError
+
+        try:
+            self.checkpoint_client.rundb_checkpoint(run_name)
+        except HarnessAPIError as exc:
+            if exc.status in (404, 405):
+                logger.debug(
+                    "rundb checkpoint unavailable for %s (HTTP %d); pulling -wal/-shm as-is",
+                    run_name,
+                    exc.status,
+                )
+            else:
+                logger.warning("rundb checkpoint request failed for %s: %s", run_name, exc)
+        except Exception as exc:  # defensive: a checkpoint request must never fail the pull
+            logger.warning("rundb checkpoint request failed for %s: %s", run_name, exc)
 
     def local_run_dir(self, run_name: str) -> Path:
         # H1: the chokepoint where a run name becomes a local path. Every pull /
@@ -324,6 +363,11 @@ class PullCoordinator:
         """One full pull->replay->bookkeep cycle. Returns the synced run status."""
         local_dir = self.local_run_dir(run_name)
         db_path = local_dir / "run_db.sqlite"
+
+        # Best-effort: ask the runner to checkpoint its WAL into the main db
+        # file before it is synced (cambia-295 item 5), so the pulled main
+        # file is current on its own.
+        self._request_checkpoint(run_name)
 
         # Phase 1: the run_db drives the include set (design 4.2/4.4).
         self.runner.pull_db(run_name, local_dir)

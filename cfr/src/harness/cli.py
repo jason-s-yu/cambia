@@ -75,6 +75,9 @@ def _build_coordinator(cfg):
         local_runs_dir=Path(cfg.sync.local_runs_dir),
         dest_conn=dest,
         origin_host=cfg.data_plane.origin_host,
+        # Best-effort WAL-checkpoint request before each pull (cambia-295 item
+        # 5); the coordinator tolerates a 404/405 or any failure on its own.
+        checkpoint_client=_build_client(cfg),
     )
     return coordinator, dest
 

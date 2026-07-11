@@ -183,6 +183,22 @@ class FakeRunner(Runner):
         self.calls.append(("push_run", run_name, str(local_run_dir)))
 
 
+class FakeCheckpointClient:
+    """Stands in for a HarnessClient's rundb_checkpoint method: records calls,
+    optionally raising an injected exception (mirrors HarnessAPIError or any
+    other transport failure)."""
+
+    def __init__(self, fail=None):
+        self.calls = []
+        self.fail = fail
+
+    def rundb_checkpoint(self, job_id):
+        self.calls.append(job_id)
+        if self.fail is not None:
+            raise self.fail
+        return {"job_id": job_id, "busy": 0, "log_frames": 0, "checkpointed": 0}
+
+
 def _dest_db(tmp_path):
     return run_db.get_db(str(tmp_path / "dest" / "cambia_runs.db"))
 
@@ -279,6 +295,88 @@ def test_pull_invokes_replay_with_expected_args(tmp_path):
     assert seen["run_dir"] == tmp_path / "local" / "v0.4-prtcfr-r1"
     assert seen["conn"] is dest
     assert seen["origin_host"] == "runner"
+    dest.close()
+
+
+# ---------------------------------------------------------------------------
+# rundb WAL-checkpoint request before pull (cambia-295 item 5)
+# ---------------------------------------------------------------------------
+
+
+def test_pull_once_requests_checkpoint_before_pull_db(tmp_path):
+    _build_remote_run(tmp_path / "remote")
+    dest = _dest_db(tmp_path)
+    runner = FakeRunner(tmp_path / "remote")
+    ckpt = FakeCheckpointClient()
+    coord = PullCoordinator(
+        runner=runner,
+        local_runs_dir=tmp_path / "local",
+        dest_conn=dest,
+        origin_host="runner",
+        checkpoint_client=ckpt,
+    )
+    coord.pull_once("v0.4-prtcfr-r1")
+    assert ckpt.calls == ["v0.4-prtcfr-r1"]
+    assert runner.calls[0] == ("pull_db", "v0.4-prtcfr-r1")
+    dest.close()
+
+
+def test_pull_once_skips_checkpoint_when_no_client_wired(tmp_path):
+    """The default (checkpoint_client=None) is a pure no-op: the pull behaves
+    exactly as before this feature landed."""
+    _build_remote_run(tmp_path / "remote")
+    dest = _dest_db(tmp_path)
+    runner = FakeRunner(tmp_path / "remote")
+    coord = PullCoordinator(
+        runner=runner,
+        local_runs_dir=tmp_path / "local",
+        dest_conn=dest,
+        origin_host="runner",
+    )
+    status = coord.pull_once("v0.4-prtcfr-r1")
+    assert status == "completed"
+    dest.close()
+
+
+def test_pull_once_tolerates_checkpoint_404(tmp_path):
+    """An older daemon without the route (or no run_db written yet) answers
+    404; the pull must still proceed via the -wal/-shm copy fallback."""
+    from src.harness.client import HarnessAPIError
+
+    _build_remote_run(tmp_path / "remote")
+    dest = _dest_db(tmp_path)
+    runner = FakeRunner(tmp_path / "remote")
+    ckpt = FakeCheckpointClient(fail=HarnessAPIError(404, "no such job"))
+    coord = PullCoordinator(
+        runner=runner,
+        local_runs_dir=tmp_path / "local",
+        dest_conn=dest,
+        origin_host="runner",
+        checkpoint_client=ckpt,
+    )
+    status = coord.pull_once("v0.4-prtcfr-r1")
+    assert status == "completed"
+    assert ckpt.calls == ["v0.4-prtcfr-r1"]
+    assert runner.calls[0] == ("pull_db", "v0.4-prtcfr-r1")
+    dest.close()
+
+
+def test_pull_once_tolerates_checkpoint_transport_failure(tmp_path):
+    """Any other checkpoint failure (a 500, a dropped connection, ...) is
+    swallowed the same way -- the pull loop must never fail on this step."""
+    _build_remote_run(tmp_path / "remote")
+    dest = _dest_db(tmp_path)
+    runner = FakeRunner(tmp_path / "remote")
+    ckpt = FakeCheckpointClient(fail=RuntimeError("connection reset"))
+    coord = PullCoordinator(
+        runner=runner,
+        local_runs_dir=tmp_path / "local",
+        dest_conn=dest,
+        origin_host="runner",
+        checkpoint_client=ckpt,
+    )
+    status = coord.pull_once("v0.4-prtcfr-r1")
+    assert status == "completed"
     dest.close()
 
 
@@ -630,6 +728,27 @@ def test_coordinator_rejects_hostile_name_before_fs_touch(tmp_path, bad):
     # The runner was never invoked and no directory was created.
     assert runner.calls == []
     assert not (tmp_path / "local").exists() or list((tmp_path / "local").iterdir()) == []
+    dest.close()
+
+
+@pytest.mark.parametrize("bad", _HOSTILE_NAMES)
+def test_coordinator_rejects_hostile_name_before_checkpoint_request(tmp_path, bad):
+    """H1 also covers the checkpoint request added for cambia-295 item 5: a
+    hostile name must never reach it, matching the existing pull/push/
+    pull_with_retry chokepoint guard."""
+    dest = _dest_db(tmp_path)
+    runner = FakeRunner(tmp_path / "remote")
+    ckpt = FakeCheckpointClient()
+    coord = PullCoordinator(
+        runner=runner,
+        local_runs_dir=tmp_path / "local",
+        dest_conn=dest,
+        origin_host="runner",
+        checkpoint_client=ckpt,
+    )
+    with pytest.raises(PullError):
+        coord.pull_once(bad)
+    assert ckpt.calls == []
     dest.close()
 
 

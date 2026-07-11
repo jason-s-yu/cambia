@@ -132,5 +132,15 @@ class HarnessClient:
     def artifacts(self, job_id: str) -> Any:
         return self._call("GET", f"/harness/jobs/{quote(job_id, safe='')}/artifacts")
 
+    def rundb_checkpoint(self, job_id: str) -> Any:
+        """Ask the runner to WAL-checkpoint runs/<job_id>/run_db.sqlite before a
+        pull (cambia-295 item 5), folding the WAL into the main db file so the
+        synced file is current on its own. Callers treat this best-effort: a 404
+        (no run_db yet, or an older daemon without the route) is a normal
+        outcome, not a hard failure."""
+        return self._call(
+            "POST", f"/harness/jobs/{quote(job_id, safe='')}/rundb-checkpoint", ok=(200,)
+        )
+
     def health(self) -> Dict[str, Any]:
         return self._call("GET", "/harness/health")
