@@ -406,6 +406,11 @@ class PRTCFRTinyTrainer:
             if warm_start_path is not None
             else getattr(config, "warm_start_path", None)
         )
+        # cambia-374: explicit opt-in to warm-start from a bare .pt (net weights
+        # + iteration only, empty reservoir). See _resolve_warm_start.
+        self.warm_start_net_only_ok = bool(
+            getattr(config, "warm_start_net_only_ok", False)
+        )
 
         self.seq_cap = int(getattr(config, "seq_cap", SEQ_CAP))
         self.m_rollouts = int(getattr(config, "m_rollouts", 4))
@@ -736,6 +741,45 @@ class PRTCFRTinyTrainer:
         )
         return rs_iter
 
+    def _full_state_dir_hint(self, pt_path: str) -> Optional[str]:
+        """If the bare .pt's own directory, or its parent run dir, already
+        carries a full resume_state.json + reservoir.npz pair, return that
+        directory so the net-only guard error can point straight at it."""
+        own_dir = os.path.dirname(os.path.abspath(pt_path))
+        for d in (own_dir, os.path.dirname(own_dir)):
+            rs = os.path.join(d, "resume_state.json")
+            res = os.path.join(d, "reservoir.npz")
+            if os.path.exists(rs) and os.path.exists(res):
+                return d
+        return None
+
+    def _guard_net_only_warm_start(self, pt_path: str) -> None:
+        """Raise unless warm_start_net_only_ok is set (cambia-374).
+
+        A bare-.pt warm start carries net weights + iteration only, so the
+        reservoir restarts EMPTY and the trainer fine-tunes the imported net on
+        regret targets from a tiny immature buffer -- that is a fresh run with
+        a net prior, never a state-faithful continuation (measured: ~0.2
+        NashConv-quality snapshots that go on to dominate the linear SD-CFR
+        mixture). Full-mode warm start (a run dir / resume_state.json) already
+        restores net + reservoir and is the correct continuation path."""
+        if self.warm_start_net_only_ok:
+            return
+        msg = (
+            f"warm_start_path {pt_path!r} resolves to a bare checkpoint "
+            f"(net-only warm start, cambia-374): the reservoir restarts EMPTY "
+            f"and the trainer fine-tunes on regret targets from a tiny immature "
+            f"buffer, producing a fresh run with a net prior, not a "
+            f"state-faithful continuation. Point warm_start_path at the source "
+            f"RUN DIR (or its resume_state.json) for a state-faithful "
+            f"continuation that restores net + reservoir, or set "
+            f"prt_cfr.warm_start_net_only_ok: true to proceed deliberately."
+        )
+        hint = self._full_state_dir_hint(pt_path)
+        if hint is not None:
+            msg += f" Full state exists at {hint!r}; point warm_start_path there."
+        raise PRTCFRResumeError(msg)
+
     def _resolve_warm_start(self, path: str):
         """Classify a warm_start_path into (mode, files).
 
@@ -743,7 +787,10 @@ class PRTCFRTinyTrainer:
         a bit-exact continuation; mode "net" -> a bare .pt for net + iteration
         only (the legacy iter-530 snapshot case: it carries encoder/head/iteration
         and NOTHING else, so the reservoir starts empty and RNG seeds from the
-        ambient stream -- NOT bit-exact)."""
+        ambient stream -- NOT bit-exact). mode "net" raises unless
+        config.warm_start_net_only_ok is set (cambia-374): unguarded net-only
+        warm start silently produces a fresh-run-with-net-prior lineage rather
+        than the continuation callers ask for."""
         if os.path.isdir(path):
             rs = os.path.join(path, "resume_state.json")
             ckpt = os.path.join(path, "snapshots", "prtcfr_checkpoint.pt")
@@ -753,6 +800,7 @@ class PRTCFRTinyTrainer:
                 res = os.path.join(path, "reservoir.npz")
                 return "full", (rs, ckpt, res if os.path.exists(res) else None)
             if os.path.exists(ckpt):
+                self._guard_net_only_warm_start(ckpt)
                 return "net", (ckpt,)
             raise PRTCFRResumeError(
                 f"warm_start_path dir {path!r} has no resume_state.json+checkpoint "
@@ -766,6 +814,7 @@ class PRTCFRTinyTrainer:
             res = os.path.join(base, "reservoir.npz")
             return "full", (path, ckpt, res if os.path.exists(res) else None)
         # A bare .pt (per-iteration snapshot or rolling checkpoint): net + iter.
+        self._guard_net_only_warm_start(path)
         return "net", (path,)
 
     def _import_prior_snapshots(self, src_dir: str, upto_t: int) -> List[int]:
@@ -795,7 +844,13 @@ class PRTCFRTinyTrainer:
 
     def _warm_start_from_path(self) -> int:
         """Seed a fresh run from warm_start_path. Returns the iteration to
-        continue AFTER (loop starts at it+1)."""
+        continue AFTER (loop starts at it+1).
+
+        Semantics (cambia-374): mode "full" restores net + reservoir + RNG and
+        is the only state-faithful continuation; verdict/ruled continuations
+        must use it. Mode "net" restores net weights + iteration only and is a
+        fresh run with a net prior, not a continuation -- _resolve_warm_start
+        raises on it unless config.warm_start_net_only_ok is explicitly set."""
         mode, files = self._resolve_warm_start(self.warm_start_path)
         if mode == "full":
             rs, ckpt, res = files
