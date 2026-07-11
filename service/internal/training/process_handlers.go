@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
+	"github.com/jason-s-yu/cambia/service/internal/harnessproxy"
 )
 
 // defaultAlgorithm is used when a create request omits the algorithm.
@@ -43,6 +44,19 @@ type ProcessHandlers struct {
 	// gpuQuery is the nvidia-smi seam; tests replace it so preflight never
 	// depends on live VRAM or touches the GPU.
 	gpuQuery procmgr.GPUQueryFunc
+
+	// proxy forwards stop/resume for a remote run whose origin matches the
+	// configured harness runner (cambia-295 v1.1). Nil when no harness config is
+	// present: remote runs then stay read-only (409), the exact v1 behavior.
+	proxy *harnessproxy.Client
+}
+
+// SetHarnessProxy injects the harness control-plane client (or nil for no
+// proxy). Called once at construction in main.go. With a client set, a stop or
+// resume on a remote run whose origin matches proxy.OriginHost is forwarded to
+// the runner instead of refused.
+func (h *ProcessHandlers) SetHarnessProxy(c *harnessproxy.Client) {
+	h.proxy = c
 }
 
 // ProcessHandlersConfig configures NewProcessHandlers.
@@ -250,7 +264,11 @@ func (h *ProcessHandlers) launchHandler(w http.ResponseWriter, r *http.Request, 
 		writeJSONError(w, http.StatusBadRequest, "invalid_name", err.Error())
 		return
 	}
-	if h.refuseIfRemote(w, r, name) {
+	action := "start"
+	if resume {
+		action = "resume"
+	}
+	if h.handleRemoteAction(w, r, name, action) {
 		return
 	}
 	if _, ok := h.mgr.GetState(name); !ok {
@@ -344,7 +362,7 @@ func (h *ProcessHandlers) HandleStop(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid_name", err.Error())
 		return
 	}
-	if h.refuseIfRemote(w, r, name) {
+	if h.handleRemoteAction(w, r, name, "stop") {
 		return
 	}
 	if _, ok := h.mgr.GetState(name); !ok {
@@ -385,23 +403,82 @@ func (h *ProcessHandlers) HandleTemplates(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, names)
 }
 
-// refuseIfRemote writes a 409 and returns true when name is a remote
-// (serving-harness synced) run. Process control (start/stop/resume) is not
-// proxied to the origin host in v1, so the client treats remote runs as read-only
-// (design 4.5); a local pid probe or signal against a runner pid would be the
-// cross-host pid-reuse bug. A nil store (process management without a run store)
-// disables the check.
-func (h *ProcessHandlers) refuseIfRemote(w http.ResponseWriter, r *http.Request, name string) bool {
+// handleRemoteAction decides the remote-run branch of a process-control request.
+// It returns true when it has written a terminal response (the caller must
+// return); false only for a local run, where the caller proceeds with the local
+// process path.
+//
+//   - Local run (RemoteHost == "") -> return false: local path handles it.
+//   - Remote run whose origin matches a configured harness proxy -> forward the
+//     action to the runner control plane (stop=DELETE, resume=POST /resume) and
+//     translate the reply; start has no runner equivalent and stays 409.
+//   - Remote run with no proxy or an unknown origin -> keep the v1 read-only 409.
+//
+// A nil store disables the check (process management without a run store).
+func (h *ProcessHandlers) handleRemoteAction(w http.ResponseWriter, r *http.Request, name, action string) bool {
 	if h.store == nil {
 		return false
 	}
 	host := h.store.RemoteHost(r.Context(), name)
 	if host == "" {
-		return false
+		return false // local run: caller's local path handles it
 	}
-	writeJSONError(w, http.StatusConflict, "remote_run_read_only",
-		fmt.Sprintf("run %q originates on host %q; process controls are read-only on this dashboard in v1 (remote stop/resume is v1.1)", name, host))
+	if h.proxy == nil || host != h.proxy.OriginHost() {
+		// No proxy configured, or the run originates on a host this dashboard has
+		// no pinned path to: keep the v1 read-only behavior.
+		writeJSONError(w, http.StatusConflict, "remote_run_read_only",
+			fmt.Sprintf("run %q originates on host %q; this dashboard has no configured harness path to it (read-only)", name, host))
+		return true
+	}
+	switch action {
+	case "stop":
+		var req stopRunRequest
+		if err := decodeJSONBody(r, &req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_body", err.Error())
+			return true
+		}
+		resp, err := h.proxy.Stop(r.Context(), name, req.Force)
+		h.writeProxyResult(w, resp, err, "stop")
+	case "resume":
+		resp, err := h.proxy.Resume(r.Context(), name)
+		h.writeProxyResult(w, resp, err, "resume")
+	default: // start: a remote run cannot be started from this dashboard
+		writeJSONError(w, http.StatusConflict, "remote_run_read_only",
+			fmt.Sprintf("run %q is remote on host %q; start it on the runner, not this dashboard", name, host))
+	}
 	return true
+}
+
+// writeProxyResult translates a runner control-plane reply (or transport error)
+// into the dashboard's HTTP surface. A pin mismatch or an unreachable runner
+// become a 502 with a distinct error code (never a silent unpinned fallback). A
+// runner 2xx becomes a 202 "requested" envelope: the runner accepted the action
+// and the dashboard's run status flips on the next 60s pull; meanwhile the
+// frontend shows "requested". A runner non-2xx (404/409/429) is forwarded
+// verbatim so the frontend sees the runner's own error.
+func (h *ProcessHandlers) writeProxyResult(w http.ResponseWriter, resp *harnessproxy.ProxyResponse, err error, action string) {
+	if err != nil {
+		if errors.Is(err, harnessproxy.ErrPinMismatch) {
+			writeJSONError(w, http.StatusBadGateway, "runner_pin_mismatch",
+				"runner TLS certificate does not match the pinned fingerprint")
+			return
+		}
+		writeJSONError(w, http.StatusBadGateway, "runner_unreachable", err.Error())
+		return
+	}
+	if resp.Status >= 200 && resp.Status < 300 {
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"remote":        true,
+			"status":        "requested",
+			"action":        action,
+			"runner_status": resp.Status,
+		})
+		return
+	}
+	// Forward the runner's own error status and JSON body unchanged.
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.Status)
+	_, _ = w.Write(resp.Body)
 }
 
 // writeLaunchError maps procmgr.ProcessManager start/resume errors to status codes.

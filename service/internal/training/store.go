@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
+	"github.com/jason-s-yu/cambia/service/internal/harnessproxy"
 	_ "modernc.org/sqlite"
 )
 
@@ -61,6 +62,14 @@ type Run struct {
 	// 3 sync intervals (the bounded-stale threshold). Always false for a local
 	// run and for a remote run whose last_sync_at is unknown/unparseable.
 	Stale bool `json:"stale"`
+	// RemoteControllable is true when this remote run's origin host matches the
+	// dashboard's configured harness proxy, so stop/resume can be forwarded to
+	// the runner control plane (cambia-295 v1.1). False for a local run, a
+	// remote run from an unconfigured origin, or when no harness proxy is
+	// configured. This is the single field the frontend reads to decide whether
+	// to render remote process controls (mirrored as remote_controllable in
+	// web/src/types/training.ts).
+	RemoteControllable bool `json:"remote_controllable"`
 }
 
 // RunDetail extends Run with configuration and metadata.
@@ -123,6 +132,19 @@ type TrainingStore struct {
 	// never wrong-but-confident).
 	hasOriginHost  bool
 	hasHarnessSync bool
+	// proxy is the harness control-plane client, or nil when no harness config
+	// is present (the no-proxy state: remote runs stay read-only, log tails use
+	// the synced file). It supplies the origin host used to mark a remote run
+	// RemoteControllable and is the WS log-proxy dialer.
+	proxy *harnessproxy.Client
+}
+
+// SetHarnessProxy injects the harness control-plane client (or nil for no
+// proxy). Called once at construction in main.go before the store serves any
+// request. A non-nil client makes remote runs whose origin matches its
+// OriginHost controllable and enables the WS log proxy.
+func (s *TrainingStore) SetHarnessProxy(c *harnessproxy.Client) {
+	s.proxy = c
 }
 
 // NewTrainingStore opens the SQLite run database in read-only mode and starts
@@ -317,6 +339,13 @@ func (s *TrainingStore) applyRemoteProvenance(r *Run, dbOriginHost string, sr *s
 	if sr != nil && sr.lastSyncAt != nil {
 		r.LastSyncAt = sr.lastSyncAt
 		r.Stale = s.isStale(*sr.lastSyncAt)
+	}
+	// A remote run is controllable only when a harness proxy is configured and
+	// this run's origin matches the proxy's origin host: an unknown-origin
+	// remote run stays read-only (the dashboard has no pinned path to its
+	// runner).
+	if s.proxy != nil && host == s.proxy.OriginHost() {
+		r.RemoteControllable = true
 	}
 }
 

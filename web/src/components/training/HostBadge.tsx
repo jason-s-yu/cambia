@@ -15,7 +15,7 @@ const HostBadge: React.FC<HostBadgeProps> = ({ host, className = '' }) => {
 	if (!host) return null;
 	return (
 		<span
-			title={`Remote run synced from ${host} (read-only on this dashboard)`}
+			title={`Remote run synced from ${host}`}
 			className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200 ${className}`}
 		>
 			<span className="inline-block w-1.5 h-1.5 rounded-full bg-purple-500" />

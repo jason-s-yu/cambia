@@ -38,6 +38,15 @@ function extractPreflightChecks(err: any): PreflightCheck[] | null {
 	return Array.isArray(checks) ? checks : null;
 }
 
+/** Human-readable message for a failed process action (e.g. a 502
+ * runner_unreachable / runner_pin_mismatch when forwarding to a runner). */
+function extractActionError(err: any): string {
+	const d = err?.response?.data;
+	if (d?.detail) return String(d.detail);
+	if (d?.error) return String(d.error);
+	return err?.message ?? 'request failed';
+}
+
 interface TrainingState {
 	runs: Run[];
 	selectedRun: RunDetail | null;
@@ -50,6 +59,10 @@ interface TrainingState {
 	processes: Record<string, ProcessState>;
 	templates: string[];
 	preflight: PreflightCheck[] | null;
+	/** Last process-action failure message (502 runner_unreachable /
+	 * runner_pin_mismatch when forwarding a remote action, or any non-preflight
+	 * error). Null when the last action succeeded or none has run. */
+	actionError: string | null;
 	evalJobs: Record<string, EvalJob[]>;
 	comparison: ComparisonResponse | null;
 }
@@ -87,6 +100,7 @@ export const useTrainingStore = create<TrainingState & TrainingActions>()(
 		processes: {},
 		templates: [],
 		preflight: null,
+		actionError: null,
 		evalJobs: {},
 		comparison: null,
 
@@ -184,11 +198,13 @@ export const useTrainingStore = create<TrainingState & TrainingActions>()(
 		},
 
 		startRun: async (name: string, opts: StartRunOptions = {}) => {
-			set((state) => { state.isLoading = true; });
+			set((state) => { state.isLoading = true; state.actionError = null; });
 			try {
 				const res = await api.post<ProcessActionResponse>(`/training/runs/${name}/start`, opts);
 				set((state) => {
-					state.processes[name] = res.data.process;
+					// A remote-forwarded action returns no process (state flips on the
+					// next pull); only a local action returns the updated ProcessState.
+					if (res.data.process) state.processes[name] = res.data.process;
 					state.preflight = null;
 					state.isLoading = false;
 				});
@@ -197,16 +213,17 @@ export const useTrainingStore = create<TrainingState & TrainingActions>()(
 				set((state) => {
 					state.isLoading = false;
 					state.preflight = extractPreflightChecks(err);
+					state.actionError = extractActionError(err);
 				});
 			}
 		},
 
 		stopRun: async (name: string, opts: StopRunOptions = {}) => {
-			set((state) => { state.isLoading = true; });
+			set((state) => { state.isLoading = true; state.actionError = null; });
 			try {
 				const res = await api.post<ProcessActionResponse>(`/training/runs/${name}/stop`, opts);
 				set((state) => {
-					state.processes[name] = res.data.process;
+					if (res.data.process) state.processes[name] = res.data.process;
 					state.preflight = null;
 					state.isLoading = false;
 				});
@@ -215,16 +232,17 @@ export const useTrainingStore = create<TrainingState & TrainingActions>()(
 				set((state) => {
 					state.isLoading = false;
 					state.preflight = extractPreflightChecks(err);
+					state.actionError = extractActionError(err);
 				});
 			}
 		},
 
 		resumeRun: async (name: string, opts: ResumeRunOptions = {}) => {
-			set((state) => { state.isLoading = true; });
+			set((state) => { state.isLoading = true; state.actionError = null; });
 			try {
 				const res = await api.post<ProcessActionResponse>(`/training/runs/${name}/resume`, opts);
 				set((state) => {
-					state.processes[name] = res.data.process;
+					if (res.data.process) state.processes[name] = res.data.process;
 					state.preflight = null;
 					state.isLoading = false;
 				});
@@ -233,6 +251,7 @@ export const useTrainingStore = create<TrainingState & TrainingActions>()(
 				set((state) => {
 					state.isLoading = false;
 					state.preflight = extractPreflightChecks(err);
+					state.actionError = extractActionError(err);
 				});
 			}
 		},

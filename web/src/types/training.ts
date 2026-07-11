@@ -20,6 +20,12 @@ export interface Run {
 	/** True when a remote run's synced projection is older than 3 sync intervals
 	 * (bounded-stale threshold). Always false for a local run. */
 	stale?: boolean;
+	/** True when this remote run's origin host matches the dashboard's configured
+	 * harness proxy, so stop/resume can be forwarded to the runner control plane
+	 * (cambia-295 v1.1). False for a local run, a remote run from an unconfigured
+	 * origin, or when no harness proxy is configured. The single flag the UI reads
+	 * to decide whether to render remote process controls. */
+	remote_controllable?: boolean;
 }
 
 export interface RunDetail extends Run {
@@ -94,9 +100,18 @@ export interface CreateRunResponse {
 	process: ProcessState;
 }
 
-/** POST /training/runs/{name}/start|stop|resume -> 202 response body. */
+/** POST /training/runs/{name}/start|stop|resume -> 202 response body.
+ *
+ * A local run returns `process` (the updated ProcessState). A remote run whose
+ * action was forwarded to the runner returns the `remote` envelope instead: the
+ * runner accepted the request and the dashboard's run status flips on the next
+ * pull, so `process` is absent and `status` is "requested". */
 export interface ProcessActionResponse {
-	process: ProcessState;
+	process?: ProcessState;
+	remote?: boolean;
+	status?: 'requested';
+	action?: 'start' | 'stop' | 'resume';
+	runner_status?: number;
 }
 
 /** 409 response body shape for preflight failures (start/resume) and create collisions. */

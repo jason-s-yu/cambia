@@ -23,12 +23,25 @@ type WSMessage struct {
 	Data interface{} `json:"data"`
 }
 
-// HandleLogStream upgrades to WebSocket and streams training log lines in real time.
+// HandleLogStream upgrades to WebSocket and streams training log lines in real
+// time. A remote (serving-harness) run whose origin matches the configured
+// harness proxy is proxied to the runner's pinned WS log stream (see
+// serveRemoteLogs); every other run tails the local synced file.
 func (s *TrainingStore) HandleLogStream(w http.ResponseWriter, r *http.Request) {
 	name := extractRunName(r)
 	if name == "" {
 		http.Error(w, "missing run name", http.StatusBadRequest)
 		return
+	}
+
+	// Remote proxy branch: only when a proxy client is configured and this run's
+	// origin host matches it. A remote-but-unknown-origin run falls through to
+	// the local synced-file tail (its log was pulled by the reconciler).
+	if s.proxy != nil {
+		if host := s.RemoteHost(r.Context(), name); host != "" && host == s.proxy.OriginHost() {
+			s.serveRemoteLogs(w, r, name)
+			return
+		}
 	}
 
 	logPath := s.findLogFile(name)
@@ -48,6 +61,14 @@ func (s *TrainingStore) HandleLogStream(w http.ResponseWriter, r *http.Request) 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
+	s.streamLocalFile(ctx, c, logPath)
+}
+
+// streamLocalFile backfills the last logBackfillLines lines of logPath then tails
+// it via fsnotify, writing log_backfill/log_line frames to c until ctx is done or
+// a write fails. It is the shared local tail path: the direct local branch and
+// the remote-proxy fallback (serveRemoteLogs) both call it.
+func (s *TrainingStore) streamLocalFile(ctx context.Context, c *websocket.Conn, logPath string) {
 	// Send backfill.
 	lines, offset, err := readLastNLines(logPath, logBackfillLines)
 	if err != nil {
