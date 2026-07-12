@@ -617,6 +617,49 @@ def test_real_baseline_win_rate_above_one_still_rejected(tmp_path):
         replay(run_dir, _dest_path(tmp_path), origin_host="runner")
 
 
+def test_metric_baseline_negative_ci_low_reconciles_clean(tmp_path):
+    """A symmetric normal CI on a near-zero exploitability can dip below 0
+    (cambia-420). For a STABILITY_METRIC_BASELINES row the reconciler must accept
+    a pre-clamp-negative ci_low (bounded as finite, matching win_rate's relaxed
+    bound), not reject it on the strict [0, 1] probability bound."""
+    run_dir = tmp_path / "runs" / "v0.4-prtcfr-r1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    conn = _new_source(run_dir / "run_db.sqlite")
+    rid = _insert_run(conn)
+    _insert_eval(
+        conn, rid, 20, run_db.EXPLOIT_TIER_B_LBR_BASELINE,
+        win_rate=0.01, ci_low=-0.02, ci_high=0.04,
+    )
+    conn.close()
+
+    summary = replay(run_dir, _dest_path(tmp_path), origin_host="runner")
+    assert summary["evals"] == 1
+
+    dest = _open_dest(_dest_path(tmp_path))
+    try:
+        row = dest.execute(
+            "SELECT ci_low, ci_high FROM eval_results WHERE baseline=?",
+            (run_db.EXPLOIT_TIER_B_LBR_BASELINE,),
+        ).fetchone()
+    finally:
+        dest.close()
+    assert row["ci_low"] == pytest.approx(-0.02)
+    assert row["ci_high"] == pytest.approx(0.04)
+
+
+def test_normal_baseline_negative_ci_low_still_rejected(tmp_path):
+    """The ci_low exemption (cambia-420) is scoped to STABILITY_METRIC_BASELINES:
+    a genuine agent win-rate row keeps the strict [0, 1] bound on ci_low."""
+    run_dir = tmp_path / "runs" / "v0.4-prtcfr-r1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    conn = _new_source(run_dir / "run_db.sqlite")
+    rid = _insert_run(conn)
+    _insert_eval(conn, rid, 10, "random_no_cambia", ci_low=-0.02)
+    conn.close()
+    with pytest.raises(ReconcilerValidationError):
+        replay(run_dir, _dest_path(tmp_path), origin_host="runner")
+
+
 def test_adversarial_negative_checkpoint_iteration_rejected(tmp_path):
     run_dir = tmp_path / "runs" / "v0.4-prtcfr-r1"
     run_dir.mkdir(parents=True, exist_ok=True)
