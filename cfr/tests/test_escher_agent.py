@@ -23,7 +23,6 @@ import torch
 from src.networks import AdvantageNetwork, StrategyNetwork
 from src.encoding import INPUT_DIM, NUM_ACTIONS
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -262,7 +261,9 @@ class TestESCHERAgentWrapper:
             ckpt_path = f.name
         try:
             _make_escher_checkpoint(ckpt_path)
-            agent = get_agent("escher", 0, config, checkpoint_path=ckpt_path, device="cpu")
+            agent = get_agent(
+                "escher", 0, config, checkpoint_path=ckpt_path, device="cpu"
+            )
             assert isinstance(agent, ESCHERAgentWrapper)
         finally:
             os.unlink(ckpt_path)
@@ -347,7 +348,9 @@ class TestDeepCFRAgentWrapperRegression:
             ckpt_path = f.name
         try:
             _make_deep_cfr_checkpoint(ckpt_path)
-            agent = get_agent("deep_cfr", 0, config, checkpoint_path=ckpt_path, device="cpu")
+            agent = get_agent(
+                "deep_cfr", 0, config, checkpoint_path=ckpt_path, device="cpu"
+            )
             assert isinstance(agent, DeepCFRAgentWrapper)
         finally:
             os.unlink(ckpt_path)
@@ -484,8 +487,15 @@ class TestRunHeadToHeadTyped:
             )
 
             required_keys = {
-                "wins_a", "wins_b", "draws", "win_rate_a", "win_rate_b",
-                "num_games", "errors", "avg_game_turns", "std_game_turns",
+                "wins_a",
+                "wins_b",
+                "draws",
+                "win_rate_a",
+                "win_rate_b",
+                "num_games",
+                "errors",
+                "avg_game_turns",
+                "std_game_turns",
             }
             assert required_keys.issubset(result.keys())
         finally:
@@ -540,27 +550,29 @@ class TestESCHERAgentStateReset:
             game2 = CambiaGameState(house_rules=config.cambia_rules)
             agent.initialize_state(game2)
 
-            assert agent.agent_state is not None, "agent_state must not be None after re-init"
+            assert (
+                agent.agent_state is not None
+            ), "agent_state must not be None after re-init"
 
             # 1. Must be a fresh object, not the game-1 state
-            assert id(agent.agent_state) != dirty_id, (
-                "initialize_state() must create a new AgentState object, not reuse the old one"
-            )
+            assert (
+                id(agent.agent_state) != dirty_id
+            ), "initialize_state() must create a new AgentState object, not reuse the old one"
 
             # 2. own_active_mask must only contain the initial-peek slots for game 2
             peek_indices = set(game2.players[0].initial_peek_indices)
             active = set(agent.agent_state.own_active_mask)
             # Every active slot must be one that was peeked at start
-            assert active <= peek_indices, (
-                f"own_active_mask {active} contains non-peeked slots; expected subset of {peek_indices}"
-            )
+            assert (
+                active <= peek_indices
+            ), f"own_active_mask {active} contains non-peeked slots; expected subset of {peek_indices}"
 
             # 3. Peeked slots must have a non-UNKNOWN bucket (concrete knowledge)
             for slot in peek_indices:
                 bucket = agent.agent_state.own_hand[slot].bucket
-                assert bucket != CardBucket.UNKNOWN, (
-                    f"Slot {slot} was peeked at init but has UNKNOWN bucket after initialize_state()"
-                )
+                assert (
+                    bucket != CardBucket.UNKNOWN
+                ), f"Slot {slot} was peeked at init but has UNKNOWN bucket after initialize_state()"
 
             # 4. Non-peeked slots must be UNKNOWN (no bleed-over from game 1)
             non_peeked = set(range(len(game2.players[0].hand))) - peek_indices
@@ -593,8 +605,8 @@ class TestESCHERAgentStateReset:
             agent.initialize_state(game2)
             state2 = agent.agent_state
 
-            assert state2 is not state1, (
-                "initialize_state() must assign a new AgentState instance, not reuse the existing one"
-            )
+            assert (
+                state2 is not state1
+            ), "initialize_state() must assign a new AgentState instance, not reuse the existing one"
         finally:
             os.unlink(ckpt_path)

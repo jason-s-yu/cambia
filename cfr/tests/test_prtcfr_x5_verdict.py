@@ -40,7 +40,6 @@ from scripts import prtcfr_x5_verdict as x5  # noqa: E402
 from src import run_db  # noqa: E402
 from src.evaluate_agents import MEAN_IMP_BASELINES  # noqa: E402
 
-
 K_GAMES = 8192
 # ceil(2.0e7 / 8192) = 2442 (the 10x anchor iteration).
 ANCHOR_ITER = math.ceil(x5.BUDGET_ANCHOR_TRAVERSALS / K_GAMES)
@@ -78,7 +77,11 @@ def _flat_lbr(iters, base=0.30, slope=1.0e-5, noise_amp=2.0e-2):
 def _write_metrics(path, lbr_values):
     with open(path, "w", encoding="utf-8") as fh:
         for it in sorted(lbr_values):
-            row = {"iteration": it, "tier_a_lbr": lbr_values[it], "grad_norm_violations": 0}
+            row = {
+                "iteration": it,
+                "tier_a_lbr": lbr_values[it],
+                "grad_norm_violations": 0,
+            }
             fh.write(json.dumps(row) + "\n")
 
 
@@ -95,11 +98,11 @@ def _write_config_yaml(run_dir, k_games=K_GAMES):
 
 # games=5000 per baseline. (p0_wins, ties) chosen so not_a_loss = (p0 + 0.5*ties)/5000.
 _G2_PASS = {
-    "random_no_cambia": (3500, 100),   # na = 0.710
+    "random_no_cambia": (3500, 100),  # na = 0.710
     "random_late_cambia": (3000, 100),  # na = 0.610
-    "imperfect_greedy": (2950, 200),    # na = 0.610
-    "memory_heuristic": (2900, 150),    # na = 0.595
-    "aggressive_snap": (2850, 100),     # na = 0.580
+    "imperfect_greedy": (2950, 200),  # na = 0.610
+    "memory_heuristic": (2900, 150),  # na = 0.595
+    "aggressive_snap": (2850, 100),  # na = 0.580
 }
 
 
@@ -109,11 +112,17 @@ def _seed_g2(db_path, run_name, seat_counts, iteration=5000, games=5000):
     for baseline, (p0, ties) in seat_counts.items():
         p1 = games - p0 - ties
         run_db.insert_eval_result(
-            db, run_id, None,
+            db,
+            run_id,
+            None,
             {
-                "iteration": iteration, "baseline": baseline,
-                "win_rate": p0 / games, "games_played": games,
-                "p0_wins": p0, "p1_wins": p1, "ties": ties,
+                "iteration": iteration,
+                "baseline": baseline,
+                "win_rate": p0 / games,
+                "games_played": games,
+                "p0_wins": p0,
+                "p1_wins": p1,
+                "ties": ties,
             },
         )
     return db, run_id
@@ -131,11 +140,15 @@ def _seed_mixture_exploit(db_path, run_name, mixture, iteration=5000, games=2000
     run_id = run_db.upsert_run(db, name=run_name, algorithm="prt-cfr")
     for key, vals in mixture.items():
         run_db.insert_eval_result(
-            db, run_id, None,
+            db,
+            run_id,
+            None,
             {
-                "iteration": iteration, "baseline": key,
+                "iteration": iteration,
+                "baseline": key,
                 "win_rate": vals["exploitability"],
-                "ci_low": vals["ci_low"], "ci_high": vals["ci_high"],
+                "ci_low": vals["ci_low"],
+                "ci_high": vals["ci_high"],
                 "games_played": games,
             },
         )
@@ -173,25 +186,32 @@ def _write_reference(path, baselines):
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def _rows_from_baselines(baselines, timestamp="2026-07-12T00:00:00Z", seed=42,
-                          rule_profile="prtcfr_production", sample_count=2000):
+def _rows_from_baselines(
+    baselines,
+    timestamp="2026-07-12T00:00:00Z",
+    seed=42,
+    rule_profile="prtcfr_production",
+    sample_count=2000,
+):
     """Flatten a nested {baseline: {estimator: {exploitability, ci_low, ci_high}}}
     map into the canonical producer row-list shape (P3W5's write_table format),
     for asserting the row-list and nested-map reference loaders agree."""
     rows = []
     for baseline, estimators in baselines.items():
         for estimator, vals in estimators.items():
-            rows.append({
-                "baseline": baseline,
-                "estimator": estimator,
-                "value": vals["exploitability"],
-                "ci_low": vals["ci_low"],
-                "ci_high": vals["ci_high"],
-                "sample_count": sample_count,
-                "rule_profile": rule_profile,
-                "seed": seed,
-                "timestamp": timestamp,
-            })
+            rows.append(
+                {
+                    "baseline": baseline,
+                    "estimator": estimator,
+                    "value": vals["exploitability"],
+                    "ci_low": vals["ci_low"],
+                    "ci_high": vals["ci_high"],
+                    "sample_count": sample_count,
+                    "rule_profile": rule_profile,
+                    "seed": seed,
+                    "timestamp": timestamp,
+                }
+            )
     return rows
 
 
@@ -310,7 +330,9 @@ def test_resolve_k_games_cli_override_wins(tmp_path):
     run_dir = tmp_path / "runs" / "k-run2"
     run_dir.mkdir(parents=True)
     _write_config_yaml(run_dir, k_games=8192)
-    k, source = x5.resolve_k_games(run_dir, k_override=1234, db_path=str(tmp_path / "db.sqlite"))
+    k, source = x5.resolve_k_games(
+        run_dir, k_override=1234, db_path=str(tmp_path / "db.sqlite")
+    )
     assert k == 1234
     assert "cli" in source
 
@@ -408,7 +430,9 @@ def test_g3_ordering_pass_non_overlapping(tmp_path):
     ref_path = tmp_path / "ref.json"
     _write_reference(ref_path, _REF_PASS)
 
-    g3 = x5.compute_g3_ordering(run_dir, db_path=str(db_path), baseline_ref_path=str(ref_path))
+    g3 = x5.compute_g3_ordering(
+        run_dir, db_path=str(db_path), baseline_ref_path=str(ref_path)
+    )
     assert g3["verdict"] == "PASS"
     assert g3["primary_pass"] is True
     for baseline in MEAN_IMP_BASELINES:
@@ -425,12 +449,16 @@ def test_g3_ordering_ci_overlap_fails_and_flags(tmp_path):
     ref = json.loads(json.dumps(_REF_PASS))  # deep copy
     # Drag memory_heuristic's Tier-B CI down so it overlaps the mixture (ci_high 0.12).
     ref["memory_heuristic"]["lbr_tier_b"] = {
-        "exploitability": 0.13, "ci_low": 0.11, "ci_high": 0.15
+        "exploitability": 0.13,
+        "ci_low": 0.11,
+        "ci_high": 0.15,
     }
     ref_path = tmp_path / "ref.json"
     _write_reference(ref_path, ref)
 
-    g3 = x5.compute_g3_ordering(run_dir, db_path=str(db_path), baseline_ref_path=str(ref_path))
+    g3 = x5.compute_g3_ordering(
+        run_dir, db_path=str(db_path), baseline_ref_path=str(ref_path)
+    )
     leg = g3["legs"]["memory_heuristic"]["primary"]
     assert leg["overlap"] is True
     assert leg["pass"] is False
@@ -450,18 +478,25 @@ def test_g3_ordering_ismcts_disagreement_flag_not_veto(tmp_path):
     # ISMCTS reference for aggressive_snap overlaps the mixture (0.14) -> confirming FAIL,
     # while Tier-B still passes. Default: flag, gate still PASS.
     ref["aggressive_snap"]["ismcts_br"] = {
-        "exploitability": 0.15, "ci_low": 0.13, "ci_high": 0.17
+        "exploitability": 0.15,
+        "ci_low": 0.13,
+        "ci_high": 0.17,
     }
     ref_path = tmp_path / "ref.json"
     _write_reference(ref_path, ref)
 
-    default_g3 = x5.compute_g3_ordering(run_dir, db_path=str(db_path), baseline_ref_path=str(ref_path))
+    default_g3 = x5.compute_g3_ordering(
+        run_dir, db_path=str(db_path), baseline_ref_path=str(ref_path)
+    )
     assert default_g3["legs"]["aggressive_snap"]["disagreement_flag"] is True
     assert default_g3["verdict"] == "PASS"  # confirming-only: not a veto
     assert any("aggressive_snap" in f for f in default_g3["flags"])
 
     binding_g3 = x5.compute_g3_ordering(
-        run_dir, db_path=str(db_path), baseline_ref_path=str(ref_path), ismcts_binding=True
+        run_dir,
+        db_path=str(db_path),
+        baseline_ref_path=str(ref_path),
+        ismcts_binding=True,
     )
     assert binding_g3["verdict"] == "FAIL"  # now ISMCTS gates
 
@@ -497,19 +532,29 @@ def test_read_baseline_reference_accepts_row_list_shape(tmp_path):
     assert entry["ci_low"] == pytest.approx(0.27)
     assert entry["ci_high"] == pytest.approx(0.33)
     assert entry["games"] == 2000
-    assert ref["baselines"]["aggressive_snap"]["ismcts_br"]["exploitability"] == pytest.approx(0.40)
+    assert ref["baselines"]["aggressive_snap"]["ismcts_br"][
+        "exploitability"
+    ] == pytest.approx(0.40)
 
 
 def test_baselines_from_rows_latest_timestamp_wins_on_duplicates():
     rows = [
         {
-            "baseline": "aggressive_snap", "estimator": "lbr_tier_b", "value": 0.20,
-            "ci_low": 0.18, "ci_high": 0.22, "sample_count": 1000,
+            "baseline": "aggressive_snap",
+            "estimator": "lbr_tier_b",
+            "value": 0.20,
+            "ci_low": 0.18,
+            "ci_high": 0.22,
+            "sample_count": 1000,
             "timestamp": "2026-07-01T00:00:00Z",
         },
         {
-            "baseline": "aggressive_snap", "estimator": "lbr_tier_b", "value": 0.35,
-            "ci_low": 0.32, "ci_high": 0.38, "sample_count": 2000,
+            "baseline": "aggressive_snap",
+            "estimator": "lbr_tier_b",
+            "value": 0.35,
+            "ci_low": 0.32,
+            "ci_high": 0.38,
+            "sample_count": 2000,
             "timestamp": "2026-07-12T00:00:00Z",
         },
     ]
@@ -565,10 +610,7 @@ def test_g3_trend_pass_negative_in_budget(tmp_path):
 
 
 def test_g3_trend_flat_slope_ci_spans_zero(tmp_path):
-    rows = [
-        {"iteration": it, "tier_a_lbr": v}
-        for it, v in _flat_lbr(PASS_ITERS).items()
-    ]
+    rows = [{"iteration": it, "tier_a_lbr": v} for it, v in _flat_lbr(PASS_ITERS).items()]
     t = x5.compute_g3_trend(rows, K_GAMES)
     assert t["window"]["valid"] is True
     assert t["budget_reached"] is True  # budget reached, but slope not significant
@@ -596,8 +638,16 @@ def test_g3_trend_budget_not_reached(tmp_path):
 def test_budget_curve_table_cumulative_traversals():
     rows = [{"iteration": it, "tier_a_lbr": 0.5} for it in [10, 20, 30]]
     curve = x5.budget_curve_table(rows, K_GAMES)
-    assert curve[0] == {"iteration": 10, "cumulative_traversals": 10 * K_GAMES, "tier_a_lbr": 0.5}
-    assert [pt["cumulative_traversals"] for pt in curve] == [10 * K_GAMES, 20 * K_GAMES, 30 * K_GAMES]
+    assert curve[0] == {
+        "iteration": 10,
+        "cumulative_traversals": 10 * K_GAMES,
+        "tier_a_lbr": 0.5,
+    }
+    assert [pt["cumulative_traversals"] for pt in curve] == [
+        10 * K_GAMES,
+        20 * K_GAMES,
+        30 * K_GAMES,
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -609,7 +659,9 @@ def test_verdict_full_pass(tmp_path):
     run_dir, db_path, ref_path = _make_run(
         tmp_path, "x5-pass", _decreasing_lbr(PASS_ITERS), _G2_PASS, _MIX_PASS, _REF_PASS
     )
-    verdict = x5.compute_verdict(str(run_dir), db_path=db_path, baseline_ref_path=ref_path)
+    verdict = x5.compute_verdict(
+        str(run_dir), db_path=db_path, baseline_ref_path=ref_path
+    )
 
     assert verdict["k_games"] == K_GAMES
     assert verdict["g2_not_a_loss"]["verdict"] == "PASS"
@@ -631,7 +683,9 @@ def test_verdict_fail_strategic_g2_leg(tmp_path):
     run_dir, db_path, ref_path = _make_run(
         tmp_path, "x5-g2fail", _decreasing_lbr(PASS_ITERS), counts, _MIX_PASS, _REF_PASS
     )
-    verdict = x5.compute_verdict(str(run_dir), db_path=db_path, baseline_ref_path=ref_path)
+    verdict = x5.compute_verdict(
+        str(run_dir), db_path=db_path, baseline_ref_path=ref_path
+    )
     assert verdict["g2_not_a_loss"]["verdict"] == "FAIL"
     assert verdict["g3_ordering"]["verdict"] == "PASS"  # unaffected axis
     assert verdict["g3_trend"]["verdict"] == "PASS"  # unaffected axis
@@ -642,12 +696,16 @@ def test_verdict_fail_strategic_g2_leg(tmp_path):
 def test_verdict_fail_exploitability_ci_overlap(tmp_path):
     ref = json.loads(json.dumps(_REF_PASS))
     ref["imperfect_greedy"]["lbr_tier_b"] = {
-        "exploitability": 0.13, "ci_low": 0.11, "ci_high": 0.15  # overlaps mixture 0.12
+        "exploitability": 0.13,
+        "ci_low": 0.11,
+        "ci_high": 0.15,  # overlaps mixture 0.12
     }
     run_dir, db_path, ref_path = _make_run(
         tmp_path, "x5-ordfail", _decreasing_lbr(PASS_ITERS), _G2_PASS, _MIX_PASS, ref
     )
-    verdict = x5.compute_verdict(str(run_dir), db_path=db_path, baseline_ref_path=ref_path)
+    verdict = x5.compute_verdict(
+        str(run_dir), db_path=db_path, baseline_ref_path=ref_path
+    )
     assert verdict["g2_not_a_loss"]["verdict"] == "PASS"  # unaffected axis
     assert verdict["g3_ordering"]["verdict"] == "FAIL"
     assert verdict["g3_trend"]["verdict"] == "PASS"  # unaffected axis
@@ -658,9 +716,13 @@ def test_verdict_fail_flat_curve_kill(tmp_path):
     run_dir, db_path, ref_path = _make_run(
         tmp_path, "x5-flat", _flat_lbr(PASS_ITERS), _G2_PASS, _MIX_PASS, _REF_PASS
     )
-    verdict = x5.compute_verdict(str(run_dir), db_path=db_path, baseline_ref_path=ref_path)
+    verdict = x5.compute_verdict(
+        str(run_dir), db_path=db_path, baseline_ref_path=ref_path
+    )
     assert verdict["g3_trend"]["verdict"] == "FAIL"
-    assert verdict["g3_trend"]["budget_reached"] is True  # flat-curve kill: budget reached
+    assert (
+        verdict["g3_trend"]["budget_reached"] is True
+    )  # flat-curve kill: budget reached
     assert verdict["overall_verdict"] == "FAIL"
     # The budget curve is still written on the kill.
     assert len(verdict["budget_curve"]) == len(PASS_ITERS)
@@ -672,7 +734,9 @@ def test_verdict_fail_budget_not_reached(tmp_path):
     run_dir, db_path, ref_path = _make_run(
         tmp_path, "x5-short", _decreasing_lbr(SHORT_ITERS), _G2_PASS, _MIX_PASS, _REF_PASS
     )
-    verdict = x5.compute_verdict(str(run_dir), db_path=db_path, baseline_ref_path=ref_path)
+    verdict = x5.compute_verdict(
+        str(run_dir), db_path=db_path, baseline_ref_path=ref_path
+    )
     assert verdict["g3_trend"]["verdict"] == "FAIL"
     assert verdict["g3_trend"]["budget_reached"] is False
     assert verdict["overall_verdict"] == "FAIL"
@@ -688,7 +752,9 @@ def test_verdict_missing_k_fails_trend_cleanly(tmp_path):
     _seed_mixture_exploit(db_path, "x5-nok", _MIX_PASS)
     ref_path = tmp_path / "ref.json"
     _write_reference(ref_path, _REF_PASS)
-    verdict = x5.compute_verdict(str(run_dir), db_path=str(db_path), baseline_ref_path=str(ref_path))
+    verdict = x5.compute_verdict(
+        str(run_dir), db_path=str(db_path), baseline_ref_path=str(ref_path)
+    )
     assert verdict["k_games"] is None
     assert verdict["g3_trend"]["verdict"] == "FAIL"
     assert "k_games_per_iter" in verdict["g3_trend"]["error"]
@@ -713,19 +779,23 @@ def test_g3_ordering_strategic_default_passes_when_only_random_leg_fails(tmp_pat
     # Drag random_no_cambia's Tier-B CI down so it overlaps the mixture (an
     # artifact-driven tight bar, per the module docstring rationale).
     ref["random_no_cambia"]["lbr_tier_b"] = {
-        "exploitability": 0.11, "ci_low": 0.09, "ci_high": 0.13
+        "exploitability": 0.11,
+        "ci_low": 0.09,
+        "ci_high": 0.13,
     }
     ref_path = tmp_path / "ref.json"
     _write_reference(ref_path, ref)
 
-    g3 = x5.compute_g3_ordering(run_dir, db_path=str(db_path), baseline_ref_path=str(ref_path))
+    g3 = x5.compute_g3_ordering(
+        run_dir, db_path=str(db_path), baseline_ref_path=str(ref_path)
+    )
     assert g3["g3_binding"] == "strategic"
     assert g3["legs"]["random_no_cambia"]["binding"] is False
-    assert g3["legs"]["random_no_cambia"]["primary"]["pass"] is False  # the leg itself still fails
+    assert (
+        g3["legs"]["random_no_cambia"]["primary"]["pass"] is False
+    )  # the leg itself still fails
     assert g3["verdict"] == "PASS"  # non-binding leg does not veto
-    assert any(
-        "random_no_cambia" in f and "non-binding" in f for f in g3["flags"]
-    )
+    assert any("random_no_cambia" in f and "non-binding" in f for f in g3["flags"])
 
 
 def test_g3_ordering_all_binding_restores_old_behavior(tmp_path):
@@ -736,7 +806,9 @@ def test_g3_ordering_all_binding_restores_old_behavior(tmp_path):
     _seed_mixture_exploit(db_path, "g3randomfail2", _MIX_PASS)
     ref = json.loads(json.dumps(_REF_PASS))
     ref["random_no_cambia"]["lbr_tier_b"] = {
-        "exploitability": 0.11, "ci_low": 0.09, "ci_high": 0.13
+        "exploitability": 0.11,
+        "ci_low": 0.09,
+        "ci_high": 0.13,
     }
     ref_path = tmp_path / "ref.json"
     _write_reference(ref_path, ref)
@@ -753,7 +825,9 @@ def test_verdict_records_g3_binding_mode_and_defaults_to_strategic(tmp_path):
     run_dir, db_path, ref_path = _make_run(
         tmp_path, "x5-g3mode", _decreasing_lbr(PASS_ITERS), _G2_PASS, _MIX_PASS, _REF_PASS
     )
-    verdict = x5.compute_verdict(str(run_dir), db_path=db_path, baseline_ref_path=ref_path)
+    verdict = x5.compute_verdict(
+        str(run_dir), db_path=db_path, baseline_ref_path=ref_path
+    )
     assert verdict["g3_ordering"]["g3_binding"] == "strategic"
     summary = x5.human_summary(verdict)
     assert "g3-binding=strategic" in summary
@@ -769,7 +843,9 @@ def test_g3_ordering_invalid_binding_raises(tmp_path):
     run_dir = tmp_path / "runs" / "g3bogus"
     run_dir.mkdir(parents=True)
     with pytest.raises(ValueError):
-        x5.compute_g3_ordering(run_dir, db_path=str(tmp_path / "db.sqlite"), g3_binding="bogus")
+        x5.compute_g3_ordering(
+            run_dir, db_path=str(tmp_path / "db.sqlite"), g3_binding="bogus"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -782,15 +858,21 @@ def test_g3_ordering_invalid_binding_raises(tmp_path):
 
 def test_ismcts_binding_fails_closed_when_mixture_has_no_ismcts_row(tmp_path):
     run_dir, db_path, ref_path = _make_run(
-        tmp_path, "x5-noismcts", _decreasing_lbr(PASS_ITERS), _G2_PASS,
-        {"lbr_tier_b": _MIX_PASS["lbr_tier_b"]}, _REF_PASS,
+        tmp_path,
+        "x5-noismcts",
+        _decreasing_lbr(PASS_ITERS),
+        _G2_PASS,
+        {"lbr_tier_b": _MIX_PASS["lbr_tier_b"]},
+        _REF_PASS,
     )
     verdict = x5.compute_verdict(
         str(run_dir), db_path=db_path, baseline_ref_path=ref_path, ismcts_binding=True
     )
     g3 = verdict["g3_ordering"]
     assert g3["primary_pass"] is True  # primary alone would have passed
-    assert g3["ismcts_binding_fail_reason"] == "ismcts binding requested but no ismcts rows"
+    assert (
+        g3["ismcts_binding_fail_reason"] == "ismcts binding requested but no ismcts rows"
+    )
     assert g3["verdict"] == "FAIL"
     assert verdict["overall_verdict"] == "FAIL"
     summary = x5.human_summary(verdict)
@@ -803,14 +885,21 @@ def test_ismcts_binding_fails_closed_when_reference_has_no_ismcts_rows(tmp_path)
     db_path = tmp_path / "db.sqlite"
     _seed_g2(db_path, "g3norefismcts", _G2_PASS)
     _seed_mixture_exploit(db_path, "g3norefismcts", _MIX_PASS)  # has both keys
-    ref = {b: {"lbr_tier_b": v["lbr_tier_b"]} for b, v in _REF_PASS.items()}  # no ismcts_br entries
+    ref = {
+        b: {"lbr_tier_b": v["lbr_tier_b"]} for b, v in _REF_PASS.items()
+    }  # no ismcts_br entries
     ref_path = tmp_path / "ref.json"
     _write_reference(ref_path, ref)
 
     g3 = x5.compute_g3_ordering(
-        run_dir, db_path=str(db_path), baseline_ref_path=str(ref_path), ismcts_binding=True
+        run_dir,
+        db_path=str(db_path),
+        baseline_ref_path=str(ref_path),
+        ismcts_binding=True,
     )
-    assert g3["ismcts_binding_fail_reason"] == "ismcts binding requested but no ismcts rows"
+    assert (
+        g3["ismcts_binding_fail_reason"] == "ismcts binding requested but no ismcts rows"
+    )
     assert g3["verdict"] == "FAIL"
 
 
@@ -818,10 +907,16 @@ def test_ismcts_binding_default_confirming_only_still_degrades_gracefully(tmp_pa
     """Default (ismcts_binding=False) keeps passing on primary alone when
     there are no confirming rows -- only --ismcts-binding fails closed."""
     run_dir, db_path, ref_path = _make_run(
-        tmp_path, "x5-noismcts2", _decreasing_lbr(PASS_ITERS), _G2_PASS,
-        {"lbr_tier_b": _MIX_PASS["lbr_tier_b"]}, _REF_PASS,
+        tmp_path,
+        "x5-noismcts2",
+        _decreasing_lbr(PASS_ITERS),
+        _G2_PASS,
+        {"lbr_tier_b": _MIX_PASS["lbr_tier_b"]},
+        _REF_PASS,
     )
-    verdict = x5.compute_verdict(str(run_dir), db_path=db_path, baseline_ref_path=ref_path)
+    verdict = x5.compute_verdict(
+        str(run_dir), db_path=db_path, baseline_ref_path=ref_path
+    )
     g3 = verdict["g3_ordering"]
     assert g3["ismcts_binding_fail_reason"] is None
     assert g3["verdict"] == "PASS"

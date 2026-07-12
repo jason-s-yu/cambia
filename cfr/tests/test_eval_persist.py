@@ -273,10 +273,7 @@ class TestCheckpointDiscovery:
 
         target_epoch = 100
         all_ckpts = sorted(ckpt_dir.glob("*gtcfr*epoch_*.pt"))
-        matches = [
-            p for p in all_ckpts
-            if f"epoch_{target_epoch}.pt" in p.name
-        ]
+        matches = [p for p in all_ckpts if f"epoch_{target_epoch}.pt" in p.name]
         assert len(matches) == 1
         assert "epoch_100" in matches[0].name
 
@@ -338,7 +335,10 @@ class TestPPOCheckpointDiscovery:
 
         found = _find_run_dir_checkpoints(ckpt_dir, "deep_cfr_checkpoint", "os-mccfr")
         names = {p.name for p in found}
-        assert names == {"deep_cfr_checkpoint_iter_100.pt", "deep_cfr_checkpoint_iter_200.pt"}
+        assert names == {
+            "deep_cfr_checkpoint_iter_100.pt",
+            "deep_cfr_checkpoint_iter_200.pt",
+        }
 
     def test_latest_picks_highest_step_across_steps_and_eval(self, tmp_path):
         from src.cli import _find_run_dir_checkpoints, _extract_checkpoint_num

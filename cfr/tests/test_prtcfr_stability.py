@@ -29,7 +29,6 @@ from src.cfr.prtcfr_trainer import (
 )
 from tools.tiny_solver import build_tree
 
-
 _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 CONFIG_2CARD = "config/tiny_2card_plateau.yaml"
 
@@ -71,18 +70,18 @@ def test_controller_early_stop_after_patience_worse_checks():
 def test_controller_tolerance_band_resets_streak():
     # a check within the tolerance band of best must NOT count toward the stop.
     c = BestSnapshotController(rel_tolerance=0.20, patience=2, min_iters=1, mode="min")
-    c.update(1, 0.20)          # best
-    c.update(2, 0.30)          # worse (> 0.24) streak 1
-    d3 = c.update(3, 0.22)     # within band (<= 0.24) -> reset
+    c.update(1, 0.20)  # best
+    c.update(2, 0.30)  # worse (> 0.24) streak 1
+    d3 = c.update(3, 0.22)  # within band (<= 0.24) -> reset
     assert d3.num_worse_since_best == 0
-    d4 = c.update(4, 0.30)     # worse streak 1 again (not 2)
+    d4 = c.update(4, 0.30)  # worse streak 1 again (not 2)
     assert d4.should_stop is False
 
 
 def test_controller_respects_min_iters():
     c = BestSnapshotController(rel_tolerance=0.1, patience=1, min_iters=100, mode="min")
     c.update(1, 0.2)
-    d = c.update(2, 0.9)       # worse, but below min_iters -> no stop
+    d = c.update(2, 0.9)  # worse, but below min_iters -> no stop
     assert d.should_stop is False
 
 
@@ -100,10 +99,23 @@ def test_controller_pins_original_x2_trajectory():
     """The audit's warm-start NashConv trajectory: best in the plateau, diverge
     after iter 300. The controller must pin the deployable window BEFORE 300."""
     traj = [
-        (1, 1.134), (25, 0.182), (50, 0.102), (75, 0.082), (100, 0.075),
-        (125, 0.064), (150, 0.054), (175, 0.047), (200, 0.042), (225, 0.039),
-        (250, 0.041), (275, 0.040), (300, 0.041), (325, 0.077), (350, 0.117),
-        (375, 0.136), (400, 0.158),
+        (1, 1.134),
+        (25, 0.182),
+        (50, 0.102),
+        (75, 0.082),
+        (100, 0.075),
+        (125, 0.064),
+        (150, 0.054),
+        (175, 0.047),
+        (200, 0.042),
+        (225, 0.039),
+        (250, 0.041),
+        (275, 0.040),
+        (300, 0.041),
+        (325, 0.077),
+        (350, 0.117),
+        (375, 0.136),
+        (400, 0.158),
     ]
     c = BestSnapshotController(rel_tolerance=0.15, patience=2, min_iters=50, mode="min")
     stop_at = None
@@ -128,15 +140,27 @@ def test_controller_pins_original_x2_trajectory():
 # value, so the default divergence rule must never stop on it; see
 # test_plateau_mode_default_config_never_engages_plateau_mode below).
 _FLAT_AFTER_50_TRAJ = [
-    (10, 0.50), (20, 0.30), (30, 0.20), (40, 0.15), (50, 0.10),
-    (60, 0.10), (70, 0.10), (80, 0.10), (90, 0.10), (100, 0.10),
+    (10, 0.50),
+    (20, 0.30),
+    (30, 0.20),
+    (40, 0.15),
+    (50, 0.10),
+    (60, 0.10),
+    (70, 0.10),
+    (80, 0.10),
+    (90, 0.10),
+    (100, 0.10),
 ]
 
 
 def test_plateau_mode_stops_on_flattened_trajectory():
     c = BestSnapshotController(
-        mode="min", stop_mode="plateau", min_iters=1,
-        plateau_window_iters=50, plateau_step_iters=10, plateau_rel_improvement=0.005,
+        mode="min",
+        stop_mode="plateau",
+        min_iters=1,
+        plateau_window_iters=50,
+        plateau_step_iters=10,
+        plateau_rel_improvement=0.005,
     )
     stop_at = None
     for it, m in _FLAT_AFTER_50_TRAJ:
@@ -155,8 +179,12 @@ def test_plateau_mode_does_not_stop_while_still_descending():
     # the 0.5%/step threshold, for the whole run.
     traj = [(t, 1.0 * (0.95 ** (t / 10))) for t in range(10, 310, 10)]
     c = BestSnapshotController(
-        mode="min", stop_mode="plateau", min_iters=1,
-        plateau_window_iters=50, plateau_step_iters=10, plateau_rel_improvement=0.005,
+        mode="min",
+        stop_mode="plateau",
+        min_iters=1,
+        plateau_window_iters=50,
+        plateau_step_iters=10,
+        plateau_rel_improvement=0.005,
     )
     for it, m in traj:
         d = c.update(it, m)
@@ -189,7 +217,9 @@ def test_manifest_round_trip(tmp_path):
     for it, m in [(1, 0.5), (2, 0.2), (3, 0.4)]:
         c.update(it, m)
     d = str(tmp_path)
-    path = write_deployable_manifest(d, c, [1, 2, 3], metric_name="nashconv", stopped_early=True)
+    path = write_deployable_manifest(
+        d, c, [1, 2, 3], metric_name="nashconv", stopped_early=True
+    )
     assert os.path.basename(path) == DEPLOYABLE_MANIFEST
     man = read_deployable_manifest(d)
     assert man["best_iteration"] == 2
@@ -268,8 +298,14 @@ def test_peak_lr_unknown_schedule_raises():
 def tiny_tree():
     cfg = load_config(CONFIG_2CARD)
     root, _isets, _n, aborted = build_tree(
-        cfg, n_deals=5, seed0=0, max_nodes_per_deal=2_000_000,
-        enumerate_draws=True, perfect_recall=True, tokenize=True, seq_cap=256,
+        cfg,
+        n_deals=5,
+        seed0=0,
+        max_nodes_per_deal=2_000_000,
+        enumerate_draws=True,
+        perfect_recall=True,
+        tokenize=True,
+        seq_cap=256,
     )
     assert aborted == 0
     return root
@@ -283,8 +319,13 @@ def _fast_ns(**extra):
     same pattern the production config plumbing (S1W5) will land on PRTCFRConfig.
     """
     base = PRTCFRConfig(
-        m_rollouts=2, k_games_per_iter=15, iterations=6, train_steps_per_iter=20,
-        batch_size=256, warm_start=True, device=_DEVICE,
+        m_rollouts=2,
+        k_games_per_iter=15,
+        iterations=6,
+        train_steps_per_iter=20,
+        batch_size=256,
+        warm_start=True,
+        device=_DEVICE,
     ).model_dump()
     base.update(extra)
     return types.SimpleNamespace(**base)
@@ -332,8 +373,11 @@ def test_stability_controller_drives_and_writes_manifest(tiny_tree, tmp_path):
         return metric_by_iter[t]
 
     cfg = _fast_ns(
-        stability_enabled=True, stability_eval_every=1, stability_patience=2,
-        stability_rel_tolerance=0.15, stability_min_iters=1,
+        stability_enabled=True,
+        stability_eval_every=1,
+        stability_patience=2,
+        stability_rel_tolerance=0.15,
+        stability_min_iters=1,
     )
     snap_dir = str(tmp_path / "snaps")
     trainer = PRTCFRTinyTrainer(tiny_tree, cfg, snap_dir, eval_fn=eval_fn)
@@ -362,14 +406,21 @@ def test_stability_best_mirrors_into_run_db(tiny_tree, tmp_path):
         return metric_by_iter[t]
 
     cfg = _fast_ns(
-        stability_enabled=True, stability_eval_every=1, stability_patience=10,
-        stability_rel_tolerance=0.15, stability_min_iters=1,
+        stability_enabled=True,
+        stability_eval_every=1,
+        stability_patience=10,
+        stability_rel_tolerance=0.15,
+        stability_min_iters=1,
     )
     run_dir = str(tmp_path / "run")
     db_path = str(tmp_path / "cambia_runs.db")
     trainer = PRTCFRTinyTrainer(
-        tiny_tree, cfg, run_dir=run_dir, run_name="cambia-390-test",
-        db_path=db_path, eval_fn=eval_fn,
+        tiny_tree,
+        cfg,
+        run_dir=run_dir,
+        run_name="cambia-390-test",
+        db_path=db_path,
+        eval_fn=eval_fn,
     )
     hist = trainer.train(iterations=5)
     assert len(hist) == 5  # patience=10 never trips early-stop on this trajectory
@@ -409,9 +460,13 @@ def test_stability_plateau_mode_drives_trainer_and_writes_manifest(tiny_tree, tm
         return metric_by_iter[t]
 
     cfg = _fast_ns(
-        stability_enabled=True, stability_eval_every=1, stability_min_iters=1,
-        stability_stop_mode="plateau", stability_plateau_window_iters=3,
-        stability_plateau_step_iters=1, stability_plateau_rel_improvement=0.005,
+        stability_enabled=True,
+        stability_eval_every=1,
+        stability_min_iters=1,
+        stability_stop_mode="plateau",
+        stability_plateau_window_iters=3,
+        stability_plateau_step_iters=1,
+        stability_plateau_rel_improvement=0.005,
     )
     snap_dir = str(tmp_path / "snaps")
     trainer = PRTCFRTinyTrainer(tiny_tree, cfg, snap_dir, eval_fn=eval_fn)

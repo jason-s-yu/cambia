@@ -34,7 +34,6 @@ from src.constants import ACE, FIVE, FOUR, THREE, TWO, ALL_SUITS
 from src.game.engine import CambiaGameState
 from src.game.player_state import PlayerState
 
-
 # Twenty-card reduced deck: A-5 in each of four suits. All these ranks have
 # no ability on discard, so the micro game stays ability-free.
 _MICRO_RANKS: List[str] = [ACE, TWO, THREE, FOUR, FIVE]
@@ -101,6 +100,7 @@ def build_micro_game(seed: int = 0) -> CambiaGameState:
 # Smoke test: harness produces a valid game
 # ---------------------------------------------------------------------------
 
+
 def test_micro_game_builder_produces_valid_state():
     game = build_micro_game(seed=0)
 
@@ -132,6 +132,6 @@ def test_micro_game_deck_has_no_ability_ranks():
     assert len(deck) == 20
     ability_ranks = {"7", "8", "9", "T", "J", "Q", "K"}
     for c in deck:
-        assert c.rank not in ability_ranks, (
-            f"Micro deck must be ability-free; found rank {c.rank!r}"
-        )
+        assert (
+            c.rank not in ability_ranks
+        ), f"Micro deck must be ability-free; found rank {c.rank!r}"

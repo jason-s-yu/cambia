@@ -188,9 +188,7 @@ def collect_infosets(
                 if take:
                     state_copy = copy.deepcopy(game_state)
                     actions_list = list(legal_actions)
-                    agent_action = agent_wrapper.choose_action(
-                        game_state, legal_actions
-                    )
+                    agent_action = agent_wrapper.choose_action(game_state, legal_actions)
                     try:
                         action_idx = actions_list.index(agent_action)
                     except ValueError:
@@ -198,9 +196,7 @@ def collect_infosets(
                     sampled.append((state_copy, actions_list, action_idx))
                     chosen_action = agent_action
                 else:
-                    chosen_action = agent_wrapper.choose_action(
-                        game_state, legal_actions
-                    )
+                    chosen_action = agent_wrapper.choose_action(game_state, legal_actions)
             else:
                 chosen_action = opp_agent.choose_action(game_state, legal_actions)
 
@@ -377,9 +373,7 @@ def tier_b_lbr(
                     continue
                 rollout_opp = rollout_opponent_factory(_OPPONENT_ID, config)
                 utils.append(
-                    _agent_policy_rollout(
-                        branch, agent_wrapper, rollout_opp, max_turns
-                    )
+                    _agent_policy_rollout(branch, agent_wrapper, rollout_opp, max_turns)
                 )
             action_mean_utils.append(float(np.mean(utils)) if utils else 0.0)
 

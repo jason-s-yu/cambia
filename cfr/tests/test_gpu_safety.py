@@ -5,6 +5,7 @@ validated in their CUDA-absent no-op behavior (run with CUDA hidden); their
 CUDA-present paths (cap, OOM retry under real pressure) are exercised when the X2
 run and capacity probe actually run on the GPU.
 """
+
 import os
 
 import pytest

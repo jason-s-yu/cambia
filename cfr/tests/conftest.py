@@ -23,15 +23,21 @@ _config_mod = sys.modules.get("src.config")
 if _config_mod is None or not hasattr(_config_mod, "Config"):
     _config_stub = types.ModuleType("src.config")
 
-    from pydantic import BaseModel as _BaseModel, Field as _Field, ConfigDict as _ConfigDict
+    from pydantic import (
+        BaseModel as _BaseModel,
+        Field as _Field,
+        ConfigDict as _ConfigDict,
+    )
 
     class _StubConfig(_BaseModel):
         """Minimal placeholder for Config and its sub-classes."""
+
         model_config = _ConfigDict(extra="allow")
 
     # CambiaRulesConfig needs real defaults because CambiaGameState reads them
     class _CambiaRulesConfig(_BaseModel):
         """Stub for CambiaRulesConfig with real game defaults."""
+
         allowDrawFromDiscardPile: bool = False
         allowReplaceAbilities: bool = False
         snapRace: bool = False
@@ -47,6 +53,7 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
 
     class _DeepCfrConfig(_BaseModel):
         """Stub for DeepCfrConfig with real defaults."""
+
         hidden_dim: int = 256
         dropout: float = 0.1
         learning_rate: float = 1e-3
@@ -159,12 +166,14 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
 
     class _StallDetectionConfig(_BaseModel):
         """Stub for StallDetectionConfig."""
+
         window_size_iters: int = 50
         num_windows: int = 5
         max_iter_abs: int = 3000
 
     class _DESCAConfig(_BaseModel):
         """Stub for DESCAConfig."""
+
         encoding_version: int = 2
         hidden_dim: int = 512
         num_abstract_actions: int = 32
@@ -181,10 +190,13 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         eval_every: int = 50
         warmup_iters: int = 50
         inner_update: str = "apcfr_plus"
-        stall_detection: _StallDetectionConfig = _Field(default_factory=_StallDetectionConfig)
+        stall_detection: _StallDetectionConfig = _Field(
+            default_factory=_StallDetectionConfig
+        )
 
     class _PRTCFRConfig(_BaseModel):
         """Stub for PRTCFRConfig (Phase 1 X2 PRT-CFR)."""
+
         gru_vocab_size: int = 325
         gru_embed_dim: int = 64
         gru_hidden_dim: int = 256
@@ -249,6 +261,7 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
             # Temporarily remove stub to import real module
             _saved = sys.modules.pop("src.config", None)
             import importlib
+
             _real_mod = importlib.import_module("src.config")
             result = _real_mod.load_config(path)
             # Restore stub
@@ -267,6 +280,7 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         """
         _saved = sys.modules.pop("src.config", None)
         import importlib
+
         _real_mod = importlib.import_module("src.config")
         try:
             return _real_mod.resolve_config_yaml(path)

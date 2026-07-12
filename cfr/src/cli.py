@@ -537,7 +537,9 @@ def train_gtcfr(
     ckpt_path = (
         str(save_path)
         if save_path
-        else str(Path(cfg.persistence.agent_data_save_path).parent / "gtcfr_checkpoint.pt")
+        else str(
+            Path(cfg.persistence.agent_data_save_path).parent / "gtcfr_checkpoint.pt"
+        )
     )
 
     trainer = GTCFRTrainer(
@@ -630,6 +632,7 @@ def train_sog(
         # Detect checkpoint type by presence of sog_metadata or cvpn_state_dict
         try:
             import torch as _torch
+
             ckpt_peek = _torch.load(warm_start_str, map_location="cpu", weights_only=True)
             if "rebel_policy_net_state_dict" in ckpt_peek:
                 trainer.warm_start_from_rebel(warm_start_str)
@@ -652,7 +655,8 @@ def train_sog(
 
 
 @train_app.command(
-    "ppo", help="Train PPO: fair self-play (--self-play, E2 anchor) or best-response diagnostic"
+    "ppo",
+    help="Train PPO: fair self-play (--self-play, E2 anchor) or best-response diagnostic",
 )
 def train_ppo_cmd(
     opponent: str = typer.Option(
@@ -783,7 +787,9 @@ def _build_desca_python_env_factory(cfg):
         def get_utility(self):
             if not self._game.is_terminal():
                 return [0.0] * len(self._game.players)
-            return [float(self._game.get_utility(i)) for i in range(len(self._game.players))]
+            return [
+                float(self._game.get_utility(i)) for i in range(len(self._game.players))
+            ]
 
         def get_acting_player(self):
             return int(self._game.current_player_index)
@@ -830,6 +836,7 @@ def _build_desca_python_env_factory(cfg):
             `desca_worker._encode_omniscient` for the Python backend.
             """
             import numpy as _np
+
             _MAX_HAND_SIZE = 6  # matches engine.MaxHandSize on the Go side
             _PER_SLOT = 10
             num_players = len(self._game.players)
@@ -864,8 +871,7 @@ def _build_desca_python_env_factory(cfg):
                     action=engine._last_action,
                     discard_top_card=game.get_discard_top(),
                     player_hand_sizes=[
-                        game.get_player_card_count(i)
-                        for i in range(len(game.players))
+                        game.get_player_card_count(i) for i in range(len(game.players))
                     ],
                     stockpile_size=game.get_stockpile_size(),
                     drawn_card=None,
@@ -938,6 +944,7 @@ def _build_desca_env_factory_for_test():
     to verify the omniscient pipe end-to-end."""
     from .config import load_config
     from pathlib import Path as _Path
+
     cfg_path = _Path(__file__).parent.parent / "config" / "desca_phase1_rmplus.yaml"
     cfg = load_config(str(cfg_path))
     return _build_desca_python_env_factory(cfg)
@@ -1292,6 +1299,7 @@ def _build_desca_env_factory_for_test_go():
     """
     from .config import load_config
     from pathlib import Path as _Path
+
     cfg_path = _Path(__file__).parent.parent / "config" / "desca_phase1_rmplus.yaml"
     cfg = load_config(str(cfg_path))
     return _build_desca_go_env_factory(cfg)
@@ -1352,7 +1360,9 @@ def train_desca(
     if not any(isinstance(h, _logging.StreamHandler) for h in _root_logger.handlers):
         _h = _logging.StreamHandler(sys.stderr)
         _h.setLevel(_logging.INFO)
-        _h.setFormatter(_logging.Formatter("[%(asctime)s] %(name)s %(levelname)s: %(message)s"))
+        _h.setFormatter(
+            _logging.Formatter("[%(asctime)s] %(name)s %(levelname)s: %(message)s")
+        )
         _root_logger.addHandler(_h)
     _logging.getLogger("src.cfr.desca_trainer").setLevel(_logging.INFO)
 
@@ -1388,7 +1398,9 @@ def train_desca(
     # inline version here used to silently drop an xpu-capable host to cpu).
     from .cfr.deep_trainer import _resolve_device
 
-    _raw_device = device or getattr(getattr(cfg, "deep_cfr", None), "device", None) or "cpu"
+    _raw_device = (
+        device or getattr(getattr(cfg, "deep_cfr", None), "device", None) or "cpu"
+    )
     try:
         _device = _resolve_device(_raw_device)
     except RuntimeError as _e:
@@ -1409,15 +1421,21 @@ def train_desca(
         from .cfr.desca_trainer import DESCATrainer
     except ImportError as e:
         print(f"ERROR: Could not import DESCATrainer: {e}", file=sys.stderr)
-        print("Stream B (desca_trainer.py) must be merged before training.", file=sys.stderr)
+        print(
+            "Stream B (desca_trainer.py) must be merged before training.", file=sys.stderr
+        )
         raise typer.Exit(1)
 
     # Build networks
     _hidden = desca_cfg.hidden_dim
     _n_abs = desca_cfg.num_abstract_actions
     regret_net = RegretNetwork(input_dim=257, hidden_dim=_hidden, num_actions=_n_abs)
-    avg_strategy_net = AvgStrategyNetwork(input_dim=257, hidden_dim=_hidden, num_actions=_n_abs)
-    history_value_net = HistoryValueNetwork(input_dim=257, omniscient_dim=120, hidden_dim=_hidden)
+    avg_strategy_net = AvgStrategyNetwork(
+        input_dim=257, hidden_dim=_hidden, num_actions=_n_abs
+    )
+    history_value_net = HistoryValueNetwork(
+        input_dim=257, omniscient_dim=120, hidden_dim=_hidden
+    )
 
     # Build the production env_factory. Default backend is Go FFI: eliminates
     # `copy.deepcopy` of Python game/agent state in the worker hot loop and
@@ -1437,9 +1455,7 @@ def train_desca(
         env_factory = _build_desca_python_env_factory(cfg)
 
     # Checkpoint path: CLI --save-path > config.persistence.agent_data_save_path
-    _ckpt_path = (
-        str(save_path) if save_path else cfg.persistence.agent_data_save_path
-    )
+    _ckpt_path = str(save_path) if save_path else cfg.persistence.agent_data_save_path
     _ckpt_dir = Path(_ckpt_path).parent
     _ckpt_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1451,11 +1467,15 @@ def train_desca(
         try:
             from .config import resolve_config_yaml
             import yaml as _yaml
+
             _merged = resolve_config_yaml(str(config))
             with open(_run_config_dst, "w", encoding="utf-8") as _f:
                 _yaml.safe_dump(_merged, _f, sort_keys=False)
         except Exception as _e:
-            print(f"WARNING: could not write materialized config.yaml to run dir: {_e}", file=sys.stderr)
+            print(
+                f"WARNING: could not write materialized config.yaml to run dir: {_e}",
+                file=sys.stderr,
+            )
 
     trainer = DESCATrainer(
         desca_cfg,
@@ -1603,6 +1623,7 @@ def train_prtcfr(
     _run_config_dst = _run_dir / "config.yaml"
     try:
         import yaml as _yaml
+
         _config_dict = resolve_config_yaml(str(config))
         _config_yaml = _yaml.safe_dump(_config_dict, sort_keys=False)
         if not _run_config_dst.exists():
@@ -1635,8 +1656,14 @@ def train_prtcfr(
         from tools.tiny_solver import build_tree as _build_tree
 
         _root, _isets, _nnodes, _aborted = _build_tree(
-            cfg, 5, 0, 2_000_000, enumerate_draws=True, perfect_recall=True,
-            tokenize=True, seq_cap=prt_cfg.seq_cap,
+            cfg,
+            5,
+            0,
+            2_000_000,
+            enumerate_draws=True,
+            perfect_recall=True,
+            tokenize=True,
+            seq_cap=prt_cfg.seq_cap,
         )
         if _aborted:
             print(
@@ -1973,9 +2000,7 @@ def resume(
             )
         else:
             print(f"ERROR: Unknown checkpoint type: {suffix}", file=sys.stderr)
-            print(
-                "Expected .pt (Deep CFR) or .joblib (Tabular CFR)", file=sys.stderr
-            )
+            print("Expected .pt (Deep CFR) or .joblib (Tabular CFR)", file=sys.stderr)
             raise typer.Exit(1)
     except Exception as e:
         print(f"FATAL: Error during training: {e}", file=sys.stderr)
@@ -2010,9 +2035,7 @@ def info(
             table.add_column("Value", style="green")
 
             table.add_row("Training Step", str(ckpt.get("training_step", "N/A")))
-            table.add_row(
-                "Total Traversals", str(ckpt.get("total_traversals", "N/A"))
-            )
+            table.add_row("Total Traversals", str(ckpt.get("total_traversals", "N/A")))
 
             if "dcfr_config" in ckpt:
                 dcfr = ckpt["dcfr_config"]
@@ -2049,16 +2072,12 @@ def info(
 
             if isinstance(data, dict):
                 table.add_row("Iteration", str(data.get("iteration", "N/A")))
-                table.add_row(
-                    "Infoset Count", str(len(data.get("regret_sum", {})))
-                )
+                table.add_row("Infoset Count", str(len(data.get("regret_sum", {}))))
 
                 if "exploitability_history" in data:
                     history = data["exploitability_history"]
                     if history:
-                        table.add_row(
-                            "Recent Exploitability", f"{history[-1]:.6f}"
-                        )
+                        table.add_row("Recent Exploitability", f"{history[-1]:.6f}")
             else:
                 table.add_row("Type", str(type(data).__name__))
 
@@ -2492,9 +2511,7 @@ def _find_run_dir_checkpoints(ckpt_dir: Path, prefix: str, algorithm: str) -> Li
     else:
         prefixes = [prefix] + _LEGACY_CHECKPOINT_PREFIXES.get(prefix, [])
         patterns = [
-            f"*{p}*{suffix}"
-            for p in prefixes
-            for suffix in ["epoch_*.pt", "iter_*.pt"]
+            f"*{p}*{suffix}" for p in prefixes for suffix in ["epoch_*.pt", "iter_*.pt"]
         ]
     return sorted(set(match for pattern in patterns for match in ckpt_dir.glob(pattern)))
 
@@ -2614,7 +2631,7 @@ def evaluate(
 
     run_dir = None
     checkpoint_path = None
-    games_was_default = (games == 100)
+    games_was_default = games == 100
 
     if checkpoint.is_dir():
         # Run-dir mode
@@ -2638,6 +2655,7 @@ def evaluate(
             # Fall back to raw load; algorithm detection will rely on checkpoint filename below.
             print(f"WARNING: {e}", file=sys.stderr)
             import yaml as _yaml
+
             with open(run_config, encoding="utf-8") as f:
                 config_dict = _yaml.safe_load(f) or {}
 
@@ -2650,7 +2668,9 @@ def evaluate(
         if chk_ckpt_dir.exists():
             sample_ckpts = sorted(chk_ckpt_dir.glob("*_checkpoint*.pt"))
             if sample_ckpts:
-                algorithm = infer_algorithm(config_dict, checkpoint_filename=sample_ckpts[0].name)
+                algorithm = infer_algorithm(
+                    config_dict, checkpoint_filename=sample_ckpts[0].name
+                )
 
         # Use auto-detected values unless user explicitly overrode
         if agent_type == "deep_cfr":
@@ -2676,14 +2696,21 @@ def evaluate(
 
         if latest:
             if not all_ckpts:
-                print(f"ERROR: No checkpoints matching prefix '{prefix}' found", file=sys.stderr)
+                print(
+                    f"ERROR: No checkpoints matching prefix '{prefix}' found",
+                    file=sys.stderr,
+                )
                 raise typer.Exit(1)
             all_ckpts.sort(key=_extract_checkpoint_num)
             checkpoint_path = all_ckpts[-1]
         elif epoch is not None:
-            matches = [p for p in all_ckpts if _checkpoint_matches_epoch(p, epoch, algorithm)]
+            matches = [
+                p for p in all_ckpts if _checkpoint_matches_epoch(p, epoch, algorithm)
+            ]
             if not matches:
-                print(f"ERROR: No checkpoint for epoch/iter {epoch} found", file=sys.stderr)
+                print(
+                    f"ERROR: No checkpoint for epoch/iter {epoch} found", file=sys.stderr
+                )
                 raise typer.Exit(1)
             checkpoint_path = matches[0]
         else:
@@ -2694,7 +2721,9 @@ def evaluate(
         try:
             import torch
 
-            ckpt_data = torch.load(str(checkpoint_path), map_location="cpu", weights_only=True)
+            ckpt_data = torch.load(
+                str(checkpoint_path), map_location="cpu", weights_only=True
+            )
             ckpt_keys = set(ckpt_data.keys())
             refined_algo = infer_algorithm(config_dict, checkpoint_keys=ckpt_keys)
             if agent_type == algo_to_agent_type(algorithm):
@@ -2711,14 +2740,20 @@ def evaluate(
             raise typer.Exit(1)
         checkpoint_path = checkpoint
         # Try to detect run_dir from checkpoint path
-        if checkpoint.parent.name == "checkpoints" and (checkpoint.parent.parent / "config.yaml").exists():
+        if (
+            checkpoint.parent.name == "checkpoints"
+            and (checkpoint.parent.parent / "config.yaml").exists()
+        ):
             run_dir = checkpoint.parent.parent
 
         if config is None:
             # Fall back to config.yaml in cwd
             config = Path("config.yaml")
             if not config.exists():
-                print("ERROR: No --config specified and no config.yaml in current directory.", file=sys.stderr)
+                print(
+                    "ERROR: No --config specified and no config.yaml in current directory.",
+                    file=sys.stderr,
+                )
                 raise typer.Exit(1)
 
     if not config.exists():
@@ -2788,9 +2823,7 @@ def evaluate(
 
     # Eval-hygiene provenance line: seat scheme, selection mode, and whether the
     # agent under test genuinely played both seats (seat_balanced).
-    _first_stats = next(
-        (getattr(r, "stats", {}) for r in results_map.values()), {}
-    )
+    _first_stats = next((getattr(r, "stats", {}) for r in results_map.values()), {})
     _seat_scheme = _first_stats.get("seat_scheme", "alternated")
     _selection_mode = _first_stats.get(
         "selection_mode", "argmax" if argmax else "stochastic"
@@ -3009,15 +3042,23 @@ def play(
             agent_kwargs = {}
             if opponent.lower() in _checkpoint_types:
                 if not checkpoint:
-                    print(f"ERROR: --checkpoint required for {opponent} agent", file=sys.stderr)
+                    print(
+                        f"ERROR: --checkpoint required for {opponent} agent",
+                        file=sys.stderr,
+                    )
                     raise typer.Exit(1)
                 agent_kwargs["checkpoint_path"] = str(checkpoint)
                 agent_kwargs["device"] = device
             agent = get_agent(opponent, player_id=seat_id, config=cfg, **agent_kwargs)
-            seats.append(SeatConfig(
-                seat_id=seat_id, is_human=False, name=f"{opponent} (P{seat_id})",
-                agent_type=opponent, agent=agent,
-            ))
+            seats.append(
+                SeatConfig(
+                    seat_id=seat_id,
+                    is_human=False,
+                    name=f"{opponent} (P{seat_id})",
+                    agent_type=opponent,
+                    agent=agent,
+                )
+            )
 
     if not human_indices:
         print("ERROR: At least one seat must be human", file=sys.stderr)
@@ -3025,7 +3066,10 @@ def play(
 
     available = list(AGENT_REGISTRY.keys())
     if opponent.lower() not in [a.lower() for a in available]:
-        print(f"ERROR: Unknown opponent '{opponent}'. Available: {available}", file=sys.stderr)
+        print(
+            f"ERROR: Unknown opponent '{opponent}'. Available: {available}",
+            file=sys.stderr,
+        )
         raise typer.Exit(1)
 
     play_game(seats, cfg.cambia_rules)
@@ -3196,7 +3240,11 @@ def config_diff(
         table.add_column(file1.name, style="yellow")
         table.add_column(file2.name, style="green")
         for p, v1, v2 in diffs:
-            table.add_row(p, str(v1) if v1 is not None else "(default)", str(v2) if v2 is not None else "(default)")
+            table.add_row(
+                p,
+                str(v1) if v1 is not None else "(default)",
+                str(v2) if v2 is not None else "(default)",
+            )
         console.print(table)
 
 
@@ -3237,7 +3285,9 @@ def _resolve_nested_model_cls(annotation):
     return None
 
 
-def _apply_dotted_override(merged: dict, dotted_key: str, raw_value: str, root_model_cls) -> None:
+def _apply_dotted_override(
+    merged: dict, dotted_key: str, raw_value: str, root_model_cls
+) -> None:
     """Validate a dotted `--set` key against the Config schema and apply it.
 
     Walks `root_model_cls.model_fields` one dotted segment at a time,
@@ -3279,7 +3329,9 @@ def _apply_dotted_override(merged: dict, dotted_key: str, raw_value: str, root_m
 
 @config_app.command("render")
 def config_render(
-    base: Path = typer.Argument(..., help="Base config YAML (may reference _base)", exists=True),
+    base: Path = typer.Argument(
+        ..., help="Base config YAML (may reference _base)", exists=True
+    ),
     set_: List[str] = typer.Option(
         [],
         "--set",
@@ -3351,7 +3403,11 @@ app.add_typer(runs_app, name="runs")
 def runs_list(
     status: Optional[str] = typer.Option(None, "--status", "-s", help="Filter by status"),
     tag: Optional[str] = typer.Option(None, "--tag", "-t", help="Filter by tag"),
-    sort_by: str = typer.Option("name", "--sort-by", help="Sort by field (name, status, best_metric_value, created_at)"),
+    sort_by: str = typer.Option(
+        "name",
+        "--sort-by",
+        help="Sort by field (name, status, best_metric_value, created_at)",
+    ),
 ):
     """List all runs in the database."""
     from src.run_db import get_db
@@ -3414,9 +3470,15 @@ def runs_list(
 @runs_app.command("prune")
 def runs_prune(
     run_name: str = typer.Argument(..., help="Run name to prune"),
-    keep_every_n: int = typer.Option(50, "--keep-every-n", help="Keep every Nth checkpoint"),
-    keep_latest: int = typer.Option(3, "--keep-latest", help="Keep N most recent checkpoints"),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be deleted without deleting"),
+    keep_every_n: int = typer.Option(
+        50, "--keep-every-n", help="Keep every Nth checkpoint"
+    ),
+    keep_latest: int = typer.Option(
+        3, "--keep-latest", help="Keep N most recent checkpoints"
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show what would be deleted without deleting"
+    ),
 ):
     """Prune non-retained checkpoints from a run."""
     from src.run_db import get_db, compute_retention_flags

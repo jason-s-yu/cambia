@@ -196,8 +196,12 @@ def test_controller_dict_roundtrip_fresh_and_updated():
 
 
 def test_resume_state_written_each_iteration(tmp_path):
-    cfg = _prod_config(iterations=2, stability_enabled=True, stability_eval_every=1,
-                       stability_min_iters=1)
+    cfg = _prod_config(
+        iterations=2,
+        stability_enabled=True,
+        stability_eval_every=1,
+        stability_min_iters=1,
+    )
     run_dir = tmp_path / "run"
     tr = _make_trainer(cfg, run_dir, tmp_path / "db.sqlite", "v0.4-resume-schema")
     tr.train(iterations=2)
@@ -231,9 +235,16 @@ def test_resume_two_iter_then_resume(tmp_path):
     reservoir length carried across the interruption (batched gen + critic ON,
     i.e. the production paths)."""
     cfg = _prod_config(
-        iterations=4, gen_batched=True, infer_dtype="bf16", critic_enabled=True,
-        critic_capacity=500, critic_steps_per_iter=3, critic_batch_size=8,
-        stability_enabled=True, stability_eval_every=1, stability_min_iters=1,
+        iterations=4,
+        gen_batched=True,
+        infer_dtype="bf16",
+        critic_enabled=True,
+        critic_capacity=500,
+        critic_steps_per_iter=3,
+        critic_batch_size=8,
+        stability_enabled=True,
+        stability_eval_every=1,
+        stability_min_iters=1,
         stability_patience=10,
     )
     run_dir = tmp_path / "run"
@@ -241,16 +252,18 @@ def test_resume_two_iter_then_resume(tmp_path):
 
     # First segment: run exactly 2 iterations (self.iterations still reflects the
     # full target so the LR schedule matches the eventual 4-iter run).
-    tr1 = _make_trainer(cfg, run_dir, db_path, "v0.4-resume-2then",
-                        eval_fn=lambda _t, t: 1.0 / t)
+    tr1 = _make_trainer(
+        cfg, run_dir, db_path, "v0.4-resume-2then", eval_fn=lambda _t, t: 1.0 / t
+    )
     hist1 = tr1.train(iterations=2)
     base_total = sum(hist1[-1].buffer_sizes.values())
     assert base_total > 0
     tr1.close()
 
     # Resume toward the full 4 iterations.
-    tr2 = _make_trainer(cfg, run_dir, db_path, "v0.4-resume-2then",
-                        eval_fn=lambda _t, t: 1.0 / t)
+    tr2 = _make_trainer(
+        cfg, run_dir, db_path, "v0.4-resume-2then", eval_fn=lambda _t, t: 1.0 / t
+    )
     hist2 = tr2.train(iterations=4, resume=True)
     tr2.close()
 
@@ -258,13 +271,14 @@ def test_resume_two_iter_then_resume(tmp_path):
     assert [s.iteration for s in hist2] == [3, 4]
     # Reservoir length preserved: iter-3 buffers == carried base + iter-3 adds.
     first_resumed = hist2[0]
-    assert (
-        sum(first_resumed.buffer_sizes.values())
-        == base_total + sum(first_resumed.samples_added.values())
+    assert sum(first_resumed.buffer_sizes.values()) == base_total + sum(
+        first_resumed.samples_added.values()
     )
     # metrics.jsonl is a continuous 1..4 log (resumed rows appended).
-    rows = [json.loads(x) for x in
-            (run_dir / "metrics.jsonl").read_text().strip().splitlines()]
+    rows = [
+        json.loads(x)
+        for x in (run_dir / "metrics.jsonl").read_text().strip().splitlines()
+    ]
     assert [r["iteration"] for r in rows] == [1, 2, 3, 4]
     # Final snapshot + resume_state reflect the completed run.
     assert (run_dir / "snapshots" / "prtcfr_snapshot_iter_4.pt").exists()
@@ -438,7 +452,9 @@ def test_resume_after_mid_iteration_interrupt_no_duplicate_samples(tmp_path):
 
     def interrupting_save_snapshot(t):
         if t == 3:
-            raise KeyboardInterrupt("simulated SIGINT mid-iteration 3 (post-gen, pre-commit)")
+            raise KeyboardInterrupt(
+                "simulated SIGINT mid-iteration 3 (post-gen, pre-commit)"
+            )
         return orig_save_snapshot(t)
 
     tr_s._save_snapshot = interrupting_save_snapshot
@@ -451,7 +467,9 @@ def test_resume_after_mid_iteration_interrupt_no_duplicate_samples(tmp_path):
     rs_iter = json.loads((run_dir / "resume_state.json").read_text())["iteration"]
     assert rs_iter == 2
     ckpt = torch.load(
-        run_dir / "snapshots" / "prtcfr_checkpoint.pt", map_location="cpu", weights_only=False
+        run_dir / "snapshots" / "prtcfr_checkpoint.pt",
+        map_location="cpu",
+        weights_only=False,
     )
     assert int(ckpt["iteration"]) == 2
 
@@ -512,9 +530,7 @@ def test_resume_reuses_run_db_row(tmp_path):
     tr1.close()
 
     db = run_db.get_db(str(db_path))
-    row1 = db.execute(
-        "SELECT id, created_at FROM runs WHERE name=?", (name,)
-    ).fetchone()
+    row1 = db.execute("SELECT id, created_at FROM runs WHERE name=?", (name,)).fetchone()
     assert row1 is not None
     id1, created1 = row1["id"], row1["created_at"]
     db.close()
@@ -529,8 +545,8 @@ def test_resume_reuses_run_db_row(tmp_path):
     assert len(rows) == 1
     assert rows[0]["id"] == id1
     assert rows[0]["created_at"] == created1
-    status = db.execute(
-        "SELECT status FROM runs WHERE name=?", (name,)
-    ).fetchone()["status"]
+    status = db.execute("SELECT status FROM runs WHERE name=?", (name,)).fetchone()[
+        "status"
+    ]
     assert status == "completed"
     db.close()

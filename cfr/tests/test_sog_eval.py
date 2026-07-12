@@ -9,7 +9,11 @@ import numpy as np
 import pytest
 
 try:
-    from src.ffi.bridge import GoEngine, python_card_to_go_index, extract_deck_from_python_game
+    from src.ffi.bridge import (
+        GoEngine,
+        python_card_to_go_index,
+        extract_deck_from_python_game,
+    )
 
     HAS_GO = True
 except Exception:
@@ -26,6 +30,7 @@ skipgo = pytest.mark.skipif(not HAS_GO, reason="libcambia.so not available")
 def test_python_card_to_go_index_ace_clubs():
     """Ace of Clubs → index 0 (C=0, rank A=0, 0*13+0=0)."""
     from src.card import Card
+
     card = Card(rank="A", suit="C")
     assert python_card_to_go_index(card) == 0
 
@@ -33,6 +38,7 @@ def test_python_card_to_go_index_ace_clubs():
 def test_python_card_to_go_index_king_spades():
     """King of Spades → index 51 (S=3, rank K=12, 3*13+12=51)."""
     from src.card import Card
+
     card = Card(rank="K", suit="S")
     assert python_card_to_go_index(card) == 51
 
@@ -40,6 +46,7 @@ def test_python_card_to_go_index_king_spades():
 def test_python_card_to_go_index_ace_hearts():
     """Ace of Hearts → index 26 (H=2, rank A=0, 2*13+0=26)."""
     from src.card import Card
+
     card = Card(rank="A", suit="H")
     assert python_card_to_go_index(card) == 26
 
@@ -47,6 +54,7 @@ def test_python_card_to_go_index_ace_hearts():
 def test_python_card_to_go_index_ten_diamonds():
     """Ten of Diamonds → index 22 (D=1, rank T=9, 1*13+9=22)."""
     from src.card import Card
+
     card = Card(rank="T", suit="D")
     assert python_card_to_go_index(card) == 22
 
@@ -54,6 +62,7 @@ def test_python_card_to_go_index_ten_diamonds():
 def test_python_card_to_go_index_joker():
     """Joker → index 52."""
     from src.card import Card
+
     card = Card(rank="R")
     assert python_card_to_go_index(card) == 52
 
@@ -62,6 +71,7 @@ def test_card_index_coverage():
     """All 52 standard cards produce unique indices in [0, 51]."""
     from src.card import Card
     from src.constants import ALL_SUITS, ALL_RANKS_STR, JOKER_RANK_STR
+
     indices = set()
     for suit in ALL_SUITS:
         for rank in ALL_RANKS_STR:
@@ -99,6 +109,7 @@ def test_from_deck_creates_valid_engine():
             joker_count += 1
             return idx
         from src.ffi.bridge import SUIT_OFFSET, RANK_VALUE
+
         return SUIT_OFFSET[card.suit] * 13 + RANK_VALUE[card.rank]
 
     # deck order: p0c0, p1c0, p0c1, p1c1, p0c2, p1c2, p0c3, p1c3, discard, stock...
@@ -129,6 +140,7 @@ def test_from_deck_legal_actions_nonempty():
             joker_count += 1
             return idx
         from src.ffi.bridge import SUIT_OFFSET, RANK_VALUE
+
         return SUIT_OFFSET[card.suit] * 13 + RANK_VALUE[card.rank]
 
     deck_indices = [to_idx(c) for c in deck]
@@ -165,9 +177,9 @@ def test_extract_and_from_deck_roundtrip():
     assert len(deck_indices) == 54, f"Expected 54 deck indices, got {len(deck_indices)}"
 
     with GoEngine.from_deck(deck_indices, starting_player) as eng:
-        assert eng.stock_len() == len(game.stockpile), (
-            f"Go stockpile {eng.stock_len()} != Python stockpile {len(game.stockpile)}"
-        )
+        assert eng.stock_len() == len(
+            game.stockpile
+        ), f"Go stockpile {eng.stock_len()} != Python stockpile {len(game.stockpile)}"
         assert not eng.is_terminal()
 
 
@@ -189,6 +201,7 @@ def test_from_deck_action_applies():
             joker_count += 1
             return idx
         from src.ffi.bridge import SUIT_OFFSET, RANK_VALUE
+
         return SUIT_OFFSET[card.suit] * 13 + RANK_VALUE[card.rank]
 
     deck_indices = [to_idx(c) for c in deck]
@@ -257,8 +270,11 @@ def _make_config(eval_budget: int = 3):
 def test_sog_agent_wrapper_instantiates():
     """SoGAgentWrapper initializes without error."""
     from src.evaluate_agents import SoGAgentWrapper
+
     config = _make_config()
-    wrapper = SoGAgentWrapper(player_id=0, config=config, checkpoint_path="", device="cpu")
+    wrapper = SoGAgentWrapper(
+        player_id=0, config=config, checkpoint_path="", device="cpu"
+    )
     assert wrapper._cvpn is not None
     assert not wrapper._cvpn.training  # eval mode
 
@@ -269,7 +285,9 @@ def test_sog_agent_wrapper_choose_action_fallback():
     from src.constants import ActionDrawStockpile, ActionCallCambia
 
     config = _make_config()
-    wrapper = SoGAgentWrapper(player_id=0, config=config, checkpoint_path="", device="cpu")
+    wrapper = SoGAgentWrapper(
+        player_id=0, config=config, checkpoint_path="", device="cpu"
+    )
     # No initialize_state called → _go_engine is None → falls back to CVPN-only → random
     legal_actions = {ActionDrawStockpile(), ActionCallCambia()}
     action = wrapper.choose_action(game_state=None, legal_actions=legal_actions)
@@ -279,7 +297,10 @@ def test_sog_agent_wrapper_choose_action_fallback():
 def test_sog_inference_wrapper_instantiates():
     """SoGInferenceAgentWrapper is a GTCFRAgentWrapper subclass."""
     from src.evaluate_agents import SoGInferenceAgentWrapper, GTCFRAgentWrapper
+
     config = _make_config()
-    wrapper = SoGInferenceAgentWrapper(player_id=1, config=config, checkpoint_path="", device="cpu")
+    wrapper = SoGInferenceAgentWrapper(
+        player_id=1, config=config, checkpoint_path="", device="cpu"
+    )
     assert isinstance(wrapper, GTCFRAgentWrapper)
     assert wrapper._cvpn is not None

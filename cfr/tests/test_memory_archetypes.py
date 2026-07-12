@@ -3,12 +3,18 @@ tests/test_memory_archetypes.py
 
 Tests for memory archetype behavior (Perfect, Decaying, HumanLike) in AgentState.
 """
+
 import random
 
 import pytest
 
 from src.agent_state import AgentState, KnownCardInfo
-from src.constants import CardBucket, EpistemicTag, EP_PBS_MAX_ACTIVE_MASK, bucket_saliency
+from src.constants import (
+    CardBucket,
+    EpistemicTag,
+    EP_PBS_MAX_ACTIVE_MASK,
+    bucket_saliency,
+)
 
 
 def _make_agent(memory_archetype="perfect", memory_decay_lambda=0.1, memory_capacity=3):
@@ -56,7 +62,9 @@ def test_config_fields_exist():
 
     cfg = DeepCfrConfig()
     assert hasattr(cfg, "memory_archetype"), "DeepCfrConfig missing memory_archetype"
-    assert hasattr(cfg, "memory_decay_lambda"), "DeepCfrConfig missing memory_decay_lambda"
+    assert hasattr(
+        cfg, "memory_decay_lambda"
+    ), "DeepCfrConfig missing memory_decay_lambda"
     assert hasattr(cfg, "memory_capacity"), "DeepCfrConfig missing memory_capacity"
     assert cfg.memory_archetype == "perfect"
     assert cfg.memory_decay_lambda == 0.1
@@ -80,9 +88,9 @@ def test_perfect_no_decay():
 
     assert len(agent.own_active_mask) == 3
     for slot in [0, 1, 2]:
-        assert agent.slot_tags[slot] == EpistemicTag.PRIV_OWN, (
-            f"Slot {slot} should remain PRIV_OWN for MemoryPerfect"
-        )
+        assert (
+            agent.slot_tags[slot] == EpistemicTag.PRIV_OWN
+        ), f"Slot {slot} should remain PRIV_OWN for MemoryPerfect"
 
 
 # ---------------------------------------------------------------------------
@@ -100,9 +108,7 @@ def test_decaying_eventual_loss():
     agent.apply_memory_decay(rng=rng)
 
     # With lambda=10, p ≈ 1.0 — should decay everything in one step.
-    assert len(agent.own_active_mask) == 0, (
-        "Expected all slots decayed with lambda=10"
-    )
+    assert len(agent.own_active_mask) == 0, "Expected all slots decayed with lambda=10"
     for slot in [0, 1]:
         assert agent.slot_tags[slot] == EpistemicTag.UNK
 
@@ -149,14 +155,14 @@ def test_human_like_capacity_limit():
     agent = _make_agent(memory_archetype="human_like", memory_capacity=2)
     # Manually insert 3 slots.
     _add_priv_own_slot(agent, 0, CardBucket.HIGH_KING.value)  # saliency = 8.5
-    _add_priv_own_slot(agent, 1, CardBucket.ACE.value)         # saliency = 3.5
-    _add_priv_own_slot(agent, 2, CardBucket.ZERO.value)        # saliency = 4.5
+    _add_priv_own_slot(agent, 1, CardBucket.ACE.value)  # saliency = 3.5
+    _add_priv_own_slot(agent, 2, CardBucket.ZERO.value)  # saliency = 4.5
 
     agent.apply_memory_decay()
 
-    assert len(agent.own_active_mask) == 2, (
-        f"Expected mask len 2, got {len(agent.own_active_mask)}"
-    )
+    assert (
+        len(agent.own_active_mask) == 2
+    ), f"Expected mask len 2, got {len(agent.own_active_mask)}"
 
 
 def test_human_like_saliency_eviction():
@@ -172,9 +178,9 @@ def test_human_like_saliency_eviction():
     agent.apply_memory_decay()
 
     # Slot 0 (ACE, lowest saliency) should be evicted.
-    assert agent.slot_tags[0] == EpistemicTag.UNK, (
-        "Slot 0 (BucketAce, lowest saliency 3.5) should have been evicted"
-    )
+    assert (
+        agent.slot_tags[0] == EpistemicTag.UNK
+    ), "Slot 0 (BucketAce, lowest saliency 3.5) should have been evicted"
     assert agent.slot_tags[1] == EpistemicTag.PRIV_OWN, "Slot 1 (HIGH_KING) should remain"
     assert agent.slot_tags[2] == EpistemicTag.PRIV_OWN, "Slot 2 (ZERO) should remain"
     assert 0 not in agent.own_active_mask, "Evicted slot 0 should not be in mask"

@@ -57,6 +57,7 @@ def _encode_seq(hand, peek_indices, observations, observer_id, seq_cap):
         hand, peek_indices, observations, observer_id, seq_cap=seq_cap
     )
 
+
 # Suppress the engine's chatty per-node warnings during full-tree expansion.
 # Scoped to the expansion call path (see _quiet_src_loggers / Builder.
 # build_decision_or_terminal), NOT import time: setting logger levels as a
@@ -83,7 +84,9 @@ def _quiet_src_loggers():
     global _quiet_depth
     if _quiet_depth == 0:
         names = set(_QUIET_EXPLICIT_LOGGERS) | {
-            n for n in _logging.root.manager.loggerDict if n.startswith(_QUIET_LOGGER_PREFIX)
+            n
+            for n in _logging.root.manager.loggerDict
+            if n.startswith(_QUIET_LOGGER_PREFIX)
         }
         saved = {n: _logging.getLogger(n).level for n in names}
         for n in names:
@@ -102,25 +105,31 @@ def _quiet_src_loggers():
 
 # ---- Node types (lightweight; built once, traversed many times) ----
 
+
 class Terminal:
     __slots__ = ("util",)
     kind = "T"
+
     def __init__(self, util):
         self.util = util  # tuple (u0, u1)
+
 
 class Chance:
     __slots__ = ("children", "weights")
     kind = "C"
+
     def __init__(self):
         self.children = []
         self.weights = []
 
+
 class Decision:
     __slots__ = ("player", "iset", "pkey", "actions", "children", "seq_tokens")
     kind = "D"
+
     def __init__(self, player, iset, pkey, actions):
         self.player = player
-        self.iset = iset            # production infoset key (get_infoset_key + ctx)
+        self.iset = iset  # production infoset key (get_infoset_key + ctx)
         # PRT-CFR token sequence for the ACTING player at this node (perfect-recall
         # observation-action stream, tokenized via src.sequence_encoding). Populated
         # only when the tree is built with tokenize=True; None otherwise. This is the
@@ -135,13 +144,14 @@ class Decision:
         # refinement of production's partition); DESCA sidesteps this via its
         # fixed-32 abstraction. We report divergence on `iset` separately.
         self.pkey = pkey
-        self.actions = actions      # list of GameAction (sorted)
-        self.children = []          # one node per action
+        self.actions = actions  # list of GameAction (sorted)
+        self.children = []  # one node per action
 
 
 def _mk_agent(game, pid, opp, cfg, init_obs):
     a = AgentState(
-        player_id=pid, opponent_id=opp,
+        player_id=pid,
+        opponent_id=opp,
         memory_level=cfg.agent_params.memory_level,
         time_decay_turns=cfg.agent_params.time_decay_turns,
         initial_hand_size=len(game.players[pid].hand),
@@ -164,8 +174,15 @@ def _advance(game, action, acting, ag):
 
 
 class Builder:
-    def __init__(self, cfg, max_nodes, enumerate_draws=True, perfect_recall=False,
-                 tokenize=False, seq_cap=256):
+    def __init__(
+        self,
+        cfg,
+        max_nodes,
+        enumerate_draws=True,
+        perfect_recall=False,
+        tokenize=False,
+        seq_cap=256,
+    ):
         self.cfg = cfg
         self.max_nodes = max_nodes
         self.enumerate_draws = enumerate_draws
@@ -189,7 +206,7 @@ class Builder:
         self.obs_path = {0: [], 1: []}
         self.n = 0
         self.aborted = False
-        self.iset_actions = {}     # iset -> num actions (consistency check)
+        self.iset_actions = {}  # iset -> num actions (consistency check)
         self.iset_count = 0
         # Perfect-recall keying (X1 keystone). When on, a decision node's policy
         # key is the ACTING player's genuine perfect-recall information state
@@ -295,7 +312,11 @@ class Builder:
             )
 
         for action in legal:
-            if self.enumerate_draws and isinstance(action, ActionDrawStockpile) and game.stockpile:
+            if (
+                self.enumerate_draws
+                and isinstance(action, ActionDrawStockpile)
+                and game.stockpile
+            ):
                 node.children.append(self._draw_chance(game, action, acting, ag, depth))
             else:
                 # enumerate_draws=False: draw follows the realized (pre-shuffled)
@@ -316,7 +337,11 @@ class Builder:
         total = len(game.stockpile)
         orig = list(game.stockpile)
         for (rank, suit), cnt in distinct.items():
-            idx = next(i for i, c in enumerate(game.stockpile) if (c.rank, c.suit) == (rank, suit))
+            idx = next(
+                i
+                for i, c in enumerate(game.stockpile)
+                if (c.rank, c.suit) == (rank, suit)
+            )
             card = game.stockpile.pop(idx)
             game.stockpile.append(card)
             child = self._apply_one(game, action, acting, ag, depth)
@@ -390,8 +415,17 @@ class Builder:
         return child
 
 
-def build_tree(cfg, n_deals, seed0, max_nodes_per_deal, enumerate_draws=True,
-               perfect_recall=False, tokenize=False, seq_cap=256, quiet=True):
+def build_tree(
+    cfg,
+    n_deals,
+    seed0,
+    max_nodes_per_deal,
+    enumerate_draws=True,
+    perfect_recall=False,
+    tokenize=False,
+    seq_cap=256,
+    quiet=True,
+):
     """Synthetic root: K deals, each weight 1/K; each is a full chance-tree.
 
     tokenize (default off): populate Decision.seq_tokens with each acting player's
@@ -408,11 +442,22 @@ def build_tree(cfg, n_deals, seed0, max_nodes_per_deal, enumerate_draws=True,
     total_nodes = 0
     aborted_deals = 0
     for d in range(n_deals):
-        b = Builder(cfg, max_nodes_per_deal, enumerate_draws=enumerate_draws,
-                    perfect_recall=perfect_recall, tokenize=tokenize, seq_cap=seq_cap)
-        game = CambiaGameState(house_rules=cfg.cambia_rules, _rng=random.Random(seed0 + d))
+        b = Builder(
+            cfg,
+            max_nodes_per_deal,
+            enumerate_draws=enumerate_draws,
+            perfect_recall=perfect_recall,
+            tokenize=tokenize,
+            seq_cap=seq_cap,
+        )
+        game = CambiaGameState(
+            house_rules=cfg.cambia_rules, _rng=random.Random(seed0 + d)
+        )
         init_obs = AnalysisTools._create_observation_for_br(game, None, -1)
-        ag = {0: _mk_agent(game, 0, 1, cfg, init_obs), 1: _mk_agent(game, 1, 0, cfg, init_obs)}
+        ag = {
+            0: _mk_agent(game, 0, 1, cfg, init_obs),
+            1: _mk_agent(game, 1, 0, cfg, init_obs),
+        }
         if tokenize:
             # Seed each player's initial private state for the tokenizer: their dealt
             # hand contents and the slots they peeked at deal time. encode_observation_sequence
@@ -449,6 +494,7 @@ def build_tree(cfg, n_deals, seed0, max_nodes_per_deal, enumerate_draws=True,
 
 
 # ---- Tabular CFR+ over the explicit tree ----
+
 
 class TabularCFR:
     def __init__(self, isets):
@@ -526,6 +572,7 @@ class TabularCFR:
 # to the argmax} until the action map stops changing. On a finite tree this
 # converges to the exact infoset best response (standard result).
 
+
 def _br_eval(node, br_player, policy, br_actions, cfav):
     """Value to br_player given fixed BR action map `br_actions` (iset->idx).
     Accumulates per-infoset counterfactual action values into `cfav` along the
@@ -552,7 +599,9 @@ def _br_eval_rec(node, br_player, policy, br_actions, cfav, cfreach):
         # value of each action (downstream uses current br_actions choices)
         vals = np.empty(nA)
         for i in range(nA):
-            vals[i] = _br_eval_rec(node.children[i], br_player, policy, br_actions, cfav, cfreach)
+            vals[i] = _br_eval_rec(
+                node.children[i], br_player, policy, br_actions, cfav, cfreach
+            )
         acc = cfav.get(bkey)
         if acc is None:
             acc = np.zeros(nA)
@@ -570,7 +619,9 @@ def _br_eval_rec(node, br_player, policy, br_actions, cfav, cfreach):
         p = dist[i]
         if p <= 0:
             continue
-        v += p * _br_eval_rec(node.children[i], br_player, policy, br_actions, cfav, cfreach * p)
+        v += p * _br_eval_rec(
+            node.children[i], br_player, policy, br_actions, cfav, cfreach * p
+        )
     return v
 
 
@@ -615,7 +666,10 @@ def _policy_value(node, policy_by_player, who):
     if node.kind == "T":
         return node.util[who]
     if node.kind == "C":
-        return sum(w * _policy_value(c, policy_by_player, who) for c, w in zip(node.children, node.weights))
+        return sum(
+            w * _policy_value(c, policy_by_player, who)
+            for c, w in zip(node.children, node.weights)
+        )
     pol = policy_by_player[node.player]
     nA = len(node.actions)
     dist = _lookup(pol, node)
@@ -647,32 +701,52 @@ def main():
     ap.add_argument("--seed0", type=int, default=0)
     ap.add_argument("--iters", type=int, default=2000)
     ap.add_argument("--max-nodes-per-deal", type=int, default=2_000_000)
-    ap.add_argument("--enumerate-draws", action="store_true",
-                    help="enumerate stockpile-draw chance (exact draws; large tree). "
-                         "Default off: draws follow realized deck order, covered by K deals.")
-    ap.add_argument("--perfect-recall", action="store_true",
-                    help="X1 keystone: key the tabular policy by each player's "
-                         "genuine perfect-recall information state (initial peek "
-                         "+ own draws + public action/reveal sequence) instead of "
-                         "the production imperfect-recall belief abstraction. "
-                         "Tests whether perfect recall cures the NashConv plateau.")
+    ap.add_argument(
+        "--enumerate-draws",
+        action="store_true",
+        help="enumerate stockpile-draw chance (exact draws; large tree). "
+        "Default off: draws follow realized deck order, covered by K deals.",
+    )
+    ap.add_argument(
+        "--perfect-recall",
+        action="store_true",
+        help="X1 keystone: key the tabular policy by each player's "
+        "genuine perfect-recall information state (initial peek "
+        "+ own draws + public action/reveal sequence) instead of "
+        "the production imperfect-recall belief abstraction. "
+        "Tests whether perfect recall cures the NashConv plateau.",
+    )
     ap.add_argument("--save-tree", type=str, default=None)
     ap.add_argument("--save-policy", type=str, default=None)
     ap.add_argument("--eval-every", type=int, default=200)
     args = ap.parse_args()
 
     cfg = load_config(args.config)
-    print(f"[build] deals={args.deals} seed0={args.seed0} deck={cfg.cambia_rules.deck_ranks} "
-          f"cpp={cfg.cambia_rules.cards_per_player} maxturns={cfg.cambia_rules.max_game_turns} "
-          f"perfect_recall={args.perfect_recall}", flush=True)
+    print(
+        f"[build] deals={args.deals} seed0={args.seed0} deck={cfg.cambia_rules.deck_ranks} "
+        f"cpp={cfg.cambia_rules.cards_per_player} maxturns={cfg.cambia_rules.max_game_turns} "
+        f"perfect_recall={args.perfect_recall}",
+        flush=True,
+    )
     t0 = time.time()
     root, isets, nnodes, aborted = build_tree(
-        cfg, args.deals, args.seed0, args.max_nodes_per_deal,
-        enumerate_draws=args.enumerate_draws, perfect_recall=args.perfect_recall)
-    print(f"[build] nodes~{nnodes} infosets={len(isets)} aborted_deals={aborted} "
-          f"build_time={time.time()-t0:.1f}s", flush=True)
+        cfg,
+        args.deals,
+        args.seed0,
+        args.max_nodes_per_deal,
+        enumerate_draws=args.enumerate_draws,
+        perfect_recall=args.perfect_recall,
+    )
+    print(
+        f"[build] nodes~{nnodes} infosets={len(isets)} aborted_deals={aborted} "
+        f"build_time={time.time()-t0:.1f}s",
+        flush=True,
+    )
     if aborted:
-        print("[build] WARNING: some deals hit max-nodes; tree truncated (raise cap or shrink game).", flush=True)
+        print(
+            "[build] WARNING: some deals hit max-nodes; tree truncated (raise cap or shrink game).",
+            flush=True,
+        )
 
     if args.save_tree:
         with open(args.save_tree, "wb") as f:
@@ -686,9 +760,12 @@ def main():
         if it % args.eval_every == 0 or it == args.iters:
             avg = solver.average_strategy()
             nc, parts = exploitability(root, avg)
-            print(f"[cfr] iter={it} exploitability(NashConv)={nc:.6e} "
-                  f"br=({parts[0]:.4f},{parts[1]:.4f}) onp=({parts[2]:.4f},{parts[3]:.4f}) "
-                  f"t={time.time()-tcfr:.0f}s", flush=True)
+            print(
+                f"[cfr] iter={it} exploitability(NashConv)={nc:.6e} "
+                f"br=({parts[0]:.4f},{parts[1]:.4f}) onp=({parts[2]:.4f},{parts[3]:.4f}) "
+                f"t={time.time()-tcfr:.0f}s",
+                flush=True,
+            )
 
     avg = solver.average_strategy()
     if args.save_policy:

@@ -34,7 +34,6 @@ from src.constants import (
     V2_ACTION_CATEGORY_DRAW,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -42,6 +41,7 @@ from src.constants import (
 
 def _mk_state(*, player_id: int = 0, opponent_id: int = 1) -> AgentState:
     from src.config import CambiaRulesConfig, DeepCfrConfig
+
     cfg = Config(cambia_rules=CambiaRulesConfig(), deep_cfr=DeepCfrConfig())
     st = AgentState(
         player_id=player_id,
@@ -63,8 +63,8 @@ def _mk_state(*, player_id: int = 0, opponent_id: int = 1) -> AgentState:
     )
     peeks = (0, 1)
     hand = [
-        Card(rank="A", suit="S"),   # Ace bucket (2)
-        Card(rank="2", suit="H"),   # LowNum bucket (3)
+        Card(rank="A", suit="S"),  # Ace bucket (2)
+        Card(rank="2", suit="H"),  # LowNum bucket (3)
         Card(rank="7", suit="D"),
         Card(rank="K", suit="S"),
     ]
@@ -218,37 +218,59 @@ def test_action_history_ring_oldest_first_overflow():
     st = _mk_state()
     # Push 4 actions for the same actor; ring keeps the last 3 with oldest at index 0.
     actions = [
-        ActionDrawStockpile(),                         # category 0, slot 0.0
-        ActionDiscard(use_ability=False),              # category 1, slot 0.0
+        ActionDrawStockpile(),  # category 0, slot 0.0
+        ActionDiscard(use_ability=False),  # category 1, slot 0.0
         ActionAbilityPeekOwnSelect(target_hand_index=2),  # category 2, slot 2/5 = 0.4
-        ActionSnapOwn(own_card_hand_index=3),          # category 2, slot 3/5 = 0.6
+        ActionSnapOwn(own_card_hand_index=3),  # category 2, slot 3/5 = 0.6
     ]
     # Send actions at increasing turns. Discard and SnapOwn imply a discard pile update;
     # SnapOwn needs snap_results to not crash reconciliation: feed a minimal result.
-    st.update(_make_obs(action=actions[0], acting_player=0, turn=1,
-                        discard_top=Card(rank="5", suit="S")))
-    st.update(_make_obs(action=actions[1], acting_player=0, turn=2,
-                        discard_top=Card(rank="A", suit="H")))
+    st.update(
+        _make_obs(
+            action=actions[0],
+            acting_player=0,
+            turn=1,
+            discard_top=Card(rank="5", suit="S"),
+        )
+    )
+    st.update(
+        _make_obs(
+            action=actions[1],
+            acting_player=0,
+            turn=2,
+            discard_top=Card(rank="A", suit="H"),
+        )
+    )
     # Peek: discard pile unchanged (previous top persists).
-    st.update(_make_obs(
-        action=actions[2], acting_player=0, turn=3,
-        discard_top=Card(rank="A", suit="H"),
-        peeked={(0, 2): Card(rank="7", suit="D")},
-    ))
+    st.update(
+        _make_obs(
+            action=actions[2],
+            acting_player=0,
+            turn=3,
+            discard_top=Card(rank="A", suit="H"),
+            peeked={(0, 2): Card(rank="7", suit="D")},
+        )
+    )
     # SnapOwn with successful snap removing own slot 3. Provide snap_results so the
     # reconciliation keeps hand size consistent: snap removes 1 from own.
-    st.update(_make_obs(
-        action=actions[3], acting_player=0, turn=4,
-        discard_top=Card(rank="K", suit="S"),
-        hand_sizes=(3, 4),
-        snap_results=[{
-            "snapper": 0,
-            "success": True,
-            "penalty": False,
-            "action_type": "ActionSnapOwn",
-            "removed_own_index": 3,
-        }],
-    ))
+    st.update(
+        _make_obs(
+            action=actions[3],
+            acting_player=0,
+            turn=4,
+            discard_top=Card(rank="K", suit="S"),
+            hand_sizes=(3, 4),
+            snap_results=[
+                {
+                    "snapper": 0,
+                    "success": True,
+                    "penalty": False,
+                    "action_type": "ActionSnapOwn",
+                    "removed_own_index": 3,
+                }
+            ],
+        )
+    )
     ring = st.action_history[0]
     # After 4 pushes the oldest surviving is the 2nd action (DISCARD).
     assert ring[0][0] == V2_ACTION_CATEGORY_DISCARD
@@ -263,10 +285,14 @@ def test_action_history_ring_oldest_first_overflow():
 def test_action_history_keyed_by_actor():
     st = _mk_state()
     # Opponent draws; own ring stays empty.
-    st.update(_make_obs(
-        action=ActionDrawStockpile(), acting_player=1, turn=1,
-        discard_top=Card(rank="5", suit="S"),
-    ))
+    st.update(
+        _make_obs(
+            action=ActionDrawStockpile(),
+            acting_player=1,
+            turn=1,
+            discard_top=Card(rank="5", suit="S"),
+        )
+    )
     assert all(x is None for x in st.action_history[0])
     # Go-parity: first push lands at index 0, not index -1.
     assert st.action_history[1][0] == (V2_ACTION_CATEGORY_DRAW, 0.0)
@@ -295,12 +321,14 @@ def test_action_history_ignores_system_actor():
 
 def test_clone_copies_parity_fields():
     st = _mk_state()
-    st.update(_make_obs(
-        action=ActionDiscard(use_ability=False),
-        acting_player=0,
-        turn=1,
-        discard_top=Card(rank="A", suit="H"),
-    ))
+    st.update(
+        _make_obs(
+            action=ActionDiscard(use_ability=False),
+            acting_player=0,
+            turn=1,
+            discard_top=Card(rank="A", suit="H"),
+        )
+    )
     clone = st.clone()
     assert clone.slot_last_seen_turn == st.slot_last_seen_turn
     assert clone.discard_bucket_counts == st.discard_bucket_counts
@@ -314,5 +342,6 @@ def test_clone_copies_parity_fields():
     assert st.slot_last_seen_turn[0] != 999
     assert st.discard_bucket_counts[0] != 999
     assert st.action_history[0][0] is None or st.action_history[0][0] != (
-        V2_ACTION_CATEGORY_DISCARD, 0.5,
+        V2_ACTION_CATEGORY_DISCARD,
+        0.5,
     )

@@ -37,28 +37,28 @@ class TestSlotFiLMNetwork:
     def test_film_init_zeros(self):
         """FiLM gamma and beta weights and biases must be zero at init."""
         net = SlotFiLMAdvantageNetwork()
-        assert net.film_gamma.weight.abs().max().item() == 0.0, (
-            "film_gamma.weight not zero-initialized"
-        )
-        assert net.film_gamma.bias.abs().max().item() == 0.0, (
-            "film_gamma.bias not zero-initialized"
-        )
-        assert net.film_beta.weight.abs().max().item() == 0.0, (
-            "film_beta.weight not zero-initialized"
-        )
-        assert net.film_beta.bias.abs().max().item() == 0.0, (
-            "film_beta.bias not zero-initialized"
-        )
+        assert (
+            net.film_gamma.weight.abs().max().item() == 0.0
+        ), "film_gamma.weight not zero-initialized"
+        assert (
+            net.film_gamma.bias.abs().max().item() == 0.0
+        ), "film_gamma.bias not zero-initialized"
+        assert (
+            net.film_beta.weight.abs().max().item() == 0.0
+        ), "film_beta.weight not zero-initialized"
+        assert (
+            net.film_beta.bias.abs().max().item() == 0.0
+        ), "film_beta.bias not zero-initialized"
 
     def test_tag_id_bias_zeros(self):
         """tag_embed and id_embed biases must be zero at init (preserves empty/UNK divergence)."""
         net = SlotFiLMAdvantageNetwork()
-        assert net.tag_embed.bias.abs().max().item() == 0.0, (
-            "tag_embed.bias not zero-initialized"
-        )
-        assert net.id_embed.bias.abs().max().item() == 0.0, (
-            "id_embed.bias not zero-initialized"
-        )
+        assert (
+            net.tag_embed.bias.abs().max().item() == 0.0
+        ), "tag_embed.bias not zero-initialized"
+        assert (
+            net.id_embed.bias.abs().max().item() == 0.0
+        ), "id_embed.bias not zero-initialized"
 
     def test_identity_passthrough_at_init(self):
         """At init, gated == id_h since gamma_delta=0 and beta=0."""
@@ -74,9 +74,9 @@ class TestSlotFiLMNetwork:
             beta = net.film_beta(tag_h)
             gated = (1.0 + gamma_delta) * id_h + beta
         # gamma_delta=0 and beta=0 at init → gated should equal id_h
-        assert torch.allclose(gated, id_h, atol=1e-6), (
-            f"Expected gated == id_h at init; max diff = {(gated - id_h).abs().max().item()}"
-        )
+        assert torch.allclose(
+            gated, id_h, atol=1e-6
+        ), f"Expected gated == id_h at init; max diff = {(gated - id_h).abs().max().item()}"
 
     def test_priv_opp_gradient_flow(self):
         """Gradient flows through beta (additive) path when identity is all-zeros (PRIV_OPP case).
@@ -101,9 +101,9 @@ class TestSlotFiLMNetwork:
 
         # film_beta must receive gradient (it is the only path when id_h=0)
         assert net.film_beta.weight.grad is not None, "film_beta.weight has no gradient"
-        assert net.film_beta.weight.grad.abs().max().item() > 0.0, (
-            "film_beta.weight gradient is zero — additive path is broken"
-        )
+        assert (
+            net.film_beta.weight.grad.abs().max().item() > 0.0
+        ), "film_beta.weight gradient is zero — additive path is broken"
 
     def test_empty_slot_film_beta_weight_grad_zero(self):
         """Empty slots (all-zeros input including tag) produce zero weight gradient on film_beta.
@@ -122,9 +122,9 @@ class TestSlotFiLMNetwork:
         loss = out.sum()
         loss.backward()
         assert net.film_beta.weight.grad is not None, "film_beta.weight has no gradient"
-        assert net.film_beta.weight.grad.abs().max().item() == 0.0, (
-            "film_beta.weight should have zero gradient for all-zero (empty) input"
-        )
+        assert (
+            net.film_beta.weight.grad.abs().max().item() == 0.0
+        ), "film_beta.weight should have zero gradient for all-zero (empty) input"
 
     def test_slot_multiply_no_priv_opp_gradient(self):
         """Ablation B (multiply gate): zero gradient on tag_gate.weight when identity is all-zeros.
@@ -141,9 +141,9 @@ class TestSlotFiLMNetwork:
         loss = out.sum()
         loss.backward()
         assert net.tag_gate.weight.grad is not None, "tag_gate.weight has no gradient"
-        assert net.tag_gate.weight.grad.abs().max().item() == 0.0, (
-            "tag_gate.weight should have zero gradient when id_h=0 (multiply gate dead-end)"
-        )
+        assert (
+            net.tag_gate.weight.grad.abs().max().item() == 0.0
+        ), "tag_gate.weight should have zero gradient when id_h=0 (multiply gate dead-end)"
 
     def test_no_pos_embed_variant(self):
         """use_pos_embed=False variant produces correct output shape."""
@@ -160,16 +160,18 @@ class TestSlotFiLMNetwork:
             network_type="slot_film",
             num_hidden_layers=3,
         )
-        assert isinstance(net, SlotFiLMAdvantageNetwork), (
-            f"Expected SlotFiLMAdvantageNetwork, got {type(net).__name__}"
-        )
+        assert isinstance(
+            net, SlotFiLMAdvantageNetwork
+        ), f"Expected SlotFiLMAdvantageNetwork, got {type(net).__name__}"
 
     def test_factory_dispatch_slot_multiply(self):
         """Factory returns SlotFiLMAdvantageNetwork(use_film=False) for 'slot_multiply'."""
-        net = build_advantage_network(input_dim=EP_PBS_INPUT_DIM, network_type="slot_multiply")
-        assert isinstance(net, SlotFiLMAdvantageNetwork), (
-            f"Expected SlotFiLMAdvantageNetwork, got {type(net).__name__}"
+        net = build_advantage_network(
+            input_dim=EP_PBS_INPUT_DIM, network_type="slot_multiply"
         )
+        assert isinstance(
+            net, SlotFiLMAdvantageNetwork
+        ), f"Expected SlotFiLMAdvantageNetwork, got {type(net).__name__}"
         assert not net.use_film, "use_film should be False for slot_multiply"
 
     def test_factory_backward_compat(self):
@@ -177,9 +179,9 @@ class TestSlotFiLMNetwork:
         from src.networks import ResidualAdvantageNetwork
 
         net = build_advantage_network(use_residual=True)
-        assert isinstance(net, ResidualAdvantageNetwork), (
-            f"Expected ResidualAdvantageNetwork, got {type(net).__name__}"
-        )
+        assert isinstance(
+            net, ResidualAdvantageNetwork
+        ), f"Expected ResidualAdvantageNetwork, got {type(net).__name__}"
 
     def test_illegal_actions_are_neg_inf(self):
         """All illegal actions in the mask produce exactly -inf in output."""
@@ -188,13 +190,13 @@ class TestSlotFiLMNetwork:
         mask = torch.zeros(4, 146, dtype=torch.bool)
         mask[:, :10] = True  # only first 10 legal
         out = net(x, mask)
-        assert (out[:, 10:] == float("-inf")).all(), (
-            "Expected -inf for all illegal actions"
-        )
+        assert (
+            out[:, 10:] == float("-inf")
+        ).all(), "Expected -inf for all illegal actions"
         # Legal actions should not be -inf
-        assert not (out[:, :10] == float("-inf")).any(), (
-            "Legal actions should not be -inf"
-        )
+        assert not (
+            out[:, :10] == float("-inf")
+        ).any(), "Legal actions should not be -inf"
 
     def test_deterministic_eval_mode(self):
         """Two identical forward passes in eval mode produce identical outputs (dropout off)."""

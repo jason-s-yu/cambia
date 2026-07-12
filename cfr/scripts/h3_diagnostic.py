@@ -60,16 +60,21 @@ def run_h3_diagnostic(
 
         # Create P0: trained agent (SD-CFR uses EMA wrapper)
         p0 = get_agent(
-            "sd_cfr", player_id=0, config=config,
-            checkpoint_path=checkpoint_path, device=device,
+            "sd_cfr",
+            player_id=0,
+            config=config,
+            checkpoint_path=checkpoint_path,
+            device=device,
         )
 
         # Create P1: mixed opponent
         agent_random = RandomAgent(player_id=1, config=config)
         agent_baseline = baseline_cls(player_id=1, config=config)
         p1 = MixedOpponentAgent(
-            player_id=1, config=config,
-            agent_a=agent_random, agent_b=agent_baseline,
+            player_id=1,
+            config=config,
+            agent_a=agent_random,
+            agent_b=agent_baseline,
             weight_a=EPSILON,
         )
 
@@ -84,7 +89,11 @@ def run_h3_diagnostic(
 
             agents = [p0, p1]
             turn = 0
-            max_turns = config.cambia_rules.max_game_turns if config.cambia_rules.max_game_turns > 0 else 500
+            max_turns = (
+                config.cambia_rules.max_game_turns
+                if config.cambia_rules.max_game_turns > 0
+                else 500
+            )
 
             while not game_state.is_terminal() and turn < max_turns:
                 turn += 1
@@ -103,13 +112,19 @@ def run_h3_diagnostic(
                 current = agents[acting_player]
                 chosen = current.choose_action(game_state, legal_actions)
 
-                if turn == 1 and acting_player == 0 and type(chosen).__name__ == "ActionCallCambia":
+                if (
+                    turn == 1
+                    and acting_player == 0
+                    and type(chosen).__name__ == "ActionCallCambia"
+                ):
                     t1_cambia_count += 1
 
                 state_delta, undo_info = game_state.apply_action(chosen)
 
                 # Update P0 state
-                if isinstance(p0, NeuralAgentWrapper) and hasattr(p0, "_create_observation"):
+                if isinstance(p0, NeuralAgentWrapper) and hasattr(
+                    p0, "_create_observation"
+                ):
                     obs = p0._create_observation(game_state, chosen, acting_player)
                     if obs:
                         p0.update_state(obs)
@@ -141,8 +156,10 @@ def run_h3_diagnostic(
             "t1_cambia_pct": t1_rate,
         }
 
-        print(f"  WR: {wr:.1f}%  P0:{counts['p0_wins']} P1:{counts['p1_wins']} "
-              f"Ties:{counts['ties']}  AvgTurns:{avg_turns:.1f}  T1Cambia:{t1_rate:.1f}%")
+        print(
+            f"  WR: {wr:.1f}%  P0:{counts['p0_wins']} P1:{counts['p1_wins']} "
+            f"Ties:{counts['ties']}  AvgTurns:{avg_turns:.1f}  T1Cambia:{t1_rate:.1f}%"
+        )
 
     # Summary
     print("\n" + "=" * 70)
@@ -152,7 +169,9 @@ def run_h3_diagnostic(
     print("-" * 70)
     for name, r in results.items():
         label = f"0.6*random + 0.4*{name}"
-        print(f"{label:<45} {r['win_rate']:>5.1f}% {r['avg_turns']:>5.1f} {r['t1_cambia_pct']:>4.1f}%")
+        print(
+            f"{label:<45} {r['win_rate']:>5.1f}% {r['avg_turns']:>5.1f} {r['t1_cambia_pct']:>4.1f}%"
+        )
 
     print("-" * 70)
     avg_wr = sum(r["win_rate"] for r in results.values()) / len(results)
@@ -174,8 +193,12 @@ def run_h3_diagnostic(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="H3 Diagnostic Prediction Test")
     parser.add_argument("checkpoint", help="Path to checkpoint .pt file")
-    parser.add_argument("--config", "-c", default="runs/interleaved-resnet-adaptive/config.yaml",
-                        help="Config YAML path")
+    parser.add_argument(
+        "--config",
+        "-c",
+        default="runs/interleaved-resnet-adaptive/config.yaml",
+        help="Config YAML path",
+    )
     parser.add_argument("--games", "-n", type=int, default=5000, help="Games per mix")
     parser.add_argument("--device", "-d", default="cpu", help="Torch device")
     args = parser.parse_args()

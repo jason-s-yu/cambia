@@ -190,8 +190,12 @@ def test_infer_algorithm_prtcfr_before_desca():
 
 def test_net_production_sigma_valid_distribution():
     net = PRTCFRNet(
-        embed_dim=8, hidden_dim=16, num_layers=1, dropout=0.0,
-        head_hidden_dim=16, device=_DEVICE,
+        embed_dim=8,
+        hidden_dim=16,
+        num_layers=1,
+        dropout=0.0,
+        head_hidden_dim=16,
+        device=_DEVICE,
     )
     sigma = NetProductionSigma(net, seq_cap=64)
     mask = np.zeros(NUM_ACTIONS, dtype=bool)
@@ -212,8 +216,12 @@ def test_net_production_sigma_valid_distribution():
 
 def test_unpadding_reservoir_stores_ragged(tmp_path):
     disk = DiskReservoir(
-        path=str(tmp_path / "b0"), capacity=100, seq_cap=64,
-        target_dim=NUM_ACTIONS, has_mask=True, seed=0,
+        path=str(tmp_path / "b0"),
+        capacity=100,
+        seq_cap=64,
+        target_dim=NUM_ACTIONS,
+        has_mask=True,
+        seed=0,
     )
     adapter = _UnpaddingReservoir(disk)
     tokens = [1, 5, 6, 7]  # natural length 4
@@ -230,14 +238,27 @@ def test_unpadding_reservoir_stores_ragged(tmp_path):
 
 
 def test_multi_reservoir_sampler_and_merge(tmp_path):
-    r0 = DiskReservoir(path=str(tmp_path / "r0"), capacity=100, seq_cap=64,
-                       target_dim=NUM_ACTIONS, has_mask=True, seed=1)
-    r1 = DiskReservoir(path=str(tmp_path / "r1"), capacity=100, seq_cap=64,
-                       target_dim=NUM_ACTIONS, has_mask=True, seed=2)
+    r0 = DiskReservoir(
+        path=str(tmp_path / "r0"),
+        capacity=100,
+        seq_cap=64,
+        target_dim=NUM_ACTIONS,
+        has_mask=True,
+        seed=1,
+    )
+    r1 = DiskReservoir(
+        path=str(tmp_path / "r1"),
+        capacity=100,
+        seq_cap=64,
+        target_dim=NUM_ACTIONS,
+        has_mask=True,
+        seed=2,
+    )
     a0, a1 = _UnpaddingReservoir(r0), _UnpaddingReservoir(r1)
     tgt = np.zeros(NUM_ACTIONS, dtype=np.float32)
     m = np.zeros(NUM_ACTIONS, dtype=bool)
     m[0] = True
+
     def _s(toks):
         return ReservoirSample(
             features=pad_tokens(toks, 64), target=tgt, action_mask=m, iteration=1
@@ -299,10 +320,14 @@ def test_end_to_end_scripted_driver(tmp_path):
         assert p.exists(), p
         d = torch.load(str(p), map_location="cpu", weights_only=False)
         assert set(d.keys()) == {"encoder_state_dict", "head_state_dict", "iteration"}
-    ckpt = torch.load(str(snap_dir / "prtcfr_checkpoint.pt"),
-                      map_location="cpu", weights_only=False)
+    ckpt = torch.load(
+        str(snap_dir / "prtcfr_checkpoint.pt"), map_location="cpu", weights_only=False
+    )
     assert set(ckpt.keys()) == {
-        "encoder_state_dict", "head_state_dict", "config", "iteration",
+        "encoder_state_dict",
+        "head_state_dict",
+        "config",
+        "iteration",
     }
     assert ckpt["iteration"] == 3
 
@@ -314,9 +339,15 @@ def test_end_to_end_scripted_driver(tmp_path):
         assert row["iteration"] == i
         assert set(row["samples_added"].keys()) == {"0", "1"}
         assert set(row["buffer_sizes"].keys()) == {"0", "1"}
-        for key in ("fit_loss", "peak_lr", "gen_seconds", "fit_seconds",
-                    "critic_held_out_mse", "critic_constant_baseline_mse",
-                    "critic_ratio"):
+        for key in (
+            "fit_loss",
+            "peak_lr",
+            "gen_seconds",
+            "fit_seconds",
+            "critic_held_out_mse",
+            "critic_constant_baseline_mse",
+            "critic_ratio",
+        ):
             assert key in row
         assert row["gen_seconds"] >= 0.0
         assert row["fit_seconds"] >= 0.0
@@ -378,8 +409,12 @@ def test_stability_best_moves_to_later_iteration_in_run_db(tmp_path):
 
     db_path = str(tmp_path / "cambia_runs.db")
     trainer = PRTCFRProductionTrainer(
-        cfg, str(tmp_path / "run"), driver_factory=_scripted_factory,
-        eval_fn=eval_fn, db_path=db_path, run_name="v0.4-prtcfr-bestmoves",
+        cfg,
+        str(tmp_path / "run"),
+        driver_factory=_scripted_factory,
+        eval_fn=eval_fn,
+        db_path=db_path,
+        run_name="v0.4-prtcfr-bestmoves",
     )
     history = trainer.train(iterations=4)
     trainer.close()
@@ -410,8 +445,11 @@ def test_early_stop_pins_deployable_window(tmp_path):
     cfg = _prod_config(iterations=6, stability_patience=2, stability_eval_every=1)
     metrics_seq = {1: 0.10, 2: 0.50, 3: 0.60, 4: 0.70, 5: 0.80, 6: 0.90}
     trainer = PRTCFRProductionTrainer(
-        cfg, str(tmp_path / "run"), driver_factory=_scripted_factory,
-        eval_fn=lambda _t, t: metrics_seq[t], db_path=str(tmp_path / "db.sqlite"),
+        cfg,
+        str(tmp_path / "run"),
+        driver_factory=_scripted_factory,
+        eval_fn=lambda _t, t: metrics_seq[t],
+        db_path=str(tmp_path / "db.sqlite"),
         run_name="v0.4-prtcfr-earlystop",
     )
     history = trainer.train(iterations=6)
@@ -446,13 +484,20 @@ def test_end_to_end_real_python_driver(tmp_path):
         return new_production_driver(seed, house_rules=hr, backend="python")
 
     cfg = _prod_config(
-        seq_cap=512, k_games_per_iter=2, iterations=2, train_steps=3,
-        critic_steps_per_iter=3, max_trajectory_steps=60,
+        seq_cap=512,
+        k_games_per_iter=2,
+        iterations=2,
+        train_steps=3,
+        critic_steps_per_iter=3,
+        max_trajectory_steps=60,
     )
     run_dir = tmp_path / "run"
     trainer = PRTCFRProductionTrainer(
-        cfg, str(run_dir), driver_factory=driver_factory,
-        db_path=str(tmp_path / "db.sqlite"), run_name="v0.4-prtcfr-pydriver",
+        cfg,
+        str(run_dir),
+        driver_factory=driver_factory,
+        db_path=str(tmp_path / "db.sqlite"),
+        run_name="v0.4-prtcfr-pydriver",
     )
     history = trainer.train(iterations=2)
     trainer.close()

@@ -34,8 +34,14 @@ def mask_batch():
 
 def test_cvpn_forward_shapes(cvpn, pbs_batch, mask_batch):
     values, logits = cvpn(pbs_batch, mask_batch)
-    assert values.shape == (BATCH, VALUE_DIM), f"Expected ({BATCH}, {VALUE_DIM}), got {values.shape}"
-    assert logits.shape == (BATCH, NUM_ACTIONS), f"Expected ({BATCH}, {NUM_ACTIONS}), got {logits.shape}"
+    assert values.shape == (
+        BATCH,
+        VALUE_DIM,
+    ), f"Expected ({BATCH}, {VALUE_DIM}), got {values.shape}"
+    assert logits.shape == (
+        BATCH,
+        NUM_ACTIONS,
+    ), f"Expected ({BATCH}, {NUM_ACTIONS}), got {logits.shape}"
 
 
 def test_cvpn_policy_masking(cvpn, pbs_batch, mask_batch):
@@ -50,7 +56,9 @@ def test_cvpn_policy_probs_sum_to_one(cvpn, pbs_batch, mask_batch):
     probs = cvpn.policy_probs(pbs_batch, mask_batch)
     assert probs.shape == (BATCH, NUM_ACTIONS)
     sums = probs.sum(dim=-1)
-    assert torch.allclose(sums, torch.ones(BATCH), atol=1e-5), f"Probs should sum to 1, got {sums}"
+    assert torch.allclose(
+        sums, torch.ones(BATCH), atol=1e-5
+    ), f"Probs should sum to 1, got {sums}"
 
 
 def test_cvpn_param_count(cvpn):
@@ -58,9 +66,9 @@ def test_cvpn_param_count(cvpn):
     # Default config (hidden_dim=512, 4 ResBlocks, value_dim=936, policy_dim=146)
     # yields ~3.1M params. Verify within 50% tolerance of expected.
     expected = 3_141_178
-    assert int(expected * 0.5) < total < int(expected * 1.5), (
-        f"Unexpected param count: {total} (expected ~{expected})"
-    )
+    assert (
+        int(expected * 0.5) < total < int(expected * 1.5)
+    ), f"Unexpected param count: {total} (expected ~{expected})"
 
 
 def test_build_cvpn_factory():

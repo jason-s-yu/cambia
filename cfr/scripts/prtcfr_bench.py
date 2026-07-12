@@ -200,15 +200,21 @@ class ContentionMonitor:
         out: Dict[str, Any] = {"samples": len(self._samples)}
         if utils:
             out["gpu_util_pct"] = {
-                "min": min(utils), "mean": round(statistics.mean(utils), 1), "max": max(utils),
+                "min": min(utils),
+                "mean": round(statistics.mean(utils), 1),
+                "max": max(utils),
             }
         if frees:
             out["gpu_mem_free_mib"] = {
-                "min": min(frees), "mean": round(statistics.mean(frees), 1), "max": max(frees),
+                "min": min(frees),
+                "mean": round(statistics.mean(frees), 1),
+                "max": max(frees),
             }
         if loads:
             out["load1"] = {
-                "min": min(loads), "mean": round(statistics.mean(loads), 2), "max": max(loads),
+                "min": min(loads),
+                "mean": round(statistics.mean(loads), 2),
+                "max": max(loads),
             }
         return out
 
@@ -385,8 +391,14 @@ def _batch_gt1_predicate(a: tuple, kw: dict) -> bool:
 
 
 _FFI_METHODS = (
-    "apply", "clone", "tokens", "legal_actions", "is_terminal", "current_player",
-    "utility", "close",
+    "apply",
+    "clone",
+    "tokens",
+    "legal_actions",
+    "is_terminal",
+    "current_player",
+    "utility",
+    "close",
 )
 
 
@@ -548,7 +560,11 @@ def run_cell(
 
     pre = contention_snapshot()
     gpu_pre = pre.get("gpu") if device.startswith("cuda") else None
-    if device.startswith("cuda") and isinstance(gpu_pre, dict) and "mem_free_mib" in gpu_pre:
+    if (
+        device.startswith("cuda")
+        and isinstance(gpu_pre, dict)
+        and "mem_free_mib" in gpu_pre
+    ):
         print(
             f"[prtcfr-bench] pre-launch GPU headroom: free={gpu_pre['mem_free_mib']}MiB "
             f"util={gpu_pre['util_pct']}% (of {gpu_pre['mem_total_mib']}MiB total)"
@@ -570,7 +586,9 @@ def run_cell(
 
     def driver_factory(seed: int):
         hb.tick(f"driver-init game_seed={seed}")
-        return new_production_driver(seed, num_players=cfg.num_players, backend=cfg.backend)
+        return new_production_driver(
+            seed, num_players=cfg.num_players, backend=cfg.backend
+        )
 
     hb.force("trainer-init:start")
     trainer = PRTCFRProductionTrainer(
@@ -594,20 +612,31 @@ def run_cell(
                     stack.enter_context(_patched(cls, meth, timers, "ffi"))
                 stack.enter_context(_heartbeat_patched(cls, "close", hb, "game-done"))
             # Sequential path (--no-gen-batched): per-query un-batched forward.
-            stack.enter_context(_patched(NetProductionSigma, "__call__", timers, "inference"))
+            stack.enter_context(
+                _patched(NetProductionSigma, "__call__", timers, "inference")
+            )
             # Batched path (config.gen_batched default True, S1W15): the
             # SigmaBackend.evaluate seam the scheduler calls once per tick
             # with the whole batch of live queries; only one of these two
             # patches ever actually fires for a given run, depending on which
             # generation path run_iteration takes.
-            stack.enter_context(_patched(IncrementalSigmaManager, "evaluate", timers, "inference"))
-            stack.enter_context(_patched(_UnpaddingReservoir, "add", timers, "reservoir_write"))
             stack.enter_context(
-                _patched(_MultiReservoirSampler, "sample_batch", timers, "reservoir_sample")
+                _patched(IncrementalSigmaManager, "evaluate", timers, "inference")
+            )
+            stack.enter_context(
+                _patched(_UnpaddingReservoir, "add", timers, "reservoir_write")
             )
             stack.enter_context(
                 _patched(
-                    PRTCFRNet, "raw_advantages", timers, "fit_forward",
+                    _MultiReservoirSampler, "sample_batch", timers, "reservoir_sample"
+                )
+            )
+            stack.enter_context(
+                _patched(
+                    PRTCFRNet,
+                    "raw_advantages",
+                    timers,
+                    "fit_forward",
                     predicate=_batch_gt1_predicate,
                 )
             )
@@ -649,7 +678,9 @@ def run_cell(
     )
     gen_other = max(0.0, gen_seconds - gen_measured)
 
-    fit_measured = timers.seconds.get("reservoir_sample", 0.0) + timers.seconds.get("fit_forward", 0.0)
+    fit_measured = timers.seconds.get("reservoir_sample", 0.0) + timers.seconds.get(
+        "fit_forward", 0.0
+    )
     fit_other = max(0.0, fit_seconds - fit_measured)
 
     profile = {
@@ -818,11 +849,16 @@ def run_fit_scale_probe(
 
     def driver_factory(seed: int):
         hb.tick(f"seed-gen driver-init game_seed={seed}")
-        return new_production_driver(seed, num_players=cfg.num_players, backend=cfg.backend)
+        return new_production_driver(
+            seed, num_players=cfg.num_players, backend=cfg.backend
+        )
 
     hb.force("trainer-init:start")
     trainer = PRTCFRProductionTrainer(
-        cfg, run_dir, driver_factory=driver_factory, db_path=db_path,
+        cfg,
+        run_dir,
+        driver_factory=driver_factory,
+        db_path=db_path,
         run_name=f"x3-fitprobe-{int(time.time())}",
     )
     hb.force("trainer-init:done")
@@ -839,34 +875,52 @@ def run_fit_scale_probe(
         for p in range(cfg.num_players):
             _replicate_reservoir_to_size(trainer.reservoirs[p].raw, target_per_player)
         reservoir_sizes = {p: len(trainer.reservoirs[p]) for p in range(cfg.num_players)}
-        print(f"[prtcfr-bench] fit-scale probe: reservoir sizes after replication: {reservoir_sizes}")
+        print(
+            f"[prtcfr-bench] fit-scale probe: reservoir sizes after replication: {reservoir_sizes}"
+        )
 
         sampler = _MultiReservoirSampler(
             [trainer.reservoirs[p] for p in range(cfg.num_players)]
         )
-        peak_lr = _peak_lr_for_iter(cfg.lr, cfg.lr_min, 1, cfg.iterations, cfg.lr_schedule)
+        peak_lr = _peak_lr_for_iter(
+            cfg.lr, cfg.lr_min, 1, cfg.iterations, cfg.lr_schedule
+        )
 
         timers = BenchTimers()
         host_before = os.getloadavg()[0]
         gpu_before = contention_snapshot().get("gpu")
         with contextlib.ExitStack() as stack:
             stack.enter_context(
-                _patched(_MultiReservoirSampler, "sample_batch", timers, "reservoir_sample")
+                _patched(
+                    _MultiReservoirSampler, "sample_batch", timers, "reservoir_sample"
+                )
             )
-            stack.enter_context(_heartbeat_patched(PRTCFRNet, "raw_advantages", hb, "fit-step"))
+            stack.enter_context(
+                _heartbeat_patched(PRTCFRNet, "raw_advantages", hb, "fit-step")
+            )
             stack.enter_context(
                 _patched(
-                    PRTCFRNet, "raw_advantages", timers, "fit_forward",
+                    PRTCFRNet,
+                    "raw_advantages",
+                    timers,
+                    "fit_forward",
                     predicate=_batch_gt1_predicate,
                 )
             )
             with ContentionMonitor(interval_s=args.contention_interval_s) as mon:
-                hb.force(f"fit:start batch_size={args.batch_size} train_steps={args.train_steps}")
+                hb.force(
+                    f"fit:start batch_size={args.batch_size} train_steps={args.train_steps}"
+                )
                 t0 = time.perf_counter()
                 loss = _fit_from_scratch(
-                    trainer.net, sampler,
-                    lr=peak_lr, batch_size=args.batch_size, num_steps=args.train_steps,
-                    weight_decay=cfg.weight_decay, grad_clip=cfg.grad_clip, lr_min=cfg.lr_min,
+                    trainer.net,
+                    sampler,
+                    lr=peak_lr,
+                    batch_size=args.batch_size,
+                    num_steps=args.train_steps,
+                    weight_decay=cfg.weight_decay,
+                    grad_clip=cfg.grad_clip,
+                    lr_min=cfg.lr_min,
                 )
                 fit_seconds = time.perf_counter() - t0
                 hb.force("fit:done")
@@ -891,7 +945,9 @@ def run_fit_scale_probe(
     finally:
         trainer.close()
 
-    fit_measured = timers.seconds.get("reservoir_sample", 0.0) + timers.seconds.get("fit_forward", 0.0)
+    fit_measured = timers.seconds.get("reservoir_sample", 0.0) + timers.seconds.get(
+        "fit_forward", 0.0
+    )
     fit_other = max(0.0, fit_seconds - fit_measured)
 
     return {
@@ -945,7 +1001,9 @@ def run_fit_scale_probe(
 # ---------------------------------------------------------------------------
 
 
-def gate_verdict(result: Dict[str, Any], gate_gen_s: float, gate_fit_s: float) -> Dict[str, str]:
+def gate_verdict(
+    result: Dict[str, Any], gate_gen_s: float, gate_fit_s: float
+) -> Dict[str, str]:
     gen = result["gen_seconds"]
     fit = result["fit_seconds"]
     return {
@@ -954,7 +1012,9 @@ def gate_verdict(result: Dict[str, Any], gate_gen_s: float, gate_fit_s: float) -
     }
 
 
-def human_summary(result: Dict[str, Any], gate_gen_s: float = 90.0, gate_fit_s: float = 120.0) -> str:
+def human_summary(
+    result: Dict[str, Any], gate_gen_s: float = 90.0, gate_fit_s: float = 120.0
+) -> str:
     gen = result["gen_seconds"]
     fit = result["fit_seconds"]
     verdict = gate_verdict(result, gate_gen_s, gate_fit_s)
@@ -1029,11 +1089,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--min-free-vram-mib", type=int, default=800)
     ap.add_argument("--contention-interval-s", type=float, default=5.0)
     ap.add_argument(
-        "--heartbeat-interval-s", type=float, default=2.0,
+        "--heartbeat-interval-s",
+        type=float,
+        default=2.0,
         help="Minimum seconds between throttled progress heartbeat log lines.",
     )
     ap.add_argument(
-        "--cuda-init-timeout-s", type=float, default=20.0,
+        "--cuda-init-timeout-s",
+        type=float,
+        default=20.0,
         help=(
             "Fail fast (raise) if CUDA init / first alloc does not return "
             "within this many seconds (a co-tenant at ~100%% SM util can "
@@ -1047,7 +1111,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--gate-gen-s", type=float, default=90.0)
     ap.add_argument("--gate-fit-s", type=float, default=120.0)
     ap.add_argument(
-        "--fit-scale-probe", action="store_true",
+        "--fit-scale-probe",
+        action="store_true",
         help=(
             "Measure fit_seconds at --batch-size/--train-steps against a "
             "reservoir seeded from --seed-k-games real games and replicated "
@@ -1063,9 +1128,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
     if not args.no_wait_for_clean_host:
-        _wait_for_clean_host(args.max_host_load, args.host_wait_poll_s, args.host_wait_timeout_s)
+        _wait_for_clean_host(
+            args.max_host_load, args.host_wait_poll_s, args.host_wait_timeout_s
+        )
     if args.fit_scale_probe:
-        result = run_fit_scale_probe(args, seed_k_games=args.seed_k_games, out_path=args.out)
+        result = run_fit_scale_probe(
+            args, seed_k_games=args.seed_k_games, out_path=args.out
+        )
         verdict = "PASS" if result["fit_seconds"] <= args.gate_fit_s else "FAIL"
         print(
             f"[fit-scale-probe] batch={result['config']['batch_size']} "

@@ -201,6 +201,7 @@ def sog_self_play_episode(
                     # Per-hand-type policy matrix BEFORE apply_action
                     # (state must reflect pre-action decision point)
                     from .range_utils import compute_policy_matrix_cvpn
+
                     policy_matrix = compute_policy_matrix_cvpn(
                         cvpn, game, range_p0, range_p1
                     )
@@ -240,8 +241,10 @@ def sog_self_play_episode(
             "range_entropy p0=%.3f->%.3f p1=%.3f->%.3f "
             "policy_entropy mean=%.3f tree_depth_max mean=%.1f",
             len(samples),
-            _entropy_p0[0], _entropy_p0[-1],
-            _entropy_p1[0], _entropy_p1[-1],
+            _entropy_p0[0],
+            _entropy_p0[-1],
+            _entropy_p1[0],
+            _entropy_p1[-1],
             float(np.mean(_policy_entropies)),
             float(np.mean(_tree_depths)),
         )

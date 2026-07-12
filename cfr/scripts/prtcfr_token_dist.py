@@ -134,8 +134,12 @@ def main() -> None:
     args = ap.parse_args()
 
     net = PRTCFRNet(
-        embed_dim=64, hidden_dim=256, num_layers=2, head_hidden_dim=256,
-        dropout=0.0, device="cpu",
+        embed_dim=64,
+        hidden_dim=256,
+        num_layers=2,
+        head_hidden_dim=256,
+        dropout=0.0,
+        device="cpu",
     ).eval()
 
     if args.incremental:

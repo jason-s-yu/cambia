@@ -236,9 +236,7 @@ def _build_callbacks(
         )
     callbacks.append(MeanImpEvalCallback())
     if checkpoint_freq:
-        callbacks.append(
-            PeriodicCheckpointCallback(save_path, checkpoint_freq, n_envs)
-        )
+        callbacks.append(PeriodicCheckpointCallback(save_path, checkpoint_freq, n_envs))
     return callbacks
 
 

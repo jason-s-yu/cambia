@@ -34,7 +34,6 @@ from src.pbs import (
     update_range,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -145,18 +144,18 @@ def test_encode_pbs_shape_dtype() -> None:
     """encode_pbs output must have shape (PBS_INPUT_DIM,) and dtype float32."""
     pbs = _make_pbs()
     encoded = encode_pbs(pbs)
-    assert encoded.shape == (PBS_INPUT_DIM,), (
-        f"Expected shape ({PBS_INPUT_DIM},), got {encoded.shape}"
-    )
+    assert encoded.shape == (
+        PBS_INPUT_DIM,
+    ), f"Expected shape ({PBS_INPUT_DIM},), got {encoded.shape}"
     assert encoded.dtype == np.float32, f"Expected float32, got {encoded.dtype}"
 
 
 def test_encode_pbs_dim_constant() -> None:
     """PBS_INPUT_DIM must equal 2 * NUM_HAND_TYPES + NUM_PUBLIC_FEATURES."""
     expected = 2 * NUM_HAND_TYPES + NUM_PUBLIC_FEATURES
-    assert PBS_INPUT_DIM == expected, (
-        f"PBS_INPUT_DIM {PBS_INPUT_DIM} != 2*{NUM_HAND_TYPES}+{NUM_PUBLIC_FEATURES}"
-    )
+    assert (
+        PBS_INPUT_DIM == expected
+    ), f"PBS_INPUT_DIM {PBS_INPUT_DIM} != 2*{NUM_HAND_TYPES}+{NUM_PUBLIC_FEATURES}"
 
 
 def test_encode_pbs_content() -> None:
@@ -173,9 +172,10 @@ def test_encode_pbs_batch() -> None:
     """encode_pbs_batch must return shape (B, PBS_INPUT_DIM) for B PBS objects."""
     pbs_list = [_make_pbs(phase=p) for p in range(6)]
     batch = encode_pbs_batch(pbs_list)
-    assert batch.shape == (6, PBS_INPUT_DIM), (
-        f"Expected shape (6, {PBS_INPUT_DIM}), got {batch.shape}"
-    )
+    assert batch.shape == (
+        6,
+        PBS_INPUT_DIM,
+    ), f"Expected shape (6, {PBS_INPUT_DIM}), got {batch.shape}"
     assert batch.dtype == np.float32
 
     # Each row must match the individual encode

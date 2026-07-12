@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 # PBS dimensions — imported from canonical sources
 from ..pbs import PBS_INPUT_DIM, NUM_HAND_TYPES
 from ..encoding import NUM_ACTIONS
+
 VALUE_OUTPUT_DIM: int = 2 * NUM_HAND_TYPES
 POLICY_OUTPUT_DIM: int = NUM_ACTIONS
 
@@ -215,9 +216,7 @@ class ReBeLTrainer:
 
     def _get_network_state_dicts_numpy(self) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Serialize networks to CPU numpy state dicts for pickling to workers."""
-        value_state = {
-            k: v.cpu().numpy() for k, v in self.value_net.state_dict().items()
-        }
+        value_state = {k: v.cpu().numpy() for k, v in self.value_net.state_dict().items()}
         policy_state = {
             k: v.cpu().numpy() for k, v in self.policy_net.state_dict().items()
         }
@@ -270,9 +269,9 @@ class ReBeLTrainer:
 
             features_t = torch.from_numpy(batch.features).float().to(self.device)
             targets_t = torch.from_numpy(batch.targets).float().to(self.device)
-            iterations_t = torch.from_numpy(
-                batch.iterations.astype(np.float32)
-            ).to(self.device)
+            iterations_t = torch.from_numpy(batch.iterations.astype(np.float32)).to(
+                self.device
+            )
 
             weights = (iterations_t + 1.0).pow(alpha)
             weights = weights / weights.mean()
@@ -291,7 +290,9 @@ class ReBeLTrainer:
         avg_loss = total_loss / max(actual_steps, 1)
         logger.info(
             "Value net training: %d steps, avg loss: %.6f (buffer size: %d)",
-            actual_steps, avg_loss, len(self.value_buffer),
+            actual_steps,
+            avg_loss,
+            len(self.value_buffer),
         )
         return avg_loss
 
@@ -324,9 +325,9 @@ class ReBeLTrainer:
             features_t = torch.from_numpy(batch.features).float().to(self.device)
             targets_t = torch.from_numpy(batch.targets).float().to(self.device)
             masks_t = torch.from_numpy(batch.masks).to(self.device)
-            iterations_t = torch.from_numpy(
-                batch.iterations.astype(np.float32)
-            ).to(self.device)
+            iterations_t = torch.from_numpy(batch.iterations.astype(np.float32)).to(
+                self.device
+            )
 
             weights = (iterations_t + 1.0).pow(alpha)
             weights = weights / weights.mean()
@@ -338,9 +339,7 @@ class ReBeLTrainer:
             masked_preds = predictions.masked_fill(~masks_t, 0.0)
             masked_targets = targets_t.masked_fill(~masks_t, 0.0)
             num_legal = masks_t.float().sum(dim=1).clamp(min=1.0)
-            per_sample_mse = (
-                ((masked_preds - masked_targets) ** 2).sum(dim=1) / num_legal
-            )
+            per_sample_mse = ((masked_preds - masked_targets) ** 2).sum(dim=1) / num_legal
             loss = (weights * per_sample_mse).mean()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
@@ -352,7 +351,9 @@ class ReBeLTrainer:
         avg_loss = total_loss / max(actual_steps, 1)
         logger.info(
             "Policy net training: %d steps, avg loss: %.6f (buffer size: %d)",
-            actual_steps, avg_loss, len(self.policy_buffer),
+            actual_steps,
+            avg_loss,
+            len(self.policy_buffer),
         )
         return avg_loss
 
@@ -368,7 +369,9 @@ class ReBeLTrainer:
             num_iterations: Number of training iterations (overrides config.rebel_epochs
                 if provided). Each iteration runs rebel_games_per_epoch self-play episodes.
         """
-        total_iters = num_iterations if num_iterations is not None else self.config.rebel_epochs
+        total_iters = (
+            num_iterations if num_iterations is not None else self.config.rebel_epochs
+        )
         episodes_per_iter = self.config.rebel_games_per_epoch
         train_steps = self.config.train_steps_per_iteration
         save_interval = self.config.save_interval
@@ -387,7 +390,10 @@ class ReBeLTrainer:
         logger.info(
             "Starting ReBeL training from iter %d to %d "
             "(%d episodes/iter, %d train_steps/iter).",
-            start_iter, end_iter, episodes_per_iter, train_steps,
+            start_iter,
+            end_iter,
+            episodes_per_iter,
+            train_steps,
         )
 
         executor = concurrent.futures.ProcessPoolExecutor(
@@ -419,9 +425,7 @@ class ReBeLTrainer:
                     future = executor.submit(_rebel_batch_worker, worker_args)
                     all_samples = future.result()
                 except Exception as e:
-                    logger.error(
-                        "Self-play workers failed at iter %d: %s", iteration, e
-                    )
+                    logger.error("Self-play workers failed at iter %d: %s", iteration, e)
                     all_samples = []
                 phase_times["self_play"] = time.time() - _sp_start
 
@@ -453,9 +457,7 @@ class ReBeLTrainer:
                     self.save_checkpoint()
 
                 # 7. Headless output
-                phase_str = " ".join(
-                    f"{k}={v:.1f}s" for k, v in phase_times.items()
-                )
+                phase_str = " ".join(f"{k}={v:.1f}s" for k, v in phase_times.items())
                 print(
                     f"[rebel] iter {iteration} | samples={len(all_samples)} "
                     f"{phase_str} | "
@@ -467,8 +469,12 @@ class ReBeLTrainer:
                 logger.info(
                     "Iter %d complete in %.2fs. v_loss=%.6f, p_loss=%.6f. "
                     "Buffers: v=%d, p=%d. Samples: %d",
-                    iteration, iter_time, v_loss, p_loss,
-                    len(self.value_buffer), len(self.policy_buffer),
+                    iteration,
+                    iter_time,
+                    v_loss,
+                    p_loss,
+                    len(self.value_buffer),
+                    len(self.policy_buffer),
                     len(all_samples),
                 )
 
@@ -511,6 +517,7 @@ class ReBeLTrainer:
         try:
             config_dict = self.config.model_dump()
             import json
+
             json.dumps(config_dict, default=str)
             metadata["config"] = config_dict
         except Exception:
@@ -520,7 +527,9 @@ class ReBeLTrainer:
         try:
             result = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
                 cwd=os.path.dirname(__file__),
             )
             metadata["git_commit"] = (
@@ -536,7 +545,8 @@ class ReBeLTrainer:
             "pytorch_version": str(torch.__version__),
             "xpu_available": bool(
                 getattr(torch.xpu, "is_available", lambda: False)()
-                if hasattr(torch, "xpu") else False
+                if hasattr(torch, "xpu")
+                else False
             ),
             "cuda_available": bool(torch.cuda.is_available()),
         }
@@ -607,13 +617,9 @@ class ReBeLTrainer:
             try:
                 atomic_torch_save(checkpoint, iter_path)
             except Exception as e_iter:
-                logger.warning(
-                    "Failed to save iter checkpoint %s: %s", iter_path, e_iter
-                )
+                logger.warning("Failed to save iter checkpoint %s: %s", iter_path, e_iter)
 
-            logger.info(
-                "Checkpoint saved to %s (iter %d).", path, self.current_iteration
-            )
+            logger.info("Checkpoint saved to %s (iter %d).", path, self.current_iteration)
             print(
                 f"[checkpoint] saved to {path} (iter {self.current_iteration})",
                 flush=True,
@@ -706,10 +712,11 @@ class ReBeLTrainer:
             self._loaded_from_metadata = checkpoint.get("metadata")
 
             logger.info(
-                "Checkpoint loaded from %s. Resuming at iter %d. "
-                "Buffers: v=%d, p=%d.",
-                path, self.current_iteration,
-                len(self.value_buffer), len(self.policy_buffer),
+                "Checkpoint loaded from %s. Resuming at iter %d. " "Buffers: v=%d, p=%d.",
+                path,
+                self.current_iteration,
+                len(self.value_buffer),
+                len(self.policy_buffer),
             )
 
         except FileNotFoundError as e:

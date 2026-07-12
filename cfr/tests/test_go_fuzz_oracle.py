@@ -197,7 +197,9 @@ def _setup_game_with_go_rng(seed: int) -> CambiaGameState:
     hands: List[List[Card]] = [[] for _ in range(_NUM_PLAYERS)]
     for _ in range(_CARDS_PER_PLAYER):
         for p in range(_NUM_PLAYERS):
-            hands[p].append(deck.pop())  # pop() takes from end (== go's Stockpile[--StockLen])
+            hands[p].append(
+                deck.pop()
+            )  # pop() takes from end (== go's Stockpile[--StockLen])
 
     # Remaining deck is the stockpile (Python convention: top-of-deck is last element).
     stockpile = deck  # already in correct order
@@ -225,6 +227,7 @@ def _setup_game_with_go_rng(seed: int) -> CambiaGameState:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _get_decision_context(state: CambiaGameState) -> DecisionContext:
     """Infer the current DecisionContext from the game state (mirrors deep_worker logic)."""
@@ -267,6 +270,7 @@ def _hand_sizes(state: CambiaGameState) -> List[int]:
 # ---------------------------------------------------------------------------
 # Core: play one game and collect traces
 # ---------------------------------------------------------------------------
+
 
 def _play_game(seed: int, rng: random.Random) -> List[Dict[str, Any]]:
     """
@@ -336,6 +340,7 @@ def _play_game(seed: int, rng: random.Random) -> List[Dict[str, Any]]:
 # Main: generate traces for N games
 # ---------------------------------------------------------------------------
 
+
 def generate_traces(num_games: int, output_path: str) -> List[Dict[str, Any]]:
     """
     Generate fuzz traces for `num_games` games and write them to `output_path`.
@@ -366,6 +371,7 @@ def generate_traces(num_games: int, output_path: str) -> List[Dict[str, Any]]:
 # Pytest test: validate oracle output format
 # ---------------------------------------------------------------------------
 
+
 def test_fuzz_oracle_output_format():
     """Verify the oracle produces valid, parseable trace data."""
     # Generate a small trace (5 games) in-memory
@@ -387,9 +393,9 @@ def test_fuzz_oracle_output_format():
         game_traces.setdefault(seed, []).append(entry)
 
     for seed, entries in game_traces.items():
-        assert entries[-1]["is_terminal"], (
-            f"Game {seed} did not terminate (last entry is_terminal=False)"
-        )
+        assert entries[-1][
+            "is_terminal"
+        ], f"Game {seed} did not terminate (last entry is_terminal=False)"
 
     required_keys = {
         "seed",
@@ -412,48 +418,49 @@ def test_fuzz_oracle_output_format():
 
         # action indices in valid range [0, NUM_ACTIONS)
         for idx in entry["legal_actions"]:
-            assert 0 <= idx < NUM_ACTIONS, (
-                f"Entry {i}: legal action index {idx} out of range [0, {NUM_ACTIONS})"
-            )
-        assert 0 <= entry["action_chosen_idx"] < NUM_ACTIONS, (
-            f"Entry {i}: action_chosen_idx {entry['action_chosen_idx']} out of range"
-        )
+            assert (
+                0 <= idx < NUM_ACTIONS
+            ), f"Entry {i}: legal action index {idx} out of range [0, {NUM_ACTIONS})"
+        assert (
+            0 <= entry["action_chosen_idx"] < NUM_ACTIONS
+        ), f"Entry {i}: action_chosen_idx {entry['action_chosen_idx']} out of range"
 
         # chosen action must be in legal actions
-        assert entry["action_chosen_idx"] in entry["legal_actions"], (
-            f"Entry {i}: chosen action {entry['action_chosen_idx']} not in legal_actions"
-        )
+        assert (
+            entry["action_chosen_idx"] in entry["legal_actions"]
+        ), f"Entry {i}: chosen action {entry['action_chosen_idx']} not in legal_actions"
 
         # hand sizes are reasonable
         for size in entry["hand_sizes"]:
             assert 0 <= size <= 10, f"Entry {i}: unreasonable hand size {size}"
 
         # utilities: list of NUM_PLAYERS floats
-        assert len(entry["utilities"]) == NUM_PLAYERS, (
-            f"Entry {i}: utilities length {len(entry['utilities'])} != {NUM_PLAYERS}"
-        )
+        assert (
+            len(entry["utilities"]) == NUM_PLAYERS
+        ), f"Entry {i}: utilities length {len(entry['utilities'])} != {NUM_PLAYERS}"
 
         # decision_context in valid range
         valid_contexts = {dc.value for dc in DecisionContext}
-        assert entry["decision_context"] in valid_contexts, (
-            f"Entry {i}: invalid decision_context {entry['decision_context']}"
-        )
+        assert (
+            entry["decision_context"] in valid_contexts
+        ), f"Entry {i}: invalid decision_context {entry['decision_context']}"
 
         # acting_player is 0 or 1
-        assert entry["acting_player"] in (0, 1), (
-            f"Entry {i}: acting_player {entry['acting_player']} not in (0, 1)"
-        )
+        assert entry["acting_player"] in (
+            0,
+            1,
+        ), f"Entry {i}: acting_player {entry['acting_player']} not in (0, 1)"
 
         # stockpile_size is non-negative
-        assert entry["stockpile_size"] >= 0, (
-            f"Entry {i}: negative stockpile_size {entry['stockpile_size']}"
-        )
+        assert (
+            entry["stockpile_size"] >= 0
+        ), f"Entry {i}: negative stockpile_size {entry['stockpile_size']}"
 
         # discard_top_rank is int or None
         dtr = entry["discard_top_rank"]
-        assert dtr is None or isinstance(dtr, int), (
-            f"Entry {i}: discard_top_rank must be int or null, got {type(dtr)}"
-        )
+        assert dtr is None or isinstance(
+            dtr, int
+        ), f"Entry {i}: discard_top_rank must be int or null, got {type(dtr)}"
 
     # Verify round-trip through JSON
     serialized = json.dumps(all_traces)

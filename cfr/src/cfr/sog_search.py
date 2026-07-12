@@ -178,7 +178,8 @@ class SoGSearch:
         if node_count > self._max_persist_handles:
             logger.debug(
                 "SoGSearch: subtree has %d nodes (> %d max), falling back to fresh.",
-                node_count, self._max_persist_handles,
+                node_count,
+                self._max_persist_handles,
             )
             self._inner._cleanup_tree(subtree)
             return None
@@ -224,9 +225,7 @@ class SoGSearch:
         subtree_game = subtree.engine_handle
         for _ in range(self._current_budget):
             for _ in range(self._cfr_iters):
-                last_cfvs = self._inner._cfr_traverse(
-                    subtree, reach, range_p0, range_p1
-                )
+                last_cfvs = self._inner._cfr_traverse(subtree, reach, range_p0, range_p1)
             self._inner._expand_once(subtree, subtree_game, range_p0, range_p1)
 
         # Collect depth stats
@@ -239,8 +238,11 @@ class SoGSearch:
         # Disabled during training (budget too low to beat trained CVPN estimates,
         # causing 100% rejection and blocking all policy learning signal).
         # Active at eval/play for deployment soundness.
-        if (self._safety_check_enabled
-                and commitment_v0 is not None and commitment_v1 is not None):
+        if (
+            self._safety_check_enabled
+            and commitment_v0 is not None
+            and commitment_v1 is not None
+        ):
             new_v0 = float(np.dot(range_p0, last_cfvs[0]))
             new_v1 = float(np.dot(range_p1, last_cfvs[1]))
             ap = subtree.acting_player
@@ -254,7 +256,11 @@ class SoGSearch:
                 logger.warning(
                     "SoGSearch safety check (player %d): new=(%.4f,%.4f) "
                     "< commit=(%.4f,%.4f) margin=%.4f. Retaining prior strategy.",
-                    ap, new_v0, new_v1, commitment_v0, commitment_v1,
+                    ap,
+                    new_v0,
+                    new_v1,
+                    commitment_v0,
+                    commitment_v1,
                     self._safety_margin,
                 )
                 new_policy = prior_strategy
@@ -352,9 +358,7 @@ class SoGSearch:
 
             for _ in range(self._current_budget):
                 for _ in range(self._cfr_iters):
-                    last_cfvs = self._inner._cfr_traverse(
-                        root, reach, range_p0, range_p1
-                    )
+                    last_cfvs = self._inner._cfr_traverse(root, reach, range_p0, range_p1)
                 self._inner._expand_once(root, root.engine_handle, range_p0, range_p1)
 
             depths: List[int] = []

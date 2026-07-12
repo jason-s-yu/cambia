@@ -20,18 +20,21 @@ from src.constants import NUM_PLAYERS
 from src.game.engine import CambiaGameState
 from src.utils import WorkerStats
 
-
 # ---------------------------------------------------------------------------
 # Config builder (SimpleNamespace, following test_deep_worker_os.py pattern)
 # ---------------------------------------------------------------------------
 
 
-def _make_config(depth_limit: int = 0, sampling_method: str = "external") -> SimpleNamespace:
+def _make_config(
+    depth_limit: int = 0, sampling_method: str = "external"
+) -> SimpleNamespace:
     """Build a minimal SimpleNamespace config for traversal tests."""
     config = SimpleNamespace()
 
     config.cambia_rules = CambiaRulesConfig()
-    config.cambia_rules.max_game_turns = 6  # keep very small for ES traversal tractability
+    config.cambia_rules.max_game_turns = (
+        6  # keep very small for ES traversal tractability
+    )
     config.cambia_rules.cards_per_player = 4
     config.cambia_rules.use_jokers = 0
 
@@ -172,37 +175,42 @@ class TestDeepCfrConfigField:
     def test_stub_default_is_zero(self):
         """Conftest stub has traversal_depth_limit defaulting to 0."""
         from src.config import DeepCfrConfig
+
         cfg = DeepCfrConfig()
         assert cfg.traversal_depth_limit == 0
 
     def test_stub_set_positive_value(self):
         """Conftest stub accepts traversal_depth_limit=10."""
         from src.config import DeepCfrConfig
+
         cfg = DeepCfrConfig(traversal_depth_limit=10)
         assert cfg.traversal_depth_limit == 10
 
     def test_stub_zero_means_unlimited(self):
         """Zero value accepted."""
         from src.config import DeepCfrConfig
+
         cfg = DeepCfrConfig(traversal_depth_limit=0)
         assert cfg.traversal_depth_limit == 0
 
     def test_internal_deepcfrconfig_has_field(self):
         """deep_trainer.py DeepCFRConfig declares traversal_depth_limit."""
         import os
+
         src_path = os.path.join(
             os.path.dirname(__file__), "..", "src", "cfr", "deep_trainer.py"
         )
         with open(src_path, "r") as f:
             source = f.read()
-        assert "traversal_depth_limit" in source, (
-            "traversal_depth_limit not found in deep_trainer.py"
-        )
+        assert (
+            "traversal_depth_limit" in source
+        ), "traversal_depth_limit not found in deep_trainer.py"
 
     def test_from_yaml_config_passes_field(self):
         """from_yaml_config includes traversal_depth_limit in kwargs."""
         import os
         import re
+
         src_path = os.path.join(
             os.path.dirname(__file__), "..", "src", "cfr", "deep_trainer.py"
         )
@@ -212,9 +220,9 @@ class TestDeepCfrConfigField:
             r"def from_yaml_config.*?return cls\(\*\*kwargs\)", source, re.DOTALL
         )
         assert match is not None, "from_yaml_config not found in deep_trainer.py"
-        assert "traversal_depth_limit" in match.group(0), (
-            "traversal_depth_limit not passed through from_yaml_config"
-        )
+        assert "traversal_depth_limit" in match.group(
+            0
+        ), "traversal_depth_limit not passed through from_yaml_config"
 
 
 # ---------------------------------------------------------------------------

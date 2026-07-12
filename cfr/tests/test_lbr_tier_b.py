@@ -19,7 +19,6 @@ from src.agents.baseline_agents import RandomAgent
 from src.cfr.lbr import tier_b_lbr, collect_infosets, DEFAULT_TRAJECTORY_OPPONENT
 from src.cfr.sampled_lbr import sampled_lbr
 
-
 # ---------------------------------------------------------------------------
 # Minimal config stubs (mirror tests/test_sampled_lbr.py, plus agents.greedy)
 # ---------------------------------------------------------------------------
@@ -99,8 +98,13 @@ def test_tier_b_valid_result():
     )
 
     assert isinstance(result, dict)
-    for key in ("exploitability", "num_infosets_sampled", "std_err", "tier",
-                "rollout_opponent"):
+    for key in (
+        "exploitability",
+        "num_infosets_sampled",
+        "std_err",
+        "tier",
+        "rollout_opponent",
+    ):
         assert key in result, f"missing key {key}"
     assert result["tier"] == "B"
     assert isinstance(result["exploitability"], float)
@@ -111,9 +115,7 @@ def test_tier_b_valid_result():
 def test_tier_b_non_negative_exploitability():
     config = _Config()
     agent = _RandomAgentWrapper(config)
-    result = tier_b_lbr(
-        agent, config, num_infosets=40, br_rollouts_per_infoset=4, seed=7
-    )
+    result = tier_b_lbr(agent, config, num_infosets=40, br_rollouts_per_infoset=4, seed=7)
     assert result["exploitability"] >= 0.0
     assert result["std_err"] >= 0.0
 
@@ -134,9 +136,7 @@ def test_tier_b_uses_agent_policy_in_rollouts():
     call count must far exceed the number of sampled infosets."""
     config = _Config()
     agent = _RecordingWrapper(config)
-    result = tier_b_lbr(
-        agent, config, num_infosets=15, br_rollouts_per_infoset=4, seed=3
-    )
+    result = tier_b_lbr(agent, config, num_infosets=15, br_rollouts_per_infoset=4, seed=3)
     n = result["num_infosets_sampled"]
     if n == 0:
         pytest.skip("no infosets sampled in this tiny config")
@@ -202,6 +202,6 @@ def test_sampled_lbr_tier_a_also_meets_count():
     result = sampled_lbr(
         agent, config, num_infosets=requested, br_rollouts_per_infoset=2, seed=21
     )
-    assert result["num_infosets_sampled"] >= requested, (
-        f"Tier-A under-collected: {result['num_infosets_sampled']} of {requested}"
-    )
+    assert (
+        result["num_infosets_sampled"] >= requested
+    ), f"Tier-A under-collected: {result['num_infosets_sampled']} of {requested}"

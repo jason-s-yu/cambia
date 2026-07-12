@@ -58,7 +58,7 @@ def make_fast_config(**overrides) -> DeepCfrConfig:
     # ReBeL settings — must be set explicitly for conftest stub compatibility
     cfg.rebel_value_buffer_capacity = 200
     cfg.rebel_policy_buffer_capacity = 200
-    cfg.rebel_value_hidden_dim = 32    # tiny network for speed
+    cfg.rebel_value_hidden_dim = 32  # tiny network for speed
     cfg.rebel_policy_hidden_dim = 32
     cfg.rebel_value_learning_rate = 1e-3
     cfg.rebel_policy_learning_rate = 1e-3
@@ -188,12 +188,12 @@ def test_checkpoint_roundtrip():
         trainer.save_checkpoint(ckpt_path)
 
         assert os.path.exists(ckpt_path), "Checkpoint file not created"
-        assert os.path.exists(ckpt_path.replace(".pt", "_rebel_value_buffer.npz")), (
-            "Value buffer file not created"
-        )
-        assert os.path.exists(ckpt_path.replace(".pt", "_rebel_policy_buffer.npz")), (
-            "Policy buffer file not created"
-        )
+        assert os.path.exists(
+            ckpt_path.replace(".pt", "_rebel_value_buffer.npz")
+        ), "Value buffer file not created"
+        assert os.path.exists(
+            ckpt_path.replace(".pt", "_rebel_policy_buffer.npz")
+        ), "Policy buffer file not created"
 
         # Capture original weights before loading into a fresh trainer
         orig_value_weights = {
@@ -280,9 +280,9 @@ def test_cli_rebel_command_exists():
 
     # Verify the rebel subcommand is registered
     command_names = [cmd.name for cmd in train_app.registered_commands]
-    assert "rebel" in command_names, (
-        f"'rebel' command not found in train_app. Found: {command_names}"
-    )
+    assert (
+        "rebel" in command_names
+    ), f"'rebel' command not found in train_app. Found: {command_names}"
 
 
 # ---------------------------------------------------------------------------

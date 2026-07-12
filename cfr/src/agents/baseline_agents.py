@@ -571,11 +571,7 @@ class ImperfectMemoryMixin:
         if isinstance(sample, ActionAbilityPeekOtherSelect):
             # Peek first unknown opponent card for snap setup
             unknown_opp = next(
-                (
-                    slot
-                    for slot, val in self.opponent_memory.items()
-                    if val is None
-                ),
+                (slot for slot, val in self.opponent_memory.items() if val is None),
                 None,
             )
             if unknown_opp is not None:
@@ -586,11 +582,7 @@ class ImperfectMemoryMixin:
                     self._update_memory_peek_opp(unknown_opp, game_state)
                     return action
             action = next(
-                (
-                    a
-                    for a in legal_actions
-                    if isinstance(a, ActionAbilityPeekOtherSelect)
-                ),
+                (a for a in legal_actions if isinstance(a, ActionAbilityPeekOtherSelect)),
                 sample,
             )
             if isinstance(action, ActionAbilityPeekOtherSelect):
@@ -617,11 +609,7 @@ class ImperfectMemoryMixin:
                     return action
             # Fallback: (0, 0)
             return next(
-                (
-                    a
-                    for a in legal_actions
-                    if isinstance(a, ActionAbilityBlindSwapSelect)
-                ),
+                (a for a in legal_actions if isinstance(a, ActionAbilityBlindSwapSelect)),
                 sample,
             )
 
@@ -639,11 +627,7 @@ class ImperfectMemoryMixin:
             if action in legal_actions:
                 return action
             return next(
-                (
-                    a
-                    for a in legal_actions
-                    if isinstance(a, ActionAbilityKingLookSelect)
-                ),
+                (a for a in legal_actions if isinstance(a, ActionAbilityKingLookSelect)),
                 sample,
             )
 
@@ -751,9 +735,7 @@ class ImperfectGreedyAgent(ImperfectMemoryMixin, BaseAgent):
 
         # 3. Snap phase: only snap own cards we know match
         if game_state.snap_phase_active:
-            snap_own_actions = {
-                a for a in legal_actions if isinstance(a, ActionSnapOwn)
-            }
+            snap_own_actions = {a for a in legal_actions if isinstance(a, ActionSnapOwn)}
             for action in snap_own_actions:
                 if self._own_card_matches_discard(action.own_card_hand_index, game_state):
                     return action
@@ -823,9 +805,7 @@ class ImperfectGreedyAgent(ImperfectMemoryMixin, BaseAgent):
             return ActionDrawStockpile()
 
         chosen = list(legal_actions)[0]
-        logger.warning(
-            "ImperfectGreedyAgent P%d fallback to: %s", self.player_id, chosen
-        )
+        logger.warning("ImperfectGreedyAgent P%d fallback to: %s", self.player_id, chosen)
         return chosen
 
 
@@ -877,9 +857,7 @@ class MemoryHeuristicAgent(ImperfectMemoryMixin, BaseAgent):
 
         # 3. Snap phase: only snap own cards we know match
         if game_state.snap_phase_active:
-            snap_own_actions = {
-                a for a in legal_actions if isinstance(a, ActionSnapOwn)
-            }
+            snap_own_actions = {a for a in legal_actions if isinstance(a, ActionSnapOwn)}
             for action in snap_own_actions:
                 if self._own_card_matches_discard(action.own_card_hand_index, game_state):
                     return action
@@ -941,9 +919,7 @@ class MemoryHeuristicAgent(ImperfectMemoryMixin, BaseAgent):
             return ActionDrawStockpile()
 
         chosen = list(legal_actions)[0]
-        logger.warning(
-            "MemoryHeuristicAgent P%d fallback to: %s", self.player_id, chosen
-        )
+        logger.warning("MemoryHeuristicAgent P%d fallback to: %s", self.player_id, chosen)
         return chosen
 
 
@@ -1044,11 +1020,7 @@ class AggressiveSnapAgent(ImperfectMemoryMixin, BaseAgent):
                     self._update_memory_peek_opp(unknown_opp, game_state)
                     return action
             action = next(
-                (
-                    a
-                    for a in legal_actions
-                    if isinstance(a, ActionAbilityPeekOtherSelect)
-                ),
+                (a for a in legal_actions if isinstance(a, ActionAbilityPeekOtherSelect)),
                 sample,
             )
             if isinstance(action, ActionAbilityPeekOtherSelect):
@@ -1073,11 +1045,7 @@ class AggressiveSnapAgent(ImperfectMemoryMixin, BaseAgent):
                     self._mark_own_unknown(own_high_slot)
                     return action
             return next(
-                (
-                    a
-                    for a in legal_actions
-                    if isinstance(a, ActionAbilityBlindSwapSelect)
-                ),
+                (a for a in legal_actions if isinstance(a, ActionAbilityBlindSwapSelect)),
                 sample,
             )
 
@@ -1132,9 +1100,7 @@ class AggressiveSnapAgent(ImperfectMemoryMixin, BaseAgent):
         # 3. Snap phase: snap own known matches AND opponent known matches
         if game_state.snap_phase_active:
             # Try own snaps first
-            snap_own_actions = {
-                a for a in legal_actions if isinstance(a, ActionSnapOwn)
-            }
+            snap_own_actions = {a for a in legal_actions if isinstance(a, ActionSnapOwn)}
             for action in snap_own_actions:
                 if self._own_card_matches_discard(action.own_card_hand_index, game_state):
                     return action
@@ -1207,9 +1173,7 @@ class AggressiveSnapAgent(ImperfectMemoryMixin, BaseAgent):
             return ActionDrawStockpile()
 
         chosen = list(legal_actions)[0]
-        logger.warning(
-            "AggressiveSnapAgent P%d fallback to: %s", self.player_id, chosen
-        )
+        logger.warning("AggressiveSnapAgent P%d fallback to: %s", self.player_id, chosen)
         return chosen
 
 
@@ -1527,10 +1491,7 @@ class HumanPlayerAgent(ImperfectMemoryMixin, BaseAgent):
                     self._update_memory_peek_opp(unknown_opp, game_state)
                     return action
             action = next(
-                (
-                    a for a in legal_actions
-                    if isinstance(a, ActionAbilityPeekOtherSelect)
-                ),
+                (a for a in legal_actions if isinstance(a, ActionAbilityPeekOtherSelect)),
                 sample,
             )
             if isinstance(action, ActionAbilityPeekOtherSelect):

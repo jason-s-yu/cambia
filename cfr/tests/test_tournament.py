@@ -2,8 +2,13 @@
 
 import pytest
 
-from src.tournament import BracketRound, Matchup, PlayerStanding, TournamentConfig, TournamentState
-
+from src.tournament import (
+    BracketRound,
+    Matchup,
+    PlayerStanding,
+    TournamentConfig,
+    TournamentState,
+)
 
 # ---------------------------------------------------------------------------
 # Interface tests
@@ -263,9 +268,9 @@ def test_double_elim_two_losses():
 
     for s in ts.standings:
         if s.eliminated:
-            assert s.losses >= 2, (
-                f"player {s.player_id} eliminated with only {s.losses} loss"
-            )
+            assert (
+                s.losses >= 2
+            ), f"player {s.player_id} eliminated with only {s.losses} loss"
 
 
 def test_double_elim_loser_dropped():

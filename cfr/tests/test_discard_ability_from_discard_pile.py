@@ -131,9 +131,7 @@ def test_discard_pile_draw_ability_discard_does_not_execute():
     game.apply_action(ActionDiscard(use_ability=True))
 
     legal_after = game.get_legal_actions()
-    assert not any(
-        isinstance(a, ActionAbilityBlindSwapSelect) for a in legal_after
-    ), (
+    assert not any(isinstance(a, ActionAbilityBlindSwapSelect) for a in legal_after), (
         "Jack's BlindSwap ability must not fire after discarding a card drawn "
         "from the discard pile -- the source gate forbids abilities on "
         "discard-pile draws (RULES.md Sec. 3B/4)."

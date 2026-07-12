@@ -279,9 +279,15 @@ def test_total_param_count_matches_architecture_spec():
     n_v = sum(p.numel() for p in v.parameters())
     total = n_r + n_a + n_v
 
-    assert 1_500_000 <= n_r <= 1_900_000, f"RegretNetwork param count out of band: {n_r:,}"
-    assert 1_500_000 <= n_a <= 1_900_000, f"AvgStrategyNetwork param count out of band: {n_a:,}"
-    assert 1_500_000 <= n_v <= 1_950_000, f"HistoryValueNetwork param count out of band: {n_v:,}"
+    assert (
+        1_500_000 <= n_r <= 1_900_000
+    ), f"RegretNetwork param count out of band: {n_r:,}"
+    assert (
+        1_500_000 <= n_a <= 1_900_000
+    ), f"AvgStrategyNetwork param count out of band: {n_a:,}"
+    assert (
+        1_500_000 <= n_v <= 1_950_000
+    ), f"HistoryValueNetwork param count out of band: {n_v:,}"
     assert 4_500_000 <= total <= 6_000_000, f"Total param count out of band: {total:,}"
 
 
@@ -317,7 +323,9 @@ def test_history_value_backward_does_not_leak_to_avg_strategy_params():
             "omniscient gradient leakage detected"
         )
 
-    saw_grad = any(p.grad is not None and p.grad.abs().sum().item() > 0 for p in v.parameters())
+    saw_grad = any(
+        p.grad is not None and p.grad.abs().sum().item() > 0 for p in v.parameters()
+    )
     assert saw_grad, "HistoryValueNetwork did not receive any gradient (sanity check)"
 
 
@@ -337,9 +345,9 @@ def test_history_value_backward_does_not_leak_to_regret_params():
     val.sum().backward()
 
     for name, p in regret.named_parameters():
-        assert p.grad is None, (
-            f"RegretNetwork.{name} received a gradient from V_omni backward"
-        )
+        assert (
+            p.grad is None
+        ), f"RegretNetwork.{name} received a gradient from V_omni backward"
 
 
 # ----- Smoke: gradient flow (forward/backward stability) -----
@@ -365,4 +373,6 @@ def test_all_networks_backward_produces_finite_gradients():
     for net in (r, a, v):
         for name, p in net.named_parameters():
             assert p.grad is not None, f"{type(net).__name__}.{name} missing grad"
-            assert torch.isfinite(p.grad).all(), f"{type(net).__name__}.{name} non-finite grad"
+            assert torch.isfinite(
+                p.grad
+            ).all(), f"{type(net).__name__}.{name} non-finite grad"

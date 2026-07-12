@@ -81,12 +81,8 @@ def _encode_sparse_delta_batch(
     # Delta ranges: rows of identity matrix at active indices
     deltas = _IDENTITY[active_indices]  # (n, 468)
 
-    opp_tiled = np.broadcast_to(
-        opponent_range[None, :], (n, NUM_HAND_TYPES)
-    )
-    pub_tiled = np.broadcast_to(
-        public_features[None, :], (n, NUM_PUBLIC_FEATURES)
-    )
+    opp_tiled = np.broadcast_to(opponent_range[None, :], (n, NUM_HAND_TYPES))
+    pub_tiled = np.broadcast_to(public_features[None, :], (n, NUM_PUBLIC_FEATURES))
 
     if acting_player == 0:
         return np.concatenate([deltas, opp_tiled, pub_tiled], axis=1).astype(np.float32)
@@ -219,7 +215,9 @@ def compute_policy_matrix_cvpn_from_pbs(
 
     pub = pbs.public_features.astype(np.float32)
     opponent_range = range_p1 if acting_player == 0 else range_p0
-    pbs_encs = _encode_sparse_delta_batch(acting_player, opponent_range, pub, active_indices)
+    pbs_encs = _encode_sparse_delta_batch(
+        acting_player, opponent_range, pub, active_indices
+    )
     active_probs = _run_cvpn_policy(cvpn, pbs_encs, legal_mask_bool)
     result[active_indices] = active_probs
 

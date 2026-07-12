@@ -31,7 +31,6 @@ from src.cli import (  # type: ignore[attr-defined]
 )
 from src.cfr.desca_worker import _encode_state
 
-
 _NUM_STEPS = 50
 _TOLERANCE_ATOL = 1e-5
 
@@ -77,9 +76,7 @@ def test_go_backend_random_walk_50_steps():
         feat = _encode_state(engine, agent)
         assert feat.shape == (257,)
         assert feat.dtype == np.float32
-        assert np.isfinite(feat).all(), (
-            f"step {step_idx}: non-finite values in encoding"
-        )
+        assert np.isfinite(feat).all(), f"step {step_idx}: non-finite values in encoding"
 
         # Pick a random legal action; advance state in both engine + agents.
         choice_idx = int(walk_rng.integers(0, len(legal)))
@@ -90,7 +87,9 @@ def test_go_backend_random_walk_50_steps():
 
         # Belief surface invariants on the actor's agent post-update.
         own_len_max = max(agent.own_hand.keys()) + 1 if agent.own_hand else 0
-        opp_len_max = max(agent.opponent_belief.keys()) + 1 if agent.opponent_belief else 0
+        opp_len_max = (
+            max(agent.opponent_belief.keys()) + 1 if agent.opponent_belief else 0
+        )
         # Hand sizes never exceed MaxHandSize=6.
         assert own_len_max <= 6
         assert opp_len_max <= 6
@@ -158,9 +157,9 @@ def test_go_backend_omniscient_dim():
     assert omni.shape == (120,), f"got shape {omni.shape}, expected (120,)"
     assert omni.dtype == np.float32
     # Sum should be num_slots = 12 (each slot one-hot).
-    assert np.isclose(float(omni.sum()), 12.0), (
-        f"omniscient sum {float(omni.sum())} != 12.0 (one-hot per slot violated)"
-    )
+    assert np.isclose(
+        float(omni.sum()), 12.0
+    ), f"omniscient sum {float(omni.sum())} != 12.0 (one-hot per slot violated)"
 
 
 def test_go_backend_clone_isolation():
@@ -169,9 +168,9 @@ def test_go_backend_clone_isolation():
     engine, agents = factory(np.random.default_rng(0))
     a0 = agents[0]
     cloned = a0.clone()
-    assert cloned._go_agent._agent_h != a0._go_agent._agent_h, (
-        "clone shares the same underlying agent handle"
-    )
+    assert (
+        cloned._go_agent._agent_h != a0._go_agent._agent_h
+    ), "clone shares the same underlying agent handle"
 
 
 def test_go_backend_encoding_dim():
@@ -193,9 +192,9 @@ def test_go_backend_omniscient_dim():
     assert omni.shape == (120,), f"got shape {omni.shape}, expected (120,)"
     assert omni.dtype == np.float32
     # Sum should be num_slots = 12 (each slot one-hot).
-    assert np.isclose(float(omni.sum()), 12.0), (
-        f"omniscient sum {float(omni.sum())} != 12.0 (one-hot per slot violated)"
-    )
+    assert np.isclose(
+        float(omni.sum()), 12.0
+    ), f"omniscient sum {float(omni.sum())} != 12.0 (one-hot per slot violated)"
 
 
 def test_go_backend_clone_isolation():
@@ -217,9 +216,9 @@ def test_go_backend_clone_isolation():
     # We assert that cloned has its OWN underlying GoAgentState handle
     # (independent), even if the turn happens to coincide on equal-state
     # games.
-    assert cloned._go_agent._agent_h != a0._go_agent._agent_h, (
-        "clone shares the same underlying agent handle"
-    )
+    assert (
+        cloned._go_agent._agent_h != a0._go_agent._agent_h
+    ), "clone shares the same underlying agent handle"
 
 
 def test_go_backend_save_restore():

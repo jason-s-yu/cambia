@@ -32,17 +32,26 @@ if str(_CFR_ROOT) not in sys.path:
 
 import torch
 
-from src.evaluate_agents import run_evaluation_multi_baseline, run_head_to_head, MEAN_IMP_BASELINES, get_agent, persist_eval_results
+from src.evaluate_agents import (
+    run_evaluation_multi_baseline,
+    run_head_to_head,
+    MEAN_IMP_BASELINES,
+    get_agent,
+    persist_eval_results,
+)
 from src.config import load_config
 from src.cfr.sampled_lbr import sampled_lbr
 
 try:
     import src.run_db as run_db
+
     _RUN_DB_AVAILABLE = True
 except Exception:
     _RUN_DB_AVAILABLE = False
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 # MEAN_IMP_BASELINES imported from src.evaluate_agents (canonical source)
@@ -104,6 +113,7 @@ def _get_run_id_for_dir(
             yaml_text = f.read()
         try:
             import yaml
+
             config_dict = yaml.safe_load(yaml_text) or {}
         except Exception:
             pass
@@ -258,12 +268,14 @@ def evaluate_head_to_head(
         "sog_checkpoint": ["checkpoint_sog_sog", "checkpoint_sog"],
     }
     prefixes = [checkpoint_prefix] + _LEGACY_PREFIXES.get(checkpoint_prefix, [])
-    all_ckpts = sorted(set(
-        match
-        for pfx in prefixes
-        for pattern in [f"{pfx}_iter_*.pt", f"{pfx}_epoch_*.pt"]
-        for match in glob(str(ckpt_dir / pattern))
-    ))
+    all_ckpts = sorted(
+        set(
+            match
+            for pfx in prefixes
+            for pattern in [f"{pfx}_iter_*.pt", f"{pfx}_epoch_*.pt"]
+            for match in glob(str(ckpt_dir / pattern))
+        )
+    )
 
     if not all_ckpts:
         return
@@ -305,7 +317,13 @@ def evaluate_head_to_head(
 
     with open(h2h_path, "a", encoding="utf-8") as f:
         for label, opponent_path, opp_iter in targets:
-            logger.info("H2H: iter %d vs %s (iter %d), %d games", iter_num, label, opp_iter, num_games)
+            logger.info(
+                "H2H: iter %d vs %s (iter %d), %d games",
+                iter_num,
+                label,
+                opp_iter,
+                num_games,
+            )
             try:
                 h2h = run_head_to_head(
                     checkpoint_a=str(Path(checkpoint_path).resolve()),
@@ -315,8 +333,12 @@ def evaluate_head_to_head(
                     device="cpu",
                     agent_type=agent_type,
                 )
-                total_scored = h2h["checkpoint_a_wins"] + h2h["checkpoint_b_wins"] + h2h["ties"]
-                a_win_rate = h2h["checkpoint_a_wins"] / total_scored if total_scored > 0 else 0.0
+                total_scored = (
+                    h2h["checkpoint_a_wins"] + h2h["checkpoint_b_wins"] + h2h["ties"]
+                )
+                a_win_rate = (
+                    h2h["checkpoint_a_wins"] / total_scored if total_scored > 0 else 0.0
+                )
                 row = {
                     "run": run_dir_path.name,
                     "iter_a": iter_num,
@@ -332,7 +354,10 @@ def evaluate_head_to_head(
                 f.write(json.dumps(row) + "\n")
                 logger.info(
                     "H2H iter %d vs %d (%s): WR=%.1f%%",
-                    iter_num, opp_iter, label, a_win_rate * 100,
+                    iter_num,
+                    opp_iter,
+                    label,
+                    a_win_rate * 100,
                 )
                 if _RUN_DB_AVAILABLE:
                     try:
@@ -341,7 +366,11 @@ def evaluate_head_to_head(
                         run_db.insert_head_to_head(_db, _run_id, row)
                         _db.close()
                     except Exception:
-                        logger.debug("DB H2H write failed for %s iter %d", run_dir_path.name, iter_num)
+                        logger.debug(
+                            "DB H2H write failed for %s iter %d",
+                            run_dir_path.name,
+                            iter_num,
+                        )
             except Exception:
                 logger.exception("H2H eval failed: iter %d vs %s", iter_num, label)
 
@@ -352,16 +381,23 @@ def format_results(run_dir: str, iter_num: int, all_results: dict) -> str:
     parts = []
     for baseline, results in all_results.items():
         p0_wins = results.get("P0 Wins", 0)
-        total = p0_wins + results.get("P1 Wins", 0) + results.get("Ties", 0) + results.get("MaxTurnTies", 0)
+        total = (
+            p0_wins
+            + results.get("P1 Wins", 0)
+            + results.get("Ties", 0)
+            + results.get("MaxTurnTies", 0)
+        )
         win_rate = p0_wins / total if total > 0 else 0.0
-        stats = getattr(results, 'stats', {})
+        stats = getattr(results, "stats", {})
         t1_cambia = stats.get("t1_cambia_rate")
         suffix = f" [t1_cambia={t1_cambia:.3f}]" if t1_cambia is not None else ""
         parts.append(f"{baseline}={win_rate:.2f}{suffix}")
     return f"[{ts}] Evaluated {run_name} iter {iter_num}: {', '.join(parts)}"
 
 
-def _infer_checkpoint_prefix(agent_type: str, explicit_prefix: Optional[str] = None) -> str:
+def _infer_checkpoint_prefix(
+    agent_type: str, explicit_prefix: Optional[str] = None
+) -> str:
     """Resolve the checkpoint filename prefix for an eval-watcher agent type.
 
     Prefix must match the actual filename stem before _iter_N/_epoch_N (or,
@@ -381,7 +417,9 @@ def _infer_checkpoint_prefix(agent_type: str, explicit_prefix: Optional[str] = N
         # ppo_train.py's actual save-stem convention, see run_db.py) rather
         # than a local copy, so the two can't drift out of sync again. Falls
         # back to the known-correct value if run_db is unavailable.
-        "ppo": run_db.ALGO_TO_CHECKPOINT_PREFIX["ppo"] if _RUN_DB_AVAILABLE else "ppo_model",
+        "ppo": (
+            run_db.ALGO_TO_CHECKPOINT_PREFIX["ppo"] if _RUN_DB_AVAILABLE else "ppo_model"
+        ),
         "gtcfr": "gtcfr_checkpoint",
         "sog": "sog_checkpoint",
         "sog_inference": "sog_checkpoint",
@@ -399,7 +437,9 @@ def _scan_dir_for_agent(run_dir: str, agent_type: str) -> str:
     PRT-CFR writes its snapshots to run_dir/snapshots; every other algorithm
     uses run_dir/checkpoints.
     """
-    return os.path.join(run_dir, "snapshots" if agent_type == "prt_cfr" else "checkpoints")
+    return os.path.join(
+        run_dir, "snapshots" if agent_type == "prt_cfr" else "checkpoints"
+    )
 
 
 def main() -> None:
@@ -481,7 +521,10 @@ def main() -> None:
     logger.info("Watching %d run dir(s): %s", len(run_dirs), run_dirs)
     logger.info(
         "Agent type: %s, checkpoint prefix: %s, games: %d, poll interval: %ds",
-        args.agent_type, checkpoint_prefix, args.games, args.poll_interval,
+        args.agent_type,
+        checkpoint_prefix,
+        args.games,
+        args.poll_interval,
     )
 
     try:
@@ -501,13 +544,17 @@ def main() -> None:
                     "gtcfr_checkpoint": ["checkpoint_gtcfr"],
                     "sog_checkpoint": ["checkpoint_sog_sog", "checkpoint_sog"],
                 }
-                prefixes = [checkpoint_prefix] + _LEGACY_PREFIXES.get(checkpoint_prefix, [])
-                checkpoints = sorted(set(
-                    match
-                    for pfx in prefixes
-                    for pattern in [f"{pfx}_iter_*.pt", f"{pfx}_epoch_*.pt"]
-                    for match in glob(os.path.join(ckpt_dir, pattern))
-                ))
+                prefixes = [checkpoint_prefix] + _LEGACY_PREFIXES.get(
+                    checkpoint_prefix, []
+                )
+                checkpoints = sorted(
+                    set(
+                        match
+                        for pfx in prefixes
+                        for pattern in [f"{pfx}_iter_*.pt", f"{pfx}_epoch_*.pt"]
+                        for match in glob(os.path.join(ckpt_dir, pattern))
+                    )
+                )
 
                 for ckpt in checkpoints:
                     filename = os.path.basename(ckpt)
@@ -517,7 +564,10 @@ def main() -> None:
                     logger.info("New checkpoint: %s", ckpt)
                     try:
                         all_results, iter_num = evaluate_checkpoint(
-                            run_dir, ckpt, args.games, config_path,
+                            run_dir,
+                            ckpt,
+                            args.games,
+                            config_path,
                             agent_type=args.agent_type,
                             run_lbr=args.lbr,
                             lbr_infosets=args.lbr_infosets,
@@ -535,12 +585,18 @@ def main() -> None:
                         if args.h2h_games > 0 and args.agent_type != "prt_cfr":
                             try:
                                 evaluate_head_to_head(
-                                    run_dir, ckpt, iter_num, config_path, args.h2h_games,
+                                    run_dir,
+                                    ckpt,
+                                    iter_num,
+                                    config_path,
+                                    args.h2h_games,
                                     agent_type=args.agent_type,
                                     checkpoint_prefix=checkpoint_prefix,
                                 )
                             except Exception:
-                                logger.exception("H2H evaluation failed for iter %d", iter_num)
+                                logger.exception(
+                                    "H2H evaluation failed for iter %d", iter_num
+                                )
                         # Write DB summary outputs after all evals complete
                         if _RUN_DB_AVAILABLE:
                             try:

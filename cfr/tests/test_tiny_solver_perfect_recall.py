@@ -28,7 +28,6 @@ from src.agent_state import AgentState
 from src.analysis_tools import AnalysisTools
 from tools.tiny_solver import build_tree, Builder, _mk_agent
 
-
 CONFIG_1CARD = "config/tiny_norecall.yaml"
 
 
@@ -48,8 +47,12 @@ def _walk_decisions(node, acc):
 def _build(perfect_recall):
     cfg = load_config(CONFIG_1CARD)
     root, isets, nnodes, aborted = build_tree(
-        cfg, n_deals=5, seed0=0, max_nodes_per_deal=2_000_000,
-        enumerate_draws=True, perfect_recall=perfect_recall,
+        cfg,
+        n_deals=5,
+        seed0=0,
+        max_nodes_per_deal=2_000_000,
+        enumerate_draws=True,
+        perfect_recall=perfect_recall,
     )
     assert aborted == 0, "tree truncated; raise max_nodes_per_deal"
     decisions = []
@@ -153,8 +156,10 @@ def test_perfect_recall_distinguishes_distinct_dealt_hands_at_root():
         b = Builder(cfg, 2_000_000, enumerate_draws=True, perfect_recall=True)
         game = CambiaGameState(house_rules=cfg.cambia_rules, _rng=random.Random(seed))
         init_obs = AnalysisTools._create_observation_for_br(game, None, -1)
-        ag = {0: _mk_agent(game, 0, 1, cfg, init_obs),
-              1: _mk_agent(game, 1, 0, cfg, init_obs)}
+        ag = {
+            0: _mk_agent(game, 0, 1, cfg, init_obs),
+            1: _mk_agent(game, 1, 0, cfg, init_obs),
+        }
         for pid in (0, 1):
             peeks = tuple(
                 (i, repr(game.players[pid].hand[i]))
@@ -178,9 +183,9 @@ def test_perfect_recall_distinguishes_distinct_dealt_hands_at_root():
     for peeked, keys in root_keys.items():
         assert len(keys) == 1, f"peeked hand {peeked} aliases {len(keys)} root keys"
         all_keys |= keys
-    assert len(all_keys) == len(root_keys), (
-        "distinct dealt hands collapsed to the same root key (own-action-only bug)"
-    )
+    assert len(all_keys) == len(
+        root_keys
+    ), "distinct dealt hands collapsed to the same root key (own-action-only bug)"
 
 
 if __name__ == "__main__":

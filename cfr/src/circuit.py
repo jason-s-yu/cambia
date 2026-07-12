@@ -12,7 +12,6 @@ import math
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-
 # ── OpenSkill (Plackett-Luce) ────────────────────────────────────────
 
 
@@ -159,7 +158,9 @@ class CircuitPlayerState:
     raw_cumulative: int = 0
     round_scores: list[int] = field(default_factory=list)
     round_placements: list[int] = field(default_factory=list)
-    h2h_record: dict[int, list[int]] = field(default_factory=dict)  # {opp: [wins, losses]}
+    h2h_record: dict[int, list[int]] = field(
+        default_factory=dict
+    )  # {opp: [wins, losses]}
     best_round: int = 999_999
     consecutive_misses: int = 0
     abandoned: bool = False
@@ -235,9 +236,7 @@ class CircuitState:
 
     def record_round(self, scores: dict[int, int], cambia_caller_id: int = -1) -> None:
         """Record a completed round's results."""
-        participating = {
-            pid: s for pid, s in scores.items() if pid in self._player_map
-        }
+        participating = {pid: s for pid, s in scores.items() if pid in self._player_map}
         n = len(participating)
         subsidy_table = _get_subsidies_for_n(n)
 

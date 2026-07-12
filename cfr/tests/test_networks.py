@@ -22,7 +22,6 @@ from src.networks import (
 )
 from src.cfr.exceptions import InvalidNetworkInputError
 
-
 # ===== AdvantageNetwork =====
 
 
@@ -275,20 +274,26 @@ class TestGetStrategyFromAdvantages:
 
     def test_batch_processing(self):
         """Works correctly with batched inputs."""
-        advantages = torch.tensor([
-            [2.0, 1.0, 0.0, -1.0],
-            [-1.0, -2.0, -3.0, -4.0],
-        ])
-        mask = torch.tensor([
-            [True, True, True, True],
-            [True, True, True, True],
-        ])
+        advantages = torch.tensor(
+            [
+                [2.0, 1.0, 0.0, -1.0],
+                [-1.0, -2.0, -3.0, -4.0],
+            ]
+        )
+        mask = torch.tensor(
+            [
+                [True, True, True, True],
+                [True, True, True, True],
+            ]
+        )
         strategy = get_strategy_from_advantages(advantages, mask)
         assert strategy.shape == (2, 4)
         # Row 0: positive advantages -> normalized
         assert torch.isclose(strategy[0].sum(), torch.tensor(1.0), atol=1e-5)
         # Row 1: all negative -> uniform
-        assert torch.allclose(strategy[1], torch.tensor([0.25, 0.25, 0.25, 0.25]), atol=1e-5)
+        assert torch.allclose(
+            strategy[1], torch.tensor([0.25, 0.25, 0.25, 0.25]), atol=1e-5
+        )
 
     def test_single_positive_advantage(self):
         """A single positive advantage gets probability 1.0."""

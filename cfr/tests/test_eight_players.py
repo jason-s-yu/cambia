@@ -20,10 +20,10 @@ from src.constants import (
     N_PLAYER_NUM_ACTIONS,
 )
 
-
 # ---------------------------------------------------------------------------
 # 2P constant regression — must NOT change
 # ---------------------------------------------------------------------------
+
 
 def test_2p_input_dim_unchanged():
     """Legacy 2P input dim must remain 222."""
@@ -44,8 +44,11 @@ def test_num_actions_2p_unchanged():
 # N-player constant values (MaxPlayers=8, MaxHandSize=6, MaxOpponents=7)
 # ---------------------------------------------------------------------------
 
+
 def test_n_player_max_players():
-    assert N_PLAYER_MAX_PLAYERS == 8, f"N_PLAYER_MAX_PLAYERS={N_PLAYER_MAX_PLAYERS}, want 8"
+    assert (
+        N_PLAYER_MAX_PLAYERS == 8
+    ), f"N_PLAYER_MAX_PLAYERS={N_PLAYER_MAX_PLAYERS}, want 8"
 
 
 def test_n_player_max_slots():
@@ -55,21 +58,28 @@ def test_n_player_max_slots():
 
 def test_n_player_powerset_dim():
     """384 = 48 slots × 8 bits (MaxKnowledgePlayers)."""
-    assert N_PLAYER_POWERSET_DIM == 384, f"N_PLAYER_POWERSET_DIM={N_PLAYER_POWERSET_DIM}, want 384"
+    assert (
+        N_PLAYER_POWERSET_DIM == 384
+    ), f"N_PLAYER_POWERSET_DIM={N_PLAYER_POWERSET_DIM}, want 384"
     # Also verify formula
     assert N_PLAYER_POWERSET_DIM == N_PLAYER_MAX_SLOTS * N_PLAYER_MAX_PLAYERS
 
 
 def test_n_player_identity_dim():
     """432 = 48 slots × 9 buckets."""
-    assert N_PLAYER_IDENTITY_DIM == 432, f"N_PLAYER_IDENTITY_DIM={N_PLAYER_IDENTITY_DIM}, want 432"
+    assert (
+        N_PLAYER_IDENTITY_DIM == 432
+    ), f"N_PLAYER_IDENTITY_DIM={N_PLAYER_IDENTITY_DIM}, want 432"
     assert N_PLAYER_IDENTITY_DIM == N_PLAYER_MAX_SLOTS * 9
 
 
 def test_n_player_input_dim():
     """856 = 384 (powerset) + 432 (identity) + 40 (public)."""
     assert N_PLAYER_INPUT_DIM == 856, f"N_PLAYER_INPUT_DIM={N_PLAYER_INPUT_DIM}, want 856"
-    assert N_PLAYER_INPUT_DIM == N_PLAYER_POWERSET_DIM + N_PLAYER_IDENTITY_DIM + N_PLAYER_PUBLIC_DIM
+    assert (
+        N_PLAYER_INPUT_DIM
+        == N_PLAYER_POWERSET_DIM + N_PLAYER_IDENTITY_DIM + N_PLAYER_PUBLIC_DIM
+    )
 
 
 def test_n_player_public_dim_unchanged():
@@ -86,7 +96,9 @@ def test_n_player_num_actions():
       + KingSwapNo + KingSwapYes + PassSnap
       + SnapOwn(6) + SnapOpponent(6×7=42) + SnapOpponentMove(6) = 620
     """
-    assert N_PLAYER_NUM_ACTIONS == 620, f"N_PLAYER_NUM_ACTIONS={N_PLAYER_NUM_ACTIONS}, want 620"
+    assert (
+        N_PLAYER_NUM_ACTIONS == 620
+    ), f"N_PLAYER_NUM_ACTIONS={N_PLAYER_NUM_ACTIONS}, want 620"
 
 
 # ---------------------------------------------------------------------------
@@ -94,26 +106,28 @@ def test_n_player_num_actions():
 # (values computed independently; this is the cross-validation)
 # ---------------------------------------------------------------------------
 
+
 def test_go_python_input_dim_parity():
     """Go NPlayerInputDim must equal Python N_PLAYER_INPUT_DIM."""
     # These are the same formula: MaxTotalSlots*MaxKnowledgePlayers + MaxTotalSlots*9 + 40
     go_value = 856  # from engine/agent/constants.go NPlayerInputDim
-    assert N_PLAYER_INPUT_DIM == go_value, (
-        f"Python N_PLAYER_INPUT_DIM={N_PLAYER_INPUT_DIM} != Go NPlayerInputDim={go_value}"
-    )
+    assert (
+        N_PLAYER_INPUT_DIM == go_value
+    ), f"Python N_PLAYER_INPUT_DIM={N_PLAYER_INPUT_DIM} != Go NPlayerInputDim={go_value}"
 
 
 def test_go_python_num_actions_parity():
     """Go NPlayerNumActions must equal Python N_PLAYER_NUM_ACTIONS."""
     go_value = 620  # from engine/agent/constants.go NPlayerNumActions
-    assert N_PLAYER_NUM_ACTIONS == go_value, (
-        f"Python N_PLAYER_NUM_ACTIONS={N_PLAYER_NUM_ACTIONS} != Go NPlayerNumActions={go_value}"
-    )
+    assert (
+        N_PLAYER_NUM_ACTIONS == go_value
+    ), f"Python N_PLAYER_NUM_ACTIONS={N_PLAYER_NUM_ACTIONS} != Go NPlayerNumActions={go_value}"
 
 
 # ---------------------------------------------------------------------------
 # Behavioral tests using the Python game engine
 # ---------------------------------------------------------------------------
+
 
 def test_8_player_game_creation():
     """8-player game can be created with correct player count and hand sizes."""
@@ -124,9 +138,9 @@ def test_8_player_game_creation():
     assert len(game.players) == 8
     # Each player should have 4 cards dealt.
     for p in range(8):
-        assert len(game.players[p].hand) == 4, (
-            f"player {p}: hand size {len(game.players[p].hand)}, want 4"
-        )
+        assert (
+            len(game.players[p].hand) == 4
+        ), f"player {p}: hand size {len(game.players[p].hand)}, want 4"
 
 
 def test_7_player_game_creation():

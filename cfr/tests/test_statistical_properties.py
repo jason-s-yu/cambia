@@ -34,7 +34,6 @@ from src.constants import (
     ActionSnapOpponentMove,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -43,7 +42,9 @@ from src.constants import (
 def _make_sample(features: np.ndarray) -> ReservoirSample:
     target = np.zeros(NUM_ACTIONS, dtype=np.float32)
     mask = np.ones(NUM_ACTIONS, dtype=bool)
-    return ReservoirSample(features=features, target=target, action_mask=mask, iteration=0)
+    return ReservoirSample(
+        features=features, target=target, action_mask=mask, iteration=0
+    )
 
 
 def _all_2p_actions():
@@ -62,10 +63,14 @@ def _all_2p_actions():
         actions.append(ActionAbilityPeekOtherSelect(target_opponent_hand_index=i))
     for own in range(6):
         for opp in range(6):
-            actions.append(ActionAbilityBlindSwapSelect(own_hand_index=own, opponent_hand_index=opp))
+            actions.append(
+                ActionAbilityBlindSwapSelect(own_hand_index=own, opponent_hand_index=opp)
+            )
     for own in range(6):
         for opp in range(6):
-            actions.append(ActionAbilityKingLookSelect(own_hand_index=own, opponent_hand_index=opp))
+            actions.append(
+                ActionAbilityKingLookSelect(own_hand_index=own, opponent_hand_index=opp)
+            )
     actions.append(ActionAbilityKingSwapDecision(perform_swap=False))
     actions.append(ActionAbilityKingSwapDecision(perform_swap=True))
     actions.append(ActionPassSnap())
@@ -75,7 +80,11 @@ def _all_2p_actions():
         actions.append(ActionSnapOpponent(opponent_target_hand_index=i))
     for own in range(6):
         for slot in range(6):
-            actions.append(ActionSnapOpponentMove(own_card_to_move_hand_index=own, target_empty_slot_index=slot))
+            actions.append(
+                ActionSnapOpponentMove(
+                    own_card_to_move_hand_index=own, target_empty_slot_index=slot
+                )
+            )
     return actions
 
 
@@ -109,7 +118,9 @@ class TestReservoirUniformRetention:
                 feat = np.array([[float(i)]], dtype=np.float32).reshape(1)
                 tgt = np.zeros(1, dtype=np.float32)
                 mask = np.ones(1, dtype=bool)
-                sample = ReservoirSample(features=feat, target=tgt, action_mask=mask, iteration=0)
+                sample = ReservoirSample(
+                    features=feat, target=tgt, action_mask=mask, iteration=0
+                )
                 buf.add(sample)
 
             # Count which items are in the buffer (identify by feature value)
@@ -129,10 +140,12 @@ class TestReservoirUniformRetention:
         # Bin items to reduce chi-sq df (group into 100 equal-size bins)
         n_bins = 100
         bin_size = n_items // n_bins
-        observed_binned = np.array([
-            retention_counts[b * bin_size:(b + 1) * bin_size].sum()
-            for b in range(n_bins)
-        ])
+        observed_binned = np.array(
+            [
+                retention_counts[b * bin_size : (b + 1) * bin_size].sum()
+                for b in range(n_bins)
+            ]
+        )
         expected_binned = np.full(n_bins, total_retained / n_bins)
 
         # Manual chi-squared statistic
@@ -142,6 +155,7 @@ class TestReservoirUniformRetention:
         # Use scipy if available, else approximate with CDF
         try:
             from scipy import stats as scipy_stats
+
             p_value = 1.0 - scipy_stats.chi2.cdf(chi2_stat, df)
         except ImportError:
             # Rough approximation: chi2 with df=99 at 99th percentile ~= 134
@@ -165,17 +179,17 @@ class TestActionIndexBijection:
         actions = _all_2p_actions()
         indices = [action_to_index(a) for a in actions]
 
-        assert len(indices) == NUM_ACTIONS, (
-            f"Expected {NUM_ACTIONS} unique actions, got {len(indices)}"
-        )
+        assert (
+            len(indices) == NUM_ACTIONS
+        ), f"Expected {NUM_ACTIONS} unique actions, got {len(indices)}"
         assert set(indices) == set(range(NUM_ACTIONS)), (
             f"Index set mismatch. Missing: {set(range(NUM_ACTIONS)) - set(indices)}, "
             f"Extra: {set(indices) - set(range(NUM_ACTIONS))}"
         )
         # Check no duplicates
-        assert len(indices) == len(set(indices)), (
-            f"Duplicate indices found: {[i for i in indices if indices.count(i) > 1]}"
-        )
+        assert len(indices) == len(
+            set(indices)
+        ), f"Duplicate indices found: {[i for i in indices if indices.count(i) > 1]}"
 
     @pytest.mark.skip(
         reason="Phase 0 F8 carry-forward: N-player FFI constants stale (452 should be 620). "
@@ -204,33 +218,50 @@ class TestActionIndexBijection:
         for i in range(6):
             collected.add(nplayer_action_to_index(ActionReplace(target_hand_index=i)))
         for i in range(6):
-            collected.add(nplayer_action_to_index(ActionAbilityPeekOwnSelect(target_hand_index=i)))
+            collected.add(
+                nplayer_action_to_index(ActionAbilityPeekOwnSelect(target_hand_index=i))
+            )
 
         # Multi-opponent actions: slot × opp_idx
         for slot in range(6):
             for opp in range(MAX_OPP):
-                collected.add(nplayer_action_to_index(
-                    ActionAbilityPeekOtherSelect(target_opponent_hand_index=slot), opp_idx=opp
-                ))
+                collected.add(
+                    nplayer_action_to_index(
+                        ActionAbilityPeekOtherSelect(target_opponent_hand_index=slot),
+                        opp_idx=opp,
+                    )
+                )
 
         for own in range(6):
             for opp_slot in range(6):
                 for opp in range(MAX_OPP):
-                    collected.add(nplayer_action_to_index(
-                        ActionAbilityBlindSwapSelect(own_hand_index=own, opponent_hand_index=opp_slot),
-                        opp_idx=opp
-                    ))
+                    collected.add(
+                        nplayer_action_to_index(
+                            ActionAbilityBlindSwapSelect(
+                                own_hand_index=own, opponent_hand_index=opp_slot
+                            ),
+                            opp_idx=opp,
+                        )
+                    )
 
         for own in range(6):
             for opp_slot in range(6):
                 for opp in range(MAX_OPP):
-                    collected.add(nplayer_action_to_index(
-                        ActionAbilityKingLookSelect(own_hand_index=own, opponent_hand_index=opp_slot),
-                        opp_idx=opp
-                    ))
+                    collected.add(
+                        nplayer_action_to_index(
+                            ActionAbilityKingLookSelect(
+                                own_hand_index=own, opponent_hand_index=opp_slot
+                            ),
+                            opp_idx=opp,
+                        )
+                    )
 
-        collected.add(nplayer_action_to_index(ActionAbilityKingSwapDecision(perform_swap=False)))
-        collected.add(nplayer_action_to_index(ActionAbilityKingSwapDecision(perform_swap=True)))
+        collected.add(
+            nplayer_action_to_index(ActionAbilityKingSwapDecision(perform_swap=False))
+        )
+        collected.add(
+            nplayer_action_to_index(ActionAbilityKingSwapDecision(perform_swap=True))
+        )
         collected.add(nplayer_action_to_index(ActionPassSnap()))
 
         for i in range(6):
@@ -238,14 +269,20 @@ class TestActionIndexBijection:
 
         for slot in range(6):
             for opp in range(MAX_OPP):
-                collected.add(nplayer_action_to_index(
-                    ActionSnapOpponent(opponent_target_hand_index=slot), opp_idx=opp
-                ))
+                collected.add(
+                    nplayer_action_to_index(
+                        ActionSnapOpponent(opponent_target_hand_index=slot), opp_idx=opp
+                    )
+                )
 
         for own in range(6):
-            collected.add(nplayer_action_to_index(
-                ActionSnapOpponentMove(own_card_to_move_hand_index=own, target_empty_slot_index=0)
-            ))
+            collected.add(
+                nplayer_action_to_index(
+                    ActionSnapOpponentMove(
+                        own_card_to_move_hand_index=own, target_empty_slot_index=0
+                    )
+                )
+            )
 
         assert collected == set(range(N_PLAYER_NUM_ACTIONS)), (
             f"N-player index coverage mismatch. Size: {len(collected)}. "
@@ -297,7 +334,9 @@ class TestPlackettLuce:
                 wins += 1.0 if pos < len(ordering) - 1 else 0.0
                 for j in range(len(ordering) - 1):  # j from 0 to k-2
                     if j <= pos:
-                        remaining_sum = sum(ratings[ordering[k]] for k in range(j, len(ordering)))
+                        remaining_sum = sum(
+                            ratings[ordering[k]] for k in range(j, len(ordering))
+                        )
                         if remaining_sum > 1e-10:
                             denominator += 1.0 / remaining_sum
             if denominator > 1e-10:
@@ -385,9 +424,9 @@ class TestPlackettLuce:
         for step in range(200):
             ratings = self._mm_update(ratings, orderings, n)
             curr_ll = self._pl_log_likelihood(ratings, orderings)
-            assert curr_ll >= prev_ll - 1e-10, (
-                f"Log-likelihood decreased at step {step}: {prev_ll:.6f} -> {curr_ll:.6f}"
-            )
+            assert (
+                curr_ll >= prev_ll - 1e-10
+            ), f"Log-likelihood decreased at step {step}: {prev_ll:.6f} -> {curr_ll:.6f}"
             prev_ll = curr_ll
 
 
@@ -433,7 +472,10 @@ class TestEMAConvergence:
 
         # Generate random snapshots
         snapshots = [
-            {"w": rng.randn(4, 3).astype(np.float32), "b": rng.randn(3).astype(np.float32)}
+            {
+                "w": rng.randn(4, 3).astype(np.float32),
+                "b": rng.randn(3).astype(np.float32),
+            }
             for _ in range(n_snapshots)
         ]
 
@@ -441,8 +483,10 @@ class TestEMAConvergence:
         weights = np.array([(t + 1) ** 1.5 for t in range(n_snapshots)])
         total_weight = weights.sum()
         avg = {
-            "w": sum(weights[t] * snapshots[t]["w"] for t in range(n_snapshots)) / total_weight,
-            "b": sum(weights[t] * snapshots[t]["b"] for t in range(n_snapshots)) / total_weight,
+            "w": sum(weights[t] * snapshots[t]["w"] for t in range(n_snapshots))
+            / total_weight,
+            "b": sum(weights[t] * snapshots[t]["b"] for t in range(n_snapshots))
+            / total_weight,
         }
 
         # Incremental EMA (matching deep_trainer._update_ema)
@@ -473,19 +517,25 @@ class TestOSRegretFormula:
     MAX_IS_WEIGHT = 20.0
 
     @staticmethod
-    def _compute_os_regret_worker_style(sigma, chosen_idx, utility, sampling_prob, num_actions):
+    def _compute_os_regret_worker_style(
+        sigma, chosen_idx, utility, sampling_prob, num_actions
+    ):
         """Replicate corrected regret computation from deep_worker.py (constant baseline)."""
         MAX_IS_WEIGHT = 20.0
         utility_estimate = utility * min(1.0 / sampling_prob, MAX_IS_WEIGHT)
         regrets = np.zeros(num_actions, dtype=np.float64)
         baseline = sigma[chosen_idx] * utility_estimate
         for a_idx in range(num_actions):
-            action_value_estimate = (1.0 if a_idx == chosen_idx else 0.0) * utility_estimate
+            action_value_estimate = (
+                1.0 if a_idx == chosen_idx else 0.0
+            ) * utility_estimate
             regrets[a_idx] = action_value_estimate - baseline
         return regrets
 
     @staticmethod
-    def _compute_os_regret_theoretical(sigma, chosen_idx, utility, sampling_prob, num_actions):
+    def _compute_os_regret_theoretical(
+        sigma, chosen_idx, utility, sampling_prob, num_actions
+    ):
         """Theoretical IS-corrected regret with constant baseline: r(a) = (u/q) * (I(a==a*) - σ(a*))."""
         MAX_IS_WEIGHT = 20.0
         u_q = utility * min(1.0 / sampling_prob, MAX_IS_WEIGHT)

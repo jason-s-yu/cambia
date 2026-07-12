@@ -59,7 +59,17 @@ def _insert_run(
     cur = conn.execute(
         "INSERT INTO runs (name, algorithm, status, engine_commit_hash, tags, notes, "
         "origin_host, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
-        (name, algorithm, status, engine_commit_hash, tags, notes, origin_host, _NOW, _NOW),
+        (
+            name,
+            algorithm,
+            status,
+            engine_commit_hash,
+            tags,
+            notes,
+            origin_host,
+            _NOW,
+            _NOW,
+        ),
     )
     conn.commit()
     return cur.lastrowid
@@ -78,7 +88,16 @@ def _insert_ckpt(
     cur = conn.execute(
         "INSERT INTO checkpoints (run_id, iteration, file_path, file_size_bytes, "
         "created_at, is_best, is_retained, compressed) VALUES (?,?,?,?,?,?,?,?)",
-        (run_id, iteration, file_path, file_size_bytes, _NOW, is_best, is_retained, compressed),
+        (
+            run_id,
+            iteration,
+            file_path,
+            file_size_bytes,
+            _NOW,
+            is_best,
+            is_retained,
+            compressed,
+        ),
     )
     conn.commit()
     return cur.lastrowid
@@ -111,9 +130,7 @@ def _insert_eval(conn, run_id, iteration, baseline, checkpoint_id=999, **over):
     vals.update(over)
     cols = ",".join(vals.keys())
     ph = ",".join(["?"] * len(vals))
-    conn.execute(
-        f"INSERT INTO eval_results ({cols}) VALUES ({ph})", tuple(vals.values())
-    )
+    conn.execute(f"INSERT INTO eval_results ({cols}) VALUES ({ph})", tuple(vals.values()))
     conn.commit()
 
 
@@ -133,9 +150,7 @@ def _build_full_run(
             if write_files:
                 (snap / fname).write_bytes(b"x" * (10 * (idx + 1)))
             is_best = 1 if idx == len(iterations) - 1 else 0
-            _insert_ckpt(
-                conn, rid, it, str(snap / fname), is_best=is_best, is_retained=1
-            )
+            _insert_ckpt(conn, rid, it, str(snap / fname), is_best=is_best, is_retained=1)
             for bl in ("random_no_cambia", "memory_heuristic"):
                 _insert_eval(conn, rid, it, bl)
     finally:
@@ -280,9 +295,7 @@ def test_mark_run_pushed_idempotent_and_noop_when_absent(tmp_path):
         assert run_db.mark_run_pushed(db, "pushme", "runner") == 1
         # Re-marking the same host stays idempotent (a re-push).
         assert run_db.mark_run_pushed(db, "pushme", "runner") == 1
-        row = db.execute(
-            "SELECT origin_host FROM runs WHERE name='pushme'"
-        ).fetchone()
+        row = db.execute("SELECT origin_host FROM runs WHERE name='pushme'").fetchone()
         assert row["origin_host"] == "runner"
     finally:
         db.close()
@@ -627,8 +640,13 @@ def test_metric_baseline_negative_ci_low_reconciles_clean(tmp_path):
     conn = _new_source(run_dir / "run_db.sqlite")
     rid = _insert_run(conn)
     _insert_eval(
-        conn, rid, 20, run_db.EXPLOIT_TIER_B_LBR_BASELINE,
-        win_rate=0.01, ci_low=-0.02, ci_high=0.04,
+        conn,
+        rid,
+        20,
+        run_db.EXPLOIT_TIER_B_LBR_BASELINE,
+        win_rate=0.01,
+        ci_low=-0.02,
+        ci_high=0.04,
     )
     conn.close()
 

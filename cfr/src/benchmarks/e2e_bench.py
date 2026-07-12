@@ -160,7 +160,9 @@ def benchmark_e2e(
             features_t = torch.from_numpy(batch.features).float().to(device_obj)
             targets_t = torch.from_numpy(batch.targets).float().to(device_obj)
             masks_t = torch.from_numpy(batch.masks.copy()).to(device_obj)
-            iterations_t = torch.from_numpy(batch.iterations.astype(np.float32)).to(device_obj)
+            iterations_t = torch.from_numpy(batch.iterations.astype(np.float32)).to(
+                device_obj
+            )
 
             weights = (iterations_t + 1.0).pow(1.5) / (iterations_t + 1.0).pow(1.5).mean()
 
@@ -191,7 +193,9 @@ def benchmark_e2e(
             features_t = torch.from_numpy(batch.features).float().to(device_obj)
             targets_t = torch.from_numpy(batch.targets).float().to(device_obj)
             masks_t = torch.from_numpy(batch.masks.copy()).to(device_obj)
-            iterations_t = torch.from_numpy(batch.iterations.astype(np.float32)).to(device_obj)
+            iterations_t = torch.from_numpy(batch.iterations.astype(np.float32)).to(
+                device_obj
+            )
 
             weights = (iterations_t + 1.0).pow(1.5) / (iterations_t + 1.0).pow(1.5).mean()
 
@@ -259,29 +263,29 @@ def benchmark_e2e(
         },
         metrics={
             "steps_per_hour": 3600 / avg_step_time if avg_step_time > 0 else 0,
-            "traversals_per_sec": traversals_per_step / avg_traversal
-            if avg_traversal > 0
-            else 0,
+            "traversals_per_sec": (
+                traversals_per_step / avg_traversal if avg_traversal > 0 else 0
+            ),
             "buffer_sizes": {
                 "advantage": len(adv_buffer),
                 "strategy": len(strat_buffer),
             },
             "time_breakdown_pct": {
-                "serialization": (avg_serialization / avg_step_time * 100)
-                if avg_step_time > 0
-                else 0,
-                "traversal": (avg_traversal / avg_step_time * 100)
-                if avg_step_time > 0
-                else 0,
-                "buffer_append": (avg_append / avg_step_time * 100)
-                if avg_step_time > 0
-                else 0,
-                "advantage_training": (avg_adv_train / avg_step_time * 100)
-                if avg_step_time > 0
-                else 0,
-                "strategy_training": (avg_strat_train / avg_step_time * 100)
-                if avg_step_time > 0
-                else 0,
+                "serialization": (
+                    (avg_serialization / avg_step_time * 100) if avg_step_time > 0 else 0
+                ),
+                "traversal": (
+                    (avg_traversal / avg_step_time * 100) if avg_step_time > 0 else 0
+                ),
+                "buffer_append": (
+                    (avg_append / avg_step_time * 100) if avg_step_time > 0 else 0
+                ),
+                "advantage_training": (
+                    (avg_adv_train / avg_step_time * 100) if avg_step_time > 0 else 0
+                ),
+                "strategy_training": (
+                    (avg_strat_train / avg_step_time * 100) if avg_step_time > 0 else 0
+                ),
             },
         },
         metadata={

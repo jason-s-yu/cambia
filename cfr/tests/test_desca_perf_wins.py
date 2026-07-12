@@ -33,7 +33,6 @@ from src.desca_networks import (
     RegretNetwork,
 )
 
-
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -42,7 +41,9 @@ from src.desca_networks import (
 def _make_small_regret_net(seed: int = 42) -> RegretNetwork:
     """Create a small RegretNetwork (reduced hidden_dim for fast tests)."""
     torch.manual_seed(seed)
-    net = RegretNetwork(input_dim=FEATURE_DIM, hidden_dim=64, num_actions=NUM_ABSTRACT_ACTIONS_2P)
+    net = RegretNetwork(
+        input_dim=FEATURE_DIM, hidden_dim=64, num_actions=NUM_ABSTRACT_ACTIONS_2P
+    )
     net.eval()
     return net
 
@@ -50,7 +51,9 @@ def _make_small_regret_net(seed: int = 42) -> RegretNetwork:
 def _make_small_value_net(seed: int = 7) -> HistoryValueNetwork:
     """Create a small HistoryValueNetwork (reduced hidden_dim for fast tests)."""
     torch.manual_seed(seed)
-    net = HistoryValueNetwork(input_dim=FEATURE_DIM, omniscient_dim=OMNISCIENT_DIM_2P, hidden_dim=64)
+    net = HistoryValueNetwork(
+        input_dim=FEATURE_DIM, omniscient_dim=OMNISCIENT_DIM_2P, hidden_dim=64
+    )
     net.eval()
     return net
 
@@ -58,7 +61,9 @@ def _make_small_value_net(seed: int = 7) -> HistoryValueNetwork:
 def _make_small_avg_strategy_net(seed: int = 13) -> AvgStrategyNetwork:
     """Create a small AvgStrategyNetwork (reduced hidden_dim for fast tests)."""
     torch.manual_seed(seed)
-    net = AvgStrategyNetwork(input_dim=FEATURE_DIM, hidden_dim=64, num_actions=NUM_ABSTRACT_ACTIONS_2P)
+    net = AvgStrategyNetwork(
+        input_dim=FEATURE_DIM, hidden_dim=64, num_actions=NUM_ABSTRACT_ACTIONS_2P
+    )
     net.eval()
     return net
 
@@ -97,9 +102,9 @@ class TestBf16InferenceDrift:
         out_bf16 = _forward_np(net, x, device=None, use_bf16=True)
 
         max_diff = float(np.abs(out_fp32 - out_bf16).max())
-        assert max_diff < 0.1, (
-            f"bf16 drift {max_diff:.6f} >= 0.1; check autocast wrapping"
-        )
+        assert (
+            max_diff < 0.1
+        ), f"bf16 drift {max_diff:.6f} >= 0.1; check autocast wrapping"
 
     def test_forward_value_net_bf16_drift(self) -> None:
         """_forward_value_net bf16 drift < 0.1 relative to fp32."""
@@ -111,9 +116,9 @@ class TestBf16InferenceDrift:
         val_fp32 = _forward_value_net(net, fair, omni, device=None, use_bf16=False)
         val_bf16 = _forward_value_net(net, fair, omni, device=None, use_bf16=True)
 
-        assert abs(val_fp32 - val_bf16) < 0.1, (
-            f"bf16 value net drift {abs(val_fp32 - val_bf16):.6f} >= 0.1"
-        )
+        assert (
+            abs(val_fp32 - val_bf16) < 0.1
+        ), f"bf16 value net drift {abs(val_fp32 - val_bf16):.6f} >= 0.1"
 
     def test_bf16_output_shape_preserved(self) -> None:
         """bf16 wrapping does not change output shape or break nan-free property."""
@@ -231,6 +236,7 @@ class TestVOmniBatchedEquivalence:
         use_bf16: bool = False,
     ) -> _TraversalCtx:
         from src.cfr.desca_worker import DESCAWorkerResult
+
         return _TraversalCtx(
             updating_player=0,
             regret_net=None,
@@ -280,14 +286,22 @@ class TestVOmniBatchedEquivalence:
 
         B = 8  # number of non-terminal abstract actions to simulate
         rng = np.random.default_rng(rng_seed)
-        fair_rows = [rng.standard_normal(FEATURE_DIM).astype(np.float32) for _ in range(B)]
-        omni_rows = [rng.standard_normal(OMNISCIENT_DIM_2P).astype(np.float32) for _ in range(B)]
+        fair_rows = [
+            rng.standard_normal(FEATURE_DIM).astype(np.float32) for _ in range(B)
+        ]
+        omni_rows = [
+            rng.standard_normal(OMNISCIENT_DIM_2P).astype(np.float32) for _ in range(B)
+        ]
 
         # Sequential reference
-        v_seq = np.array([
-            _forward_value_net(net, fair_rows[i], omni_rows[i], device=None, use_bf16=False)
-            for i in range(B)
-        ])
+        v_seq = np.array(
+            [
+                _forward_value_net(
+                    net, fair_rows[i], omni_rows[i], device=None, use_bf16=False
+                )
+                for i in range(B)
+            ]
+        )
 
         # Batched forward (same logic as the refactored _traverse code)
         fair_stack = np.stack(fair_rows, axis=0)
@@ -302,13 +316,13 @@ class TestVOmniBatchedEquivalence:
                 out = net(combined)
         v_batch = out.squeeze(-1).detach().cpu().float().numpy()
 
-        assert v_seq.shape == v_batch.shape, (
-            f"shape mismatch: seq={v_seq.shape} batch={v_batch.shape}"
-        )
+        assert (
+            v_seq.shape == v_batch.shape
+        ), f"shape mismatch: seq={v_seq.shape} batch={v_batch.shape}"
         max_diff = float(np.abs(v_seq - v_batch).max())
-        assert max_diff < 1e-5, (
-            f"batched V_omni differs from sequential by {max_diff:.2e} (atol=1e-5)"
-        )
+        assert (
+            max_diff < 1e-5
+        ), f"batched V_omni differs from sequential by {max_diff:.2e} (atol=1e-5)"
 
     def test_batched_path_handles_mixed_terminal_nonterminal(self) -> None:
         """When some actions are terminal and some are not, v_hat is correct.
@@ -331,14 +345,24 @@ class TestVOmniBatchedEquivalence:
 
         # Build batch for non-terminal indices
         nonterminal_indices = [i for i in range(n_total) if not terminal_mask[i]]
-        fair_rows = [rng.standard_normal(FEATURE_DIM).astype(np.float32) for _ in nonterminal_indices]
-        omni_rows = [rng.standard_normal(OMNISCIENT_DIM_2P).astype(np.float32) for _ in nonterminal_indices]
+        fair_rows = [
+            rng.standard_normal(FEATURE_DIM).astype(np.float32)
+            for _ in nonterminal_indices
+        ]
+        omni_rows = [
+            rng.standard_normal(OMNISCIENT_DIM_2P).astype(np.float32)
+            for _ in nonterminal_indices
+        ]
 
         # Sequential reference for non-terminal slots
-        v_seq_nonterminal = np.array([
-            _forward_value_net(net, fair_rows[j], omni_rows[j], device=None, use_bf16=False)
-            for j in range(len(nonterminal_indices))
-        ])
+        v_seq_nonterminal = np.array(
+            [
+                _forward_value_net(
+                    net, fair_rows[j], omni_rows[j], device=None, use_bf16=False
+                )
+                for j in range(len(nonterminal_indices))
+            ]
+        )
 
         # Assemble final v_hat (sequential)
         v_hat_seq = np.zeros(n_total, dtype=np.float64)
@@ -370,9 +394,9 @@ class TestVOmniBatchedEquivalence:
             v_hat_batched[i] = float(v_batch_nonterminal[j])
 
         max_diff = float(np.abs(v_hat_seq - v_hat_batched).max())
-        assert max_diff < 1e-5, (
-            f"mixed terminal/non-terminal v_hat mismatch: {max_diff:.2e} (atol=1e-5)"
-        )
+        assert (
+            max_diff < 1e-5
+        ), f"mixed terminal/non-terminal v_hat mismatch: {max_diff:.2e} (atol=1e-5)"
 
 
 # ---------------------------------------------------------------------------
@@ -389,15 +413,26 @@ class TestDcfrWeightPrecompute:
     def _make_minimal_trainer(self, alpha: float = 1.5) -> DESCATrainer:
         """Instantiate a DESCATrainer with tiny networks for LUT tests."""
         import tempfile, os
-        regret_net = RegretNetwork(input_dim=FEATURE_DIM, hidden_dim=32, num_actions=NUM_ABSTRACT_ACTIONS_2P)
-        avg_strategy_net = AvgStrategyNetwork(input_dim=FEATURE_DIM, hidden_dim=32, num_actions=NUM_ABSTRACT_ACTIONS_2P)
-        history_value_net = HistoryValueNetwork(input_dim=FEATURE_DIM, omniscient_dim=OMNISCIENT_DIM_2P, hidden_dim=32)
+
+        regret_net = RegretNetwork(
+            input_dim=FEATURE_DIM, hidden_dim=32, num_actions=NUM_ABSTRACT_ACTIONS_2P
+        )
+        avg_strategy_net = AvgStrategyNetwork(
+            input_dim=FEATURE_DIM, hidden_dim=32, num_actions=NUM_ABSTRACT_ACTIONS_2P
+        )
+        history_value_net = HistoryValueNetwork(
+            input_dim=FEATURE_DIM, omniscient_dim=OMNISCIENT_DIM_2P, hidden_dim=32
+        )
 
         # Minimal env_factory returning a trivially terminal mock
         def _env():
             class _TrivialAgent:
-                def update(self, e): pass
-                def clone(self): return _TrivialAgent()
+                def update(self, e):
+                    pass
+
+                def clone(self):
+                    return _TrivialAgent()
+
                 own_hand = {}
                 opponent_belief = {}
                 _current_game_turn = 0
@@ -407,16 +442,36 @@ class TestDcfrWeightPrecompute:
 
             class _TrivialEngine:
                 num_players = 2
-                def is_terminal(self): return True
-                def get_utility(self): return [0.0, 0.0]
-                def get_acting_player(self): return 0
-                def legal_actions(self): return []
-                def apply_action(self, a): pass
-                def save(self): return {}
-                def restore(self, s): pass
-                def free_snapshot(self, s): pass
-                def get_decision_context(self): return None
-                def get_drawn_card_bucket(self): return 0
+
+                def is_terminal(self):
+                    return True
+
+                def get_utility(self):
+                    return [0.0, 0.0]
+
+                def get_acting_player(self):
+                    return 0
+
+                def legal_actions(self):
+                    return []
+
+                def apply_action(self, a):
+                    pass
+
+                def save(self):
+                    return {}
+
+                def restore(self, s):
+                    pass
+
+                def free_snapshot(self, s):
+                    pass
+
+                def get_decision_context(self):
+                    return None
+
+                def get_drawn_card_bucket(self):
+                    return 0
 
             return _TrivialEngine(), [_TrivialAgent(), _TrivialAgent()]
 
@@ -511,6 +566,6 @@ class TestDcfrWeightPrecompute:
         """Iteration 1 maps correctly (w(1) = 1^alpha / (1^alpha + 1) = 0.5)."""
         trainer = self._make_minimal_trainer(alpha=1.5)
         w1 = trainer._get_dcfr_weights(torch.tensor([1], dtype=torch.int64))
-        assert abs(float(w1[0].item()) - 0.5) < 1e-7, (
-            f"w(iter=1) = {float(w1[0].item())} != 0.5"
-        )
+        assert (
+            abs(float(w1[0].item()) - 0.5) < 1e-7
+        ), f"w(iter=1) = {float(w1[0].item())} != 0.5"

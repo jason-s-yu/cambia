@@ -37,7 +37,6 @@ import types
 import numpy as np
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Parallel-dev stub for src.cfr.prtcfr_net (only if core has not landed).
 # ---------------------------------------------------------------------------
@@ -219,7 +218,11 @@ def test_load_net_infers_dims_from_custom_checkpoint(tmp_path):
 
     torch.manual_seed(0)
     custom = PRTCFRNet(
-        embed_dim=8, hidden_dim=12, num_layers=1, head_hidden_dim=10, device="cpu",
+        embed_dim=8,
+        hidden_dim=12,
+        num_layers=1,
+        head_hidden_dim=10,
+        device="cpu",
     )
     path = str(tmp_path / "prtcfr_snapshot_iter_1.pt")
     torch.save(
@@ -263,15 +266,23 @@ def test_incremental_policy_matches_materialize_policy_small_tree():
 
     cfg = load_config(prtcfr_eval.TINY_2CARD_CONFIG)
     root, _isets, nnodes, aborted = build_tree(
-        cfg, 1, 0, 2_000_000, enumerate_draws=False,
-        perfect_recall=True, tokenize=True, seq_cap=256,
+        cfg,
+        1,
+        0,
+        2_000_000,
+        enumerate_draws=False,
+        perfect_recall=True,
+        tokenize=True,
+        seq_cap=256,
     )
     assert aborted == 0
     assert nnodes < 20_000, f"small-tree fixture grew unexpectedly: {nnodes} nodes"
 
     nets = [(it, _make_random_net(seed=it)) for it in (5, 15, 25)]
 
-    reference = prtcfr_eval.materialize_policy(root, nets, weighting="linear", seq_cap=256)
+    reference = prtcfr_eval.materialize_policy(
+        root, nets, weighting="linear", seq_cap=256
+    )
     incremental = prtcfr_eval.materialize_policy_incremental(
         root, nets, weighting="linear", seq_cap=256, chunk_size=67
     )

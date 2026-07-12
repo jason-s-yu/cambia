@@ -11,7 +11,6 @@ from src.circuit import (
     update_openskill,
 )
 
-
 # ── Config / validation ───────────────────────────────────────────────
 
 
@@ -71,10 +70,10 @@ def test_circuit_record_round_subsidies_4p():
     state.record_round({10: 5, 20: 8, 30: 12, 40: 18})
 
     # cumulative_score = raw + subsidy
-    assert state._player_map[10].cumulative_score == 5 + (-5)   # 0
-    assert state._player_map[20].cumulative_score == 8 + (-2)   # 6
-    assert state._player_map[30].cumulative_score == 12 + 0     # 12
-    assert state._player_map[40].cumulative_score == 18 + 0     # 18
+    assert state._player_map[10].cumulative_score == 5 + (-5)  # 0
+    assert state._player_map[20].cumulative_score == 8 + (-2)  # 6
+    assert state._player_map[30].cumulative_score == 12 + 0  # 12
+    assert state._player_map[40].cumulative_score == 18 + 0  # 18
 
 
 def test_circuit_record_round_subsidies_5p():

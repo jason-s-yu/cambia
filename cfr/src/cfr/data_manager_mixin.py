@@ -160,7 +160,9 @@ class CFRDataManagerMixin:
                 "exploitability_results": self.exploitability_results,
             }
             save_agent_data(data_to_save, path)
-        except Exception as e_save:  # JUSTIFIED: Broad catch to ensure all save errors are logged; persistence module handles specifics
+        except (
+            Exception
+        ) as e_save:  # JUSTIFIED: Broad catch to ensure all save errors are logged; persistence module handles specifics
             logger.exception("Error saving agent data to %s: %s", path, e_save)
 
     def _merge_local_updates(self, results: List[Optional[WorkerResult]]):

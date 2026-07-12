@@ -66,10 +66,15 @@ def play_one_game(agent, config, max_steps=100):
 class TestAgentStateReset:
     """Verify agents properly reinitialize for new game states."""
 
-    @pytest.mark.parametrize("AgentClass", [
-        ImperfectGreedyAgent, MemoryHeuristicAgent,
-        AggressiveSnapAgent, HumanPlayerAgent,
-    ])
+    @pytest.mark.parametrize(
+        "AgentClass",
+        [
+            ImperfectGreedyAgent,
+            MemoryHeuristicAgent,
+            AggressiveSnapAgent,
+            HumanPlayerAgent,
+        ],
+    )
     def test_memory_resets_on_new_game(self, config, AgentClass):
         """Agent must re-initialize memory when game_state changes."""
         agent = AgentClass(0, config)
@@ -100,10 +105,15 @@ class TestAgentStateReset:
                     f"{hand[slot].value}. Memory not reset for new game!"
                 )
 
-    @pytest.mark.parametrize("AgentClass", [
-        ImperfectGreedyAgent, MemoryHeuristicAgent,
-        AggressiveSnapAgent, HumanPlayerAgent,
-    ])
+    @pytest.mark.parametrize(
+        "AgentClass",
+        [
+            ImperfectGreedyAgent,
+            MemoryHeuristicAgent,
+            AggressiveSnapAgent,
+            HumanPlayerAgent,
+        ],
+    )
     def test_multi_game_memory_correctness(self, config, AgentClass):
         """Agent memory must match actual cards in EVERY new game, not just the first."""
         agent = AgentClass(0, config)
@@ -122,10 +132,15 @@ class TestAgentStateReset:
                         f"actual card is {hand[slot]}. Memory not reset!"
                     )
 
-    @pytest.mark.parametrize("AgentClass", [
-        ImperfectGreedyAgent, MemoryHeuristicAgent,
-        AggressiveSnapAgent, HumanPlayerAgent,
-    ])
+    @pytest.mark.parametrize(
+        "AgentClass",
+        [
+            ImperfectGreedyAgent,
+            MemoryHeuristicAgent,
+            AggressiveSnapAgent,
+            HumanPlayerAgent,
+        ],
+    )
     def test_game_id_tracking(self, config, AgentClass):
         """Agent must track game identity and reinit on new game state."""
         agent = AgentClass(0, config)
@@ -145,10 +160,15 @@ class TestAgentStateReset:
 class TestCambiaDecisionQuality:
     """Verify Cambia is called at appropriate times."""
 
-    @pytest.mark.parametrize("AgentClass", [
-        ImperfectGreedyAgent, MemoryHeuristicAgent,
-        AggressiveSnapAgent, HumanPlayerAgent,
-    ])
+    @pytest.mark.parametrize(
+        "AgentClass",
+        [
+            ImperfectGreedyAgent,
+            MemoryHeuristicAgent,
+            AggressiveSnapAgent,
+            HumanPlayerAgent,
+        ],
+    )
     def test_no_cambia_with_only_initial_peek(self, config, AgentClass):
         """Agent should not call Cambia knowing only 2 of 4 cards (initial peek)."""
         agent = AgentClass(0, config)
@@ -236,7 +256,9 @@ class TestEvalHarnessAgentReset:
             agent1_type="imperfect_greedy",
             agent2_type="random_no_cambia",
             num_games=100,
-            strategy_path=None, checkpoint_path=None, device="cpu",
+            strategy_path=None,
+            checkpoint_path=None,
+            device="cpu",
         )
         stats1 = getattr(c1, "stats", {})
         avg_turns_100 = stats1.get("avg_game_turns", 0)
@@ -257,7 +279,9 @@ class TestEvalHarnessAgentReset:
             agent1_type="imperfect_greedy",
             agent2_type="random_no_cambia",
             num_games=500,
-            strategy_path=None, checkpoint_path=None, device="cpu",
+            strategy_path=None,
+            checkpoint_path=None,
+            device="cpu",
         )
         decided = c.get("P0 Wins", 0) + c.get("P1 Wins", 0)
         wr = c.get("P0 Wins", 0) / decided if decided else 0

@@ -8,7 +8,14 @@ import warnings
 import yaml
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    field_validator,
+    model_validator,
+)
 
 T = TypeVar("T")
 
@@ -119,7 +126,9 @@ class _CambiaBaseModel(BaseModel):
             section_name = re.sub(r"(?<!^)(?=[A-Z])", "_", raw_name).lower()
             for key in values:
                 if key not in known:
-                    log.warning("Unknown %s key '%s' — will be ignored", section_name, key)
+                    log.warning(
+                        "Unknown %s key '%s' — will be ignored", section_name, key
+                    )
         return values
 
 
@@ -703,7 +712,10 @@ def resolve_config_yaml(config_path: Union[str, Path]) -> dict:
         profile_path = config_dir / "rule_profiles" / f"{rule_profile}.yaml"
         if not profile_path.exists():
             profile_path = (
-                Path(__file__).parent.parent / "config" / "rule_profiles" / f"{rule_profile}.yaml"
+                Path(__file__).parent.parent
+                / "config"
+                / "rule_profiles"
+                / f"{rule_profile}.yaml"
             )
         if profile_path.exists():
             with open(profile_path, encoding="utf-8") as pf:

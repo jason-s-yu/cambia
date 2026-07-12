@@ -162,7 +162,15 @@ DEFAULT_BASELINE_REF: str = os.path.join(
 # Recognized reference-table metadata keys (skipped when the baselines map is at
 # the top level rather than nested under a "baselines" key).
 _REF_META_KEYS = frozenset(
-    {"schema_version", "rule_profile", "generated_at", "estimators", "notes", "games", "rows"}
+    {
+        "schema_version",
+        "rule_profile",
+        "generated_at",
+        "estimators",
+        "notes",
+        "games",
+        "rows",
+    }
 )
 
 
@@ -241,11 +249,11 @@ def _k_from_yaml_text(text: str) -> Optional[int]:
 # ---------------------------------------------------------------------------
 
 
-def _open_run(run_dir: Path, db_path: Optional[str]) -> Tuple[sqlite3.Connection, Optional[int]]:
+def _open_run(
+    run_dir: Path, db_path: Optional[str]
+) -> Tuple[sqlite3.Connection, Optional[int]]:
     db = get_db(db_path)
-    row = db.execute(
-        "SELECT id FROM runs WHERE name=?", (Path(run_dir).name,)
-    ).fetchone()
+    row = db.execute("SELECT id FROM runs WHERE name=?", (Path(run_dir).name,)).fetchone()
     return db, (row["id"] if row is not None else None)
 
 
@@ -341,9 +349,15 @@ def compute_g2(
         binding = baseline in STRATEGIC_BASELINES
         if row is None:
             legs[baseline] = {
-                "present": False, "binding": binding, "rule": rule,
-                "not_a_loss": None, "ci_low": None, "ci_high": None,
-                "games_played": None, "tie_aware": False, "pass": False,
+                "present": False,
+                "binding": binding,
+                "rule": rule,
+                "not_a_loss": None,
+                "ci_low": None,
+                "ci_high": None,
+                "games_played": None,
+                "tie_aware": False,
+                "pass": False,
                 "note": "no eval_results row for this baseline",
             }
             continue
@@ -360,20 +374,34 @@ def compute_g2(
             tie_aware = False
         else:
             legs[baseline] = {
-                "present": True, "binding": binding, "rule": rule,
-                "not_a_loss": None, "ci_low": None, "ci_high": None,
-                "games_played": n, "tie_aware": False, "pass": False,
+                "present": True,
+                "binding": binding,
+                "rule": rule,
+                "not_a_loss": None,
+                "ci_low": None,
+                "ci_high": None,
+                "games_played": n,
+                "tie_aware": False,
+                "pass": False,
                 "note": "row present but games_played/seat counts missing",
             }
             continue
         ci_low, ci_high = wilson_ci(not_a_loss, n)
         leg_pass = (not_a_loss >= threshold) if rule == "point" else (ci_low >= threshold)
         legs[baseline] = {
-            "present": True, "binding": binding, "rule": rule,
-            "not_a_loss": not_a_loss, "ci_low": ci_low, "ci_high": ci_high,
-            "games_played": n, "iteration": row.get("iteration"),
-            "p0_wins": p0, "p1_wins": row.get("p1_wins"), "ties": ties,
-            "tie_aware": tie_aware, "pass": bool(leg_pass),
+            "present": True,
+            "binding": binding,
+            "rule": rule,
+            "not_a_loss": not_a_loss,
+            "ci_low": ci_low,
+            "ci_high": ci_high,
+            "games_played": n,
+            "iteration": row.get("iteration"),
+            "p0_wins": p0,
+            "p1_wins": row.get("p1_wins"),
+            "ties": ties,
+            "tie_aware": tie_aware,
+            "pass": bool(leg_pass),
         }
 
     strategic_pass = all(legs[b]["pass"] for b in STRATEGIC_BASELINES)
@@ -450,14 +478,18 @@ def read_baseline_reference(path: str) -> Dict[str, Any]:
     p = Path(path)
     if not p.exists():
         return {
-            "available": False, "path": str(p), "baselines": {},
+            "available": False,
+            "path": str(p),
+            "baselines": {},
             "note": "baseline reference table not found at %s (P3W5 not landed?)" % p,
         }
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
         return {
-            "available": False, "path": str(p), "baselines": {},
+            "available": False,
+            "path": str(p),
+            "baselines": {},
             "error": "failed to parse baseline reference table: %s" % exc,
         }
     if isinstance(data, dict) and isinstance(data.get("rows"), list):
@@ -468,7 +500,9 @@ def read_baseline_reference(path: str) -> Dict[str, Any]:
         baselines = {k: v for k, v in data.items() if k not in _REF_META_KEYS}
     else:
         return {
-            "available": False, "path": str(p), "baselines": {},
+            "available": False,
+            "path": str(p),
+            "baselines": {},
             "error": "unexpected reference table shape (not a dict)",
         }
     return {
@@ -479,7 +513,9 @@ def read_baseline_reference(path: str) -> Dict[str, Any]:
     }
 
 
-def _estimator_entry(baseline_ref_row: Any, estimator_key: str) -> Optional[Dict[str, Any]]:
+def _estimator_entry(
+    baseline_ref_row: Any, estimator_key: str
+) -> Optional[Dict[str, Any]]:
     if not isinstance(baseline_ref_row, dict):
         return None
     entry = baseline_ref_row.get(estimator_key)
@@ -496,16 +532,23 @@ def _compare_ordering(
     comparison that cannot confirm non-overlap (pass=False, overlap=None).
     """
     if mixture is None or ref is None:
-        return {"pass": False, "overlap": None, "note": "missing mixture or reference value"}
+        return {
+            "pass": False,
+            "overlap": None,
+            "note": "missing mixture or reference value",
+        }
     m_val = mixture.get("exploitability")
     r_val = ref.get("exploitability")
     m_hi = mixture.get("ci_high")
     r_lo = ref.get("ci_low")
-    point_below = (m_val is not None and r_val is not None and m_val < r_val)
+    point_below = m_val is not None and r_val is not None and m_val < r_val
     if m_hi is None or r_lo is None:
         return {
-            "pass": False, "overlap": None, "point_below": point_below,
-            "mixture_exploitability": m_val, "reference_exploitability": r_val,
+            "pass": False,
+            "overlap": None,
+            "point_below": point_below,
+            "mixture_exploitability": m_val,
+            "reference_exploitability": r_val,
             "note": "CI bounds missing; cannot confirm non-overlap",
         }
     non_overlap_below = m_hi < r_lo
@@ -513,8 +556,10 @@ def _compare_ordering(
         "pass": bool(non_overlap_below),
         "overlap": (not non_overlap_below),
         "point_below": point_below,
-        "mixture_exploitability": m_val, "mixture_ci_high": m_hi,
-        "reference_exploitability": r_val, "reference_ci_low": r_lo,
+        "mixture_exploitability": m_val,
+        "mixture_ci_high": m_hi,
+        "reference_exploitability": r_val,
+        "reference_ci_low": r_lo,
     }
 
 
@@ -568,7 +613,9 @@ def compute_g3_ordering(
                 }
 
     if g3_binding not in G3_BINDING_CHOICES:
-        raise ValueError("g3_binding must be one of %s, got %r" % (G3_BINDING_CHOICES, g3_binding))
+        raise ValueError(
+            "g3_binding must be one of %s, got %r" % (G3_BINDING_CHOICES, g3_binding)
+        )
     binding_baselines: Tuple[str, ...] = (
         STRATEGIC_BASELINES if g3_binding == "strategic" else MEAN_IMP_BASELINES
     )
@@ -581,7 +628,8 @@ def compute_g3_ordering(
             mixture[EXPLOIT_PRIMARY_KEY], _estimator_entry(ref_row, EXPLOIT_PRIMARY_KEY)
         )
         confirming = _compare_ordering(
-            mixture[EXPLOIT_CONFIRMING_KEY], _estimator_entry(ref_row, EXPLOIT_CONFIRMING_KEY)
+            mixture[EXPLOIT_CONFIRMING_KEY],
+            _estimator_entry(ref_row, EXPLOIT_CONFIRMING_KEY),
         )
         confirming_available = (
             mixture[EXPLOIT_CONFIRMING_KEY] is not None
@@ -621,7 +669,9 @@ def compute_g3_ordering(
     # the confirming comparisons over the same set only when the user rules
     # ISMCTS-BR binding.
     primary_pass = all(legs[b]["primary"]["pass"] for b in binding_baselines)
-    confirming_considered = [b for b in binding_baselines if legs[b]["confirming_available"]]
+    confirming_considered = [
+        b for b in binding_baselines if legs[b]["confirming_available"]
+    ]
     confirming_pass = all(legs[b]["confirming"]["pass"] for b in confirming_considered)
 
     ismcts_binding_fail_reason: Optional[str] = None
@@ -629,14 +679,13 @@ def compute_g3_ordering(
         ismcts_binding_fail_reason = "ismcts binding requested but no ismcts rows"
 
     if ismcts_binding:
-        overall = primary_pass and confirming_pass and (ismcts_binding_fail_reason is None)
+        overall = (
+            primary_pass and confirming_pass and (ismcts_binding_fail_reason is None)
+        )
     else:
         overall = primary_pass
 
-    available = (
-        ref.get("available", False)
-        and mixture[EXPLOIT_PRIMARY_KEY] is not None
-    )
+    available = ref.get("available", False) and mixture[EXPLOIT_PRIMARY_KEY] is not None
     return {
         "available": available,
         "g3_binding": g3_binding,
@@ -659,7 +708,9 @@ def compute_g3_ordering(
 # ---------------------------------------------------------------------------
 
 
-def _lbr_points(rows: Sequence[Dict[str, Any]], field: str = "tier_a_lbr") -> List[Tuple[int, float]]:
+def _lbr_points(
+    rows: Sequence[Dict[str, Any]], field: str = "tier_a_lbr"
+) -> List[Tuple[int, float]]:
     pts = [
         (int(row["iteration"]), float(row[field]))
         for row in rows
@@ -688,10 +739,17 @@ def select_trend_window(
     pts = _lbr_points(rows, field=field)
     if not pts:
         return {
-            "valid": False, "anchor_iter": anchor_iter, "k_games": k_games,
-            "window_width": window_width, "end_iter": None, "start_iter": None,
-            "n_in_window": 0, "points": [], "budget_start_traversals": None,
-            "budget_ok": False, "note": "no Tier-A LBR points in metrics.jsonl",
+            "valid": False,
+            "anchor_iter": anchor_iter,
+            "k_games": k_games,
+            "window_width": window_width,
+            "end_iter": None,
+            "start_iter": None,
+            "n_in_window": 0,
+            "points": [],
+            "budget_start_traversals": None,
+            "budget_ok": False,
+            "note": "no Tier-A LBR points in metrics.jsonl",
         }
     end_iter = pts[-1][0]
     start_iter = end_iter - window_width
@@ -762,9 +820,7 @@ def compute_g3_trend(
     slope = slope_info.get("slope")
     ci_high = slope_info.get("ci_high")
     ci_negative = ci_high is not None and ci_high < 0.0
-    clears_mds = (
-        slope is not None and mds is not None and abs(slope) >= mds
-    )
+    clears_mds = slope is not None and mds is not None and abs(slope) >= mds
     trend_pass = bool(
         window["valid"] and window["budget_ok"] and ci_negative and clears_mds
     )
@@ -822,8 +878,13 @@ def write_budget_curve_plot(
     ys = [pt["tier_a_lbr"] for pt in curve]
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.plot(xs, ys, marker=".", linewidth=1.0)
-    ax.axvline(BUDGET_ANCHOR_TRAVERSALS, color="gray", linestyle="--", linewidth=0.8,
-               label="10x DESCA anchor (2.0e7)")
+    ax.axvline(
+        BUDGET_ANCHOR_TRAVERSALS,
+        color="gray",
+        linestyle="--",
+        linewidth=0.8,
+        label="10x DESCA anchor (2.0e7)",
+    )
     ax.set_xlabel("cumulative traversals (iteration * K)")
     ax.set_ylabel("Tier-A LBR exploitability")
     ax.set_title("X5 budget curve: exploitability vs traversals")
@@ -858,12 +919,18 @@ def compute_verdict(
     metrics_path = run_dir_path / "metrics.jsonl"
     rows = load_metrics_rows(metrics_path)
 
-    k_resolved, k_source = resolve_k_games(run_dir_path, k_override=k_games, db_path=db_path)
+    k_resolved, k_source = resolve_k_games(
+        run_dir_path, k_override=k_games, db_path=db_path
+    )
 
     g2 = compute_g2(run_dir_path, db_path=db_path, g2_rule=g2_rule, iteration=iteration)
     g3_ord = compute_g3_ordering(
-        run_dir_path, db_path=db_path, baseline_ref_path=baseline_ref_path,
-        ismcts_binding=ismcts_binding, g3_binding=g3_binding, iteration=iteration,
+        run_dir_path,
+        db_path=db_path,
+        baseline_ref_path=baseline_ref_path,
+        ismcts_binding=ismcts_binding,
+        g3_binding=g3_binding,
+        iteration=iteration,
     )
 
     if k_resolved is None:
@@ -871,7 +938,8 @@ def compute_verdict(
             "verdict": "FAIL",
             "budget_reached": False,
             "error": k_source,
-            "window": None, "slope_ci": None,
+            "window": None,
+            "slope_ci": None,
             "minimum_detectable_slope": None,
         }
         budget_curve: List[Dict[str, Any]] = []
@@ -937,9 +1005,14 @@ def human_summary(verdict: Dict[str, Any]) -> str:
         lines.append(
             "   %-20s [%s] not_a_loss=%s ci=[%s, %s] rule=%s games=%s tie_aware=%s -> %s"
             % (
-                baseline, tag, _fmt(leg.get("not_a_loss")),
-                _fmt(leg.get("ci_low")), _fmt(leg.get("ci_high")),
-                leg.get("rule"), leg.get("games_played"), leg.get("tie_aware"),
+                baseline,
+                tag,
+                _fmt(leg.get("not_a_loss")),
+                _fmt(leg.get("ci_low")),
+                _fmt(leg.get("ci_high")),
+                leg.get("rule"),
+                leg.get("games_played"),
+                leg.get("tie_aware"),
                 "PASS" if leg.get("pass") else "FAIL",
             )
         )
@@ -978,8 +1051,11 @@ def human_summary(verdict: Dict[str, Any]) -> str:
                 " (CI overlap)" if prim.get("overlap") else "",
                 _fmt(conf.get("mixture_exploitability")),
                 _fmt(conf.get("reference_exploitability")),
-                ("PASS" if conf.get("pass") else "FAIL")
-                if leg.get("confirming_available") else "n/a",
+                (
+                    ("PASS" if conf.get("pass") else "FAIL")
+                    if leg.get("confirming_available")
+                    else "n/a"
+                ),
             )
         )
     for flag in g3o.get("flags", []):
@@ -1001,9 +1077,13 @@ def human_summary(verdict: Dict[str, Any]) -> str:
             "   window: iters [%s, %s] (width %s), 10x anchor iter=%s, n=%s, "
             "budget@start=%s traversals (reached=%s)"
             % (
-                win.get("start_iter"), win.get("end_iter"), win.get("window_width"),
-                win.get("anchor_iter"), win.get("n_in_window"),
-                win.get("budget_start_traversals"), win.get("budget_ok"),
+                win.get("start_iter"),
+                win.get("end_iter"),
+                win.get("window_width"),
+                win.get("anchor_iter"),
+                win.get("n_in_window"),
+                win.get("budget_start_traversals"),
+                win.get("budget_ok"),
             )
         )
         if win.get("note"):
@@ -1011,10 +1091,15 @@ def human_summary(verdict: Dict[str, Any]) -> str:
         lines.append(
             "   slope=%s ci=[%s, %s] se=%s df=%s | MDS(power=%s)=%s | |slope|=%s clears=%s"
             % (
-                _fmt(sc.get("slope")), _fmt(sc.get("ci_low")), _fmt(sc.get("ci_high")),
-                _fmt(sc.get("se")), sc.get("df"), g3t.get("trend_power"),
+                _fmt(sc.get("slope")),
+                _fmt(sc.get("ci_low")),
+                _fmt(sc.get("ci_high")),
+                _fmt(sc.get("se")),
+                sc.get("df"),
+                g3t.get("trend_power"),
                 _fmt(g3t.get("minimum_detectable_slope")),
-                _fmt(g3t.get("observed_slope_magnitude")), g3t.get("observed_clears_mds"),
+                _fmt(g3t.get("observed_slope_magnitude")),
+                g3t.get("observed_clears_mds"),
             )
         )
         if sc.get("error"):
@@ -1033,7 +1118,9 @@ def human_summary(verdict: Dict[str, Any]) -> str:
     # Budget curve
     curve = verdict.get("budget_curve", [])
     lines.append("")
-    lines.append("Budget curve (Tier-A LBR vs cumulative traversals), %d points:" % len(curve))
+    lines.append(
+        "Budget curve (Tier-A LBR vs cumulative traversals), %d points:" % len(curve)
+    )
     for pt in _curve_preview(curve):
         lines.append(
             "   iter=%-6s traversals=%-12s tier_a_lbr=%s"
@@ -1050,7 +1137,12 @@ def human_summary(verdict: Dict[str, Any]) -> str:
         for name, row in floor["baselines"].items():
             lines.append(
                 "   %-20s win_rate=%s games=%s iter=%s"
-                % (name, _fmt(row.get("win_rate")), row.get("games_played"), row.get("iteration"))
+                % (
+                    name,
+                    _fmt(row.get("win_rate")),
+                    row.get("games_played"),
+                    row.get("iteration"),
+                )
             )
         if floor.get("mean_imp") is not None:
             lines.append("   mean_imp(5) = %.4f" % floor["mean_imp"])
@@ -1060,7 +1152,9 @@ def human_summary(verdict: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _curve_preview(curve: Sequence[Dict[str, Any]], head: int = 5, tail: int = 5) -> List[Dict[str, Any]]:
+def _curve_preview(
+    curve: Sequence[Dict[str, Any]], head: int = 5, tail: int = 5
+) -> List[Dict[str, Any]]:
     """Head + tail of the curve for the human summary (full table lives in JSON)."""
     if len(curve) <= head + tail:
         return list(curve)
@@ -1096,31 +1190,40 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("run_dir", help="X5 run directory (e.g. runs/v0.4-x5-full).")
     ap.add_argument(
-        "--db-path", default=None,
+        "--db-path",
+        default=None,
         help="run_db sqlite path override (default: CAMBIA_RUN_DB env or cfr/runs/cambia_runs.db).",
     )
     ap.add_argument(
-        "--baseline-ref", default=DEFAULT_BASELINE_REF,
+        "--baseline-ref",
+        default=DEFAULT_BASELINE_REF,
         help="P3W5 baseline exploitability reference table JSON (default: %(default)s).",
     )
     ap.add_argument(
-        "--k-games", type=int, default=None,
+        "--k-games",
+        type=int,
+        default=None,
         help="Traversals per iteration (K). Default: read prt_cfr.k_games_per_iter "
         "from <run_dir>/config.yaml or run_db.",
     )
     ap.add_argument(
-        "--g2-rule", choices=("default", "point", "lower-ci"), default="default",
+        "--g2-rule",
+        choices=("default", "point", "lower-ci"),
+        default="default",
         help="G2 pass rule. default = lower-ci on strategic legs, point on random "
         "legs (user ruling pending); point / lower-ci force one rule everywhere.",
     )
     ap.add_argument(
-        "--ismcts-binding", action="store_true",
+        "--ismcts-binding",
+        action="store_true",
         help="Make ISMCTS-BR a binding G3-ordering estimator (default: confirming only, "
         "disagreement is a flag not a veto). With zero confirming comparisons "
         "available, fails closed instead of passing vacuously.",
     )
     ap.add_argument(
-        "--g3-binding", choices=G3_BINDING_CHOICES, default=DEFAULT_G3_BINDING,
+        "--g3-binding",
+        choices=G3_BINDING_CHOICES,
+        default=DEFAULT_G3_BINDING,
         help="G3-ordering binding scope (default: %(default)s). strategic binds only "
         "imperfect_greedy/memory_heuristic/aggressive_snap (the random legs' "
         "reference exploitability is a known estimator artifact, see module "
@@ -1128,22 +1231,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "computed and rendered, flagged non-binding under strategic.",
     )
     ap.add_argument(
-        "--window-width", type=int, default=DEFAULT_WINDOW_WIDTH,
+        "--window-width",
+        type=int,
+        default=DEFAULT_WINDOW_WIDTH,
         help="G3-trend window width in iterations (default: %(default)s).",
     )
     ap.add_argument(
-        "--trend-power", type=float, default=DEFAULT_TREND_POWER,
+        "--trend-power",
+        type=float,
+        default=DEFAULT_TREND_POWER,
         help="Power for the minimum-detectable-slope bar (default: %(default)s; "
         "0.5 makes MDS the CI half-width).",
     )
     ap.add_argument(
-        "--iter", dest="iteration", type=int, default=None,
+        "--iter",
+        dest="iteration",
+        type=int,
+        default=None,
         help="Pin G2 and mixture-exploitability reads to this eval iteration "
         "(default: latest per baseline key).",
     )
     ap.add_argument("--out", default=None, help="JSON verdict output path.")
     ap.add_argument(
-        "--plot-out", default=None,
+        "--plot-out",
+        default=None,
         help="Budget-curve PNG output path (default: <run_dir>/x5_budget_curve.png "
         "when matplotlib is importable).",
     )
@@ -1168,7 +1279,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # The budget curve is written regardless of PASS or FAIL (the flat-curve kill
     # deliverable). PNG is best-effort; the JSON table is authoritative.
-    plot_path = Path(args.plot_out) if args.plot_out else (Path(args.run_dir) / "x5_budget_curve.png")
+    plot_path = (
+        Path(args.plot_out)
+        if args.plot_out
+        else (Path(args.run_dir) / "x5_budget_curve.png")
+    )
     written = write_budget_curve_plot(verdict.get("budget_curve", []), plot_path)
     verdict["budget_curve_plot"] = written
     if written:

@@ -72,8 +72,12 @@ class TestComputePolicyMatrixFromPbs:
         r0, r1 = uniform_ranges
         with torch.inference_mode():
             result = compute_policy_matrix_cvpn_from_pbs(
-                small_cvpn, sample_pbs, sample_legal_mask,
-                acting_player=0, range_p0=r0, range_p1=r1,
+                small_cvpn,
+                sample_pbs,
+                sample_legal_mask,
+                acting_player=0,
+                range_p0=r0,
+                range_p1=r1,
             )
 
         assert result.shape == (NUM_HAND_TYPES, NUM_ACTIONS)
@@ -90,8 +94,12 @@ class TestComputePolicyMatrixFromPbs:
         r0, r1 = uniform_ranges
         with torch.inference_mode():
             result = compute_policy_matrix_cvpn_from_pbs(
-                small_cvpn, sample_pbs, sample_legal_mask,
-                acting_player=0, range_p0=r0, range_p1=r1,
+                small_cvpn,
+                sample_pbs,
+                sample_legal_mask,
+                acting_player=0,
+                range_p0=r0,
+                range_p1=r1,
             )
 
         # Check that not all rows are identical (the whole point of the fix)
@@ -101,40 +109,54 @@ class TestComputePolicyMatrixFromPbs:
         row_300 = result[300]
 
         # At least some pair should differ
-        assert not np.allclose(row_0, row_100) or not np.allclose(row_0, row_300), (
-            "All rows are identical: delta-range PBS encoding is not working"
-        )
+        assert not np.allclose(row_0, row_100) or not np.allclose(
+            row_0, row_300
+        ), "All rows are identical: delta-range PBS encoding is not working"
 
-    def test_rows_sum_to_one(self, small_cvpn, sample_pbs, sample_legal_mask, uniform_ranges):
+    def test_rows_sum_to_one(
+        self, small_cvpn, sample_pbs, sample_legal_mask, uniform_ranges
+    ):
         """Each row sums to ~1.0 (valid probability distribution)."""
         from src.cfr.range_utils import compute_policy_matrix_cvpn_from_pbs
 
         r0, r1 = uniform_ranges
         with torch.inference_mode():
             result = compute_policy_matrix_cvpn_from_pbs(
-                small_cvpn, sample_pbs, sample_legal_mask,
-                acting_player=0, range_p0=r0, range_p1=r1,
+                small_cvpn,
+                sample_pbs,
+                sample_legal_mask,
+                acting_player=0,
+                range_p0=r0,
+                range_p1=r1,
             )
 
         row_sums = result.sum(axis=1)
         np.testing.assert_allclose(row_sums, 1.0, atol=1e-5)
 
-    def test_illegal_actions_zero(self, small_cvpn, sample_pbs, sample_legal_mask, uniform_ranges):
+    def test_illegal_actions_zero(
+        self, small_cvpn, sample_pbs, sample_legal_mask, uniform_ranges
+    ):
         """Illegal actions should have zero probability (masked out)."""
         from src.cfr.range_utils import compute_policy_matrix_cvpn_from_pbs
 
         r0, r1 = uniform_ranges
         with torch.inference_mode():
             result = compute_policy_matrix_cvpn_from_pbs(
-                small_cvpn, sample_pbs, sample_legal_mask,
-                acting_player=0, range_p0=r0, range_p1=r1,
+                small_cvpn,
+                sample_pbs,
+                sample_legal_mask,
+                acting_player=0,
+                range_p0=r0,
+                range_p1=r1,
             )
 
         illegal_mask = ~sample_legal_mask
         # All probabilities at illegal action indices should be 0
         assert np.allclose(result[:, illegal_mask], 0.0, atol=1e-7)
 
-    def test_acting_player_1(self, small_cvpn, sample_pbs, sample_legal_mask, uniform_ranges):
+    def test_acting_player_1(
+        self, small_cvpn, sample_pbs, sample_legal_mask, uniform_ranges
+    ):
         """Works correctly for acting_player=1 (delta applied to P1 range)."""
         from src.cfr.range_utils import compute_policy_matrix_cvpn_from_pbs
         from src.pbs import NUM_HAND_TYPES
@@ -143,8 +165,12 @@ class TestComputePolicyMatrixFromPbs:
         r0, r1 = uniform_ranges
         with torch.inference_mode():
             result = compute_policy_matrix_cvpn_from_pbs(
-                small_cvpn, sample_pbs, sample_legal_mask,
-                acting_player=1, range_p0=r0, range_p1=r1,
+                small_cvpn,
+                sample_pbs,
+                sample_legal_mask,
+                acting_player=1,
+                range_p0=r0,
+                range_p1=r1,
             )
 
         assert result.shape == (NUM_HAND_TYPES, NUM_ACTIONS)
@@ -155,7 +181,9 @@ class TestComputePolicyMatrixFromPbs:
 class TestRangeUpdateWithProperMatrix:
     """Tests that update_range with per-hand-type matrix changes the distribution."""
 
-    def test_range_changes(self, small_cvpn, sample_pbs, sample_legal_mask, uniform_ranges):
+    def test_range_changes(
+        self, small_cvpn, sample_pbs, sample_legal_mask, uniform_ranges
+    ):
         """Range update with per-hand-type matrix produces a non-uniform result."""
         from src.cfr.range_utils import compute_policy_matrix_cvpn_from_pbs
         from src.pbs import update_range, uniform_range
@@ -163,8 +191,12 @@ class TestRangeUpdateWithProperMatrix:
         r0, r1 = uniform_ranges
         with torch.inference_mode():
             policy_matrix = compute_policy_matrix_cvpn_from_pbs(
-                small_cvpn, sample_pbs, sample_legal_mask,
-                acting_player=0, range_p0=r0, range_p1=r1,
+                small_cvpn,
+                sample_pbs,
+                sample_legal_mask,
+                acting_player=0,
+                range_p0=r0,
+                range_p1=r1,
             )
 
         # Pick a legal action
@@ -176,9 +208,9 @@ class TestRangeUpdateWithProperMatrix:
 
         # Updated range should differ from uniform (the whole point)
         uniform = uniform_range()
-        assert not np.allclose(updated, uniform, atol=1e-4), (
-            "Range did not change after update with per-hand-type policy matrix"
-        )
+        assert not np.allclose(
+            updated, uniform, atol=1e-4
+        ), "Range did not change after update with per-hand-type policy matrix"
 
     def test_tiled_range_stays_uniform(self, uniform_ranges):
         """Verify the bug: np.tile(policy, (468,1)) keeps range uniform (identity update)."""
@@ -207,7 +239,9 @@ class TestRangeUpdateWithProperMatrix:
 class TestRangeEntropyDecreases:
     """Range entropy should decrease after successive updates with proper policy matrix."""
 
-    def test_entropy_decreases(self, small_cvpn, sample_pbs, sample_legal_mask, uniform_ranges):
+    def test_entropy_decreases(
+        self, small_cvpn, sample_pbs, sample_legal_mask, uniform_ranges
+    ):
         """Multiple range updates should concentrate the distribution (lower entropy)."""
         from src.cfr.range_utils import compute_policy_matrix_cvpn_from_pbs
         from src.pbs import update_range
@@ -222,8 +256,12 @@ class TestRangeEntropyDecreases:
 
         with torch.inference_mode():
             policy_matrix = compute_policy_matrix_cvpn_from_pbs(
-                small_cvpn, sample_pbs, sample_legal_mask,
-                acting_player=0, range_p0=r0, range_p1=r1,
+                small_cvpn,
+                sample_pbs,
+                sample_legal_mask,
+                acting_player=0,
+                range_p0=r0,
+                range_p1=r1,
             )
 
         # Apply several updates with different legal actions
@@ -235,6 +273,6 @@ class TestRangeEntropyDecreases:
         final_entropy = entropy(current_range)
 
         # Entropy should decrease (distribution concentrating)
-        assert final_entropy < initial_entropy, (
-            f"Entropy did not decrease: {initial_entropy:.4f} -> {final_entropy:.4f}"
-        )
+        assert (
+            final_entropy < initial_entropy
+        ), f"Entropy did not decrease: {initial_entropy:.4f} -> {final_entropy:.4f}"

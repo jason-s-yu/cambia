@@ -20,6 +20,7 @@ except Exception:  # torch absent or XPU probe failed
 # Helpers: extract real dataclass definitions from source files
 # ---------------------------------------------------------------------------
 
+
 def _read_source(relative_path: str) -> str:
     """Read a source file relative to cfr/src/."""
     base = os.path.join(os.path.dirname(__file__), "..", "src")
@@ -30,6 +31,7 @@ def _read_source(relative_path: str) -> str:
 def _extract_deep_cfr_config_from_config_py() -> type:
     """Import DeepCfrConfig from the real config.py (not conftest stub)."""
     import importlib
+
     real_config = importlib.reload(importlib.import_module("src.config"))
     cls = getattr(real_config, "DeepCfrConfig", None)
     assert cls is not None, "Could not find DeepCfrConfig in src.config"
@@ -48,6 +50,7 @@ def _extract_deep_cfr_config_from_trainer() -> type:
     class_src = match.group(1)
     from src.encoding import INPUT_DIM, NUM_ACTIONS
     from typing import List, Optional, Union
+
     namespace = {
         "dataclass": dataclass,
         "INPUT_DIM": INPUT_DIM,
@@ -64,15 +67,18 @@ def _extract_deep_cfr_config_from_trainer() -> type:
 # Tests: _resolve_device
 # ---------------------------------------------------------------------------
 
+
 class TestResolveDevice:
     """Tests for _resolve_device() in deep_trainer.py."""
 
     def test_cpu_passthrough(self):
         from src.cfr.deep_trainer import _resolve_device
+
         assert _resolve_device("cpu") == "cpu"
 
     def test_cuda_passthrough(self):
         from src.cfr.deep_trainer import _resolve_device
+
         assert _resolve_device("cuda") == "cuda"
 
     @pytest.mark.skipif(
@@ -82,14 +88,17 @@ class TestResolveDevice:
     )
     def test_xpu_passthrough(self):
         from src.cfr.deep_trainer import _resolve_device
+
         assert _resolve_device("xpu") == "xpu"
 
     def test_cuda_colon_zero_passthrough(self):
         from src.cfr.deep_trainer import _resolve_device
+
         assert _resolve_device("cuda:0") == "cuda:0"
 
     def test_auto_returns_valid_device(self):
         from src.cfr.deep_trainer import _resolve_device
+
         result = _resolve_device("auto")
         assert isinstance(result, str)
         assert result in ("cpu", "cuda", "xpu")
@@ -99,12 +108,14 @@ class TestResolveDevice:
         # prefer it ahead of xpu/cpu.
         import torch
         from src.cfr.deep_trainer import _resolve_device
+
         assert torch.cuda.is_available()
         assert _resolve_device("auto") == "cuda"
 
     def test_auto_prefers_cuda_over_xpu(self, monkeypatch):
         import torch
         import src.cfr.deep_trainer as deep_trainer
+
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         monkeypatch.setattr(torch.xpu, "is_available", lambda: True)
         assert deep_trainer._resolve_device("auto") == "cuda"
@@ -112,6 +123,7 @@ class TestResolveDevice:
     def test_auto_falls_back_to_xpu_without_cuda(self, monkeypatch):
         import torch
         import src.cfr.deep_trainer as deep_trainer
+
         monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
         monkeypatch.setattr(torch.xpu, "is_available", lambda: True)
         assert deep_trainer._resolve_device("auto") == "xpu"
@@ -119,6 +131,7 @@ class TestResolveDevice:
     def test_auto_falls_back_to_cpu_without_cuda_or_xpu(self, monkeypatch):
         import torch
         import src.cfr.deep_trainer as deep_trainer
+
         monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
         monkeypatch.setattr(torch.xpu, "is_available", lambda: False)
         assert deep_trainer._resolve_device("auto") == "cpu"
@@ -126,6 +139,7 @@ class TestResolveDevice:
     def test_explicit_xpu_raises_when_unavailable(self, monkeypatch):
         import torch
         import src.cfr.deep_trainer as deep_trainer
+
         monkeypatch.setattr(torch.xpu, "is_available", lambda: False)
         with pytest.raises(RuntimeError, match="no XPU device is available"):
             deep_trainer._resolve_device("xpu")
@@ -136,6 +150,7 @@ class TestResolveDevice:
         # library and should not appear in the remediation message.
         import torch
         import src.cfr.deep_trainer as deep_trainer
+
         monkeypatch.setattr(torch.xpu, "is_available", lambda: False)
         with pytest.raises(RuntimeError) as exc_info:
             deep_trainer._resolve_device("xpu")
@@ -146,6 +161,7 @@ class TestResolveDevice:
 # ---------------------------------------------------------------------------
 # Tests: config.py DeepCfrConfig (source-level, not stub)
 # ---------------------------------------------------------------------------
+
 
 class TestDeepCfrConfigDevice:
     """Tests for config.py DeepCfrConfig device field (real source, not conftest stub)."""
@@ -171,6 +187,7 @@ class TestDeepCfrConfigDevice:
 # ---------------------------------------------------------------------------
 # Tests: deep_trainer.py DeepCFRConfig (source-level)
 # ---------------------------------------------------------------------------
+
 
 class TestDeepCFRConfigDevice:
     """Tests for deep_trainer.py DeepCFRConfig device field."""
@@ -200,18 +217,18 @@ class TestDeepCFRConfigDevice:
 # Tests: YAML backward compatibility (use_gpu -> device)
 # ---------------------------------------------------------------------------
 
+
 class TestYamlBackwardCompat:
     """Tests that YAML configs with use_gpu are loaded correctly."""
 
     def _write_and_load(self, deep_cfr_dict):
         import importlib
+
         # Reload the real config module (conftest stub returns None from load_config)
         real_config = importlib.reload(importlib.import_module("src.config"))
 
         config_dict = {"deep_cfr": deep_cfr_dict}
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".yaml", delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             yaml.dump(config_dict, f)
             f.flush()
             try:
@@ -244,6 +261,7 @@ class TestYamlBackwardCompat:
 # ---------------------------------------------------------------------------
 # Tests: DeepCFRConfig.from_yaml_config
 # ---------------------------------------------------------------------------
+
 
 class TestFromYamlConfig:
     """Tests for DeepCFRConfig.from_yaml_config device propagation."""
@@ -295,6 +313,7 @@ class TestFromYamlConfig:
 # Tests: DeepCFRTrainer device init
 # ---------------------------------------------------------------------------
 
+
 class TestTrainerDeviceInit:
     """Tests that DeepCFRTrainer resolves device correctly."""
 
@@ -328,6 +347,7 @@ class TestTrainerDeviceInit:
 # ---------------------------------------------------------------------------
 # Tests: source-level verification of _resolve_device function
 # ---------------------------------------------------------------------------
+
 
 class TestResolveDeviceSource:
     """Verify _resolve_device exists and handles xpu in source."""
@@ -403,10 +423,15 @@ class TestValueNetInputDim:
         from src.networks import HistoryValueNetwork
 
         for dim in (444, 448):
-            net = HistoryValueNetwork(input_dim=dim, hidden_dim=512, validate_inputs=False)
+            net = HistoryValueNetwork(
+                input_dim=dim, hidden_dim=512, validate_inputs=False
+            )
             x = torch.randn(4, dim)
             out = net(x)
-            assert out.shape == (4, 1), f"Expected (4,1) output for dim={dim}, got {out.shape}"
+            assert out.shape == (
+                4,
+                1,
+            ), f"Expected (4,1) output for dim={dim}, got {out.shape}"
 
     @pytest.mark.xfail(
         strict=False,

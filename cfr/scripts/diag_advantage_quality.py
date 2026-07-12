@@ -12,6 +12,7 @@ Usage:
 
 import sys
 import os
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import numpy as np
@@ -34,10 +35,10 @@ IDX_DRAW_DISCARD = 1
 IDX_CAMBIA = 2
 IDX_DISCARD_NO_ABILITY = 3
 IDX_DISCARD_ABILITY = 4
-IDX_REPLACE_BASE = 5       # 5-10: replace slot 0-5
-IDX_PEEK_OWN_BASE = 11     # 11-16: peek own 0-5
-IDX_PEEK_OTHER_BASE = 17   # 17-22: peek other 0-5
-IDX_BLIND_SWAP_BASE = 23   # 23-58: blind swap own*6+opp
+IDX_REPLACE_BASE = 5  # 5-10: replace slot 0-5
+IDX_PEEK_OWN_BASE = 11  # 11-16: peek own 0-5
+IDX_PEEK_OTHER_BASE = 17  # 17-22: peek other 0-5
+IDX_BLIND_SWAP_BASE = 23  # 23-58: blind swap own*6+opp
 IDX_PASS_SNAP = 97
 IDX_SNAP_OWN_BASE = 98
 
@@ -71,6 +72,7 @@ def action_name(idx):
 # Using the interleaved encoding directly. We craft 224-dim vectors by hand
 # for clarity and auditability.
 
+
 def _make_mask(indices):
     """Create a 146-dim bool mask from a list of legal action indices."""
     mask = np.zeros(NUM_ACTIONS, dtype=bool)
@@ -80,15 +82,30 @@ def _make_mask(indices):
 
 
 def _build_start_turn_state(
-    own_tags, own_buckets, opp_tags, opp_buckets,
-    discard_bucket, game_phase, stock_est=StockpileEstimate.HIGH.value,
-    own_hand_size=4, opp_hand_size=4, turn_progress=0.0,
+    own_tags,
+    own_buckets,
+    opp_tags,
+    opp_buckets,
+    discard_bucket,
+    game_phase,
+    stock_est=StockpileEstimate.HIGH.value,
+    own_hand_size=4,
+    opp_hand_size=4,
+    turn_progress=0.0,
 ):
     """Build a START_TURN state. Legal actions: DrawStock(0), DrawDiscard(1), Cambia(2)."""
-    slot_tags = list(own_tags) + [EpistemicTag.UNK] * (6 - len(own_tags)) + \
-                list(opp_tags) + [EpistemicTag.UNK] * (6 - len(opp_tags))
-    slot_buckets = list(own_buckets) + [0] * (6 - len(own_buckets)) + \
-                   list(opp_buckets) + [0] * (6 - len(opp_buckets))
+    slot_tags = (
+        list(own_tags)
+        + [EpistemicTag.UNK] * (6 - len(own_tags))
+        + list(opp_tags)
+        + [EpistemicTag.UNK] * (6 - len(opp_tags))
+    )
+    slot_buckets = (
+        list(own_buckets)
+        + [0] * (6 - len(own_buckets))
+        + list(opp_buckets)
+        + [0] * (6 - len(opp_buckets))
+    )
     features = encode_infoset_eppbs_interleaved(
         slot_tags=slot_tags,
         slot_buckets=slot_buckets,
@@ -107,16 +124,32 @@ def _build_start_turn_state(
 
 
 def _build_post_draw_state(
-    own_tags, own_buckets, opp_tags, opp_buckets,
-    drawn_card_bucket, discard_bucket, game_phase,
-    has_ability=False, ability_type=None,
-    own_hand_size=4, opp_hand_size=4, turn_progress=0.0,
+    own_tags,
+    own_buckets,
+    opp_tags,
+    opp_buckets,
+    drawn_card_bucket,
+    discard_bucket,
+    game_phase,
+    has_ability=False,
+    ability_type=None,
+    own_hand_size=4,
+    opp_hand_size=4,
+    turn_progress=0.0,
 ):
     """Build a POST_DRAW state after drawing from stockpile."""
-    slot_tags = list(own_tags) + [EpistemicTag.UNK] * (6 - len(own_tags)) + \
-                list(opp_tags) + [EpistemicTag.UNK] * (6 - len(opp_tags))
-    slot_buckets = list(own_buckets) + [0] * (6 - len(own_buckets)) + \
-                   list(opp_buckets) + [0] * (6 - len(opp_buckets))
+    slot_tags = (
+        list(own_tags)
+        + [EpistemicTag.UNK] * (6 - len(own_tags))
+        + list(opp_tags)
+        + [EpistemicTag.UNK] * (6 - len(opp_tags))
+    )
+    slot_buckets = (
+        list(own_buckets)
+        + [0] * (6 - len(own_buckets))
+        + list(opp_buckets)
+        + [0] * (6 - len(opp_buckets))
+    )
     features = encode_infoset_eppbs_interleaved(
         slot_tags=slot_tags,
         slot_buckets=slot_buckets,
@@ -141,15 +174,29 @@ def _build_post_draw_state(
 
 
 def _build_ability_peek_own_state(
-    own_tags, own_buckets, opp_tags, opp_buckets,
-    discard_bucket, game_phase, own_hand_size=4, opp_hand_size=4,
+    own_tags,
+    own_buckets,
+    opp_tags,
+    opp_buckets,
+    discard_bucket,
+    game_phase,
+    own_hand_size=4,
+    opp_hand_size=4,
     turn_progress=0.0,
 ):
     """Build an ABILITY_SELECT state for peek-own (7/8 discarded)."""
-    slot_tags = list(own_tags) + [EpistemicTag.UNK] * (6 - len(own_tags)) + \
-                list(opp_tags) + [EpistemicTag.UNK] * (6 - len(opp_tags))
-    slot_buckets = list(own_buckets) + [0] * (6 - len(own_buckets)) + \
-                   list(opp_buckets) + [0] * (6 - len(opp_buckets))
+    slot_tags = (
+        list(own_tags)
+        + [EpistemicTag.UNK] * (6 - len(own_tags))
+        + list(opp_tags)
+        + [EpistemicTag.UNK] * (6 - len(opp_tags))
+    )
+    slot_buckets = (
+        list(own_buckets)
+        + [0] * (6 - len(own_buckets))
+        + list(opp_buckets)
+        + [0] * (6 - len(opp_buckets))
+    )
     features = encode_infoset_eppbs_interleaved(
         slot_tags=slot_tags,
         slot_buckets=slot_buckets,
@@ -169,15 +216,29 @@ def _build_ability_peek_own_state(
 
 
 def _build_snap_decision_state(
-    own_tags, own_buckets, opp_tags, opp_buckets,
-    discard_bucket, game_phase, own_hand_size=4, opp_hand_size=4,
+    own_tags,
+    own_buckets,
+    opp_tags,
+    opp_buckets,
+    discard_bucket,
+    game_phase,
+    own_hand_size=4,
+    opp_hand_size=4,
     turn_progress=0.0,
 ):
     """Build a SNAP_DECISION state. Legal: PassSnap(97), SnapOwn(98-103)."""
-    slot_tags = list(own_tags) + [EpistemicTag.UNK] * (6 - len(own_tags)) + \
-                list(opp_tags) + [EpistemicTag.UNK] * (6 - len(opp_tags))
-    slot_buckets = list(own_buckets) + [0] * (6 - len(own_buckets)) + \
-                   list(opp_buckets) + [0] * (6 - len(opp_buckets))
+    slot_tags = (
+        list(own_tags)
+        + [EpistemicTag.UNK] * (6 - len(own_tags))
+        + list(opp_tags)
+        + [EpistemicTag.UNK] * (6 - len(opp_tags))
+    )
+    slot_buckets = (
+        list(own_buckets)
+        + [0] * (6 - len(own_buckets))
+        + list(opp_buckets)
+        + [0] * (6 - len(opp_buckets))
+    )
     features = encode_infoset_eppbs_interleaved(
         slot_tags=slot_tags,
         slot_buckets=slot_buckets,
@@ -200,6 +261,7 @@ def _build_snap_decision_state(
 
 # ── Canonical Scenarios ──
 
+
 def build_scenarios():
     """Return list of (name, features, mask, expected_description) tuples."""
     P = EpistemicTag.PRIV_OWN
@@ -213,205 +275,270 @@ def build_scenarios():
     # S1: Excellent hand (A+A+2+3 = 6), turn 1. Should NOT call Cambia yet (too early to know).
     # Actually at sum=6, Nash T1C is conditional on discard value. With discard=5 (MID_NUM), borderline.
     # The key question: does the network differentiate by hand quality?
-    scenarios.append((
-        "S1: START_TURN, excellent hand (A,A,2,3), turn 1, early game",
-        *_build_start_turn_state(
-            own_tags=[P, P, U, U], own_buckets=[B.ACE.value, B.ACE.value, 0, 0],
-            opp_tags=[U, U, U, U], opp_buckets=[0, 0, 0, 0],
-            discard_bucket=B.MID_NUM.value, game_phase=GamePhase.EARLY.value,
-            turn_progress=0.05,
-        ),
-        "T1C plausible (sum≤6). Expect elevated Cambia advantage.",
-    ))
+    scenarios.append(
+        (
+            "S1: START_TURN, excellent hand (A,A,2,3), turn 1, early game",
+            *_build_start_turn_state(
+                own_tags=[P, P, U, U],
+                own_buckets=[B.ACE.value, B.ACE.value, 0, 0],
+                opp_tags=[U, U, U, U],
+                opp_buckets=[0, 0, 0, 0],
+                discard_bucket=B.MID_NUM.value,
+                game_phase=GamePhase.EARLY.value,
+                turn_progress=0.05,
+            ),
+            "T1C plausible (sum≤6). Expect elevated Cambia advantage.",
+        )
+    )
 
     # S2: Terrible hand (K,Q,T,9 = 13+12+10+9 = 44), turn 1. Should NOT call Cambia.
-    scenarios.append((
-        "S2: START_TURN, terrible hand (K,Q,T,9=44), turn 1",
-        *_build_start_turn_state(
-            own_tags=[P, P, P, P],
-            own_buckets=[B.HIGH_KING.value, B.SWAP_BLIND.value, B.PEEK_OTHER.value, B.PEEK_OTHER.value],
-            opp_tags=[U, U, U, U], opp_buckets=[0, 0, 0, 0],
-            discard_bucket=B.MID_NUM.value, game_phase=GamePhase.EARLY.value,
-            turn_progress=0.05,
-        ),
-        "Should strongly NOT Cambia. Draw is dominant.",
-    ))
+    scenarios.append(
+        (
+            "S2: START_TURN, terrible hand (K,Q,T,9=44), turn 1",
+            *_build_start_turn_state(
+                own_tags=[P, P, P, P],
+                own_buckets=[
+                    B.HIGH_KING.value,
+                    B.SWAP_BLIND.value,
+                    B.PEEK_OTHER.value,
+                    B.PEEK_OTHER.value,
+                ],
+                opp_tags=[U, U, U, U],
+                opp_buckets=[0, 0, 0, 0],
+                discard_bucket=B.MID_NUM.value,
+                game_phase=GamePhase.EARLY.value,
+                turn_progress=0.05,
+            ),
+            "Should strongly NOT Cambia. Draw is dominant.",
+        )
+    )
 
     # S3: Perfect hand (Joker+RedK+A+A = 0+(-1)+1+1 = 1), turn 1. Clear T1C.
-    scenarios.append((
-        "S3: START_TURN, near-perfect hand (0,-1,1,1 = 1), turn 1",
-        *_build_start_turn_state(
-            own_tags=[P, P, P, P],
-            own_buckets=[B.ZERO.value, B.NEG_KING.value, B.ACE.value, B.ACE.value],
-            opp_tags=[U, U, U, U], opp_buckets=[0, 0, 0, 0],
-            discard_bucket=B.MID_NUM.value, game_phase=GamePhase.EARLY.value,
-            turn_progress=0.05,
-        ),
-        "Clear T1C — Cambia should dominate strongly.",
-    ))
+    scenarios.append(
+        (
+            "S3: START_TURN, near-perfect hand (0,-1,1,1 = 1), turn 1",
+            *_build_start_turn_state(
+                own_tags=[P, P, P, P],
+                own_buckets=[B.ZERO.value, B.NEG_KING.value, B.ACE.value, B.ACE.value],
+                opp_tags=[U, U, U, U],
+                opp_buckets=[0, 0, 0, 0],
+                discard_bucket=B.MID_NUM.value,
+                game_phase=GamePhase.EARLY.value,
+                turn_progress=0.05,
+            ),
+            "Clear T1C — Cambia should dominate strongly.",
+        )
+    )
 
     # S4: Average hand, mid game, no known cards. Should draw.
-    scenarios.append((
-        "S4: START_TURN, all unknown hand, mid game, turn 5",
-        *_build_start_turn_state(
-            own_tags=[U, U, U, U], own_buckets=[0, 0, 0, 0],
-            opp_tags=[U, U, U, U], opp_buckets=[0, 0, 0, 0],
-            discard_bucket=B.LOW_NUM.value, game_phase=GamePhase.MID.value,
-            stock_est=StockpileEstimate.MEDIUM.value,
-            turn_progress=0.3,
-        ),
-        "All unknown — should draw (need information). Cambia suicidal.",
-    ))
+    scenarios.append(
+        (
+            "S4: START_TURN, all unknown hand, mid game, turn 5",
+            *_build_start_turn_state(
+                own_tags=[U, U, U, U],
+                own_buckets=[0, 0, 0, 0],
+                opp_tags=[U, U, U, U],
+                opp_buckets=[0, 0, 0, 0],
+                discard_bucket=B.LOW_NUM.value,
+                game_phase=GamePhase.MID.value,
+                stock_est=StockpileEstimate.MEDIUM.value,
+                turn_progress=0.3,
+            ),
+            "All unknown — should draw (need information). Cambia suicidal.",
+        )
+    )
 
     # S5: Known low hand (2,3,A,2 = 8), mid game, discard is HIGH_KING.
-    scenarios.append((
-        "S5: START_TURN, good known hand (2,3,1,2=8), mid game",
-        *_build_start_turn_state(
-            own_tags=[P, P, P, P],
-            own_buckets=[B.LOW_NUM.value, B.LOW_NUM.value, B.ACE.value, B.LOW_NUM.value],
-            opp_tags=[U, U, U, U], opp_buckets=[0, 0, 0, 0],
-            discard_bucket=B.HIGH_KING.value, game_phase=GamePhase.MID.value,
-            turn_progress=0.3,
-        ),
-        "Good hand, mid-game. Cambia reasonable but DrawDiscard bad (high K).",
-    ))
+    scenarios.append(
+        (
+            "S5: START_TURN, good known hand (2,3,1,2=8), mid game",
+            *_build_start_turn_state(
+                own_tags=[P, P, P, P],
+                own_buckets=[
+                    B.LOW_NUM.value,
+                    B.LOW_NUM.value,
+                    B.ACE.value,
+                    B.LOW_NUM.value,
+                ],
+                opp_tags=[U, U, U, U],
+                opp_buckets=[0, 0, 0, 0],
+                discard_bucket=B.HIGH_KING.value,
+                game_phase=GamePhase.MID.value,
+                turn_progress=0.3,
+            ),
+            "Good hand, mid-game. Cambia reasonable but DrawDiscard bad (high K).",
+        )
+    )
 
     # S6: Known good hand, late game. Should strongly Cambia.
-    scenarios.append((
-        "S6: START_TURN, good hand (1,2,2,3=8), late game, low stock",
-        *_build_start_turn_state(
-            own_tags=[P, P, P, P],
-            own_buckets=[B.ACE.value, B.LOW_NUM.value, B.LOW_NUM.value, B.LOW_NUM.value],
-            opp_tags=[U, U, U, U], opp_buckets=[0, 0, 0, 0],
-            discard_bucket=B.MID_NUM.value, game_phase=GamePhase.LATE.value,
-            stock_est=StockpileEstimate.LOW.value,
-            turn_progress=0.6,
-        ),
-        "Late game, good hand, low stock → strong Cambia signal.",
-    ))
+    scenarios.append(
+        (
+            "S6: START_TURN, good hand (1,2,2,3=8), late game, low stock",
+            *_build_start_turn_state(
+                own_tags=[P, P, P, P],
+                own_buckets=[
+                    B.ACE.value,
+                    B.LOW_NUM.value,
+                    B.LOW_NUM.value,
+                    B.LOW_NUM.value,
+                ],
+                opp_tags=[U, U, U, U],
+                opp_buckets=[0, 0, 0, 0],
+                discard_bucket=B.MID_NUM.value,
+                game_phase=GamePhase.LATE.value,
+                stock_est=StockpileEstimate.LOW.value,
+                turn_progress=0.6,
+            ),
+            "Late game, good hand, low stock → strong Cambia signal.",
+        )
+    )
 
     # ── POST_DRAW scenarios ──
 
     # S7: Drew Ace (low), have one known high card. Should replace the high card.
-    scenarios.append((
-        "S7: POST_DRAW, drew ACE, have HIGH_KING in slot 2",
-        *_build_post_draw_state(
-            own_tags=[P, U, P, U],
-            own_buckets=[B.LOW_NUM.value, 0, B.HIGH_KING.value, 0],
-            opp_tags=[U, U, U, U], opp_buckets=[0, 0, 0, 0],
-            drawn_card_bucket=B.ACE.value,
-            discard_bucket=B.MID_NUM.value,
-            game_phase=GamePhase.MID.value,
-            turn_progress=0.25,
-        ),
-        "Should replace slot 2 (HIGH_KING). Discard is terrible.",
-    ))
+    scenarios.append(
+        (
+            "S7: POST_DRAW, drew ACE, have HIGH_KING in slot 2",
+            *_build_post_draw_state(
+                own_tags=[P, U, P, U],
+                own_buckets=[B.LOW_NUM.value, 0, B.HIGH_KING.value, 0],
+                opp_tags=[U, U, U, U],
+                opp_buckets=[0, 0, 0, 0],
+                drawn_card_bucket=B.ACE.value,
+                discard_bucket=B.MID_NUM.value,
+                game_phase=GamePhase.MID.value,
+                turn_progress=0.25,
+            ),
+            "Should replace slot 2 (HIGH_KING). Discard is terrible.",
+        )
+    )
 
     # S8: Drew a 7 (PEEK_SELF), have unknown cards. Should use ability.
-    scenarios.append((
-        "S8: POST_DRAW, drew 7 (PEEK_SELF), 2 unknown slots",
-        *_build_post_draw_state(
-            own_tags=[P, P, U, U],
-            own_buckets=[B.LOW_NUM.value, B.ACE.value, 0, 0],
-            opp_tags=[U, U, U, U], opp_buckets=[0, 0, 0, 0],
-            drawn_card_bucket=B.PEEK_SELF.value,
-            discard_bucket=B.MID_NUM.value,
-            game_phase=GamePhase.MID.value,
-            has_ability=True,
-            turn_progress=0.25,
-        ),
-        "7 drawn, unknown slots exist → Discard(ability) to peek. Value of info.",
-    ))
+    scenarios.append(
+        (
+            "S8: POST_DRAW, drew 7 (PEEK_SELF), 2 unknown slots",
+            *_build_post_draw_state(
+                own_tags=[P, P, U, U],
+                own_buckets=[B.LOW_NUM.value, B.ACE.value, 0, 0],
+                opp_tags=[U, U, U, U],
+                opp_buckets=[0, 0, 0, 0],
+                drawn_card_bucket=B.PEEK_SELF.value,
+                discard_bucket=B.MID_NUM.value,
+                game_phase=GamePhase.MID.value,
+                has_ability=True,
+                turn_progress=0.25,
+            ),
+            "7 drawn, unknown slots exist → Discard(ability) to peek. Value of info.",
+        )
+    )
 
     # S9: Drew HIGH_KING, all cards low. Should discard (don't replace).
-    scenarios.append((
-        "S9: POST_DRAW, drew HIGH_KING, all own slots are low",
-        *_build_post_draw_state(
-            own_tags=[P, P, P, P],
-            own_buckets=[B.ACE.value, B.LOW_NUM.value, B.LOW_NUM.value, B.ACE.value],
-            opp_tags=[U, U, U, U], opp_buckets=[0, 0, 0, 0],
-            drawn_card_bucket=B.HIGH_KING.value,
-            discard_bucket=B.MID_NUM.value,
-            game_phase=GamePhase.MID.value,
-            turn_progress=0.25,
-        ),
-        "HIGH_KING drawn, all slots low → discard, never replace.",
-    ))
+    scenarios.append(
+        (
+            "S9: POST_DRAW, drew HIGH_KING, all own slots are low",
+            *_build_post_draw_state(
+                own_tags=[P, P, P, P],
+                own_buckets=[B.ACE.value, B.LOW_NUM.value, B.LOW_NUM.value, B.ACE.value],
+                opp_tags=[U, U, U, U],
+                opp_buckets=[0, 0, 0, 0],
+                drawn_card_bucket=B.HIGH_KING.value,
+                discard_bucket=B.MID_NUM.value,
+                game_phase=GamePhase.MID.value,
+                turn_progress=0.25,
+            ),
+            "HIGH_KING drawn, all slots low → discard, never replace.",
+        )
+    )
 
     # S10: Drew LOW_NUM (2-4), have one unknown. Replace unknown or keep?
-    scenarios.append((
-        "S10: POST_DRAW, drew LOW_NUM, 2 known low + 2 unknown",
-        *_build_post_draw_state(
-            own_tags=[P, P, U, U],
-            own_buckets=[B.ACE.value, B.LOW_NUM.value, 0, 0],
-            opp_tags=[U, U, U, U], opp_buckets=[0, 0, 0, 0],
-            drawn_card_bucket=B.LOW_NUM.value,
-            discard_bucket=B.MID_NUM.value,
-            game_phase=GamePhase.MID.value,
-            turn_progress=0.25,
-        ),
-        "LOW drawn, unknown slots → replace unknown (risk-neutral) or discard.",
-    ))
+    scenarios.append(
+        (
+            "S10: POST_DRAW, drew LOW_NUM, 2 known low + 2 unknown",
+            *_build_post_draw_state(
+                own_tags=[P, P, U, U],
+                own_buckets=[B.ACE.value, B.LOW_NUM.value, 0, 0],
+                opp_tags=[U, U, U, U],
+                opp_buckets=[0, 0, 0, 0],
+                drawn_card_bucket=B.LOW_NUM.value,
+                discard_bucket=B.MID_NUM.value,
+                game_phase=GamePhase.MID.value,
+                turn_progress=0.25,
+            ),
+            "LOW drawn, unknown slots → replace unknown (risk-neutral) or discard.",
+        )
+    )
 
     # ── ABILITY_SELECT (peek own) scenarios ──
 
     # S11: Peek own — 2 known slots, 2 unknown. Should peek unknown.
-    scenarios.append((
-        "S11: PEEK_OWN, slots 0,1 known, slots 2,3 unknown",
-        *_build_ability_peek_own_state(
-            own_tags=[P, P, U, U],
-            own_buckets=[B.LOW_NUM.value, B.ACE.value, 0, 0],
-            opp_tags=[U, U, U, U], opp_buckets=[0, 0, 0, 0],
-            discard_bucket=B.PEEK_SELF.value,
-            game_phase=GamePhase.MID.value,
-            turn_progress=0.25,
-        ),
-        "Should peek slot 2 or 3 (unknown). Peeking known slots is wasted.",
-    ))
+    scenarios.append(
+        (
+            "S11: PEEK_OWN, slots 0,1 known, slots 2,3 unknown",
+            *_build_ability_peek_own_state(
+                own_tags=[P, P, U, U],
+                own_buckets=[B.LOW_NUM.value, B.ACE.value, 0, 0],
+                opp_tags=[U, U, U, U],
+                opp_buckets=[0, 0, 0, 0],
+                discard_bucket=B.PEEK_SELF.value,
+                game_phase=GamePhase.MID.value,
+                turn_progress=0.25,
+            ),
+            "Should peek slot 2 or 3 (unknown). Peeking known slots is wasted.",
+        )
+    )
 
     # S12: Peek own — all unknown. Any slot equally good.
-    scenarios.append((
-        "S12: PEEK_OWN, all 4 slots unknown",
-        *_build_ability_peek_own_state(
-            own_tags=[U, U, U, U],
-            own_buckets=[0, 0, 0, 0],
-            opp_tags=[U, U, U, U], opp_buckets=[0, 0, 0, 0],
-            discard_bucket=B.PEEK_SELF.value,
-            game_phase=GamePhase.EARLY.value,
-            turn_progress=0.1,
-        ),
-        "All unknown → uniform over 4 slots is correct.",
-    ))
+    scenarios.append(
+        (
+            "S12: PEEK_OWN, all 4 slots unknown",
+            *_build_ability_peek_own_state(
+                own_tags=[U, U, U, U],
+                own_buckets=[0, 0, 0, 0],
+                opp_tags=[U, U, U, U],
+                opp_buckets=[0, 0, 0, 0],
+                discard_bucket=B.PEEK_SELF.value,
+                game_phase=GamePhase.EARLY.value,
+                turn_progress=0.1,
+            ),
+            "All unknown → uniform over 4 slots is correct.",
+        )
+    )
 
     # ── SNAP_DECISION scenarios ──
 
     # S13: Discard is ACE, own slot 0 is known ACE. Should snap.
-    scenarios.append((
-        "S13: SNAP, discard=ACE, own slot 0 = known ACE",
-        *_build_snap_decision_state(
-            own_tags=[P, U, U, U],
-            own_buckets=[B.ACE.value, 0, 0, 0],
-            opp_tags=[U, U, U, U], opp_buckets=[0, 0, 0, 0],
-            discard_bucket=B.ACE.value,
-            game_phase=GamePhase.MID.value,
-            turn_progress=0.25,
-        ),
-        "Known match at slot 0 → SnapOwn(0) strongly dominates PassSnap.",
-    ))
+    scenarios.append(
+        (
+            "S13: SNAP, discard=ACE, own slot 0 = known ACE",
+            *_build_snap_decision_state(
+                own_tags=[P, U, U, U],
+                own_buckets=[B.ACE.value, 0, 0, 0],
+                opp_tags=[U, U, U, U],
+                opp_buckets=[0, 0, 0, 0],
+                discard_bucket=B.ACE.value,
+                game_phase=GamePhase.MID.value,
+                turn_progress=0.25,
+            ),
+            "Known match at slot 0 → SnapOwn(0) strongly dominates PassSnap.",
+        )
+    )
 
     # S14: Discard is HIGH_KING, no known cards. Should pass.
-    scenarios.append((
-        "S14: SNAP, discard=HIGH_KING, all unknown",
-        *_build_snap_decision_state(
-            own_tags=[U, U, U, U],
-            own_buckets=[0, 0, 0, 0],
-            opp_tags=[U, U, U, U], opp_buckets=[0, 0, 0, 0],
-            discard_bucket=B.HIGH_KING.value,
-            game_phase=GamePhase.MID.value,
-            turn_progress=0.25,
-        ),
-        "No info, snapping is blind gamble → PassSnap should dominate.",
-    ))
+    scenarios.append(
+        (
+            "S14: SNAP, discard=HIGH_KING, all unknown",
+            *_build_snap_decision_state(
+                own_tags=[U, U, U, U],
+                own_buckets=[0, 0, 0, 0],
+                opp_tags=[U, U, U, U],
+                opp_buckets=[0, 0, 0, 0],
+                discard_bucket=B.HIGH_KING.value,
+                game_phase=GamePhase.MID.value,
+                turn_progress=0.25,
+            ),
+            "No info, snapping is blind gamble → PassSnap should dominate.",
+        )
+    )
 
     return scenarios
 
@@ -520,19 +647,25 @@ def print_scenario_result(name, adv, strat, mask, expected, net_label):
     legal_advs = adv[legal_indices]
     legal_advs_finite = legal_advs[np.isfinite(legal_advs)]
     if len(legal_advs_finite) > 1:
-        print(f"\n  Adv stats: mean={legal_advs_finite.mean():.4f}, "
-              f"std={legal_advs_finite.std():.4f}, "
-              f"range=[{legal_advs_finite.min():.4f}, {legal_advs_finite.max():.4f}]")
+        print(
+            f"\n  Adv stats: mean={legal_advs_finite.mean():.4f}, "
+            f"std={legal_advs_finite.std():.4f}, "
+            f"range=[{legal_advs_finite.min():.4f}, {legal_advs_finite.max():.4f}]"
+        )
         # Entropy of strategy
         legal_strats = strat[legal_indices]
         legal_strats = legal_strats[legal_strats > 0]
         entropy = -np.sum(legal_strats * np.log(legal_strats + 1e-10))
         max_entropy = np.log(len(legal_indices))
-        print(f"  Strategy entropy: {entropy:.4f} / {max_entropy:.4f} "
-              f"(ratio={entropy / max_entropy:.3f})")
+        print(
+            f"  Strategy entropy: {entropy:.4f} / {max_entropy:.4f} "
+            f"(ratio={entropy / max_entropy:.3f})"
+        )
 
 
-def sensitivity_analysis(net, base_features, base_mask, vary_dim, vary_range, name, net_label):
+def sensitivity_analysis(
+    net, base_features, base_mask, vary_dim, vary_range, name, net_label
+):
     """Vary one input dimension and see how strategy changes."""
     print(f"\n{'─' * 60}")
     print(f"  Sensitivity: varying {name} (dim {vary_dim})")
@@ -586,7 +719,13 @@ def cross_network_comparison(nets, scenarios):
 
 
 def main():
-    base = os.path.join(os.path.dirname(__file__), "..", "runs", "interleaved-resnet-adaptive", "checkpoints")
+    base = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "runs",
+        "interleaved-resnet-adaptive",
+        "checkpoints",
+    )
     best_ckpt = os.path.join(base, "best.pt")  # symlink → iter 450
     ema_ckpt = os.path.join(base, "deep_cfr_checkpoint_ema.pt")
 
@@ -658,7 +797,9 @@ def main():
         print(f"\n  {label}:")
         print(f"    Mean normalized entropy: {np.mean(all_entropies):.3f}")
         if start_turn_count > 0:
-            print(f"    Cambia dominant (>40%) in {cambia_dominant_count}/{start_turn_count} START_TURN scenarios")
+            print(
+                f"    Cambia dominant (>40%) in {cambia_dominant_count}/{start_turn_count} START_TURN scenarios"
+            )
 
     # ── Sensitivity: Does the network respond to hand quality changes? ──
     print("\n" + "#" * 80)
@@ -667,17 +808,27 @@ def main():
 
     # Build a base START_TURN state with 2 known low cards, vary turn_progress
     base_feat, base_mask = _build_start_turn_state(
-        own_tags=[EpistemicTag.PRIV_OWN, EpistemicTag.PRIV_OWN, EpistemicTag.UNK, EpistemicTag.UNK],
+        own_tags=[
+            EpistemicTag.PRIV_OWN,
+            EpistemicTag.PRIV_OWN,
+            EpistemicTag.UNK,
+            EpistemicTag.UNK,
+        ],
         own_buckets=[CardBucket.ACE.value, CardBucket.LOW_NUM.value, 0, 0],
-        opp_tags=[EpistemicTag.UNK] * 4, opp_buckets=[0] * 4,
+        opp_tags=[EpistemicTag.UNK] * 4,
+        opp_buckets=[0] * 4,
         discard_bucket=CardBucket.MID_NUM.value,
         game_phase=GamePhase.MID.value,
         turn_progress=0.3,
     )
     sensitivity_analysis(
-        primary_net, base_feat, base_mask,
-        vary_dim=222, vary_range=[0.0, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9],
-        name="turn_progress", net_label=primary_label,
+        primary_net,
+        base_feat,
+        base_mask,
+        vary_dim=222,
+        vary_range=[0.0, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9],
+        name="turn_progress",
+        net_label=primary_label,
     )
 
     # Sensitivity: swap slot 0 known card bucket through all values
@@ -688,7 +839,9 @@ def main():
     # Actually in interleaved: public=42, then slot i starts at 42 + i*13.
     # Tag is 4 dims, identity is 9 dims.
     slot0_identity_start = 42 + 4  # slot 0, skip 4-dim tag, identity starts at dim 46
-    print(f"  {'Bucket':<18} {'P(Cambia)':>10} {'P(DrawStock)':>12} {'P(DrawDiscard)':>14}")
+    print(
+        f"  {'Bucket':<18} {'P(Cambia)':>10} {'P(DrawStock)':>12} {'P(DrawDiscard)':>14}"
+    )
     for bucket_name, bucket_val in [
         ("NEG_KING(-1)", CardBucket.NEG_KING.value),
         ("ZERO(0)", CardBucket.ZERO.value),
@@ -702,11 +855,13 @@ def main():
     ]:
         f = base_feat.copy()
         # Zero out slot 0 identity, set the right bucket
-        f[slot0_identity_start:slot0_identity_start + 9] = 0.0
+        f[slot0_identity_start : slot0_identity_start + 9] = 0.0
         f[slot0_identity_start + bucket_val] = 1.0
         _, strat = evaluate_scenario(primary_net, f, base_mask)
-        print(f"  {bucket_name:<18} {strat[IDX_CAMBIA]:>10.4f} "
-              f"{strat[IDX_DRAW_STOCK]:>12.4f} {strat[IDX_DRAW_DISCARD]:>14.4f}")
+        print(
+            f"  {bucket_name:<18} {strat[IDX_CAMBIA]:>10.4f} "
+            f"{strat[IDX_DRAW_STOCK]:>12.4f} {strat[IDX_DRAW_DISCARD]:>14.4f}"
+        )
 
     print("\n\nDone.")
 

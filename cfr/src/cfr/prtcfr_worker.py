@@ -902,9 +902,8 @@ class PRTCFRProductionWorker:
         # DIFFERENT game never draws the same rollout CRN stream -- see
         # _ROLLOUT_SEED_GAME_STRIDE.
         self._rollout_counter += 1
-        return (
-            self._seed * _ROLLOUT_SEED_GAME_STRIDE
-            + self._rollout_counter * (self.m_rollouts + 1009)
+        return self._seed * _ROLLOUT_SEED_GAME_STRIDE + self._rollout_counter * (
+            self.m_rollouts + 1009
         )
 
     def traverse(
@@ -1164,9 +1163,7 @@ class SigmaBackend(Protocol):
     def drop(self, stream: int) -> None: ...
 
 
-def _run_batched_scheduler(
-    root_gens: List[Iterator], backend: SigmaBackend
-) -> None:
+def _run_batched_scheduler(root_gens: List[Iterator], backend: SigmaBackend) -> None:
     """Cooperative trampoline: run every generator in ``root_gens`` (and any
     _Join subtasks they spawn) to completion, gathering all pending _Query
     yields at each tick into a single ``backend.evaluate`` call.
@@ -1376,9 +1373,9 @@ class _FullReencodeSigmaBackend:
             if len(toks) > self.seq_cap:
                 toks = toks[-self.seq_cap :]
             t = torch.as_tensor(toks, dtype=torch.long, device=device).unsqueeze(0)
-            m = torch.as_tensor(
-                np.asarray(q.mask, dtype=bool), device=device
-            ).unsqueeze(0)
+            m = torch.as_tensor(np.asarray(q.mask, dtype=bool), device=device).unsqueeze(
+                0
+            )
             with torch.no_grad():
                 strat = self.net.strategy_from_tokens(t, m)
             q.result = strat[0].detach().to("cpu", dtype=torch.float64).numpy()
@@ -1480,9 +1477,8 @@ class PRTCFRBatchedProductionWorker:
         # _ROLLOUT_SEED_GAME_STRIDE). Must stay bit-identical to the sequential
         # worker's formula for test_batched_scheduler_faithful_to_sequential_worker.
         rollout_counter[0] += 1
-        return (
-            game_seed * _ROLLOUT_SEED_GAME_STRIDE
-            + rollout_counter[0] * (self.m_rollouts + 1009)
+        return game_seed * _ROLLOUT_SEED_GAME_STRIDE + rollout_counter[0] * (
+            self.m_rollouts + 1009
         )
 
     def _traverse_coro(

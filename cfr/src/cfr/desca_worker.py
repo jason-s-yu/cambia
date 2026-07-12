@@ -200,7 +200,9 @@ def _uniform(mask: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
-def _forward_np(net: Any, x: np.ndarray, device: Any, use_bf16: bool = False) -> np.ndarray:
+def _forward_np(
+    net: Any, x: np.ndarray, device: Any, use_bf16: bool = False
+) -> np.ndarray:
     """Run a torch ``nn.Module`` on a single-batch numpy input and return numpy.
 
     Returns a 1-D array over the module's output dimension.
@@ -219,7 +221,9 @@ def _forward_np(net: Any, x: np.ndarray, device: Any, use_bf16: bool = False) ->
     with torch.no_grad():
         if use_bf16:
             try:
-                with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=True):
+                with torch.autocast(
+                    device_type=device_type, dtype=torch.bfloat16, enabled=True
+                ):
                     out = net(t)
             except RuntimeError:
                 # Device doesn't support bf16 autocast (e.g. older CPUs); fall back to fp32.
@@ -251,7 +255,9 @@ def _forward_masked_softmax_net(
     with torch.no_grad():
         if use_bf16:
             try:
-                with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=True):
+                with torch.autocast(
+                    device_type=device_type, dtype=torch.bfloat16, enabled=True
+                ):
                     try:
                         out = net(t, m)
                     except TypeError:
@@ -289,9 +295,13 @@ def _forward_value_net(
     """
     if torch is None:
         raise RuntimeError("torch is required for DESCA worker network inference")
-    t = torch.from_numpy(np.ascontiguousarray(fair_features, dtype=np.float32)).unsqueeze(0)
+    t = torch.from_numpy(np.ascontiguousarray(fair_features, dtype=np.float32)).unsqueeze(
+        0
+    )
     if omni_features is not None:
-        h = torch.from_numpy(np.ascontiguousarray(omni_features, dtype=np.float32)).unsqueeze(0)
+        h = torch.from_numpy(
+            np.ascontiguousarray(omni_features, dtype=np.float32)
+        ).unsqueeze(0)
     else:
         h = None
     if device is not None:
@@ -302,7 +312,9 @@ def _forward_value_net(
     with torch.no_grad():
         if use_bf16:
             try:
-                with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=True):
+                with torch.autocast(
+                    device_type=device_type, dtype=torch.bfloat16, enabled=True
+                ):
                     try:
                         out = net(t, h)
                     except TypeError:
@@ -432,7 +444,9 @@ def _policy_at_infoset(
         if ctx.regret_net is None:
             return _uniform(mask)
         try:
-            regrets = _forward_np(ctx.regret_net, features, ctx.device, use_bf16=ctx.use_bf16)
+            regrets = _forward_np(
+                ctx.regret_net, features, ctx.device, use_bf16=ctx.use_bf16
+            )
         except Exception as e:
             logger.debug("regret_net forward failed: %s", e)
             return _uniform(mask)
@@ -449,9 +463,7 @@ def _policy_at_infoset(
         return _uniform(mask)
 
 
-def _evaluate_v_omni(
-    ctx: _TraversalCtx, engine: Any, agent_for_features: Any
-) -> float:
+def _evaluate_v_omni(ctx: _TraversalCtx, engine: Any, agent_for_features: Any) -> float:
     """Compute V_omni on the current engine state.
 
     Encodes 257-dim fair features for ``agent_for_features`` and 120-dim
@@ -463,7 +475,9 @@ def _evaluate_v_omni(
     try:
         fair = _encode_state(engine, agent_for_features)
         omni = _encode_omniscient(engine)
-        return _forward_value_net(ctx.history_value_net, fair, omni, ctx.device, use_bf16=ctx.use_bf16)
+        return _forward_value_net(
+            ctx.history_value_net, fair, omni, ctx.device, use_bf16=ctx.use_bf16
+        )
     except Exception as e:
         logger.debug("history_value_net forward failed: %s", e)
         return 0.0
@@ -571,9 +585,7 @@ def _traverse(ctx: _TraversalCtx, engine: Any, agents: Sequence[Any]) -> float:
                     a.update(engine)
                 if engine.is_terminal():
                     # Terminal: write value directly; skip batched forward.
-                    v_hat[a_idx] = float(
-                        engine.get_utility()[ctx.updating_player]
-                    )
+                    v_hat[a_idx] = float(engine.get_utility()[ctx.updating_player])
                 else:
                     # Non-terminal: encode features and defer forward to batch.
                     if ctx.history_value_net is not None:
@@ -596,8 +608,8 @@ def _traverse(ctx: _TraversalCtx, engine: Any, agents: Sequence[Any]) -> float:
         # Batched V_omni forward: one forward over all deferred non-terminal rows.
         if _batch_indices and ctx.history_value_net is not None:
             try:
-                fair_stack = np.stack(_batch_fair, axis=0)   # [B, 257]
-                omni_stack = np.stack(_batch_omni, axis=0)   # [B, 120]
+                fair_stack = np.stack(_batch_fair, axis=0)  # [B, 257]
+                omni_stack = np.stack(_batch_omni, axis=0)  # [B, 120]
                 combined = np.concatenate([fair_stack, omni_stack], axis=1)  # [B, 377]
                 t_in = torch.from_numpy(np.ascontiguousarray(combined, dtype=np.float32))
                 if ctx.device is not None:
@@ -639,7 +651,9 @@ def _traverse(ctx: _TraversalCtx, engine: Any, agents: Sequence[Any]) -> float:
                 for batch_pos, a_idx in enumerate(_batch_indices):
                     v_hat[a_idx] = float(vals[batch_pos])
             except Exception as e:
-                logger.debug("DESCA: batched V_omni forward failed; falling back to zeros: %s", e)
+                logger.debug(
+                    "DESCA: batched V_omni forward failed; falling back to zeros: %s", e
+                )
                 ctx.result.errors += 1
 
         # After possibly masking off a_idx in the loop, renormalize sigma.
@@ -833,7 +847,9 @@ def run_desca_iteration(
         rng = np.random.default_rng()
 
     if updating_player not in (0, 1):
-        raise ValueError(f"DESCA worker currently supports 2P only; got updating_player={updating_player}")
+        raise ValueError(
+            f"DESCA worker currently supports 2P only; got updating_player={updating_player}"
+        )
 
     result = DESCAWorkerResult()
     ctx = _TraversalCtx(

@@ -74,18 +74,26 @@ def find_checkpoint(ckpt_dir: str, iter_num: int) -> str | None:
 def main():
     total = sum(len(e["iters"]) for e in EVALS)
     done = 0
-    print(f"Evaluating {total} checkpoints x {len(NEW_BASELINES)} baselines x {GAMES} games")
+    print(
+        f"Evaluating {total} checkpoints x {len(NEW_BASELINES)} baselines x {GAMES} games"
+    )
 
     with open(OUTPUT_FILE, "a") as f:
         for eval_spec in EVALS:
             for it in eval_spec["iters"]:
                 ckpt = find_checkpoint(eval_spec["checkpoints"], it)
                 if ckpt is None:
-                    print(f"  SKIP {eval_spec['run_name']} iter {it}: checkpoint not found")
+                    print(
+                        f"  SKIP {eval_spec['run_name']} iter {it}: checkpoint not found"
+                    )
                     continue
 
                 t0 = time.time()
-                print(f"  [{done+1}/{total}] {eval_spec['run_name']} iter {it}...", end="", flush=True)
+                print(
+                    f"  [{done+1}/{total}] {eval_spec['run_name']} iter {it}...",
+                    end="",
+                    flush=True,
+                )
 
                 results = run_evaluation_multi_baseline(
                     config_path=eval_spec["config"],
@@ -119,7 +127,12 @@ def main():
                 parts = []
                 for bl, res in results.items():
                     p0 = res.get("P0 Wins", 0)
-                    total_games = p0 + res.get("P1 Wins", 0) + res.get("Ties", 0) + res.get("MaxTurnTies", 0)
+                    total_games = (
+                        p0
+                        + res.get("P1 Wins", 0)
+                        + res.get("Ties", 0)
+                        + res.get("MaxTurnTies", 0)
+                    )
                     parts.append(f"{bl}={p0/total_games:.3f}")
                 done += 1
                 print(f" {', '.join(parts)} ({elapsed:.1f}s)")

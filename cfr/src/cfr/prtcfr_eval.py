@@ -263,10 +263,12 @@ def _load_net(filepath: str, device: str = "cpu") -> Any:
                 break
     if _build_net_from_state is not None:
         encoder_sd = {
-            k[len("encoder."):]: v for k, v in state_dict.items() if k.startswith("encoder.")
+            k[len("encoder.") :]: v
+            for k, v in state_dict.items()
+            if k.startswith("encoder.")
         }
         head_sd = {
-            k[len("head."):]: v for k, v in state_dict.items() if k.startswith("head.")
+            k[len("head.") :]: v for k, v in state_dict.items() if k.startswith("head.")
         }
         if encoder_sd and head_sd:
             return _build_net_from_state(encoder_sd, head_sd, device)
@@ -543,8 +545,12 @@ class IncrementalPolicyAccumulator:
             dev = getattr(net, "device", None) or torch.device("cpu")
             for lo in range(0, n, self.chunk_size):
                 hi = min(lo + self.chunk_size, n)
-                tok_t = torch.as_tensor(self._tok_rows[lo:hi], dtype=torch.long, device=dev)
-                mask_t = torch.as_tensor(self._mask_rows[lo:hi], dtype=torch.bool, device=dev)
+                tok_t = torch.as_tensor(
+                    self._tok_rows[lo:hi], dtype=torch.long, device=dev
+                )
+                mask_t = torch.as_tensor(
+                    self._mask_rows[lo:hi], dtype=torch.bool, device=dev
+                )
                 with torch.no_grad():
                     strat = net.strategy_from_tokens(tok_t, mask_t)
                 strat_np = strat.detach().to("cpu", dtype=torch.float64).numpy()
@@ -656,7 +662,9 @@ def score_with_loaded_nets(
     root, _isets, _n, _ab = build_tiny_tree(config_path, seq_cap=seq_cap)
     # See score_policy_on_tiny_game: incremental/chunked, not the single-batch
     # materialize_policy, to stay well under a few GB RSS at production dims.
-    policy = materialize_policy_incremental(root, nets_by_iter, weighting=weighting, seq_cap=seq_cap)
+    policy = materialize_policy_incremental(
+        root, nets_by_iter, weighting=weighting, seq_cap=seq_cap
+    )
     nashconv, components = exploitability(root, policy)
     return {
         "nashconv": float(nashconv),

@@ -24,7 +24,6 @@ from src.encoding import INPUT_DIM, NUM_ACTIONS
 from src.networks import AdvantageNetwork
 from src.cfr.es_validator import ESValidator, _compute_entropy
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -123,7 +122,9 @@ class TestESValidatorCreation:
         weights = make_random_weights()
         net_cfg = make_network_config()
 
-        validator = ESValidator(config=config, network_weights=weights, network_config=net_cfg)
+        validator = ESValidator(
+            config=config, network_weights=weights, network_config=net_cfg
+        )
 
         assert validator is not None
         assert validator.depth_limit == 5

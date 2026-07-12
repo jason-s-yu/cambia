@@ -334,7 +334,9 @@ class TournamentState:
             raise ValueError(f"matchup ({p1},{p2}) not found in current round")
 
         m = br.matchups[idx]
-        winner = m.player1 if m.bye else self._determine_winner(m.player1, m.player2, scores)
+        winner = (
+            m.player1 if m.bye else self._determine_winner(m.player1, m.player2, scores)
+        )
         loser = m.player2 if winner == m.player1 else m.player1
 
         m.winner = winner
@@ -427,7 +429,10 @@ class TournamentState:
             i += 2
 
     def _check_double_elim_complete(self) -> None:
-        if self.current_round >= len(self.bracket) or not self.bracket[self.current_round].matchups:
+        if (
+            self.current_round >= len(self.bracket)
+            or not self.bracket[self.current_round].matchups
+        ):
             self.completed = True
 
     def _record_double_elim(self, p1: int, p2: int, scores: List[int]) -> None:

@@ -525,9 +525,7 @@ def update_run_status(db: sqlite3.Connection, run_id: int, status: str) -> None:
     db.commit()
 
 
-def mark_run_pushed(
-    db: sqlite3.Connection, run_name: str, origin_host: str
-) -> int:
+def mark_run_pushed(db: sqlite3.Connection, run_name: str, origin_host: str) -> int:
     """Transfer local ownership of a run to a remote host after a successful push.
 
     `cambia harness push-run` rsyncs a client-local run dir up to the runner so the

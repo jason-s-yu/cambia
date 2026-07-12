@@ -5,6 +5,7 @@ Unit tests for snap-phase legal action generation.
 Constructs known card configurations and verifies that the engine
 produces the correct set of legal snap actions.
 """
+
 import pytest
 from types import SimpleNamespace
 
@@ -45,8 +46,7 @@ def build_snap_state(
 
     used_cards = set(id(c) for c in p0_hand + p1_hand + [snap_card])
     remaining = [
-        c for c in create_standard_deck(include_jokers=2)
-        if id(c) not in used_cards
+        c for c in create_standard_deck(include_jokers=2) if id(c) not in used_cards
     ]
 
     players = [
@@ -76,6 +76,7 @@ def build_snap_state(
 # ---------------------------------------------------------------------------
 # Test 1: Player has matching cards — snap own and snap opponent should be legal
 # ---------------------------------------------------------------------------
+
 
 def test_player_has_matching_own_cards():
     """P0 has two 5s at indices 0 and 2; P1 has a 5 at index 1.
@@ -113,6 +114,7 @@ def test_player_has_matching_own_cards():
 # Test 2: Player has no matching cards — only pass snap should be legal
 # ---------------------------------------------------------------------------
 
+
 def test_player_has_no_matching_cards():
     """P0 has no 5s and P1 has no 5s; snap discard is 5D.
 
@@ -149,6 +151,7 @@ def test_player_has_no_matching_cards():
 # ---------------------------------------------------------------------------
 # Test 3: Multiple matching cards in own hand
 # ---------------------------------------------------------------------------
+
 
 def test_multiple_matching_own_cards():
     """P0 has four 5s; snap discard is 5H. All own indices should be snap-legal."""
@@ -209,6 +212,7 @@ def test_multiple_matching_own_cards():
 # Test 4: Opponent snapping disabled
 # ---------------------------------------------------------------------------
 
+
 def test_opponent_snapping_disabled():
     """Same hands as Test 1 but allowOpponentSnapping=False. No SnapOpponent actions."""
     p0_hand = [
@@ -239,6 +243,7 @@ def test_opponent_snapping_disabled():
 # ---------------------------------------------------------------------------
 # Test 5: Opponent has matching cards, player can snap opponent
 # ---------------------------------------------------------------------------
+
 
 def test_snap_opponent_cards_no_own_match():
     """P0 has no own matches but P1 has two 5s.
@@ -274,6 +279,7 @@ def test_snap_opponent_cards_no_own_match():
 # Test 6: Action indices map correctly
 # ---------------------------------------------------------------------------
 
+
 def test_action_index_mapping_pass_snap():
     """PassSnap should map to index 97."""
     assert action_to_index(ActionPassSnap()) == 97
@@ -288,7 +294,9 @@ def test_action_index_mapping_snap_own():
 def test_action_index_mapping_snap_opponent():
     """SnapOpponent(i) should map to index 104+i."""
     for i in range(6):
-        assert action_to_index(ActionSnapOpponent(opponent_target_hand_index=i)) == 104 + i
+        assert (
+            action_to_index(ActionSnapOpponent(opponent_target_hand_index=i)) == 104 + i
+        )
 
 
 def test_action_indices_in_legal_set_test1():
@@ -317,8 +325,10 @@ def test_action_indices_in_legal_set_test1():
     legal = state.get_legal_actions()
     legal_indices = {action_to_index(a) for a in legal}
 
-    assert 97 in legal_indices   # PassSnap
-    for idx in list(range(98, 102)) + list(range(104, 108)):  # SnapOwn(0-3) + SnapOpponent(0-3)
+    assert 97 in legal_indices  # PassSnap
+    for idx in list(range(98, 102)) + list(
+        range(104, 108)
+    ):  # SnapOwn(0-3) + SnapOpponent(0-3)
         assert idx in legal_indices, f"expected idx {idx} legal"
 
 
@@ -342,8 +352,8 @@ def test_action_indices_in_legal_set_test4():
     legal = state.get_legal_actions()
     legal_indices = {action_to_index(a) for a in legal}
 
-    assert 97 in legal_indices   # PassSnap
-    assert 98 in legal_indices   # SnapOwn(0)
+    assert 97 in legal_indices  # PassSnap
+    assert 98 in legal_indices  # SnapOwn(0)
     assert 100 in legal_indices  # SnapOwn(2)
 
     # No SnapOpponent indices (104-109)
@@ -376,6 +386,8 @@ def test_action_indices_in_legal_set_test5():
     legal = state.get_legal_actions()
     legal_indices = {action_to_index(a) for a in legal}
 
-    assert 97 in legal_indices    # PassSnap
-    for idx in list(range(98, 102)) + list(range(104, 108)):  # SnapOwn(0-3) + SnapOpponent(0-3)
+    assert 97 in legal_indices  # PassSnap
+    for idx in list(range(98, 102)) + list(
+        range(104, 108)
+    ):  # SnapOwn(0-3) + SnapOpponent(0-3)
         assert idx in legal_indices, f"expected idx {idx} legal"

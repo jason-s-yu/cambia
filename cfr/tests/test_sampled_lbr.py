@@ -8,7 +8,6 @@ from src.game.engine import CambiaGameState
 from src.agents.baseline_agents import RandomAgent
 from src.cfr.sampled_lbr import sampled_lbr
 
-
 # ---------------------------------------------------------------------------
 # Minimal config stubs
 # ---------------------------------------------------------------------------
@@ -84,9 +83,9 @@ def test_lbr_non_negative_exploitability():
         agent, config, num_infosets=50, br_rollouts_per_infoset=5, seed=7
     )
 
-    assert result["exploitability"] >= 0.0, (
-        f"Exploitability must be >= 0, got {result['exploitability']}"
-    )
+    assert (
+        result["exploitability"] >= 0.0
+    ), f"Exploitability must be >= 0, got {result['exploitability']}"
     assert result["std_err"] >= 0.0
 
 
@@ -103,7 +102,7 @@ def test_lbr_deterministic_seed():
         agent_b, config, num_infosets=30, br_rollouts_per_infoset=5, seed=99
     )
 
-    assert result_a["exploitability"] == result_b["exploitability"], (
-        f"Same seed should give same exploitability: {result_a} vs {result_b}"
-    )
+    assert (
+        result_a["exploitability"] == result_b["exploitability"]
+    ), f"Same seed should give same exploitability: {result_a} vs {result_b}"
     assert result_a["num_infosets_sampled"] == result_b["num_infosets_sampled"]

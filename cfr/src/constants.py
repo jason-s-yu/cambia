@@ -135,10 +135,10 @@ class EpistemicTag(enum.IntEnum):
     Used in the EP-PBS 200-dim encoding alongside slot identity features.
     """
 
-    UNK = 0       # Unknown to both players
+    UNK = 0  # Unknown to both players
     PRIV_OWN = 1  # This agent privately knows
     PRIV_OPP = 2  # Opponent privately knows
-    PUB = 3       # Common knowledge (both know)
+    PUB = 3  # Common knowledge (both know)
 
 
 # EP-PBS encoding constants
@@ -156,12 +156,12 @@ EP_PBS_SLOT_REPR_DIM = 64  # slot encoder output dim
 
 # Encoding v2 additions (Phase 0 DESCA foundation).
 # Layout: v1 [0:224] unchanged, v2 appends [224:233] posterior, [233:257] action history.
-V2_CARD_COUNT_DIM = 9          # 9-bucket card-counting posterior over remaining deck
-V2_ACTION_HISTORY_DIM = 24     # last 3 actions per player, 4 dims each, 2 players
+V2_CARD_COUNT_DIM = 9  # 9-bucket card-counting posterior over remaining deck
+V2_ACTION_HISTORY_DIM = 24  # last 3 actions per player, 4 dims each, 2 players
 V2_ACTION_HISTORY_PER_PLAYER = 12
-V2_ACTION_HISTORY_SLOTS = 3    # ring buffer depth per player
-V2_ACTION_CATEGORY_DIM = 3     # 3-one-hot: DRAW_PHASE, DISCARD_PHASE, ABILITY_OR_SNAP
-V2_ACTION_SLOT_FEATURE_DIM = 4 # category(3) + target_slot_norm(1)
+V2_ACTION_HISTORY_SLOTS = 3  # ring buffer depth per player
+V2_ACTION_CATEGORY_DIM = 3  # 3-one-hot: DRAW_PHASE, DISCARD_PHASE, ABILITY_OR_SNAP
+V2_ACTION_SLOT_FEATURE_DIM = 4  # category(3) + target_slot_norm(1)
 EP_PBS_V2_INPUT_DIM = EP_PBS_INPUT_DIM + V2_CARD_COUNT_DIM + V2_ACTION_HISTORY_DIM  # 257
 
 # Action categories for the action history window (oldest first per player).
@@ -171,24 +171,26 @@ V2_ACTION_CATEGORY_ABILITY_SNAP = 2
 
 # N-Player constants (MaxPlayers=8, MaxHandSize=6, MaxOpponents=7)
 N_PLAYER_MAX_PLAYERS = 8
-N_PLAYER_MAX_SLOTS = 48        # 8 players × 6 cards
-N_PLAYER_POWERSET_DIM = 384    # 48 slots × 8 bits (MaxKnowledgePlayers)
-N_PLAYER_IDENTITY_DIM = 432    # 48 slots × 9 buckets
+N_PLAYER_MAX_SLOTS = 48  # 8 players × 6 cards
+N_PLAYER_POWERSET_DIM = 384  # 48 slots × 8 bits (MaxKnowledgePlayers)
+N_PLAYER_IDENTITY_DIM = 432  # 48 slots × 9 buckets
 N_PLAYER_PUBLIC_DIM = 40
-N_PLAYER_INPUT_DIM = N_PLAYER_POWERSET_DIM + N_PLAYER_IDENTITY_DIM + N_PLAYER_PUBLIC_DIM  # 856
-N_PLAYER_NUM_ACTIONS = 620     # scales with MaxOpponents=7; see engine.NPlayerNumActions
+N_PLAYER_INPUT_DIM = (
+    N_PLAYER_POWERSET_DIM + N_PLAYER_IDENTITY_DIM + N_PLAYER_PUBLIC_DIM
+)  # 856
+N_PLAYER_NUM_ACTIONS = 620  # scales with MaxOpponents=7; see engine.NPlayerNumActions
 
 # Bucket midpoints for saliency eviction
 _BUCKET_MIDPOINTS = {
-    0: 0.0,    # BucketZero (Joker)
-    1: -1.0,   # BucketNegKing
-    2: 1.0,    # BucketAce
-    3: 3.0,    # BucketLowNum (2-4)
-    4: 5.5,    # BucketMidNum (5-6)
-    5: 7.5,    # BucketPeekSelf (7-8)
-    6: 9.5,    # BucketPeekOther (9-10)
-    7: 11.5,   # BucketSwapBlind (J-Q)
-    8: 13.0,   # BucketHighKing
+    0: 0.0,  # BucketZero (Joker)
+    1: -1.0,  # BucketNegKing
+    2: 1.0,  # BucketAce
+    3: 3.0,  # BucketLowNum (2-4)
+    4: 5.5,  # BucketMidNum (5-6)
+    5: 7.5,  # BucketPeekSelf (7-8)
+    6: 9.5,  # BucketPeekOther (9-10)
+    7: 11.5,  # BucketSwapBlind (J-Q)
+    8: 13.0,  # BucketHighKing
 }
 
 
@@ -236,7 +238,9 @@ class ActionDiscard(NamedTuple):
     """Action: Discard the card just drawn from stockpile/discard."""
 
     use_ability: bool  # Does the player intend to use the card's ability?
-    tag: str = "discard"  # type discriminator — prevents hash collision with ActionReplace(0)
+    tag: str = (
+        "discard"  # type discriminator — prevents hash collision with ActionReplace(0)
+    )
 
 
 class ActionReplace(NamedTuple):
@@ -281,7 +285,9 @@ class ActionAbilityKingSwapDecision(NamedTuple):
     """Action: Decide whether to perform swap after looking (second part of K ability)."""
 
     perform_swap: bool  # True to swap the looked-at cards, False otherwise
-    tag: str = "king_swap"  # type discriminator — prevents hash collision with ActionDiscard
+    tag: str = (
+        "king_swap"  # type discriminator — prevents hash collision with ActionDiscard
+    )
 
 
 # --- Snap Actions ---

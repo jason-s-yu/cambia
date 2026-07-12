@@ -65,7 +65,7 @@ abstract_action_semantics: List[dict] = [
     {
         "name": "replace_slot_low",
         "rule": "ActionReplace targeting slot whose own bucket quantile is low"
-                " (ZERO, NEG_KING, ACE, LOW_NUM)",
+        " (ZERO, NEG_KING, ACE, LOW_NUM)",
     },
     {
         "name": "replace_slot_mid",
@@ -74,7 +74,7 @@ abstract_action_semantics: List[dict] = [
     {
         "name": "replace_slot_high",
         "rule": "ActionReplace targeting slot with high bucket"
-                " (PEEK_OTHER, SWAP_BLIND, HIGH_KING)",
+        " (PEEK_OTHER, SWAP_BLIND, HIGH_KING)",
     },
     {
         "name": "replace_slot_unknown",
@@ -153,13 +153,16 @@ abstract_action_semantics: List[dict] = [
     {"name": "pass_snap", "rule": "direct: ActionPassSnap"},
     {"name": "snap_own", "rule": "ActionSnapOwn over any own hand index"},
     {"name": "snap_opp", "rule": "ActionSnapOpponent over any opponent hand index"},
-    {"name": "snap_opp_move", "rule": "ActionSnapOpponentMove over any (own_to_move, target)"},
+    {
+        "name": "snap_opp_move",
+        "rule": "ActionSnapOpponentMove over any (own_to_move, target)",
+    },
 ]
 
 NUM_ABSTRACT_ACTIONS_2P: int = len(abstract_action_semantics)
-assert NUM_ABSTRACT_ACTIONS_2P == 32, (
-    f"Expected 32 abstract classes, got {NUM_ABSTRACT_ACTIONS_2P}"
-)
+assert (
+    NUM_ABSTRACT_ACTIONS_2P == 32
+), f"Expected 32 abstract classes, got {NUM_ABSTRACT_ACTIONS_2P}"
 
 # Name -> index lookup for internal helpers.
 _NAME_TO_IDX = {entry["name"]: idx for idx, entry in enumerate(abstract_action_semantics)}
@@ -188,6 +191,7 @@ _RECENT_AGE_THRESHOLD = 2
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _own_slot_bucket(agent_state: Any, slot_idx: int) -> int:
     """Return own slot bucket value or CardBucket.UNKNOWN.value if missing."""
@@ -259,6 +263,7 @@ def _opp_slot_tracked(agent_state: Any, slot_idx: int) -> bool:
 # Concrete -> abstract
 # ---------------------------------------------------------------------------
 
+
 def _concrete_to_abstract(action: GameAction, agent_state: Any) -> Optional[int]:
     """Return the abstract index for a concrete action, or None if unmappable."""
     tag = getattr(action, "tag", None)
@@ -295,7 +300,9 @@ def _concrete_to_abstract(action: GameAction, agent_state: Any) -> Optional[int]
         own_cls = _own_slot_class(agent_state, int(getattr(action, "own_hand_index", 0)))
         opp_cls = (
             "known"
-            if _opp_slot_tracked(agent_state, int(getattr(action, "opponent_hand_index", 0)))
+            if _opp_slot_tracked(
+                agent_state, int(getattr(action, "opponent_hand_index", 0))
+            )
             else "unknown"
         )
         own_group = "mid" if own_cls == "unknown" else own_cls
@@ -305,7 +312,9 @@ def _concrete_to_abstract(action: GameAction, agent_state: Any) -> Optional[int]
         own_cls = _own_slot_class(agent_state, int(getattr(action, "own_hand_index", 0)))
         opp_cls = (
             "known"
-            if _opp_slot_tracked(agent_state, int(getattr(action, "opponent_hand_index", 0)))
+            if _opp_slot_tracked(
+                agent_state, int(getattr(action, "opponent_hand_index", 0))
+            )
             else "unknown"
         )
         own_group = "mid" if own_cls == "unknown" else own_cls
@@ -330,6 +339,7 @@ def _concrete_to_abstract(action: GameAction, agent_state: Any) -> Optional[int]
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def abstract_actions(
     legal_actions: Sequence[GameAction],
@@ -371,7 +381,8 @@ def unabstract(
         )
 
     candidates: List[GameAction] = [
-        a for a in legal_actions
+        a
+        for a in legal_actions
         if _concrete_to_abstract(a, agent_state) == int(abstract_idx)
     ]
     if not candidates:

@@ -24,7 +24,6 @@ from src.encoding import NUM_ACTIONS
 from src.networks import CVPN
 from src.pbs import uniform_range
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -121,7 +120,9 @@ def test_search_returns_valid_cfvs(searcher: GTCFRSearch):
     with _make_game() as game:
         result = searcher.search(game, r0, r1)
 
-    assert result.root_values.shape == (VALUE_DIM,), f"Got shape {result.root_values.shape}"
+    assert result.root_values.shape == (
+        VALUE_DIM,
+    ), f"Got shape {result.root_values.shape}"
     assert result.root_values.dtype == np.float32
     assert np.isfinite(result.root_values).all(), "CFVs contain non-finite values"
 
@@ -136,16 +137,20 @@ def test_tree_grows_with_budget(small_cvpn: CVPN):
     r0, r1 = _uniform_ranges()
 
     with _make_game() as game:
-        searcher_small = GTCFRSearch(small_cvpn, expansion_budget=1, cfr_iters_per_expansion=1)
+        searcher_small = GTCFRSearch(
+            small_cvpn, expansion_budget=1, cfr_iters_per_expansion=1
+        )
         result_small = searcher_small.search(game, r0, r1)
 
     with _make_game() as game:
-        searcher_large = GTCFRSearch(small_cvpn, expansion_budget=10, cfr_iters_per_expansion=1)
+        searcher_large = GTCFRSearch(
+            small_cvpn, expansion_budget=10, cfr_iters_per_expansion=1
+        )
         result_large = searcher_large.search(game, r0, r1)
 
-    assert result_large.tree_size >= result_small.tree_size, (
-        f"Expected larger tree with larger budget: {result_large.tree_size} >= {result_small.tree_size}"
-    )
+    assert (
+        result_large.tree_size >= result_small.tree_size
+    ), f"Expected larger tree with larger budget: {result_large.tree_size} >= {result_small.tree_size}"
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +168,7 @@ def test_puct_scores_prefer_unvisited(small_cvpn: CVPN):
     legal_mask[2] = True
 
     prior = np.zeros(NUM_ACTIONS, dtype=np.float32)
-    prior[0] = 0.9   # high prior, unvisited
+    prior[0] = 0.9  # high prior, unvisited
     prior[1] = 0.05  # low prior, unvisited
     prior[2] = 0.05  # low prior, visited many times
 
@@ -192,9 +197,9 @@ def test_puct_scores_prefer_unvisited(small_cvpn: CVPN):
     scores = searcher._puct_scores(node)
 
     # Action 0 (high prior, unvisited) should score highest
-    assert scores[0] > scores[2], (
-        f"Expected scores[0]={scores[0]:.3f} > scores[2]={scores[2]:.3f}"
-    )
+    assert (
+        scores[0] > scores[2]
+    ), f"Expected scores[0]={scores[0]:.3f} > scores[2]={scores[2]:.3f}"
     # Illegal actions should have very low scores
     assert scores[3] < -100, f"Illegal action score should be -1e9, got {scores[3]}"
 
@@ -234,8 +239,12 @@ def test_cfr_traverse_terminal(small_cvpn: CVPN):
 
     assert cfvs.shape == (2, NUM_HAND_TYPES)
     # All hand types should have the same value (broadcast)
-    assert np.allclose(cfvs[0], 1.0), f"Player 0 CFVs should all be 1.0, got {cfvs[0][:3]}"
-    assert np.allclose(cfvs[1], -1.0), f"Player 1 CFVs should all be -1.0, got {cfvs[1][:3]}"
+    assert np.allclose(
+        cfvs[0], 1.0
+    ), f"Player 0 CFVs should all be 1.0, got {cfvs[0][:3]}"
+    assert np.allclose(
+        cfvs[1], -1.0
+    ), f"Player 1 CFVs should all be -1.0, got {cfvs[1][:3]}"
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +307,9 @@ def test_search_result_depth_stats(searcher: GTCFRSearch):
 
     assert isinstance(stats["min"], int), f"'min' should be int, got {type(stats['min'])}"
     assert isinstance(stats["max"], int), f"'max' should be int, got {type(stats['max'])}"
-    assert isinstance(stats["mean"], float), f"'mean' should be float, got {type(stats['mean'])}"
+    assert isinstance(
+        stats["mean"], float
+    ), f"'mean' should be float, got {type(stats['mean'])}"
 
     assert stats["min"] >= 0
     assert stats["max"] >= stats["min"]
@@ -334,6 +345,6 @@ def test_engine_handles_freed(small_cvpn: CVPN):
         f"after_search={after_search})"
     )
 
-    assert after_all == before, (
-        f"Handle leak after context exit: before={before}, after={after_all}"
-    )
+    assert (
+        after_all == before
+    ), f"Handle leak after context exit: before={before}, after={after_all}"

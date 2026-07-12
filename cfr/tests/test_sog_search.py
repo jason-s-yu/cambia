@@ -20,7 +20,6 @@ from src.encoding import NUM_ACTIONS
 from src.networks import CVPN
 from src.pbs import uniform_range, NUM_HAND_TYPES
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -294,13 +293,19 @@ class TestResolveSearch:
 
         r0, r1 = uniform_range(), uniform_range()
 
-        with patch.object(sog._inner, "_cleanup_tree") as mock_cleanup, \
-             patch.object(sog._inner, "_cfr_traverse",
-                          return_value=np.zeros((2, NUM_HAND_TYPES), dtype=np.float32)), \
-             patch.object(sog._inner, "_expand_once", return_value=0), \
-             patch.object(sog._inner, "_collect_depths",
-                          side_effect=lambda n, d: d.extend([0])), \
-             patch.object(sog._inner, "_count_nodes", return_value=2):
+        with (
+            patch.object(sog._inner, "_cleanup_tree") as mock_cleanup,
+            patch.object(
+                sog._inner,
+                "_cfr_traverse",
+                return_value=np.zeros((2, NUM_HAND_TYPES), dtype=np.float32),
+            ),
+            patch.object(sog._inner, "_expand_once", return_value=0),
+            patch.object(
+                sog._inner, "_collect_depths", side_effect=lambda n, d: d.extend([0])
+            ),
+            patch.object(sog._inner, "_count_nodes", return_value=2),
+        ):
 
             result = sog._resolve_search(make_mock_engine(), r0, r1, root, 1)
 
@@ -318,8 +323,10 @@ class TestResolveSearch:
 
         r0, r1 = uniform_range(), uniform_range()
 
-        with patch.object(sog._inner, "_cleanup_tree"), \
-             patch.object(sog._inner, "_count_nodes", return_value=100):  # > 5
+        with (
+            patch.object(sog._inner, "_cleanup_tree"),
+            patch.object(sog._inner, "_count_nodes", return_value=100),
+        ):  # > 5
 
             result = sog._resolve_search(make_mock_engine(), r0, r1, root, 0)
 
@@ -340,12 +347,15 @@ class TestResolveSearch:
         # Make cfr_traverse return values much worse than commitment
         bad_cfvs = np.zeros((2, NUM_HAND_TYPES), dtype=np.float32)  # 0 < 0.5 - 0.1
 
-        with patch.object(sog._inner, "_cleanup_tree"), \
-             patch.object(sog._inner, "_cfr_traverse", return_value=bad_cfvs), \
-             patch.object(sog._inner, "_expand_once", return_value=0), \
-             patch.object(sog._inner, "_collect_depths",
-                          side_effect=lambda n, d: d.extend([0])), \
-             patch.object(sog._inner, "_count_nodes", return_value=2):
+        with (
+            patch.object(sog._inner, "_cleanup_tree"),
+            patch.object(sog._inner, "_cfr_traverse", return_value=bad_cfvs),
+            patch.object(sog._inner, "_expand_once", return_value=0),
+            patch.object(
+                sog._inner, "_collect_depths", side_effect=lambda n, d: d.extend([0])
+            ),
+            patch.object(sog._inner, "_count_nodes", return_value=2),
+        ):
 
             result = sog._resolve_search(make_mock_engine(), r0, r1, root, 0)
 
@@ -379,12 +389,15 @@ class TestResolveSearch:
         mixed_cfvs[0] *= 0.6  # acting player improved
         mixed_cfvs[1] *= 0.3  # non-acting player worsened
 
-        with patch.object(sog._inner, "_cleanup_tree"), \
-             patch.object(sog._inner, "_cfr_traverse", return_value=mixed_cfvs), \
-             patch.object(sog._inner, "_expand_once", return_value=0), \
-             patch.object(sog._inner, "_collect_depths",
-                          side_effect=lambda n, d: d.extend([0])), \
-             patch.object(sog._inner, "_count_nodes", return_value=2):
+        with (
+            patch.object(sog._inner, "_cleanup_tree"),
+            patch.object(sog._inner, "_cfr_traverse", return_value=mixed_cfvs),
+            patch.object(sog._inner, "_expand_once", return_value=0),
+            patch.object(
+                sog._inner, "_collect_depths", side_effect=lambda n, d: d.extend([0])
+            ),
+            patch.object(sog._inner, "_count_nodes", return_value=2),
+        ):
 
             result = sog._resolve_search(make_mock_engine(), r0, r1, root, 0)
 
@@ -396,7 +409,9 @@ class TestResolveSearch:
     def test_resolve_safety_check_disabled_allows_worse_values(self, small_cvpn):
         """When safety_check_enabled=False, worse values are accepted (training mode)."""
         sog = SoGSearch(
-            cvpn=small_cvpn, train_budget=2, safety_margin=0.1,
+            cvpn=small_cvpn,
+            train_budget=2,
+            safety_margin=0.1,
             safety_check_enabled=False,
         )
 
@@ -411,12 +426,15 @@ class TestResolveSearch:
         # Values worse for acting player: would trigger if enabled
         bad_cfvs = np.zeros((2, NUM_HAND_TYPES), dtype=np.float32)
 
-        with patch.object(sog._inner, "_cleanup_tree"), \
-             patch.object(sog._inner, "_cfr_traverse", return_value=bad_cfvs), \
-             patch.object(sog._inner, "_expand_once", return_value=0), \
-             patch.object(sog._inner, "_collect_depths",
-                          side_effect=lambda n, d: d.extend([0])), \
-             patch.object(sog._inner, "_count_nodes", return_value=2):
+        with (
+            patch.object(sog._inner, "_cleanup_tree"),
+            patch.object(sog._inner, "_cfr_traverse", return_value=bad_cfvs),
+            patch.object(sog._inner, "_expand_once", return_value=0),
+            patch.object(
+                sog._inner, "_collect_depths", side_effect=lambda n, d: d.extend([0])
+            ),
+            patch.object(sog._inner, "_count_nodes", return_value=2),
+        ):
 
             result = sog._resolve_search(make_mock_engine(), r0, r1, root, 0)
 
@@ -431,8 +449,9 @@ class TestResolveSearch:
 
         r0, r1 = uniform_range(), uniform_range()
 
-        with patch.object(sog, "_resolve_search",
-                          return_value=make_mock_search_result()) as mock_resolve:
+        with patch.object(
+            sog, "_resolve_search", return_value=make_mock_search_result()
+        ) as mock_resolve:
             sog.search(make_mock_engine(), r0, r1, prior_tree=root, action_taken=1)
 
         mock_resolve.assert_called_once()
@@ -444,8 +463,9 @@ class TestResolveSearch:
 
         r0, r1 = uniform_range(), uniform_range()
 
-        with patch.object(sog, "_fresh_search",
-                          return_value=make_mock_search_result()) as mock_fresh:
+        with patch.object(
+            sog, "_fresh_search", return_value=make_mock_search_result()
+        ) as mock_fresh:
             sog.search(make_mock_engine(), r0, r1, prior_tree=root, action_taken=99)
 
         mock_fresh.assert_called_once()

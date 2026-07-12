@@ -51,10 +51,10 @@ from src.constants import (
     CardBucket,
 )
 
-
 # ---------------------------------------------------------------------------
 # Minimal AgentState stub
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class _KnownCardInfo:
@@ -113,12 +113,10 @@ _ALL_BUCKETS = [
 
 def _random_agent(rng: random.Random, hand_size: int = 4) -> _FakeAgentState:
     own = [
-        rng.choice(_ALL_BUCKETS) if rng.random() < 0.8 else None
-        for _ in range(hand_size)
+        rng.choice(_ALL_BUCKETS) if rng.random() < 0.8 else None for _ in range(hand_size)
     ]
     opp = [
-        rng.choice(_ALL_BUCKETS) if rng.random() < 0.5 else None
-        for _ in range(hand_size)
+        rng.choice(_ALL_BUCKETS) if rng.random() < 0.5 else None for _ in range(hand_size)
     ]
     ages = [rng.randint(0, 10) for _ in range(hand_size)]
     current = rng.randint(5, 20)
@@ -180,6 +178,7 @@ def _random_legal_actions(
 # Bound + registry properties
 # ---------------------------------------------------------------------------
 
+
 def test_num_abstract_actions_in_contract_bound():
     assert 30 <= NUM_ABSTRACT_ACTIONS_2P <= 40
 
@@ -201,6 +200,7 @@ def test_abstract_action_name_roundtrip():
 # Mask shape and dtype
 # ---------------------------------------------------------------------------
 
+
 def test_abstract_actions_mask_shape_and_dtype():
     rng = random.Random(0)
     agent = _random_agent(rng)
@@ -213,6 +213,7 @@ def test_abstract_actions_mask_shape_and_dtype():
 # ---------------------------------------------------------------------------
 # No-orphan property
 # ---------------------------------------------------------------------------
+
 
 def test_no_orphan_concrete_actions():
     """Every legal concrete action must map to some abstract class."""
@@ -234,6 +235,7 @@ def test_no_orphan_concrete_actions():
 # ---------------------------------------------------------------------------
 # Round-trip idempotency
 # ---------------------------------------------------------------------------
+
 
 def test_abstract_unabstract_roundtrip_idempotent():
     """For every set bit in the mask, unabstract returns an action that
@@ -259,6 +261,7 @@ def test_abstract_unabstract_roundtrip_idempotent():
 # Determinism given seed
 # ---------------------------------------------------------------------------
 
+
 def test_unabstract_deterministic_given_seed():
     rng = random.Random(5)
     agent = _random_agent(rng)
@@ -273,6 +276,7 @@ def test_unabstract_deterministic_given_seed():
 # ---------------------------------------------------------------------------
 # Orphan-raise
 # ---------------------------------------------------------------------------
+
 
 def test_unabstract_raises_on_empty_class():
     """If no legal action maps to the requested abstract class, unabstract raises."""
@@ -316,9 +320,7 @@ def test_unabstract_varies_with_state_for_multi_candidate_classes():
     """
     rng = random.Random(99)
     observed = {name: set() for name in _MULTI_CANDIDATE_CLASSES}
-    name_to_idx = {
-        e["name"]: i for i, e in enumerate(abstract_action_semantics)
-    }
+    name_to_idx = {e["name"]: i for i, e in enumerate(abstract_action_semantics)}
 
     for trial in range(100):
         agent = _random_agent(rng)
@@ -343,6 +345,7 @@ def test_unabstract_varies_with_state_for_multi_candidate_classes():
 # Targeted collapse rules (sanity)
 # ---------------------------------------------------------------------------
 
+
 def test_replace_slot_quantile_mapping():
     """Replace by own slot bucket maps to the correct quantile class."""
     agent = _mk_agent(
@@ -362,9 +365,7 @@ def test_replace_slot_quantile_mapping():
         "replace_slot_high",
         "replace_slot_unknown",
     }
-    name_to_idx = {
-        e["name"]: i for i, e in enumerate(abstract_action_semantics)
-    }
+    name_to_idx = {e["name"]: i for i, e in enumerate(abstract_action_semantics)}
     for name in expected:
         assert mask[name_to_idx[name]], f"Expected mask bit for {name}"
     # Nothing outside expected should be set.
@@ -380,9 +381,7 @@ def test_discard_ability_split():
         ActionDiscard(use_ability=True),
     ]
     mask = abstract_actions(actions, agent)
-    name_to_idx = {
-        e["name"]: i for i, e in enumerate(abstract_action_semantics)
-    }
+    name_to_idx = {e["name"]: i for i, e in enumerate(abstract_action_semantics)}
     assert mask[name_to_idx["discard_drawn_no_ability"]]
     assert mask[name_to_idx["discard_drawn_with_ability"]]
 
@@ -392,7 +391,12 @@ def test_peek_own_age_split():
     agent = _mk_agent(
         own_buckets=[CardBucket.LOW_NUM, CardBucket.LOW_NUM, CardBucket.UNKNOWN, None],
         opp_buckets=[None, None, None, None],
-        own_ages=[5, 0, 0, 0],  # slot0 recently_seen=5 (current turn), slot1 last_seen=0 (old)
+        own_ages=[
+            5,
+            0,
+            0,
+            0,
+        ],  # slot0 recently_seen=5 (current turn), slot1 last_seen=0 (old)
         current_turn=5,
     )
     actions = [
@@ -401,9 +405,7 @@ def test_peek_own_age_split():
         ActionAbilityPeekOwnSelect(target_hand_index=2),  # unknown
     ]
     mask = abstract_actions(actions, agent)
-    name_to_idx = {
-        e["name"]: i for i, e in enumerate(abstract_action_semantics)
-    }
+    name_to_idx = {e["name"]: i for i, e in enumerate(abstract_action_semantics)}
     assert mask[name_to_idx["peek_own_known_recent"]]
     assert mask[name_to_idx["peek_own_known_stale"]]
     assert mask[name_to_idx["peek_own_unknown"]]

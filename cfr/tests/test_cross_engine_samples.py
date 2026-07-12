@@ -65,9 +65,7 @@ def _go_available() -> bool:
 
 
 go_available = _go_available()
-skip_if_no_go = pytest.mark.skipif(
-    not go_available, reason="libcambia.so not available"
-)
+skip_if_no_go = pytest.mark.skipif(not go_available, reason="libcambia.so not available")
 
 # ---------------------------------------------------------------------------
 # xorshift64 — mirrors Go engine's RNG exactly
@@ -120,9 +118,7 @@ def _setup_python_game_matching_go(seed: int) -> CambiaGameState:
     rng = XorShift64(seed)
 
     go_suits = ["H", "D", "C", "S"]
-    go_ranks = [
-        "A", "2", "3", "4", "5", "6", "7", "8", "9", "T", "J", "Q", "K"
-    ]
+    go_ranks = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "T", "J", "Q", "K"]
 
     deck: List[Card] = []
     for suit in go_suits:
@@ -323,9 +319,9 @@ class TestCrossEngineLegalActions:
             f"(compared {compared_steps} steps, {snap_passes} snap passes):\n"
             + "\n".join(non_snap_mismatches)
         )
-        assert compared_steps > 0, (
-            f"seed {seed}: no steps compared (immediate divergence)"
-        )
+        assert (
+            compared_steps > 0
+        ), f"seed {seed}: no steps compared (immediate divergence)"
 
     def test_seed_0(self):
         self._play_and_compare(seed=0)
@@ -388,9 +384,9 @@ class TestCrossEngineInitialState:
 
         go_actor = go_engine.acting_player()
         py_actor = py_state.get_acting_player()
-        assert go_actor == py_actor, (
-            f"seed {seed}: acting player go={go_actor} py={py_actor}"
-        )
+        assert (
+            go_actor == py_actor
+        ), f"seed {seed}: acting player go={go_actor} py={py_actor}"
 
         go_engine.close()
 
@@ -405,8 +401,8 @@ class TestCrossEngineInitialState:
         go_stock = go_engine.stock_len()
         py_stock = py_state.get_stockpile_size()
         # 54 cards - 8 dealt (4 per player) - 1 discard = 45
-        assert go_stock == py_stock == 45, (
-            f"seed {seed}: stock_len go={go_stock} py={py_stock}"
-        )
+        assert (
+            go_stock == py_stock == 45
+        ), f"seed {seed}: stock_len go={go_stock} py={py_stock}"
 
         go_engine.close()

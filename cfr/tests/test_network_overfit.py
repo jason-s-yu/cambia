@@ -5,13 +5,18 @@ Validates that AdvantageNetwork and ResidualAdvantageNetwork can memorize
 a small synthetic dataset with polarized regret targets. Confirms that
 encoding dimensionality and architecture have no information bottleneck.
 """
+
 import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-from src.networks import AdvantageNetwork, ResidualAdvantageNetwork, SlotFiLMAdvantageNetwork
+from src.networks import (
+    AdvantageNetwork,
+    ResidualAdvantageNetwork,
+    SlotFiLMAdvantageNetwork,
+)
 
 # Encoding dimensions per project spec
 LEGACY_INPUT_DIM = 222
@@ -81,9 +86,9 @@ def test_advantage_network_overfit(input_dim: int, label: str):
         validate_inputs=False,
     )
     mse = _train_and_eval(net, features, mask, targets)
-    assert mse < MSE_THRESHOLD, (
-        f"AdvantageNetwork ({label}): MSE={mse:.6f} exceeds threshold {MSE_THRESHOLD}"
-    )
+    assert (
+        mse < MSE_THRESHOLD
+    ), f"AdvantageNetwork ({label}): MSE={mse:.6f} exceeds threshold {MSE_THRESHOLD}"
 
 
 def test_slot_film_overfit_small_batch():
@@ -98,9 +103,9 @@ def test_slot_film_overfit_small_batch():
         validate_inputs=False,
     )
     mse = _train_and_eval(net, features, mask, targets)
-    assert mse < MSE_THRESHOLD, (
-        f"SlotFiLMAdvantageNetwork: MSE={mse:.6f} exceeds threshold {MSE_THRESHOLD}"
-    )
+    assert (
+        mse < MSE_THRESHOLD
+    ), f"SlotFiLMAdvantageNetwork: MSE={mse:.6f} exceeds threshold {MSE_THRESHOLD}"
 
 
 @pytest.mark.parametrize(
@@ -121,9 +126,9 @@ def test_residual_advantage_network_overfit(input_dim: int, label: str):
         validate_inputs=False,
     )
     mse = _train_and_eval(net, features, mask, targets)
-    assert mse < MSE_THRESHOLD, (
-        f"ResidualAdvantageNetwork ({label}): MSE={mse:.6f} exceeds threshold {MSE_THRESHOLD}"
-    )
+    assert (
+        mse < MSE_THRESHOLD
+    ), f"ResidualAdvantageNetwork ({label}): MSE={mse:.6f} exceeds threshold {MSE_THRESHOLD}"
 
 
 def test_history_value_network_mse_decreases():

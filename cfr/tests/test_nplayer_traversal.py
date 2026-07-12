@@ -11,7 +11,6 @@ import pytest
 import numpy as np
 from types import SimpleNamespace
 
-
 # Phase 0 F8 carry-forward: N-player FFI constants stale (580/452 should be 856/620).
 # Constructing GoEngine with num_players=3/4 causes a malloc crash at the Go side.
 # Skip the entire module until Phase 3 fixes the FFI constants.
@@ -67,7 +66,9 @@ def _make_engine_and_agents(num_players: int = 3, seed: int = 42):
     rules = CambiaRulesConfig()
     rules.cards_per_player = 4
     engine = GoEngine(seed=seed, house_rules=rules, num_players=num_players)
-    agents = [GoAgentState.new_nplayer(engine, i, num_players) for i in range(num_players)]
+    agents = [
+        GoAgentState.new_nplayer(engine, i, num_players) for i in range(num_players)
+    ]
     return engine, agents
 
 
@@ -134,18 +135,18 @@ class TestNPlayerTraversalBasic:
         # N-player utility: u_i = (totalScore - N*score_i) / (N-1).
         # By construction, sum(u_i) = (N*totalScore - N*totalScore) / (N-1) = 0.
         # Tolerance: float32 accumulation from Go engine then cast to float64.
-        assert abs(result.sum()) < 1e-4, (
-            f"3P utility not zero-sum: sum={result.sum()}, values={result}"
-        )
+        assert (
+            abs(result.sum()) < 1e-4
+        ), f"3P utility not zero-sum: sum={result.sum()}, values={result}"
 
         # --- Utility range bounds ---
         # Max hand score = 4*13 = 52, min = 4*(-1) = -4. With 3P pairwise formula,
         # max |u_i| = (N-1)*max_score_diff / (N-1) = max_score_diff = 56.
         # But in practice, values are much smaller. Use generous bound.
         for i in range(3):
-            assert -100.0 <= result[i] <= 100.0, (
-                f"3P utility[{i}]={result[i]} implausibly large"
-            )
+            assert (
+                -100.0 <= result[i] <= 100.0
+            ), f"3P utility[{i}]={result[i]} implausibly large"
 
     @skip_if_no_go
     def test_basic_4p_call_returns_utility(self):
@@ -164,9 +165,9 @@ class TestNPlayerTraversalBasic:
         assert result.dtype == np.float64
 
         # 4P zero-sum conservation (same algebraic identity as 3P)
-        assert abs(result.sum()) < 1e-4, (
-            f"4P utility not zero-sum: sum={result.sum()}, values={result}"
-        )
+        assert (
+            abs(result.sum()) < 1e-4
+        ), f"4P utility not zero-sum: sum={result.sum()}, values={result}"
 
 
 class TestNPlayerUtilityShape:
@@ -220,9 +221,9 @@ class TestNPlayerSampleDimensions:
             # Regret targets are zero-initialized; only legal action indices are written.
             # Illegal action slots must remain exactly zero.
             illegal_mask = ~s.action_mask
-            assert (s.target[illegal_mask] == 0).all(), (
-                "N-player: non-zero regret for illegal action"
-            )
+            assert (
+                s.target[illegal_mask] == 0
+            ).all(), "N-player: non-zero regret for illegal action"
 
     @skip_if_no_go
     def test_strategy_sample_feature_dim(self):
@@ -245,9 +246,9 @@ class TestNPlayerSampleDimensions:
             # actions forms a valid probability distribution summing to 1.0.
             mask = s.action_mask
             strategy_sum = s.target[mask].sum()
-            assert abs(strategy_sum - 1.0) < 0.01, (
-                f"N-player strategy sum {strategy_sum} != 1.0"
-            )
+            assert (
+                abs(strategy_sum - 1.0) < 0.01
+            ), f"N-player strategy sum {strategy_sum} != 1.0"
 
     @skip_if_no_go
     def test_samples_collected_across_players(self):
@@ -266,7 +267,9 @@ class TestNPlayerSampleDimensions:
             if len(adv) + len(strat) > 0:
                 collected = True
                 break
-        assert collected, "Expected at least one sample after traversal over multiple seeds"
+        assert (
+            collected
+        ), "Expected at least one sample after traversal over multiple seeds"
 
 
 class TestNPlayerDepthLimit:

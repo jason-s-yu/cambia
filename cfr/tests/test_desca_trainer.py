@@ -45,7 +45,6 @@ from src.cfr.desca_trainer import (
 )
 from src.reservoir import ReservoirSample
 
-
 # ---------------------------------------------------------------------------
 # Tier 1: regret matching + invariants
 # ---------------------------------------------------------------------------
@@ -99,7 +98,9 @@ class TestRegretInvariants:
 
     def test_masked_softmax_no_legal_is_zero(self) -> None:
         out = _masked_softmax(np.array([1.0, 2.0, 3.0]), np.array([False, False, False]))
-        assert out.sum() == 0.0 or np.isclose(out.sum(), 0.0) or np.allclose(out, [0, 0, 0])
+        assert (
+            out.sum() == 0.0 or np.isclose(out.sum(), 0.0) or np.allclose(out, [0, 0, 0])
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -162,8 +163,12 @@ class TestInnerUpdates:
         for _ in range(5):
             loss = ((net(x) - y) ** 2).mean()
             g = _apcfr_plus_step(
-                opt, list(net.parameters()), loss,
-                asymmetry=0.9, grad_clip=1.0, prev_store=store,
+                opt,
+                list(net.parameters()),
+                loss,
+                asymmetry=0.9,
+                grad_clip=1.0,
+                prev_store=store,
             )
             assert g >= 0.0
             assert not any(torch.isnan(p).any().item() for p in net.parameters())
@@ -184,8 +189,12 @@ class TestInnerUpdates:
         _rm_plus_step(opt1, list(net1.parameters()), loss1, grad_clip=1.0)
         loss2 = ((net2(x) - y) ** 2).mean()
         _apcfr_plus_step(
-            opt2, list(net2.parameters()), loss2,
-            asymmetry=0.9, grad_clip=1.0, prev_store=_PrevGradStore(),
+            opt2,
+            list(net2.parameters()),
+            loss2,
+            asymmetry=0.9,
+            grad_clip=1.0,
+            prev_store=_PrevGradStore(),
         )
 
         for p1, p2 in zip(net1.parameters(), net2.parameters()):
@@ -209,8 +218,12 @@ class TestInnerUpdates:
             _rm_plus_step(opt1, list(net1.parameters()), loss1, grad_clip=1.0)
             loss2 = ((net2(x) - y) ** 2).mean()
             _apcfr_plus_step(
-                opt2, list(net2.parameters()), loss2,
-                asymmetry=0.0, grad_clip=1.0, prev_store=store,
+                opt2,
+                list(net2.parameters()),
+                loss2,
+                asymmetry=0.0,
+                grad_clip=1.0,
+                prev_store=store,
             )
         for p1, p2 in zip(net1.parameters(), net2.parameters()):
             assert torch.allclose(p1, p2, atol=1e-6)
@@ -239,8 +252,12 @@ class TestInnerUpdates:
         _rm_plus_step(opt_rm, list(net_rm.parameters()), loss_rm, grad_clip=1.0)
         loss_apcfr = ((net_apcfr(x1) - y1) ** 2).mean()
         _apcfr_plus_step(
-            opt_apcfr, list(net_apcfr.parameters()), loss_apcfr,
-            asymmetry=0.9, grad_clip=1.0, prev_store=store,
+            opt_apcfr,
+            list(net_apcfr.parameters()),
+            loss_apcfr,
+            asymmetry=0.9,
+            grad_clip=1.0,
+            prev_store=store,
         )
 
         # Step 2: APCFR+ now has prev grads and should diverge from RM+.
@@ -248,18 +265,20 @@ class TestInnerUpdates:
         _rm_plus_step(opt_rm, list(net_rm.parameters()), loss_rm, grad_clip=1.0)
         loss_apcfr = ((net_apcfr(x2) - y2) ** 2).mean()
         _apcfr_plus_step(
-            opt_apcfr, list(net_apcfr.parameters()), loss_apcfr,
-            asymmetry=0.9, grad_clip=1.0, prev_store=store,
+            opt_apcfr,
+            list(net_apcfr.parameters()),
+            loss_apcfr,
+            asymmetry=0.9,
+            grad_clip=1.0,
+            prev_store=store,
         )
 
         max_abs_diff = 0.0
         for p_rm, p_apcfr in zip(net_rm.parameters(), net_apcfr.parameters()):
-            max_abs_diff = max(
-                max_abs_diff, float((p_rm - p_apcfr).abs().max().item())
-            )
-        assert max_abs_diff > 1e-6, (
-            f"APCFR+ and RM+ paths did not diverge: max|Δ|={max_abs_diff:.2e}"
-        )
+            max_abs_diff = max(max_abs_diff, float((p_rm - p_apcfr).abs().max().item()))
+        assert (
+            max_abs_diff > 1e-6
+        ), f"APCFR+ and RM+ paths did not diverge: max|Δ|={max_abs_diff:.2e}"
 
     def test_apcfr_prev_grad_store_roundtrip(self) -> None:
         """_PrevGradStore caches and returns grads keyed by id(parameter)."""
@@ -319,9 +338,7 @@ class TestInnerUpdates:
             captured[id(p)], expected_extrapolated, atol=1e-7, rtol=0
         )
         # prev_store must cache raw g_t, not the extrapolated value
-        torch.testing.assert_close(
-            prev_store.get(p), g_t, atol=1e-7, rtol=0
-        )
+        torch.testing.assert_close(prev_store.get(p), g_t, atol=1e-7, rtol=0)
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +381,7 @@ class _StubEngine:
             ActionDrawDiscard,
             ActionCallCambia,
         )
+
         return [ActionDrawStockpile(), ActionDrawDiscard(), ActionCallCambia()]
 
     def apply_action(self, action: Any) -> None:
@@ -442,10 +460,12 @@ class _StubAgent:
 @pytest.fixture
 def stub_env_factory(monkeypatch: pytest.MonkeyPatch):
     """Factory that produces stub (engine, agents) and stubs encoder/omni."""
+
     def _encode_stub(agent: Any, ctx: int, drawn: int) -> np.ndarray:
         return np.arange(FEATURE_DIM, dtype=np.float32) / float(FEATURE_DIM)
 
     monkeypatch.setattr(desca_worker, "encode_infoset_eppbs_interleaved_v2", _encode_stub)
+
     # Force the worker to treat all abstract classes as legal: we replace
     # abstract_actions with a stub returning True on a fixed subset.
     def _abstract_stub(legal_actions, agent_state):
@@ -512,9 +532,7 @@ class TestWorkerOutputs:
         # Traversals must have been initiated.
         assert result.traversals_started == 5
 
-    def test_worker_produces_regret_variance_over_iters(
-        self, stub_env_factory
-    ) -> None:
+    def test_worker_produces_regret_variance_over_iters(self, stub_env_factory) -> None:
         """Tier 2 information flow: regret targets are not uniformly zero.
 
         A synthetic engine whose payoff differs per first-action yields
@@ -541,9 +559,9 @@ class TestWorkerOutputs:
         if not all_targets:
             pytest.skip("No regret samples were generated.")
         flat = np.concatenate(all_targets)
-        assert flat.std() > 0.05, (
-            f"expected std > 0.05 on decision infosets, got {flat.std():.4f}"
-        )
+        assert (
+            flat.std() > 0.05
+        ), f"expected std > 0.05 on decision infosets, got {flat.std():.4f}"
 
 
 # ---------------------------------------------------------------------------
@@ -661,9 +679,7 @@ class TestDESCATrainer:
             p.data.add_(1.0)
         fresh.load_checkpoint(ckpt_path)
 
-        for p1, p2 in zip(
-            trainer.regret_net.parameters(), fresh.regret_net.parameters()
-        ):
+        for p1, p2 in zip(trainer.regret_net.parameters(), fresh.regret_net.parameters()):
             assert torch.allclose(p1, p2, atol=1e-6)
         for p1, p2 in zip(
             trainer.avg_strategy_net.parameters(),
@@ -677,9 +693,7 @@ class TestDESCATrainer:
             assert torch.allclose(p1, p2, atol=1e-6)
         assert fresh.iteration == trainer.iteration
 
-    def test_stall_detection_requires_floor(
-        self, stub_env_factory, tmp_path
-    ) -> None:
+    def test_stall_detection_requires_floor(self, stub_env_factory, tmp_path) -> None:
         trainer = _make_trainer("rm_plus", stub_env_factory, tmp_path)
         # Populate window_means with no improvement but iteration below the floor.
         trainer._window_means = [0.40, 0.40, 0.40, 0.40, 0.40, 0.40]
@@ -689,9 +703,7 @@ class TestDESCATrainer:
         trainer.iteration = 600
         assert trainer._detect_stall() is True
 
-    def test_record_mean_imp_updates_windows(
-        self, stub_env_factory, tmp_path
-    ) -> None:
+    def test_record_mean_imp_updates_windows(self, stub_env_factory, tmp_path) -> None:
         trainer = _make_trainer("rm_plus", stub_env_factory, tmp_path)
         trainer.iteration = 50
         trainer.record_mean_imp(0.42)

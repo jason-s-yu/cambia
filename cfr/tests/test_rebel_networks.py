@@ -12,7 +12,6 @@ from src.networks import PBSValueNetwork, PBSPolicyNetwork
 from src.config import DeepCfrConfig, load_config
 from src.cfr.exceptions import InvalidNetworkInputError
 
-
 # ---------------------------------------------------------------------------
 # PBSValueNetwork
 # ---------------------------------------------------------------------------
@@ -47,9 +46,9 @@ def test_pbs_value_network_no_nan():
 def test_pbs_value_network_param_count():
     net = PBSValueNetwork()
     total = sum(p.numel() for p in net.parameters())
-    assert 2_500_000 <= total <= 5_000_000, (
-        f"Expected parameter count in [2.5M, 5M], got {total:,}"
-    )
+    assert (
+        2_500_000 <= total <= 5_000_000
+    ), f"Expected parameter count in [2.5M, 5M], got {total:,}"
 
 
 # ---------------------------------------------------------------------------
@@ -75,14 +74,14 @@ def test_pbs_policy_network_masked_softmax():
     out = net(x, mask)
     # Each row should sum to ~1
     row_sums = out.sum(dim=-1)
-    assert torch.allclose(row_sums, torch.ones(batch), atol=1e-5), (
-        f"Row sums not close to 1: {row_sums}"
-    )
+    assert torch.allclose(
+        row_sums, torch.ones(batch), atol=1e-5
+    ), f"Row sums not close to 1: {row_sums}"
     # Masked-out positions should be ~0
     masked_vals = out[:, 10:]
-    assert (masked_vals < 1e-6).all(), (
-        f"Masked positions are non-zero: max={masked_vals.max().item()}"
-    )
+    assert (
+        masked_vals < 1e-6
+    ).all(), f"Masked positions are non-zero: max={masked_vals.max().item()}"
 
 
 def test_pbs_policy_network_gradient_flow():
@@ -100,9 +99,9 @@ def test_pbs_policy_network_gradient_flow():
 def test_pbs_policy_network_param_count():
     net = PBSPolicyNetwork()
     total = sum(p.numel() for p in net.parameters())
-    assert 500_000 <= total <= 1_000_000, (
-        f"Expected parameter count in [0.5M, 1M], got {total:,}"
-    )
+    assert (
+        500_000 <= total <= 1_000_000
+    ), f"Expected parameter count in [0.5M, 1M], got {total:,}"
 
 
 # ---------------------------------------------------------------------------

@@ -166,7 +166,11 @@ def test_backfill_run_missing_resume_state_raises(tmp_path):
 
 
 def test_cli_help_runs():
-    script = Path(__file__).resolve().parent.parent / "scripts" / "backfill_imported_checkpoints.py"
+    script = (
+        Path(__file__).resolve().parent.parent
+        / "scripts"
+        / "backfill_imported_checkpoints.py"
+    )
     result = subprocess.run(
         [sys.executable, str(script), "--help"],
         capture_output=True,

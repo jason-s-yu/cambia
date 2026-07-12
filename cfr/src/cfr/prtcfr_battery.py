@@ -151,7 +151,12 @@ def build_production_battery_eval_fn(
         logger.info(
             "[prtcfr-battery] iter=%d tier_a_lbr=%.6f (games=%d depth=%d "
             "infosets_sampled=%d window=[1..%d])",
-            t, lbr, games, depth, int(result.get("num_infosets_sampled", 0)), t,
+            t,
+            lbr,
+            games,
+            depth,
+            int(result.get("num_infosets_sampled", 0)),
+            t,
         )
         return lbr
 

@@ -44,8 +44,18 @@ def _make_fake_checkpoint(
     from src.networks import AdvantageNetwork, StrategyNetwork
     from src.encoding import INPUT_DIM, NUM_ACTIONS
 
-    net = AdvantageNetwork(input_dim=INPUT_DIM, hidden_dim=hidden_dim, output_dim=NUM_ACTIONS, validate_inputs=False)
-    strat_net = StrategyNetwork(input_dim=INPUT_DIM, hidden_dim=hidden_dim, output_dim=NUM_ACTIONS, validate_inputs=False)
+    net = AdvantageNetwork(
+        input_dim=INPUT_DIM,
+        hidden_dim=hidden_dim,
+        output_dim=NUM_ACTIONS,
+        validate_inputs=False,
+    )
+    strat_net = StrategyNetwork(
+        input_dim=INPUT_DIM,
+        hidden_dim=hidden_dim,
+        output_dim=NUM_ACTIONS,
+        validate_inputs=False,
+    )
 
     checkpoint = {
         "training_step": training_step,
@@ -72,28 +82,44 @@ class TestCollectMetrics:
 
     def _fake_multi_baseline_results(self) -> dict:
         """Returns fake run_evaluation_multi_baseline results."""
-        baselines = ["random", "random_no_cambia", "random_late_cambia", "greedy", "imperfect_greedy", "memory_heuristic", "aggressive_snap"]
+        baselines = [
+            "random",
+            "random_no_cambia",
+            "random_late_cambia",
+            "greedy",
+            "imperfect_greedy",
+            "memory_heuristic",
+            "aggressive_snap",
+        ]
         results = {}
         for bl in baselines:
-            results[bl] = Counter({
-                "P0 Wins": 55,
-                "P1 Wins": 40,
-                "Ties": 5,
-            })
+            results[bl] = Counter(
+                {
+                    "P0 Wins": 55,
+                    "P1 Wins": 40,
+                    "Ties": 5,
+                }
+            )
         return results
 
     def test_jsonl_row_schema(self, tmp_path):
         """Each JSONL row must contain the required schema fields."""
         import torch
+
         ckpt_path = _make_fake_checkpoint(tmp_path, training_step=50)
 
         fake_results = self._fake_multi_baseline_results()
         fake_config = MagicMock()
         fake_config.cambia_rules = MagicMock()
 
-        with patch("scripts.collect_metrics.run_evaluation_multi_baseline", return_value=fake_results), \
-             patch("scripts.collect_metrics.load_config", return_value=fake_config), \
-             patch("scripts.collect_metrics.torch.load") as mock_load:
+        with (
+            patch(
+                "scripts.collect_metrics.run_evaluation_multi_baseline",
+                return_value=fake_results,
+            ),
+            patch("scripts.collect_metrics.load_config", return_value=fake_config),
+            patch("scripts.collect_metrics.torch.load") as mock_load,
+        ):
 
             mock_load.return_value = {
                 "training_step": 50,
@@ -120,8 +146,17 @@ class TestCollectMetrics:
         assert metrics_path.exists(), "metrics.jsonl was not created"
 
         required_fields = {
-            "run", "iter", "baseline", "win_rate", "games_played",
-            "p0_wins", "p1_wins", "ties", "adv_loss", "strat_loss", "timestamp",
+            "run",
+            "iter",
+            "baseline",
+            "win_rate",
+            "games_played",
+            "p0_wins",
+            "p1_wins",
+            "ties",
+            "adv_loss",
+            "strat_loss",
+            "timestamp",
             "avg_game_turns",
         }
         rows = []
@@ -142,9 +177,14 @@ class TestCollectMetrics:
         }
         fake_config = MagicMock()
 
-        with patch("scripts.collect_metrics.run_evaluation_multi_baseline", return_value=fake_results), \
-             patch("scripts.collect_metrics.load_config", return_value=fake_config), \
-             patch("scripts.collect_metrics.torch.load") as mock_load:
+        with (
+            patch(
+                "scripts.collect_metrics.run_evaluation_multi_baseline",
+                return_value=fake_results,
+            ),
+            patch("scripts.collect_metrics.load_config", return_value=fake_config),
+            patch("scripts.collect_metrics.torch.load") as mock_load,
+        ):
 
             mock_load.return_value = {
                 "training_step": 25,
@@ -163,6 +203,7 @@ class TestCollectMetrics:
 
             # Temporarily override ALL_BASELINES to just "random".
             import scripts.collect_metrics as cm_mod
+
             original_baselines = cm_mod.ALL_BASELINES
             cm_mod.ALL_BASELINES = ["random"]
             try:
@@ -191,7 +232,10 @@ class TestCollectMetrics:
         """Iteration number should be inferred from checkpoint filename when not in metadata."""
         from scripts.collect_metrics import _infer_iter_from_path
 
-        assert _infer_iter_from_path("runs/os-20/checkpoints/deep_cfr_checkpoint_iter_75.pt") == 75
+        assert (
+            _infer_iter_from_path("runs/os-20/checkpoints/deep_cfr_checkpoint_iter_75.pt")
+            == 75
+        )
         assert _infer_iter_from_path("deep_cfr_checkpoint_iter_1.pt") == 1
         assert _infer_iter_from_path("deep_cfr_checkpoint.pt") == -1
 
@@ -232,17 +276,41 @@ class TestCollectMetrics:
         original_baselines = cm_mod.ALL_BASELINES
         cm_mod.ALL_BASELINES = ["random"]
 
-        with patch("scripts.collect_metrics.run_evaluation_multi_baseline", return_value=fake_results), \
-             patch("scripts.collect_metrics.load_config", return_value=fake_config), \
-             patch("scripts.collect_metrics.torch.load") as mock_load:
-            mock_load.return_value = {"training_step": 10, "dcfr_config": {}, "adv_loss_history": [], "strat_loss_history": []}
-            cm_mod.collect_metrics(str(run_dir), str(tmp_path / "ckpt.pt"), 10, config_path)
+        with (
+            patch(
+                "scripts.collect_metrics.run_evaluation_multi_baseline",
+                return_value=fake_results,
+            ),
+            patch("scripts.collect_metrics.load_config", return_value=fake_config),
+            patch("scripts.collect_metrics.torch.load") as mock_load,
+        ):
+            mock_load.return_value = {
+                "training_step": 10,
+                "dcfr_config": {},
+                "adv_loss_history": [],
+                "strat_loss_history": [],
+            }
+            cm_mod.collect_metrics(
+                str(run_dir), str(tmp_path / "ckpt.pt"), 10, config_path
+            )
 
-        with patch("scripts.collect_metrics.run_evaluation_multi_baseline", return_value=fake_results), \
-             patch("scripts.collect_metrics.load_config", return_value=fake_config), \
-             patch("scripts.collect_metrics.torch.load") as mock_load:
-            mock_load.return_value = {"training_step": 20, "dcfr_config": {}, "adv_loss_history": [], "strat_loss_history": []}
-            cm_mod.collect_metrics(str(run_dir), str(tmp_path / "ckpt.pt"), 10, config_path)
+        with (
+            patch(
+                "scripts.collect_metrics.run_evaluation_multi_baseline",
+                return_value=fake_results,
+            ),
+            patch("scripts.collect_metrics.load_config", return_value=fake_config),
+            patch("scripts.collect_metrics.torch.load") as mock_load,
+        ):
+            mock_load.return_value = {
+                "training_step": 20,
+                "dcfr_config": {},
+                "adv_loss_history": [],
+                "strat_loss_history": [],
+            }
+            cm_mod.collect_metrics(
+                str(run_dir), str(tmp_path / "ckpt.pt"), 10, config_path
+            )
 
         cm_mod.ALL_BASELINES = original_baselines
 
@@ -369,7 +437,12 @@ class TestKLDivergence:
 
         def _make_ckpt(filename, seed):
             torch.manual_seed(seed)
-            net = AdvantageNetwork(input_dim=INPUT_DIM, hidden_dim=64, output_dim=NUM_ACTIONS, validate_inputs=False)
+            net = AdvantageNetwork(
+                input_dim=INPUT_DIM,
+                hidden_dim=64,
+                output_dim=NUM_ACTIONS,
+                validate_inputs=False,
+            )
             # Re-initialize with different random seed.
             for p in net.parameters():
                 p.data = torch.randn_like(p.data)
@@ -410,8 +483,32 @@ class TestPlotMetrics:
     def _write_sample_metrics(self, runs_dir: Path) -> None:
         """Write sample metrics.jsonl files to test runs."""
         runs = [
-            {"run": "os-20", "iters": [25, 50], "baselines": ["random", "random_no_cambia", "random_late_cambia", "greedy", "imperfect_greedy", "memory_heuristic", "aggressive_snap"]},
-            {"run": "os-30", "iters": [25], "baselines": ["random", "random_no_cambia", "random_late_cambia", "greedy", "imperfect_greedy", "memory_heuristic", "aggressive_snap"]},
+            {
+                "run": "os-20",
+                "iters": [25, 50],
+                "baselines": [
+                    "random",
+                    "random_no_cambia",
+                    "random_late_cambia",
+                    "greedy",
+                    "imperfect_greedy",
+                    "memory_heuristic",
+                    "aggressive_snap",
+                ],
+            },
+            {
+                "run": "os-30",
+                "iters": [25],
+                "baselines": [
+                    "random",
+                    "random_no_cambia",
+                    "random_late_cambia",
+                    "greedy",
+                    "imperfect_greedy",
+                    "memory_heuristic",
+                    "aggressive_snap",
+                ],
+            },
         ]
         for run_spec in runs:
             run_dir = runs_dir / run_spec["run"]
@@ -487,11 +584,14 @@ class TestPlotMetrics:
                     "baseline": "random",
                     "win_rate": 0.5,
                     "games_played": 100,
-                    "p0_wins": 50, "p1_wins": 50, "ties": 0,
+                    "p0_wins": 50,
+                    "p1_wins": 50,
+                    "ties": 0,
                     "avg_game_turns": 15.0,
                     "t1_cambia_rate": 0.35,
                     "avg_score_margin": 8.5,
-                    "adv_loss": 3.5, "strat_loss": 0.06,
+                    "adv_loss": 3.5,
+                    "strat_loss": 0.06,
                     "timestamp": "2026-02-19T12:00:00Z",
                 }
                 f.write(json.dumps(row) + "\n")
@@ -521,9 +621,13 @@ class TestPlotMetrics:
         run_dir = tmp_path / "bad-run"
         run_dir.mkdir()
         with open(run_dir / "metrics.jsonl", "w") as f:
-            f.write('{"run": "bad-run", "iter": 1, "baseline": "random", "win_rate": 0.5, "games_played": 10, "p0_wins": 5, "p1_wins": 5, "ties": 0, "avg_game_turns": 15.0, "t1_cambia_rate": 0.35, "avg_score_margin": 8.5, "adv_loss": null, "strat_loss": null, "timestamp": "2026-02-19T12:00:00Z"}\n')
+            f.write(
+                '{"run": "bad-run", "iter": 1, "baseline": "random", "win_rate": 0.5, "games_played": 10, "p0_wins": 5, "p1_wins": 5, "ties": 0, "avg_game_turns": 15.0, "t1_cambia_rate": 0.35, "avg_score_margin": 8.5, "adv_loss": null, "strat_loss": null, "timestamp": "2026-02-19T12:00:00Z"}\n'
+            )
             f.write("NOT VALID JSON {\n")
-            f.write('{"run": "bad-run", "iter": 2, "baseline": "random", "win_rate": 0.6, "games_played": 10, "p0_wins": 6, "p1_wins": 4, "ties": 0, "avg_game_turns": 15.0, "t1_cambia_rate": 0.35, "avg_score_margin": 8.5, "adv_loss": null, "strat_loss": null, "timestamp": "2026-02-19T12:00:00Z"}\n')
+            f.write(
+                '{"run": "bad-run", "iter": 2, "baseline": "random", "win_rate": 0.6, "games_played": 10, "p0_wins": 6, "p1_wins": 4, "ties": 0, "avg_game_turns": 15.0, "t1_cambia_rate": 0.35, "avg_score_margin": 8.5, "adv_loss": null, "strat_loss": null, "timestamp": "2026-02-19T12:00:00Z"}\n'
+            )
 
         rows = load_all_metrics(tmp_path)
         # Only 2 valid rows.

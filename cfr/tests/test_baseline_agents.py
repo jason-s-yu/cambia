@@ -27,7 +27,6 @@ from src.constants import (
 )
 from src.card import Card
 
-
 # ---------------------------------------------------------------------------
 # Minimal config stubs (avoid importing yaml-dependent Config)
 # ---------------------------------------------------------------------------
@@ -86,6 +85,7 @@ def default_config() -> _TestConfig:
 def _make_rules(**kwargs):
     """Create a CambiaRulesConfig from the stub (conftest-injected) module."""
     from src.config import CambiaRulesConfig as _RC
+
     # The stub class may not accept kwargs; fall back to setting attrs manually.
     try:
         obj = _RC(**kwargs)
@@ -176,6 +176,7 @@ def run_agent_through_game(agent: BaseAgent, num_turns: int = 50) -> int:
         if acting != agent.player_id:
             # Opponent's turn: use random agent
             import random
+
             action = random.choice(list(legal_actions))
         else:
             action = agent.choose_action(game, legal_actions)
@@ -197,6 +198,7 @@ class TestLegalActionValidity:
     @pytest.mark.parametrize("seed", range(20))
     def test_random_agent_legal_actions(self, seed, default_config):
         import random
+
         random.seed(seed)
         agent = RandomAgent(player_id=0, config=default_config)
         turns = run_agent_through_game(agent, num_turns=60)
@@ -205,6 +207,7 @@ class TestLegalActionValidity:
     @pytest.mark.parametrize("seed", range(20))
     def test_greedy_agent_legal_actions(self, seed, default_config):
         import random
+
         random.seed(seed)
         agent = GreedyAgent(player_id=0, config=default_config)
         turns = run_agent_through_game(agent, num_turns=60)
@@ -213,6 +216,7 @@ class TestLegalActionValidity:
     @pytest.mark.parametrize("seed", range(20))
     def test_imperfect_greedy_legal_actions(self, seed, default_config):
         import random
+
         random.seed(seed)
         agent = ImperfectGreedyAgent(player_id=0, config=default_config)
         turns = run_agent_through_game(agent, num_turns=60)
@@ -221,6 +225,7 @@ class TestLegalActionValidity:
     @pytest.mark.parametrize("seed", range(20))
     def test_memory_heuristic_legal_actions(self, seed, default_config):
         import random
+
         random.seed(seed)
         agent = MemoryHeuristicAgent(player_id=0, config=default_config)
         turns = run_agent_through_game(agent, num_turns=60)
@@ -229,6 +234,7 @@ class TestLegalActionValidity:
     @pytest.mark.parametrize("seed", range(20))
     def test_aggressive_snap_legal_actions(self, seed, default_config):
         import random
+
         random.seed(seed)
         agent = AggressiveSnapAgent(player_id=0, config=default_config)
         turns = run_agent_through_game(agent, num_turns=60)
@@ -243,6 +249,7 @@ class TestLegalActionValidity:
 def run_full_games(AgentClass, num_games: int = 5, max_turns: int = 200):
     """Run multiple complete games with the agent as P0, random as P1."""
     import random
+
     config = make_config()
     for seed in range(num_games):
         random.seed(seed * 17 + 3)
@@ -364,6 +371,7 @@ class TestSnapPhaseHandling:
     def test_handles_snap_phase_without_crash(self, AgentClass, default_config):
         """Run games with snap enabled and ensure no crashes."""
         import random
+
         random.seed(42)
         # Enable snapping
         rules = _make_rules(
@@ -386,9 +394,9 @@ class TestSnapPhaseHandling:
 
             if acting == 0:
                 action = agent.choose_action(game, legal)
-                assert action in legal, (
-                    f"{AgentClass.__name__} chose illegal action {action}"
-                )
+                assert (
+                    action in legal
+                ), f"{AgentClass.__name__} chose illegal action {action}"
             else:
                 action = random.choice(list(legal))
 
@@ -408,6 +416,7 @@ class TestAbilityPhaseHandling:
     def test_handles_ability_phases(self, AgentClass, default_config):
         """Run multiple games and ensure ability phases are handled."""
         import random
+
         config = make_config()
         for seed in range(5):
             random.seed(seed * 31)
@@ -445,6 +454,7 @@ class TestAgentBehaviors:
     def test_random_agent_is_nondeterministic(self, default_config):
         """RandomAgent should occasionally make different choices."""
         import random
+
         agent = RandomAgent(player_id=0, config=default_config)
         game = make_game()
         legal = game.get_legal_actions()
@@ -458,6 +468,7 @@ class TestAgentBehaviors:
     def test_greedy_agent_calls_cambia_with_low_hand(self, default_config):
         """GreedyAgent should call Cambia when hand value is below threshold."""
         from src.card import Card
+
         agent = GreedyAgent(player_id=0, config=default_config)
         game = make_game()
 
@@ -499,7 +510,11 @@ class TestAgentBehaviors:
 
     def test_imperfect_agents_dont_snap_unknown_own_cards(self, default_config):
         """Imperfect agents should not snap own cards they haven't seen."""
-        for AgentClass in [ImperfectGreedyAgent, MemoryHeuristicAgent, AggressiveSnapAgent]:
+        for AgentClass in [
+            ImperfectGreedyAgent,
+            MemoryHeuristicAgent,
+            AggressiveSnapAgent,
+        ]:
             agent = AgentClass(player_id=0, config=default_config)
             game = make_game()
             agent._ensure_initialized(game)
@@ -516,9 +531,9 @@ class TestAgentBehaviors:
             game.snap_phase_active = True
             action = agent.choose_action(game, legal)
             # Should pass since card at slot 0 is unknown
-            assert action == pass_snap, (
-                f"{AgentClass.__name__} should pass snap for unknown card, chose {action}"
-            )
+            assert (
+                action == pass_snap
+            ), f"{AgentClass.__name__} should pass snap for unknown card, chose {action}"
             game.snap_phase_active = False
 
     def test_memory_heuristic_always_draws_stockpile(self, default_config):
@@ -527,6 +542,7 @@ class TestAgentBehaviors:
         game = make_game()
         # Give a discard action too
         from src.constants import ActionDrawDiscard
+
         legal = {ActionDrawStockpile(), ActionDrawDiscard()}
         action = agent.choose_action(game, legal)
         assert action == ActionDrawStockpile()
@@ -534,6 +550,7 @@ class TestAgentBehaviors:
     def test_aggressive_snap_snaps_known_opponent_card(self, default_config):
         """AggressiveSnapAgent should snap opponent cards it knows match discard."""
         from src.card import Card
+
         agent = AggressiveSnapAgent(player_id=0, config=default_config)
         game = make_game()
         agent._ensure_initialized(game)
@@ -555,7 +572,7 @@ class TestAgentBehaviors:
 
         game.snap_phase_active = True
         action = agent.choose_action(game, legal)
-        assert action == snap_opp, (
-            f"AggressiveSnapAgent should snap opponent's known card, chose {action}"
-        )
+        assert (
+            action == snap_opp
+        ), f"AggressiveSnapAgent should snap opponent's known card, chose {action}"
         game.snap_phase_active = False

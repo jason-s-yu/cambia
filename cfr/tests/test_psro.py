@@ -125,6 +125,7 @@ class TestPlackettLuce:
         pop = oracle.population
         # Create perfectly symmetric orderings: each permutation of 3 players
         from itertools import permutations
+
         orderings = list(permutations(range(3)))
         ratings = oracle._plackett_luce_ratings(pop, orderings)
         # All ratings should be near 1.0 (normalized to sum=n)

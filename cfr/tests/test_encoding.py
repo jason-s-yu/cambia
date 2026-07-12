@@ -59,8 +59,8 @@ from src.encoding import (
     index_to_action,
 )
 
-
 # --- Helper to build a fake AgentState ---
+
 
 def _make_agent_state(
     player_id=0,
@@ -74,13 +74,9 @@ def _make_agent_state(
 ):
     """Build a SimpleNamespace that matches the AgentState interface for encode_infoset."""
     if own_hand is None:
-        own_hand = {
-            i: KnownCardInfo(bucket=CardBucket.UNKNOWN) for i in range(4)
-        }
+        own_hand = {i: KnownCardInfo(bucket=CardBucket.UNKNOWN) for i in range(4)}
     if opponent_belief is None:
-        opponent_belief = {
-            i: CardBucket.UNKNOWN for i in range(opponent_card_count)
-        }
+        opponent_belief = {i: CardBucket.UNKNOWN for i in range(opponent_card_count)}
     return SimpleNamespace(
         player_id=player_id,
         own_hand=own_hand,
@@ -229,9 +225,7 @@ class TestEncodeInfoset:
     def test_card_counts_normalized(self):
         """Own and opponent card counts are normalized by MAX_HAND."""
         state = _make_agent_state(opponent_card_count=3)
-        state.own_hand = {
-            i: KnownCardInfo(bucket=CardBucket.UNKNOWN) for i in range(5)
-        }
+        state.own_hand = {i: KnownCardInfo(bucket=CardBucket.UNKNOWN) for i in range(5)}
         features = encode_infoset(state, DecisionContext.START_TURN)
         count_offset = 2 * MAX_HAND * SLOT_ENCODING_DIM  # 180
         assert features[count_offset] == pytest.approx(5 / MAX_HAND)  # own
@@ -240,9 +234,7 @@ class TestEncodeInfoset:
     def test_card_count_clamped_to_max(self):
         """Card counts exceeding MAX_HAND are clamped."""
         state = _make_agent_state(opponent_card_count=8)
-        state.own_hand = {
-            i: KnownCardInfo(bucket=CardBucket.UNKNOWN) for i in range(8)
-        }
+        state.own_hand = {i: KnownCardInfo(bucket=CardBucket.UNKNOWN) for i in range(8)}
         features = encode_infoset(state, DecisionContext.START_TURN)
         count_offset = 2 * MAX_HAND * SLOT_ENCODING_DIM
         assert features[count_offset] == pytest.approx(1.0)  # clamped to 6/6
@@ -380,9 +372,7 @@ class TestEncodeInfoset:
 
     def test_max_hand_six_slots(self):
         """A full 6-card hand fills all own slots."""
-        own_hand = {
-            i: KnownCardInfo(bucket=CardBucket.ACE) for i in range(6)
-        }
+        own_hand = {i: KnownCardInfo(bucket=CardBucket.ACE) for i in range(6)}
         state = _make_agent_state(own_hand=own_hand)
         features = encode_infoset(state, DecisionContext.START_TURN)
         for slot in range(6):
@@ -449,7 +439,9 @@ class TestActionToIndex:
 
     def test_peek_own(self):
         for i in range(MAX_HAND):
-            assert action_to_index(ActionAbilityPeekOwnSelect(target_hand_index=i)) == 11 + i
+            assert (
+                action_to_index(ActionAbilityPeekOwnSelect(target_hand_index=i)) == 11 + i
+            )
 
     def test_peek_other(self):
         for i in range(MAX_HAND):
@@ -475,12 +467,18 @@ class TestActionToIndex:
 
     def test_blind_swap_boundaries(self):
         """First and last BlindSwap index."""
-        assert action_to_index(
-            ActionAbilityBlindSwapSelect(own_hand_index=0, opponent_hand_index=0)
-        ) == 23
-        assert action_to_index(
-            ActionAbilityBlindSwapSelect(own_hand_index=5, opponent_hand_index=5)
-        ) == 58
+        assert (
+            action_to_index(
+                ActionAbilityBlindSwapSelect(own_hand_index=0, opponent_hand_index=0)
+            )
+            == 23
+        )
+        assert (
+            action_to_index(
+                ActionAbilityBlindSwapSelect(own_hand_index=5, opponent_hand_index=5)
+            )
+            == 58
+        )
 
     def test_king_look(self):
         for own in range(MAX_HAND):
@@ -496,12 +494,18 @@ class TestActionToIndex:
                 )
 
     def test_king_look_boundaries(self):
-        assert action_to_index(
-            ActionAbilityKingLookSelect(own_hand_index=0, opponent_hand_index=0)
-        ) == 59
-        assert action_to_index(
-            ActionAbilityKingLookSelect(own_hand_index=5, opponent_hand_index=5)
-        ) == 94
+        assert (
+            action_to_index(
+                ActionAbilityKingLookSelect(own_hand_index=0, opponent_hand_index=0)
+            )
+            == 59
+        )
+        assert (
+            action_to_index(
+                ActionAbilityKingLookSelect(own_hand_index=5, opponent_hand_index=5)
+            )
+            == 94
+        )
 
     def test_king_swap_decision(self):
         assert action_to_index(ActionAbilityKingSwapDecision(perform_swap=False)) == 95
@@ -536,17 +540,29 @@ class TestActionToIndex:
                 )
 
     def test_snap_opponent_move_boundaries(self):
-        assert action_to_index(
-            ActionSnapOpponentMove(own_card_to_move_hand_index=0, target_empty_slot_index=0)
-        ) == 110
-        assert action_to_index(
-            ActionSnapOpponentMove(own_card_to_move_hand_index=5, target_empty_slot_index=5)
-        ) == 145
+        assert (
+            action_to_index(
+                ActionSnapOpponentMove(
+                    own_card_to_move_hand_index=0, target_empty_slot_index=0
+                )
+            )
+            == 110
+        )
+        assert (
+            action_to_index(
+                ActionSnapOpponentMove(
+                    own_card_to_move_hand_index=5, target_empty_slot_index=5
+                )
+            )
+            == 145
+        )
 
     def test_max_index_is_145(self):
         """The highest valid action index should be 145 (NUM_ACTIONS - 1)."""
         max_idx = action_to_index(
-            ActionSnapOpponentMove(own_card_to_move_hand_index=5, target_empty_slot_index=5)
+            ActionSnapOpponentMove(
+                own_card_to_move_hand_index=5, target_empty_slot_index=5
+            )
         )
         assert max_idx == NUM_ACTIONS - 1
 
@@ -568,18 +584,24 @@ class TestActionToIndex:
         for own in range(MAX_HAND):
             for opp in range(MAX_HAND):
                 all_actions.append(
-                    ActionAbilityBlindSwapSelect(own_hand_index=own, opponent_hand_index=opp)
+                    ActionAbilityBlindSwapSelect(
+                        own_hand_index=own, opponent_hand_index=opp
+                    )
                 )
         for own in range(MAX_HAND):
             for opp in range(MAX_HAND):
                 all_actions.append(
-                    ActionAbilityKingLookSelect(own_hand_index=own, opponent_hand_index=opp)
+                    ActionAbilityKingLookSelect(
+                        own_hand_index=own, opponent_hand_index=opp
+                    )
                 )
-        all_actions.extend([
-            ActionAbilityKingSwapDecision(perform_swap=False),
-            ActionAbilityKingSwapDecision(perform_swap=True),
-            ActionPassSnap(),
-        ])
+        all_actions.extend(
+            [
+                ActionAbilityKingSwapDecision(perform_swap=False),
+                ActionAbilityKingSwapDecision(perform_swap=True),
+                ActionPassSnap(),
+            ]
+        )
         for i in range(MAX_HAND):
             all_actions.append(ActionSnapOwn(own_card_hand_index=i))
         for i in range(MAX_HAND):
@@ -695,7 +717,7 @@ class TestEncodeActionMask:
             ActionSnapOpponent(opponent_target_hand_index=1),
         ]
         mask = encode_action_mask(actions)
-        assert mask[97]   # PassSnap
+        assert mask[97]  # PassSnap
         assert mask[100]  # SnapOwn(2)
         assert mask[105]  # SnapOpponent(1)
         assert mask.sum() == 3
@@ -717,7 +739,7 @@ class TestEncodeActionMask:
 # Padding:       dims [198-199]
 
 _SLOT_BLOCK = 13  # EP_PBS_TAG_DIM(4) + EP_PBS_BUCKET_DIM(9)
-_PUB_DIM = 42    # length of public feature region
+_PUB_DIM = 42  # length of public feature region
 
 
 def _make_eppbs_inputs(
@@ -753,9 +775,7 @@ class TestEncodeInfosetEppbsInterleaved:
     def test_interleaved_total_dim(self):
         """Output shape is exactly (EP_PBS_INPUT_DIM,) with float32 dtype."""
         slot_tags, slot_buckets = _make_eppbs_inputs()
-        out = encode_infoset_eppbs_interleaved(
-            slot_tags, slot_buckets, 0, 0, 1, 0, 2
-        )
+        out = encode_infoset_eppbs_interleaved(slot_tags, slot_buckets, 0, 0, 1, 0, 2)
         assert out.shape == (EP_PBS_INPUT_DIM,)
         assert out.dtype == np.float32
 
@@ -763,13 +783,17 @@ class TestEncodeInfosetEppbsInterleaved:
         """Dims [42:55] = slot 0 (13 dims), [55:68] = slot 1, etc."""
         # Use PRIV_OWN for slot 0 with bucket=2 (ACE), PUB for slot 1 with bucket=3
         slot_tags, slot_buckets = _make_eppbs_inputs(
-            own_tags=[EpistemicTag.PRIV_OWN, EpistemicTag.PUB, EpistemicTag.UNK,
-                      EpistemicTag.UNK, EpistemicTag.UNK, EpistemicTag.UNK],
+            own_tags=[
+                EpistemicTag.PRIV_OWN,
+                EpistemicTag.PUB,
+                EpistemicTag.UNK,
+                EpistemicTag.UNK,
+                EpistemicTag.UNK,
+                EpistemicTag.UNK,
+            ],
             own_buckets=[2, 3, 0, 0, 0, 0],
         )
-        out = encode_infoset_eppbs_interleaved(
-            slot_tags, slot_buckets, 0, 0, 1, 0, 2
-        )
+        out = encode_infoset_eppbs_interleaved(slot_tags, slot_buckets, 0, 0, 1, 0, 2)
 
         # Slot 0 block: dims [42:55]
         slot0 = out[42:55]
@@ -795,8 +819,15 @@ class TestEncodeInfosetEppbsInterleaved:
         """Dim [40] = own_hand_size/6.0, dim [41] = opp_hand_size/6.0."""
         slot_tags, slot_buckets = _make_eppbs_inputs(own_hand_size=4, opp_hand_size=5)
         out = encode_infoset_eppbs_interleaved(
-            slot_tags, slot_buckets, 0, 0, 1, 0, 2,
-            own_hand_size=4, opp_hand_size=5,
+            slot_tags,
+            slot_buckets,
+            0,
+            0,
+            1,
+            0,
+            2,
+            own_hand_size=4,
+            opp_hand_size=5,
         )
         assert out[40] == pytest.approx(4 / 6.0), "dim[40] should be own_hand_size/6"
         assert out[41] == pytest.approx(5 / 6.0), "dim[41] should be opp_hand_size/6"
@@ -809,8 +840,15 @@ class TestEncodeInfosetEppbsInterleaved:
             own_tags=own_tags, own_buckets=own_buckets
         )
         out = encode_infoset_eppbs_interleaved(
-            slot_tags, slot_buckets, 0, 0, 1, 0, 2,
-            own_hand_size=4, opp_hand_size=6,
+            slot_tags,
+            slot_buckets,
+            0,
+            0,
+            1,
+            0,
+            2,
+            own_hand_size=4,
+            opp_hand_size=6,
         )
 
         # Slots 0-3 (own, active): should have non-zero tag data
@@ -829,16 +867,27 @@ class TestEncodeInfosetEppbsInterleaved:
         slot_tags = [EpistemicTag.UNK] * 12
         slot_buckets = [0] * 12
         out = encode_infoset_eppbs_interleaved(
-            slot_tags, slot_buckets, 0, 0, 1, 0, 2,
-            own_hand_size=4, opp_hand_size=6,
+            slot_tags,
+            slot_buckets,
+            0,
+            0,
+            1,
+            0,
+            2,
+            own_hand_size=4,
+            opp_hand_size=6,
         )
 
         # Slots 0-3: UNK → tag one-hot at index 0 = [1,0,0,0], identity all-zeros
         for i in range(4):
             slot_block = out[42 + i * _SLOT_BLOCK : 42 + (i + 1) * _SLOT_BLOCK]
             assert slot_block[0] == 1.0, f"Slot {i} UNK tag should be 1 at index 0"
-            assert slot_block[1:4].sum() == 0.0, f"Slot {i} UNK remaining tag bits should be 0"
-            assert slot_block[4:].sum() == 0.0, f"Slot {i} UNK identity should be all-zeros"
+            assert (
+                slot_block[1:4].sum() == 0.0
+            ), f"Slot {i} UNK remaining tag bits should be 0"
+            assert (
+                slot_block[4:].sum() == 0.0
+            ), f"Slot {i} UNK identity should be all-zeros"
 
         # Slots 4-5: EMPTY → entire 13-dim block is zero (no tag set)
         for i in range(4, 6):
@@ -849,8 +898,14 @@ class TestEncodeInfosetEppbsInterleaved:
 
     def test_interleaved_backward_compat(self):
         """encode_infoset_eppbs dims [0-39] equal encode_infoset_eppbs_interleaved dims [0-39]."""
-        own_tags = [EpistemicTag.PRIV_OWN, EpistemicTag.UNK, EpistemicTag.PUB,
-                    EpistemicTag.UNK, EpistemicTag.UNK, EpistemicTag.UNK]
+        own_tags = [
+            EpistemicTag.PRIV_OWN,
+            EpistemicTag.UNK,
+            EpistemicTag.PUB,
+            EpistemicTag.UNK,
+            EpistemicTag.UNK,
+            EpistemicTag.UNK,
+        ]
         opp_tags = [EpistemicTag.PRIV_OPP, EpistemicTag.UNK] * 3
         own_buckets = [2, 0, 5, 0, 0, 0]
         opp_buckets = [0] * 6
@@ -877,14 +932,15 @@ class TestEncodeInfosetEppbsInterleaved:
 
         # Public features [0-39] must be identical between both encodings
         np.testing.assert_array_equal(
-            out_orig[:40], out_interleaved[:40],
+            out_orig[:40],
+            out_interleaved[:40],
             err_msg="Public features [0-39] must be identical between both encodings",
         )
 
         # The two encodings must differ in layout (slot region is reorganized)
-        assert not np.array_equal(out_orig[40:], out_interleaved[40:]), (
-            "Slot regions should differ between non-interleaved and interleaved layouts"
-        )
+        assert not np.array_equal(
+            out_orig[40:], out_interleaved[40:]
+        ), "Slot regions should differ between non-interleaved and interleaved layouts"
 
 
 # ===== encode_infoset_eppbs_dealiased =====
@@ -913,37 +969,53 @@ class TestEncodeInfosetEppbsDealiased:
             own_buckets=[0] * 6,
         )
         out = encode_infoset_eppbs_dealiased(
-            slot_tags, slot_buckets, 0, 0, 1, 0, 2,
-            own_hand_size=4, opp_hand_size=6,
+            slot_tags,
+            slot_buckets,
+            0,
+            0,
+            1,
+            0,
+            2,
+            own_hand_size=4,
+            opp_hand_size=6,
         )
         assert out.shape == (EP_PBS_INPUT_DIM,)
         assert out.dtype == np.float32
 
         # Own slots 4 and 5 are empty: tag block dims [40+4*4 : 40+6*4] must be zeros
         slot4_tag_start = _DEALIASED_TAG_BASE + 4 * _DEALIASED_TAG_DIM  # 56
-        slot5_tag_end = _DEALIASED_TAG_BASE + 6 * _DEALIASED_TAG_DIM    # 64
-        assert np.all(out[slot4_tag_start:slot5_tag_end] == 0.0), (
-            "Empty own slots 4-5 tag region must be all-zeros (not UNK)"
-        )
+        slot5_tag_end = _DEALIASED_TAG_BASE + 6 * _DEALIASED_TAG_DIM  # 64
+        assert np.all(
+            out[slot4_tag_start:slot5_tag_end] == 0.0
+        ), "Empty own slots 4-5 tag region must be all-zeros (not UNK)"
 
         # Own slots 4 and 5 identity block: [88+4*9 : 88+6*9] must be zeros
-        slot4_id_start = _DEALIASED_ID_BASE + 4 * _DEALIASED_ID_DIM   # 124
-        slot5_id_end = _DEALIASED_ID_BASE + 6 * _DEALIASED_ID_DIM     # 142
-        assert np.all(out[slot4_id_start:slot5_id_end] == 0.0), (
-            "Empty own slots 4-5 identity region must be all-zeros"
-        )
+        slot4_id_start = _DEALIASED_ID_BASE + 4 * _DEALIASED_ID_DIM  # 124
+        slot5_id_end = _DEALIASED_ID_BASE + 6 * _DEALIASED_ID_DIM  # 142
+        assert np.all(
+            out[slot4_id_start:slot5_id_end] == 0.0
+        ), "Empty own slots 4-5 identity region must be all-zeros"
 
         # Active own slots 0-3 should have their UNK tag set (EpistemicTag.UNK=0 → index 0)
         for s in range(4):
             tag_start = _DEALIASED_TAG_BASE + s * _DEALIASED_TAG_DIM
-            assert out[tag_start] == 1.0, f"Active slot {s} should have UNK tag set at index 0"
+            assert (
+                out[tag_start] == 1.0
+            ), f"Active slot {s} should have UNK tag set at index 0"
 
     def test_eppbs_dealiased_hand_size_features(self):
         """Dim [196] = own_hand_size/6.0, dim [197] = opp_hand_size/6.0."""
         slot_tags, slot_buckets = _make_eppbs_inputs(own_hand_size=4, opp_hand_size=5)
         out = encode_infoset_eppbs_dealiased(
-            slot_tags, slot_buckets, 0, 0, 1, 0, 2,
-            own_hand_size=4, opp_hand_size=5,
+            slot_tags,
+            slot_buckets,
+            0,
+            0,
+            1,
+            0,
+            2,
+            own_hand_size=4,
+            opp_hand_size=5,
         )
         assert out[196] == pytest.approx(4 / 6.0), "Dim 196 should be own_hand_size/6.0"
         assert out[197] == pytest.approx(5 / 6.0), "Dim 197 should be opp_hand_size/6.0"
@@ -979,7 +1051,8 @@ class TestEncodeInfosetEppbsDealiased:
 
         # First 196 dims must be identical (no empty slots, same tag/id encoding)
         np.testing.assert_array_equal(
-            out_flat[:196], out_dealiased[:196],
+            out_flat[:196],
+            out_dealiased[:196],
             err_msg="First 196 dims must match between flat and dealiased (full 6-card hand)",
         )
 
@@ -988,7 +1061,9 @@ class TestEncodeInfosetEppbsDealiased:
         assert out_dealiased[197] == pytest.approx(1.0)
 
         # Flat encoder has 4 padding zeros at [196-199]
-        assert np.all(out_flat[196:] == 0.0), "Original flat encoder should have zeros at [196-199]"
+        assert np.all(
+            out_flat[196:] == 0.0
+        ), "Original flat encoder should have zeros at [196-199]"
 
     def test_eppbs_dealiased_cross_engine_parity(self):
         """Go and Python dealiased encoders produce identical vectors (FFI parity)."""
@@ -999,17 +1074,22 @@ class TestEncodeInfosetEppbsDealiased:
             pytest.skip("libcambia.so not available")
 
         from src.config import CambiaRulesConfig
+
         rules = CambiaRulesConfig()
 
         with GoEngine(seed=42, house_rules=rules) as engine:
             agent = GoAgentState(engine, player_id=0)
             try:
                 ctx = engine.decision_ctx()
-                go_vec = agent.encode_eppbs_dealiased(decision_context=ctx, drawn_bucket=-1)
+                go_vec = agent.encode_eppbs_dealiased(
+                    decision_context=ctx, drawn_bucket=-1
+                )
             finally:
                 agent.close()
 
-        assert go_vec.shape == (EP_PBS_INPUT_DIM,), f"Expected ({EP_PBS_INPUT_DIM},), got {go_vec.shape}"
+        assert go_vec.shape == (
+            EP_PBS_INPUT_DIM,
+        ), f"Expected ({EP_PBS_INPUT_DIM},), got {go_vec.shape}"
         assert go_vec.dtype == np.float32
 
         # Hand sizes at [196] and [197] must be in [0, 1]

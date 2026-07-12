@@ -47,7 +47,9 @@ def compute_stats(records: list[dict], baseline: str) -> dict:
         "p1_wins": p1_wins,
         "ties": ties,
         "avg_game_turns": round(avg_turns, 3) if avg_turns is not None else None,
-        "avg_score_margin": round(avg_score_margin, 3) if avg_score_margin is not None else None,
+        "avg_score_margin": (
+            round(avg_score_margin, 3) if avg_score_margin is not None else None
+        ),
     }
 
 
@@ -58,6 +60,7 @@ def load_losses(checkpoint_path: Path) -> tuple[float | None, float | None]:
         ck = torch.load(checkpoint_path, weights_only=True)
         adv = ck.get("advantage_loss_history") or ck.get("adv_loss_history")
         strat = ck.get("strategy_loss_history") or ck.get("strat_loss_history")
+
         def extract_last(history):
             if not history:
                 return None
@@ -104,7 +107,9 @@ def find_checkpoint(run_dir: Path, iter_num: int) -> Path | None:
             # Check if the last entry covers iter_num
             if adv:
                 last_entry = adv[-1]
-                last_iter = last_entry[0] if isinstance(last_entry, (list, tuple)) else iter_num
+                last_iter = (
+                    last_entry[0] if isinstance(last_entry, (list, tuple)) else iter_num
+                )
                 if last_iter >= iter_num:
                     return latest
         except Exception:
@@ -169,7 +174,9 @@ def scan_run(run_dir: Path) -> list[dict]:
             }
             # Remove None values for cleanliness (keep explicit None for avg_score_margin if missing)
             rows.append(row)
-            print(f"  [{run_name}/iter_{iter_num}/{baseline}] games={stats['games_played']} win_rate={stats['win_rate']}")
+            print(
+                f"  [{run_name}/iter_{iter_num}/{baseline}] games={stats['games_played']} win_rate={stats['win_rate']}"
+            )
 
     return rows
 
@@ -179,7 +186,9 @@ def main():
         print(f"Runs directory not found: {RUNS_BASE}")
         return
 
-    run_dirs = sorted(d for d in RUNS_BASE.iterdir() if d.is_dir() and (d / "evaluations").exists())
+    run_dirs = sorted(
+        d for d in RUNS_BASE.iterdir() if d.is_dir() and (d / "evaluations").exists()
+    )
     print(f"Found {len(run_dirs)} run(s) with evaluations: {[d.name for d in run_dirs]}")
 
     all_rows_by_run: dict[str, list[dict]] = defaultdict(list)

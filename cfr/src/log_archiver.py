@@ -82,13 +82,17 @@ class LogArchiver(threading.Thread):
                 item = self.archive_queue.get(timeout=1.0)
             except (queue.Empty, EOFError):
                 continue
-            except Exception as e:  # JUSTIFIED: archiver thread must not crash from queue errors
+            except (
+                Exception
+            ) as e:  # JUSTIFIED: archiver thread must not crash from queue errors
                 logger.debug("LogArchiver queue error: %s", e)
                 continue
 
             try:
                 self._process_item(item)
-            except Exception as e:  # JUSTIFIED: archiver thread must not crash; errors are logged and skipped
+            except (
+                Exception
+            ) as e:  # JUSTIFIED: archiver thread must not crash; errors are logged and skipped
                 logger.error("LogArchiver error processing item: %s", e, exc_info=True)
 
         # Drain remaining items on shutdown
@@ -191,9 +195,13 @@ class LogArchiver(threading.Thread):
             oldest = archives.pop(0)
             try:
                 os.remove(oldest)
-                logger.info("LogArchiver: removed old archive %s", os.path.basename(oldest))
+                logger.info(
+                    "LogArchiver: removed old archive %s", os.path.basename(oldest)
+                )
             except OSError as e:
-                logger.warning("LogArchiver: could not remove old archive %s: %s", oldest, e)
+                logger.warning(
+                    "LogArchiver: could not remove old archive %s: %s", oldest, e
+                )
                 break
 
     def _update_size_info(self):

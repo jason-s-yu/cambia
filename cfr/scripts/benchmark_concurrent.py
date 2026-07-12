@@ -57,10 +57,16 @@ DEFAULT_CONFIG = CFR_DIR / "config" / "bench_concurrent.yaml"
 
 def _collect_hardware_info() -> dict:
     """Collect system hardware info for benchmark reproducibility."""
-    info = {"cpu": "unknown", "gpu": "unknown", "ram": "unknown",
-            "python": sys.version.split()[0], "torch": "unknown"}
+    info = {
+        "cpu": "unknown",
+        "gpu": "unknown",
+        "ram": "unknown",
+        "python": sys.version.split()[0],
+        "torch": "unknown",
+    }
     try:
         import torch
+
         info["torch"] = torch.__version__
         if torch.cuda.is_available():
             info["gpu"] = torch.cuda.get_device_name(0)
@@ -286,7 +292,9 @@ def launch_training_processes(
     return processes, run_dirs
 
 
-def wait_for_processes(processes: list[subprocess.Popen], timeout_per_step: float = 120.0) -> list[int]:
+def wait_for_processes(
+    processes: list[subprocess.Popen], timeout_per_step: float = 120.0
+) -> list[int]:
     """Wait for all processes to complete, return list of return codes."""
     return_codes = []
     for i, proc in enumerate(processes):
@@ -305,10 +313,7 @@ def wait_for_processes(processes: list[subprocess.Popen], timeout_per_step: floa
 
 def print_results_table(results: list[dict], warmup: int, steps: int) -> None:
     """Print a plain-text summary table."""
-    print(
-        f"\nConcurrency Benchmark Results (warm steps {warmup+1}-{steps})\n"
-        + "-" * 80
-    )
+    print(f"\nConcurrency Benchmark Results (warm steps {warmup+1}-{steps})\n" + "-" * 80)
     header = f"{'N':>4} | {'Mean (s)':>9} | {'Std (s)':>8} | {'95% CI':>16} | {'P5 (s)':>7} | {'P95 (s)':>7} | {'Steps/s':>8}"
     print(header)
     print("-" * 80)
@@ -316,7 +321,9 @@ def print_results_table(results: list[dict], warmup: int, steps: int) -> None:
         n = r["concurrency"]
         s = r.get("stats", {})
         if not s:
-            print(f"{n:>4} | {'N/A':>9} | {'N/A':>8} | {'N/A':>16} | {'N/A':>7} | {'N/A':>7} | {'N/A':>8}")
+            print(
+                f"{n:>4} | {'N/A':>9} | {'N/A':>8} | {'N/A':>16} | {'N/A':>7} | {'N/A':>7} | {'N/A':>8}"
+            )
             continue
         ci = f"[{s['ci_low']:.2f}, {s['ci_high']:.2f}]"
         print(

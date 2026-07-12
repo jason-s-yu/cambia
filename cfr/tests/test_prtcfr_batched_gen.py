@@ -182,8 +182,11 @@ def _sequential_samples(net, seeds, iteration=1):
     for gi, seed in enumerate(seeds):
         buf = _CapturingBuf()
         worker = PRTCFRProductionWorker(
-            sigma=sigma, m_rollouts=_M, seq_cap=PRODUCTION_SEQ_CAP,
-            seed=seed, max_trajectory_steps=_MAX_STEPS,
+            sigma=sigma,
+            m_rollouts=_M,
+            seq_cap=PRODUCTION_SEQ_CAP,
+            seed=seed,
+            max_trajectory_steps=_MAX_STEPS,
         )
         worker.reseed(seed)
         driver = new_production_driver(seed=seed, backend="python")
@@ -197,8 +200,13 @@ def _batched_samples(backend_factory, net, seeds, iteration=1):
     factory; return {game_index: [ReservoirSample]}."""
     bufs = {gi: _CapturingBuf() for gi in range(len(seeds))}
     specs = [
-        {"seed": seed, "driver": new_production_driver(seed=seed, backend="python"),
-         "traverser": gi % 2, "iteration": iteration, "buf": bufs[gi]}
+        {
+            "seed": seed,
+            "driver": new_production_driver(seed=seed, backend="python"),
+            "traverser": gi % 2,
+            "iteration": iteration,
+            "buf": bufs[gi],
+        }
         for gi, seed in enumerate(seeds)
     ]
     worker = PRTCFRBatchedProductionWorker(
@@ -215,19 +223,21 @@ def _assert_samples_equal(seq, bat, atol):
     assert set(seq.keys()) == set(bat.keys())
     for gi in seq:
         s, b = seq[gi], bat[gi]
-        assert len(s) == len(b), (
-            f"game {gi}: sequential recorded {len(s)} samples, batched {len(b)}"
-        )
+        assert len(s) == len(
+            b
+        ), f"game {gi}: sequential recorded {len(s)} samples, batched {len(b)}"
         for j, (ss, bb) in enumerate(zip(s, b)):
-            assert np.array_equal(ss.features, bb.features), (
-                f"game {gi} sample {j}: token features differ"
-            )
-            assert np.array_equal(ss.action_mask, bb.action_mask), (
-                f"game {gi} sample {j}: masks differ"
-            )
+            assert np.array_equal(
+                ss.features, bb.features
+            ), f"game {gi} sample {j}: token features differ"
+            assert np.array_equal(
+                ss.action_mask, bb.action_mask
+            ), f"game {gi} sample {j}: masks differ"
             assert ss.iteration == bb.iteration
             np.testing.assert_allclose(
-                ss.target, bb.target, atol=atol,
+                ss.target,
+                bb.target,
+                atol=atol,
                 err_msg=f"game {gi} sample {j}: regret targets differ",
             )
 
@@ -289,7 +299,9 @@ def test_batched_incremental_matches_batched_reencode_per_decision():
                 diverged += 1
                 break
             np.testing.assert_allclose(
-                a.target, b.target, atol=1e-4,
+                a.target,
+                b.target,
+                atol=1e-4,
                 err_msg=f"game {gi} sample {j}: incremental vs reencode target",
             )
     # Trajectory divergence must be rare (fp32 boundary flips); the per-decision
@@ -316,7 +328,9 @@ def test_fork_carry_matches_reencode_of_forked_prefix():
         legal = driver.legal_actions()
         if not legal:
             break
-        _sample_and_apply(driver, legal, uniform_policy_production([], _legal_mask(legal)), rng)
+        _sample_and_apply(
+            driver, legal, uniform_policy_production([], _legal_mask(legal)), rng
+        )
     assert not driver.is_terminal()
 
     svc = PRTCFRInferenceService(net, device="cpu", dtype=torch.float32)
@@ -349,7 +363,9 @@ def test_fork_carry_matches_reencode_of_forked_prefix():
     # for the same (unchanged) tokens reproduces its sigma.
     q2 = _Query(parent, actor, driver.tokens(actor), mask)
     mgr.evaluate([q2])
-    np.testing.assert_allclose(q2.result, old_sigma(driver.tokens(actor), mask), atol=1e-4)
+    np.testing.assert_allclose(
+        q2.result, old_sigma(driver.tokens(actor), mask), atol=1e-4
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -385,8 +401,10 @@ def test_incremental_manager_batched_equals_single_item():
     # Batched.
     svc_b = PRTCFRInferenceService(net, device="cpu", dtype=torch.float32)
     mgr_b = IncrementalSigmaManager(svc_b, num_players=2)
-    qb = [_Query(i, actor, driver.tokens(actor), mask)
-          for i, (driver, actor, mask) in enumerate(streams)]
+    qb = [
+        _Query(i, actor, driver.tokens(actor), mask)
+        for i, (driver, actor, mask) in enumerate(streams)
+    ]
     mgr_b.evaluate(qb)
     # Single-item.
     singles = []
@@ -451,7 +469,7 @@ def test_batched_worker_closes_all_clones_python_backend():
     # Every clone created by the worker must have been closed; the top driver
     # is closed by us here. So closes == clones_created + 0 (top counted in
     # opens but closed here). opens includes top + all clones.
-    assert _CountingDriver.counter["close"] == _CountingDriver.counter["open"], (
-        f"driver leak: {_CountingDriver.counter}"
-    )
+    assert (
+        _CountingDriver.counter["close"] == _CountingDriver.counter["open"]
+    ), f"driver leak: {_CountingDriver.counter}"
     assert _CountingDriver.counter["open"] > opens_before  # clones happened

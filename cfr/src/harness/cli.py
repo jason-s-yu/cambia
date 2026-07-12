@@ -166,7 +166,9 @@ def submit(
         False, "--force", help="Set spec.force (only gpu_vram is forceable in v1)"
     ),
     after: Optional[str] = typer.Option(
-        None, "--after", help="Gate this job on another job id finishing first (cambia-352)"
+        None,
+        "--after",
+        help="Gate this job on another job id finishing first (cambia-352)",
     ),
     on_failure: Optional[str] = typer.Option(
         None,

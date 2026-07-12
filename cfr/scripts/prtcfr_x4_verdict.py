@@ -57,7 +57,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.evaluate_agents import MEAN_IMP_BASELINES  # noqa: E402
 from src.run_db import get_db  # noqa: E402
 
-
 # ---------------------------------------------------------------------------
 # metrics.jsonl parsing
 # ---------------------------------------------------------------------------
@@ -214,8 +213,14 @@ def ols_slope_ci(
     n = len(xs)
     if n < 3:
         return {
-            "n_points": n, "df": None, "slope": None, "intercept": None,
-            "se": None, "t_crit": None, "ci_low": None, "ci_high": None,
+            "n_points": n,
+            "df": None,
+            "slope": None,
+            "intercept": None,
+            "se": None,
+            "t_crit": None,
+            "ci_low": None,
+            "ci_high": None,
             "error": "insufficient data points for OLS (need >= 3, got %d)" % n,
         }
     xbar = sum(xs) / n
@@ -223,8 +228,14 @@ def ols_slope_ci(
     sxx = sum((x - xbar) ** 2 for x in xs)
     if sxx == 0.0:
         return {
-            "n_points": n, "df": n - 2, "slope": None, "intercept": None,
-            "se": None, "t_crit": None, "ci_low": None, "ci_high": None,
+            "n_points": n,
+            "df": n - 2,
+            "slope": None,
+            "intercept": None,
+            "se": None,
+            "t_crit": None,
+            "ci_low": None,
+            "ci_high": None,
             "error": "degenerate x series (zero variance)",
         }
     sxy = sum((x - xbar) * (y - ybar) for x, y in zip(xs, ys))
@@ -241,9 +252,15 @@ def ols_slope_ci(
         t_crit = _t_ppf(1.0 - alpha / 2.0, df)
     margin = t_crit * se_slope
     return {
-        "n_points": n, "df": df, "slope": slope, "intercept": intercept,
-        "se": se_slope, "t_crit": t_crit,
-        "ci_low": slope - margin, "ci_high": slope + margin, "error": None,
+        "n_points": n,
+        "df": df,
+        "slope": slope,
+        "intercept": intercept,
+        "se": se_slope,
+        "t_crit": t_crit,
+        "ci_low": slope - margin,
+        "ci_high": slope + margin,
+        "error": None,
     }
 
 
@@ -275,9 +292,7 @@ def tier_a_lbr_slope(
 def grad_norm_violations_total(
     rows: Sequence[Dict[str, Any]], field: str = "grad_norm_violations"
 ) -> int:
-    return sum(
-        int(row[field]) for row in rows if field in row and row[field] is not None
-    )
+    return sum(int(row[field]) for row in rows if field in row and row[field] is not None)
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +313,9 @@ def read_mean_imp5_floor(run_dir: Path, db_path: Optional[str] = None) -> Dict[s
     run_row = db.execute("SELECT id FROM runs WHERE name=?", (run_name,)).fetchone()
     if run_row is None:
         return {
-            "run_name": run_name, "available": False, "baselines": {},
+            "run_name": run_name,
+            "available": False,
+            "baselines": {},
             "mean_imp": None,
             "note": "no run_db row named '%s'; mean_imp(5) not yet reconciled" % run_name,
         }
@@ -311,7 +328,9 @@ def read_mean_imp5_floor(run_dir: Path, db_path: Optional[str] = None) -> Dict[s
     ).fetchall()
     if not result_rows:
         return {
-            "run_name": run_name, "available": False, "baselines": {},
+            "run_name": run_name,
+            "available": False,
+            "baselines": {},
             "mean_imp": None,
             "note": "run_db row found but no mean_imp(5) baseline eval_results rows present",
         }
@@ -409,9 +428,14 @@ def human_summary(verdict: Dict[str, Any]) -> str:
         "2. Tier-A LBR slope over iters [%d, %d] negative, 95%% CI excludes 0: "
         "slope=%s ci=[%s, %s] n=%s df=%s [%s]"
         % (
-            c2["iter_lo"], c2["iter_hi"],
-            _fmt(c2.get("slope")), _fmt(c2.get("ci_low")), _fmt(c2.get("ci_high")),
-            c2.get("n_points"), c2.get("df"), c2["verdict"],
+            c2["iter_lo"],
+            c2["iter_hi"],
+            _fmt(c2.get("slope")),
+            _fmt(c2.get("ci_low")),
+            _fmt(c2.get("ci_high")),
+            c2.get("n_points"),
+            c2.get("df"),
+            c2["verdict"],
         ),
     ]
     if c2.get("error"):
@@ -431,7 +455,12 @@ def human_summary(verdict: Dict[str, Any]) -> str:
         for name, row in floor["baselines"].items():
             lines.append(
                 "  %-22s win_rate=%s games=%s iter=%s"
-                % (name, _fmt(row.get("win_rate")), row.get("games_played"), row.get("iteration"))
+                % (
+                    name,
+                    _fmt(row.get("win_rate")),
+                    row.get("games_played"),
+                    row.get("iteration"),
+                )
             )
         if floor.get("mean_imp") is not None:
             lines.append("  mean_imp(5) = %.4f" % floor["mean_imp"])
@@ -462,13 +491,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("run_dir", help="Pilot run directory (e.g. runs/v0.4-x4-pilot).")
     ap.add_argument(
-        "--db-path", default=None,
+        "--db-path",
+        default=None,
         help="run_db sqlite path override (default: CAMBIA_RUN_DB env or cfr/runs/cambia_runs.db).",
     )
-    ap.add_argument("--iter-lo", type=int, default=100, help="Tier-A LBR slope window start (inclusive).")
-    ap.add_argument("--iter-hi", type=int, default=300, help="Tier-A LBR slope window end (inclusive).")
-    ap.add_argument("--sub5-threshold", type=float, default=0.05, help="T1-Cambia crossing threshold.")
-    ap.add_argument("--sub5-iter-gate", type=int, default=150, help="Gate: crossing iter must be <= this.")
+    ap.add_argument(
+        "--iter-lo",
+        type=int,
+        default=100,
+        help="Tier-A LBR slope window start (inclusive).",
+    )
+    ap.add_argument(
+        "--iter-hi",
+        type=int,
+        default=300,
+        help="Tier-A LBR slope window end (inclusive).",
+    )
+    ap.add_argument(
+        "--sub5-threshold", type=float, default=0.05, help="T1-Cambia crossing threshold."
+    )
+    ap.add_argument(
+        "--sub5-iter-gate",
+        type=int,
+        default=150,
+        help="Gate: crossing iter must be <= this.",
+    )
     ap.add_argument("--out", default=None, help="JSON verdict output path.")
     return ap
 

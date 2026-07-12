@@ -35,7 +35,12 @@ import torch.optim as optim
 from ..config import Config
 from ..constants import NUM_PLAYERS, EP_PBS_INPUT_DIM
 from ..encoding import INPUT_DIM, NUM_ACTIONS
-from ..networks import AdvantageNetwork, StrategyNetwork, HistoryValueNetwork, build_advantage_network
+from ..networks import (
+    AdvantageNetwork,
+    StrategyNetwork,
+    HistoryValueNetwork,
+    build_advantage_network,
+)
 from ..persistence import atomic_torch_save, atomic_npz_save
 from ..reservoir import ReservoirBuffer, ReservoirSample
 from ..utils import LogQueue as ProgressQueue
@@ -44,11 +49,16 @@ from ..log_archiver import LogArchiver
 
 from .deep_worker import run_deep_cfr_worker, DeepCFRWorkerResult
 from .es_validator import ESValidator
-from .exceptions import GracefulShutdownException, CheckpointSaveError, CheckpointLoadError
+from .exceptions import (
+    GracefulShutdownException,
+    CheckpointSaveError,
+    CheckpointLoadError,
+)
 from ..serial_rotating_handler import SerialRotatingFileHandler
 
 try:
     from .. import run_db as _run_db
+
     _RUN_DB_AVAILABLE = True
 except Exception:
     _run_db = None  # type: ignore[assignment]
@@ -60,6 +70,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class DeepCFRConfig:
     """Configuration for Deep CFR training."""
+
     # Network architecture
     input_dim: int = INPUT_DIM
     hidden_dim: int = 256
@@ -169,8 +180,8 @@ class DeepCFRConfig:
     num_players: int = 2  # Number of players (2-6)
 
     # QRE regularization
-    qre_lambda_start: float = 0.5   # Initial QRE temperature
-    qre_lambda_end: float = 0.05    # Final QRE temperature
+    qre_lambda_start: float = 0.5  # Initial QRE temperature
+    qre_lambda_end: float = 0.05  # Final QRE temperature
     qre_anneal_fraction: float = 0.6  # Fraction of total iterations to anneal over
 
     # PSRO configuration
@@ -204,6 +215,7 @@ class DeepCFRConfig:
         # Override input_dim/output_dim based on num_players or encoding_mode
         if self.num_players > 2:
             from ..constants import N_PLAYER_INPUT_DIM, N_PLAYER_NUM_ACTIONS
+
             self.input_dim = N_PLAYER_INPUT_DIM
             self.output_dim = N_PLAYER_NUM_ACTIONS
         elif self.encoding_mode == "ep_pbs":
@@ -350,7 +362,9 @@ def _resolve_max_tasks_per_child(
 
     if isinstance(max_tasks_per_child, int):
         if max_tasks_per_child < 1:
-            raise ValueError(f"max_tasks_per_child must be >= 1, got {max_tasks_per_child}")
+            raise ValueError(
+                f"max_tasks_per_child must be >= 1, got {max_tasks_per_child}"
+            )
         return max_tasks_per_child
 
     if isinstance(max_tasks_per_child, str) and max_tasks_per_child.lower() == "auto":
@@ -359,6 +373,7 @@ def _resolve_max_tasks_per_child(
 
         try:
             import psutil
+
             total_ram_mb = psutil.virtual_memory().total / (1024 * 1024)
         except ImportError:
             # Fallback: read /proc/meminfo
@@ -395,7 +410,11 @@ def _resolve_max_tasks_per_child(
 
 
 def _create_worker_file_handler(
-    config, worker_id: int, run_log_dir: str, run_timestamp: str, archive_queue=None,
+    config,
+    worker_id: int,
+    run_log_dir: str,
+    run_timestamp: str,
+    archive_queue=None,
 ) -> SerialRotatingFileHandler:
     """Create a single SerialRotatingFileHandler for a worker slot.
 
@@ -436,7 +455,14 @@ def _run_traversals_batch(
     run_timestamp: str,
     progress_queue=None,
     archive_queue=None,
-) -> Tuple[List[ReservoirSample], List[ReservoirSample], List[ReservoirSample], int, int, Dict[str, float]]:
+) -> Tuple[
+    List[ReservoirSample],
+    List[ReservoirSample],
+    List[ReservoirSample],
+    int,
+    int,
+    Dict[str, float],
+]:
     """Run all traversals for one training step.
 
     Returns (adv_samples, strat_samples, value_samples, traversals_done, total_nodes, timing_stats).
@@ -453,7 +479,11 @@ def _run_traversals_batch(
 
     # Create file handler ONCE for the batch — avoids glob.glob() per traversal.
     file_handler = _create_worker_file_handler(
-        config, 0, run_log_dir, run_timestamp, archive_queue,
+        config,
+        0,
+        run_log_dir,
+        run_timestamp,
+        archive_queue,
     )
 
     try:
@@ -495,13 +525,26 @@ def _run_traversals_batch(
     timing_stats: Dict[str, float] = {
         "min_s": min(traversal_times) if traversal_times else 0.0,
         "max_s": max(traversal_times) if traversal_times else 0.0,
-        "mean_s": (sum(traversal_times) / len(traversal_times)) if traversal_times else 0.0,
+        "mean_s": (
+            (sum(traversal_times) / len(traversal_times)) if traversal_times else 0.0
+        ),
         "total_s": sum(traversal_times),
         "count": float(len(traversal_times)),
-        "escher_sampled_regret_mag": float(np.mean(_escher_sampled_mags)) if _escher_sampled_mags else 0.0,
-        "escher_cf_regret_mag": float(np.mean(_escher_cf_mags)) if _escher_cf_mags else 0.0,
+        "escher_sampled_regret_mag": (
+            float(np.mean(_escher_sampled_mags)) if _escher_sampled_mags else 0.0
+        ),
+        "escher_cf_regret_mag": (
+            float(np.mean(_escher_cf_mags)) if _escher_cf_mags else 0.0
+        ),
     }
-    return advantage_samples, strategy_samples, value_samples, traversals_done, total_nodes, timing_stats
+    return (
+        advantage_samples,
+        strategy_samples,
+        value_samples,
+        traversals_done,
+        total_nodes,
+        timing_stats,
+    )
 
 
 def _run_single_traversal(args_tuple, file_handler_override=None):
@@ -540,7 +583,11 @@ def _run_traversals_threaded(
     worker_handlers: Dict[int, SerialRotatingFileHandler] = {}
     for slot in range(num_threads):
         worker_handlers[slot] = _create_worker_file_handler(
-            config, slot, run_log_dir, run_timestamp, archive_queue,
+            config,
+            slot,
+            run_log_dir,
+            run_timestamp,
+            archive_queue,
         )
 
     worker_args_list = []
@@ -548,21 +595,25 @@ def _run_traversals_threaded(
     for i in range(traversals_per_step):
         iter_num = iteration_offset + i
         slot = i % num_threads
-        worker_args_list.append((
-            iter_num,
-            config,
-            network_weights,
-            network_config,
-            progress_queue,
-            archive_queue,
-            slot,  # worker_id: thread pool slot
-            run_log_dir,
-            run_timestamp,
-        ))
+        worker_args_list.append(
+            (
+                iter_num,
+                config,
+                network_weights,
+                network_config,
+                progress_queue,
+                archive_queue,
+                slot,  # worker_id: thread pool slot
+                run_log_dir,
+                run_timestamp,
+            )
+        )
         handler_for_args.append(worker_handlers[slot])
 
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as thread_pool:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=num_threads
+        ) as thread_pool:
             futures = [
                 thread_pool.submit(_run_single_traversal, args, fh)
                 for args, fh in zip(worker_args_list, handler_for_args)
@@ -576,7 +627,9 @@ def _run_traversals_threaded(
                         value_samples.extend(result.value_samples)
                     total_nodes += result.stats.nodes_visited
                     if result.stats.error_count > 0:
-                        logger.warning("Worker reported %d errors.", result.stats.error_count)
+                        logger.warning(
+                            "Worker reported %d errors.", result.stats.error_count
+                        )
                 traversals_done += 1
     finally:
         for handler in worker_handlers.values():
@@ -585,7 +638,13 @@ def _run_traversals_threaded(
             except Exception:
                 pass
 
-    return advantage_samples, strategy_samples, value_samples, traversals_done, total_nodes
+    return (
+        advantage_samples,
+        strategy_samples,
+        value_samples,
+        traversals_done,
+        total_nodes,
+    )
 
 
 def qre_strategy(
@@ -611,7 +670,7 @@ def qre_strategy(
         (batch, num_actions) strategy tensor (sums to 1 per row over legal actions)
     """
     # Mask illegal actions to -inf
-    masked_adv = advantages.masked_fill(~legal_mask, float('-inf'))
+    masked_adv = advantages.masked_fill(~legal_mask, float("-inf"))
 
     # Per-row max for numerical stability (NOT global max!)
     row_max = masked_adv.max(dim=-1, keepdim=True).values
@@ -693,11 +752,19 @@ class DeepCFRTrainer:
             self.strategy_net = None
 
         # B5: torch.compile — gated by config (effective on CUDA and XPU)
-        if self.dcfr_config.use_compile and hasattr(torch, "compile") and self.device.type != "cpu":
+        if (
+            self.dcfr_config.use_compile
+            and hasattr(torch, "compile")
+            and self.device.type != "cpu"
+        ):
             try:
-                self.advantage_net = torch.compile(self.advantage_net, mode="reduce-overhead")
+                self.advantage_net = torch.compile(
+                    self.advantage_net, mode="reduce-overhead"
+                )
                 if self.strategy_net is not None:
-                    self.strategy_net = torch.compile(self.strategy_net, mode="reduce-overhead")
+                    self.strategy_net = torch.compile(
+                        self.strategy_net, mode="reduce-overhead"
+                    )
                 logger.info("Networks compiled with torch.compile (reduce-overhead mode)")
             except Exception as e:
                 logger.warning("torch.compile failed, using eager mode: %s", e)
@@ -716,7 +783,11 @@ class DeepCFRTrainer:
         # ESCHER value network (only when traversal_method == "escher")
         self._is_escher = self.dcfr_config.traversal_method == "escher"
         if self._is_escher:
-            _base_dim = EP_PBS_INPUT_DIM if self.dcfr_config.encoding_mode == "ep_pbs" else INPUT_DIM
+            _base_dim = (
+                EP_PBS_INPUT_DIM
+                if self.dcfr_config.encoding_mode == "ep_pbs"
+                else INPUT_DIM
+            )
             _value_input_dim = _base_dim * 2
             self.value_net: Optional[HistoryValueNetwork] = HistoryValueNetwork(
                 input_dim=_value_input_dim,
@@ -767,7 +838,9 @@ class DeepCFRTrainer:
         # SD-CFR snapshot storage
         self._sd_snapshots: List[Dict[str, np.ndarray]] = []
         self._sd_snapshot_iterations: List[int] = []
-        self._snapshot_count: int = 0  # Total snapshots ever taken (for reservoir sampling)
+        self._snapshot_count: int = (
+            0  # Total snapshots ever taken (for reservoir sampling)
+        )
 
         # EMA serving weights: O(1) inference alternative to full snapshot averaging.
         # Tracks the linearly t-weighted (alpha=1.5) ensemble as an online EMA.
@@ -778,8 +851,11 @@ class DeepCFRTrainer:
         # PSRO population oracle (optional)
         if self.dcfr_config.use_psro:
             from .psro import PSROOracle
+
             heuristic_types = [
-                t.strip() for t in self.dcfr_config.psro_heuristic_types.split(",") if t.strip()
+                t.strip()
+                for t in self.dcfr_config.psro_heuristic_types.split(",")
+                if t.strip()
             ]
             self._psro_oracle: Optional["PSROOracle"] = PSROOracle(
                 max_checkpoints=self.dcfr_config.psro_population_size,
@@ -787,16 +863,24 @@ class DeepCFRTrainer:
             )
             logger.info(
                 "PSRO enabled: max_checkpoints=%d, heuristics=%s",
-                self.dcfr_config.psro_population_size, heuristic_types,
+                self.dcfr_config.psro_population_size,
+                heuristic_types,
             )
         else:
             self._psro_oracle = None
 
         adv_params = sum(p.numel() for p in self.advantage_net.parameters())
-        strat_params = sum(p.numel() for p in self.strategy_net.parameters()) if self.strategy_net else 0
+        strat_params = (
+            sum(p.numel() for p in self.strategy_net.parameters())
+            if self.strategy_net
+            else 0
+        )
         logger.info(
             "DeepCFRTrainer initialized. Advantage net params: %d, Strategy net params: %d, SD-CFR: %s, PSRO: %s",
-            adv_params, strat_params, self.dcfr_config.use_sd_cfr, self.dcfr_config.use_psro,
+            adv_params,
+            strat_params,
+            self.dcfr_config.use_sd_cfr,
+            self.dcfr_config.use_psro,
         )
 
         # Run DB state (never raises — DB is optional)
@@ -805,24 +889,36 @@ class DeepCFRTrainer:
         if _RUN_DB_AVAILABLE:
             try:
                 ckpt_path = getattr(
-                    self.config.persistence, "agent_data_save_path",
+                    self.config.persistence,
+                    "agent_data_save_path",
                     "strategy/deep_cfr_checkpoint.pt",
                 )
-                save_dir = os.path.dirname(ckpt_path) if os.path.dirname(ckpt_path) else "."
+                save_dir = (
+                    os.path.dirname(ckpt_path) if os.path.dirname(ckpt_path) else "."
+                )
                 db_path = os.environ.get("CAMBIA_RUN_DB") or str(
                     Path(save_dir).parent.parent / "cambia_runs.db"
                 )
                 self._db_conn = _run_db.get_db(db_path)
-                run_name = Path(save_dir).parent.name if Path(save_dir).name == "checkpoints" else Path(save_dir).name
+                run_name = (
+                    Path(save_dir).parent.name
+                    if Path(save_dir).name == "checkpoints"
+                    else Path(save_dir).name
+                )
                 config_yaml = None
                 config_dict = {}
-                run_dir = Path(save_dir).parent if Path(save_dir).name == "checkpoints" else Path(save_dir)
+                run_dir = (
+                    Path(save_dir).parent
+                    if Path(save_dir).name == "checkpoints"
+                    else Path(save_dir)
+                )
                 config_path = run_dir / "config.yaml"
                 if config_path.exists():
                     try:
                         config_yaml = config_path.read_text(encoding="utf-8")
                         try:
                             import yaml
+
                             config_dict = yaml.safe_load(config_yaml) or {}
                         except Exception:
                             pass
@@ -837,7 +933,9 @@ class DeepCFRTrainer:
                     config_dict=config_dict,
                     status="running",
                 )
-                logger.info("Run DB: registered run '%s' (id=%d)", run_name, self._db_run_id)
+                logger.info(
+                    "Run DB: registered run '%s' (id=%d)", run_name, self._db_run_id
+                )
             except Exception as _e:
                 logger.debug("Run DB init failed (non-fatal): %s", _e)
                 self._db_run_id = None
@@ -851,13 +949,16 @@ class DeepCFRTrainer:
         state_dict = self.advantage_net.state_dict()
         weights = {k: v.cpu().numpy() for k, v in state_dict.items()}
         if self._is_escher and self.value_net is not None:
-            weights["__value_net__"] = {k: v.cpu().numpy() for k, v in self.value_net.state_dict().items()}
+            weights["__value_net__"] = {
+                k: v.cpu().numpy() for k, v in self.value_net.state_dict().items()
+            }
         return weights
 
     def _write_run_notes(self):
         """Auto-generate a NOTES.md in the run directory if one doesn't exist."""
         ckpt_path = getattr(
-            self.config.persistence, "agent_data_save_path",
+            self.config.persistence,
+            "agent_data_save_path",
             "strategy/deep_cfr_checkpoint.pt",
         )
         # Walk up from checkpoint path to find run dir (parent of checkpoints/)
@@ -925,7 +1026,9 @@ class DeepCFRTrainer:
 
     def _take_advantage_snapshot(self):
         """Serialize current advantage_net weights as a numpy snapshot for SD-CFR averaging."""
-        snapshot = {k: v.cpu().numpy() for k, v in self.advantage_net.state_dict().items()}
+        snapshot = {
+            k: v.cpu().numpy() for k, v in self.advantage_net.state_dict().items()
+        }
         max_snaps = self.dcfr_config.sd_cfr_max_snapshots
         self._snapshot_count += 1
 
@@ -956,7 +1059,9 @@ class DeepCFRTrainer:
 
         w_T = float((self.training_step + 1) ** self.dcfr_config.alpha)
         new_sum = self._ema_weight_sum + w_T
-        current_weights = {k: v.cpu().numpy() for k, v in self.advantage_net.state_dict().items()}
+        current_weights = {
+            k: v.cpu().numpy() for k, v in self.advantage_net.state_dict().items()
+        }
 
         if self._ema_state_dict is None:
             self._ema_state_dict = {k: v.copy() for k, v in current_weights.items()}
@@ -1004,7 +1109,11 @@ class DeepCFRTrainer:
         Separate from _train_network because value net outputs a scalar (not 146-dim),
         so action masking is not applicable.
         """
-        if self.value_net is None or self.value_buffer is None or self.value_optimizer is None:
+        if (
+            self.value_net is None
+            or self.value_buffer is None
+            or self.value_optimizer is None
+        ):
             return 0.0
         if len(self.value_buffer) == 0:
             logger.warning("Cannot train value network: buffer is empty.")
@@ -1029,7 +1138,9 @@ class DeepCFRTrainer:
 
             features_t = torch.from_numpy(batch.features).float().to(self.device)
             targets_t = torch.from_numpy(batch.targets).float().to(self.device)
-            iterations_t = torch.from_numpy(batch.iterations.astype(np.float32)).to(self.device)
+            iterations_t = torch.from_numpy(batch.iterations.astype(np.float32)).to(
+                self.device
+            )
 
             weights = (iterations_t + 1.0).pow(alpha)
             weights = weights / weights.mean()
@@ -1051,7 +1162,12 @@ class DeepCFRTrainer:
             actual_steps += 1
 
         avg_loss = total_loss / max(actual_steps, 1)
-        logger.info("Value net MSE: %.6f (%d steps, buf=%d)", avg_loss, actual_steps, len(self.value_buffer))
+        logger.info(
+            "Value net MSE: %.6f (%d steps, buf=%d)",
+            avg_loss,
+            actual_steps,
+            len(self.value_buffer),
+        )
         return avg_loss
 
     def _prefetch_batches(self, buffer, batch_size, num_steps, prefetch_queue):
@@ -1063,7 +1179,9 @@ class DeepCFRTrainer:
             features_t = torch.from_numpy(batch.features).float().pin_memory()
             targets_t = torch.from_numpy(batch.targets).float().pin_memory()
             masks_t = torch.from_numpy(batch.masks).pin_memory()
-            iterations_t = torch.from_numpy(batch.iterations.astype(np.float32)).pin_memory()
+            iterations_t = torch.from_numpy(
+                batch.iterations.astype(np.float32)
+            ).pin_memory()
             prefetch_queue.put((features_t, targets_t, masks_t, iterations_t))
         prefetch_queue.put(None)  # sentinel
 
@@ -1162,13 +1280,18 @@ class DeepCFRTrainer:
                 features_t = torch.from_numpy(batch.features).float().to(self.device)
                 targets_t = torch.from_numpy(batch.targets).float().to(self.device)
                 masks_t = torch.from_numpy(batch.masks).to(self.device)
-                iterations_t = torch.from_numpy(batch.iterations.astype(np.float32)).to(self.device)
+                iterations_t = torch.from_numpy(batch.iterations.astype(np.float32)).to(
+                    self.device
+                )
                 _do_train_step(features_t, targets_t, masks_t, iterations_t)
 
         avg_loss = total_loss / max(actual_steps, 1)
         logger.info(
             "%s training: %d steps, avg loss: %.6f (buffer size: %d)",
-            network_name, actual_steps, avg_loss, len(buffer),
+            network_name,
+            actual_steps,
+            avg_loss,
+            len(buffer),
         )
         return avg_loss
 
@@ -1196,8 +1319,8 @@ class DeepCFRTrainer:
         Returns float('inf') when QRE is not configured, which results in standard
         regret matching (infinite temperature → uniform strategy).
         """
-        if not hasattr(self.dcfr_config, 'qre_lambda_start'):
-            return float('inf')  # No QRE → standard regret matching
+        if not hasattr(self.dcfr_config, "qre_lambda_start"):
+            return float("inf")  # No QRE → standard regret matching
 
         start = self.dcfr_config.qre_lambda_start
         end = self.dcfr_config.qre_lambda_end
@@ -1243,30 +1366,45 @@ class DeepCFRTrainer:
             if not _jsonl_path:
                 # Auto-generate path alongside the checkpoint
                 _ckpt_path = getattr(
-                    self.config.persistence, "agent_data_save_path",
+                    self.config.persistence,
+                    "agent_data_save_path",
                     "strategy/deep_cfr_checkpoint.pt",
                 )
-                _run_dir = os.path.dirname(_ckpt_path) if os.path.dirname(_ckpt_path) else "."
+                _run_dir = (
+                    os.path.dirname(_ckpt_path) if os.path.dirname(_ckpt_path) else "."
+                )
                 _jsonl_path = os.path.join(_run_dir, "profiling.jsonl")
             try:
-                os.makedirs(os.path.dirname(_jsonl_path) if os.path.dirname(_jsonl_path) else ".", exist_ok=True)
+                os.makedirs(
+                    os.path.dirname(_jsonl_path) if os.path.dirname(_jsonl_path) else ".",
+                    exist_ok=True,
+                )
                 _jsonl_file = open(_jsonl_path, "a", encoding="utf-8")
                 logger.info("Profiling JSONL output: %s", _jsonl_path)
             except Exception as _e:
-                logger.warning("Failed to open profiling JSONL file %s: %s", _jsonl_path, _e)
+                logger.warning(
+                    "Failed to open profiling JSONL file %s: %s", _jsonl_path, _e
+                )
                 _jsonl_file = None
 
         sampling_method = self.dcfr_config.sampling_method
         logger.info(
             "Starting Deep CFR training from step %d to %d (%d workers, %d traversals/step, sampling=%s).",
-            start_step, end_step, num_workers, traversals_per_step, sampling_method,
+            start_step,
+            end_step,
+            num_workers,
+            traversals_per_step,
+            sampling_method,
         )
         if sampling_method == "outcome":
             logger.info(
                 "Using Outcome Sampling MCCFR with exploration_epsilon=%.2f",
                 self.dcfr_config.exploration_epsilon,
             )
-        if self.dcfr_config.engine_backend == "go" and self.dcfr_config.num_traversal_threads > 1:
+        if (
+            self.dcfr_config.engine_backend == "go"
+            and self.dcfr_config.num_traversal_threads > 1
+        ):
             logger.info(
                 "Using ThreadPoolExecutor with %d threads for Go FFI traversals.",
                 self.dcfr_config.num_traversal_threads,
@@ -1308,6 +1446,7 @@ class DeepCFRTrainer:
                 _prof = None
                 if _profiling_this_step:
                     import torch.profiler as _torch_profiler
+
                     _prof_activities = [_torch_profiler.ProfilerActivity.CPU]
                     if self.device.type == "cuda":
                         _prof_activities.append(_torch_profiler.ProfilerActivity.CUDA)
@@ -1322,7 +1461,9 @@ class DeepCFRTrainer:
                     _prof.__enter__()
 
                 if display and hasattr(display, "update_main_process_status"):
-                    display.update_main_process_status(f"Step {step}: Running traversals...")
+                    display.update_main_process_status(
+                        f"Step {step}: Running traversals..."
+                    )
 
                 # Get current network weights for workers
                 _t0 = time.time()
@@ -1335,7 +1476,14 @@ class DeepCFRTrainer:
                 if pending_future is not None:
                     # B3: Collect results from pipelined traversal started after prev step's adv training
                     _future_result = pending_future.result()
-                    step_advantage_samples, step_strategy_samples, step_value_samples, traversals_done, total_nodes, _trav_timing = _future_result
+                    (
+                        step_advantage_samples,
+                        step_strategy_samples,
+                        step_value_samples,
+                        traversals_done,
+                        total_nodes,
+                        _trav_timing,
+                    ) = _future_result
                     pending_future = None
                     if self.dcfr_config.enable_traversal_profiling:
                         logger.info(
@@ -1359,22 +1507,27 @@ class DeepCFRTrainer:
                         if self.shutdown_event.is_set():
                             raise GracefulShutdownException("Shutdown during traversals")
 
-                        batch_size = min(num_workers, traversals_per_step - traversals_done)
+                        batch_size = min(
+                            num_workers, traversals_per_step - traversals_done
+                        )
 
                         worker_args_list = []
                         for i in range(batch_size):
                             iter_num = self.total_traversals + traversals_done + i
-                            worker_args_list.append((
-                                iter_num,
-                                self.config,
-                                network_weights,
-                                network_config,
-                                self.progress_queue,
-                                self.archive_queue,
-                                i % num_workers,  # worker_id: pool slot (not traversal index)
-                                self.run_log_dir or "logs",
-                                self.run_timestamp or "unknown",
-                            ))
+                            worker_args_list.append(
+                                (
+                                    iter_num,
+                                    self.config,
+                                    network_weights,
+                                    network_config,
+                                    self.progress_queue,
+                                    self.archive_queue,
+                                    i
+                                    % num_workers,  # worker_id: pool slot (not traversal index)
+                                    self.run_log_dir or "logs",
+                                    self.run_timestamp or "unknown",
+                                )
+                            )
 
                         if not pool:
                             logger.info("Creating worker pool (size %d)...", num_workers)
@@ -1407,12 +1560,16 @@ class DeepCFRTrainer:
                             if isinstance(result, DeepCFRWorkerResult):
                                 step_advantage_samples.extend(result.advantage_samples)
                                 step_strategy_samples.extend(result.strategy_samples)
-                                if hasattr(result, "value_samples") and result.value_samples:
+                                if (
+                                    hasattr(result, "value_samples")
+                                    and result.value_samples
+                                ):
                                     step_value_samples.extend(result.value_samples)
                                 total_nodes += result.stats.nodes_visited
                                 if result.stats.error_count > 0:
                                     logger.warning(
-                                        "Worker reported %d errors.", result.stats.error_count
+                                        "Worker reported %d errors.",
+                                        result.stats.error_count,
                                     )
 
                         traversals_done += batch_size
@@ -1423,36 +1580,45 @@ class DeepCFRTrainer:
                     # Threaded path for Go FFI backend — threads share the
                     # advantage network read-only; each thread gets its own
                     # GoEngine instance (handle pool is mutex-protected).
-                    step_advantage_samples, step_strategy_samples, step_value_samples, traversals_done, total_nodes = (
-                        _run_traversals_threaded(
-                            self.total_traversals,
-                            self.config,
-                            network_weights,
-                            network_config,
-                            traversals_per_step,
-                            self.dcfr_config.num_traversal_threads,
-                            self.run_log_dir or "logs",
-                            self.run_timestamp or "unknown",
-                            self.progress_queue,
-                            self.archive_queue,
-                        )
+                    (
+                        step_advantage_samples,
+                        step_strategy_samples,
+                        step_value_samples,
+                        traversals_done,
+                        total_nodes,
+                    ) = _run_traversals_threaded(
+                        self.total_traversals,
+                        self.config,
+                        network_weights,
+                        network_config,
+                        traversals_per_step,
+                        self.dcfr_config.num_traversal_threads,
+                        self.run_log_dir or "logs",
+                        self.run_timestamp or "unknown",
+                        self.progress_queue,
+                        self.archive_queue,
                     )
                 else:
                     # Sequential path (single worker, no pipeline yet on first step)
-                    step_advantage_samples, step_strategy_samples, step_value_samples, traversals_done, total_nodes, _trav_timing = (
-                        _run_traversals_batch(
-                            self.total_traversals,
-                            self.total_traversals,
-                            self.config,
-                            network_weights,
-                            network_config,
-                            traversals_per_step,
-                            1,
-                            self.run_log_dir or "logs",
-                            self.run_timestamp or "unknown",
-                            self.progress_queue,
-                            self.archive_queue,
-                        )
+                    (
+                        step_advantage_samples,
+                        step_strategy_samples,
+                        step_value_samples,
+                        traversals_done,
+                        total_nodes,
+                        _trav_timing,
+                    ) = _run_traversals_batch(
+                        self.total_traversals,
+                        self.total_traversals,
+                        self.config,
+                        network_weights,
+                        network_config,
+                        traversals_per_step,
+                        1,
+                        self.run_log_dir or "logs",
+                        self.run_timestamp or "unknown",
+                        self.progress_queue,
+                        self.archive_queue,
                     )
                     if self.dcfr_config.enable_traversal_profiling:
                         logger.info(
@@ -1482,8 +1648,11 @@ class DeepCFRTrainer:
 
                 logger.info(
                     "Step %d: %d traversals, %d advantage samples, %d strategy samples, %d nodes",
-                    step, traversals_done, len(step_advantage_samples),
-                    len(step_strategy_samples), total_nodes,
+                    step,
+                    traversals_done,
+                    len(step_advantage_samples),
+                    len(step_strategy_samples),
+                    total_nodes,
                 )
 
                 if self.shutdown_event.is_set():
@@ -1513,12 +1682,16 @@ class DeepCFRTrainer:
 
                 # Train advantage network
                 if display and hasattr(display, "update_main_process_status"):
-                    display.update_main_process_status(f"Step {step}: Training advantage net...")
+                    display.update_main_process_status(
+                        f"Step {step}: Training advantage net..."
+                    )
 
                 _adv_start = time.time()
                 adv_loss = self._train_network(
-                    self.advantage_net, self.advantage_optimizer,
-                    self.advantage_buffer, self.dcfr_config.alpha,
+                    self.advantage_net,
+                    self.advantage_optimizer,
+                    self.advantage_buffer,
+                    self.dcfr_config.alpha,
                     self._compute_train_steps(self.advantage_buffer),
                     "AdvantageNetwork",
                 )
@@ -1534,14 +1707,27 @@ class DeepCFRTrainer:
                 val_loss = 0.0
                 if self._is_escher:
                     if display and hasattr(display, "update_main_process_status"):
-                        display.update_main_process_status(f"Step {step}: Training value net...")
+                        display.update_main_process_status(
+                            f"Step {step}: Training value net..."
+                        )
                     _val_start = time.time()
                     # Adaptive steps for value net using value_target_buffer_passes
                     _val_passes = self.dcfr_config.value_target_buffer_passes
-                    if _val_passes > 0.0 and self.value_buffer is not None and len(self.value_buffer) > 0:
+                    if (
+                        _val_passes > 0.0
+                        and self.value_buffer is not None
+                        and len(self.value_buffer) > 0
+                    ):
                         _val_steps = min(
                             self.dcfr_config.train_steps_per_iteration,
-                            max(250, int(len(self.value_buffer) * _val_passes / self.dcfr_config.batch_size)),
+                            max(
+                                250,
+                                int(
+                                    len(self.value_buffer)
+                                    * _val_passes
+                                    / self.dcfr_config.batch_size
+                                ),
+                            ),
                         )
                     else:
                         _val_steps = self.dcfr_config.train_steps_per_iteration
@@ -1555,7 +1741,10 @@ class DeepCFRTrainer:
                         _escher_ratio = _escher_sm / max(_escher_cf, 1e-8)
                         logger.info(
                             "Step %d ESCHER regrets: sampled_mag=%.4f cf_mag=%.4f ratio=%.4f",
-                            step, _escher_sm, _escher_cf, _escher_ratio,
+                            step,
+                            _escher_sm,
+                            _escher_cf,
+                            _escher_ratio,
                         )
 
                 if self.shutdown_event.is_set():
@@ -1564,12 +1753,16 @@ class DeepCFRTrainer:
                 if not self.dcfr_config.use_sd_cfr:
                     # Train strategy network (overlaps with async traversals if pipelining)
                     if display and hasattr(display, "update_main_process_status"):
-                        display.update_main_process_status(f"Step {step}: Training strategy net...")
+                        display.update_main_process_status(
+                            f"Step {step}: Training strategy net..."
+                        )
 
                     _strat_start = time.time()
                     strat_loss = self._train_network(
-                        self.strategy_net, self.strategy_optimizer,
-                        self.strategy_buffer, self.dcfr_config.alpha,
+                        self.strategy_net,
+                        self.strategy_optimizer,
+                        self.strategy_buffer,
+                        self.dcfr_config.alpha,
                         self._compute_train_steps(self.strategy_buffer),
                         "StrategyNetwork",
                     )
@@ -1590,7 +1783,12 @@ class DeepCFRTrainer:
                     display.update_stats(
                         iteration=step,
                         infosets=buf_str,
-                        exploitability=f"AdvL:{adv_loss:.4f}" + (f" StrL:{strat_loss:.4f}" if not self.dcfr_config.use_sd_cfr else f" Snaps:{len(self._sd_snapshots)}"),
+                        exploitability=f"AdvL:{adv_loss:.4f}"
+                        + (
+                            f" StrL:{strat_loss:.4f}"
+                            if not self.dcfr_config.use_sd_cfr
+                            else f" Snaps:{len(self._sd_snapshots)}"
+                        ),
                         last_iter_time=step_time,
                     )
                 if display and hasattr(display, "update_main_process_status"):
@@ -1600,16 +1798,23 @@ class DeepCFRTrainer:
                     logger.info(
                         "Step %d complete in %.2fs. Adv loss: %.6f. "
                         "Buffer: Adv=%d. Snapshots: %d. Total traversals: %d",
-                        step, step_time, adv_loss,
-                        len(self.advantage_buffer), len(self._sd_snapshots),
+                        step,
+                        step_time,
+                        adv_loss,
+                        len(self.advantage_buffer),
+                        len(self._sd_snapshots),
                         self.total_traversals,
                     )
                 else:
                     logger.info(
                         "Step %d complete in %.2fs. Adv loss: %.6f, Strat loss: %.6f. "
                         "Buffers: Adv=%d, Strat=%d. Total traversals: %d",
-                        step, step_time, adv_loss, strat_loss,
-                        len(self.advantage_buffer), len(self.strategy_buffer),
+                        step,
+                        step_time,
+                        adv_loss,
+                        strat_loss,
+                        len(self.advantage_buffer),
+                        len(self.strategy_buffer),
                         self.total_traversals,
                     )
                 if display is None:
@@ -1641,11 +1846,18 @@ class DeepCFRTrainer:
                     try:
                         _prof.__exit__(None, None, None)
                         _ckpt_base = getattr(
-                            self.config.persistence, "agent_data_save_path",
+                            self.config.persistence,
+                            "agent_data_save_path",
                             "strategy/deep_cfr_checkpoint.pt",
                         )
-                        _trace_dir = os.path.dirname(_ckpt_base) if os.path.dirname(_ckpt_base) else "."
-                        _trace_path = os.path.join(_trace_dir, f"profile_step_{step}.json")
+                        _trace_dir = (
+                            os.path.dirname(_ckpt_base)
+                            if os.path.dirname(_ckpt_base)
+                            else "."
+                        )
+                        _trace_path = os.path.join(
+                            _trace_dir, f"profile_step_{step}.json"
+                        )
                         _prof.export_chrome_trace(_trace_path)
                         logger.info("Torch profiler trace exported to %s", _trace_path)
                     except Exception as _prof_e:
@@ -1654,15 +1866,27 @@ class DeepCFRTrainer:
                 # Tier 2: write JSONL profiling record
                 if _jsonl_file is not None:
                     try:
-                        _samples_this_step = len(step_advantage_samples) + len(step_strategy_samples)
+                        _samples_this_step = len(step_advantage_samples) + len(
+                            step_strategy_samples
+                        )
                         _record = {
                             "step": step,
                             "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "traversal_ms": round(phase_times.get("traversal", 0.0) * 1000, 1),
-                            "adv_train_ms": round(phase_times.get("adv_train", 0.0) * 1000, 1),
-                            "strat_train_ms": round(phase_times.get("strat_train", 0.0) * 1000, 1),
-                            "buffer_insert_ms": round(phase_times.get("buffer_insert", 0.0) * 1000, 1),
-                            "weights_copy_ms": round(phase_times.get("weights_copy", 0.0) * 1000, 1),
+                            "traversal_ms": round(
+                                phase_times.get("traversal", 0.0) * 1000, 1
+                            ),
+                            "adv_train_ms": round(
+                                phase_times.get("adv_train", 0.0) * 1000, 1
+                            ),
+                            "strat_train_ms": round(
+                                phase_times.get("strat_train", 0.0) * 1000, 1
+                            ),
+                            "buffer_insert_ms": round(
+                                phase_times.get("buffer_insert", 0.0) * 1000, 1
+                            ),
+                            "weights_copy_ms": round(
+                                phase_times.get("weights_copy", 0.0) * 1000, 1
+                            ),
                             "buffer_size": len(self.advantage_buffer),
                             "samples_this_step": _samples_this_step,
                         }
@@ -1676,6 +1900,7 @@ class DeepCFRTrainer:
                     # Tier 1: log handle pool stats at INFO level
                     try:
                         from ..ffi.bridge import get_handle_pool_stats
+
                         _pool_stats = get_handle_pool_stats()
                         logger.info(
                             "Handle pool: games=%s, agents=%s, snapshots=%s",
@@ -1687,33 +1912,56 @@ class DeepCFRTrainer:
                         pass
                     self.save_checkpoint()
                     # PSRO: add checkpoint to population after save
-                    if self._psro_oracle is not None and step % self.dcfr_config.psro_checkpoint_interval == 0:
+                    if (
+                        self._psro_oracle is not None
+                        and step % self.dcfr_config.psro_checkpoint_interval == 0
+                    ):
                         checkpoint_path = getattr(
-                            self.config.persistence, "agent_data_save_path",
+                            self.config.persistence,
+                            "agent_data_save_path",
                             "strategy/deep_cfr_checkpoint.pt",
                         )
                         self._psro_oracle.add_checkpoint(checkpoint_path, step)
-                        logger.info("PSRO: added checkpoint at step %d (population size=%d)", step, self._psro_oracle.size)
+                        logger.info(
+                            "PSRO: added checkpoint at step %d (population size=%d)",
+                            step,
+                            self._psro_oracle.size,
+                        )
 
                         # Run population evaluation if configured
                         if self.dcfr_config.psro_eval_games > 0:
                             try:
                                 n = max(1, self._psro_oracle.size)
                                 ratings = self._psro_oracle.evaluate_population(
-                                    games_per_matchup=max(1, self.dcfr_config.psro_eval_games // n),
+                                    games_per_matchup=max(
+                                        1, self.dcfr_config.psro_eval_games // n
+                                    ),
                                     num_players=self.dcfr_config.num_players,
                                     config=self.config,
                                 )
                                 if ratings:
-                                    logger.info("PSRO population ratings at step %d: %s", step, ratings)
+                                    logger.info(
+                                        "PSRO population ratings at step %d: %s",
+                                        step,
+                                        ratings,
+                                    )
                                     if self.live_display_manager is None:
-                                        print(f"[psro step={step}] ratings={ratings}", flush=True)
+                                        print(
+                                            f"[psro step={step}] ratings={ratings}",
+                                            flush=True,
+                                        )
                             except Exception as e_psro:
-                                logger.warning("PSRO evaluation failed at step %d: %s", step, e_psro)
+                                logger.warning(
+                                    "PSRO evaluation failed at step %d: %s", step, e_psro
+                                )
 
                         # Persist PSRO state alongside the main checkpoint
                         try:
-                            checkpoint_dir = os.path.dirname(checkpoint_path) if os.path.dirname(checkpoint_path) else "."
+                            checkpoint_dir = (
+                                os.path.dirname(checkpoint_path)
+                                if os.path.dirname(checkpoint_path)
+                                else "."
+                            )
                             psro_path = os.path.join(checkpoint_dir, "psro_state.json")
                             self._psro_oracle.save_state(psro_path)
                         except Exception as e_psro_save:
@@ -1758,14 +2006,14 @@ class DeepCFRTrainer:
                             )
                         self.es_validation_history.append((step, es_metrics))
                     except Exception as e_val:
-                        logger.warning(
-                            "ES validation failed at step %d: %s", step, e_val
-                        )
+                        logger.warning("ES validation failed at step %d: %s", step, e_val)
 
             logger.info("Deep CFR training completed %d steps.", total_steps)
 
         except (GracefulShutdownException, KeyboardInterrupt) as e:
-            logger.warning("Shutdown during training: %s. Saving checkpoint...", type(e).__name__)
+            logger.warning(
+                "Shutdown during training: %s. Saving checkpoint...", type(e).__name__
+            )
             if pending_future:
                 pending_future.cancel()
             if executor:
@@ -1779,11 +2027,19 @@ class DeepCFRTrainer:
                     pass
             self.save_checkpoint()
             try:
-                if _RUN_DB_AVAILABLE and self._db_conn is not None and self._db_run_id is not None:
-                    _run_db.update_run_status(self._db_conn, self._db_run_id, "interrupted")
+                if (
+                    _RUN_DB_AVAILABLE
+                    and self._db_conn is not None
+                    and self._db_run_id is not None
+                ):
+                    _run_db.update_run_status(
+                        self._db_conn, self._db_run_id, "interrupted"
+                    )
             except Exception:
                 pass
-            raise GracefulShutdownException("Shutdown processed in Deep CFR trainer") from e
+            raise GracefulShutdownException(
+                "Shutdown processed in Deep CFR trainer"
+            ) from e
 
         except Exception as e:
             logger.exception("Unhandled error in Deep CFR training loop.")
@@ -1800,7 +2056,11 @@ class DeepCFRTrainer:
                     pass
             self.save_checkpoint()
             try:
-                if _RUN_DB_AVAILABLE and self._db_conn is not None and self._db_run_id is not None:
+                if (
+                    _RUN_DB_AVAILABLE
+                    and self._db_conn is not None
+                    and self._db_run_id is not None
+                ):
                     _run_db.update_run_status(self._db_conn, self._db_run_id, "failed")
             except Exception:
                 pass
@@ -1822,7 +2082,11 @@ class DeepCFRTrainer:
 
         # Mark run completed
         try:
-            if _RUN_DB_AVAILABLE and self._db_conn is not None and self._db_run_id is not None:
+            if (
+                _RUN_DB_AVAILABLE
+                and self._db_conn is not None
+                and self._db_run_id is not None
+            ):
                 _run_db.update_run_status(self._db_conn, self._db_run_id, "completed")
         except Exception:
             pass
@@ -1838,7 +2102,8 @@ class DeepCFRTrainer:
             CheckpointSaveError: If saving the checkpoint or buffers fails.
         """
         path = filepath or getattr(
-            self.config.persistence, "agent_data_save_path",
+            self.config.persistence,
+            "agent_data_save_path",
             "strategy/deep_cfr_checkpoint.pt",
         )
 
@@ -1852,15 +2117,31 @@ class DeepCFRTrainer:
             adv_buffer_path = f"{base_path}_advantage_buffer"
             strat_buffer_path = f"{base_path}_strategy_buffer"
             val_buffer_path = f"{base_path}_value_buffer" if self._is_escher else None
-            sd_snapshots_path = f"{base_path}_sd_snapshots.pt" if self.dcfr_config.use_sd_cfr else None
-            ema_path = f"{base_path}_ema.pt" if (self.dcfr_config.use_sd_cfr and self.dcfr_config.use_ema) else None
+            sd_snapshots_path = (
+                f"{base_path}_sd_snapshots.pt" if self.dcfr_config.use_sd_cfr else None
+            )
+            ema_path = (
+                f"{base_path}_ema.pt"
+                if (self.dcfr_config.use_sd_cfr and self.dcfr_config.use_ema)
+                else None
+            )
 
             checkpoint = {
                 "advantage_net_state_dict": self.advantage_net.state_dict(),
-                "strategy_net_state_dict": self.strategy_net.state_dict() if self.strategy_net is not None else None,
-                "value_net_state_dict": self.value_net.state_dict() if self._is_escher else None,
+                "strategy_net_state_dict": (
+                    self.strategy_net.state_dict()
+                    if self.strategy_net is not None
+                    else None
+                ),
+                "value_net_state_dict": (
+                    self.value_net.state_dict() if self._is_escher else None
+                ),
                 "advantage_optimizer_state_dict": self.advantage_optimizer.state_dict(),
-                "strategy_optimizer_state_dict": self.strategy_optimizer.state_dict() if self.strategy_optimizer is not None else None,
+                "strategy_optimizer_state_dict": (
+                    self.strategy_optimizer.state_dict()
+                    if self.strategy_optimizer is not None
+                    else None
+                ),
                 "value_optimizer_state_dict": (
                     self.value_optimizer.state_dict() if self._is_escher else None
                 ),
@@ -1876,8 +2157,14 @@ class DeepCFRTrainer:
                 "value_buffer_path": val_buffer_path,
                 "sd_snapshots_path": sd_snapshots_path,
                 "grad_scaler_state_dict": self.scaler.state_dict(),
-                "ema_state_dict": {k: torch.from_numpy(v) for k, v in self._ema_state_dict.items()} if self._ema_state_dict is not None else None,
-                "ema_weight_sum": self._ema_weight_sum if self._ema_state_dict is not None else None,
+                "ema_state_dict": (
+                    {k: torch.from_numpy(v) for k, v in self._ema_state_dict.items()}
+                    if self._ema_state_dict is not None
+                    else None
+                ),
+                "ema_weight_sum": (
+                    self._ema_weight_sum if self._ema_state_dict is not None else None
+                ),
                 "snapshot_count": self._snapshot_count,
             }
 
@@ -1891,7 +2178,9 @@ class DeepCFRTrainer:
                 # Flatten snapshots into a tensor-only dict for weights_only=True compat
                 snapshot_data = {
                     "num_snapshots": torch.tensor(len(self._sd_snapshots)),
-                    "iterations": torch.tensor(self._sd_snapshot_iterations, dtype=torch.long),
+                    "iterations": torch.tensor(
+                        self._sd_snapshot_iterations, dtype=torch.long
+                    ),
                 }
                 for i, snap in enumerate(self._sd_snapshots):
                     for k, v in snap.items():
@@ -1899,25 +2188,41 @@ class DeepCFRTrainer:
                 atomic_torch_save(snapshot_data, sd_snapshots_path)
             if ema_path is not None and self._ema_state_dict is not None:
                 ema_data = {
-                    "ema_state_dict": {k: torch.from_numpy(v) for k, v in self._ema_state_dict.items()},
+                    "ema_state_dict": {
+                        k: torch.from_numpy(v) for k, v in self._ema_state_dict.items()
+                    },
                     "ema_weight_sum": torch.tensor(self._ema_weight_sum),
                 }
                 atomic_torch_save(ema_data, ema_path)
-                logger.info("EMA state saved to %s (weight_sum=%.2f).", ema_path, self._ema_weight_sum)
+                logger.info(
+                    "EMA state saved to %s (weight_sum=%.2f).",
+                    ema_path,
+                    self._ema_weight_sum,
+                )
             elif ema_path is None:
-                logger.warning("EMA save skipped: ema_path is None (use_sd_cfr or use_ema not enabled).")
+                logger.warning(
+                    "EMA save skipped: ema_path is None (use_sd_cfr or use_ema not enabled)."
+                )
             else:
-                logger.warning("EMA save skipped: _ema_state_dict is None (no EMA updates recorded yet).")
+                logger.warning(
+                    "EMA save skipped: _ema_state_dict is None (no EMA updates recorded yet)."
+                )
 
             # Save iteration-specific .pt copy (no buffers) for post-hoc evaluation
             iter_path = f"{base_path}_iter_{self.training_step}.pt"
             try:
                 atomic_torch_save(checkpoint, iter_path)
             except Exception as e_iter:
-                logger.warning("Failed to save iteration checkpoint %s: %s", iter_path, e_iter)
+                logger.warning(
+                    "Failed to save iteration checkpoint %s: %s", iter_path, e_iter
+                )
 
             # DB: register checkpoint and update retention flags
-            if _RUN_DB_AVAILABLE and self._db_conn is not None and self._db_run_id is not None:
+            if (
+                _RUN_DB_AVAILABLE
+                and self._db_conn is not None
+                and self._db_run_id is not None
+            ):
                 try:
                     ckpt_id = _run_db.register_checkpoint(
                         self._db_conn, self._db_run_id, self.training_step, iter_path
@@ -1933,11 +2238,15 @@ class DeepCFRTrainer:
                     self._psro_oracle.save_state(psro_path)
                     logger.info("PSRO state saved to %s.", psro_path)
                 except Exception as e_psro:
-                    logger.warning("Failed to save PSRO state to %s: %s", psro_path, e_psro)
+                    logger.warning(
+                        "Failed to save PSRO state to %s: %s", psro_path, e_psro
+                    )
 
             logger.info(
                 "Checkpoint saved to %s (step %d, %d traversals).",
-                path, self.training_step, self.total_traversals,
+                path,
+                self.training_step,
+                self.total_traversals,
             )
             if self.live_display_manager is None:
                 print(
@@ -1950,7 +2259,9 @@ class DeepCFRTrainer:
             raise CheckpointSaveError(f"Failed to save checkpoint to {path}: {e}") from e
         except Exception as e:
             logger.error("Unexpected error saving checkpoint to %s: %s", path, e)
-            raise CheckpointSaveError(f"Unexpected error saving checkpoint to {path}: {e}") from e
+            raise CheckpointSaveError(
+                f"Unexpected error saving checkpoint to {path}: {e}"
+            ) from e
 
     def load_checkpoint(self, filepath: Optional[str] = None):
         """
@@ -1960,7 +2271,8 @@ class DeepCFRTrainer:
             CheckpointLoadError: If loading the checkpoint or buffers fails.
         """
         path = filepath or getattr(
-            self.config.persistence, "agent_data_save_path",
+            self.config.persistence,
+            "agent_data_save_path",
             "strategy/deep_cfr_checkpoint.pt",
         )
 
@@ -1972,11 +2284,21 @@ class DeepCFRTrainer:
             checkpoint = torch.load(path, map_location=self.device, weights_only=True)
 
             self.advantage_net.load_state_dict(checkpoint["advantage_net_state_dict"])
-            if self.strategy_net is not None and checkpoint.get("strategy_net_state_dict") is not None:
+            if (
+                self.strategy_net is not None
+                and checkpoint.get("strategy_net_state_dict") is not None
+            ):
                 self.strategy_net.load_state_dict(checkpoint["strategy_net_state_dict"])
-            self.advantage_optimizer.load_state_dict(checkpoint["advantage_optimizer_state_dict"])
-            if self.strategy_optimizer is not None and checkpoint.get("strategy_optimizer_state_dict") is not None:
-                self.strategy_optimizer.load_state_dict(checkpoint["strategy_optimizer_state_dict"])
+            self.advantage_optimizer.load_state_dict(
+                checkpoint["advantage_optimizer_state_dict"]
+            )
+            if (
+                self.strategy_optimizer is not None
+                and checkpoint.get("strategy_optimizer_state_dict") is not None
+            ):
+                self.strategy_optimizer.load_state_dict(
+                    checkpoint["strategy_optimizer_state_dict"]
+                )
 
             # ESCHER value network — cross-mode safe
             value_net_sd = checkpoint.get("value_net_state_dict")
@@ -2009,7 +2331,11 @@ class DeepCFRTrainer:
             strat_loaded = False
 
             if adv_buffer_path:
-                npz_path = adv_buffer_path if adv_buffer_path.endswith(".npz") else adv_buffer_path + ".npz"
+                npz_path = (
+                    adv_buffer_path
+                    if adv_buffer_path.endswith(".npz")
+                    else adv_buffer_path + ".npz"
+                )
                 if os.path.exists(npz_path):
                     self.advantage_buffer = ReservoirBuffer(
                         capacity=self.dcfr_config.advantage_buffer_capacity,
@@ -2019,11 +2345,16 @@ class DeepCFRTrainer:
                     adv_loaded = True
                 else:
                     logger.warning(
-                        "Advantage buffer file not found: %s. Starting with empty buffer.", npz_path
+                        "Advantage buffer file not found: %s. Starting with empty buffer.",
+                        npz_path,
                     )
 
             if self.strategy_buffer is not None and strat_buffer_path:
-                npz_path = strat_buffer_path if strat_buffer_path.endswith(".npz") else strat_buffer_path + ".npz"
+                npz_path = (
+                    strat_buffer_path
+                    if strat_buffer_path.endswith(".npz")
+                    else strat_buffer_path + ".npz"
+                )
                 if os.path.exists(npz_path):
                     self.strategy_buffer = ReservoirBuffer(
                         capacity=self.dcfr_config.strategy_buffer_capacity,
@@ -2033,16 +2364,25 @@ class DeepCFRTrainer:
                     strat_loaded = True
                 else:
                     logger.warning(
-                        "Strategy buffer file not found: %s. Starting with empty buffer.", npz_path
+                        "Strategy buffer file not found: %s. Starting with empty buffer.",
+                        npz_path,
                     )
 
             # ESCHER value buffer loading
             if self._is_escher:
                 val_buffer_path = checkpoint.get("value_buffer_path")
                 if val_buffer_path:
-                    npz_path = val_buffer_path if val_buffer_path.endswith(".npz") else val_buffer_path + ".npz"
+                    npz_path = (
+                        val_buffer_path
+                        if val_buffer_path.endswith(".npz")
+                        else val_buffer_path + ".npz"
+                    )
                     if os.path.exists(npz_path):
-                        _base_dim_ckpt = EP_PBS_INPUT_DIM if self.dcfr_config.encoding_mode == "ep_pbs" else INPUT_DIM
+                        _base_dim_ckpt = (
+                            EP_PBS_INPUT_DIM
+                            if self.dcfr_config.encoding_mode == "ep_pbs"
+                            else INPUT_DIM
+                        )
                         self.value_buffer = ReservoirBuffer(
                             capacity=self.dcfr_config.value_buffer_capacity,
                             input_dim=_base_dim_ckpt * 2,
@@ -2053,7 +2393,8 @@ class DeepCFRTrainer:
                         logger.info("Loaded value buffer from %s.", npz_path)
                     else:
                         logger.warning(
-                            "Value buffer file not found: %s. Starting with empty buffer.", npz_path
+                            "Value buffer file not found: %s. Starting with empty buffer.",
+                            npz_path,
                         )
 
             if not adv_loaded and not strat_loaded:
@@ -2064,15 +2405,25 @@ class DeepCFRTrainer:
             # SD-CFR snapshot loading
             sd_snapshots_path = checkpoint.get("sd_snapshots_path")
             if sd_snapshots_path and os.path.exists(sd_snapshots_path):
-                snapshot_data = torch.load(sd_snapshots_path, map_location="cpu", weights_only=True)
+                snapshot_data = torch.load(
+                    sd_snapshots_path, map_location="cpu", weights_only=True
+                )
                 num_snapshots = int(snapshot_data["num_snapshots"].item())
                 self._sd_snapshot_iterations = snapshot_data["iterations"].tolist()
                 self._sd_snapshots = []
                 for i in range(num_snapshots):
                     prefix = f"snap_{i}_"
-                    snap = {k[len(prefix):]: v.numpy() for k, v in snapshot_data.items() if k.startswith(prefix)}
+                    snap = {
+                        k[len(prefix) :]: v.numpy()
+                        for k, v in snapshot_data.items()
+                        if k.startswith(prefix)
+                    }
                     self._sd_snapshots.append(snap)
-                logger.info("Loaded %d SD-CFR snapshots from %s.", len(self._sd_snapshots), sd_snapshots_path)
+                logger.info(
+                    "Loaded %d SD-CFR snapshots from %s.",
+                    len(self._sd_snapshots),
+                    sd_snapshots_path,
+                )
 
             # Restore snapshot count for correct reservoir sampling after warm-start
             if "snapshot_count" in checkpoint:
@@ -2090,21 +2441,25 @@ class DeepCFRTrainer:
                     }
                     self._ema_weight_sum = float(checkpoint["ema_weight_sum"])
                     logger.info(
-                        "Loaded EMA state from checkpoint dict (weight_sum=%.2f).", self._ema_weight_sum
+                        "Loaded EMA state from checkpoint dict (weight_sum=%.2f).",
+                        self._ema_weight_sum,
                     )
                 else:
                     # Backward compat: try separate _ema.pt file
                     base_path = os.path.splitext(path)[0]
                     ema_path = f"{base_path}_ema.pt"
                     if os.path.exists(ema_path):
-                        ema_data = torch.load(ema_path, map_location="cpu", weights_only=True)
+                        ema_data = torch.load(
+                            ema_path, map_location="cpu", weights_only=True
+                        )
                         self._ema_state_dict = {
                             k: v.numpy() for k, v in ema_data["ema_state_dict"].items()
                         }
                         self._ema_weight_sum = float(ema_data["ema_weight_sum"].item())
                         logger.info(
                             "Loaded EMA state from separate file %s (weight_sum=%.2f).",
-                            ema_path, self._ema_weight_sum,
+                            ema_path,
+                            self._ema_weight_sum,
                         )
                     else:
                         logger.info(
@@ -2120,9 +2475,13 @@ class DeepCFRTrainer:
                         self._psro_oracle.load_state(psro_path)
                         logger.info("PSRO state loaded from %s.", psro_path)
                     except Exception as e_psro:
-                        logger.warning("Failed to load PSRO state from %s: %s", psro_path, e_psro)
+                        logger.warning(
+                            "Failed to load PSRO state from %s: %s", psro_path, e_psro
+                        )
                 else:
-                    logger.info("No PSRO state file found at %s; starting fresh.", psro_path)
+                    logger.info(
+                        "No PSRO state file found at %s; starting fresh.", psro_path
+                    )
 
             self.training_step = checkpoint.get("training_step", 0)
             self.total_traversals = checkpoint.get("total_traversals", 0)
@@ -2145,7 +2504,9 @@ class DeepCFRTrainer:
                     if saved_val != current_val:
                         logger.warning(
                             "Config mismatch for '%s': checkpoint=%r, current=%r",
-                            key, saved_val, current_val,
+                            key,
+                            saved_val,
+                            current_val,
                         )
 
             # Warn on cambia_rules mismatch between checkpoint and current config
@@ -2162,25 +2523,36 @@ class DeepCFRTrainer:
                             current_rules.get(key),
                         )
 
-            strat_len = len(self.strategy_buffer) if self.strategy_buffer is not None else 0
+            strat_len = (
+                len(self.strategy_buffer) if self.strategy_buffer is not None else 0
+            )
             logger.info(
                 "Checkpoint loaded from %s. Resuming at step %d (%d traversals). "
                 "Buffers: Adv=%d, Strat=%d.",
-                path, self.training_step, self.total_traversals,
-                len(self.advantage_buffer), strat_len,
+                path,
+                self.training_step,
+                self.total_traversals,
+                len(self.advantage_buffer),
+                strat_len,
             )
         except FileNotFoundError as e:
             logger.error("Checkpoint file not found: %s", path)
             raise CheckpointLoadError(f"Checkpoint file not found: {path}") from e
         except (KeyError, ValueError) as e:
             logger.error("Corrupted or incompatible checkpoint file %s: %s", path, e)
-            raise CheckpointLoadError(f"Corrupted or incompatible checkpoint file {path}: {e}") from e
+            raise CheckpointLoadError(
+                f"Corrupted or incompatible checkpoint file {path}: {e}"
+            ) from e
         except (OSError, IOError) as e:
             logger.error("Failed to load checkpoint from %s: %s", path, e)
-            raise CheckpointLoadError(f"Failed to load checkpoint from {path}: {e}") from e
+            raise CheckpointLoadError(
+                f"Failed to load checkpoint from {path}: {e}"
+            ) from e
         except Exception as e:
             logger.error("Unexpected error loading checkpoint from %s: %s", path, e)
-            raise CheckpointLoadError(f"Unexpected error loading checkpoint from {path}: {e}") from e
+            raise CheckpointLoadError(
+                f"Unexpected error loading checkpoint from {path}: {e}"
+            ) from e
 
     def get_strategy_network(self) -> StrategyNetwork:
         """Returns the trained strategy network for deployment/evaluation."""

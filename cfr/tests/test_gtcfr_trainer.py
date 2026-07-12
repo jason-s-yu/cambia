@@ -194,9 +194,7 @@ class TestCheckpointSaveLoad:
         trainer.current_epoch = 3
 
         # Save original weights
-        original_weights = {
-            k: v.clone() for k, v in trainer.cvpn.state_dict().items()
-        }
+        original_weights = {k: v.clone() for k, v in trainer.cvpn.state_dict().items()}
 
         with tempfile.TemporaryDirectory() as tmpdir:
             ckpt_path = os.path.join(tmpdir, "test_gtcfr.pt")
@@ -208,9 +206,9 @@ class TestCheckpointSaveLoad:
 
             # Verify CVPN weights match
             for k, v in trainer2.cvpn.state_dict().items():
-                assert torch.allclose(v, original_weights[k], atol=1e-6), (
-                    f"CVPN weight mismatch for key {k}"
-                )
+                assert torch.allclose(
+                    v, original_weights[k], atol=1e-6
+                ), f"CVPN weight mismatch for key {k}"
 
             # Verify epoch
             assert trainer2.current_epoch == 3

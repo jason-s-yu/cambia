@@ -492,7 +492,11 @@ def test_submit_after_flag_overrides_and_posts(tmp_path, monkeypatch):
     spec_file.write_text("kind: train\nname: r2\nconfig: cfr/config/x.yaml\n")
 
     cli.submit(
-        spec_file=spec_file, force=False, after="parent-run", on_failure="run", config=None
+        spec_file=spec_file,
+        force=False,
+        after="parent-run",
+        on_failure="run",
+        config=None,
     )
 
     assert posted["payload"]["after"] == "parent-run"

@@ -46,6 +46,7 @@ class BenchmarkResult:
         run_id: Shared identifier tying results from the same suite run
         notes: Free-text context about what state the code was in (e.g. "baseline before columnar buffer refactor")
     """
+
     name: str
     config: Dict[str, Any] = field(default_factory=dict)
     timings: Dict[str, float] = field(default_factory=dict)
@@ -101,7 +102,7 @@ class BenchmarkSuite:
         output_dir: Optional[str] = None,
         device: Optional[str] = None,
         run_id: str = "",
-        **kwargs
+        **kwargs,
     ) -> BenchmarkResult:
         """
         Run a single benchmark by name.
@@ -120,7 +121,9 @@ class BenchmarkSuite:
             KeyError: If benchmark name is not registered
         """
         if name not in self.benchmarks:
-            raise KeyError(f"Benchmark '{name}' not registered. Available: {list(self.benchmarks.keys())}")
+            raise KeyError(
+                f"Benchmark '{name}' not registered. Available: {list(self.benchmarks.keys())}"
+            )
 
         # Determine device: resolve "auto" (and an unset device) through the
         # shared resolver, matching the cuda -> xpu -> cpu order the rest of
@@ -144,9 +147,9 @@ class BenchmarkSuite:
             result.metadata["device"] = device
         accel_kind = device.split(":")[0]
         if "accel_available" not in result.metadata:
-            result.metadata["accel_available"] = (
-                gpu_safety.accel_available("cuda") or gpu_safety.accel_available("xpu")
-            )
+            result.metadata["accel_available"] = gpu_safety.accel_available(
+                "cuda"
+            ) or gpu_safety.accel_available("xpu")
         if accel_kind == "cuda" and gpu_safety.accel_available("cuda"):
             result.metadata["accel_device_name"] = torch.cuda.get_device_name(0)
         elif (
@@ -173,10 +176,7 @@ class BenchmarkSuite:
         return result
 
     def run_all(
-        self,
-        output_dir: Optional[str] = None,
-        device: Optional[str] = None,
-        **kwargs
+        self, output_dir: Optional[str] = None, device: Optional[str] = None, **kwargs
     ) -> List[BenchmarkResult]:
         """
         Run all registered benchmarks.
@@ -209,7 +209,7 @@ class BenchmarkSuite:
                     output_dir=str(output_base) if output_base else None,
                     device=device,
                     run_id=run_id,
-                    **kwargs
+                    **kwargs,
                 )
                 results.append(result)
             except Exception as e:
@@ -222,5 +222,9 @@ class BenchmarkSuite:
             save_summary(results, str(summary_path))
             logger.info("Saved summary to %s", summary_path)
 
-        logger.info("Benchmark suite complete: %d/%d succeeded", len(results), len(self.benchmarks))
+        logger.info(
+            "Benchmark suite complete: %d/%d succeeded",
+            len(results),
+            len(self.benchmarks),
+        )
         return results

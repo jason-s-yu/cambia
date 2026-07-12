@@ -26,7 +26,6 @@ import yaml
 from src.encoding import INPUT_DIM, NUM_ACTIONS
 from src.networks import HistoryValueNetwork
 
-
 # ---------------------------------------------------------------------------
 # Helpers to build minimal Config + DeepCFRConfig without full YAML loading
 # ---------------------------------------------------------------------------
@@ -135,7 +134,9 @@ class TestEscherConfigFields:
 
 class TestCheckpointSaveEscher:
     def test_escher_checkpoint_contains_value_net(self, tmp_path):
-        trainer, checkpoint_path = _build_trainer(str(tmp_path), traversal_method="escher")
+        trainer, checkpoint_path = _build_trainer(
+            str(tmp_path), traversal_method="escher"
+        )
         trainer.save_checkpoint(checkpoint_path)
 
         assert os.path.exists(checkpoint_path)
@@ -145,7 +146,9 @@ class TestCheckpointSaveEscher:
         assert len(ckpt["value_net_state_dict"]) > 0
 
     def test_os_checkpoint_value_net_is_none(self, tmp_path):
-        trainer, checkpoint_path = _build_trainer(str(tmp_path), traversal_method="outcome")
+        trainer, checkpoint_path = _build_trainer(
+            str(tmp_path), traversal_method="outcome"
+        )
         trainer.save_checkpoint(checkpoint_path)
 
         ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
@@ -153,7 +156,9 @@ class TestCheckpointSaveEscher:
         assert ckpt["value_net_state_dict"] is None
 
     def test_escher_checkpoint_has_value_buffer_path(self, tmp_path):
-        trainer, checkpoint_path = _build_trainer(str(tmp_path), traversal_method="escher")
+        trainer, checkpoint_path = _build_trainer(
+            str(tmp_path), traversal_method="escher"
+        )
         trainer.save_checkpoint(checkpoint_path)
 
         ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
@@ -169,12 +174,12 @@ class TestCheckpointSaveEscher:
 class TestCheckpointRoundtrip:
     def test_escher_roundtrip_preserves_value_net(self, tmp_path):
         """Save ESCHER checkpoint, load into new trainer, verify value_net weights match."""
-        trainer, checkpoint_path = _build_trainer(str(tmp_path), traversal_method="escher")
+        trainer, checkpoint_path = _build_trainer(
+            str(tmp_path), traversal_method="escher"
+        )
 
         # Capture original value_net weights
-        original_sd = {
-            k: v.clone() for k, v in trainer.value_net.state_dict().items()
-        }
+        original_sd = {k: v.clone() for k, v in trainer.value_net.state_dict().items()}
 
         trainer.save_checkpoint(checkpoint_path)
 
@@ -186,13 +191,17 @@ class TestCheckpointRoundtrip:
         loaded_sd = trainer2.value_net.state_dict()
         for k in original_sd:
             assert k in loaded_sd, f"Missing key in loaded value_net: {k}"
-            assert torch.allclose(original_sd[k], loaded_sd[k]), (
-                f"Value net weight mismatch for {k}"
-            )
+            assert torch.allclose(
+                original_sd[k], loaded_sd[k]
+            ), f"Value net weight mismatch for {k}"
 
     def test_escher_roundtrip_preserves_advantage_net(self, tmp_path):
-        trainer, checkpoint_path = _build_trainer(str(tmp_path), traversal_method="escher")
-        original_sd = {k: v.clone() for k, v in trainer.advantage_net.state_dict().items()}
+        trainer, checkpoint_path = _build_trainer(
+            str(tmp_path), traversal_method="escher"
+        )
+        original_sd = {
+            k: v.clone() for k, v in trainer.advantage_net.state_dict().items()
+        }
         trainer.save_checkpoint(checkpoint_path)
 
         trainer2, _ = _build_trainer(str(tmp_path), traversal_method="escher")
@@ -202,7 +211,9 @@ class TestCheckpointRoundtrip:
             assert torch.allclose(original_sd[k], trainer2.advantage_net.state_dict()[k])
 
     def test_escher_roundtrip_preserves_strategy_net(self, tmp_path):
-        trainer, checkpoint_path = _build_trainer(str(tmp_path), traversal_method="escher")
+        trainer, checkpoint_path = _build_trainer(
+            str(tmp_path), traversal_method="escher"
+        )
         original_sd = {k: v.clone() for k, v in trainer.strategy_net.state_dict().items()}
         trainer.save_checkpoint(checkpoint_path)
 
@@ -222,7 +233,9 @@ class TestCrossModeSafety:
     def test_os_checkpoint_to_escher_load(self, tmp_path):
         """Loading an OS checkpoint into ESCHER trainer: value_net initializes fresh."""
         # Save an OS checkpoint
-        os_trainer, checkpoint_path = _build_trainer(str(tmp_path), traversal_method="outcome")
+        os_trainer, checkpoint_path = _build_trainer(
+            str(tmp_path), traversal_method="outcome"
+        )
         os_trainer.save_checkpoint(checkpoint_path)
 
         # Load into ESCHER trainer
@@ -384,20 +397,20 @@ class TestEscherTrainingLoop:
 
         # 2. Verify value_buffer has samples
         assert trainer.value_buffer is not None
-        assert len(trainer.value_buffer) > 0, (
-            "Expected value buffer to have samples after 2 ESCHER iterations"
-        )
+        assert (
+            len(trainer.value_buffer) > 0
+        ), "Expected value buffer to have samples after 2 ESCHER iterations"
 
         # 3. Verify value buffer samples have 444-dim features
         from src.encoding import INPUT_DIM
 
         batch = trainer.value_buffer.sample_batch(min(4, len(trainer.value_buffer)))
-        assert batch.features.shape[1] == INPUT_DIM * 2, (
-            f"Expected feature dim {INPUT_DIM * 2}, got {batch.features.shape[1]}"
-        )
-        assert batch.targets.shape[1] == 1, (
-            f"Expected target dim 1, got {batch.targets.shape[1]}"
-        )
+        assert (
+            batch.features.shape[1] == INPUT_DIM * 2
+        ), f"Expected feature dim {INPUT_DIM * 2}, got {batch.features.shape[1]}"
+        assert (
+            batch.targets.shape[1] == 1
+        ), f"Expected target dim 1, got {batch.targets.shape[1]}"
 
         # 4. Verify all three networks have non-NaN weights
         import torch
@@ -408,9 +421,9 @@ class TestEscherTrainingLoop:
             ("value_net", trainer.value_net),
         ]:
             for param in net.parameters():
-                assert not torch.isnan(param).any(), (
-                    f"{net_name} has NaN parameters after training"
-                )
+                assert not torch.isnan(
+                    param
+                ).any(), f"{net_name} has NaN parameters after training"
 
         # 5. Verify training completed without error
         assert trainer.total_traversals > 0

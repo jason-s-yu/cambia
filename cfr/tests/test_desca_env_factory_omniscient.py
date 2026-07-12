@@ -58,9 +58,9 @@ def test_production_env_factory_emits_nonzero_omniscient_features(backend: str):
     num_slots = expected_dim // per_slot
     for s in range(num_slots):
         slot = feats[s * per_slot : (s + 1) * per_slot]
-        assert np.isclose(slot.sum(), 1.0), (
-            f"slot {s} not a valid one-hot ({backend}): {slot}"
-        )
+        assert np.isclose(
+            slot.sum(), 1.0
+        ), f"slot {s} not a valid one-hot ({backend}): {slot}"
 
     # At least some slots must encode real card buckets (indices 0..8), not
     # all empty/unknown. A fresh Cambia game has 4 cards in each player's

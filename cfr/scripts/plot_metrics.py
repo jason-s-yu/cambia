@@ -24,7 +24,9 @@ from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 _MEAN_IMP_BASELINES = [
     "random_no_cambia",
@@ -70,7 +72,9 @@ def load_all_metrics(runs_dir: Path) -> list[dict]:
                     try:
                         rows.append(json.loads(line))
                     except json.JSONDecodeError as e:
-                        logger.warning("Skipping malformed JSONL row in %s: %s", metrics_file, e)
+                        logger.warning(
+                            "Skipping malformed JSONL row in %s: %s", metrics_file, e
+                        )
     return rows
 
 
@@ -81,9 +85,7 @@ def _group_by(rows: list[dict], key: str) -> dict[str, list[dict]]:
     return dict(groups)
 
 
-def plot_win_rate_by_run(
-    rows: list[dict], output_dir: Path, import_matplotlib
-) -> None:
+def plot_win_rate_by_run(rows: list[dict], output_dir: Path, import_matplotlib) -> None:
     """One subplot per run, one line per baseline."""
     plt = import_matplotlib()
     by_run = _group_by(rows, "run")
@@ -98,7 +100,9 @@ def plot_win_rate_by_run(
         by_baseline = _group_by(run_rows, "baseline")
 
         for i, baseline in enumerate(_BASELINES):
-            baseline_rows = sorted(by_baseline.get(baseline, []), key=lambda r: r.get("iter", 0))
+            baseline_rows = sorted(
+                by_baseline.get(baseline, []), key=lambda r: r.get("iter", 0)
+            )
             if not baseline_rows:
                 continue
             iters = [r["iter"] for r in baseline_rows]
@@ -147,7 +151,9 @@ def plot_win_rate_by_baseline(
         ax = axes[0][col]
 
         for i, run_name in enumerate(all_runs):
-            run_rows = [r for r in by_run.get(run_name, []) if r.get("baseline") == baseline]
+            run_rows = [
+                r for r in by_run.get(run_name, []) if r.get("baseline") == baseline
+            ]
             run_rows = sorted(run_rows, key=lambda r: r.get("iter", 0))
             if not run_rows:
                 continue
@@ -179,9 +185,7 @@ def plot_win_rate_by_baseline(
     logger.info("Saved %s", out_path)
 
 
-def plot_win_rate_combined(
-    rows: list[dict], output_dir: Path, import_matplotlib
-) -> None:
+def plot_win_rate_combined(rows: list[dict], output_dir: Path, import_matplotlib) -> None:
     """All runs on the same axes, averaging win rate across all baselines per iteration."""
     plt = import_matplotlib()
     # Build (run, iter) -> [win_rates] mapping.
@@ -248,9 +252,7 @@ def load_head_to_head(runs_dir: Path) -> list[dict]:
     return rows
 
 
-def plot_t1_cambia_rate(
-    rows: list[dict], output_dir: Path, import_matplotlib
-) -> None:
+def plot_t1_cambia_rate(rows: list[dict], output_dir: Path, import_matplotlib) -> None:
     """T1 Cambia rate vs iteration, averaged across baselines, one line per run."""
     plt = import_matplotlib()
 
@@ -307,9 +309,7 @@ def plot_t1_cambia_rate(
     logger.info("Saved %s", out_path)
 
 
-def plot_avg_game_length(
-    rows: list[dict], output_dir: Path, import_matplotlib
-) -> None:
+def plot_avg_game_length(rows: list[dict], output_dir: Path, import_matplotlib) -> None:
     """Average game turns vs iteration, one line per baseline, one subplot per run."""
     plt = import_matplotlib()
     by_run = _group_by(rows, "run")
@@ -332,7 +332,9 @@ def plot_avg_game_length(
         for i, baseline in enumerate(_BASELINES):
             baseline_rows = [
                 r
-                for r in sorted(by_baseline.get(baseline, []), key=lambda r: r.get("iter", 0))
+                for r in sorted(
+                    by_baseline.get(baseline, []), key=lambda r: r.get("iter", 0)
+                )
                 if r.get("avg_game_turns") is not None
             ]
             if not baseline_rows:
@@ -363,9 +365,7 @@ def plot_avg_game_length(
     logger.info("Saved %s", out_path)
 
 
-def plot_head_to_head(
-    h2h_rows: list[dict], output_dir: Path, import_matplotlib
-) -> None:
+def plot_head_to_head(h2h_rows: list[dict], output_dir: Path, import_matplotlib) -> None:
     """Cross-iteration win rate from head_to_head.jsonl.
 
     X-axis: iter_a (newer checkpoint).
@@ -399,7 +399,9 @@ def plot_head_to_head(
         win_rates = [r["a_win_rate"] for r in label_rows if "a_win_rate" in r]
         if not iters_a:
             continue
-        display_label = f"{run_name} / {label}" if len(set(k[0] for k in all_keys)) > 1 else label
+        display_label = (
+            f"{run_name} / {label}" if len(set(k[0] for k in all_keys)) > 1 else label
+        )
         ax.plot(
             iters_a,
             win_rates,
@@ -452,8 +454,10 @@ def generate_plots(runs_dir: str, output_dir: str) -> None:
     # Lazy import matplotlib so the module is importable without it at test time.
     def _import_plt():
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+
         return plt
 
     plot_win_rate_by_run(rows, out_path, _import_plt)

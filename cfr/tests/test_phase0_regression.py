@@ -39,7 +39,6 @@ from src.constants import (
 )
 from src.game.engine import CambiaGameState
 
-
 # ===================================================================
 # BUG-1: King Swap Belief Gap
 # ===================================================================
@@ -75,10 +74,14 @@ class TestBug1KingSwapBeliefGap:
     def test_agent_state_handles_self_king_swap(self):
         """After a self-initiated King Swap with indices, own hand is set to UNKNOWN
         and opponent belief is decayed."""
-        rules_stub = type("Rules", (), {
-            "penaltyDrawCount": 2,
-            "use_jokers": 2,
-        })()
+        rules_stub = type(
+            "Rules",
+            (),
+            {
+                "penaltyDrawCount": 2,
+                "use_jokers": 2,
+            },
+        )()
         config_stub = type("Config", (), {"cambia_rules": rules_stub})()
         state = AgentState(
             player_id=0,
@@ -130,10 +133,14 @@ class TestBug1KingSwapBeliefGap:
         """After an opponent-initiated King Swap with indices, beliefs
         update appropriately (our involved slot becomes UNKNOWN, opponent
         slot decays)."""
-        rules_stub = type("Rules", (), {
-            "penaltyDrawCount": 2,
-            "use_jokers": 2,
-        })()
+        rules_stub = type(
+            "Rules",
+            (),
+            {
+                "penaltyDrawCount": 2,
+                "use_jokers": 2,
+            },
+        )()
         config_stub = type("Config", (), {"cambia_rules": rules_stub})()
         state = AgentState(
             player_id=0,
@@ -239,9 +246,9 @@ class TestBug3ExceptionName:
         ]
         for line in except_lines:
             # Verify it's the correct spelling
-            assert "AssertionError" in line, (
-                f"Found unexpected Assert*Error variant: {line}"
-            )
+            assert (
+                "AssertionError" in line
+            ), f"Found unexpected Assert*Error variant: {line}"
 
 
 # ===================================================================
@@ -335,24 +342,26 @@ class TestPerf2ShallowCopy:
     def test_engine_does_not_import_deepcopy_for_pending(self):
         """The engine module should not use deepcopy on pending_action_data."""
         import src.game.engine as engine_mod
+
         source = inspect.getsource(engine_mod)
         # Count occurrences of deepcopy(self.pending_action_data)
         deepcopy_count = source.count("deepcopy(self.pending_action_data)")
-        assert deepcopy_count == 0, (
-            f"Found {deepcopy_count} deepcopy(self.pending_action_data) in engine.py"
-        )
+        assert (
+            deepcopy_count == 0
+        ), f"Found {deepcopy_count} deepcopy(self.pending_action_data) in engine.py"
 
     def test_ability_mixin_uses_shallow_copy(self):
         """_ability_mixin.py should use dict() not deepcopy() for pending_action_data."""
         from src.game._ability_mixin import AbilityMixin
+
         source = inspect.getsource(AbilityMixin)
         dict_count = source.count("dict(self.pending_action_data)")
         deepcopy_count = source.count("deepcopy(self.pending_action_data)")
         # Should have more dict() than deepcopy() calls
         assert dict_count > 0, "Expected dict(self.pending_action_data) in ability mixin"
-        assert deepcopy_count == 0, (
-            f"Found {deepcopy_count} deepcopy calls in ability mixin"
-        )
+        assert (
+            deepcopy_count == 0
+        ), f"Found {deepcopy_count} deepcopy calls in ability mixin"
 
 
 # ===================================================================
@@ -368,6 +377,7 @@ class TestPerf3ConsolidatedObservation:
         """recursion_mixin._create_observation should delegate to worker's
         _create_observation to avoid code duplication."""
         from src.cfr.recursion_mixin import CFRRecursionMixin
+
         source = inspect.getsource(CFRRecursionMixin._create_observation)
         # Should import or call the worker's _create_observation
         assert "_worker_create_observation" in source or "_create_observation" in source
@@ -375,11 +385,13 @@ class TestPerf3ConsolidatedObservation:
     def test_worker_create_observation_exists(self):
         """worker.py should have a standalone _create_observation function."""
         from src.cfr.worker import _create_observation
+
         assert callable(_create_observation)
 
     def test_worker_create_observation_returns_agent_observation(self):
         """The _create_observation function should return AgentObservation."""
         from src.cfr.worker import _create_observation
+
         sig = inspect.signature(_create_observation)
         # It should accept the standard parameters
         params = list(sig.parameters.keys())

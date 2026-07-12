@@ -30,7 +30,7 @@ from typing import Any, Callable, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-_GB = 1024 ** 3
+_GB = 1024**3
 
 
 def _accel_module(device_type: str) -> Optional[Any]:
@@ -99,7 +99,10 @@ def require_free_vram(
             if waited > 0:
                 logger.info(
                     "%sVRAM ok after %.0fs: free=%.1fGB need=%.1fGB",
-                    tag, waited, free / _GB, need_gb,
+                    tag,
+                    waited,
+                    free / _GB,
+                    need_gb,
                 )
             return
         if waited >= wait_s:
@@ -111,7 +114,11 @@ def require_free_vram(
             )
         logger.warning(
             "%swaiting for VRAM: free=%.1fGB need=%.1fGB (%.0f/%.0fs)",
-            tag, free / _GB, need_gb, waited, wait_s,
+            tag,
+            free / _GB,
+            need_gb,
+            waited,
+            wait_s,
         )
         time.sleep(poll_s)
         waited += poll_s
@@ -136,7 +143,11 @@ def cap_process_vram(
     mod.set_per_process_memory_fraction(frac, dev)
     logger.info(
         "VRAM cap: %.1fGB (%.1f%% of %.1fGB) on %s:%d",
-        cap_gb, frac * 100, total / _GB, device_type, dev,
+        cap_gb,
+        frac * 100,
+        total / _GB,
+        device_type,
+        dev,
     )
 
 
@@ -189,7 +200,11 @@ def oom_retry(
                     attempt += 1
                     logger.warning(
                         "%s OOM in %s; empty_cache + retry %d/%d after %.0fs",
-                        device_type, fn.__name__, attempt, retries, backoff_s,
+                        device_type,
+                        fn.__name__,
+                        attempt,
+                        retries,
+                        backoff_s,
                     )
                     mod.empty_cache()
                     time.sleep(backoff_s)

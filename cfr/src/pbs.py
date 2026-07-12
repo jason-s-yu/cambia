@@ -43,7 +43,6 @@ from typing import Sequence
 
 import numpy as np
 
-
 # ---------------------------------------------------------------------------
 # Bucket metadata
 # ---------------------------------------------------------------------------
@@ -422,7 +421,7 @@ def make_public_features(
 
     # [17-19] stockpile soft triclass
     frac = stockpile_remaining / max(stockpile_total, 1)
-    features[17] = float(frac > 2.0 / 3.0)   # high
+    features[17] = float(frac > 2.0 / 3.0)  # high
     features[18] = float(1.0 / 3.0 < frac <= 2.0 / 3.0)  # medium
     features[19] = float(frac <= 1.0 / 3.0)  # low
 

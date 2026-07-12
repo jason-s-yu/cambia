@@ -175,10 +175,10 @@ def _replay_collect(
     avoid_cambia: bool = False,
 ) -> Tuple[
     Dict[int, List[Any]],  # per-observer filtered observation stream
-    Dict[int, _GTTrace],   # per-observer ground-truth trace
-    Dict[int, List[Card]], # per-observer initial hand
+    Dict[int, _GTTrace],  # per-observer ground-truth trace
+    Dict[int, List[Card]],  # per-observer initial hand
     Dict[int, Tuple[int, ...]],  # per-observer initial peek indices
-    int,                   # number of decision steps taken
+    int,  # number of decision steps taken
 ]:
     """Play a game with random legal actions, collecting per-player streams.
 
@@ -241,9 +241,9 @@ def _replay_collect(
 # ---------------------------------------------------------------------------
 
 
-def _decoded_to_gt_events(decoded: List[se.DecodedEvent]) -> Tuple[
-    List[Tuple[int, Tuple[str, Optional[str]]]], List[Tuple]
-]:
+def _decoded_to_gt_events(
+    decoded: List[se.DecodedEvent],
+) -> Tuple[List[Tuple[int, Tuple[str, Optional[str]]]], List[Tuple]]:
     """Project decoded frames into the same (priv_init, events) shape as _GTTrace."""
     priv_init: List[Tuple[int, Tuple[str, Optional[str]]]] = []
     events: List[Tuple] = []
@@ -342,9 +342,9 @@ def test_tiny_2card_plateau_roundtrip_lossless():
         )
         overall_max = max(overall_max, mx)
     # Tiny game is far under the cap.
-    assert overall_max <= se.SEQ_CAP, (
-        f"tiny max token length {overall_max} exceeds cap {se.SEQ_CAP}"
-    )
+    assert (
+        overall_max <= se.SEQ_CAP
+    ), f"tiny max token length {overall_max} exceeds cap {se.SEQ_CAP}"
 
 
 def test_full_2p_roundtrip_lossless():
@@ -365,8 +365,10 @@ def test_full_2p_roundtrip_lossless():
         overall_max = max(overall_max, mx)
     assert total_steps > 0, "full games produced no decision steps"
     # Report-worthy: max observed sequence length vs the 256 cap.
-    print(f"\n[full 2P] max token sequence length over {len(_FULL_SEEDS)} games: "
-          f"{overall_max} (cap {se.SEQ_CAP})")
+    print(
+        f"\n[full 2P] max token sequence length over {len(_FULL_SEEDS)} games: "
+        f"{overall_max} (cap {se.SEQ_CAP})"
+    )
     assert overall_max <= se.SEQ_CAP, (
         f"full 2P max token length {overall_max} EXCEEDS cap {se.SEQ_CAP}; "
         f"truncation would lose information -- revisit SEQ_CAP or frame width"
@@ -398,18 +400,24 @@ def test_full_2p_natural_length_exceeds_cap_and_truncation_is_frame_safe():
         for observer in range(NUM_PLAYERS):
             # Raw (untruncated) length.
             raw = se.encode_observation_sequence(
-                init_hands[observer], init_peeks[observer], obs_streams[observer],
-                observer, seq_cap=10**9,
+                init_hands[observer],
+                init_peeks[observer],
+                obs_streams[observer],
+                observer,
+                seq_cap=10**9,
             )
             raw_lengths.append(len(raw))
             # Capped (default SEQ_CAP) length must fit and decode.
             capped = se.encode_observation_sequence(
-                init_hands[observer], init_peeks[observer], obs_streams[observer], observer
+                init_hands[observer],
+                init_peeks[observer],
+                obs_streams[observer],
+                observer,
             )
             capped_lengths.append(len(capped))
-            assert len(capped) <= se.SEQ_CAP, (
-                f"seed {seed} obs {observer}: capped length {len(capped)} > cap {se.SEQ_CAP}"
-            )
+            assert (
+                len(capped) <= se.SEQ_CAP
+            ), f"seed {seed} obs {observer}: capped length {len(capped)} > cap {se.SEQ_CAP}"
             # Frame-safe: decodes without raising on a partial leading frame.
             decoded = se.decode_sequence(capped)
             assert isinstance(decoded, list)
@@ -447,7 +455,10 @@ def test_truncation_is_frame_aligned_and_a_suffix_of_full_decode():
     assert steps > 0
     observer = 0
     full_seq = se.encode_observation_sequence(
-        init_hands[observer], init_peeks[observer], obs_streams[observer], observer,
+        init_hands[observer],
+        init_peeks[observer],
+        obs_streams[observer],
+        observer,
         seq_cap=10**9,
     )
     full_events = se.decode_sequence(full_seq)
@@ -455,7 +466,10 @@ def test_truncation_is_frame_aligned_and_a_suffix_of_full_decode():
     # Force a cap below the natural length to exercise truncation.
     small_cap = max(8, len(full_seq) // 3)
     trunc = se.encode_observation_sequence(
-        init_hands[observer], init_peeks[observer], obs_streams[observer], observer,
+        init_hands[observer],
+        init_peeks[observer],
+        obs_streams[observer],
+        observer,
         seq_cap=small_cap,
     )
     assert len(trunc) <= small_cap, "truncated sequence exceeds the forced cap"
@@ -466,16 +480,23 @@ def test_truncation_is_frame_aligned_and_a_suffix_of_full_decode():
     # Suffix property: the kept events equal the tail of the full event list.
     def _key(ev: se.DecodedEvent):
         return (
-            ev.kind, ev.peek_slot, _card_ident(ev.peek_card), ev.actor,
-            _action_repr_key(ev.action), _card_ident(ev.discard_top),
-            _card_ident(ev.drawn_card), ev.snap_actor, ev.snap_outcome,
-            ev.snap_slot, ev.cambia_caller,
+            ev.kind,
+            ev.peek_slot,
+            _card_ident(ev.peek_card),
+            ev.actor,
+            _action_repr_key(ev.action),
+            _card_ident(ev.discard_top),
+            _card_ident(ev.drawn_card),
+            ev.snap_actor,
+            ev.snap_outcome,
+            ev.snap_slot,
+            ev.cambia_caller,
         )
 
-    tail = full_events[len(full_events) - len(trunc_events):]
-    assert [_key(e) for e in trunc_events] == [_key(e) for e in tail], (
-        "frame-aligned truncation is not an exact suffix of the full decode"
-    )
+    tail = full_events[len(full_events) - len(trunc_events) :]
+    assert [_key(e) for e in trunc_events] == [
+        _key(e) for e in tail
+    ], "frame-aligned truncation is not an exact suffix of the full decode"
 
 
 def test_vocab_layout_is_contiguous_and_nonoverlapping():
@@ -491,9 +512,9 @@ def test_vocab_layout_is_contiguous_and_nonoverlapping():
     for start, end in spans:
         assert start == cursor, f"vocab gap/overlap: expected {cursor}, got {start}"
         cursor = end
-    assert cursor == se.VOCAB_SIZE, (
-        f"vocab blocks end at {cursor}, VOCAB_SIZE={se.VOCAB_SIZE}"
-    )
+    assert (
+        cursor == se.VOCAB_SIZE
+    ), f"vocab blocks end at {cursor}, VOCAB_SIZE={se.VOCAB_SIZE}"
 
 
 def test_all_action_types_round_trip():

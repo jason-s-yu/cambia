@@ -15,7 +15,6 @@ import pytest
 import numpy as np
 from types import SimpleNamespace
 
-
 # ---------------------------------------------------------------------------
 # Skip guard
 # ---------------------------------------------------------------------------
@@ -88,7 +87,11 @@ class TestThreadedTraversal:
         from src.encoding import INPUT_DIM, NUM_ACTIONS
 
         config = _make_config()
-        network_config = {"input_dim": INPUT_DIM, "hidden_dim": 64, "output_dim": NUM_ACTIONS}
+        network_config = {
+            "input_dim": INPUT_DIM,
+            "hidden_dim": 64,
+            "output_dim": NUM_ACTIONS,
+        }
 
         adv, strat, val, done, nodes = _run_traversals_threaded(
             iteration_offset=0,
@@ -111,17 +114,17 @@ class TestThreadedTraversal:
         for sample in strat:
             mask = sample.action_mask
             strategy_sum = sample.target[mask].sum()
-            assert abs(strategy_sum - 1.0) < 0.01, (
-                f"Threaded strategy sum {strategy_sum} != 1.0"
-            )
+            assert (
+                abs(strategy_sum - 1.0) < 0.01
+            ), f"Threaded strategy sum {strategy_sum} != 1.0"
 
         # --- Behavioral: regret targets zero for illegal actions ---
         # Regret vectors are zero-initialized; only legal slots are written.
         for sample in adv:
             illegal_mask = ~sample.action_mask
-            assert (sample.target[illegal_mask] == 0).all(), (
-                "Threaded: non-zero regret for illegal action"
-            )
+            assert (
+                sample.target[illegal_mask] == 0
+            ).all(), "Threaded: non-zero regret for illegal action"
 
     def test_threaded_traversal_sample_dimensions(self):
         """Samples from threaded traversal have correct tensor dimensions."""
@@ -129,7 +132,11 @@ class TestThreadedTraversal:
         from src.encoding import INPUT_DIM, NUM_ACTIONS
 
         config = _make_config()
-        network_config = {"input_dim": INPUT_DIM, "hidden_dim": 64, "output_dim": NUM_ACTIONS}
+        network_config = {
+            "input_dim": INPUT_DIM,
+            "hidden_dim": 64,
+            "output_dim": NUM_ACTIONS,
+        }
 
         adv, strat, val, done, nodes = _run_traversals_threaded(
             iteration_offset=0,
@@ -143,28 +150,28 @@ class TestThreadedTraversal:
         )
 
         for sample in adv:
-            assert sample.features.shape == (INPUT_DIM,), (
-                f"Expected ({INPUT_DIM},), got {sample.features.shape}"
-            )
-            assert sample.target.shape == (NUM_ACTIONS,), (
-                f"Expected ({NUM_ACTIONS},), got {sample.target.shape}"
-            )
-            assert sample.action_mask.shape == (NUM_ACTIONS,), (
-                f"Expected ({NUM_ACTIONS},), got {sample.action_mask.shape}"
-            )
+            assert sample.features.shape == (
+                INPUT_DIM,
+            ), f"Expected ({INPUT_DIM},), got {sample.features.shape}"
+            assert sample.target.shape == (
+                NUM_ACTIONS,
+            ), f"Expected ({NUM_ACTIONS},), got {sample.target.shape}"
+            assert sample.action_mask.shape == (
+                NUM_ACTIONS,
+            ), f"Expected ({NUM_ACTIONS},), got {sample.action_mask.shape}"
             # Regret mask: illegal action regrets must be zero
             illegal_mask = ~sample.action_mask
-            assert (sample.target[illegal_mask] == 0).all(), (
-                "Threaded dim test: non-zero regret for illegal action"
-            )
+            assert (
+                sample.target[illegal_mask] == 0
+            ).all(), "Threaded dim test: non-zero regret for illegal action"
 
         for sample in strat:
             # Strategy targets form valid probability distribution
             mask = sample.action_mask
             strategy_sum = sample.target[mask].sum()
-            assert abs(strategy_sum - 1.0) < 0.01, (
-                f"Threaded dim test: strategy sum {strategy_sum} != 1.0"
-            )
+            assert (
+                abs(strategy_sum - 1.0) < 0.01
+            ), f"Threaded dim test: strategy sum {strategy_sum} != 1.0"
 
     def test_threaded_vs_sequential_consistency(self):
         """Threaded path produces roughly similar sample counts as sequential."""
@@ -172,7 +179,11 @@ class TestThreadedTraversal:
         from src.encoding import INPUT_DIM, NUM_ACTIONS
 
         config = _make_config()
-        network_config = {"input_dim": INPUT_DIM, "hidden_dim": 64, "output_dim": NUM_ACTIONS}
+        network_config = {
+            "input_dim": INPUT_DIM,
+            "hidden_dim": 64,
+            "output_dim": NUM_ACTIONS,
+        }
         traversals = 4
 
         # Sequential (_run_traversals_batch returns 6-tuple with timing_stats)
@@ -211,7 +222,11 @@ class TestThreadedTraversal:
         from src.encoding import INPUT_DIM, NUM_ACTIONS
 
         config = _make_config()
-        network_config = {"input_dim": INPUT_DIM, "hidden_dim": 64, "output_dim": NUM_ACTIONS}
+        network_config = {
+            "input_dim": INPUT_DIM,
+            "hidden_dim": 64,
+            "output_dim": NUM_ACTIONS,
+        }
 
         adv, strat, val, done, nodes = _run_traversals_threaded(
             iteration_offset=0,
@@ -244,7 +259,11 @@ class TestThreadedBenchmark:
         from src.encoding import INPUT_DIM, NUM_ACTIONS
 
         config = _make_config()
-        network_config = {"input_dim": INPUT_DIM, "hidden_dim": 64, "output_dim": NUM_ACTIONS}
+        network_config = {
+            "input_dim": INPUT_DIM,
+            "hidden_dim": 64,
+            "output_dim": NUM_ACTIONS,
+        }
 
         start = time.perf_counter()
         adv, strat, val, done, nodes = _run_traversals_threaded(

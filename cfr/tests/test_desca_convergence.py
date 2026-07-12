@@ -49,18 +49,21 @@ import torch
 
 try:
     from src.desca_networks import AvgStrategyNetwork
+
     DESCA_NETWORKS_AVAILABLE = True
 except ImportError:
     DESCA_NETWORKS_AVAILABLE = False
 
 try:
     from src.cfr.desca_trainer import DESCATrainer
+
     DESCA_TRAINER_AVAILABLE = True
 except ImportError:
     DESCA_TRAINER_AVAILABLE = False
 
 try:
     from src.evaluate_agents import DESCAAgentWrapper
+
     DESCA_WRAPPER_AVAILABLE = True
 except ImportError:
     DESCA_WRAPPER_AVAILABLE = False
@@ -70,12 +73,14 @@ except ImportError:
 # Minimal config helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_agent_config(micro_rules=None):
     """Return a minimal config object for AgentState and DESCAAgentWrapper."""
     config = type("Config", (), {})()
 
     if micro_rules is None:
         from tests.micro_game import build_micro_rules
+
         micro_rules = build_micro_rules()
     config.cambia_rules = micro_rules
 
@@ -165,6 +170,7 @@ def _make_desca_checkpoint(path: str, hidden_dim: int = 64) -> None:
 # Python engine adapter for the DESCA worker
 # ---------------------------------------------------------------------------
 
+
 class _MicroGameEngine:
     """
     Adapter wrapping Python CambiaGameState to expose the DESCA worker's
@@ -220,6 +226,7 @@ class _MicroGameEngine:
 
     def get_decision_context(self) -> int:
         from src.constants import DecisionContext, ActionDiscard
+
         if getattr(self._game, "snap_phase_active", False):
             return DecisionContext.SNAP_DECISION.value
         pending = getattr(self._game, "pending_action", None)
@@ -245,6 +252,7 @@ class _MicroGameEngine:
 # ---------------------------------------------------------------------------
 # Python agent adapter for the DESCA worker
 # ---------------------------------------------------------------------------
+
 
 class _DESCATestAgent:
     """
@@ -281,13 +289,12 @@ class _DESCATestAgent:
         game = engine._game
         try:
             from src.agent_state import AgentObservation
+
             obs = AgentObservation(
                 acting_player=engine._last_actor,
                 action=engine._last_action,
                 discard_top_card=game.get_discard_top(),
-                player_hand_sizes=[
-                    game.get_player_card_count(i) for i in range(2)
-                ],
+                player_hand_sizes=[game.get_player_card_count(i) for i in range(2)],
                 stockpile_size=game.get_stockpile_size(),
                 drawn_card=None,
                 peeked_cards=None,
@@ -318,6 +325,7 @@ class _DESCATestAgent:
 # ---------------------------------------------------------------------------
 # Env factory for the convergence test
 # ---------------------------------------------------------------------------
+
 
 def _build_micro_env_factory(seed_base: int = 0):
     """
@@ -357,9 +365,7 @@ def _build_micro_env_factory(seed_base: int = 0):
                 acting_player=-1,
                 action=None,
                 discard_top_card=game.get_discard_top(),
-                player_hand_sizes=[
-                    game.get_player_card_count(i) for i in range(2)
-                ],
+                player_hand_sizes=[game.get_player_card_count(i) for i in range(2)],
                 stockpile_size=game.get_stockpile_size(),
                 drawn_card=None,
                 peeked_cards=None,
@@ -382,6 +388,7 @@ def _build_micro_env_factory(seed_base: int = 0):
 # Simple micro-game evaluator
 # ---------------------------------------------------------------------------
 
+
 def _run_micro_episode(policy0, policy1, seed: int, max_turns: int = 64) -> float:
     """
     Run one micro-game episode between two policies.
@@ -390,6 +397,7 @@ def _run_micro_episode(policy0, policy1, seed: int, max_turns: int = 64) -> floa
     Returns: 1.0 if P0 wins, 0.0 if P0 loses, 0.5 on tie.
     """
     from tests.micro_game import build_micro_game
+
     game = build_micro_game(seed=seed)
 
     for _ in range(max_turns):
@@ -426,9 +434,7 @@ def _random_policy(game_state, legal_actions: list, player_id: int):
     return random.choice(legal_actions)
 
 
-def _evaluate_policy_vs_random(
-    policy, n_games: int = 200, seed_offset: int = 0
-) -> float:
+def _evaluate_policy_vs_random(policy, n_games: int = 200, seed_offset: int = 0) -> float:
     """Win rate of `policy` vs random, alternating roles."""
     wins = 0.0
     for i in range(n_games):
@@ -489,6 +495,7 @@ def _net_to_policy(avg_strategy_net):
 # State-tracked evaluation for Tier 3 convergence test
 # ---------------------------------------------------------------------------
 
+
 def _run_episode_desca_vs_random(
     avg_strategy_net,
     desca_player: int,
@@ -525,7 +532,9 @@ def _run_episode_desca_vs_random(
             config=agent_config,
         )
         initial_hand = game.players[pid].hand
-        initial_peeks = getattr(game.players[pid], "initial_peek_indices", tuple(range(2)))
+        initial_peeks = getattr(
+            game.players[pid], "initial_peek_indices", tuple(range(2))
+        )
         init_obs = AgentObservation(
             acting_player=-1,
             action=None,
@@ -584,10 +593,14 @@ def _run_episode_desca_vs_random(
                         legal_probs = np.ones(len(legal_abstract)) / len(legal_abstract)
                     else:
                         legal_probs /= prob_sum
-                    chosen_local = int(np.random.choice(len(legal_abstract), p=legal_probs))
+                    chosen_local = int(
+                        np.random.choice(len(legal_abstract), p=legal_probs)
+                    )
                     chosen_abstract_idx = int(legal_abstract[chosen_local])
                     seed_a = (pid * 997 + chosen_abstract_idx) & 0xFFFF_FFFF
-                    action = unabstract(chosen_abstract_idx, legal, agents_eval[pid], seed=seed_a)
+                    action = unabstract(
+                        chosen_abstract_idx, legal, agents_eval[pid], seed=seed_a
+                    )
             except Exception:
                 action = random.choice(legal)
         else:
@@ -613,7 +626,8 @@ def _run_episode_desca_vs_random(
                     drawn_card=None,
                     peeked_cards=None,
                     snap_results=list(getattr(game, "snap_results_log", [])),
-                    did_cambia_get_called=getattr(game, "cambia_caller_id", None) is not None,
+                    did_cambia_get_called=getattr(game, "cambia_caller_id", None)
+                    is not None,
                     who_called_cambia=getattr(game, "cambia_caller_id", None),
                     is_game_over=game.is_terminal(),
                     current_turn=game.get_turn_number(),
@@ -657,6 +671,7 @@ def _evaluate_desca_vs_random(
 # Deliverable 4: DESCAAgentWrapper smoke test
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.skipif(
     not (DESCA_NETWORKS_AVAILABLE and DESCA_WRAPPER_AVAILABLE),
     reason="Requires desca_networks.py (Stream A) and DESCAAgentWrapper (Stream C)",
@@ -682,7 +697,9 @@ def test_desca_agent_wrapper_smoke_50_states():
             game = build_micro_game(seed=trial)
             agent.initialize_state(game)
             legal = game.get_legal_actions()
-            assert len(legal) > 0, f"Trial {trial}: micro-game has no legal actions at start"
+            assert (
+                len(legal) > 0
+            ), f"Trial {trial}: micro-game has no legal actions at start"
             chosen = agent.choose_action(game, legal)
             assert chosen in legal, (
                 f"Trial {trial}: DESCAAgentWrapper returned action not in legal set.\n"
@@ -699,6 +716,7 @@ def test_desca_agent_wrapper_smoke_50_states():
 # ---------------------------------------------------------------------------
 # Deliverable 1: Tier 3 micro-game convergence test
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.slow
 @pytest.mark.skipif(

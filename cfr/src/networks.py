@@ -73,9 +73,7 @@ class AdvantageNetwork(nn.Module):
                 nn.init.kaiming_normal_(module.weight, nonlinearity="relu")
                 nn.init.zeros_(module.bias)
 
-    def forward(
-        self, features: torch.Tensor, action_mask: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, features: torch.Tensor, action_mask: torch.Tensor) -> torch.Tensor:
         """
         Args:
             features: (batch, input_dim) float tensor of encoded infoset features.
@@ -160,9 +158,7 @@ class ResidualAdvantageNetwork(nn.Module):
         # Residual blocks
         self.res_blocks = nn.ModuleList()
         for _ in range(num_hidden_layers):
-            self.res_blocks.append(
-                _ResBlock(hidden_dim, dropout)
-            )
+            self.res_blocks.append(_ResBlock(hidden_dim, dropout))
 
         # Output head: hidden_dim → output_dim
         self.output_head = nn.Sequential(
@@ -178,9 +174,7 @@ class ResidualAdvantageNetwork(nn.Module):
                 nn.init.kaiming_normal_(module.weight, nonlinearity="relu")
                 nn.init.zeros_(module.bias)
 
-    def forward(
-        self, features: torch.Tensor, action_mask: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, features: torch.Tensor, action_mask: torch.Tensor) -> torch.Tensor:
         if features.dim() != 2 or features.shape[1] != self._input_dim:
             raise InvalidNetworkInputError(
                 f"Invalid features shape: expected (batch, {self._input_dim}), got {tuple(features.shape)}"
@@ -468,9 +462,7 @@ class StrategyNetwork(nn.Module):
                 nn.init.kaiming_normal_(module.weight, nonlinearity="relu")
                 nn.init.zeros_(module.bias)
 
-    def forward(
-        self, features: torch.Tensor, action_mask: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, features: torch.Tensor, action_mask: torch.Tensor) -> torch.Tensor:
         """
         Args:
             features: (batch, input_dim) float tensor of encoded infoset features.
@@ -764,7 +756,9 @@ class CVPN(nn.Module):
         )
 
         # Shared trunk
-        self.trunk = nn.Sequential(*[_ResBlock(hidden_dim, dropout) for _ in range(num_blocks)])
+        self.trunk = nn.Sequential(
+            *[_ResBlock(hidden_dim, dropout) for _ in range(num_blocks)]
+        )
 
         # Value head
         half = hidden_dim // 2

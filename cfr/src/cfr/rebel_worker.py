@@ -67,10 +67,10 @@ _STOCK_TOTAL: int = 46
 class EpisodeSample:
     """One training sample from a ReBeL self-play episode decision point."""
 
-    features: np.ndarray      # (PBS_INPUT_DIM,) = (956,) float32
+    features: np.ndarray  # (PBS_INPUT_DIM,) = (956,) float32
     value_target: np.ndarray  # (VALUE_DIM,)     = (936,) float32
-    policy_target: np.ndarray # (NUM_ACTIONS,)   = (146,) float32
-    action_mask: np.ndarray   # (NUM_ACTIONS,)   = (146,) bool
+    policy_target: np.ndarray  # (NUM_ACTIONS,)   = (146,) float32
+    action_mask: np.ndarray  # (NUM_ACTIONS,)   = (146,) bool
 
 
 def _build_pbs(game: Any, range_p0: np.ndarray, range_p1: np.ndarray) -> PBS:
@@ -203,7 +203,11 @@ def rebel_self_play_episode(
     Returns:
         List of EpisodeSample, one per decision point encountered during the game.
     """
-    from ..ffi.bridge import GoEngine, GoAgentState, SubgameSolver  # deferred for worker spawn
+    from ..ffi.bridge import (
+        GoEngine,
+        GoAgentState,
+        SubgameSolver,
+    )  # deferred for worker spawn
 
     samples: List[EpisodeSample] = []
     seed = random.getrandbits(64)
@@ -326,6 +330,7 @@ def rebel_self_play_episode(
     # --- Episode diagnostic summary ---
     if _entropy_p0:
         from collections import Counter
+
         bucket_counts = Counter(_discard_buckets)
         logger.info(
             "rebel_episode done: steps=%d samples=%d "
@@ -334,8 +339,10 @@ def rebel_self_play_episode(
             "discard_buckets=%s",
             len(_entropy_p0),
             len(samples),
-            _entropy_p0[0], _entropy_p0[-1],
-            _entropy_p1[0], _entropy_p1[-1],
+            _entropy_p0[0],
+            _entropy_p0[-1],
+            _entropy_p1[0],
+            _entropy_p1[-1],
             float(np.mean(_value_variances)) if _value_variances else 0.0,
             dict(bucket_counts),
         )
