@@ -147,9 +147,9 @@ class BenchmarkSuite:
             result.metadata["device"] = device
         accel_kind = device.split(":")[0]
         if "accel_available" not in result.metadata:
-            result.metadata["accel_available"] = gpu_safety.accel_available(
-                "cuda"
-            ) or gpu_safety.accel_available("xpu")
+            nv_ok = gpu_safety.accel_available("cuda")
+            xpu_ok = gpu_safety.accel_available("xpu")
+            result.metadata["accel_available"] = nv_ok or xpu_ok
         if accel_kind == "cuda" and gpu_safety.accel_available("cuda"):
             result.metadata["accel_device_name"] = torch.cuda.get_device_name(0)
         elif (
