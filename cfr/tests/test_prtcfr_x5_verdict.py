@@ -693,3 +693,164 @@ def test_verdict_missing_k_fails_trend_cleanly(tmp_path):
     assert verdict["g3_trend"]["verdict"] == "FAIL"
     assert "k_games_per_iter" in verdict["g3_trend"]["error"]
     assert verdict["overall_verdict"] == "FAIL"
+
+
+# ---------------------------------------------------------------------------
+# G3-binding mode (review finding, ruled): strategic-only binding is the
+# default; the random legs' Tier-B reference exploitability is a known
+# estimator artifact and must never veto the verdict on its own. --g3-binding
+# all restores the pre-fix all-five-binding behavior.
+# ---------------------------------------------------------------------------
+
+
+def test_g3_ordering_strategic_default_passes_when_only_random_leg_fails(tmp_path):
+    run_dir = tmp_path / "runs" / "g3randomfail"
+    run_dir.mkdir(parents=True)
+    db_path = tmp_path / "db.sqlite"
+    _seed_g2(db_path, "g3randomfail", _G2_PASS)
+    _seed_mixture_exploit(db_path, "g3randomfail", _MIX_PASS)
+    ref = json.loads(json.dumps(_REF_PASS))
+    # Drag random_no_cambia's Tier-B CI down so it overlaps the mixture (an
+    # artifact-driven tight bar, per the module docstring rationale).
+    ref["random_no_cambia"]["lbr_tier_b"] = {
+        "exploitability": 0.11, "ci_low": 0.09, "ci_high": 0.13
+    }
+    ref_path = tmp_path / "ref.json"
+    _write_reference(ref_path, ref)
+
+    g3 = x5.compute_g3_ordering(run_dir, db_path=str(db_path), baseline_ref_path=str(ref_path))
+    assert g3["g3_binding"] == "strategic"
+    assert g3["legs"]["random_no_cambia"]["binding"] is False
+    assert g3["legs"]["random_no_cambia"]["primary"]["pass"] is False  # the leg itself still fails
+    assert g3["verdict"] == "PASS"  # non-binding leg does not veto
+    assert any(
+        "random_no_cambia" in f and "non-binding" in f for f in g3["flags"]
+    )
+
+
+def test_g3_ordering_all_binding_restores_old_behavior(tmp_path):
+    run_dir = tmp_path / "runs" / "g3randomfail2"
+    run_dir.mkdir(parents=True)
+    db_path = tmp_path / "db.sqlite"
+    _seed_g2(db_path, "g3randomfail2", _G2_PASS)
+    _seed_mixture_exploit(db_path, "g3randomfail2", _MIX_PASS)
+    ref = json.loads(json.dumps(_REF_PASS))
+    ref["random_no_cambia"]["lbr_tier_b"] = {
+        "exploitability": 0.11, "ci_low": 0.09, "ci_high": 0.13
+    }
+    ref_path = tmp_path / "ref.json"
+    _write_reference(ref_path, ref)
+
+    g3 = x5.compute_g3_ordering(
+        run_dir, db_path=str(db_path), baseline_ref_path=str(ref_path), g3_binding="all"
+    )
+    assert g3["g3_binding"] == "all"
+    assert g3["legs"]["random_no_cambia"]["binding"] is True
+    assert g3["verdict"] == "FAIL"
+
+
+def test_verdict_records_g3_binding_mode_and_defaults_to_strategic(tmp_path):
+    run_dir, db_path, ref_path = _make_run(
+        tmp_path, "x5-g3mode", _decreasing_lbr(PASS_ITERS), _G2_PASS, _MIX_PASS, _REF_PASS
+    )
+    verdict = x5.compute_verdict(str(run_dir), db_path=db_path, baseline_ref_path=ref_path)
+    assert verdict["g3_ordering"]["g3_binding"] == "strategic"
+    summary = x5.human_summary(verdict)
+    assert "g3-binding=strategic" in summary
+
+    verdict_all = x5.compute_verdict(
+        str(run_dir), db_path=db_path, baseline_ref_path=ref_path, g3_binding="all"
+    )
+    assert verdict_all["g3_ordering"]["g3_binding"] == "all"
+    assert "g3-binding=all" in x5.human_summary(verdict_all)
+
+
+def test_g3_ordering_invalid_binding_raises(tmp_path):
+    run_dir = tmp_path / "runs" / "g3bogus"
+    run_dir.mkdir(parents=True)
+    with pytest.raises(ValueError):
+        x5.compute_g3_ordering(run_dir, db_path=str(tmp_path / "db.sqlite"), g3_binding="bogus")
+
+
+# ---------------------------------------------------------------------------
+# ISMCTS-binding fail-closed (review finding): with --ismcts-binding set but
+# zero confirming comparisons available, the leg must FAIL CLOSED with an
+# explicit reason rather than passing vacuously by degrading to primary-only.
+# Default (confirming-only) mode keeps the graceful degrade.
+# ---------------------------------------------------------------------------
+
+
+def test_ismcts_binding_fails_closed_when_mixture_has_no_ismcts_row(tmp_path):
+    run_dir, db_path, ref_path = _make_run(
+        tmp_path, "x5-noismcts", _decreasing_lbr(PASS_ITERS), _G2_PASS,
+        {"lbr_tier_b": _MIX_PASS["lbr_tier_b"]}, _REF_PASS,
+    )
+    verdict = x5.compute_verdict(
+        str(run_dir), db_path=db_path, baseline_ref_path=ref_path, ismcts_binding=True
+    )
+    g3 = verdict["g3_ordering"]
+    assert g3["primary_pass"] is True  # primary alone would have passed
+    assert g3["ismcts_binding_fail_reason"] == "ismcts binding requested but no ismcts rows"
+    assert g3["verdict"] == "FAIL"
+    assert verdict["overall_verdict"] == "FAIL"
+    summary = x5.human_summary(verdict)
+    assert "ismcts binding requested but no ismcts rows" in summary
+
+
+def test_ismcts_binding_fails_closed_when_reference_has_no_ismcts_rows(tmp_path):
+    run_dir = tmp_path / "runs" / "g3norefismcts"
+    run_dir.mkdir(parents=True)
+    db_path = tmp_path / "db.sqlite"
+    _seed_g2(db_path, "g3norefismcts", _G2_PASS)
+    _seed_mixture_exploit(db_path, "g3norefismcts", _MIX_PASS)  # has both keys
+    ref = {b: {"lbr_tier_b": v["lbr_tier_b"]} for b, v in _REF_PASS.items()}  # no ismcts_br entries
+    ref_path = tmp_path / "ref.json"
+    _write_reference(ref_path, ref)
+
+    g3 = x5.compute_g3_ordering(
+        run_dir, db_path=str(db_path), baseline_ref_path=str(ref_path), ismcts_binding=True
+    )
+    assert g3["ismcts_binding_fail_reason"] == "ismcts binding requested but no ismcts rows"
+    assert g3["verdict"] == "FAIL"
+
+
+def test_ismcts_binding_default_confirming_only_still_degrades_gracefully(tmp_path):
+    """Default (ismcts_binding=False) keeps passing on primary alone when
+    there are no confirming rows -- only --ismcts-binding fails closed."""
+    run_dir, db_path, ref_path = _make_run(
+        tmp_path, "x5-noismcts2", _decreasing_lbr(PASS_ITERS), _G2_PASS,
+        {"lbr_tier_b": _MIX_PASS["lbr_tier_b"]}, _REF_PASS,
+    )
+    verdict = x5.compute_verdict(str(run_dir), db_path=db_path, baseline_ref_path=ref_path)
+    g3 = verdict["g3_ordering"]
+    assert g3["ismcts_binding_fail_reason"] is None
+    assert g3["verdict"] == "PASS"
+
+
+# ---------------------------------------------------------------------------
+# Key-constant provenance (review finding, FIX 2): the mixture-exploitability
+# metric baseline keys must be sourced from src.run_db, not duplicated as
+# string literals. Patch run_db's constants and reload the script module to
+# confirm it follows rather than pinning its own frozen copy.
+# ---------------------------------------------------------------------------
+
+
+def test_exploit_keys_are_sourced_from_run_db_and_follow_patches():
+    import importlib
+
+    orig_primary = run_db.EXPLOIT_TIER_B_LBR_BASELINE
+    orig_confirming = run_db.EXPLOIT_ISMCTS_BR_BASELINE
+    assert x5.EXPLOIT_PRIMARY_KEY == orig_primary
+    assert x5.EXPLOIT_CONFIRMING_KEY == orig_confirming
+    try:
+        run_db.EXPLOIT_TIER_B_LBR_BASELINE = "patched_primary_key"
+        run_db.EXPLOIT_ISMCTS_BR_BASELINE = "patched_confirming_key"
+        importlib.reload(x5)
+        assert x5.EXPLOIT_PRIMARY_KEY == "patched_primary_key"
+        assert x5.EXPLOIT_CONFIRMING_KEY == "patched_confirming_key"
+    finally:
+        run_db.EXPLOIT_TIER_B_LBR_BASELINE = orig_primary
+        run_db.EXPLOIT_ISMCTS_BR_BASELINE = orig_confirming
+        importlib.reload(x5)
+        assert x5.EXPLOIT_PRIMARY_KEY == orig_primary
+        assert x5.EXPLOIT_CONFIRMING_KEY == orig_confirming
