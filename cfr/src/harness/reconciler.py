@@ -440,22 +440,29 @@ def _read_evals(src: sqlite3.Connection, src_run_id: Any) -> List[Dict[str, Any]
         baseline = _str_or_none(e.get("baseline"), "eval.baseline", _MAX_BASELINE_LEN)
         if not baseline:
             raise ReconcilerValidationError("eval.baseline is empty or NULL")
-        # Stability-metric journal rows (e.g. "nashconv", written by the tiny
-        # gate's _record_nashconv_in_db) ride the exact metric value in
-        # win_rate but are not a win probability -- exact NashConv on the
-        # tiny tree routinely exceeds 1.0. Bound them as finite/non-negative
-        # instead of the genuine win-rate [0, 1] bound; every other baseline
-        # (real agent win rates, incl. MEAN_IMP_BASELINES) keeps the strict bound.
+        # Stability-metric journal rows (e.g. "nashconv" from the tiny gate's
+        # _record_nashconv_in_db, "lbr_tier_b"/"ismcts_br" from the mixture
+        # exploitability script) ride the exact metric value in win_rate but are
+        # not a win probability -- exact NashConv on the tiny tree routinely
+        # exceeds 1.0, and a symmetric CI on a near-zero exploitability can dip
+        # below 0. Bound win_rate as finite/non-negative and the CI columns as
+        # finite (a bound may be slightly negative near zero) instead of the
+        # genuine win-rate [0, 1] bound; every other baseline (real agent win
+        # rates, incl. MEAN_IMP_BASELINES) keeps the strict bound on all three.
         if baseline in STABILITY_METRIC_BASELINES:
             win_rate = _num_or_none(e.get("win_rate"), "eval.win_rate", lo=0.0)
+            ci_low = _num_or_none(e.get("ci_low"), "eval.ci_low")
+            ci_high = _num_or_none(e.get("ci_high"), "eval.ci_high")
         else:
             win_rate = _prob_or_none(e.get("win_rate"), "eval.win_rate")
+            ci_low = _prob_or_none(e.get("ci_low"), "eval.ci_low")
+            ci_high = _prob_or_none(e.get("ci_high"), "eval.ci_high")
         row_dict = {
             "iteration": iteration,
             "baseline": baseline,
             "win_rate": win_rate,
-            "ci_low": _prob_or_none(e.get("ci_low"), "eval.ci_low"),
-            "ci_high": _prob_or_none(e.get("ci_high"), "eval.ci_high"),
+            "ci_low": ci_low,
+            "ci_high": ci_high,
             "games_played": _int_or_none(e.get("games_played"), "eval.games_played"),
             "p0_wins": _int_or_none(e.get("p0_wins"), "eval.p0_wins"),
             "p1_wins": _int_or_none(e.get("p1_wins"), "eval.p1_wins"),
