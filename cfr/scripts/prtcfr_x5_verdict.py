@@ -131,7 +131,7 @@ DEFAULT_BASELINE_REF: str = os.path.join(
 # Recognized reference-table metadata keys (skipped when the baselines map is at
 # the top level rather than nested under a "baselines" key).
 _REF_META_KEYS = frozenset(
-    {"schema_version", "rule_profile", "generated_at", "estimators", "notes", "games"}
+    {"schema_version", "rule_profile", "generated_at", "estimators", "notes", "games", "rows"}
 )
 
 
@@ -365,12 +365,55 @@ def compute_g2(
 # ---------------------------------------------------------------------------
 
 
+def _baselines_from_rows(rows: Sequence[Any]) -> Dict[str, Any]:
+    """Convert the canonical row-list reference table into the per-baseline map.
+
+    Builds ``{baseline: {estimator: {"exploitability", "ci_low", "ci_high",
+    "games"}}}`` from flat rows (``baseline``, ``estimator``, ``value``,
+    ``ci_low``, ``ci_high``, ``sample_count``) -- the producer's
+    (``scripts/prtcfr_baseline_exploitability.py``) row shape. When duplicate
+    ``(baseline, estimator)`` rows exist, the row with the latest ``timestamp``
+    wins (ISO-8601 UTC strings sort lexicographically; ties keep the later row
+    in list order).
+    """
+    latest: Dict[Tuple[str, str], Tuple[str, Dict[str, Any]]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        baseline = row.get("baseline")
+        estimator = row.get("estimator")
+        if baseline is None or estimator is None:
+            continue
+        key = (baseline, estimator)
+        ts = row.get("timestamp") or ""
+        existing = latest.get(key)
+        if existing is None or ts >= existing[0]:
+            latest[key] = (ts, row)
+
+    baselines: Dict[str, Any] = {}
+    for (baseline, estimator), (_, row) in latest.items():
+        baselines.setdefault(baseline, {})[estimator] = {
+            "exploitability": row.get("value"),
+            "ci_low": row.get("ci_low"),
+            "ci_high": row.get("ci_high"),
+            "games": row.get("sample_count"),
+        }
+    return baselines
+
+
 def read_baseline_reference(path: str) -> Dict[str, Any]:
     """Load the P3W5 baseline exploitability reference table.
 
-    Accepts either ``{"baselines": {name: {estimator: {...}}}}`` or a top-level
-    ``{name: {estimator: {...}}}`` map (metadata keys skipped). Each estimator
-    entry carries ``exploitability`` and, when available, ``ci_low``/``ci_high``.
+    Accepts the canonical ``{"schema_version": 1, "rows": [...]}`` row-list
+    shape (the producer's ``write_table`` format) as the primary format: each
+    row is ``{baseline, estimator, value, ci_low, ci_high, sample_count, ...}``,
+    converted into the per-baseline ``{estimator: {exploitability, ci_low,
+    ci_high, games}}`` structure via ``_baselines_from_rows`` (latest row wins
+    per (baseline, estimator) on duplicates). Falls back to a nested
+    ``{"baselines": {name: {estimator: {...}}}}`` map or a top-level
+    ``{name: {estimator: {...}}}`` map (metadata keys skipped) for callers not
+    on the canonical schema. Each estimator entry carries ``exploitability``
+    and, when available, ``ci_low``/``ci_high``.
     Returns ``{"available": bool, "baselines": {...}, "note"/"error"}``.
     """
     p = Path(path)
@@ -386,7 +429,9 @@ def read_baseline_reference(path: str) -> Dict[str, Any]:
             "available": False, "path": str(p), "baselines": {},
             "error": "failed to parse baseline reference table: %s" % exc,
         }
-    if isinstance(data, dict) and isinstance(data.get("baselines"), dict):
+    if isinstance(data, dict) and isinstance(data.get("rows"), list):
+        baselines = _baselines_from_rows(data["rows"])
+    elif isinstance(data, dict) and isinstance(data.get("baselines"), dict):
         baselines = data["baselines"]
     elif isinstance(data, dict):
         baselines = {k: v for k, v in data.items() if k not in _REF_META_KEYS}
