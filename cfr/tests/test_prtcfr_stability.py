@@ -348,6 +348,56 @@ def test_stability_controller_drives_and_writes_manifest(tiny_tree, tmp_path):
     assert max(man["deployable_iters"]) == 2
 
 
+def test_stability_best_mirrors_into_run_db(tiny_tree, tmp_path):
+    """cambia-390: each new-best stability check must mirror the controller's
+    best pointer into run_db -- exactly the new-best checkpoint row gets
+    is_best=1 and runs.best_metric_* reflects the controller's (iteration,
+    metric). A later, better iteration moves the flag off the earlier one."""
+    import src.run_db as run_db
+
+    # improves to iter 2, worse at 3, new best at 4 (moves the flag off 2), worse at 5.
+    metric_by_iter = {1: 0.5, 2: 0.3, 3: 0.4, 4: 0.2, 5: 0.25}
+
+    def eval_fn(_trainer, t):
+        return metric_by_iter[t]
+
+    cfg = _fast_ns(
+        stability_enabled=True, stability_eval_every=1, stability_patience=10,
+        stability_rel_tolerance=0.15, stability_min_iters=1,
+    )
+    run_dir = str(tmp_path / "run")
+    db_path = str(tmp_path / "cambia_runs.db")
+    trainer = PRTCFRTinyTrainer(
+        tiny_tree, cfg, run_dir=run_dir, run_name="cambia-390-test",
+        db_path=db_path, eval_fn=eval_fn,
+    )
+    hist = trainer.train(iterations=5)
+    assert len(hist) == 5  # patience=10 never trips early-stop on this trajectory
+
+    db = run_db.get_db(db_path)
+    try:
+        run_row = db.execute(
+            "SELECT id, best_metric_name, best_metric_value, best_metric_iter "
+            "FROM runs WHERE name=?",
+            ("cambia-390-test",),
+        ).fetchone()
+        assert run_row is not None
+        assert run_row["best_metric_name"] == "nashconv"
+        assert run_row["best_metric_value"] == pytest.approx(0.2)
+        assert run_row["best_metric_iter"] == 4
+
+        rid = run_row["id"]
+        ckpts = db.execute(
+            "SELECT iteration, is_best FROM checkpoints WHERE run_id=? "
+            "ORDER BY iteration",
+            (rid,),
+        ).fetchall()
+        best_iters = {r["iteration"] for r in ckpts if r["is_best"]}
+        assert best_iters == {4}
+    finally:
+        db.close()
+
+
 def test_stability_plateau_mode_drives_trainer_and_writes_manifest(tiny_tree, tmp_path):
     """End-to-end plumbing: config.stability_stop_mode="plateau" reaches the
     controller through PRTCFRTinyTrainer and early-stops on a flattened (not

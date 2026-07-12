@@ -338,7 +338,8 @@ def test_end_to_end_scripted_driver(tmp_path):
     # run_db rows: run registered as prt-cfr, 3 checkpoints.
     db = run_db.get_db(db_path)
     run_row = db.execute(
-        "SELECT id, algorithm, status FROM runs WHERE name=?",
+        "SELECT id, algorithm, status, best_metric_name, best_metric_value, "
+        "best_metric_iter FROM runs WHERE name=?",
         ("v0.4-prtcfr-scripted",),
     ).fetchone()
     assert run_row is not None
@@ -348,6 +349,59 @@ def test_end_to_end_scripted_driver(tmp_path):
         "SELECT COUNT(*) AS c FROM checkpoints WHERE run_id=?", (run_row["id"],)
     ).fetchone()["c"]
     assert n_ckpt == 3
+
+    # cambia-390: stability best mirrored into run_db -- best at iter 2 (0.3).
+    assert run_row["best_metric_name"] == "nashconv"
+    assert run_row["best_metric_value"] == pytest.approx(0.3)
+    assert run_row["best_metric_iter"] == 2
+    best_ckpt_iters = {
+        r["iteration"]
+        for r in db.execute(
+            "SELECT iteration, is_best FROM checkpoints WHERE run_id=?",
+            (run_row["id"],),
+        ).fetchall()
+        if r["is_best"]
+    }
+    assert best_ckpt_iters == {2}
+    db.close()
+
+
+def test_stability_best_moves_to_later_iteration_in_run_db(tmp_path):
+    """cambia-390: a later, better iteration must move is_best off the earlier
+    checkpoint row and refresh runs.best_metric_*, not just append a second
+    best row."""
+    cfg = _prod_config(iterations=4, stability_patience=10, stability_eval_every=1)
+    metrics_seq = {1: 0.5, 2: 0.3, 3: 0.4, 4: 0.2}  # best moves 2 -> 4
+
+    def eval_fn(_trainer, t):
+        return metrics_seq[t]
+
+    db_path = str(tmp_path / "cambia_runs.db")
+    trainer = PRTCFRProductionTrainer(
+        cfg, str(tmp_path / "run"), driver_factory=_scripted_factory,
+        eval_fn=eval_fn, db_path=db_path, run_name="v0.4-prtcfr-bestmoves",
+    )
+    history = trainer.train(iterations=4)
+    trainer.close()
+    assert len(history) == 4  # high patience: no early-stop on this trajectory
+
+    db = run_db.get_db(db_path)
+    run_row = db.execute(
+        "SELECT id, best_metric_value, best_metric_iter FROM runs WHERE name=?",
+        ("v0.4-prtcfr-bestmoves",),
+    ).fetchone()
+    assert run_row is not None
+    assert run_row["best_metric_value"] == pytest.approx(0.2)
+    assert run_row["best_metric_iter"] == 4
+    best_ckpt_iters = {
+        r["iteration"]
+        for r in db.execute(
+            "SELECT iteration, is_best FROM checkpoints WHERE run_id=?",
+            (run_row["id"],),
+        ).fetchall()
+        if r["is_best"]
+    }
+    assert best_ckpt_iters == {4}
     db.close()
 
 
