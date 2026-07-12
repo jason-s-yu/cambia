@@ -211,5 +211,83 @@ def test_result_shape_and_nonnegative(cfg):
     assert isinstance(r["exploitability"], float)
 
 
+def test_incremental_key_matches_rebuilt(cfg):
+    """The info key carried incrementally down a playout equals the key rebuilt
+    from scratch from the full streams, and induces exactly the same equivalence
+    classes (tree-node sharing) as the pre-refactor
+    ("PR", priv_init, tuple(priv_draw), tuple(pub_path)) tuple. This is the guard
+    that the O(1)-extend incremental key stays content-identical to the O(L) rebuild.
+    """
+    from src.cfr.ismcts_br import (
+        _InfoKey,
+        _step_tokens,
+        _responder_priv_init,
+        _new_deal,
+    )
+
+    responder = 0
+    house_rules = cfg.cambia_rules
+    deal_rng = random.Random(2024)
+    move_rng = random.Random(99)
+    opp = _UniformWrapper(7)
+
+    # (old_tuple, incremental_key) at every responder decision across many random
+    # playouts; the two keying schemes must agree class-for-class.
+    pairs = []
+    for _ in range(80):
+        state = _new_deal(house_rules, deal_rng, None)
+        priv_init = _responder_priv_init(state, responder)
+        key = _InfoKey.root(priv_init)
+        priv_draw = []
+        pub_path = []
+        turns = 0
+        while not state.is_terminal() and turns < 200:
+            turns += 1
+            acting = state.get_acting_player()
+            if acting == -1:
+                break
+            legal = sorted(state.get_legal_actions(), key=repr)
+            if not legal:
+                break
+            if acting == responder:
+                # At each responder decision: incremental key == rebuild-from-scratch.
+                rebuilt = _InfoKey.from_streams(priv_init, priv_draw, pub_path)
+                assert key == rebuilt, "incremental key != rebuilt-from-scratch key"
+                assert hash(key) == hash(rebuilt), "equal keys must hash equal"
+                old_tuple = ("PR", priv_init, tuple(priv_draw), tuple(pub_path))
+                pairs.append((old_tuple, key))
+                action = legal[move_rng.randrange(len(legal))]
+            else:
+                action = opp.choose_action(state, legal)
+            state.apply_action(action)
+            pub_entry, draw_token = _step_tokens(state, action, acting, responder)
+            key = key.extend_pub(pub_entry)
+            pub_path.append(pub_entry)
+            if draw_token is not None:
+                key = key.extend_draw(draw_token)
+                priv_draw.append(draw_token)
+
+    assert len(pairs) > 20, f"too few responder decisions sampled ({len(pairs)})"
+    # Node sharing is exact: two decisions share a tree node under the incremental
+    # key iff they shared one under the rebuilt tuple, and equal keys hash equal.
+    saw_equal = saw_distinct = False
+    for i in range(len(pairs)):
+        old_i, key_i = pairs[i]
+        for j in range(i + 1, len(pairs)):
+            old_j, key_j = pairs[j]
+            same_old = old_i == old_j
+            same_new = key_i == key_j
+            assert same_old == same_new, (
+                "info-key equivalence classes diverge from the rebuilt-tuple key"
+            )
+            if same_new:
+                assert hash(key_i) == hash(key_j)
+                saw_equal = True
+            else:
+                saw_distinct = True
+    # The sample must exercise both a shared node and a distinct one.
+    assert saw_equal and saw_distinct, "sample did not cover both equal and distinct keys"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
