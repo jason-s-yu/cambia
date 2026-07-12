@@ -42,9 +42,22 @@ Gates (all on the deployable SD-CFR mixture at cumulative budget >= 10x DESCA):
           emitted JSON records which rule evaluated each leg.
   G3-ord  mixture exploitability strictly below each baseline's reference
           exploitability with non-overlapping CIs. Tier-B LBR (``lbr_tier_b``) is
-          the primary binding estimator; ISMCTS-BR (``ismcts_br``) is confirming:
-          its disagreement with Tier-B LBR is raised as a flag, not a veto,
-          unless ``--ismcts-binding`` is set.
+          the primary estimator; ISMCTS-BR (``ismcts_br``) is confirming: its
+          disagreement with Tier-B LBR is raised as a flag, not a veto, unless
+          ``--ismcts-binding`` is set (which also fails closed if zero
+          confirming comparisons are available, rather than passing
+          vacuously). Binding scope is selectable via ``--g3-binding``: default
+          ``strategic`` makes only the three strategic baselines
+          (imperfect_greedy, memory_heuristic, aggressive_snap) binding on the
+          verdict, since the two random legs' Tier-B reference exploitability
+          is a known estimator artifact (the self-continuation one-ply gap
+          flattens a random target's action differences: reference values
+          ~0.08/0.12 vs ~0.41-0.43 for the strategic legs), producing
+          artifact-driven tight bars that contradict G2's strategic-binding
+          amendment. ``all`` restores binding over all five baselines. The
+          random legs are always computed and rendered (informational,
+          flagged non-binding) regardless of mode. The emitted JSON records
+          which mode evaluated (``g3_binding``), like ``g2_rule`` does for G2.
   G3-trnd in-loop Tier-A LBR OLS slope over the in-budget 1000-iter window with a
           95% CI upper bound < 0, and the observed magnitude clearing the window's
           minimum detectable slope (computed from the in-window residual variance
@@ -85,7 +98,11 @@ sys.path.insert(0, _CFR_ROOT)
 # for the G3-trend leg"). Do not re-derive.
 from scripts import prtcfr_x4_verdict as x4  # noqa: E402
 from src.evaluate_agents import MEAN_IMP_BASELINES  # noqa: E402
-from src.run_db import get_db  # noqa: E402
+from src.run_db import (  # noqa: E402
+    EXPLOIT_ISMCTS_BR_BASELINE,
+    EXPLOIT_TIER_B_LBR_BASELINE,
+    get_db,
+)
 
 # Re-export the reused helpers so tests and callers reference one surface.
 ols_slope_ci = x4.ols_slope_ci
@@ -120,8 +137,22 @@ STRATEGIC_BASELINES: Tuple[str, ...] = (
 RANDOM_BASELINES: Tuple[str, ...] = ("random_no_cambia", "random_late_cambia")
 
 # run_db metric baseline keys for the mixture exploitability rows (P3W2 pin).
-EXPLOIT_PRIMARY_KEY: str = "lbr_tier_b"
-EXPLOIT_CONFIRMING_KEY: str = "ismcts_br"
+# Sourced from src.run_db (the single source of truth) rather than duplicated
+# as string literals.
+EXPLOIT_PRIMARY_KEY: str = EXPLOIT_TIER_B_LBR_BASELINE
+EXPLOIT_CONFIRMING_KEY: str = EXPLOIT_ISMCTS_BR_BASELINE
+
+# G3-ordering binding scope (review finding, ruled): Tier-B LBR reference
+# exploitability against the two random baselines is a known estimator
+# artifact -- the self-continuation one-ply gap flattens a random target's
+# action differences (reference values ~0.08/0.12 vs ~0.41-0.43 for the
+# strategic legs), producing artifact-driven tight bars that contradict G2's
+# strategic-binding amendment. Default "strategic" makes only the three
+# strategic baselines binding for the G3-ordering verdict; the two random
+# legs are still computed and rendered every run (informational, flagged
+# non-binding). "all" restores the original all-five-binding behavior.
+G3_BINDING_CHOICES: Tuple[str, ...] = ("all", "strategic")
+DEFAULT_G3_BINDING: str = "strategic"
 
 # The frozen G3-ordering reference table (P3W5), relative to the cfr/ root.
 DEFAULT_BASELINE_REF: str = os.path.join(
@@ -492,13 +523,27 @@ def compute_g3_ordering(
     db_path: Optional[str] = None,
     baseline_ref_path: str = DEFAULT_BASELINE_REF,
     ismcts_binding: bool = False,
+    g3_binding: str = DEFAULT_G3_BINDING,
     iteration: Optional[int] = None,
 ) -> Dict[str, Any]:
     """G3-ordering: mixture exploitability below each baseline's reference.
 
-    Tier-B LBR (``lbr_tier_b``) is the primary binding estimator over all five
-    baselines. ISMCTS-BR (``ismcts_br``) is confirming: per-leg disagreement with
-    the primary verdict is flagged; it gates only under ``ismcts_binding``.
+    Tier-B LBR (``lbr_tier_b``) is the primary estimator. ISMCTS-BR
+    (``ismcts_br``) is confirming: per-leg disagreement with the primary
+    verdict is flagged; it gates only under ``ismcts_binding``.
+
+    ``g3_binding`` selects which baselines are binding on the overall verdict:
+    ``"strategic"`` (default) binds only ``STRATEGIC_BASELINES``, since the
+    random legs' reference exploitability is an estimator artifact (see the
+    module docstring); ``"all"`` binds all five ``MEAN_IMP_BASELINES``. Every
+    baseline's comparison is always computed and rendered regardless of mode;
+    non-binding legs are marked ``"binding": False`` and a FAILing non-binding
+    leg is raised as an informational flag, never a veto.
+
+    When ``ismcts_binding`` is set but zero confirming comparisons are
+    available among the binding baselines, the leg fails closed (an empty
+    binding set vacuously passing would silently degrade to primary-only)
+    rather than reporting a comparison that never ran.
     """
     db, run_id = _open_run(run_dir, db_path)
     ref = read_baseline_reference(baseline_ref_path)
@@ -522,6 +567,12 @@ def compute_g3_ordering(
                     "iteration": row.get("iteration"),
                 }
 
+    if g3_binding not in G3_BINDING_CHOICES:
+        raise ValueError("g3_binding must be one of %s, got %r" % (G3_BINDING_CHOICES, g3_binding))
+    binding_baselines: Tuple[str, ...] = (
+        STRATEGIC_BASELINES if g3_binding == "strategic" else MEAN_IMP_BASELINES
+    )
+
     legs: Dict[str, Any] = {}
     flags: List[str] = []
     for baseline in MEAN_IMP_BASELINES:
@@ -542,25 +593,43 @@ def compute_g3_ordering(
                 "ISMCTS-BR disagrees with Tier-B LBR on %s (primary=%s, confirming=%s)"
                 % (baseline, primary["pass"], confirming["pass"])
             )
+        binding = baseline in binding_baselines
         if primary.get("overlap"):
-            flags.append("Tier-B LBR CI overlap on binding comparison: %s" % baseline)
+            flags.append(
+                "Tier-B LBR CI overlap on %s comparison: %s"
+                % ("binding" if binding else "non-binding (informational)", baseline)
+            )
+        elif not binding and not primary.get("pass"):
+            # Random-leg reference exploitability is a known estimator artifact
+            # (module docstring); a FAIL here never gates the verdict, but is
+            # surfaced so a reader doesn't mistake it for a silent pass.
+            flags.append(
+                "%s exploitability comparison FAILs but is non-binding under "
+                "g3-binding=%s (random-baseline reference is an estimator "
+                "artifact, see module docstring)" % (baseline, g3_binding)
+            )
         legs[baseline] = {
             "primary": primary,
             "confirming": confirming,
             "confirming_available": confirming_available,
             "disagreement_flag": disagreement,
+            "binding": binding,
         }
 
-    # Binding set: the primary (Tier-B LBR) comparisons for all five baselines,
-    # plus the confirming comparisons only when the user rules ISMCTS-BR binding.
-    primary_pass = all(legs[b]["primary"]["pass"] for b in MEAN_IMP_BASELINES)
-    confirming_pass = all(
-        legs[b]["confirming"]["pass"]
-        for b in MEAN_IMP_BASELINES
-        if legs[b]["confirming_available"]
-    )
+    # Binding set: the primary (Tier-B LBR) comparisons over binding_baselines
+    # (all five under "all", the three strategic legs under "strategic"), plus
+    # the confirming comparisons over the same set only when the user rules
+    # ISMCTS-BR binding.
+    primary_pass = all(legs[b]["primary"]["pass"] for b in binding_baselines)
+    confirming_considered = [b for b in binding_baselines if legs[b]["confirming_available"]]
+    confirming_pass = all(legs[b]["confirming"]["pass"] for b in confirming_considered)
+
+    ismcts_binding_fail_reason: Optional[str] = None
+    if ismcts_binding and not confirming_considered:
+        ismcts_binding_fail_reason = "ismcts binding requested but no ismcts rows"
+
     if ismcts_binding:
-        overall = primary_pass and confirming_pass
+        overall = primary_pass and confirming_pass and (ismcts_binding_fail_reason is None)
     else:
         overall = primary_pass
 
@@ -570,7 +639,10 @@ def compute_g3_ordering(
     )
     return {
         "available": available,
+        "g3_binding": g3_binding,
+        "binding_baselines": list(binding_baselines),
         "ismcts_binding": ismcts_binding,
+        "ismcts_binding_fail_reason": ismcts_binding_fail_reason,
         "reference_path": ref.get("path"),
         "reference_available": ref.get("available", False),
         "mixture": mixture,
@@ -777,6 +849,7 @@ def compute_verdict(
     k_games: Optional[int] = None,
     g2_rule: str = "default",
     ismcts_binding: bool = False,
+    g3_binding: str = DEFAULT_G3_BINDING,
     window_width: int = DEFAULT_WINDOW_WIDTH,
     trend_power: float = DEFAULT_TREND_POWER,
     iteration: Optional[int] = None,
@@ -790,7 +863,7 @@ def compute_verdict(
     g2 = compute_g2(run_dir_path, db_path=db_path, g2_rule=g2_rule, iteration=iteration)
     g3_ord = compute_g3_ordering(
         run_dir_path, db_path=db_path, baseline_ref_path=baseline_ref_path,
-        ismcts_binding=ismcts_binding, iteration=iteration,
+        ismcts_binding=ismcts_binding, g3_binding=g3_binding, iteration=iteration,
     )
 
     if k_resolved is None:
@@ -876,21 +949,29 @@ def human_summary(verdict: Dict[str, Any]) -> str:
     g3o = verdict["g3_ordering"]
     lines.append(
         "G3-ordering mixture exploitability below baselines (Tier-B LBR primary, "
-        "ISMCTS-BR %s) [%s]"
-        % ("binding" if g3o.get("ismcts_binding") else "confirming", g3o["verdict"])
+        "ISMCTS-BR %s) [g3-binding=%s] [%s]"
+        % (
+            "binding" if g3o.get("ismcts_binding") else "confirming",
+            g3o.get("g3_binding"),
+            g3o["verdict"],
+        )
     )
+    if g3o.get("ismcts_binding_fail_reason"):
+        lines.append("   ISMCTS-BINDING FAIL: %s" % g3o["ismcts_binding_fail_reason"])
     if not g3o.get("reference_available"):
         lines.append("   reference table unavailable: %s" % g3o.get("reference_path"))
     for baseline in MEAN_IMP_BASELINES:
         leg = g3o["legs"].get(baseline)
         if leg is None:
             continue
+        tag = "binding" if leg.get("binding") else "non-binding"
         prim = leg["primary"]
         conf = leg["confirming"]
         lines.append(
-            "   %-20s tierB: mix=%s vs ref=%s -> %s%s | ismcts: mix=%s vs ref=%s -> %s"
+            "   %-20s [%s] tierB: mix=%s vs ref=%s -> %s%s | ismcts: mix=%s vs ref=%s -> %s"
             % (
                 baseline,
+                tag,
                 _fmt(prim.get("mixture_exploitability")),
                 _fmt(prim.get("reference_exploitability")),
                 "PASS" if prim.get("pass") else "FAIL",
@@ -1035,7 +1116,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--ismcts-binding", action="store_true",
         help="Make ISMCTS-BR a binding G3-ordering estimator (default: confirming only, "
-        "disagreement is a flag not a veto).",
+        "disagreement is a flag not a veto). With zero confirming comparisons "
+        "available, fails closed instead of passing vacuously.",
+    )
+    ap.add_argument(
+        "--g3-binding", choices=G3_BINDING_CHOICES, default=DEFAULT_G3_BINDING,
+        help="G3-ordering binding scope (default: %(default)s). strategic binds only "
+        "imperfect_greedy/memory_heuristic/aggressive_snap (the random legs' "
+        "reference exploitability is a known estimator artifact, see module "
+        "docstring); all restores all-five binding. Random legs are always "
+        "computed and rendered, flagged non-binding under strategic.",
     )
     ap.add_argument(
         "--window-width", type=int, default=DEFAULT_WINDOW_WIDTH,
@@ -1069,6 +1159,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         k_games=args.k_games,
         g2_rule=args.g2_rule,
         ismcts_binding=args.ismcts_binding,
+        g3_binding=args.g3_binding,
         window_width=args.window_width,
         trend_power=args.trend_power,
         iteration=args.iteration,
