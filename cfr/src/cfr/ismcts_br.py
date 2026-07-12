@@ -109,10 +109,13 @@ _QUIET_ENGINE_LOGGERS = ("src.game", "src.game.engine", "src.agent_state")
 # Exploitability is measured from the responder seat; P0 by the LBR convention.
 _RESPONDER_ID = 0
 
-# UCB1 exploration constant on the +/-1 utility scale. sqrt(2) is the textbook
-# value for rewards in [0, 1]; the utility range here is [-1, 1] (width 2), so a
-# slightly larger constant keeps exploration alive over the wider spread.
-_DEFAULT_UCB_C = 1.4
+# UCB1 exploration constant on the +/-1 utility scale. The textbook sqrt(2) assumes
+# rewards in [0, 1]; the exploration bonus must scale with the reward range, and
+# these utilities span [-1, 1] (width 2), so the matched constant is 2*sqrt(2). That
+# is equivalent to normalizing backed-up values to [0, 1] and keeping sqrt(2) (same
+# argmax: the +1 offset is constant across actions). Calibrated worst |error| on the
+# tiny-game exact BR stays within CALIB_TOL at this value (tests/test_ismcts_br.py).
+_DEFAULT_UCB_C = 2.0 * math.sqrt(2)  # ~= 2.8284, matched to the width-2 utility range
 
 # Factory signature: (player_id, config) -> agent exposing choose_action.
 OpponentFactory = Callable[[int, Any], Any]
@@ -223,39 +226,131 @@ def _responder_priv_init(state: CambiaGameState, responder: int) -> Tuple:
     )
 
 
-def _apply_and_track(
-    state: CambiaGameState,
-    action,
-    acting: int,
-    responder: int,
-    priv_draw: List[str],
-    pub_path: List[Tuple],
-) -> None:
-    """Apply ``action`` and extend the responder's perfect-recall accumulators.
+class _InfoKey:
+    """Perfect-recall responder info key that extends in O(1) and hashes in O(1).
 
-    pub_path gets a common-knowledge (actor, action-repr, post-action discard-top)
-    entry for every action; priv_draw gets the responder's freshly drawn stockpile
-    card (hidden from the opponent). Same public/private split as the solver.
+    Content-equivalent to the former ``("PR", priv_init, tuple(priv_draw),
+    tuple(pub_path))`` tuple: two keys are equal iff their ``priv_init`` and their
+    ordered ``priv_draw`` / ``pub_path`` streams match, so states the responder
+    cannot distinguish share a tree node exactly as the rebuilt tuple did (node
+    sharing stays content-exact, not hash-approximate). The old builder rebuilt both
+    growing lists at every responder decision (O(L) copy per decision, O(L^2) over an
+    L-decision playout) and hashed an O(L) tuple; this carries each stream as a cons
+    chain that extends in O(1) and folds each element into a per-stream running hash,
+    so ``__hash__`` is O(1) while ``__eq__`` still walks the chains for an exact
+    comparison. The two stream hashes are kept independent, so the pub/draw
+    interleaving order along a playout cannot affect the hash: equal content (equal
+    per-stream order) always hashes equal, which is required for correct node sharing.
     """
-    state.apply_action(action)
+
+    __slots__ = ("priv_init", "draw", "pub", "_draw_h", "_pub_h", "_hash")
+
+    def __init__(
+        self, priv_init: Tuple, draw: Tuple, pub: Tuple, draw_h: int, pub_h: int
+    ):
+        self.priv_init = priv_init
+        self.draw = draw
+        self.pub = pub
+        self._draw_h = draw_h
+        self._pub_h = pub_h
+        self._hash = hash((priv_init, draw_h, pub_h))
+
+    @classmethod
+    def root(cls, priv_init: Tuple) -> "_InfoKey":
+        """Key at the responder's first decision: empty draw/pub streams."""
+        return cls(priv_init, (), (), 0, 0)
+
+    def extend_pub(self, entry: Tuple) -> "_InfoKey":
+        """Append a common-knowledge public entry; O(1)."""
+        return _InfoKey(
+            self.priv_init,
+            self.draw,
+            (self.pub, entry),
+            self._draw_h,
+            hash((self._pub_h, entry)),
+        )
+
+    def extend_draw(self, token: str) -> "_InfoKey":
+        """Append the responder's freshly drawn (private) stockpile card; O(1)."""
+        return _InfoKey(
+            self.priv_init,
+            (self.draw, token),
+            self.pub,
+            hash((self._draw_h, token)),
+            self._pub_h,
+        )
+
+    @classmethod
+    def from_streams(cls, priv_init: Tuple, priv_draw, pub_path) -> "_InfoKey":
+        """Rebuild a key from full streams: the reference the incremental descent
+        must match. Each stream is folded in its own order, so the result does not
+        depend on how pub/draw extensions interleave along the playout.
+        """
+        key = cls.root(priv_init)
+        for entry in pub_path:
+            key = key.extend_pub(entry)
+        for token in priv_draw:
+            key = key.extend_draw(token)
+        return key
+
+    def __hash__(self) -> int:
+        return self._hash
+
+    def __eq__(self, other: Any) -> bool:
+        if other is self:
+            return True
+        if not isinstance(other, _InfoKey):
+            return NotImplemented
+        return (
+            self._hash == other._hash
+            and self.priv_init == other.priv_init
+            and self.pub == other.pub
+            and self.draw == other.draw
+        )
+
+
+def _step_tokens(
+    state: CambiaGameState, action, acting: int, responder: int
+) -> Tuple[Tuple, Optional[str]]:
+    """Info-key tokens produced by ``action`` (already applied to ``state``): the
+    common-knowledge (actor, action-repr, post-action discard-top) public entry for
+    every action, and the responder's freshly drawn stockpile card (hidden from the
+    opponent) or None. Same public/private split as ``tools/tiny_solver``.
+    """
     try:
         top = state.get_discard_top()
     except Exception:  # JUSTIFIED: eval resilience on odd terminal states
         top = None
     top_id = _card_id(top) if top is not None else None
-    pub_path.append((acting, repr(action), top_id))
+    pub_entry = (acting, repr(action), top_id)
+    draw_token: Optional[str] = None
     if acting == responder and isinstance(action, ActionDrawStockpile):
         try:
             if state.pending_action_player == responder:
                 drawn = state.pending_action_data.get("drawn_card")
                 if drawn is not None:
-                    priv_draw.append(_card_id(drawn))
+                    draw_token = _card_id(drawn)
         except Exception:  # JUSTIFIED: pending state absent -> no draw token
             pass
+    return pub_entry, draw_token
 
 
-def _info_key(priv_init: Tuple, priv_draw: List[str], pub_path: List[Tuple]) -> Tuple:
-    return ("PR", priv_init, tuple(priv_draw), tuple(pub_path))
+def _apply_and_track(
+    state: CambiaGameState,
+    action,
+    acting: int,
+    responder: int,
+    key: "_InfoKey",
+) -> "_InfoKey":
+    """Apply ``action`` and return the responder's info key extended in O(1) with
+    this action's public entry (and, on a responder stockpile draw, the drawn card).
+    """
+    state.apply_action(action)
+    pub_entry, draw_token = _step_tokens(state, action, acting, responder)
+    key = key.extend_pub(pub_entry)
+    if draw_token is not None:
+        key = key.extend_draw(draw_token)
+    return key
 
 
 def _terminal_util(state: CambiaGameState, responder: int) -> float:
@@ -361,8 +456,7 @@ def _simulate(
     """One ISMCTS iteration over a single determinization (``root_state``)."""
     state = copy.deepcopy(root_state)
     priv_init = _responder_priv_init(state, responder)
-    priv_draw: List[str] = []
-    pub_path: List[Tuple] = []
+    key = _InfoKey.root(priv_init)
     path: List[Tuple[Tuple, int]] = []
     turns = 0
     value = 0.0
@@ -382,26 +476,26 @@ def _simulate(
         turns += 1
 
         if acting == responder:
-            nkey = (_info_key(priv_init, priv_draw, pub_path), len(legal))
+            nkey = (key, len(legal))
             node = tree.get(nkey)
             if node is None:
                 node = [0, [0] * len(legal), [0.0] * len(legal)]
                 tree[nkey] = node
                 a_idx = rng.randrange(len(legal))
                 path.append((nkey, a_idx))
-                _apply_and_track(state, legal[a_idx], acting, responder, priv_draw, pub_path)
+                key = _apply_and_track(state, legal[a_idx], acting, responder, key)
                 value = _rollout(state, responder, opponent, rng, max_turns - turns)
                 break
             untried = [i for i in range(len(legal)) if node[1][i] == 0]
             if untried:
                 a_idx = untried[rng.randrange(len(untried))]
                 path.append((nkey, a_idx))
-                _apply_and_track(state, legal[a_idx], acting, responder, priv_draw, pub_path)
+                key = _apply_and_track(state, legal[a_idx], acting, responder, key)
                 value = _rollout(state, responder, opponent, rng, max_turns - turns)
                 break
             a_idx = _ucb_select(node, ucb_c)
             path.append((nkey, a_idx))
-            _apply_and_track(state, legal[a_idx], acting, responder, priv_draw, pub_path)
+            key = _apply_and_track(state, legal[a_idx], acting, responder, key)
             continue
 
         # Opponent (or any non-responder) node: fixed policy.
@@ -409,7 +503,7 @@ def _simulate(
             action = opponent.choose_action(state, legal)
         except Exception:  # JUSTIFIED: eval resilience
             action = legal[rng.randrange(len(legal))]
-        _apply_and_track(state, action, acting, responder, priv_draw, pub_path)
+        key = _apply_and_track(state, action, acting, responder, key)
 
     for nkey, a_idx in path:
         node = tree[nkey]
@@ -431,8 +525,7 @@ def _play_greedy_br_game(
     """
     state = copy.deepcopy(root_state)
     priv_init = _responder_priv_init(state, responder)
-    priv_draw: List[str] = []
-    pub_path: List[Tuple] = []
+    key = _InfoKey.root(priv_init)
     turns = 0
     while not state.is_terminal() and turns < max_turns:
         turns += 1
@@ -443,7 +536,7 @@ def _play_greedy_br_game(
         if not legal:
             break
         if acting == responder:
-            nkey = (_info_key(priv_init, priv_draw, pub_path), len(legal))
+            nkey = (key, len(legal))
             a_idx = _greedy_action_index(tree.get(nkey), len(legal), rng)
             action = legal[a_idx]
         else:
@@ -451,7 +544,7 @@ def _play_greedy_br_game(
                 action = opponent.choose_action(state, legal)
             except Exception:  # JUSTIFIED: eval resilience
                 action = legal[rng.randrange(len(legal))]
-        _apply_and_track(state, action, acting, responder, priv_draw, pub_path)
+        key = _apply_and_track(state, action, acting, responder, key)
     return _terminal_util(state, responder)
 
 
