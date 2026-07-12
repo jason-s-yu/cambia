@@ -609,6 +609,29 @@ def update_best_metric(
         db.commit()
 
 
+def set_best_metric(
+    db: sqlite3.Connection,
+    run_id: int,
+    name: str,
+    value: float,
+    iter_num: int,
+) -> None:
+    """Unconditionally set a run's best_metric_* fields.
+
+    Unlike ``update_best_metric`` (which assumes higher-is-better and compares
+    against the stored value), this mirrors a best pointer the caller has
+    already decided on -- e.g. the PRT-CFR stability controller, which is
+    mode-aware (``min`` or ``max``) and performs its own comparison. Calling
+    this with a lower value than the one on file is expected and correct for
+    a min-mode metric (exploitability/NashConv); it is not a bug.
+    """
+    db.execute(
+        "UPDATE runs SET best_metric_name=?, best_metric_value=?, best_metric_iter=?, updated_at=? WHERE id=?",
+        (name, value, iter_num, _now(), run_id),
+    )
+    db.commit()
+
+
 def register_checkpoint(
     db: sqlite3.Connection,
     run_id: int,

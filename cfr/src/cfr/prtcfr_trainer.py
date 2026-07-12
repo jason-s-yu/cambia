@@ -493,6 +493,11 @@ class PRTCFRTinyTrainer:
         # run_db journaling (run-dir mode with a run_name only; never fatal).
         self._db_conn = None
         self._db_run_id: Optional[int] = None
+        # iteration -> checkpoints.id, populated by _register_checkpoint_in_db;
+        # lets the stability-best mirror (cambia-390) flip is_best without a
+        # re-query, since a checkpoint for iteration t is always registered
+        # (run_iteration) before that iteration's stability check runs (train).
+        self._db_ckpt_ids: Dict[int, int] = {}
         if self._persist_resume and run_name is not None:
             self._init_run_db(db_path, run_name, config_yaml, config_dict)
 
@@ -585,9 +590,33 @@ class PRTCFRTinyTrainer:
         try:
             from .. import run_db as _run_db
 
-            _run_db.register_checkpoint(self._db_conn, self._db_run_id, t, path)
+            ckpt_id = _run_db.register_checkpoint(self._db_conn, self._db_run_id, t, path)
+            self._db_ckpt_ids[t] = ckpt_id
         except Exception as e:  # pragma: no cover - never fatal
             logger.debug("[prtcfr-tiny] register_checkpoint failed (non-fatal): %s", e)
+
+    def _record_stability_best_in_db(self, t: int, metric: float) -> None:
+        """Mirror a new stability-controller best into run_db (cambia-390).
+
+        Called only when the controller's ``update`` reports ``is_best`` for
+        iteration t, so the mode-aware (min/max) comparison already happened
+        in the controller; this just persists its pointer -- exclusive
+        checkpoints.is_best plus runs.best_metric_*. Runs every stability
+        eval (not just at stop), so a resume/interrupt after any eval still
+        leaves run_db reflecting the best known at that point."""
+        if self._db_conn is None or self._db_run_id is None:
+            return
+        try:
+            from .. import run_db as _run_db
+
+            _run_db.set_best_metric(
+                self._db_conn, self._db_run_id, self.stability_metric_name, metric, t,
+            )
+            ckpt_id = self._db_ckpt_ids.get(t)
+            if ckpt_id is not None:
+                _run_db.mark_best_checkpoint(self._db_conn, self._db_run_id, ckpt_id)
+        except Exception as e:  # pragma: no cover - never fatal
+            logger.debug("[prtcfr-tiny] stability best journal failed (non-fatal): %s", e)
 
     def _record_nashconv_in_db(self, t: int, value: float) -> None:
         """Journal one per-eval NashConv as a reconcile-visible eval_results row.
@@ -959,6 +988,8 @@ class PRTCFRTinyTrainer:
                         metric = float(self.eval_fn(self, t))
                         self._record_nashconv_in_db(t, metric)
                         decision = self.controller.update(t, metric)
+                        if decision.is_best:
+                            self._record_stability_best_in_db(t, metric)
                         logger.info(
                             "[prtcfr] stability iter=%d %s=%.5f best_iter=%d best=%.5f "
                             "worse_streak=%d stop=%s",
@@ -1682,6 +1713,11 @@ class PRTCFRProductionTrainer:
         # run_db registration (optional, never fatal).
         self._db_conn = None
         self._db_run_id: Optional[int] = None
+        # iteration -> checkpoints.id, populated by _register_checkpoint_in_db;
+        # lets the stability-best mirror (cambia-390) flip is_best without a
+        # re-query, since a checkpoint for iteration t is always registered
+        # (run_iteration) before that iteration's stability check runs (train).
+        self._db_ckpt_ids: Dict[int, int] = {}
         self._init_run_db(db_path, run_name, config_yaml, config_dict)
 
     # -- setup helpers ------------------------------------------------------
@@ -1831,9 +1867,33 @@ class PRTCFRProductionTrainer:
         try:
             from .. import run_db as _run_db
 
-            _run_db.register_checkpoint(self._db_conn, self._db_run_id, t, path)
+            ckpt_id = _run_db.register_checkpoint(self._db_conn, self._db_run_id, t, path)
+            self._db_ckpt_ids[t] = ckpt_id
         except Exception as e:  # pragma: no cover - never fatal
             logger.debug("[prtcfr] register_checkpoint failed (non-fatal): %s", e)
+
+    def _record_stability_best_in_db(self, t: int, metric: float) -> None:
+        """Mirror a new stability-controller best into run_db (cambia-390).
+
+        Called only when the controller's ``update`` reports ``is_best`` for
+        iteration t, so the mode-aware (min/max) comparison already happened
+        in the controller; this just persists its pointer -- exclusive
+        checkpoints.is_best plus runs.best_metric_*. Runs every stability
+        eval (not just at stop), so a resume/interrupt after any eval still
+        leaves run_db reflecting the best known at that point."""
+        if self._db_conn is None or self._db_run_id is None:
+            return
+        try:
+            from .. import run_db as _run_db
+
+            _run_db.set_best_metric(
+                self._db_conn, self._db_run_id, self.stability_metric_name, metric, t,
+            )
+            ckpt_id = self._db_ckpt_ids.get(t)
+            if ckpt_id is not None:
+                _run_db.mark_best_checkpoint(self._db_conn, self._db_run_id, ckpt_id)
+        except Exception as e:  # pragma: no cover - never fatal
+            logger.debug("[prtcfr] stability best journal failed (non-fatal): %s", e)
 
     def _update_db_status(self, status: str) -> None:
         if self._db_conn is None or self._db_run_id is None:
@@ -2248,6 +2308,8 @@ class PRTCFRProductionTrainer:
                         # it on the trainer; record it in this iteration's row.
                         st.tier_a_lbr = metric
                         decision = self.controller.update(t, metric)
+                        if decision.is_best:
+                            self._record_stability_best_in_db(t, metric)
                         logger.info(
                             "[prtcfr-prod] stability iter=%d %s=%.5f best_iter=%d "
                             "best=%.5f worse_streak=%d stop=%s",
