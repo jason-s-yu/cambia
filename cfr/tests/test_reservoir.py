@@ -202,9 +202,7 @@ class TestReservoirSamplingProperty:
         total_retained = early_count + late_count
         early_ratio = early_count / total_retained
         # Should be approximately 0.5 (within 10%)
-        assert 0.4 < early_ratio < 0.6, (
-            f"Early/late ratio {early_ratio} is too skewed"
-        )
+        assert 0.4 < early_ratio < 0.6, f"Early/late ratio {early_ratio} is too skewed"
 
 
 # ===== ReservoirBuffer: Save/Load =====

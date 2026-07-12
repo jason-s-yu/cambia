@@ -38,14 +38,22 @@ from scripts.prtcfr_bench import (  # noqa: E402
 def _tiny_args(**overrides) -> argparse.Namespace:
     args = build_arg_parser().parse_args(
         [
-            "--k-games", "4",
-            "--m-rollouts", "1",
-            "--batch-size", "16",
-            "--train-steps", "5",
-            "--seq-cap", "128",
-            "--backend", "python",
-            "--device", "cpu",
-            "--max-trajectory-steps", "40",
+            "--k-games",
+            "4",
+            "--m-rollouts",
+            "1",
+            "--batch-size",
+            "16",
+            "--train-steps",
+            "5",
+            "--seq-cap",
+            "128",
+            "--backend",
+            "python",
+            "--device",
+            "cpu",
+            "--max-trajectory-steps",
+            "40",
             "--no-wait-for-clean-host",
         ]
     )
@@ -116,9 +124,18 @@ def test_run_cell_tiny_python_backend_cpu(tmp_path):
     # remainders of gen_seconds/fit_seconds, so a millisecond-scale tolerance
     # is the rounding-only slack, not a correctness gap.
     p = result["profile"]
-    gen_sum = p["gen"]["ffi_s"] + p["gen"]["inference_s"] + p["gen"]["reservoir_write_s"] + p["gen"]["other_s"]
+    gen_sum = (
+        p["gen"]["ffi_s"]
+        + p["gen"]["inference_s"]
+        + p["gen"]["reservoir_write_s"]
+        + p["gen"]["other_s"]
+    )
     assert gen_sum == pytest.approx(p["gen"]["total_s"], abs=5e-3)
-    fit_sum = p["fit"]["reservoir_sample_s"] + p["fit"]["forward_s"] + p["fit"]["backward_opt_misc_s"]
+    fit_sum = (
+        p["fit"]["reservoir_sample_s"]
+        + p["fit"]["forward_s"]
+        + p["fit"]["backward_opt_misc_s"]
+    )
     assert fit_sum == pytest.approx(p["fit"]["total_s"], abs=5e-3)
 
     # At least some FFI and inference calls happened during generation.
@@ -164,8 +181,12 @@ def test_replicate_reservoir_to_size_grows_and_preserves_content(tmp_path):
     from src.encoding import NUM_ACTIONS
 
     disk = DiskReservoir(
-        path=str(tmp_path / "r0"), capacity=10_000, seq_cap=64,
-        target_dim=NUM_ACTIONS, has_mask=True, seed=0,
+        path=str(tmp_path / "r0"),
+        capacity=10_000,
+        seq_cap=64,
+        target_dim=NUM_ACTIONS,
+        has_mask=True,
+        seed=0,
     )
     tgt = __import__("numpy").zeros(NUM_ACTIONS, dtype="float32")
     mask = __import__("numpy").zeros(NUM_ACTIONS, dtype=bool)
@@ -173,7 +194,9 @@ def test_replicate_reservoir_to_size_grows_and_preserves_content(tmp_path):
     from src.reservoir import ReservoirSample
 
     for toks in ([1, 5, 6], [1, 5, 7, 8]):
-        disk.add(ReservoirSample(features=toks, target=tgt, action_mask=mask, iteration=1))
+        disk.add(
+            ReservoirSample(features=toks, target=tgt, action_mask=mask, iteration=1)
+        )
     assert len(disk) == 2
 
     _replicate_reservoir_to_size(disk, 20)
@@ -190,8 +213,12 @@ def test_replicate_reservoir_to_size_noop_when_already_at_target(tmp_path):
     from src.encoding import NUM_ACTIONS
 
     disk = DiskReservoir(
-        path=str(tmp_path / "r1"), capacity=10_000, seq_cap=64,
-        target_dim=NUM_ACTIONS, has_mask=True, seed=0,
+        path=str(tmp_path / "r1"),
+        capacity=10_000,
+        seq_cap=64,
+        target_dim=NUM_ACTIONS,
+        has_mask=True,
+        seed=0,
     )
     assert len(disk) == 0
     _replicate_reservoir_to_size(disk, 5)  # empty reservoir: no-op, must not crash

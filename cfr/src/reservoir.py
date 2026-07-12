@@ -141,7 +141,9 @@ class _BufferView:
                     features=owner._features[i].copy(),
                     target=owner._targets[i].copy(),
                     action_mask=(
-                        owner._masks[i].copy() if owner._has_mask else np.empty(0, dtype=bool)
+                        owner._masks[i].copy()
+                        if owner._has_mask
+                        else np.empty(0, dtype=bool)
                     ),
                     iteration=int(owner._iterations[i]),
                 )
@@ -245,7 +247,11 @@ class ReservoirBuffer:
             return ColumnarBatch(
                 features=np.empty((0, self._input_dim), dtype=np.float32),
                 targets=np.empty((0, self._target_dim), dtype=np.float32),
-                masks=np.empty((0, self._target_dim), dtype=bool) if self._has_mask else None,
+                masks=(
+                    np.empty((0, self._target_dim), dtype=bool)
+                    if self._has_mask
+                    else None
+                ),
                 iterations=np.empty(0, dtype=np.int64),
             )
 
@@ -292,10 +298,14 @@ class ReservoirBuffer:
             )
         except (OSError, IOError, PermissionError) as e:
             logger.error("Failed to save reservoir buffer to %s: %s", path, e)
-            raise ReservoirIOError(f"Failed to save reservoir buffer to {path}: {e}") from e
+            raise ReservoirIOError(
+                f"Failed to save reservoir buffer to {path}: {e}"
+            ) from e
         except Exception as e:
             logger.error("Unexpected error saving reservoir buffer to %s: %s", path, e)
-            raise ReservoirIOError(f"Unexpected error saving reservoir buffer to {path}: {e}") from e
+            raise ReservoirIOError(
+                f"Unexpected error saving reservoir buffer to {path}: {e}"
+            ) from e
 
     def load(self, path: str):
         """
@@ -326,8 +336,12 @@ class ReservoirBuffer:
 
             # Load optional has_mask / dimension metadata (added Feb 2026 for ESCHER)
             saved_has_mask = bool(data["has_mask"][0]) if "has_mask" in data else True
-            saved_input_dim = int(data["input_dim"][0]) if "input_dim" in data else INPUT_DIM
-            saved_target_dim = int(data["target_dim"][0]) if "target_dim" in data else NUM_ACTIONS
+            saved_input_dim = (
+                int(data["input_dim"][0]) if "input_dim" in data else INPUT_DIM
+            )
+            saved_target_dim = (
+                int(data["target_dim"][0]) if "target_dim" in data else NUM_ACTIONS
+            )
 
             masks = data["masks"] if saved_has_mask and "masks" in data else None
 
@@ -352,11 +366,17 @@ class ReservoirBuffer:
                     n = self.capacity
 
             # Re-allocate arrays if capacity or dims changed since construction
-            if self._features.shape[0] != self.capacity or self._input_dim != saved_input_dim:
+            if (
+                self._features.shape[0] != self.capacity
+                or self._input_dim != saved_input_dim
+            ):
                 self._features = np.zeros(
                     (self.capacity, self._input_dim), dtype=np.float32
                 )
-            if self._targets.shape[0] != self.capacity or self._target_dim != saved_target_dim:
+            if (
+                self._targets.shape[0] != self.capacity
+                or self._target_dim != saved_target_dim
+            ):
                 self._targets = np.zeros(
                     (self.capacity, self._target_dim), dtype=np.float32
                 )
@@ -385,13 +405,17 @@ class ReservoirBuffer:
             raise ReservoirIOError(f"Reservoir buffer file not found: {path}") from e
         except (OSError, IOError, PermissionError) as e:
             logger.error("Failed to load reservoir buffer from %s: %s", path, e)
-            raise ReservoirIOError(f"Failed to load reservoir buffer from {path}: {e}") from e
+            raise ReservoirIOError(
+                f"Failed to load reservoir buffer from {path}: {e}"
+            ) from e
         except (KeyError, ValueError, IndexError) as e:
             logger.error("Corrupted reservoir buffer file %s: %s", path, e)
             raise ReservoirIOError(f"Corrupted reservoir buffer file {path}: {e}") from e
         except Exception as e:
             logger.error("Unexpected error loading reservoir buffer from %s: %s", path, e)
-            raise ReservoirIOError(f"Unexpected error loading reservoir buffer from {path}: {e}") from e
+            raise ReservoirIOError(
+                f"Unexpected error loading reservoir buffer from {path}: {e}"
+            ) from e
 
     def resize(self, new_capacity: int):
         """

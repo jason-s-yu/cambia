@@ -38,7 +38,9 @@ from src.run_db import (
     update_best_metric,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 
@@ -46,6 +48,7 @@ def _load_yaml_as_dict(yaml_path: str):
     """Load a YAML file, returning (text, dict). Uses PyYAML if available, else None."""
     try:
         import yaml
+
         with open(yaml_path, encoding="utf-8") as f:
             text = f.read()
         return text, yaml.safe_load(text) or {}
@@ -60,6 +63,7 @@ def _load_yaml_as_dict(yaml_path: str):
 def _parse_iter(path: str) -> int:
     """Extract iteration number from checkpoint filename."""
     import re
+
     m = re.search(r"_iter_(\d+)\.pt$", path)
     return int(m.group(1)) if m else -1
 
@@ -88,7 +92,9 @@ def backfill_run(db, run_dir: Path) -> None:
     logger.info("  run_id=%d, algorithm=%s", run_id, algorithm)
 
     # Register checkpoints
-    ckpt_files = sorted(glob(str(run_dir / "checkpoints" / "deep_cfr_checkpoint_iter_*.pt")))
+    ckpt_files = sorted(
+        glob(str(run_dir / "checkpoints" / "deep_cfr_checkpoint_iter_*.pt"))
+    )
     ckpt_id_map = {}  # iter -> ckpt_id
     for ckpt_file in ckpt_files:
         it = _parse_iter(ckpt_file)
@@ -110,6 +116,7 @@ def backfill_run(db, run_dir: Path) -> None:
     if metrics_path.exists():
         # Group by iter to compute mean_imp
         from collections import defaultdict
+
         iter_rows = defaultdict(dict)
         with open(metrics_path, encoding="utf-8") as f:
             for line in f:
@@ -129,8 +136,11 @@ def backfill_run(db, run_dir: Path) -> None:
 
         # Compute mean_imp and find best
         MEAN_IMP = [
-            "random_no_cambia", "random_late_cambia", "imperfect_greedy",
-            "memory_heuristic", "aggressive_snap",
+            "random_no_cambia",
+            "random_late_cambia",
+            "imperfect_greedy",
+            "memory_heuristic",
+            "aggressive_snap",
         ]
         for it, baselines in iter_rows.items():
             wrs = [baselines[bl] for bl in MEAN_IMP if bl in baselines]
@@ -144,10 +154,15 @@ def backfill_run(db, run_dir: Path) -> None:
             update_best_metric(db, run_id, "mean_imp", best_mean_imp, best_mean_imp_iter)
             if best_mean_imp_iter in ckpt_id_map:
                 from src.run_db import mark_best_checkpoint
+
                 mark_best_checkpoint(db, run_id, ckpt_id_map[best_mean_imp_iter])
 
-        logger.info("  inserted %d eval results (best mean_imp=%.4f at iter %s)",
-                    eval_count, best_mean_imp or 0.0, best_mean_imp_iter)
+        logger.info(
+            "  inserted %d eval results (best mean_imp=%.4f at iter %s)",
+            eval_count,
+            best_mean_imp or 0.0,
+            best_mean_imp_iter,
+        )
 
     # Parse head_to_head.jsonl
     h2h_path = run_dir / "head_to_head.jsonl"
@@ -206,7 +221,8 @@ def main():
 
     # Collect run dirs (skip _archive itself and hidden dirs)
     run_dirs = [
-        d for d in sorted(runs_root.iterdir())
+        d
+        for d in sorted(runs_root.iterdir())
         if d.is_dir() and not d.name.startswith("_") and not d.name.startswith(".")
     ]
 
@@ -214,7 +230,8 @@ def main():
         archive = runs_root / "_archive"
         if archive.exists():
             run_dirs += [
-                d for d in sorted(archive.iterdir())
+                d
+                for d in sorted(archive.iterdir())
                 if d.is_dir() and not d.name.startswith(".")
             ]
 

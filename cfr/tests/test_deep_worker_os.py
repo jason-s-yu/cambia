@@ -81,6 +81,7 @@ def minimal_config():
     # Helper method for logging
     def get_worker_log_level(worker_id, num_workers):
         return "WARNING"
+
     config.logging.get_worker_log_level = get_worker_log_level
 
     return config
@@ -167,9 +168,7 @@ def test_os_traversal_single_path(minimal_config, short_game_state, initial_agen
     # Should have some advantage and strategy samples
     total_samples = len(advantage_samples) + len(strategy_samples)
     assert total_samples > 0, "No samples generated"
-    assert total_samples <= worker_stats.nodes_visited, (
-        "More samples than nodes visited"
-    )
+    assert total_samples <= worker_stats.nodes_visited, "More samples than nodes visited"
 
 
 def test_os_vs_es_node_count(minimal_config):
@@ -184,7 +183,8 @@ def test_os_vs_es_node_count(minimal_config):
     es_agents = []
     for i in range(NUM_PLAYERS):
         agent = AgentState(
-            player_id=i, opponent_id=1-i,
+            player_id=i,
+            opponent_id=1 - i,
             memory_level=minimal_config.agent_params.memory_level,
             time_decay_turns=minimal_config.agent_params.time_decay_turns,
             initial_hand_size=len(es_hands[i]),
@@ -225,7 +225,8 @@ def test_os_vs_es_node_count(minimal_config):
     os_agents = []
     for i in range(NUM_PLAYERS):
         agent = AgentState(
-            player_id=i, opponent_id=1-i,
+            player_id=i,
+            opponent_id=1 - i,
             memory_level=minimal_config.agent_params.memory_level,
             time_decay_turns=minimal_config.agent_params.time_decay_turns,
             initial_hand_size=len(os_hands[i]),
@@ -268,7 +269,9 @@ def test_os_vs_es_node_count(minimal_config):
 
     # ES should visit many more nodes (potentially hundreds for even short games)
     # OS should visit O(depth) nodes (typically < 50 for short games)
-    assert os_stats.nodes_visited < 50, f"OS visited {os_stats.nodes_visited} nodes, expected < 50"
+    assert (
+        os_stats.nodes_visited < 50
+    ), f"OS visited {os_stats.nodes_visited} nodes, expected < 50"
 
 
 def test_os_regret_values_valid(minimal_config, short_game_state, initial_agent_states):
@@ -305,7 +308,9 @@ def test_os_regret_values_valid(minimal_config, short_game_state, initial_agent_
         assert max_abs_regret < 1000, f"Regret magnitude {max_abs_regret} too large"
 
 
-def test_os_advantage_samples_generation(minimal_config, short_game_state, initial_agent_states):
+def test_os_advantage_samples_generation(
+    minimal_config, short_game_state, initial_agent_states
+):
     """Test that advantage samples are generated at traverser nodes."""
     advantage_samples: List[ReservoirSample] = []
     strategy_samples: List[ReservoirSample] = []
@@ -342,7 +347,9 @@ def test_os_advantage_samples_generation(minimal_config, short_game_state, initi
         assert len(sample.target) > 0
 
 
-def test_os_strategy_samples_generation(minimal_config, short_game_state, initial_agent_states):
+def test_os_strategy_samples_generation(
+    minimal_config, short_game_state, initial_agent_states
+):
     """Test that strategy samples are generated at opponent nodes."""
     advantage_samples: List[ReservoirSample] = []
     strategy_samples: List[ReservoirSample] = []
@@ -409,9 +416,9 @@ def test_config_routing_outcome_sampling(minimal_config):
     assert result.stats.nodes_visited > 0
 
     # OS should visit fewer nodes (single path)
-    assert result.stats.nodes_visited < 100, (
-        f"OS visited {result.stats.nodes_visited} nodes, expected < 100"
-    )
+    assert (
+        result.stats.nodes_visited < 100
+    ), f"OS visited {result.stats.nodes_visited} nodes, expected < 100"
 
 
 def test_config_routing_external_sampling(minimal_config):
@@ -473,7 +480,9 @@ def test_os_smoke_test_multiple_traversals(minimal_config):
         all_strategy_samples.extend(result.strategy_samples)
 
     # Verify samples accumulated
-    assert len(all_advantage_samples) > 0, "No advantage samples after multiple traversals"
+    assert (
+        len(all_advantage_samples) > 0
+    ), "No advantage samples after multiple traversals"
     assert len(all_strategy_samples) > 0, "No strategy samples after multiple traversals"
 
     # Each traversal should contribute some samples
@@ -495,7 +504,8 @@ def test_exploration_epsilon_affects_sampling(minimal_config):
     high_eps_agents = []
     for i in range(NUM_PLAYERS):
         agent = AgentState(
-            player_id=i, opponent_id=1-i,
+            player_id=i,
+            opponent_id=1 - i,
             memory_level=minimal_config.agent_params.memory_level,
             time_decay_turns=minimal_config.agent_params.time_decay_turns,
             initial_hand_size=len(high_eps_hands[i]),
@@ -533,7 +543,8 @@ def test_exploration_epsilon_affects_sampling(minimal_config):
     low_eps_agents = []
     for i in range(NUM_PLAYERS):
         agent = AgentState(
-            player_id=i, opponent_id=1-i,
+            player_id=i,
+            opponent_id=1 - i,
             memory_level=minimal_config.agent_params.memory_level,
             time_decay_turns=minimal_config.agent_params.time_decay_turns,
             initial_hand_size=len(low_eps_hands[i]),
@@ -580,7 +591,11 @@ def test_exploration_epsilon_affects_sampling(minimal_config):
 # ---------------------------------------------------------------------------
 
 import torch
-from src.networks import AdvantageNetwork, ResidualAdvantageNetwork, build_advantage_network
+from src.networks import (
+    AdvantageNetwork,
+    ResidualAdvantageNetwork,
+    build_advantage_network,
+)
 from src.encoding import INPUT_DIM, NUM_ACTIONS
 
 
@@ -651,9 +666,9 @@ def test_worker_network_roundtrip(minimal_config, use_residual):
     with torch.no_grad():
         trainer_out = trainer_net(features, mask)
         worker_out = worker_net(features, mask)
-    assert torch.allclose(trainer_out, worker_out, atol=1e-6), (
-        f"Output mismatch: max diff={torch.max(torch.abs(trainer_out - worker_out))}"
-    )
+    assert torch.allclose(
+        trainer_out, worker_out, atol=1e-6
+    ), f"Output mismatch: max diff={torch.max(torch.abs(trainer_out - worker_out))}"
 
 
 @pytest.mark.parametrize("use_residual", [False, True], ids=["plain", "residual"])
@@ -665,14 +680,18 @@ def test_worker_network_mismatch_raises(use_residual):
 
     # Build network with one architecture
     source_net = build_advantage_network(
-        input_dim=input_dim, hidden_dim=hidden_dim, output_dim=output_dim,
+        input_dim=input_dim,
+        hidden_dim=hidden_dim,
+        output_dim=output_dim,
         use_residual=use_residual,
     )
     weights_numpy = {k: v.cpu().numpy() for k, v in source_net.state_dict().items()}
 
     # Build network with the OTHER architecture
     target_net = build_advantage_network(
-        input_dim=input_dim, hidden_dim=hidden_dim, output_dim=output_dim,
+        input_dim=input_dim,
+        hidden_dim=hidden_dim,
+        output_dim=output_dim,
         use_residual=not use_residual,
     )
     weights_tensors = {k: torch.tensor(v) for k, v in weights_numpy.items()}

@@ -16,10 +16,10 @@ pytestmark = pytest.mark.skip(
 
 from src.ffi.bridge import GoEngine, SubgameSolver
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_game(seed: int = 42) -> GoEngine:
     """Return a fresh GoEngine using default (Go) house rules."""
@@ -102,9 +102,7 @@ class TestSolve:
         with _make_game(seed=seed) as g:
             with SubgameSolver(g, max_depth=depth) as solver:
                 count = solver.leaf_count
-                leaf_values = np.random.default_rng(0).random(
-                    count * 2, dtype=np.float32
-                )
+                leaf_values = np.random.default_rng(0).random(count * 2, dtype=np.float32)
                 strategy, root_values = solver.solve(leaf_values, num_iterations=iters)
         return strategy, root_values
 

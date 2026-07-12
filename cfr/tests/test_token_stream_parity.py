@@ -169,9 +169,9 @@ def test_card_token_mapping_matches_python():
     for rank, suit in se.CARD_IDENTITIES:
         card = Card(rank=rank, suit=suit)
         go_idx = python_card_to_go_index(card)
-        assert encode_card_token(go_idx) == se._card_tok(card), (
-            f"card ({rank},{suit}) go_idx={go_idx}"
-        )
+        assert encode_card_token(go_idx) == se._card_tok(
+            card
+        ), f"card ({rank},{suit}) go_idx={go_idx}"
     assert encode_card_token(52) == encode_card_token(53)  # both jokers collapse
 
 
@@ -219,9 +219,7 @@ def test_action_token_mapping_matches_python():
     for a in actions:
         idx = action_to_index(a)
         local, _name = se._action_local_id(a)
-        assert encode_action_token(idx) == se._action_tok(local), (
-            f"action {a} idx={idx}"
-        )
+        assert encode_action_token(idx) == se._action_tok(local), f"action {a} idx={idx}"
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +326,9 @@ def _play_lockstep(seed: int, call_cambia_after: int = -1) -> _GameResult:
 
     obs_streams: Dict[int, List[Any]] = {p: [] for p in range(NUM_PLAYERS)}
     init_hands = {p: list(pygame.players[p].hand) for p in range(NUM_PLAYERS)}
-    init_peeks = {p: tuple(pygame.players[p].initial_peek_indices) for p in range(NUM_PLAYERS)}
+    init_peeks = {
+        p: tuple(pygame.players[p].initial_peek_indices) for p in range(NUM_PLAYERS)
+    }
     called = False
 
     try:
@@ -344,9 +344,9 @@ def _play_lockstep(seed: int, call_cambia_after: int = -1) -> _GameResult:
         for step in range(800):
             g_term, p_term = eng.is_terminal(), pygame.is_terminal()
             if g_term or p_term:
-                assert g_term == p_term, (
-                    f"seed {seed} step {step}: terminal mismatch Go={g_term} Py={p_term}"
-                )
+                assert (
+                    g_term == p_term
+                ), f"seed {seed} step {step}: terminal mismatch Go={g_term} Py={p_term}"
                 break
             go_set = _go_legal_set(eng)
             py_set = _py_legal_set(pygame)
@@ -371,7 +371,9 @@ def _play_lockstep(seed: int, call_cambia_after: int = -1) -> _GameResult:
                 if real_snaps and action_rng.random() < 0.6:
                     action_idx = action_rng.choice(real_snaps)
                 elif _is_snap_only(set(common)):
-                    action_idx = _SNAP_MIN if _SNAP_MIN in common else action_rng.choice(common)
+                    action_idx = (
+                        _SNAP_MIN if _SNAP_MIN in common else action_rng.choice(common)
+                    )
                 else:
                     pool = [c for c in common if c != _CAMBIA_IDX]
                     if _DRAW_STOCKPILE_IDX in pool and action_rng.random() < 0.5:
@@ -387,18 +389,18 @@ def _play_lockstep(seed: int, call_cambia_after: int = -1) -> _GameResult:
                 if action_to_index(a) == action_idx:
                     py_action = a
                     break
-            assert py_action is not None, (
-                f"seed {seed} step {step}: no python action found for idx {action_idx}"
-            )
+            assert (
+                py_action is not None
+            ), f"seed {seed} step {step}: no python action found for idx {action_idx}"
 
             pygame.apply_action(py_action)
             apply_games_batch([eng.handle], [a0.handle], [a1.handle], [action_idx])
 
             snap_results = list(getattr(pygame, "snap_results_log", []) or [])
             full_obs = _create_observation(None, py_action, pygame, actor, snap_results)
-            assert full_obs is not None, (
-                f"seed {seed} step {step}: observation construction failed for action {action_idx}"
-            )
+            assert (
+                full_obs is not None
+            ), f"seed {seed} step {step}: observation construction failed for action {action_idx}"
             for observer in range(NUM_PLAYERS):
                 obs_streams[observer].append(_filter_observation(full_obs, observer))
 
@@ -410,9 +412,9 @@ def _play_lockstep(seed: int, call_cambia_after: int = -1) -> _GameResult:
                 f"Go={g_term} Py={p_term} action={action_idx}"
             )
             if not g_term:
-                assert eng.acting_player() == pygame.get_acting_player(), (
-                    f"seed {seed} step {step}: acting-player mismatch after action {action_idx}"
-                )
+                assert (
+                    eng.acting_player() == pygame.get_acting_player()
+                ), f"seed {seed} step {step}: acting-player mismatch after action {action_idx}"
             assert eng.stock_len() == len(pygame.stockpile), (
                 f"seed {seed} step {step}: stock_len mismatch "
                 f"Go={eng.stock_len()} Py={len(pygame.stockpile)} action={action_idx}"
@@ -430,7 +432,10 @@ def _play_lockstep(seed: int, call_cambia_after: int = -1) -> _GameResult:
             for observer in range(NUM_PLAYERS):
                 go_body = agents[observer].tokens().tolist()
                 py_body = _py_body(
-                    init_hands[observer], init_peeks[observer], obs_streams[observer], observer
+                    init_hands[observer],
+                    init_peeks[observer],
+                    obs_streams[observer],
+                    observer,
                 )
                 assert go_body == py_body, (
                     f"seed {seed} obs {observer} step {step}: token body mismatch\n"
@@ -478,17 +483,17 @@ def test_live_lockstep_token_parity_full_games():
         f"max_body={overall_max} (SEQ_CAP={se.SEQ_CAP}) games_over_cap={games_over_cap} "
         f"games_with_snap_frames={snap_frames}"
     )
-    assert total_compared >= 100, (
-        f"only {total_compared} live states compared byte-for-byte (need >= 100)"
-    )
+    assert (
+        total_compared >= 100
+    ), f"only {total_compared} live states compared byte-for-byte (need >= 100)"
     # Full-length coverage: streams must exceed the 256 cap so the long-game /
     # truncation-boundary paths are exercised (mean natural length ~726).
-    assert overall_max > se.SEQ_CAP, (
-        f"max token body {overall_max} never exceeded SEQ_CAP={se.SEQ_CAP}"
-    )
-    assert games_over_cap >= 5, (
-        f"only {games_over_cap} games exceeded the cap; long-game coverage too thin"
-    )
+    assert (
+        overall_max > se.SEQ_CAP
+    ), f"max token body {overall_max} never exceeded SEQ_CAP={se.SEQ_CAP}"
+    assert (
+        games_over_cap >= 5
+    ), f"only {games_over_cap} games exceeded the cap; long-game coverage too thin"
     assert snap_frames > 0, "no snap frames exercised in any live game"
 
 
@@ -530,9 +535,9 @@ def test_frame_aligned_window_matches_python(cap):
                 seq_cap=cap,
                 add_bos_eos=True,
             )
-            assert windowed == py_seq, (
-                f"seed {seed} obs {observer} cap {cap}: frame_aligned_window mismatch"
-            )
+            assert (
+                windowed == py_seq
+            ), f"seed {seed} obs {observer} cap {cap}: frame_aligned_window mismatch"
             assert len(windowed) <= cap
             if len(go_body) > cap:
                 over_cap_seen += 1
@@ -584,12 +589,12 @@ def test_go_snap_frames_decode_via_python_codec():
     # The Python codec decoded every Go stream without error, and the driver hit
     # a range of snap outcomes including at least one concrete-slot success.
     assert "fail" in outcomes_seen or "penalty" in outcomes_seen, outcomes_seen
-    assert any(o in outcomes_seen for o in ("success_own", "success_opp")), (
-        f"no successful-snap frame emitted/decoded; outcomes={outcomes_seen}"
-    )
-    assert any(s is not None and s >= 0 for s in slots_seen), (
-        f"no concrete snap slot decoded; slots={slots_seen}"
-    )
+    assert any(
+        o in outcomes_seen for o in ("success_own", "success_opp")
+    ), f"no successful-snap frame emitted/decoded; outcomes={outcomes_seen}"
+    assert any(
+        s is not None and s >= 0 for s in slots_seen
+    ), f"no concrete snap slot decoded; slots={slots_seen}"
 
 
 @skip_if_no_go
@@ -718,9 +723,15 @@ def test_state_clone_independence_game_and_tokens():
                 if c_eng.is_terminal():
                     break
                 _apply_first_legal(c_eng, c_a0, c_a1)
-            assert _observable_state(eng) == pre_state, "source game mutated by clone apply"
-            assert a0.tokens().tolist() == pre_tokens0, "source a0 tokens mutated by clone apply"
-            assert a1.tokens().tolist() == pre_tokens1, "source a1 tokens mutated by clone apply"
+            assert (
+                _observable_state(eng) == pre_state
+            ), "source game mutated by clone apply"
+            assert (
+                a0.tokens().tolist() == pre_tokens0
+            ), "source a0 tokens mutated by clone apply"
+            assert (
+                a1.tokens().tolist() == pre_tokens1
+            ), "source a1 tokens mutated by clone apply"
 
             # Diverge the SOURCE further; the (already-advanced) clone must be
             # unaffected by source-side apply.
@@ -730,12 +741,12 @@ def test_state_clone_independence_game_and_tokens():
                 if eng.is_terminal():
                     break
                 _apply_first_legal(eng, a0, a1)
-            assert _observable_state(c_eng) == clone_state_before, (
-                "clone game mutated by source apply"
-            )
-            assert c_a0.tokens().tolist() == clone_tokens0_before, (
-                "clone a0 tokens mutated by source apply"
-            )
+            assert (
+                _observable_state(c_eng) == clone_state_before
+            ), "clone game mutated by source apply"
+            assert (
+                c_a0.tokens().tolist() == clone_tokens0_before
+            ), "clone a0 tokens mutated by source apply"
         finally:
             c_a0.close()
             c_a1.close()
@@ -774,12 +785,12 @@ def test_state_clone_of_clone():
                     if c2_eng.is_terminal():
                         break
                     _apply_first_legal(c2_eng, c2_a0, c2_a1)
-                assert _observable_state(c1_eng) == c1_state_before, (
-                    "parent clone mutated by grandchild apply"
-                )
-                assert _observable_state(eng) == src_state_before, (
-                    "source mutated by grandchild apply"
-                )
+                assert (
+                    _observable_state(c1_eng) == c1_state_before
+                ), "parent clone mutated by grandchild apply"
+                assert (
+                    _observable_state(eng) == src_state_before
+                ), "source mutated by grandchild apply"
             finally:
                 c2_a0.close()
                 c2_a1.close()

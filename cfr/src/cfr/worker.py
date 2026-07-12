@@ -260,7 +260,9 @@ def _traverse_game_for_worker(
         )
         worker_stats.error_count += 1
         return np.zeros(NUM_PLAYERS, dtype=np.float64)
-    except Exception as e_key:  # JUSTIFIED: worker resilience - workers must not crash the training pool
+    except (
+        Exception
+    ) as e_key:  # JUSTIFIED: worker resilience - workers must not crash the training pool
         logger_traverse.error(
             "W%d D%d: Error getting infoset key P%d: %s. AgentState: %s Context: %s",
             worker_id,
@@ -289,7 +291,9 @@ def _traverse_game_for_worker(
         )
         worker_stats.error_count += 1
         return np.zeros(NUM_PLAYERS, dtype=np.float64)
-    except Exception as e_legal:  # JUSTIFIED: worker resilience - workers must not crash the training pool
+    except (
+        Exception
+    ) as e_legal:  # JUSTIFIED: worker resilience - workers must not crash the training pool
         logger_traverse.error(
             "W%d D%d: Error getting legal actions P%d: %s. State: %s Context: %s",
             worker_id,
@@ -523,7 +527,9 @@ def _traverse_game_for_worker(
                 and simulation_nodes[-1] is node_data
             ):
                 node_data["state_delta"] = [("apply_error", str(apply_err))]
-        except Exception as apply_err:  # JUSTIFIED: worker resilience - workers must not crash the training pool
+        except (
+            Exception
+        ) as apply_err:  # JUSTIFIED: worker resilience - workers must not crash the training pool
             logger_traverse.error(
                 "W%d D%d P%d: Error applying sampled action %s: %s. State:%s Context:%s",
                 worker_id,
@@ -576,7 +582,9 @@ def _traverse_game_for_worker(
                             depth,
                             undo_e,
                         )
-                    except Exception as undo_e:  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
+                    except (
+                        Exception
+                    ) as undo_e:  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
                         logger_traverse.error(
                             "W%d D%d: Error undoing after obs create fail: %s",
                             worker_id,
@@ -615,7 +623,9 @@ def _traverse_game_for_worker(
                                 undo_e,
                             )
                             worker_stats.error_count += 1
-                        except Exception as undo_e:  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
+                        except (
+                            Exception
+                        ) as undo_e:  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
                             logger_traverse.error(
                                 "W%d D%d: Error undoing after agent update fail: %s",
                                 worker_id,
@@ -624,7 +634,9 @@ def _traverse_game_for_worker(
                                 exc_info=True,
                             )
                             worker_stats.error_count += 1
-                except Exception as e_update:  # JUSTIFIED: worker resilience - workers must not crash the training pool
+                except (
+                    Exception
+                ) as e_update:  # JUSTIFIED: worker resilience - workers must not crash the training pool
                     failed_agent_idx = agent_idx  # Capture index where failure occurred
                     logger_traverse.error(
                         "W%d D%d: Error updating agent P%d after action %s: %s. State(post-action):%s FilteredObs:%s",
@@ -650,7 +662,9 @@ def _traverse_game_for_worker(
                                 undo_e,
                             )
                             worker_stats.error_count += 1
-                        except Exception as undo_e:  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
+                        except (
+                            Exception
+                        ) as undo_e:  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
                             logger_traverse.error(
                                 "W%d D%d: Error undoing after agent update fail: %s",
                                 worker_id,
@@ -704,7 +718,9 @@ def _traverse_game_for_worker(
                                 undo_e,
                             )
                             worker_stats.error_count += 1
-                        except Exception as undo_e:  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
+                        except (
+                            Exception
+                        ) as undo_e:  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
                             logger_traverse.error(
                                 "W%d D%d: Error undoing after traversal error: %s",
                                 worker_id,
@@ -713,7 +729,9 @@ def _traverse_game_for_worker(
                                 exc_info=True,
                             )
                             worker_stats.error_count += 1
-                except Exception as recursive_err:  # JUSTIFIED: worker resilience - workers must not crash the training pool
+                except (
+                    Exception
+                ) as recursive_err:  # JUSTIFIED: worker resilience - workers must not crash the training pool
                     logger_traverse.error(
                         "W%d D%d: Error in recursive call after action %s: %s. State:%s Context:%s",
                         worker_id,
@@ -739,7 +757,9 @@ def _traverse_game_for_worker(
                                 undo_e,
                             )
                             worker_stats.error_count += 1
-                        except Exception as undo_e:  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
+                        except (
+                            Exception
+                        ) as undo_e:  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
                             logger_traverse.error(
                                 "W%d D%d: Error undoing after recursion error: %s",
                                 worker_id,
@@ -765,7 +785,9 @@ def _traverse_game_for_worker(
                         )
                         worker_stats.error_count += 1
                         return np.zeros(NUM_PLAYERS, dtype=np.float64)
-                    except Exception as undo_e:  # JUSTIFIED: worker resilience - must not crash on undo, state likely corrupt
+                    except (
+                        Exception
+                    ) as undo_e:  # JUSTIFIED: worker resilience - must not crash on undo, state likely corrupt
                         logger_traverse.error(
                             "W%d D%d P%d: Error undoing action %s: %s. State likely corrupt. Returning zero.",
                             worker_id,
@@ -950,7 +972,9 @@ def run_cfr_simulation_worker(
                 simulation_nodes=simulation_nodes_this_sim,
                 final_utility=None,
             )
-        except Exception as game_init_e:  # JUSTIFIED: worker resilience - workers must not crash the training pool
+        except (
+            Exception
+        ) as game_init_e:  # JUSTIFIED: worker resilience - workers must not crash the training pool
             if logger_instance:
                 logger_instance.error(
                     "W%d Iter %d: Failed GameState init: %s",
@@ -990,7 +1014,11 @@ def run_cfr_simulation_worker(
                     )
                     agent.initialize(initial_obs, initial_hands[i], initial_peeks[i])
                     initial_agent_states.append(agent)
-            except (AgentStateError, ObservationUpdateError, EncodingError) as agent_init_e:
+            except (
+                AgentStateError,
+                ObservationUpdateError,
+                EncodingError,
+            ) as agent_init_e:
                 if logger_instance:
                     logger_instance.warning(
                         "W%d Iter %d: Agent state initialization error: %s",
@@ -1004,7 +1032,9 @@ def run_cfr_simulation_worker(
                     simulation_nodes=simulation_nodes_this_sim,
                     final_utility=None,
                 )
-            except Exception as agent_init_e:  # JUSTIFIED: worker resilience - workers must not crash the training pool
+            except (
+                Exception
+            ) as agent_init_e:  # JUSTIFIED: worker resilience - workers must not crash the training pool
                 if logger_instance:
                     logger_instance.error(
                         "W%d Iter %d: Failed AgentStates init: %s. GameState: %s",
@@ -1134,7 +1164,9 @@ def run_cfr_simulation_worker(
             simulation_nodes=simulation_nodes_this_sim,
             final_utility=None,
         )
-    except Exception as e_inner:  # JUSTIFIED: worker resilience - top-level worker catch to prevent pool crash
+    except (
+        Exception
+    ) as e_inner:  # JUSTIFIED: worker resilience - top-level worker catch to prevent pool crash
         worker_stats.error_count += 1
         if logger_instance:
             logger_instance.critical(
@@ -1308,7 +1340,9 @@ def _create_observation(
     except GameStateError as e:
         logger_obs.warning("Game state error creating observation: %s", e)
         return None
-    except Exception as e:  # JUSTIFIED: worker resilience - observation creation must not crash worker
+    except (
+        Exception
+    ) as e:  # JUSTIFIED: worker resilience - observation creation must not crash worker
         logger_obs.error("Error creating observation: %s", e, exc_info=True)
         return None
 

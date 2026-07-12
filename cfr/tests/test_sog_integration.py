@@ -75,6 +75,7 @@ def _make_config(eval_budget: int = 3):
 def test_sog_in_agent_registry():
     """'sog' must be registered in AGENT_REGISTRY."""
     from src.evaluate_agents import AGENT_REGISTRY, SoGAgentWrapper
+
     assert "sog" in AGENT_REGISTRY
     assert AGENT_REGISTRY["sog"] is SoGAgentWrapper
 
@@ -82,6 +83,7 @@ def test_sog_in_agent_registry():
 def test_sog_inference_in_agent_registry():
     """'sog_inference' must be registered in AGENT_REGISTRY."""
     from src.evaluate_agents import AGENT_REGISTRY, SoGInferenceAgentWrapper
+
     assert "sog_inference" in AGENT_REGISTRY
     assert AGENT_REGISTRY["sog_inference"] is SoGInferenceAgentWrapper
 
@@ -97,7 +99,9 @@ def test_sog_inference_choose_action_with_state():
     from src.game.engine import CambiaGameState
 
     config = _make_config()
-    wrapper = SoGInferenceAgentWrapper(player_id=0, config=config, checkpoint_path="", device="cpu")
+    wrapper = SoGInferenceAgentWrapper(
+        player_id=0, config=config, checkpoint_path="", device="cpu"
+    )
 
     game_state = CambiaGameState(house_rules=config.cambia_rules)
     wrapper.initialize_state(game_state)
@@ -115,7 +119,9 @@ def test_sog_inference_full_game_vs_random():
 
     config = _make_config()
     agents = [
-        SoGInferenceAgentWrapper(player_id=0, config=config, checkpoint_path="", device="cpu"),
+        SoGInferenceAgentWrapper(
+            player_id=0, config=config, checkpoint_path="", device="cpu"
+        ),
         RandomAgent(player_id=1, config=config),
     ]
 
@@ -177,8 +183,12 @@ def test_sog_agent_full_game_vs_random():
     config = _make_config(eval_budget=3)
     agents = [
         SoGAgentWrapper(
-            player_id=0, config=config, checkpoint_path="", device="cpu",
-            eval_budget=3, cfr_iters=2,
+            player_id=0,
+            config=config,
+            checkpoint_path="",
+            device="cpu",
+            eval_budget=3,
+            cfr_iters=2,
         ),
         RandomAgent(player_id=1, config=config),
     ]

@@ -117,6 +117,7 @@ def get_decision_context(game_state):
             ActionAbilityKingSwapDecision,
             ActionSnapOpponentMove,
         )
+
         pa = game_state.pending_action
         if isinstance(pa, ActionDiscard):
             return DecisionContext.POST_DRAW
@@ -168,9 +169,7 @@ def encode_state_eppbs(agent_state, decision_context):
             else int(st.stockpile_estimate)
         ),
         game_phase=(
-            st.game_phase.value
-            if hasattr(st.game_phase, "value")
-            else int(st.game_phase)
+            st.game_phase.value if hasattr(st.game_phase, "value") else int(st.game_phase)
         ),
         decision_context=(
             decision_context.value
@@ -328,19 +327,27 @@ def collect_samples(net, n_samples, target_turn_range, device, rng_seed_base):
 
         with torch.inference_mode():
             raw_advantages = net(feat_t, mask_t).squeeze(0).cpu().numpy()
-            strategy = get_strategy_from_advantages(
-                torch.from_numpy(raw_advantages).unsqueeze(0),
-                mask_t.cpu(),
-            ).squeeze(0).numpy()
+            strategy = (
+                get_strategy_from_advantages(
+                    torch.from_numpy(raw_advantages).unsqueeze(0),
+                    mask_t.cpu(),
+                )
+                .squeeze(0)
+                .numpy()
+            )
 
         legal_indices = np.where(action_mask)[0]
         legal_advs = raw_advantages[legal_indices]
         legal_strat = strategy[legal_indices]
 
         # Cambia-specific
-        cambia_adv = raw_advantages[IDX_CALL_CAMBIA] if action_mask[IDX_CALL_CAMBIA] else None
+        cambia_adv = (
+            raw_advantages[IDX_CALL_CAMBIA] if action_mask[IDX_CALL_CAMBIA] else None
+        )
         non_cambia_legal = [i for i in legal_indices if i != IDX_CALL_CAMBIA]
-        non_cambia_advs = raw_advantages[non_cambia_legal] if non_cambia_legal else np.array([])
+        non_cambia_advs = (
+            raw_advantages[non_cambia_legal] if non_cambia_legal else np.array([])
+        )
 
         # Strategy entropy
         probs = legal_strat[legal_strat > 0]
@@ -364,37 +371,81 @@ def collect_samples(net, n_samples, target_turn_range, device, rng_seed_base):
         # Top action
         top_idx = legal_indices[np.argmax(legal_advs)]
 
-        results.append({
-            "turn": turn,
-            "decision_ctx": decision_ctx.name,
-            "n_legal": len(legal_indices),
-            "legal_adv_mean": float(np.mean(legal_advs)),
-            "legal_adv_std": float(np.std(legal_advs)),
-            "legal_adv_min": float(np.min(legal_advs)),
-            "legal_adv_max": float(np.max(legal_advs)),
-            "max_minus_2nd": float(gap),
-            "entropy": float(entropy),
-            "norm_entropy": float(norm_entropy),
-            "cambia_adv": float(cambia_adv) if cambia_adv is not None else None,
-            "cambia_prob": float(cambia_prob) if cambia_prob is not None else None,
-            "non_cambia_adv_mean": float(np.mean(non_cambia_advs)) if len(non_cambia_advs) > 0 else None,
-            "non_cambia_adv_std": float(np.std(non_cambia_advs)) if len(non_cambia_advs) > 0 else None,
-            "top_action": ACTION_NAMES.get(int(top_idx), f"idx_{top_idx}"),
-            "top_action_idx": int(top_idx),
-            "top_action_cat": action_category(int(top_idx)),
-            "top_action_prob": float(strategy[top_idx]),
-            "cambia_is_legal": bool(action_mask[IDX_CALL_CAMBIA]),
-            # Per-category advantage means
-            "draw_adv_mean": float(np.mean([raw_advantages[i] for i in legal_indices if action_category(i) == "draw"])) if any(action_category(i) == "draw" for i in legal_indices) else None,
-            "replace_adv_mean": float(np.mean([raw_advantages[i] for i in legal_indices if action_category(i) == "replace"])) if any(action_category(i) == "replace" for i in legal_indices) else None,
-            "discard_adv_mean": float(np.mean([raw_advantages[i] for i in legal_indices if action_category(i) == "discard"])) if any(action_category(i) == "discard" for i in legal_indices) else None,
-        })
+        results.append(
+            {
+                "turn": turn,
+                "decision_ctx": decision_ctx.name,
+                "n_legal": len(legal_indices),
+                "legal_adv_mean": float(np.mean(legal_advs)),
+                "legal_adv_std": float(np.std(legal_advs)),
+                "legal_adv_min": float(np.min(legal_advs)),
+                "legal_adv_max": float(np.max(legal_advs)),
+                "max_minus_2nd": float(gap),
+                "entropy": float(entropy),
+                "norm_entropy": float(norm_entropy),
+                "cambia_adv": float(cambia_adv) if cambia_adv is not None else None,
+                "cambia_prob": float(cambia_prob) if cambia_prob is not None else None,
+                "non_cambia_adv_mean": (
+                    float(np.mean(non_cambia_advs)) if len(non_cambia_advs) > 0 else None
+                ),
+                "non_cambia_adv_std": (
+                    float(np.std(non_cambia_advs)) if len(non_cambia_advs) > 0 else None
+                ),
+                "top_action": ACTION_NAMES.get(int(top_idx), f"idx_{top_idx}"),
+                "top_action_idx": int(top_idx),
+                "top_action_cat": action_category(int(top_idx)),
+                "top_action_prob": float(strategy[top_idx]),
+                "cambia_is_legal": bool(action_mask[IDX_CALL_CAMBIA]),
+                # Per-category advantage means
+                "draw_adv_mean": (
+                    float(
+                        np.mean(
+                            [
+                                raw_advantages[i]
+                                for i in legal_indices
+                                if action_category(i) == "draw"
+                            ]
+                        )
+                    )
+                    if any(action_category(i) == "draw" for i in legal_indices)
+                    else None
+                ),
+                "replace_adv_mean": (
+                    float(
+                        np.mean(
+                            [
+                                raw_advantages[i]
+                                for i in legal_indices
+                                if action_category(i) == "replace"
+                            ]
+                        )
+                    )
+                    if any(action_category(i) == "replace" for i in legal_indices)
+                    else None
+                ),
+                "discard_adv_mean": (
+                    float(
+                        np.mean(
+                            [
+                                raw_advantages[i]
+                                for i in legal_indices
+                                if action_category(i) == "discard"
+                            ]
+                        )
+                    )
+                    if any(action_category(i) == "discard" for i in legal_indices)
+                    else None
+                ),
+            }
+        )
 
     return results
 
 
 def main():
-    ckpt_path = "runs/interleaved-resnet-adaptive/checkpoints/deep_cfr_checkpoint_iter_450.pt"
+    ckpt_path = (
+        "runs/interleaved-resnet-adaptive/checkpoints/deep_cfr_checkpoint_iter_450.pt"
+    )
     device = "cpu"
     n_samples = 500
 
@@ -415,8 +466,10 @@ def main():
     net.load_state_dict(ckpt["advantage_net_state_dict"])
     net.eval()
 
-    print(f"Network: {type(net).__name__}, input_dim={dcfr_config.get('input_dim')}, "
-          f"hidden_dim={dcfr_config.get('hidden_dim')}, layers={dcfr_config.get('num_hidden_layers')}")
+    print(
+        f"Network: {type(net).__name__}, input_dim={dcfr_config.get('input_dim')}, "
+        f"hidden_dim={dcfr_config.get('hidden_dim')}, layers={dcfr_config.get('num_hidden_layers')}"
+    )
     n_params = sum(p.numel() for p in net.parameters())
     print(f"Parameters: {n_params:,}")
     print()
@@ -434,7 +487,9 @@ def main():
 
     for label, tmin, tmax in phases:
         print(f"--- Collecting {n_samples} samples for {label} (turns {tmin}-{tmax}) ---")
-        samples = collect_samples(net, n_samples, (tmin, tmax), device, rng_seed_base=tmin * 10000)
+        samples = collect_samples(
+            net, n_samples, (tmin, tmax), device, rng_seed_base=tmin * 10000
+        )
         all_phase_data[label] = samples
         print(f"  Collected {len(samples)} samples")
 
@@ -465,15 +520,23 @@ def main():
         cambia_probs = [s["cambia_prob"] for s in samples if s["cambia_prob"] is not None]
         cambia_prob_mean = np.mean(cambia_probs) if cambia_probs else float("nan")
 
-        nc_stds = [s["non_cambia_adv_std"] for s in samples if s["non_cambia_adv_std"] is not None]
+        nc_stds = [
+            s["non_cambia_adv_std"]
+            for s in samples
+            if s["non_cambia_adv_std"] is not None
+        ]
         nc_std_mean = np.mean(nc_stds) if nc_stds else float("nan")
 
-        print(f"{label:<22} {n:>4} {adv_mean:>8.4f} {adv_std:>8.4f} {gap:>8.4f} {nent:>8.4f} "
-              f"{cambia_adv_mean:>8.4f} {cambia_prob_mean:>8.4f} {nc_std_mean:>8.4f} {n_legal:>6.1f}")
+        print(
+            f"{label:<22} {n:>4} {adv_mean:>8.4f} {adv_std:>8.4f} {gap:>8.4f} {nent:>8.4f} "
+            f"{cambia_adv_mean:>8.4f} {cambia_prob_mean:>8.4f} {nc_std_mean:>8.4f} {n_legal:>6.1f}"
+        )
 
     # Detailed: top action distribution per phase
     print("\n" + "=" * 120)
-    print("TOP ACTION CATEGORY DISTRIBUTION (% of samples where category has highest advantage)")
+    print(
+        "TOP ACTION CATEGORY DISTRIBUTION (% of samples where category has highest advantage)"
+    )
     print("=" * 120)
     header2 = f"{'Phase':<22} {'draw':>8} {'cambia':>8} {'discard':>8} {'replace':>8} {'peek':>8} {'swap/king':>8} {'snap':>8}"
     print(header2)
@@ -485,6 +548,7 @@ def main():
             continue
         n = len(samples)
         from collections import Counter
+
         cat_counts = Counter(s["top_action_cat"] for s in samples)
         cats = ["draw", "cambia", "discard", "replace", "peek", "swap/king", "snap"]
         pcts = [100.0 * cat_counts.get(c, 0) / n for c in cats]
@@ -511,8 +575,20 @@ def main():
         # Cambia dominance
         cambia_samples = [s for s in samples if s["cambia_is_legal"]]
         if cambia_samples:
-            cambia_top = sum(1 for s in cambia_samples if s["top_action_cat"] == "cambia") / len(cambia_samples) * 100
-            cambia_high_prob = sum(1 for s in cambia_samples if s["cambia_prob"] is not None and s["cambia_prob"] > 0.5) / len(cambia_samples) * 100
+            cambia_top = (
+                sum(1 for s in cambia_samples if s["top_action_cat"] == "cambia")
+                / len(cambia_samples)
+                * 100
+            )
+            cambia_high_prob = (
+                sum(
+                    1
+                    for s in cambia_samples
+                    if s["cambia_prob"] is not None and s["cambia_prob"] > 0.5
+                )
+                / len(cambia_samples)
+                * 100
+            )
         else:
             cambia_top = 0
             cambia_high_prob = 0
@@ -522,7 +598,9 @@ def main():
         print(f"  Near-uniform (ent>0.9):  {near_uniform:5.1f}% of states")
         print(f"  Tiny gap (gap<0.05):     {tiny_gap:5.1f}% of states")
         if cambia_samples:
-            print(f"  Cambia is top action:    {cambia_top:5.1f}% (of {len(cambia_samples)} states where Cambia legal)")
+            print(
+                f"  Cambia is top action:    {cambia_top:5.1f}% (of {len(cambia_samples)} states where Cambia legal)"
+            )
             print(f"  Cambia prob > 50%:       {cambia_high_prob:5.1f}%")
 
     # Detailed advantage stats per decision context
@@ -534,6 +612,7 @@ def main():
         all_samples.extend(samples)
 
     from collections import defaultdict
+
     by_ctx = defaultdict(list)
     for s in all_samples:
         by_ctx[s["decision_ctx"]].append(s)
@@ -543,20 +622,30 @@ def main():
         adv_std = np.mean([s["legal_adv_std"] for s in samples])
         nent = np.mean([s["norm_entropy"] for s in samples])
         gap = np.mean([s["max_minus_2nd"] for s in samples])
-        print(f"  {ctx:<20} N={n:>4}  AdvStd={adv_std:.4f}  NormEnt={nent:.4f}  Gap={gap:.4f}")
+        print(
+            f"  {ctx:<20} N={n:>4}  AdvStd={adv_std:.4f}  NormEnt={nent:.4f}  Gap={gap:.4f}"
+        )
 
     # Show example advantage vectors from a few early-game states
     print("\n" + "=" * 120)
     print("EXAMPLE: First 3 START_TURN states from Turn 0-1")
     print("=" * 120)
-    start_samples = [s for s in all_phase_data.get("Turn 0-1 (START)", []) if s["decision_ctx"] == "START_TURN"][:3]
+    start_samples = [
+        s
+        for s in all_phase_data.get("Turn 0-1 (START)", [])
+        if s["decision_ctx"] == "START_TURN"
+    ][:3]
     for i, s in enumerate(start_samples):
-        print(f"\n  State {i}: turn={s['turn']}, n_legal={s['n_legal']}, "
-              f"adv_std={s['legal_adv_std']:.4f}, norm_entropy={s['norm_entropy']:.4f}")
+        print(
+            f"\n  State {i}: turn={s['turn']}, n_legal={s['n_legal']}, "
+            f"adv_std={s['legal_adv_std']:.4f}, norm_entropy={s['norm_entropy']:.4f}"
+        )
         print(f"    Top: {s['top_action']} (prob={s['top_action_prob']:.4f})")
         if s["cambia_adv"] is not None:
             print(f"    Cambia adv={s['cambia_adv']:.4f}, prob={s['cambia_prob']:.4f}")
-            print(f"    Non-Cambia adv mean={s['non_cambia_adv_mean']:.4f}, std={s['non_cambia_adv_std']:.4f}")
+            print(
+                f"    Non-Cambia adv mean={s['non_cambia_adv_mean']:.4f}, std={s['non_cambia_adv_std']:.4f}"
+            )
 
 
 if __name__ == "__main__":

@@ -65,6 +65,7 @@ logger = logging.getLogger(__name__)
 # Action classification
 # ---------------------------------------------------------------------------
 
+
 def classify_action(action: GameAction) -> str:
     """Return a short category string for any game action."""
     name = type(action).__name__
@@ -110,20 +111,21 @@ def hand_size(game_state: CambiaGameState, player_id: int) -> int:
 # Profile data structures
 # ---------------------------------------------------------------------------
 
+
 class BehaviorProfile:
     """Accumulates behavioral statistics across many games."""
 
     def __init__(self, label: str):
         self.label = label
-        self.action_counts: Counter = Counter()        # action_category -> count
+        self.action_counts: Counter = Counter()  # action_category -> count
         self.p0_score_by_turn: Dict[int, List[int]] = defaultdict(list)
         self.p1_score_by_turn: Dict[int, List[int]] = defaultdict(list)
         self.p0_hand_size_by_turn: Dict[int, List[int]] = defaultdict(list)
-        self.cambia_turns: List[int] = []              # turn when P0 called Cambia
-        self.replace_slots: Counter = Counter()        # slot index -> count
+        self.cambia_turns: List[int] = []  # turn when P0 called Cambia
+        self.replace_slots: Counter = Counter()  # slot index -> count
         # Ability utilization: how often P0 uses vs skips ability
-        self.ability_opportunities: int = 0            # times P0 discarded an ability card
-        self.ability_used: int = 0                     # times P0 chose use_ability=True
+        self.ability_opportunities: int = 0  # times P0 discarded an ability card
+        self.ability_used: int = 0  # times P0 chose use_ability=True
         # Per-rank ability tracking
         self.ability_opp_by_rank: Counter = Counter()  # rank -> opportunities
         self.ability_use_by_rank: Counter = Counter()  # rank -> used
@@ -141,6 +143,7 @@ class BehaviorProfile:
 # ---------------------------------------------------------------------------
 # Game loop with full action logging
 # ---------------------------------------------------------------------------
+
 
 def play_games(
     p0_type: str,
@@ -184,7 +187,11 @@ def _play_one_game(
         if isinstance(agent, NeuralAgentWrapper):
             agent.initialize_state(game_state)
 
-    max_turns = config.cambia_rules.max_game_turns if config.cambia_rules.max_game_turns > 0 else 500
+    max_turns = (
+        config.cambia_rules.max_game_turns
+        if config.cambia_rules.max_game_turns > 0
+        else 500
+    )
     turn = 0
     game_turn_number = 0  # coarse turn (one per P0 start-of-turn)
 
@@ -219,7 +226,15 @@ def _play_one_game(
         if acting_player == 0 and game_state.pending_action is not None:
             if isinstance(game_state.pending_action, ActionDiscard):
                 drawn_card = game_state.pending_action_data.get("drawn_card")
-                if drawn_card and drawn_card.rank in (SEVEN, EIGHT, NINE, TEN, JACK, QUEEN, KING):
+                if drawn_card and drawn_card.rank in (
+                    SEVEN,
+                    EIGHT,
+                    NINE,
+                    TEN,
+                    JACK,
+                    QUEEN,
+                    KING,
+                ):
                     profile._pending_drawn_rank = drawn_card.rank
                 else:
                     profile._pending_drawn_rank = None
@@ -270,7 +285,9 @@ def _play_one_game(
         if acting_player == 0 and action_is_start and game_turn_number <= 50:
             profile.p0_score_by_turn[game_turn_number].append(hand_score(game_state, 0))
             profile.p1_score_by_turn[game_turn_number].append(hand_score(game_state, 1))
-            profile.p0_hand_size_by_turn[game_turn_number].append(hand_size(game_state, 0))
+            profile.p0_hand_size_by_turn[game_turn_number].append(
+                hand_size(game_state, 0)
+            )
 
     # Record outcome
     if game_state.is_terminal():
@@ -296,7 +313,8 @@ def _make_observation(game_state, action, acting_player) -> Optional[AgentObserv
             action=action,
             discard_top_card=game_state.get_discard_top(),
             player_hand_sizes=[
-                game_state.get_player_card_count(i) for i in range(len(game_state.players))
+                game_state.get_player_card_count(i)
+                for i in range(len(game_state.players))
             ],
             stockpile_size=game_state.get_stockpile_size(),
             drawn_card=None,
@@ -315,6 +333,7 @@ def _make_observation(game_state, action, acting_player) -> Optional[AgentObserv
 # Reporting
 # ---------------------------------------------------------------------------
 
+
 def print_profile(profile: BehaviorProfile):
     """Print formatted profile summary."""
     total_actions = sum(profile.action_counts.values())
@@ -324,12 +343,18 @@ def print_profile(profile: BehaviorProfile):
     print(f"\n{'='*70}")
     print(f"  BEHAVIORAL PROFILE: {profile.label}")
     print(f"{'='*70}")
-    print(f"  Games: {total_games}  |  Wins: {profile.wins}  Losses: {profile.losses}  Ties: {profile.ties}  Errors: {profile.errors}")
+    print(
+        f"  Games: {total_games}  |  Wins: {profile.wins}  Losses: {profile.losses}  Ties: {profile.ties}  Errors: {profile.errors}"
+    )
     print(f"  Win Rate (excl ties): {wr:.1f}%")
     if profile.total_turns:
-        print(f"  Avg game turns: {np.mean(profile.total_turns):.1f}  (median {np.median(profile.total_turns):.0f})")
+        print(
+            f"  Avg game turns: {np.mean(profile.total_turns):.1f}  (median {np.median(profile.total_turns):.0f})"
+        )
     if profile.final_score_p0:
-        print(f"  Avg final P0 score: {np.mean(profile.final_score_p0):.1f}  |  Avg final P1 score: {np.mean(profile.final_score_p1):.1f}")
+        print(
+            f"  Avg final P0 score: {np.mean(profile.final_score_p0):.1f}  |  Avg final P1 score: {np.mean(profile.final_score_p1):.1f}"
+        )
 
     # Action frequencies
     print(f"\n  --- Action Frequencies (P0, {total_actions} total actions) ---")
@@ -344,7 +369,9 @@ def print_profile(profile: BehaviorProfile):
     print(f"\n  --- Ability Utilization ---")
     if profile.ability_opportunities > 0:
         use_rate = profile.ability_used / profile.ability_opportunities * 100
-        print(f"  Overall: {profile.ability_used}/{profile.ability_opportunities} = {use_rate:.1f}%")
+        print(
+            f"  Overall: {profile.ability_used}/{profile.ability_opportunities} = {use_rate:.1f}%"
+        )
         print(f"  {'Rank':<10s} {'Used':>6s} {'Opps':>6s} {'Rate':>7s}")
         print(f"  {'-'*10} {'-'*6} {'-'*6} {'-'*7}")
         for rank in (SEVEN, EIGHT, NINE, TEN, JACK, QUEEN, KING):
@@ -360,7 +387,9 @@ def print_profile(profile: BehaviorProfile):
     print(f"\n  --- Cambia Timing ---")
     if profile.cambia_turns:
         arr = np.array(profile.cambia_turns)
-        print(f"  Count: {len(arr)}  |  Mean turn: {arr.mean():.1f}  Median: {np.median(arr):.0f}")
+        print(
+            f"  Count: {len(arr)}  |  Mean turn: {arr.mean():.1f}  Median: {np.median(arr):.0f}"
+        )
         print(f"  Min: {arr.min()}  Max: {arr.max()}  Std: {arr.std():.1f}")
         # Distribution buckets
         bins = [0, 1, 2, 3, 4, 5, 7, 10, 15, 20, 50]
@@ -368,7 +397,9 @@ def print_profile(profile: BehaviorProfile):
         print(f"  Distribution:")
         for i in range(len(hist)):
             if hist[i] > 0:
-                print(f"    Turn {bins[i]}-{bins[i+1]-1}: {hist[i]} ({hist[i]/len(arr)*100:.1f}%)")
+                print(
+                    f"    Turn {bins[i]}-{bins[i+1]-1}: {hist[i]} ({hist[i]/len(arr)*100:.1f}%)"
+                )
     else:
         print(f"  No Cambia calls recorded.")
 
@@ -385,9 +416,13 @@ def print_profile(profile: BehaviorProfile):
 
     # Per-turn score trajectory
     print(f"\n  --- Per-Turn Mean Hand Score ---")
-    max_turn = min(20, max(profile.p0_score_by_turn.keys()) if profile.p0_score_by_turn else 0)
+    max_turn = min(
+        20, max(profile.p0_score_by_turn.keys()) if profile.p0_score_by_turn else 0
+    )
     if max_turn > 0:
-        print(f"  {'Turn':>5s} {'P0 Score':>10s} {'P1 Score':>10s} {'Gap':>8s} {'P0 Hand':>8s} {'N games':>8s}")
+        print(
+            f"  {'Turn':>5s} {'P0 Score':>10s} {'P1 Score':>10s} {'Gap':>8s} {'P0 Hand':>8s} {'N games':>8s}"
+        )
         print(f"  {'-'*5} {'-'*10} {'-'*10} {'-'*8} {'-'*8} {'-'*8}")
         for t in range(0, max_turn + 1):
             if t in profile.p0_score_by_turn:
@@ -399,7 +434,9 @@ def print_profile(profile: BehaviorProfile):
                 p1_mean = np.mean(p1_scores)
                 gap = p0_mean - p1_mean
                 hand_mean = np.mean(p0_hand) if p0_hand else float("nan")
-                print(f"  {t:>5d} {p0_mean:>10.1f} {p1_mean:>10.1f} {gap:>+8.1f} {hand_mean:>8.1f} {n:>8d}")
+                print(
+                    f"  {t:>5d} {p0_mean:>10.1f} {p1_mean:>10.1f} {gap:>+8.1f} {hand_mean:>8.1f} {n:>8d}"
+                )
 
 
 def compare_profiles(p1: BehaviorProfile, p2: BehaviorProfile):
@@ -434,20 +471,27 @@ def compare_profiles(p1: BehaviorProfile, p2: BehaviorProfile):
     # Cambia timing comparison
     print(f"\n  --- Cambia Timing Comparison ---")
     if p1.cambia_turns:
-        print(f"  {p1.label}: mean turn {np.mean(p1.cambia_turns):.1f}, N={len(p1.cambia_turns)}")
+        print(
+            f"  {p1.label}: mean turn {np.mean(p1.cambia_turns):.1f}, N={len(p1.cambia_turns)}"
+        )
     else:
         print(f"  {p1.label}: no Cambia calls")
     if p2.cambia_turns:
-        print(f"  {p2.label}: mean turn {np.mean(p2.cambia_turns):.1f}, N={len(p2.cambia_turns)}")
+        print(
+            f"  {p2.label}: mean turn {np.mean(p2.cambia_turns):.1f}, N={len(p2.cambia_turns)}"
+        )
     else:
         print(f"  {p2.label}: no Cambia calls")
 
     # Per-turn score gap comparison
     print(f"\n  --- Per-Turn P0 Score Gap (P0 - P1) ---")
-    max_turn = min(15, max(
-        max(p1.p0_score_by_turn.keys()) if p1.p0_score_by_turn else 0,
-        max(p2.p0_score_by_turn.keys()) if p2.p0_score_by_turn else 0,
-    ))
+    max_turn = min(
+        15,
+        max(
+            max(p1.p0_score_by_turn.keys()) if p1.p0_score_by_turn else 0,
+            max(p2.p0_score_by_turn.keys()) if p2.p0_score_by_turn else 0,
+        ),
+    )
     if max_turn > 0:
         print(f"  {'Turn':>5s} {p1.label:>12s} {p2.label:>12s}")
         print(f"  {'-'*5} {'-'*12} {'-'*12}")
@@ -467,10 +511,15 @@ def compare_profiles(p1: BehaviorProfile, p2: BehaviorProfile):
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     NUM_GAMES = 2000
     CONFIG_PATH = os.path.join(
-        os.path.dirname(__file__), "..", "runs", "interleaved-resnet-adaptive", "config.yaml"
+        os.path.dirname(__file__),
+        "..",
+        "runs",
+        "interleaved-resnet-adaptive",
+        "config.yaml",
     )
     CHECKPOINT_PATH = os.path.join(
         os.path.dirname(__file__),
@@ -495,21 +544,42 @@ def main():
     print(f"Running {NUM_GAMES} games: deep_cfr vs imperfect_greedy ...")
     t0 = time.time()
     trained_profile = BehaviorProfile("deep_cfr_450")
-    play_games("deep_cfr", "imperfect_greedy", CONFIG_PATH, CHECKPOINT_PATH, NUM_GAMES, trained_profile)
+    play_games(
+        "deep_cfr",
+        "imperfect_greedy",
+        CONFIG_PATH,
+        CHECKPOINT_PATH,
+        NUM_GAMES,
+        trained_profile,
+    )
     print(f"  Done in {time.time() - t0:.1f}s")
 
     # --- Profile 2: random_no_cambia (P0) vs imperfect_greedy (P1) ---
     print(f"Running {NUM_GAMES} games: random_no_cambia vs imperfect_greedy ...")
     t0 = time.time()
     random_profile = BehaviorProfile("random_no_cambia")
-    play_games("random_no_cambia", "imperfect_greedy", CONFIG_PATH, None, NUM_GAMES, random_profile)
+    play_games(
+        "random_no_cambia",
+        "imperfect_greedy",
+        CONFIG_PATH,
+        None,
+        NUM_GAMES,
+        random_profile,
+    )
     print(f"  Done in {time.time() - t0:.1f}s")
 
     # --- Profile 3: imperfect_greedy (P0) vs imperfect_greedy (P1) for reference ---
     print(f"Running {NUM_GAMES} games: imperfect_greedy vs imperfect_greedy ...")
     t0 = time.time()
     greedy_profile = BehaviorProfile("imp_greedy_mirror")
-    play_games("imperfect_greedy", "imperfect_greedy", CONFIG_PATH, None, NUM_GAMES, greedy_profile)
+    play_games(
+        "imperfect_greedy",
+        "imperfect_greedy",
+        CONFIG_PATH,
+        None,
+        NUM_GAMES,
+        greedy_profile,
+    )
     print(f"  Done in {time.time() - t0:.1f}s")
 
     # Print profiles

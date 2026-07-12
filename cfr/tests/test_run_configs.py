@@ -139,7 +139,9 @@ def test_escher_interleaved_value_target_buffer_passes():
     """value_target_buffer_passes must load correctly from escher-interleaved config."""
     cfg = _load_run_config_yaml("escher-interleaved")
     if not hasattr(cfg.deep_cfr, "value_target_buffer_passes"):
-        pytest.skip("value_target_buffer_passes not yet in DeepCfrConfig (impl-1 pending)")
+        pytest.skip(
+            "value_target_buffer_passes not yet in DeepCfrConfig (impl-1 pending)"
+        )
     assert cfg.deep_cfr.value_target_buffer_passes == 2.0, (
         f"expected value_target_buffer_passes=2.0, "
         f"got {cfg.deep_cfr.value_target_buffer_passes}"

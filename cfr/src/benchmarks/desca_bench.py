@@ -30,10 +30,10 @@ from typing import Dict, List, Tuple
 import numpy as np
 import torch
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _device_info(device: torch.device) -> str:
     if device.type == "cuda":
@@ -85,6 +85,7 @@ def _supports_fp16(device: torch.device) -> bool:
 # ---------------------------------------------------------------------------
 # Minimal micro-game env factory (mirrors test_desca_convergence.py)
 # ---------------------------------------------------------------------------
+
 
 def _make_env_factory(seed_base: int = 0):
     """Minimal factory for DESCAWorker tests. Avoids importing test helpers."""
@@ -238,7 +239,9 @@ def _make_env_factory(seed_base: int = 0):
                 config=config,
             )
             initial_hand = game.players[pid].hand
-            initial_peeks = getattr(game.players[pid], "initial_peek_indices", tuple(range(2)))
+            initial_peeks = getattr(
+                game.players[pid], "initial_peek_indices", tuple(range(2))
+            )
             init_obs = AgentObservation(
                 acting_player=-1,
                 action=None,
@@ -263,6 +266,7 @@ def _make_env_factory(seed_base: int = 0):
 # ---------------------------------------------------------------------------
 # Network timing helpers
 # ---------------------------------------------------------------------------
+
 
 def _time_net_step(
     net: torch.nn.Module,
@@ -339,6 +343,7 @@ def _time_net_step(
 # Traversal timing
 # ---------------------------------------------------------------------------
 
+
 def _time_traversals(
     env_factory,
     traversals: int,
@@ -384,6 +389,7 @@ def _time_traversals(
 # Full iteration timing
 # ---------------------------------------------------------------------------
 
+
 def _time_network_fit(
     regret_net: torch.nn.Module,
     avg_strategy_net: torch.nn.Module,
@@ -417,15 +423,24 @@ def _time_network_fit(
     cap = max(buffer_n, sgd_steps * batch_size)
     regret_buf = _fill_buf(
         ReservoirBuffer(cap, FEATURE_DIM, NUM_ABSTRACT_ACTIONS_2P, has_mask=True),
-        FEATURE_DIM, NUM_ABSTRACT_ACTIONS_2P, buffer_n, has_mask=True,
+        FEATURE_DIM,
+        NUM_ABSTRACT_ACTIONS_2P,
+        buffer_n,
+        has_mask=True,
     )
     strategy_buf = _fill_buf(
         ReservoirBuffer(cap, FEATURE_DIM, NUM_ABSTRACT_ACTIONS_2P, has_mask=True),
-        FEATURE_DIM, NUM_ABSTRACT_ACTIONS_2P, buffer_n, has_mask=True,
+        FEATURE_DIM,
+        NUM_ABSTRACT_ACTIONS_2P,
+        buffer_n,
+        has_mask=True,
     )
     value_buf = _fill_buf(
         ReservoirBuffer(cap, VALUE_INPUT_DIM, 1, has_mask=False),
-        VALUE_INPUT_DIM, 1, buffer_n, has_mask=False,
+        VALUE_INPUT_DIM,
+        1,
+        buffer_n,
+        has_mask=False,
     )
 
     reg_opt = torch.optim.AdamW(regret_net.parameters(), lr=3e-4)
@@ -468,7 +483,9 @@ def _time_network_fit(
 
     t_regret = _fit_buf(regret_buf, regret_net, reg_opt, sgd_steps, True)
     t_strategy = _fit_buf(strategy_buf, avg_strategy_net, str_opt, sgd_steps, True)
-    t_value = _fit_buf(value_buf, history_value_net, val_opt, sgd_steps // 2, False, split_input=True)
+    t_value = _fit_buf(
+        value_buf, history_value_net, val_opt, sgd_steps // 2, False, split_input=True
+    )
 
     return {
         "regret_fit_s": t_regret,
@@ -481,6 +498,7 @@ def _time_network_fit(
 # ---------------------------------------------------------------------------
 # dtype sweep
 # ---------------------------------------------------------------------------
+
 
 def _dtype_sweep(
     device: torch.device,
@@ -510,8 +528,15 @@ def _dtype_sweep(
             ).to(device=device, dtype=dt)
             opt = torch.optim.AdamW(net.parameters(), lr=3e-4)
             ms_per_step, total_s = _time_net_step(
-                net, opt, EP_PBS_V2_INPUT_DIM, NUM_ABSTRACT_ACTIONS_2P,
-                device, dt, n_steps, batch_size, mask=False,
+                net,
+                opt,
+                EP_PBS_V2_INPUT_DIM,
+                NUM_ABSTRACT_ACTIONS_2P,
+                device,
+                dt,
+                n_steps,
+                batch_size,
+                mask=False,
             )
             results[label] = {"ms_per_step": ms_per_step, "total_s": total_s}
         except Exception as e:
@@ -524,6 +549,7 @@ def _dtype_sweep(
 # Report writer
 # ---------------------------------------------------------------------------
 
+
 def _write_notes(notes_path: Path, lines: List[str]) -> None:
     notes_path.parent.mkdir(parents=True, exist_ok=True)
     notes_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -533,6 +559,7 @@ def _write_notes(notes_path: Path, lines: List[str]) -> None:
 # ---------------------------------------------------------------------------
 # Main benchmark driver
 # ---------------------------------------------------------------------------
+
 
 def run_desca_bench(
     device_str: str = "auto",
@@ -566,10 +593,16 @@ def run_desca_bench(
     print(f"hidden_dim={hidden_dim}, batch_size={batch_size}, sgd_steps={sgd_steps}\n")
 
     def _make_nets():
-        r = RegretNetwork(EP_PBS_V2_INPUT_DIM, hidden_dim, NUM_ABSTRACT_ACTIONS_2P).to(device)
-        s = AvgStrategyNetwork(EP_PBS_V2_INPUT_DIM, hidden_dim, NUM_ABSTRACT_ACTIONS_2P).to(device)
+        r = RegretNetwork(EP_PBS_V2_INPUT_DIM, hidden_dim, NUM_ABSTRACT_ACTIONS_2P).to(
+            device
+        )
+        s = AvgStrategyNetwork(
+            EP_PBS_V2_INPUT_DIM, hidden_dim, NUM_ABSTRACT_ACTIONS_2P
+        ).to(device)
         # Use keyword args: second positional arg is omniscient_dim, not hidden_dim
-        v = HistoryValueNetwork(input_dim=EP_PBS_V2_INPUT_DIM, hidden_dim=hidden_dim).to(device)
+        v = HistoryValueNetwork(input_dim=EP_PBS_V2_INPUT_DIM, hidden_dim=hidden_dim).to(
+            device
+        )
         return r, s, v
 
     # ---- Traversal timing: K=500 and K=2000 ----
@@ -586,14 +619,21 @@ def run_desca_bench(
             "total_s_both": total_s * 2,  # both players ~= 2x p0 time
             "nodes": nodes,
         }
-        print(f"  K={K:5d}: {ms_per:.2f} ms/traversal, {total_s:.2f}s (P0), "
-              f"{total_s*2:.2f}s (2P projected), {nodes} nodes")
+        print(
+            f"  K={K:5d}: {ms_per:.2f} ms/traversal, {total_s:.2f}s (P0), "
+            f"{total_s*2:.2f}s (2P projected), {nodes} nodes"
+        )
 
     # ---- Network fit timing (synthetic buffers, independent of traversals) ----
     print("\n=== Network fit timing (synthetic 10K-sample buffers) ===")
     r, s, v = _make_nets()
     fit_timings = _time_network_fit(
-        r, s, v, device, sgd_steps=sgd_steps, batch_size=batch_size,
+        r,
+        s,
+        v,
+        device,
+        sgd_steps=sgd_steps,
+        batch_size=batch_size,
     )
     print(f"  regret  : {fit_timings['regret_fit_s']:.3f}s ({sgd_steps} steps)")
     print(f"  strategy: {fit_timings['strategy_fit_s']:.3f}s ({sgd_steps} steps)")
@@ -602,7 +642,9 @@ def run_desca_bench(
 
     # ---- dtype sweep ----
     print("\n=== dtype sweep (RegretNetwork fwd+bwd, 200 steps) ===")
-    dtype_res = _dtype_sweep(device, hidden_dim=hidden_dim, n_steps=200, batch_size=batch_size)
+    dtype_res = _dtype_sweep(
+        device, hidden_dim=hidden_dim, n_steps=200, batch_size=batch_size
+    )
     for label, res in dtype_res.items():
         if "error" in res:
             print(f"  {label:8s}: ERROR - {res['error']}")
@@ -627,9 +669,13 @@ def run_desca_bench(
         trav_s = trav_results[K]["total_s_both"]
         total_s = trav_s + fit_prod_s
         proj_h = (total_s * 1000) / 3600
-        proj_rows.append(f"| K={K} | {trav_s:.1f}s | {fit_prod_s:.1f}s | {total_s:.1f}s | {proj_h:.1f}h |")
-        print(f"  K={K}: trav={trav_s:.1f}s + fit(prod)={fit_prod_s:.1f}s = {total_s:.1f}s/iter "
-              f"-> {proj_h:.1f}h for 1000 iters")
+        proj_rows.append(
+            f"| K={K} | {trav_s:.1f}s | {fit_prod_s:.1f}s | {total_s:.1f}s | {proj_h:.1f}h |"
+        )
+        print(
+            f"  K={K}: trav={trav_s:.1f}s + fit(prod)={fit_prod_s:.1f}s = {total_s:.1f}s/iter "
+            f"-> {proj_h:.1f}h for 1000 iters"
+        )
 
     # ---- Write NOTES.md ----
     notes_path = Path(runs_dir) / "desca-bench" / "NOTES.md"
@@ -642,70 +688,90 @@ def run_desca_bench(
         else:
             dtype_rows.append(f"| {label} | {res['ms_per_step']:.3f} ms/step |")
 
-    notes_lines = [
-        "# DESCA XPU Benchmark Results",
-        "",
-        f"Device: {dev_label}",
-        f"Date: 2026-04-24",
-        f"Config: hidden_dim={hidden_dim}, batch_size={batch_size}",
-        "",
-        "## Traversal phase (player 0 only, best of 3 reps)",
-        "",
-        "| K | ms/traversal | s (P0) | s (2P projected) | nodes (P0) |",
-        "|-|-|-|-|-|",
-    ] + [
-        f"| {K} | {trav_results[K]['ms_per_traversal']:.2f} | "
-        f"{trav_results[K]['total_s_p0']:.2f} | {trav_results[K]['total_s_both']:.2f} | "
-        f"{trav_results[K]['nodes']} |"
-        for K in [500, 2000]
-    ] + [
-        "",
-        "## Network fit timing (synthetic 10K-sample buffers, bench sgd_steps=" + str(sgd_steps) + ")",
-        "",
-        "| network | steps | s |",
-        "|-|-|-|",
-        f"| regret | {sgd_steps} | {fit_timings['regret_fit_s']:.3f} |",
-        f"| strategy | {sgd_steps} | {fit_timings['strategy_fit_s']:.3f} |",
-        f"| value | {sgd_steps//2} | {fit_timings['value_fit_s']:.3f} |",
-        f"| total | - | {fit_timings['fit_total_s']:.3f} |",
-        "",
-        "## dtype comparison (RegretNetwork fwd+bwd, 200 steps, batch=" + str(batch_size) + ")",
-        "",
-        "| dtype | ms/step |",
-        "|-|-|",
-    ] + dtype_rows + [
-        "",
-        "## Projected 1000-iter wall clock (traversal 2P + production fit 2000/2000/1000 steps)",
-        "",
-        "| K | trav 2P (s) | fit prod (s) | total/iter (s) | 1000-iter |",
-        "|-|-|-|-|-|",
-    ] + proj_rows + [
-        "",
-        "## Notes",
-        "",
-        "- Traversal time dominates. Python `copy.deepcopy` at each CFR node is the bottleneck.",
-        "  GoEngine (FFI) traversals reduce this by 5-10x; this benchmark uses Python micro-game.",
-        "- Fit timing uses synthetic random buffers to isolate network overhead from traversal GC.",
-        "  Production fit time scales linearly with sgd_steps vs bench steps above.",
-    ] + (
+    notes_lines = (
         [
-            "- dtype comparison: CUDA tensor cores (bf16/fp16) deliver real speedup over fp32.",
-            "- K=2000 viable on CUDA at production scale.",
-        ] if device.type == "cuda" else
-        [
-            "- dtype comparison: Intel Arc XPU has hardware bf16/fp16 paths; bf16 typically wins.",
-            f"- K=2000 viable on {dev_label} at production scale; see projection above.",
-        ] if device.type == "xpu" else
-        [
-            "- dtype comparison: MPS bf16/fp16 support is chip-dependent; speedup varies.",
-            "- K=2000 may be slow on MPS at production scale; profile before committing.",
-        ] if device.type == "mps" else
-        [
-            "- dtype comparison only meaningful on accelerators (bf16/fp16 tensor cores).",
-            "  CPU bf16/fp16 is emulated; float32 shown for reference.",
-            "- K=2000 on CPU is impractical for production training. Requires accelerator.",
-            "  K=500 on CPU is borderline; accelerator recommended for runs of 1000+ iters.",
+            "# DESCA XPU Benchmark Results",
+            "",
+            f"Device: {dev_label}",
+            f"Date: 2026-04-24",
+            f"Config: hidden_dim={hidden_dim}, batch_size={batch_size}",
+            "",
+            "## Traversal phase (player 0 only, best of 3 reps)",
+            "",
+            "| K | ms/traversal | s (P0) | s (2P projected) | nodes (P0) |",
+            "|-|-|-|-|-|",
         ]
+        + [
+            f"| {K} | {trav_results[K]['ms_per_traversal']:.2f} | "
+            f"{trav_results[K]['total_s_p0']:.2f} | {trav_results[K]['total_s_both']:.2f} | "
+            f"{trav_results[K]['nodes']} |"
+            for K in [500, 2000]
+        ]
+        + [
+            "",
+            "## Network fit timing (synthetic 10K-sample buffers, bench sgd_steps="
+            + str(sgd_steps)
+            + ")",
+            "",
+            "| network | steps | s |",
+            "|-|-|-|",
+            f"| regret | {sgd_steps} | {fit_timings['regret_fit_s']:.3f} |",
+            f"| strategy | {sgd_steps} | {fit_timings['strategy_fit_s']:.3f} |",
+            f"| value | {sgd_steps//2} | {fit_timings['value_fit_s']:.3f} |",
+            f"| total | - | {fit_timings['fit_total_s']:.3f} |",
+            "",
+            "## dtype comparison (RegretNetwork fwd+bwd, 200 steps, batch="
+            + str(batch_size)
+            + ")",
+            "",
+            "| dtype | ms/step |",
+            "|-|-|",
+        ]
+        + dtype_rows
+        + [
+            "",
+            "## Projected 1000-iter wall clock (traversal 2P + production fit 2000/2000/1000 steps)",
+            "",
+            "| K | trav 2P (s) | fit prod (s) | total/iter (s) | 1000-iter |",
+            "|-|-|-|-|-|",
+        ]
+        + proj_rows
+        + [
+            "",
+            "## Notes",
+            "",
+            "- Traversal time dominates. Python `copy.deepcopy` at each CFR node is the bottleneck.",
+            "  GoEngine (FFI) traversals reduce this by 5-10x; this benchmark uses Python micro-game.",
+            "- Fit timing uses synthetic random buffers to isolate network overhead from traversal GC.",
+            "  Production fit time scales linearly with sgd_steps vs bench steps above.",
+        ]
+        + (
+            [
+                "- dtype comparison: CUDA tensor cores (bf16/fp16) deliver real speedup over fp32.",
+                "- K=2000 viable on CUDA at production scale.",
+            ]
+            if device.type == "cuda"
+            else (
+                [
+                    "- dtype comparison: Intel Arc XPU has hardware bf16/fp16 paths; bf16 typically wins.",
+                    f"- K=2000 viable on {dev_label} at production scale; see projection above.",
+                ]
+                if device.type == "xpu"
+                else (
+                    [
+                        "- dtype comparison: MPS bf16/fp16 support is chip-dependent; speedup varies.",
+                        "- K=2000 may be slow on MPS at production scale; profile before committing.",
+                    ]
+                    if device.type == "mps"
+                    else [
+                        "- dtype comparison only meaningful on accelerators (bf16/fp16 tensor cores).",
+                        "  CPU bf16/fp16 is emulated; float32 shown for reference.",
+                        "- K=2000 on CPU is impractical for production training. Requires accelerator.",
+                        "  K=500 on CPU is borderline; accelerator recommended for runs of 1000+ iters.",
+                    ]
+                )
+            )
+        )
     )
 
     _write_notes(notes_path, notes_lines)
@@ -722,16 +788,32 @@ if __name__ == "__main__":
         sys.path.insert(0, str(cfr_root))
 
     parser = argparse.ArgumentParser(description="DESCA XPU benchmark")
-    parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps", "xpu"],
-                        help="Compute device: auto resolves cuda -> xpu -> cpu")
-    parser.add_argument("--runs-dir", default="runs",
-                        help="Path to cfr/runs/ directory for NOTES.md output")
-    parser.add_argument("--hidden-dim", type=int, default=512,
-                        help="Network hidden dim (default 512 = production size)")
-    parser.add_argument("--sgd-steps", type=int, default=500,
-                        help="SGD steps per network per iteration (subset of production 2000)")
-    parser.add_argument("--batch-size", type=int, default=256,
-                        help="Minibatch size for network fitting")
+    parser.add_argument(
+        "--device",
+        default="auto",
+        choices=["auto", "cpu", "cuda", "mps", "xpu"],
+        help="Compute device: auto resolves cuda -> xpu -> cpu",
+    )
+    parser.add_argument(
+        "--runs-dir",
+        default="runs",
+        help="Path to cfr/runs/ directory for NOTES.md output",
+    )
+    parser.add_argument(
+        "--hidden-dim",
+        type=int,
+        default=512,
+        help="Network hidden dim (default 512 = production size)",
+    )
+    parser.add_argument(
+        "--sgd-steps",
+        type=int,
+        default=500,
+        help="SGD steps per network per iteration (subset of production 2000)",
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=256, help="Minibatch size for network fitting"
+    )
     args = parser.parse_args()
 
     run_desca_bench(

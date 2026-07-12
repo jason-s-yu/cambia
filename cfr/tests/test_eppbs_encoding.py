@@ -1,4 +1,5 @@
 """Tests for EP-PBS encoding."""
+
 import numpy as np
 import pytest
 from src.encoding import (
@@ -36,10 +37,12 @@ class TestEPPBSEncoding:
         assert out[34] == 1.0
 
     def test_slot_tags_one_hot(self):
-        tags = (
-            [EpistemicTag.UNK, EpistemicTag.PRIV_OWN, EpistemicTag.PRIV_OPP, EpistemicTag.PUB]
-            + [EpistemicTag.UNK] * 8
-        )
+        tags = [
+            EpistemicTag.UNK,
+            EpistemicTag.PRIV_OWN,
+            EpistemicTag.PRIV_OPP,
+            EpistemicTag.PUB,
+        ] + [EpistemicTag.UNK] * 8
         buckets = [0, 2, 0, 8] + [0] * 8
         out = encode_infoset_eppbs(tags, buckets, 0, 0, 0, 0, 0)
         # Slot 0 tag (offset 40): UNK=0
@@ -53,10 +56,12 @@ class TestEPPBSEncoding:
 
     def test_slot_identity_zeroing(self):
         """TagPrivOpp and TagUnk slots should have zero bucket encoding."""
-        tags = (
-            [EpistemicTag.PRIV_OWN, EpistemicTag.PRIV_OPP, EpistemicTag.UNK, EpistemicTag.PUB]
-            + [EpistemicTag.UNK] * 8
-        )
+        tags = [
+            EpistemicTag.PRIV_OWN,
+            EpistemicTag.PRIV_OPP,
+            EpistemicTag.UNK,
+            EpistemicTag.PUB,
+        ] + [EpistemicTag.UNK] * 8
         buckets = [2, 5, 0, 8] + [0] * 8
         out = encode_infoset_eppbs(tags, buckets, 0, 0, 0, 0, 0)
         # Slot 0 (PRIV_OWN, bucket 2): identity at offset 88+2
@@ -140,6 +145,7 @@ class TestEPPBSAgentStateTracking:
         )
         # Manually set up minimal hand state (bypass full initialize)
         from src.constants import GamePhase, StockpileEstimate
+
         state.own_hand = {
             i: KnownCardInfo(bucket=CardBucket.UNKNOWN, last_seen_turn=0)
             for i in range(4)
@@ -155,6 +161,7 @@ class TestEPPBSAgentStateTracking:
     def test_eppbs_fields_initialized(self, agent_state):
         """AgentState has EP-PBS fields after construction."""
         from src.constants import EpistemicTag
+
         assert len(agent_state.slot_tags) == 12
         assert all(t == EpistemicTag.UNK for t in agent_state.slot_tags)
         assert len(agent_state.slot_buckets) == 12
@@ -164,6 +171,7 @@ class TestEPPBSAgentStateTracking:
     def test_eppbs_tag_transitions_unk_to_priv_own(self, agent_state):
         """UNK → PRIV_OWN when we learn a slot."""
         from src.constants import EpistemicTag
+
         agent_state._eppbs_set_tag(0, EpistemicTag.PRIV_OWN, 3)  # LOW_NUM bucket
         assert agent_state.slot_tags[0] == EpistemicTag.PRIV_OWN
         assert agent_state.slot_buckets[0] == 3
@@ -172,6 +180,7 @@ class TestEPPBSAgentStateTracking:
     def test_eppbs_tag_transitions_priv_opp_to_pub(self, agent_state):
         """PRIV_OPP → PUB when we also learn a slot the opponent already knew."""
         from src.constants import EpistemicTag
+
         # First opponent learns slot 0
         agent_state._eppbs_set_tag(0, EpistemicTag.PRIV_OPP)
         assert agent_state.slot_tags[0] == EpistemicTag.PRIV_OPP
@@ -185,6 +194,7 @@ class TestEPPBSAgentStateTracking:
     def test_eppbs_tag_transitions_priv_own_to_pub(self, agent_state):
         """PRIV_OWN → PUB when opponent learns a slot we already knew."""
         from src.constants import EpistemicTag
+
         agent_state._eppbs_set_tag(2, EpistemicTag.PRIV_OWN, 4)
         assert 2 in agent_state.own_active_mask
         # Opponent learns it → PUB
@@ -195,13 +205,14 @@ class TestEPPBSAgentStateTracking:
     def test_eppbs_saliency_eviction(self, agent_state):
         """Peeking 4 own cards evicts the lowest-saliency one."""
         from src.constants import EpistemicTag
+
         # Peek 3 low-saliency cards first: MID_NUM(4,sal=1.0), MID_NUM(4), LOW_NUM(3,sal=1.5)
-        agent_state._eppbs_set_tag(0, EpistemicTag.PRIV_OWN, 4)   # MID_NUM, sal=1.0
-        agent_state._eppbs_set_tag(1, EpistemicTag.PRIV_OWN, 3)   # LOW_NUM, sal=1.5
-        agent_state._eppbs_set_tag(2, EpistemicTag.PRIV_OWN, 5)   # PEEK_SELF, sal=3.0
+        agent_state._eppbs_set_tag(0, EpistemicTag.PRIV_OWN, 4)  # MID_NUM, sal=1.0
+        agent_state._eppbs_set_tag(1, EpistemicTag.PRIV_OWN, 3)  # LOW_NUM, sal=1.5
+        agent_state._eppbs_set_tag(2, EpistemicTag.PRIV_OWN, 5)  # PEEK_SELF, sal=3.0
         assert agent_state.own_active_mask == [0, 1, 2]
         # Now peek a high-saliency card: HIGH_KING(8,sal=8.5)
-        agent_state._eppbs_set_tag(3, EpistemicTag.PRIV_OWN, 8)   # HIGH_KING, sal=8.5
+        agent_state._eppbs_set_tag(3, EpistemicTag.PRIV_OWN, 8)  # HIGH_KING, sal=8.5
         # Slot 0 (sal=1.0) should have been evicted
         assert 0 not in agent_state.own_active_mask
         assert agent_state.slot_tags[0] == EpistemicTag.UNK
@@ -211,12 +222,13 @@ class TestEPPBSAgentStateTracking:
     def test_eppbs_saliency_no_eviction_if_new_lower(self, agent_state):
         """New card with lower saliency than all existing is NOT added."""
         from src.constants import EpistemicTag
+
         # Fill mask with high-saliency cards
-        agent_state._eppbs_set_tag(0, EpistemicTag.PRIV_OWN, 8)   # HIGH_KING, sal=8.5
-        agent_state._eppbs_set_tag(1, EpistemicTag.PRIV_OWN, 1)   # NEG_KING, sal=5.5
-        agent_state._eppbs_set_tag(2, EpistemicTag.PRIV_OWN, 6)   # PEEK_OTHER, sal=5.0
+        agent_state._eppbs_set_tag(0, EpistemicTag.PRIV_OWN, 8)  # HIGH_KING, sal=8.5
+        agent_state._eppbs_set_tag(1, EpistemicTag.PRIV_OWN, 1)  # NEG_KING, sal=5.5
+        agent_state._eppbs_set_tag(2, EpistemicTag.PRIV_OWN, 6)  # PEEK_OTHER, sal=5.0
         # Now add very low saliency: MID_NUM(4, sal=1.0) — lower than minimum (5.0)
-        agent_state._eppbs_set_tag(3, EpistemicTag.PRIV_OWN, 4)   # MID_NUM, sal=1.0
+        agent_state._eppbs_set_tag(3, EpistemicTag.PRIV_OWN, 4)  # MID_NUM, sal=1.0
         # Slot 3 should NOT be in mask (lower saliency than slot 2's 5.0)
         assert 3 not in agent_state.own_active_mask
         # Slot 2 (min of {8.5,5.5,5.0}=5.0) should remain since new sal=1.0 < 5.0
@@ -225,6 +237,7 @@ class TestEPPBSAgentStateTracking:
     def test_eppbs_fifo_eviction(self, agent_state):
         """Opponent peeking 4 slots evicts the oldest (FIFO)."""
         from src.constants import EpistemicTag
+
         # Opponent peeks slots 6,7,8 (3 opp slots)
         agent_state._eppbs_set_tag(6, EpistemicTag.PRIV_OPP)
         agent_state._eppbs_set_tag(7, EpistemicTag.PRIV_OPP)
@@ -240,6 +253,7 @@ class TestEPPBSAgentStateTracking:
     def test_eppbs_clone_copies_state(self, agent_state):
         """clone() preserves EP-PBS state."""
         from src.constants import EpistemicTag
+
         agent_state._eppbs_set_tag(0, EpistemicTag.PRIV_OWN, 3)
         agent_state._eppbs_set_tag(6, EpistemicTag.PRIV_OPP)
         cloned = agent_state.clone()
@@ -255,6 +269,7 @@ class TestEPPBSAgentStateTracking:
     def test_eppbs_forget_slot(self, agent_state):
         """Setting tag to UNK removes from active masks."""
         from src.constants import EpistemicTag
+
         agent_state._eppbs_set_tag(0, EpistemicTag.PRIV_OWN, 3)
         assert 0 in agent_state.own_active_mask
         agent_state._eppbs_set_tag(0, EpistemicTag.UNK)

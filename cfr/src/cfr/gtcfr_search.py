@@ -86,12 +86,12 @@ class GTCFRNode:
 
     # Identity
     depth: int
-    acting_player: int          # 0 or 1; -1 for terminal nodes
+    acting_player: int  # 0 or 1; -1 for terminal nodes
     is_terminal: bool
     terminal_values: Optional[np.ndarray]  # (2,) float32 if terminal
 
     # Legal actions at this node
-    legal_mask: np.ndarray      # (NUM_ACTIONS,) bool
+    legal_mask: np.ndarray  # (NUM_ACTIONS,) bool
     n_legal: int
 
     # Children (populated on expansion)
@@ -99,14 +99,14 @@ class GTCFRNode:
     is_expanded: bool
 
     # CFR state
-    cumulative_regret: np.ndarray    # (NUM_ACTIONS,) float32
+    cumulative_regret: np.ndarray  # (NUM_ACTIONS,) float32
     cumulative_strategy: np.ndarray  # (NUM_ACTIONS,) float32
     cfr_visits: int
 
     # PUCT state
-    visit_counts: np.ndarray        # (NUM_ACTIONS,) int32
+    visit_counts: np.ndarray  # (NUM_ACTIONS,) int32
     total_action_value: np.ndarray  # (NUM_ACTIONS,) float32 — sum of values
-    policy_prior: np.ndarray        # (NUM_ACTIONS,) float32 — from CVPN
+    policy_prior: np.ndarray  # (NUM_ACTIONS,) float32 — from CVPN
 
     # CVPN leaf evaluation (stored when first evaluated)
     leaf_values: Optional[np.ndarray]  # (2, NUM_HAND_TYPES) float32
@@ -148,10 +148,10 @@ class GTCFRNode:
 class SearchResult:
     """Result of a GT-CFR search."""
 
-    policy: np.ndarray       # (NUM_ACTIONS,) float32 — root average strategy
+    policy: np.ndarray  # (NUM_ACTIONS,) float32 — root average strategy
     root_values: np.ndarray  # (VALUE_DIM,) = (936,) float32 — flattened (2, 468) CFVs
-    tree_size: int           # total nodes in tree
-    depth_stats: dict        # {"min": int, "max": int, "mean": float}
+    tree_size: int  # total nodes in tree
+    depth_stats: dict  # {"min": int, "max": int, "mean": float}
 
 
 # ---------------------------------------------------------------------------
@@ -195,9 +195,9 @@ class GTCFRSearch:
 
     def search(
         self,
-        game: Any,               # GoEngine at current decision point (not modified)
-        range_p0: np.ndarray,    # (NUM_HAND_TYPES,) current range for player 0
-        range_p1: np.ndarray,    # (NUM_HAND_TYPES,) current range for player 1
+        game: Any,  # GoEngine at current decision point (not modified)
+        range_p0: np.ndarray,  # (NUM_HAND_TYPES,) current range for player 0
+        range_p1: np.ndarray,  # (NUM_HAND_TYPES,) current range for player 1
     ) -> SearchResult:
         """Run GT-CFR search from the current game state.
 
@@ -396,7 +396,7 @@ class GTCFRSearch:
             puct_scores = self._puct_scores(node)
             legal_puct = [(a, puct_scores[a]) for a in legal_actions]
             legal_puct.sort(key=lambda x: x[1], reverse=True)
-            legal_actions = [a for a, _ in legal_puct[:self._expansion_k]]
+            legal_actions = [a for a, _ in legal_puct[: self._expansion_k]]
 
         # Create child engines for selected legal actions
         child_engines: List[Any] = []
@@ -443,8 +443,8 @@ class GTCFRSearch:
             with torch.inference_mode():
                 values_t, logits_t = self._cvpn(pbs_batch, mask_batch)
 
-            values_np = values_t.cpu().numpy()                       # (N, 936)
-            probs_np = F.softmax(logits_t, dim=-1).cpu().numpy()     # (N, 146)
+            values_np = values_t.cpu().numpy()  # (N, 936)
+            probs_np = F.softmax(logits_t, dim=-1).cpu().numpy()  # (N, 146)
 
             for j, i in enumerate(non_term_indices):
                 batch_leaf_values[i] = values_np[j].reshape(2, NUM_HAND_TYPES)
@@ -619,9 +619,7 @@ class GTCFRSearch:
     # Tree utilities
     # ---------------------------------------------------------------------------
 
-    def _make_terminal_node(
-        self, depth: int, engine: Any, util: np.ndarray
-    ) -> GTCFRNode:
+    def _make_terminal_node(self, depth: int, engine: Any, util: np.ndarray) -> GTCFRNode:
         """Create a terminal GTCFRNode."""
         return GTCFRNode(
             depth=depth,

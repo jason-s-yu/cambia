@@ -51,9 +51,9 @@ class TestImportHasNoLoggingSideEffects:
             text=True,
             timeout=60,
         )
-        assert result.returncode == 0, (
-            f"stdout={result.stdout!r} stderr={result.stderr!r}"
-        )
+        assert (
+            result.returncode == 0
+        ), f"stdout={result.stdout!r} stderr={result.stderr!r}"
         assert "OK" in result.stdout
 
 
@@ -136,9 +136,9 @@ class TestBuildTreeQuietParameter:
         logger.setLevel(logging.WARNING)
         try:
             build_tree(cfg, n_deals=1, seed0=0, max_nodes_per_deal=2_000_000)
-            assert logger.level == logging.WARNING, (
-                "build_tree(quiet=True default) must restore logger levels after returning"
-            )
+            assert (
+                logger.level == logging.WARNING
+            ), "build_tree(quiet=True default) must restore logger levels after returning"
         finally:
             logger.setLevel(original)
 

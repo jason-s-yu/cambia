@@ -7,6 +7,7 @@ Unit tests for lockCallerHand rule:
 - lockCallerHand=False preserves old behavior.
 - Bridge rejects non-CambiaRulesConfig house_rules with TypeError.
 """
+
 import pytest
 
 from src.card import Card, create_standard_deck
@@ -21,7 +22,6 @@ from src.constants import (
 )
 from src.game.engine import CambiaGameState
 from src.game.player_state import PlayerState
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -56,7 +56,9 @@ def build_post_cambia_pending_state(
     """
     deck = create_standard_deck(include_jokers=2)
     # Remove drawn_card from deck to avoid duplicates
-    remaining = [c for c in deck if not (c.rank == drawn_card.rank and c.suit == drawn_card.suit)]
+    remaining = [
+        c for c in deck if not (c.rank == drawn_card.rank and c.suit == drawn_card.suit)
+    ]
 
     p0_hand = remaining[:4]
     p1_hand = remaining[4:8]
@@ -135,7 +137,7 @@ class TestLockCallerHandReplace:
         drawn = Card(rank="2", suit="H")
         remaining = [c for c in deck if not (c.rank == "2" and c.suit == "H")]
 
-        p0_hand = remaining[:4]   # P0 = caller
+        p0_hand = remaining[:4]  # P0 = caller
         p1_hand = remaining[4:8]
         stockpile = remaining[8:30]
         discard_top = remaining[30]
@@ -160,9 +162,9 @@ class TestLockCallerHandReplace:
 
         legal = state.get_legal_actions()
         replace_actions = [a for a in legal if isinstance(a, ActionReplace)]
-        assert len(replace_actions) == 0, (
-            f"Expected no Replace actions for locked caller P0, got: {replace_actions}"
-        )
+        assert (
+            len(replace_actions) == 0
+        ), f"Expected no Replace actions for locked caller P0, got: {replace_actions}"
         # Discard action should still be present
         discard_actions = [a for a in legal if isinstance(a, ActionDiscard)]
         assert len(discard_actions) > 0, "Discard action should still be legal"
@@ -199,9 +201,9 @@ class TestLockCallerHandReplace:
         legal = state.get_legal_actions()
         replace_actions = [a for a in legal if isinstance(a, ActionReplace)]
         # P1 has 4 cards, so should have 4 Replace options
-        assert len(replace_actions) == 4, (
-            f"Expected 4 Replace actions for non-caller P1, got: {replace_actions}"
-        )
+        assert (
+            len(replace_actions) == 4
+        ), f"Expected 4 Replace actions for non-caller P1, got: {replace_actions}"
 
     def test_replace_allowed_when_lock_disabled(self):
         """When lockCallerHand=False, the caller CAN still Replace."""
@@ -234,9 +236,9 @@ class TestLockCallerHandReplace:
         legal = state.get_legal_actions()
         replace_actions = [a for a in legal if isinstance(a, ActionReplace)]
         # With lock disabled, P0 should be able to Replace (has 4 cards)
-        assert len(replace_actions) == 4, (
-            f"Expected 4 Replace actions when lock disabled, got: {replace_actions}"
-        )
+        assert (
+            len(replace_actions) == 4
+        ), f"Expected 4 Replace actions when lock disabled, got: {replace_actions}"
 
 
 # ---------------------------------------------------------------------------
@@ -254,10 +256,12 @@ class TestLockCallerHandBlindSwap:
             ability_action=ActionAbilityBlindSwapSelect(-1, -1),
         )
         legal = state.get_legal_actions()
-        blind_swap_actions = [a for a in legal if isinstance(a, ActionAbilityBlindSwapSelect)]
-        assert len(blind_swap_actions) == 0, (
-            f"BlindSwap should fizzle when opponent is locked caller, got: {blind_swap_actions}"
-        )
+        blind_swap_actions = [
+            a for a in legal if isinstance(a, ActionAbilityBlindSwapSelect)
+        ]
+        assert (
+            len(blind_swap_actions) == 0
+        ), f"BlindSwap should fizzle when opponent is locked caller, got: {blind_swap_actions}"
 
     def test_blindswap_works_when_opponent_is_not_caller(self):
         """When lockCallerHand=True but opponent is NOT the caller, BlindSwap proceeds normally."""
@@ -290,11 +294,13 @@ class TestLockCallerHandBlindSwap:
         state.pending_action_data = {"ability_card": discard_top}
 
         legal = state.get_legal_actions()
-        blind_swap_actions = [a for a in legal if isinstance(a, ActionAbilityBlindSwapSelect)]
+        blind_swap_actions = [
+            a for a in legal if isinstance(a, ActionAbilityBlindSwapSelect)
+        ]
         # P0 has 4 cards, P1 has 4 cards -> 4*4=16 BlindSwap combinations
-        assert len(blind_swap_actions) == 16, (
-            f"Expected 16 BlindSwap actions when no caller locked, got: {len(blind_swap_actions)}"
-        )
+        assert (
+            len(blind_swap_actions) == 16
+        ), f"Expected 16 BlindSwap actions when no caller locked, got: {len(blind_swap_actions)}"
 
     def test_blindswap_works_when_lock_disabled(self):
         """When lockCallerHand=False, BlindSwap works even if opponent called Cambia."""
@@ -304,11 +310,13 @@ class TestLockCallerHandBlindSwap:
             ability_action=ActionAbilityBlindSwapSelect(-1, -1),
         )
         legal = state.get_legal_actions()
-        blind_swap_actions = [a for a in legal if isinstance(a, ActionAbilityBlindSwapSelect)]
+        blind_swap_actions = [
+            a for a in legal if isinstance(a, ActionAbilityBlindSwapSelect)
+        ]
         # P0 and P1 each have 4 cards -> 16 combinations
-        assert len(blind_swap_actions) == 16, (
-            f"Expected 16 BlindSwap actions when lock disabled, got: {len(blind_swap_actions)}"
-        )
+        assert (
+            len(blind_swap_actions) == 16
+        ), f"Expected 16 BlindSwap actions when lock disabled, got: {len(blind_swap_actions)}"
 
 
 # ---------------------------------------------------------------------------
@@ -325,10 +333,12 @@ class TestLockCallerHandKingLook:
             ability_action=ActionAbilityKingLookSelect(-1, -1),
         )
         legal = state.get_legal_actions()
-        king_look_actions = [a for a in legal if isinstance(a, ActionAbilityKingLookSelect)]
-        assert len(king_look_actions) == 0, (
-            f"KingLook should fizzle when opponent is locked caller, got: {king_look_actions}"
-        )
+        king_look_actions = [
+            a for a in legal if isinstance(a, ActionAbilityKingLookSelect)
+        ]
+        assert (
+            len(king_look_actions) == 0
+        ), f"KingLook should fizzle when opponent is locked caller, got: {king_look_actions}"
 
     def test_kinglook_works_when_lock_disabled(self):
         """When lockCallerHand=False, KingLook works even if opponent called Cambia."""
@@ -338,11 +348,13 @@ class TestLockCallerHandKingLook:
             ability_action=ActionAbilityKingLookSelect(-1, -1),
         )
         legal = state.get_legal_actions()
-        king_look_actions = [a for a in legal if isinstance(a, ActionAbilityKingLookSelect)]
+        king_look_actions = [
+            a for a in legal if isinstance(a, ActionAbilityKingLookSelect)
+        ]
         # 4*4=16 combinations
-        assert len(king_look_actions) == 16, (
-            f"Expected 16 KingLook actions when lock disabled, got: {len(king_look_actions)}"
-        )
+        assert (
+            len(king_look_actions) == 16
+        ), f"Expected 16 KingLook actions when lock disabled, got: {len(king_look_actions)}"
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +371,7 @@ class TestBridgeTypeCheck:
             pytest.skip("libcambia.so not available")
 
         from types import SimpleNamespace
+
         fake_rules = SimpleNamespace(
             max_game_turns=300,
             cards_per_player=4,

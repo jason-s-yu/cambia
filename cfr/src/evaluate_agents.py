@@ -361,18 +361,19 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
     used by DeepCFRAgentWrapper, ESCHERAgentWrapper, and ReBeLAgentWrapper.
     """
 
-    def __init__(self, player_id: int, config, device: str = "cpu", use_argmax: bool = False):
+    def __init__(
+        self, player_id: int, config, device: str = "cpu", use_argmax: bool = False
+    ):
         super().__init__(player_id, config)
         import torch
+
         self._torch = torch
         self.device = torch.device(device)
         self.agent_state: Optional[AgentState] = None
         self._use_argmax = use_argmax
 
     @abc.abstractmethod
-    def choose_action(
-        self, game_state, legal_actions: Set[GameAction]
-    ) -> GameAction:
+    def choose_action(self, game_state, legal_actions: Set[GameAction]) -> GameAction:
         pass
 
     def initialize_state(self, initial_game_state):
@@ -414,10 +415,14 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
         filtered.peeked_cards = None
         try:
             from src.cfr.exceptions import AgentStateError, ObservationUpdateError
+
             self.agent_state.update(filtered)
         except Exception as e:  # JUSTIFIED: evaluation resilience
             logger.error(
-                "%s P%d state update error: %s", self.__class__.__name__, self.player_id, e
+                "%s P%d state update error: %s",
+                self.__class__.__name__,
+                self.player_id,
+                e,
             )
 
     def _get_decision_context(self, game_state) -> DecisionContext:
@@ -467,12 +472,28 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
             cambia_state = 1
 
         kwargs = dict(
-            slot_tags=[t.value if hasattr(t, 'value') else int(t) for t in st.slot_tags],
+            slot_tags=[t.value if hasattr(t, "value") else int(t) for t in st.slot_tags],
             slot_buckets=[int(b) for b in st.slot_buckets],
-            discard_top_bucket=st.known_discard_top_bucket.value if hasattr(st.known_discard_top_bucket, 'value') else int(st.known_discard_top_bucket),
-            stock_estimate=st.stockpile_estimate.value if hasattr(st.stockpile_estimate, 'value') else int(st.stockpile_estimate),
-            game_phase=st.game_phase.value if hasattr(st.game_phase, 'value') else int(st.game_phase),
-            decision_context=decision_context.value if hasattr(decision_context, 'value') else int(decision_context),
+            discard_top_bucket=(
+                st.known_discard_top_bucket.value
+                if hasattr(st.known_discard_top_bucket, "value")
+                else int(st.known_discard_top_bucket)
+            ),
+            stock_estimate=(
+                st.stockpile_estimate.value
+                if hasattr(st.stockpile_estimate, "value")
+                else int(st.stockpile_estimate)
+            ),
+            game_phase=(
+                st.game_phase.value
+                if hasattr(st.game_phase, "value")
+                else int(st.game_phase)
+            ),
+            decision_context=(
+                decision_context.value
+                if hasattr(decision_context, "value")
+                else int(decision_context)
+            ),
             cambia_state=cambia_state,
         )
 
@@ -534,13 +555,17 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
         if _saved_rules and hasattr(config, "cambia_rules"):
             try:
                 from dataclasses import asdict as _asdict
+
                 _current_rules = _asdict(config.cambia_rules)
                 for _key in set(_saved_rules) | set(_current_rules):
                     if _saved_rules.get(_key) != _current_rules.get(_key):
                         logger.warning(
                             "%s P%d: cambia_rules mismatch '%s': checkpoint=%r, current=%r",
-                            cls.__name__, player_id, _key,
-                            _saved_rules.get(_key), _current_rules.get(_key),
+                            cls.__name__,
+                            player_id,
+                            _key,
+                            _saved_rules.get(_key),
+                            _current_rules.get(_key),
                         )
             except Exception:
                 pass
@@ -566,7 +591,11 @@ class DeepCFRAgentWrapper(NeuralAgentWrapper):
         use_argmax: bool = False,
     ):
         super().__init__(player_id, config, device=device, use_argmax=use_argmax)
-        from src.networks import AdvantageNetwork, get_strategy_from_advantages, build_advantage_network
+        from src.networks import (
+            AdvantageNetwork,
+            get_strategy_from_advantages,
+            build_advantage_network,
+        )
         from src.encoding import INPUT_DIM, NUM_ACTIONS
 
         self._get_strategy_from_advantages = get_strategy_from_advantages
@@ -575,7 +604,9 @@ class DeepCFRAgentWrapper(NeuralAgentWrapper):
 
         # Load checkpoint
         torch = self._torch
-        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
+        checkpoint = torch.load(
+            checkpoint_path, map_location=self.device, weights_only=True
+        )
         dcfr_config = checkpoint.get("dcfr_config", {})
 
         # Warn on cambia_rules mismatch between checkpoint and eval config
@@ -590,6 +621,7 @@ class DeepCFRAgentWrapper(NeuralAgentWrapper):
         self._network_type = network_type
 
         from src.constants import EP_PBS_INPUT_DIM
+
         # Use checkpoint's input_dim if available (handles 200→224 migration)
         net_input_dim = dcfr_config.get(
             "input_dim",
@@ -622,7 +654,12 @@ class DeepCFRAgentWrapper(NeuralAgentWrapper):
         self, game_state: CambiaGameState, legal_actions: Set[GameAction]
     ) -> GameAction:
         """Choose an action using the AdvantageNetwork via regret-matching strategy."""
-        from src.encoding import encode_infoset, encode_infoset_eppbs, encode_action_mask, index_to_action
+        from src.encoding import (
+            encode_infoset,
+            encode_infoset_eppbs,
+            encode_action_mask,
+            index_to_action,
+        )
         from src.cfr.exceptions import ActionEncodingError
 
         if not self.agent_state:
@@ -701,7 +738,9 @@ class ESCHERAgentWrapper(NeuralAgentWrapper):
         self._NUM_ACTIONS = NUM_ACTIONS
 
         torch = self._torch
-        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
+        checkpoint = torch.load(
+            checkpoint_path, map_location=self.device, weights_only=True
+        )
         dcfr_config = checkpoint.get("dcfr_config", {})
 
         # Warn on cambia_rules mismatch
@@ -716,6 +755,7 @@ class ESCHERAgentWrapper(NeuralAgentWrapper):
         self._network_type = network_type
 
         from src.constants import EP_PBS_INPUT_DIM
+
         # Use checkpoint's input_dim if available (handles 200→224 migration)
         net_input_dim = dcfr_config.get(
             "input_dim",
@@ -726,6 +766,7 @@ class ESCHERAgentWrapper(NeuralAgentWrapper):
         if "advantage_net_state_dict" in checkpoint:
             # New format: AdvantageNetwork + regret matching (SD-CFR ESCHER)
             from src.networks import build_advantage_network, get_strategy_from_advantages
+
             self._get_strategy_from_advantages = get_strategy_from_advantages
             self.advantage_net = build_advantage_network(
                 input_dim=net_input_dim,
@@ -744,6 +785,7 @@ class ESCHERAgentWrapper(NeuralAgentWrapper):
         else:
             # Legacy format: StrategyNetwork (backward compat for old checkpoints)
             from src.networks import StrategyNetwork
+
             self.advantage_net = None
             self._get_strategy_from_advantages = None
             self.policy_net = StrategyNetwork(
@@ -763,9 +805,7 @@ class ESCHERAgentWrapper(NeuralAgentWrapper):
             checkpoint.get("total_traversals", "N/A"),
         )
 
-    def choose_action(
-        self, game_state, legal_actions: Set[GameAction]
-    ) -> GameAction:
+    def choose_action(self, game_state, legal_actions: Set[GameAction]) -> GameAction:
         """Choose an action using regret matching (new) or direct policy probabilities (legacy)."""
         from src.encoding import encode_infoset, encode_action_mask, index_to_action
         from src.cfr.exceptions import ActionEncodingError
@@ -851,7 +891,9 @@ class ReBeLAgentWrapper(NeuralAgentWrapper):
         self._range_p1 = uniform_range()
 
         torch = self._torch
-        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
+        checkpoint = torch.load(
+            checkpoint_path, map_location=self.device, weights_only=True
+        )
         dcfr_config = checkpoint.get("rebel_config", checkpoint.get("dcfr_config", {}))
 
         # Warn on cambia_rules mismatch
@@ -891,6 +933,7 @@ class ReBeLAgentWrapper(NeuralAgentWrapper):
     def initialize_state(self, initial_game_state):
         """Reset ranges to uniform and delegate to parent."""
         from src.pbs import uniform_range
+
         self._range_p0 = uniform_range()
         self._range_p1 = uniform_range()
         super().initialize_state(initial_game_state)
@@ -898,8 +941,13 @@ class ReBeLAgentWrapper(NeuralAgentWrapper):
     def _build_pbs(self, game_state):
         """Build a PBS from the current game state using tracked ranges."""
         from src.pbs import (
-            PBS, make_public_features,
-            PHASE_DRAW, PHASE_DISCARD, PHASE_ABILITY, PHASE_SNAP, PHASE_TERMINAL,
+            PBS,
+            make_public_features,
+            PHASE_DRAW,
+            PHASE_DISCARD,
+            PHASE_ABILITY,
+            PHASE_SNAP,
+            PHASE_TERMINAL,
         )
 
         range_p0 = self._range_p0
@@ -930,12 +978,15 @@ class ReBeLAgentWrapper(NeuralAgentWrapper):
                 phase = PHASE_DRAW
 
             stockpile_remaining = game_state.get_stockpile_size()
-            stockpile_total = 46  # Standard initial stockpile (54 - 8 dealt - 1 discard + jokers)
+            stockpile_total = (
+                46  # Standard initial stockpile (54 - 8 dealt - 1 discard + jokers)
+            )
 
             discard_top_bucket = None
             try:
                 from src.pbs import rank_to_bucket
                 from src.constants import JOKER_RANK_STR, RED_SUITS, ALL_RANKS_STR
+
                 discard_card = game_state.get_discard_top()
                 if discard_card is not None:
                     rank_int = ALL_RANKS_STR.index(discard_card.rank)
@@ -957,13 +1008,12 @@ class ReBeLAgentWrapper(NeuralAgentWrapper):
             )
         except Exception:
             from src.pbs import NUM_PUBLIC_FEATURES
+
             public_features = np.zeros(NUM_PUBLIC_FEATURES, dtype=np.float32)
 
         return PBS(range_p0=range_p0, range_p1=range_p1, public_features=public_features)
 
-    def choose_action(
-        self, game_state, legal_actions: Set[GameAction]
-    ) -> GameAction:
+    def choose_action(self, game_state, legal_actions: Set[GameAction]) -> GameAction:
         """Choose an action using PBSPolicyNetwork inference."""
         from src.encoding import encode_action_mask, index_to_action
         from src.cfr.exceptions import ActionEncodingError
@@ -1008,11 +1058,16 @@ class ReBeLAgentWrapper(NeuralAgentWrapper):
         # forward passes; this trivial update maintains the interface.)
         try:
             from src.pbs import update_range, NUM_HAND_TYPES
+
             policy_matrix = np.tile(probs_np, (NUM_HAND_TYPES, 1))
             if self.player_id == 0:
-                self._range_p0 = update_range(self._range_p0, int(chosen_global_idx), policy_matrix)
+                self._range_p0 = update_range(
+                    self._range_p0, int(chosen_global_idx), policy_matrix
+                )
             else:
-                self._range_p1 = update_range(self._range_p1, int(chosen_global_idx), policy_matrix)
+                self._range_p1 = update_range(
+                    self._range_p1, int(chosen_global_idx), policy_matrix
+                )
         except Exception:
             pass
 
@@ -1066,6 +1121,7 @@ class GTCFRAgentWrapper(NeuralAgentWrapper):
     def initialize_state(self, initial_game_state):
         """Reset ranges to uniform and delegate to parent."""
         from src.pbs import uniform_range
+
         self._range_p0 = uniform_range()
         self._range_p1 = uniform_range()
         super().initialize_state(initial_game_state)
@@ -1073,8 +1129,13 @@ class GTCFRAgentWrapper(NeuralAgentWrapper):
     def _build_pbs(self, game_state):
         """Build a PBS from current game state using tracked ranges."""
         from src.pbs import (
-            PBS, make_public_features,
-            PHASE_DRAW, PHASE_DISCARD, PHASE_ABILITY, PHASE_SNAP, PHASE_TERMINAL,
+            PBS,
+            make_public_features,
+            PHASE_DRAW,
+            PHASE_DISCARD,
+            PHASE_ABILITY,
+            PHASE_SNAP,
+            PHASE_TERMINAL,
         )
 
         range_p0 = self._range_p0
@@ -1110,6 +1171,7 @@ class GTCFRAgentWrapper(NeuralAgentWrapper):
             try:
                 from src.pbs import rank_to_bucket
                 from src.constants import RED_SUITS, ALL_RANKS_STR
+
                 discard_card = game_state.get_discard_top()
                 if discard_card is not None:
                     rank_int = ALL_RANKS_STR.index(discard_card.rank)
@@ -1130,6 +1192,7 @@ class GTCFRAgentWrapper(NeuralAgentWrapper):
             )
         except Exception:
             from src.pbs import NUM_PUBLIC_FEATURES
+
             public_features = np.zeros(NUM_PUBLIC_FEATURES, dtype=np.float32)
 
         return PBS(range_p0=range_p0, range_p1=range_p1, public_features=public_features)
@@ -1180,18 +1243,28 @@ class GTCFRAgentWrapper(NeuralAgentWrapper):
         # Range update: per-hand-type (slow, correct) or tiled (fast, approximate)
         try:
             from src.pbs import update_range, NUM_HAND_TYPES
+
             if self._per_hand_ranges:
                 from src.cfr.range_utils import compute_policy_matrix_cvpn_from_pbs
+
                 policy_matrix = compute_policy_matrix_cvpn_from_pbs(
-                    self._cvpn, pbs, action_mask, self.player_id,
-                    self._range_p0, self._range_p1,
+                    self._cvpn,
+                    pbs,
+                    action_mask,
+                    self.player_id,
+                    self._range_p0,
+                    self._range_p1,
                 )
             else:
                 policy_matrix = np.tile(probs_np, (NUM_HAND_TYPES, 1))
             if self.player_id == 0:
-                self._range_p0 = update_range(self._range_p0, int(chosen_global_idx), policy_matrix)
+                self._range_p0 = update_range(
+                    self._range_p0, int(chosen_global_idx), policy_matrix
+                )
             else:
-                self._range_p1 = update_range(self._range_p1, int(chosen_global_idx), policy_matrix)
+                self._range_p1 = update_range(
+                    self._range_p1, int(chosen_global_idx), policy_matrix
+                )
         except Exception:
             pass
 
@@ -1205,6 +1278,7 @@ class GTCFRAgentWrapper(NeuralAgentWrapper):
         try:
             from src.pbs import update_range, NUM_HAND_TYPES
             from src.encoding import NUM_ACTIONS, encode_action_mask
+
             uniform_policy = np.ones(NUM_ACTIONS, dtype=np.float32) / NUM_ACTIONS
             policy_matrix = np.tile(uniform_policy, (NUM_HAND_TYPES, 1))
             action_mask = encode_action_mask([action])
@@ -1212,15 +1286,20 @@ class GTCFRAgentWrapper(NeuralAgentWrapper):
             if len(legal_indices) > 0:
                 action_idx = int(legal_indices[0])
                 if acting_player == 0:
-                    self._range_p0 = update_range(self._range_p0, action_idx, policy_matrix)
+                    self._range_p0 = update_range(
+                        self._range_p0, action_idx, policy_matrix
+                    )
                 else:
-                    self._range_p1 = update_range(self._range_p1, action_idx, policy_matrix)
+                    self._range_p1 = update_range(
+                        self._range_p1, action_idx, policy_matrix
+                    )
         except Exception:
             pass
 
     def reset(self):
         """Reset ranges for a new game."""
         from src.pbs import uniform_range
+
         self._range_p0 = uniform_range()
         self._range_p1 = uniform_range()
 
@@ -1254,11 +1333,18 @@ class SoGAgentWrapper(GTCFRAgentWrapper):
         try:
             from src.ffi.bridge import GoEngine, extract_deck_from_python_game
             from src.cfr.sog_search import SoGSearch
-            deck_indices, starting_player = extract_deck_from_python_game(initial_game_state)
+
+            deck_indices, starting_player = extract_deck_from_python_game(
+                initial_game_state
+            )
             house_rules = getattr(self.config, "cambia_rules", None)
-            self._go_engine = GoEngine.from_deck(deck_indices, starting_player, house_rules)
+            self._go_engine = GoEngine.from_deck(
+                deck_indices, starting_player, house_rules
+            )
             _exp_k = 3
-            if hasattr(self.config, "deep_cfr") and hasattr(self.config.deep_cfr, "gtcfr_expansion_k"):
+            if hasattr(self.config, "deep_cfr") and hasattr(
+                self.config.deep_cfr, "gtcfr_expansion_k"
+            ):
                 _exp_k = self.config.deep_cfr.gtcfr_expansion_k
             self._sog_search = SoGSearch(
                 self._cvpn,
@@ -1272,7 +1358,8 @@ class SoGAgentWrapper(GTCFRAgentWrapper):
         except Exception as e:
             logger.warning(
                 "SoGAgentWrapper P%d: GoEngine init failed (%s). Using CVPN-only fallback.",
-                self.player_id, e,
+                self.player_id,
+                e,
             )
             self._go_engine = None
             self._sog_search = None
@@ -1308,7 +1395,9 @@ class SoGAgentWrapper(GTCFRAgentWrapper):
             legal_probs = policy[legal_indices].astype(np.float32)
             prob_sum = legal_probs.sum()
             if prob_sum <= 0:
-                legal_probs = np.ones(len(legal_indices), dtype=np.float32) / len(legal_indices)
+                legal_probs = np.ones(len(legal_indices), dtype=np.float32) / len(
+                    legal_indices
+                )
             else:
                 legal_probs /= prob_sum
 
@@ -1323,9 +1412,12 @@ class SoGAgentWrapper(GTCFRAgentWrapper):
             policy_matrix_np = None
             try:
                 from src.cfr.range_utils import compute_policy_matrix_cvpn
+
                 policy_matrix_np = compute_policy_matrix_cvpn(
-                    self._cvpn, self._go_engine,
-                    self._range_p0, self._range_p1,
+                    self._cvpn,
+                    self._go_engine,
+                    self._range_p0,
+                    self._range_p1,
                 )
             except Exception:
                 pass
@@ -1336,20 +1428,27 @@ class SoGAgentWrapper(GTCFRAgentWrapper):
             except Exception as e_go:
                 logger.warning(
                     "SoGAgent P%d: GoEngine apply_action failed: %s. Disabling shadow engine.",
-                    self.player_id, e_go,
+                    self.player_id,
+                    e_go,
                 )
                 self._cleanup_search()
 
             # Bayesian range update with per-hand-type policies
             try:
                 from src.pbs import update_range
+
                 if policy_matrix_np is None:
                     from src.pbs import NUM_HAND_TYPES
+
                     policy_matrix_np = np.tile(policy, (NUM_HAND_TYPES, 1))
                 if self.player_id == 0:
-                    self._range_p0 = update_range(self._range_p0, chosen_global_idx, policy_matrix_np)
+                    self._range_p0 = update_range(
+                        self._range_p0, chosen_global_idx, policy_matrix_np
+                    )
                 else:
-                    self._range_p1 = update_range(self._range_p1, chosen_global_idx, policy_matrix_np)
+                    self._range_p1 = update_range(
+                        self._range_p1, chosen_global_idx, policy_matrix_np
+                    )
             except Exception:
                 pass
 
@@ -1375,6 +1474,7 @@ class SoGAgentWrapper(GTCFRAgentWrapper):
             return
         try:
             from src.encoding import encode_action_mask
+
             action_mask = encode_action_mask([action])
             legal_indices = np.where(action_mask)[0]
             if len(legal_indices) > 0:
@@ -1383,7 +1483,8 @@ class SoGAgentWrapper(GTCFRAgentWrapper):
         except Exception as e:
             logger.warning(
                 "SoGAgent P%d: opponent GoEngine apply failed: %s. Disabling shadow engine.",
-                self.player_id, e,
+                self.player_id,
+                e,
             )
             self._cleanup_search()
 
@@ -1471,11 +1572,16 @@ class SoGInferenceAgentWrapper(GTCFRAgentWrapper):
         # Fast tiled range update (skip 468-pass matrix for inference-only eval)
         try:
             from src.pbs import update_range, NUM_HAND_TYPES
+
             policy_matrix = np.tile(probs_np, (NUM_HAND_TYPES, 1))
             if self.player_id == 0:
-                self._range_p0 = update_range(self._range_p0, int(chosen_global_idx), policy_matrix)
+                self._range_p0 = update_range(
+                    self._range_p0, int(chosen_global_idx), policy_matrix
+                )
             else:
-                self._range_p1 = update_range(self._range_p1, int(chosen_global_idx), policy_matrix)
+                self._range_p1 = update_range(
+                    self._range_p1, int(chosen_global_idx), policy_matrix
+                )
         except Exception:
             pass
 
@@ -1512,7 +1618,10 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
 
         torch = self._torch
         import os
-        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
+
+        checkpoint = torch.load(
+            checkpoint_path, map_location=self.device, weights_only=True
+        )
         dcfr_config = checkpoint.get("dcfr_config", {})
         self._load_cambia_rules_mismatch_check(checkpoint, config, player_id)
 
@@ -1526,6 +1635,7 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
         self._network_type = network_type
 
         from src.constants import EP_PBS_INPUT_DIM
+
         # Use checkpoint's input_dim if available (handles 200→224 migration)
         net_input_dim = dcfr_config.get(
             "input_dim",
@@ -1537,7 +1647,9 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
 
         # Try EMA fast path: single network, O(1) inference
         ema_path = f"{base_path}_ema.pt"
-        ema_enabled = use_ema and dcfr_config.get("use_ema", True) and os.path.exists(ema_path)
+        ema_enabled = (
+            use_ema and dcfr_config.get("use_ema", True) and os.path.exists(ema_path)
+        )
 
         if ema_enabled:
             ema_data = torch.load(ema_path, map_location=self.device, weights_only=True)
@@ -1560,24 +1672,32 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
             self._snapshot_iterations = []
             logger.info(
                 "SDCFRAgent P%d loaded EMA weights (step=%s) for O(1) inference.",
-                self.player_id, checkpoint.get("training_step", "N/A"),
+                self.player_id,
+                checkpoint.get("training_step", "N/A"),
             )
         else:
             self._ema_net = None
             # Fall back to full snapshot averaging
-            sd_snapshots_path = checkpoint.get("sd_snapshots_path", f"{base_path}_sd_snapshots.pt")
+            sd_snapshots_path = checkpoint.get(
+                "sd_snapshots_path", f"{base_path}_sd_snapshots.pt"
+            )
             if not os.path.exists(sd_snapshots_path):
                 # Fall back to sibling file (handles moved run directories)
                 sd_snapshots_path = f"{base_path}_sd_snapshots.pt"
             if not os.path.exists(sd_snapshots_path):
                 # Try stripping _iter_NNN suffix (snapshot file is shared)
                 import re
+
                 canon = re.sub(r"_iter_\d+$", "", base_path)
                 sd_snapshots_path = f"{canon}_sd_snapshots.pt"
             if not os.path.exists(sd_snapshots_path):
-                raise FileNotFoundError(f"SD-CFR snapshots not found: {sd_snapshots_path}")
+                raise FileNotFoundError(
+                    f"SD-CFR snapshots not found: {sd_snapshots_path}"
+                )
 
-            snapshot_data = torch.load(sd_snapshots_path, map_location="cpu", weights_only=True)
+            snapshot_data = torch.load(
+                sd_snapshots_path, map_location="cpu", weights_only=True
+            )
             num_snapshots = int(snapshot_data["num_snapshots"].item())
             self._snapshot_iterations = snapshot_data["iterations"].tolist()
 
@@ -1588,7 +1708,11 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
             snapshots = []
             for i in range(num_snapshots):
                 prefix = f"snap_{i}_"
-                snap = {k[len(prefix):]: v for k, v in snapshot_data.items() if k.startswith(prefix)}
+                snap = {
+                    k[len(prefix) :]: v
+                    for k, v in snapshot_data.items()
+                    if k.startswith(prefix)
+                }
                 snapshots.append(snap)
 
             # Build networks from snapshots
@@ -1612,15 +1736,20 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
 
             logger.info(
                 "SDCFRAgent P%d loaded %d snapshots (step=%s, weighting=%s)",
-                self.player_id, len(self._snapshot_nets),
-                checkpoint.get("training_step", "N/A"), self._weighting,
+                self.player_id,
+                len(self._snapshot_nets),
+                checkpoint.get("training_step", "N/A"),
+                self._weighting,
             )
 
-    def choose_action(
-        self, game_state, legal_actions: Set[GameAction]
-    ) -> GameAction:
+    def choose_action(self, game_state, legal_actions: Set[GameAction]) -> GameAction:
         """Choose action by averaging regret-matched strategies across all snapshots."""
-        from src.encoding import encode_infoset, encode_infoset_eppbs, encode_action_mask, index_to_action
+        from src.encoding import (
+            encode_infoset,
+            encode_infoset_eppbs,
+            encode_action_mask,
+            index_to_action,
+        )
         from src.cfr.exceptions import ActionEncodingError
 
         if not self.agent_state:
@@ -1658,7 +1787,11 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
                     strategy = self._get_strategy_from_advantages(advantages, mask_t)
 
                     if self._weighting == "linear":
-                        w = float(self._snapshot_iterations[i] + 1) if i < len(self._snapshot_iterations) else 1.0
+                        w = (
+                            float(self._snapshot_iterations[i] + 1)
+                            if i < len(self._snapshot_iterations)
+                            else 1.0
+                        )
                     else:
                         w = 1.0
 
@@ -1738,8 +1871,7 @@ class PPOAgentWrapper(BaseAgent):
             action=None,
             discard_top_card=initial_game_state.get_discard_top(),
             player_hand_sizes=[
-                initial_game_state.get_player_card_count(i)
-                for i in range(NUM_PLAYERS)
+                initial_game_state.get_player_card_count(i) for i in range(NUM_PLAYERS)
             ],
             stockpile_size=initial_game_state.get_stockpile_size(),
             drawn_card=None,
@@ -1908,15 +2040,17 @@ class NPlayerAgentWrapper(NeuralAgentWrapper):
         from src.networks import build_advantage_network
         from src.constants import N_PLAYER_INPUT_DIM, N_PLAYER_NUM_ACTIONS
 
-        self.num_players = kwargs.get('num_players', num_players)
-        self.qre_lambda = kwargs.get('qre_lambda', qre_lambda)
+        self.num_players = kwargs.get("num_players", num_players)
+        self.qre_lambda = kwargs.get("qre_lambda", qre_lambda)
         self._N_PLAYER_INPUT_DIM = N_PLAYER_INPUT_DIM
         self._N_PLAYER_NUM_ACTIONS = N_PLAYER_NUM_ACTIONS
 
         torch = self._torch
 
         if checkpoint_path is not None:
-            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
+            checkpoint = torch.load(
+                checkpoint_path, map_location=self.device, weights_only=True
+            )
             dcfr_config = checkpoint.get("dcfr_config", {})
 
             self._load_cambia_rules_mismatch_check(checkpoint, config, player_id)
@@ -1959,9 +2093,7 @@ class NPlayerAgentWrapper(NeuralAgentWrapper):
             self.advantage_net.to(self.device)
             self.advantage_net.eval()
 
-    def choose_action(
-        self, game_state, legal_actions: Set[GameAction]
-    ) -> GameAction:
+    def choose_action(self, game_state, legal_actions: Set[GameAction]) -> GameAction:
         """Choose an action using N-player encoding and QRE strategy."""
         from src.cfr.deep_trainer import qre_strategy
         from src.cfr.exceptions import ActionEncodingError
@@ -1978,9 +2110,11 @@ class NPlayerAgentWrapper(NeuralAgentWrapper):
             # Attempt N-player encoding; fall back to legacy if not available
             try:
                 from src.encoding import encode_infoset_nplayer
+
                 features = encode_infoset_nplayer(self.agent_state, decision_context)
             except (ImportError, AttributeError):
                 from src.encoding import encode_infoset
+
                 features = encode_infoset(self.agent_state, decision_context)
             action_mask = encode_action_mask(legal_list)
         except Exception as e:  # JUSTIFIED: evaluation resilience
@@ -1994,7 +2128,7 @@ class NPlayerAgentWrapper(NeuralAgentWrapper):
             mask_np = action_mask
             if mask_np.shape[0] < self._N_PLAYER_NUM_ACTIONS:
                 padded = np.zeros(self._N_PLAYER_NUM_ACTIONS, dtype=np.float32)
-                padded[:mask_np.shape[0]] = mask_np
+                padded[: mask_np.shape[0]] = mask_np
                 mask_np = padded
 
             mask_t = torch.from_numpy(mask_np.astype(bool)).unsqueeze(0).to(self.device)
@@ -2002,7 +2136,7 @@ class NPlayerAgentWrapper(NeuralAgentWrapper):
             # Ensure input dim matches
             if feat_t.shape[-1] != self._N_PLAYER_INPUT_DIM:
                 padded_feat = torch.zeros(1, self._N_PLAYER_INPUT_DIM, device=self.device)
-                padded_feat[0, :feat_t.shape[-1]] = feat_t[0]
+                padded_feat[0, : feat_t.shape[-1]] = feat_t[0]
                 feat_t = padded_feat
 
             advantages = self.advantage_net(feat_t, mask_t)
@@ -2083,7 +2217,9 @@ class DESCAAgentWrapper(NeuralAgentWrapper):
         super().__init__(player_id, config, device=device, use_argmax=use_argmax)
 
         torch = self._torch
-        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
+        checkpoint = torch.load(
+            checkpoint_path, map_location=self.device, weights_only=True
+        )
 
         try:
             from src.desca_networks import AvgStrategyNetwork
@@ -2175,7 +2311,9 @@ class DESCAAgentWrapper(NeuralAgentWrapper):
                 else int(st.stockpile_estimate)
             ),
             game_phase=(
-                st.game_phase.value if hasattr(st.game_phase, "value") else int(st.game_phase)
+                st.game_phase.value
+                if hasattr(st.game_phase, "value")
+                else int(st.game_phase)
             ),
             decision_context=(
                 decision_context.value
@@ -2235,7 +2373,9 @@ class DESCAAgentWrapper(NeuralAgentWrapper):
 
         seed = hash((id(game_state), chosen_abstract_idx)) & 0xFFFF_FFFF
         try:
-            return unabstract(chosen_abstract_idx, legal_list, self.agent_state, seed=seed)
+            return unabstract(
+                chosen_abstract_idx, legal_list, self.agent_state, seed=seed
+            )
         except (ValueError, Exception) as e:
             logger.error("DESCAAgent P%d unabstract error: %s", self.player_id, e)
             return random.choice(legal_list)
@@ -2318,9 +2458,13 @@ class PRTCFRAgentWrapper(NeuralAgentWrapper):
         self._cursor_obs_idx = 0
         logger.info(
             "PRTCFRAgent P%d loaded %d deployable snapshot(s) (iters=%s, weighting=%s)",
-            self.player_id, len(self._mixture),
-            self._mixture.iters if len(self._mixture) <= 12 else
-            f"{self._mixture.iters[:3]}..{self._mixture.iters[-3:]}",
+            self.player_id,
+            len(self._mixture),
+            (
+                self._mixture.iters
+                if len(self._mixture) <= 12
+                else f"{self._mixture.iters[:3]}..{self._mixture.iters[-3:]}"
+            ),
             weighting,
         )
 
@@ -2410,7 +2554,9 @@ class PRTCFRAgentWrapper(NeuralAgentWrapper):
                 logger.warning(
                     "PRTCFRAgent P%d: token stream over seq_cap=%d (%s); "
                     "falling back to keep-most-recent for this game.",
-                    self.player_id, self._seq_cap, e,
+                    self.player_id,
+                    self._seq_cap,
+                    e,
                 )
                 self._overflow_warned = True
             return encode_observation_sequence(
@@ -2459,7 +2605,8 @@ class PRTCFRAgentWrapper(NeuralAgentWrapper):
                     "PRTCFRAgent P%d: incremental cursor over seq_cap=%d; "
                     "falling back to full re-encode (keep-most-recent) for "
                     "the remainder of this game.",
-                    self.player_id, self._seq_cap,
+                    self.player_id,
+                    self._seq_cap,
                 )
                 self._overflow_warned = True
         tokens = self._encode_tokens()
@@ -2557,16 +2704,18 @@ def get_agent(agent_type: str, player_id: int, config, **kwargs) -> BaseAgent:
     elif agent_type.lower() in ("deep_cfr", "escher", "sd_cfr"):
         checkpoint_path = kwargs.get("checkpoint_path")
         if not checkpoint_path:
-            raise ValueError(
-                f"{agent_class.__name__} requires 'checkpoint_path'."
-            )
+            raise ValueError(f"{agent_class.__name__} requires 'checkpoint_path'.")
         device = kwargs.get("device", "cpu")
         use_argmax = kwargs.get("use_argmax", False)
-        return agent_class(player_id, config, checkpoint_path, device=device, use_argmax=use_argmax)
+        return agent_class(
+            player_id, config, checkpoint_path, device=device, use_argmax=use_argmax
+        )
     elif agent_type.lower() == "ppo":
         model_path = kwargs.get("model_path") or kwargs.get("checkpoint_path")
         if not model_path:
-            raise ValueError("PPOAgentWrapper requires 'model_path' or 'checkpoint_path'.")
+            raise ValueError(
+                "PPOAgentWrapper requires 'model_path' or 'checkpoint_path'."
+            )
         device = kwargs.get("device", "cpu")
         return PPOAgentWrapper(player_id, config, model_path, device=device)
     elif agent_type.lower() == "rebel":
@@ -2579,7 +2728,9 @@ def get_agent(agent_type: str, player_id: int, config, **kwargs) -> BaseAgent:
         checkpoint_path = kwargs.get("checkpoint_path", "")
         device = kwargs.get("device", "cpu")
         deterministic = kwargs.get("use_argmax", True)
-        return GTCFRAgentWrapper(player_id, config, checkpoint_path, device=device, deterministic=deterministic)
+        return GTCFRAgentWrapper(
+            player_id, config, checkpoint_path, device=device, deterministic=deterministic
+        )
     elif agent_type.lower() == "sog":
         checkpoint_path = kwargs.get("checkpoint_path", "")
         device = kwargs.get("device", "cpu")
@@ -2588,22 +2739,31 @@ def get_agent(agent_type: str, player_id: int, config, **kwargs) -> BaseAgent:
         cfr_iters = int(kwargs.get("cfr_iters", 10))
         deterministic = kwargs.get("use_argmax", True)
         return SoGAgentWrapper(
-            player_id, config, checkpoint_path,
-            device=device, eval_budget=eval_budget, c_puct=c_puct, cfr_iters=cfr_iters,
+            player_id,
+            config,
+            checkpoint_path,
+            device=device,
+            eval_budget=eval_budget,
+            c_puct=c_puct,
+            cfr_iters=cfr_iters,
             deterministic=deterministic,
         )
     elif agent_type.lower() == "sog_inference":
         checkpoint_path = kwargs.get("checkpoint_path", "")
         device = kwargs.get("device", "cpu")
         deterministic = kwargs.get("use_argmax", True)
-        return SoGInferenceAgentWrapper(player_id, config, checkpoint_path, device=device, deterministic=deterministic)
+        return SoGInferenceAgentWrapper(
+            player_id, config, checkpoint_path, device=device, deterministic=deterministic
+        )
     elif agent_type.lower() in ("desca", "dense-escher"):
         checkpoint_path = kwargs.get("checkpoint_path")
         if not checkpoint_path:
             raise ValueError("DESCAAgentWrapper requires 'checkpoint_path'.")
         device = kwargs.get("device", "cpu")
         use_argmax = kwargs.get("use_argmax", False)
-        return DESCAAgentWrapper(player_id, config, checkpoint_path, device=device, use_argmax=use_argmax)
+        return DESCAAgentWrapper(
+            player_id, config, checkpoint_path, device=device, use_argmax=use_argmax
+        )
     elif agent_type.lower() == "prt_cfr":
         checkpoint_path = kwargs.get("checkpoint_path")
         if not checkpoint_path:
@@ -2655,7 +2815,9 @@ def run_evaluation(
     """
     seat_scheme = (seat_scheme or "alternated").lower()
     if seat_scheme not in ("alternated", "fixed"):
-        logger.warning("Unknown seat_scheme %r; falling back to 'alternated'.", seat_scheme)
+        logger.warning(
+            "Unknown seat_scheme %r; falling back to 'alternated'.", seat_scheme
+        )
         seat_scheme = "alternated"
     alternate_seats = seat_scheme == "alternated"
     logger.info("--- Starting Agent Evaluation ---")
@@ -2668,10 +2830,28 @@ def run_evaluation(
             logger.error("Strategy file path (--strategy) required for CFR agent.")
             sys.exit(1)
         logger.info("CFR Strategy File: %s", strategy_path)
-    _checkpoint_agent_types = {"deep_cfr", "escher", "sd_cfr", "nplayer", "ppo", "rebel", "gtcfr", "sog", "sog_inference", "desca", "dense-escher", "prt_cfr"}
-    if agent1_type.lower() in _checkpoint_agent_types or agent2_type.lower() in _checkpoint_agent_types:
+    _checkpoint_agent_types = {
+        "deep_cfr",
+        "escher",
+        "sd_cfr",
+        "nplayer",
+        "ppo",
+        "rebel",
+        "gtcfr",
+        "sog",
+        "sog_inference",
+        "desca",
+        "dense-escher",
+        "prt_cfr",
+    }
+    if (
+        agent1_type.lower() in _checkpoint_agent_types
+        or agent2_type.lower() in _checkpoint_agent_types
+    ):
         if not checkpoint_path:
-            logger.error("Checkpoint path (--checkpoint) required for %s agent.", agent1_type)
+            logger.error(
+                "Checkpoint path (--checkpoint) required for %s agent.", agent1_type
+            )
             sys.exit(1)
         logger.info("Checkpoint: %s", checkpoint_path)
 
@@ -2704,11 +2884,19 @@ def run_evaluation(
         if agent1_type.lower() == "cfr":
             agent1_kwargs = {"average_strategy": average_strategy}
         elif agent1_type.lower() in _checkpoint_agent_types:
-            agent1_kwargs = {"checkpoint_path": checkpoint_path, "device": device, "use_argmax": use_argmax}
+            agent1_kwargs = {
+                "checkpoint_path": checkpoint_path,
+                "device": device,
+                "use_argmax": use_argmax,
+            }
         if agent2_type.lower() == "cfr":
             agent2_kwargs = {"average_strategy": average_strategy}
         elif agent2_type.lower() in _checkpoint_agent_types:
-            agent2_kwargs = {"checkpoint_path": checkpoint_path, "device": device, "use_argmax": use_argmax}
+            agent2_kwargs = {
+                "checkpoint_path": checkpoint_path,
+                "device": device,
+                "use_argmax": use_argmax,
+            }
 
         # Build each side at the seat(s) it will occupy. A wrapper's player_id is
         # baked in at construction and threaded into its AgentState, so swapping
@@ -2763,7 +2951,9 @@ def run_evaluation(
         output_file = open(output_path, "w", encoding="utf-8")
 
     try:
-        for game_num in tqdm(range(1, num_games + 1), desc="Simulating Games", unit="game"):
+        for game_num in tqdm(
+            range(1, num_games + 1), desc="Simulating Games", unit="game"
+        ):
             game_start = time.perf_counter()
             game_actions: List[Dict] = []
             game_winner = "error"
@@ -2788,8 +2978,12 @@ def run_evaluation(
                 # (1,2), (3,4), ... under one seed; the seat differs within a pair.
                 deck_seed: Optional[int] = None
                 if crn_seed_base is not None:
-                    pair_index = (game_num - 1) // 2 if alternate_seats else (game_num - 1)
-                    seed_key = f"{crn_seed_base}|{crn_identity}|{agent2_type}|{pair_index}"
+                    pair_index = (
+                        (game_num - 1) // 2 if alternate_seats else (game_num - 1)
+                    )
+                    seed_key = (
+                        f"{crn_seed_base}|{crn_identity}|{agent2_type}|{pair_index}"
+                    )
                     deck_seed = int(
                         hashlib.sha256(seed_key.encode("utf-8")).hexdigest()[:8], 16
                     )
@@ -2860,21 +3054,29 @@ def run_evaluation(
                             break
 
                         # Choose action
-                        chosen_action = current_agent.choose_action(game_state, legal_actions)
+                        chosen_action = current_agent.choose_action(
+                            game_state, legal_actions
+                        )
 
                         # Track first-turn Cambia calls by the agent under test
                         # (which may sit at either seat under alternation).
-                        if turn == 1 and acting_player_id == agent_seat and type(chosen_action).__name__ == "ActionCallCambia":
+                        if (
+                            turn == 1
+                            and acting_player_id == agent_seat
+                            and type(chosen_action).__name__ == "ActionCallCambia"
+                        ):
                             t1_cambia_count += 1
 
                         # Collect action record if logging
                         if output_file is not None:
-                            game_actions.append({
-                                "turn": turn,
-                                "player": acting_player_id,
-                                "action": type(chosen_action).__name__,
-                                "legal_count": len(legal_actions),
-                            })
+                            game_actions.append(
+                                {
+                                    "turn": turn,
+                                    "player": acting_player_id,
+                                    "action": type(chosen_action).__name__,
+                                    "legal_count": len(legal_actions),
+                                }
+                            )
 
                         # Apply action
                         state_delta, undo_info = game_state.apply_action(chosen_action)
@@ -2907,7 +3109,8 @@ def run_evaluation(
 
                         # Create observation AFTER action (for stateful agents)
                         has_stateful = any(
-                            isinstance(a, (CFRAgentWrapper, NeuralAgentWrapper)) for a in agents
+                            isinstance(a, (CFRAgentWrapper, NeuralAgentWrapper))
+                            for a in agents
                         )
                         observation = None
                         if has_stateful and hasattr(current_agent, "_create_observation"):
@@ -2918,7 +3121,9 @@ def run_evaluation(
                         # Update agent states (only stateful agents need it)
                         if observation:
                             for agent in agents:
-                                if isinstance(agent, (CFRAgentWrapper, NeuralAgentWrapper)):
+                                if isinstance(
+                                    agent, (CFRAgentWrapper, NeuralAgentWrapper)
+                                ):
                                     agent.update_state(observation)
 
                     except GameStateError as e_turn:
@@ -2993,7 +3198,9 @@ def run_evaluation(
                 elif turn >= max_turns:
                     logger.debug(
                         "Game %d hit the action-count safety valve (%d actions) without "
-                        "engine termination. Scoring as MaxTurnTie.", game_num, max_turns
+                        "engine termination. Scoring as MaxTurnTie.",
+                        game_num,
+                        max_turns,
                     )
                     results["MaxTurnTies"] += 1
                     game_winner = "max_turns"
@@ -3055,7 +3262,9 @@ def run_evaluation(
     # Report JSONL overhead if logging was enabled
     if output_path is not None:
         avg_overhead_ms = jsonl_overhead_ms / num_games if num_games > 0 else 0.0
-        pct_overhead = (jsonl_overhead_ms / total_time_ms * 100) if total_time_ms > 0 else 0.0
+        pct_overhead = (
+            (jsonl_overhead_ms / total_time_ms * 100) if total_time_ms > 0 else 0.0
+        )
         logger.info(
             "JSONL logging overhead: total=%.1fms, avg=%.3fms/game, pct=%.2f%% of total time",
             jsonl_overhead_ms,
@@ -3073,11 +3282,15 @@ def run_evaluation(
         enhanced_stats["avg_score_margin"] = avg_margin
     if game_turns_list:
         avg_turns = sum(game_turns_list) / len(game_turns_list)
-        variance = sum((t - avg_turns) ** 2 for t in game_turns_list) / len(game_turns_list)
+        variance = sum((t - avg_turns) ** 2 for t in game_turns_list) / len(
+            game_turns_list
+        )
         std_turns = math.sqrt(variance)
         enhanced_stats["avg_game_turns"] = avg_turns
         enhanced_stats["std_game_turns"] = std_turns
-    enhanced_stats["t1_cambia_rate"] = t1_cambia_count / num_games if num_games > 0 else 0.0
+    enhanced_stats["t1_cambia_rate"] = (
+        t1_cambia_count / num_games if num_games > 0 else 0.0
+    )
     # Eval-hygiene provenance: seat scheme actually used, whether the agent under
     # test genuinely played both seats (seat_balanced), and the CRN seed root.
     enhanced_stats["seat_scheme"] = seat_scheme
@@ -3142,8 +3355,16 @@ def _run_single_baseline(args: tuple) -> tuple:
         parent reattaches it so enhanced/hygiene stats survive parallel runs.
     """
     (
-        config_path, agent_type, baseline, num_games, checkpoint_path, device,
-        output_path, use_argmax, seat_scheme, crn_seed_base,
+        config_path,
+        agent_type,
+        baseline,
+        num_games,
+        checkpoint_path,
+        device,
+        output_path,
+        use_argmax,
+        seat_scheme,
+        crn_seed_base,
     ) = args
     results = run_evaluation(
         config_path=config_path,
@@ -3215,11 +3436,20 @@ def run_evaluation_multi_baseline(
     work_items = []
     for baseline in baselines:
         output_path = f"{output_dir}/{baseline}.jsonl" if output_dir is not None else None
-        work_items.append((
-            config_path, agent_type, baseline, num_games,
-            checkpoint_path, device, output_path, use_argmax,
-            seat_scheme, crn_seed_base,
-        ))
+        work_items.append(
+            (
+                config_path,
+                agent_type,
+                baseline,
+                num_games,
+                checkpoint_path,
+                device,
+                output_path,
+                use_argmax,
+                seat_scheme,
+                crn_seed_base,
+            )
+        )
 
     def _reattach(results: Counter, stats: Dict) -> Counter:
         # Counter pickling drops dynamic attributes, so the worker returns stats
@@ -3237,7 +3467,9 @@ def run_evaluation_multi_baseline(
         return all_results
 
     logger.info(
-        "Parallel eval: %d baselines across %d workers", len(baselines), max_workers,
+        "Parallel eval: %d baselines across %d workers",
+        len(baselines),
+        max_workers,
     )
     all_results = {}
     ctx = mp.get_context("spawn")
@@ -3245,15 +3477,16 @@ def run_evaluation_multi_baseline(
 
     with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as pool:
         future_to_baseline = {
-            pool.submit(_run_single_baseline, item): item[2]
-            for item in work_items
+            pool.submit(_run_single_baseline, item): item[2] for item in work_items
         }
         for future in as_completed(future_to_baseline):
             baseline = future_to_baseline[future]
             try:
                 _, results, stats = future.result()
                 all_results[baseline] = _reattach(results, stats)
-                logger.info("Completed %s vs %s (%d games)", agent_type, baseline, num_games)
+                logger.info(
+                    "Completed %s vs %s (%d games)", agent_type, baseline, num_games
+                )
             except Exception:
                 logger.exception("Failed evaluating vs %s", baseline)
                 all_results[baseline] = Counter()
@@ -3280,7 +3513,11 @@ def run_head_to_head(
         std_game_turns.
     """
     logger.info(
-        "Head-to-head (%s): %s vs %s (%d games)", agent_type, checkpoint_a, checkpoint_b, num_games
+        "Head-to-head (%s): %s vs %s (%d games)",
+        agent_type,
+        checkpoint_a,
+        checkpoint_b,
+        num_games,
     )
 
     _agent_class = AGENT_REGISTRY.get(agent_type.lower(), DeepCFRAgentWrapper)
@@ -3293,7 +3530,7 @@ def run_head_to_head(
 
     for game_num in range(1, num_games + 1):
         # Alternate who goes first
-        a_is_p0 = (game_num % 2 == 1)
+        a_is_p0 = game_num % 2 == 1
         if a_is_p0:
             agent0 = _agent_class(0, config, checkpoint_a, device=device)
             agent1 = _agent_class(1, config, checkpoint_b, device=device)
@@ -3412,7 +3649,11 @@ def run_head_to_head_typed(
     """
     logger.info(
         "Head-to-head-typed: %s (%s) vs %s (%s) (%d games)",
-        agent_a_type, checkpoint_a, agent_b_type, checkpoint_b, num_games,
+        agent_a_type,
+        checkpoint_a,
+        agent_b_type,
+        checkpoint_b,
+        num_games,
     )
 
     wins_a = 0
@@ -3422,15 +3663,43 @@ def run_head_to_head_typed(
     turns_list: List[int] = []
 
     for game_num in range(1, num_games + 1):
-        a_is_p0 = (game_num % 2 == 1)
+        a_is_p0 = game_num % 2 == 1
 
         try:
             if a_is_p0:
-                agent0 = get_agent(agent_a_type, 0, config, checkpoint_path=checkpoint_a, device=device, use_argmax=use_argmax_a)
-                agent1 = get_agent(agent_b_type, 1, config, checkpoint_path=checkpoint_b, device=device, use_argmax=use_argmax_b)
+                agent0 = get_agent(
+                    agent_a_type,
+                    0,
+                    config,
+                    checkpoint_path=checkpoint_a,
+                    device=device,
+                    use_argmax=use_argmax_a,
+                )
+                agent1 = get_agent(
+                    agent_b_type,
+                    1,
+                    config,
+                    checkpoint_path=checkpoint_b,
+                    device=device,
+                    use_argmax=use_argmax_b,
+                )
             else:
-                agent0 = get_agent(agent_b_type, 0, config, checkpoint_path=checkpoint_b, device=device, use_argmax=use_argmax_b)
-                agent1 = get_agent(agent_a_type, 1, config, checkpoint_path=checkpoint_a, device=device, use_argmax=use_argmax_a)
+                agent0 = get_agent(
+                    agent_b_type,
+                    0,
+                    config,
+                    checkpoint_path=checkpoint_b,
+                    device=device,
+                    use_argmax=use_argmax_b,
+                )
+                agent1 = get_agent(
+                    agent_a_type,
+                    1,
+                    config,
+                    checkpoint_path=checkpoint_a,
+                    device=device,
+                    use_argmax=use_argmax_a,
+                )
 
             agents = [agent0, agent1]
 
@@ -3577,9 +3846,7 @@ def persist_eval_results(
             p = win_rate
             denom = 1 + z**2 / total
             center = (p + z**2 / (2 * total)) / denom
-            margin = (z / denom) * math.sqrt(
-                p * (1 - p) / total + z**2 / (4 * total**2)
-            )
+            margin = (z / denom) * math.sqrt(p * (1 - p) / total + z**2 / (4 * total**2))
             ci_low = max(0.0, center - margin)
             ci_high = min(1.0, center + margin)
 
@@ -3609,12 +3876,24 @@ def persist_eval_results(
             "p0_wins": p0_wins,
             "p1_wins": p1_wins,
             "ties": ties,
-            "adv_loss": None if adv_loss is None or adv_loss != adv_loss else round(adv_loss, 6),
-            "strat_loss": None if strat_loss is None or strat_loss != strat_loss else round(strat_loss, 6),
+            "adv_loss": (
+                None if adv_loss is None or adv_loss != adv_loss else round(adv_loss, 6)
+            ),
+            "strat_loss": (
+                None
+                if strat_loss is None or strat_loss != strat_loss
+                else round(strat_loss, 6)
+            ),
             "timestamp": timestamp,
-            "avg_game_turns": round(avg_game_turns, 2) if avg_game_turns is not None else None,
-            "t1_cambia_rate": round(t1_cambia_rate, 4) if t1_cambia_rate is not None else None,
-            "avg_score_margin": round(avg_score_margin, 2) if avg_score_margin is not None else None,
+            "avg_game_turns": (
+                round(avg_game_turns, 2) if avg_game_turns is not None else None
+            ),
+            "t1_cambia_rate": (
+                round(t1_cambia_rate, 4) if t1_cambia_rate is not None else None
+            ),
+            "avg_score_margin": (
+                round(avg_score_margin, 2) if avg_score_margin is not None else None
+            ),
             "seat_scheme": row_seat_scheme,
             "selection_mode": row_selection_mode,
             "crn_seed": None if row_crn_seed is None else str(row_crn_seed),
@@ -3666,9 +3945,7 @@ def persist_eval_results(
                 except Exception:
                     pass
 
-            algorithm = run_db.infer_algorithm(
-                config_dict, checkpoint_keys=ckpt_keys
-            )
+            algorithm = run_db.infer_algorithm(config_dict, checkpoint_keys=ckpt_keys)
             run_id = run_db.upsert_run(
                 db,
                 name=run_name,
@@ -3695,9 +3972,7 @@ def persist_eval_results(
                 pass
             db.close()
         except Exception:
-            logger.warning(
-                "SQLite dual-write failed for %s iter %d", run_name, iteration
-            )
+            logger.warning("SQLite dual-write failed for %s iter %d", run_name, iteration)
 
 
 if __name__ == "__main__":

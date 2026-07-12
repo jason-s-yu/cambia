@@ -94,6 +94,7 @@ def save_agent_data(data_to_save: Dict[str, Any], filepath: str) -> bool:
 
         # Save the data
         import joblib
+
         joblib.dump(data_to_save, filepath)
 
         iteration = data_to_save.get("iteration", "N/A")
@@ -117,6 +118,7 @@ def load_agent_data(filepath: str) -> Optional[Dict[str, Any]]:
     try:
         if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
             import joblib
+
             loaded_data = joblib.load(filepath)
             iteration = loaded_data.get("iteration", 0)
             # Basic validation: Check if expected keys exist

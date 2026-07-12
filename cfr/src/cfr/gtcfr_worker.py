@@ -65,10 +65,10 @@ _MAX_DECISIONS: int = 200  # safety cap: abort episode if stuck in loops
 class EpisodeSample:
     """One training sample from a GT-CFR self-play episode decision point."""
 
-    features: np.ndarray      # (PBS_INPUT_DIM,) = (956,) float32
+    features: np.ndarray  # (PBS_INPUT_DIM,) = (956,) float32
     value_target: np.ndarray  # (VALUE_DIM,)     = (936,) float32
-    policy_target: np.ndarray # (NUM_ACTIONS,)   = (146,) float32
-    action_mask: np.ndarray   # (NUM_ACTIONS,)   = (146,) bool
+    policy_target: np.ndarray  # (NUM_ACTIONS,)   = (146,) float32
+    action_mask: np.ndarray  # (NUM_ACTIONS,)   = (146,) bool
 
 
 def _build_pbs(game: Any, range_p0: np.ndarray, range_p1: np.ndarray) -> PBS:
@@ -202,6 +202,7 @@ def gtcfr_self_play_episode(
 
                     # --- Per-hand-type policy matrix BEFORE apply_action ---
                     from .range_utils import compute_policy_matrix_cvpn
+
                     policy_matrix = compute_policy_matrix_cvpn(
                         cvpn, game, range_p0, range_p1
                     )

@@ -39,10 +39,10 @@ from src.constants import (
     ActionSnapOpponentMove,
 )
 
-
 # ---------------------------------------------------------------------------
 # 1. encode_infoset_nplayer dimension test
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.skip(
     reason="Phase 0 F8 carry-forward: N-player FFI constants stale (580/452 should be "
@@ -99,12 +99,16 @@ class TestNPlayerEncodingDimension:
         # Powerset masks should all be zero
         assert np.all(out[:N_PLAYER_POWERSET_DIM] == 0.0)
         # Identity section should all be zero
-        assert np.all(out[N_PLAYER_POWERSET_DIM:N_PLAYER_POWERSET_DIM + N_PLAYER_IDENTITY_DIM] == 0.0)
+        assert np.all(
+            out[N_PLAYER_POWERSET_DIM : N_PLAYER_POWERSET_DIM + N_PLAYER_IDENTITY_DIM]
+            == 0.0
+        )
 
 
 # ---------------------------------------------------------------------------
 # 2. N-player action index round-trip (all 452 indices)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.skip(
     reason="Phase 0 F8 carry-forward: N-player FFI constants stale (580/452 should be "
@@ -133,7 +137,9 @@ class TestNPlayerActionIndices:
 
     def test_peek_own_all_slots(self):
         for slot in range(6):
-            idx = nplayer_action_to_index(ActionAbilityPeekOwnSelect(target_hand_index=slot))
+            idx = nplayer_action_to_index(
+                ActionAbilityPeekOwnSelect(target_hand_index=slot)
+            )
             assert idx == 11 + slot
 
     def test_peek_other_all_combinations(self):
@@ -145,7 +151,9 @@ class TestNPlayerActionIndices:
                     opp_idx=opp_idx,
                 )
                 expected = 17 + slot * 5 + opp_idx
-                assert idx == expected, f"PeekOther({slot},{opp_idx}): expected {expected}, got {idx}"
+                assert (
+                    idx == expected
+                ), f"PeekOther({slot},{opp_idx}): expected {expected}, got {idx}"
 
     def test_blind_swap_range(self):
         # 47 + own*30 + opp_slot*5 + opp_idx
@@ -158,7 +166,7 @@ class TestNPlayerActionIndices:
             ActionAbilityBlindSwapSelect(own_hand_index=5, opponent_hand_index=5),
             opp_idx=4,
         )
-        assert idx == 47 + 5*30 + 5*5 + 4  # 47 + 150 + 25 + 4 = 226
+        assert idx == 47 + 5 * 30 + 5 * 5 + 4  # 47 + 150 + 25 + 4 = 226
 
     def test_king_look_range(self):
         idx = nplayer_action_to_index(
@@ -170,11 +178,17 @@ class TestNPlayerActionIndices:
             ActionAbilityKingLookSelect(own_hand_index=5, opponent_hand_index=5),
             opp_idx=4,
         )
-        assert idx == 227 + 5*30 + 5*5 + 4  # 227 + 150 + 25 + 4 = 406
+        assert idx == 227 + 5 * 30 + 5 * 5 + 4  # 227 + 150 + 25 + 4 = 406
 
     def test_king_swap_decision(self):
-        assert nplayer_action_to_index(ActionAbilityKingSwapDecision(perform_swap=False)) == 407
-        assert nplayer_action_to_index(ActionAbilityKingSwapDecision(perform_swap=True)) == 408
+        assert (
+            nplayer_action_to_index(ActionAbilityKingSwapDecision(perform_swap=False))
+            == 407
+        )
+        assert (
+            nplayer_action_to_index(ActionAbilityKingSwapDecision(perform_swap=True))
+            == 408
+        )
 
     def test_pass_snap(self):
         assert nplayer_action_to_index(ActionPassSnap()) == 409
@@ -216,24 +230,36 @@ class TestNPlayerActionIndices:
             (ActionReplace(target_hand_index=3), {}),
             (ActionAbilityPeekOwnSelect(target_hand_index=2), {}),
             (ActionAbilityPeekOtherSelect(target_opponent_hand_index=1), {"opp_idx": 2}),
-            (ActionAbilityBlindSwapSelect(own_hand_index=1, opponent_hand_index=2), {"opp_idx": 1}),
-            (ActionAbilityKingLookSelect(own_hand_index=0, opponent_hand_index=3), {"opp_idx": 0}),
+            (
+                ActionAbilityBlindSwapSelect(own_hand_index=1, opponent_hand_index=2),
+                {"opp_idx": 1},
+            ),
+            (
+                ActionAbilityKingLookSelect(own_hand_index=0, opponent_hand_index=3),
+                {"opp_idx": 0},
+            ),
             (ActionAbilityKingSwapDecision(perform_swap=True), {}),
             (ActionPassSnap(), {}),
             (ActionSnapOwn(own_card_hand_index=4), {}),
             (ActionSnapOpponent(opponent_target_hand_index=2), {"opp_idx": 3}),
-            (ActionSnapOpponentMove(own_card_to_move_hand_index=1, target_empty_slot_index=2), {}),
+            (
+                ActionSnapOpponentMove(
+                    own_card_to_move_hand_index=1, target_empty_slot_index=2
+                ),
+                {},
+            ),
         ]
         for action, kwargs in test_actions:
             idx = nplayer_action_to_index(action, **kwargs)
-            assert 0 <= idx < N_PLAYER_NUM_ACTIONS, (
-                f"{type(action).__name__} gave index {idx} out of range [0, {N_PLAYER_NUM_ACTIONS})"
-            )
+            assert (
+                0 <= idx < N_PLAYER_NUM_ACTIONS
+            ), f"{type(action).__name__} gave index {idx} out of range [0, {N_PLAYER_NUM_ACTIONS})"
 
 
 # ---------------------------------------------------------------------------
 # 3. Action mask dimension test
 # ---------------------------------------------------------------------------
+
 
 class TestNPlayerActionMask:
     def test_encode_nplayer_action_mask_shape(self):
@@ -252,6 +278,7 @@ class TestNPlayerActionMask:
 # 4. Powerset mask encoding verification
 # ---------------------------------------------------------------------------
 
+
 class TestPowersetMaskEncoding:
     def test_single_knower(self):
         """Slot (0, 0) known only by player 0 → bit 0 set in first 6-bit block."""
@@ -268,9 +295,9 @@ class TestPowersetMaskEncoding:
             cambia_state=2,
         )
         # Slot (0,0) is global_slot=0, offset=0
-        assert out[0] == 1.0   # bit 0 (player 0 knows)
-        assert out[1] == 0.0   # bit 1 (player 1 doesn't know)
-        assert out[2] == 0.0   # bit 2 (player 2 doesn't know)
+        assert out[0] == 1.0  # bit 0 (player 0 knows)
+        assert out[1] == 0.0  # bit 1 (player 1 doesn't know)
+        assert out[2] == 0.0  # bit 2 (player 2 doesn't know)
 
     def test_multiple_knowers(self):
         """Slot (1, 2) known by players 0 and 2."""
@@ -288,10 +315,10 @@ class TestPowersetMaskEncoding:
             cambia_state=2,
         )
         base = global_slot * N_PLAYER_MAX_PLAYERS
-        assert out[base + 0] == 1.0   # player 0 knows
-        assert out[base + 1] == 0.0   # player 1 doesn't know
-        assert out[base + 2] == 1.0   # player 2 knows
-        assert out[base + 3] == 0.0   # player 3 doesn't know
+        assert out[base + 0] == 1.0  # player 0 knows
+        assert out[base + 1] == 0.0  # player 1 doesn't know
+        assert out[base + 2] == 1.0  # player 2 knows
+        assert out[base + 3] == 0.0  # player 3 doesn't know
 
     def test_nonexistent_player_slots_are_zero(self):
         """Slots for players beyond num_players must remain zero."""
@@ -309,18 +336,19 @@ class TestPowersetMaskEncoding:
         # Global slot for (5,0) = 5*6+0 = 30
         base = 30 * N_PLAYER_MAX_PLAYERS
         # All bits should be 0 since player 5 doesn't exist in a 2P game
-        assert np.all(out[base:base + N_PLAYER_MAX_PLAYERS] == 0.0)
+        assert np.all(out[base : base + N_PLAYER_MAX_PLAYERS] == 0.0)
 
 
 # ---------------------------------------------------------------------------
 # 5. Slot identity encoding with known/unknown cards
 # ---------------------------------------------------------------------------
 
+
 class TestSlotIdentityEncoding:
     def test_known_card_sets_identity(self):
         """When encoding player knows a card, its bucket identity is set."""
         km = {(0, 0): {0}}  # player 0 knows slot (0,0)
-        sb = {(0, 0): 5}    # bucket 5 = PEEK_SELF
+        sb = {(0, 0): 5}  # bucket 5 = PEEK_SELF
         out = encode_infoset_nplayer(
             knowledge_masks=km,
             slot_buckets=sb,
@@ -357,7 +385,7 @@ class TestSlotIdentityEncoding:
         )
         identity_base = N_PLAYER_POWERSET_DIM
         # Slot (0,0) identity block should be all zero
-        assert np.all(out[identity_base:identity_base + 9] == 0.0)
+        assert np.all(out[identity_base : identity_base + 9] == 0.0)
 
     def test_public_knowledge_sets_identity(self):
         """When a card is public knowledge, any encoding player sees the identity."""
@@ -384,6 +412,7 @@ class TestSlotIdentityEncoding:
 # 6. Public features section
 # ---------------------------------------------------------------------------
 
+
 class TestPublicFeatures:
     def _pub_offset(self):
         return N_PLAYER_POWERSET_DIM + N_PLAYER_IDENTITY_DIM  # 540
@@ -391,10 +420,15 @@ class TestPublicFeatures:
     def test_discard_bucket_onehot(self):
         for bucket in range(10):
             out = encode_infoset_nplayer(
-                knowledge_masks={}, slot_buckets={},
-                encoding_player=0, num_players=2,
+                knowledge_masks={},
+                slot_buckets={},
+                encoding_player=0,
+                num_players=2,
                 discard_top_bucket=bucket,
-                stock_estimate=0, game_phase=0, decision_context=0, cambia_state=2,
+                stock_estimate=0,
+                game_phase=0,
+                decision_context=0,
+                cambia_state=2,
             )
             pub = self._pub_offset()
             for b in range(10):
@@ -403,21 +437,35 @@ class TestPublicFeatures:
 
     def test_drawn_card_none(self):
         out = encode_infoset_nplayer(
-            knowledge_masks={}, slot_buckets={},
-            encoding_player=0, num_players=2,
-            discard_top_bucket=0, stock_estimate=0, game_phase=0,
-            decision_context=0, cambia_state=2, drawn_card_bucket=-1,
+            knowledge_masks={},
+            slot_buckets={},
+            encoding_player=0,
+            num_players=2,
+            discard_top_bucket=0,
+            stock_estimate=0,
+            game_phase=0,
+            decision_context=0,
+            cambia_state=2,
+            drawn_card_bucket=-1,
         )
         pub = self._pub_offset()
-        drawn_base = pub + 10 + 4 + 6 + 6 + 3  # after discard(10)+stock(4)+phase(6)+ctx(6)+cambia(3)
+        drawn_base = (
+            pub + 10 + 4 + 6 + 6 + 3
+        )  # after discard(10)+stock(4)+phase(6)+ctx(6)+cambia(3)
         assert out[drawn_base + 10] == 1.0  # NONE index
 
     def test_drawn_card_known(self):
         out = encode_infoset_nplayer(
-            knowledge_masks={}, slot_buckets={},
-            encoding_player=0, num_players=2,
-            discard_top_bucket=0, stock_estimate=0, game_phase=0,
-            decision_context=0, cambia_state=2, drawn_card_bucket=4,
+            knowledge_masks={},
+            slot_buckets={},
+            encoding_player=0,
+            num_players=2,
+            discard_top_bucket=0,
+            stock_estimate=0,
+            game_phase=0,
+            decision_context=0,
+            cambia_state=2,
+            drawn_card_bucket=4,
         )
         pub = self._pub_offset()
         drawn_base = pub + 10 + 4 + 6 + 6 + 3
@@ -429,11 +477,13 @@ class TestPublicFeatures:
 # 7. AgentState N-player knowledge mask methods
 # ---------------------------------------------------------------------------
 
+
 class TestAgentStateNPlayerMasks:
     def _make_agent_state(self):
         """Create a minimal AgentState for testing."""
         from unittest.mock import MagicMock
         from src.agent_state import AgentState
+
         config = MagicMock()
         config.cambia_rules.penaltyDrawCount = 1
         config.cambia_rules.use_jokers = 0
@@ -502,6 +552,7 @@ class TestAgentStateNPlayerMasks:
 # 8. GoEngine N-player construction (FFI — skip if libcambia unavailable)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.skip(
     reason="Phase 0 F8 carry-forward: N-player FFI constants stale (580/452 should be "
     "856/620); malloc crash on legal_actions. Fix in Phase 3."
@@ -511,6 +562,7 @@ class TestGoEngineNPlayer:
     def skip_if_no_lib(self):
         try:
             from src.ffi.bridge import _get_lib
+
             _get_lib()
         except (FileNotFoundError, OSError):
             pytest.skip("libcambia.so not available")
@@ -519,6 +571,7 @@ class TestGoEngineNPlayer:
         """GoEngine can be constructed with num_players=4 via house_rules."""
         import warnings
         from src.ffi.bridge import GoEngine
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
             # Use default (no rules) with num_players=4
@@ -531,6 +584,7 @@ class TestGoEngineNPlayer:
         """nplayer_legal_actions_mask returns (452,) array."""
         import warnings
         from src.ffi.bridge import GoEngine
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
             with GoEngine(seed=42, num_players=4) as game:
@@ -542,6 +596,7 @@ class TestGoEngineNPlayer:
         """apply_nplayer_action raises ValueError for out-of-range index."""
         import warnings
         from src.ffi.bridge import GoEngine
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
             with GoEngine(seed=42, num_players=3) as game:
@@ -553,6 +608,7 @@ class TestGoEngineNPlayer:
 # 9. GoAgentState N-player encode (FFI — skip if libcambia unavailable)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.skip(
     reason="Phase 0 F8 carry-forward: N-player FFI constants stale (580/452 should be "
     "856/620); malloc crash on encode_nplayer. Fix in Phase 3."
@@ -562,6 +618,7 @@ class TestGoAgentStateNPlayer:
     def skip_if_no_lib(self):
         try:
             from src.ffi.bridge import _get_lib
+
             _get_lib()
         except (FileNotFoundError, OSError):
             pytest.skip("libcambia.so not available")
@@ -570,6 +627,7 @@ class TestGoAgentStateNPlayer:
         """GoAgentState.new_nplayer() creates agent for N-player game."""
         import warnings
         from src.ffi.bridge import GoEngine, GoAgentState
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
             with GoEngine(seed=123, num_players=4) as game:
@@ -580,6 +638,7 @@ class TestGoAgentStateNPlayer:
         """encode_nplayer returns (580,) float32 array."""
         import warnings
         from src.ffi.bridge import GoEngine, GoAgentState
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
             with GoEngine(seed=456, num_players=4) as game:
@@ -592,6 +651,7 @@ class TestGoAgentStateNPlayer:
         """nplayer_action_mask returns (452,) uint8 array."""
         import warnings
         from src.ffi.bridge import GoEngine, GoAgentState
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
             with GoEngine(seed=789, num_players=4) as game:

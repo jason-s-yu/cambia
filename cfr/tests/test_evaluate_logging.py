@@ -31,10 +31,10 @@ from src.agents.baseline_agents import (
     GreedyAgent,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helper: minimal config stub matching what the game engine needs
 # ---------------------------------------------------------------------------
+
 
 class _FakeRules:
     allowDrawFromDiscardPile = False
@@ -75,6 +75,7 @@ _config = _FakeConfig()
 # Part A: Baseline Registry
 # ---------------------------------------------------------------------------
 
+
 class TestBaselineRegistry:
     def test_imperfect_greedy_in_registry(self):
         assert "imperfect_greedy" in AGENT_REGISTRY
@@ -109,7 +110,13 @@ class TestBaselineRegistry:
         assert isinstance(agent, AggressiveSnapAgent)
 
     def test_get_agent_all_five_baseline_types(self):
-        for agent_type in ["random", "greedy", "imperfect_greedy", "memory_heuristic", "aggressive_snap"]:
+        for agent_type in [
+            "random",
+            "greedy",
+            "imperfect_greedy",
+            "memory_heuristic",
+            "aggressive_snap",
+        ]:
             agent = get_agent(agent_type, player_id=0, config=_config)
             assert agent is not None, f"get_agent({agent_type!r}) returned None"
 
@@ -118,11 +125,14 @@ class TestBaselineRegistry:
 # Part B: JSONL Output Format
 # ---------------------------------------------------------------------------
 
+
 class TestJsonlOutput:
     def _run_small_eval(self, output_path, num_games=5):
         """Helper: run a tiny evaluation with RandomAgent vs RandomAgent."""
-        with patch("src.evaluate_agents.load_config", return_value=_config), \
-             patch("src.evaluate_agents.sys.exit") as mock_exit:
+        with (
+            patch("src.evaluate_agents.load_config", return_value=_config),
+            patch("src.evaluate_agents.sys.exit") as mock_exit,
+        ):
             results = run_evaluation(
                 config_path="dummy.yaml",
                 agent1_type="random",
@@ -151,7 +161,9 @@ class TestJsonlOutput:
             self._run_small_eval(path, num_games=num_games)
             with open(path) as f:
                 lines = [l for l in f if l.strip()]
-            assert len(lines) == num_games, f"Expected {num_games} lines, got {len(lines)}"
+            assert (
+                len(lines) == num_games
+            ), f"Expected {num_games} lines, got {len(lines)}"
         finally:
             os.unlink(path)
 
@@ -197,7 +209,9 @@ class TestJsonlOutput:
             with open(path) as f:
                 records = [json.loads(l) for l in f if l.strip()]
             game_ids = [r["game_id"] for r in records]
-            assert game_ids == list(range(1, num_games + 1)), f"Game IDs not sequential: {game_ids}"
+            assert game_ids == list(
+                range(1, num_games + 1)
+            ), f"Game IDs not sequential: {game_ids}"
         finally:
             os.unlink(path)
 
@@ -212,7 +226,9 @@ class TestJsonlOutput:
                     if not line.strip():
                         continue
                     record = json.loads(line)
-                    assert record["winner"] in valid_winners, f"Invalid winner: {record['winner']}"
+                    assert (
+                        record["winner"] in valid_winners
+                    ), f"Invalid winner: {record['winner']}"
         finally:
             os.unlink(path)
 
@@ -244,7 +260,9 @@ class TestJsonlOutput:
                     if not line.strip():
                         continue
                     record = json.loads(line)
-                    assert record["duration_ms"] >= 0, "duration_ms should be non-negative"
+                    assert (
+                        record["duration_ms"] >= 0
+                    ), "duration_ms should be non-negative"
         finally:
             os.unlink(path)
 
@@ -252,6 +270,7 @@ class TestJsonlOutput:
 # ---------------------------------------------------------------------------
 # Part C: Perf Tracking
 # ---------------------------------------------------------------------------
+
 
 class TestPerfTracking:
     def _run_with_output(self, num_games=5):
@@ -273,11 +292,15 @@ class TestPerfTracking:
 
     def test_overhead_ms_in_results(self):
         results = self._run_with_output(num_games=5)
-        assert "logging_overhead_ms" in results, "logging_overhead_ms not returned in Counter"
+        assert (
+            "logging_overhead_ms" in results
+        ), "logging_overhead_ms not returned in Counter"
 
     def test_overhead_pct_in_results(self):
         results = self._run_with_output(num_games=5)
-        assert "logging_overhead_pct" in results, "logging_overhead_pct not returned in Counter"
+        assert (
+            "logging_overhead_pct" in results
+        ), "logging_overhead_pct not returned in Counter"
 
     def test_overhead_ms_non_negative(self):
         results = self._run_with_output(num_games=5)
@@ -307,6 +330,7 @@ class TestPerfTracking:
 # Part D: Backward Compatibility
 # ---------------------------------------------------------------------------
 
+
 class TestBackwardCompat:
     def _run_eval(self, output_path=None, num_games=10):
         with patch("src.evaluate_agents.load_config", return_value=_config):
@@ -325,7 +349,11 @@ class TestBackwardCompat:
 
     def test_without_output_path_has_expected_keys(self):
         results = self._run_eval(output_path=None, num_games=10)
-        total = sum(v for k, v in results.items() if k not in ("logging_overhead_ms", "logging_overhead_pct"))
+        total = sum(
+            v
+            for k, v in results.items()
+            if k not in ("logging_overhead_ms", "logging_overhead_pct")
+        )
         assert total == 10, f"Expected 10 games accounted for, got {total}"
 
     def test_without_output_no_file_created(self, tmp_path):
@@ -339,6 +367,7 @@ class TestBackwardCompat:
         """Results Counter game counts should be identical regardless of logging."""
         num_games = 10
         import random as _random
+
         _random.seed(42)
 
         with patch("src.evaluate_agents.load_config", return_value=_config):
@@ -365,15 +394,22 @@ class TestBackwardCompat:
                     output_path=path,
                 )
             # Strip overhead keys before comparing
-            keys_to_compare = [k for k in results_with_log if k not in ("logging_overhead_ms", "logging_overhead_pct")]
+            keys_to_compare = [
+                k
+                for k in results_with_log
+                if k not in ("logging_overhead_ms", "logging_overhead_pct")
+            ]
             for key in keys_to_compare:
-                assert results_with_log[key] == results_no_log.get(key, 0) or True, (
-                    f"Key {key}: {results_with_log[key]} vs {results_no_log.get(key)}"
-                )
+                assert (
+                    results_with_log[key] == results_no_log.get(key, 0) or True
+                ), f"Key {key}: {results_with_log[key]} vs {results_no_log.get(key)}"
             # Main check: same total games
             total_no_log = sum(v for k, v in results_no_log.items())
-            total_with_log = sum(v for k, v in results_with_log.items()
-                                 if k not in ("logging_overhead_ms", "logging_overhead_pct"))
+            total_with_log = sum(
+                v
+                for k, v in results_with_log.items()
+                if k not in ("logging_overhead_ms", "logging_overhead_pct")
+            )
             assert total_no_log == total_with_log == num_games
         finally:
             os.unlink(path)

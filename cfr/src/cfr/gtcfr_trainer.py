@@ -48,8 +48,8 @@ logger = logging.getLogger(__name__)
 from ..pbs import PBS_INPUT_DIM, NUM_HAND_TYPES
 from ..encoding import NUM_ACTIONS
 
-VALUE_DIM: int = 2 * NUM_HAND_TYPES   # 936
-POLICY_DIM: int = NUM_ACTIONS          # 146
+VALUE_DIM: int = 2 * NUM_HAND_TYPES  # 936
+POLICY_DIM: int = NUM_ACTIONS  # 146
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +299,11 @@ class GTCFRTrainer:
         logger.info(
             "CVPN training: %d steps, value_loss=%.6f policy_loss=%.6f "
             "(v_buf=%d p_buf=%d)",
-            actual_steps, avg_v, avg_p, len(self.value_buffer), len(self.policy_buffer),
+            actual_steps,
+            avg_v,
+            avg_p,
+            len(self.value_buffer),
+            len(self.policy_buffer),
         )
         return avg_v, avg_p
 
@@ -325,7 +329,10 @@ class GTCFRTrainer:
         logger.info(
             "Starting GT-CFR training from epoch %d to %d "
             "(%d episodes/epoch, %d train_steps/epoch).",
-            start_epoch, end_epoch, episodes_per_epoch, train_steps,
+            start_epoch,
+            end_epoch,
+            episodes_per_epoch,
+            train_steps,
         )
 
         try:
@@ -371,8 +378,13 @@ class GTCFRTrainer:
                 logger.info(
                     "Epoch %d complete in %.2fs. v_loss=%.6f p_loss=%.6f "
                     "v_buf=%d p_buf=%d samples=%d",
-                    epoch, epoch_time, v_loss, p_loss,
-                    len(self.value_buffer), len(self.policy_buffer), len(all_samples),
+                    epoch,
+                    epoch_time,
+                    v_loss,
+                    p_loss,
+                    len(self.value_buffer),
+                    len(self.policy_buffer),
+                    len(all_samples),
                 )
 
             logger.info("GT-CFR training completed %d epochs.", total_epochs)
@@ -405,7 +417,9 @@ class GTCFRTrainer:
             return
 
         try:
-            ckpt = torch.load(rebel_checkpoint_path, map_location="cpu", weights_only=True)
+            ckpt = torch.load(
+                rebel_checkpoint_path, map_location="cpu", weights_only=True
+            )
             policy_state = ckpt.get("rebel_policy_net_state_dict", {})
             value_state = ckpt.get("rebel_value_net_state_dict", {})
             skipped = warm_start_cvpn_from_rebel(
@@ -413,9 +427,12 @@ class GTCFRTrainer:
             )
             logger.info(
                 "Warm start from ReBeL checkpoint %s. Skipped %d keys.",
-                rebel_checkpoint_path, len(skipped),
+                rebel_checkpoint_path,
+                len(skipped),
             )
-            print(f"[gtcfr] warm start from {rebel_checkpoint_path} (skipped {len(skipped)} keys)")
+            print(
+                f"[gtcfr] warm start from {rebel_checkpoint_path} (skipped {len(skipped)} keys)"
+            )
         except Exception as e:
             logger.error("Failed to warm start from %s: %s", rebel_checkpoint_path, e)
 
@@ -467,8 +484,13 @@ class GTCFRTrainer:
                     "Failed to save epoch checkpoint %s: %s", epoch_path, e_epoch
                 )
 
-            logger.info("GT-CFR checkpoint saved to %s (epoch %d).", path, self.current_epoch)
-            print(f"[checkpoint] gtcfr saved to {path} (epoch {self.current_epoch})", flush=True)
+            logger.info(
+                "GT-CFR checkpoint saved to %s (epoch %d).", path, self.current_epoch
+            )
+            print(
+                f"[checkpoint] gtcfr saved to {path} (epoch {self.current_epoch})",
+                flush=True,
+            )
 
         except (OSError, IOError, PermissionError) as e:
             logger.error("Failed to save checkpoint to %s: %s", path, e)
@@ -511,7 +533,9 @@ class GTCFRTrainer:
                         has_mask=False,
                     )
                     self.value_buffer.load(vbp)
-                    logger.info("Loaded value buffer: %d samples.", len(self.value_buffer))
+                    logger.info(
+                        "Loaded value buffer: %d samples.", len(self.value_buffer)
+                    )
                 else:
                     logger.warning("Value buffer file not found: %s", npz)
 
@@ -527,13 +551,16 @@ class GTCFRTrainer:
                         has_mask=True,
                     )
                     self.policy_buffer.load(pbp)
-                    logger.info("Loaded policy buffer: %d samples.", len(self.policy_buffer))
+                    logger.info(
+                        "Loaded policy buffer: %d samples.", len(self.policy_buffer)
+                    )
                 else:
                     logger.warning("Policy buffer file not found: %s", npz)
 
             logger.info(
                 "GT-CFR checkpoint loaded from %s. Resuming at epoch %d.",
-                path, self.current_epoch,
+                path,
+                self.current_epoch,
             )
 
         except FileNotFoundError as e:

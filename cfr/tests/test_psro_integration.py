@@ -41,9 +41,7 @@ class TestPSROConfigFields:
                 "psro_heuristic_types": "random,greedy",
             }
         }
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".yaml", delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             yaml.dump(yaml_content, f)
             tmp_path = f.name
 
@@ -64,9 +62,7 @@ class TestPSROConfigFields:
         from src.config import load_config
 
         yaml_content = {"deep_cfr": {"hidden_dim": 128}}
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".yaml", delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             yaml.dump(yaml_content, f)
             tmp_path = f.name
 
@@ -181,12 +177,8 @@ class TestPSROTrainerIntegration:
 
     def test_trainer_oracle_heuristic_types(self):
         """Oracle receives parsed heuristic types."""
-        trainer = self._make_trainer(
-            use_psro=True, psro_heuristic_types="random,greedy"
-        )
-        heuristic_types = [
-            m.agent_type for m in trainer._psro_oracle._heuristics
-        ]
+        trainer = self._make_trainer(use_psro=True, psro_heuristic_types="random,greedy")
+        heuristic_types = [m.agent_type for m in trainer._psro_oracle._heuristics]
         assert "random" in heuristic_types
         assert "greedy" in heuristic_types
         assert len(heuristic_types) == 2
@@ -208,9 +200,7 @@ class TestPSROCheckpointState:
         oracle.add_checkpoint("/tmp/fake_ckpt.pt", iteration=10)
         oracle.add_checkpoint("/tmp/fake_ckpt2.pt", iteration=20)
 
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             tmp_path = f.name
 
         try:
@@ -233,9 +223,7 @@ class TestPSROCheckpointState:
         oracle = PSROOracle(max_checkpoints=3, heuristic_types=["random", "greedy"])
         oracle.add_checkpoint("/tmp/ckpt.pt", iteration=5)
 
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             tmp_path = f.name
 
         try:

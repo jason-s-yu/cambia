@@ -26,7 +26,6 @@ from scripts import prtcfr_x4_verdict as verdict_mod  # noqa: E402
 from src import run_db  # noqa: E402
 from src.evaluate_agents import MEAN_IMP_BASELINES  # noqa: E402
 
-
 # ---------------------------------------------------------------------------
 # Synthetic metrics.jsonl fixture construction
 #
@@ -41,12 +40,50 @@ LBR_ITERS = list(range(100, 301, 10))
 
 # Deterministic (non-random) noise patterns so the fixtures are reproducible.
 _NOISE_TIGHT = [
-    0.01, -0.01, 0.005, -0.008, 0.012, -0.006, 0.009, -0.011, 0.004, -0.007,
-    0.01, -0.009, 0.006, -0.005, 0.011, -0.01, 0.007, -0.008, 0.005, -0.006, 0.009,
+    0.01,
+    -0.01,
+    0.005,
+    -0.008,
+    0.012,
+    -0.006,
+    0.009,
+    -0.011,
+    0.004,
+    -0.007,
+    0.01,
+    -0.009,
+    0.006,
+    -0.005,
+    0.011,
+    -0.01,
+    0.007,
+    -0.008,
+    0.005,
+    -0.006,
+    0.009,
 ]
 _NOISE_WIDE = [
-    0.05, -0.04, 0.03, -0.06, 0.04, -0.03, 0.05, -0.05, 0.02, -0.04,
-    0.06, -0.03, 0.04, -0.05, 0.03, -0.04, 0.05, -0.03, 0.04, -0.05, 0.03,
+    0.05,
+    -0.04,
+    0.03,
+    -0.06,
+    0.04,
+    -0.03,
+    0.05,
+    -0.05,
+    0.02,
+    -0.04,
+    0.06,
+    -0.03,
+    0.04,
+    -0.05,
+    0.03,
+    -0.04,
+    0.05,
+    -0.03,
+    0.04,
+    -0.05,
+    0.03,
 ]
 assert len(_NOISE_TIGHT) == len(LBR_ITERS)
 assert len(_NOISE_WIDE) == len(LBR_ITERS)
@@ -67,7 +104,9 @@ def _t1_crossing_at_170(it: int) -> float:
 
 
 def _lbr_series(noise, slope: float, base: float = 1.0) -> dict:
-    return {it: round(base + slope * (it - 100) + n, 6) for it, n in zip(LBR_ITERS, noise)}
+    return {
+        it: round(base + slope * (it - 100) + n, 6) for it, n in zip(LBR_ITERS, noise)
+    }
 
 
 def _build_rows(t1_fn, lbr_values: dict, violations_at: dict | None = None) -> list:
@@ -212,8 +251,15 @@ def _seed_mean_imp5(db_path, run_name, iteration=300, win_rates=None):
     run_id = run_db.upsert_run(db, name=run_name, algorithm="prt-cfr")
     for baseline, wr in win_rates.items():
         run_db.insert_eval_result(
-            db, run_id, None,
-            {"iteration": iteration, "baseline": baseline, "win_rate": wr, "games_played": 5000},
+            db,
+            run_id,
+            None,
+            {
+                "iteration": iteration,
+                "baseline": baseline,
+                "win_rate": wr,
+                "games_played": 5000,
+            },
         )
     return run_id
 
@@ -231,7 +277,9 @@ def test_mean_imp5_floor_reads_latest_iteration_per_baseline(tmp_path):
     run_dir = tmp_path / "runs" / "x4-pilot"
     run_dir.mkdir(parents=True)
     db_path = tmp_path / "db.sqlite"
-    _seed_mean_imp5(db_path, "x4-pilot", iteration=200, win_rates={"random_no_cambia": 0.40})
+    _seed_mean_imp5(
+        db_path, "x4-pilot", iteration=200, win_rates={"random_no_cambia": 0.40}
+    )
     _seed_mean_imp5(db_path, "x4-pilot", iteration=300)  # newer, full 5-baseline row set
 
     floor = verdict_mod.read_mean_imp5_floor(run_dir, db_path=str(db_path))
@@ -250,8 +298,15 @@ def test_mean_imp5_floor_partial_baselines_no_mean_imp(tmp_path):
     db = run_db.get_db(str(db_path))
     run_id = run_db.upsert_run(db, name="x4-partial", algorithm="prt-cfr")
     run_db.insert_eval_result(
-        db, run_id, None,
-        {"iteration": 300, "baseline": "random_no_cambia", "win_rate": 0.6, "games_played": 5000},
+        db,
+        run_id,
+        None,
+        {
+            "iteration": 300,
+            "baseline": "random_no_cambia",
+            "win_rate": 0.6,
+            "games_played": 5000,
+        },
     )
 
     floor = verdict_mod.read_mean_imp5_floor(run_dir, db_path=str(db_path))

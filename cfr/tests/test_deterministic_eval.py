@@ -1,4 +1,5 @@
 """Tests for deterministic eval action selection and config defaults."""
+
 import numpy as np
 import pytest
 from unittest.mock import MagicMock, patch
@@ -29,8 +30,10 @@ def test_config_defaults():
 
 def test_gtcfr_wrapper_accepts_deterministic_flag(mock_config):
     """GTCFRAgentWrapper accepts and stores the deterministic kwarg."""
-    with patch("src.networks.build_cvpn") as mock_build, \
-         patch("src.pbs.uniform_range", return_value=np.ones(468) / 468):
+    with (
+        patch("src.networks.build_cvpn") as mock_build,
+        patch("src.pbs.uniform_range", return_value=np.ones(468) / 468),
+    ):
         mock_net = MagicMock()
         mock_build.return_value = mock_net
 
@@ -47,8 +50,10 @@ def test_gtcfr_wrapper_accepts_deterministic_flag(mock_config):
 
 def test_sog_inference_inherits_deterministic(mock_config):
     """SoGInferenceAgentWrapper inherits deterministic flag from GTCFRAgentWrapper."""
-    with patch("src.networks.build_cvpn") as mock_build, \
-         patch("src.pbs.uniform_range", return_value=np.ones(468) / 468):
+    with (
+        patch("src.networks.build_cvpn") as mock_build,
+        patch("src.pbs.uniform_range", return_value=np.ones(468) / 468),
+    ):
         mock_net = MagicMock()
         mock_build.return_value = mock_net
 
@@ -87,8 +92,10 @@ def test_stochastic_can_vary():
 
 def test_get_agent_passes_deterministic_for_gtcfr(mock_config):
     """get_agent maps use_argmax to deterministic for gtcfr agent type."""
-    with patch("src.networks.build_cvpn") as mock_build, \
-         patch("src.pbs.uniform_range", return_value=np.ones(468) / 468):
+    with (
+        patch("src.networks.build_cvpn") as mock_build,
+        patch("src.pbs.uniform_range", return_value=np.ones(468) / 468),
+    ):
         mock_net = MagicMock()
         mock_build.return_value = mock_net
 
@@ -105,8 +112,10 @@ def test_get_agent_passes_deterministic_for_gtcfr(mock_config):
 
 def test_get_agent_default_deterministic_for_gtcfr(mock_config):
     """Without use_argmax, gtcfr defaults to deterministic=True."""
-    with patch("src.networks.build_cvpn") as mock_build, \
-         patch("src.pbs.uniform_range", return_value=np.ones(468) / 468):
+    with (
+        patch("src.networks.build_cvpn") as mock_build,
+        patch("src.pbs.uniform_range", return_value=np.ones(468) / 468),
+    ):
         mock_net = MagicMock()
         mock_build.return_value = mock_net
 

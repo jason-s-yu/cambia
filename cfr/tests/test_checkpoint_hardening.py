@@ -20,7 +20,6 @@ import numpy as np
 import pytest
 import torch
 
-
 # ---------------------------------------------------------------------------
 # atomic_torch_save
 # ---------------------------------------------------------------------------
@@ -118,7 +117,11 @@ class TestAtomicNpzSave:
         base = str(tmp_path / "buffer")
         arr = np.zeros(4)
         atomic_npz_save(lambda p: self._dummy_save_fn(arr, p), base)
-        tmp_files = [f for f in os.listdir(tmp_path) if f.endswith(".tmp") or f.endswith(".tmp.npz")]
+        tmp_files = [
+            f
+            for f in os.listdir(tmp_path)
+            if f.endswith(".tmp") or f.endswith(".tmp.npz")
+        ]
         assert tmp_files == []
 
     def test_no_partial_file_on_failure(self, tmp_path):
@@ -158,6 +161,7 @@ def _read_source(rel_path: str) -> str:
 def _find_torch_load_calls(source: str):
     """Return list of torch.load(...) calls from a source string."""
     import re
+
     # Match multi-line torch.load(...) by finding the opening and scanning to close paren
     calls = re.findall(r"torch\.load\((?:[^()]*|\([^()]*\))*\)", source)
     return calls
@@ -169,27 +173,27 @@ class TestWeightsOnlyAtLoadSites:
         calls = _find_torch_load_calls(source)
         assert calls, "Expected at least one torch.load call in deep_trainer.py"
         for call in calls:
-            assert "weights_only=True" in call, (
-                f"torch.load call does not use weights_only=True: {call}"
-            )
+            assert (
+                "weights_only=True" in call
+            ), f"torch.load call does not use weights_only=True: {call}"
 
     def test_main_train_inspect_checkpoint_uses_weights_only_true(self):
         source = _read_source("main_train.py")
         calls = _find_torch_load_calls(source)
         assert calls, "Expected at least one torch.load call in main_train.py"
         for call in calls:
-            assert "weights_only=True" in call, (
-                f"torch.load call does not use weights_only=True: {call}"
-            )
+            assert (
+                "weights_only=True" in call
+            ), f"torch.load call does not use weights_only=True: {call}"
 
     def test_cli_uses_weights_only_true(self):
         source = _read_source("cli.py")
         calls = _find_torch_load_calls(source)
         assert calls, "Expected at least one torch.load call in cli.py"
         for call in calls:
-            assert "weights_only=True" in call, (
-                f"torch.load call does not use weights_only=True: {call}"
-            )
+            assert (
+                "weights_only=True" in call
+            ), f"torch.load call does not use weights_only=True: {call}"
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +223,7 @@ def _extract_deep_cfr_config_class() -> type:
     # Build a minimal namespace to exec the class definition
     from src.encoding import INPUT_DIM, NUM_ACTIONS
     from typing import List, Optional, Union
+
     namespace = {
         "dataclass": dataclass,
         "INPUT_DIM": INPUT_DIM,
@@ -246,9 +251,9 @@ class TestValueNetWorkerKey:
     def test_worker_weights_include_value_net_key(self):
         """_get_network_weights_for_workers must serialize __value_net__ for ESCHER."""
         source = _read_source("cfr/deep_trainer.py")
-        assert "__value_net__" in source, (
-            "_get_network_weights_for_workers must include __value_net__ key for ESCHER"
-        )
+        assert (
+            "__value_net__" in source
+        ), "_get_network_weights_for_workers must include __value_net__ key for ESCHER"
 
 
 def _make_escher_ep_pbs_checkpoint(path: str):
@@ -322,8 +327,12 @@ class TestESCHEREPBSCheckpoint:
         config = self._make_config()
         agent = ESCHERAgentWrapper(0, config, ckpt_path, device="cpu")
 
-        assert agent.advantage_net is not None, "advantage_net must be loaded for new-format checkpoint"
-        assert agent.policy_net is None, "policy_net must be None for new-format checkpoint"
+        assert (
+            agent.advantage_net is not None
+        ), "advantage_net must be loaded for new-format checkpoint"
+        assert (
+            agent.policy_net is None
+        ), "policy_net must be None for new-format checkpoint"
         assert agent._encoding_mode == "ep_pbs"
         assert agent._encoding_layout == "interleaved"
 

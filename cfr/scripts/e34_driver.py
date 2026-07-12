@@ -144,9 +144,7 @@ def cmd_lbr(args):
         _eprint(f"[E3] ERROR: unknown --tier {tier!r}")
         sys.exit(1)
 
-    agent = _build_agent(
-        args.agent_type, cfg, args.checkpoint, args.device, args.argmax
-    )
+    agent = _build_agent(args.agent_type, cfg, args.checkpoint, args.device, args.argmax)
 
     t0 = time.time()
     if tier == "B":
@@ -299,8 +297,12 @@ def main():
     h.add_argument("--config", required=True)
     h.add_argument("--games", type=int, default=5000)
     h.add_argument("--device", default="cpu")
-    h.add_argument("--argmax-a", action="store_true", help="Side A uses argmax (default sampling)")
-    h.add_argument("--argmax-b", action="store_true", help="Side B uses argmax (default sampling)")
+    h.add_argument(
+        "--argmax-a", action="store_true", help="Side A uses argmax (default sampling)"
+    )
+    h.add_argument(
+        "--argmax-b", action="store_true", help="Side B uses argmax (default sampling)"
+    )
     h.set_defaults(func=cmd_h2h)
 
     args = ap.parse_args()

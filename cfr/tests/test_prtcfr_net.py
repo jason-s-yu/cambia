@@ -24,7 +24,6 @@ from src.encoding import NUM_ACTIONS
 from src.sequence_encoding import PAD_ID, VOCAB_SIZE
 from tools.tiny_solver import build_tree
 
-
 CONFIG_2CARD = "config/tiny_2card_plateau.yaml"
 _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -34,8 +33,14 @@ def tiny_tree():
     """Tokenized perfect-recall tiny tree (built once for the module)."""
     cfg = load_config(CONFIG_2CARD)
     root, isets, nnodes, aborted = build_tree(
-        cfg, n_deals=5, seed0=0, max_nodes_per_deal=2_000_000,
-        enumerate_draws=True, perfect_recall=True, tokenize=True, seq_cap=256,
+        cfg,
+        n_deals=5,
+        seed0=0,
+        max_nodes_per_deal=2_000_000,
+        enumerate_draws=True,
+        perfect_recall=True,
+        tokenize=True,
+        seq_cap=256,
     )
     assert aborted == 0, "tree truncated; raise max_nodes_per_deal"
     return root
@@ -144,7 +149,7 @@ def test_token_parity_traversal_vs_direct_lookup(tiny_tree):
         via_array = tiny_node_to_token_array(node)
         # The padded array's non-pad prefix must equal the list.
         assert via_array[: len(via_list)].tolist() == list(via_list)
-        assert np.all(via_array[len(via_list):] == PAD_ID)
+        assert np.all(via_array[len(via_list) :] == PAD_ID)
 
 
 def test_token_parity_same_pkey_same_tokens(tiny_tree):
@@ -171,8 +176,13 @@ def test_tiny_node_to_tokens_requires_tokenized_tree():
     silently feed an empty/garbage sequence."""
     cfg = load_config(CONFIG_2CARD)
     root, _isets, _n, _ab = build_tree(
-        cfg, n_deals=2, seed0=0, max_nodes_per_deal=2_000_000,
-        enumerate_draws=True, perfect_recall=True, tokenize=False,
+        cfg,
+        n_deals=2,
+        seed0=0,
+        max_nodes_per_deal=2_000_000,
+        enumerate_draws=True,
+        perfect_recall=True,
+        tokenize=False,
     )
     decisions = []
     _all_decisions(root, decisions)

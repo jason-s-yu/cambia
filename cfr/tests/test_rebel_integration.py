@@ -25,7 +25,6 @@ from src.cfr.rebel_worker import (
     rebel_self_play_episode,
 )
 
-
 # ---------------------------------------------------------------------------
 # Skip guard
 # ---------------------------------------------------------------------------
@@ -159,18 +158,28 @@ def test_rebel_self_play_episode_produces_valid_samples(
         assert isinstance(s, EpisodeSample), f"sample {i} is not EpisodeSample"
         assert s.features.shape == (PBS_INPUT_DIM,), f"sample {i} features shape mismatch"
         assert s.features.dtype == np.float32, f"sample {i} features dtype mismatch"
-        assert s.value_target.shape == (VALUE_DIM,), f"sample {i} value_target shape mismatch"
+        assert s.value_target.shape == (
+            VALUE_DIM,
+        ), f"sample {i} value_target shape mismatch"
         assert s.value_target.dtype == np.float32
-        assert s.policy_target.shape == (NUM_ACTIONS,), f"sample {i} policy_target shape mismatch"
+        assert s.policy_target.shape == (
+            NUM_ACTIONS,
+        ), f"sample {i} policy_target shape mismatch"
         assert s.policy_target.dtype == np.float32
-        assert s.action_mask.shape == (NUM_ACTIONS,), f"sample {i} action_mask shape mismatch"
+        assert s.action_mask.shape == (
+            NUM_ACTIONS,
+        ), f"sample {i} action_mask shape mismatch"
         assert s.action_mask.dtype == bool
         assert np.isfinite(s.features).all(), f"sample {i} features has non-finite values"
-        assert np.isfinite(s.value_target).all(), f"sample {i} value_target has non-finite values"
+        assert np.isfinite(
+            s.value_target
+        ).all(), f"sample {i} value_target has non-finite values"
 
     # Value variance > 0: not all value targets degenerate (collapsed to scalar)
     all_values = np.concatenate([s.value_target for s in samples])
-    assert float(np.var(all_values)) > 0.0, "All value targets are identical — degenerate output"
+    assert (
+        float(np.var(all_values)) > 0.0
+    ), "All value targets are identical — degenerate output"
 
     # Diagnostic log was emitted
     log_messages = [r.message for r in caplog.records]
@@ -214,7 +223,9 @@ def test_rebel_episode_range_entropy_logged(
     assert h0_final >= 0.0, f"Final p0 entropy negative: {h0_final}"
     # Max entropy: log(NUM_HAND_TYPES)
     max_entropy = float(np.log(NUM_HAND_TYPES))
-    assert h0_init <= max_entropy + 1e-4, f"Initial entropy {h0_init} exceeds max {max_entropy}"
+    assert (
+        h0_init <= max_entropy + 1e-4
+    ), f"Initial entropy {h0_init} exceeds max {max_entropy}"
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +393,9 @@ def test_rebel_train_one_iteration(small_value_net, small_policy_net, fast_confi
         masked_pred = pred.masked_fill(~masks, 0.0)
         masked_tgt = tgt.masked_fill(~masks, 0.0)
         num_legal = masks.float().sum(dim=1).clamp(min=1.0)
-        return float((((masked_pred - masked_tgt) ** 2).sum(dim=1) / num_legal).mean().item())
+        return float(
+            (((masked_pred - masked_tgt) ** 2).sum(dim=1) / num_legal).mean().item()
+        )
 
     # --- Measure initial loss ---
     value_net.train()
@@ -432,20 +445,20 @@ def test_rebel_train_one_iteration(small_value_net, small_policy_net, fast_confi
     assert np.isfinite(loss_p_after), f"Final policy loss not finite: {loss_p_after}"
 
     # Loss should not blow up (overfitting on small dataset is expected)
-    assert loss_v_after < loss_v_before * 2 + 1e-3, (
-        f"Value loss exploded: before={loss_v_before:.4f} after={loss_v_after:.4f}"
-    )
-    assert loss_p_after < loss_p_before * 2 + 1e-3, (
-        f"Policy loss exploded: before={loss_p_before:.4f} after={loss_p_after:.4f}"
-    )
+    assert (
+        loss_v_after < loss_v_before * 2 + 1e-3
+    ), f"Value loss exploded: before={loss_v_before:.4f} after={loss_v_after:.4f}"
+    assert (
+        loss_p_after < loss_p_before * 2 + 1e-3
+    ), f"Policy loss exploded: before={loss_p_before:.4f} after={loss_p_after:.4f}"
 
     # With 20 gradient steps on a small dataset, loss should decrease on training data
-    assert loss_v_after <= loss_v_before + 1e-4, (
-        f"Value loss did not decrease: before={loss_v_before:.4f} after={loss_v_after:.4f}"
-    )
-    assert loss_p_after <= loss_p_before + 1e-4, (
-        f"Policy loss did not decrease: before={loss_p_before:.4f} after={loss_p_after:.4f}"
-    )
+    assert (
+        loss_v_after <= loss_v_before + 1e-4
+    ), f"Value loss did not decrease: before={loss_v_before:.4f} after={loss_v_after:.4f}"
+    assert (
+        loss_p_after <= loss_p_before + 1e-4
+    ), f"Policy loss did not decrease: before={loss_p_before:.4f} after={loss_p_after:.4f}"
 
 
 # ---------------------------------------------------------------------------
@@ -486,17 +499,23 @@ def test_range_diverges_from_uniform(
 
     # Validate entropy values are well-formed
     for label, h_init, h_final in [("p0", h0_init, h0_final), ("p1", h1_init, h1_final)]:
-        assert 0.0 <= h_init <= max_entropy + 1e-4, f"{label} init entropy out of range: {h_init}"
-        assert 0.0 <= h_final <= max_entropy + 1e-4, f"{label} final entropy out of range: {h_final}"
-        assert math.isfinite(h_init) and math.isfinite(h_final), f"{label} entropy not finite"
+        assert (
+            0.0 <= h_init <= max_entropy + 1e-4
+        ), f"{label} init entropy out of range: {h_init}"
+        assert (
+            0.0 <= h_final <= max_entropy + 1e-4
+        ), f"{label} final entropy out of range: {h_final}"
+        assert math.isfinite(h_init) and math.isfinite(
+            h_final
+        ), f"{label} entropy not finite"
 
     # With untrained (random) nets, policy may be near-uniform across hand types,
     # so Bayesian range update is approximately a no-op. We check the mechanism
     # runs correctly (valid entropy, no NaN) rather than requiring strict decrease.
     # Strict divergence is validated during training with trained nets.
-    assert h0_final <= max_entropy + 1e-4 and h1_final <= max_entropy + 1e-4, (
-        f"Entropy exceeds max: p0={h0_final:.3f}, p1={h1_final:.3f}, max={max_entropy:.3f}"
-    )
+    assert (
+        h0_final <= max_entropy + 1e-4 and h1_final <= max_entropy + 1e-4
+    ), f"Entropy exceeds max: p0={h0_final:.3f}, p1={h1_final:.3f}, max={max_entropy:.3f}"
 
 
 # ---------------------------------------------------------------------------
@@ -518,6 +537,6 @@ def test_discard_bucket_varies(small_value_net, small_policy_net, fast_config):
 
     discard_features = np.stack([s.features[7:17] for s in samples])
     # If all samples have identical discard bucket features, the bug is present
-    assert not np.all(discard_features == discard_features[0]), (
-        "All samples have identical discard bucket features — discard bucket may not be populated"
-    )
+    assert not np.all(
+        discard_features == discard_features[0]
+    ), "All samples have identical discard bucket features — discard bucket may not be populated"

@@ -11,7 +11,6 @@ import pytest
 
 from src.ffi.bridge import GoAgentState, GoEngine
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -362,9 +361,9 @@ class TestIntegration:
             utility = play_random_game(seed)
             assert utility.shape == (2,)
             assert np.all(np.isfinite(utility)), f"seed={seed}: non-finite utility"
-            assert abs(float(utility.sum())) < 1e-3, (
-                f"seed={seed}: non-zero-sum utility {utility}"
-            )
+            assert (
+                abs(float(utility.sum())) < 1e-3
+            ), f"seed={seed}: non-zero-sum utility {utility}"
 
     def test_agent_encode_across_full_game(self):
         """Agent encodes remain valid shape and range for an entire game."""

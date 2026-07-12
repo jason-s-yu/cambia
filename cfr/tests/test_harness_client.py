@@ -117,9 +117,7 @@ def test_preflight_error_label_and_checks_both_rendered(tmp_path):
             412,
             {
                 "error": "preflight_failed",
-                "checks": [
-                    {"name": "xpu_render_node", "ok": False, "detail": "no node"}
-                ],
+                "checks": [{"name": "xpu_render_node", "ok": False, "detail": "no node"}],
                 "override": "force (gpu_vram only)",
             },
         )

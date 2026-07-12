@@ -133,23 +133,36 @@ def load_existing_raw_evals(run_dir: Path) -> dict:
 
 def mean_imp(baseline_results: dict) -> float:
     """Compute mean_imp from baseline win rates."""
-    vals = [baseline_results[bl]["win_rate"] for bl in MEAN_IMP_BASELINES if bl in baseline_results]
+    vals = [
+        baseline_results[bl]["win_rate"]
+        for bl in MEAN_IMP_BASELINES
+        if bl in baseline_results
+    ]
     return sum(vals) / len(vals) if vals else 0.0
 
 
 def main():
     parser = argparse.ArgumentParser(description="R0: EMA vs raw checkpoint evaluation")
     parser.add_argument("--iters", nargs="+", type=int, default=DEFAULT_ITERS)
-    parser.add_argument("--games", type=int, default=DEFAULT_GAMES,
-                        help="Games per baseline (seat-balanced)")
+    parser.add_argument(
+        "--games",
+        type=int,
+        default=DEFAULT_GAMES,
+        help="Games per baseline (seat-balanced)",
+    )
     parser.add_argument("--baselines", nargs="+", default=MEAN_IMP_BASELINES)
     parser.add_argument("--output", default=str(RUN_DIR / "r0_ema_vs_raw.json"))
-    parser.add_argument("--skip-raw", action="store_true",
-                        help="Skip raw eval (use existing eval_summary.jsonl data)")
+    parser.add_argument(
+        "--skip-raw",
+        action="store_true",
+        help="Skip raw eval (use existing eval_summary.jsonl data)",
+    )
     args = parser.parse_args()
 
-    print(f"R0: EMA vs Raw evaluation — {len(args.iters)} checkpoints × "
-          f"{len(args.baselines)} baselines × {args.games} games")
+    print(
+        f"R0: EMA vs Raw evaluation — {len(args.iters)} checkpoints × "
+        f"{len(args.baselines)} baselines × {args.games} games"
+    )
     print(f"Config: {CONFIG_PATH}")
     print(f"Checkpoints: {CKPT_DIR}")
     print()
@@ -176,10 +189,16 @@ def main():
             continue
 
         # EMA evaluation
-        print(f"  Evaluating EMA weights ({args.games} games × {len(args.baselines)} baselines)...")
+        print(
+            f"  Evaluating EMA weights ({args.games} games × {len(args.baselines)} baselines)..."
+        )
         mt = time.perf_counter()
         ema_results = eval_with_weights(
-            "ema", str(ckpt_path), CONFIG_PATH, args.baselines, args.games,
+            "ema",
+            str(ckpt_path),
+            CONFIG_PATH,
+            args.baselines,
+            args.games,
             ema_override_state=ema_state,
         )
         ema_time = time.perf_counter() - mt
@@ -192,10 +211,16 @@ def main():
             raw_mi = mean_imp(raw_results)
             print(f"  RAW  mean_imp = {raw_mi*100:.1f}%  (from eval_summary.jsonl)")
         else:
-            print(f"  Evaluating RAW weights ({args.games} games × {len(args.baselines)} baselines)...")
+            print(
+                f"  Evaluating RAW weights ({args.games} games × {len(args.baselines)} baselines)..."
+            )
             mt = time.perf_counter()
             raw_results = eval_with_weights(
-                "raw", str(ckpt_path), CONFIG_PATH, args.baselines, args.games,
+                "raw",
+                str(ckpt_path),
+                CONFIG_PATH,
+                args.baselines,
+                args.games,
             )
             raw_time = time.perf_counter() - mt
             raw_mi = mean_imp(raw_results)
@@ -224,7 +249,9 @@ def main():
     print("-" * len(header))
     for it_str in sorted(all_results, key=int):
         r = all_results[it_str]
-        print(f"{it_str:>6s}  {r['raw_mean_imp']*100:>7.1f}%  {r['ema_mean_imp']*100:>7.1f}%  {r['delta_pp']:>+7.1f}")
+        print(
+            f"{it_str:>6s}  {r['raw_mean_imp']*100:>7.1f}%  {r['ema_mean_imp']*100:>7.1f}%  {r['delta_pp']:>+7.1f}"
+        )
 
     print()
     print("Per-baseline breakdown:")

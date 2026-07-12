@@ -151,7 +151,9 @@ class SerialRotatingFileHandler(logging.handlers.BaseRotatingHandler):
                         max_serial = serial
                 except ValueError as e:  # JUSTIFIED: logging handler resilience
                     # Should not happen if regex is correct
-                    self._internal_logger.debug("Non-integer serial in log filename %s: %s", f_name, e)
+                    self._internal_logger.debug(
+                        "Non-integer serial in log filename %s: %s", f_name, e
+                    )
         self.current_serial = max_serial + 1
         if max_serial == 0:  # If no files found, start at 1
             self.current_serial = 1
@@ -283,7 +285,9 @@ class SerialRotatingFileHandler(logging.handlers.BaseRotatingHandler):
                 )
             except Exception as e:  # JUSTIFIED: logging handler resilience
                 # If encoding fails for any reason, try a safe fallback
-                self._internal_logger.debug("Error encoding log message, using fallback: %s", e)
+                self._internal_logger.debug(
+                    "Error encoding log message, using fallback: %s", e
+                )
                 msg_bytes = msg.encode("utf-8", "replace")
 
             if current_size + len(msg_bytes) >= self.maxBytes:

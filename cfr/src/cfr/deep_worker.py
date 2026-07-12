@@ -49,9 +49,20 @@ from ..constants import (
 from ..game.engine import CambiaGameState
 from ..serial_rotating_handler import SerialRotatingFileHandler
 from ..abstraction import get_card_bucket
-from ..encoding import encode_infoset, encode_action_mask, action_to_index, INPUT_DIM, NUM_ACTIONS
+from ..encoding import (
+    encode_infoset,
+    encode_action_mask,
+    action_to_index,
+    INPUT_DIM,
+    NUM_ACTIONS,
+)
 from ..constants import EP_PBS_INPUT_DIM, N_PLAYER_NUM_ACTIONS, N_PLAYER_INPUT_DIM
-from ..networks import AdvantageNetwork, HistoryValueNetwork, build_advantage_network, get_strategy_from_advantages
+from ..networks import (
+    AdvantageNetwork,
+    HistoryValueNetwork,
+    build_advantage_network,
+    get_strategy_from_advantages,
+)
 from ..reservoir import ReservoirSample
 from ..utils import WorkerStats, SimulationNodeData
 
@@ -107,12 +118,16 @@ def _get_strategy_from_network(
     try:
         with torch.inference_mode():
             if _feat_buf is not None and _mask_buf is not None:
-                _feat_buf.copy_(torch.as_tensor(features, dtype=torch.float32).unsqueeze(0))
+                _feat_buf.copy_(
+                    torch.as_tensor(features, dtype=torch.float32).unsqueeze(0)
+                )
                 _mask_buf.copy_(torch.from_numpy(action_mask).bool().unsqueeze(0))
                 features_tensor = _feat_buf
                 mask_tensor = _mask_buf
             else:
-                features_tensor = torch.as_tensor(features, dtype=torch.float32).unsqueeze(0)
+                features_tensor = torch.as_tensor(
+                    features, dtype=torch.float32
+                ).unsqueeze(0)
                 mask_tensor = torch.from_numpy(action_mask).bool().unsqueeze(0)
             raw_advantages = network(features_tensor, mask_tensor).squeeze(0)
             strategy_tensor = get_strategy_from_advantages(
@@ -266,7 +281,9 @@ def _deep_traverse(
         )
         worker_stats.error_count += 1
         return np.zeros(NUM_PLAYERS, dtype=np.float64)
-    except Exception as e_legal:  # JUSTIFIED: worker resilience - workers must not crash the training pool
+    except (
+        Exception
+    ) as e_legal:  # JUSTIFIED: worker resilience - workers must not crash the training pool
         logger.error(
             "W%d D%d: Error getting legal actions: %s",
             worker_id,
@@ -280,9 +297,7 @@ def _deep_traverse(
     num_actions = len(legal_actions)
     if num_actions == 0:
         if not game_state.is_terminal():
-            logger.error(
-                "W%d D%d: No legal actions but non-terminal!", worker_id, depth
-            )
+            logger.error("W%d D%d: No legal actions but non-terminal!", worker_id, depth)
             worker_stats.error_count += 1
             return np.zeros(NUM_PLAYERS, dtype=np.float64)
         else:
@@ -318,7 +333,9 @@ def _deep_traverse(
         )
         worker_stats.error_count += 1
         return np.zeros(NUM_PLAYERS, dtype=np.float64)
-    except Exception as e_encode:  # JUSTIFIED: worker resilience - workers must not crash the training pool
+    except (
+        Exception
+    ) as e_encode:  # JUSTIFIED: worker resilience - workers must not crash the training pool
         logger.error(
             "W%d D%d: Error encoding infoset/mask: %s",
             worker_id,
@@ -344,7 +361,9 @@ def _deep_traverse(
             )
             worker_stats.warning_count += 1
             strategy = np.ones(num_actions, dtype=np.float64) / num_actions
-        except Exception as e_net:  # JUSTIFIED: worker resilience - fallback to uniform strategy on unexpected errors
+        except (
+            Exception
+        ) as e_net:  # JUSTIFIED: worker resilience - fallback to uniform strategy on unexpected errors
             logger.warning(
                 "W%d D%d: Network inference failed: %s. Using uniform.",
                 worker_id,
@@ -413,7 +432,9 @@ def _deep_traverse(
                     e_apply,
                 )
                 worker_stats.error_count += 1
-            except Exception as e_apply:  # JUSTIFIED: worker resilience - workers must not crash the training pool
+            except (
+                Exception
+            ) as e_apply:  # JUSTIFIED: worker resilience - workers must not crash the training pool
                 logger.error(
                     "W%d D%d: Error applying action %s: %s",
                     worker_id,
@@ -445,7 +466,9 @@ def _deep_traverse(
                         undo_info()
                     except UndoFailureError:
                         pass
-                    except Exception:  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
+                    except (
+                        Exception
+                    ):  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
                         pass
                 else:
                     try:
@@ -470,9 +493,13 @@ def _deep_traverse(
                             undo_info()
                         except UndoFailureError:
                             pass
-                        except Exception:  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
+                        except (
+                            Exception
+                        ):  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
                             pass
-                    except Exception as e_update:  # JUSTIFIED: worker resilience - workers must not crash the training pool
+                    except (
+                        Exception
+                    ) as e_update:  # JUSTIFIED: worker resilience - workers must not crash the training pool
                         logger.error(
                             "W%d D%d: Error updating agents after %s: %s",
                             worker_id,
@@ -487,7 +514,9 @@ def _deep_traverse(
                             undo_info()
                         except UndoFailureError:
                             pass
-                        except Exception:  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
+                        except (
+                            Exception
+                        ):  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
                             pass
 
                 if not agent_update_failed:
@@ -520,7 +549,9 @@ def _deep_traverse(
                             e_recurse,
                         )
                         worker_stats.error_count += 1
-                    except Exception as e_recurse:  # JUSTIFIED: worker resilience - workers must not crash the training pool
+                    except (
+                        Exception
+                    ) as e_recurse:  # JUSTIFIED: worker resilience - workers must not crash the training pool
                         logger.error(
                             "W%d D%d: Recursion error after %s: %s",
                             worker_id,
@@ -545,7 +576,9 @@ def _deep_traverse(
                         )
                         worker_stats.error_count += 1
                         return np.zeros(NUM_PLAYERS, dtype=np.float64)
-                    except Exception as e_undo:  # JUSTIFIED: worker resilience - must not crash on undo, state likely corrupt
+                    except (
+                        Exception
+                    ) as e_undo:  # JUSTIFIED: worker resilience - must not crash on undo, state likely corrupt
                         logger.error(
                             "W%d D%d: Error undoing %s: %s. State corrupt.",
                             worker_id,
@@ -637,7 +670,9 @@ def _deep_traverse(
                 e_apply,
             )
             worker_stats.error_count += 1
-        except Exception as e_apply:  # JUSTIFIED: worker resilience - workers must not crash the training pool
+        except (
+            Exception
+        ) as e_apply:  # JUSTIFIED: worker resilience - workers must not crash the training pool
             logger.error(
                 "W%d D%d: Error applying sampled %s: %s",
                 worker_id,
@@ -668,7 +703,9 @@ def _deep_traverse(
                     undo_info()
                 except UndoFailureError:
                     pass
-                except Exception:  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
+                except (
+                    Exception
+                ):  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
                     pass
             else:
                 try:
@@ -691,9 +728,13 @@ def _deep_traverse(
                         undo_info()
                     except UndoFailureError:
                         pass
-                    except Exception:  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
+                    except (
+                        Exception
+                    ):  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
                         pass
-                except Exception as e_update:  # JUSTIFIED: worker resilience - workers must not crash the training pool
+                except (
+                    Exception
+                ) as e_update:  # JUSTIFIED: worker resilience - workers must not crash the training pool
                     logger.error(
                         "W%d D%d: Error updating agents after sampled %s: %s",
                         worker_id,
@@ -708,7 +749,9 @@ def _deep_traverse(
                         undo_info()
                     except UndoFailureError:
                         pass
-                    except Exception:  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
+                    except (
+                        Exception
+                    ):  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
                         pass
 
             if not agent_update_failed:
@@ -741,7 +784,9 @@ def _deep_traverse(
                         e_recurse,
                     )
                     worker_stats.error_count += 1
-                except Exception as e_recurse:  # JUSTIFIED: worker resilience - workers must not crash the training pool
+                except (
+                    Exception
+                ) as e_recurse:  # JUSTIFIED: worker resilience - workers must not crash the training pool
                     logger.error(
                         "W%d D%d: Recursion error after sampled %s: %s",
                         worker_id,
@@ -765,7 +810,9 @@ def _deep_traverse(
                     )
                     worker_stats.error_count += 1
                     return np.zeros(NUM_PLAYERS, dtype=np.float64)
-                except Exception as e_undo:  # JUSTIFIED: worker resilience - must not crash on undo, state likely corrupt
+                except (
+                    Exception
+                ) as e_undo:  # JUSTIFIED: worker resilience - must not crash on undo, state likely corrupt
                     logger.error(
                         "W%d D%d: Error undoing sampled %s: %s. State corrupt.",
                         worker_id,
@@ -811,8 +858,13 @@ def _infer_decision_context(legal_mask: np.ndarray) -> int:
 _INTERLEAVED_NETWORK_TYPES = frozenset({"slot_film", "slot_multiply"})
 
 
-def _encode_ep_pbs(agent_state: "GoAgentState", decision_context: int, drawn_bucket: int,
-                   network_type: str, encoding_layout: str = "auto") -> "np.ndarray":
+def _encode_ep_pbs(
+    agent_state: "GoAgentState",
+    decision_context: int,
+    drawn_bucket: int,
+    network_type: str,
+    encoding_layout: str = "auto",
+) -> "np.ndarray":
     """Route EP-PBS encoding to interleaved or flat layout.
 
     Uses interleaved layout when: encoding_layout="interleaved", or
@@ -820,9 +872,13 @@ def _encode_ep_pbs(agent_state: "GoAgentState", decision_context: int, drawn_buc
     All other cases use the flat encode_eppbs() layout.
     """
     if encoding_layout == "flat_dealiased":
-        return agent_state.encode_eppbs_dealiased(decision_context, drawn_bucket=drawn_bucket)
+        return agent_state.encode_eppbs_dealiased(
+            decision_context, drawn_bucket=drawn_bucket
+        )
     if encoding_layout == "interleaved" or network_type in _INTERLEAVED_NETWORK_TYPES:
-        return agent_state.encode_eppbs_interleaved(decision_context, drawn_bucket=drawn_bucket)
+        return agent_state.encode_eppbs_interleaved(
+            decision_context, drawn_bucket=drawn_bucket
+        )
     return agent_state.encode_eppbs(decision_context, drawn_bucket=drawn_bucket)
 
 
@@ -960,19 +1016,25 @@ def _deep_traverse_go(
     # Encode infoset using Go agent
     _encoding_mode = getattr(getattr(config, "deep_cfr", None), "encoding_mode", "legacy")
     _network_type = getattr(getattr(config, "deep_cfr", None), "network_type", "residual")
-    _encoding_layout = getattr(getattr(config, "deep_cfr", None), "encoding_layout", "auto")
+    _encoding_layout = getattr(
+        getattr(config, "deep_cfr", None), "encoding_layout", "auto"
+    )
     try:
         if _encoding_mode == "ep_pbs":
             features = _encode_ep_pbs(
-                agent_states[player], current_context, drawn_bucket, _network_type, _encoding_layout
+                agent_states[player],
+                current_context,
+                drawn_bucket,
+                _network_type,
+                _encoding_layout,
             )
         else:
-            features = agent_states[player].encode(current_context, drawn_bucket=drawn_bucket)
+            features = agent_states[player].encode(
+                current_context, drawn_bucket=drawn_bucket
+            )
         action_mask = legal_mask.copy()
     except Exception as e_encode:
-        logger.error(
-            "W%d D%d: Error encoding infoset: %s", worker_id, depth, e_encode
-        )
+        logger.error("W%d D%d: Error encoding infoset: %s", worker_id, depth, e_encode)
         worker_stats.error_count += 1
         return np.zeros(NUM_PLAYERS, dtype=np.float64)
 
@@ -1046,7 +1108,10 @@ def _deep_traverse_go(
                     engine.restore(snap)
                 except Exception as e_restore:
                     logger.error(
-                        "W%d D%d: Failed to restore engine: %s", worker_id, depth, e_restore
+                        "W%d D%d: Failed to restore engine: %s",
+                        worker_id,
+                        depth,
+                        e_restore,
                     )
                     worker_stats.error_count += 1
                     break
@@ -1057,7 +1122,10 @@ def _deep_traverse_go(
                     except Exception as e_clone2:
                         logger.error(
                             "W%d D%d: Failed to clone agent %d: %s",
-                            worker_id, depth, j, e_clone2,
+                            worker_id,
+                            depth,
+                            j,
+                            e_clone2,
                         )
                         worker_stats.error_count += 1
                         break
@@ -1068,7 +1136,10 @@ def _deep_traverse_go(
             except Exception as e_apply:
                 logger.error(
                     "W%d D%d: Error applying action %d: %s",
-                    worker_id, depth, action_idx, e_apply,
+                    worker_id,
+                    depth,
+                    action_idx,
+                    e_apply,
                 )
                 worker_stats.error_count += 1
                 continue
@@ -1096,7 +1167,11 @@ def _deep_traverse_go(
             except Exception as e_recurse:  # JUSTIFIED: worker resilience
                 logger.error(
                     "W%d D%d: Recursion error after action %d: %s",
-                    worker_id, depth, action_idx, e_recurse, exc_info=True,
+                    worker_id,
+                    depth,
+                    action_idx,
+                    e_recurse,
+                    exc_info=True,
                 )
                 worker_stats.error_count += 1
 
@@ -1105,7 +1180,10 @@ def _deep_traverse_go(
             engine.restore(snap)
         except Exception as e_restore_final:
             logger.error(
-                "W%d D%d: Failed final engine restore: %s", worker_id, depth, e_restore_final
+                "W%d D%d: Failed final engine restore: %s",
+                worker_id,
+                depth,
+                e_restore_final,
             )
             worker_stats.error_count += 1
         for j, a in enumerate(agent_states):
@@ -1173,7 +1251,9 @@ def _deep_traverse_go(
         except Exception as e_save:
             logger.error(
                 "W%d D%d: Failed to save engine state for opponent: %s",
-                worker_id, depth, e_save,
+                worker_id,
+                depth,
+                e_save,
             )
             worker_stats.error_count += 1
             return node_value
@@ -1183,7 +1263,9 @@ def _deep_traverse_go(
         except Exception as e_clone:
             logger.error(
                 "W%d D%d: Failed to clone agent states for opponent: %s",
-                worker_id, depth, e_clone,
+                worker_id,
+                depth,
+                e_clone,
             )
             worker_stats.error_count += 1
             engine.free_snapshot(snap)
@@ -1197,7 +1279,10 @@ def _deep_traverse_go(
         except Exception as e_apply:
             logger.error(
                 "W%d D%d: Error applying sampled action %d: %s",
-                worker_id, depth, chosen_action_idx, e_apply,
+                worker_id,
+                depth,
+                chosen_action_idx,
+                e_apply,
             )
             worker_stats.error_count += 1
 
@@ -1225,7 +1310,11 @@ def _deep_traverse_go(
             except Exception as e_recurse:  # JUSTIFIED: worker resilience
                 logger.error(
                     "W%d D%d: Recursion error after sampled action %d: %s",
-                    worker_id, depth, chosen_action_idx, e_recurse, exc_info=True,
+                    worker_id,
+                    depth,
+                    chosen_action_idx,
+                    e_recurse,
+                    exc_info=True,
                 )
                 worker_stats.error_count += 1
 
@@ -1235,7 +1324,9 @@ def _deep_traverse_go(
         except Exception as e_restore:
             logger.error(
                 "W%d D%d: Failed to restore engine after opponent: %s",
-                worker_id, depth, e_restore,
+                worker_id,
+                depth,
+                e_restore,
             )
             worker_stats.error_count += 1
         for j, a in enumerate(agent_states):
@@ -1281,9 +1372,13 @@ def _deep_traverse_os_go(
     """
     # Resolve config values once at the root call; propagated via params on recursion
     if recursion_limit is None:
-        recursion_limit = getattr(getattr(config, "system", None), "recursion_limit", 10000)
+        recursion_limit = getattr(
+            getattr(config, "system", None), "recursion_limit", 10000
+        )
     if depth_limit is None:
-        depth_limit = getattr(getattr(config, "deep_cfr", None), "traversal_depth_limit", 0)
+        depth_limit = getattr(
+            getattr(config, "deep_cfr", None), "traversal_depth_limit", 0
+        )
 
     worker_stats.nodes_visited += 1
     worker_stats.max_depth = max(worker_stats.max_depth, depth)
@@ -1387,19 +1482,25 @@ def _deep_traverse_os_go(
     # Encode infoset using Go agent
     _encoding_mode = getattr(getattr(config, "deep_cfr", None), "encoding_mode", "legacy")
     _network_type = getattr(getattr(config, "deep_cfr", None), "network_type", "residual")
-    _encoding_layout = getattr(getattr(config, "deep_cfr", None), "encoding_layout", "auto")
+    _encoding_layout = getattr(
+        getattr(config, "deep_cfr", None), "encoding_layout", "auto"
+    )
     try:
         if _encoding_mode == "ep_pbs":
             features = _encode_ep_pbs(
-                agent_states[player], current_context, drawn_bucket, _network_type, _encoding_layout
+                agent_states[player],
+                current_context,
+                drawn_bucket,
+                _network_type,
+                _encoding_layout,
             )
         else:
-            features = agent_states[player].encode(current_context, drawn_bucket=drawn_bucket)
+            features = agent_states[player].encode(
+                current_context, drawn_bucket=drawn_bucket
+            )
         action_mask = legal_mask.copy()
     except Exception as e_encode:
-        logger.error(
-            "W%d D%d: Error encoding infoset: %s", worker_id, depth, e_encode
-        )
+        logger.error("W%d D%d: Error encoding infoset: %s", worker_id, depth, e_encode)
         worker_stats.error_count += 1
         return np.zeros(NUM_PLAYERS, dtype=np.float64)
 
@@ -1446,7 +1547,8 @@ def _deep_traverse_os_go(
         # Traverser: use exploration policy q(a) = epsilon * uniform + (1-epsilon) * sigma(a)
         uniform_prob = 1.0 / num_actions
         exploration_policy = (
-            exploration_epsilon * uniform_prob + (1.0 - exploration_epsilon) * local_strategy
+            exploration_epsilon * uniform_prob
+            + (1.0 - exploration_epsilon) * local_strategy
         )
     else:
         # Opponent: sample from pure strategy (no exploration)
@@ -1476,9 +1578,7 @@ def _deep_traverse_os_go(
     try:
         snap = engine.save()
     except Exception as e_save:
-        logger.error(
-            "W%d D%d: Failed to save engine state: %s", worker_id, depth, e_save
-        )
+        logger.error("W%d D%d: Failed to save engine state: %s", worker_id, depth, e_save)
         worker_stats.error_count += 1
         return node_value
 
@@ -1500,7 +1600,10 @@ def _deep_traverse_os_go(
     except Exception as e_apply:
         logger.error(
             "W%d D%d: Error applying sampled action %d: %s",
-            worker_id, depth, chosen_action_idx, e_apply,
+            worker_id,
+            depth,
+            chosen_action_idx,
+            e_apply,
         )
         worker_stats.error_count += 1
 
@@ -1531,7 +1634,11 @@ def _deep_traverse_os_go(
         except Exception as e_recurse:  # JUSTIFIED: worker resilience
             logger.error(
                 "W%d D%d: Recursion error after sampled action %d: %s",
-                worker_id, depth, chosen_action_idx, e_recurse, exc_info=True,
+                worker_id,
+                depth,
+                chosen_action_idx,
+                e_recurse,
+                exc_info=True,
             )
             worker_stats.error_count += 1
 
@@ -1539,9 +1646,7 @@ def _deep_traverse_os_go(
     try:
         engine.restore(snap)
     except Exception as e_restore:
-        logger.error(
-            "W%d D%d: Failed to restore engine: %s", worker_id, depth, e_restore
-        )
+        logger.error("W%d D%d: Failed to restore engine: %s", worker_id, depth, e_restore)
         worker_stats.error_count += 1
     for j, a in enumerate(agent_states):
         a.close()
@@ -1639,9 +1744,13 @@ def _deep_traverse_os_go_nplayer(
     """
     # Resolve config values once at root; propagated via params on recursion
     if recursion_limit is None:
-        recursion_limit = getattr(getattr(config, "system", None), "recursion_limit", 10000)
+        recursion_limit = getattr(
+            getattr(config, "system", None), "recursion_limit", 10000
+        )
     if depth_limit is None:
-        depth_limit = getattr(getattr(config, "deep_cfr", None), "traversal_depth_limit", 0)
+        depth_limit = getattr(
+            getattr(config, "deep_cfr", None), "traversal_depth_limit", 0
+        )
 
     worker_stats.nodes_visited += 1
     worker_stats.max_depth = max(worker_stats.max_depth, depth)
@@ -1711,7 +1820,10 @@ def _deep_traverse_os_go_nplayer(
         legal_mask = engine.nplayer_legal_actions_mask()
     except Exception as e_legal:
         logger.error(
-            "W%d D%d: Error getting N-player legal action mask: %s", worker_id, depth, e_legal
+            "W%d D%d: Error getting N-player legal action mask: %s",
+            worker_id,
+            depth,
+            e_legal,
         )
         worker_stats.error_count += 1
         return np.zeros(num_players, dtype=np.float64)
@@ -1720,7 +1832,9 @@ def _deep_traverse_os_go_nplayer(
     num_actions = len(legal_indices)
 
     if num_actions == 0:
-        logger.error("W%d D%d: No legal N-player actions but non-terminal!", worker_id, depth)
+        logger.error(
+            "W%d D%d: No legal N-player actions but non-terminal!", worker_id, depth
+        )
         worker_stats.error_count += 1
         return np.zeros(num_players, dtype=np.float64)
 
@@ -1744,7 +1858,9 @@ def _deep_traverse_os_go_nplayer(
 
     # Encode infoset using N-player Go agent (580-dim)
     try:
-        features = agent_states[player].encode_nplayer(current_context, drawn_bucket=drawn_bucket)
+        features = agent_states[player].encode_nplayer(
+            current_context, drawn_bucket=drawn_bucket
+        )
         action_mask = legal_mask.copy()
     except Exception as e_encode:
         logger.error(
@@ -1796,7 +1912,8 @@ def _deep_traverse_os_go_nplayer(
         # Traverser: use exploration policy q(a) = epsilon * uniform + (1-epsilon) * sigma(a)
         uniform_prob = 1.0 / num_actions
         exploration_policy = (
-            exploration_epsilon * uniform_prob + (1.0 - exploration_epsilon) * local_strategy
+            exploration_epsilon * uniform_prob
+            + (1.0 - exploration_epsilon) * local_strategy
         )
     else:
         # Opponent: sample from pure strategy (no exploration)
@@ -1826,9 +1943,7 @@ def _deep_traverse_os_go_nplayer(
     try:
         snap = engine.save()
     except Exception as e_save:
-        logger.error(
-            "W%d D%d: Failed to save engine state: %s", worker_id, depth, e_save
-        )
+        logger.error("W%d D%d: Failed to save engine state: %s", worker_id, depth, e_save)
         worker_stats.error_count += 1
         return node_value
 
@@ -1836,7 +1951,10 @@ def _deep_traverse_os_go_nplayer(
         agent_clones = [a.clone() for a in agent_states]
     except Exception as e_clone:
         logger.error(
-            "W%d D%d: Failed to clone N-player agent states: %s", worker_id, depth, e_clone
+            "W%d D%d: Failed to clone N-player agent states: %s",
+            worker_id,
+            depth,
+            e_clone,
         )
         worker_stats.error_count += 1
         engine.free_snapshot(snap)
@@ -1851,7 +1969,10 @@ def _deep_traverse_os_go_nplayer(
     except Exception as e_apply:
         logger.error(
             "W%d D%d: Error applying N-player sampled action %d: %s",
-            worker_id, depth, chosen_action_idx, e_apply,
+            worker_id,
+            depth,
+            chosen_action_idx,
+            e_apply,
         )
         worker_stats.error_count += 1
 
@@ -1883,7 +2004,11 @@ def _deep_traverse_os_go_nplayer(
         except Exception as e_recurse:  # JUSTIFIED: worker resilience
             logger.error(
                 "W%d D%d: Recursion error after N-player sampled action %d: %s",
-                worker_id, depth, chosen_action_idx, e_recurse, exc_info=True,
+                worker_id,
+                depth,
+                chosen_action_idx,
+                e_recurse,
+                exc_info=True,
             )
             worker_stats.error_count += 1
 
@@ -1891,9 +2016,7 @@ def _deep_traverse_os_go_nplayer(
     try:
         engine.restore(snap)
     except Exception as e_restore:
-        logger.error(
-            "W%d D%d: Failed to restore engine: %s", worker_id, depth, e_restore
-        )
+        logger.error("W%d D%d: Failed to restore engine: %s", worker_id, depth, e_restore)
         worker_stats.error_count += 1
     for j, a in enumerate(agent_states):
         a.close()
@@ -2014,9 +2137,13 @@ def _escher_traverse_go(
     """
     # Resolve config values once at the root call
     if recursion_limit is None:
-        recursion_limit = getattr(getattr(config, "system", None), "recursion_limit", 10000)
+        recursion_limit = getattr(
+            getattr(config, "system", None), "recursion_limit", 10000
+        )
     if depth_limit is None:
-        depth_limit = getattr(getattr(config, "deep_cfr", None), "traversal_depth_limit", 0)
+        depth_limit = getattr(
+            getattr(config, "deep_cfr", None), "traversal_depth_limit", 0
+        )
     if value_net_device is None:
         value_net_device = torch.device("cpu")
 
@@ -2118,18 +2245,29 @@ def _escher_traverse_go(
     # Encode acting player's infoset
     _encoding_mode = getattr(getattr(config, "deep_cfr", None), "encoding_mode", "legacy")
     _network_type = getattr(getattr(config, "deep_cfr", None), "network_type", "residual")
-    _encoding_layout = getattr(getattr(config, "deep_cfr", None), "encoding_layout", "auto")
+    _encoding_layout = getattr(
+        getattr(config, "deep_cfr", None), "encoding_layout", "auto"
+    )
     try:
         if _encoding_mode == "ep_pbs":
             features_player = _encode_ep_pbs(
-                agent_states[player], current_context, drawn_bucket, _network_type, _encoding_layout
+                agent_states[player],
+                current_context,
+                drawn_bucket,
+                _network_type,
+                _encoding_layout,
             )
         else:
-            features_player = agent_states[player].encode(current_context, drawn_bucket=drawn_bucket)
+            features_player = agent_states[player].encode(
+                current_context, drawn_bucket=drawn_bucket
+            )
         action_mask = legal_mask.copy()
     except Exception as e_encode:
         logger.error(
-            "W%d D%d: Error encoding acting player infoset: %s", worker_id, depth, e_encode
+            "W%d D%d: Error encoding acting player infoset: %s",
+            worker_id,
+            depth,
+            e_encode,
         )
         worker_stats.error_count += 1
         return np.zeros(NUM_PLAYERS, dtype=np.float64)
@@ -2143,14 +2281,18 @@ def _escher_traverse_go(
         except NetworkError as e_net:
             logger.warning(
                 "W%d D%d: Regret net inference error: %s. Using uniform.",
-                worker_id, depth, e_net,
+                worker_id,
+                depth,
+                e_net,
             )
             worker_stats.warning_count += 1
             strategy_full = None
         except Exception as e_net:  # JUSTIFIED: worker resilience
             logger.warning(
                 "W%d D%d: Regret net inference failed: %s. Using uniform.",
-                worker_id, depth, e_net,
+                worker_id,
+                depth,
+                e_net,
             )
             worker_stats.warning_count += 1
             strategy_full = None
@@ -2183,9 +2325,7 @@ def _escher_traverse_go(
     try:
         snap = engine.save()
     except Exception as e_save:
-        logger.error(
-            "W%d D%d: Failed to save engine state: %s", worker_id, depth, e_save
-        )
+        logger.error("W%d D%d: Failed to save engine state: %s", worker_id, depth, e_save)
         worker_stats.error_count += 1
         return node_value
 
@@ -2207,7 +2347,10 @@ def _escher_traverse_go(
     except Exception as e_apply:
         logger.error(
             "W%d D%d: Error applying sampled action %d: %s",
-            worker_id, depth, chosen_action_idx, e_apply,
+            worker_id,
+            depth,
+            chosen_action_idx,
+            e_apply,
         )
         worker_stats.error_count += 1
 
@@ -2243,7 +2386,11 @@ def _escher_traverse_go(
         except Exception as e_recurse:  # JUSTIFIED: worker resilience
             logger.error(
                 "W%d D%d: Recursion error after sampled action %d: %s",
-                worker_id, depth, chosen_action_idx, e_recurse, exc_info=True,
+                worker_id,
+                depth,
+                chosen_action_idx,
+                e_recurse,
+                exc_info=True,
             )
             worker_stats.error_count += 1
 
@@ -2251,9 +2398,7 @@ def _escher_traverse_go(
     try:
         engine.restore(snap)
     except Exception as e_restore:
-        logger.error(
-            "W%d D%d: Failed to restore engine: %s", worker_id, depth, e_restore
-        )
+        logger.error("W%d D%d: Failed to restore engine: %s", worker_id, depth, e_restore)
         worker_stats.error_count += 1
     for j, a in enumerate(agent_states):
         a.close()
@@ -2274,7 +2419,9 @@ def _escher_traverse_go(
     except Exception as e_enc_opp:
         logger.warning(
             "W%d D%d: Error encoding opponent infoset: %s. Skipping value sample.",
-            worker_id, depth, e_enc_opp,
+            worker_id,
+            depth,
+            e_enc_opp,
         )
         worker_stats.warning_count += 1
         _opp_dim = EP_PBS_INPUT_DIM if _encoding_mode == "ep_pbs" else INPUT_DIM
@@ -2308,7 +2455,9 @@ def _escher_traverse_go(
             except Exception as e_vnet:
                 logger.warning(
                     "W%d D%d: Value net predict failed: %s. Using 0.0.",
-                    worker_id, depth, e_vnet,
+                    worker_id,
+                    depth,
+                    e_vnet,
                 )
                 worker_stats.warning_count += 1
 
@@ -2336,7 +2485,10 @@ def _escher_traverse_go(
                     except Exception as e_cf_save:
                         logger.warning(
                             "W%d D%d: CF save failed for action %d: %s",
-                            worker_id, depth, action_idx, e_cf_save,
+                            worker_id,
+                            depth,
+                            action_idx,
+                            e_cf_save,
                         )
                         worker_stats.warning_count += 1
                         continue
@@ -2345,7 +2497,10 @@ def _escher_traverse_go(
                         cf_agent_clones = [a.clone() for a in agent_states]
                     except Exception as e_cf_clone:
                         logger.warning(
-                            "W%d D%d: CF agent clone failed: %s", worker_id, depth, e_cf_clone
+                            "W%d D%d: CF agent clone failed: %s",
+                            worker_id,
+                            depth,
+                            e_cf_clone,
                         )
                         worker_stats.warning_count += 1
                         engine.free_snapshot(cf_snap)
@@ -2367,13 +2522,15 @@ def _escher_traverse_go(
                                 agent_states[0],
                                 cf_ctx if cf_next_player == 0 else 0,
                                 cf_drawn if cf_next_player == 0 else -1,
-                                _network_type, _encoding_layout,
+                                _network_type,
+                                _encoding_layout,
                             )
                             cf_feat_p1 = _encode_ep_pbs(
                                 agent_states[1],
                                 cf_ctx if cf_next_player == 1 else 0,
                                 cf_drawn if cf_next_player == 1 else -1,
-                                _network_type, _encoding_layout,
+                                _network_type,
+                                _encoding_layout,
                             )
                         else:
                             cf_feat_p0 = agent_states[0].encode(
@@ -2384,14 +2541,17 @@ def _escher_traverse_go(
                                 cf_ctx if cf_next_player == 1 else 0,
                                 drawn_bucket=cf_drawn if cf_next_player == 1 else -1,
                             )
-                        cf_feat_both = np.concatenate(
-                            [cf_feat_p0, cf_feat_p1]
-                        ).astype(np.float32)
+                        cf_feat_both = np.concatenate([cf_feat_p0, cf_feat_p1]).astype(
+                            np.float32
+                        )
                         cf_ok = True
                     except Exception as e_cf_apply:
                         logger.warning(
                             "W%d D%d: CF apply/encode failed for action %d: %s",
-                            worker_id, depth, action_idx, e_cf_apply,
+                            worker_id,
+                            depth,
+                            action_idx,
+                            e_cf_apply,
                         )
                         worker_stats.warning_count += 1
 
@@ -2400,7 +2560,10 @@ def _escher_traverse_go(
                         engine.restore(cf_snap)
                     except Exception as e_cf_restore:
                         logger.warning(
-                            "W%d D%d: CF restore failed: %s", worker_id, depth, e_cf_restore
+                            "W%d D%d: CF restore failed: %s",
+                            worker_id,
+                            depth,
+                            e_cf_restore,
                         )
                         worker_stats.error_count += 1
                     for j, a in enumerate(agent_states):
@@ -2423,7 +2586,10 @@ def _escher_traverse_go(
                             regret_full[cf_action_idx] = float(cf_values[i]) - v_hat
                     except Exception as e_batch:
                         logger.warning(
-                            "W%d D%d: Batch CF predict failed: %s", worker_id, depth, e_batch
+                            "W%d D%d: Batch CF predict failed: %s",
+                            worker_id,
+                            depth,
+                            e_batch,
                         )
                         worker_stats.warning_count += 1
             else:
@@ -2437,7 +2603,10 @@ def _escher_traverse_go(
                     except Exception as e_cf_save:
                         logger.warning(
                             "W%d D%d: CF save failed for action %d: %s",
-                            worker_id, depth, action_idx, e_cf_save,
+                            worker_id,
+                            depth,
+                            action_idx,
+                            e_cf_save,
                         )
                         worker_stats.warning_count += 1
                         continue
@@ -2446,7 +2615,10 @@ def _escher_traverse_go(
                         cf_agent_clones = [a.clone() for a in agent_states]
                     except Exception as e_cf_clone:
                         logger.warning(
-                            "W%d D%d: CF agent clone failed: %s", worker_id, depth, e_cf_clone
+                            "W%d D%d: CF agent clone failed: %s",
+                            worker_id,
+                            depth,
+                            e_cf_clone,
                         )
                         worker_stats.warning_count += 1
                         engine.free_snapshot(cf_snap)
@@ -2466,13 +2638,15 @@ def _escher_traverse_go(
                                 agent_states[0],
                                 cf_ctx if cf_next_player == 0 else 0,
                                 cf_drawn if cf_next_player == 0 else -1,
-                                _network_type, _encoding_layout,
+                                _network_type,
+                                _encoding_layout,
                             )
                             cf_feat_p1 = _encode_ep_pbs(
                                 agent_states[1],
                                 cf_ctx if cf_next_player == 1 else 0,
                                 cf_drawn if cf_next_player == 1 else -1,
-                                _network_type, _encoding_layout,
+                                _network_type,
+                                _encoding_layout,
                             )
                         else:
                             cf_feat_p0 = agent_states[0].encode(
@@ -2483,14 +2657,19 @@ def _escher_traverse_go(
                                 cf_ctx if cf_next_player == 1 else 0,
                                 drawn_bucket=cf_drawn if cf_next_player == 1 else -1,
                             )
-                        cf_feat_both = np.concatenate(
-                            [cf_feat_p0, cf_feat_p1]
-                        ).astype(np.float32)
-                        cf_val = _value_net_predict(value_net, cf_feat_both, value_net_device)
+                        cf_feat_both = np.concatenate([cf_feat_p0, cf_feat_p1]).astype(
+                            np.float32
+                        )
+                        cf_val = _value_net_predict(
+                            value_net, cf_feat_both, value_net_device
+                        )
                     except Exception as e_cf_apply:
                         logger.warning(
                             "W%d D%d: CF apply/encode/predict failed for action %d: %s",
-                            worker_id, depth, action_idx, e_cf_apply,
+                            worker_id,
+                            depth,
+                            action_idx,
+                            e_cf_apply,
                         )
                         worker_stats.warning_count += 1
 
@@ -2499,7 +2678,10 @@ def _escher_traverse_go(
                         engine.restore(cf_snap)
                     except Exception as e_cf_restore:
                         logger.warning(
-                            "W%d D%d: CF restore failed: %s", worker_id, depth, e_cf_restore
+                            "W%d D%d: CF restore failed: %s",
+                            worker_id,
+                            depth,
+                            e_cf_restore,
                         )
                         worker_stats.error_count += 1
                     for j, a in enumerate(agent_states):
@@ -2576,9 +2758,13 @@ def _deep_traverse_os(
     """
     # Resolve config values once at the root call; propagated via params on recursion
     if recursion_limit is None:
-        recursion_limit = getattr(getattr(config, "system", None), "recursion_limit", 10000)
+        recursion_limit = getattr(
+            getattr(config, "system", None), "recursion_limit", 10000
+        )
     if depth_limit is None:
-        depth_limit = getattr(getattr(config, "deep_cfr", None), "traversal_depth_limit", 0)
+        depth_limit = getattr(
+            getattr(config, "deep_cfr", None), "traversal_depth_limit", 0
+        )
 
     worker_stats.nodes_visited += 1
     worker_stats.max_depth = max(worker_stats.max_depth, depth)
@@ -2692,7 +2878,9 @@ def _deep_traverse_os(
         )
         worker_stats.error_count += 1
         return np.zeros(NUM_PLAYERS, dtype=np.float64)
-    except Exception as e_legal:  # JUSTIFIED: worker resilience - workers must not crash the training pool
+    except (
+        Exception
+    ) as e_legal:  # JUSTIFIED: worker resilience - workers must not crash the training pool
         logger.error(
             "W%d D%d: Error getting legal actions: %s",
             worker_id,
@@ -2706,9 +2894,7 @@ def _deep_traverse_os(
     num_actions = len(legal_actions)
     if num_actions == 0:
         if not game_state.is_terminal():
-            logger.error(
-                "W%d D%d: No legal actions but non-terminal!", worker_id, depth
-            )
+            logger.error("W%d D%d: No legal actions but non-terminal!", worker_id, depth)
             worker_stats.error_count += 1
             return np.zeros(NUM_PLAYERS, dtype=np.float64)
         else:
@@ -2744,7 +2930,9 @@ def _deep_traverse_os(
         )
         worker_stats.error_count += 1
         return np.zeros(NUM_PLAYERS, dtype=np.float64)
-    except Exception as e_encode:  # JUSTIFIED: worker resilience - workers must not crash the training pool
+    except (
+        Exception
+    ) as e_encode:  # JUSTIFIED: worker resilience - workers must not crash the training pool
         logger.error(
             "W%d D%d: Error encoding infoset/mask: %s",
             worker_id,
@@ -2770,7 +2958,9 @@ def _deep_traverse_os(
             )
             worker_stats.warning_count += 1
             strategy = np.ones(num_actions, dtype=np.float64) / num_actions
-        except Exception as e_net:  # JUSTIFIED: worker resilience - fallback to uniform strategy on unexpected errors
+        except (
+            Exception
+        ) as e_net:  # JUSTIFIED: worker resilience - fallback to uniform strategy on unexpected errors
             logger.warning(
                 "W%d D%d: Network inference failed: %s. Using uniform.",
                 worker_id,
@@ -2862,7 +3052,9 @@ def _deep_traverse_os(
             e_apply,
         )
         worker_stats.error_count += 1
-    except Exception as e_apply:  # JUSTIFIED: worker resilience - workers must not crash the training pool
+    except (
+        Exception
+    ) as e_apply:  # JUSTIFIED: worker resilience - workers must not crash the training pool
         logger.error(
             "W%d D%d: Error applying action %s: %s",
             worker_id,
@@ -2893,7 +3085,9 @@ def _deep_traverse_os(
                 undo_info()
             except UndoFailureError:
                 pass
-            except Exception:  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
+            except (
+                Exception
+            ):  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
                 pass
         else:
             try:
@@ -2916,9 +3110,13 @@ def _deep_traverse_os(
                     undo_info()
                 except UndoFailureError:
                     pass
-                except Exception:  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
+                except (
+                    Exception
+                ):  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
                     pass
-            except Exception as e_update:  # JUSTIFIED: worker resilience - workers must not crash the training pool
+            except (
+                Exception
+            ) as e_update:  # JUSTIFIED: worker resilience - workers must not crash the training pool
                 logger.error(
                     "W%d D%d: Error updating agents after %s: %s",
                     worker_id,
@@ -2933,7 +3131,9 @@ def _deep_traverse_os(
                     undo_info()
                 except UndoFailureError:
                     pass
-                except Exception:  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
+                except (
+                    Exception
+                ):  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
                     pass
 
         if not agent_update_failed:
@@ -2969,7 +3169,9 @@ def _deep_traverse_os(
                     e_recurse,
                 )
                 worker_stats.error_count += 1
-            except Exception as e_recurse:  # JUSTIFIED: worker resilience - workers must not crash the training pool
+            except (
+                Exception
+            ) as e_recurse:  # JUSTIFIED: worker resilience - workers must not crash the training pool
                 logger.error(
                     "W%d D%d: Recursion error after %s: %s",
                     worker_id,
@@ -2993,7 +3195,9 @@ def _deep_traverse_os(
                 )
                 worker_stats.error_count += 1
                 return np.zeros(NUM_PLAYERS, dtype=np.float64)
-            except Exception as e_undo:  # JUSTIFIED: worker resilience - must not crash on undo, state likely corrupt
+            except (
+                Exception
+            ) as e_undo:  # JUSTIFIED: worker resilience - must not crash on undo, state likely corrupt
                 logger.error(
                     "W%d D%d: Error undoing %s: %s. State corrupt.",
                     worker_id,
@@ -3174,7 +3378,9 @@ def run_deep_cfr_worker(
                 output_dim = network_config.get("output_dim", NUM_ACTIONS)
 
                 advantage_network = build_advantage_network(
-                    input_dim=input_dim, hidden_dim=hidden_dim, output_dim=output_dim,
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    output_dim=output_dim,
                     validate_inputs=network_config.get("validate_inputs", True),
                     use_residual=network_config.get("use_residual", False),
                     num_hidden_layers=network_config.get("num_hidden_layers", 2),
@@ -3265,7 +3471,9 @@ def run_deep_cfr_worker(
 
             go_engine = None
             go_agents = []
-            _profiling = getattr(getattr(config, "deep_cfr", None), "enable_traversal_profiling", False)
+            _profiling = getattr(
+                getattr(config, "deep_cfr", None), "enable_traversal_profiling", False
+            )
             _setup_t0 = time.time() if _profiling else 0.0
             try:
                 go_engine = GoEngine(house_rules=config.cambia_rules)
@@ -3298,7 +3506,10 @@ def run_deep_cfr_worker(
                 _setup_elapsed = time.time() - _setup_t0
                 if logger_instance:
                     logger_instance.debug(
-                        "W%d Iter %d: engine_setup=%.4fs", worker_id, iteration, _setup_elapsed
+                        "W%d Iter %d: engine_setup=%.4fs",
+                        worker_id,
+                        iteration,
+                        _setup_elapsed,
                     )
 
             _traversal_t0 = time.time() if _profiling else 0.0
@@ -3339,9 +3550,15 @@ def run_deep_cfr_worker(
                         _cf_regret_track=_escher_cf_track,
                     )
                 elif sampling_method == "outcome":
-                    exploration_epsilon = getattr(config.deep_cfr, "exploration_epsilon", 0.6)
-                    depth_limit = getattr(getattr(config, "deep_cfr", None), "traversal_depth_limit", 0)
-                    recursion_limit = getattr(getattr(config, "system", None), "recursion_limit", 10000)
+                    exploration_epsilon = getattr(
+                        config.deep_cfr, "exploration_epsilon", 0.6
+                    )
+                    depth_limit = getattr(
+                        getattr(config, "deep_cfr", None), "traversal_depth_limit", 0
+                    )
+                    recursion_limit = getattr(
+                        getattr(config, "system", None), "recursion_limit", 10000
+                    )
                     final_utility_value = _deep_traverse_os_go(
                         engine=go_engine,
                         agent_states=go_agents,
@@ -3421,7 +3638,9 @@ def run_deep_cfr_worker(
                     stats=worker_stats,
                     simulation_nodes=simulation_nodes_this_sim,
                 )
-            except Exception as game_init_e:  # JUSTIFIED: worker resilience - workers must not crash the training pool
+            except (
+                Exception
+            ) as game_init_e:  # JUSTIFIED: worker resilience - workers must not crash the training pool
                 if logger_instance:
                     logger_instance.error(
                         "W%d Iter %d: Failed GameState init: %s",
@@ -3457,7 +3676,11 @@ def run_deep_cfr_worker(
                         )
                         agent.initialize(initial_obs, initial_hands[i], initial_peeks[i])
                         initial_agent_states.append(agent)
-                except (AgentStateError, ObservationUpdateError, EncodingError) as agent_init_e:
+                except (
+                    AgentStateError,
+                    ObservationUpdateError,
+                    EncodingError,
+                ) as agent_init_e:
                     if logger_instance:
                         logger_instance.warning(
                             "W%d Iter %d: Agent state initialization error: %s",
@@ -3470,7 +3693,9 @@ def run_deep_cfr_worker(
                         stats=worker_stats,
                         simulation_nodes=simulation_nodes_this_sim,
                     )
-                except Exception as agent_init_e:  # JUSTIFIED: worker resilience - workers must not crash the training pool
+                except (
+                    Exception
+                ) as agent_init_e:  # JUSTIFIED: worker resilience - workers must not crash the training pool
                     if logger_instance:
                         logger_instance.error(
                             "W%d Iter %d: Failed AgentStates init: %s",
@@ -3492,7 +3717,8 @@ def run_deep_cfr_worker(
                         iteration,
                     )
                 final_utility = np.array(
-                    [game_state.get_utility(i) for i in range(NUM_PLAYERS)], dtype=np.float64
+                    [game_state.get_utility(i) for i in range(NUM_PLAYERS)],
+                    dtype=np.float64,
                 )
                 return DeepCFRWorkerResult(
                     stats=worker_stats,
@@ -3519,8 +3745,12 @@ def run_deep_cfr_worker(
             if sampling_method == "outcome":
                 # Run outcome sampling traversal
                 exploration_epsilon = config.deep_cfr.exploration_epsilon
-                depth_limit = getattr(getattr(config, "deep_cfr", None), "traversal_depth_limit", 0)
-                recursion_limit = getattr(getattr(config, "system", None), "recursion_limit", 10000)
+                depth_limit = getattr(
+                    getattr(config, "deep_cfr", None), "traversal_depth_limit", 0
+                )
+                recursion_limit = getattr(
+                    getattr(config, "system", None), "recursion_limit", 10000
+                )
                 final_utility_value = _deep_traverse_os(
                     game_state=game_state,
                     agent_states=initial_agent_states,
@@ -3598,7 +3828,9 @@ def run_deep_cfr_worker(
                 worker_stats.nodes_visited,
             )
 
-        _escher_sampled_mag = float(np.mean(_escher_sampled_track)) if _escher_sampled_track else None
+        _escher_sampled_mag = (
+            float(np.mean(_escher_sampled_track)) if _escher_sampled_track else None
+        )
         _escher_cf_mag = float(np.mean(_escher_cf_track)) if _escher_cf_track else None
         return DeepCFRWorkerResult(
             advantage_samples=advantage_samples,
@@ -3624,7 +3856,9 @@ def run_deep_cfr_worker(
             stats=worker_stats,
             simulation_nodes=simulation_nodes_this_sim,
         )
-    except Exception as e_inner:  # JUSTIFIED: worker resilience - top-level worker catch to prevent pool crash
+    except (
+        Exception
+    ) as e_inner:  # JUSTIFIED: worker resilience - top-level worker catch to prevent pool crash
         worker_stats.error_count += 1
         if logger_instance:
             logger_instance.critical(

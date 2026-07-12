@@ -58,12 +58,22 @@ def eval_checkpoint(ckpt_path: str, config_path: str, baselines: list, games: in
     half = games // 2
     for bl in baselines:
         c1 = run_evaluation(
-            config_path=config_path, agent1_type="deep_cfr", agent2_type=bl,
-            num_games=half, strategy_path=None, checkpoint_path=ckpt_path, device="cpu",
+            config_path=config_path,
+            agent1_type="deep_cfr",
+            agent2_type=bl,
+            num_games=half,
+            strategy_path=None,
+            checkpoint_path=ckpt_path,
+            device="cpu",
         )
         c2 = run_evaluation(
-            config_path=config_path, agent1_type=bl, agent2_type="deep_cfr",
-            num_games=half, strategy_path=None, checkpoint_path=ckpt_path, device="cpu",
+            config_path=config_path,
+            agent1_type=bl,
+            agent2_type="deep_cfr",
+            num_games=half,
+            strategy_path=None,
+            checkpoint_path=ckpt_path,
+            device="cpu",
         )
         model_wins = c1.get("P0 Wins", 0) + c2.get("P1 Wins", 0)
         bl_wins = c1.get("P1 Wins", 0) + c2.get("P0 Wins", 0)
@@ -74,15 +84,20 @@ def eval_checkpoint(ckpt_path: str, config_path: str, baselines: list, games: in
         avg_turns = (s1.get("avg_game_turns", 0) + s2.get("avg_game_turns", 0)) / 2
 
         results[bl] = {
-            "model_wins": model_wins, "bl_wins": bl_wins,
-            "win_rate": round(wr, 4), "ci_lo": round(ci_lo, 4), "ci_hi": round(ci_hi, 4),
-            "avg_turns": round(avg_turns, 1), "decided": decided,
+            "model_wins": model_wins,
+            "bl_wins": bl_wins,
+            "win_rate": round(wr, 4),
+            "ci_lo": round(ci_lo, 4),
+            "ci_hi": round(ci_hi, 4),
+            "avg_turns": round(avg_turns, 1),
+            "decided": decided,
         }
     return results
 
 
 def main():
     import argparse
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=LEGACY_CONFIG)
     parser.add_argument("--games", type=int, default=GAMES_PER_BASELINE)
@@ -108,8 +123,10 @@ def main():
             print(f"[SKIP] iter {it}: {ckpt} not found")
             continue
 
-        print(f"\n[iter {it}] Evaluating against {len(args.baselines)} baselines "
-              f"({args.games} games each, seat-balanced)...")
+        print(
+            f"\n[iter {it}] Evaluating against {len(args.baselines)} baselines "
+            f"({args.games} games each, seat-balanced)..."
+        )
         mt = time.perf_counter()
 
         results = eval_checkpoint(str(ckpt), config_path, args.baselines, args.games)
@@ -144,14 +161,18 @@ def main():
     output_path = args.output
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w") as f:
-        json.dump({
-            "config": config_path,
-            "games_per_baseline": args.games,
-            "baselines": args.baselines,
-            "note": "Corrected eval: agents now properly reset memory between games",
-            "bug": "ImperfectMemoryMixin._ensure_initialized() never re-initialized on new game",
-            "results": all_results,
-        }, f, indent=2)
+        json.dump(
+            {
+                "config": config_path,
+                "games_per_baseline": args.games,
+                "baselines": args.baselines,
+                "note": "Corrected eval: agents now properly reset memory between games",
+                "bug": "ImperfectMemoryMixin._ensure_initialized() never re-initialized on new game",
+                "results": all_results,
+            },
+            f,
+            indent=2,
+        )
     print(f"\nSaved to {output_path}")
 
 

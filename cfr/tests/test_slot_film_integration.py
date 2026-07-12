@@ -25,7 +25,6 @@ import numpy as np
 import pytest
 import torch
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -94,9 +93,9 @@ class TestSlotFiLMPipelineSmoke:
             save_path = os.path.join(tmpdir, "smoke.pt")
             trainer = DeepCFRTrainer(_make_config(save_path), deep_cfr_config=dcfr)
 
-        assert isinstance(trainer.advantage_net, SlotFiLMAdvantageNetwork), (
-            f"Expected SlotFiLMAdvantageNetwork, got {type(trainer.advantage_net).__name__}"
-        )
+        assert isinstance(
+            trainer.advantage_net, SlotFiLMAdvantageNetwork
+        ), f"Expected SlotFiLMAdvantageNetwork, got {type(trainer.advantage_net).__name__}"
         assert trainer.strategy_net is None  # SD-CFR mode
 
     def test_slot_film_two_iterations_mocked_traversal(self, tmp_path):
@@ -118,7 +117,7 @@ class TestSlotFiLMPipelineSmoke:
             network_type="slot_film",
             use_sd_cfr=True,
             device="cpu",
-            pipeline_training=False,   # avoid subprocess spawn in tests
+            pipeline_training=False,  # avoid subprocess spawn in tests
             traversals_per_step=50,
             train_steps_per_iteration=5,
             batch_size=32,
@@ -155,7 +154,13 @@ class TestSlotFiLMPipelineSmoke:
             )
             strat_samples = []  # SD-CFR: no strategy samples
             value_samples = []
-            timing = {"min_s": 0.0, "max_s": 0.0, "mean_s": 0.0, "total_s": 0.0, "count": n_samples}
+            timing = {
+                "min_s": 0.0,
+                "max_s": 0.0,
+                "mean_s": 0.0,
+                "total_s": 0.0,
+                "count": n_samples,
+            }
             return adv_samples, strat_samples, value_samples, n_samples, n_samples, timing
 
         patch_target = "src.cfr.deep_trainer._run_traversals_batch"
@@ -163,9 +168,9 @@ class TestSlotFiLMPipelineSmoke:
             trainer.train(num_training_steps=2)
 
         # Checkpoint must be written (save_interval=1 → save after every step)
-        assert os.path.exists(save_path), (
-            f"Expected checkpoint at {save_path} but it was not created."
-        )
+        assert os.path.exists(
+            save_path
+        ), f"Expected checkpoint at {save_path} but it was not created."
 
         # Load and verify forward pass
         from src.cfr.deep_trainer import DeepCFRTrainer as _Trainer2
@@ -183,13 +188,18 @@ class TestSlotFiLMPipelineSmoke:
         with torch.inference_mode():
             out = trainer2.advantage_net(features, mask)
 
-        assert out.shape == (batch_size, NUM_ACTIONS), (
-            f"Expected output shape ({batch_size}, {NUM_ACTIONS}), got {out.shape}"
-        )
+        assert out.shape == (
+            batch_size,
+            NUM_ACTIONS,
+        ), f"Expected output shape ({batch_size}, {NUM_ACTIONS}), got {out.shape}"
         # Legal actions should be finite
-        assert torch.isfinite(out[:, :5]).all(), "Legal action outputs contain non-finite values"
+        assert torch.isfinite(
+            out[:, :5]
+        ).all(), "Legal action outputs contain non-finite values"
         # Illegal actions should be -inf
-        assert (out[:, 5:] == float("-inf")).all(), "Illegal actions should be masked to -inf"
+        assert (
+            out[:, 5:] == float("-inf")
+        ).all(), "Illegal actions should be masked to -inf"
 
     def test_slot_film_checkpoint_encodes_network_type(self, tmp_path):
         """Checkpoint metadata records network_type='slot_film'."""

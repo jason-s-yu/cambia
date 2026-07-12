@@ -2,13 +2,13 @@
 Mathematical invariant tests for core CFR algorithms.
 Verifies correctness of RM+, QRE, IS-weights, CFV, LCFR weighting, and snapshot averaging.
 """
+
 import numpy as np
 import pytest
 import torch
 
 from src.cfr.deep_trainer import qre_strategy
 from src.networks import AdvantageNetwork, get_strategy_from_advantages
-
 
 # ---------------------------------------------------------------------------
 # RM+ (Regret Matching Plus) tests
@@ -90,9 +90,7 @@ def test_os_regret_formula_matches_worker():
         baseline = sigma[chosen] * utility_estimate
         worker_regrets = np.zeros(num_actions)
         for a in range(num_actions):
-            action_value_estimate = (
-                1.0 if a == chosen else 0.0
-            ) * utility_estimate
+            action_value_estimate = (1.0 if a == chosen else 0.0) * utility_estimate
             worker_regrets[a] = action_value_estimate - baseline
 
         # Theoretical formula: r(a) = (u/q) * (I(a==a*) - σ(a*))
@@ -113,9 +111,9 @@ def test_os_regret_formula_matches_worker():
         # Proof: Σ_a σ(a) * (u/q) * (I(a==a*) - σ(a*))
         #      = (u/q) * σ(a*) * (1 - σ(a*)) + (u/q) * Σ_{a≠a*} σ(a) * (-σ(a*))
         #      = (u/q) * σ(a*) * (1 - σ(a*) - (1 - σ(a*))) = 0
-        assert np.isclose(np.sum(sigma * worker_regrets), 0.0, atol=1e-10), (
-            f"Weighted sum not zero: {np.sum(sigma * worker_regrets):.2e}"
-        )
+        assert np.isclose(
+            np.sum(sigma * worker_regrets), 0.0, atol=1e-10
+        ), f"Weighted sum not zero: {np.sum(sigma * worker_regrets):.2e}"
 
 
 # ---------------------------------------------------------------------------
@@ -151,12 +149,8 @@ def test_qre_strategy_sum_one_random():
             mask[0, idx] = True
 
             result = qre_strategy(adv, mask, lam)
-            assert torch.allclose(
-                result[mask].sum(), torch.tensor(1.0), atol=1e-5
-            )
-            assert torch.allclose(
-                result[~mask].sum(), torch.tensor(0.0), atol=1e-6
-            )
+            assert torch.allclose(result[mask].sum(), torch.tensor(1.0), atol=1e-5)
+            assert torch.allclose(result[~mask].sum(), torch.tensor(0.0), atol=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -286,9 +280,9 @@ def test_exploration_policy_properties():
 
         assert abs(q.sum() - 1.0) < 1e-10, f"q sums to {q.sum()}, expected 1.0"
         floor = epsilon / num_actions
-        assert np.all(q >= floor - 1e-10), (
-            f"Floor violated: min q = {q.min()}, floor = {floor}"
-        )
+        assert np.all(
+            q >= floor - 1e-10
+        ), f"Floor violated: min q = {q.min()}, floor = {floor}"
         assert np.all(q > 0), "Exploration policy must be positive everywhere"
 
 
@@ -322,9 +316,7 @@ def test_weighted_regret_orthogonality():
 
         # Verify identity at every iteration
         weighted_sum = np.dot(sigma, regrets)
-        assert abs(weighted_sum) < 1e-6, (
-            f"Iteration {t}: σ·r = {weighted_sum} ≠ 0"
-        )
+        assert abs(weighted_sum) < 1e-6, f"Iteration {t}: σ·r = {weighted_sum} ≠ 0"
 
         # Accumulate regrets for next iteration (drives strategy evolution)
         cumulative_regrets += regrets

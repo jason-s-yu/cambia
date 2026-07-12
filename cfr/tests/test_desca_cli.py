@@ -22,9 +22,11 @@ def _real_config_module():
         sys.modules["src.config"] = saved
     return mod
 
+
 # ---------------------------------------------------------------------------
 # CLI runner fixture
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def runner():
@@ -34,12 +36,14 @@ def runner():
 @pytest.fixture
 def cambia_app():
     from src.cli import app
+
     return app
 
 
 # ---------------------------------------------------------------------------
 # DESCA command - --help (no crash)
 # ---------------------------------------------------------------------------
+
 
 def test_train_desca_help(runner, cambia_app):
     result = runner.invoke(cambia_app, ["train", "desca", "--help"])
@@ -66,15 +70,11 @@ def test_train_dense_escher_underscore_help(runner, cambia_app):
 # DESCA command - missing desca config section
 # ---------------------------------------------------------------------------
 
+
 def test_train_desca_missing_desca_section(runner, cambia_app, tmp_path):
     """Invoking train desca with a config that has no [desca] section exits 1."""
     cfg = tmp_path / "config.yaml"
-    cfg.write_text(
-        "cambia_rules:\n"
-        "  use_jokers: 2\n"
-        "deep_cfr:\n"
-        "  device: cpu\n"
-    )
+    cfg.write_text("cambia_rules:\n" "  use_jokers: 2\n" "deep_cfr:\n" "  device: cpu\n")
     result = runner.invoke(cambia_app, ["train", "desca", "--config", str(cfg)])
     assert result.exit_code == 1
     assert "desca" in result.output.lower()
@@ -83,6 +83,7 @@ def test_train_desca_missing_desca_section(runner, cambia_app, tmp_path):
 # ---------------------------------------------------------------------------
 # F2 carry-forward: sd-cfr / os-mccfr --help
 # ---------------------------------------------------------------------------
+
 
 def test_train_sd_cfr_help(runner, cambia_app):
     result = runner.invoke(cambia_app, ["train", "sd-cfr", "--help"])
@@ -114,6 +115,7 @@ def test_train_osmccfr_alias_help(runner, cambia_app):
 # F2: sd-cfr dispatches train_deep with use_sd_cfr=True
 # ---------------------------------------------------------------------------
 
+
 def test_train_sd_cfr_dispatches_with_use_sd_cfr(tmp_path):
     """sd-cfr command passes use_sd_cfr=True to DeepCFRConfig.from_yaml_config."""
     cfg = tmp_path / "config.yaml"
@@ -133,7 +135,10 @@ def test_train_sd_cfr_dispatches_with_use_sd_cfr(tmp_path):
             with patch("src.main_train.create_infrastructure", return_value=MagicMock()):
                 runner = CliRunner()
                 from src.cli import app
-                runner.invoke(app, ["train", "sd-cfr", "--config", str(cfg), "--steps", "1"])
+
+                runner.invoke(
+                    app, ["train", "sd-cfr", "--config", str(cfg), "--steps", "1"]
+                )
 
     assert captured_overrides.get("use_sd_cfr") is True
 
@@ -141,6 +146,7 @@ def test_train_sd_cfr_dispatches_with_use_sd_cfr(tmp_path):
 # ---------------------------------------------------------------------------
 # F2: os-mccfr dispatches train_deep with sampling_method="os"
 # ---------------------------------------------------------------------------
+
 
 def test_train_os_mccfr_dispatches_with_sampling_method_os(tmp_path):
     """os-mccfr command passes sampling_method='os' to DeepCFRConfig.from_yaml_config."""
@@ -160,7 +166,10 @@ def test_train_os_mccfr_dispatches_with_sampling_method_os(tmp_path):
             with patch("src.main_train.create_infrastructure", return_value=MagicMock()):
                 runner = CliRunner()
                 from src.cli import app
-                runner.invoke(app, ["train", "os-mccfr", "--config", str(cfg), "--steps", "1"])
+
+                runner.invoke(
+                    app, ["train", "os-mccfr", "--config", str(cfg), "--steps", "1"]
+                )
 
     assert captured_overrides.get("sampling_method") == "os"
 
@@ -168,6 +177,7 @@ def test_train_os_mccfr_dispatches_with_sampling_method_os(tmp_path):
 # ---------------------------------------------------------------------------
 # Config schema: DESCAConfig validates ablation YAMLs
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def config_dir():
@@ -247,14 +257,17 @@ def test_desca_stall_detection_defaults(config_dir):
 # AGENT_REGISTRY: desca and dense-escher keys resolve to DESCAAgentWrapper
 # ---------------------------------------------------------------------------
 
+
 def test_agent_registry_desca_key():
     from src.evaluate_agents import AGENT_REGISTRY, DESCAAgentWrapper
+
     assert "desca" in AGENT_REGISTRY
     assert AGENT_REGISTRY["desca"] is DESCAAgentWrapper
 
 
 def test_agent_registry_dense_escher_key():
     from src.evaluate_agents import AGENT_REGISTRY, DESCAAgentWrapper
+
     assert "dense-escher" in AGENT_REGISTRY
     assert AGENT_REGISTRY["dense-escher"] is DESCAAgentWrapper
 
@@ -263,9 +276,11 @@ def test_agent_registry_dense_escher_key():
 # DESCAConfig: num_abstract_actions must equal NUM_ABSTRACT_ACTIONS_2P
 # ---------------------------------------------------------------------------
 
+
 def test_desca_num_abstract_actions_matches_abstraction_layer():
     real_config = _real_config_module()
     from src.action_abstraction import NUM_ABSTRACT_ACTIONS_2P
+
     cfg = real_config.DESCAConfig()
     assert cfg.num_abstract_actions == NUM_ABSTRACT_ACTIONS_2P
 

@@ -10,7 +10,6 @@ import pytest
 import numpy as np
 from types import SimpleNamespace
 
-
 # ---------------------------------------------------------------------------
 # Skip guard — skip all tests if libcambia.so is unavailable
 # ---------------------------------------------------------------------------
@@ -42,6 +41,7 @@ class TestGoBackendConfig:
         # Import the real module (bypassing any stub)
         import importlib
         import sys
+
         # Remove stub if present so we can check the real dataclass
         real_mod = importlib.import_module("src.config")
         # The real module should have DeepCfrConfig as a dataclass
@@ -49,6 +49,7 @@ class TestGoBackendConfig:
         if DeepCfrConfig is None:
             pytest.skip("DeepCfrConfig not in src.config (stub active)")
         import dataclasses
+
         if not dataclasses.is_dataclass(DeepCfrConfig):
             pytest.skip("DeepCfrConfig is a stub, not a real dataclass")
         cfg = DeepCfrConfig()
@@ -57,11 +58,13 @@ class TestGoBackendConfig:
     def test_real_config_go_backend(self):
         """Real DeepCfrConfig can be set to 'go'."""
         import importlib
+
         real_mod = importlib.import_module("src.config")
         DeepCfrConfig = getattr(real_mod, "DeepCfrConfig", None)
         if DeepCfrConfig is None:
             pytest.skip("DeepCfrConfig not in src.config (stub active)")
         import dataclasses
+
         if not dataclasses.is_dataclass(DeepCfrConfig):
             pytest.skip("DeepCfrConfig is a stub, not a real dataclass")
         cfg = DeepCfrConfig(engine_backend="go")
@@ -259,16 +262,16 @@ class TestGoTraversal:
 
             # --- Behavioral assertion: 2P zero-sum utility ---
             # Score-margin utility: continuous in [-1, 1], zero-sum.
-            assert abs(utility[0] + utility[1]) < 1e-5, (
-                f"2P utility not zero-sum: {utility}"
-            )
+            assert (
+                abs(utility[0] + utility[1]) < 1e-5
+            ), f"2P utility not zero-sum: {utility}"
 
             # --- Behavioral assertion: utility in valid range ---
             # Score-margin utilities are clamped to [-1, 1].
             for i in range(2):
-                assert -1.01 <= utility[i] <= 1.01, (
-                    f"Utility[{i}]={utility[i]} outside [-1, 1]"
-                )
+                assert (
+                    -1.01 <= utility[i] <= 1.01
+                ), f"Utility[{i}]={utility[i]} outside [-1, 1]"
 
             # --- Behavioral assertion: strategy samples sum to ~1.0 ---
             # In ES-MCCFR, opponent nodes store σ(I) as strategy targets.
@@ -277,9 +280,9 @@ class TestGoTraversal:
             for sample in strategy_samples:
                 mask = sample.action_mask
                 strategy_sum = sample.target[mask].sum()
-                assert abs(strategy_sum - 1.0) < 0.01, (
-                    f"Strategy sample sum {strategy_sum} != 1.0"
-                )
+                assert (
+                    abs(strategy_sum - 1.0) < 0.01
+                ), f"Strategy sample sum {strategy_sum} != 1.0"
 
             # --- Behavioral assertion: regret mask consistency ---
             # Regret targets must be zero for illegal actions. The traversal
@@ -287,9 +290,9 @@ class TestGoTraversal:
             # is zero-initialized, so illegal slots must remain zero.
             for sample in advantage_samples:
                 illegal_mask = ~sample.action_mask
-                assert (sample.target[illegal_mask] == 0).all(), (
-                    "Non-zero regret found for illegal action"
-                )
+                assert (
+                    sample.target[illegal_mask] == 0
+                ).all(), "Non-zero regret found for illegal action"
         finally:
             for a in agents:
                 a.close()
@@ -331,15 +334,15 @@ class TestGoTraversal:
             )
 
             for sample in advantage_samples:
-                assert sample.features.shape == (INPUT_DIM,), (
-                    f"Expected ({INPUT_DIM},), got {sample.features.shape}"
-                )
-                assert sample.target.shape == (NUM_ACTIONS,), (
-                    f"Expected ({NUM_ACTIONS},), got {sample.target.shape}"
-                )
-                assert sample.action_mask.shape == (NUM_ACTIONS,), (
-                    f"Expected ({NUM_ACTIONS},), got {sample.action_mask.shape}"
-                )
+                assert sample.features.shape == (
+                    INPUT_DIM,
+                ), f"Expected ({INPUT_DIM},), got {sample.features.shape}"
+                assert sample.target.shape == (
+                    NUM_ACTIONS,
+                ), f"Expected ({NUM_ACTIONS},), got {sample.target.shape}"
+                assert sample.action_mask.shape == (
+                    NUM_ACTIONS,
+                ), f"Expected ({NUM_ACTIONS},), got {sample.action_mask.shape}"
         finally:
             for a in agents:
                 a.close()
@@ -382,14 +385,14 @@ class TestGoTraversal:
                 assert len(advantage_samples) > 0, f"seed={seed}: no advantage samples"
 
                 # 2P zero-sum: u0 + u1 = 0 exactly
-                assert abs(utility[0] + utility[1]) < 1e-9, (
-                    f"seed={seed}: 2P utility not zero-sum: {utility}"
-                )
+                assert (
+                    abs(utility[0] + utility[1]) < 1e-9
+                ), f"seed={seed}: 2P utility not zero-sum: {utility}"
                 # Utility bounded in [-1, 1]
                 for i in range(2):
-                    assert -1.01 <= utility[i] <= 1.01, (
-                        f"seed={seed}: utility[{i}]={utility[i]} out of range"
-                    )
+                    assert (
+                        -1.01 <= utility[i] <= 1.01
+                    ), f"seed={seed}: utility[{i}]={utility[i]} out of range"
             finally:
                 for a in agents:
                     a.close()
@@ -499,15 +502,15 @@ class TestGoTraversal:
 
                 # --- 2P zero-sum: u0 + u1 = 0 exactly ---
                 # Cambia 2P utilities are {+1,-1}, {-1,+1}, or {0,0}.
-                assert abs(utility[0] + utility[1]) < 1e-9, (
-                    f"seed={seed}: OS utility not zero-sum: {utility}"
-                )
+                assert (
+                    abs(utility[0] + utility[1]) < 1e-9
+                ), f"seed={seed}: OS utility not zero-sum: {utility}"
 
                 # --- Utility range: each u_i in [-1, 1] ---
                 for i in range(2):
-                    assert -1.01 <= utility[i] <= 1.01, (
-                        f"seed={seed}: OS utility[{i}]={utility[i]} out of range"
-                    )
+                    assert (
+                        -1.01 <= utility[i] <= 1.01
+                    ), f"seed={seed}: OS utility[{i}]={utility[i]} out of range"
 
                 # --- Strategy samples: probability distribution sums to 1 ---
                 # OS-MCCFR stores σ(I) at opponent nodes. The strategy over
@@ -515,18 +518,18 @@ class TestGoTraversal:
                 for sample in strategy_samples:
                     mask = sample.action_mask
                     strategy_sum = sample.target[mask].sum()
-                    assert abs(strategy_sum - 1.0) < 0.01, (
-                        f"seed={seed}: OS strategy sum {strategy_sum} != 1.0"
-                    )
+                    assert (
+                        abs(strategy_sum - 1.0) < 0.01
+                    ), f"seed={seed}: OS strategy sum {strategy_sum} != 1.0"
 
                 # --- Regret mask consistency ---
                 # Regret targets are zero-initialized; only legal action slots
                 # are written. Illegal action slots must remain exactly zero.
                 for sample in advantage_samples:
                     illegal_mask = ~sample.action_mask
-                    assert (sample.target[illegal_mask] == 0).all(), (
-                        f"seed={seed}: Non-zero regret for illegal action"
-                    )
+                    assert (
+                        sample.target[illegal_mask] == 0
+                    ).all(), f"seed={seed}: Non-zero regret for illegal action"
             finally:
                 for a in agents:
                     a.close()

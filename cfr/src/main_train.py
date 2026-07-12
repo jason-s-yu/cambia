@@ -19,7 +19,11 @@ from rich.console import Console
 
 from .serial_rotating_handler import SerialRotatingFileHandler
 from .config import Config, load_config
-from .cfr.exceptions import GracefulShutdownException, ConfigParseError, ConfigValidationError
+from .cfr.exceptions import (
+    GracefulShutdownException,
+    ConfigParseError,
+    ConfigValidationError,
+)
 from .live_display import LiveDisplayManager
 from .live_log_handler import LiveLogHandler
 from .log_archiver import LogArchiver
@@ -86,6 +90,7 @@ def handle_sigint(sig, frame):
 @dataclass
 class TrainingInfrastructure:
     """Container for training infrastructure components."""
+
     live_display_manager: Optional[LiveDisplayManager]
     progress_queue: Optional[ProgressQueue]
     archive_queue: Optional[Union[queue.Queue, "multiprocessing.Queue"]]
@@ -162,8 +167,12 @@ def setup_logging(
                 root_logger.removeHandler(handler)
                 if hasattr(handler, "close"):
                     handler.close()
-            except Exception:  # JUSTIFIED: Cleaning up old handlers during reconfiguration; errors don't affect new setup
-                logger.debug("Error closing old handler during cleanup")  # Use logger if available, else silent
+            except (
+                Exception
+            ):  # JUSTIFIED: Cleaning up old handlers during reconfiguration; errors don't affect new setup
+                logger.debug(
+                    "Error closing old handler during cleanup"
+                )  # Use logger if available, else silent
         # Set level and add new handlers
         root_logger.setLevel(logging.DEBUG)  # Set root low, handlers control output
         for handler in handlers:
@@ -183,7 +192,9 @@ def setup_logging(
                 "Console via Rich (Handler Level: %s, Rich Filter Level: %s)",
                 logging.getLevelName(live_handler.level),
                 logging.getLevelName(
-                    getattr(live_display_manager, "console_log_level_value", logging.ERROR)
+                    getattr(
+                        live_display_manager, "console_log_level_value", logging.ERROR
+                    )
                 ),  # Get effective level used by Rich
             )
         else:
@@ -211,7 +222,9 @@ def setup_logging(
                 logging.info("Updated latest_run symlink -> %s", absolute_run_log_dir)
         except OSError as e_link:
             logging.error("Could not create/update latest_run link/marker: %s", e_link)
-        except Exception as e_link_other:  # JUSTIFIED: Symlink creation is convenience feature; must not crash logging setup
+        except (
+            Exception
+        ) as e_link_other:  # JUSTIFIED: Symlink creation is convenience feature; must not crash logging setup
             logging.error(
                 "Unexpected error updating latest_run link/marker: %s",
                 e_link_other,
@@ -231,7 +244,9 @@ def setup_logging(
         print(f"FATAL: Logging setup failed: {e_setup}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
         return None
-    except Exception as e_setup_other:  # JUSTIFIED: Top-level setup handler; logging not yet functional; print to stderr
+    except (
+        Exception
+    ) as e_setup_other:  # JUSTIFIED: Top-level setup handler; logging not yet functional; print to stderr
         print(
             f"FATAL: Unexpected error during logging setup: {e_setup_other}",
             file=sys.stderr,
@@ -269,7 +284,9 @@ def create_infrastructure(
     live_display_manager: Optional[LiveDisplayManager] = None
     if not headless:
         rich_console = Console(stderr=True, record=False)
-        console_log_level_str = getattr(config.logging, "log_level_console", "ERROR").upper()
+        console_log_level_str = getattr(
+            config.logging, "log_level_console", "ERROR"
+        ).upper()
         console_log_level_value = console_log_level or getattr(
             logging, console_log_level_str, logging.ERROR
         )
@@ -710,6 +727,7 @@ def get_checkpoint_info(filepath: str) -> dict:
     elif filepath.endswith(".joblib"):
         # Tabular CFR checkpoint
         from .cfr import persistence
+
         data = persistence.load_agent_data(filepath)
         return {
             "type": "tabular_cfr",
@@ -768,7 +786,11 @@ def main():
 
         # Run tabular training
         exit_code = run_tabular_training(
-            config, infra, iterations=args.iterations, load=args.load, save_path=args.save_path
+            config,
+            infra,
+            iterations=args.iterations,
+            load=args.load,
+            save_path=args.save_path,
         )
 
         sys.exit(exit_code)
@@ -815,10 +837,14 @@ if __name__ == "__main__":
                 "ERROR: No suitable multiprocessing start method found!", file=sys.stderr
             )
 
-    except RuntimeError:  # JUSTIFIED: Context already set is expected condition; silent is appropriate
+    except (
+        RuntimeError
+    ):  # JUSTIFIED: Context already set is expected condition; silent is appropriate
         # print("DEBUG: Multiprocessing context already set.", file=sys.stderr)
         logger.debug("Multiprocessing context already set")
-    except Exception as e_mp_start:  # JUSTIFIED: Multiprocessing setup before logging; must print to stderr
+    except (
+        Exception
+    ) as e_mp_start:  # JUSTIFIED: Multiprocessing setup before logging; must print to stderr
         print(
             f"ERROR: Setting multiprocessing start method failed: {e_mp_start}",
             file=sys.stderr,

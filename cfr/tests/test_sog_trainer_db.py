@@ -14,7 +14,13 @@ import pytest
 import torch
 
 from src.config import DeepCfrConfig
-from src.cfr.sog_trainer import SoGTrainer, VALUE_DIM, POLICY_DIM, PBS_INPUT_DIM, NUM_ACTIONS
+from src.cfr.sog_trainer import (
+    SoGTrainer,
+    VALUE_DIM,
+    POLICY_DIM,
+    PBS_INPUT_DIM,
+    NUM_ACTIONS,
+)
 from src.cfr.gtcfr_worker import EpisodeSample
 
 
@@ -69,8 +75,10 @@ class TestSoGTrainerCallsUpsertRun:
         mock_run_db.infer_algorithm.return_value = "sog"
         mock_run_db.upsert_run.return_value = 42
 
-        with patch("src.cfr.sog_trainer._RUN_DB_AVAILABLE", True), \
-             patch("src.cfr.sog_trainer._run_db", mock_run_db):
+        with (
+            patch("src.cfr.sog_trainer._RUN_DB_AVAILABLE", True),
+            patch("src.cfr.sog_trainer._run_db", mock_run_db),
+        ):
             config = _fast_config()
             trainer = SoGTrainer(config=config, game_config=None)
 
@@ -94,8 +102,10 @@ class TestSoGTrainerCallsRegisterCheckpoint:
         mock_run_db.upsert_run.return_value = 7
         mock_run_db.register_checkpoint.return_value = 1
 
-        with patch("src.cfr.sog_trainer._RUN_DB_AVAILABLE", True), \
-             patch("src.cfr.sog_trainer._run_db", mock_run_db):
+        with (
+            patch("src.cfr.sog_trainer._RUN_DB_AVAILABLE", True),
+            patch("src.cfr.sog_trainer._run_db", mock_run_db),
+        ):
             config = _fast_config()
             trainer = SoGTrainer(config=config, game_config=None)
             trainer.current_epoch = 5
@@ -122,8 +132,10 @@ class TestSoGTrainerUpdateRunStatus:
         mock_run_db.infer_algorithm.return_value = "sog"
         mock_run_db.upsert_run.return_value = 10
 
-        with patch("src.cfr.sog_trainer._RUN_DB_AVAILABLE", True), \
-             patch("src.cfr.sog_trainer._run_db", mock_run_db):
+        with (
+            patch("src.cfr.sog_trainer._RUN_DB_AVAILABLE", True),
+            patch("src.cfr.sog_trainer._run_db", mock_run_db),
+        ):
             config = _fast_config(save_interval=0)
             trainer = SoGTrainer(config=config, game_config=None)
             fake = _fake_samples(3)
@@ -142,8 +154,10 @@ class TestSoGTrainerUpdateRunStatus:
         mock_run_db.infer_algorithm.return_value = "sog"
         mock_run_db.upsert_run.return_value = 11
 
-        with patch("src.cfr.sog_trainer._RUN_DB_AVAILABLE", True), \
-             patch("src.cfr.sog_trainer._run_db", mock_run_db):
+        with (
+            patch("src.cfr.sog_trainer._RUN_DB_AVAILABLE", True),
+            patch("src.cfr.sog_trainer._run_db", mock_run_db),
+        ):
             config = _fast_config()
             trainer = SoGTrainer(config=config, game_config=None)
 
@@ -152,6 +166,7 @@ class TestSoGTrainerUpdateRunStatus:
 
             with patch.object(trainer, "_generate_episodes", side_effect=raise_keyboard):
                 from src.cfr.exceptions import GracefulShutdownException
+
                 with pytest.raises(GracefulShutdownException):
                     trainer.train(num_epochs=1)
 

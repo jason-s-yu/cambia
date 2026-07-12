@@ -453,7 +453,9 @@ class PRTCFRTinyTrainer:
         self.stability_metric_name = str(
             getattr(config, "stability_metric_name", "nashconv")
         )
-        self.stability_stop_mode = str(getattr(config, "stability_stop_mode", "divergence"))
+        self.stability_stop_mode = str(
+            getattr(config, "stability_stop_mode", "divergence")
+        )
         self.stability_plateau_window_iters = int(
             getattr(config, "stability_plateau_window_iters", 50)
         )
@@ -582,7 +584,8 @@ class PRTCFRTinyTrainer:
             )
             logger.info(
                 "[prtcfr-tiny] run_db: registered '%s' (id=%s)",
-                run_name, self._db_run_id,
+                run_name,
+                self._db_run_id,
             )
         except Exception as e:  # pragma: no cover - never fatal
             logger.debug("[prtcfr-tiny] run_db init failed (non-fatal): %s", e)
@@ -615,7 +618,11 @@ class PRTCFRTinyTrainer:
             from .. import run_db as _run_db
 
             _run_db.set_best_metric(
-                self._db_conn, self._db_run_id, self.stability_metric_name, metric, t,
+                self._db_conn,
+                self._db_run_id,
+                self.stability_metric_name,
+                metric,
+                t,
             )
             ckpt_id = self._db_ckpt_ids.get(t)
             if ckpt_id is not None:
@@ -735,8 +742,9 @@ class PRTCFRTinyTrainer:
         )
         return int(payload.get("iteration", 0))
 
-    def _load_full_state(self, resume_state_file: str, checkpoint_file: str,
-                         reservoir_file: Optional[str]) -> int:
+    def _load_full_state(
+        self, resume_state_file: str, checkpoint_file: str, reservoir_file: Optional[str]
+    ) -> int:
         """Bit-exact restore: net + reservoir + RNG + controller + counter.
 
         Returns the last completed iteration; the loop resumes at it+1. RNG is
@@ -766,7 +774,9 @@ class PRTCFRTinyTrainer:
         _global_rng_restore(state)
         logger.info(
             "[prtcfr-tiny] full-state restore from iter=%d: buffer=%d snapshots=%s",
-            rs_iter, len(self.buffer), self._written_iters,
+            rs_iter,
+            len(self.buffer),
+            self._written_iters,
         )
         return rs_iter
 
@@ -898,15 +908,14 @@ class PRTCFRTinyTrainer:
             return last_t
         (ckpt,) = files
         last_t = self._restore_net_from_checkpoint(ckpt)
-        self._written_iters = self._import_prior_snapshots(
-            os.path.dirname(ckpt), last_t
-        )
+        self._written_iters = self._import_prior_snapshots(os.path.dirname(ckpt), last_t)
         logger.warning(
             "[prtcfr-tiny] warm-start (net-only) from %s at iter=%d: net weights "
             "+ prior snapshots imported, but the reservoir starts EMPTY and RNG is "
             "the ambient stream -- NOT a bit-exact continuation (the source carries "
             "net weights + iteration only)",
-            ckpt, last_t,
+            ckpt,
+            last_t,
         )
         return last_t
 
@@ -1014,9 +1023,7 @@ class PRTCFRTinyTrainer:
             rs = self.resume_state_path()
             ckpt = self.checkpoint_path()
             if not os.path.exists(rs) or not os.path.exists(ckpt):
-                raise PRTCFRResumeError(
-                    f"cannot resume: missing {rs} or {ckpt}"
-                )
+                raise PRTCFRResumeError(f"cannot resume: missing {rs} or {ckpt}")
             last_t = self._load_full_state(rs, ckpt, self.reservoir_path())
             start_t = last_t + 1
         elif self.warm_start_path:
@@ -1030,7 +1037,10 @@ class PRTCFRTinyTrainer:
                 self._written_iters.append(t)
                 logger.info(
                     "[prtcfr] iter=%d samples+=%d buffer=%d fit_loss=%.5f snapshot=%s",
-                    st.iteration, st.samples_added, st.buffer_size, st.fit_loss,
+                    st.iteration,
+                    st.samples_added,
+                    st.buffer_size,
+                    st.fit_loss,
                     os.path.basename(st.snapshot_path),
                 )
 
@@ -1039,14 +1049,19 @@ class PRTCFRTinyTrainer:
                 # iteration t must land in-memory before t's resume_state.json
                 # is written, or a resume at t never sees t's own update.
                 stop_early = False
-                if self.stability_enabled and self.controller is not None and (
-                    self._stability_check_due(t, n)
+                if (
+                    self.stability_enabled
+                    and self.controller is not None
+                    and (self._stability_check_due(t, n))
                 ):
                     if self.eval_fn is None:
                         # No trend metric available: keep the whole set deployable.
                         write_deployable_manifest(
-                            self.snapshot_dir, self.controller, self._written_iters,
-                            metric_name=self.stability_metric_name, stopped_early=False,
+                            self.snapshot_dir,
+                            self.controller,
+                            self._written_iters,
+                            metric_name=self.stability_metric_name,
+                            stopped_early=False,
                         )
                     else:
                         metric = float(self.eval_fn(self, t))
@@ -1057,12 +1072,18 @@ class PRTCFRTinyTrainer:
                         logger.info(
                             "[prtcfr] stability iter=%d %s=%.5f best_iter=%d best=%.5f "
                             "worse_streak=%d stop=%s",
-                            t, self.stability_metric_name, metric, decision.best_iteration,
-                            decision.best_metric, decision.num_worse_since_best,
+                            t,
+                            self.stability_metric_name,
+                            metric,
+                            decision.best_iteration,
+                            decision.best_metric,
+                            decision.num_worse_since_best,
                             decision.should_stop,
                         )
                         write_deployable_manifest(
-                            self.snapshot_dir, self.controller, self._written_iters,
+                            self.snapshot_dir,
+                            self.controller,
+                            self._written_iters,
                             metric_name=self.stability_metric_name,
                             stopped_early=decision.should_stop,
                         )
@@ -1070,7 +1091,9 @@ class PRTCFRTinyTrainer:
                             logger.info(
                                 "[prtcfr] early-stop at iter=%d; deployable window "
                                 "pinned to [1..%d] (%s=%.5f)",
-                                t, decision.best_iteration, self.stability_metric_name,
+                                t,
+                                decision.best_iteration,
+                                self.stability_metric_name,
                                 decision.best_metric,
                             )
                             stop_early = True
@@ -1140,7 +1163,9 @@ def train_tiny_prtcfr(
     )
     logger.info(
         "[prtcfr] tiny tree built: nodes~%d aborted_deals=%d seq_cap=%d",
-        n_nodes, aborted, prt_cfg.seq_cap,
+        n_nodes,
+        aborted,
+        prt_cfg.seq_cap,
     )
 
     trainer = PRTCFRTinyTrainer(root, prt_cfg, snapshot_dir)
@@ -1269,9 +1294,7 @@ def _merge_columnar_batches(batches: List[ColumnarBatch]) -> Optional[ColumnarBa
     for b in batches:
         f = b.features
         if f.shape[1] < max_w:
-            padw = np.full(
-                (f.shape[0], max_w - f.shape[1]), PAD_ID, dtype=f.dtype
-            )
+            padw = np.full((f.shape[0], max_w - f.shape[1]), PAD_ID, dtype=f.dtype)
             f = np.concatenate([f, padw], axis=1)
         feats.append(f)
     features = np.concatenate(feats, axis=0)
@@ -1583,7 +1606,11 @@ class _GenTurn1Observer:
             # First decision that actually advanced the game: the game's turn-1
             # move. Count it iff it is the Cambia call.
             self._recorded = True
-            idx = int(action) if isinstance(action, (int, np.integer)) else action_to_index(action)
+            idx = (
+                int(action)
+                if isinstance(action, (int, np.integer))
+                else action_to_index(action)
+            )
             if idx == _CALL_CAMBIA_INDEX:
                 self._stats["t1_cambia"] += 1
         return ok
@@ -1689,7 +1716,9 @@ class PRTCFRProductionTrainer:
         self.stability_metric_name = str(
             getattr(config, "stability_metric_name", "nashconv")
         )
-        self.stability_stop_mode = str(getattr(config, "stability_stop_mode", "divergence"))
+        self.stability_stop_mode = str(
+            getattr(config, "stability_stop_mode", "divergence")
+        )
         self.stability_plateau_window_iters = int(
             getattr(config, "stability_plateau_window_iters", 50)
         )
@@ -1951,7 +1980,11 @@ class PRTCFRProductionTrainer:
             from .. import run_db as _run_db
 
             _run_db.set_best_metric(
-                self._db_conn, self._db_run_id, self.stability_metric_name, metric, t,
+                self._db_conn,
+                self._db_run_id,
+                self.stability_metric_name,
+                metric,
+                t,
             )
             ckpt_id = self._db_ckpt_ids.get(t)
             if ckpt_id is not None:
@@ -2033,13 +2066,9 @@ class PRTCFRProductionTrainer:
         ckpt = self.checkpoint_path()
         rs_path = self.resume_state_path()
         if not os.path.isfile(ckpt):
-            raise PRTCFRResumeError(
-                f"cannot resume: no rolling checkpoint at {ckpt}"
-            )
+            raise PRTCFRResumeError(f"cannot resume: no rolling checkpoint at {ckpt}")
         if not os.path.isfile(rs_path):
-            raise PRTCFRResumeError(
-                f"cannot resume: no resume_state.json at {rs_path}"
-            )
+            raise PRTCFRResumeError(f"cannot resume: no resume_state.json at {rs_path}")
         with open(rs_path, "r", encoding="utf-8") as fh:
             state = json.load(fh)
         schema = int(state.get("schema", 0))
@@ -2114,7 +2143,9 @@ class PRTCFRProductionTrainer:
     def _infer_torch_dtype(self):
         import torch
 
-        return torch.float32 if self.infer_dtype in ("fp32", "float32") else torch.bfloat16
+        return (
+            torch.float32 if self.infer_dtype in ("fp32", "float32") else torch.bfloat16
+        )
 
     def _generate_sequential(self, t: int, added: Dict[int, int], value_sink) -> None:
         """Original per-decision full-prefix generation (NetProductionSigma):
@@ -2170,7 +2201,9 @@ class PRTCFRProductionTrainer:
                 traverser = (t + k) % self.num_players
                 game_seed = self.seed + t * 1_000_003 + k
                 rng_seed = self.seed + t * 7_000_003 + k * 2_000_029
-                driver = _GenTurn1Observer(self._driver_factory(game_seed), self._gen_stats)
+                driver = _GenTurn1Observer(
+                    self._driver_factory(game_seed), self._gen_stats
+                )
                 specs.append(
                     {
                         "seed": rng_seed,
@@ -2338,7 +2371,8 @@ class PRTCFRProductionTrainer:
                 logger.info(
                     "[prtcfr-prod] resume: last iter=%d already at/past n=%d; "
                     "nothing to run",
-                    last_t, n,
+                    last_t,
+                    n,
                 )
         try:
             for t in range(start_t, n + 1):
@@ -2348,9 +2382,15 @@ class PRTCFRProductionTrainer:
                 logger.info(
                     "[prtcfr-prod] iter=%d added=%s buffers=%s fit_loss=%.5f "
                     "peak_lr=%.2e critic_mse=%.4f/%.4f gen=%.1fs fit=%.1fs",
-                    st.iteration, st.samples_added, st.buffer_sizes, st.fit_loss,
-                    st.peak_lr, st.critic_held_out_mse,
-                    st.critic_constant_baseline_mse, st.gen_seconds, st.fit_seconds,
+                    st.iteration,
+                    st.samples_added,
+                    st.buffer_sizes,
+                    st.fit_loss,
+                    st.peak_lr,
+                    st.critic_held_out_mse,
+                    st.critic_constant_baseline_mse,
+                    st.gen_seconds,
+                    st.fit_seconds,
                 )
 
                 # Stability check BEFORE the resume_state commit (cambia-341):
@@ -2358,13 +2398,18 @@ class PRTCFRProductionTrainer:
                 # iteration t must land in-memory before t's resume_state.json
                 # is written, or a resume at t never sees t's own update.
                 stop_early = False
-                if self.stability_enabled and self.controller is not None and (
-                    self._stability_check_due(t, n)
+                if (
+                    self.stability_enabled
+                    and self.controller is not None
+                    and (self._stability_check_due(t, n))
                 ):
                     if self.eval_fn is None:
                         write_deployable_manifest(
-                            self.snapshot_dir, self.controller, self._written_iters,
-                            metric_name=self.stability_metric_name, stopped_early=False,
+                            self.snapshot_dir,
+                            self.controller,
+                            self._written_iters,
+                            metric_name=self.stability_metric_name,
+                            stopped_early=False,
                         )
                     else:
                         metric = float(self.eval_fn(self, t))
@@ -2377,19 +2422,27 @@ class PRTCFRProductionTrainer:
                         logger.info(
                             "[prtcfr-prod] stability iter=%d %s=%.5f best_iter=%d "
                             "best=%.5f worse_streak=%d stop=%s",
-                            t, self.stability_metric_name, metric, decision.best_iteration,
-                            decision.best_metric, decision.num_worse_since_best,
+                            t,
+                            self.stability_metric_name,
+                            metric,
+                            decision.best_iteration,
+                            decision.best_metric,
+                            decision.num_worse_since_best,
                             decision.should_stop,
                         )
                         write_deployable_manifest(
-                            self.snapshot_dir, self.controller, self._written_iters,
+                            self.snapshot_dir,
+                            self.controller,
+                            self._written_iters,
                             metric_name=self.stability_metric_name,
                             stopped_early=decision.should_stop,
                         )
                         if decision.should_stop:
                             logger.info(
                                 "[prtcfr-prod] early-stop at iter=%d; deployable "
-                                "window pinned to [1..%d]", t, decision.best_iteration,
+                                "window pinned to [1..%d]",
+                                t,
+                                decision.best_iteration,
                             )
                             stop_early = True
 

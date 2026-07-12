@@ -88,13 +88,13 @@ _BUCKET_EXPECTED_VALUE = {
     CardBucket.NEG_KING.value: -1.0,
     CardBucket.ZERO.value: 0.0,
     CardBucket.ACE.value: 1.0,
-    CardBucket.LOW_NUM.value: 3.0,    # midpoint of 2-4
-    CardBucket.MID_NUM.value: 5.5,    # midpoint of 5-6
+    CardBucket.LOW_NUM.value: 3.0,  # midpoint of 2-4
+    CardBucket.MID_NUM.value: 5.5,  # midpoint of 5-6
     CardBucket.PEEK_SELF.value: 7.5,  # 7-8
-    CardBucket.PEEK_OTHER.value: 9.5, # 9-10
-    CardBucket.SWAP_BLIND.value: 11.5, # J-Q
+    CardBucket.PEEK_OTHER.value: 9.5,  # 9-10
+    CardBucket.SWAP_BLIND.value: 11.5,  # J-Q
     CardBucket.HIGH_KING.value: 13.0,
-    CardBucket.UNKNOWN.value: 6.5,    # prior: slightly above neutral midpoint (4.5)
+    CardBucket.UNKNOWN.value: 6.5,  # prior: slightly above neutral midpoint (4.5)
 }
 
 # For UNKNOWN slots, we assume a slightly above-average value, encouraging
@@ -152,7 +152,8 @@ def belief_greedy_unabstract(
     """
     # Collect candidates for this abstract class.
     candidates: List[GameAction] = [
-        a for a in legal_actions
+        a
+        for a in legal_actions
         if _concrete_to_abstract(a, agent_state) == int(abstract_idx)
     ]
     if not candidates:
@@ -199,7 +200,12 @@ def belief_greedy_unabstract(
         # Snap opponent card: pick slot with lowest EV (snap the best card from their hand).
         # ActionSnapOpponent uses field name: opponent_target_hand_index
         scored = [
-            (_opp_bucket_ev(agent_state, int(getattr(c, "opponent_target_hand_index", 0))), c)
+            (
+                _opp_bucket_ev(
+                    agent_state, int(getattr(c, "opponent_target_hand_index", 0))
+                ),
+                c,
+            )
             for c in candidates
         ]
         scored.sort(key=lambda x: x[0])  # ascending: smallest EV = best opp card to snap
@@ -212,7 +218,12 @@ def belief_greedy_unabstract(
         # Move action after snapping opp: pick own slot with highest EV (give worst card).
         # ActionSnapOpponentMove uses field name: own_card_to_move_hand_index
         scored = [
-            (_own_bucket_ev(agent_state, int(getattr(c, "own_card_to_move_hand_index", 0))), c)
+            (
+                _own_bucket_ev(
+                    agent_state, int(getattr(c, "own_card_to_move_hand_index", 0))
+                ),
+                c,
+            )
             for c in candidates
         ]
         scored.sort(key=lambda x: -x[0])
@@ -224,6 +235,7 @@ def belief_greedy_unabstract(
     if tag == "peek_own":
         # Prefer unknown/stale slots (information gain maximizing).
         own_hand = getattr(agent_state, "own_hand", None)
+
         def peek_priority(c):
             slot = int(getattr(c, "target_hand_index", 0))
             if not own_hand or slot not in own_hand:
@@ -240,12 +252,14 @@ def belief_greedy_unabstract(
             cur = int(getattr(agent_state, "_current_game_turn", 0) or 0)
             age = max(0, cur - (last_seen or 0))
             return -(age + 1)  # more negative = lower priority
+
         scored = sorted(candidates, key=peek_priority)
         return scored[0]
 
     if tag == "peek_other":
         # Prefer opponent slots with unknown belief (more information gain).
         belief = getattr(agent_state, "opponent_belief", None)
+
         def opp_peek_priority(c):
             slot = int(getattr(c, "target_opponent_hand_index", 0))
             if not belief or slot not in belief:
@@ -257,6 +271,7 @@ def belief_greedy_unabstract(
             except (TypeError, ValueError):
                 return 0
             return 1 if bval != CardBucket.UNKNOWN.value else 0
+
         scored = sorted(candidates, key=opp_peek_priority)
         return scored[0]
 
@@ -266,6 +281,7 @@ def belief_greedy_unabstract(
         own_attr = "own_hand_index"
         opp_attr = "opponent_hand_index"
         belief = getattr(agent_state, "opponent_belief", None)
+
         def swap_priority(c):
             own_slot = int(getattr(c, own_attr, 0))
             opp_slot = int(getattr(c, opp_attr, 0))
@@ -283,6 +299,7 @@ def belief_greedy_unabstract(
                 opp_known = 0 if bval == CardBucket.UNKNOWN.value else 1
             # Sort key: descending own_ev, ascending opp_known (prefer unknown opp)
             return (-own_ev, opp_known)
+
         scored = sorted(candidates, key=swap_priority)
         return scored[0]
 
@@ -293,6 +310,7 @@ def belief_greedy_unabstract(
 # ---------------------------------------------------------------------------
 # Belief-greedy DESCA wrapper (subclasses DESCAAgentWrapper, overrides unabstract)
 # ---------------------------------------------------------------------------
+
 
 class BeliefGreedyDESCAWrapper(DESCAAgentWrapper):
     """DESCA with belief-greedy within-class concrete action selection.
@@ -445,7 +463,9 @@ def _run_paired_games(
                                 baseline_agent.update_state(obs)
 
                 except Exception as e:
-                    logger.debug("Game %d cond=%s turn %d error: %s", game_num, cond, turn, e)
+                    logger.debug(
+                        "Game %d cond=%s turn %d error: %s", game_num, cond, turn, e
+                    )
                     results["Errors"] += 1
                     error = True
                     break
@@ -469,10 +489,7 @@ def _win_rate(results: Counter) -> float:
     """Fraction of games won by P0 (DESCA). Ties contribute 0.5."""
     w = results.get("P0 Wins", 0)
     t = results.get("Ties", 0)
-    total = sum(
-        results.get(k, 0)
-        for k in ("P0 Wins", "P1 Wins", "Ties", "MaxTurnTies")
-    )
+    total = sum(results.get(k, 0) for k in ("P0 Wins", "P1 Wins", "Ties", "MaxTurnTies"))
     if total == 0:
         return float("nan")
     return (w + 0.5 * t) / total
@@ -481,6 +498,7 @@ def _win_rate(results: Counter) -> float:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main(argv: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(
@@ -635,7 +653,12 @@ def main(argv: Optional[List[str]] = None) -> None:
     # Dump machine-readable results to stdout as JSON.
     print()
     print("--- JSON summary ---")
-    print(json.dumps({"baselines": summary, "mean_delta_pp": mean_delta if deltas else None}, indent=2))
+    print(
+        json.dumps(
+            {"baselines": summary, "mean_delta_pp": mean_delta if deltas else None},
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

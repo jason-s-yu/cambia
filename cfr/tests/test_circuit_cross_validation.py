@@ -11,25 +11,24 @@ from src.circuit import (
     ranks_from_scores,
 )
 
-
 # ── Deterministic 12-round scenario ──────────────────────────────────
 # 4 players (IDs 0-3), 12 rounds, known scores per round.
 # This exact scenario is replicated in Go via TestCircuitCrossValidation.
 
 CROSS_VALIDATION_ROUNDS = [
     # (scores_dict, cambia_caller_id)
-    ({0: 5, 1: 10, 2: 3, 3: 8}, 2),      # R1: P2 wins (caller)
-    ({0: 7, 1: 2, 2: 12, 3: 6}, -1),      # R2: P1 wins
-    ({0: 4, 1: 4, 2: 9, 3: 15}, 0),       # R3: P0 ties P1, P0 is caller
-    ({0: 11, 1: 6, 2: 1, 3: 3}, 2),       # R4: P2 wins (caller)
-    ({0: 8, 1: 8, 2: 8, 3: 8}, -1),       # R5: 4-way tie, no caller
-    ({0: 2, 1: 13, 2: 7, 3: 5}, 0),       # R6: P0 wins (caller)
-    ({0: 9, 1: 3, 2: 6, 3: 10}, 1),       # R7: P1 wins (caller)
-    ({0: 6, 1: 7, 2: 4, 3: 2}, 3),        # R8: P3 wins (caller)
-    ({0: 3, 1: 11, 2: 5, 3: 9}, -1),      # R9: P0 wins
-    ({0: 10, 1: 1, 2: 8, 3: 4}, 1),       # R10: P1 wins (caller)
-    ({0: 7, 1: 5, 2: 2, 3: 6}, 2),        # R11: P2 wins (caller)
-    ({0: 1, 1: 9, 2: 11, 3: 3}, 0),       # R12: P0 wins (caller)
+    ({0: 5, 1: 10, 2: 3, 3: 8}, 2),  # R1: P2 wins (caller)
+    ({0: 7, 1: 2, 2: 12, 3: 6}, -1),  # R2: P1 wins
+    ({0: 4, 1: 4, 2: 9, 3: 15}, 0),  # R3: P0 ties P1, P0 is caller
+    ({0: 11, 1: 6, 2: 1, 3: 3}, 2),  # R4: P2 wins (caller)
+    ({0: 8, 1: 8, 2: 8, 3: 8}, -1),  # R5: 4-way tie, no caller
+    ({0: 2, 1: 13, 2: 7, 3: 5}, 0),  # R6: P0 wins (caller)
+    ({0: 9, 1: 3, 2: 6, 3: 10}, 1),  # R7: P1 wins (caller)
+    ({0: 6, 1: 7, 2: 4, 3: 2}, 3),  # R8: P3 wins (caller)
+    ({0: 3, 1: 11, 2: 5, 3: 9}, -1),  # R9: P0 wins
+    ({0: 10, 1: 1, 2: 8, 3: 4}, 1),  # R10: P1 wins (caller)
+    ({0: 7, 1: 5, 2: 2, 3: 6}, 2),  # R11: P2 wins (caller)
+    ({0: 1, 1: 9, 2: 11, 3: 3}, 0),  # R12: P0 wins (caller)
 ]
 
 
@@ -73,7 +72,9 @@ class TestCrossValidation:
 
         # Verify ordering: lowest cumulative first
         for i in range(len(standings) - 1):
-            assert standings[i]["cumulative_score"] <= standings[i + 1]["cumulative_score"]
+            assert (
+                standings[i]["cumulative_score"] <= standings[i + 1]["cumulative_score"]
+            )
 
         # Compute expected raw cumulatives manually
         raw_totals = {pid: 0 for pid in range(4)}

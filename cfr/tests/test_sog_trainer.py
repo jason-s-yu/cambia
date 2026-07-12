@@ -200,9 +200,7 @@ class TestCheckpointRoundtrip:
         trainer._train_step(1)
         trainer.current_epoch = 3
 
-        original_weights = {
-            k: v.clone() for k, v in trainer.cvpn.state_dict().items()
-        }
+        original_weights = {k: v.clone() for k, v in trainer.cvpn.state_dict().items()}
 
         with tempfile.TemporaryDirectory() as tmpdir:
             ckpt_path = os.path.join(tmpdir, "test_sog.pt")
@@ -221,9 +219,9 @@ class TestCheckpointRoundtrip:
 
             # Verify CVPN weights match
             for k, v in trainer2.cvpn.state_dict().items():
-                assert torch.allclose(v, original_weights[k], atol=1e-6), (
-                    f"CVPN weight mismatch for key {k}"
-                )
+                assert torch.allclose(
+                    v, original_weights[k], atol=1e-6
+                ), f"CVPN weight mismatch for key {k}"
 
             assert trainer2.current_epoch == 3
 
@@ -278,6 +276,6 @@ class TestCheckpointRoundtrip:
 
             # CVPN weights should match the saved ones
             for k, v in trainer.cvpn.state_dict().items():
-                assert torch.allclose(v, cvpn.state_dict()[k], atol=1e-6), (
-                    f"warm start weight mismatch at {k}"
-                )
+                assert torch.allclose(
+                    v, cvpn.state_dict()[k], atol=1e-6
+                ), f"warm start weight mismatch at {k}"

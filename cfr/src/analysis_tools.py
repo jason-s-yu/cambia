@@ -47,7 +47,6 @@ from .cfr.exceptions import (
     ObservationUpdateError,
 )
 
-
 # Conditional imports for type hinting
 from typing import TYPE_CHECKING
 

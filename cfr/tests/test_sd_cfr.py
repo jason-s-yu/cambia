@@ -8,9 +8,11 @@ import numpy as np
 import pytest
 import torch
 
+
 def _make_mock_config(agent_data_save_path: str = "") -> MagicMock:
     """Minimal Config mock sufficient for DeepCFRTrainer and agent wrappers."""
     from src.config import CambiaRulesConfig
+
     cfg = MagicMock()
     cfg.persistence.agent_data_save_path = agent_data_save_path
     cfg.cfr_training.num_iterations = 1
@@ -33,8 +35,11 @@ class TestResidualNetwork:
     def test_residual_network_forward_shape(self):
         """Output shape, masking, ~500K param count."""
         net = ResidualAdvantageNetwork(
-            input_dim=INPUT_DIM, hidden_dim=256, num_hidden_layers=3,
-            output_dim=NUM_ACTIONS, dropout=0.1,
+            input_dim=INPUT_DIM,
+            hidden_dim=256,
+            num_hidden_layers=3,
+            output_dim=NUM_ACTIONS,
+            dropout=0.1,
         )
         params = sum(p.numel() for p in net.parameters())
         assert 400_000 < params < 600_000, f"Expected ~500K params, got {params}"
@@ -54,7 +59,9 @@ class TestResidualNetwork:
     def test_residual_network_gradient_flow(self):
         """Gradient reaches first layer through skip connections."""
         net = ResidualAdvantageNetwork(
-            input_dim=INPUT_DIM, hidden_dim=256, num_hidden_layers=3,
+            input_dim=INPUT_DIM,
+            hidden_dim=256,
+            num_hidden_layers=3,
             output_dim=NUM_ACTIONS,
         )
         features = torch.randn(2, INPUT_DIM, requires_grad=True)
@@ -86,7 +93,9 @@ class TestSnapshotMechanics:
 
         config = Config()
         dcfr_config = DeepCFRConfig(
-            use_sd_cfr=True, sd_cfr_max_snapshots=200, device="cpu",
+            use_sd_cfr=True,
+            sd_cfr_max_snapshots=200,
+            device="cpu",
             use_residual=False,  # smaller net for speed
         )
         trainer = DeepCFRTrainer(config, deep_cfr_config=dcfr_config)
@@ -149,7 +158,10 @@ class TestTrainerSDCFR:
 
         config = Config()
         trainer = DeepCFRTrainer(
-            config, deep_cfr_config=DeepCFRConfig(use_sd_cfr=True, device="cpu", use_residual=False)
+            config,
+            deep_cfr_config=DeepCFRConfig(
+                use_sd_cfr=True, device="cpu", use_residual=False
+            ),
         )
         assert len(trainer._sd_snapshots) == 0
 
@@ -213,7 +225,9 @@ class TestTrainerSDCFR:
 
             # Load into SD-CFR trainer
             new_dcfr = DeepCFRConfig(use_sd_cfr=True, use_residual=False, device="cpu")
-            new_trainer = DeepCFRTrainer(_make_mock_config(path), deep_cfr_config=new_dcfr)
+            new_trainer = DeepCFRTrainer(
+                _make_mock_config(path), deep_cfr_config=new_dcfr
+            )
             new_trainer.load_checkpoint(path)
 
             assert new_trainer.training_step == 100
@@ -237,7 +251,9 @@ class TestTrainerSDCFR:
 
             # Load into non-SD-CFR trainer (has strategy_net)
             old_dcfr = DeepCFRConfig(use_sd_cfr=False, use_residual=False, device="cpu")
-            old_trainer = DeepCFRTrainer(_make_mock_config(path), deep_cfr_config=old_dcfr)
+            old_trainer = DeepCFRTrainer(
+                _make_mock_config(path), deep_cfr_config=old_dcfr
+            )
             old_trainer.load_checkpoint(path)
 
             assert old_trainer.training_step == 50
@@ -264,15 +280,20 @@ class TestSDCFRAgentWrapper:
             trainer.save_checkpoint(path)
 
             from src.evaluate_agents import SDCFRAgentWrapper
+
             # Disable EMA to test snapshot path (EMA was not updated separately)
             wrapper = SDCFRAgentWrapper(
-                player_id=0, config=mock_config, checkpoint_path=path, device="cpu",
+                player_id=0,
+                config=mock_config,
+                checkpoint_path=path,
+                device="cpu",
                 use_ema=False,
             )
             assert len(wrapper._snapshot_nets) == 3
 
             # Test inference with fake game state (use default rules)
             from src.game.engine import CambiaGameState
+
             game = CambiaGameState()
             wrapper.initialize_state(game)
 
@@ -289,7 +310,11 @@ class TestEMAWeights:
 
         config = Config()
         dcfr_config = DeepCFRConfig(
-            use_sd_cfr=True, use_ema=True, device="cpu", use_residual=False, alpha=1.5,
+            use_sd_cfr=True,
+            use_ema=True,
+            device="cpu",
+            use_residual=False,
+            alpha=1.5,
         )
         trainer = DeepCFRTrainer(config, deep_cfr_config=dcfr_config)
 
@@ -308,7 +333,9 @@ class TestEMAWeights:
             trainer._update_ema()
             w = float((step + 1) ** 1.5)
             weights.append(w)
-            snapshots.append(trainer.advantage_net.state_dict()[param_key].cpu().numpy().copy())
+            snapshots.append(
+                trainer.advantage_net.state_dict()[param_key].cpu().numpy().copy()
+            )
 
         # Compute manual weighted average
         total_w = sum(weights)
@@ -316,14 +343,18 @@ class TestEMAWeights:
 
         assert trainer._ema_state_dict is not None
         np.testing.assert_allclose(
-            trainer._ema_state_dict[param_key], manual_avg, atol=1e-5,
+            trainer._ema_state_dict[param_key],
+            manual_avg,
+            atol=1e-5,
         )
 
     def test_ema_checkpoint_roundtrip(self):
         """Save and reload EMA state yields exact match."""
         from src.cfr.deep_trainer import DeepCFRTrainer, DeepCFRConfig
 
-        dcfr = DeepCFRConfig(use_sd_cfr=True, use_ema=True, device="cpu", use_residual=False)
+        dcfr = DeepCFRConfig(
+            use_sd_cfr=True, use_ema=True, device="cpu", use_residual=False
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "ema_ckpt.pt")
@@ -356,7 +387,9 @@ class TestEMAWeights:
         """EMA action distribution is close to full snapshot average (within noise)."""
         from src.cfr.deep_trainer import DeepCFRTrainer, DeepCFRConfig
 
-        dcfr = DeepCFRConfig(use_sd_cfr=True, use_ema=True, device="cpu", use_residual=False, alpha=1.5)
+        dcfr = DeepCFRConfig(
+            use_sd_cfr=True, use_ema=True, device="cpu", use_residual=False, alpha=1.5
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "ema_parity.pt")
@@ -379,11 +412,19 @@ class TestEMAWeights:
 
             # Load with EMA
             ema_wrapper = SDCFRAgentWrapper(
-                player_id=0, config=config, checkpoint_path=path, device="cpu", use_ema=True,
+                player_id=0,
+                config=config,
+                checkpoint_path=path,
+                device="cpu",
+                use_ema=True,
             )
             # Load without EMA (snapshot averaging)
             snap_wrapper = SDCFRAgentWrapper(
-                player_id=0, config=config, checkpoint_path=path, device="cpu", use_ema=False,
+                player_id=0,
+                config=config,
+                checkpoint_path=path,
+                device="cpu",
+                use_ema=False,
             )
 
             assert ema_wrapper._ema_net is not None
@@ -415,7 +456,9 @@ class TestEMAWeights:
         """use_ema=False: no EMA file saved, _ema_state_dict stays None."""
         from src.cfr.deep_trainer import DeepCFRTrainer, DeepCFRConfig
 
-        dcfr = DeepCFRConfig(use_sd_cfr=True, use_ema=False, device="cpu", use_residual=False)
+        dcfr = DeepCFRConfig(
+            use_sd_cfr=True, use_ema=False, device="cpu", use_residual=False
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "no_ema.pt")
@@ -433,4 +476,6 @@ class TestEMAWeights:
             trainer.save_checkpoint(path)
 
             base = os.path.splitext(path)[0]
-            assert not os.path.exists(f"{base}_ema.pt"), "EMA file should NOT be saved when disabled"
+            assert not os.path.exists(
+                f"{base}_ema.pt"
+            ), "EMA file should NOT be saved when disabled"

@@ -182,7 +182,9 @@ class CambiaGameState(QueryMixin, SnapLogicMixin, AbilityMixin):
             logger.critical(
                 "Failed to initialize PlayerState: %s", e_player_state, exc_info=True
             )
-            raise InvalidGameStateError("PlayerState initialization failed") from e_player_state
+            raise InvalidGameStateError(
+                "PlayerState initialization failed"
+            ) from e_player_state
 
         # Deal cards
         try:
@@ -206,7 +208,9 @@ class CambiaGameState(QueryMixin, SnapLogicMixin, AbilityMixin):
                         logger.error(
                             "Invalid PlayerState object %d detected during deal.", i
                         )
-                        raise InvalidGameStateError(f"Invalid PlayerState {i} during deal")
+                        raise InvalidGameStateError(
+                            f"Invalid PlayerState {i} during deal"
+                        )
                     self.players[i].hand.append(self.stockpile.pop())
         except Exception as e_deal:
             logger.critical("Error during card dealing: %s", e_deal, exc_info=True)
@@ -410,7 +414,10 @@ class CambiaGameState(QueryMixin, SnapLogicMixin, AbilityMixin):
                                     use_ability=False
                                 )  # Placeholder type
                                 self.pending_action_player = player
-                                self.pending_action_data = {"drawn_card": drawn_card, "drawn_from": "stockpile"}
+                                self.pending_action_data = {
+                                    "drawn_card": drawn_card,
+                                    "drawn_from": "stockpile",
+                                }
 
                             def undo_draw_stock():
                                 drawn_card_in_pending = (
@@ -485,7 +492,10 @@ class CambiaGameState(QueryMixin, SnapLogicMixin, AbilityMixin):
                                 )
                                 self.pending_action = ActionDiscard(use_ability=False)
                                 self.pending_action_player = player
-                                self.pending_action_data = {"drawn_card": drawn_card, "drawn_from": "discard"}
+                                self.pending_action_data = {
+                                    "drawn_card": drawn_card,
+                                    "drawn_from": "discard",
+                                }
 
                             def undo_draw_discard():
                                 drawn_card_in_pending = (
@@ -657,8 +667,12 @@ class CambiaGameState(QueryMixin, SnapLogicMixin, AbilityMixin):
                     "Exception during master undo after apply_action error: %s. Game state may be inconsistent!",
                     e_undo_master,
                 )
-                raise UndoFailureError("Master undo failed after action application error") from e_undo_master
-            raise ActionApplicationError(f"Action application failed for {action}") from e_apply
+                raise UndoFailureError(
+                    "Master undo failed after action application error"
+                ) from e_undo_master
+            raise ActionApplicationError(
+                f"Action application failed for {action}"
+            ) from e_apply
 
         return delta_list, undo_action
 
@@ -778,7 +792,9 @@ class CambiaGameState(QueryMixin, SnapLogicMixin, AbilityMixin):
                     )
                     break
                 if not self.stockpile:
-                    reshuffle_outcome_deltas = self._attempt_reshuffle(_discard_undo_stack)
+                    reshuffle_outcome_deltas = self._attempt_reshuffle(
+                        _discard_undo_stack
+                    )
                     if reshuffle_outcome_deltas:
                         penalty_deltas.extend(reshuffle_outcome_deltas)
                         logger.debug(

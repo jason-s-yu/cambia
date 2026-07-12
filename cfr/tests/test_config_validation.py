@@ -17,10 +17,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
-
 # ---------------------------------------------------------------------------
 # Helper: load real load_config bypassing conftest stub
 # ---------------------------------------------------------------------------
+
 
 def _get_real_load_config():
     """Import the real load_config from src.config, bypassing stub."""
@@ -101,12 +101,13 @@ class TestUnknownYamlKeyWarnings:
             load_config(str(config_file))
 
         unknown_warnings = [
-            r.message for r in caplog.records
+            r.message
+            for r in caplog.records
             if r.levelno == logging.WARNING and "will be ignored" in r.message
         ]
-        assert unknown_warnings == [], (
-            f"Expected no unknown-key warnings for valid keys. Got: {unknown_warnings}"
-        )
+        assert (
+            unknown_warnings == []
+        ), f"Expected no unknown-key warnings for valid keys. Got: {unknown_warnings}"
 
     def test_empty_config_no_crash(self, tmp_path):
         """Empty YAML file should not crash."""
@@ -201,7 +202,8 @@ class TestCheckpointCambiaRulesMismatch:
         current_rules = {"cards_per_player": 4, "use_jokers": 2}
 
         mismatches = [
-            k for k in set(saved_rules) | set(current_rules)
+            k
+            for k in set(saved_rules) | set(current_rules)
             if saved_rules.get(k) != current_rules.get(k)
         ]
         assert mismatches == []
@@ -232,19 +234,22 @@ class TestCheckpointCambiaRulesMismatch:
         current_rules = {"cards_per_player": 4, "use_jokers": 2}
 
         import logging as _logging
+
         logger = _logging.getLogger("src.cfr.deep_trainer")
         with caplog.at_level(logging.WARNING, logger="src.cfr.deep_trainer"):
             for key in set(saved_rules) | set(current_rules):
                 if saved_rules.get(key) != current_rules.get(key):
                     logger.warning(
                         "cambia_rules mismatch '%s': checkpoint=%r, current=%r",
-                        key, saved_rules.get(key), current_rules.get(key),
+                        key,
+                        saved_rules.get(key),
+                        current_rules.get(key),
                     )
 
         msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
-        assert any("use_jokers" in m and "cambia_rules mismatch" in m for m in msgs), (
-            f"Expected cambia_rules mismatch warning for use_jokers. Got: {msgs}"
-        )
+        assert any(
+            "use_jokers" in m and "cambia_rules mismatch" in m for m in msgs
+        ), f"Expected cambia_rules mismatch warning for use_jokers. Got: {msgs}"
         assert not any("cards_per_player" in m for m in msgs)
 
 
@@ -302,9 +307,9 @@ class TestEvalCambiaRulesMismatch:
             )
 
         msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
-        assert any("use_jokers" in m and "cambia_rules mismatch" in m for m in msgs), (
-            f"Expected cambia_rules mismatch warning for use_jokers. Got: {msgs}"
-        )
+        assert any(
+            "use_jokers" in m and "cambia_rules mismatch" in m for m in msgs
+        ), f"Expected cambia_rules mismatch warning for use_jokers. Got: {msgs}"
 
     def test_mismatch_logic_warns_on_divergence(self, caplog):
         """The mismatch logic emits a warning when rules differ."""
@@ -317,7 +322,9 @@ class TestEvalCambiaRulesMismatch:
                     logging.warning(
                         "DeepCFRAgentWrapper P0: cambia_rules mismatch '%s': "
                         "checkpoint=%r, current=%r",
-                        key, saved_rules.get(key), current_rules.get(key),
+                        key,
+                        saved_rules.get(key),
+                        current_rules.get(key),
                     )
 
         messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]

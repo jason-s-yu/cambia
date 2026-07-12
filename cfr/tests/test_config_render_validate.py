@@ -15,7 +15,6 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
-
 # ---------------------------------------------------------------------------
 # The conftest stub for src.config (extra="allow", no fields defined) makes
 # the render/validate commands' schema walk vacuous -- every dotted key would
@@ -53,7 +52,9 @@ def cambia_app():
     return app
 
 
-PRODUCTION_CONFIG = Path(__file__).resolve().parent.parent / "config" / "prtcfr_production.yaml"
+PRODUCTION_CONFIG = (
+    Path(__file__).resolve().parent.parent / "config" / "prtcfr_production.yaml"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +190,15 @@ def test_render_malformed_set_missing_equals(runner, cambia_app, tmp_path):
     out_path = tmp_path / "rendered.yaml"
     result = runner.invoke(
         cambia_app,
-        ["config", "render", str(PRODUCTION_CONFIG), "--set", "prt_cfr.iterations", "-o", str(out_path)],
+        [
+            "config",
+            "render",
+            str(PRODUCTION_CONFIG),
+            "--set",
+            "prt_cfr.iterations",
+            "-o",
+            str(out_path),
+        ],
     )
     assert result.exit_code != 0
     assert not out_path.exists()
@@ -221,7 +230,9 @@ def test_validate_schema_invalid_value_exits_nonzero(runner, cambia_app, tmp_pat
 
 
 def test_validate_missing_file_exits_nonzero(runner, cambia_app, tmp_path):
-    result = runner.invoke(cambia_app, ["config", "validate", str(tmp_path / "nope.yaml")])
+    result = runner.invoke(
+        cambia_app, ["config", "validate", str(tmp_path / "nope.yaml")]
+    )
     assert result.exit_code != 0
 
 

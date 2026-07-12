@@ -353,7 +353,11 @@ class PRTCFRMixture:
             iters.append(it if it > 0 else 1)
 
         return cls(
-            iters, loaders, weighting=weighting, seq_cap=seq_cap, device=device,
+            iters,
+            loaders,
+            weighting=weighting,
+            seq_cap=seq_cap,
+            device=device,
             lazy_cache_size=lazy_cache_size,
         )
 
@@ -420,7 +424,7 @@ class PRTCFRIncrementalCursor:
             return
         prospective = self._body_len + len(new_body_tokens)
         if prospective + 2 > self.seq_cap:  # +2 = BOS + EOS budget, matches
-            self.overflowed = True          # encode_observation_sequence's own cap.
+            self.overflowed = True  # encode_observation_sequence's own cap.
             return
         chunk = list(new_body_tokens)
         if not self._registered:
@@ -444,7 +448,9 @@ class PRTCFRIncrementalCursor:
                 "(call advance() first; if overflowed, the caller must fall "
                 "back to a full stateless re-encode instead of calling query)"
             )
-        eos = torch.as_tensor([EOS_ID], dtype=torch.long, device=self.net.device).unsqueeze(0)
+        eos = torch.as_tensor(
+            [EOS_ID], dtype=torch.long, device=self.net.device
+        ).unsqueeze(0)
         h_n = self.net.step_hidden(eos, self._hidden)  # transient: not stored back
         top = h_n[-1]  # (1, hidden) top-layer hidden after the transient EOS
         mask_t = torch.as_tensor(

@@ -56,8 +56,18 @@ CONFIG = DeepCfrConfig(
 
 
 def make_nets():
-    v = PBSValueNetwork(input_dim=PBS_INPUT_DIM, hidden_dim=1024, output_dim=VALUE_DIM, validate_inputs=False)
-    p = PBSPolicyNetwork(input_dim=PBS_INPUT_DIM, hidden_dim=512, output_dim=NUM_ACTIONS, validate_inputs=False)
+    v = PBSValueNetwork(
+        input_dim=PBS_INPUT_DIM,
+        hidden_dim=1024,
+        output_dim=VALUE_DIM,
+        validate_inputs=False,
+    )
+    p = PBSPolicyNetwork(
+        input_dim=PBS_INPUT_DIM,
+        hidden_dim=512,
+        output_dim=NUM_ACTIONS,
+        validate_inputs=False,
+    )
     return v, p
 
 
@@ -71,7 +81,8 @@ def benchmark_self_play(num_workers_list, episodes_per_trial=20):
     """Benchmark self-play throughput with varying worker counts."""
     print("\n=== Self-Play Throughput Benchmark ===")
     v, p = make_nets()
-    v.eval(); p.eval()
+    v.eval()
+    p.eval()
     vs, ps = nets_to_numpy(v, p)
 
     results = {}
@@ -108,9 +119,11 @@ def benchmark_self_play(num_workers_list, episodes_per_trial=20):
             "samples_per_sec": round(samples_per_sec, 2),
             "samples_per_episode": round(len(all_samples) / max(actual_total, 1), 1),
         }
-        print(f"  {nw:2d} workers: {actual_total} eps in {elapsed:.2f}s "
-              f"({eps_per_sec:.1f} eps/s, {samples_per_sec:.0f} samp/s, "
-              f"{len(all_samples)/max(actual_total,1):.1f} samp/ep)")
+        print(
+            f"  {nw:2d} workers: {actual_total} eps in {elapsed:.2f}s "
+            f"({eps_per_sec:.1f} eps/s, {samples_per_sec:.0f} samp/s, "
+            f"{len(all_samples)/max(actual_total,1):.1f} samp/ep)"
+        )
 
     return results
 
@@ -136,7 +149,9 @@ def benchmark_training(devices):
         try:
             device = torch.device(device_name)
             # Quick availability check
-            if device_name == "xpu" and not (hasattr(torch, "xpu") and torch.xpu.is_available()):
+            if device_name == "xpu" and not (
+                hasattr(torch, "xpu") and torch.xpu.is_available()
+            ):
                 print(f"  {device_name}: SKIPPED (not available)")
                 continue
             if device_name == "cuda" and not torch.cuda.is_available():
@@ -147,7 +162,8 @@ def benchmark_training(devices):
             continue
 
         v, p = make_nets()
-        v.to(device); p.to(device)
+        v.to(device)
+        p.to(device)
         v_opt = torch.optim.Adam(v.parameters(), lr=1e-3)
         p_opt = torch.optim.Adam(p.parameters(), lr=1e-3)
 
@@ -164,7 +180,8 @@ def benchmark_training(devices):
         weights = weights / weights.mean()
 
         # Warmup
-        v.train(); p.train()
+        v.train()
+        p.train()
         for _ in range(5):
             v_opt.zero_grad()
             pred = v(feat_t)
@@ -227,8 +244,10 @@ def benchmark_training(devices):
             "value_steps_per_sec": round(1 / v_time, 1),
             "policy_steps_per_sec": round(1 / p_time, 1),
         }
-        print(f"  {device_name}: value={v_time*1000:.1f}ms/step  policy={p_time*1000:.1f}ms/step  "
-              f"total={((v_time+p_time)*1000):.1f}ms/step")
+        print(
+            f"  {device_name}: value={v_time*1000:.1f}ms/step  policy={p_time*1000:.1f}ms/step  "
+            f"total={((v_time+p_time)*1000):.1f}ms/step"
+        )
 
         # Cleanup
         del v, p, v_opt, p_opt, feat_t, vtgt_t, ptgt_t, mask_t, iter_t

@@ -128,9 +128,7 @@ def _create_py_observation(py_state, action, acting_player):
         acting_player=acting_player,
         action=action,
         discard_top_card=py_state.get_discard_top(),
-        player_hand_sizes=[
-            py_state.get_player_card_count(i) for i in range(NUM_PLAYERS)
-        ],
+        player_hand_sizes=[py_state.get_player_card_count(i) for i in range(NUM_PLAYERS)],
         stockpile_size=py_state.get_stockpile_size(),
         drawn_card=None,
         peeked_cards=None,
@@ -177,9 +175,7 @@ class TestEncodingDimensionConstants:
         """AdvantageNetwork accepts INPUT_DIM input and produces NUM_ACTIONS output."""
         from src.networks import AdvantageNetwork
 
-        net = AdvantageNetwork(
-            input_dim=INPUT_DIM, hidden_dim=64, output_dim=NUM_ACTIONS
-        )
+        net = AdvantageNetwork(input_dim=INPUT_DIM, hidden_dim=64, output_dim=NUM_ACTIONS)
         x = torch.randn(1, INPUT_DIM)
         mask = torch.ones(1, NUM_ACTIONS, dtype=torch.bool)
         out = net(x, mask)
@@ -209,9 +205,10 @@ class TestEncodingDimensionConstants:
         x = torch.randn(1, N_PLAYER_INPUT_DIM)
         mask = torch.ones(1, N_PLAYER_NUM_ACTIONS, dtype=torch.bool)
         out = net(x, mask)
-        assert out.shape == (1, N_PLAYER_NUM_ACTIONS), (
-            f"N-player output shape {out.shape}"
-        )
+        assert out.shape == (
+            1,
+            N_PLAYER_NUM_ACTIONS,
+        ), f"N-player output shape {out.shape}"
 
 
 # ---------------------------------------------------------------------------
@@ -582,8 +579,14 @@ class TestEPPBSCrossEngine:
             # history features written by Go agent state (obs ages, discard histogram,
             # turn progress) which the Python reference encoder doesn't track.
             _EPPBS_CORE_DIMS = 200
-            if not np.allclose(go_enc[:_EPPBS_CORE_DIMS], py_enc[:_EPPBS_CORE_DIMS], atol=1e-4):
-                diff_indices = np.where(~np.isclose(go_enc[:_EPPBS_CORE_DIMS], py_enc[:_EPPBS_CORE_DIMS], atol=1e-4))[0]
+            if not np.allclose(
+                go_enc[:_EPPBS_CORE_DIMS], py_enc[:_EPPBS_CORE_DIMS], atol=1e-4
+            ):
+                diff_indices = np.where(
+                    ~np.isclose(
+                        go_enc[:_EPPBS_CORE_DIMS], py_enc[:_EPPBS_CORE_DIMS], atol=1e-4
+                    )
+                )[0]
                 first_divergence = (
                     f"seed={seed} step={step} actor=P{actor} "
                     f"ctx={ctx_int} drawn={drawn_int}\n"
@@ -809,8 +812,14 @@ class TestMemoryDecayParity:
         # Compare only first 200 dims (core EP-PBS). Dims 200-223 are Go-only
         # history features (obs ages, discard histogram, turn progress).
         _EPPBS_CORE_DIMS = 200
-        if not np.allclose(go_enc[:_EPPBS_CORE_DIMS], py_enc[:_EPPBS_CORE_DIMS], atol=1e-4):
-            diff_indices = np.where(~np.isclose(go_enc[:_EPPBS_CORE_DIMS], py_enc[:_EPPBS_CORE_DIMS], atol=1e-4))[0]
+        if not np.allclose(
+            go_enc[:_EPPBS_CORE_DIMS], py_enc[:_EPPBS_CORE_DIMS], atol=1e-4
+        ):
+            diff_indices = np.where(
+                ~np.isclose(
+                    go_enc[:_EPPBS_CORE_DIMS], py_enc[:_EPPBS_CORE_DIMS], atol=1e-4
+                )
+            )[0]
             pytest.fail(
                 f"seed={seed}: decaying archetype EP-PBS encoding mismatch\n"
                 f"  Divergent indices: {diff_indices.tolist()}\n"

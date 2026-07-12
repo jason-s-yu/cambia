@@ -16,7 +16,6 @@ from src.evaluate_agents import AGENT_REGISTRY, GTCFRAgentWrapper, get_agent
 from src.networks import build_cvpn, CVPN
 from src.pbs import PBS_INPUT_DIM, NUM_HAND_TYPES
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -117,7 +116,9 @@ def test_gtcfr_in_agent_registry():
 def test_gtcfr_eval_wrapper_instantiates():
     """GTCFRAgentWrapper initializes without error (no checkpoint)."""
     config = _make_config()
-    wrapper = GTCFRAgentWrapper(player_id=0, config=config, checkpoint_path="", device="cpu")
+    wrapper = GTCFRAgentWrapper(
+        player_id=0, config=config, checkpoint_path="", device="cpu"
+    )
     assert wrapper._cvpn is not None
     assert not wrapper._cvpn.training  # eval mode
     assert wrapper._range_p0.shape == (NUM_HAND_TYPES,)
@@ -129,7 +130,9 @@ def test_gtcfr_eval_wrapper_choose_action_fallback():
     from src.constants import ActionDrawStockpile, ActionCallCambia
 
     config = _make_config()
-    wrapper = GTCFRAgentWrapper(player_id=0, config=config, checkpoint_path="", device="cpu")
+    wrapper = GTCFRAgentWrapper(
+        player_id=0, config=config, checkpoint_path="", device="cpu"
+    )
     legal_actions = {ActionDrawStockpile(), ActionCallCambia()}
     action = wrapper.choose_action(game_state=None, legal_actions=legal_actions)
     assert action in legal_actions
@@ -140,7 +143,9 @@ def test_gtcfr_eval_wrapper_choose_action_with_state():
     from src.game.engine import CambiaGameState
 
     config = _make_config()
-    wrapper = GTCFRAgentWrapper(player_id=0, config=config, checkpoint_path="", device="cpu")
+    wrapper = GTCFRAgentWrapper(
+        player_id=0, config=config, checkpoint_path="", device="cpu"
+    )
 
     game_state = CambiaGameState(house_rules=config.cambia_rules)
     wrapper.initialize_state(game_state)
@@ -156,7 +161,9 @@ def test_gtcfr_eval_wrapper_choose_action_with_state():
 def test_gtcfr_eval_wrapper_reset():
     """reset() restores ranges to uniform."""
     config = _make_config()
-    wrapper = GTCFRAgentWrapper(player_id=0, config=config, checkpoint_path="", device="cpu")
+    wrapper = GTCFRAgentWrapper(
+        player_id=0, config=config, checkpoint_path="", device="cpu"
+    )
 
     # Dirty the ranges
     wrapper._range_p0 = np.zeros(NUM_HAND_TYPES, dtype=np.float32)
@@ -214,18 +221,22 @@ def test_gtcfr_end_to_end():
         policy_target = rng.dirichlet(np.ones(POLICY_DIM)).astype(np.float32)
         mask = np.ones(POLICY_DIM, dtype=bool)
 
-        trainer.value_buffer.add(ReservoirSample(
-            features=features,
-            target=value_target,
-            action_mask=np.empty(0, dtype=bool),
-            iteration=0,
-        ))
-        trainer.policy_buffer.add(ReservoirSample(
-            features=features,
-            target=policy_target,
-            action_mask=mask,
-            iteration=0,
-        ))
+        trainer.value_buffer.add(
+            ReservoirSample(
+                features=features,
+                target=value_target,
+                action_mask=np.empty(0, dtype=bool),
+                iteration=0,
+            )
+        )
+        trainer.policy_buffer.add(
+            ReservoirSample(
+                features=features,
+                target=policy_target,
+                action_mask=mask,
+                iteration=0,
+            )
+        )
 
     assert len(trainer.value_buffer) == n_samples
     assert len(trainer.policy_buffer) == n_samples
@@ -249,7 +260,9 @@ def test_gtcfr_vs_random():
     config = _make_config(expansion_budget=3, cvpn_hidden_dim=64, cvpn_num_blocks=1)
 
     for game_num in range(5):
-        gtcfr_agent = GTCFRAgentWrapper(player_id=0, config=config, checkpoint_path="", device="cpu")
+        gtcfr_agent = GTCFRAgentWrapper(
+            player_id=0, config=config, checkpoint_path="", device="cpu"
+        )
         random_agent = RandomAgent(player_id=1, config=config)
         agents = [gtcfr_agent, random_agent]
 

@@ -59,9 +59,9 @@ def test_k_limited_expands_k_children():
         f"got {result.tree_size}"
     )
     # Should have more than just the root (at least 1 expansion happened)
-    assert result.tree_size >= 2, (
-        f"Expected at least 2 nodes after 1 expansion, got {result.tree_size}"
-    )
+    assert (
+        result.tree_size >= 2
+    ), f"Expected at least 2 nodes after 1 expansion, got {result.tree_size}"
 
 
 def test_k_inf_backward_compat():
@@ -72,9 +72,9 @@ def test_k_inf_backward_compat():
     # With k=-1 and budget=1, root gets ALL legal actions expanded.
     # Cambia draw phase typically has 2+ legal actions (draw stockpile, etc.)
     # tree_size should be 1 (root) + n_legal children
-    assert result.tree_size >= 2, (
-        f"k=-1 should expand at least some children, got tree_size={result.tree_size}"
-    )
+    assert (
+        result.tree_size >= 2
+    ), f"k=-1 should expand at least some children, got tree_size={result.tree_size}"
 
 
 def test_k1_fewer_nodes_than_kinf():

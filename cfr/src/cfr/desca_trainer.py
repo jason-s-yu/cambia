@@ -80,6 +80,7 @@ from .desca_worker import (
 
 try:
     from .. import run_db as _run_db  # type: ignore[attr-defined]
+
     _RUN_DB_AVAILABLE = True
 except Exception:
     _run_db = None  # type: ignore[assignment]
@@ -230,9 +231,7 @@ def _strategy_loss(
     return weighted.mean()
 
 
-def _value_loss(
-    pred: "torch.Tensor", target: "torch.Tensor"
-) -> "torch.Tensor":
+def _value_loss(pred: "torch.Tensor", target: "torch.Tensor") -> "torch.Tensor":
     """Plain MSE for V_omni."""
     return ((pred - target) ** 2).mean()
 
@@ -383,7 +382,9 @@ class DESCATrainer:
 
         self.config = config
         self.env_factory = env_factory
-        self.checkpoint_path = checkpoint_path or "runs/desca-scratch/checkpoints/desca_checkpoint.pt"
+        self.checkpoint_path = (
+            checkpoint_path or "runs/desca-scratch/checkpoints/desca_checkpoint.pt"
+        )
 
         # Device
         if device is None:
@@ -396,7 +397,9 @@ class DESCATrainer:
         self.history_value_net = history_value_net.to(self.device)
 
         # Config fields (with reasonable defaults)
-        self.num_abstract_actions = int(_cfg_get(config, "num_abstract_actions", NUM_ABSTRACT_ACTIONS_2P))
+        self.num_abstract_actions = int(
+            _cfg_get(config, "num_abstract_actions", NUM_ABSTRACT_ACTIONS_2P)
+        )
         if self.num_abstract_actions != NUM_ABSTRACT_ACTIONS_2P:
             raise ValueError(
                 f"DESCAConfig.num_abstract_actions={self.num_abstract_actions} "
@@ -452,12 +455,16 @@ class DESCATrainer:
             self.avg_strategy_net.parameters(), lr=self.lr, weight_decay=self.weight_decay
         )
         self.value_opt = torch.optim.AdamW(
-            self.history_value_net.parameters(), lr=self.lr, weight_decay=self.weight_decay
+            self.history_value_net.parameters(),
+            lr=self.lr,
+            weight_decay=self.weight_decay,
         )
 
         # RNG / iteration state
         self.iteration: int = 0
-        self.rng = np.random.default_rng(seed) if seed is not None else np.random.default_rng()
+        self.rng = (
+            np.random.default_rng(seed) if seed is not None else np.random.default_rng()
+        )
         if seed is not None:
             try:
                 torch.manual_seed(int(seed))
@@ -524,6 +531,7 @@ class DESCATrainer:
                 try:
                     config_yaml = config_path.read_text(encoding="utf-8")
                     import yaml  # type: ignore[import-not-found]
+
                     loaded = yaml.safe_load(config_yaml) or {}
                     if isinstance(loaded, dict):
                         config_dict.update(loaded)
@@ -554,7 +562,9 @@ class DESCATrainer:
         Args:
             num_iterations: Overrides ``config.iterations`` when provided.
         """
-        total = int(num_iterations) if num_iterations is not None else self.total_iterations
+        total = (
+            int(num_iterations) if num_iterations is not None else self.total_iterations
+        )
         safety_cap = int(self.stall_cfg["max_iter_abs"])
 
         for _ in range(total):
@@ -568,7 +578,9 @@ class DESCATrainer:
             self._run_iteration()
 
             if self._detect_stall():
-                logger.warning("DESCA stall detected at iter %d; halting.", self.iteration)
+                logger.warning(
+                    "DESCA stall detected at iter %d; halting.", self.iteration
+                )
                 break
 
         # Final checkpoint
@@ -591,7 +603,9 @@ class DESCATrainer:
         warmup = self.iteration <= self.warmup_iters
         logger.info(
             "DESCA iter %d start (warmup=%s, inner_update=%s)",
-            self.iteration, warmup, self.inner_update,
+            self.iteration,
+            warmup,
+            self.inner_update,
         )
 
         # 1. Traversals per player
@@ -614,8 +628,11 @@ class DESCATrainer:
             )
             logger.debug(
                 "DESCA iter %d player %d: nodes=%d, terminals=%d, errors=%d",
-                self.iteration, p, result.nodes_visited,
-                result.terminals_reached, result.errors,
+                self.iteration,
+                p,
+                result.nodes_visited,
+                result.terminals_reached,
+                result.errors,
             )
 
         # 2. Fit networks (skipped if buffers are empty).
@@ -635,8 +652,9 @@ class DESCATrainer:
             try:
                 self.save_checkpoint()
             except Exception as e:
-                logger.warning("DESCA checkpoint save failed at iter %d: %s",
-                               self.iteration, e)
+                logger.warning(
+                    "DESCA checkpoint save failed at iter %d: %s", self.iteration, e
+                )
 
     # ------------------------------------------------------------------
     # Buffer ingestion
@@ -686,9 +704,9 @@ class DESCATrainer:
                 if batch.masks is not None
                 else None
             )
-            iter_t = torch.from_numpy(
-                np.asarray(batch.iterations, dtype=np.int64)
-            ).to(self.device)
+            iter_t = torch.from_numpy(np.asarray(batch.iterations, dtype=np.int64)).to(
+                self.device
+            )
             w_iter = self._get_dcfr_weights(iter_t)
             pred = self.regret_net(x)
             loss = _regret_loss(pred, y, mask, w_iter)
@@ -827,7 +845,9 @@ class DESCATrainer:
             raise RuntimeError("torch required for _get_dcfr_weights")
 
         max_iter = int(iterations.max().item())
-        needed_size = max_iter  # LUT[i] covers iteration i+1; need at least max_iter entries.
+        needed_size = (
+            max_iter  # LUT[i] covers iteration i+1; need at least max_iter entries.
+        )
 
         if self._dcfr_weight_lut is None or self._dcfr_weight_lut.shape[0] < needed_size:
             # Extend to the next power of 2 past needed_size (or at least 1024)
@@ -877,7 +897,9 @@ class DESCATrainer:
             if g > 0.0 and not (1e-6 <= g <= 100.0):
                 logger.warning(
                     "Monitor: %s grad_norm %.6g outside [1e-6, 100] at iter %d",
-                    name, g, self.iteration,
+                    name,
+                    g,
+                    self.iteration,
                 )
         self._grad_norm_history.append(
             float((regret_grad + strategy_grad + value_grad) / 3.0)
@@ -888,19 +910,26 @@ class DESCATrainer:
             if self._v_loss_history[-1] > 0.1:
                 logger.warning(
                     "Monitor: V_omni loss %.4f > 0.1 at iter %d (spec target ≤ 0.1 by iter 50)",
-                    self._v_loss_history[-1], self.iteration,
+                    self._v_loss_history[-1],
+                    self.iteration,
                 )
 
     def _iteration_milestone_log(self) -> None:
         """Log Tier 4 iteration milestones per spec 10.5."""
-        milestone_map = {20: "early smoke", 100: "coverage",
-                         200: "H2H trend", 300: "mean_imp target"}
+        milestone_map = {
+            20: "early smoke",
+            100: "coverage",
+            200: "H2H trend",
+            300: "mean_imp target",
+        }
         label = milestone_map.get(self.iteration)
         if label is None:
             return
         logger.info(
             "DESCA milestone iter %d (%s): regret_steps=%d, V_loss_last=%s",
-            self.iteration, label, self._regret_steps_per_iter,
+            self.iteration,
+            label,
+            self._regret_steps_per_iter,
             f"{self._v_loss_history[-1]:.4f}" if self._v_loss_history else "n/a",
         )
 
@@ -915,7 +944,7 @@ class DESCATrainer:
             return False
         if len(self._window_means) < self.stall_cfg["num_windows"] + 1:
             return False
-        tail = self._window_means[-(self.stall_cfg["num_windows"] + 1):]
+        tail = self._window_means[-(self.stall_cfg["num_windows"] + 1) :]
         deltas = [tail[i + 1] - tail[i] for i in range(len(tail) - 1)]
         return all(d < 0.01 for d in deltas)
 
@@ -931,7 +960,7 @@ class DESCATrainer:
             return
         # Recompute window means.
         windows: Dict[int, List[float]] = {}
-        for (it, m) in self._mean_imp_history:
+        for it, m in self._mean_imp_history:
             w = it // window_size
             windows.setdefault(w, []).append(m)
         self._window_means = [float(np.mean(windows[k])) for k in sorted(windows.keys())]
@@ -983,7 +1012,9 @@ class DESCATrainer:
             atomic_torch_save(payload, self.checkpoint_path)
         except Exception:
             pass
-        logger.info("DESCA checkpoint saved to %s%s", iter_path, " (final)" if final else "")
+        logger.info(
+            "DESCA checkpoint saved to %s%s", iter_path, " (final)" if final else ""
+        )
 
         if self._db_conn is not None and self._db_run_id is not None:
             try:

@@ -27,8 +27,19 @@ SUIT_OFFSET = {"C": 0, "D": 1, "H": 2, "S": 3}
 
 # Python rank → canonical rank index (A=0, 2=1, ..., K=12)
 RANK_VALUE = {
-    "A": 0, "2": 1, "3": 2, "4": 3, "5": 4, "6": 5,
-    "7": 6, "8": 7, "9": 8, "T": 9, "J": 10, "Q": 11, "K": 12,
+    "A": 0,
+    "2": 1,
+    "3": 2,
+    "4": 3,
+    "5": 4,
+    "6": 5,
+    "7": 6,
+    "8": 7,
+    "9": 8,
+    "T": 9,
+    "J": 10,
+    "Q": 11,
+    "K": 12,
 }
 
 # PRT-CFR per-agent token stream hard cap (must equal agent.MaxTokenStream in
@@ -94,6 +105,7 @@ def extract_deck_from_python_game(game) -> Tuple[List[int], int]:
 
     starting_player = getattr(game, "current_player_index", 0)
     return deck_indices, starting_player
+
 
 # ---------------------------------------------------------------------------
 # Library loading — module-level singleton
@@ -431,7 +443,8 @@ class GoEngine:
 
         if house_rules is not None:
             game_h = lib.cambia_game_new_with_deck(
-                deck_arr, len(deck_indices),
+                deck_arr,
+                len(deck_indices),
                 obj._num_players,
                 int(house_rules.cards_per_player),
                 int(starting_player),
@@ -450,9 +463,22 @@ class GoEngine:
         else:
             # Defaults: 2 players, 4 cards each, standard competitive rules
             game_h = lib.cambia_game_new_with_deck(
-                deck_arr, len(deck_indices),
-                2, 4, int(starting_player),
-                46, 0, 2, 1, 0, 1, 0, 2, 1, 2, 1,
+                deck_arr,
+                len(deck_indices),
+                2,
+                4,
+                int(starting_player),
+                46,
+                0,
+                2,
+                1,
+                0,
+                1,
+                0,
+                2,
+                1,
+                2,
+                1,
             )
 
         if game_h < 0:
@@ -650,9 +676,7 @@ class GoEngine:
         Raises:
             RuntimeError: On engine error.
         """
-        ret = self._lib.cambia_agents_update_both(
-            a0._agent_h, a1._agent_h, self._game_h
-        )
+        ret = self._lib.cambia_agents_update_both(a0._agent_h, a1._agent_h, self._game_h)
         if ret < 0:
             raise RuntimeError(
                 f"cambia_agents_update_both failed (returned {ret}) "
@@ -712,9 +736,7 @@ class GoEngine:
         Uses the N-player FFI export that copies all N utility values.
         """
         util_buf = _ffi.new(f"float[{self._num_players}]")
-        self._lib.cambia_game_get_utility_n(
-            self._game_h, util_buf, self._num_players
-        )
+        self._lib.cambia_game_get_utility_n(self._game_h, util_buf, self._num_players)
         return np.frombuffer(
             _ffi.buffer(util_buf, self._num_players * 4), dtype=np.float32
         ).copy()
@@ -1030,7 +1052,12 @@ class GoAgentState:
             _ffi.buffer(self._token_buf, int(n) * 4), dtype=np.int32
         ).copy()
 
-    def encode(self, decision_context: int, drawn_bucket: int = -1, out: Optional[np.ndarray] = None) -> np.ndarray:
+    def encode(
+        self,
+        decision_context: int,
+        drawn_bucket: int = -1,
+        out: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
         """
         Encode agent belief state as a 222-dimensional float32 feature vector.
 
@@ -1070,7 +1097,12 @@ class GoAgentState:
             return out
         return view.copy()
 
-    def encode_eppbs(self, decision_context: int, drawn_bucket: int = -1, out: Optional[np.ndarray] = None) -> np.ndarray:
+    def encode_eppbs(
+        self,
+        decision_context: int,
+        drawn_bucket: int = -1,
+        out: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
         """EP-PBS encoding via Go FFI. Returns ndarray of shape (224,).
 
         Uses a pre-allocated cffi buffer cached on this GoAgentState instance
@@ -1094,7 +1126,12 @@ class GoAgentState:
             return out
         return view.copy()
 
-    def encode_eppbs_interleaved(self, decision_context: int, drawn_bucket: int = -1, out: Optional[np.ndarray] = None) -> np.ndarray:
+    def encode_eppbs_interleaved(
+        self,
+        decision_context: int,
+        drawn_bucket: int = -1,
+        out: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
         """EP-PBS interleaved encoding via Go FFI. Returns ndarray of shape (224,).
 
         Uses interleaved slot layout: public(42) + 12×slot(13) + pad(2) + history(24) = 224.
@@ -1120,7 +1157,12 @@ class GoAgentState:
             return out
         return view.copy()
 
-    def encode_eppbs_interleaved_v2(self, decision_context: int, drawn_bucket: int = -1, out: Optional[np.ndarray] = None) -> np.ndarray:
+    def encode_eppbs_interleaved_v2(
+        self,
+        decision_context: int,
+        drawn_bucket: int = -1,
+        out: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
         """Encoding v2 (257-dim): base 224-dim interleaved EP-PBS + 9-dim
         card-counting posterior + 24-dim action history window.
 
@@ -1148,7 +1190,12 @@ class GoAgentState:
             return out
         return view.copy()
 
-    def encode_eppbs_dealiased(self, decision_context: int, drawn_bucket: int = -1, out: Optional[np.ndarray] = None) -> np.ndarray:
+    def encode_eppbs_dealiased(
+        self,
+        decision_context: int,
+        drawn_bucket: int = -1,
+        out: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
         """De-aliased flat EP-PBS encoding via Go FFI. Returns ndarray of shape (224,).
 
         Uses flat layout (tags grouped, then identities grouped) with two de-aliasing fixes:
@@ -1175,7 +1222,12 @@ class GoAgentState:
             return out
         return view.copy()
 
-    def encode_nplayer(self, decision_context: int, drawn_bucket: int = -1, out: Optional[np.ndarray] = None) -> np.ndarray:
+    def encode_nplayer(
+        self,
+        decision_context: int,
+        drawn_bucket: int = -1,
+        out: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
         """N-player encoding via Go FFI. Returns ndarray of shape (580,).
 
         Lazy-allocates a 580-float cffi buffer on first call (T1-2 buffer reuse
@@ -1598,9 +1650,7 @@ def state_clone(game_h: int, a0_h: int, a1_h: int) -> Tuple[int, int, int]:
     out_g = _ffi.new("int32_t *")
     out_a0 = _ffi.new("int32_t *")
     out_a1 = _ffi.new("int32_t *")
-    ret = lib.cambia_state_clone(
-        int(game_h), int(a0_h), int(a1_h), out_g, out_a0, out_a1
-    )
+    ret = lib.cambia_state_clone(int(game_h), int(a0_h), int(a1_h), out_g, out_a0, out_a1)
     if ret < 0:
         raise RuntimeError(
             f"cambia_state_clone failed (returned {ret}) "
@@ -1640,11 +1690,27 @@ def get_token_stream_cap() -> int:
 # Fixed field order of cambia_token_vocab (mirrors agent.TokenVocab). Consumers
 # read positionally; the cross-check test asserts each against sequence_encoding.
 TOKEN_VOCAB_FIELDS = [
-    "VOCAB_SIZE", "PAD_ID", "BOS_ID", "EOS_ID", "SEP_ID", "NUM_SPECIAL",
-    "FRAME_BASE", "NUM_FRAME_IDS", "ACTOR_BASE", "MAX_ACTORS",
-    "ACTION_BASE", "NUM_ACTION_IDS", "CARD_BASE", "NUM_CARD_IDS",
-    "SLOT_BASE", "NUM_SLOT_IDS", "OUTCOME_BASE", "NUM_SNAP_OUTCOME_IDS",
-    "MAX_SLOTS", "SEQ_CAP", "GO_TOKEN_STREAM_CAP",
+    "VOCAB_SIZE",
+    "PAD_ID",
+    "BOS_ID",
+    "EOS_ID",
+    "SEP_ID",
+    "NUM_SPECIAL",
+    "FRAME_BASE",
+    "NUM_FRAME_IDS",
+    "ACTOR_BASE",
+    "MAX_ACTORS",
+    "ACTION_BASE",
+    "NUM_ACTION_IDS",
+    "CARD_BASE",
+    "NUM_CARD_IDS",
+    "SLOT_BASE",
+    "NUM_SLOT_IDS",
+    "OUTCOME_BASE",
+    "NUM_SNAP_OUTCOME_IDS",
+    "MAX_SLOTS",
+    "SEQ_CAP",
+    "GO_TOKEN_STREAM_CAP",
 ]
 
 

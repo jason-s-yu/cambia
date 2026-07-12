@@ -23,7 +23,6 @@ import torch
 from src.networks import AdvantageNetwork, StrategyNetwork
 from src.encoding import INPUT_DIM, NUM_ACTIONS
 
-
 # --- Helpers ---
 
 
@@ -97,6 +96,7 @@ class TestDeepCFRAgentWrapper:
         config = _make_config()
 
         from src.evaluate_agents import DeepCFRAgentWrapper
+
         agent = DeepCFRAgentWrapper(player_id=0, config=config, checkpoint_path=ckpt_path)
         assert agent.advantage_net is not None
 

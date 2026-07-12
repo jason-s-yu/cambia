@@ -32,7 +32,9 @@ import torch
 from src.evaluate_agents import run_evaluation_multi_baseline, MEAN_IMP_BASELINES
 from src.config import load_config
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 # MEAN_IMP_BASELINES imported from src.evaluate_agents (canonical source)
@@ -154,7 +156,9 @@ def collect_metrics(
                 "avg_game_turns": round(stats.get("avg_game_turns", 0), 2),
                 "t1_cambia_rate": round(stats.get("t1_cambia_rate", 0), 4),
                 "avg_score_margin": round(stats.get("avg_score_margin", 0), 2),
-                "adv_loss": None if adv_loss != adv_loss else round(adv_loss, 6),  # nan check
+                "adv_loss": (
+                    None if adv_loss != adv_loss else round(adv_loss, 6)
+                ),  # nan check
                 "strat_loss": None if strat_loss != strat_loss else round(strat_loss, 6),
                 "timestamp": timestamp,
             }
@@ -175,7 +179,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Collect Deep CFR checkpoint evaluation metrics."
     )
-    parser.add_argument("--run-dir", required=True, help="Path to run directory (e.g. cfr/runs/os-20)")
+    parser.add_argument(
+        "--run-dir", required=True, help="Path to run directory (e.g. cfr/runs/os-20)"
+    )
     parser.add_argument("--checkpoint", required=True, help="Path to .pt checkpoint file")
     parser.add_argument(
         "--games", type=int, default=2000, help="Games per baseline (default: 2000)"

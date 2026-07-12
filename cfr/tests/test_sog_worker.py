@@ -100,6 +100,7 @@ class TestEpisodeSampleImport:
         """EpisodeSample should be importable via gtcfr_worker (not redefined in sog_worker)."""
         from src.cfr.sog_worker import EpisodeSample as SogEpisodeSample
         from src.cfr.gtcfr_worker import EpisodeSample as GtcfrEpisodeSample
+
         assert SogEpisodeSample is GtcfrEpisodeSample
 
     def test_episode_sample_dataclass(self):

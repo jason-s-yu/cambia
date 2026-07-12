@@ -210,8 +210,8 @@ class AgentState:
         # EP-PBS state: slots 0-5 = own, 6-11 = opp
         self.slot_tags = [EpistemicTag.UNK] * 12
         self.slot_buckets = [0] * 12
-        self.own_active_mask: list = []   # max EP_PBS_MAX_ACTIVE_MASK PrivOwn slot indices
-        self.opp_active_mask: list = []   # max EP_PBS_MAX_ACTIVE_MASK PrivOpp slot indices
+        self.own_active_mask: list = []  # max EP_PBS_MAX_ACTIVE_MASK PrivOwn slot indices
+        self.opp_active_mask: list = []  # max EP_PBS_MAX_ACTIVE_MASK PrivOpp slot indices
 
         # Phase 0 parity: reset history + discard tracking at game start. The EP-PBS tag
         # setter below stamps slot_last_seen_turn for peeked slots automatically.
@@ -233,7 +233,11 @@ class AgentState:
         # Track initial discard top (matches Go Initialize -> trackDiscard()).
         initial_bucket = self.known_discard_top_bucket
         if initial_bucket is not None:
-            bv = initial_bucket.value if hasattr(initial_bucket, "value") else int(initial_bucket)
+            bv = (
+                initial_bucket.value
+                if hasattr(initial_bucket, "value")
+                else int(initial_bucket)
+            )
             if 0 <= bv < len(self.discard_bucket_counts):
                 self.discard_bucket_counts[bv] += 1
                 self.total_discards_seen += 1
@@ -322,6 +326,7 @@ class AgentState:
             V2_ACTION_CATEGORY_DISCARD,
             V2_ACTION_CATEGORY_ABILITY_SNAP,
         )
+
         if action is None:
             return -1
         from .constants import (
@@ -330,6 +335,7 @@ class AgentState:
             ActionDrawDiscard,
             ActionDrawStockpile,
         )
+
         if isinstance(action, (ActionDrawStockpile, ActionDrawDiscard, ActionCallCambia)):
             return V2_ACTION_CATEGORY_DRAW
         if isinstance(action, (ActionDiscard, ActionReplace)):
@@ -349,6 +355,7 @@ class AgentState:
             ActionSnapOpponentMove,
             ActionSnapOwn,
         )
+
         if action is None:
             return -1
         if isinstance(action, ActionReplace):
@@ -357,7 +364,9 @@ class AgentState:
             return int(action.target_hand_index)
         if isinstance(action, ActionAbilityPeekOtherSelect):
             return int(action.target_opponent_hand_index)
-        if isinstance(action, (ActionAbilityBlindSwapSelect, ActionAbilityKingLookSelect)):
+        if isinstance(
+            action, (ActionAbilityBlindSwapSelect, ActionAbilityKingLookSelect)
+        ):
             return int(action.own_hand_index)
         if isinstance(action, ActionSnapOwn):
             return int(action.own_card_hand_index)
@@ -425,14 +434,18 @@ class AgentState:
         bucket_enum = self.known_discard_top_bucket
         if bucket_enum is None:
             return
-        bucket_val = bucket_enum.value if hasattr(bucket_enum, "value") else int(bucket_enum)
+        bucket_val = (
+            bucket_enum.value if hasattr(bucket_enum, "value") else int(bucket_enum)
+        )
         if bucket_val < 0 or bucket_val >= len(self.discard_bucket_counts):
             return
         self.discard_bucket_counts[bucket_val] += 1
         self.total_discards_seen += 1
         self._last_tracked_discard_bucket = bucket_val
 
-    def _eppbs_update_from_action(self, action, actor: int, observation: "AgentObservation"):
+    def _eppbs_update_from_action(
+        self, action, actor: int, observation: "AgentObservation"
+    ):
         """Update EP-PBS epistemic tags based on the observed action.
 
         Tag transitions:
@@ -500,7 +513,9 @@ class AgentState:
                 _we_learn_slot(own_idx, bv_own)
                 _we_learn_slot(6 + opp_idx, bv_opp)
 
-            elif isinstance(action, ActionAbilityKingSwapDecision) and action.perform_swap:
+            elif (
+                isinstance(action, ActionAbilityKingSwapDecision) and action.perform_swap
+            ):
                 if observation.king_swap_indices is not None:
                     own_idx, opp_idx = observation.king_swap_indices
                     # After swap: we hold opp's old card (we peeked it → PRIV_OWN)
@@ -528,9 +543,11 @@ class AgentState:
                 own_idx = action.own_hand_index
                 opp_idx = action.opponent_hand_index
                 _opp_learns_slot(6 + own_idx)  # opp sees their own card
-                _opp_learns_slot(opp_idx)       # opp sees our card
+                _opp_learns_slot(opp_idx)  # opp sees our card
 
-            elif isinstance(action, ActionAbilityKingSwapDecision) and action.perform_swap:
+            elif (
+                isinstance(action, ActionAbilityKingSwapDecision) and action.perform_swap
+            ):
                 if observation.king_swap_indices is not None:
                     opp_own_idx, our_idx = observation.king_swap_indices
                     # Both slots become uncertain from our perspective
@@ -602,8 +619,12 @@ class AgentState:
         try:
             self._track_new_discard(observation)
         except Exception as _e_track:
-            logger.debug("Agent %d: discard tracking failed T%d: %s",
-                         self.player_id, self._current_game_turn, _e_track)
+            logger.debug(
+                "Agent %d: discard tracking failed T%d: %s",
+                self.player_id,
+                self._current_game_turn,
+                _e_track,
+            )
         logger.debug(
             " Public State Updated: Disc:%s, Stock:%s, Phase:%s, Cambia:%s",
             self.known_discard_top_bucket.name,
@@ -1441,7 +1462,11 @@ class AgentState:
 
         elif archetype == "human_like":
             # Enforce capacity by evicting the lowest-saliency slots.
-            capacity = self.memory_capacity if self.memory_capacity > 0 else EP_PBS_MAX_ACTIVE_MASK
+            capacity = (
+                self.memory_capacity
+                if self.memory_capacity > 0
+                else EP_PBS_MAX_ACTIVE_MASK
+            )
             while len(self.own_active_mask) > capacity:
                 min_sal = float("inf")
                 min_idx = 0
@@ -1611,8 +1636,10 @@ class AgentState:
 
     def nplayer_record_swap(
         self,
-        player_a: int, slot_a: int,
-        player_b: int, slot_b: int,
+        player_a: int,
+        slot_a: int,
+        player_b: int,
+        slot_b: int,
     ):
         """Record that cards at two slots were swapped; both slots lose all knowledge.
 
@@ -1644,7 +1671,9 @@ class AgentState:
         for performance (called millions of times during traversals)."""
         # own_hand: Dict[int, KnownCardInfo] — copy KnownCardInfo objects (mutable dataclass)
         own_hand_copy = {
-            k: KnownCardInfo(bucket=v.bucket, last_seen_turn=v.last_seen_turn, card=v.card)
+            k: KnownCardInfo(
+                bucket=v.bucket, last_seen_turn=v.last_seen_turn, card=v.card
+            )
             for k, v in self.own_hand.items()
         }
         # opponent_belief/opponent_last_seen_turn: values are enums/ints (immutable)
@@ -1679,9 +1708,7 @@ class AgentState:
         new_state.total_discards_seen = int(self.total_discards_seen)
         new_state.max_game_turns = int(self.max_game_turns)
         new_state._last_tracked_discard_bucket = int(self._last_tracked_discard_bucket)
-        new_state.action_history = {
-            k: list(v) for k, v in self.action_history.items()
-        }
+        new_state.action_history = {k: list(v) for k, v in self.action_history.items()}
         return new_state
 
     def __str__(self) -> str:

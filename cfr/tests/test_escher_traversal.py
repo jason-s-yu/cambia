@@ -44,7 +44,6 @@ from src.networks import AdvantageNetwork, HistoryValueNetwork
 from src.reservoir import ReservoirSample
 from src.utils import WorkerStats
 
-
 # ---------------------------------------------------------------------------
 # Mock classes
 # ---------------------------------------------------------------------------
@@ -75,9 +74,7 @@ class MockRegretNet(AdvantageNetwork):
         self._validate_inputs = False
         self.net = torch.nn.Sequential(torch.nn.Linear(INPUT_DIM, NUM_ACTIONS))
 
-    def forward(
-        self, features: torch.Tensor, action_mask: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, features: torch.Tensor, action_mask: torch.Tensor) -> torch.Tensor:
         # Return zero advantages (uniform after regret matching)
         out = torch.zeros(features.shape[0], NUM_ACTIONS)
         out = out.masked_fill(~action_mask, float("-inf"))
@@ -164,9 +161,7 @@ def go_engine_and_agents():
 
     cfg = _make_escher_config()
     engine = GoEngine(house_rules=cfg.cambia_rules)
-    agents = [
-        GoAgentState(engine, pid, 1, 3) for pid in range(2)
-    ]
+    agents = [GoAgentState(engine, pid, 1, 3) for pid in range(2)]
     yield engine, agents, cfg
     for a in agents:
         a.close()
@@ -273,9 +268,9 @@ def test_escher_no_importance_weights():
         # from 1/q scaling. All regrets should be bounded by actual game utility.
         for sample in regret_samples:
             # Regret values should be in reasonable range (not IS-inflated)
-            assert np.all(np.abs(sample.target) < 1000), (
-                f"Suspiciously large regret: {sample.target.max()}"
-            )
+            assert np.all(
+                np.abs(sample.target) < 1000
+            ), f"Suspiciously large regret: {sample.target.max()}"
     finally:
         for a in agents:
             a.close()
@@ -433,9 +428,7 @@ def test_escher_policy_samples_opponent_only():
         for ps in policy_samples:
             # Policy target should be a valid probability distribution
             prob_sum = ps.target.sum()
-            assert 0.99 <= prob_sum <= 1.01, (
-                f"Policy target sum {prob_sum} not ~1.0"
-            )
+            assert 0.99 <= prob_sum <= 1.01, f"Policy target sum {prob_sum} not ~1.0"
             assert ps.features.shape == (INPUT_DIM,)
             assert ps.target.shape == (NUM_ACTIONS,)
     finally:
@@ -486,9 +479,9 @@ def test_escher_value_sample_features_444_dim():
 
         expected_dim = INPUT_DIM * 2
         for vs in value_samples:
-            assert vs.features.shape == (expected_dim,), (
-                f"Expected ({expected_dim},) but got {vs.features.shape}"
-            )
+            assert vs.features.shape == (
+                expected_dim,
+            ), f"Expected ({expected_dim},) but got {vs.features.shape}"
     finally:
         for a in agents:
             a.close()
@@ -594,9 +587,7 @@ def test_escher_depth_limit():
         )
 
         # With depth_limit=2, max depth visited = 2. stats.max_depth <= 2.
-        assert stats.max_depth <= 2, (
-            f"Expected max_depth <= 2 but got {stats.max_depth}"
-        )
+        assert stats.max_depth <= 2, f"Expected max_depth <= 2 but got {stats.max_depth}"
     finally:
         for a in agents:
             a.close()
@@ -747,12 +738,23 @@ def test_escher_batch_vs_unbatch_same_sample_count():
 
         try:
             _escher_traverse_go(
-                engine=engine, agent_states=agents, updating_player=0,
-                regret_net=None, value_net=mock_vnet, iteration=1, config=cfg,
-                regret_samples=reg, value_samples=val, policy_samples=pol, depth=0,
-                worker_stats=stats, progress_queue=None, worker_id=0,
+                engine=engine,
+                agent_states=agents,
+                updating_player=0,
+                regret_net=None,
+                value_net=mock_vnet,
+                iteration=1,
+                config=cfg,
+                regret_samples=reg,
+                value_samples=val,
+                policy_samples=pol,
+                depth=0,
+                worker_stats=stats,
+                progress_queue=None,
+                worker_id=0,
                 min_depth_after_bottom_out_tracker=min_d,
-                has_bottomed_out_tracker=bot, simulation_nodes=[],
+                has_bottomed_out_tracker=bot,
+                simulation_nodes=[],
                 batch_counterfactuals=batch_cf,
             )
 
@@ -799,22 +801,32 @@ def test_escher_value_net_input_shape():
 
     try:
         _escher_traverse_go(
-            engine=engine, agent_states=agents, updating_player=0,
-            regret_net=None, value_net=net, iteration=1, config=cfg,
-            regret_samples=regret_samples, value_samples=value_samples,
-            policy_samples=policy_samples, depth=0, worker_stats=stats,
-            progress_queue=None, worker_id=0,
+            engine=engine,
+            agent_states=agents,
+            updating_player=0,
+            regret_net=None,
+            value_net=net,
+            iteration=1,
+            config=cfg,
+            regret_samples=regret_samples,
+            value_samples=value_samples,
+            policy_samples=policy_samples,
+            depth=0,
+            worker_stats=stats,
+            progress_queue=None,
+            worker_id=0,
             min_depth_after_bottom_out_tracker=min_d,
-            has_bottomed_out_tracker=bot, simulation_nodes=[],
+            has_bottomed_out_tracker=bot,
+            simulation_nodes=[],
             batch_counterfactuals=False,
         )
 
         expected_dim = INPUT_DIM * 2
         for shape in received_shapes:
             assert len(shape) == 2, f"Expected 2D input but got {len(shape)}D"
-            assert shape[1] == expected_dim, (
-                f"Expected dim {expected_dim} but got {shape[1]}"
-            )
+            assert (
+                shape[1] == expected_dim
+            ), f"Expected dim {expected_dim} but got {shape[1]}"
     finally:
         for a in agents:
             a.close()
@@ -842,26 +854,36 @@ def test_escher_regret_vector_structure():
 
     try:
         _escher_traverse_go(
-            engine=engine, agent_states=agents, updating_player=0,
-            regret_net=None, value_net=MockValueNet(), iteration=1, config=cfg,
-            regret_samples=regret_samples, value_samples=value_samples,
-            policy_samples=policy_samples, depth=0, worker_stats=stats,
-            progress_queue=None, worker_id=0,
+            engine=engine,
+            agent_states=agents,
+            updating_player=0,
+            regret_net=None,
+            value_net=MockValueNet(),
+            iteration=1,
+            config=cfg,
+            regret_samples=regret_samples,
+            value_samples=value_samples,
+            policy_samples=policy_samples,
+            depth=0,
+            worker_stats=stats,
+            progress_queue=None,
+            worker_id=0,
             min_depth_after_bottom_out_tracker=min_d,
-            has_bottomed_out_tracker=bot, simulation_nodes=[],
+            has_bottomed_out_tracker=bot,
+            simulation_nodes=[],
         )
 
         for rs in regret_samples:
-            assert rs.target.shape == (NUM_ACTIONS,), (
-                f"Expected ({NUM_ACTIONS},) but got {rs.target.shape}"
-            )
+            assert rs.target.shape == (
+                NUM_ACTIONS,
+            ), f"Expected ({NUM_ACTIONS},) but got {rs.target.shape}"
             assert rs.features.shape == (INPUT_DIM,)
             assert rs.action_mask.dtype == np.bool_
             # Only legal actions should have non-zero regrets
             illegal_mask = ~rs.action_mask
-            assert np.all(rs.target[illegal_mask] == 0.0), (
-                "Illegal actions should have zero regret"
-            )
+            assert np.all(
+                rs.target[illegal_mask] == 0.0
+            ), "Illegal actions should have zero regret"
     finally:
         for a in agents:
             a.close()
@@ -903,9 +925,9 @@ def test_worker_routes_to_escher():
 
     result = run_deep_cfr_worker(args_tuple)
 
-    assert isinstance(result, DeepCFRWorkerResult), (
-        f"Expected DeepCFRWorkerResult, got {type(result)}"
-    )
+    assert isinstance(
+        result, DeepCFRWorkerResult
+    ), f"Expected DeepCFRWorkerResult, got {type(result)}"
     # ESCHER should generate value samples
     assert hasattr(result, "value_samples")
     # With ESCHER, we should get some value samples (at least 1 if game completes)
@@ -926,7 +948,9 @@ def test_worker_loads_value_net_weights():
     cfg.cfr_training.num_iterations = 1
 
     # Build real value net and serialize
-    value_net = HistoryValueNetwork(input_dim=INPUT_DIM * 2, hidden_dim=64, validate_inputs=False)
+    value_net = HistoryValueNetwork(
+        input_dim=INPUT_DIM * 2, hidden_dim=64, validate_inputs=False
+    )
     value_sd = value_net.state_dict()
     value_weights_np = {k: v.cpu().numpy() for k, v in value_sd.items()}
 

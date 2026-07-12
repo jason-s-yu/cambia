@@ -162,9 +162,7 @@ def test_tighter_bound_than_lbr(cfg):
     lbr = sampled_lbr(
         _PassiveStub(), cfg, num_infosets=800, br_rollouts_per_infoset=20, seed=13
     )
-    ism = ismcts_br(
-        _PassiveStub(), cfg, ismcts_iterations=4000, eval_games=3000, seed=13
-    )
+    ism = ismcts_br(_PassiveStub(), cfg, ismcts_iterations=4000, eval_games=3000, seed=13)
     assert ism["exploitability"] >= lbr["exploitability"], (
         f"ISMCTS-BR ({ism['exploitability']:.4f}) must be a tighter (>=) bound than "
         f"one-ply LBR ({lbr['exploitability']:.4f}) on the exploitable stub"
@@ -189,9 +187,7 @@ def test_deterministic_under_seed(cfg):
 
 def test_result_shape_and_nonnegative(cfg):
     """Return-dict shape (mirrors src.cfr.lbr.tier_b_lbr) and basic invariants."""
-    r = ismcts_br(
-        _UniformWrapper(0), cfg, ismcts_iterations=400, eval_games=400, seed=1
-    )
+    r = ismcts_br(_UniformWrapper(0), cfg, ismcts_iterations=400, eval_games=400, seed=1)
     for key in (
         "exploitability",
         "br_value",
@@ -277,9 +273,9 @@ def test_incremental_key_matches_rebuilt(cfg):
             old_j, key_j = pairs[j]
             same_old = old_i == old_j
             same_new = key_i == key_j
-            assert same_old == same_new, (
-                "info-key equivalence classes diverge from the rebuilt-tuple key"
-            )
+            assert (
+                same_old == same_new
+            ), "info-key equivalence classes diverge from the rebuilt-tuple key"
             if same_new:
                 assert hash(key_i) == hash(key_j)
                 saw_equal = True

@@ -43,7 +43,10 @@ def make_standard_sample(iteration: int = 0) -> ReservoirSample:
 class TestValueBuffer:
     def test_construction(self):
         buf = ReservoirBuffer(
-            capacity=100, input_dim=VALUE_INPUT_DIM, target_dim=VALUE_TARGET_DIM, has_mask=False
+            capacity=100,
+            input_dim=VALUE_INPUT_DIM,
+            target_dim=VALUE_TARGET_DIM,
+            has_mask=False,
         )
         assert buf.capacity == 100
         assert buf._input_dim == VALUE_INPUT_DIM
@@ -53,7 +56,10 @@ class TestValueBuffer:
 
     def test_add_without_mask(self):
         buf = ReservoirBuffer(
-            capacity=10, input_dim=VALUE_INPUT_DIM, target_dim=VALUE_TARGET_DIM, has_mask=False
+            capacity=10,
+            input_dim=VALUE_INPUT_DIM,
+            target_dim=VALUE_TARGET_DIM,
+            has_mask=False,
         )
         sample = make_value_sample()
         buf.add(sample)
@@ -61,7 +67,10 @@ class TestValueBuffer:
 
     def test_add_none_mask_accepted(self):
         buf = ReservoirBuffer(
-            capacity=10, input_dim=VALUE_INPUT_DIM, target_dim=VALUE_TARGET_DIM, has_mask=False
+            capacity=10,
+            input_dim=VALUE_INPUT_DIM,
+            target_dim=VALUE_TARGET_DIM,
+            has_mask=False,
         )
         # Should not raise even when action_mask is None
         for i in range(5):
@@ -70,7 +79,10 @@ class TestValueBuffer:
 
     def test_sample_batch_shapes(self):
         buf = ReservoirBuffer(
-            capacity=100, input_dim=VALUE_INPUT_DIM, target_dim=VALUE_TARGET_DIM, has_mask=False
+            capacity=100,
+            input_dim=VALUE_INPUT_DIM,
+            target_dim=VALUE_TARGET_DIM,
+            has_mask=False,
         )
         for i in range(20):
             buf.add(make_value_sample(i))
@@ -83,7 +95,10 @@ class TestValueBuffer:
 
     def test_sample_batch_empty_buffer(self):
         buf = ReservoirBuffer(
-            capacity=10, input_dim=VALUE_INPUT_DIM, target_dim=VALUE_TARGET_DIM, has_mask=False
+            capacity=10,
+            input_dim=VALUE_INPUT_DIM,
+            target_dim=VALUE_TARGET_DIM,
+            has_mask=False,
         )
         batch = buf.sample_batch(5)
         assert len(batch) == 0
@@ -95,7 +110,10 @@ class TestValueBuffer:
         """Verify reservoir sampling distributes uniformly over all seen samples."""
         capacity = 50
         buf = ReservoirBuffer(
-            capacity=capacity, input_dim=VALUE_INPUT_DIM, target_dim=VALUE_TARGET_DIM, has_mask=False
+            capacity=capacity,
+            input_dim=VALUE_INPUT_DIM,
+            target_dim=VALUE_TARGET_DIM,
+            has_mask=False,
         )
         for i in range(200):
             buf.add(make_value_sample(i))
@@ -104,7 +122,10 @@ class TestValueBuffer:
 
     def test_save_load_roundtrip(self):
         buf = ReservoirBuffer(
-            capacity=50, input_dim=VALUE_INPUT_DIM, target_dim=VALUE_TARGET_DIM, has_mask=False
+            capacity=50,
+            input_dim=VALUE_INPUT_DIM,
+            target_dim=VALUE_TARGET_DIM,
+            has_mask=False,
         )
         for i in range(20):
             buf.add(make_value_sample(i))
@@ -123,8 +144,12 @@ class TestValueBuffer:
 
             assert len(buf2) == len(buf)
             assert buf2.seen_count == buf.seen_count
-            np.testing.assert_array_almost_equal(buf2._features[: len(buf)], buf._features[: len(buf)])
-            np.testing.assert_array_almost_equal(buf2._targets[: len(buf)], buf._targets[: len(buf)])
+            np.testing.assert_array_almost_equal(
+                buf2._features[: len(buf)], buf._features[: len(buf)]
+            )
+            np.testing.assert_array_almost_equal(
+                buf2._targets[: len(buf)], buf._targets[: len(buf)]
+            )
             assert buf2._masks is None
 
 
@@ -162,6 +187,4 @@ class TestBackwardCompatibility:
             buf2.load(path)
             assert len(buf2) == len(buf)
             assert buf2._masks is not None
-            np.testing.assert_array_equal(
-                buf2._masks[: len(buf)], buf._masks[: len(buf)]
-            )
+            np.testing.assert_array_equal(buf2._masks[: len(buf)], buf._masks[: len(buf)])

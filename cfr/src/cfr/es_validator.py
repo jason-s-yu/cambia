@@ -25,7 +25,13 @@ from ..constants import (
     ActionSnapOpponentMove,
     DecisionContext,
 )
-from ..encoding import INPUT_DIM, NUM_ACTIONS, encode_infoset, encode_action_mask, action_to_index
+from ..encoding import (
+    INPUT_DIM,
+    NUM_ACTIONS,
+    encode_infoset,
+    encode_action_mask,
+    action_to_index,
+)
 from ..abstraction import get_card_bucket
 from ..game.engine import CambiaGameState
 from ..networks import AdvantageNetwork, get_strategy_from_advantages
@@ -59,10 +65,14 @@ def _get_strategy_from_network(
         features_t = torch.from_numpy(features).float().unsqueeze(0)
         mask_t = torch.from_numpy(action_mask).bool().unsqueeze(0)
         advantages = network(features_t, mask_t).squeeze(0).numpy()
-    return get_strategy_from_advantages(
-        torch.from_numpy(advantages).unsqueeze(0),
-        mask_t,
-    ).squeeze(0).numpy()
+    return (
+        get_strategy_from_advantages(
+            torch.from_numpy(advantages).unsqueeze(0),
+            mask_t,
+        )
+        .squeeze(0)
+        .numpy()
+    )
 
 
 def _infer_decision_context_python(game_state: "CambiaGameState") -> DecisionContext:
@@ -209,7 +219,9 @@ class ESValidator:
         nodes_counter = [0]
 
         # Initialise game
-        game_state = CambiaGameState(house_rules=getattr(self.config, "cambia_rules", None))
+        game_state = CambiaGameState(
+            house_rules=getattr(self.config, "cambia_rules", None)
+        )
 
         if game_state.is_terminal():
             return regrets, entropies, 0
@@ -310,7 +322,9 @@ class ESValidator:
 
         # Compute strategy
         try:
-            strategy_full = _get_strategy_from_network(self.network, features, action_mask)
+            strategy_full = _get_strategy_from_network(
+                self.network, features, action_mask
+            )
         except Exception:
             strategy_full = None
 
@@ -460,9 +474,7 @@ class ESValidator:
 
             return node_value
 
-    def _traverse_go(
-        self, updating_player: int
-    ) -> Tuple[List[float], List[float], int]:
+    def _traverse_go(self, updating_player: int) -> Tuple[List[float], List[float], int]:
         """
         Run one ES traversal using the Go engine backend.
 
@@ -569,13 +581,17 @@ class ESValidator:
             drawn_bucket = engine.get_drawn_card_bucket()
 
         try:
-            features = agent_states[player].encode(current_context, drawn_bucket=drawn_bucket)
+            features = agent_states[player].encode(
+                current_context, drawn_bucket=drawn_bucket
+            )
             action_mask = legal_mask.copy()
         except Exception:
             return np.zeros(NUM_PLAYERS, dtype=np.float64)
 
         try:
-            strategy_full = _get_strategy_from_network(self.network, features, action_mask)
+            strategy_full = _get_strategy_from_network(
+                self.network, features, action_mask
+            )
         except Exception:
             strategy_full = None
 

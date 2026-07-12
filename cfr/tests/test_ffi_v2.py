@@ -87,9 +87,9 @@ class TestGetAllCardsMatchesGoInspection:
                             f"expected {expected} from deck idx {deck[s * num_players + p]}"
                         )
                     else:
-                        assert got == 0xFF, (
-                            f"trial {trial}: empty slot p={p} s={s} got {got}, want sentinel 0xFF"
-                        )
+                        assert (
+                            got == 0xFF
+                        ), f"trial {trial}: empty slot p={p} s={s} got {got}, want sentinel 0xFF"
         finally:
             engine.close()
 

@@ -519,9 +519,9 @@ def _local_run_dir(tmp_path, name=_ROUND_TRIP_NAME):
 
 
 def _origin_host_of(dest, name=_ROUND_TRIP_NAME):
-    return dest.execute(
-        "SELECT origin_host FROM runs WHERE name=?", (name,)
-    ).fetchone()["origin_host"]
+    return dest.execute("SELECT origin_host FROM runs WHERE name=?", (name,)).fetchone()[
+        "origin_host"
+    ]
 
 
 def test_push_run_marks_origin_host(tmp_path):

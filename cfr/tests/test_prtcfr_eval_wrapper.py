@@ -33,7 +33,10 @@ from src.cfr.prtcfr_mixture import (  # noqa: E402
 )
 from src.cfr.prtcfr_net import PRTCFRNet  # noqa: E402
 from src.cfr.prtcfr_infer import PRTCFRInferenceService  # noqa: E402
-from src.cfr.prtcfr_stability import BestSnapshotController, write_deployable_manifest  # noqa: E402
+from src.cfr.prtcfr_stability import (
+    BestSnapshotController,
+    write_deployable_manifest,
+)  # noqa: E402
 from src.cfr.prtcfr_worker import (  # noqa: E402
     new_production_driver,
     _legal_mask,
@@ -47,8 +50,12 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def _tiny_net(seed: int) -> PRTCFRNet:
     torch.manual_seed(seed)
     return PRTCFRNet(
-        embed_dim=8, hidden_dim=16, num_layers=2, head_hidden_dim=16,
-        dropout=0.0, device="cpu",
+        embed_dim=8,
+        hidden_dim=16,
+        num_layers=2,
+        head_hidden_dim=16,
+        dropout=0.0,
+        device="cpu",
     )
 
 
@@ -96,7 +103,10 @@ def _real_tokens(min_len: int = 60) -> list:
                     break
                 try:
                     _sample_and_apply(
-                        driver, legal, uniform_policy_production([], _legal_mask(legal)), rng
+                        driver,
+                        legal,
+                        uniform_policy_production([], _legal_mask(legal)),
+                        rng,
                     )
                 except RuntimeError:
                     break
@@ -216,8 +226,12 @@ def test_from_checkpoint_single_file_degenerate(tmp_path):
 
 def test_arch_inferred_from_nondefault_state():
     net = PRTCFRNet(
-        embed_dim=12, hidden_dim=20, num_layers=3, head_hidden_dim=24,
-        dropout=0.0, device="cpu",
+        embed_dim=12,
+        hidden_dim=20,
+        num_layers=3,
+        head_hidden_dim=24,
+        dropout=0.0,
+        device="cpu",
     )
     arch = _infer_arch_from_state(net.encoder_state_dict(), net.head_state_dict())
     assert arch["embed_dim"] == 12
@@ -306,8 +320,7 @@ def test_run_db_mapping_tables_and_infer_algorithm():
     assert algo_to_checkpoint_prefix("prt-cfr") == "prtcfr_checkpoint"
     assert infer_algorithm({"prt_cfr": {"iterations": 300}}) == "prt-cfr"
     assert (
-        infer_algorithm({}, checkpoint_filename="prtcfr_snapshot_iter_5.pt")
-        == "prt-cfr"
+        infer_algorithm({}, checkpoint_filename="prtcfr_snapshot_iter_5.pt") == "prt-cfr"
     )
 
 
@@ -351,8 +364,11 @@ def test_observe_transition_grows_token_stream_and_captures_all_frames(tmp_path)
     snapdir = _make_run_dir(tmp_path, [1, 2], best_iteration=2)
     cfg = load_config(_write_fast_config(tmp_path))
     agent = get_agent(
-        "prt_cfr", player_id=0, config=cfg,
-        checkpoint_path=str(snapdir / "prtcfr_snapshot_iter_2.pt"), device="cpu",
+        "prt_cfr",
+        player_id=0,
+        config=cfg,
+        checkpoint_path=str(snapdir / "prtcfr_snapshot_iter_2.pt"),
+        device="cpu",
     )
     game = CambiaGameState(house_rules=cfg.cambia_rules, seed=13)
     agent.initialize_state(game)
@@ -417,9 +433,15 @@ def test_end_to_end_argmax_mode_smoke(tmp_path):
         snapdir = _make_run_dir(tmp_path, [1, 2], best_iteration=2)
         cfgpath = _write_fast_config(tmp_path)
         res = run_evaluation(
-            cfgpath, "prt_cfr", "random_no_cambia", 2, None,
+            cfgpath,
+            "prt_cfr",
+            "random_no_cambia",
+            2,
+            None,
             checkpoint_path=str(snapdir / "prtcfr_snapshot_iter_2.pt"),
-            device="cpu", use_argmax=True, crn_seed_base=5,
+            device="cpu",
+            use_argmax=True,
+            crn_seed_base=5,
         )
     finally:
         logging.disable(logging.NOTSET)
@@ -470,7 +492,8 @@ def test_lazy_mixture_sampling_distribution_matches_eager(tmp_path):
 def test_lazy_cache_evicts_least_recently_used(tmp_path):
     snapdir = _make_run_dir(tmp_path, [1, 2, 3, 4], best_iteration=None)
     mix = PRTCFRMixture.from_checkpoint(
-        str(snapdir / "prtcfr_snapshot_iter_4.pt"), lazy_cache_size=2,
+        str(snapdir / "prtcfr_snapshot_iter_4.pt"),
+        lazy_cache_size=2,
     )
     mix._resolve(0)
     mix._resolve(1)
@@ -521,8 +544,11 @@ def test_incremental_cursor_matches_full_reencode_across_seeded_games(tmp_path):
     snapdir = _make_run_dir(tmp_path, [1, 2], best_iteration=2)
     cfg = load_config(_write_fast_config(tmp_path, max_turns=60))
     agent = get_agent(
-        "prt_cfr", player_id=0, config=cfg,
-        checkpoint_path=str(snapdir / "prtcfr_snapshot_iter_2.pt"), device="cpu",
+        "prt_cfr",
+        player_id=0,
+        config=cfg,
+        checkpoint_path=str(snapdir / "prtcfr_snapshot_iter_2.pt"),
+        device="cpu",
     )
 
     max_abs_dev = 0.0
@@ -581,8 +607,11 @@ def test_incremental_cursor_falls_back_to_full_reencode_on_seq_cap_overflow(tmp_
     snapdir = _make_run_dir(tmp_path, [1, 2], best_iteration=2)
     cfg = load_config(_write_fast_config(tmp_path, max_turns=60))
     agent = get_agent(
-        "prt_cfr", player_id=0, config=cfg,
-        checkpoint_path=str(snapdir / "prtcfr_snapshot_iter_2.pt"), device="cpu",
+        "prt_cfr",
+        player_id=0,
+        config=cfg,
+        checkpoint_path=str(snapdir / "prtcfr_snapshot_iter_2.pt"),
+        device="cpu",
     )
     agent._seq_cap = 12  # force overflow almost immediately
 

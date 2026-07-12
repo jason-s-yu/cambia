@@ -11,6 +11,7 @@ import torch
 
 def _make_mock_config(agent_data_save_path: str = "") -> MagicMock:
     from src.config import CambiaRulesConfig
+
     cfg = MagicMock()
     cfg.persistence.agent_data_save_path = agent_data_save_path
     cfg.cfr_training.num_iterations = 1
@@ -40,9 +41,9 @@ class TestEPPBSTrainerInit:
                 first_linear = module
                 break
         assert first_linear is not None
-        assert first_linear.in_features == EP_PBS_INPUT_DIM, (
-            f"Expected in_features={EP_PBS_INPUT_DIM}, got {first_linear.in_features}"
-        )
+        assert (
+            first_linear.in_features == EP_PBS_INPUT_DIM
+        ), f"Expected in_features={EP_PBS_INPUT_DIM}, got {first_linear.in_features}"
 
     def test_legacy_trainer_input_dim_unchanged(self):
         """Trainer with encoding_mode='legacy' (default) keeps INPUT_DIM=222."""
@@ -141,6 +142,7 @@ class TestEPPBSCheckpoint:
 
         # getattr fallbacks for optional fields
         import unittest.mock as um
+
         with um.patch("builtins.getattr", wraps=getattr) as _:
             pass  # ensure no side effects
 

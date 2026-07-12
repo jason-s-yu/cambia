@@ -445,8 +445,12 @@ class SnapLogicMixin:
                                         self.players[opp_idx].hand
                                         == original_opp_hand_state
                                     ), f"Undo SnapOpponentRemove: Hand state mismatch! Expected {original_opp_hand_state}, Got {self.players[opp_idx].hand}"
-                                    assert len(self.discard_pile) == original_discard_len_opp
-                                    assert self.get_discard_top() is original_discard_top_opp
+                                    assert (
+                                        len(self.discard_pile) == original_discard_len_opp
+                                    )
+                                    assert (
+                                        self.get_discard_top() is original_discard_top_opp
+                                    )
 
                                 delta_snap_opp_remove = (
                                     "snap_opponent_remove",
@@ -550,7 +554,9 @@ class SnapLogicMixin:
                                 # SnapRace: explicitly clear remaining snap state so
                                 # other snappers forfeit. snap_phase_active already False.
                                 if self.house_rules.snapRace:
-                                    orig_sr_potentials = list(self.snap_potential_snappers)
+                                    orig_sr_potentials = list(
+                                        self.snap_potential_snappers
+                                    )
                                     orig_sr_card = self.snap_discarded_card
                                     orig_sr_idx = self.snap_current_snapper_idx
 
@@ -637,7 +643,9 @@ class SnapLogicMixin:
                 acting_player,
                 e_snap_handle,
             )
-            raise ActionApplicationError(f"Snap action handling failed for {action}") from e_snap_handle
+            raise ActionApplicationError(
+                f"Snap action handling failed for {action}"
+            ) from e_snap_handle
 
         # --- Advance Snap Turn or End Phase ---
         # (Do not advance if ActionSnapOpponent succeeded and set a pending move)
@@ -679,7 +687,9 @@ class SnapLogicMixin:
                     raise
                 except Exception as e_advance_snap:
                     # JUSTIFIED: Catch errors advancing snap turn to attempt cleanup
-                    logger.exception("Error advancing snap turn index: %s", e_advance_snap)
+                    logger.exception(
+                        "Error advancing snap turn index: %s", e_advance_snap
+                    )
                     self._end_snap_phase(undo_stack, delta_list)  # Attempt cleanup
 
         return True  # Action was processed (passed, snapped, penalized, or errored out but handled)

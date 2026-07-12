@@ -107,7 +107,9 @@ class AbilityMixin:
             if isinstance(action_type, ActionDiscard):  # Post-Draw Choice
                 legal_actions.add(ActionDiscard(use_ability=False))
                 drawn_card = self.pending_action_data.get("drawn_card")
-                drawn_from_source = self.pending_action_data.get("drawn_from", "stockpile")
+                drawn_from_source = self.pending_action_data.get(
+                    "drawn_from", "stockpile"
+                )
                 if drawn_card and card_has_discard_ability(drawn_card):
                     # RULES.md Sec 3B/4 + Go engine/legal.go legalPostDraw: the
                     # immediate-discard ability is legal only when the card was
@@ -128,7 +130,11 @@ class AbilityMixin:
 
                     if rank in [JACK, QUEEN, KING]:
                         opp_is_locked = (
-                            getattr(getattr(self, 'house_rules', None), 'lockCallerHand', False)
+                            getattr(
+                                getattr(self, "house_rules", None),
+                                "lockCallerHand",
+                                False,
+                            )
                             and self.cambia_caller_id is not None
                             and self.cambia_caller_id == opponent_id
                         )
@@ -146,7 +152,7 @@ class AbilityMixin:
                 # Add Replace actions only if hand has cards
                 # When lockCallerHand is true, the Cambia caller cannot replace
                 lock_caller = (
-                    getattr(getattr(self, 'house_rules', None), 'lockCallerHand', False)
+                    getattr(getattr(self, "house_rules", None), "lockCallerHand", False)
                     and self.cambia_caller_id is not None
                     and self.cambia_caller_id == player
                 )
@@ -180,11 +186,15 @@ class AbilityMixin:
 
             elif isinstance(action_type, ActionAbilityBlindSwapSelect):  # J/Q Swap Choice
                 opp_is_locked = (
-                    getattr(getattr(self, 'house_rules', None), 'lockCallerHand', False)
+                    getattr(getattr(self, "house_rules", None), "lockCallerHand", False)
                     and self.cambia_caller_id is not None
                     and self.cambia_caller_id == opponent_id
                 )
-                if player_hand_count > 0 and opponent_hand_count > 0 and not opp_is_locked:
+                if (
+                    player_hand_count > 0
+                    and opponent_hand_count > 0
+                    and not opp_is_locked
+                ):
                     for i in range(player_hand_count):
                         for j in range(opponent_hand_count):
                             legal_actions.add(
@@ -203,11 +213,15 @@ class AbilityMixin:
 
             elif isinstance(action_type, ActionAbilityKingLookSelect):  # K Look Choice
                 opp_is_locked = (
-                    getattr(getattr(self, 'house_rules', None), 'lockCallerHand', False)
+                    getattr(getattr(self, "house_rules", None), "lockCallerHand", False)
                     and self.cambia_caller_id is not None
                     and self.cambia_caller_id == opponent_id
                 )
-                if player_hand_count > 0 and opponent_hand_count > 0 and not opp_is_locked:
+                if (
+                    player_hand_count > 0
+                    and opponent_hand_count > 0
+                    and not opp_is_locked
+                ):
                     for i in range(player_hand_count):
                         for j in range(opponent_hand_count):
                             legal_actions.add(
@@ -373,7 +387,9 @@ class AbilityMixin:
             # --- Handle Post-Draw Choices (Discard/Replace) ---
             if isinstance(pending_type, ActionDiscard):
                 drawn_card = self.pending_action_data.get("drawn_card")
-                drawn_from_source = self.pending_action_data.get("drawn_from", "stockpile")
+                drawn_from_source = self.pending_action_data.get(
+                    "drawn_from", "stockpile"
+                )
                 if not isinstance(drawn_card, Card):
                     logger.error(
                         "Pending post-draw choice but invalid/missing drawn_card in data! Data: %s",
@@ -555,14 +571,20 @@ class AbilityMixin:
                     # AllowReplaceAbilities: if enabled, the old (replaced-out) card's ability
                     # triggers when drawn from the stockpile (mirrors Go engine logic).
                     if (
-                        getattr(getattr(self, "house_rules", None), "allowReplaceAbilities", False)
+                        getattr(
+                            getattr(self, "house_rules", None),
+                            "allowReplaceAbilities",
+                            False,
+                        )
                         and drawn_from_source == "stockpile"
                         and card_has_discard_ability(replaced_card)
                     ):
                         self._trigger_discard_ability(
                             player, replaced_card, undo_stack, delta_list
                         )
-                        card_just_discarded_for_snap_check = None  # snap deferred to ability resolution
+                        card_just_discarded_for_snap_check = (
+                            None  # snap deferred to ability resolution
+                        )
 
                 else:
                     # This path is now unreachable due to the legal action check at the start
@@ -1217,9 +1239,7 @@ class AbilityMixin:
                     # decision, and the accumulated snap-outcome log would
                     # otherwise leak into unrelated later observations.
                     if hasattr(self, "_resume_or_end_snap_phase_after_move"):
-                        self._resume_or_end_snap_phase_after_move(
-                            undo_stack, delta_list
-                        )
+                        self._resume_or_end_snap_phase_after_move(undo_stack, delta_list)
                     # Turn advances after pending action resolved and no snap phase active
                     return None  # No card discarded this step
                 else:
@@ -1250,7 +1270,9 @@ class AbilityMixin:
                 e_handle,
             )
             self._clear_pending_action(undo_stack, delta_list)  # Attempt recovery
-            raise ActionApplicationError(f"Pending action handling failed for {action}") from e_handle
+            raise ActionApplicationError(
+                f"Pending action handling failed for {action}"
+            ) from e_handle
 
         return card_just_discarded_for_snap_check  # Return card discarded this step (for snap check) or None
 

@@ -33,7 +33,6 @@ from .constants import EP_PBS_V2_INPUT_DIM
 from .action_abstraction import NUM_ABSTRACT_ACTIONS_2P
 from .networks import _ResBlock
 
-
 DEFAULT_HIDDEN_DIM: int = 512
 DEFAULT_NUM_BLOCKS: int = 3
 DEFAULT_OMNISCIENT_DIM_2P: int = 120  # 2 players x 6 max hand slots x 10 buckets

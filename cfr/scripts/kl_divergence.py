@@ -36,7 +36,9 @@ from src.config import Config, CambiaRulesConfig, AgentParamsConfig
 from src.constants import DecisionContext, NUM_PLAYERS
 from src.game.engine import CambiaGameState
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 _EPS = 1e-10
@@ -75,7 +77,9 @@ def _make_minimal_config() -> Config:
     return config
 
 
-def _init_agent_state(game_state: CambiaGameState, player_id: int, config: Config) -> AgentState:
+def _init_agent_state(
+    game_state: CambiaGameState, player_id: int, config: Config
+) -> AgentState:
     """Initialize an AgentState from a fresh game state."""
     opponent_id = 1 - player_id
     hand = game_state.players[player_id].hand
@@ -93,7 +97,9 @@ def _init_agent_state(game_state: CambiaGameState, player_id: int, config: Confi
         acting_player=-1,
         action=None,
         discard_top_card=game_state.get_discard_top(),
-        player_hand_sizes=[game_state.get_player_card_count(i) for i in range(NUM_PLAYERS)],
+        player_hand_sizes=[
+            game_state.get_player_card_count(i) for i in range(NUM_PLAYERS)
+        ],
         stockpile_size=game_state.get_stockpile_size(),
         drawn_card=None,
         peeked_cards=None,
@@ -116,7 +122,12 @@ def _get_strategy(
     """Run the network and return a strategy distribution (numpy, shape NUM_ACTIONS)."""
     with torch.inference_mode():
         feat_t = torch.from_numpy(features).unsqueeze(0).to(device)
-        mask_t = torch.from_numpy(action_mask.astype(np.float32)).bool().unsqueeze(0).to(device)
+        mask_t = (
+            torch.from_numpy(action_mask.astype(np.float32))
+            .bool()
+            .unsqueeze(0)
+            .to(device)
+        )
         advantages = net(feat_t, mask_t)
         strategy = get_strategy_from_advantages(advantages, mask_t)
         return strategy.squeeze(0).cpu().numpy()
@@ -124,7 +135,7 @@ def _get_strategy(
 
 def _kl_div(p: np.ndarray, q: np.ndarray) -> float:
     """KL divergence KL(p || q) over legal-action support."""
-    support = (p > 0)
+    support = p > 0
     if not support.any():
         return 0.0
     p_s = p[support]
@@ -268,7 +279,12 @@ def compute_kl_divergence(
 
     if not samples:
         logger.warning("No samples collected.")
-        return {"mean_kl": float("nan"), "max_kl": float("nan"), "median_kl": float("nan"), "num_states_sampled": 0}
+        return {
+            "mean_kl": float("nan"),
+            "max_kl": float("nan"),
+            "median_kl": float("nan"),
+            "num_states_sampled": 0,
+        }
 
     kl_values = []
     for agent_state, action_mask, ctx, features in samples:
@@ -281,7 +297,12 @@ def compute_kl_divergence(
             logger.debug("Skipping sample due to error: %s", e)
 
     if not kl_values:
-        return {"mean_kl": float("nan"), "max_kl": float("nan"), "median_kl": float("nan"), "num_states_sampled": 0}
+        return {
+            "mean_kl": float("nan"),
+            "max_kl": float("nan"),
+            "median_kl": float("nan"),
+            "num_states_sampled": 0,
+        }
 
     kl_arr = np.array(kl_values)
     return {
@@ -296,15 +317,21 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Compute KL-divergence between two Deep CFR checkpoint strategy distributions."
     )
-    parser.add_argument("--checkpoint-a", required=True, help="Path to first .pt checkpoint")
-    parser.add_argument("--checkpoint-b", required=True, help="Path to second .pt checkpoint")
+    parser.add_argument(
+        "--checkpoint-a", required=True, help="Path to first .pt checkpoint"
+    )
+    parser.add_argument(
+        "--checkpoint-b", required=True, help="Path to second .pt checkpoint"
+    )
     parser.add_argument(
         "--num-states",
         type=int,
         default=500,
         help="Number of random game states to sample (default: 500)",
     )
-    parser.add_argument("--device", default="cpu", help="Torch device string (default: cpu)")
+    parser.add_argument(
+        "--device", default="cpu", help="Torch device string (default: cpu)"
+    )
 
     args = parser.parse_args()
 

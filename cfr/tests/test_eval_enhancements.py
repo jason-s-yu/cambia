@@ -18,7 +18,6 @@ import torch
 
 from src.networks import AdvantageNetwork, StrategyNetwork
 
-
 # ---------------------------------------------------------------------------
 # Helpers shared across tests
 # ---------------------------------------------------------------------------
@@ -111,12 +110,14 @@ class TestScoreMargin:
     def test_score_margin_present_in_results(self):
         """avg_score_margin should appear in results.stats when games finish terminally."""
         results = self._run_eval(num_games=15)
-        finished = results.get("P0 Wins", 0) + results.get("P1 Wins", 0) + results.get("Ties", 0)
+        finished = (
+            results.get("P0 Wins", 0) + results.get("P1 Wins", 0) + results.get("Ties", 0)
+        )
         stats = self._get_stats(results)
         if finished > 0:
-            assert "avg_score_margin" in stats, (
-                f"Expected avg_score_margin in results.stats; got keys: {list(stats.keys())}"
-            )
+            assert (
+                "avg_score_margin" in stats
+            ), f"Expected avg_score_margin in results.stats; got keys: {list(stats.keys())}"
 
     def test_score_margin_non_negative(self):
         """Score margin must be >= 0 (absolute difference of hand totals)."""
@@ -131,9 +132,9 @@ class TestScoreMargin:
         results = self._run_eval(num_games=15)
         stats = self._get_stats(results)
         if "avg_score_margin" in stats:
-            assert isinstance(stats["avg_score_margin"], float), (
-                f"Expected float, got {type(stats['avg_score_margin'])}"
-            )
+            assert isinstance(
+                stats["avg_score_margin"], float
+            ), f"Expected float, got {type(stats['avg_score_margin'])}"
 
     def test_score_margin_reasonable_range(self):
         """Score margin should be in a plausible range for Cambia."""
@@ -172,35 +173,35 @@ class TestGameLengthStats:
         """avg_game_turns should be in results.stats after evaluation."""
         results = self._run_eval(num_games=15)
         stats = self._get_stats(results)
-        assert "avg_game_turns" in stats, (
-            f"Expected avg_game_turns in results.stats; got {list(stats.keys())}"
-        )
+        assert (
+            "avg_game_turns" in stats
+        ), f"Expected avg_game_turns in results.stats; got {list(stats.keys())}"
 
     def test_std_game_turns_present(self):
         """std_game_turns should be in results.stats after evaluation."""
         results = self._run_eval(num_games=15)
         stats = self._get_stats(results)
-        assert "std_game_turns" in stats, (
-            f"Expected std_game_turns in results.stats; got {list(stats.keys())}"
-        )
+        assert (
+            "std_game_turns" in stats
+        ), f"Expected std_game_turns in results.stats; got {list(stats.keys())}"
 
     def test_avg_turns_positive(self):
         """Average game turns must be > 0."""
         results = self._run_eval(num_games=15)
         stats = self._get_stats(results)
         if "avg_game_turns" in stats:
-            assert stats["avg_game_turns"] > 0, (
-                f"Average turns must be positive, got {stats['avg_game_turns']}"
-            )
+            assert (
+                stats["avg_game_turns"] > 0
+            ), f"Average turns must be positive, got {stats['avg_game_turns']}"
 
     def test_std_turns_non_negative(self):
         """Standard deviation of turns must be >= 0."""
         results = self._run_eval(num_games=15)
         stats = self._get_stats(results)
         if "std_game_turns" in stats:
-            assert stats["std_game_turns"] >= 0.0, (
-                f"Std dev must be non-negative, got {stats['std_game_turns']}"
-            )
+            assert (
+                stats["std_game_turns"] >= 0.0
+            ), f"Std dev must be non-negative, got {stats['std_game_turns']}"
 
     def test_avg_turns_within_max_bounds(self):
         """Average turns should not exceed max_game_turns config."""
@@ -218,9 +219,9 @@ class TestGameLengthStats:
 
         stats = getattr(results, "stats", {})
         if "avg_game_turns" in stats:
-            assert stats["avg_game_turns"] <= 80, (
-                f"Avg turns {stats['avg_game_turns']} exceeds max_game_turns=80"
-            )
+            assert (
+                stats["avg_game_turns"] <= 80
+            ), f"Avg turns {stats['avg_game_turns']} exceeds max_game_turns=80"
 
     def test_stats_are_floats(self):
         """avg_game_turns and std_game_turns must be float values."""
@@ -238,9 +239,7 @@ class TestGameLengthStats:
         if "avg_game_turns" in stats and "std_game_turns" in stats:
             avg = stats["avg_game_turns"]
             std = stats["std_game_turns"]
-            assert std <= avg * 3 + 5, (
-                f"Implausibly large std={std:.2f} vs avg={avg:.2f}"
-            )
+            assert std <= avg * 3 + 5, f"Implausibly large std={std:.2f} vs avg={avg:.2f}"
 
 
 # ---------------------------------------------------------------------------
@@ -295,9 +294,9 @@ class TestHeadToHead:
             + result["ties"]
             + result.get("errors", 0)
         )
-        assert total == num_games, (
-            f"Expected {num_games} games accounted for, got {total}: {result}"
-        )
+        assert (
+            total == num_games
+        ), f"Expected {num_games} games accounted for, got {total}: {result}"
 
     def test_head_to_head_identical_checkpoints_roughly_50_50(self, tmp_path):
         """Two identical checkpoints should produce roughly balanced win rates.

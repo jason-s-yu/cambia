@@ -59,11 +59,19 @@ def run_ema_parity(
 
         try:
             if ema_is_p0:
-                agent0 = SDCFRAgentWrapper(0, config, checkpoint_path, device=device, use_ema=True)
-                agent1 = SDCFRAgentWrapper(1, config, checkpoint_path, device=device, use_ema=False)
+                agent0 = SDCFRAgentWrapper(
+                    0, config, checkpoint_path, device=device, use_ema=True
+                )
+                agent1 = SDCFRAgentWrapper(
+                    1, config, checkpoint_path, device=device, use_ema=False
+                )
             else:
-                agent0 = SDCFRAgentWrapper(0, config, checkpoint_path, device=device, use_ema=False)
-                agent1 = SDCFRAgentWrapper(1, config, checkpoint_path, device=device, use_ema=True)
+                agent0 = SDCFRAgentWrapper(
+                    0, config, checkpoint_path, device=device, use_ema=False
+                )
+                agent1 = SDCFRAgentWrapper(
+                    1, config, checkpoint_path, device=device, use_ema=True
+                )
 
             agents = [agent0, agent1]
 
@@ -125,7 +133,9 @@ def run_ema_parity(
         if game_num % 500 == 0:
             decided = wins_ema + wins_snap + draws
             wr = wins_ema / decided * 100 if decided > 0 else 0
-            print(f"[{game_num}/{num_games}] EMA WR: {wr:.1f}% ({wins_ema}W/{wins_snap}L/{draws}D, {errors} errors)")
+            print(
+                f"[{game_num}/{num_games}] EMA WR: {wr:.1f}% ({wins_ema}W/{wins_snap}L/{draws}D, {errors} errors)"
+            )
 
     decided = wins_ema + wins_snap + draws
     ema_wr = wins_ema / decided * 100 if decided > 0 else 0
@@ -180,7 +190,9 @@ def main():
     )
 
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+    )
     run_ema_parity(args.checkpoint, args.config, args.num_games, args.device)
 
 

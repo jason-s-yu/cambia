@@ -14,7 +14,6 @@ from src.constants import (
 )
 from src.evaluate_agents import AGENT_REGISTRY
 
-
 # ---------------------------------------------------------------------------
 # Config stubs (matching pattern from test_baseline_agents.py)
 # ---------------------------------------------------------------------------

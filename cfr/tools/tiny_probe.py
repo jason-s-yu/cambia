@@ -108,7 +108,11 @@ class Probe:
         from src.constants import ActionDrawStockpile
 
         for action in legal:
-            if self.enumerate_chance and isinstance(action, ActionDrawStockpile) and game.stockpile:
+            if (
+                self.enumerate_chance
+                and isinstance(action, ActionDrawStockpile)
+                and game.stockpile
+            ):
                 # Enumerate distinct drawable cards (by identity rank/suit), weighted by count.
                 # We mutate the stockpile top to each distinct card, recurse, then restore.
                 self.chance_nodes += 1
@@ -119,7 +123,11 @@ class Probe:
                 orig_stock = list(game.stockpile)
                 for (rank, suit), _cnt in distinct.items():
                     # find an index of that card, move it to top (-1)
-                    idx = next(i for i, c in enumerate(game.stockpile) if (c.rank, c.suit) == (rank, suit))
+                    idx = next(
+                        i
+                        for i, c in enumerate(game.stockpile)
+                        if (c.rank, c.suit) == (rank, suit)
+                    )
                     card = game.stockpile.pop(idx)
                     game.stockpile.append(card)
                     self._apply_and_recurse(game, action, acting, ag, depth)
@@ -153,23 +161,30 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
     ap.add_argument("--chance", action="store_true", help="enumerate draw chance nodes")
-    ap.add_argument("--deals", type=int, default=1, help="number of random initial deals to probe")
+    ap.add_argument(
+        "--deals", type=int, default=1, help="number of random initial deals to probe"
+    )
     ap.add_argument("--max-nodes", type=int, default=5_000_000)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
     cfg = load_config(args.config)
-    print(f"deck_ranks={cfg.cambia_rules.deck_ranks} cards_per_player={cfg.cambia_rules.cards_per_player} "
-          f"use_jokers={cfg.cambia_rules.use_jokers} initial_view={cfg.cambia_rules.initial_view_count} "
-          f"max_game_turns={cfg.cambia_rules.max_game_turns} cambia_allowed_round={cfg.cambia_rules.cambia_allowed_round}",
-          flush=True)
+    print(
+        f"deck_ranks={cfg.cambia_rules.deck_ranks} cards_per_player={cfg.cambia_rules.cards_per_player} "
+        f"use_jokers={cfg.cambia_rules.use_jokers} initial_view={cfg.cambia_rules.initial_view_count} "
+        f"max_game_turns={cfg.cambia_rules.max_game_turns} cambia_allowed_round={cfg.cambia_rules.cambia_allowed_round}",
+        flush=True,
+    )
 
     import random
+
     agg_infosets = set()
     for d in range(args.deals):
         t0 = time.time()
         # Seeded rng -> reproducible deal (dataclass field consumed by __post_init__).
-        game = CambiaGameState(house_rules=cfg.cambia_rules, _rng=random.Random(args.seed + d))
+        game = CambiaGameState(
+            house_rules=cfg.cambia_rules, _rng=random.Random(args.seed + d)
+        )
 
         init_obs = AnalysisTools._create_observation_for_br(game, None, -1)
         ag = {
@@ -181,9 +196,12 @@ def main():
         agg_infosets |= p.infosets
         dt = time.time() - t0
         status = "ABORTED(>max_nodes)" if p.aborted else "complete"
-        print(f"deal {d}: nodes={p.nodes} decision={p.decision_nodes} chance={p.chance_nodes} "
-              f"terminals={p.terminals} max_depth={p.max_depth} infosets={len(p.infosets)} "
-              f"[{status}] {dt:.2f}s ctx={dict(p.ctx_counts)}", flush=True)
+        print(
+            f"deal {d}: nodes={p.nodes} decision={p.decision_nodes} chance={p.chance_nodes} "
+            f"terminals={p.terminals} max_depth={p.max_depth} infosets={len(p.infosets)} "
+            f"[{status}] {dt:.2f}s ctx={dict(p.ctx_counts)}",
+            flush=True,
+        )
         sys.stdout.flush()
 
     print(f"UNION infosets across {args.deals} deals: {len(agg_infosets)}", flush=True)

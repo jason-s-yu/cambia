@@ -41,6 +41,7 @@ from .sog_worker import _sog_batch_worker
 
 try:
     from .. import run_db as _run_db
+
     _RUN_DB_AVAILABLE = True
 except Exception:
     _run_db = None  # type: ignore[assignment]
@@ -51,8 +52,8 @@ logger = logging.getLogger(__name__)
 from ..pbs import PBS_INPUT_DIM, NUM_HAND_TYPES
 from ..encoding import NUM_ACTIONS
 
-VALUE_DIM: int = 2 * NUM_HAND_TYPES   # 936
-POLICY_DIM: int = NUM_ACTIONS          # 146
+VALUE_DIM: int = 2 * NUM_HAND_TYPES  # 936
+POLICY_DIM: int = NUM_ACTIONS  # 146
 
 
 class SoGTrainer:
@@ -124,25 +125,41 @@ class SoGTrainer:
         if _RUN_DB_AVAILABLE:
             try:
                 _persistence = getattr(self.config, "persistence", None)
-                ckpt_path = getattr(
-                    _persistence, "agent_data_save_path",
-                    "strategy/sog_checkpoint.pt",
-                ) if _persistence is not None else "strategy/sog_checkpoint.pt"
-                save_dir = os.path.dirname(ckpt_path) if os.path.dirname(ckpt_path) else "."
+                ckpt_path = (
+                    getattr(
+                        _persistence,
+                        "agent_data_save_path",
+                        "strategy/sog_checkpoint.pt",
+                    )
+                    if _persistence is not None
+                    else "strategy/sog_checkpoint.pt"
+                )
+                save_dir = (
+                    os.path.dirname(ckpt_path) if os.path.dirname(ckpt_path) else "."
+                )
                 db_path = os.environ.get("CAMBIA_RUN_DB") or str(
                     Path(save_dir).parent.parent / "cambia_runs.db"
                 )
                 self._db_conn = _run_db.get_db(db_path)
-                run_name = Path(save_dir).parent.name if Path(save_dir).name == "checkpoints" else Path(save_dir).name
+                run_name = (
+                    Path(save_dir).parent.name
+                    if Path(save_dir).name == "checkpoints"
+                    else Path(save_dir).name
+                )
                 config_yaml = None
                 config_dict = {}
-                run_dir = Path(save_dir).parent if Path(save_dir).name == "checkpoints" else Path(save_dir)
+                run_dir = (
+                    Path(save_dir).parent
+                    if Path(save_dir).name == "checkpoints"
+                    else Path(save_dir)
+                )
                 config_path = run_dir / "config.yaml"
                 if config_path.exists():
                     try:
                         config_yaml = config_path.read_text(encoding="utf-8")
                         try:
                             import yaml
+
                             config_dict = yaml.safe_load(config_yaml) or {}
                         except Exception:
                             pass
@@ -157,14 +174,20 @@ class SoGTrainer:
                     config_dict=config_dict,
                     status="running",
                 )
-                logger.info("Run DB: registered run '%s' (id=%d)", run_name, self._db_run_id)
+                logger.info(
+                    "Run DB: registered run '%s' (id=%d)", run_name, self._db_run_id
+                )
             except Exception as _e:
                 logger.debug("Run DB init failed (non-fatal): %s", _e)
                 self._db_run_id = None
                 self._db_conn = None
 
         # Auto warm-start from config if specified and no explicit checkpoint
-        if config.sog_warm_start_checkpoint and checkpoint_path and not os.path.exists(checkpoint_path):
+        if (
+            config.sog_warm_start_checkpoint
+            and checkpoint_path
+            and not os.path.exists(checkpoint_path)
+        ):
             self.warm_start_from_gtcfr(config.sog_warm_start_checkpoint)
 
     # ------------------------------------------------------------------
@@ -281,7 +304,11 @@ class SoGTrainer:
         logger.info(
             "CVPN training: %d steps, value_loss=%.6f policy_loss=%.6f "
             "(v_buf=%d p_buf=%d)",
-            actual_steps, avg_v, avg_p, len(self.value_buffer), len(self.policy_buffer),
+            actual_steps,
+            avg_v,
+            avg_p,
+            len(self.value_buffer),
+            len(self.policy_buffer),
         )
         return avg_v, avg_p
 
@@ -307,7 +334,10 @@ class SoGTrainer:
         logger.info(
             "Starting SoG training from epoch %d to %d "
             "(%d episodes/epoch, %d train_steps/epoch).",
-            start_epoch, end_epoch, episodes_per_epoch, train_steps,
+            start_epoch,
+            end_epoch,
+            episodes_per_epoch,
+            train_steps,
         )
 
         try:
@@ -363,8 +393,13 @@ class SoGTrainer:
                 logger.info(
                     "Epoch %d complete in %.2fs. v_loss=%.6f p_loss=%.6f "
                     "v_buf=%d p_buf=%d samples=%d",
-                    epoch, epoch_time, v_loss, p_loss,
-                    len(self.value_buffer), len(self.policy_buffer), len(all_samples),
+                    epoch,
+                    epoch_time,
+                    v_loss,
+                    p_loss,
+                    len(self.value_buffer),
+                    len(self.policy_buffer),
+                    len(all_samples),
                 )
 
             logger.info("SoG training completed %d epochs.", total_epochs)
@@ -373,8 +408,14 @@ class SoGTrainer:
             logger.warning("Shutdown during SoG training: %s", type(e).__name__)
             self.save_checkpoint()
             try:
-                if _RUN_DB_AVAILABLE and self._db_conn is not None and self._db_run_id is not None:
-                    _run_db.update_run_status(self._db_conn, self._db_run_id, "interrupted")
+                if (
+                    _RUN_DB_AVAILABLE
+                    and self._db_conn is not None
+                    and self._db_run_id is not None
+                ):
+                    _run_db.update_run_status(
+                        self._db_conn, self._db_run_id, "interrupted"
+                    )
             except Exception:
                 pass
             raise GracefulShutdownException("Shutdown processed in SoGTrainer") from e
@@ -383,7 +424,11 @@ class SoGTrainer:
             logger.exception("Unhandled error in SoG training loop.")
             self.save_checkpoint()
             try:
-                if _RUN_DB_AVAILABLE and self._db_conn is not None and self._db_run_id is not None:
+                if (
+                    _RUN_DB_AVAILABLE
+                    and self._db_conn is not None
+                    and self._db_run_id is not None
+                ):
                     _run_db.update_run_status(self._db_conn, self._db_run_id, "failed")
             except Exception:
                 pass
@@ -394,7 +439,11 @@ class SoGTrainer:
 
         # Mark run completed
         try:
-            if _RUN_DB_AVAILABLE and self._db_conn is not None and self._db_run_id is not None:
+            if (
+                _RUN_DB_AVAILABLE
+                and self._db_conn is not None
+                and self._db_run_id is not None
+            ):
                 _run_db.update_run_status(self._db_conn, self._db_run_id, "completed")
         except Exception:
             pass
@@ -419,11 +468,10 @@ class SoGTrainer:
             epoch = ckpt.get("epoch", 0)
             logger.info(
                 "Warm start from GT-CFR checkpoint %s (epoch %d).",
-                gtcfr_checkpoint_path, epoch,
+                gtcfr_checkpoint_path,
+                epoch,
             )
-            print(
-                f"[sog] warm start from GT-CFR {gtcfr_checkpoint_path} (epoch {epoch})"
-            )
+            print(f"[sog] warm start from GT-CFR {gtcfr_checkpoint_path} (epoch {epoch})")
         except Exception as e:
             logger.error(
                 "Failed to warm start from GT-CFR %s: %s", gtcfr_checkpoint_path, e
@@ -448,7 +496,8 @@ class SoGTrainer:
             )
             logger.info(
                 "Warm start from ReBeL checkpoint %s. Skipped %d keys.",
-                rebel_checkpoint_path, len(skipped),
+                rebel_checkpoint_path,
+                len(skipped),
             )
             print(
                 f"[sog] warm start from ReBeL {rebel_checkpoint_path} "
@@ -516,14 +565,20 @@ class SoGTrainer:
                     "Failed to save epoch checkpoint %s: %s", epoch_path, e_epoch
                 )
 
-            logger.info("SoG checkpoint saved to %s (epoch %d).", path, self.current_epoch)
+            logger.info(
+                "SoG checkpoint saved to %s (epoch %d).", path, self.current_epoch
+            )
             print(
                 f"[checkpoint] sog saved to {path} (epoch {self.current_epoch})",
                 flush=True,
             )
 
             # DB: register checkpoint and update retention flags
-            if _RUN_DB_AVAILABLE and self._db_conn is not None and self._db_run_id is not None:
+            if (
+                _RUN_DB_AVAILABLE
+                and self._db_conn is not None
+                and self._db_run_id is not None
+            ):
                 try:
                     _run_db.register_checkpoint(
                         self._db_conn, self._db_run_id, self.current_epoch, epoch_path
@@ -575,7 +630,9 @@ class SoGTrainer:
                         has_mask=False,
                     )
                     self.value_buffer.load(vbp)
-                    logger.info("Loaded value buffer: %d samples.", len(self.value_buffer))
+                    logger.info(
+                        "Loaded value buffer: %d samples.", len(self.value_buffer)
+                    )
                 else:
                     logger.warning("Value buffer file not found: %s", npz)
 
@@ -598,7 +655,8 @@ class SoGTrainer:
 
             logger.info(
                 "SoG checkpoint loaded from %s. Resuming at epoch %d.",
-                path, self.current_epoch,
+                path,
+                self.current_epoch,
             )
 
         except FileNotFoundError as e:

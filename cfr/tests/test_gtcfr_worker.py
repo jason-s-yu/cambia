@@ -27,7 +27,6 @@ from src.networks import build_cvpn
 from src.pbs import PBS_INPUT_DIM, uniform_range
 from src.encoding import NUM_ACTIONS
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -106,6 +105,7 @@ class TestBuildPbs:
         r0 = uniform_range()
         r1 = uniform_range()
         from src.pbs import PBS
+
         pbs = _build_pbs(game, r0, r1)
         assert isinstance(pbs, PBS)
         assert pbs.range_p0.shape == (NUM_HAND_TYPES,)
@@ -156,10 +156,18 @@ class TestEpisodeSampleShapes:
     def test_episode_sample_shapes(self):
         samples = self._run_episode_mocked(num_steps=4)
         for s in samples:
-            assert s.features.shape == (PBS_INPUT_DIM,), f"features shape mismatch: {s.features.shape}"
-            assert s.value_target.shape == (VALUE_DIM,), f"value_target shape mismatch: {s.value_target.shape}"
-            assert s.policy_target.shape == (NUM_ACTIONS,), f"policy_target shape mismatch: {s.policy_target.shape}"
-            assert s.action_mask.shape == (NUM_ACTIONS,), f"action_mask shape mismatch: {s.action_mask.shape}"
+            assert s.features.shape == (
+                PBS_INPUT_DIM,
+            ), f"features shape mismatch: {s.features.shape}"
+            assert s.value_target.shape == (
+                VALUE_DIM,
+            ), f"value_target shape mismatch: {s.value_target.shape}"
+            assert s.policy_target.shape == (
+                NUM_ACTIONS,
+            ), f"policy_target shape mismatch: {s.policy_target.shape}"
+            assert s.action_mask.shape == (
+                NUM_ACTIONS,
+            ), f"action_mask shape mismatch: {s.action_mask.shape}"
             assert s.action_mask.dtype == bool, "action_mask must be bool"
             assert s.features.dtype == np.float32
             assert s.value_target.dtype == np.float32
@@ -180,7 +188,9 @@ class TestEpisodeSampleShapes:
         # that the episode runs without error and produces samples (range update is
         # an internal detail verified via code inspection).
         samples = self._run_episode_mocked(num_steps=2)
-        assert len(samples) >= 1, "Episode should produce samples (implying range updates ran)"
+        assert (
+            len(samples) >= 1
+        ), "Episode should produce samples (implying range updates ran)"
 
 
 class TestEpisodeSampleDataclass:

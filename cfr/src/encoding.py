@@ -220,16 +220,16 @@ _IDX_DRAW_DISCARD = 1
 _IDX_CALL_CAMBIA = 2
 _IDX_DISCARD_NO_ABILITY = 3
 _IDX_DISCARD_ABILITY = 4
-_IDX_REPLACE_BASE = 5       # 5-10
-_IDX_PEEK_OWN_BASE = 11     # 11-16
-_IDX_PEEK_OTHER_BASE = 17   # 17-22
-_IDX_BLIND_SWAP_BASE = 23   # 23-58 (6x6=36)
-_IDX_KING_LOOK_BASE = 59    # 59-94 (6x6=36)
+_IDX_REPLACE_BASE = 5  # 5-10
+_IDX_PEEK_OWN_BASE = 11  # 11-16
+_IDX_PEEK_OTHER_BASE = 17  # 17-22
+_IDX_BLIND_SWAP_BASE = 23  # 23-58 (6x6=36)
+_IDX_KING_LOOK_BASE = 59  # 59-94 (6x6=36)
 _IDX_KING_SWAP_FALSE = 95
 _IDX_KING_SWAP_TRUE = 96
 _IDX_PASS_SNAP = 97
-_IDX_SNAP_OWN_BASE = 98     # 98-103
-_IDX_SNAP_OPP_BASE = 104    # 104-109
+_IDX_SNAP_OWN_BASE = 98  # 98-103
+_IDX_SNAP_OPP_BASE = 104  # 104-109
 _IDX_SNAP_OPP_MOVE_BASE = 110  # 110-145 (6x6=36)
 
 
@@ -374,7 +374,9 @@ def encode_infoset(
     return features
 
 
-def _write_history_features(out: np.ndarray, own_obs_ages, opp_obs_ages, dead_card_histogram, turn_progress: float):
+def _write_history_features(
+    out: np.ndarray, own_obs_ages, opp_obs_ages, dead_card_histogram, turn_progress: float
+):
     """Write the 24 new dims at offsets [200-223] into an EP-PBS output buffer."""
     if own_obs_ages is not None:
         for i in range(min(6, len(own_obs_ages))):
@@ -390,8 +392,8 @@ def _write_history_features(out: np.ndarray, own_obs_ages, opp_obs_ages, dead_ca
 
 
 def encode_infoset_eppbs(
-    slot_tags: list,          # list of 12 EpistemicTag values
-    slot_buckets: list,       # list of 12 bucket values (0 if unknown)
+    slot_tags: list,  # list of 12 EpistemicTag values
+    slot_buckets: list,  # list of 12 bucket values (0 if unknown)
     discard_top_bucket: int,
     stock_estimate: int,
     game_phase: int,
@@ -461,13 +463,15 @@ def encode_infoset_eppbs(
     # offset = 196
 
     # [196-199] were padding; now [200-223] are history features.
-    _write_history_features(out, own_obs_ages, opp_obs_ages, dead_card_histogram, turn_progress)
+    _write_history_features(
+        out, own_obs_ages, opp_obs_ages, dead_card_histogram, turn_progress
+    )
     return out
 
 
 def encode_infoset_eppbs_dealiased(
-    slot_tags: list,          # list of 12 EpistemicTag values
-    slot_buckets: list,       # list of 12 bucket values (0 if unknown)
+    slot_tags: list,  # list of 12 EpistemicTag values
+    slot_buckets: list,  # list of 12 bucket values (0 if unknown)
     discard_top_bucket: int,
     stock_estimate: int,
     game_phase: int,
@@ -574,7 +578,9 @@ def encode_infoset_eppbs_dealiased(
     out[197] = opp_hand_size / 6.0
 
     # [198-199] were padding; now [200-223] are history features.
-    _write_history_features(out, own_obs_ages, opp_obs_ages, dead_card_histogram, turn_progress)
+    _write_history_features(
+        out, own_obs_ages, opp_obs_ages, dead_card_histogram, turn_progress
+    )
     return out
 
 
@@ -707,7 +713,9 @@ def encode_infoset_eppbs_interleaved(
     # offset after slots = 42 + 12*13 = 198
 
     # [198-199] were padding; now [200-223] are history features.
-    _write_history_features(out, own_obs_ages, opp_obs_ages, dead_card_histogram, turn_progress)
+    _write_history_features(
+        out, own_obs_ages, opp_obs_ages, dead_card_histogram, turn_progress
+    )
 
     # Encoding v2: append card-counting posterior + action history window.
     if encoding_version == 2:
@@ -717,14 +725,14 @@ def encode_infoset_eppbs_interleaved(
                 raise InfosetEncodingError(
                     f"card_counting_posterior must have {V2_CARD_COUNT_DIM} entries, got {arr.shape[0]}"
                 )
-            out[EP_PBS_INPUT_DIM:EP_PBS_INPUT_DIM + V2_CARD_COUNT_DIM] = arr
+            out[EP_PBS_INPUT_DIM : EP_PBS_INPUT_DIM + V2_CARD_COUNT_DIM] = arr
         if action_history_window is not None:
             arr = np.asarray(action_history_window, dtype=np.float32)
             if arr.shape[0] != V2_ACTION_HISTORY_DIM:
                 raise InfosetEncodingError(
                     f"action_history_window must have {V2_ACTION_HISTORY_DIM} entries, got {arr.shape[0]}"
                 )
-            out[EP_PBS_INPUT_DIM + V2_CARD_COUNT_DIM:EP_PBS_V2_INPUT_DIM] = arr
+            out[EP_PBS_INPUT_DIM + V2_CARD_COUNT_DIM : EP_PBS_V2_INPUT_DIM] = arr
     return out
 
 
@@ -859,8 +867,8 @@ def encode_infoset_v2(
     out[:EP_PBS_INPUT_DIM] = base_v1
     posterior = compute_card_counting_posterior(agent_state)
     history = compute_action_history_window(agent_state)
-    out[EP_PBS_INPUT_DIM:EP_PBS_INPUT_DIM + V2_CARD_COUNT_DIM] = posterior
-    out[EP_PBS_INPUT_DIM + V2_CARD_COUNT_DIM:EP_PBS_V2_INPUT_DIM] = history
+    out[EP_PBS_INPUT_DIM : EP_PBS_INPUT_DIM + V2_CARD_COUNT_DIM] = posterior
+    out[EP_PBS_INPUT_DIM + V2_CARD_COUNT_DIM : EP_PBS_V2_INPUT_DIM] = history
     return out
 
 
@@ -895,8 +903,14 @@ def encode_infoset_eppbs_interleaved_v2(
     # carrying ``_go_agent`` (used by the DESCA Go env_factory in cli.py).
     go_agent = getattr(agent_state, "_go_agent", agent_state)
     if hasattr(go_agent, "_agent_h") and hasattr(go_agent, "encode_eppbs_interleaved_v2"):
-        ctx = decision_context.value if hasattr(decision_context, "value") else int(decision_context)
-        return go_agent.encode_eppbs_interleaved_v2(int(ctx), int(drawn_card_bucket), out=out)
+        ctx = (
+            decision_context.value
+            if hasattr(decision_context, "value")
+            else int(decision_context)
+        )
+        return go_agent.encode_eppbs_interleaved_v2(
+            int(ctx), int(drawn_card_bucket), out=out
+        )
 
     st = agent_state
     # Cambia state mapping (SELF=0, OPPONENT=1, NONE=2).
@@ -1063,7 +1077,9 @@ def action_to_index(action: GameAction) -> int:
         idx = action.opponent_target_hand_index
         if 0 <= idx < MAX_HAND:
             return _IDX_SNAP_OPP_BASE + idx
-        raise ActionEncodingError(f"SnapOpponent index {idx} out of range [0, {MAX_HAND})")
+        raise ActionEncodingError(
+            f"SnapOpponent index {idx} out of range [0, {MAX_HAND})"
+        )
 
     if isinstance(action, ActionSnapOpponentMove):
         own = action.own_card_to_move_hand_index
@@ -1148,16 +1164,16 @@ _NP_IDX_DRAW_DISCARD = 1
 _NP_IDX_CALL_CAMBIA = 2
 _NP_IDX_DISCARD_NO_ABILITY = 3
 _NP_IDX_DISCARD_ABILITY = 4
-_NP_IDX_REPLACE_BASE = 5       # 5-10
-_NP_IDX_PEEK_OWN_BASE = 11     # 11-16
-_NP_IDX_PEEK_OTHER_BASE = 17   # 17-46 (6 slots × 5 opps)
-_NP_IDX_BLIND_SWAP_BASE = 47   # 47-226 (6 own × 6 opp_slots × 5 opps = 180)
-_NP_IDX_KING_LOOK_BASE = 227   # 227-406 (6 own × 6 opp_slots × 5 opps = 180)
+_NP_IDX_REPLACE_BASE = 5  # 5-10
+_NP_IDX_PEEK_OWN_BASE = 11  # 11-16
+_NP_IDX_PEEK_OTHER_BASE = 17  # 17-46 (6 slots × 5 opps)
+_NP_IDX_BLIND_SWAP_BASE = 47  # 47-226 (6 own × 6 opp_slots × 5 opps = 180)
+_NP_IDX_KING_LOOK_BASE = 227  # 227-406 (6 own × 6 opp_slots × 5 opps = 180)
 _NP_IDX_KING_SWAP_FALSE = 407
 _NP_IDX_KING_SWAP_TRUE = 408
 _NP_IDX_PASS_SNAP = 409
-_NP_IDX_SNAP_OWN_BASE = 410   # 410-415
-_NP_IDX_SNAP_OPP_BASE = 416   # 416-445 (6 slots × 5 opps = 30)
+_NP_IDX_SNAP_OWN_BASE = 410  # 410-415
+_NP_IDX_SNAP_OPP_BASE = 416  # 416-445 (6 slots × 5 opps = 30)
 _NP_IDX_SNAP_OPP_MOVE_BASE = 446  # 446-451
 
 
@@ -1193,7 +1209,9 @@ def nplayer_action_to_index(action: GameAction, opp_idx: int = 0) -> int:
         return _NP_IDX_CALL_CAMBIA
 
     if isinstance(action, ActionDiscard):
-        return _NP_IDX_DISCARD_ABILITY if action.use_ability else _NP_IDX_DISCARD_NO_ABILITY
+        return (
+            _NP_IDX_DISCARD_ABILITY if action.use_ability else _NP_IDX_DISCARD_NO_ABILITY
+        )
 
     if isinstance(action, ActionReplace):
         idx = action.target_hand_index
@@ -1211,14 +1229,16 @@ def nplayer_action_to_index(action: GameAction, opp_idx: int = 0) -> int:
         slot = action.target_opponent_hand_index
         if 0 <= slot < MAX_HAND and 0 <= opp_idx < N_PLAYER_MAX_PLAYERS - 1:
             return _NP_IDX_PEEK_OTHER_BASE + slot * (N_PLAYER_MAX_PLAYERS - 1) + opp_idx
-        raise ActionEncodingError(
-            f"PeekOther slot={slot} opp_idx={opp_idx} out of range"
-        )
+        raise ActionEncodingError(f"PeekOther slot={slot} opp_idx={opp_idx} out of range")
 
     if isinstance(action, ActionAbilityBlindSwapSelect):
         own = action.own_hand_index
         opp_slot = action.opponent_hand_index
-        if 0 <= own < MAX_HAND and 0 <= opp_slot < MAX_HAND and 0 <= opp_idx < N_PLAYER_MAX_PLAYERS - 1:
+        if (
+            0 <= own < MAX_HAND
+            and 0 <= opp_slot < MAX_HAND
+            and 0 <= opp_idx < N_PLAYER_MAX_PLAYERS - 1
+        ):
             return (
                 _NP_IDX_BLIND_SWAP_BASE
                 + own * MAX_HAND * (N_PLAYER_MAX_PLAYERS - 1)
@@ -1232,7 +1252,11 @@ def nplayer_action_to_index(action: GameAction, opp_idx: int = 0) -> int:
     if isinstance(action, ActionAbilityKingLookSelect):
         own = action.own_hand_index
         opp_slot = action.opponent_hand_index
-        if 0 <= own < MAX_HAND and 0 <= opp_slot < MAX_HAND and 0 <= opp_idx < N_PLAYER_MAX_PLAYERS - 1:
+        if (
+            0 <= own < MAX_HAND
+            and 0 <= opp_slot < MAX_HAND
+            and 0 <= opp_idx < N_PLAYER_MAX_PLAYERS - 1
+        ):
             return (
                 _NP_IDX_KING_LOOK_BASE
                 + own * MAX_HAND * (N_PLAYER_MAX_PLAYERS - 1)
@@ -1286,15 +1310,15 @@ def encode_nplayer_action_mask(uint8_mask: np.ndarray) -> np.ndarray:
 
 
 def encode_infoset_nplayer(
-    knowledge_masks: dict,    # (player_idx, slot_idx) → set of player IDs who know
-    slot_buckets: dict,       # (player_idx, slot_idx) → bucket int (0-8) or -1 unknown
-    encoding_player: int,     # which player is encoding
-    num_players: int,         # total players (2-6)
+    knowledge_masks: dict,  # (player_idx, slot_idx) → set of player IDs who know
+    slot_buckets: dict,  # (player_idx, slot_idx) → bucket int (0-8) or -1 unknown
+    encoding_player: int,  # which player is encoding
+    num_players: int,  # total players (2-6)
     discard_top_bucket: int,  # 0-9
-    stock_estimate: int,      # 0-3
-    game_phase: int,          # 0-5
-    decision_context: int,    # 0-5
-    cambia_state: int,        # 0=self, 1=opponent, 2=none
+    stock_estimate: int,  # 0-3
+    game_phase: int,  # 0-5
+    decision_context: int,  # 0-5
+    cambia_state: int,  # 0=self, 1=opponent, 2=none
     drawn_card_bucket: int = -1,  # -1=none, 0-9=bucket
 ) -> np.ndarray:
     """

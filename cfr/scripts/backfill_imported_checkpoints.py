@@ -43,7 +43,9 @@ if str(_CFR_ROOT) not in sys.path:
 
 from src.run_db import get_db, register_checkpoint  # noqa: E402
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 SNAPSHOT_NAME_FMT = "prtcfr_snapshot_iter_{iteration}.pt"
@@ -91,7 +93,9 @@ class BackfillSummary:
         )
 
 
-def backfill_run(db, run_dir: Path, run_name: str, dry_run: bool = False) -> BackfillSummary:
+def backfill_run(
+    db, run_dir: Path, run_name: str, dry_run: bool = False
+) -> BackfillSummary:
     """Backfill checkpoint rows for one run's imported-snapshot ledger gap.
 
     Never touches iterations absent from the ledger, and never re-registers
@@ -202,7 +206,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             logger.warning(
                 "[%s] %d ledger-listed iteration(s) have no snapshot file on "
                 "disk and were NOT registered: %s",
-                run_name, len(summary.missing), summary.missing,
+                run_name,
+                len(summary.missing),
+                summary.missing,
             )
 
     return 1 if failures else 0

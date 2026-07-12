@@ -20,7 +20,6 @@ from src.cfr.prtcfr_trainer import (
 )
 from tools.tiny_solver import build_tree
 
-
 CONFIG_2CARD = "config/tiny_2card_plateau.yaml"
 _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -29,8 +28,14 @@ _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 def tiny_tree():
     cfg = load_config(CONFIG_2CARD)
     root, isets, nnodes, aborted = build_tree(
-        cfg, n_deals=5, seed0=0, max_nodes_per_deal=2_000_000,
-        enumerate_draws=True, perfect_recall=True, tokenize=True, seq_cap=256,
+        cfg,
+        n_deals=5,
+        seed0=0,
+        max_nodes_per_deal=2_000_000,
+        enumerate_draws=True,
+        perfect_recall=True,
+        tokenize=True,
+        seq_cap=256,
     )
     assert aborted == 0
     return root
@@ -82,7 +87,12 @@ def test_snapshot_and_checkpoint_formats(tiny_tree, tmp_path):
     assert snap["iteration"] == 1
 
     ckpt = torch.load(trainer.checkpoint_path(), map_location="cpu", weights_only=False)
-    assert set(ckpt.keys()) == {"encoder_state_dict", "head_state_dict", "config", "iteration"}
+    assert set(ckpt.keys()) == {
+        "encoder_state_dict",
+        "head_state_dict",
+        "config",
+        "iteration",
+    }
 
     # the snapshot must load into a fresh net (the X2 scorer does exactly this)
     net = PRTCFRNet(device="cpu")
@@ -110,13 +120,22 @@ def test_warm_start_carries_net_forward(tiny_tree, tmp_path):
     """
     scratch_calls = {"n": 0}
     cfg_scratch = PRTCFRConfig(
-        m_rollouts=2, k_games_per_iter=15, iterations=2, train_steps_per_iter=20,
-        batch_size=256, warm_start=False, device=_DEVICE,
+        m_rollouts=2,
+        k_games_per_iter=15,
+        iterations=2,
+        train_steps_per_iter=20,
+        batch_size=256,
+        warm_start=False,
+        device=_DEVICE,
     )
     t_scratch = PRTCFRTinyTrainer(
-        tiny_tree, cfg_scratch, str(tmp_path / "scratch"),
-        net_factory=lambda: (scratch_calls.__setitem__("n", scratch_calls["n"] + 1)
-                             or PRTCFRNet(device=_DEVICE)),
+        tiny_tree,
+        cfg_scratch,
+        str(tmp_path / "scratch"),
+        net_factory=lambda: (
+            scratch_calls.__setitem__("n", scratch_calls["n"] + 1)
+            or PRTCFRNet(device=_DEVICE)
+        ),
     )
     t_scratch.run_iteration(t=1)
     t_scratch.run_iteration(t=2)
@@ -124,13 +143,21 @@ def test_warm_start_carries_net_forward(tiny_tree, tmp_path):
 
     warm_calls = {"n": 0}
     cfg_warm = PRTCFRConfig(
-        m_rollouts=2, k_games_per_iter=15, iterations=2, train_steps_per_iter=20,
-        batch_size=256, warm_start=True, device=_DEVICE,
+        m_rollouts=2,
+        k_games_per_iter=15,
+        iterations=2,
+        train_steps_per_iter=20,
+        batch_size=256,
+        warm_start=True,
+        device=_DEVICE,
     )
     t_warm = PRTCFRTinyTrainer(
-        tiny_tree, cfg_warm, str(tmp_path / "warm"),
-        net_factory=lambda: (warm_calls.__setitem__("n", warm_calls["n"] + 1)
-                             or PRTCFRNet(device=_DEVICE)),
+        tiny_tree,
+        cfg_warm,
+        str(tmp_path / "warm"),
+        net_factory=lambda: (
+            warm_calls.__setitem__("n", warm_calls["n"] + 1) or PRTCFRNet(device=_DEVICE)
+        ),
     )
     t_warm.run_iteration(t=1)
     net_after_iter1 = t_warm.net

@@ -41,7 +41,6 @@ if _PROJECT_ROOT not in sys.path:
 from src.constants import GameAction
 from src.game.engine import CambiaGameState
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

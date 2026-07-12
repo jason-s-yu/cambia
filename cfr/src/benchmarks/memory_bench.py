@@ -72,6 +72,7 @@ def benchmark_memory(
 
         # Measure baseline memory
         import gc
+
         gc.collect()
         baseline_mb = _get_process_memory_mb()
 

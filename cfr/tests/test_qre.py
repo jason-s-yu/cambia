@@ -10,10 +10,10 @@ import pytest
 import torch
 import numpy as np
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_adv_and_mask(batch, num_actions, legal_indices=None):
     """Return (advantages, legal_mask) tensors.
@@ -33,11 +33,13 @@ def _make_adv_and_mask(batch, num_actions, legal_indices=None):
 # TestQREStrategy
 # ---------------------------------------------------------------------------
 
+
 class TestQREStrategy:
     """Unit tests for the qre_strategy() module-level function."""
 
     def setup_method(self):
         from src.cfr.deep_trainer import qre_strategy
+
         self.qre_strategy = qre_strategy
 
     def test_qre_softmax_basic(self):
@@ -56,8 +58,9 @@ class TestQREStrategy:
         sigma = self.qre_strategy(adv, mask, lam=0.5)
         illegal = [i for i in range(10) if i not in legal]
         for i in illegal:
-            assert sigma[0, i].item() == pytest.approx(0.0, abs=1e-6), \
-                f"illegal action {i} has nonzero prob {sigma[0, i].item()}"
+            assert sigma[0, i].item() == pytest.approx(
+                0.0, abs=1e-6
+            ), f"illegal action {i} has nonzero prob {sigma[0, i].item()}"
 
     def test_qre_high_lambda_uniform(self):
         """High lambda → near-uniform over legal actions."""
@@ -72,8 +75,9 @@ class TestQREStrategy:
         # With huge lambda, strategy should be near-uniform over 4 legal actions
         expected = 1.0 / len(legal)
         for i in legal:
-            assert sigma[0, i].item() == pytest.approx(expected, abs=0.01), \
-                f"action {i}: expected ~{expected}, got {sigma[0, i].item()}"
+            assert sigma[0, i].item() == pytest.approx(
+                expected, abs=0.01
+            ), f"action {i}: expected ~{expected}, got {sigma[0, i].item()}"
 
     def test_qre_low_lambda_greedy(self):
         """Low lambda → concentrates on highest advantage."""
@@ -82,12 +86,14 @@ class TestQREStrategy:
         mask = torch.ones(1, 10, dtype=torch.bool)
         sigma = self.qre_strategy(adv, mask, lam=1e-6)
         # Action 3 should get essentially all the probability
-        assert sigma[0, 3].item() > 0.99, f"expected dominant action 3, got {sigma[0, 3].item()}"
+        assert (
+            sigma[0, 3].item() > 0.99
+        ), f"expected dominant action 3, got {sigma[0, 3].item()}"
 
     def test_qre_no_nan(self):
         """No NaN even with extreme advantage values."""
         # Simulate extreme values (as arise from early-stage advantage nets)
-        adv = torch.full((4, 146), float('-inf'))
+        adv = torch.full((4, 146), float("-inf"))
         mask = torch.zeros(4, 146, dtype=torch.bool)
         # Give each row at least one legal action
         for b in range(4):
@@ -129,6 +135,7 @@ class TestQREStrategy:
 # TestQREAnnealing
 # ---------------------------------------------------------------------------
 
+
 class TestQREAnnealing:
     """Tests for _get_qre_lambda() annealing schedule on DeepCFRTrainer."""
 
@@ -160,6 +167,7 @@ class TestQREAnnealing:
         t.training_step = training_step
         # Bind the method
         from src.cfr.deep_trainer import DeepCFRTrainer
+
         t._get_qre_lambda = DeepCFRTrainer._get_qre_lambda.__get__(t, type(t))
         return t
 
@@ -183,7 +191,9 @@ class TestQREAnnealing:
             t = self._make_trainer(training_step=step, num_iterations=1000)
             lam = t._get_qre_lambda()
             if prev is not None:
-                assert lam <= prev + 1e-9, f"lambda increased at step {step}: {prev} -> {lam}"
+                assert (
+                    lam <= prev + 1e-9
+                ), f"lambda increased at step {step}: {prev} -> {lam}"
             prev = lam
 
     def test_lambda_midpoint(self):
@@ -196,14 +206,19 @@ class TestQREAnnealing:
 
     def test_lambda_after_anneal_end_stays_constant(self):
         """Lambda stays at qre_lambda_end after the annealing period ends."""
-        lam_at_600 = self._make_trainer(training_step=600, num_iterations=1000)._get_qre_lambda()
-        lam_at_900 = self._make_trainer(training_step=900, num_iterations=1000)._get_qre_lambda()
+        lam_at_600 = self._make_trainer(
+            training_step=600, num_iterations=1000
+        )._get_qre_lambda()
+        lam_at_900 = self._make_trainer(
+            training_step=900, num_iterations=1000
+        )._get_qre_lambda()
         assert lam_at_600 == pytest.approx(lam_at_900, abs=1e-9)
 
 
 # ---------------------------------------------------------------------------
 # TestNPlayerTrainerConfig
 # ---------------------------------------------------------------------------
+
 
 class TestNPlayerTrainerConfig:
     """Tests for N-player dim overrides in DeepCFRConfig.__post_init__."""
@@ -214,10 +229,12 @@ class TestNPlayerTrainerConfig:
         from src.constants import N_PLAYER_INPUT_DIM, N_PLAYER_NUM_ACTIONS
 
         cfg = DeepCFRConfig(num_players=4)
-        assert cfg.input_dim == N_PLAYER_INPUT_DIM, \
-            f"expected input_dim={N_PLAYER_INPUT_DIM}, got {cfg.input_dim}"
-        assert cfg.output_dim == N_PLAYER_NUM_ACTIONS, \
-            f"expected output_dim={N_PLAYER_NUM_ACTIONS}, got {cfg.output_dim}"
+        assert (
+            cfg.input_dim == N_PLAYER_INPUT_DIM
+        ), f"expected input_dim={N_PLAYER_INPUT_DIM}, got {cfg.input_dim}"
+        assert (
+            cfg.output_dim == N_PLAYER_NUM_ACTIONS
+        ), f"expected output_dim={N_PLAYER_NUM_ACTIONS}, got {cfg.output_dim}"
 
     def test_2p_dims_unchanged(self):
         """num_players=2 keeps legacy dims (222-dim input, 146 actions)."""
@@ -225,10 +242,12 @@ class TestNPlayerTrainerConfig:
         from src.encoding import INPUT_DIM, NUM_ACTIONS
 
         cfg = DeepCFRConfig(num_players=2)
-        assert cfg.input_dim == INPUT_DIM, \
-            f"expected input_dim={INPUT_DIM}, got {cfg.input_dim}"
-        assert cfg.output_dim == NUM_ACTIONS, \
-            f"expected output_dim={NUM_ACTIONS}, got {cfg.output_dim}"
+        assert (
+            cfg.input_dim == INPUT_DIM
+        ), f"expected input_dim={INPUT_DIM}, got {cfg.input_dim}"
+        assert (
+            cfg.output_dim == NUM_ACTIONS
+        ), f"expected output_dim={NUM_ACTIONS}, got {cfg.output_dim}"
 
     def test_3p_also_uses_nplayer_dims(self):
         """num_players=3 also triggers N-player dims."""
@@ -264,6 +283,7 @@ class TestNPlayerTrainerConfig:
 # ---------------------------------------------------------------------------
 # TestNPlayerDispatch
 # ---------------------------------------------------------------------------
+
 
 class TestNPlayerDispatch:
     """Tests verifying N-player traversal dispatch configuration."""
@@ -359,23 +379,30 @@ class TestNPlayerDispatch:
 # Overflow regression tests
 # ---------------------------------------------------------------------------
 
+
 class TestQREOverflowRegression:
     def test_qre_tiny_lambda_no_overflow(self):
         """Tiny lambda should not cause exp() overflow — no NaN/Inf in output."""
         from src.cfr.deep_trainer import qre_strategy
+
         adv = torch.tensor([[10.0, 5.0, 0.0]])
         mask = torch.ones(1, 3, dtype=torch.bool)
         sigma = qre_strategy(adv, mask, 1e-8)
         assert not torch.isnan(sigma).any(), "NaN in sigma"
         assert not torch.isinf(sigma).any(), "Inf in sigma"
-        assert sigma[0, 0].item() > 0.99, f"Expected sigma[0,0]>0.99, got {sigma[0,0].item()}"
+        assert (
+            sigma[0, 0].item() > 0.99
+        ), f"Expected sigma[0,0]>0.99, got {sigma[0,0].item()}"
 
     def test_qre_large_spread_no_overflow(self):
         """Large advantage spread should not cause overflow."""
         from src.cfr.deep_trainer import qre_strategy
+
         adv = torch.tensor([[1000.0, -1000.0, 500.0, -500.0]])
         mask = torch.ones(1, 4, dtype=torch.bool)
         sigma = qre_strategy(adv, mask, 0.01)
         assert not torch.isnan(sigma).any(), "NaN in sigma"
         assert not torch.isinf(sigma).any(), "Inf in sigma"
-        assert abs(sigma.sum().item() - 1.0) < 1e-5, f"sigma does not sum to 1: {sigma.sum().item()}"
+        assert (
+            abs(sigma.sum().item() - 1.0) < 1e-5
+        ), f"sigma does not sum to 1: {sigma.sum().item()}"

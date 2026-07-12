@@ -9,6 +9,7 @@ SDCFRAgentWrapper:
 
 We monkey-patch get_agent to inject use_ema=False for snapshot mode.
 """
+
 import sys
 import os
 import time
@@ -18,8 +19,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import src.evaluate_agents as ea
 
-RUN_DIR = os.path.join(os.path.dirname(__file__), "..", "runs", "interleaved-resnet-adaptive")
-CHECKPOINT = os.path.abspath(os.path.join(RUN_DIR, "checkpoints", "deep_cfr_checkpoint.pt"))
+RUN_DIR = os.path.join(
+    os.path.dirname(__file__), "..", "runs", "interleaved-resnet-adaptive"
+)
+CHECKPOINT = os.path.abspath(
+    os.path.join(RUN_DIR, "checkpoints", "deep_cfr_checkpoint.pt")
+)
 CONFIG_PATH = os.path.abspath(os.path.join(RUN_DIR, "config.yaml"))
 BASELINES = ["imperfect_greedy", "memory_heuristic", "aggressive_snap"]
 NUM_GAMES = 1000
@@ -66,7 +71,9 @@ def evaluate_mode(use_ema: bool) -> tuple:
         wr_list.append(wr)
         wins = results.get("P0 Wins", 0)
         total = sum(results.values())
-        print(f"  vs {baseline}: {wr:.1%}  ({wins}/{total}  ties={results.get('Ties',0)})")
+        print(
+            f"  vs {baseline}: {wr:.1%}  ({wins}/{total}  ties={results.get('Ties',0)})"
+        )
     ea.get_agent = original_get_agent
 
     mean = sum(wr_list) / len(wr_list)
@@ -88,4 +95,6 @@ if __name__ == "__main__":
     print(f"  Snapshot: {snap_mean:.1%}")
     print(f"  Delta:    {snap_mean - ema_mean:+.1%}")
     for i, b in enumerate(BASELINES):
-        print(f"  {b}: EMA={ema_wrs[i]:.1%} Snap={snap_wrs[i]:.1%} delta={snap_wrs[i]-ema_wrs[i]:+.1%}")
+        print(
+            f"  {b}: EMA={ema_wrs[i]:.1%} Snap={snap_wrs[i]:.1%} delta={snap_wrs[i]-ema_wrs[i]:+.1%}"
+        )

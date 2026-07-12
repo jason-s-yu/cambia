@@ -201,8 +201,11 @@ def test_battery_rows_carry_all_three_fields(tmp_path):
         return metrics_seq[t]
 
     trainer = PRTCFRProductionTrainer(
-        cfg, str(run_dir), driver_factory=_scripted_factory,
-        eval_fn=stub_eval_fn, db_path=str(tmp_path / "db.sqlite"),
+        cfg,
+        str(run_dir),
+        driver_factory=_scripted_factory,
+        eval_fn=stub_eval_fn,
+        db_path=str(tmp_path / "db.sqlite"),
         run_name="v0.4-prtcfr-battery-schema",
     )
     history = trainer.train(iterations=3)
@@ -241,8 +244,11 @@ def test_tier_a_lbr_null_off_cadence(tmp_path):
         return 0.1 * t
 
     trainer = PRTCFRProductionTrainer(
-        cfg, str(run_dir), driver_factory=_scripted_factory,
-        eval_fn=stub_eval_fn, db_path=str(tmp_path / "db.sqlite"),
+        cfg,
+        str(run_dir),
+        driver_factory=_scripted_factory,
+        eval_fn=stub_eval_fn,
+        db_path=str(tmp_path / "db.sqlite"),
         run_name="v0.4-prtcfr-battery-cadence",
     )
     trainer.train(iterations=3)
@@ -250,7 +256,7 @@ def test_tier_a_lbr_null_off_cadence(tmp_path):
 
     rows = _read_rows(run_dir)
     assert rows[0]["tier_a_lbr"] is not None  # t=1 (t==1 always due)
-    assert rows[1]["tier_a_lbr"] is None      # t=2 off cadence
+    assert rows[1]["tier_a_lbr"] is None  # t=2 off cadence
     assert rows[2]["tier_a_lbr"] is not None  # t=3 (t==n due)
     # t1_cambia_rate / grad_norm_violations are per-iteration (every row).
     for row in rows:
@@ -268,8 +274,11 @@ def test_grad_clip_below_norm_increments_violations(tmp_path):
     cfg = _prod_config(grad_clip=1.0e-9, iterations=2, train_steps=4)
     run_dir = tmp_path / "run"
     trainer = PRTCFRProductionTrainer(
-        cfg, str(run_dir), driver_factory=_scripted_factory,
-        eval_fn=lambda tr, t: 0.0, db_path=str(tmp_path / "db.sqlite"),
+        cfg,
+        str(run_dir),
+        driver_factory=_scripted_factory,
+        eval_fn=lambda tr, t: 0.0,
+        db_path=str(tmp_path / "db.sqlite"),
         run_name="v0.4-prtcfr-battery-gradviol",
     )
     trainer.train(iterations=2)
@@ -285,8 +294,11 @@ def test_grad_clip_above_norm_zero_violations(tmp_path):
     cfg = _prod_config(grad_clip=1.0e9, iterations=2, train_steps=4)
     run_dir = tmp_path / "run"
     trainer = PRTCFRProductionTrainer(
-        cfg, str(run_dir), driver_factory=_scripted_factory,
-        eval_fn=lambda tr, t: 0.0, db_path=str(tmp_path / "db.sqlite"),
+        cfg,
+        str(run_dir),
+        driver_factory=_scripted_factory,
+        eval_fn=lambda tr, t: 0.0,
+        db_path=str(tmp_path / "db.sqlite"),
         run_name="v0.4-prtcfr-battery-noviol",
     )
     trainer.train(iterations=2)
@@ -309,10 +321,10 @@ def test_observer_clone_is_unwrapped():
     obs = _GenTurn1Observer(inner, stats)
     assert stats["games"] == 1
     child = obs.clone()
-    assert isinstance(child, ScriptedDriver)   # unwrapped
-    child.apply(2)                             # a rollout apply
-    assert stats["t1_cambia"] == 0             # not counted
-    obs.apply(2)                               # the real turn-1 move
+    assert isinstance(child, ScriptedDriver)  # unwrapped
+    child.apply(2)  # a rollout apply
+    assert stats["t1_cambia"] == 0  # not counted
+    obs.apply(2)  # the real turn-1 move
     assert stats["t1_cambia"] == 1
     # Delegation: non-overridden attributes reach the inner driver.
     assert obs.current_player() == inner.current_player()
@@ -322,14 +334,18 @@ def test_observer_clone_is_unwrapped():
 def test_t1_cambia_rate_all_games_open_cambia(tmp_path, gen_batched):
     # Opening legal set == [Cambia] -> every game's first move is a Cambia call.
     cfg = _prod_config(
-        iterations=2, k_games_per_iter=4, critic_enabled=False,
+        iterations=2,
+        k_games_per_iter=4,
+        critic_enabled=False,
         gen_batched=gen_batched,
     )
     run_dir = tmp_path / "run"
     trainer = PRTCFRProductionTrainer(
-        cfg, str(run_dir),
+        cfg,
+        str(run_dir),
         driver_factory=_first_legal_factory([_CALL_CAMBIA_INDEX]),
-        eval_fn=lambda tr, t: 0.0, db_path=str(tmp_path / "db.sqlite"),
+        eval_fn=lambda tr, t: 0.0,
+        db_path=str(tmp_path / "db.sqlite"),
         run_name=f"v0.4-prtcfr-battery-t1hi-{int(gen_batched)}",
     )
     trainer.train(iterations=2)
@@ -344,14 +360,18 @@ def test_t1_cambia_rate_all_games_open_cambia(tmp_path, gen_batched):
 def test_t1_cambia_rate_no_game_opens_cambia(tmp_path, gen_batched):
     # Opening legal set excludes Cambia -> rate 0.0.
     cfg = _prod_config(
-        iterations=2, k_games_per_iter=4, critic_enabled=False,
+        iterations=2,
+        k_games_per_iter=4,
+        critic_enabled=False,
         gen_batched=gen_batched,
     )
     run_dir = tmp_path / "run"
     trainer = PRTCFRProductionTrainer(
-        cfg, str(run_dir),
+        cfg,
+        str(run_dir),
         driver_factory=_first_legal_factory([0]),
-        eval_fn=lambda tr, t: 0.0, db_path=str(tmp_path / "db.sqlite"),
+        eval_fn=lambda tr, t: 0.0,
+        db_path=str(tmp_path / "db.sqlite"),
         run_name=f"v0.4-prtcfr-battery-t1lo-{int(gen_batched)}",
     )
     trainer.train(iterations=2)
@@ -373,9 +393,7 @@ def _fast_eval_config(tmp_path, max_turns=8):
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     base = os.path.join(project_root, "config", "prtcfr_production.yaml")
     cfgpath = tmp_path / "eval_config.yaml"
-    cfgpath.write_text(
-        f"_base: {base}\ncambia_rules:\n  max_game_turns: {max_turns}\n"
-    )
+    cfgpath.write_text(f"_base: {base}\ncambia_rules:\n  max_game_turns: {max_turns}\n")
     return load_config(str(cfgpath))
 
 
@@ -385,17 +403,26 @@ def test_build_production_battery_eval_fn_runs_real_lbr(tmp_path):
     # loads the [1..t] snapshot mixture and plays real Cambia LBR games.
     eval_config = _fast_eval_config(tmp_path, max_turns=8)
     battery = build_production_battery_eval_fn(
-        eval_config, device=_DEVICE, lbr_games=2, lbr_depth=1,
+        eval_config,
+        device=_DEVICE,
+        lbr_games=2,
+        lbr_depth=1,
     )
 
     cfg = _prod_config(
-        iterations=2, k_games_per_iter=4, stability_eval_every=2,
-        stability_metric_name="tier_a_lbr", critic_enabled=False,
+        iterations=2,
+        k_games_per_iter=4,
+        stability_eval_every=2,
+        stability_metric_name="tier_a_lbr",
+        critic_enabled=False,
     )
     run_dir = tmp_path / "run"
     trainer = PRTCFRProductionTrainer(
-        cfg, str(run_dir), driver_factory=_scripted_factory,
-        eval_fn=battery, db_path=str(tmp_path / "db.sqlite"),
+        cfg,
+        str(run_dir),
+        driver_factory=_scripted_factory,
+        eval_fn=battery,
+        db_path=str(tmp_path / "db.sqlite"),
         run_name="v0.4-prtcfr-battery-reallbr",
     )
     history = trainer.train(iterations=2)
@@ -429,8 +456,11 @@ def test_upto_mixture_spans_one_to_t(tmp_path):
     cfg = _prod_config(iterations=3, k_games_per_iter=3, critic_enabled=False)
     run_dir = tmp_path / "run"
     trainer = PRTCFRProductionTrainer(
-        cfg, str(run_dir), driver_factory=_scripted_factory,
-        eval_fn=lambda tr, t: 0.0, db_path=str(tmp_path / "db.sqlite"),
+        cfg,
+        str(run_dir),
+        driver_factory=_scripted_factory,
+        eval_fn=lambda tr, t: 0.0,
+        db_path=str(tmp_path / "db.sqlite"),
         run_name="v0.4-prtcfr-battery-window",
     )
     trainer.train(iterations=3)

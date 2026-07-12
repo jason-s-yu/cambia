@@ -27,7 +27,6 @@ from unittest.mock import patch
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Shared config helper (no jokers, short games for fast termination)
 # ---------------------------------------------------------------------------
@@ -191,8 +190,14 @@ class TestSeatAlternation:
         healthy games are long; stale memory would short-circuit them.
         """
         config = _make_config(max_game_turns=60)
-        results = _run("memory_heuristic", "random_no_cambia", 120, config,
-                       seat_scheme="alternated", crn_seed_base=4242)
+        results = _run(
+            "memory_heuristic",
+            "random_no_cambia",
+            120,
+            config,
+            seat_scheme="alternated",
+            crn_seed_base=4242,
+        )
         avg_turns = results.stats.get("avg_game_turns", 0.0)
         assert avg_turns > 15, (
             f"avg_game_turns={avg_turns:.1f} too low under alternation -- stale "
@@ -211,8 +216,9 @@ class TestTerminationScale:
         are scored as P0/P1/Ties; the action-count safety valve (MaxTurnTies)
         should essentially never fire."""
         config = _make_config(max_game_turns=40)
-        results = _run("memory_heuristic", "random_no_cambia", 80, config,
-                       seat_scheme="alternated")
+        results = _run(
+            "memory_heuristic", "random_no_cambia", 80, config, seat_scheme="alternated"
+        )
         max_turn_ties = results.get("MaxTurnTies", 0)
         errors = results.get("Errors", 0)
         scored = (
@@ -245,19 +251,33 @@ class TestCRNSeatPairing:
 
         def snapshot(r):
             return (
-                r.get("P0 Wins", 0), r.get("P1 Wins", 0),
-                r.get("Ties", 0), r.get("MaxTurnTies", 0),
+                r.get("P0 Wins", 0),
+                r.get("P1 Wins", 0),
+                r.get("Ties", 0),
+                r.get("MaxTurnTies", 0),
                 round(r.stats.get("avg_game_turns", 0.0), 4),
             )
 
-        r1 = _run("greedy", "memory_heuristic", 30, config,
-                  seat_scheme="alternated", crn_seed_base=777)
-        r2 = _run("greedy", "memory_heuristic", 30, config,
-                  seat_scheme="alternated", crn_seed_base=777)
-        assert r1.stats["crn_seed"] == 777
-        assert snapshot(r1) == snapshot(r2), (
-            f"CRN runs not reproducible: {snapshot(r1)} != {snapshot(r2)}"
+        r1 = _run(
+            "greedy",
+            "memory_heuristic",
+            30,
+            config,
+            seat_scheme="alternated",
+            crn_seed_base=777,
         )
+        r2 = _run(
+            "greedy",
+            "memory_heuristic",
+            30,
+            config,
+            seat_scheme="alternated",
+            crn_seed_base=777,
+        )
+        assert r1.stats["crn_seed"] == 777
+        assert snapshot(r1) == snapshot(
+            r2
+        ), f"CRN runs not reproducible: {snapshot(r1)} != {snapshot(r2)}"
 
     def test_crn_seed_recorded_in_stats(self):
         config = _make_config()
@@ -357,7 +377,9 @@ class TestEvalResultsColumns:
         tmp = tempfile.mktemp(suffix=".db")
         db = run_db.get_db(tmp)
         try:
-            cols = {r[1] for r in db.execute("PRAGMA table_info(eval_results)").fetchall()}
+            cols = {
+                r[1] for r in db.execute("PRAGMA table_info(eval_results)").fetchall()
+            }
             assert {"selection_mode", "crn_seed", "seat_scheme"} <= cols
         finally:
             db.close()
@@ -370,8 +392,7 @@ class TestEvalResultsColumns:
 
         tmp = tempfile.mktemp(suffix=".db")
         old = sqlite3.connect(tmp)
-        old.executescript(
-            """
+        old.executescript("""
             CREATE TABLE eval_results (
               id INTEGER PRIMARY KEY, run_id INTEGER, checkpoint_id INTEGER,
               iteration INTEGER, baseline TEXT, win_rate REAL, ci_low REAL,
@@ -383,14 +404,15 @@ class TestEvalResultsColumns:
             );
             INSERT INTO eval_results (run_id, iteration, baseline, win_rate, games_played, timestamp)
             VALUES (1, 10, 'random_no_cambia', 0.42, 5000, '2020-01-01T00:00:00Z');
-            """
-        )
+            """)
         old.commit()
         old.close()
 
         db = run_db.get_db(tmp)
         try:
-            cols = {r[1] for r in db.execute("PRAGMA table_info(eval_results)").fetchall()}
+            cols = {
+                r[1] for r in db.execute("PRAGMA table_info(eval_results)").fetchall()
+            }
             assert {"selection_mode", "crn_seed", "seat_scheme"} <= cols
             row = db.execute(
                 "SELECT win_rate, selection_mode, crn_seed, seat_scheme "
@@ -422,17 +444,25 @@ class TestEvalResultsColumns:
         try:
             rid = run_db.upsert_run(db, name="cols-run", algorithm="desca")
             run_db.insert_eval_result(
-                db, rid, None,
+                db,
+                rid,
+                None,
                 {
-                    "iter": 5, "baseline": "random_no_cambia", "win_rate": 0.5,
-                    "games_played": 100, "timestamp": "2026-06-13T00:00:00Z",
-                    "selection_mode": "stochastic", "crn_seed": 999,
-                    "seat_scheme": "alternated", "seat_balanced": 1,
+                    "iter": 5,
+                    "baseline": "random_no_cambia",
+                    "win_rate": 0.5,
+                    "games_played": 100,
+                    "timestamp": "2026-06-13T00:00:00Z",
+                    "selection_mode": "stochastic",
+                    "crn_seed": 999,
+                    "seat_scheme": "alternated",
+                    "seat_balanced": 1,
                 },
             )
             row = db.execute(
                 "SELECT selection_mode, crn_seed, seat_scheme, seat_balanced "
-                "FROM eval_results WHERE run_id=?", (rid,)
+                "FROM eval_results WHERE run_id=?",
+                (rid,),
             ).fetchone()
             assert row["selection_mode"] == "stochastic"
             assert row["crn_seed"] == "999"  # stored as TEXT
@@ -478,8 +508,12 @@ class TestEvalResultsColumns:
         results = Counter({"P0 Wins": 50, "P1 Wins": 50})
         results.stats = {}
         persist_eval_results(
-            str(run_dir), 100, {"random": results},
-            selection_mode="stochastic", seat_scheme="fixed", crn_seed=7,
+            str(run_dir),
+            100,
+            {"random": results},
+            selection_mode="stochastic",
+            seat_scheme="fixed",
+            crn_seed=7,
         )
         with open(run_dir / "metrics.jsonl") as f:
             row = json.loads(f.readline())
@@ -501,9 +535,16 @@ class TestDBHygiene:
         for it, wr in [(10, 0.40), (20, 0.45)]:
             for bl in run_db.MEAN_IMP_BASELINES:
                 run_db.insert_eval_result(
-                    db, rid, None,
-                    {"iter": it, "baseline": bl, "win_rate": wr,
-                     "games_played": 5000, "timestamp": "2026-06-13T00:00:00Z"},
+                    db,
+                    rid,
+                    None,
+                    {
+                        "iter": it,
+                        "baseline": bl,
+                        "win_rate": wr,
+                        "games_played": 5000,
+                        "timestamp": "2026-06-13T00:00:00Z",
+                    },
                 )
         return rid
 
@@ -518,7 +559,8 @@ class TestDBHygiene:
             assert abs(best - 0.45) < 1e-6
             row = db.execute(
                 "SELECT best_metric_name, best_metric_value, best_metric_iter "
-                "FROM runs WHERE id=?", (rid,)
+                "FROM runs WHERE id=?",
+                (rid,),
             ).fetchone()
             assert row["best_metric_name"] == "mean_imp"
             assert row["best_metric_iter"] == 20
@@ -553,7 +595,9 @@ class TestDBHygiene:
             )
             db.commit()
             assert run_db.mark_stale_running_runs(db, max_age_hours=24.0) == 1
-            status = db.execute("SELECT status FROM runs WHERE id=?", (rid,)).fetchone()["status"]
+            status = db.execute("SELECT status FROM runs WHERE id=?", (rid,)).fetchone()[
+                "status"
+            ]
             assert status == "interrupted"
         finally:
             db.close()
@@ -572,11 +616,14 @@ class TestDBHygiene:
                 "SELECT id FROM checkpoints WHERE iteration=10 AND run_id=?", (rid,)
             ).fetchone()["id"]
             run_db.mark_best_checkpoint(db, rid, best_id)
-            dropped = run_db.apply_checkpoint_retention(db, rid, keep_last_n=1, keep_best=True)
+            dropped = run_db.apply_checkpoint_retention(
+                db, rid, keep_last_n=1, keep_best=True
+            )
             retained = {
                 r["iteration"]
                 for r in db.execute(
-                    "SELECT iteration FROM checkpoints WHERE run_id=? AND is_retained=1", (rid,)
+                    "SELECT iteration FROM checkpoints WHERE run_id=? AND is_retained=1",
+                    (rid,),
                 ).fetchall()
             }
             assert dropped == 1

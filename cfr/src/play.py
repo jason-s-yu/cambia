@@ -37,6 +37,7 @@ console = Console()
 # Action formatting
 # ---------------------------------------------------------------------------
 
+
 def action_to_str(action: GameAction) -> str:
     """Human-readable description of a game action."""
     match action:
@@ -70,7 +71,9 @@ def action_to_str(action: GameAction) -> str:
             return f"Snap your slot {i} (match discard)"
         case ActionSnapOpponent(opponent_target_hand_index=i):
             return f"Snap opponent slot {i} (match discard)"
-        case ActionSnapOpponentMove(own_card_to_move_hand_index=o, target_empty_slot_index=t):
+        case ActionSnapOpponentMove(
+            own_card_to_move_hand_index=o, target_empty_slot_index=t
+        ):
             return f"Move your slot {o} to opponent slot {t}"
         case _:
             return str(action)
@@ -79,7 +82,7 @@ def action_to_str(action: GameAction) -> str:
 _ACTION_ORDER = {
     "draw_stockpile": 0,
     "draw_discard": 1,
-    "discard": 2,      # within discard: use_ability=True sorts before False
+    "discard": 2,  # within discard: use_ability=True sorts before False
     "replace": 3,
     "call_cambia": 4,
     "peek_own": 5,
@@ -102,8 +105,14 @@ def _action_sort_key(action: GameAction):
     if tag == "discard":
         return (order, not getattr(action, "use_ability", False))
     # For positional actions: sort by slot index
-    for attr in ("target_hand_index", "own_hand_index", "own_card_hand_index",
-                 "target_opponent_hand_index", "opponent_hand_index", "opponent_target_hand_index"):
+    for attr in (
+        "target_hand_index",
+        "own_hand_index",
+        "own_card_hand_index",
+        "target_opponent_hand_index",
+        "opponent_hand_index",
+        "opponent_target_hand_index",
+    ):
         val = getattr(action, attr, None)
         if val is not None:
             return (order, val)
@@ -126,9 +135,11 @@ def card_value(card) -> int:
 # Player knowledge tracker
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class PlayerKnowledge:
     """Tracks what a human player knows about cards on the table."""
+
     # Maps (player_id, slot_index) -> Card object the human knows about
     known_cards: Dict[tuple, Any] = field(default_factory=dict)
 
@@ -146,9 +157,11 @@ class PlayerKnowledge:
 # Seat config
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class SeatConfig:
     """Configuration for a single seat at the table."""
+
     seat_id: int
     is_human: bool
     name: str
@@ -160,6 +173,7 @@ class SeatConfig:
 # ---------------------------------------------------------------------------
 # Display functions
 # ---------------------------------------------------------------------------
+
 
 def render_game_state(
     game: CambiaGameState,
@@ -182,7 +196,9 @@ def render_game_state(
     # Discard pile
     if game.discard_pile:
         top = game.discard_pile[-1]
-        console.print(f"  Discard pile top: [bold yellow]{card_str(top)}[/] (value {card_value(top)})")
+        console.print(
+            f"  Discard pile top: [bold yellow]{card_str(top)}[/] (value {card_value(top)})"
+        )
     else:
         console.print("  Discard pile: [dim]empty[/]")
 
@@ -200,9 +216,13 @@ def render_game_state(
         for slot_idx, card in enumerate(hand):
             known = viewer.knowledge.get(pid, slot_idx)
             if is_viewer and known is not None:
-                hand_display.append(f"[bold green]{card_str(known)}[/]({card_value(known)})")
+                hand_display.append(
+                    f"[bold green]{card_str(known)}[/]({card_value(known)})"
+                )
             elif not is_viewer and known is not None:
-                hand_display.append(f"[bold magenta]{card_str(known)}[/]({card_value(known)})")
+                hand_display.append(
+                    f"[bold magenta]{card_str(known)}[/]({card_value(known)})"
+                )
             else:
                 hand_display.append("[dim][ ?? ][/]")
 
@@ -270,7 +290,9 @@ def render_game_over(game: CambiaGameState, seats: List[SeatConfig]) -> None:
         hand_strs = [f"{card_str(c)}({card_value(c)})" for c in hand]
         score = sum(card_value(c) for c in hand)
         scores.append(score)
-        table.add_row(seat.name, "  ".join(hand_strs) if hand_strs else "empty (0)", str(score))
+        table.add_row(
+            seat.name, "  ".join(hand_strs) if hand_strs else "empty (0)", str(score)
+        )
 
     console.print(table)
 
@@ -293,7 +315,10 @@ def render_game_over(game: CambiaGameState, seats: List[SeatConfig]) -> None:
 # Knowledge update logic
 # ---------------------------------------------------------------------------
 
-def _shift_knowledge_after_removal(k: PlayerKnowledge, player_id: int, removed_slot: int) -> None:
+
+def _shift_knowledge_after_removal(
+    k: PlayerKnowledge, player_id: int, removed_slot: int
+) -> None:
     """Shift knowledge entries down after a card is removed from a hand."""
     # Collect all entries for this player, sorted by slot
     entries = sorted(
@@ -327,7 +352,11 @@ def update_knowledge(
         case ActionReplace(target_hand_index=slot):
             if acting_player == viewer:
                 # We know what card we just placed (it was the drawn card)
-                card = game.players[viewer].hand[slot] if slot < len(game.players[viewer].hand) else None
+                card = (
+                    game.players[viewer].hand[slot]
+                    if slot < len(game.players[viewer].hand)
+                    else None
+                )
                 if card:
                     k.know(viewer, slot, card)
             # If opponent replaced, we don't know their new card
@@ -335,28 +364,44 @@ def update_knowledge(
 
         case ActionAbilityPeekOwnSelect(target_hand_index=slot):
             if acting_player == viewer:
-                card = game.players[viewer].hand[slot] if slot < len(game.players[viewer].hand) else None
+                card = (
+                    game.players[viewer].hand[slot]
+                    if slot < len(game.players[viewer].hand)
+                    else None
+                )
                 if card:
                     k.know(viewer, slot, card)
-                    console.print(f"  [bold green]You peeked: your slot {slot} = {card_str(card)} ({card_value(card)})[/]")
+                    console.print(
+                        f"  [bold green]You peeked: your slot {slot} = {card_str(card)} ({card_value(card)})[/]"
+                    )
 
         case ActionAbilityPeekOtherSelect(target_opponent_hand_index=slot):
             if acting_player == viewer:
                 # Peeked at opponent's card
                 opp = 1 - viewer  # 2-player assumption; extend for N
-                card = game.players[opp].hand[slot] if slot < len(game.players[opp].hand) else None
+                card = (
+                    game.players[opp].hand[slot]
+                    if slot < len(game.players[opp].hand)
+                    else None
+                )
                 if card:
                     k.know(opp, slot, card)
-                    console.print(f"  [bold magenta]You peeked: opponent slot {slot} = {card_str(card)} ({card_value(card)})[/]")
+                    console.print(
+                        f"  [bold magenta]You peeked: opponent slot {slot} = {card_str(card)} ({card_value(card)})[/]"
+                    )
 
         case ActionSnapOwn(own_card_hand_index=snap_slot):
             # A card was removed from acting_player's hand at snap_slot.
             # All cards above that index shift down by 1.
             _shift_knowledge_after_removal(k, acting_player, snap_slot)
             # The snapped card went to discard — visible to all, no knowledge needed
-            console.print(f"  [bold]Snap![/] {seats[acting_player].name} snapped slot {snap_slot}")
+            console.print(
+                f"  [bold]Snap![/] {seats[acting_player].name} snapped slot {snap_slot}"
+            )
 
-        case ActionAbilityBlindSwapSelect(own_hand_index=own_slot, opponent_hand_index=opp_slot):
+        case ActionAbilityBlindSwapSelect(
+            own_hand_index=own_slot, opponent_hand_index=opp_slot
+        ):
             if acting_player == viewer:
                 # After blind swap, we no longer know what's in our slot
                 # (it's whatever opponent had, which we didn't see)
@@ -364,17 +409,31 @@ def update_knowledge(
                 k.forget(viewer, own_slot)
                 k.forget(opp, opp_slot)
 
-        case ActionAbilityKingLookSelect(own_hand_index=own_slot, opponent_hand_index=opp_slot):
+        case ActionAbilityKingLookSelect(
+            own_hand_index=own_slot, opponent_hand_index=opp_slot
+        ):
             if acting_player == viewer:
                 opp = 1 - viewer
-                own_card = game.players[viewer].hand[own_slot] if own_slot < len(game.players[viewer].hand) else None
-                opp_card = game.players[opp].hand[opp_slot] if opp_slot < len(game.players[opp].hand) else None
+                own_card = (
+                    game.players[viewer].hand[own_slot]
+                    if own_slot < len(game.players[viewer].hand)
+                    else None
+                )
+                opp_card = (
+                    game.players[opp].hand[opp_slot]
+                    if opp_slot < len(game.players[opp].hand)
+                    else None
+                )
                 if own_card:
                     k.know(viewer, own_slot, own_card)
-                    console.print(f"  [bold green]You looked: your slot {own_slot} = {card_str(own_card)} ({card_value(own_card)})[/]")
+                    console.print(
+                        f"  [bold green]You looked: your slot {own_slot} = {card_str(own_card)} ({card_value(own_card)})[/]"
+                    )
                 if opp_card:
                     k.know(opp, opp_slot, opp_card)
-                    console.print(f"  [bold magenta]You looked: opponent slot {opp_slot} = {card_str(opp_card)} ({card_value(opp_card)})[/]")
+                    console.print(
+                        f"  [bold magenta]You looked: opponent slot {opp_slot} = {card_str(opp_card)} ({card_value(opp_card)})[/]"
+                    )
 
         case ActionAbilityKingSwapDecision(perform_swap=True):
             if acting_player == viewer:
@@ -398,6 +457,7 @@ def update_knowledge(
 # ---------------------------------------------------------------------------
 # Main game loop
 # ---------------------------------------------------------------------------
+
 
 def play_game(
     seat_configs: List[SeatConfig],
@@ -426,14 +486,22 @@ def play_game(
                 if slot < len(hand):
                     seat.knowledge.know(seat.seat_id, slot, hand[slot])
 
-    max_turns = house_rules.max_game_turns if hasattr(house_rules, "max_game_turns") and house_rules.max_game_turns > 0 else 500
+    max_turns = (
+        house_rules.max_game_turns
+        if hasattr(house_rules, "max_game_turns") and house_rules.max_game_turns > 0
+        else 500
+    )
     turn = 0
 
     # Show initial state for first human
     for seat in seat_configs:
         if seat.is_human:
-            console.print(f"\n[bold]Welcome, {seat.name}![/] You are Player {seat.seat_id}.")
-            console.print(f"Your initial peek shows you slots {list(game.players[seat.seat_id].initial_peek_indices)}.")
+            console.print(
+                f"\n[bold]Welcome, {seat.name}![/] You are Player {seat.seat_id}."
+            )
+            console.print(
+                f"Your initial peek shows you slots {list(game.players[seat.seat_id].initial_peek_indices)}."
+            )
             break
 
     while not game.is_terminal() and turn < max_turns:

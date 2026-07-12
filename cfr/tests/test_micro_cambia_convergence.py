@@ -27,10 +27,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 # ---------------------------------------------------------------------------
 # Micro advantage network (self-contained, avoids coupling to src.networks)
 # ---------------------------------------------------------------------------
+
 
 class MicroAdvantageNetwork(nn.Module):
     """
@@ -65,9 +65,7 @@ class MicroAdvantageNetwork(nn.Module):
                 nn.init.kaiming_normal_(module.weight, nonlinearity="relu")
                 nn.init.zeros_(module.bias)
 
-    def forward(
-        self, features: torch.Tensor, action_mask: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, features: torch.Tensor, action_mask: torch.Tensor) -> torch.Tensor:
         out = self.net(features)
         out = out.masked_fill(~action_mask, float("-inf"))
         return out
@@ -84,8 +82,8 @@ AdvantageNetwork = MicroAdvantageNetwork
 # Action indices (compact — only 5 possible actions)
 A_DRAW_STOCK = 0
 A_DRAW_DISCARD = 1
-A_DISCARD = 2       # Discard drawn card (keep hand)
-A_REPLACE = 3       # Replace hand card with drawn card
+A_DISCARD = 2  # Discard drawn card (keep hand)
+A_REPLACE = 3  # Replace hand card with drawn card
 A_CALL_CAMBIA = 4
 NUM_MICRO_ACTIONS = 5
 
@@ -101,17 +99,18 @@ class MicroCambiaState:
     Full game state for micro-Cambia. Fully observable (no hidden info from
     the state's perspective; the BR oracle needs the chance node structure).
     """
-    hands: List[int]                    # hands[p] = card value (1-4), one card each
-    discard_pile: List[int]             # stack, top = last element
-    stockpile: List[int]               # stack, top = last element
+
+    hands: List[int]  # hands[p] = card value (1-4), one card each
+    discard_pile: List[int]  # stack, top = last element
+    stockpile: List[int]  # stack, top = last element
     current_player: int = 0
-    turn_number: int = 0                # increments each time a player finishes a turn
+    turn_number: int = 0  # increments each time a player finishes a turn
     max_turns: int = 4
-    cambia_caller: Optional[int] = None # player who called cambia, or None
+    cambia_caller: Optional[int] = None  # player who called cambia, or None
     turns_after_cambia: int = 0
-    drawn_card: Optional[int] = None    # card drawn but not yet placed
+    drawn_card: Optional[int] = None  # card drawn but not yet placed
     game_over: bool = False
-    _phase: str = "pre_draw"            # "pre_draw" or "post_draw"
+    _phase: str = "pre_draw"  # "pre_draw" or "post_draw"
 
     def clone(self) -> "MicroCambiaState":
         return MicroCambiaState(
@@ -298,6 +297,7 @@ def make_micro_action_mask(state: MicroCambiaState) -> np.ndarray:
 # Chance node enumeration: all possible deals
 # ---------------------------------------------------------------------------
 
+
 def enumerate_deals() -> List[Tuple[Tuple[int, int, int, int], float]]:
     """
     Enumerate all possible initial deals and their probabilities.
@@ -327,6 +327,7 @@ def make_initial_state(deal: Tuple[int, int, int, int]) -> MicroCambiaState:
 # ---------------------------------------------------------------------------
 # Strategy (policy) from advantage network via regret matching
 # ---------------------------------------------------------------------------
+
 
 def get_strategy_from_network(
     network: nn.Module,
@@ -361,6 +362,7 @@ def get_strategy_from_network(
 # ---------------------------------------------------------------------------
 # Best Response Oracle (exact, full tree traversal)
 # ---------------------------------------------------------------------------
+
 
 def best_response_value(
     policy_fn,
@@ -487,9 +489,7 @@ def os_mccfr_traverse(
             strategy_full[a] = 1.0 / num_actions
 
     # Extract local strategy over legal actions
-    local_strategy = np.array(
-        [strategy_full[a] for a in legal_actions], dtype=np.float64
-    )
+    local_strategy = np.array([strategy_full[a] for a in legal_actions], dtype=np.float64)
     total = local_strategy.sum()
     if total > 1e-9:
         local_strategy /= total
@@ -499,8 +499,7 @@ def os_mccfr_traverse(
     # Exploration policy: q(a) = eps * uniform + (1-eps) * sigma(a)
     uniform_prob = 1.0 / num_actions
     exploration_policy = (
-        exploration_epsilon * uniform_prob
-        + (1.0 - exploration_epsilon) * local_strategy
+        exploration_epsilon * uniform_prob + (1.0 - exploration_epsilon) * local_strategy
     )
     exp_total = exploration_policy.sum()
     if exp_total > 1e-9:
@@ -517,8 +516,13 @@ def os_mccfr_traverse(
     child = state.clone()
     child.apply_action(chosen_action)
     node_value = os_mccfr_traverse(
-        child, updating_player, network, iteration,
-        advantage_samples, exploration_epsilon, rng,
+        child,
+        updating_player,
+        network,
+        iteration,
+        advantage_samples,
+        exploration_epsilon,
+        rng,
     )
 
     # Store regret samples for the updating player
@@ -541,12 +545,14 @@ def os_mccfr_traverse(
             regret_target[a] = regrets[i]
             mask_target[a] = True
 
-        advantage_samples.append({
-            "features": features.copy(),
-            "target": regret_target,
-            "mask": mask_target,
-            "iteration": iteration,
-        })
+        advantage_samples.append(
+            {
+                "features": features.copy(),
+                "target": regret_target,
+                "mask": mask_target,
+                "iteration": iteration,
+            }
+        )
 
     return node_value
 
@@ -625,7 +631,10 @@ def train_network_on_samples(
 # Full Deep CFR training + exploitability measurement
 # ---------------------------------------------------------------------------
 
-def reservoir_add(buffer: list, sample: dict, capacity: int, rng: np.random.RandomState, count: int) -> int:
+
+def reservoir_add(
+    buffer: list, sample: dict, capacity: int, rng: np.random.RandomState, count: int
+) -> int:
     """
     Reservoir sampling: add a sample to the buffer with bounded capacity.
     Returns the updated total count (including samples that didn't make it in).
@@ -672,9 +681,7 @@ def run_micro_dcfr(
         )
         for _ in range(2)
     ]
-    optimizers = [
-        torch.optim.Adam(net.parameters(), lr=lr) for net in networks
-    ]
+    optimizers = [torch.optim.Adam(net.parameters(), lr=lr) for net in networks]
 
     # Sample buffers with reservoir sampling (one per player)
     advantage_buffers: List[list] = [[], []]
@@ -711,8 +718,11 @@ def run_micro_dcfr(
             # Add new samples to reservoir buffer
             for sample in new_samples:
                 buffer_counts[player] = reservoir_add(
-                    advantage_buffers[player], sample, buffer_capacity,
-                    rng, buffer_counts[player],
+                    advantage_buffers[player],
+                    sample,
+                    buffer_capacity,
+                    rng,
+                    buffer_counts[player],
                 )
 
         # --- Train networks ---
@@ -739,6 +749,7 @@ def run_micro_dcfr(
             def make_player_policy(p, _nets=networks):
                 def policy(features, mask):
                     return get_strategy_from_network(_nets[p], features, mask)
+
                 return policy
 
             exploit = compute_exploitability_per_player(
@@ -812,9 +823,7 @@ def best_response_value_per_player(
         for action in legal_actions:
             child = state.clone()
             child.apply_action(action)
-            val = best_response_value_per_player(
-                policy_p0, policy_p1, child, br_player
-            )
+            val = best_response_value_per_player(policy_p0, policy_p1, child, br_player)
             best_val = max(best_val, val)
         return best_val
     else:
@@ -832,9 +841,7 @@ def best_response_value_per_player(
                 continue
             child = state.clone()
             child.apply_action(action)
-            val = best_response_value_per_player(
-                policy_p0, policy_p1, child, br_player
-            )
+            val = best_response_value_per_player(policy_p0, policy_p1, child, br_player)
             ev += prob * val
         return ev
 
@@ -889,7 +896,7 @@ class TestMicroCambiaGame:
         state = make_initial_state((1, 2, 3, 4))
         state.apply_action(A_DRAW_STOCK)
         state.apply_action(A_REPLACE)
-        assert state.hands[0] == 4   # replaced with drawn card
+        assert state.hands[0] == 4  # replaced with drawn card
         assert state.discard_pile == [3, 1]  # old hand card discarded
         assert state.current_player == 1
 
@@ -934,7 +941,7 @@ class TestMicroCambiaGame:
     def test_utility_lowest_wins(self):
         state = make_initial_state((1, 3, 2, 4))
         state.game_over = True
-        assert state.get_utility(0) == 1.0   # hand=1 < hand=3
+        assert state.get_utility(0) == 1.0  # hand=1 < hand=3
         assert state.get_utility(1) == -1.0
 
     def test_utility_tie(self):
@@ -1036,8 +1043,11 @@ class TestOSMCCFR:
         state = make_initial_state((1, 2, 3, 4))
         samples = []
         result = os_mccfr_traverse(
-            state, updating_player=0, network=None,
-            iteration=1, advantage_samples=samples,
+            state,
+            updating_player=0,
+            network=None,
+            iteration=1,
+            advantage_samples=samples,
             rng=np.random.RandomState(42),
         )
         assert result.shape == (2,)
@@ -1048,8 +1058,11 @@ class TestOSMCCFR:
         samples = []
         for _ in range(10):
             os_mccfr_traverse(
-                state, updating_player=0, network=None,
-                iteration=1, advantage_samples=samples,
+                state,
+                updating_player=0,
+                network=None,
+                iteration=1,
+                advantage_samples=samples,
                 rng=np.random.RandomState(42),
             )
         assert len(samples) > 0, "Should accumulate at least one advantage sample"
@@ -1058,8 +1071,11 @@ class TestOSMCCFR:
         state = make_initial_state((1, 2, 3, 4))
         samples = []
         os_mccfr_traverse(
-            state, updating_player=0, network=None,
-            iteration=1, advantage_samples=samples,
+            state,
+            updating_player=0,
+            network=None,
+            iteration=1,
+            advantage_samples=samples,
             rng=np.random.RandomState(42),
         )
         for s in samples:
@@ -1080,8 +1096,11 @@ class TestOSMCCFR:
         state = make_initial_state((1, 2, 3, 4))
         samples = []
         result = os_mccfr_traverse(
-            state, updating_player=0, network=net,
-            iteration=1, advantage_samples=samples,
+            state,
+            updating_player=0,
+            network=net,
+            iteration=1,
+            advantage_samples=samples,
             rng=np.random.RandomState(42),
         )
         assert result.shape == (2,)
@@ -1108,7 +1127,12 @@ class TestNetworkTraining:
             for deal, _ in enumerate_deals()[:4]:
                 s = make_initial_state(deal)
                 os_mccfr_traverse(
-                    s, 0, None, 1, samples, rng=rng,
+                    s,
+                    0,
+                    None,
+                    1,
+                    samples,
+                    rng=rng,
                 )
 
         loss1 = train_network_on_samples(net, opt, samples, train_steps=50)
@@ -1158,14 +1182,14 @@ class TestMicroCambiaConvergence:
 
         # 1. Minimum exploitability seen should be well below 1.0 (random is ~1.2)
         min_exploit = min(exploits)
-        assert min_exploit < 0.5, (
-            f"Minimum exploitability {min_exploit:.4f} should be < 0.5"
-        )
+        assert (
+            min_exploit < 0.5
+        ), f"Minimum exploitability {min_exploit:.4f} should be < 0.5"
 
         # 2. Exploitability should generally decrease (compare early to late)
         # Compare iter 1 to best seen in second half
         initial_exploit = exploits[0]
-        second_half_min = min(exploits[len(exploits) // 2:])
+        second_half_min = min(exploits[len(exploits) // 2 :])
         assert second_half_min < initial_exploit, (
             f"Second half min {second_half_min:.4f} should be less than "
             f"initial {initial_exploit:.4f}"
@@ -1174,9 +1198,9 @@ class TestMicroCambiaConvergence:
         # 3. Final exploitability should show meaningful improvement over random
         # Random policy exploitability is ~1.0-1.2, so < 0.6 is significant
         final_exploit = exploits[-1]
-        assert final_exploit < 0.7, (
-            f"Final exploitability {final_exploit:.4f} should be < 0.7"
-        )
+        assert (
+            final_exploit < 0.7
+        ), f"Final exploitability {final_exploit:.4f} should be < 0.7"
 
         print(f"\nFinal exploitability: {final_exploit:.6f}")
         print(f"Min exploitability:   {min_exploit:.6f}")
@@ -1207,9 +1231,9 @@ class TestMicroCambiaConvergence:
         print(f"Min exploitability:   {minimum:.6f}")
 
         # With 300 iterations on this tiny game, should show strong convergence
-        assert minimum < 0.4, (
-            f"With 300 iterations, min exploitability {minimum:.4f} should be < 0.4"
-        )
+        assert (
+            minimum < 0.4
+        ), f"With 300 iterations, min exploitability {minimum:.4f} should be < 0.4"
 
     def test_both_players_converge(self):
         """

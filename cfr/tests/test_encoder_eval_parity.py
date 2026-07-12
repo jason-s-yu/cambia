@@ -71,18 +71,41 @@ from src.encoding import (
     action_to_index,
 )
 
-
 # ---------------------------------------------------------------------------
 # Seed set: 30 seeds, each producing 15-30+ decision points -> well above 100.
 # ---------------------------------------------------------------------------
 
 _SEEDS = [
-    42, 137, 313, 1729, 2718,
-    3141, 4096, 5551, 7777, 12345,
-    54321, 99991, 100003, 131313, 242424,
-    333667, 414213, 500000, 600613, 714285,
-    808080, 919191, 10000019, 31337, 65537,
-    104729, 271828, 998244353, 1000003, 2718281,
+    42,
+    137,
+    313,
+    1729,
+    2718,
+    3141,
+    4096,
+    5551,
+    7777,
+    12345,
+    54321,
+    99991,
+    100003,
+    131313,
+    242424,
+    333667,
+    414213,
+    500000,
+    600613,
+    714285,
+    808080,
+    919191,
+    10000019,
+    31337,
+    65537,
+    104729,
+    271828,
+    998244353,
+    1000003,
+    2718281,
 ]
 
 _SNAP_ACTION_MIN = 97
@@ -250,12 +273,12 @@ def _run_parity_check(wrapper, min_states: int = 100):
             # Under test: wrapper encode path.
             got = _wrapper_encode(wrapper, agent_state, ctx, drawn)
 
-            assert ref.shape == (EP_PBS_V2_INPUT_DIM,), (
-                f"Reference encoder returned shape {ref.shape}; expected (257,)"
-            )
-            assert got.shape == (EP_PBS_V2_INPUT_DIM,), (
-                f"Wrapper returned shape {got.shape}; expected (257,)"
-            )
+            assert ref.shape == (
+                EP_PBS_V2_INPUT_DIM,
+            ), f"Reference encoder returned shape {ref.shape}; expected (257,)"
+            assert got.shape == (
+                EP_PBS_V2_INPUT_DIM,
+            ), f"Wrapper returned shape {got.shape}; expected (257,)"
 
             if not np.array_equal(ref, got):
                 diff_mask = ref != got

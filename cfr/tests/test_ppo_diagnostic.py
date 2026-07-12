@@ -27,10 +27,10 @@ from src.encoding import (  # noqa: E402
 from src.evaluate_agents import AGENT_REGISTRY, get_agent  # noqa: E402
 from src.ppo_env import CambiaEnv, make_env  # noqa: E402
 
-
 # ------------------------------------------------------------------
 # Config stubs — mirror conftest pattern but with agent_params
 # ------------------------------------------------------------------
+
 
 @dataclass
 class _GreedyAgentConfig:
@@ -39,9 +39,7 @@ class _GreedyAgentConfig:
 
 @dataclass
 class _AgentsConfig:
-    greedy_agent: _GreedyAgentConfig = field(
-        default_factory=_GreedyAgentConfig
-    )
+    greedy_agent: _GreedyAgentConfig = field(default_factory=_GreedyAgentConfig)
 
 
 @dataclass
@@ -116,12 +114,8 @@ class _DeepCfrConfig:
 @dataclass
 class _TestConfig:
     agents: _AgentsConfig = field(default_factory=_AgentsConfig)
-    cambia_rules: _CambiaRulesConfig = field(
-        default_factory=_CambiaRulesConfig
-    )
-    agent_params: _AgentParamsConfig = field(
-        default_factory=_AgentParamsConfig
-    )
+    cambia_rules: _CambiaRulesConfig = field(default_factory=_CambiaRulesConfig)
+    agent_params: _AgentParamsConfig = field(default_factory=_AgentParamsConfig)
     deep_cfr: _DeepCfrConfig = field(default_factory=_DeepCfrConfig)
 
 
@@ -302,9 +296,7 @@ class TestEnvSeatVariants:
         mask = env_seat1.action_masks()
         assert mask.any()
         legal_idx = int(np.where(mask)[0][0])
-        obs2, reward, terminated, truncated, info = env_seat1.step(
-            legal_idx
-        )
+        obs2, reward, terminated, truncated, info = env_seat1.step(legal_idx)
         assert obs2.shape == (EP_PBS_INPUT_DIM,)
 
     def test_env_agent_seat_one_full_episode(self, env_seat1):
@@ -348,9 +340,9 @@ class TestActionMaskConsistency:
         legal_indices = {action_to_index(a) for a in legal}
         mask_indices = set(np.where(mask)[0].tolist())
 
-        assert legal_indices == mask_indices, (
-            f"Mask indices {mask_indices} != legal indices {legal_indices}"
-        )
+        assert (
+            legal_indices == mask_indices
+        ), f"Mask indices {mask_indices} != legal indices {legal_indices}"
 
     def test_action_masks_all_false_never_happens(self, env):
         """Mask always has >= 1 True before terminal."""
@@ -430,9 +422,7 @@ def tiny_ppo_model_path():
     from src.config import load_config
 
     config = load_config(
-        os.path.join(
-            os.path.dirname(__file__), "..", "config", "deep_train.yaml"
-        )
+        os.path.join(os.path.dirname(__file__), "..", "config", "deep_train.yaml")
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -460,9 +450,7 @@ def tiny_ppo_model_path():
 
 
 class TestPPOAgentWrapperIntegration:
-    def test_ppo_agent_wrapper_full_game(
-        self, tiny_ppo_model_path, test_config
-    ):
+    def test_ppo_agent_wrapper_full_game(self, tiny_ppo_model_path, test_config):
         """Load trained model and play a complete game via eval harness."""
         from src.game.engine import CambiaGameState
         from src.agent_state import AgentState, AgentObservation
@@ -488,16 +476,13 @@ class TestPPOAgentWrapperIntegration:
                 action=action,
                 discard_top_card=game_state.get_discard_top(),
                 player_hand_sizes=[
-                    game_state.get_player_card_count(i)
-                    for i in range(NUM_PLAYERS)
+                    game_state.get_player_card_count(i) for i in range(NUM_PLAYERS)
                 ],
                 stockpile_size=game_state.get_stockpile_size(),
                 drawn_card=None,
                 peeked_cards=None,
                 snap_results=list(game_state.snap_results_log),
-                did_cambia_get_called=(
-                    game_state.cambia_caller_id is not None
-                ),
+                did_cambia_get_called=(game_state.cambia_caller_id is not None),
                 who_called_cambia=game_state.cambia_caller_id,
                 is_game_over=game_state.is_terminal(),
                 current_turn=game_state.get_turn_number(),
@@ -552,10 +537,7 @@ class TestEncodingConsistency:
             cambia_state = 1
 
         manual_enc = encode_infoset_eppbs_interleaved(
-            slot_tags=[
-                t.value if hasattr(t, "value") else int(t)
-                for t in st.slot_tags
-            ],
+            slot_tags=[t.value if hasattr(t, "value") else int(t) for t in st.slot_tags],
             slot_buckets=[int(b) for b in st.slot_buckets],
             discard_top_bucket=(
                 st.known_discard_top_bucket.value
@@ -572,9 +554,7 @@ class TestEncodingConsistency:
                 if hasattr(st.game_phase, "value")
                 else int(st.game_phase)
             ),
-            decision_context=(
-                ctx.value if hasattr(ctx, "value") else int(ctx)
-            ),
+            decision_context=(ctx.value if hasattr(ctx, "value") else int(ctx)),
             cambia_state=cambia_state,
             own_hand_size=len(st.own_hand),
             opp_hand_size=st.opponent_card_count,
@@ -634,9 +614,9 @@ class TestRegressions:
 
         nonzero_rewards = [r for r in rewards if r != 0.0]
         # At most 1 nonzero reward (the terminal one); ties give 0.0
-        assert len(nonzero_rewards) <= 1, (
-            f"Expected at most 1 nonzero reward, got {len(nonzero_rewards)}"
-        )
+        assert (
+            len(nonzero_rewards) <= 1
+        ), f"Expected at most 1 nonzero reward, got {len(nonzero_rewards)}"
         # All non-terminal steps should be 0.0
         for r in rewards[:-1]:
             assert r == 0.0
@@ -645,9 +625,9 @@ class TestRegressions:
         """Observations stay within declared space bounds during episode."""
         obs, _ = env.reset()
         for _ in range(200):
-            assert env.observation_space.contains(obs), (
-                f"Obs out of bounds: min={obs.min()}, max={obs.max()}"
-            )
+            assert env.observation_space.contains(
+                obs
+            ), f"Obs out of bounds: min={obs.min()}, max={obs.max()}"
             mask = env.action_masks()
             legal_indices = np.where(mask)[0]
             action = int(np.random.choice(legal_indices))
@@ -664,6 +644,6 @@ class TestRegressions:
             assert terminated
             results.append(steps)
         # With different seeds, we should get at least 2 distinct step counts
-        assert len(set(results)) > 1, (
-            "All 10 episodes had identical step counts — likely not random"
-        )
+        assert (
+            len(set(results)) > 1
+        ), "All 10 episodes had identical step counts — likely not random"

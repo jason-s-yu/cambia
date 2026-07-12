@@ -347,8 +347,12 @@ class PullCoordinator:
                     exc.status,
                 )
             else:
-                logger.warning("rundb checkpoint request failed for %s: %s", run_name, exc)
-        except Exception as exc:  # defensive: a checkpoint request must never fail the pull
+                logger.warning(
+                    "rundb checkpoint request failed for %s: %s", run_name, exc
+                )
+        except (
+            Exception
+        ) as exc:  # defensive: a checkpoint request must never fail the pull
             logger.warning("rundb checkpoint request failed for %s: %s", run_name, exc)
 
     def local_run_dir(self, run_name: str) -> Path:

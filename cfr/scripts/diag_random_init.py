@@ -57,7 +57,12 @@ from src.constants import (
 from src.encoding import encode_action_mask, index_to_action
 from src.networks import build_advantage_network, get_strategy_from_advantages
 from src.evaluate_agents import NeuralAgentWrapper, AGENT_REGISTRY, get_agent
-from src.cfr.exceptions import GameStateError, AgentStateError, ObservationUpdateError, ActionEncodingError
+from src.cfr.exceptions import (
+    GameStateError,
+    AgentStateError,
+    ObservationUpdateError,
+    ActionEncodingError,
+)
 
 logging.basicConfig(level=logging.ERROR)
 logger = logging.getLogger(__name__)
@@ -161,7 +166,9 @@ def run_single_matchup(
     game_turns_list = []
     t1_cambia_count = 0
 
-    for game_num in tqdm(range(1, num_games + 1), desc=f"vs {baseline_type}", unit="game", leave=False):
+    for game_num in tqdm(
+        range(1, num_games + 1), desc=f"vs {baseline_type}", unit="game", leave=False
+    ):
         try:
             game_state = CambiaGameState(house_rules=config.cambia_rules)
             agent0 = agent_factory(player_id=0)
@@ -199,7 +206,11 @@ def run_single_matchup(
                     chosen_action = current_agent.choose_action(game_state, legal_actions)
 
                     # Track T1 Cambia
-                    if turn == 1 and acting_player_id == 0 and type(chosen_action).__name__ == "ActionCallCambia":
+                    if (
+                        turn == 1
+                        and acting_player_id == 0
+                        and type(chosen_action).__name__ == "ActionCallCambia"
+                    ):
                         t1_cambia_count += 1
 
                     state_delta, undo_info = game_state.apply_action(chosen_action)
@@ -281,7 +292,9 @@ def main():
 
     parser = argparse.ArgumentParser(description="Random-init network diagnostic")
     parser.add_argument(
-        "-c", "--config", type=str,
+        "-c",
+        "--config",
+        type=str,
         default="runs/interleaved-resnet-adaptive/config.yaml",
         help="Config YAML path",
     )
@@ -304,7 +317,9 @@ def main():
         sys.exit(1)
 
     print(f"Config: {args.config}")
-    print(f"Architecture: ResidualAdvantageNetwork(input={args.input_dim}, hidden={args.hidden_dim}, layers={args.num_layers}, dropout={args.dropout})")
+    print(
+        f"Architecture: ResidualAdvantageNetwork(input={args.input_dim}, hidden={args.hidden_dim}, layers={args.num_layers}, dropout={args.dropout})"
+    )
     print(f"Encoding: interleaved EP-PBS, truncated to {args.input_dim} dims")
     print(f"Action selection: regret matching (ReLU + normalize)")
     print(f"Games per baseline: {args.num_games}")
@@ -340,7 +355,13 @@ def main():
     ]
 
     MI3_BASELINES = {"imperfect_greedy", "memory_heuristic", "aggressive_snap"}
-    MI5_BASELINES = {"random_no_cambia", "random_late_cambia", "imperfect_greedy", "memory_heuristic", "aggressive_snap"}
+    MI5_BASELINES = {
+        "random_no_cambia",
+        "random_late_cambia",
+        "imperfect_greedy",
+        "memory_heuristic",
+        "aggressive_snap",
+    }
 
     all_results = []
     start = time.time()
@@ -348,9 +369,11 @@ def main():
     for bl in baselines:
         result = run_single_matchup(agent_factory, bl, config, args.num_games)
         all_results.append(result)
-        print(f"  {bl:25s}  WR={result['wr']:5.1f}%  wins={result['p0_wins']}/{result['total_games']}  "
-              f"avg_turns={result['avg_turns']:5.1f}  T1C={result['t1c_rate']:.1f}%  "
-              f"margin={result['avg_margin']:+.1f}  err={result['errors']}")
+        print(
+            f"  {bl:25s}  WR={result['wr']:5.1f}%  wins={result['p0_wins']}/{result['total_games']}  "
+            f"avg_turns={result['avg_turns']:5.1f}  T1C={result['t1c_rate']:.1f}%  "
+            f"margin={result['avg_margin']:+.1f}  err={result['errors']}"
+        )
 
     elapsed = time.time() - start
 
@@ -364,10 +387,14 @@ def main():
     print("=" * 70)
     print("RANDOM-INIT NETWORK DIAGNOSTIC RESULTS")
     print("=" * 70)
-    print(f"{'Baseline':25s} {'WR%':>6s} {'Wins':>6s} {'Losses':>6s} {'Ties':>5s} {'AvgTurns':>8s} {'T1C%':>5s}")
+    print(
+        f"{'Baseline':25s} {'WR%':>6s} {'Wins':>6s} {'Losses':>6s} {'Ties':>5s} {'AvgTurns':>8s} {'T1C%':>5s}"
+    )
     print("-" * 70)
     for r in all_results:
-        print(f"{r['baseline']:25s} {r['wr']:5.1f}% {r['p0_wins']:6d} {r['p1_wins']:6d} {r['ties']:5d} {r['avg_turns']:8.1f} {r['t1c_rate']:5.1f}")
+        print(
+            f"{r['baseline']:25s} {r['wr']:5.1f}% {r['p0_wins']:6d} {r['p1_wins']:6d} {r['ties']:5d} {r['avg_turns']:8.1f} {r['t1c_rate']:5.1f}"
+        )
     print("-" * 70)
     print(f"mean_imp(3) = {mi3:.1f}%")
     print(f"mean_imp(5) = {mi5:.1f}%")
@@ -378,8 +405,12 @@ def main():
     print("INTERPRETATION:")
     if mi5 > 47:
         print("  Random-init network achieves ~50% => training ACTIVELY HURTS the agent.")
-        print("  The network bias + regret matching produces a near-uniform strategy that")
-        print("  outperforms the trained agent. Training is converging to a worse strategy.")
+        print(
+            "  The network bias + regret matching produces a near-uniform strategy that"
+        )
+        print(
+            "  outperforms the trained agent. Training is converging to a worse strategy."
+        )
     elif mi5 > 38:
         print("  Random-init network achieves 38-47% => moderate structural bias exists,")
         print("  but training adds some value (trained agent at ~41% mi(5)).")

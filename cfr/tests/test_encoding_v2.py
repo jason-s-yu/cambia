@@ -41,7 +41,6 @@ from src.encoding import (
     encode_infoset_eppbs_interleaved_v2,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -67,6 +66,7 @@ def _make_agent_state(
     Using a plain ``types.SimpleNamespace``-style object keeps the test decoupled
     from the real ``AgentState`` constructor and its config dependencies.
     """
+
     class _Stub:
         pass
 
@@ -83,14 +83,14 @@ def _make_agent_state(
     s.cambia_caller = None
     s._current_game_turn = int(current_turn)
     s.max_game_turns = int(max_game_turns)
-    s.slot_last_seen_turn = list(slot_last_seen) if slot_last_seen is not None else [-1] * 12
+    s.slot_last_seen_turn = (
+        list(slot_last_seen) if slot_last_seen is not None else [-1] * 12
+    )
     s.discard_bucket_counts = (
         list(discard_counts) if discard_counts is not None else [0] * 9
     )
     s.total_discards_seen = int(
-        total_discards
-        if total_discards is not None
-        else sum(s.discard_bucket_counts)
+        total_discards if total_discards is not None else sum(s.discard_bucket_counts)
     )
     s.action_history = (
         action_history
@@ -151,10 +151,18 @@ def test_v2_base_prefix_matches_v1():
     """[0:224] of v2 output is bit-identical to v1 output on the same inputs."""
     kwargs = dict(
         slot_tags=[
-            EpistemicTag.PRIV_OWN, EpistemicTag.UNK, EpistemicTag.PUB, EpistemicTag.UNK,
-            EpistemicTag.UNK, EpistemicTag.UNK,
-            EpistemicTag.PRIV_OPP, EpistemicTag.UNK, EpistemicTag.UNK, EpistemicTag.UNK,
-            EpistemicTag.UNK, EpistemicTag.UNK,
+            EpistemicTag.PRIV_OWN,
+            EpistemicTag.UNK,
+            EpistemicTag.PUB,
+            EpistemicTag.UNK,
+            EpistemicTag.UNK,
+            EpistemicTag.UNK,
+            EpistemicTag.PRIV_OPP,
+            EpistemicTag.UNK,
+            EpistemicTag.UNK,
+            EpistemicTag.UNK,
+            EpistemicTag.UNK,
+            EpistemicTag.UNK,
         ],
         slot_buckets=[2, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         discard_top_bucket=3,
@@ -180,8 +188,10 @@ def test_v2_base_prefix_matches_v1():
         action_history_window=history,
     )
     assert np.allclose(v1, v2[:EP_PBS_INPUT_DIM])
-    assert np.allclose(v2[EP_PBS_INPUT_DIM:EP_PBS_INPUT_DIM + V2_CARD_COUNT_DIM], posterior)
-    assert np.allclose(v2[EP_PBS_INPUT_DIM + V2_CARD_COUNT_DIM:], history)
+    assert np.allclose(
+        v2[EP_PBS_INPUT_DIM : EP_PBS_INPUT_DIM + V2_CARD_COUNT_DIM], posterior
+    )
+    assert np.allclose(v2[EP_PBS_INPUT_DIM + V2_CARD_COUNT_DIM :], history)
 
 
 def test_v2_rejects_wrong_shape_posterior():
@@ -231,8 +241,9 @@ def test_posterior_non_constant_across_states():
             1: (EpistemicTag.PRIV_OWN, rng.randint(0, 8)),
         }
         disc = [rng.randint(0, 2) for _ in range(9)]
-        st = _make_agent_state(own_buckets=own, discard_counts=disc,
-                               total_discards=sum(disc))
+        st = _make_agent_state(
+            own_buckets=own, discard_counts=disc, total_discards=sum(disc)
+        )
         samples.append(compute_card_counting_posterior(st))
     arr = np.stack(samples, axis=0)
     # Each column should vary across the 20 samples; at least 5 columns non-constant.
@@ -293,7 +304,9 @@ def test_action_history_window_layout_oldest_first():
     assert out[8 + 2] == 1.0
     assert math.isclose(float(out[11]), 1.0, abs_tol=1e-6)
     # Opponent oldest slot empty: all zeros at offsets [12:16].
-    assert np.all(out[V2_ACTION_HISTORY_PER_PLAYER:V2_ACTION_HISTORY_PER_PLAYER + 4] == 0.0)
+    assert np.all(
+        out[V2_ACTION_HISTORY_PER_PLAYER : V2_ACTION_HISTORY_PER_PLAYER + 4] == 0.0
+    )
     # Opponent mid slot: DISCARD=1, scalar 0.2 at offsets [16:20].
     assert out[V2_ACTION_HISTORY_PER_PLAYER + 4 + 1] == 1.0
     assert math.isclose(
@@ -318,7 +331,7 @@ def test_action_history_category_one_hot_exclusivity():
     out = compute_action_history_window(st)
     for slot_idx in range(V2_ACTION_HISTORY_SLOTS):
         base = slot_idx * V2_ACTION_SLOT_FEATURE_DIM
-        one_hot = out[base:base + V2_ACTION_CATEGORY_DIM]
+        one_hot = out[base : base + V2_ACTION_CATEGORY_DIM]
         assert int(one_hot.sum()) == 1
 
 
@@ -352,9 +365,9 @@ def test_info_flow_peeked_ace_vs_unknown_differs_on_10_dims():
     enc_peeked = encode_infoset_eppbs_interleaved_v2(peeked, ctx, drawn_card_bucket=-1)
     assert enc_base.shape == (EP_PBS_V2_INPUT_DIM,)
     diff_dims = int(np.sum(np.abs(enc_base - enc_peeked) > 1e-7))
-    assert diff_dims >= 10, (
-        f"Expected >= 10 differing dims between peeked-Ace and unknown states; got {diff_dims}"
-    )
+    assert (
+        diff_dims >= 10
+    ), f"Expected >= 10 differing dims between peeked-Ace and unknown states; got {diff_dims}"
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +383,7 @@ def test_info_flow_peeked_ace_vs_unknown_differs_on_10_dims():
 
 try:
     from src.ffi.bridge import GoAgentState, GoEngine
+
     _HAS_GO = True
 except Exception:
     _HAS_GO = False
@@ -390,10 +404,36 @@ def _cross_path_parity_seeds():
     PassSnap acting_player asymmetry documented in the test body.
     """
     return [
-        42, 137, 313, 1729, 2718, 3141, 4096, 5551, 7777, 12345,
-        54321, 99991, 100003, 131313, 242424, 333667, 414213, 500000,
-        600613, 714285, 808080, 919191, 10000019, 31337, 65537,
-        104729, 271828, 998244353, 1000003, 2718281,
+        42,
+        137,
+        313,
+        1729,
+        2718,
+        3141,
+        4096,
+        5551,
+        7777,
+        12345,
+        54321,
+        99991,
+        100003,
+        131313,
+        242424,
+        333667,
+        414213,
+        500000,
+        600613,
+        714285,
+        808080,
+        919191,
+        10000019,
+        31337,
+        65537,
+        104729,
+        271828,
+        998244353,
+        1000003,
+        2718281,
     ]
 
 
@@ -529,7 +569,9 @@ def test_python_v2_matches_go_v2_live_ffi_100_states():
                 go_v2 = go_agents[actor].encode_eppbs_interleaved_v2(ctx_int, drawn_int)
                 py_ctx = _dc_int_to_enum(ctx_int)
                 py_v2 = encode_infoset_eppbs_interleaved_v2(
-                    py_agents[actor], py_ctx, drawn_card_bucket=int(drawn_int),
+                    py_agents[actor],
+                    py_ctx,
+                    drawn_card_bucket=int(drawn_int),
                 )
 
                 assert go_v2.shape == (EP_PBS_V2_INPUT_DIM,)

@@ -221,9 +221,7 @@ def _responder_priv_init(state: CambiaGameState, responder: int) -> Tuple:
     """
     hand = state.players[responder].hand
     peeks = state.players[responder].initial_peek_indices
-    return tuple(
-        (i, _card_id(hand[i])) for i in sorted(peeks) if i < len(hand)
-    )
+    return tuple((i, _card_id(hand[i])) for i in sorted(peeks) if i < len(hand))
 
 
 class _InfoKey:
@@ -420,7 +418,9 @@ def _ucb_select(node: _Node, c: float) -> int:
     return best_i
 
 
-def _greedy_action_index(node: Optional[_Node], num_legal: int, rng: random.Random) -> int:
+def _greedy_action_index(
+    node: Optional[_Node], num_legal: int, rng: random.Random
+) -> int:
     """Best responder action for the extracted policy: argmax mean value over
     visited actions, ties broken by visit count; uniform when the information set
     was never searched.

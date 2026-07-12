@@ -23,7 +23,6 @@ from src.reservoir import ReservoirBuffer
 from src.sequence_encoding import SEQ_CAP
 from tools.tiny_solver import build_tree
 
-
 CONFIG_2CARD = "config/tiny_2card_plateau.yaml"
 
 
@@ -31,8 +30,14 @@ CONFIG_2CARD = "config/tiny_2card_plateau.yaml"
 def tiny_tree():
     cfg = load_config(CONFIG_2CARD)
     root, isets, nnodes, aborted = build_tree(
-        cfg, n_deals=5, seed0=0, max_nodes_per_deal=2_000_000,
-        enumerate_draws=True, perfect_recall=True, tokenize=True, seq_cap=256,
+        cfg,
+        n_deals=5,
+        seed0=0,
+        max_nodes_per_deal=2_000_000,
+        enumerate_draws=True,
+        perfect_recall=True,
+        tokenize=True,
+        seq_cap=256,
     )
     assert aborted == 0
     return root
@@ -72,6 +77,7 @@ def test_mc_estimate_within_one_action_is_constant(tiny_tree):
     estimate of that child equals the exact terminal value with zero variance
     (no stochastic descent), so any m and any seed give the exact value."""
     traverser = 0
+
     # Find a traverser decision whose first child is a Terminal.
     def find(node):
         if node.kind == "T":
@@ -104,8 +110,12 @@ def test_worker_traversal_appends_valid_regret_samples(tiny_tree):
     """One external-sampling traversal appends well-formed regret samples: token
     features (seq_cap int width), 146-dim target, 146-dim mask with the legal-set
     True, and the recorded iteration."""
-    buf = ReservoirBuffer(capacity=10000, input_dim=SEQ_CAP, target_dim=NUM_ACTIONS, has_mask=True)
-    worker = PRTCFRWorker(tiny_tree, uniform_policy, m_rollouts=2, seq_cap=SEQ_CAP, seed=7)
+    buf = ReservoirBuffer(
+        capacity=10000, input_dim=SEQ_CAP, target_dim=NUM_ACTIONS, has_mask=True
+    )
+    worker = PRTCFRWorker(
+        tiny_tree, uniform_policy, m_rollouts=2, seq_cap=SEQ_CAP, seed=7
+    )
     added = worker.traverse(traverser=0, iteration=5, buf=buf)
     assert added >= 1
     assert len(buf) == added

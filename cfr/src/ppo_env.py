@@ -178,9 +178,7 @@ class CambiaEnv(gymnasium.Env):
         # _config stays None until _load_config() is called on first reset().
         self._encoding_version: int = _peek_encoding_version(config_path)
         obs_dim = EP_PBS_V2_INPUT_DIM if self._encoding_version == 2 else EP_PBS_INPUT_DIM
-        self.observation_space = gymnasium.spaces.Box(
-            -5.0, 5.0, (obs_dim,), np.float32
-        )
+        self.observation_space = gymnasium.spaces.Box(-5.0, 5.0, (obs_dim,), np.float32)
         self.action_space = gymnasium.spaces.Discrete(NUM_ACTIONS)
         self._opponent_type = opponent_type
         self._self_play = opponent_type == SELF_PLAY_OPPONENT
@@ -418,7 +416,9 @@ class CambiaEnv(gymnasium.Env):
                 else int(st.stockpile_estimate)
             ),
             game_phase=(
-                st.game_phase.value if hasattr(st.game_phase, "value") else int(st.game_phase)
+                st.game_phase.value
+                if hasattr(st.game_phase, "value")
+                else int(st.game_phase)
             ),
             decision_context=ctx.value if hasattr(ctx, "value") else int(ctx),
             cambia_state=cambia_state,

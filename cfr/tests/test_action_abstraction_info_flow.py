@@ -55,10 +55,10 @@ from src.constants import (
     CardBucket,
 )
 
-
 # ---------------------------------------------------------------------------
 # Minimal agent state stub (mirrors test_action_abstraction.py)
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class _KnownCardInfo:
@@ -96,6 +96,7 @@ def _mk_agent(
 # ---------------------------------------------------------------------------
 # Mutual information helper
 # ---------------------------------------------------------------------------
+
 
 def _mutual_information_bits(x_vals: List[int], y_vals: List[int]) -> float:
     """Compute empirical mutual information I(X; Y) in bits.
@@ -135,6 +136,7 @@ _OPP_BUCKETS_POOL = [CardBucket.LOW_NUM, None]
 # F7.1 - Own-bucket merge MI test: blind_swap
 # ---------------------------------------------------------------------------
 
+
 def test_blind_swap_own_bucket_merge_mi():
     """
     F7 carry-forward: I(own_bucket_mid_vs_unknown; abstract_class | blind_swap).
@@ -167,9 +169,9 @@ def test_blind_swap_own_bucket_merge_mi():
         mask = abstract_actions([action], agent)
 
         active = np.flatnonzero(mask)
-        assert len(active) == 1, (
-            f"Single blind_swap must map to exactly one abstract class; got {len(active)}"
-        )
+        assert (
+            len(active) == 1
+        ), f"Single blind_swap must map to exactly one abstract class; got {len(active)}"
 
         x_labels.append(0 if own_b in _MID_BUCKETS else 1)
         y_labels.append(int(active[0]))
@@ -186,6 +188,7 @@ def test_blind_swap_own_bucket_merge_mi():
 # ---------------------------------------------------------------------------
 # F7.2 - Own-bucket merge MI test: king_look
 # ---------------------------------------------------------------------------
+
 
 def test_king_look_own_bucket_merge_mi():
     """
@@ -211,9 +214,9 @@ def test_king_look_own_bucket_merge_mi():
         mask = abstract_actions([action], agent)
 
         active = np.flatnonzero(mask)
-        assert len(active) == 1, (
-            f"Single king_look must map to exactly one abstract class; got {len(active)}"
-        )
+        assert (
+            len(active) == 1
+        ), f"Single king_look must map to exactly one abstract class; got {len(active)}"
 
         x_labels.append(0 if own_b in _MID_BUCKETS else 1)
         y_labels.append(int(active[0]))
@@ -230,6 +233,7 @@ def test_king_look_own_bucket_merge_mi():
 # ---------------------------------------------------------------------------
 # F7.3 - Snap tiebreaker determinism: snap_own
 # ---------------------------------------------------------------------------
+
 
 def test_snap_own_tiebreaker_determinism():
     """
@@ -264,6 +268,7 @@ def test_snap_own_tiebreaker_determinism():
 # F7.4 - Snap tiebreaker determinism: snap_opp
 # ---------------------------------------------------------------------------
 
+
 def test_snap_opp_tiebreaker_determinism():
     """
     F7 carry-forward: snap_opp tiebreaker determinism under seeded selection.
@@ -285,14 +290,15 @@ def test_snap_opp_tiebreaker_determinism():
         r1 = unabstract(snap_opp_idx, snap_actions, agent, seed=seed)
         r2 = unabstract(snap_opp_idx, snap_actions, agent, seed=seed)
 
-        assert r1 == r2, (
-            f"Trial {trial}: snap_opp unabstract not deterministic with seed={seed}."
-        )
+        assert (
+            r1 == r2
+        ), f"Trial {trial}: snap_opp unabstract not deterministic with seed={seed}."
 
 
 # ---------------------------------------------------------------------------
 # F7.5 - Snap tiebreaker: different seeds produce different concrete actions
 # ---------------------------------------------------------------------------
+
 
 def test_snap_own_tiebreaker_varies_with_seed():
     """
@@ -325,6 +331,7 @@ def test_snap_own_tiebreaker_varies_with_seed():
 # F7.6 - Confirm abstract class names reflect mid_or_unknown merge (documentation)
 # ---------------------------------------------------------------------------
 
+
 def test_blind_swap_king_look_class_names_reflect_merge():
     """
     Registry consistency: abstract class names for blind_swap and king_look
@@ -345,9 +352,9 @@ def test_blind_swap_king_look_class_names_reflect_merge():
         )
 
     # Verify 3 own-bucket classes per action type x 2 opp classes = 6 classes each
-    assert len(blind_swap_names) == 6, (
-        f"Expected 6 blind_swap abstract classes (3 own x 2 opp), got {len(blind_swap_names)}"
-    )
-    assert len(king_look_names) == 6, (
-        f"Expected 6 king_look abstract classes (3 own x 2 opp), got {len(king_look_names)}"
-    )
+    assert (
+        len(blind_swap_names) == 6
+    ), f"Expected 6 blind_swap abstract classes (3 own x 2 opp), got {len(blind_swap_names)}"
+    assert (
+        len(king_look_names) == 6
+    ), f"Expected 6 king_look abstract classes (3 own x 2 opp), got {len(king_look_names)}"

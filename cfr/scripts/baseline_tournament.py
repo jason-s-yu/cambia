@@ -49,15 +49,21 @@ def main():
 
     parser = argparse.ArgumentParser(description="Baseline agent round-robin tournament")
     parser.add_argument(
-        "--config", type=str, default="runs/eppbs-2p/config.yaml",
+        "--config",
+        type=str,
+        default="runs/eppbs-2p/config.yaml",
         help="Config YAML (for game rules)",
     )
     parser.add_argument(
-        "--games", type=int, default=10000,
+        "--games",
+        type=int,
+        default=10000,
         help="Games per matchup (alternates seats)",
     )
     parser.add_argument(
-        "--output", type=str, default=None,
+        "--output",
+        type=str,
+        default=None,
         help="Output JSON file for full results",
     )
     args = parser.parse_args()
@@ -72,8 +78,10 @@ def main():
 
     matchups = list(itertools.combinations(BASELINES, 2))
     total_games = len(matchups) * games_per_matchup
-    print(f"Tournament: {len(BASELINES)} baselines, {len(matchups)} matchups, "
-          f"{games_per_matchup} games each = {total_games:,} total games")
+    print(
+        f"Tournament: {len(BASELINES)} baselines, {len(matchups)} matchups, "
+        f"{games_per_matchup} games each = {total_games:,} total games"
+    )
     print(f"Config: {config_path}")
     print()
 
@@ -82,18 +90,31 @@ def main():
 
     for i, (a1, a2) in enumerate(matchups, 1):
         half = games_per_matchup // 2
-        print(f"[{i}/{len(matchups)}] {a1} vs {a2} ({games_per_matchup} games, seat-balanced)...",
-              end=" ", flush=True)
+        print(
+            f"[{i}/{len(matchups)}] {a1} vs {a2} ({games_per_matchup} games, seat-balanced)...",
+            end=" ",
+            flush=True,
+        )
         mt = time.perf_counter()
 
         # Play half with a1 as P0, half with a2 as P0 to eliminate first-mover bias
         c1 = run_evaluation(
-            config_path=config_path, agent1_type=a1, agent2_type=a2,
-            num_games=half, strategy_path=None, checkpoint_path=None, device="cpu",
+            config_path=config_path,
+            agent1_type=a1,
+            agent2_type=a2,
+            num_games=half,
+            strategy_path=None,
+            checkpoint_path=None,
+            device="cpu",
         )
         c2 = run_evaluation(
-            config_path=config_path, agent1_type=a2, agent2_type=a1,
-            num_games=half, strategy_path=None, checkpoint_path=None, device="cpu",
+            config_path=config_path,
+            agent1_type=a2,
+            agent2_type=a1,
+            num_games=half,
+            strategy_path=None,
+            checkpoint_path=None,
+            device="cpu",
         )
         elapsed = time.perf_counter() - mt
 
@@ -113,10 +134,12 @@ def main():
         avg_turns = (s1.get("avg_game_turns", 0) + s2.get("avg_game_turns", 0)) / 2
         avg_margin = (s1.get("avg_score_margin", 0) + s2.get("avg_score_margin", 0)) / 2
 
-        print(f"{a1} {wr*100:.1f}% [{ci_lo*100:.1f}-{ci_hi*100:.1f}] | "
-              f"turns={avg_turns:.0f} margin={avg_margin:.1f} | "
-              f"{elapsed:.1f}s ({games_per_matchup/elapsed:.0f} games/s)"
-              f"{f' errs={errs}' if errs else ''}")
+        print(
+            f"{a1} {wr*100:.1f}% [{ci_lo*100:.1f}-{ci_hi*100:.1f}] | "
+            f"turns={avg_turns:.0f} margin={avg_margin:.1f} | "
+            f"{elapsed:.1f}s ({games_per_matchup/elapsed:.0f} games/s)"
+            f"{f' errs={errs}' if errs else ''}"
+        )
 
         results[f"{a1}_vs_{a2}"] = {
             "agent1": a1,
@@ -166,14 +189,18 @@ def main():
     output_path = args.output or "runs/eppbs-2p/baseline_tournament.json"
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w") as f:
-        json.dump({
-            "config": config_path,
-            "games_per_matchup": games_per_matchup,
-            "baselines": BASELINES,
-            "total_games": total_games,
-            "total_elapsed_s": round(total_elapsed, 1),
-            "matchups": results,
-        }, f, indent=2)
+        json.dump(
+            {
+                "config": config_path,
+                "games_per_matchup": games_per_matchup,
+                "baselines": BASELINES,
+                "total_games": total_games,
+                "total_elapsed_s": round(total_elapsed, 1),
+                "matchups": results,
+            },
+            f,
+            indent=2,
+        )
     print(f"\nResults saved to {output_path}")
 
 

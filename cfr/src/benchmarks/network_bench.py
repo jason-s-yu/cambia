@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 # Try to import psutil for CPU memory tracking (optional)
 try:
     import psutil
+
     HAS_PSUTIL = True
 except ImportError:
     HAS_PSUTIL = False
@@ -64,9 +65,9 @@ def _peak_memory_mb(device: str) -> Optional[float]:
     """Peak accelerator memory in MB for device, or None off-accelerator."""
     kind = _accel_kind(device)
     if kind == "cuda":
-        return torch.cuda.max_memory_allocated() / (1024 ** 2)
+        return torch.cuda.max_memory_allocated() / (1024**2)
     if kind == "xpu" and hasattr(torch.xpu, "max_memory_allocated"):
-        return torch.xpu.max_memory_allocated() / (1024 ** 2)
+        return torch.xpu.max_memory_allocated() / (1024**2)
     return None
 
 
@@ -178,7 +179,10 @@ def benchmark_forward_pass(
 
             logger.info(
                 "Batch %d: %.4f ms (± %.4f ms), %.2f samples/s",
-                batch_size, avg_duration * 1000, std_duration * 1000, throughput
+                batch_size,
+                avg_duration * 1000,
+                std_duration * 1000,
+                throughput,
             )
 
     result = BenchmarkResult(
@@ -253,7 +257,9 @@ def benchmark_backward_pass(
         # Generate random target values (regrets)
         targets = torch.randn(batch_size, NUM_ACTIONS, device=device)
         # Generate random iteration weights
-        iterations = torch.randint(1, 100, (batch_size,), dtype=torch.float32, device=device)
+        iterations = torch.randint(
+            1, 100, (batch_size,), dtype=torch.float32, device=device
+        )
         weights = (iterations + 1.0).pow(alpha)
         weights = weights / weights.mean()
 
@@ -307,7 +313,10 @@ def benchmark_backward_pass(
 
         logger.info(
             "Batch %d: %.4f ms (± %.4f ms), %.2f samples/s",
-            batch_size, avg_duration * 1000, std_duration * 1000, throughput
+            batch_size,
+            avg_duration * 1000,
+            std_duration * 1000,
+            throughput,
         )
 
     result = BenchmarkResult(
@@ -412,7 +421,9 @@ def benchmark_gpu_vs_cpu(
 
         logger.info(
             "Batch %d: Forward speedup %.2fx, Backward speedup %.2fx",
-            batch_size, forward_speedup, backward_speedup
+            batch_size,
+            forward_speedup,
+            backward_speedup,
         )
 
     result = BenchmarkResult(
@@ -475,7 +486,9 @@ def benchmark_batch_size_sweep(
             # Generate batch
             features, action_mask = _generate_batch(batch_size, device)
             targets = torch.randn(batch_size, NUM_ACTIONS, device=device)
-            iterations = torch.randint(1, 100, (batch_size,), dtype=torch.float32, device=device)
+            iterations = torch.randint(
+                1, 100, (batch_size,), dtype=torch.float32, device=device
+            )
             weights = (iterations + 1.0).pow(alpha)
             weights = weights / weights.mean()
 
@@ -493,7 +506,9 @@ def benchmark_batch_size_sweep(
                 masked_preds = predictions * action_mask.float()
                 masked_targets = targets * action_mask.float()
                 num_legal = action_mask.float().sum(dim=1).clamp(min=1.0)
-                per_sample_mse = ((masked_preds - masked_targets) ** 2).sum(dim=1) / num_legal
+                per_sample_mse = ((masked_preds - masked_targets) ** 2).sum(
+                    dim=1
+                ) / num_legal
                 loss = (weights * per_sample_mse).mean()
                 loss.backward()
                 nn.utils.clip_grad_norm_(network.parameters(), max_norm=1.0)
@@ -512,7 +527,9 @@ def benchmark_batch_size_sweep(
                 masked_preds = predictions * action_mask.float()
                 masked_targets = targets * action_mask.float()
                 num_legal = action_mask.float().sum(dim=1).clamp(min=1.0)
-                per_sample_mse = ((masked_preds - masked_targets) ** 2).sum(dim=1) / num_legal
+                per_sample_mse = ((masked_preds - masked_targets) ** 2).sum(
+                    dim=1
+                ) / num_legal
                 loss = (weights * per_sample_mse).mean()
                 loss.backward()
                 nn.utils.clip_grad_norm_(network.parameters(), max_norm=1.0)
@@ -533,15 +550,19 @@ def benchmark_batch_size_sweep(
                 metrics[f"batch_{batch_size}_memory_mb"] = peak_memory_mb
                 logger.info(
                     "Batch %d: %.2f samples/s, %.2f MB GPU memory",
-                    batch_size, throughput, peak_memory_mb
+                    batch_size,
+                    throughput,
+                    peak_memory_mb,
                 )
             elif HAS_PSUTIL:
                 mem_after = process.memory_info().rss
-                mem_delta_mb = (mem_after - mem_before) / (1024 ** 2)
+                mem_delta_mb = (mem_after - mem_before) / (1024**2)
                 metrics[f"batch_{batch_size}_memory_mb"] = mem_delta_mb
                 logger.info(
                     "Batch %d: %.2f samples/s, %.2f MB CPU memory delta",
-                    batch_size, throughput, mem_delta_mb
+                    batch_size,
+                    throughput,
+                    mem_delta_mb,
                 )
             else:
                 logger.info("Batch %d: %.2f samples/s", batch_size, throughput)
@@ -555,10 +576,7 @@ def benchmark_batch_size_sweep(
                 raise
 
     # Find optimal batch size (highest throughput)
-    throughput_items = [
-        (k, v) for k, v in metrics.items()
-        if k.endswith("_throughput")
-    ]
+    throughput_items = [(k, v) for k, v in metrics.items() if k.endswith("_throughput")]
     if throughput_items:
         optimal_key, optimal_throughput = max(throughput_items, key=lambda x: x[1])
         optimal_batch = int(optimal_key.split("_")[1])
