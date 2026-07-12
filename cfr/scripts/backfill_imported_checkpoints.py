@@ -195,7 +195,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             failures += 1
             continue
 
-        logger.info("%s", summary.report(dry_run=args.dry_run))
+        # print, not logger.info: an imported module's logging config can set
+        # the root level above INFO, which silently swallows the summary.
+        print(summary.report(dry_run=args.dry_run))
         if summary.missing:
             logger.warning(
                 "[%s] %d ledger-listed iteration(s) have no snapshot file on "
