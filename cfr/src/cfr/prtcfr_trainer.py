@@ -821,6 +821,13 @@ class PRTCFRTinyTrainer:
         """Copy prtcfr_snapshot_iter_{i}.pt (i <= upto_t) from a source snapshot
         dir into this run's snapshot dir when they are not already there, so the
         continuation's SD-CFR average spans [1 .. N], not just the new iters.
+
+        Registers every present iter in run_db via the same helper run_iteration
+        uses for natively-written checkpoints (cambia-389): otherwise an imported
+        snapshot is ledger-listed (resume_state.json's snapshots list) but has no
+        checkpoints row, so the harness pull include-set -- derived from run_db
+        checkpoint rows -- silently skips it.
+
         Returns the sorted iters now present (source + already-local)."""
         present = set()
         pat = re.compile(r"prtcfr_snapshot_iter_(\d+)\.pt$")
@@ -840,6 +847,8 @@ class PRTCFRTinyTrainer:
             m = pat.search(os.path.basename(fp))
             if m and int(m.group(1)) <= upto_t:
                 present.add(int(m.group(1)))
+        for it in present:
+            self._register_checkpoint_in_db(it, self.snapshot_path(it))
         return sorted(present)
 
     def _warm_start_from_path(self) -> int:
