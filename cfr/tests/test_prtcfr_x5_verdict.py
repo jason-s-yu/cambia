@@ -13,7 +13,11 @@ exploitability reference-table JSON drive:
   - unit tests for the window-selection and minimum-detectable-slope math on
     known series;
   - the --g2-rule flag flipping a borderline strategic leg (point passes, lower
-    CI bound does not).
+    CI bound does not);
+  - the canonical row-list reference schema (cambia-415): read_baseline_reference
+    accepting {"schema_version", "rows": [...]}, latest-row-wins on duplicate
+    (baseline, estimator) rows, and row-list vs. nested-map agreement on
+    G3-ordering results for identical underlying data.
 
 The slope-CI math itself is imported from prtcfr_x4_verdict (already unit-tested
 against numpy polyfit and a Student's-t table in test_prtcfr_x4_verdict.py), so
@@ -166,6 +170,33 @@ _REF_PASS = {
 
 def _write_reference(path, baselines):
     payload = {"schema_version": 1, "rule_profile": "production", "baselines": baselines}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _rows_from_baselines(baselines, timestamp="2026-07-12T00:00:00Z", seed=42,
+                          rule_profile="prtcfr_production", sample_count=2000):
+    """Flatten a nested {baseline: {estimator: {exploitability, ci_low, ci_high}}}
+    map into the canonical producer row-list shape (P3W5's write_table format),
+    for asserting the row-list and nested-map reference loaders agree."""
+    rows = []
+    for baseline, estimators in baselines.items():
+        for estimator, vals in estimators.items():
+            rows.append({
+                "baseline": baseline,
+                "estimator": estimator,
+                "value": vals["exploitability"],
+                "ci_low": vals["ci_low"],
+                "ci_high": vals["ci_high"],
+                "sample_count": sample_count,
+                "rule_profile": rule_profile,
+                "seed": seed,
+                "timestamp": timestamp,
+            })
+    return rows
+
+
+def _write_row_list_reference(path, baselines, **kwargs):
+    payload = {"schema_version": 1, "rows": _rows_from_baselines(baselines, **kwargs)}
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
@@ -446,6 +477,72 @@ def test_g3_ordering_reference_missing(tmp_path):
     )
     assert g3["reference_available"] is False
     assert g3["verdict"] == "FAIL"
+
+
+# ---------------------------------------------------------------------------
+# Canonical row-list reference schema (cambia-415): {"schema_version", "rows"}
+# is the producer's (prtcfr_baseline_exploitability.py) write_table shape and
+# must be accepted as the primary reference-loader format.
+# ---------------------------------------------------------------------------
+
+
+def test_read_baseline_reference_accepts_row_list_shape(tmp_path):
+    path = tmp_path / "ref_rows.json"
+    _write_row_list_reference(path, _REF_PASS)
+
+    ref = x5.read_baseline_reference(str(path))
+    assert ref["available"] is True
+    entry = ref["baselines"]["imperfect_greedy"]["lbr_tier_b"]
+    assert entry["exploitability"] == pytest.approx(0.30)
+    assert entry["ci_low"] == pytest.approx(0.27)
+    assert entry["ci_high"] == pytest.approx(0.33)
+    assert entry["games"] == 2000
+    assert ref["baselines"]["aggressive_snap"]["ismcts_br"]["exploitability"] == pytest.approx(0.40)
+
+
+def test_baselines_from_rows_latest_timestamp_wins_on_duplicates():
+    rows = [
+        {
+            "baseline": "aggressive_snap", "estimator": "lbr_tier_b", "value": 0.20,
+            "ci_low": 0.18, "ci_high": 0.22, "sample_count": 1000,
+            "timestamp": "2026-07-01T00:00:00Z",
+        },
+        {
+            "baseline": "aggressive_snap", "estimator": "lbr_tier_b", "value": 0.35,
+            "ci_low": 0.32, "ci_high": 0.38, "sample_count": 2000,
+            "timestamp": "2026-07-12T00:00:00Z",
+        },
+    ]
+    baselines = x5._baselines_from_rows(rows)
+    entry = baselines["aggressive_snap"]["lbr_tier_b"]
+    assert entry["exploitability"] == pytest.approx(0.35)
+    assert entry["games"] == 2000
+
+
+def test_g3_ordering_row_list_and_nested_map_reference_agree(tmp_path):
+    """The canonical row-list reference and the nested-map reference for the
+    same underlying data must produce identical G3-ordering results."""
+    run_dir = tmp_path / "runs" / "g3rows"
+    run_dir.mkdir(parents=True)
+    db_path = tmp_path / "db.sqlite"
+    _seed_g2(db_path, "g3rows", _G2_PASS)
+    _seed_mixture_exploit(db_path, "g3rows", _MIX_PASS)
+
+    nested_path = tmp_path / "ref_nested.json"
+    _write_reference(nested_path, _REF_PASS)
+    rows_path = tmp_path / "ref_rows.json"
+    _write_row_list_reference(rows_path, _REF_PASS)
+
+    g3_nested = x5.compute_g3_ordering(
+        run_dir, db_path=str(db_path), baseline_ref_path=str(nested_path)
+    )
+    g3_rows = x5.compute_g3_ordering(
+        run_dir, db_path=str(db_path), baseline_ref_path=str(rows_path)
+    )
+
+    assert g3_nested["verdict"] == g3_rows["verdict"] == "PASS"
+    assert g3_nested["primary_pass"] == g3_rows["primary_pass"]
+    assert g3_nested["legs"] == g3_rows["legs"]
 
 
 # ---------------------------------------------------------------------------
