@@ -32,6 +32,7 @@ rl = ["gymnasium>=1.0", "stable-baselines3>=2.4", "sb3-contrib>=2.4"]
 # the base deps: only the `cambia harness` subcommand and the pull loop import
 # these, and a training host never needs them.
 harness = ["websockets>=13.0", "pyjwt>=2.8", "cryptography>=42.0"]
+dev = ["black==26.5.1"]
 
 [project.scripts]
 cambia = "src.cli:app"
