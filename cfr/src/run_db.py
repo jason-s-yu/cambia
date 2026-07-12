@@ -232,6 +232,10 @@ def get_db(db_path: Optional[str] = None) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # WAL only serializes readers vs one writer; a second writer still gets
+    # SQLITE_BUSY immediately without a timeout. Post-pull writers (mixture
+    # runner, backfill) plus the trainer mirror widen the writer surface.
+    conn.execute("PRAGMA busy_timeout=5000")
 
     conn.executescript(_DDL)
     _migrate_schema(conn)
