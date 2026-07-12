@@ -178,6 +178,51 @@ def test_full_mode_warm_start_is_continuous(tiny_tree, warm_run_a, tmp_path):
     )
 
 
+def test_full_mode_warm_start_registers_imported_snapshots_in_run_db(
+    tiny_tree, warm_run_a, tmp_path
+):
+    """Every prtcfr_snapshot_iter_N.pt imported by a warm start must get a
+    checkpoints row in run_db, exactly like a natively-written checkpoint
+    (cambia-389). The harness pull include-set is derived from checkpoint
+    rows, so an unregistered import is invisible to artifact sync even
+    though resume_state.json's snapshots ledger lists it."""
+    run_a = warm_run_a["run_dir"]
+
+    _seed_all(2026)
+    run_b = str(tmp_path / "run_b_dbcheck")
+    db_path = str(tmp_path / "cambia_runs.db")
+    cfg_b = _reduced_cfg(warm_start_path=run_a, iterations=_N_A)
+    tr_b = PRTCFRTinyTrainer(
+        tiny_tree,
+        cfg_b,
+        run_dir=run_b,
+        run_name="cambia-389-warmstart-dbcheck",
+        db_path=db_path,
+    )
+    # iterations == _N_A == A's last iteration: the training loop runs zero
+    # NEW iterations, isolating import-time registration from the
+    # natively-produced-checkpoint registration run_iteration already does.
+    history = tr_b.train(iterations=_N_A)
+    assert history == []
+
+    assert tr_b._db_conn is not None and tr_b._db_run_id is not None
+    rows = tr_b._db_conn.execute(
+        "SELECT iteration, file_path FROM checkpoints WHERE run_id=? ORDER BY iteration",
+        (tr_b._db_run_id,),
+    ).fetchall()
+    got_iters = [r["iteration"] for r in rows]
+    assert got_iters == list(range(1, _N_A + 1)), (
+        f"expected a checkpoint row per imported snapshot iter 1..{_N_A}, got "
+        f"{got_iters} -- the harness pull include-set derives from these rows, "
+        f"so a gap here means iter_N.pt is skipped by artifact sync"
+    )
+    for r in rows:
+        assert os.path.exists(r["file_path"])
+        assert r["file_path"] == os.path.join(
+            run_b, "snapshots", f"prtcfr_snapshot_iter_{r['iteration']}.pt"
+        )
+
+
 def test_net_only_warm_start_guard(tiny_tree, warm_run_a, tmp_path):
     """Net-only warm start (a bare snapshot .pt) raises by default
     (cambia-374) and is permitted -- with an EMPTY reservoir, the root-cause
