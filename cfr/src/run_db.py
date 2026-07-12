@@ -33,8 +33,18 @@ from src.evaluate_agents import MEAN_IMP_BASELINES  # canonical source
 # instead of the normal win_rate 0..1 bound. Genuine win-rate rows (baseline
 # names from evaluate_agents.AGENT_REGISTRY, e.g. MEAN_IMP_BASELINES) keep the
 # probability bound.
+#
+# 'lbr_tier_b' / 'ismcts_br' (v0.4 Phase 3, cambia-408/P3W8): the X5
+# G3-ordering mixture exploitability rows, written by the post-pull local
+# script prtcfr_mixture_exploitability.py. win_rate carries the exploitability
+# value (mean BR gap over a [-1, 1] utility, so it can exceed 1.0), the same
+# generic-metric convention as 'nashconv'.
 STABILITY_NASHCONV_BASELINE = "nashconv"
-STABILITY_METRIC_BASELINES: frozenset = frozenset({STABILITY_NASHCONV_BASELINE})
+EXPLOIT_TIER_B_LBR_BASELINE = "lbr_tier_b"
+EXPLOIT_ISMCTS_BR_BASELINE = "ismcts_br"
+STABILITY_METRIC_BASELINES: frozenset = frozenset(
+    {STABILITY_NASHCONV_BASELINE, EXPLOIT_TIER_B_LBR_BASELINE, EXPLOIT_ISMCTS_BR_BASELINE}
+)
 
 _DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "runs" / "cambia_runs.db"
 
