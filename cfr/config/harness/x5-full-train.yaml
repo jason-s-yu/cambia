@@ -1,0 +1,80 @@
+# cfr/config/harness/x5-full-train.yaml
+#
+# X5 full-game PRT-CFR run to the Phase 3 G2 + G3 verdict, run as a harness train
+# job (Phase 3 Sprint 1, P3W1; see .docs/v0.4/phase3-full-run/sprint-1-plan.md,
+# contract.md "Budget anchor and run length", and the budget branches in
+# .docs/v0.4/phase3-full-run/budget-math.md).
+# Submit with: cambia harness submit cfr/config/harness/x5-full-train.yaml
+#
+# Client-side validation (src/harness/spec.py) runs before submit; the runner
+# re-validates and re-guards server-side. Unknown keys are rejected.
+#
+# X5 is X4 at scale: the same estimator, encoder, in-loop battery, and deployable
+# SD-CFR mixture. Only the budget grows, the stop mode changes to divergence, and
+# stability_min_iters floors at the 10x anchor iteration so no early stop can
+# truncate the budget curve the gate must observe.
+
+# Train job. The runner resolves kind: train to `cambia train prtcfr`.
+kind: train
+
+# Placeholder run name; becomes the run directory on the runner and the job id.
+# @chief sets the final run name at submit time. The eval specs
+# (x5-meanimp-eval.yaml, x5-exploitability-eval.yaml) `target` must equal
+# whatever name is used here.
+name: v0.4-x5-full
+
+# Production PRT-CFR config: SD-CFR snapshot mixture, disk-backed reservoirs,
+# global-cosine peak-LR decay, best-snapshot stability controller (cambia-341).
+config: cfr/config/prtcfr_production.yaml
+
+# Compute device. Placeholder cpu; V5 role decision (cambia-337) sets this before
+# submit. Train-offload role -> xpu (branch A); eval-only role -> cpu on nash with
+# the A310 reserved for the eval battery (branch b1), or cuda on the pangu
+# uncontended window (branch b2, cambia-251). The runner injects this device as
+# the prt_cfr.device render rail, overriding the config default, so no
+# prt_cfr.device override is needed here. See budget-math.md "Host branches".
+device: cpu
+
+# Dotted-key overrides applied on top of `config` at render time.
+#
+# The three budget knobs (iterations, k_games_per_iter, m_rollouts) carry the
+# full-branch values pending the @chief + user sign-off ruled in budget-math.md.
+# They are pinned in the SPEC (not edited into the shared production config, which
+# X4 also consumes) so a C2-contingency K reduction re-derives the iteration
+# target by editing this file alone (budget-math.md "C2-reduced re-derivation").
+# The first 10 to 50 iters are a throughput probe checked against budget-math.md
+# before committing the full length; a reduction of K or m is valid ONLY with the
+# X2-grid C2 measured-noise-cost run plus explicit user sign-off.
+#
+# iterations 5000 is the primary target (~20.5x DESCA); the in-budget floor is
+# 3442 (one clean 1000-iter trend window past the 10x anchor). See budget-math.md.
+#
+# stability_metric_name switches the in-loop stability trend from the tiny-gate
+# NashConv default to the Tier-A LBR fast lane (S2W1 battery). Load-bearing: the
+# production config default is nashconv.
+#
+# stability_stop_mode divergence (NOT the X4 pilot's plateau mode): the divergence
+# rule never fires on a flattening trajectory, so a flat-but-not-rising run reaches
+# the full ruled budget, which is exactly the curve the gate must observe at 10x.
+#
+# stability_min_iters 2442 is the 10x anchor iteration at K=8192
+# (ceil(2.0e7 / 8192)); flooring here guarantees no early stop truncates before
+# the budget anchor. If K is reduced under C2, re-floor to ceil(2.0e7 / K_reduced)
+# per budget-math.md.
+overrides:
+  prt_cfr.k_games_per_iter: 8192          # P3W1-gated (full branch)
+  prt_cfr.m_rollouts: 4                   # P3W1-gated (C2 contingency may reduce)
+  prt_cfr.iterations: 5000                # P3W1-gated (primary target; floor 3442)
+  prt_cfr.stability_metric_name: tier_a_lbr
+  prt_cfr.stability_stop_mode: divergence
+  prt_cfr.stability_min_iters: 2442       # 10x anchor iter at K=8192
+
+# The run starts from a FRESH net: no warm_start. Note that prt_cfr.warm_start is
+# true in the production config, but that is the WITHIN-run iteration schedule
+# (carry the iterate across per-iteration fits), NOT a cross-run warm start. The
+# harness `warm_start` field seeds a NEW run from another run's saved state and is
+# deliberately omitted here.
+
+resume: false
+priority: normal
+force: false
