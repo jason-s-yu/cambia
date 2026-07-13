@@ -18,6 +18,9 @@ type Lobby struct {
 	Type       string    `json:"type"`
 	GameMode   string    `json:"gameMode"`
 
+	// Name is an optional, host-supplied display name for the lobby. Empty when unset.
+	Name string `json:"name"`
+
 	// Users maps userID -> joined (true) or invited (false).
 	Users map[uuid.UUID]bool `json:"-"`
 

@@ -14,7 +14,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jason-s-yu/cambia/service/internal/auth"
 	"github.com/jason-s-yu/cambia/service/internal/database"
-	"github.com/jason-s-yu/cambia/service/internal/models"
 )
 
 // authenticateAndGetUser performs JWT authentication and retrieves the user UUID.
@@ -133,7 +132,19 @@ func AcceptFriendHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "Friend request accepted.")
 }
 
-// ListFriendsHandler returns all friend relationships (pending or accepted) for the authenticated user.
+// FriendListRow is a single entry in the GET /friends/list response, resolved from
+// the authenticated caller's perspective: UserID is always the counterpart, never
+// the caller. Online presence is omitted: connection tracking (hub.Hub.conns) is
+// keyed per-lobby, not per-user, so there is no O(1) global "is this user online"
+// lookup available to join in here (see cambia-481 report).
+type FriendListRow struct {
+	UserID   uuid.UUID `json:"userId"`
+	Username string    `json:"username"`
+	Status   string    `json:"status"`
+}
+
+// ListFriendsHandler returns all friend relationships (pending or accepted) for the
+// authenticated user, resolved to the counterpart's userId and username.
 func ListFriendsHandler(w http.ResponseWriter, r *http.Request) {
 	userUUID, ok := authenticateAndGetUser(w, r)
 	if !ok {
@@ -141,20 +152,20 @@ func ListFriendsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	friends, err := database.ListFriends(ctx, userUUID)
+	friends, err := database.ListFriendsEnriched(ctx, userUUID)
 	if err != nil {
 		log.Printf("Failed to list friends for user %s: %v", userUUID, err)
 		http.Error(w, "Failed to retrieve friends list", http.StatusInternalServerError)
 		return
 	}
 
-	// Return empty array instead of null if no friends.
-	if friends == nil {
-		friends = []models.Friend{}
+	rows := make([]FriendListRow, 0, len(friends))
+	for _, f := range friends {
+		rows = append(rows, FriendListRow{UserID: f.CounterpartID, Username: f.Username, Status: f.Status})
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(friends)
+	json.NewEncoder(w).Encode(rows)
 }
 
 // RemoveFriendHandler handles removing a friend relationship or declining/canceling a request.

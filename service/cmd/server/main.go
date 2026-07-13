@@ -131,6 +131,11 @@ func main() {
 		handlers.ListQueuesHandler(srv),
 	)))
 
+	// leaderboard
+	mux.Handle("/leaderboard", middleware.LogMiddleware(logger)(http.HandlerFunc(
+		handlers.LeaderboardHandler,
+	)))
+
 	// Training dashboard routes. All /training/* and /ws/training/* endpoints
 	// are gated by RequireAuth (CF#1), logged by LogMiddleware.
 	runsDir := os.Getenv("CAMBIA_RUNS_DIR")
