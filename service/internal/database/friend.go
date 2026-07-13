@@ -74,6 +74,45 @@ func ListFriends(ctx context.Context, userID uuid.UUID) ([]models.Friend, error)
 	return fs, nil
 }
 
+// FriendListEntry is a friend relationship resolved from one side's perspective:
+// CounterpartID is always "the other user" relative to the userID passed to
+// ListFriendsEnriched, never the caller themselves.
+type FriendListEntry struct {
+	CounterpartID uuid.UUID
+	Username      string
+	Status        string
+}
+
+// ListFriendsEnriched returns userID's friend relationships (pending or accepted)
+// resolved from userID's perspective: CounterpartID is always the other party, with
+// their username joined in from the users table.
+func ListFriendsEnriched(ctx context.Context, userID uuid.UUID) ([]FriendListEntry, error) {
+	q := `
+		SELECT
+			CASE WHEN f.user1_id = $1 THEN f.user2_id ELSE f.user1_id END AS counterpart_id,
+			u.username,
+			f.status
+		FROM friends f
+		JOIN users u ON u.id = CASE WHEN f.user1_id = $1 THEN f.user2_id ELSE f.user1_id END
+		WHERE f.user1_id = $1 OR f.user2_id = $1
+	`
+	rows, err := DB.Query(ctx, q, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []FriendListEntry
+	for rows.Next() {
+		var e FriendListEntry
+		if err := rows.Scan(&e.CounterpartID, &e.Username, &e.Status); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // RemoveFriend hard deletes the friend relation
 func RemoveFriend(ctx context.Context, user1, user2 uuid.UUID) error {
 	q := `

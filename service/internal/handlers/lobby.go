@@ -70,6 +70,9 @@ func CreateLobbyHandler(gs *GameServer) http.HandlerFunc {
 			if qID, ok := reqBody["queueID"].(string); ok {
 				lob.QueueID = qID
 			}
+			if name, ok := reqBody["name"].(string); ok {
+				lob.Name = name
+			}
 			lob.Update(reqBody) // Apply overrides for rules/settings.
 		}
 
@@ -195,6 +198,7 @@ func ListLobbiesHandler(gs *GameServer) http.HandlerFunc {
 				HostUserID:    lob.HostUserID,
 				Type:          lob.Type,
 				GameMode:      lob.GameMode,
+				Name:          lob.Name,
 				GameID:        lob.GameID,
 				InGame:        lob.InGame,
 				HouseRules:    lob.HouseRules,

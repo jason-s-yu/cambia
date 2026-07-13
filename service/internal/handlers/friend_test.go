@@ -112,13 +112,14 @@ func TestFriendFlow(t *testing.T) {
 	ListFriendsHandler(listRecorderBob, listReqBob)
 	require.Equal(t, http.StatusOK, listRecorderBob.Code, "ListFriends for Bob failed: %s", listRecorderBob.Body.String())
 
-	var friendsListBob []models.Friend
+	var friendsListBob []FriendListRow
 	err = json.Unmarshal(listRecorderBob.Body.Bytes(), &friendsListBob)
 	require.NoError(t, err, "Failed to decode Bob's friend list response")
 	require.Len(t, friendsListBob, 1, "Bob should have 1 accepted friend relationship")
 	assert.Equal(t, "accepted", friendsListBob[0].Status)
-	assert.Equal(t, userAlice.ID, friendsListBob[0].User1ID)
-	assert.Equal(t, userBob.ID, friendsListBob[0].User2ID)
+	// Resolved from Bob's perspective: userId is the counterpart (Alice).
+	assert.Equal(t, userAlice.ID, friendsListBob[0].UserID)
+	assert.Equal(t, "alice", friendsListBob[0].Username)
 
 	// 7. Verify the relationship for Alice as well.
 	listReqAlice := httptest.NewRequest("GET", "/friends/list", nil)
@@ -127,11 +128,14 @@ func TestFriendFlow(t *testing.T) {
 	ListFriendsHandler(listRecorderAlice, listReqAlice)
 	require.Equal(t, http.StatusOK, listRecorderAlice.Code, "ListFriends for Alice failed: %s", listRecorderAlice.Body.String())
 
-	var friendsListAlice []models.Friend
+	var friendsListAlice []FriendListRow
 	err = json.Unmarshal(listRecorderAlice.Body.Bytes(), &friendsListAlice)
 	require.NoError(t, err, "Failed to decode Alice's friend list response")
 	require.Len(t, friendsListAlice, 1, "Alice should have 1 accepted friend relationship")
 	assert.Equal(t, "accepted", friendsListAlice[0].Status)
+	// Resolved from Alice's perspective: userId is the counterpart (Bob).
+	assert.Equal(t, userBob.ID, friendsListAlice[0].UserID)
+	assert.Equal(t, "bob", friendsListAlice[0].Username)
 
 	// 8. Alice removes Bob as a friend.
 	removeReqBody := `{"friend_id":"` + userBob.ID.String() + `"}`
@@ -147,7 +151,7 @@ func TestFriendFlow(t *testing.T) {
 	listRecorderBobAfterRemove := httptest.NewRecorder()
 	ListFriendsHandler(listRecorderBobAfterRemove, listReqBobAfterRemove)
 	require.Equal(t, http.StatusOK, listRecorderBobAfterRemove.Code)
-	var friendsListBobAfterRemove []models.Friend
+	var friendsListBobAfterRemove []FriendListRow
 	err = json.Unmarshal(listRecorderBobAfterRemove.Body.Bytes(), &friendsListBobAfterRemove)
 	require.NoError(t, err)
 	assert.Empty(t, friendsListBobAfterRemove, "Bob should have no friends after removal")
@@ -157,7 +161,7 @@ func TestFriendFlow(t *testing.T) {
 	listRecorderAliceAfterRemove := httptest.NewRecorder()
 	ListFriendsHandler(listRecorderAliceAfterRemove, listReqAliceAfterRemove)
 	require.Equal(t, http.StatusOK, listRecorderAliceAfterRemove.Code)
-	var friendsListAliceAfterRemove []models.Friend
+	var friendsListAliceAfterRemove []FriendListRow
 	err = json.Unmarshal(listRecorderAliceAfterRemove.Body.Bytes(), &friendsListAliceAfterRemove)
 	require.NoError(t, err)
 	assert.Empty(t, friendsListAliceAfterRemove, "Alice should have no friends after removal")
