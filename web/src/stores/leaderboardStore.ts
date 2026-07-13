@@ -4,7 +4,9 @@ import type { AxiosError } from 'axios';
 import type { ApiErrorResponse } from '@/types';
 import { fetchLeaderboard, type LeaderboardRow } from '@/services/leaderboardService';
 
-export type LeaderboardPool = 'h2h' | 'ffa4';
+// Pool identifiers match the service's rating pools (validLeaderboardPools in
+// service/internal/handlers/leaderboard.go): the elo_*/phi_* column pairs.
+export type LeaderboardPool = '1v1' | '4p' | '7p8p';
 
 interface LeaderboardPoolState {
 	rows: LeaderboardRow[];
@@ -29,13 +31,14 @@ const emptyPoolState = (): LeaderboardPoolState => ({
 
 /**
  * Leaderboard store: per-pool ranked rows fetched from GET /leaderboard.
- * Each pool (h2h, ffa4) tracks its own loading/error state so switching
- * tabs never bleeds one pool's failure into another's display.
+ * Each pool tracks its own loading/error state so switching tabs never
+ * bleeds one pool's failure into another's display.
  */
 export const useLeaderboardStore = create<LeaderboardState>((set) => ({
 	pools: {
-		h2h: emptyPoolState(),
-		ffa4: emptyPoolState()
+		'1v1': emptyPoolState(),
+		'4p': emptyPoolState(),
+		'7p8p': emptyPoolState()
 	},
 
 	fetchPool: async (pool, limit = 50) => {

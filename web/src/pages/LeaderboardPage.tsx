@@ -21,9 +21,8 @@ const TIER_CUTOFFS: Array<[number, Tier]> = [
 /**
  * Client-side rating -> tier bucketing. The server contract carries only
  * numeric rating/rd, no tier field, so tiers are derived here for display.
- * Cutoffs are calibrated against the DS mock's Glicko-2 sample range; FFA-4's
- * OpenSkill mu scale is not directly comparable, so its tier chips are an
- * approximation until the server exposes pool-specific tier semantics.
+ * All pools rank on the same Glicko-2 elo scale (the per-pool elo and phi
+ * user columns), so one cutoff table applies until the server exposes tiers.
  */
 const tierFromRating = (rating: number): Tier => {
 	for (const [cutoff, tier] of TIER_CUTOFFS) {
@@ -35,8 +34,9 @@ const tierFromRating = (rating: number): Tier => {
 const formatRating = (rating: number, rd: number): string => `${Math.round(rating)} ± ${Math.round(rd)}`;
 
 const POOLS: Array<[LeaderboardPool, string]> = [
-	['h2h', 'H2H Ranked · Glicko-2'],
-	['ffa4', 'FFA-4 Ranked · OpenSkill']
+	['1v1', 'Head to Head'],
+	['4p', '4 Player'],
+	['7p8p', '7-8 Player']
 ];
 
 interface LbRowProps {
@@ -82,7 +82,7 @@ const LbRow: React.FC<LbRowProps> = ({ r, showPeak, you = false }) => {
  * the mock H2H_ROWS/YOU_ROW sample data.
  */
 const LeaderboardPage: React.FC = () => {
-	const [pool, setPool] = React.useState<LeaderboardPool>('h2h');
+	const [pool, setPool] = React.useState<LeaderboardPool>('1v1');
 	const fetchPool = useLeaderboardStore((state) => state.fetchPool);
 	const poolState = useLeaderboardStore((state) => state.pools[pool]);
 
@@ -98,7 +98,7 @@ const LeaderboardPage: React.FC = () => {
 			<div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
 				<div>
 					<h1 style={{ margin: 0, fontFamily: 'var(--font-display)', fontSize: 'var(--ds-text-3xl)', fontWeight: 'var(--weight-regular)' }}>Leaderboard</h1>
-					<p style={{ margin: '4px 0 0', color: 'var(--text-secondary)' }}>Season 4 · recalibrated monthly · percentile tiers</p>
+					<p style={{ margin: '4px 0 0', color: 'var(--text-secondary)' }}>Glicko-2 ratings by pool · updated after every rated game</p>
 				</div>
 				<div style={{ display: 'flex', gap: 6, background: 'var(--surface-inset)', border: '1.5px solid var(--border-default)', borderRadius: 'var(--radius-pill)', padding: 4 }}>
 					{POOLS.map(([id, label]) => (
@@ -148,9 +148,6 @@ const LeaderboardPage: React.FC = () => {
 					</>
 				)}
 			</Panel>
-			{pool === 'ffa4' && (
-				<p style={{ marginTop: 10, fontSize: 'var(--ds-text-xs)', color: 'var(--text-tertiary)' }}>FFA-4 shows OpenSkill μ (25.0 start, β = 8.0). Tier chips are approximated from the Glicko-2 scale until the server exposes pool-specific tiers.</p>
-			)}
 		</div>
 	);
 };

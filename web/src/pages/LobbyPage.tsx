@@ -11,7 +11,6 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useCurrentLobbyStore } from '@/stores/lobbyStore';
 import { useSocket } from '@/hooks/useSocket';
 import { useGameStore, selectGameState } from '@/stores/gameStore';
-import { useDsPreviewTheme } from '@/hooks/useDsPreviewTheme';
 import DsLobbyView from '@/components/lobby/DsLobbyView';
 import DsResultsView from '@/components/lobby/DsResultsView';
 import DsGameTable from '@/components/game/DsGameTable';
@@ -23,10 +22,6 @@ const LobbyPage: React.FC = () => {
   const { lobbyId: urlLobbyId } = useParams<{ lobbyId: string }>();
   const navigate = useNavigate();
   const hasAttemptedConnectionRef = useRef(false);
-
-  // Keep the DS design tokens (which key light mode off data-theme, not the
-  // Tailwind .dark class) in sync with the app theme while this page is mounted.
-  useDsPreviewTheme();
 
   const {
     currentLobbyId: storeLobbyId,
