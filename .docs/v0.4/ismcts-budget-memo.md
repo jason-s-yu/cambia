@@ -213,3 +213,16 @@ for base in ("random_no_cambia", "imperfect_greedy"):
         print(base, b, round(r["exploitability"], 4), round(r["std_err"], 4))
 PY
 ```
+
+## Postscript (chief, 2026-07-12): determinism correction
+
+The "seed-deterministic" claims above (and in the pass-1 manifest) were wrong
+across processes: the measurement path iterates hash-salted collections, so two
+runs with identical seeds diverged unless PYTHONHASHSEED was pinned (verified:
+unpinned runs differ on both estimators; PYTHONHASHSEED=0 runs match exactly).
+This salt only reorders sampling; all values in this memo remain unbiased
+samples, and the within-process budget comparisons (one probe process) are
+unaffected. Both exploitability scripts now self-pin PYTHONHASHSEED=0 at script
+entry (ensure_hashseed_pinned), making exact re-derivability structural. The
+frozen table was regenerated under the pin; hash-order dependence in the wider
+cfr Python stack is ticketed separately.
