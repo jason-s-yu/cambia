@@ -463,6 +463,201 @@ def test_watch_terminal_transition_pulls_and_drops(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# cambia-449: an already-synced-terminal run is never re-detected/re-pulled,
+# and a permanently missing run_db.sqlite is classified instead of retried
+# forever.
+# ---------------------------------------------------------------------------
+
+
+class NoDbRunner(Runner):
+    """Mirrors real rsync's --ignore-missing-args: pull_db silently copies
+    nothing when the remote run has no run_db.sqlite (eval-kind battery-era
+    jobs, cambia-449). pull_run is likewise a no-op. Records call counts so
+    tests can assert a classified run stops being pulled."""
+
+    def __init__(self):
+        self.pull_db_calls = 0
+        self.pull_run_calls = 0
+
+    def pull_db(self, run_name, local_run_dir):
+        self.pull_db_calls += 1
+        local_run_dir.mkdir(parents=True, exist_ok=True)
+
+    def pull_run(self, run_name, local_run_dir, filters):
+        self.pull_run_calls += 1
+
+    def push_run(self, run_name, local_run_dir):
+        raise NotImplementedError
+
+
+def test_watch_terminal_run_not_repulled_across_ticks(tmp_path):
+    """The same long-running watch() process must not re-pull or re-log a run
+    it already synced terminal and dropped, even though job_lister keeps
+    listing it every tick (the observed 4h-runtime spam, cambia-449)."""
+    _build_remote_run(tmp_path / "remote", status="completed")
+    dest = _dest_db(tmp_path)
+    runner = FakeRunner(tmp_path / "remote")
+    coord = PullCoordinator(
+        runner=runner,
+        local_runs_dir=tmp_path / "local",
+        dest_conn=dest,
+        origin_host="runner",
+        sleep_fn=lambda s: None,
+    )
+    events = []
+    pullmod.watch(
+        coord,
+        job_lister=lambda: [{"name": "v0.4-prtcfr-r1", "status": "completed"}],
+        interval_seconds=0,
+        on_event=events.append,
+        max_ticks=5,
+    )
+    # pull_db is called exactly once across all 5 ticks (the checkpoint request
+    # is skipped since no checkpoint_client is wired; pull_db is the countable
+    # per-attempt call FakeRunner records).
+    pull_db_calls = [c for c in runner.calls if c[0] == "pull_db"]
+    assert len(pull_db_calls) == 1
+    # Exactly one "terminal transition" and one "dropped" line, not five.
+    assert sum("terminal transition" in e for e in events) == 1
+    assert sum("dropped" in e for e in events) == 1
+    dest.close()
+
+
+def test_watch_skips_persisted_synced_terminal_on_restart(tmp_path):
+    """A fresh watch() call (simulating a watch restart) must consult the
+    persisted harness_sync row and skip a run already synced terminal by an
+    earlier watch() call against the same db, instead of re-detecting it as a
+    new terminal transition (cambia-449)."""
+    _build_remote_run(tmp_path / "remote", status="completed")
+    dest = _dest_db(tmp_path)
+    runner = FakeRunner(tmp_path / "remote")
+    coord = PullCoordinator(
+        runner=runner,
+        local_runs_dir=tmp_path / "local",
+        dest_conn=dest,
+        origin_host="runner",
+        sleep_fn=lambda s: None,
+    )
+    # First watch() process: syncs and drops the run.
+    pullmod.watch(
+        coord,
+        job_lister=lambda: [{"name": "v0.4-prtcfr-r1", "status": "completed"}],
+        interval_seconds=0,
+        max_ticks=1,
+    )
+    first_pull_db_calls = len([c for c in runner.calls if c[0] == "pull_db"])
+    assert first_pull_db_calls == 1
+
+    # Second watch() call: fresh in-memory state (new `active`/`skip_known`),
+    # same coordinator/dest db -- exactly what a watch restart looks like.
+    events2 = []
+    pullmod.watch(
+        coord,
+        job_lister=lambda: [{"name": "v0.4-prtcfr-r1", "status": "completed"}],
+        interval_seconds=0,
+        on_event=events2.append,
+        max_ticks=3,
+    )
+    # No new pull attempts at all.
+    assert len([c for c in runner.calls if c[0] == "pull_db"]) == first_pull_db_calls
+    assert not any("terminal transition" in e for e in events2)
+    # One summary line (loop start), not one per tick.
+    assert sum("synced-terminal" in e for e in events2) == 1
+    dest.close()
+
+
+def test_watch_classifies_missing_run_db_as_unpullable(tmp_path):
+    """A terminal run whose run_db.sqlite never exists on the runner (eval-kind
+    battery-era jobs) is classified once and never retried again, instead of
+    failing every tick forever (cambia-449)."""
+    dest = _dest_db(tmp_path)
+    runner = NoDbRunner()
+    coord = PullCoordinator(
+        runner=runner,
+        local_runs_dir=tmp_path / "local",
+        dest_conn=dest,
+        origin_host="runner",
+        sleep_fn=lambda s: None,
+    )
+    events = []
+    pullmod.watch(
+        coord,
+        job_lister=lambda: [{"name": "v4-parity-eval-cpu", "status": "completed"}],
+        interval_seconds=0,
+        on_event=events.append,
+        max_ticks=5,
+    )
+    # Exactly one classification line across 5 ticks, not five failures.
+    assert sum("permanently unpullable" in e for e in events) == 1
+    assert not any("periodic pull" in e and "failed" in e for e in events)
+    # pull_db is attempted pull_with_retry's default 5 times on the ONE terminal
+    # transition (the bounded, one-time retry cost), then never again -- no
+    # growth from the remaining ticks in this run, and no periodic-pull retries.
+    assert runner.pull_db_calls == 5
+
+    hs = dest.execute(
+        "SELECT unpullable, last_error FROM harness_sync WHERE run_name=?",
+        ("v4-parity-eval-cpu",),
+    ).fetchone()
+    assert hs["unpullable"] == 1
+    assert "no run_db.sqlite" in hs["last_error"]
+    dest.close()
+
+
+def test_watch_transient_rsync_failure_not_classified_unpullable(tmp_path):
+    """A plain rsync failure (network hiccup) must keep being retried, never
+    misclassified as the permanent no-run_db.sqlite case (cambia-449): only a
+    confirmed-missing run_db.sqlite after a real pull attempt earns the
+    permanent skip."""
+    _build_remote_run(tmp_path / "remote", status="completed")
+    dest = _dest_db(tmp_path)
+    # Every pull_db attempt fails (simulated transient rsync error).
+    runner = FakeRunner(tmp_path / "remote", fail_pull_db=99)
+    coord = PullCoordinator(
+        runner=runner,
+        local_runs_dir=tmp_path / "local",
+        dest_conn=dest,
+        origin_host="runner",
+        sleep_fn=lambda s: None,
+    )
+    events = []
+    pullmod.watch(
+        coord,
+        job_lister=lambda: [{"name": "v0.4-prtcfr-r1", "status": "completed"}],
+        interval_seconds=0,
+        on_event=events.append,
+        max_ticks=3,
+        # pull_with_retry defaults to 5 attempts; keep the test fast.
+    )
+    assert not any("permanently unpullable" in e for e in events)
+    hs = dest.execute(
+        "SELECT unpullable FROM harness_sync WHERE run_name=?", ("v0.4-prtcfr-r1",)
+    ).fetchone()
+    assert hs is None or not hs["unpullable"]
+    # Periodic retries kept happening tick over tick (not classified/dropped).
+    assert sum("periodic pull" in e and "failed" in e for e in events) >= 1
+    dest.close()
+
+
+def test_mark_harness_sync_unpullable_cleared_by_successful_pull(tmp_path):
+    """The reset path (cambia-449): a run marked unpullable that later pulls
+    successfully (e.g. after a resume produces a real run_db.sqlite) has the
+    flag cleared by the very next upsert_harness_sync call, with no separate
+    resume/purge hook needed."""
+    dest = _dest_db(tmp_path)
+    run_db.mark_harness_sync_unpullable(dest, "r1", "runner", "no run_db.sqlite under x")
+    row = run_db.get_harness_sync(dest, "r1")
+    assert row["unpullable"] == 1
+    assert row["last_error"]
+
+    run_db.upsert_harness_sync(dest, "r1", "runner", "running")
+    row2 = run_db.get_harness_sync(dest, "r1")
+    assert row2["unpullable"] == 0
+    assert row2["last_error"] is None
+    dest.close()
+
+
+# ---------------------------------------------------------------------------
 # push-run direction
 # ---------------------------------------------------------------------------
 

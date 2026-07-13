@@ -11,6 +11,7 @@ vector so the wire contract is proven byte-for-byte.
 import hmac
 import json
 from hashlib import sha256
+from pathlib import Path
 
 import pytest
 
@@ -498,9 +499,17 @@ def test_metrics_tail_absent_run_returns_none(tmp_path):
 # Watch containment: a raising reflector never breaks the pull loop
 # ===========================================================================
 class _FakeCoord:
-    def __init__(self):
+    """Minimal watch()-facing double. `dest`/`origin_host` mirror the real
+    PullCoordinator's attributes: watch() (cambia-449) consults the persisted
+    harness_sync row via `coordinator.dest` before re-adding an already-terminal
+    job to its active set, so a fake standing in for the coordinator needs a
+    real db connection even when it never calls into it in a given test."""
+
+    def __init__(self, dest=None, origin_host="runner"):
         self.pulled = []
         self.sleep_fn = lambda s: None
+        self.dest = dest if dest is not None else run_db.get_db(":memory:")
+        self.origin_host = origin_host
 
     def pull_with_retry(self, name, all_checkpoints=False):
         self.pulled.append(name)
@@ -508,6 +517,9 @@ class _FakeCoord:
 
     def pull_once(self, name, all_checkpoints=False):
         return "completed"
+
+    def local_run_dir(self, name):
+        return Path("/nonexistent") / name
 
 
 class _BoomReflector:

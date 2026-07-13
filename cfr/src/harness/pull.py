@@ -24,6 +24,12 @@ Terminal transitions (surfaced by the queue WS or a status poll) trigger an
 immediate pull with retry+backoff; a terminal run stays in the active pull set
 until its SYNCED status is itself terminal, so a single dropped final pull cannot
 freeze a dead run at "running".
+
+Once a run's SYNCED status is terminal, or a terminal pull attempt confirms its
+run_db.sqlite will never exist (eval-kind battery-era jobs), the watch loop
+consults the persisted harness_sync row (cambia-449) before re-adding it to the
+active set: job_lister keeps listing terminal jobs indefinitely, so without this
+check every tick would re-detect the same "new" terminal transition forever.
 """
 
 import logging
@@ -36,11 +42,18 @@ from typing import Any, Callable, Dict, List, Optional, Set
 
 from src.harness.reconciler import (
     _ALLOWED_STATUS,
+    ReconcilerError,
     ReconcilerValidationError,
     _validate_run_name,
 )
 from src.harness.reconciler import replay as reconciler_replay
-from src.run_db import get_db, mark_run_pushed, upsert_harness_sync
+from src.run_db import (
+    get_db,
+    get_harness_sync,
+    mark_harness_sync_unpullable,
+    mark_run_pushed,
+    upsert_harness_sync,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -407,9 +420,14 @@ class PullCoordinator:
                 last_exc = exc
                 if i < attempts - 1:
                     self.sleep_fn(min(base_backoff * (2**i), max_backoff))
+        # `from last_exc` chains the last attempt's real failure onto __cause__
+        # (cambia-449): watch()'s _classify_unpullable unwraps it to tell a
+        # deterministic "no run_db.sqlite" ReconcilerError from a transient
+        # rsync failure, even though every attempt here was wrapped into this
+        # single PullError.
         raise PullError(
             f"pull of {run_name!r} failed after {attempts} attempts: {last_exc}"
-        )
+        ) from last_exc
 
     def push_run(self, run_name: str) -> None:
         """Push a client-local run dir up for remote resume (design 2.5).
@@ -433,6 +451,35 @@ class PullCoordinator:
 # ---------------------------------------------------------------------------
 # The foreground watch loop (design 4.1)
 # ---------------------------------------------------------------------------
+
+
+def _classify_unpullable(exc: Exception) -> Optional[str]:
+    """Whether `exc` is the permanently-missing-run_db.sqlite signature (eval-kind
+    battery-era jobs whose run dirs never carry one, cambia-449) rather than a
+    transient rsync/validation/collision failure that must keep being retried.
+
+    reconciler.replay() raises the bare ReconcilerError (not one of its
+    subclasses) from exactly one site: "no run_db.sqlite under <dir>", raised
+    before it ever opens the synced db. ReconcilerValidationError and
+    ReconcilerCollisionError both subclass it but only ever fire after the db
+    was opened successfully, so `type(candidate) is ReconcilerError` uniquely
+    identifies the missing-file case without matching on the message text.
+
+    pull_with_retry wraps every exhausted-retry failure into a single PullError
+    (chaining the last attempt's real exception onto __cause__), so that wrapper
+    is unwrapped one level before the type check; a transient rsync failure
+    (PullError with a non-ReconcilerError cause, or none) is excluded either
+    way, so it is never misclassified as permanent.
+
+    Returns the reason to persist, or None to let the failure keep surfacing
+    (and keep being retried) normally.
+    """
+    candidate: BaseException = exc
+    if isinstance(exc, PullError) and exc.__cause__ is not None:
+        candidate = exc.__cause__
+    if type(candidate) is not ReconcilerError:
+        return None
+    return str(candidate)
 
 
 def _reflect(
@@ -479,6 +526,13 @@ def watch(
             the note carries the reconciled metrics tail. None disables reflection
             entirely (no hub configured). All reflection is best-effort and can
             never affect the pull loop or its exit.
+
+    A run already synced terminal, or confirmed permanently unpullable (no
+    run_db.sqlite on the runner), is skipped silently on every later tick
+    (cambia-449): job_lister keeps listing terminal jobs indefinitely, and
+    without this the loop would re-detect and re-pull the same terminal
+    transition forever. The first tick that discovers such a run logs one
+    summary line instead of a line per run.
     """
     stop = stop or (lambda: False)
     log = on_event or (lambda msg: None)
@@ -487,6 +541,16 @@ def watch(
     # SYNCED status is terminal (design 4.1).
     active: Dict[str, Dict[str, Any]] = {}
     ticks = 0
+
+    # cambia-449: names this process has already resolved to a terminal state
+    # (either synced, or confirmed permanently unpullable) and must never touch
+    # again -- job_lister keeps listing terminal jobs indefinitely, so without
+    # this cache every tick would re-detect the same "new" terminal transition.
+    # Populated either in-process (right when a run drops out of `active`, no
+    # extra query needed) or from the persisted harness_sync row on first sight
+    # of a name this process has not tracked before (a watch restart, or a run
+    # that was already terminal when this process started).
+    skip_known: Dict[str, str] = {}  # run_name -> "synced" | "unpullable"
 
     # Drift reconcile at startup (design 8): re-post any job whose live state
     # differs from (or was never) reflected, healing transitions missed while the
@@ -504,6 +568,11 @@ def watch(
             log(f"job list failed: {exc}")
             jobs = []
 
+        # Names newly classified into skip_known THIS tick from persisted state
+        # (not from an in-process drop, which is already logged at drop time).
+        # Reported as a single summary line instead of one line per run.
+        newly_skipped: List[str] = []
+
         for job in jobs:
             name = job.get("job_id") or job.get("name")
             status = job.get("state") or job.get("status")
@@ -514,7 +583,30 @@ def watch(
                 # path, or an rsync argument. Skip loudly, keep watching.
                 log(f"skipping job with unsafe name {name!r}")
                 continue
-            entry = active.setdefault(name, {"terminal_seen": False})
+            if name in skip_known:
+                continue
+
+            if name not in active:
+                # First time this process is considering `name` as a live entry:
+                # either genuinely new, or dropped earlier (in-process, or by an
+                # earlier watch run) after reaching a terminal outcome. Consult
+                # the persisted current-state store before re-adding it, so a
+                # run already fully synced-terminal or already known
+                # permanently-unpullable is never re-detected as new.
+                if is_terminal(status):
+                    persisted = get_harness_sync(coordinator.dest, name)
+                    if persisted is not None:
+                        if persisted["unpullable"]:
+                            skip_known[name] = "unpullable"
+                            newly_skipped.append(name)
+                            continue
+                        if is_terminal(persisted["last_status"]):
+                            skip_known[name] = "synced"
+                            newly_skipped.append(name)
+                            continue
+                active[name] = {"terminal_seen": False}
+
+            entry = active[name]
             if is_terminal(status) and not entry["terminal_seen"]:
                 entry["terminal_seen"] = True
                 log(f"terminal transition {name} -> {status}; immediate pull")
@@ -526,22 +618,59 @@ def watch(
                     _reflect(reflector, job, log, force=True, with_metrics=True)
                     if is_terminal(synced):
                         active.pop(name, None)
+                        skip_known[name] = "synced"
                         log(f"{name} synced terminal ({synced}); dropped")
                 except Exception as exc:
-                    log(f"terminal pull of {name} failed: {exc}")
+                    reason = _classify_unpullable(exc)
+                    if reason is not None:
+                        mark_harness_sync_unpullable(
+                            coordinator.dest, name, coordinator.origin_host, reason
+                        )
+                        active.pop(name, None)
+                        skip_known[name] = "unpullable"
+                        log(
+                            f"{name} has no run_db.sqlite on the runner; "
+                            "classifying as permanently unpullable, skipping future pulls"
+                        )
+                    else:
+                        log(f"terminal pull of {name} failed: {exc}")
             elif not is_terminal(status):
                 # Non-terminal transition: reflect off the poll (no pull needed).
                 _reflect(reflector, job, log)
+
+        if newly_skipped:
+            n_synced = sum(1 for n in newly_skipped if skip_known[n] == "synced")
+            n_unpullable = sum(1 for n in newly_skipped if skip_known[n] == "unpullable")
+            parts = []
+            if n_synced:
+                parts.append(f"{n_synced} already synced-terminal")
+            if n_unpullable:
+                parts.append(f"{n_unpullable} permanently unpullable")
+            log("skipping " + " and ".join(parts) + " run(s) from a prior sync (persisted)")
 
         # periodic pull of everything still active
         for name in list(active):
             try:
                 synced = coordinator.pull_once(name, all_checkpoints)
             except Exception as exc:
+                if active[name]["terminal_seen"]:
+                    reason = _classify_unpullable(exc)
+                    if reason is not None:
+                        mark_harness_sync_unpullable(
+                            coordinator.dest, name, coordinator.origin_host, reason
+                        )
+                        active.pop(name, None)
+                        skip_known[name] = "unpullable"
+                        log(
+                            f"{name} has no run_db.sqlite on the runner; "
+                            "classifying as permanently unpullable, skipping future pulls"
+                        )
+                        continue
                 log(f"periodic pull of {name} failed: {exc}")
                 continue
             if active[name]["terminal_seen"] and is_terminal(synced):
                 active.pop(name, None)
+                skip_known[name] = "synced"
                 log(f"{name} synced terminal ({synced}); dropped")
 
         ticks += 1
