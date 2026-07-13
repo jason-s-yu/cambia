@@ -144,7 +144,12 @@ class GreedyAgent(BaseAgent):
                 return ActionCallCambia()
 
         # 2. Handle Snapping: Always snap if possible (prefer own)
-        snap_own_actions = {a for a in legal_actions if isinstance(a, ActionSnapOwn)}
+        # List comprehensions here (not set comprehensions): legal_actions is
+        # already in the canonical deterministic order from
+        # CambiaGameState.get_legal_actions(); rebuilding as a set() would
+        # re-expose PYTHONHASHSEED-salted iteration order on these NamedTuple
+        # actions' str `tag` field (cambia-444).
+        snap_own_actions = [a for a in legal_actions if isinstance(a, ActionSnapOwn)]
         if snap_own_actions:
             chosen_action = min(
                 snap_own_actions, key=lambda a: a.own_card_hand_index
@@ -155,7 +160,7 @@ class GreedyAgent(BaseAgent):
                 chosen_action,
             )
             return chosen_action
-        snap_opp_actions = {a for a in legal_actions if isinstance(a, ActionSnapOpponent)}
+        snap_opp_actions = [a for a in legal_actions if isinstance(a, ActionSnapOpponent)]
         if snap_opp_actions:
             # Greedy needs perfect info to know *which* opponent card to snap.
             # Find the first valid snap opponent action based on true opponent hand.
@@ -735,7 +740,11 @@ class ImperfectGreedyAgent(ImperfectMemoryMixin, BaseAgent):
 
         # 3. Snap phase: only snap own cards we know match
         if game_state.snap_phase_active:
-            snap_own_actions = {a for a in legal_actions if isinstance(a, ActionSnapOwn)}
+            # List comprehension (not set): preserves legal_actions' canonical
+            # order so the first-match returned below is process-deterministic
+            # (cambia-444; a set() rebuild here re-exposes PYTHONHASHSEED salt
+            # via ActionSnapOwn's str `tag` field).
+            snap_own_actions = [a for a in legal_actions if isinstance(a, ActionSnapOwn)]
             for action in snap_own_actions:
                 if self._own_card_matches_discard(action.own_card_hand_index, game_state):
                     return action
@@ -857,7 +866,9 @@ class MemoryHeuristicAgent(ImperfectMemoryMixin, BaseAgent):
 
         # 3. Snap phase: only snap own cards we know match
         if game_state.snap_phase_active:
-            snap_own_actions = {a for a in legal_actions if isinstance(a, ActionSnapOwn)}
+            # List comprehension (not set): see cambia-444 note in
+            # ImperfectGreedyAgent.choose_action above.
+            snap_own_actions = [a for a in legal_actions if isinstance(a, ActionSnapOwn)]
             for action in snap_own_actions:
                 if self._own_card_matches_discard(action.own_card_hand_index, game_state):
                     return action
@@ -930,7 +941,10 @@ class RandomNoCambiaAgent(RandomAgent):
     def choose_action(
         self, game_state: CambiaGameState, legal_actions: Set[GameAction]
     ) -> GameAction:
-        filtered = {a for a in legal_actions if not isinstance(a, ActionCallCambia)}
+        # List comprehension (not set): preserves legal_actions' canonical
+        # order so RandomAgent.choose_action's random.choice() draws against a
+        # process-deterministic sequence for a given RNG state (cambia-444).
+        filtered = [a for a in legal_actions if not isinstance(a, ActionCallCambia)]
         if not filtered:
             filtered = legal_actions  # safety fallback if Cambia is the only action
         return super().choose_action(game_state, filtered)
@@ -948,7 +962,9 @@ class RandomLateCambiaAgent(RandomAgent):
         self, game_state: CambiaGameState, legal_actions: Set[GameAction]
     ) -> GameAction:
         if game_state._turn_number < self.n_turns:
-            filtered = {a for a in legal_actions if not isinstance(a, ActionCallCambia)}
+            # List comprehension (not set): see cambia-444 note in
+            # RandomNoCambiaAgent.choose_action above.
+            filtered = [a for a in legal_actions if not isinstance(a, ActionCallCambia)]
             if not filtered:
                 filtered = legal_actions
             return super().choose_action(game_state, filtered)
@@ -1100,15 +1116,17 @@ class AggressiveSnapAgent(ImperfectMemoryMixin, BaseAgent):
         # 3. Snap phase: snap own known matches AND opponent known matches
         if game_state.snap_phase_active:
             # Try own snaps first
-            snap_own_actions = {a for a in legal_actions if isinstance(a, ActionSnapOwn)}
+            # List comprehensions (not sets): see cambia-444 note in
+            # ImperfectGreedyAgent.choose_action.
+            snap_own_actions = [a for a in legal_actions if isinstance(a, ActionSnapOwn)]
             for action in snap_own_actions:
                 if self._own_card_matches_discard(action.own_card_hand_index, game_state):
                     return action
 
             # Try opponent snaps
-            snap_opp_actions = {
+            snap_opp_actions = [
                 a for a in legal_actions if isinstance(a, ActionSnapOpponent)
-            }
+            ]
             for action in snap_opp_actions:
                 if self._opp_card_matches_discard(
                     action.opponent_target_hand_index, game_state
@@ -1333,13 +1351,15 @@ class HumanPlayerAgent(ImperfectMemoryMixin, BaseAgent):
         # 3. Snap phase: snap own known matches, snap opponent known matches
         if game_state.snap_phase_active:
             # Own snaps: only snap cards we know match
-            snap_own = {a for a in legal_actions if isinstance(a, ActionSnapOwn)}
+            # List comprehensions (not sets): see cambia-444 note in
+            # ImperfectGreedyAgent.choose_action.
+            snap_own = [a for a in legal_actions if isinstance(a, ActionSnapOwn)]
             for action in snap_own:
                 if self._own_card_matches_discard(action.own_card_hand_index, game_state):
                     return action
 
             # Opponent snaps: snap if we know their card matches
-            snap_opp = {a for a in legal_actions if isinstance(a, ActionSnapOpponent)}
+            snap_opp = [a for a in legal_actions if isinstance(a, ActionSnapOpponent)]
             for action in snap_opp:
                 if self._opp_card_matches_discard(
                     action.opponent_target_hand_index, game_state
