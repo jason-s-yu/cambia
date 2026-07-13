@@ -435,6 +435,23 @@ class PullCoordinator:
 # ---------------------------------------------------------------------------
 
 
+def _reflect(
+    reflector: Optional[Any],
+    job: Dict[str, Any],
+    log: Callable[[str], None],
+    force: bool = False,
+    with_metrics: bool = False,
+) -> None:
+    """Best-effort hub reflection of one JobView. Swallows every error (cambia-353
+    containment): a hub outage or refusal must never touch the pull loop."""
+    if reflector is None:
+        return
+    try:
+        reflector.reflect_view(job, force=force, with_metrics=with_metrics)
+    except Exception as exc:
+        log(f"hub reflection dropped for {job.get('job_id') or job.get('name')}: {exc}")
+
+
 def watch(
     coordinator: PullCoordinator,
     job_lister: Callable[[], List[Dict[str, Any]]],
@@ -443,6 +460,7 @@ def watch(
     stop: Optional[Callable[[], bool]] = None,
     on_event: Optional[Callable[[str], None]] = None,
     max_ticks: Optional[int] = None,
+    reflector: Optional[Any] = None,
 ) -> None:
     """Foreground pull loop (design 4.1). Not daemonized (out of scope).
 
@@ -455,6 +473,12 @@ def watch(
         interval_seconds: periodic-pull cadence (default 60s).
         stop: optional predicate to break the loop (e.g. a signal flag).
         max_ticks: optional cap on iterations (tests inject a small value).
+        reflector: optional HubReflector (cambia-353). When set, job transitions
+            are reflected into the Codebridge hub off this poll: a non-terminal
+            transition posts immediately; a terminal is posted after its pull, so
+            the note carries the reconciled metrics tail. None disables reflection
+            entirely (no hub configured). All reflection is best-effort and can
+            never affect the pull loop or its exit.
     """
     stop = stop or (lambda: False)
     log = on_event or (lambda msg: None)
@@ -463,6 +487,15 @@ def watch(
     # SYNCED status is terminal (design 4.1).
     active: Dict[str, Dict[str, Any]] = {}
     ticks = 0
+
+    # Drift reconcile at startup (design 8): re-post any job whose live state
+    # differs from (or was never) reflected, healing transitions missed while the
+    # watcher was down. Best-effort; a failure never blocks the loop.
+    if reflector is not None:
+        try:
+            reflector.reconcile(job_lister())
+        except Exception as exc:
+            log(f"startup drift reconcile failed: {exc}")
 
     while not stop():
         try:
@@ -487,11 +520,18 @@ def watch(
                 log(f"terminal transition {name} -> {status}; immediate pull")
                 try:
                     synced = coordinator.pull_with_retry(name, all_checkpoints)
+                    # Reflect the terminal AFTER the pull so the note carries the
+                    # reconciled metrics tail (force: refresh a state a startup
+                    # reconcile may have posted metrics-less).
+                    _reflect(reflector, job, log, force=True, with_metrics=True)
                     if is_terminal(synced):
                         active.pop(name, None)
                         log(f"{name} synced terminal ({synced}); dropped")
                 except Exception as exc:
                     log(f"terminal pull of {name} failed: {exc}")
+            elif not is_terminal(status):
+                # Non-terminal transition: reflect off the poll (no pull needed).
+                _reflect(reflector, job, log)
 
         # periodic pull of everything still active
         for name in list(active):
