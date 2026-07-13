@@ -205,9 +205,12 @@ def test_stale_transition_dropped(tmp_path):
 
 
 def test_row_updated_only_on_success(tmp_path):
+    # cooldown_seconds=0: isolate the row-write-on-success behavior from the
+    # circuit breaker (covered separately below), so a failure never gates the
+    # very next attempt in this test.
     rec = _Recorder(ok=False)
     db = _db(tmp_path)
-    r = hub.HubReflector(_hub_cfg(), "nash", db, poster=rec)
+    r = hub.HubReflector(_hub_cfg(), "nash", db, poster=rec, cooldown_seconds=0.0)
     assert not r.reflect_view({"job_id": "j1", "state": "running"})
     # failed post left no reflection row -> next attempt retries (not deduped)
     assert run_db.get_harness_reflection(db, "nash", "j1") is None
@@ -252,6 +255,186 @@ def test_purge_reflects_terminal(tmp_path):
     op = rec.last_op
     assert "state: purged" in op["body"]
     assert op["item_handle"] == "cambia-439"
+
+
+# ===========================================================================
+# Review finding 1 (HIGH): same-name resubmit after purge/terminal must not be
+# locked out of reflection (a terminal-or-purged last_state observed with a new
+# pending/running-rank state is a lifecycle reset, not a regression).
+# ===========================================================================
+def test_resubmit_after_purge_reflects_full_new_lifecycle(tmp_path):
+    rec = _Recorder()
+    r = _reflector(tmp_path, rec)
+    r.reflect_view({"job_id": "j1", "state": "completed"})
+    r.reflect_purge("j1")  # last_reflected_state = "purged" (rank 4)
+    # A same-name resubmit's submit/running/terminal must all land.
+    assert r.reflect_submit({"name": "j1", "kind": "train"})
+    assert r.reflect_view({"job_id": "j1", "state": "running"})
+    assert r.reflect_view({"job_id": "j1", "state": "completed"})
+    events = [c["ops"][0]["body"].splitlines()[2] for c in rec.calls[-3:]]
+    assert events == ["event: submit", "event: running", "event: terminal"]
+
+
+def test_resubmit_after_plain_terminal_reflects_full_new_lifecycle(tmp_path):
+    rec = _Recorder()
+    r = _reflector(tmp_path, rec)
+    r.reflect_view({"job_id": "j1", "state": "completed"})  # last_state rank 3
+    # No purge this time -- just a same-name resubmit after a terminal.
+    assert r.reflect_submit({"name": "j1", "kind": "train"})
+    assert r.reflect_view({"job_id": "j1", "state": "running"})
+    assert r.reflect_view({"job_id": "j1", "state": "completed"})
+
+
+def test_reconcile_heals_terminal_to_running_without_force(tmp_path):
+    rec = _Recorder()
+    r = _reflector(tmp_path, rec)
+    r.reflect_view({"job_id": "j1", "state": "completed"})
+    rec.calls.clear()
+    # A plain (force=False) drift-reconcile poll observing the job running again
+    # (an external resume, or a resubmit the watcher missed) must heal, not drop.
+    posted = r.reconcile([{"job_id": "j1", "state": "running"}])
+    assert posted == 1
+    assert rec.last_op["body"].splitlines()[2] == "event: running"
+
+
+def test_running_to_submitted_same_lifecycle_still_dropped(tmp_path):
+    rec = _Recorder()
+    r = _reflector(tmp_path, rec)
+    r.reflect_view({"job_id": "j1", "state": "running"})  # rank 2, not terminal
+    # A same-lifecycle regression (running observed, then a stale "submitted"
+    # poll) is still a drop -- only a terminal/purged last_state resets.
+    assert not r.reflect_view({"job_id": "j1", "state": "submitted"})
+    assert len(rec.calls) == 1
+
+
+def test_equal_state_still_deduped_after_lifecycle_reset_fix(tmp_path):
+    rec = _Recorder()
+    r = _reflector(tmp_path, rec)
+    r.reflect_view({"job_id": "j1", "state": "completed"})
+    assert not r.reflect_view({"job_id": "j1", "state": "completed"})
+    assert len(rec.calls) == 1
+
+
+# ===========================================================================
+# Review finding 2 (MEDIUM): reflector-wide failure circuit breaker. A dead hub
+# must cost at most one blocking poster attempt per cooldown window, not one per
+# unreflected job per tick.
+# ===========================================================================
+class _FakeClock:
+    def __init__(self, t=1_700_000_000.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+    def advance(self, seconds):
+        self.t += seconds
+
+
+def test_breaker_opens_after_failure_and_skips_within_cooldown(tmp_path):
+    clock = _FakeClock()
+    rec = _Recorder(ok=False)
+    r = hub.HubReflector(
+        _hub_cfg(), "nash", _db(tmp_path), poster=rec, clock=clock, cooldown_seconds=300.0
+    )
+    assert not r.reflect_view({"job_id": "j1", "state": "running"})
+    assert len(rec.calls) == 1  # the one attempt that armed the breaker
+    # Within the cooldown, a distinct job's post is skipped WITHOUT invoking the
+    # poster at all (the breaker is reflector-wide, not per-job).
+    clock.advance(10.0)
+    assert not r.reflect_view({"job_id": "j2", "state": "running"})
+    assert len(rec.calls) == 1  # poster not called again
+
+
+def test_breaker_reattempts_after_cooldown_expiry(tmp_path):
+    clock = _FakeClock()
+    rec = _Recorder(ok=False)
+    r = hub.HubReflector(
+        _hub_cfg(), "nash", _db(tmp_path), poster=rec, clock=clock, cooldown_seconds=300.0
+    )
+    assert not r.reflect_view({"job_id": "j1", "state": "running"})
+    assert len(rec.calls) == 1
+    clock.advance(300.0)  # cooldown elapsed
+    assert not r.reflect_view({"job_id": "j2", "state": "running"})
+    assert len(rec.calls) == 2  # attempted again (still failing, re-arms)
+
+
+def test_breaker_success_resets_it(tmp_path):
+    clock = _FakeClock()
+    rec = _Recorder(ok=False)
+    r = hub.HubReflector(
+        _hub_cfg(), "nash", _db(tmp_path), poster=rec, clock=clock, cooldown_seconds=300.0
+    )
+    assert not r.reflect_view({"job_id": "j1", "state": "running"})
+    clock.advance(300.0)
+    rec.ok = True
+    assert r.reflect_view({"job_id": "j2", "state": "running"})  # re-attempt succeeds
+    # A success re-arms the breaker immediately: no cooldown before the next post.
+    assert r.reflect_view({"job_id": "j3", "state": "running"})
+    assert len(rec.calls) == 3
+
+
+def test_breaker_checked_before_metrics_read(tmp_path, monkeypatch):
+    clock = _FakeClock()
+    db = _db(tmp_path)
+    rec = _Recorder(ok=False)
+    r = hub.HubReflector(
+        _hub_cfg(), "nash", db, poster=rec, clock=clock, cooldown_seconds=300.0
+    )
+    r.reflect_view({"job_id": "j1", "state": "running"})  # arms the breaker
+
+    calls = {"n": 0}
+    orig = hub.read_metrics_tail
+
+    def counting(*a, **k):
+        calls["n"] += 1
+        return orig(*a, **k)
+
+    monkeypatch.setattr(hub, "read_metrics_tail", counting)
+    # Gated by the breaker: with_metrics=True must NOT read the metrics tail.
+    assert not r.reflect_view({"job_id": "j2", "state": "completed"}, with_metrics=True)
+    assert calls["n"] == 0
+
+
+def test_breaker_gates_force_true_posts_too(tmp_path):
+    clock = _FakeClock()
+    rec = _Recorder(ok=False)
+    r = hub.HubReflector(
+        _hub_cfg(), "nash", _db(tmp_path), poster=rec, clock=clock, cooldown_seconds=300.0
+    )
+    assert not r.reflect_submit({"name": "j1", "kind": "train"})  # arms the breaker
+    assert len(rec.calls) == 1
+    # A force=True post (resume/purge/submit) is still gated by the breaker.
+    assert not r.reflect_purge("j2")
+    assert not r.reflect_resume({"job_id": "j3"})
+    assert len(rec.calls) == 1
+
+
+def test_watch_loop_dead_hub_called_at_most_once_per_cooldown_window(tmp_path):
+    """watch-loop-level: many ticks with many unreflected jobs, a dead poster is
+    invoked at most once per cooldown window, not once per job per tick."""
+    from src.harness import pull as pullmod
+
+    clock = _FakeClock()
+    rec = _Recorder(ok=False)
+    reflector = hub.HubReflector(
+        _hub_cfg(), "nash", _db(tmp_path), poster=rec, clock=clock, cooldown_seconds=300.0
+    )
+    coord = _FakeCoord()
+    jobs = [{"job_id": f"j{i}", "state": "running"} for i in range(5)]
+    events = []
+    pullmod.watch(
+        coord,
+        job_lister=lambda: jobs,
+        interval_seconds=0,
+        on_event=events.append,
+        max_ticks=10,
+        reflector=reflector,
+    )
+    # 10 ticks x 5 jobs = 50 potential reflections, but the breaker (armed on the
+    # very first failure, clock never advances across ticks in this test) caps
+    # the poster to exactly one invocation.
+    assert len(rec.calls) == 1
 
 
 # ===========================================================================

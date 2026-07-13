@@ -35,6 +35,20 @@ submit/pull/watch/job behavior or exit codes. The client-side reflection row
 (run_db.harness_reflection) is written ONLY after a POST succeeds, so a dropped
 post is re-tried by the next poll or drift-reconcile pass. There is no durable
 retry spool.
+
+Circuit breaker (review finding 2): a synchronous POST carries a socket timeout
+(10s default), and the watch poll loop can carry many unreflected jobs per tick.
+Without a breaker, a down hub would re-block on every unreflected job on every
+tick (~timeout * job_count per tick), degrading pull cadence -- exactly what the
+containment requirement forbids. HubReflector tracks a single reflector-wide
+backoff_until: any poster failure arms it (clock() + cooldown_seconds, default
+300s); while armed, every post attempt (including force=True ones) returns False
+immediately, before building the payload or reading the metrics tail; a poster
+success clears it. This bounds a dead hub to at most one blocking attempt per
+cooldown window, reflector-wide. Accepted residual: that one in-flight attempt
+can still block up to the poster's socket timeout, and DNS resolution
+(getaddrinfo) is not bounded by that timeout at all -- in practice a LAN
+resolver bounds it, but this is a known, not eliminated, gap.
 """
 
 import hmac
@@ -381,11 +395,15 @@ def _view_get(view: Dict[str, Any], *keys: str) -> Any:
 
 class HubReflector:
     """Posts job lifecycle transitions to the hub, guarded by the client-side
-    monotonic reflection store (run_db.harness_reflection).
+    monotonic reflection store (run_db.harness_reflection) and a reflector-wide
+    failure circuit breaker.
 
     poster(payload) -> bool is the injection seam: production binds it to
     post_note over hub_cfg; tests inject a recorder. The db is the client's
     authoritative run_db (for the reflection store and the metrics tail).
+
+    cooldown_seconds bounds a dead hub to at most one blocking poster attempt
+    per window (module docstring "Circuit breaker"); default 300s.
     """
 
     def __init__(
@@ -395,11 +413,14 @@ class HubReflector:
         db,
         poster: Optional[Callable[[Dict[str, Any]], bool]] = None,
         clock: Callable[[], float] = time.time,
+        cooldown_seconds: float = 300.0,
     ):
         self.hub = hub_cfg
         self.origin_host = origin_host
         self.db = db
         self.clock = clock
+        self._cooldown_seconds = cooldown_seconds
+        self._backoff_until = 0.0  # 0.0 -> breaker starts closed (never gates)
         self._poster = poster or (
             lambda payload: post_note(hub_cfg, payload, clock=clock)
         )
@@ -408,23 +429,63 @@ class HubReflector:
     def _should_post(
         self, last_state: Optional[str], new_state: str, force: bool
     ) -> bool:
+        """Rank/dedup guard for one transition (the circuit breaker is separate,
+        checked in _post_record).
+
+        force bypasses every check (explicit lifecycle-starting user actions:
+        submit, resume, purge). Otherwise: an unseen job always posts; an
+        unchanged state is deduped; a terminal-or-purged last_state paired with a
+        new pending/running-rank state is a LIFECYCLE RESET, not a regression, and
+        is allowed (review finding 1) -- within one client, runner state is
+        monotonic per lifecycle, so an observed terminal/purged -> pending/running
+        transition can only mean a same-name resubmit or an out-of-band resume;
+        posting is correct either way, and refusing would otherwise lock
+        reflection out until the next force=True terminal-after-pull. Any other
+        live-state regression (e.g. running -> submitted within the SAME
+        lifecycle) is still dropped as a stale/out-of-order poll.
+        """
         if force:
             return True
         if last_state is None:
             return True
         if new_state == last_state:
             return False  # idempotent: already reflected this state
-        return _state_rank(new_state) >= _state_rank(last_state)  # drop regressions
+        new_rank = _state_rank(new_state)
+        last_rank = _state_rank(last_state)
+        if last_rank >= 3 and new_rank <= 2:  # terminal/purged -> pending/running
+            return True  # lifecycle reset: resubmit or an external resume
+        return new_rank >= last_rank  # drop same-lifecycle regressions
 
     def _item_handle(self, hub_item: Optional[str]) -> str:
         return hub_item or self.hub.collector_item
 
     # -- core -------------------------------------------------------------
-    def _post_record(self, rec: ReflectionRecord, force: bool) -> bool:
-        last = get_harness_reflection(self.db, self.origin_host, rec.run_name)
+    def _post_record(
+        self,
+        run_name: str,
+        state: str,
+        force: bool,
+        build_rec: Callable[[], ReflectionRecord],
+    ) -> bool:
+        """Gate a transition, then (only if it should post) build the record and
+        POST it.
+
+        build_rec is invoked LAZILY, only after both the rank/dedup guard and the
+        circuit breaker pass, so a dropped or breaker-gated transition never reads
+        the metrics tail or builds a payload (review finding 2). The circuit
+        breaker check runs regardless of force: force bypasses the rank/dedup
+        guard only, never the network breaker, so a dead hub still costs at most
+        one blocking attempt per cooldown window reflector-wide, including for
+        resume/purge/submit.
+        """
+        last = get_harness_reflection(self.db, self.origin_host, run_name)
         last_state = last["last_reflected_state"] if last is not None else None
-        if not self._should_post(last_state, rec.state, force):
+        if not self._should_post(last_state, state, force):
             return False
+        if self.clock() < self._backoff_until:
+            return False  # breaker open: skip before building the payload/metrics
+
+        rec = build_rec()
         # Resolve the hub item: the job's own hub_item, else the item a prior
         # transition already landed on, else the config collector item.
         prior_item = last["item_handle"] if last is not None else None
@@ -433,26 +494,40 @@ class HubReflector:
             item, note_key(self.origin_host, rec.job_id), build_note_body(rec)
         )
         if not self._poster(payload):
-            return False  # dropped: leave the row stale so a later pass re-posts
-        upsert_harness_reflection(
-            self.db, self.origin_host, rec.run_name, rec.state, item
-        )
+            # Arm the breaker from the post-attempt clock (the attempt itself may
+            # have blocked for a while); leave the reflection row stale so a later
+            # pass re-posts once the cooldown clears.
+            self._backoff_until = self.clock() + self._cooldown_seconds
+            return False
+        self._backoff_until = 0.0  # success re-arms the breaker immediately
+        upsert_harness_reflection(self.db, self.origin_host, run_name, state, item)
         return True
 
     # -- public reflection entry points -----------------------------------
     def reflect_submit(self, payload: Dict[str, Any]) -> bool:
-        """Reflect a submit off the accepted job payload (spec.to_payload)."""
-        rec = ReflectionRecord(
-            event="submit",
-            job_id=payload.get("name", ""),
-            origin_host=self.origin_host,
-            run_name=payload.get("name", ""),
-            state="submitted",
-            hub_item=payload.get("hub_item"),
-            kind=payload.get("kind"),
-            commit=payload.get("commit"),
-        )
-        return self._post_record(rec, force=False)
+        """Reflect a submit off the accepted job payload (spec.to_payload).
+
+        Posted with force=True: submit is an explicit lifecycle-starting user
+        action, the same class as resume/purge. This also covers a same-name
+        resubmit after a purge/terminal cleanly (the lifecycle-reset guard in
+        _should_post already allows it; force keeps submit unconditional exactly
+        like resume/purge, and still respects the circuit breaker).
+        """
+        name = payload.get("name", "")
+
+        def build() -> ReflectionRecord:
+            return ReflectionRecord(
+                event="submit",
+                job_id=name,
+                origin_host=self.origin_host,
+                run_name=name,
+                state="submitted",
+                hub_item=payload.get("hub_item"),
+                kind=payload.get("kind"),
+                commit=payload.get("commit"),
+            )
+
+        return self._post_record(name, "submitted", True, build)
 
     def reflect_view(
         self,
@@ -465,30 +540,35 @@ class HubReflector:
     ) -> bool:
         """Reflect a runner JobView (from list_jobs). state_override lets an
         explicit action (resume) post a state the poll has not caught up to yet;
-        with_metrics reads the reconciled metrics tail (used post terminal pull)."""
+        with_metrics reads the reconciled metrics tail (used post terminal pull).
+        The metrics read is deferred into the lazy record builder so a
+        guard/breaker-dropped call never touches the metrics tail."""
         job_id = _view_get(view, "job_id", "name")
         if not job_id:
             return False
         state = state_override or _view_get(view, "state", "status") or "unknown"
         ev = event or ("terminal" if is_terminal(state) else str(state))
-        metrics = read_metrics_tail(self.db, job_id) if with_metrics else None
-        rec = ReflectionRecord(
-            event=ev,
-            job_id=job_id,
-            origin_host=self.origin_host,
-            run_name=job_id,
-            state=state,
-            hub_item=_view_get(view, "hub_item"),
-            kind=_view_get(view, "kind"),
-            commit=_view_get(view, "commit"),
-            created_at=_view_get(view, "created_at"),
-            started_at=_view_get(view, "started_at"),
-            ended_at=_view_get(view, "finished_at", "ended_at"),
-            exit_code=view.get("exit_code"),
-            last_error=_view_get(view, "last_error"),
-            metrics=metrics,
-        )
-        return self._post_record(rec, force=force)
+
+        def build() -> ReflectionRecord:
+            metrics = read_metrics_tail(self.db, job_id) if with_metrics else None
+            return ReflectionRecord(
+                event=ev,
+                job_id=job_id,
+                origin_host=self.origin_host,
+                run_name=job_id,
+                state=state,
+                hub_item=_view_get(view, "hub_item"),
+                kind=_view_get(view, "kind"),
+                commit=_view_get(view, "commit"),
+                created_at=_view_get(view, "created_at"),
+                started_at=_view_get(view, "started_at"),
+                ended_at=_view_get(view, "finished_at", "ended_at"),
+                exit_code=view.get("exit_code"),
+                last_error=_view_get(view, "last_error"),
+                metrics=metrics,
+            )
+
+        return self._post_record(job_id, state, force, build)
 
     def reflect_resume(self, view: Dict[str, Any]) -> bool:
         """Reflect an explicit resume (terminal -> running); bypasses the rank
@@ -501,15 +581,18 @@ class HubReflector:
         """Reflect an explicit purge (run dir removed). Minimal record: the run is
         gone, so there is no view to read; hub_item falls back to the stored item
         or the collector."""
-        rec = ReflectionRecord(
-            event="purge",
-            job_id=job_id,
-            origin_host=self.origin_host,
-            run_name=job_id,
-            state="purged",
-            hub_item=hub_item,
-        )
-        return self._post_record(rec, force=True)
+
+        def build() -> ReflectionRecord:
+            return ReflectionRecord(
+                event="purge",
+                job_id=job_id,
+                origin_host=self.origin_host,
+                run_name=job_id,
+                state="purged",
+                hub_item=hub_item,
+            )
+
+        return self._post_record(job_id, "purged", True, build)
 
     def reconcile(self, views: List[Dict[str, Any]]) -> int:
         """Drift healer: re-post any job whose live state differs from (or was
