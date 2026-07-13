@@ -201,7 +201,13 @@ CREATE TABLE IF NOT EXISTS harness_sync (
     run_name TEXT PRIMARY KEY,
     origin_host TEXT,
     last_sync_at TEXT,
-    last_status TEXT
+    last_status TEXT,
+    -- 1 when a pull attempt confirmed the run's run_db.sqlite will never exist
+    -- on the runner (eval-kind battery-era jobs, cambia-449). last_status is
+    -- whatever it last was (often NULL, since a pull never succeeded); the next
+    -- successful pull (upsert_harness_sync) clears both columns back to 0/NULL.
+    unpullable INTEGER DEFAULT 0,
+    last_error TEXT
 );
 
 CREATE TABLE IF NOT EXISTS harness_reflection (
@@ -268,6 +274,13 @@ _COLUMN_MIGRATIONS: Dict[str, list] = {
         ("selection_mode", "TEXT"),
         ("crn_seed", "TEXT"),
         ("seat_scheme", "TEXT"),
+    ],
+    "harness_sync": [
+        # cambia-449: permanently-unpullable classification (no run_db.sqlite on
+        # the runner, e.g. eval-kind battery-era jobs) so the watch loop stops
+        # retrying a pull that can never succeed.
+        ("unpullable", "INTEGER DEFAULT 0"),
+        ("last_error", "TEXT"),
     ],
 }
 
@@ -585,7 +598,17 @@ def upsert_harness_sync(
     architecture rule 1): the dashboard reads last_sync_at here to render per-run
     staleness ("stale, last synced HH:MM") independent of the global reconciler
     heartbeat. Keyed by run_name (one live remote run per name in v1), upserted
-    by the pull loop after each successful replay.
+    by the pull loop after each successful replay. The watch loop also reads
+    last_status here to decide whether a run already synced terminal should be
+    skipped on later ticks (cambia-449), instead of re-detecting the same
+    transition every tick.
+
+    A successful call always clears unpullable/last_error: a call only happens
+    after a successful pull_once, which is proof this run's run_db.sqlite does
+    exist on the runner, so any earlier permanently-unpullable classification
+    (mark_harness_sync_unpullable) no longer applies. This is the reset path for
+    a resumed run that eventually produces a run_db.sqlite -- no separate
+    resume/purge hook is needed.
 
     Args:
         run_name: the remote run's name (also its run dir under runs/).
@@ -596,14 +619,73 @@ def upsert_harness_sync(
     ts = last_sync_at if last_sync_at is not None else _now()
     db.execute(
         """
-        INSERT INTO harness_sync (run_name, origin_host, last_sync_at, last_status)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO harness_sync (run_name, origin_host, last_sync_at, last_status, unpullable, last_error)
+        VALUES (?, ?, ?, ?, 0, NULL)
         ON CONFLICT(run_name) DO UPDATE SET
             origin_host=excluded.origin_host,
             last_sync_at=excluded.last_sync_at,
-            last_status=excluded.last_status
+            last_status=excluded.last_status,
+            unpullable=0,
+            last_error=NULL
         """,
         (run_name, origin_host, ts, last_status),
+    )
+    db.commit()
+
+
+def get_harness_sync(db: sqlite3.Connection, run_name: str) -> Optional[sqlite3.Row]:
+    """Point lookup of a run's harness_sync row (data architecture rule 1: the
+    current-state store for pull/sync state, read here instead of re-derived
+    from history). Used by the watch loop (cambia-449) to decide, before
+    re-adding a run to the active pull set, whether it is already known synced
+    terminal or permanently unpullable -- so a run job_lister keeps listing
+    indefinitely after it went terminal is not re-detected as a fresh
+    transition on every tick.
+
+    Returns None when no row exists yet (the run has never been pulled).
+    """
+    return db.execute(
+        "SELECT run_name, origin_host, last_sync_at, last_status, unpullable, last_error "
+        "FROM harness_sync WHERE run_name=?",
+        (run_name,),
+    ).fetchone()
+
+
+def mark_harness_sync_unpullable(
+    db: sqlite3.Connection,
+    run_name: str,
+    origin_host: str,
+    reason: str,
+    at: Optional[str] = None,
+) -> None:
+    """Record that a terminal run's artifacts can never be pulled: its
+    run_db.sqlite does not exist on the runner and never will (eval-kind
+    battery-era jobs predating run_db output, cambia-449).
+
+    Persisted on harness_sync -- the run's current-state sync record (data
+    architecture rule 1) -- so the watch loop stops retrying a pull that can
+    never succeed, on this tick, later ticks, and across a watch restart. See
+    upsert_harness_sync for the reset path: any later successful pull for this
+    run_name clears the flag automatically.
+
+    Args:
+        run_name: the run this pull attempt targeted.
+        origin_host: the source host the pull was attempted against.
+        reason: the failure detail to persist for operator visibility (e.g. the
+            reconciler's "no run_db.sqlite under ..." message).
+        at: ISO-8601 UTC timestamp; defaults to now.
+    """
+    ts = at if at is not None else _now()
+    db.execute(
+        """
+        INSERT INTO harness_sync (run_name, origin_host, last_sync_at, unpullable, last_error)
+        VALUES (?, ?, ?, 1, ?)
+        ON CONFLICT(run_name) DO UPDATE SET
+            origin_host=excluded.origin_host,
+            unpullable=1,
+            last_error=excluded.last_error
+        """,
+        (run_name, origin_host, ts, reason),
     )
     db.commit()
 
