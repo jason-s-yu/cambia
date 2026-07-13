@@ -105,6 +105,13 @@ type CambiaGame struct {
 	ID      uuid.UUID // Unique identifier for this game instance.
 	LobbyID uuid.UUID // ID of the lobby that created this game.
 
+	// Lobby provenance, needed to persist a backing lobbies row (games.lobby_id FK) at game
+	// start since the ephemeral in-memory Lobby itself is never written to Postgres. Set by
+	// the constructor that builds this CambiaGame from a lobby.Lobby (cambia-450).
+	HostUserID uuid.UUID // Lobby host, satisfies lobbies.host_user_id (NOT NULL FK to users).
+	LobbyType  string    // Lobby type ("private"/"public"/"matchmaking"), satisfies lobbies.type.
+	Rated      bool      // Whether this game's results should feed the rating system.
+
 	HouseRules HouseRules // Configurable game rules.
 	Circuit    Circuit    // Circuit mode settings.
 
@@ -330,7 +337,12 @@ func (g *CambiaGame) persistInitialGameState() {
 	}
 
 	if database.DB != nil {
-		go database.UpsertInitialGameState(g.ID, snap)
+		gameID, lobbyID, hostUserID, lobbyType, rated := g.ID, g.LobbyID, g.HostUserID, g.LobbyType, g.Rated
+		go func() {
+			if err := database.UpsertInitialGameState(context.Background(), gameID, lobbyID, hostUserID, lobbyType, rated, snap); err != nil {
+				log.Printf("Game %s: failed to persist initial game state: %v", gameID, err)
+			}
+		}()
 	}
 	g.logAction(uuid.Nil, "game_initial_state_saved", map[string]interface{}{"stockpileSize": snap.StockpileSize})
 }
@@ -905,7 +917,23 @@ func (g *CambiaGame) persistFinalGameState(finalScores map[uuid.UUID]int, winner
 	}
 
 	if database.DB != nil {
-		go database.StoreFinalGameStateInDB(context.Background(), g.ID, snapshot)
+		gameID := g.ID
+		go func() {
+			if err := database.StoreFinalGameStateInDB(context.Background(), gameID, snapshot); err != nil {
+				log.Printf("Game %s: failed to persist final game state: %v", gameID, err)
+			}
+		}()
+
+		// Record game_results and (if rated) apply rating deltas. This is the only production
+		// caller of RecordGameAndResults (cambia-450); it previously had none, so ratings never
+		// updated after real games despite the pool-aware persistence logic existing.
+		players := g.Players
+		rated := g.Rated
+		go func() {
+			if err := database.RecordGameAndResults(context.Background(), gameID, players, finalScores, winners, rated); err != nil {
+				log.Printf("Game %s: failed to record game results/ratings: %v", gameID, err)
+			}
+		}()
 	}
 }
 

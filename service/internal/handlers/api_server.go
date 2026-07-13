@@ -54,6 +54,9 @@ func (gs *GameServer) NewCambiaGameFromLobby(ctx context.Context, lob *lobby.Lob
 	lob.Mu.Lock()
 	g := game.NewCambiaGame()
 	g.LobbyID = lob.ID
+	g.HostUserID = lob.HostUserID
+	g.LobbyType = lob.Type
+	g.Rated = lob.Mode == "ranked"
 	g.HouseRules = lob.HouseRules
 	g.Circuit = lob.Circuit
 	g.Players = players
@@ -68,10 +71,15 @@ func (gs *GameServer) NewCambiaGameFromLobby(ctx context.Context, lob *lobby.Lob
 }
 
 // CreateGameInstance creates a game from pre-extracted parameters.
-// playerIDs lists the UUIDs of all players joining the game.
-func (gs *GameServer) CreateGameInstance(ctx context.Context, lobbyID, hostID uuid.UUID, gameMode string, houseRules game.HouseRules, circuit game.Circuit, playerIDs []uuid.UUID) *game.CambiaGame {
+// playerIDs lists the UUIDs of all players joining the game. lobbyType must be a valid
+// lobby_type enum value ("private"/"public"/"matchmaking"); rated marks whether results feed
+// the rating system (cambia-450).
+func (gs *GameServer) CreateGameInstance(ctx context.Context, lobbyID, hostID uuid.UUID, gameMode, lobbyType string, rated bool, houseRules game.HouseRules, circuit game.Circuit, playerIDs []uuid.UUID) *game.CambiaGame {
 	g := game.NewCambiaGame()
 	g.LobbyID = lobbyID
+	g.HostUserID = hostID
+	g.LobbyType = lobbyType
+	g.Rated = rated
 	g.Circuit = circuit
 	if circuit.Enabled {
 		g.HouseRules = houseRules
