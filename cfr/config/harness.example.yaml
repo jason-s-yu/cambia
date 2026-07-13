@@ -42,3 +42,21 @@ sync:
   interval_seconds: 60
   # where synced remote run dirs land, relative to cfr/ (flat, like local runs).
   local_runs_dir: runs
+
+# Optional Codebridge hub reflection (cambia-353). Omit this whole section to
+# disable reflection (zero behavior change). When present, `harness submit`,
+# `watch`, `resume`, `cancel --purge`, and `reflect` post job lifecycle
+# transitions to the hub's inbound webhook as keyed telemetry notes.
+# hub:
+#   # hub base URL (https only). POSTs go to {url}/api/hooks/{slug}.
+#   url: https://hub.example.com
+#   # inbound webhook trigger slug (the hub admin creates the trigger).
+#   slug: cambia-harness-reflect
+#   # hub work item that jobs WITHOUT a spec hub_item reflect onto.
+#   collector_item: cambia-439
+#   # trigger secret source: EXACTLY ONE of secret_file or secret_env. Never
+#   # inline the secret in yaml.
+#   secret_file: ~/.config/cambia/hub_webhook_secret
+#   # secret_env: CAMBIA_HUB_WEBHOOK_SECRET
+#   # optional SHA256 pin of the hub's TLS cert (omit to use CA verification).
+#   # cert_fingerprint: "AA:BB:...:64-hex-chars"

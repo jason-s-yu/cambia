@@ -88,6 +88,26 @@ def test_parse_rejects_unknown_kind():
         JobSpec.parse(_train_spec(kind="rl-ppo"))
 
 
+def test_hub_item_round_trips_spec_to_payload():
+    spec = JobSpec.parse(_train_spec(hub_item="cambia-359"))
+    assert spec.hub_item == "cambia-359"
+    payload = spec.to_payload("a" * 40)
+    assert payload["hub_item"] == "cambia-359"
+
+
+def test_hub_item_omitted_by_default():
+    spec = JobSpec.parse(_train_spec())
+    assert spec.hub_item is None
+    assert "hub_item" not in spec.to_payload("a" * 40)
+
+
+def test_hub_item_must_be_nonempty_string():
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_train_spec(hub_item=""))
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_train_spec(hub_item=123))
+
+
 def test_parse_kind_allowlist_exact():
     assert set(ALLOWED_KINDS) == {"train", "evaluate", "head-to-head", "bench"}
 

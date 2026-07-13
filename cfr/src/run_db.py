@@ -204,6 +204,15 @@ CREATE TABLE IF NOT EXISTS harness_sync (
     last_status TEXT
 );
 
+CREATE TABLE IF NOT EXISTS harness_reflection (
+    origin_host TEXT NOT NULL,
+    run_name TEXT NOT NULL,
+    last_reflected_state TEXT,
+    item_handle TEXT,
+    last_reflected_at TEXT,
+    PRIMARY KEY (origin_host, run_name)
+);
+
 CREATE INDEX IF NOT EXISTS idx_runs_name ON runs(name);
 CREATE INDEX IF NOT EXISTS idx_checkpoints_run_iter ON checkpoints(run_id, iteration);
 CREATE INDEX IF NOT EXISTS idx_eval_results_run_iter ON eval_results(run_id, iteration);
@@ -595,6 +604,57 @@ def upsert_harness_sync(
             last_status=excluded.last_status
         """,
         (run_name, origin_host, ts, last_status),
+    )
+    db.commit()
+
+
+def get_harness_reflection(
+    db: sqlite3.Connection, origin_host: str, run_name: str
+) -> Optional[sqlite3.Row]:
+    """Read the last hub-reflection row for a (origin_host, run_name) job.
+
+    The current-state store for the Codebridge hub reflector (cambia-353, data
+    architecture rule 1): it answers "what job state did we last reflect for this
+    (host, job), and onto which hub item?" as a point lookup, keeping the
+    monotonic guard and drift healer off history scans. Returns None when the job
+    was never reflected. Keyed by (origin_host, run_name) since one host runs one
+    live job per name in v1.
+    """
+    return db.execute(
+        "SELECT origin_host, run_name, last_reflected_state, item_handle, "
+        "last_reflected_at FROM harness_reflection WHERE origin_host=? AND run_name=?",
+        (origin_host, run_name),
+    ).fetchone()
+
+
+def upsert_harness_reflection(
+    db: sqlite3.Connection,
+    origin_host: str,
+    run_name: str,
+    last_reflected_state: str,
+    item_handle: str,
+    last_reflected_at: Optional[str] = None,
+) -> None:
+    """Record the last hub-reflected state for a (origin_host, run_name) job.
+
+    Written by the reflector ONLY after a webhook POST succeeds (cambia-353), so a
+    dropped post leaves the prior state on file and the next poll/drift pass
+    re-posts. item_handle is the hub item the note landed on (the job's hub_item,
+    or the collector item for an unlinked job), stored so a later transition that
+    cannot re-resolve hub_item keeps the note on the same item.
+    """
+    ts = last_reflected_at if last_reflected_at is not None else _now()
+    db.execute(
+        """
+        INSERT INTO harness_reflection
+            (origin_host, run_name, last_reflected_state, item_handle, last_reflected_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(origin_host, run_name) DO UPDATE SET
+            last_reflected_state=excluded.last_reflected_state,
+            item_handle=excluded.item_handle,
+            last_reflected_at=excluded.last_reflected_at
+        """,
+        (origin_host, run_name, last_reflected_state, item_handle, ts),
     )
     db.commit()
 

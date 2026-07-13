@@ -114,6 +114,12 @@ type JobSpec struct {
 	// jobspec.json so the FIFO order can be rebuilt after a daemon restart (queue
 	// persistence). Assigned by Submit; never supplied by the client.
 	SubmitSeq int64 `json:"submit_seq,omitempty"`
+	// HubItem is an optional Codebridge hub work-item handle (cambia-353), e.g.
+	// "cambia-359". Telemetry-only provenance: the runner never acts on it; it is
+	// carried so writeJobSpec persists it into jobspec.json and it surfaces in the
+	// JobView, letting the client-side reflector link a job's note to a hub item
+	// (recoverable from a pulled run dir). Empty means an unlinked job.
+	HubItem string `json:"hub_item,omitempty"`
 }
 
 // onFailureOrDefault returns the spec's on_failure policy, defaulting to skip.

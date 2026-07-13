@@ -82,6 +82,30 @@ def _build_coordinator(cfg):
     return coordinator, dest
 
 
+def _maybe_reflect(cfg, action) -> None:
+    """Run action(reflector) if hub reflection is configured (cambia-353).
+
+    Best-effort and fully contained: opens the run_db, builds the reflector, runs
+    the action, and swallows every error so a hub outage or a config gap never
+    changes the verb's behavior or exit code. A no-op when no [hub] section is set.
+    """
+    if getattr(cfg, "hub", None) is None:
+        return
+    try:
+        from src.harness.hub import build_reflector
+        from src.run_db import get_db
+
+        dest = get_db()
+        try:
+            reflector = build_reflector(cfg, dest)
+            if reflector is not None:
+                action(reflector)
+        finally:
+            dest.close()
+    except Exception:
+        pass
+
+
 def _git(args: List[str], cwd: Path) -> str:
     proc = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True)
     if proc.returncode != 0:
@@ -241,6 +265,9 @@ def submit(
     qpos = resp.get("queue_pos", "?") if isinstance(resp, dict) else "?"
     typer.secho(f"submitted {jid}: state={state} queue_pos={qpos}", fg=typer.colors.GREEN)
 
+    # Reflect the submit into the Codebridge hub (cambia-353); best-effort.
+    _maybe_reflect(cfg, lambda r: r.reflect_submit(spec.to_payload(sha)))
+
 
 # ---------------------------------------------------------------------------
 # status / list-remote (design 2.5: HTTPS GET)
@@ -374,6 +401,11 @@ def cancel(
         _fail(f"cancel failed: {exc}")
     typer.secho(f"canceled {job_id}", fg=typer.colors.GREEN)
 
+    # A purge removes the run dir; reflect it so the hub note records the terminal
+    # purge (cambia-353). Plain cancels keep flowing through the watch poll.
+    if purge:
+        _maybe_reflect(cfg, lambda r: r.reflect_purge(job_id))
+
 
 @harness_app.command("resume")
 def resume(
@@ -397,6 +429,10 @@ def resume(
     except Exception as exc:
         _fail(f"resume failed: {exc}")
     typer.secho(f"resumed {job_id}", fg=typer.colors.GREEN)
+
+    # Reflect the resume (terminal -> running) into the hub (cambia-353); the job
+    # view carries the hub link + kind/commit. Best-effort.
+    _maybe_reflect(cfg, lambda r: r.reflect_resume(client.get_job(job_id)))
 
 
 # ---------------------------------------------------------------------------
@@ -457,11 +493,16 @@ def watch_cmd(
 ):
     """Run the foreground pull loop: periodic delta pulls + reconcile (design 4.1)."""
     from src.harness.client import HarnessAPIError
+    from src.harness.hub import build_reflector
     from src.harness.pull import is_valid_run_name, watch
 
     cfg = _load_cfg(config)
     client = _build_client(cfg)
     coordinator, dest = _build_coordinator(cfg)
+    # Hub reflection (cambia-353): None when no [hub] section, so watch behaves
+    # exactly as before. Shares the coordinator's run_db for the reflection store
+    # and the reconciled metrics tail.
+    reflector = build_reflector(cfg, dest)
     tick = interval if interval is not None else cfg.sync.interval_seconds
 
     def job_lister():
@@ -496,8 +537,39 @@ def watch_cmd(
             interval_seconds=tick,
             all_checkpoints=all_checkpoints,
             on_event=lambda msg: typer.echo(msg),
+            reflector=reflector,
         )
     except KeyboardInterrupt:
         typer.echo("stopped")
     finally:
         dest.close()
+
+
+@harness_app.command("reflect")
+def reflect_cmd(config: Optional[str] = _CONFIG_OPT):
+    """One-shot hub drift reconcile (cambia-353): re-post every job whose live
+    runner state differs from (or was never) its last hub reflection. Idempotent;
+    works purely from client-side state (the webhook credential cannot read hub
+    notes). Best-effort per job; a hub error is logged and skipped."""
+    from src.harness.client import HarnessAPIError
+    from src.harness.hub import build_reflector
+    from src.run_db import get_db
+
+    cfg = _load_cfg(config)
+    if getattr(cfg, "hub", None) is None:
+        _fail("no [hub] section in harness config; reflection is disabled")
+    client = _build_client(cfg)
+    try:
+        jobs = client.list_jobs()
+    except HarnessAPIError as exc:
+        _fail(str(exc))
+    except Exception as exc:
+        _fail(f"list failed: {exc}")
+
+    dest = get_db()
+    try:
+        reflector = build_reflector(cfg, dest)
+        posted = reflector.reconcile(jobs)
+    finally:
+        dest.close()
+    typer.secho(f"reflected {posted} job(s) to hub {cfg.hub.slug}", fg=typer.colors.GREEN)
