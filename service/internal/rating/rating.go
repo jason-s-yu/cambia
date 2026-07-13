@@ -16,10 +16,11 @@ import (
 //  2. We call SingleOrMultiPlayerGlicko2 to apply exactly one Glicko-2 rating-period update
 //     per player, per the Glickman spec (a rating period is applied once, not iterated).
 //
-// Note: for a true persistent Glicko-2, we store each user's phi, sigma in the DB, then
-// feed them into the next match.
-// TODO: Modify returns ephemeral updated ELO only
-func FinalizeRatings(players []models.User, scoresMap map[uuid.UUID]int) []models.User {
+// Each user's phi, sigma for the given pool are read from the models.User fields
+// passed in (see PoolFields) and fed back as the new stored values by the caller;
+// callers are expected to have loaded these from the DB rather than passing zero
+// values, or every match falls back to the baseline deviation/volatility.
+func FinalizeRatings(players []models.User, scoresMap map[uuid.UUID]int, mode RatingMode) []models.User {
 	// 1) Build a rank-based fraction for each user
 	type userScore struct {
 		UserID uuid.UUID
@@ -62,7 +63,7 @@ func FinalizeRatings(players []models.User, scoresMap map[uuid.UUID]int) []model
 		scores[idx] = rankFrac[p.ID]
 	}
 
-	return SingleOrMultiPlayerGlicko2(players, scores)
+	return SingleOrMultiPlayerGlicko2(players, scores, mode)
 }
 
 // Update1v1 applies one Glicko2 rating-period update for a single decisive 1v1 result:
@@ -70,19 +71,14 @@ func FinalizeRatings(players []models.User, scoresMap map[uuid.UUID]int) []model
 // updates read the pre-match opponent rating, and a fresh user (zero Phi1v1/Sigma1v1)
 // falls back to the baseline deviation and volatility via ratingFromUser.
 func Update1v1(winner, loser models.User) (models.User, models.User) {
-	wR := ratingFromUser(winner)
-	lR := ratingFromUser(loser)
+	wR := ratingFromUser(winner, Mode1v1)
+	lR := ratingFromUser(loser, Mode1v1)
 
 	newW := updateGlicko(wR, lR, 1.0)
 	newL := updateGlicko(lR, wR, 0.0)
 
-	winner.Elo1v1 = int(math.Round(newW.ToElo()))
-	winner.Phi1v1 = newW.Phi * GlickoScale
-	winner.Sigma1v1 = newW.Sigma
-
-	loser.Elo1v1 = int(math.Round(newL.ToElo()))
-	loser.Phi1v1 = newL.Phi * GlickoScale
-	loser.Sigma1v1 = newL.Sigma
+	setPoolRating(&winner, Mode1v1, int(math.Round(newW.ToElo())), newW.Phi*GlickoScale, newW.Sigma)
+	setPoolRating(&loser, Mode1v1, int(math.Round(newL.ToElo())), newL.Phi*GlickoScale, newL.Sigma)
 
 	return winner, loser
 }

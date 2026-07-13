@@ -29,6 +29,43 @@ type Glicko2Rating struct {
 	Sigma float64
 }
 
+// RatingMode identifies which Glicko-2 rating pool a game contributes to. Each
+// pool (1v1, 4p, 7p8p) has its own Elo/Phi/Sigma columns on models.User so that
+// rating deviation converges independently per player-count bracket.
+type RatingMode string
+
+const (
+	Mode1v1  RatingMode = "1v1"
+	Mode4p   RatingMode = "4p"
+	Mode7p8p RatingMode = "7p8p"
+)
+
+// PoolFields returns the stored Elo, Phi (RD), and Sigma (volatility) for the
+// given user in the given rating pool. Unrecognized modes fall back to 1v1.
+func PoolFields(u models.User, mode RatingMode) (elo int, phi, sigma float64) {
+	switch mode {
+	case Mode4p:
+		return u.Elo4p, u.Phi4p, u.Sigma4p
+	case Mode7p8p:
+		return u.Elo7p8p, u.Phi7p8p, u.Sigma7p8p
+	default:
+		return u.Elo1v1, u.Phi1v1, u.Sigma1v1
+	}
+}
+
+// setPoolRating writes an updated Elo/Phi/Sigma triple back onto u for the given
+// rating pool. Unrecognized modes fall back to 1v1.
+func setPoolRating(u *models.User, mode RatingMode, elo int, phi, sigma float64) {
+	switch mode {
+	case Mode4p:
+		u.Elo4p, u.Phi4p, u.Sigma4p = elo, phi, sigma
+	case Mode7p8p:
+		u.Elo7p8p, u.Phi7p8p, u.Sigma7p8p = elo, phi, sigma
+	default:
+		u.Elo1v1, u.Phi1v1, u.Sigma1v1 = elo, phi, sigma
+	}
+}
+
 // NewGlicko2Rating creates a new Glicko2Rating from a standard Elo, rating deviation, and volatility.
 //
 // elo is the user's current rating in standard "1500-based" scale.
@@ -47,30 +84,30 @@ func (r Glicko2Rating) ToElo() float64 {
 	return r.Mu*GlickoScale + DefaultMu
 }
 
-// ratingFromUser builds a Glicko2Rating from a user's stored 1v1 fields, substituting
-// the baseline deviation and volatility when a user has no prior rating (zero-valued
-// Phi1v1/Sigma1v1). Without this guard a fresh user would yield phi=0 or sigma=0, which
-// makes ln(sigma^2) and the deviation update undefined.
-func ratingFromUser(u models.User) Glicko2Rating {
-	phi := u.Phi1v1
+// ratingFromUser builds a Glicko2Rating from a user's stored fields for the given rating
+// pool, substituting the baseline deviation and volatility when a user has no prior rating
+// in that pool (zero-valued Phi/Sigma). Without this guard a fresh user would yield phi=0
+// or sigma=0, which makes ln(sigma^2) and the deviation update undefined.
+func ratingFromUser(u models.User, mode RatingMode) Glicko2Rating {
+	elo, phi, sigma := PoolFields(u, mode)
 	if phi <= 0 {
 		phi = DefaultPhi
 	}
-	sigma := u.Sigma1v1
 	if sigma <= 0 {
 		sigma = 0.06
 	}
-	return NewGlicko2Rating(float64(u.Elo1v1), phi, sigma)
+	return NewGlicko2Rating(float64(elo), phi, sigma)
 }
 
 // SingleOrMultiPlayerGlicko2 applies a single-step Glicko2 update for a group of users
-// given their final scores in [0..1]. For multi-player, we approximate the "opponent rating"
-// as the average of all other players' Elos.
+// given their final scores in [0..1], reading and writing the Elo/Phi/Sigma fields for
+// the given rating pool. For multi-player, we approximate the "opponent rating" as the
+// average of all other players' Elos in that pool.
 //
-// allUsers is the slice of user objects with fields Elo1v1, Phi1v1, Sigma1v1
-// scores is a parallel slice of float64 in [0..1] representing each user's final fraction
-// returns a new slice of updated users
-func SingleOrMultiPlayerGlicko2(allUsers []models.User, scores []float64) []models.User {
+// allUsers is the slice of user objects.
+// scores is a parallel slice of float64 in [0..1] representing each user's final fraction.
+// returns a new slice of updated users.
+func SingleOrMultiPlayerGlicko2(allUsers []models.User, scores []float64, mode RatingMode) []models.User {
 	if len(allUsers) != len(scores) {
 		log.Printf("Mismatch in user vs. score count. No rating update performed.")
 		return allUsers
@@ -78,22 +115,21 @@ func SingleOrMultiPlayerGlicko2(allUsers []models.User, scores []float64) []mode
 
 	var totalMu float64
 	for i := range allUsers {
-		totalMu += float64(allUsers[i].Elo1v1)
+		elo, _, _ := PoolFields(allUsers[i], mode)
+		totalMu += float64(elo)
 	}
 	avgElo := totalMu / float64(len(allUsers))
 
 	updated := make([]models.User, len(allUsers))
 	for i, u := range allUsers {
-		r := ratingFromUser(u)
+		r := ratingFromUser(u, mode)
 
-		oppElo := (avgElo*float64(len(allUsers)) - float64(u.Elo1v1)) / float64(len(allUsers)-1)
+		elo, _, _ := PoolFields(u, mode)
+		oppElo := (avgElo*float64(len(allUsers)) - float64(elo)) / float64(len(allUsers)-1)
 		oppR := NewGlicko2Rating(oppElo, DefaultPhi, 0.06)
 
 		newR := updateGlicko(r, oppR, scores[i])
-		newElo := newR.ToElo()
-		u.Elo1v1 = int(math.Round(newElo))
-		u.Phi1v1 = newR.Phi * GlickoScale
-		u.Sigma1v1 = newR.Sigma
+		setPoolRating(&u, mode, int(math.Round(newR.ToElo())), newR.Phi*GlickoScale, newR.Sigma)
 		updated[i] = u
 	}
 	return updated

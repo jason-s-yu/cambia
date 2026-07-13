@@ -17,14 +17,20 @@ import (
 // We do a basic approach: if players == 2 => "1v1", if 4 => "4p", if 7 or 8 => "7p8p" else no rating update.
 func RecordGameAndResults(ctx context.Context, gameID uuid.UUID, players []*models.Player, finalScores map[uuid.UUID]int, winners []uuid.UUID) error {
 	err := pgx.BeginTxFunc(ctx, DB, pgx.TxOptions{}, func(tx pgx.Tx) error {
-		// upsert the game row if not exist, set status=completed
-		upsertGame := `
-			INSERT INTO games (id, status)
-			VALUES ($1, 'completed')
-			ON CONFLICT (id) DO UPDATE SET status = 'completed'
-		`
-		if _, e := tx.Exec(ctx, upsertGame, gameID); e != nil {
+		// Mark the game row completed. This assumes the row already exists (created at
+		// game-start with a lobby_id, which this function has no way to supply): games.lobby_id
+		// is NOT NULL with no default, and Postgres validates that on the proposed row before
+		// ON CONFLICT resolution even runs, so an INSERT ... ON CONFLICT DO UPDATE here always
+		// fails with a not-null violation regardless of whether a conflicting row exists
+		// (verified directly against the schema; not a hypothetical). A plain UPDATE matches
+		// this function's actual invariant.
+		updGame := `UPDATE games SET status = 'completed' WHERE id = $1`
+		ct, e := tx.Exec(ctx, updGame, gameID)
+		if e != nil {
 			return e
+		}
+		if ct.RowsAffected() == 0 {
+			log.Printf("RecordGameAndResults: no existing games row for game %v; game_results insert will fail its FK", gameID)
 		}
 
 		// Insert game_results
@@ -54,14 +60,14 @@ func RecordGameAndResults(ctx context.Context, gameID uuid.UUID, players []*mode
 	}
 
 	// figure out rating mode
-	var ratingMode string
+	var ratingMode rating.RatingMode
 	switch len(players) {
 	case 2:
-		ratingMode = "1v1"
+		ratingMode = rating.Mode1v1
 	case 4:
-		ratingMode = "4p"
+		ratingMode = rating.Mode4p
 	case 7, 8:
-		ratingMode = "7p8p"
+		ratingMode = rating.Mode7p8p
 	default:
 		ratingMode = ""
 	}
@@ -89,18 +95,26 @@ func RecordGameAndResults(ctx context.Context, gameID uuid.UUID, players []*mode
 	}
 
 	// finalize rating
-	updated := rating.FinalizeRatings(userList, smap)
+	updated := rating.FinalizeRatings(userList, smap, ratingMode)
 
-	// store updated rating for each user + rating record
+	// store updated rating (elo, phi, sigma) for each user + rating record
 	err = pgx.BeginTxFunc(ctx, DB, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		for i, uNew := range updated {
 			uOld := userList[i]
-			oldElo := uOld.Elo1v1
-			newElo := uNew.Elo1v1
+			oldElo, _, _ := rating.PoolFields(uOld, ratingMode)
+			newElo, newPhi, newSigma := rating.PoolFields(uNew, ratingMode)
 
-			// update user row
-			updQ := `UPDATE users SET elo_1v1=$1 WHERE id=$2`
-			if _, e := tx.Exec(ctx, updQ, newElo, uNew.ID); e != nil {
+			// update user row: elo/phi/sigma columns for the pool this game contributed to
+			var updQ string
+			switch ratingMode {
+			case rating.Mode4p:
+				updQ = `UPDATE users SET elo_4p=$1, phi_4p=$2, sigma_4p=$3 WHERE id=$4`
+			case rating.Mode7p8p:
+				updQ = `UPDATE users SET elo_7p8p=$1, phi_7p8p=$2, sigma_7p8p=$3 WHERE id=$4`
+			default:
+				updQ = `UPDATE users SET elo_1v1=$1, phi_1v1=$2, sigma_1v1=$3 WHERE id=$4`
+			}
+			if _, e := tx.Exec(ctx, updQ, newElo, newPhi, newSigma, uNew.ID); e != nil {
 				return e
 			}
 			// insert rating record
@@ -108,7 +122,7 @@ func RecordGameAndResults(ctx context.Context, gameID uuid.UUID, players []*mode
 				INSERT INTO ratings (user_id, game_id, old_rating, new_rating, rating_mode)
 				VALUES ($1, $2, $3, $4, $5)
 			`
-			if _, e2 := tx.Exec(ctx, insQ, uNew.ID, gameID, oldElo, newElo, ratingMode); e2 != nil {
+			if _, e2 := tx.Exec(ctx, insQ, uNew.ID, gameID, oldElo, newElo, string(ratingMode)); e2 != nil {
 				return e2
 			}
 		}

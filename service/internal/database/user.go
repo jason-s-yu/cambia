@@ -54,6 +54,8 @@ func GetUserByEmail(ctx context.Context, email string) (*models.User, error) {
 	SELECT id, email, password, username, is_ephemeral, is_admin,
 	       elo_1v1, elo_4p, elo_7p8p,
 	       phi_1v1, sigma_1v1,
+	       phi_4p, sigma_4p,
+	       phi_7p8p, sigma_7p8p,
 	       open_skill_mu, open_skill_sigma
 	FROM users
 	WHERE email=$1
@@ -63,6 +65,8 @@ func GetUserByEmail(ctx context.Context, email string) (*models.User, error) {
 		&u.IsEphemeral, &u.IsAdmin,
 		&u.Elo1v1, &u.Elo4p, &u.Elo7p8p,
 		&u.Phi1v1, &u.Sigma1v1,
+		&u.Phi4p, &u.Sigma4p,
+		&u.Phi7p8p, &u.Sigma7p8p,
 		&u.OpenSkillMu, &u.OpenSkillSigma,
 	)
 	if err != nil {
@@ -81,6 +85,8 @@ func GetUserByID(ctx context.Context, id uuid.UUID) (*models.User, error) {
 	SELECT id, email, password, username, is_ephemeral, is_admin,
 	       elo_1v1, elo_4p, elo_7p8p,
 	       phi_1v1, sigma_1v1,
+	       phi_4p, sigma_4p,
+	       phi_7p8p, sigma_7p8p,
 	       open_skill_mu, open_skill_sigma
 	FROM users
 	WHERE id=$1
@@ -90,6 +96,8 @@ func GetUserByID(ctx context.Context, id uuid.UUID) (*models.User, error) {
 		&u.IsEphemeral, &u.IsAdmin,
 		&u.Elo1v1, &u.Elo4p, &u.Elo7p8p,
 		&u.Phi1v1, &u.Sigma1v1,
+		&u.Phi4p, &u.Sigma4p,
+		&u.Phi7p8p, &u.Sigma7p8p,
 		&u.OpenSkillMu, &u.OpenSkillSigma,
 	)
 	if err != nil {
