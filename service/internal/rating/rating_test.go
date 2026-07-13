@@ -38,7 +38,7 @@ func TestFinalizeRatingsSingleWinCanonicalDelta(t *testing.T) {
 		loser.ID:  10,
 	}
 
-	updated := FinalizeRatings([]models.User{winner, loser}, scores)
+	updated := FinalizeRatings([]models.User{winner, loser}, scores, Mode1v1)
 	if len(updated) != 2 {
 		t.Fatalf("expected 2 updated players, got %d", len(updated))
 	}
@@ -78,7 +78,7 @@ func TestFinalizeRatingsNoTenXOvershoot(t *testing.T) {
 		loser.ID:  10,
 	}
 
-	updated := FinalizeRatings([]models.User{winner, loser}, scores)
+	updated := FinalizeRatings([]models.User{winner, loser}, scores, Mode1v1)
 	for _, u := range updated {
 		if u.ID != winner.ID {
 			continue
@@ -108,7 +108,7 @@ func TestFinalizeRatingsThreePlayerRankFractions(t *testing.T) {
 		third.ID:  10,
 	}
 
-	updated := FinalizeRatings([]models.User{first, second, third}, scores)
+	updated := FinalizeRatings([]models.User{first, second, third}, scores, Mode1v1)
 
 	byID := make(map[uuid.UUID]int, len(updated))
 	for _, u := range updated {

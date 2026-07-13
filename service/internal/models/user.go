@@ -19,6 +19,14 @@ type User struct {
 	Phi1v1   float64 `json:"phi_1v1"`
 	Sigma1v1 float64 `json:"sigma_1v1"`
 
+	// Glicko2 for 4p
+	Phi4p   float64 `json:"phi_4p"`
+	Sigma4p float64 `json:"sigma_4p"`
+
+	// Glicko2 for 7p/8p
+	Phi7p8p   float64 `json:"phi_7p8p"`
+	Sigma7p8p float64 `json:"sigma_7p8p"`
+
 	// OpenSkill (Plackett-Luce) for circuit/tournament mode
 	OpenSkillMu    float64 `json:"open_skill_mu"`
 	OpenSkillSigma float64 `json:"open_skill_sigma"`
