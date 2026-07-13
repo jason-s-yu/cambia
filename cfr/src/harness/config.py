@@ -57,11 +57,59 @@ class SyncConfig:
 
 
 @dataclass
+class HubConfig:
+    """Optional Codebridge hub reflection (cambia-353, design 6).
+
+    Absent from harness.yaml -> reflection disabled, zero behavior change. When
+    present the `harness` client posts job lifecycle transitions to the hub's
+    inbound webhook. The trigger secret is never inlined in yaml: it is resolved
+    from a file path (secret_file) or an env-var name (secret_env), exactly one of
+    which is required. cert_fingerprint optionally pins the hub's TLS cert (mirror
+    of the RunnerConfig pin); absent it, standard CA verification is used.
+    """
+
+    url: str  # hub base URL, https:// only (POSTs to {url}/api/hooks/{slug})
+    slug: str  # inbound webhook trigger slug
+    collector_item: str  # hub item unlinked jobs reflect onto (e.g. "cambia-439")
+    secret_file: Optional[str] = None  # path holding the trigger secret
+    secret_env: Optional[str] = None  # env-var name holding the trigger secret
+    cert_fingerprint: Optional[str] = None  # optional SHA256 TLS pin
+
+    def resolve_secret(self) -> str:
+        """Resolve the trigger secret from its env var or file (never yaml).
+
+        Raises HarnessConfigError when the configured source is missing or empty.
+        Called at post time so an unrelated command never fails on a missing
+        secret; the reflector treats the raised error as a log-and-drop.
+        """
+        if self.secret_env:
+            val = os.environ.get(self.secret_env)
+            if not val:
+                raise HarnessConfigError(
+                    f"hub.secret_env {self.secret_env!r} is unset or empty"
+                )
+            return val.strip()
+        if self.secret_file:
+            path = Path(self.secret_file).expanduser()
+            try:
+                val = path.read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                raise HarnessConfigError(
+                    f"failed to read hub.secret_file {path}: {exc}"
+                ) from exc
+            if not val:
+                raise HarnessConfigError(f"hub.secret_file {path} is empty")
+            return val
+        raise HarnessConfigError("hub requires secret_file or secret_env")
+
+
+@dataclass
 class HarnessConfig:
     runner: RunnerConfig
     auth: AuthConfig
     data_plane: DataPlaneConfig
     sync: SyncConfig
+    hub: Optional[HubConfig] = None
     source_path: Optional[str] = None
 
     def normalized_fingerprint(self) -> str:
@@ -88,6 +136,19 @@ class HarnessConfig:
             )
         if self.sync.interval_seconds <= 0:
             raise HarnessConfigError("sync.interval_seconds must be positive")
+        if self.hub is not None:
+            if not self.hub.url.startswith("https://"):
+                raise HarnessConfigError(
+                    f"hub.url must be https:// (plaintext is refused), got {self.hub.url!r}"
+                )
+            if not self.hub.slug:
+                raise HarnessConfigError("hub.slug must be non-empty")
+            if not self.hub.collector_item:
+                raise HarnessConfigError("hub.collector_item must be non-empty")
+            if bool(self.hub.secret_file) == bool(self.hub.secret_env):
+                raise HarnessConfigError(
+                    "hub requires exactly one of secret_file or secret_env"
+                )
         return self
 
 
@@ -175,10 +236,28 @@ def from_dict(data: dict, source_path: Optional[str] = None) -> HarnessConfig:
         interval_seconds=int(sync.get("interval_seconds", 60)),
         local_runs_dir=str(sync.get("local_runs_dir", "runs")),
     )
+    hub = data.get("hub")
+    hub_cfg: Optional[HubConfig] = None
+    if hub is not None:
+        if not isinstance(hub, dict):
+            raise HarnessConfigError("hub section must be a mapping")
+        hub_cfg = HubConfig(
+            url=_require(hub, "url", "hub"),
+            slug=_require(hub, "slug", "hub"),
+            collector_item=_require(hub, "collector_item", "hub"),
+            secret_file=(
+                str(Path(hub["secret_file"]).expanduser())
+                if hub.get("secret_file")
+                else None
+            ),
+            secret_env=hub.get("secret_env") or None,
+            cert_fingerprint=hub.get("cert_fingerprint") or None,
+        )
     return HarnessConfig(
         runner=runner_cfg,
         auth=auth_cfg,
         data_plane=dp_cfg,
         sync=sync_cfg,
+        hub=hub_cfg,
         source_path=source_path,
     )

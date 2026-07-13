@@ -75,3 +75,60 @@ def test_load_from_explicit_path(tmp_path):
     cfg = cfgmod.load(str(p))
     assert cfg.source_path == str(p)
     assert cfg.sync.interval_seconds == 60
+
+
+# --- hub reflection section (cambia-353) ---
+_HUB = {
+    "url": "https://hub.example.com",
+    "slug": "cambia-harness-reflect",
+    "collector_item": "cambia-439",
+    "secret_env": "CAMBIA_HUB_SECRET",
+}
+
+
+def test_absent_hub_section_is_none():
+    cfg = cfgmod.from_dict(_GOOD).validate()
+    assert cfg.hub is None  # reflection disabled, zero behavior change
+
+
+def test_hub_section_parses():
+    cfg = cfgmod.from_dict({**_GOOD, "hub": dict(_HUB)}).validate()
+    assert cfg.hub is not None
+    assert cfg.hub.url == "https://hub.example.com"
+    assert cfg.hub.collector_item == "cambia-439"
+    assert cfg.hub.secret_env == "CAMBIA_HUB_SECRET"
+
+
+def test_hub_rejects_plaintext_url():
+    bad = {**_GOOD, "hub": {**_HUB, "url": "http://hub.example.com"}}
+    with pytest.raises(cfgmod.HarnessConfigError):
+        cfgmod.from_dict(bad).validate()
+
+
+def test_hub_requires_exactly_one_secret_source():
+    # both -> reject
+    both = {**_GOOD, "hub": {**_HUB, "secret_file": "/tmp/s"}}
+    with pytest.raises(cfgmod.HarnessConfigError):
+        cfgmod.from_dict(both).validate()
+    # neither -> reject
+    neither = {k: v for k, v in _HUB.items() if k != "secret_env"}
+    with pytest.raises(cfgmod.HarnessConfigError):
+        cfgmod.from_dict({**_GOOD, "hub": neither}).validate()
+
+
+def test_hub_resolve_secret_from_env(monkeypatch):
+    cfg = cfgmod.from_dict({**_GOOD, "hub": dict(_HUB)}).validate()
+    monkeypatch.setenv("CAMBIA_HUB_SECRET", "  s3cr3t  ")
+    assert cfg.hub.resolve_secret() == "s3cr3t"
+    monkeypatch.delenv("CAMBIA_HUB_SECRET", raising=False)
+    with pytest.raises(cfgmod.HarnessConfigError):
+        cfg.hub.resolve_secret()
+
+
+def test_hub_resolve_secret_from_file(tmp_path):
+    sf = tmp_path / "sec"
+    sf.write_text("filesecret\n")
+    hub = {k: v for k, v in _HUB.items() if k != "secret_env"}
+    hub["secret_file"] = str(sf)
+    cfg = cfgmod.from_dict({**_GOOD, "hub": hub}).validate()
+    assert cfg.hub.resolve_secret() == "filesecret"
