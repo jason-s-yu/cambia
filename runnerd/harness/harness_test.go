@@ -302,6 +302,38 @@ func decodeBody(t *testing.T, resp *http.Response, v any) {
 	}
 }
 
+// TestHubItemProvenanceRoundTrip proves the optional hub_item link (cambia-353)
+// survives the jobspec.json write-once record and surfaces on the JobView, so the
+// client-side reflector can recover it from a pulled run dir or a single poll.
+func TestHubItemProvenanceRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	spec := &JobSpec{Name: "linked", Kind: "train", HubItem: "cambia-359"}
+	if err := writeJobSpec(dir, spec); err != nil {
+		t.Fatalf("writeJobSpec: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, jobSpecFile))
+	if err != nil {
+		t.Fatalf("read jobspec.json: %v", err)
+	}
+	if !strings.Contains(string(data), `"hub_item": "cambia-359"`) {
+		t.Fatalf("jobspec.json missing hub_item: %s", data)
+	}
+	got := readJobSpec(dir)
+	if got == nil || got.HubItem != "cambia-359" {
+		t.Fatalf("readJobSpec lost hub_item: %+v", got)
+	}
+
+	// JobView carries hub_item, and omits it when empty (omitempty).
+	linked, _ := json.Marshal(JobView{JobID: "linked", HubItem: "cambia-359"})
+	if !strings.Contains(string(linked), `"hub_item":"cambia-359"`) {
+		t.Fatalf("JobView missing hub_item: %s", linked)
+	}
+	unlinked, _ := json.Marshal(JobView{JobID: "bare"})
+	if strings.Contains(string(unlinked), "hub_item") {
+		t.Fatalf("JobView should omit empty hub_item: %s", unlinked)
+	}
+}
+
 // jobResp is the {job: JobView} envelope of GET/DELETE.
 type jobResp struct {
 	Job JobView `json:"job"`

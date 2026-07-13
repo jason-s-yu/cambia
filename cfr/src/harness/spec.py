@@ -105,6 +105,11 @@ class JobSpec:
     warm_start: Optional[str] = None
     after: Optional[str] = None
     on_failure: str = "skip"
+    # Optional Codebridge hub work-item handle (cambia-353), e.g. "cambia-359".
+    # Telemetry-only: it links the job's reflected note to a hub item and is
+    # persisted into jobspec.json/env.json so the link survives a run-dir pull.
+    # An unlinked job (hub_item omitted) reflects onto the config collector item.
+    hub_item: Optional[str] = None
 
     _KNOWN_KEYS = frozenset(
         {
@@ -124,6 +129,7 @@ class JobSpec:
             "warm_start",
             "after",
             "on_failure",
+            "hub_item",
         }
     )
 
@@ -241,6 +247,10 @@ class JobSpec:
                 f"on_failure must be one of {list(ON_FAILURE_POLICIES)}, got {on_failure!r}"
             )
 
+        hub_item = raw.get("hub_item")
+        if hub_item is not None and (not isinstance(hub_item, str) or not hub_item):
+            raise HarnessSpecError("hub_item must be a non-empty string when set")
+
         return cls(
             kind=kind,
             name=name,
@@ -258,6 +268,7 @@ class JobSpec:
             warm_start=warm_start,
             after=after,
             on_failure=on_failure,
+            hub_item=hub_item,
         )
 
     def to_payload(self, commit: str) -> Dict[str, Any]:
@@ -293,6 +304,10 @@ class JobSpec:
         if self.after is not None:
             payload["after"] = self.after
             payload["on_failure"] = self.on_failure
+        # hub_item is telemetry provenance: forwarded so the runner persists it
+        # into jobspec.json/env.json for a pulled-run-dir link recovery.
+        if self.hub_item is not None:
+            payload["hub_item"] = self.hub_item
         return payload
 
 

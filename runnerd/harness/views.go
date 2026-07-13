@@ -5,15 +5,19 @@ import "github.com/jason-s-yu/cambia/runnerd/procmgr"
 // JobView is the API projection of a job: the runnerd-level effective state plus
 // the process.json record and the accepted spec's provenance fields.
 type JobView struct {
-	JobID      string `json:"job_id"`
-	State      string `json:"state"`
-	Kind       string `json:"kind,omitempty"`
-	Priority   string `json:"priority,omitempty"`
-	QueuePos   int    `json:"queue_pos,omitempty"`
-	Commit     string `json:"commit,omitempty"`
-	Config     string `json:"config,omitempty"`
-	Resume     bool   `json:"resume,omitempty"`
-	After      string `json:"after,omitempty"`
+	JobID    string `json:"job_id"`
+	State    string `json:"state"`
+	Kind     string `json:"kind,omitempty"`
+	Priority string `json:"priority,omitempty"`
+	QueuePos int    `json:"queue_pos,omitempty"`
+	Commit   string `json:"commit,omitempty"`
+	Config   string `json:"config,omitempty"`
+	Resume   bool   `json:"resume,omitempty"`
+	After    string `json:"after,omitempty"`
+	// HubItem echoes the accepted spec's Codebridge hub link (cambia-353) so the
+	// client-side reflector reads it from a single list_jobs poll, no run-dir read
+	// required. Telemetry-only; empty for an unlinked job.
+	HubItem    string `json:"hub_item,omitempty"`
 	PID        int    `json:"pid,omitempty"`
 	ExitCode   *int   `json:"exit_code,omitempty"`
 	LastError  string `json:"last_error,omitempty"`
@@ -49,6 +53,7 @@ func (d *Dispatcher) pendingViewLocked(name string) JobView {
 		Config:    j.spec.Config,
 		Resume:    j.resume,
 		After:     j.spec.After,
+		HubItem:   j.spec.HubItem,
 		CreatedAt: j.submitAt,
 	}
 	if j.state == StateQueued {
@@ -103,6 +108,7 @@ func (d *Dispatcher) resolveView(name string) (JobView, bool) {
 		v.Priority = spec.Priority
 		v.Resume = spec.Resume
 		v.After = spec.After
+		v.HubItem = spec.HubItem
 	}
 	if pending {
 		v.State = pendingState
