@@ -1,0 +1,132 @@
+/* Cambia — color tokens
+   Root-boardgame-inspired woodland palette: cartoonish but serious underneath.
+   Dark theme first ("night forest": warm umber surfaces, cream text);
+   light theme ("daylight parchment") via [data-theme="light"] overrides.
+   Base hue ramps are constant; only semantic aliases switch per theme. */
+
+:root {
+  /* ---- Base: bark (warm umber-charcoal surfaces, dark theme) ---- */
+  --bark-950: #14110d;
+  --bark-900: #1a1611;
+  --bark-850: #201b15;
+  --bark-800: #282219;
+  --bark-700: #332b20;
+  --bark-600: #43392a;
+  --bark-500: #574a37;
+
+  /* ---- Base: parchment (cream papers, light theme + card faces) ---- */
+  --parchment-50: #fbf5e6;
+  --parchment-100: #f3e9d2;
+  --parchment-200: #eaddbe;
+  --parchment-300: #d9c79d;
+  --parchment-400: #bfa878;
+
+  /* ---- Base: ink (outlines, text on parchment) ---- */
+  --ink-900: #2b2114;
+  --ink-700: #46392a;
+  --ink-500: #6b5c48;
+
+  /* ---- Base: ember (rust orange — primary accent) ---- */
+  --ember-600: #b1502a;
+  --ember-500: #cd6335;
+  --ember-400: #e07c48;
+  --ember-300: #eda06f;
+
+  /* ---- Base: moss (forest green — success, tables, ready) ---- */
+  --moss-700: #2e5339;
+  --moss-600: #3c6a49;
+  --moss-500: #4f8a5e;
+  --moss-400: #6ba877;
+
+  /* ---- Base: dusk (slate blue — info, cool contrast) ---- */
+  --dusk-600: #46688b;
+  --dusk-500: #5c7fa3;
+  --dusk-400: #7d9cbc;
+
+  /* ---- Base: berry (deep red — Cambia call, danger, red suits) ---- */
+  --berry-600: #97302c;
+  --berry-500: #b33a35;
+  --berry-400: #cf554c;
+
+  /* ---- Base: honey (mustard gold — ranked, win, highlights) ---- */
+  --honey-600: #b8862f;
+  --honey-500: #dfae47;
+  --honey-400: #ecc46b;
+  --honey-300: #f5da97;
+
+  /* ================= DARK THEME (default) ================= */
+
+  --surface-page: var(--bark-900);
+  --surface-card: var(--bark-850);
+  --surface-raised: var(--bark-800);
+  --surface-inset: var(--bark-950);
+  --surface-overlay: rgba(20, 17, 13, 0.8);
+  --surface-table: var(--moss-700);
+  --surface-table-deep: #24422e;
+
+  --text-primary: #f3ecda;
+  --text-secondary: #b5a98e;
+  --text-tertiary: #7d7159;
+  --text-inverse: var(--ink-900);
+  --text-on-ember: #fdf4ec;
+  --text-on-honey: #2b2114;
+
+  --border-subtle: rgba(243, 236, 218, 0.08);
+  --border-default: rgba(243, 236, 218, 0.16);
+  --border-strong: rgba(243, 236, 218, 0.3);
+  --outline-ink: rgba(20, 15, 8, 0.85); /* thick cartoon outlines */
+
+  --accent-primary: var(--ember-500);
+  --accent-primary-hover: var(--ember-400);
+  --accent-cambia: var(--berry-500);
+  --accent-cambia-hover: var(--berry-400);
+  --accent-gold: var(--honey-500);
+
+  /* ---- Playing cards ---- */
+  --card-face: var(--parchment-100);
+  --card-face-edge: var(--parchment-300);
+  --card-back: var(--ember-600);
+  --card-back-line: rgba(243, 233, 210, 0.4);
+  --suit-red: var(--berry-500);
+  --suit-black: var(--ink-900);
+
+  /* ---- Status ---- */
+  --status-success: var(--moss-500);
+  --status-danger: var(--berry-500);
+  --status-warning: var(--honey-500);
+  --status-info: var(--dusk-500);
+
+  /* ---- Rank tiers ---- */
+  --tier-bronze: #a9714b;
+  --tier-silver: #a8b2bc;
+  --tier-gold: #dfae47;
+  --tier-platinum: #7fd1c0;
+  --tier-diamond: #7fb4e8;
+  --tier-master: #b48ae0;
+  --tier-grandmaster: #e8695f;
+}
+
+/* ================= LIGHT THEME ================= */
+
+[data-theme="light"] {
+  --surface-page: var(--parchment-100);
+  --surface-card: var(--parchment-50);
+  --surface-raised: #ffffff;
+  --surface-inset: var(--parchment-200);
+  --surface-overlay: rgba(43, 33, 20, 0.45);
+  --surface-table: var(--moss-600);
+  --surface-table-deep: var(--moss-700);
+
+  --text-primary: var(--ink-900);
+  --text-secondary: var(--ink-700);
+  --text-tertiary: #8a7a62;
+  --text-inverse: var(--parchment-50);
+
+  --border-subtle: rgba(43, 33, 20, 0.1);
+  --border-default: rgba(43, 33, 20, 0.2);
+  --border-strong: rgba(43, 33, 20, 0.38);
+  --outline-ink: rgba(43, 33, 20, 0.9);
+
+  --card-face: #fdf8ec;
+  --card-face-edge: var(--parchment-300);
+}

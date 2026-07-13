@@ -1,0 +1,24 @@
+/* Cambia — shadows, motion, focus
+   Shadow language is "tabletop": small HARD offset shadows (pieces sitting on
+   a table), not soft diffuse blurs. Soft blur reserved for overlays. */
+
+:root {
+  --shadow-piece: 0 2px 0 var(--outline-ink);                 /* buttons, chips */
+  --shadow-card: 0 3px 0 rgba(20, 15, 8, 0.55);               /* panels */
+  --shadow-raised: 0 4px 0 rgba(20, 15, 8, 0.55), 0 10px 24px rgba(20, 15, 8, 0.25);
+  --shadow-overlay: 0 6px 0 rgba(20, 15, 8, 0.5), 0 24px 60px rgba(20, 15, 8, 0.45);
+  --shadow-playing-card: 0 2px 0 rgba(20, 15, 8, 0.5), 0 4px 10px rgba(20, 15, 8, 0.3);
+
+  /* Inner table lip */
+  --inset-table: inset 0 3px 0 rgba(20, 15, 8, 0.35), inset 0 0 56px rgba(20, 15, 8, 0.28);
+
+  /* Motion — springy but quick; bounce reserved for card deals/snaps */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1); /* @kind other */
+  --ease-snap: cubic-bezier(0.34, 1.45, 0.64, 1); /* @kind other */
+  --dur-fast: 120ms; /* @kind other */
+  --dur-med: 220ms; /* @kind other */
+  --dur-slow: 420ms; /* @kind other */
+
+  /* Focus ring */
+  --focus-ring: 0 0 0 2px var(--surface-page), 0 0 0 4px var(--honey-500);
+}
