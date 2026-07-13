@@ -12,13 +12,15 @@ import (
 
 // ProcessSpecialAction handles player requests to use special card abilities (peek, swap)
 // or to skip the ability. Routes based on the card rank that triggered the special action.
-// This function assumes the game lock is HELD by the caller.
+// Public entry point: acquires mu.
 func (g *CambiaGame) ProcessSpecialAction(
 	userID uuid.UUID,
 	special string,
 	card1Data map[string]interface{},
 	card2Data map[string]interface{},
 ) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	// Verify special action state is active for this player.
 	if !g.SpecialAction.Active || g.SpecialAction.PlayerID != userID {
 		log.Printf("Game %s: ProcessSpecialAction called by player %s, but no matching special action is active. Ignoring.", g.ID, userID)
@@ -165,7 +167,7 @@ func (g *CambiaGame) doSwapBlindEngine(playerID uuid.UUID, engineIdx uint8, card
 		g.FireEventPrivateSpecialActionFail(playerID, "Cannot swap cards with a player who has called Cambia.", "swap_blind",
 			buildEventCard(&models.Card{ID: g.CardTracker.Players[engineIdx].HandUUIDs[ownIdx]}, &idx1v, owner1ID, false),
 			buildEventCard(&models.Card{ID: g.CardTracker.Players[1-engineIdx].HandUUIDs[oppIdx]}, &idx2v, owner2ID, false))
-		g.ResetTurnTimer()
+		g.scheduleNextTurnTimer()
 		return
 	}
 
@@ -231,7 +233,7 @@ func (g *CambiaGame) doKingLookEngine(playerID uuid.UUID, engineIdx uint8, card1
 
 	// After KingLook, don't advance turn — wait for swap decision.
 	// The SpecialAction state (with FirstStepDone=true) signals the second step.
-	g.ResetTurnTimer()
+	g.scheduleNextTurnTimer()
 }
 
 // doKingSwapYesEngine applies the king swap yes decision.

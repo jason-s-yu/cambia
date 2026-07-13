@@ -4,6 +4,7 @@ package game
 import (
 	"context"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -102,6 +103,14 @@ type Circuit struct {
 
 // CambiaGame represents the state and logic for a single instance of the Cambia game.
 type CambiaGame struct {
+	// mu serializes every access to this game's mutable state. The engine handle, UUID trackers,
+	// timers and player slice are not safe for concurrent use, so all public entry points (player
+	// actions, lifecycle transitions, and the turn/pre-game/circuit-grace timer callbacks) hold mu.
+	// This makes the adapter the single serialization layer over the non-thread-safe engine: the
+	// hub Run() goroutine and the game's own timer goroutines never touch state concurrently
+	// (cambia-465). Internal helpers annotated "assumes lock is held by caller" run under mu.
+	mu sync.Mutex
+
 	ID      uuid.UUID // Unique identifier for this game instance.
 	LobbyID uuid.UUID // ID of the lobby that created this game.
 
@@ -190,6 +199,8 @@ func NewCambiaGame() *CambiaGame {
 // BeginPreGame starts the initial phase where players see their first two cards.
 // Deals cards via engine and schedules the transition to the main game start.
 func (g *CambiaGame) BeginPreGame() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	if g.Started || g.GameOver || g.PreGameActive {
 		log.Printf("Game %s: BeginPreGame called in invalid state (Started:%v, Over:%v, PreGame:%v).", g.ID, g.Started, g.GameOver, g.PreGameActive)
 		return
@@ -276,6 +287,8 @@ func (g *CambiaGame) BeginPreGame() {
 // StartGame transitions the game from the pre-game phase to active play.
 // It marks the game as started and initiates the first turn.
 func (g *CambiaGame) StartGame() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	// Ensure StartGame is called in the correct state.
 	if g.GameOver || g.Started || !g.PreGameActive {
 		log.Printf("Game %s: StartGame called in invalid state (GameOver:%v, Started:%v, PreGameActive:%v). Ignoring.", g.ID, g.GameOver, g.Started, g.PreGameActive)
@@ -348,8 +361,10 @@ func (g *CambiaGame) persistInitialGameState() {
 }
 
 // AddPlayer adds a player to the game if not started, or marks them as reconnected.
-// Assumes lock is held by caller.
+// Public entry point: acquires mu.
 func (g *CambiaGame) AddPlayer(p *models.Player) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	found := false
 	for i, pl := range g.Players {
 		if pl.ID == p.ID {
@@ -431,8 +446,10 @@ func (g *CambiaGame) advanceTurn() {
 }
 
 // HandleDisconnect marks a player as disconnected and handles game state consequences.
-// Assumes lock is held by caller.
+// Public entry point: acquires mu.
 func (g *CambiaGame) HandleDisconnect(playerID uuid.UUID) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	log.Printf("Game %s: Handling disconnect for player %s.", g.ID, playerID)
 	g.logAction(playerID, "player_disconnect", nil)
 
@@ -462,6 +479,8 @@ func (g *CambiaGame) HandleDisconnect(playerID uuid.UUID) {
 			t.Stop()
 		}
 		g.circuitGraceTimers[playerID] = time.AfterFunc(60*time.Second, func() {
+			g.mu.Lock()
+			defer g.mu.Unlock()
 			g.circuitAIControlled[playerID] = true
 			log.Printf("Game %s: Player %s grace period expired, AI taking over", g.ID, playerID)
 		})
@@ -496,7 +515,7 @@ func (g *CambiaGame) HandleDisconnect(playerID uuid.UUID) {
 
 	if shouldEndGame {
 		if !g.GameOver {
-			g.EndGame() // End the game immediately.
+			g.endGame() // End the game immediately.
 		}
 	} else if shouldAdvanceTurn {
 		g.advanceTurn() // Advance turn if current player left.
@@ -504,8 +523,10 @@ func (g *CambiaGame) HandleDisconnect(playerID uuid.UUID) {
 }
 
 // HandleReconnect marks a player as connected and sends them the current game state.
-// Assumes lock is held by caller.
+// Public entry point: acquires mu.
 func (g *CambiaGame) HandleReconnect(playerID uuid.UUID, conn *websocket.Conn) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	log.Printf("Game %s: Handling reconnect for player %s.", g.ID, playerID)
 
 	found := false
@@ -558,11 +579,12 @@ func (g *CambiaGame) HandleReconnect(playerID uuid.UUID, conn *websocket.Conn) {
 }
 
 // sendSyncState sends the current obfuscated game state to a single player.
+// Assumes lock is held by caller.
 func (g *CambiaGame) sendSyncState(playerID uuid.UUID) {
 	if g.Emitter == nil {
 		return
 	}
-	state := g.GetCurrentObfuscatedGameState(playerID)
+	state := g.getCurrentObfuscatedGameState(playerID)
 	ev := GameEvent{
 		Type:  EventPrivateSyncState,
 		State: &state,
@@ -594,8 +616,10 @@ func (g *CambiaGame) countConnectedPlayers() int {
 
 // HandlePlayerAction routes incoming player actions (draw, discard, replace, snap, cambia).
 // Validates turn, state, and payload before executing the corresponding handler.
-// Assumes lock is held by the caller.
+// Public entry point: acquires mu.
 func (g *CambiaGame) HandlePlayerAction(playerID uuid.UUID, action models.GameAction) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	// --- Basic State Checks ---
 	if g.GameOver {
 		log.Printf("Game %s: Action %s from %s ignored (game over).", g.ID, action.ActionType, playerID)
@@ -698,10 +722,19 @@ func rankToSpecial(rank string) string {
 	}
 }
 
-// EndGame finalizes the game, computes scores, determines winners, applies bonuses/penalties,
+// EndGame is the public entry point for ending a game from outside an already-locked path.
+// It acquires mu and delegates to endGame. Internal callers that already hold mu (the action
+// apply path and disconnect handling) call endGame directly.
+func (g *CambiaGame) EndGame() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.endGame()
+}
+
+// endGame finalizes the game, computes scores, determines winners, applies bonuses/penalties,
 // broadcasts results, and triggers the OnGameEnd callback.
 // Assumes lock is held by caller.
-func (g *CambiaGame) EndGame() {
+func (g *CambiaGame) endGame() {
 	if g.GameOver {
 		log.Printf("Game %s: EndGame called, but game is already over.", g.ID)
 		return
@@ -1004,10 +1037,11 @@ func (g *CambiaGame) logAction(actorID uuid.UUID, actionType string, payload map
 	}(record)
 }
 
-// ResetTurnTimer restarts the turn timer for the current player.
-// Exported for use by special action logic.
-// Assumes lock is held by caller.
+// ResetTurnTimer restarts the turn timer for the current player. Public entry point: acquires mu.
+// Internal callers that already hold mu call scheduleNextTurnTimer directly.
 func (g *CambiaGame) ResetTurnTimer() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.scheduleNextTurnTimer() // Use the internal scheduler.
 }
 
@@ -1059,8 +1093,10 @@ func (g *CambiaGame) FireEventPrivateSuccess(userID uuid.UUID, special string, c
 }
 
 // CircuitAIPlay performs a minimal defensive action for an AI-controlled disconnected player.
-// Draw from stockpile and immediately discard (no abilities, no swaps).
+// Draw from stockpile and immediately discard (no abilities, no swaps). Public entry point: acquires mu.
 func (g *CambiaGame) CircuitAIPlay(playerID uuid.UUID) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	if !g.circuitAIControlled[playerID] {
 		return
 	}
@@ -1071,7 +1107,10 @@ func (g *CambiaGame) CircuitAIPlay(playerID uuid.UUID) {
 }
 
 // IsCircuitAIControlled returns whether a player is currently under AI control due to disconnect.
+// Public entry point: acquires mu.
 func (g *CambiaGame) IsCircuitAIControlled(playerID uuid.UUID) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	return g.circuitAIControlled[playerID]
 }
 

@@ -408,7 +408,7 @@ func (g *CambiaGame) applyEngineAction(actionIdx uint16, actorID uuid.UUID) erro
 
 	// Check for game end.
 	if g.Engine.IsTerminal() {
-		g.EndGame()
+		g.endGame()
 		return nil
 	}
 
@@ -417,7 +417,7 @@ func (g *CambiaGame) applyEngineAction(actionIdx uint16, actorID uuid.UUID) erro
 		g.autoProcessSnapPhase()
 		// Re-check terminal after snap phase resolution (advanceTurn may trigger game end).
 		if g.Engine.IsTerminal() {
-			g.EndGame()
+			g.endGame()
 			return nil
 		}
 	} else if !g.Engine.Snap.Active && g.Engine.Pending.Type == engine.PendingNone {
@@ -737,7 +737,7 @@ func (g *CambiaGame) handleDiscardViaEngine(playerID uuid.UUID, engineIdx uint8,
 			CardRank: rankStr,
 		}
 
-		g.ResetTurnTimer()
+		g.scheduleNextTurnTimer()
 	} else {
 		// No ability — apply directly.
 		g.applyEngineAction(engine.ActionDiscardNoAbility, playerID)
@@ -804,7 +804,7 @@ func (g *CambiaGame) handleReplaceViaEngine(playerID uuid.UUID, engineIdx uint8,
 							Card:    &EventCard{ID: discardedUUID, Rank: discardedCard.Rank},
 							Special: specialType,
 						})
-						g.ResetTurnTimer()
+						g.scheduleNextTurnTimer()
 						return
 					}
 				}
@@ -1110,14 +1110,18 @@ func (g *CambiaGame) scheduleNextTurnTimerEngine() {
 	curTurnID := g.TurnID
 	capturedPlayerUUID := currentPlayerUUID
 
+	// The AfterFunc runs in its own goroutine, so it acquires mu before reading lifecycle
+	// state and mutating via handleTimeoutEngine. The TurnID guard drops a stale fire whose
+	// turn already advanced (Stop() does not block the in-flight callback, so a reschedule
+	// that increments TurnID makes this callback a no-op once it acquires the lock).
 	g.turnTimer = time.AfterFunc(g.TurnDuration, func() {
-		go func(expectedTurnID int) {
-			isValid := !g.GameOver && g.Started && g.TurnID == expectedTurnID
-			if isValid {
-				log.Printf("Game %s, Turn %d: Timer fired for player %s.", g.ID, g.TurnID, capturedPlayerUUID)
-				g.handleTimeoutEngine(capturedPlayerUUID)
-			}
-		}(curTurnID)
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if g.GameOver || !g.Started || g.TurnID != curTurnID {
+			return
+		}
+		log.Printf("Game %s, Turn %d: Timer fired for player %s.", g.ID, g.TurnID, capturedPlayerUUID)
+		g.handleTimeoutEngine(capturedPlayerUUID)
 	})
 }
 
