@@ -94,6 +94,8 @@ export interface LobbyListEntry {
   lobby: LobbyState;
   playerCount: number;
   maxPlayers: number;
+  /** Display name for the lobby. Optional: a parallel branch adds this field server-side. */
+  name?: string;
 }
 
 
