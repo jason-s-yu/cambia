@@ -20,7 +20,7 @@ const RUN_COLORS = [
 ];
 
 function isDarkMode(): boolean {
-	return document.documentElement.classList.contains('dark');
+	return document.documentElement.getAttribute('data-theme') === 'dark';
 }
 
 const ComparisonChart: React.FC<ComparisonChartProps> = ({ runs }) => {
