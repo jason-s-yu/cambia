@@ -1,0 +1,20 @@
+/* Cambia — base element rules (kept minimal; tokens do the work) */
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--surface-page);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--ember-400); text-decoration: none; }
+a:hover { color: var(--ember-300); text-decoration: underline; }
+[data-theme="light"] a { color: var(--ember-600); }
+[data-theme="light"] a:hover { color: var(--ember-500); }
+
+::selection { background: rgba(223, 174, 71, 0.4); }

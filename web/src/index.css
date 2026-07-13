@@ -1,6 +1,11 @@
 /* Import Tailwind CSS v4 base styles, components, and utilities */
 @import "tailwindcss";
 
+/* Cambia Design System tokens (cambia-437/438) -- see styles/design-tokens.css
+   for the collision-avoidance rationale. Additive only: existing utility
+   classes below (dark: variant, default Tailwind scale) are unaffected. */
+@import "./styles/design-tokens.css";
+
 /* Enable class-based dark mode for manual toggling (Tailwind v4 method) */
 /* This allows adding/removing the 'dark' class on the <html> element */
 @custom-variant dark (&:where(.dark, .dark *));

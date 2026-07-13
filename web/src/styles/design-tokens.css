@@ -1,0 +1,302 @@
+/*
+ * Cambia Design System token bridge (cambia-437 / cambia-438).
+ *
+ * Wires ../../design-system-import/tokens/*.css into the Vite + Tailwind v4
+ * build. Source of truth for every value below is design-system-import/;
+ * this file must be kept in sync by hand if that reference snapshot changes
+ * (CSS @import cannot cherry-pick declarations out of a stylesheet).
+ *
+ * Tailwind v4 emits its own default theme scale as bare CSS custom
+ * properties (--text-sm, --radius-lg, --ease-out, --font-mono, ...). A
+ * subset of the design system's token names collide with those exact keys.
+ * Declaring the design values under the same bare names at :root would
+ * silently retarget every existing Tailwind utility of that name across the
+ * app (43 files currently use the dark: variant + Tailwind's default type
+ * scale, radii, easing and font-mono stack) -- outside this task's scope
+ * (see cambia-438 step 4: do not rewire existing screens yet).
+ *
+ * Resolution: tokens with colliding names are re-declared here under a
+ * `--ds-` prefix and bridged into Tailwind's @theme under `-ds-` suffixed
+ * keys (e.g. rounded-ds-lg, text-ds-sm, ease-ds-out, font-ds-mono). The ds/
+ * component adaptations (src/components/ds/) reference the --ds- names
+ * directly. Tokens with non-colliding names (color ramps, spacing, shadows,
+ * font-display/font-ui, weight-*, tracking-caps, ease-snap, radius-pill,
+ * radius-playing-card) are imported/declared verbatim under their original
+ * bare names -- safe today, and directly reusable if the design system
+ * later becomes the app's sole theme.
+ *
+ * design-system-import/tokens/base.css is NOT wired here: it sets global
+ * `body`/`a`/`::selection` rules that would immediately reskin the whole
+ * app. That belongs to the later "rewire existing screens" phase.
+ */
+
+/* ---- fonts.css: Google Fonts substitution, network @import (see
+   design-system-import/readme.md Caveats). No brand font binaries exist in
+   the source repo. This is a runtime browser fetch, not a build-time
+   dependency -- `vite build` does not resolve external URLs in CSS, so it
+   does not make the build itself network-dependent. Replace with local
+   @font-face rules if licensed font files are supplied. ---- */
+@import '../../design-system-import/tokens/fonts.css';
+
+/* ---- colors.css: fully collision-free (bark/parchment/ink/ember/moss/
+   dusk/berry/honey ramps + semantic aliases use bare names Tailwind's
+   default theme never defines), imported verbatim. ---- */
+@import '../../design-system-import/tokens/colors.css';
+
+:root {
+  /* ---- spacing.css: non-colliding tokens carried over by value ---- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  --radius-pill: 999px;
+  --radius-playing-card: 9px;
+
+  --line-thick: 2px;
+  --line-thin: 1.5px;
+
+  --card-w-sm: 44px;
+  --card-h-sm: 62px;
+  --card-w-md: 64px;
+  --card-h-md: 90px;
+  --card-w-lg: 92px;
+  --card-h-lg: 129px;
+
+  --topbar-h: 58px;
+  --control-h-sm: 30px;
+  --control-h-md: 40px;
+  --control-h-lg: 48px;
+
+  /* spacing.css --radius-sm/md/lg/xl collide with Tailwind's own --radius-*
+     scale; re-declared under --ds- so both scales coexist intact. */
+  --ds-radius-sm: 8px;
+  --ds-radius-md: 10px;
+  --ds-radius-lg: 14px;
+  --ds-radius-xl: 20px;
+
+  /* --font-mono collides with Tailwind's default monospace stack.
+     --font-display / --font-ui / --text-2xs / --tracking-caps are also
+     collision-free but are declared once below, inside @theme, instead of
+     here -- @theme's output doubles as their :root declaration, and giving
+     them two same-named declarations (one plain, one `var(--x): var(--x)`
+     in @theme) would be a circular self-reference. */
+  --ds-font-mono: 'Space Mono', 'SFMono-Regular', Menlo, monospace;
+
+  /* --text-md is not a Tailwind default key, safe as-is */
+  --text-md: 15px;
+  /* --text-xs/sm/lg/xl/2xl/3xl/4xl/5xl collide with Tailwind's font-size scale */
+  --ds-text-xs: 12px;
+  --ds-text-sm: 13px;
+  --ds-text-lg: 17px;
+  --ds-text-xl: 21px;
+  --ds-text-2xl: 27px;
+  --ds-text-3xl: 36px;
+  --ds-text-4xl: 48px;
+  --ds-text-5xl: 66px;
+
+  /* --weight-* (not --font-weight-*) never collides with Tailwind */
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-bold: 700;
+  --weight-black: 800;
+
+  /* --leading-tight/snug/normal collide with Tailwind's line-height scale */
+  --ds-leading-tight: 1.08;
+  --ds-leading-snug: 1.3;
+  --ds-leading-normal: 1.5;
+
+  /* --tracking-caps is safe (declared in @theme below); --tracking-tight/wide collide */
+  --ds-tracking-tight: -0.005em;
+  --ds-tracking-wide: 0.16em;
+
+  /* ---- effects.css: shadow/motion tokens ---- */
+  --shadow-piece: 0 2px 0 var(--outline-ink);
+  --shadow-card: 0 3px 0 rgba(20, 15, 8, 0.55);
+  --shadow-raised: 0 4px 0 rgba(20, 15, 8, 0.55), 0 10px 24px rgba(20, 15, 8, 0.25);
+  --shadow-overlay: 0 6px 0 rgba(20, 15, 8, 0.5), 0 24px 60px rgba(20, 15, 8, 0.45);
+  --shadow-playing-card: 0 2px 0 rgba(20, 15, 8, 0.5), 0 4px 10px rgba(20, 15, 8, 0.3);
+
+  --inset-table: inset 0 3px 0 rgba(20, 15, 8, 0.35), inset 0 0 56px rgba(20, 15, 8, 0.28);
+
+  /* --ease-snap is safe; --ease-out collides with Tailwind's easing scale */
+  --ease-snap: cubic-bezier(0.34, 1.45, 0.64, 1);
+  --ds-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-fast: 120ms;
+  --dur-med: 220ms;
+  --dur-slow: 420ms;
+
+  --focus-ring: 0 0 0 2px var(--surface-page), 0 0 0 4px var(--honey-500);
+}
+
+/* Spinner's keyframe, hoisted out of component-level DOM injection (the
+   source design-system-import/components/core/Spinner.jsx injects a <style>
+   tag into document.head at module scope, which is unsafe under React
+   StrictMode's double-invoke and has no SSR story). The ds/ adaptation
+   references this class name instead. */
+@keyframes ds-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Tailwind v4 utility bridge: exposes the tokens above as ds-* utilities
+   (bg-bark-900, text-text-primary, rounded-ds-lg, ease-ds-out, ...) without
+   touching Tailwind's own default theme keys. */
+@theme {
+  /* base ramps */
+  --color-bark-950: var(--bark-950);
+  --color-bark-900: var(--bark-900);
+  --color-bark-850: var(--bark-850);
+  --color-bark-800: var(--bark-800);
+  --color-bark-700: var(--bark-700);
+  --color-bark-600: var(--bark-600);
+  --color-bark-500: var(--bark-500);
+
+  --color-parchment-50: var(--parchment-50);
+  --color-parchment-100: var(--parchment-100);
+  --color-parchment-200: var(--parchment-200);
+  --color-parchment-300: var(--parchment-300);
+  --color-parchment-400: var(--parchment-400);
+
+  --color-ink-900: var(--ink-900);
+  --color-ink-700: var(--ink-700);
+  --color-ink-500: var(--ink-500);
+
+  --color-ember-600: var(--ember-600);
+  --color-ember-500: var(--ember-500);
+  --color-ember-400: var(--ember-400);
+  --color-ember-300: var(--ember-300);
+
+  --color-moss-700: var(--moss-700);
+  --color-moss-600: var(--moss-600);
+  --color-moss-500: var(--moss-500);
+  --color-moss-400: var(--moss-400);
+
+  --color-dusk-600: var(--dusk-600);
+  --color-dusk-500: var(--dusk-500);
+  --color-dusk-400: var(--dusk-400);
+
+  --color-berry-600: var(--berry-600);
+  --color-berry-500: var(--berry-500);
+  --color-berry-400: var(--berry-400);
+
+  --color-honey-600: var(--honey-600);
+  --color-honey-500: var(--honey-500);
+  --color-honey-400: var(--honey-400);
+  --color-honey-300: var(--honey-300);
+
+  /* semantic aliases (theme-aware via [data-theme="light"]) */
+  --color-surface-page: var(--surface-page);
+  --color-surface-card: var(--surface-card);
+  --color-surface-raised: var(--surface-raised);
+  --color-surface-inset: var(--surface-inset);
+  --color-surface-overlay: var(--surface-overlay);
+  --color-surface-table: var(--surface-table);
+  --color-surface-table-deep: var(--surface-table-deep);
+
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-tertiary: var(--text-tertiary);
+  --color-text-inverse: var(--text-inverse);
+  --color-text-on-ember: var(--text-on-ember);
+  --color-text-on-honey: var(--text-on-honey);
+
+  --color-border-subtle: var(--border-subtle);
+  --color-border-default: var(--border-default);
+  --color-border-strong: var(--border-strong);
+  --color-outline-ink: var(--outline-ink);
+
+  --color-accent-primary: var(--accent-primary);
+  --color-accent-primary-hover: var(--accent-primary-hover);
+  --color-accent-cambia: var(--accent-cambia);
+  --color-accent-cambia-hover: var(--accent-cambia-hover);
+  --color-accent-gold: var(--accent-gold);
+
+  --color-card-face: var(--card-face);
+  --color-card-face-edge: var(--card-face-edge);
+  --color-card-back: var(--card-back);
+  --color-card-back-line: var(--card-back-line);
+  --color-suit-red: var(--suit-red);
+  --color-suit-black: var(--suit-black);
+
+  --color-status-success: var(--status-success);
+  --color-status-danger: var(--status-danger);
+  --color-status-warning: var(--status-warning);
+  --color-status-info: var(--status-info);
+
+  --color-tier-bronze: var(--tier-bronze);
+  --color-tier-silver: var(--tier-silver);
+  --color-tier-gold: var(--tier-gold);
+  --color-tier-platinum: var(--tier-platinum);
+  --color-tier-diamond: var(--tier-diamond);
+  --color-tier-master: var(--tier-master);
+  --color-tier-grandmaster: var(--tier-grandmaster);
+
+  /* fonts (literal values: --font-display/--font-ui share their bare name
+     with the Tailwind utility key, so @theme is their sole declaration) */
+  --font-display: 'Young Serif', Georgia, serif;
+  --font-ui: 'Alegreya Sans', 'Gill Sans', 'Helvetica Neue', sans-serif;
+  --font-ds-mono: var(--ds-font-mono);
+
+  /* type scale, weights, tracking, leading (ds-prefixed where colliding) */
+  --text-2xs: 11px;
+  --text-ds-md: var(--text-md);
+  --text-ds-xs: var(--ds-text-xs);
+  --text-ds-sm: var(--ds-text-sm);
+  --text-ds-lg: var(--ds-text-lg);
+  --text-ds-xl: var(--ds-text-xl);
+  --text-ds-2xl: var(--ds-text-2xl);
+  --text-ds-3xl: var(--ds-text-3xl);
+  --text-ds-4xl: var(--ds-text-4xl);
+  --text-ds-5xl: var(--ds-text-5xl);
+
+  --font-weight-ds-regular: var(--weight-regular);
+  --font-weight-ds-medium: var(--weight-medium);
+  --font-weight-ds-bold: var(--weight-bold);
+  --font-weight-ds-black: var(--weight-black);
+
+  --tracking-caps: 0.09em;
+  --tracking-ds-tight: var(--ds-tracking-tight);
+  --tracking-ds-wide: var(--ds-tracking-wide);
+
+  --leading-ds-tight: var(--ds-leading-tight);
+  --leading-ds-snug: var(--ds-leading-snug);
+  --leading-ds-normal: var(--ds-leading-normal);
+
+  /* spacing / radii */
+  --spacing-ds-1: var(--space-1);
+  --spacing-ds-2: var(--space-2);
+  --spacing-ds-3: var(--space-3);
+  --spacing-ds-4: var(--space-4);
+  --spacing-ds-5: var(--space-5);
+  --spacing-ds-6: var(--space-6);
+  --spacing-ds-8: var(--space-8);
+  --spacing-ds-10: var(--space-10);
+  --spacing-ds-12: var(--space-12);
+  --spacing-ds-16: var(--space-16);
+
+  --radius-ds-sm: var(--ds-radius-sm);
+  --radius-ds-md: var(--ds-radius-md);
+  --radius-ds-lg: var(--ds-radius-lg);
+  --radius-ds-xl: var(--ds-radius-xl);
+  --radius-ds-pill: var(--radius-pill);
+  --radius-ds-card: var(--radius-playing-card);
+
+  /* shadows */
+  --shadow-ds-piece: var(--shadow-piece);
+  --shadow-ds-card: var(--shadow-card);
+  --shadow-ds-raised: var(--shadow-raised);
+  --shadow-ds-overlay: var(--shadow-overlay);
+  --shadow-ds-playing-card: var(--shadow-playing-card);
+
+  /* motion */
+  --ease-ds-out: var(--ds-ease-out);
+  --ease-ds-snap: var(--ease-snap);
+}

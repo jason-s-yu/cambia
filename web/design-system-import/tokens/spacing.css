@@ -1,0 +1,38 @@
+/* Cambia — spacing, radii, sizing tokens */
+
+:root {
+  /* Spacing (4px base) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* Radii — generous, toy-like */
+  --radius-sm: 8px;    /* inputs, tags */
+  --radius-md: 10px;   /* buttons, list rows */
+  --radius-lg: 14px;   /* panels, cards */
+  --radius-xl: 20px;   /* modals, table surface */
+  --radius-pill: 999px;
+  --radius-playing-card: 9px;
+
+  /* Cartoon outline weight */
+  --line-thick: 2px;
+  --line-thin: 1.5px;
+
+  /* Playing card geometry (poker ratio 1 : 1.4) */
+  --card-w-sm: 44px;  --card-h-sm: 62px;
+  --card-w-md: 64px;  --card-h-md: 90px;
+  --card-w-lg: 92px;  --card-h-lg: 129px;
+
+  /* Fixed chrome */
+  --topbar-h: 58px;
+  --control-h-sm: 30px;
+  --control-h-md: 40px;
+  --control-h-lg: 48px;
+}
