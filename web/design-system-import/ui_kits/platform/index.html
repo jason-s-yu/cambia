@@ -1,0 +1,51 @@
+<!-- @dsCard group="Platform" viewport="1360x850" name="Game platform" subtitle="Home → lobby → live table → leaderboard, click-through" -->
+<!-- @startingPoint section="Screens" subtitle="Full game platform: home, lobby, table, leaderboard" viewport="1360x850" -->
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Cambia — platform kit</title>
+<link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+<style>
+  html, body { height: 100%; }
+  body { display: flex; flex-direction: column; }
+  #root { display: flex; flex-direction: column; min-height: 100vh; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" src="./shared.jsx"></script>
+<script type="text/babel" src="./HomeScreen.jsx"></script>
+<script type="text/babel" src="./LobbyScreen.jsx"></script>
+<script type="text/babel" src="./GameScreen.jsx"></script>
+<script type="text/babel" src="./LeaderboardScreen.jsx"></script>
+<script type="text/babel">
+function App() {
+  const [screen, setScreen] = React.useState(localStorage.getItem('cambia-kit-screen') || 'home');
+  const [light, setLight] = React.useState(localStorage.getItem('cambia-kit-theme') === 'light');
+  const nav = (s) => { setScreen(s); localStorage.setItem('cambia-kit-screen', s); };
+  React.useEffect(() => {
+    if (light) document.documentElement.setAttribute('data-theme', 'light');
+    else document.documentElement.removeAttribute('data-theme');
+    localStorage.setItem('cambia-kit-theme', light ? 'light' : 'dark');
+  }, [light]);
+  return (
+    <React.Fragment>
+      <window.TopBar active={screen} onNav={nav} light={light} onToggleTheme={setLight} />
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        {screen === 'home' && <window.HomeScreen onPlay={() => nav('lobby')} onCreateLobby={() => nav('lobby')} />}
+        {screen === 'lobby' && <window.LobbyScreen onStart={() => nav('game')} onLeave={() => nav('home')} />}
+        {screen === 'game' && <window.GameScreen onExit={() => nav('home')} />}
+        {screen === 'leaderboard' && <window.LeaderboardScreen />}
+      </div>
+    </React.Fragment>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
