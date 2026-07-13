@@ -105,6 +105,11 @@ func HubWSHandler(logger *logrus.Logger, gs *GameServer) http.HandlerFunc {
 // hubFetchUsername retrieves the username for a user ID from the database,
 // falling back to a short UUID prefix on error.
 func hubFetchUsername(userID uuid.UUID) string {
+	// No database configured (or unreachable): fall back to a short UUID prefix rather than
+	// dereferencing a nil pool, which would panic the WS handler.
+	if database.DB == nil {
+		return "User_" + userID.String()[:4]
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	user, err := database.GetUserByID(ctx, userID)

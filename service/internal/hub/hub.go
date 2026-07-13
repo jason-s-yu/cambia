@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"sort"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -14,6 +16,15 @@ import (
 	"github.com/jason-s-yu/cambia/service/internal/lobby"
 	"github.com/jason-s-yu/cambia/service/internal/models"
 )
+
+// defaultCountdownDuration is the fallback lobby -> game countdown length when the
+// GameServer does not override CountdownDuration on the hub.
+const defaultCountdownDuration = 3 * time.Second
+
+// GameFactory builds and registers a CambiaGame for the given players, wiring emitter as
+// the event sink. The returned game is registered but not begun (the hub calls BeginPreGame
+// after routing is in place). Returns nil if the game could not be created (e.g. <2 players).
+type GameFactory func(lob *lobby.Lobby, playerIDs []uuid.UUID, emitter game.Emitter) *game.CambiaGame
 
 // LobbyPhase represents the current lifecycle state of a hub.
 type LobbyPhase int
@@ -61,7 +72,9 @@ type MatchedPlayer struct {
 }
 
 // Hub manages a single lobby's lifecycle through a single goroutine.
-// All lobby/game state access is serialized through the Run() select loop — no mutex needed.
+// Phase and lobby/game state are mutated only from the Run() select loop. The conns map is
+// the exception: an in-progress CambiaGame emits events from its own timer goroutines
+// (turn/pre-game/end timers) through the hub's Emitter, so conns is guarded by connsMu.
 type Hub struct {
 	ID    uuid.UUID
 	Phase LobbyPhase
@@ -69,12 +82,20 @@ type Hub struct {
 	Lobby *lobby.Lobby
 	Game  *game.CambiaGame
 
-	seq   uint64 // monotonic; only accessed from Run() goroutine via nextSeq()
-	conns map[uuid.UUID]*Connection // userID → connection
+	// CreateGame builds and registers the backing CambiaGame. Injected by the GameServer so
+	// the hub stays decoupled from the game/lobby stores. Nil until wired.
+	CreateGame GameFactory
+
+	// CountdownDuration is the delay from countdown start to game creation.
+	CountdownDuration time.Duration
+
+	seq     uint64                    // monotonic; only accessed from Run() goroutine via nextSeq()
+	connsMu sync.RWMutex              // guards conns (cross-goroutine emits from game timers)
+	conns   map[uuid.UUID]*Connection // userID → connection
 
 	// Match state (ranked/circuit)
-	QueueID  string
-	IsRanked bool
+	QueueID     string
+	IsRanked    bool
 	TotalRounds int
 
 	// Multi-round match state
@@ -96,17 +117,18 @@ type Hub struct {
 // NewHub creates a new hub for the given lobby.
 func NewHub(lob *lobby.Lobby) *Hub {
 	return &Hub{
-		ID:               lob.ID,
-		Phase:            PhaseOpen,
-		Lobby:            lob,
-		conns:            make(map[uuid.UUID]*Connection),
-		CumulativeScores: make(map[uuid.UUID]int),
-		RoundHistory:     make([]map[uuid.UUID]int, 0),
-		matched:          make(chan []MatchedPlayer, 1),
-		join:             make(chan *Connection, 8),
-		leave:            make(chan uuid.UUID, 8),
-		incoming:         make(chan ClientMsg, 64),
-		shutdown:         make(chan struct{}),
+		ID:                lob.ID,
+		Phase:             PhaseOpen,
+		Lobby:             lob,
+		CountdownDuration: defaultCountdownDuration,
+		conns:             make(map[uuid.UUID]*Connection),
+		CumulativeScores:  make(map[uuid.UUID]int),
+		RoundHistory:      make([]map[uuid.UUID]int, 0),
+		matched:           make(chan []MatchedPlayer, 1),
+		join:              make(chan *Connection, 8),
+		leave:             make(chan uuid.UUID, 8),
+		incoming:          make(chan ClientMsg, 64),
+		shutdown:          make(chan struct{}),
 	}
 }
 
@@ -119,17 +141,26 @@ func (h *Hub) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case conn := <-h.join:
+			h.connsMu.Lock()
 			h.conns[conn.UserID] = conn
+			h.connsMu.Unlock()
 			h.sendLobbyState(conn)
 			h.broadcastLobbyUpdate()
 		case userID := <-h.leave:
-			if conn, ok := h.conns[userID]; ok {
-				conn.Close()
+			h.connsMu.Lock()
+			conn, ok := h.conns[userID]
+			if ok {
 				delete(h.conns, userID)
 			}
-			if len(h.conns) == 0 {
+			remaining := len(h.conns)
+			h.connsMu.Unlock()
+			if ok {
+				conn.Close()
+			}
+			if remaining == 0 {
 				return // dissolve hub
 			}
+			h.broadcastLobbyUpdate()
 		case msg := <-h.incoming:
 			h.dispatch(msg)
 		case players := <-h.matched:
@@ -142,22 +173,38 @@ func (h *Hub) Run(ctx context.Context) {
 
 // cleanup closes all remaining connections when the hub exits.
 func (h *Hub) cleanup() {
+	h.connsMu.Lock()
+	conns := make([]*Connection, 0, len(h.conns))
 	for _, conn := range h.conns {
+		conns = append(conns, conn)
+	}
+	h.conns = make(map[uuid.UUID]*Connection)
+	h.connsMu.Unlock()
+	for _, conn := range conns {
 		conn.Close()
 	}
 }
 
 // dispatch routes a ClientMsg based on the current phase.
 func (h *Hub) dispatch(msg ClientMsg) {
-	// Sequence check: if client is behind, send a sync snapshot and discard.
-	if msg.LastSeq < h.seq && h.seq > 0 {
-		h.sendSyncState(msg.UserID)
+	// Synthetic internal messages (timer callbacks) carry no client seq and must be handled
+	// before the sequence check, which would otherwise discard them as stale.
+	switch msg.Type {
+	case "_begin_game":
+		if h.Phase == PhaseCountdown {
+			h.beginGame()
+		}
+		return
+	case "_start_next_round":
+		if h.Phase == PhaseRoundEnd {
+			h.startNextRound()
+		}
 		return
 	}
 
-	// Handle synthetic internal messages regardless of phase.
-	if msg.Type == "_start_next_round" && h.Phase == PhaseRoundEnd {
-		h.startNextRound()
+	// Sequence check: if client is behind, send a sync snapshot and discard.
+	if msg.LastSeq < h.seq && h.seq > 0 {
+		h.sendSyncState(msg.UserID)
 		return
 	}
 
@@ -184,22 +231,29 @@ func (h *Hub) dispatch(msg ClientMsg) {
 // handleLobbyMsg handles lobby-phase messages (ready, chat, rules, etc.).
 // Runs inside the hub's Run() goroutine — no external lock needed.
 func (h *Hub) handleLobbyMsg(msg ClientMsg) {
-	conn, ok := h.conns[msg.UserID]
-	if !ok {
+	conn := h.getConn(msg.UserID)
+	if conn == nil {
 		return
 	}
 
 	switch msg.Type {
 	case "ready":
-		if h.Lobby.MarkUserReady(msg.UserID) {
-			// All ready — transition to ready-check / countdown
-			h.Phase = PhaseReadyCheck
-			h.Emit("phase_change", map[string]interface{}{"phase": "ready_check"})
-		}
+		// MarkUserReady returns true only when every joined user is ready and the lobby is
+		// set to auto-start: that is the signal to begin the countdown to game creation.
+		allReadyAutoStart := h.Lobby.MarkUserReady(msg.UserID)
 		h.broadcastLobbyUpdate()
+		if allReadyAutoStart {
+			h.beginCountdown()
+		}
 
 	case "unready":
 		h.Lobby.MarkUserUnready(msg.UserID)
+		// Unreadying during the countdown aborts the pending start: the scheduled _begin_game
+		// then no-ops because the phase is no longer countdown.
+		if h.Phase == PhaseCountdown {
+			h.Phase = PhaseOpen
+			h.Emit("phase_change", map[string]interface{}{"phase": "open"})
+		}
 		h.broadcastLobbyUpdate()
 
 	case "invite":
@@ -260,22 +314,25 @@ func (h *Hub) handleLobbyMsg(msg ClientMsg) {
 			conn.SendEnvelope(h.errEnvelope("game already in progress"))
 			return
 		}
-		if !h.Lobby.AreAllReadyUnsafe() {
+		if h.Phase == PhaseCountdown {
+			conn.SendEnvelope(h.errEnvelope("game is already starting"))
+			return
+		}
+		if !h.Lobby.AreAllReady() {
 			conn.SendEnvelope(h.errEnvelope("not all players are ready"))
 			return
 		}
-		h.Lobby.CancelCountdownUnsafe()
-		h.Phase = PhaseCountdown
-		h.Emit("phase_change", map[string]interface{}{"phase": "countdown"})
+		h.beginCountdown()
 
 	default:
 		log.Printf("hub %s: unknown lobby message type %q from user %s", h.ID, msg.Type, msg.UserID)
 	}
 }
 
-// handleGameMsg routes game-phase messages to the game engine.
-// Runs inside the hub's Run() goroutine — no game mutex needed here;
-// game.HandlePlayerAction and game.ProcessSpecialAction manage their own locking.
+// handleGameMsg routes game-phase messages to the game engine. Player actions run here in the
+// hub's Run() goroutine. Note: CambiaGame has no internal mutex, yet its state is also mutated
+// by its own timer goroutines (turn/pre-game/end timers), so action-vs-timer access is not
+// currently synchronized (a CambiaGame-level lock is a follow-up).
 func (h *Hub) handleGameMsg(msg ClientMsg) {
 	if h.Game == nil {
 		return
@@ -310,7 +367,7 @@ func (h *Hub) handleGameMsg(msg ClientMsg) {
 		h.Game.ProcessSpecialAction(msg.UserID, raw.Special, raw.Card1, raw.Card2)
 
 	case "ping":
-		if conn, ok := h.conns[msg.UserID]; ok {
+		if conn := h.getConn(msg.UserID); conn != nil {
 			conn.SendEnvelope(Envelope{Seq: h.nextSeq(), Type: "pong"})
 		}
 
@@ -321,8 +378,8 @@ func (h *Hub) handleGameMsg(msg ClientMsg) {
 
 // handleSearchingMsg handles messages during the matchmaking search phase.
 func (h *Hub) handleSearchingMsg(msg ClientMsg) {
-	conn, ok := h.conns[msg.UserID]
-	if !ok {
+	conn := h.getConn(msg.UserID)
+	if conn == nil {
 		return
 	}
 	switch msg.Type {
@@ -438,9 +495,14 @@ func (h *Hub) HandleRoundEnd(scores map[uuid.UUID]int, cambiaCallerID uuid.UUID)
 	}
 }
 
-// startNextRound transitions to PhaseInGame for the next ranked round.
-// Actual game creation is handled by the GameServer's game creation flow.
+// startNextRound transitions to PhaseInGame for the next ranked round and creates that
+// round's game via the same path as round one. Reached only through _start_next_round, which
+// HandleRoundEnd schedules; that round-end -> HandleRoundEnd link, cumulative scoring, dealer
+// rotation and CircuitStore round tracking are the multi-round half that remains unwired
+// (cambia-458): this creates the round's game so the mechanism is consistent once that half
+// lands, but the scoring pipeline is not driven yet.
 func (h *Hub) startNextRound() {
+	h.Game = nil // clear the previous round's finished game before creating the next
 	h.Phase = PhaseInGame
 	h.Emit("phase_change", map[string]interface{}{"phase": "in_game"})
 	h.Emit("round_start", map[string]interface{}{
@@ -448,6 +510,130 @@ func (h *Hub) startNextRound() {
 		"total_rounds": h.TotalRounds,
 		"dealer_seat":  h.DealerSeatIdx,
 	})
+	if pids := h.connectedPlayerIDs(); len(pids) >= 2 {
+		h.createAndStartGame(pids)
+	}
+}
+
+// beginCountdown enters PhaseCountdown and schedules game creation. Idempotent: a hub already
+// counting down or in game is left untouched, so a duplicate ready/start_game cannot stack
+// timers. Must run in the Run() goroutine.
+func (h *Hub) beginCountdown() {
+	if h.Phase == PhaseCountdown || h.Phase == PhaseInGame {
+		return
+	}
+	h.Phase = PhaseCountdown
+	seconds := int(h.CountdownDuration / time.Second)
+	h.Emit("phase_change", map[string]interface{}{"phase": "countdown", "seconds": seconds})
+	h.scheduleGameStart()
+}
+
+// scheduleGameStart fires a _begin_game message back into the Run() loop after the countdown
+// so that game creation itself runs serialized in the hub goroutine (race-free), not in the
+// timer goroutine. A shutdown mid-countdown drops the pending start.
+func (h *Hub) scheduleGameStart() {
+	d := h.CountdownDuration
+	go func() {
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			select {
+			case h.incoming <- ClientMsg{Type: "_begin_game"}:
+			case <-h.shutdown:
+			}
+		case <-h.shutdown:
+		}
+	}()
+}
+
+// beginGame creates and starts the round-one game once the countdown elapses. Guards against
+// a second _begin_game (phase already advanced) and against every player leaving during the
+// countdown (fewer than two connections aborts back to open). Must run in the Run() goroutine.
+func (h *Hub) beginGame() {
+	if h.Phase != PhaseCountdown || h.Game != nil {
+		return // already started, or a stale timer fired
+	}
+	pids := h.connectedPlayerIDs()
+	if len(pids) < 2 {
+		h.abortToOpen("not enough connected players to start")
+		return
+	}
+	h.Phase = PhaseInGame
+	h.Emit("phase_change", map[string]interface{}{"phase": "in_game"})
+	if !h.createAndStartGame(pids) {
+		h.abortToOpen("game creation failed")
+	}
+}
+
+// abortToOpen rolls the hub back to the open lobby phase after a failed start.
+func (h *Hub) abortToOpen(reason string) {
+	log.Printf("hub %s: aborting game start: %s", h.ID, reason)
+	h.Game = nil
+	h.Phase = PhaseOpen
+	h.Emit("phase_change", map[string]interface{}{"phase": "open"})
+	h.broadcastLobbyUpdate()
+}
+
+// createAndStartGame builds the game for playerIDs via the injected factory, routes it as
+// h.Game, marks the lobby in-game, emits game_started to all participants, and begins the
+// pre-game reveal. game_started precedes BeginPreGame so clients learn the game id before the
+// first private card events arrive. Returns false if the factory is unset or returns nil.
+// Must run in the Run() goroutine.
+func (h *Hub) createAndStartGame(playerIDs []uuid.UUID) bool {
+	if h.CreateGame == nil {
+		log.Printf("hub %s: no game factory wired; cannot create game", h.ID)
+		return false
+	}
+	if h.Game != nil {
+		return false
+	}
+	g := h.CreateGame(h.Lobby, playerIDs, h)
+	if g == nil {
+		return false
+	}
+	h.Game = g
+
+	h.Lobby.Mu.Lock()
+	h.Lobby.InGame = true
+	h.Lobby.GameID = g.ID
+	h.Lobby.GameInstanceCreated = true
+	h.Lobby.Mu.Unlock()
+
+	playerStrs := make([]string, len(playerIDs))
+	for i, id := range playerIDs {
+		playerStrs[i] = id.String()
+	}
+	h.Emit("game_started", map[string]interface{}{
+		"game_id": g.ID.String(),
+		"players": playerStrs,
+	})
+
+	g.BeginPreGame()
+	return true
+}
+
+// connectedPlayerIDs returns the user IDs of currently connected participants, host first and
+// the remainder in a stable (UUID-sorted) order so seat assignment is deterministic. Using the
+// live connection set (not lobby membership) means a player who disconnected during the
+// countdown is naturally excluded.
+func (h *Hub) connectedPlayerIDs() []uuid.UUID {
+	ids := h.connUserIDs()
+
+	h.Lobby.Mu.Lock()
+	host := h.Lobby.HostUserID
+	h.Lobby.Mu.Unlock()
+
+	sort.Slice(ids, func(i, j int) bool {
+		if ids[i] == host {
+			return true
+		}
+		if ids[j] == host {
+			return false
+		}
+		return ids[i].String() < ids[j].String()
+	})
+	return ids
 }
 
 // buildSubsidyMap converts parallel playerID/subsidy slices to a string-keyed map.
@@ -459,7 +645,8 @@ func buildSubsidyMap(playerIDs []uuid.UUID, subsidies []int) map[string]int {
 	return m
 }
 
-// Emit broadcasts an envelope to all connected clients.
+// Emit broadcasts an envelope to all connected clients. Safe to call from the game's timer
+// goroutines: the connection set is snapshotted under connsMu before sending.
 func (h *Hub) Emit(eventType string, payload any) {
 	raw, err := marshalPayload(payload)
 	if err != nil {
@@ -472,15 +659,21 @@ func (h *Hub) Emit(eventType string, payload any) {
 		log.Printf("hub %s: Emit envelope marshal error: %v", h.ID, err)
 		return
 	}
+	h.connsMu.RLock()
+	conns := make([]*Connection, 0, len(h.conns))
 	for _, conn := range h.conns {
+		conns = append(conns, conn)
+	}
+	h.connsMu.RUnlock()
+	for _, conn := range conns {
 		conn.Send(data)
 	}
 }
 
 // EmitTo sends an envelope only to the connection matching userID.
 func (h *Hub) EmitTo(userID uuid.UUID, eventType string, payload any) {
-	conn, ok := h.conns[userID]
-	if !ok {
+	conn := h.getConn(userID)
+	if conn == nil {
 		return
 	}
 	raw, err := marshalPayload(payload)
@@ -490,6 +683,24 @@ func (h *Hub) EmitTo(userID uuid.UUID, eventType string, payload any) {
 	}
 	env := Envelope{Seq: h.nextSeq(), Type: eventType, Payload: raw}
 	conn.SendEnvelope(env)
+}
+
+// getConn returns the connection for userID, or nil. Acquires connsMu (read).
+func (h *Hub) getConn(userID uuid.UUID) *Connection {
+	h.connsMu.RLock()
+	defer h.connsMu.RUnlock()
+	return h.conns[userID]
+}
+
+// connUserIDs returns a snapshot of the currently connected user IDs. Acquires connsMu (read).
+func (h *Hub) connUserIDs() []uuid.UUID {
+	h.connsMu.RLock()
+	defer h.connsMu.RUnlock()
+	ids := make([]uuid.UUID, 0, len(h.conns))
+	for uid := range h.conns {
+		ids = append(ids, uid)
+	}
+	return ids
 }
 
 // buildLobbySnapshot builds a JSON-friendly lobby state payload for the given user.
@@ -504,7 +715,7 @@ func (h *Hub) buildLobbySnapshot(forUserID uuid.UUID) map[string]interface{} {
 			if uidStr, ok := u["id"].(string); ok {
 				uid, err := uuid.Parse(uidStr)
 				if err == nil {
-					if conn, exists := h.conns[uid]; exists {
+					if conn := h.getConn(uid); conn != nil {
 						u["username"] = conn.Username
 					}
 				}
@@ -550,14 +761,14 @@ func (h *Hub) sendLobbyState(conn *Connection) {
 
 // broadcastLobbyUpdate sends a lobby_state snapshot to all connected users.
 func (h *Hub) broadcastLobbyUpdate() {
-	for userID, conn := range h.conns {
-		h.EmitTo(userID, "lobby_state", h.buildLobbySnapshot(conn.UserID))
+	for _, userID := range h.connUserIDs() {
+		h.EmitTo(userID, "lobby_state", h.buildLobbySnapshot(userID))
 	}
 }
 
 // sendSyncState sends a full state snapshot to a single user for desync recovery.
 func (h *Hub) sendSyncState(userID uuid.UUID) {
-	if _, ok := h.conns[userID]; !ok {
+	if h.getConn(userID) == nil {
 		return
 	}
 	payload := h.buildLobbySnapshot(userID)

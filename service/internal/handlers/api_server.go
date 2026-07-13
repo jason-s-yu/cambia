@@ -5,15 +5,20 @@ import (
 	"context"
 	"log"
 	"sync"
+	"time"
 
-	engine "github.com/jason-s-yu/cambia/engine"
 	"github.com/google/uuid"
+	engine "github.com/jason-s-yu/cambia/engine"
 	"github.com/jason-s-yu/cambia/service/internal/game"
 	"github.com/jason-s-yu/cambia/service/internal/hub"
 	"github.com/jason-s-yu/cambia/service/internal/lobby"
 	"github.com/jason-s-yu/cambia/service/internal/matchmaking"
 	"github.com/jason-s-yu/cambia/service/internal/models"
 )
+
+// defaultCountdownDuration is the delay between a lobby reaching countdown and the
+// game being created. Tests may lower GameServer.CountdownDuration for speed.
+const defaultCountdownDuration = 3 * time.Second
 
 // GameServer manages the central stores for active lobbies and games.
 type GameServer struct {
@@ -23,58 +28,52 @@ type GameServer struct {
 	CircuitStore *game.CircuitStore
 	HubStore     *hub.HubStore
 	Matchmaker   *matchmaking.Matchmaker
+
+	// CountdownDuration is copied onto each hub at creation so the lobby -> game
+	// countdown length is configurable (production default; shortened in tests).
+	CountdownDuration time.Duration
 }
 
 // NewGameServer initializes a new GameServer with empty, ephemeral stores.
 func NewGameServer() *GameServer {
 	return &GameServer{
-		LobbyStore:   lobby.NewLobbyStore(),
-		GameStore:    game.NewGameStore(),
-		CircuitStore: game.NewCircuitStore(),
-		HubStore:     hub.NewHubStore(),
-		Matchmaker:   matchmaking.NewMatchmaker(),
+		LobbyStore:        lobby.NewLobbyStore(),
+		GameStore:         game.NewGameStore(),
+		CircuitStore:      game.NewCircuitStore(),
+		HubStore:          hub.NewHubStore(),
+		Matchmaker:        matchmaking.NewMatchmaker(),
+		CountdownDuration: defaultCountdownDuration,
 	}
 }
 
-// NewCambiaGameFromLobby creates a game instance from a Lobby's current state.
-// Prefer CreateGameInstance for new code; this is kept for backward compatibility.
-func (gs *GameServer) NewCambiaGameFromLobby(ctx context.Context, lob *lobby.Lobby) *game.CambiaGame {
-	playerIDs := lob.JoinedUsers() // acquires lock internally
-
-	var players []*models.Player
-	for _, uid := range playerIDs {
-		players = append(players, &models.Player{
-			ID:        uid,
-			Connected: true,
-			Hand:      []*models.Card{},
-			User:      &models.User{ID: uid},
-		})
-	}
-
+// NewCambiaGameFromLobby creates a game instance from a Lobby's current state for the
+// given player set. playerIDs is supplied by the caller (the hub passes its currently
+// connected players so a mid-countdown disconnect never seats a ghost). The returned game
+// is registered in the GameStore with its OnGameEnd callback and Emitter wired, but is NOT
+// yet begun: the caller sets any routing it needs and then calls BeginPreGame so the
+// pre-game reveal reaches clients through the emitter.
+func (gs *GameServer) NewCambiaGameFromLobby(ctx context.Context, lob *lobby.Lobby, playerIDs []uuid.UUID, emitter game.Emitter) *game.CambiaGame {
 	lob.Mu.Lock()
-	g := game.NewCambiaGame()
-	g.LobbyID = lob.ID
-	g.HostUserID = lob.HostUserID
-	g.LobbyType = lob.Type
-	g.Rated = lob.Mode == "ranked"
-	g.HouseRules = lob.HouseRules
-	g.Circuit = lob.Circuit
-	g.Players = players
 	lobbyID := lob.ID
+	hostID := lob.HostUserID
+	lobbyType := lob.Type
+	gameMode := lob.GameMode
+	rated := lob.Mode == "ranked"
+	houseRules := lob.HouseRules
+	circuit := lob.Circuit
 	lob.Mu.Unlock()
 
-	gs.attachOnGameEnd(g, lobbyID)
-	gs.GameStore.AddGame(g)
-	g.BeginPreGame()
-	log.Printf("Created and started game %s from lobby %s", g.ID, lobbyID)
-	return g
+	return gs.CreateGameInstance(ctx, lobbyID, hostID, gameMode, lobbyType, rated, houseRules, circuit, playerIDs, emitter)
 }
 
-// CreateGameInstance creates a game from pre-extracted parameters.
-// playerIDs lists the UUIDs of all players joining the game. lobbyType must be a valid
-// lobby_type enum value ("private"/"public"/"matchmaking"); rated marks whether results feed
-// the rating system (cambia-450).
-func (gs *GameServer) CreateGameInstance(ctx context.Context, lobbyID, hostID uuid.UUID, gameMode, lobbyType string, rated bool, houseRules game.HouseRules, circuit game.Circuit, playerIDs []uuid.UUID) *game.CambiaGame {
+// CreateGameInstance creates a game from pre-extracted parameters and registers it in the
+// GameStore with its OnGameEnd callback and Emitter wired. playerIDs lists the UUIDs of all
+// players joining the game. lobbyType must be a valid lobby_type enum value
+// ("private"/"public"/"matchmaking"); rated marks whether results feed the rating system
+// (cambia-450). emitter is the sink for all game events (the owning hub). The game is not
+// begun here: the caller invokes BeginPreGame once routing is in place. Returns nil if
+// fewer than two players are supplied.
+func (gs *GameServer) CreateGameInstance(ctx context.Context, lobbyID, hostID uuid.UUID, gameMode, lobbyType string, rated bool, houseRules game.HouseRules, circuit game.Circuit, playerIDs []uuid.UUID, emitter game.Emitter) *game.CambiaGame {
 	g := game.NewCambiaGame()
 	g.LobbyID = lobbyID
 	g.HostUserID = hostID
@@ -96,6 +95,7 @@ func (gs *GameServer) CreateGameInstance(ctx context.Context, lobbyID, hostID uu
 			ID:        uid,
 			Connected: true,
 			Hand:      []*models.Card{},
+			User:      &models.User{ID: uid},
 		})
 	}
 	if len(players) < 2 {
@@ -103,6 +103,7 @@ func (gs *GameServer) CreateGameInstance(ctx context.Context, lobbyID, hostID uu
 		return nil
 	}
 	g.Players = players
+	g.Emitter = emitter
 
 	if circuit.Enabled && gs.CircuitStore != nil {
 		existingState, _ := gs.CircuitStore.Get(lobbyID)
@@ -130,8 +131,17 @@ func (gs *GameServer) CreateGameInstance(ctx context.Context, lobbyID, hostID uu
 
 	gs.attachOnGameEnd(g, lobbyID)
 	gs.GameStore.AddGame(g)
-	g.BeginPreGame()
+	log.Printf("Created game %s from lobby %s (%d players, rated=%v)", g.ID, lobbyID, len(players), rated)
 	return g
+}
+
+// hubGameFactory returns the hub.GameFactory a hub uses to build its backing game. It binds
+// the GameServer's stores (GameStore/CircuitStore/HubStore) so the hub stays decoupled from
+// them: the hub supplies its live lobby and connected player set, the GameServer owns creation.
+func (gs *GameServer) hubGameFactory() hub.GameFactory {
+	return func(lob *lobby.Lobby, playerIDs []uuid.UUID, emitter game.Emitter) *game.CambiaGame {
+		return gs.NewCambiaGameFromLobby(context.Background(), lob, playerIDs, emitter)
+	}
 }
 
 // attachOnGameEnd wires the OnGameEnd callback that resets lobby state and emits results.

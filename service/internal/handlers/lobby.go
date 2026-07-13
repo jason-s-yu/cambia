@@ -91,8 +91,14 @@ func CreateLobbyHandler(gs *GameServer) http.HandlerFunc {
 		// Add the configured lobby to the central store.
 		gs.LobbyStore.AddLobby(lob)
 
-		// Create a hub for this lobby so WS connections can join immediately.
+		// Create a hub for this lobby so WS connections can join immediately. Inject the game
+		// factory and countdown length so the hub can create the engine-backed game itself when
+		// the lobby countdown elapses (cambia-458).
 		h := hub.NewHub(lob)
+		h.CreateGame = gs.hubGameFactory()
+		if gs.CountdownDuration > 0 {
+			h.CountdownDuration = gs.CountdownDuration
+		}
 		gs.HubStore.CreateHub(h)
 		go h.Run(context.Background())
 
