@@ -112,7 +112,7 @@ func TestRecordGameAndResultsShrinksRD1v1(t *testing.T) {
 
 	game1 := uuid.New()
 	seedGameRow(t, game1, winner.ID)
-	require.NoError(t, RecordGameAndResults(ctx, game1, players, scores, winners))
+	require.NoError(t, RecordGameAndResults(ctx, game1, players, scores, winners, true))
 
 	afterGame1, err := GetUserByID(ctx, winner.ID)
 	require.NoError(t, err)
@@ -121,7 +121,7 @@ func TestRecordGameAndResultsShrinksRD1v1(t *testing.T) {
 
 	game2 := uuid.New()
 	seedGameRow(t, game2, winner.ID)
-	require.NoError(t, RecordGameAndResults(ctx, game2, players, scores, winners))
+	require.NoError(t, RecordGameAndResults(ctx, game2, players, scores, winners, true))
 
 	afterGame2, err := GetUserByID(ctx, winner.ID)
 	require.NoError(t, err)
@@ -152,7 +152,7 @@ func TestRecordGameAndResultsShrinksRD4p(t *testing.T) {
 
 	game1 := uuid.New()
 	seedGameRow(t, game1, users[0].ID)
-	require.NoError(t, RecordGameAndResults(ctx, game1, players, scores, winners))
+	require.NoError(t, RecordGameAndResults(ctx, game1, players, scores, winners, true))
 
 	afterGame1, err := GetUserByID(ctx, users[0].ID)
 	require.NoError(t, err)
@@ -163,7 +163,7 @@ func TestRecordGameAndResultsShrinksRD4p(t *testing.T) {
 
 	game2 := uuid.New()
 	seedGameRow(t, game2, users[0].ID)
-	require.NoError(t, RecordGameAndResults(ctx, game2, players, scores, winners))
+	require.NoError(t, RecordGameAndResults(ctx, game2, players, scores, winners, true))
 
 	afterGame2, err := GetUserByID(ctx, users[0].ID)
 	require.NoError(t, err)

@@ -4,6 +4,7 @@ package database
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 
@@ -13,24 +14,41 @@ import (
 	"github.com/jason-s-yu/cambia/service/internal/rating"
 )
 
-// RecordGameAndResults persists the final outcome of a game, plus updates rating (1v1, 4p, 7p/8p).
-// We do a basic approach: if players == 2 => "1v1", if 4 => "4p", if 7 or 8 => "7p8p" else no rating update.
-func RecordGameAndResults(ctx context.Context, gameID uuid.UUID, players []*models.Player, finalScores map[uuid.UUID]int, winners []uuid.UUID) error {
+// RecordGameAndResults persists the final outcome of a game, plus updates rating (1v1, 4p, 7p/8p)
+// when rated is true. Rating is further gated on supported player counts: 2 => "1v1", 4 => "4p",
+// 7 or 8 => "7p8p", anything else => no rating update. game_results rows are always written
+// regardless of rated, so score history survives for casual games too.
+//
+// Idempotent: the completion UPDATE is conditioned on status != 'completed'. If the game was
+// already recorded (duplicate end-event from a reconnect/replay/timer race), this is a no-op
+// that returns nil rather than re-inserting results or re-applying rating deltas.
+func RecordGameAndResults(ctx context.Context, gameID uuid.UUID, players []*models.Player, finalScores map[uuid.UUID]int, winners []uuid.UUID, rated bool) error {
+	var alreadyRecorded bool
+
 	err := pgx.BeginTxFunc(ctx, DB, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		// Mark the game row completed. This assumes the row already exists (created at
-		// game-start with a lobby_id, which this function has no way to supply): games.lobby_id
-		// is NOT NULL with no default, and Postgres validates that on the proposed row before
-		// ON CONFLICT resolution even runs, so an INSERT ... ON CONFLICT DO UPDATE here always
-		// fails with a not-null violation regardless of whether a conflicting row exists
-		// (verified directly against the schema; not a hypothetical). A plain UPDATE matches
-		// this function's actual invariant.
-		updGame := `UPDATE games SET status = 'completed' WHERE id = $1`
+		// game-start via UpsertInitialGameState, which supplies lobby_id): games.lobby_id is NOT NULL
+		// with no default, so an INSERT here would always fail a not-null violation; a plain
+		// conditional UPDATE matches this function's actual invariant and doubles as the
+		// idempotency guard (status != 'completed' skips duplicate end-events).
+		updGame := `UPDATE games SET status = 'completed' WHERE id = $1 AND status != 'completed'`
 		ct, e := tx.Exec(ctx, updGame, gameID)
 		if e != nil {
 			return e
 		}
 		if ct.RowsAffected() == 0 {
-			log.Printf("RecordGameAndResults: no existing games row for game %v; game_results insert will fail its FK", gameID)
+			var existingStatus string
+			lookupErr := tx.QueryRow(ctx, `SELECT status FROM games WHERE id = $1`, gameID).Scan(&existingStatus)
+			switch {
+			case errors.Is(lookupErr, pgx.ErrNoRows):
+				return fmt.Errorf("no games row for %v: game-start invariant violated (UpsertInitialGameState was not called)", gameID)
+			case lookupErr != nil:
+				return lookupErr
+			default:
+				log.Printf("RecordGameAndResults: game %v already completed (status=%s); skipping duplicate record", gameID, existingStatus)
+				alreadyRecorded = true
+				return nil
+			}
 		}
 
 		// Insert game_results
@@ -57,6 +75,14 @@ func RecordGameAndResults(ctx context.Context, gameID uuid.UUID, players []*mode
 	})
 	if err != nil {
 		return fmt.Errorf("tx upsert game or results: %w", err)
+	}
+	if alreadyRecorded {
+		return nil
+	}
+
+	if !rated {
+		log.Printf("Game %v: unrated, skipping rating update for %d players.", gameID, len(players))
+		return nil
 	}
 
 	// figure out rating mode
@@ -175,22 +201,44 @@ func StoreInitialGameStateInDB(ctx context.Context, gameID uuid.UUID, initSnapsh
 	})
 }
 
-// UpsertInitialGameState stores 'snap' of the deck + initial player hands into games.initial_game_state.
-func UpsertInitialGameState(gameID uuid.UUID, initialData interface{}) {
-	ctx := context.Background()
+// UpsertInitialGameState creates the games row for gameID and stores 'snap' of the deck +
+// initial player hands into games.initial_game_state. This is the sole place a games row gets
+// created, and games.lobby_id is NOT NULL with an FK to lobbies(id): the ephemeral in-memory
+// lobby (internal/lobby.Lobby) is never itself persisted, so the referenced lobbies row is
+// upserted here first, in the same transaction, using the minimal fields needed to satisfy the
+// FK and to record whether the game is rated (cambia-450). lobbyType must be a valid lobby_type
+// enum value ("private", "public", "matchmaking"); an empty/invalid value fails the insert and
+// the error is returned to the caller rather than discarded.
+func UpsertInitialGameState(ctx context.Context, gameID, lobbyID, hostUserID uuid.UUID, lobbyType string, rated bool, initialData interface{}) error {
 	dataBytes, err := json.Marshal(initialData)
 	if err != nil {
-		log.Printf("failed to marshal initial game state for game %v: %v", gameID, err)
-		return
+		return fmt.Errorf("marshal initial game state for game %v: %w", gameID, err)
 	}
-	_ = pgx.BeginTxFunc(ctx, DB, pgx.TxOptions{}, func(tx pgx.Tx) error {
-		q := `
-			INSERT INTO games (id, status, initial_game_state, start_time)
-			VALUES ($1, 'in_progress', $2, NOW())
-			ON CONFLICT (id)
-			DO UPDATE SET initial_game_state = EXCLUDED.initial_game_state, status='in_progress'
+
+	lobbyMode := "casual"
+	if rated {
+		lobbyMode = "ranked"
+	}
+
+	return pgx.BeginTxFunc(ctx, DB, pgx.TxOptions{}, func(tx pgx.Tx) error {
+		lobQ := `
+			INSERT INTO lobbies (id, host_user_id, type, mode, ranked)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (id) DO NOTHING
 		`
-		_, e := tx.Exec(ctx, q, gameID, dataBytes)
-		return e
+		if _, e := tx.Exec(ctx, lobQ, lobbyID, hostUserID, lobbyType, lobbyMode, rated); e != nil {
+			return fmt.Errorf("upsert lobbies row for game %v: %w", gameID, e)
+		}
+
+		gameQ := `
+			INSERT INTO games (id, lobby_id, status, initial_game_state, start_time)
+			VALUES ($1, $2, 'in_progress', $3, NOW())
+			ON CONFLICT (id)
+			DO UPDATE SET initial_game_state = EXCLUDED.initial_game_state, status = 'in_progress'
+		`
+		if _, e := tx.Exec(ctx, gameQ, gameID, lobbyID, dataBytes); e != nil {
+			return fmt.Errorf("upsert games row for game %v: %w", gameID, e)
+		}
+		return nil
 	})
 }
