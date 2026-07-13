@@ -6,9 +6,11 @@
    classes below (dark: variant, default Tailwind scale) are unaffected. */
 @import "./styles/design-tokens.css";
 
-/* Enable class-based dark mode for manual toggling (Tailwind v4 method) */
-/* This allows adding/removing the 'dark' class on the <html> element */
-@custom-variant dark (&:where(.dark, .dark *));
+/* Bind the Tailwind `dark:` variant to the single theme mechanism: the
+   `data-theme="dark"` attribute on <html>, written by hooks/useTheme. The
+   design-system tokens key light mode off `[data-theme="light"]`; this keeps
+   every existing class-based `dark:` utility in step with that attribute. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 /* Optional: Define custom base styles or theme overrides via @theme (Tailwind v4 method) */
 /* @theme { */

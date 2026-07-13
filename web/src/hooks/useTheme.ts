@@ -6,7 +6,12 @@ import { useUiStore, type Theme } from '@/stores/uiStore';
  * Manages the application theme (light/dark/system).
  * Reads preference from Zustand store (persisted to localStorage).
  * Detects system preference using `matchMedia`.
- * Applies/removes the 'dark' class to the `<html>` element.
+ * Writes the resolved theme to the `data-theme` attribute on the `<html>`
+ * element -- the single theme mechanism: the design-system color tokens key
+ * light mode off `[data-theme="light"]`, and the Tailwind `dark:` variant is
+ * bound to `[data-theme="dark"]` (see src/index.css). A 'system' preference is
+ * resolved to an explicit 'light'/'dark' value here so the attribute is never
+ * ambiguous.
  * Listens for system theme changes and updates the UI if theme is set to 'system'.
  */
 export function useTheme() {
@@ -17,7 +22,7 @@ export function useTheme() {
 		const root = window.document.documentElement;
 		const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
 
-		/** Applies the correct theme class based on the stored or system preference. */
+		/** Resolves the preference and writes the data-theme attribute. */
 		const applyTheme = (themeToApply: Theme) => {
 			let isDark: boolean;
 
@@ -26,8 +31,7 @@ export function useTheme() {
 			} else {
 				isDark = themeToApply === 'dark';
 			}
-			// console.log(`Applying theme: ${themeToApply}, effective dark: ${isDark}`);
-			root.classList.toggle('dark', isDark);
+			root.setAttribute('data-theme', isDark ? 'dark' : 'light');
 		};
 
 		// Apply the theme initially based on the stored preference.

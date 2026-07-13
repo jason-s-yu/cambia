@@ -1,8 +1,13 @@
 import React from 'react';
 import Switch from '../core/Switch';
+import Button from '../core/Button';
 import Wordmark from './Wordmark';
 
-export type TopBarTab = 'home' | 'leaderboard';
+export interface TopBarNavItem {
+  label: string;
+  /** Route path this tab navigates to, e.g. '/dashboard'. */
+  path: string;
+}
 
 export interface TopBarUser {
   name: string;
@@ -11,28 +16,29 @@ export interface TopBarUser {
 }
 
 export interface TopBarProps {
-  active: TopBarTab;
-  onNav: (tab: TopBarTab) => void;
+  items: TopBarNavItem[];
+  /** Current router pathname; drives the active tab highlight. */
+  activePath: string;
+  onNav: (path: string) => void;
   /** True when the light theme is active (drives the day/night switch). */
   light: boolean;
   onToggleTheme: (light: boolean) => void;
   user: TopBarUser;
+  onLogout: () => void;
   style?: React.CSSProperties;
 }
 
-const TABS: Array<[TopBarTab, string]> = [
-  ['home', 'Play'],
-  ['leaderboard', 'Leaderboard']
-];
+/** A tab is active on an exact path match or when the path is a nested child. */
+function isActive(activePath: string, path: string): boolean {
+  return activePath === path || activePath.startsWith(path + '/');
+}
 
 /**
- * Platform top bar: wordmark, primary nav, theme switch and profile chip.
- *
- * Adapted from design-system-import/ui_kits/platform/shared.jsx TopBar for the
- * additive DS preview (cambia-438). Presentational: navigation, theme and the
- * profile identity are wired by the containing layout.
+ * Platform top bar: wordmark, primary nav, theme switch, profile chip and
+ * logout. Presentational: navigation, theme and identity are wired by the
+ * containing layout (AppLayout).
  */
-const TopBar: React.FC<TopBarProps> = ({ active, onNav, light, onToggleTheme, user, style }) => {
+const TopBar: React.FC<TopBarProps> = ({ items, activePath, onNav, light, onToggleTheme, user, onLogout, style }) => {
   return (
     <div
       style={{
@@ -47,29 +53,32 @@ const TopBar: React.FC<TopBarProps> = ({ active, onNav, light, onToggleTheme, us
         ...style
       }}
     >
-      <a onClick={() => onNav('home')} style={{ cursor: 'pointer', color: 'var(--text-primary)', textDecoration: 'none' }}>
+      <a onClick={() => onNav(items[0]?.path ?? '/dashboard')} style={{ cursor: 'pointer', color: 'var(--text-primary)', textDecoration: 'none' }}>
         <Wordmark />
       </a>
       <nav style={{ display: 'flex', gap: 4 }}>
-        {TABS.map(([id, label]) => (
-          <button
-            key={id}
-            onClick={() => onNav(id)}
-            style={{
-              padding: '7px 14px',
-              fontFamily: 'var(--font-ui)',
-              fontSize: 'var(--text-md)',
-              fontWeight: 'var(--weight-bold)',
-              cursor: 'pointer',
-              borderRadius: 'var(--ds-radius-md)',
-              background: active === id ? 'var(--surface-raised)' : 'transparent',
-              color: active === id ? 'var(--text-primary)' : 'var(--text-secondary)',
-              border: active === id ? '1.5px solid var(--border-strong)' : '1.5px solid transparent'
-            }}
-          >
-            {label}
-          </button>
-        ))}
+        {items.map((item) => {
+          const active = isActive(activePath, item.path);
+          return (
+            <button
+              key={item.path}
+              onClick={() => onNav(item.path)}
+              style={{
+                padding: '7px 14px',
+                fontFamily: 'var(--font-ui)',
+                fontSize: 'var(--text-md)',
+                fontWeight: 'var(--weight-bold)',
+                cursor: 'pointer',
+                borderRadius: 'var(--ds-radius-md)',
+                background: active ? 'var(--surface-raised)' : 'transparent',
+                color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
+                border: active ? '1.5px solid var(--border-strong)' : '1.5px solid transparent'
+              }}
+            >
+              {item.label}
+            </button>
+          );
+        })}
       </nav>
       <div style={{ flex: 1 }}></div>
       <div
@@ -119,6 +128,9 @@ const TopBar: React.FC<TopBarProps> = ({ active, onNav, light, onToggleTheme, us
           <span style={{ display: 'block', fontFamily: 'var(--ds-font-mono)', fontSize: 10, color: 'var(--text-tertiary)' }}>{user.rating}</span>
         </span>
       </div>
+      <Button variant="secondary" size="sm" onClick={onLogout}>
+        Logout
+      </Button>
     </div>
   );
 };

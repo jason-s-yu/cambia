@@ -20,7 +20,7 @@ const BASELINE_COLORS: Record<string, string> = {
 };
 
 function isDarkMode(): boolean {
-	return document.documentElement.classList.contains('dark');
+	return document.documentElement.getAttribute('data-theme') === 'dark';
 }
 
 const MetricsChart: React.FC<MetricsChartProps> = ({ metrics, meanImp }) => {

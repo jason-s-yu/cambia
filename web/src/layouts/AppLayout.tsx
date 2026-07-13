@@ -1,58 +1,76 @@
 // src/layouts/AppLayout.tsx
-import React from 'react';
-import { Outlet, Link, useNavigate } from 'react-router-dom';
+import React, { useEffect, useState } from 'react';
+import { Outlet, useNavigate, useLocation } from 'react-router-dom';
+import TopBar, { type TopBarNavItem, type TopBarUser } from '@/components/ds/chrome/TopBar';
 import { useAuthStore } from '@/stores/authStore';
-import Button from '@/components/common/Button';
-import ThemeToggle from '@/components/common/ThemeToggle';
+import { useUiStore } from '@/stores/uiStore';
+
+/** Primary navigation for authenticated users. */
+const NAV_ITEMS: TopBarNavItem[] = [
+	{ label: 'Home', path: '/dashboard' },
+	{ label: 'Leaderboard', path: '/leaderboard' },
+	{ label: 'Training', path: '/training' },
+	{ label: 'Profile', path: '/profile' }
+];
 
 /**
- * Main application layout for authenticated users.
- * Includes a header with navigation, user info, theme toggle, logout button,
- * the main content area rendered by <Outlet>, and a simple footer.
+ * Main application layout for authenticated users, built on the design-system
+ * chrome (TopBar + Wordmark). The TopBar carries navigation, the theme switch,
+ * the profile chip and logout; nested routes render full-bleed into the Outlet
+ * and manage their own padding, matching the design-system screen contract.
  */
 const AppLayout: React.FC = () => {
+	const navigate = useNavigate();
+	const location = useLocation();
 	const logout = useAuthStore((state) => state.logout);
 	const user = useAuthStore((state) => state.user);
-	const navigate = useNavigate();
+	const theme = useUiStore((state) => state.theme);
+	const setTheme = useUiStore((state) => state.setTheme);
+
+	// Effective light flag for the day/night switch, resolving 'system' against
+	// the OS preference so the switch reflects what is actually on screen.
+	const [light, setLight] = useState(false);
+	useEffect(() => {
+		const mq = window.matchMedia('(prefers-color-scheme: dark)');
+		const resolve = () => setLight(theme === 'light' ? true : theme === 'dark' ? false : !mq.matches);
+		resolve();
+		mq.addEventListener('change', resolve);
+		return () => mq.removeEventListener('change', resolve);
+	}, [theme]);
 
 	const handleLogout = async () => {
 		await logout();
 		navigate('/login');
 	};
 
-	return (
-		<div className="min-h-screen flex flex-col bg-gray-50 dark:bg-gray-900">
-			<header className="bg-white dark:bg-gray-800 shadow-md sticky top-0 z-20">
-				<nav className="container mx-auto px-4 py-3 flex justify-between items-center">
-					<Link to="/dashboard" className="text-xl font-bold text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-colors">
-						Cambia Online
-					</Link>
-					<Link to="/training" className="text-sm text-gray-600 dark:text-gray-300 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
-						Training
-					</Link>
-					<Link to="/training/compare" className="text-sm text-gray-600 dark:text-gray-300 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
-						Compare
-					</Link>
-					<div className='flex items-center space-x-4'>
-						<Link to="/profile" className="text-sm text-gray-700 dark:text-gray-300 hidden sm:inline hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
-							Welcome, <strong className='font-medium'>{user?.username ?? 'Player'}</strong>!
-						</Link>
-						<ThemeToggle />
-						<Button onClick={handleLogout} variant='secondary' size='sm'>
-							Logout
-						</Button>
-					</div>
-				</nav>
-			</header>
+	const topBarUser: TopBarUser = {
+		name: user?.username || 'Player',
+		rating: user?.elo !== undefined ? `${Math.round(user.elo)} ± ${Math.round(user.rd ?? 0)}` : 'unrated'
+	};
 
-			{/* Main content area where nested routes are rendered */}
-			<main className="flex-grow container mx-auto p-4 md:p-6 lg:p-8">
+	return (
+		<div
+			style={{
+				minHeight: '100vh',
+				display: 'flex',
+				flexDirection: 'column',
+				background: 'var(--surface-page)',
+				color: 'var(--text-primary)',
+				fontFamily: 'var(--font-ui)'
+			}}
+		>
+			<TopBar
+				items={NAV_ITEMS}
+				activePath={location.pathname}
+				onNav={(path) => navigate(path)}
+				light={light}
+				onToggleTheme={(nextLight) => setTheme(nextLight ? 'light' : 'dark')}
+				user={topBarUser}
+				onLogout={handleLogout}
+			/>
+			<main style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
 				<Outlet />
 			</main>
-
-			<footer className="text-center text-xs text-gray-500 dark:text-gray-400 p-3 bg-gray-100 dark:bg-gray-800 border-t dark:border-gray-700">
-				Cambia Client v0.1.0 - © 2025
-			</footer>
 		</div>
 	);
 };

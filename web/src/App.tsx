@@ -5,18 +5,12 @@ import RegisterPage from '@/pages/RegisterPage';
 import DashboardPage from '@/pages/DashboardPage';
 import LobbyPage from '@/pages/LobbyPage';
 import ProfilePage from '@/pages/ProfilePage';
-import PlayPage from '@/pages/PlayPage';
+import LeaderboardPage from '@/pages/LeaderboardPage';
 import TrainingPage from '@/pages/TrainingPage';
 import RunDetailPage from '@/pages/RunDetailPage';
 import ComparePage from '@/pages/ComparePage';
 import AuthLayout from '@/layouts/AuthLayout';
 import AppLayout from '@/layouts/AppLayout';
-import DsLayout from '@/layouts/DsLayout';
-import DsHomeScreen from '@/pages/ds/HomeScreen';
-import DsLobbyScreen from '@/pages/ds/LobbyScreen';
-import DsGameScreen from '@/pages/ds/GameScreen';
-import DsLeaderboardScreen from '@/pages/ds/LeaderboardScreen';
-import DsTrainingScreen from '@/pages/ds/TrainingScreen';
 import ProtectedRoute from '@/routes/ProtectedRoute';
 import { useAuthStore } from '@/stores/authStore';
 import NotFoundPage from './pages/NotFoundPage';
@@ -50,23 +44,14 @@ function App() {
 				<Route path="/dashboard" element={<DashboardPage />} />
 				<Route path="/lobby/:lobbyId" element={<LobbyPage />} />
 				<Route path="/profile" element={<ProfilePage />} />
-				<Route path="/play" element={<PlayPage />} />
+				<Route path="/leaderboard" element={<LeaderboardPage />} />
 				<Route path="/training" element={<TrainingPage />} />
 				<Route path="/training/compare" element={<ComparePage />} />
 				<Route path="/training/:runName" element={<RunDetailPage />} />
 			</Route>
 
-			{/* Design System preview routes (cambia-438). Additive and standalone:
-			    they render the DS chrome on the design-system surface, outside the
-			    Tailwind AppLayout, and do not require auth. */}
-			<Route path="/ds" element={<DsLayout />}>
-				<Route index element={<Navigate to="/ds/home" replace />} />
-				<Route path="home" element={<DsHomeScreen />} />
-				<Route path="lobby" element={<DsLobbyScreen />} />
-				<Route path="game" element={<DsGameScreen />} />
-				<Route path="leaderboard" element={<DsLeaderboardScreen />} />
-			</Route>
-			<Route path="/ds/training" element={<DsTrainingScreen />} />
+			{/* Legacy /play matchmaking route folded into the dashboard. */}
+			<Route path="/play" element={<Navigate to="/dashboard" replace />} />
 
 			{/* Redirect root path */}
 			<Route path="/" element={<Navigate to={isAuthenticated ? '/dashboard' : '/login'} replace />} />
