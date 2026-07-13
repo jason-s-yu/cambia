@@ -330,9 +330,9 @@ func (h *Hub) handleLobbyMsg(msg ClientMsg) {
 }
 
 // handleGameMsg routes game-phase messages to the game engine. Player actions run here in the
-// hub's Run() goroutine. Note: CambiaGame has no internal mutex, yet its state is also mutated
-// by its own timer goroutines (turn/pre-game/end timers), so action-vs-timer access is not
-// currently synchronized (a CambiaGame-level lock is a follow-up).
+// hub's Run() goroutine, while the game's own timer goroutines (turn/pre-game/end timers) also
+// mutate its state; CambiaGame serializes both through its internal mutex (cambia-465), so the
+// hub can call HandlePlayerAction/ProcessSpecialAction directly without holding a game lock.
 func (h *Hub) handleGameMsg(msg ClientMsg) {
 	if h.Game == nil {
 		return

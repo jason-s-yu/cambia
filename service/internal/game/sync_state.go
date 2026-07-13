@@ -47,11 +47,20 @@ type ObfGameState struct {
 	HouseRules      HouseRules       `json:"houseRules"`
 }
 
-// GetCurrentObfuscatedGameState generates a snapshot of the game state,
+// GetCurrentObfuscatedGameState is the public entry point for reading an observer-tailored
+// state snapshot. It acquires mu and delegates to getCurrentObfuscatedGameState. Internal
+// callers that already hold mu (sendSyncState) call getCurrentObfuscatedGameState directly.
+func (g *CambiaGame) GetCurrentObfuscatedGameState(forUser uuid.UUID) ObfGameState {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.getCurrentObfuscatedGameState(forUser)
+}
+
+// getCurrentObfuscatedGameState generates a snapshot of the game state,
 // tailored to the perspective of the requesting user (`forUser`).
 // Reads from engine state as the authoritative source.
 // This function assumes the game lock is HELD by the caller.
-func (g *CambiaGame) GetCurrentObfuscatedGameState(forUser uuid.UUID) ObfGameState {
+func (g *CambiaGame) getCurrentObfuscatedGameState(forUser uuid.UUID) ObfGameState {
 	obf := ObfGameState{
 		GameID:        g.ID,
 		PreGameActive: g.PreGameActive,
