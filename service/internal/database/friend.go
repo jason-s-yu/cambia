@@ -52,7 +52,7 @@ func AcceptFriend(ctx context.Context, user1, user2 uuid.UUID) error {
 func ListFriends(ctx context.Context, userID uuid.UUID) ([]models.Friend, error) {
 	// return rows matching (user1_id=userID or user2_id=userID), including pending or accepted
 	q := `
-		SELECT user1_id, user2_id, status, updated_at
+		SELECT user1_id, user2_id, status
 		FROM friends
 		WHERE user1_id=$1 OR user2_id=$1
 	`
