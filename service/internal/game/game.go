@@ -127,10 +127,10 @@ type CambiaGame struct {
 	Players []*models.Player // List of players in the game.
 
 	// Engine integration — authoritative game state.
-	Engine         engine.GameState                    // The authoritative game state.
-	CardTracker    CardUUIDTracker                     // UUID tracking for all cards.
-	PlayerToEngine map[uuid.UUID]uint8                 // Service player UUID -> engine index.
-	EngineToPlayer [engine.MaxPlayers]uuid.UUID        // Engine index -> service player UUID.
+	Engine         engine.GameState             // The authoritative game state.
+	CardTracker    CardUUIDTracker              // UUID tracking for all cards.
+	PlayerToEngine map[uuid.UUID]uint8          // Service player UUID -> engine index.
+	EngineToPlayer [engine.MaxPlayers]uuid.UUID // Engine index -> service player UUID.
 
 	// Buffered discard flow (ability-choice state).
 	pendingDiscardAbilityChoice bool
@@ -170,7 +170,7 @@ type CambiaGame struct {
 
 	// Circuit-mode disconnect handling (T5)
 	circuitGraceTimers  map[uuid.UUID]*time.Timer // 60s grace timers per disconnected player
-	circuitAIControlled map[uuid.UUID]bool         // Players currently under AI control
+	circuitAIControlled map[uuid.UUID]bool        // Players currently under AI control
 }
 
 // NewCambiaGame creates a new game instance with default settings.
@@ -249,6 +249,13 @@ func (g *CambiaGame) BeginPreGame() {
 	// Persist initial state for potential replay/audit.
 	g.persistInitialGameState()
 
+	// Emit the initial sync_state to every player before the reveal below. The web client drops
+	// all game events while its gameState is nil and only populates it from private_sync_state, so
+	// without a sync-first the private_initial_cards reveal (and every later game_player_turn) is
+	// discarded and the table never renders (cambia-501). Sending sync first means the subsequent
+	// private_initial_cards / game_player_turn events land on already-populated client state.
+	g.broadcastSyncStateToAll()
+
 	// Privately reveal the initial two cards (indices 0, 1) to each player.
 	for _, p := range g.Players {
 		engineIdx := g.PlayerToEngine[p.ID]
@@ -314,6 +321,12 @@ func (g *CambiaGame) StartGame() {
 
 	// Start the turn cycle.
 	g.scheduleNextTurnTimer()
+	// Re-sync every player now that the game is live: Started flips false->true here and a turn
+	// deadline was just armed. game_player_turn alone carries neither the started transition nor a
+	// fresh snapshot, so without this the client keeps gameState.started=false and would reject its
+	// own turn. Emitting sync before broadcastPlayerTurn keeps the turn event landing on up-to-date
+	// state (cambia-501).
+	g.broadcastSyncStateToAll()
 	g.broadcastPlayerTurn()
 }
 
@@ -402,7 +415,6 @@ func (g *CambiaGame) AddPlayer(p *models.Player) {
 	}
 	g.logAction(p.ID, "player_add", map[string]interface{}{"reconnect": found, "username": p.User.Username})
 }
-
 
 // scheduleNextTurnTimer delegates to the engine-aware scheduler.
 // Assumes lock is held by caller.
@@ -619,7 +631,6 @@ func (g *CambiaGame) countConnectedPlayers() int {
 	return count
 }
 
-
 // HandlePlayerAction routes incoming player actions (draw, discard, replace, snap, cambia).
 // Validates turn, state, and payload before executing the corresponding handler.
 // Public entry point: acquires mu.
@@ -709,7 +720,6 @@ func (g *CambiaGame) HandlePlayerAction(playerID uuid.UUID, action models.GameAc
 		g.fireEventToPlayer(playerID, GameEvent{Type: EventPrivateSpecialFail, Payload: map[string]interface{}{"message": "Unknown action type."}})
 	}
 }
-
 
 // rankToSpecial maps card ranks to their corresponding special action identifier string.
 // Returns an empty string if the rank has no special ability.
@@ -909,7 +919,6 @@ func (g *CambiaGame) findWinnersWithCambiaLogicEngine(scores map[uuid.UUID]int, 
 	log.Printf("Game %s: Cambia not called. Lowest score: %d. Winners: %v", g.ID, lowestScore, potentialWinners)
 	return potentialWinners, false
 }
-
 
 // persistFinalGameState saves final hands and winners to the database.
 // Assumes lock is held by caller.
