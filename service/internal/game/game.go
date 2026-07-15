@@ -1076,24 +1076,21 @@ func (g *CambiaGame) FireEventPrivateSpecialActionFail(userID uuid.UUID, reason 
 	g.logAction(userID, string(EventPrivateSpecialFail), map[string]interface{}{"reason": reason, "special": special})
 }
 
-// FailSpecialAction clears the pending special action state and advances the turn, sending a failure event.
-// Assumes lock is held by caller.
-func (g *CambiaGame) FailSpecialAction(userID uuid.UUID, reason string) {
-	if !g.SpecialAction.Active || g.SpecialAction.PlayerID != userID {
-		log.Printf("Warning: Game %s: FailSpecialAction called for %s but state mismatch (Active:%v, Player:%s). Sending fail event anyway.", g.ID, userID, g.SpecialAction.Active, g.SpecialAction.PlayerID)
-		// Send fail event even if state is inconsistent.
-		g.FireEventPrivateSpecialActionFail(userID, reason, g.SpecialAction.CardRank, nil, nil)
-		// Don't advance turn if state was already inconsistent.
-		return
-	}
-	specialType := rankToSpecial(g.SpecialAction.CardRank) // Get type before clearing.
-	log.Printf("Game %s: Failing special action %s for player %s. Reason: %s", g.ID, specialType, userID, reason)
-
-	// Fire the fail event before clearing state.
+// RejectSpecialAction rejects an invalid special-action payload without advancing the turn or
+// clearing any pending state. It fires the private fail event, then leaves both the active
+// SpecialAction and any buffered discard (pendingDiscardAbilityChoice) untouched so the player
+// can retry with a valid target, or bail cleanly with "skip" (which resolves the buffered discard
+// as a no-ability discard and advances). This keeps engine and service state in lockstep: because
+// a rejected payload never resolves the engine's pending discard, the turn is never advanced while
+// the engine's ActingPlayer has not moved. That structural invariant makes the King-peek wedge
+// (cambia-509) impossible: previously the buffered discard stayed set while advanceTurn rebroadcast
+// a turn to the same player, permanently divergent. The turn timer armed when the ability began
+// keeps running, so a client that never sends a valid payload still times out cleanly via
+// handleTimeoutEngine rather than stalling the game. Assumes lock is held by caller.
+func (g *CambiaGame) RejectSpecialAction(userID uuid.UUID, reason string) {
+	specialType := rankToSpecial(g.SpecialAction.CardRank)
+	log.Printf("Game %s: Rejecting special action %s for player %s (state retained for retry). Reason: %s", g.ID, specialType, userID, reason)
 	g.FireEventPrivateSpecialActionFail(userID, reason, specialType, nil, nil)
-
-	g.SpecialAction = SpecialActionState{} // Clear state.
-	g.advanceTurn()                        // Advance turn after failure.
 }
 
 // FireEventPrivateSuccess helper to send a private success event for special actions.

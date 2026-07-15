@@ -47,21 +47,21 @@ func (g *CambiaGame) ProcessSpecialAction(
 	switch rank {
 	case "7", "8":
 		if special != "peek_self" {
-			g.FailSpecialAction(userID, fmt.Sprintf("Invalid step '%s' for 7/8 special action.", special))
+			g.RejectSpecialAction(userID, fmt.Sprintf("Invalid step '%s' for 7/8 special action.", special))
 			return
 		}
 		g.doPeekSelfEngine(userID, engineIdx, card1Data)
 
 	case "9", "T":
 		if special != "peek_other" {
-			g.FailSpecialAction(userID, fmt.Sprintf("Invalid step '%s' for 9/T special action.", special))
+			g.RejectSpecialAction(userID, fmt.Sprintf("Invalid step '%s' for 9/T special action.", special))
 			return
 		}
 		g.doPeekOtherEngine(userID, engineIdx, card1Data)
 
 	case "J", "Q":
 		if special != "swap_blind" {
-			g.FailSpecialAction(userID, fmt.Sprintf("Invalid step '%s' for J/Q special action.", special))
+			g.RejectSpecialAction(userID, fmt.Sprintf("Invalid step '%s' for J/Q special action.", special))
 			return
 		}
 		g.doSwapBlindEngine(userID, engineIdx, card1Data, card2Data)
@@ -69,22 +69,22 @@ func (g *CambiaGame) ProcessSpecialAction(
 	case "K":
 		if special == "swap_peek" {
 			if g.SpecialAction.FirstStepDone {
-				g.FailSpecialAction(userID, "Invalid step 'swap_peek' for King action - reveal already done.")
+				g.RejectSpecialAction(userID, "Invalid step 'swap_peek' for King action - reveal already done.")
 				return
 			}
 			g.doKingLookEngine(userID, engineIdx, card1Data, card2Data)
 		} else if special == "swap_peek_swap" {
 			if !g.SpecialAction.FirstStepDone {
-				g.FailSpecialAction(userID, "Invalid step 'swap_peek_swap' for King action - must peek first.")
+				g.RejectSpecialAction(userID, "Invalid step 'swap_peek_swap' for King action - must peek first.")
 				return
 			}
 			g.doKingSwapYesEngine(userID)
 		} else {
-			g.FailSpecialAction(userID, fmt.Sprintf("Invalid 'special' value '%s' for King action.", special))
+			g.RejectSpecialAction(userID, fmt.Sprintf("Invalid 'special' value '%s' for King action.", special))
 		}
 
 	default:
-		g.FailSpecialAction(userID, fmt.Sprintf("Unsupported card rank '%s' for special action.", rank))
+		g.RejectSpecialAction(userID, fmt.Sprintf("Unsupported card rank '%s' for special action.", rank))
 	}
 }
 
@@ -94,7 +94,14 @@ func (g *CambiaGame) doPeekSelfEngine(playerID uuid.UUID, engineIdx uint8, card1
 	// The pending discard was buffered in handleDiscardViaEngine.
 	_, _, idx, ok := parseCardTarget(card1Data)
 	if !ok || idx < 0 {
-		g.FailSpecialAction(playerID, "Invalid card specified for peek_self.")
+		g.RejectSpecialAction(playerID, "Invalid card specified for peek_self.")
+		return
+	}
+	// Bounds-check before touching engine state. An out-of-range slot must reject-and-wait, never
+	// mutate the engine: validating after the buffered discard is applied would leave the engine's
+	// ability-pending state divergent from a cleared service SpecialAction (the cambia-509 wedge).
+	if idx >= int(g.Engine.Players[engineIdx].HandLen) {
+		g.RejectSpecialAction(playerID, "Card index out of range for peek_self.")
 		return
 	}
 
@@ -118,7 +125,13 @@ func (g *CambiaGame) doPeekSelfEngine(playerID uuid.UUID, engineIdx uint8, card1
 func (g *CambiaGame) doPeekOtherEngine(playerID uuid.UUID, engineIdx uint8, card1Data map[string]interface{}) {
 	_, _, idx, ok := parseCardTarget(card1Data)
 	if !ok || idx < 0 {
-		g.FailSpecialAction(playerID, "Invalid card specified for peek_other.")
+		g.RejectSpecialAction(playerID, "Invalid card specified for peek_other.")
+		return
+	}
+	// Bounds-check the opponent slot before touching engine state (reject-and-wait; see cambia-509).
+	oppEngineIdx := uint8(1 - int(engineIdx))
+	if idx >= int(g.Engine.Players[oppEngineIdx].HandLen) {
+		g.RejectSpecialAction(playerID, "Card index out of range for peek_other.")
 		return
 	}
 
@@ -144,7 +157,7 @@ func (g *CambiaGame) doSwapBlindEngine(playerID uuid.UUID, engineIdx uint8, card
 	_, owner2ID, idx2, ok2 := parseCardTarget(card2Data)
 
 	if !ok1 || !ok2 || idx1 < 0 || idx2 < 0 {
-		g.FailSpecialAction(playerID, "Invalid card specification for swap_blind.")
+		g.RejectSpecialAction(playerID, "Invalid card specification for swap_blind.")
 		return
 	}
 
@@ -156,6 +169,16 @@ func (g *CambiaGame) doSwapBlindEngine(playerID uuid.UUID, engineIdx uint8, card
 	} else {
 		ownIdx = uint8(idx2)
 		oppIdx = uint8(idx1)
+	}
+
+	// Bounds-check both slots before any engine mutation or HandUUIDs read (the fixed array would
+	// panic on an out-of-range index). An invalid slot must reject-and-wait, never mutate the
+	// engine (reject-and-wait; see cambia-509).
+	oppEngineIdx := uint8(1 - int(engineIdx))
+	if int(ownIdx) >= int(g.Engine.Players[engineIdx].HandLen) ||
+		int(oppIdx) >= int(g.Engine.Players[oppEngineIdx].HandLen) {
+		g.RejectSpecialAction(playerID, "Card index out of range for swap_blind.")
+		return
 	}
 
 	// Check Cambia lock.
@@ -193,7 +216,7 @@ func (g *CambiaGame) doKingLookEngine(playerID uuid.UUID, engineIdx uint8, card1
 	_, _, idx2, ok2 := parseCardTarget(card2Data)
 
 	if !ok1 || !ok2 || idx1 < 0 || idx2 < 0 {
-		g.FailSpecialAction(playerID, "Invalid card specification for King peek.")
+		g.RejectSpecialAction(playerID, "Invalid card specification for King peek.")
 		return
 	}
 
@@ -207,11 +230,22 @@ func (g *CambiaGame) doKingLookEngine(playerID uuid.UUID, engineIdx uint8, card1
 		oppIdx = uint8(idx1)
 	}
 
+	// Bounds-check both slots before any engine mutation or HandUUIDs read (the fixed array would
+	// panic on an out-of-range index). An out-of-range slot must reject-and-wait so the buffered
+	// discard stays unapplied and the turn never advances against an unmoved engine (the cambia-509
+	// King wedge): validating here, before FirstStepDone is set and before the discard is applied,
+	// keeps engine and service state in lockstep.
+	oppEngineIdx := uint8(1 - int(engineIdx))
+	if int(ownIdx) >= int(g.Engine.Players[engineIdx].HandLen) ||
+		int(oppIdx) >= int(g.Engine.Players[oppEngineIdx].HandLen) {
+		g.RejectSpecialAction(playerID, "Card index out of range for King peek.")
+		return
+	}
+
 	// Store context for second step.
 	g.SpecialAction.FirstStepDone = true
 	g.SpecialAction.Card1 = &models.Card{ID: g.CardTracker.Players[engineIdx].HandUUIDs[ownIdx]}
 	g.SpecialAction.Card1Owner = playerID
-	oppEngineIdx := uint8(1 - int(engineIdx))
 	g.SpecialAction.Card2 = &models.Card{ID: g.CardTracker.Players[oppEngineIdx].HandUUIDs[oppIdx]}
 	g.SpecialAction.Card2Owner = g.EngineToPlayer[oppEngineIdx]
 
