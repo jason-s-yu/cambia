@@ -19,16 +19,13 @@ import (
 // authenticateAndGetUser performs JWT authentication and retrieves the user UUID.
 // It handles common authentication errors and returns the UUID or writes an HTTP error.
 func authenticateAndGetUser(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
-	cookieHeader := r.Header.Get("Cookie")
-	token := extractCookieToken(cookieHeader, "auth_token")
-	if token == "" {
-		http.Error(w, "Missing authentication token", http.StatusUnauthorized)
-		return uuid.Nil, false
-	}
-
-	userIDStr, err := auth.AuthenticateJWT(token)
-	if err != nil {
-		http.Error(w, "Invalid or expired authentication token", http.StatusForbidden)
+	userIDStr, sawAny, ok := auth.ResolveAuthTokenCookie(w, r)
+	if !ok {
+		if !sawAny {
+			http.Error(w, "Missing authentication token", http.StatusUnauthorized)
+		} else {
+			http.Error(w, "Invalid or expired authentication token", http.StatusForbidden)
+		}
 		return uuid.Nil, false
 	}
 

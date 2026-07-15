@@ -22,9 +22,6 @@ import (
 // If invalid or missing, it creates a new ephemeral guest user, sets a new `auth_token` cookie,
 // and returns the new guest user's UUID.
 func EnsureEphemeralUser(w http.ResponseWriter, r *http.Request) (uuid.UUID, error) {
-	cookieHeader := r.Header.Get("Cookie")
-	var token string
-
 	// Helper function to create and set cookie for a new ephemeral user.
 	createAndSetEphemeralUser := func() (uuid.UUID, error) {
 		ephemeralUser := models.User{
@@ -53,19 +50,15 @@ func EnsureEphemeralUser(w http.ResponseWriter, r *http.Request) (uuid.UUID, err
 		return ephemeralUser.ID, nil
 	}
 
-	// Check if the auth token exists in the cookie header.
-	if strings.Contains(cookieHeader, "auth_token=") {
-		token = extractCookieToken(cookieHeader, "auth_token")
-	} else {
-		// No token found, create a new ephemeral user.
-		return createAndSetEphemeralUser()
-	}
-
-	// Token exists, try to authenticate.
-	userIDStr, err := auth.AuthenticateJWT(token)
-	if err != nil {
-		// Token is invalid or expired, create a new ephemeral user.
-		log.Printf("Invalid JWT token provided: %v. Creating new ephemeral user.", err)
+	// Resolve any auth_token cookie(s) on the request; accepts the first that
+	// verifies and self-heals stale/invalid duplicates (see
+	// auth.ResolveAuthTokenCookie doc comment).
+	userIDStr, sawAny, ok := auth.ResolveAuthTokenCookie(w, r)
+	if !ok {
+		if sawAny {
+			log.Printf("No auth_token cookie on the request verified. Creating new ephemeral user.")
+		}
+		// No token found (or none valid), create a new ephemeral user.
 		return createAndSetEphemeralUser()
 	}
 
@@ -107,9 +100,8 @@ type claimEphemeralRequest struct {
 }
 
 func ClaimEphemeralHandler(w http.ResponseWriter, r *http.Request) {
-	token := extractCookieToken(r.Header.Get("Cookie"), "auth_token")
-	userIDStr, err := auth.AuthenticateJWT(token)
-	if err != nil {
+	userIDStr, _, ok := auth.ResolveAuthTokenCookie(w, r)
+	if !ok {
 		http.Error(w, "Invalid or missing authentication token", http.StatusForbidden)
 		return
 	}
@@ -296,9 +288,8 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 // MeHandler retrieves and returns basic information about the currently authenticated user.
 // It relies on the `auth_token` cookie being present and valid.
 func MeHandler(w http.ResponseWriter, r *http.Request) {
-	token := extractCookieToken(r.Header.Get("Cookie"), "auth_token")
-	userIDStr, err := auth.AuthenticateJWT(token) // Verifies token validity.
-	if err != nil {
+	userIDStr, _, ok := auth.ResolveAuthTokenCookie(w, r) // Verifies token validity.
+	if !ok {
 		http.Error(w, "Invalid or missing authentication token", http.StatusForbidden)
 		return
 	}
