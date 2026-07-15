@@ -1,11 +1,12 @@
 // src/lib/axios.ts
 import axios, { AxiosError, type InternalAxiosRequestConfig } from 'axios';
 import { useAuthStore } from '@/stores/authStore';
+import { API_URL } from '@/lib/runtimeEnv';
 import type { ApiErrorResponse } from '@/types';
 
 // Create an Axios instance with default configuration
 const api = axios.create({
-	baseURL: import.meta.env.VITE_API_URL, // Use environment variable for base API URL
+	baseURL: API_URL, // Runtime-resolved base API URL (see src/lib/runtimeEnv.ts)
 	withCredentials: true, // Ensure cookies (like auth_token) are sent with requests
 	headers: {
 		'Content-Type': 'application/json',

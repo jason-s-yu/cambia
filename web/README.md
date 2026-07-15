@@ -10,6 +10,36 @@ npm run build     # tsc -b && vite build -> dist/
 npm run lint      # ESLint
 ```
 
+## Production URL configuration
+
+`VITE_API_URL`/`VITE_WS_URL` in `.env` are an override, not the primary
+config path. Same-origin deployment is the operating topology: the service
+sends no CORS headers, so the API and the web client have to share an
+origin anyway. `npm run build` (and the `dev:remote-lite` build lane below)
+resolves both base URLs at **runtime** from `window.location.origin` (see
+`src/lib/runtimeEnv.ts`) unless `.env` sets a non-empty override, in which
+case the override wins -- for split-origin deploys where the API genuinely
+lives on a different host than the client.
+
+For a same-origin deployment (the default topology), leave both variables
+empty or commented out in `.env`:
+
+```
+# VITE_API_URL=
+# VITE_WS_URL=
+```
+
+A stale value here used to get baked as a literal into the production
+bundle and would silently break once whatever it pointed at moved or was
+reassigned to another tenant (cambia-495). It no longer can: the override
+only applies when the value is a non-empty string, and a runtime module --
+not a build-time `define` substitution -- is what reads it, so there is
+nothing for `vite build`'s stricter `define` validation to reject.
+
+The dev server (`npm run dev`, `npm run dev:remote`) is unaffected either
+way -- it always derives origin unconditionally through the same-origin dev
+proxy (see below), regardless of `.env`.
+
 ## Remote development
 
 Three lanes for working over a tailnet or a tethered/hotspot link, where
@@ -80,14 +110,9 @@ There is no live-reload client in this lane -- after editing, wait for the
 `vite build --watch` rebuild to finish (console prints `built in Nms`), then
 reload the page by hand.
 
-Known limitation: unlike remote dev, the lite lane's `VITE_API_URL`/
-`VITE_WS_URL` come from `.env` unchanged (same as any production build),
-not derived from the page origin -- Vite's build-time `define` replacement
-uses esbuild's own validator, which rejects the non-literal
-origin-derivation expression remote dev uses at serve time (`Invalid define
-value (must be an entity name or JS literal)`). If `.env`'s values aren't
-reachable from the remote client, point `CAMBIA_API_TARGET` at a target
-that already matches what's baked in, or use `dev:remote` instead.
+Like any production build, the lite lane resolves its API/WS base URLs at
+runtime rather than baking a `.env` literal into the bundle -- see
+"Production URL configuration" below.
 
 ### Fronting with `tailscale serve`
 

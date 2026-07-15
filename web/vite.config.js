@@ -153,7 +153,12 @@ export default defineConfig(({ command, mode }) => {
         ],
         // Dev only: derive API/WS bases from the page origin so requests stay
         // same-origin through the dev proxy below, from any host (localhost or
-        // tailnet). Production builds keep the .env VITE_* values untouched.
+        // tailnet), overriding .env unconditionally. Production builds and the
+        // dev:remote-lite build lane instead resolve API/WS bases at runtime
+        // (see src/lib/runtimeEnv.ts): .env's VITE_API_URL/VITE_WS_URL win only
+        // when set to a non-empty string, otherwise the built bundle derives
+        // same-origin from window.location at load time. That runtime fallback
+        // is why a stale .env literal no longer gets baked into prod builds.
         define: useOriginDerivedEnv
             ? {
                   'import.meta.env.VITE_API_URL': 'globalThis.location.origin',

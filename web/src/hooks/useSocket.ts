@@ -5,8 +5,7 @@ import { useEffect, useRef, useCallback } from 'react';
 import { useAuthStore } from '@/stores/authStore';
 import { useCurrentLobbyStore } from '@/stores/lobbyStore';
 import { useGameStore } from '@/stores/gameStore';
-
-const WS_URL = import.meta.env.VITE_WS_URL;
+import { WS_URL } from '@/lib/runtimeEnv';
 const MAX_RETRIES = 5;
 const INITIAL_RETRY_DELAY = 1000;
 
