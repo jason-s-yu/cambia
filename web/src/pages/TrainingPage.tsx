@@ -3,6 +3,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { formatDistanceToNow, parseISO } from 'date-fns';
 import { useTrainingStore } from '@/stores/trainingStore';
+import PageContainer from '@/components/common/PageContainer';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import StatusBadge from '@/components/training/StatusBadge';
 import HostBadge from '@/components/training/HostBadge';
@@ -70,7 +71,7 @@ const TrainingPage: React.FC = () => {
 	});
 
 	return (
-		<div>
+		<PageContainer>
 			<ResourceMonitor />
 
 			<div className="flex items-center justify-between mb-6">
@@ -188,7 +189,7 @@ const TrainingPage: React.FC = () => {
 					</table>
 				</div>
 			)}
-		</div>
+		</PageContainer>
 	);
 };
 

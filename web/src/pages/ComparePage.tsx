@@ -2,6 +2,7 @@
 import React, { useEffect, useState } from 'react';
 import { useTrainingStore } from '@/stores/trainingStore';
 import ComparisonChart from '@/components/training/ComparisonChart';
+import PageContainer from '@/components/common/PageContainer';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import type { RunComparison } from '@/types/training';
 
@@ -47,7 +48,7 @@ const ComparePage: React.FC = () => {
 	).sort();
 
 	return (
-		<div>
+		<PageContainer>
 			<div className="mb-6">
 				<h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
 					Compare Runs
@@ -177,7 +178,7 @@ const ComparePage: React.FC = () => {
 					</div>
 				</>
 			)}
-		</div>
+		</PageContainer>
 	);
 };
 

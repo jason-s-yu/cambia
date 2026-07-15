@@ -4,6 +4,7 @@ import { useParams } from 'react-router-dom';
 import { formatDistanceToNow, parseISO } from 'date-fns';
 import { useTrainingStore } from '@/stores/trainingStore';
 import { useTrainingSocket } from '@/hooks/useTrainingSocket';
+import PageContainer from '@/components/common/PageContainer';
 import MetricsChart from '@/components/training/MetricsChart';
 import CheckpointTable from '@/components/training/CheckpointTable';
 import LogViewer from '@/components/training/LogViewer';
@@ -62,17 +63,21 @@ const RunDetailPage: React.FC = () => {
 
 	if (isLoading && !selectedRun) {
 		return (
-			<div className="flex justify-center py-12">
-				<LoadingSpinner />
-			</div>
+			<PageContainer>
+				<div className="flex justify-center py-12">
+					<LoadingSpinner />
+				</div>
+			</PageContainer>
 		);
 	}
 
 	if (!selectedRun) {
 		return (
-			<div className="text-gray-500 dark:text-gray-400 text-center py-12">
-				Run not found.
-			</div>
+			<PageContainer>
+				<div className="text-gray-500 dark:text-gray-400 text-center py-12">
+					Run not found.
+				</div>
+			</PageContainer>
 		);
 	}
 
@@ -112,7 +117,7 @@ const RunDetailPage: React.FC = () => {
 	];
 
 	return (
-		<div>
+		<PageContainer>
 			{/* Header */}
 			<div className="mb-6">
 				<div className="flex items-center gap-3 mb-2 flex-wrap">
@@ -185,7 +190,7 @@ const RunDetailPage: React.FC = () => {
 			{activeTab === 'evaluate' && runName && (
 				<EvalControls runName={runName} />
 			)}
-		</div>
+		</PageContainer>
 	);
 };
 
