@@ -40,6 +40,19 @@ function apiProxy() {
                 target: process.env.CAMBIA_API_TARGET || 'http://localhost:8088',
                 changeOrigin: false,
                 ws: path === '/ws',
+                // SPA-route / REST-prefix collision guard. Several client routes live under a
+                // proxied prefix (/lobby/:id, /leaderboard, /training[/...]); a browser reload of
+                // one of those sends a navigation request (Accept: text/html) that would otherwise
+                // proxy to Go and 404 the page path. Returning a path string makes Vite serve the
+                // SPA shell instead so client-side routing can take over. REST calls (axios sends
+                // Accept: application/json, */*) and WS upgrades (handled on the raw upgrade event,
+                // never through this bypass) carry no text/html Accept, so they still proxy.
+                bypass(req) {
+                    const accept = req.headers.accept;
+                    if (typeof accept === 'string' && accept.includes('text/html')) {
+                        return '/index.html';
+                    }
+                },
             },
         ])
     );
