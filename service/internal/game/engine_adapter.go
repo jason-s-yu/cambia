@@ -473,6 +473,16 @@ func (g *CambiaGame) applyEngineAction(actionIdx uint16, actorID uuid.UUID) erro
 			g.endGame()
 			return nil
 		}
+		// A snap phase only opens on a turn-ending discard (plain discard, replace, or the card
+		// discarded by a resolved ability). autoProcessSnapPhase passes every snapper, which drives
+		// the engine through endSnapPhase -> advanceTurn, so the engine turn has now advanced. The
+		// onTurnAdvanced() calls below live in the non-snap branch, so without notifying the service
+		// lifecycle here the turn silently advances in the engine while the previous player's timer
+		// stays armed and no game_player_turn is emitted (cambia-506 wedge). Fire it once, guarding
+		// on the snap phase having fully resolved.
+		if !g.Engine.Snap.Active && g.Engine.Pending.Type == engine.PendingNone {
+			g.onTurnAdvanced()
+		}
 	} else if !g.Engine.Snap.Active && g.Engine.Pending.Type == engine.PendingNone {
 		// Check if this action ended a turn.
 		switch actionIdx {
