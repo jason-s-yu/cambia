@@ -57,6 +57,45 @@ export const logoutUser = async (): Promise<void> => {
 };
 
 /**
+ * Creates an ephemeral guest session via the backend API.
+ * The backend sets the `auth_token` cookie; the response body only carries the
+ * new user's id, so callers must follow up with fetchMe() to hydrate the full
+ * user record (username, is_ephemeral, etc.).
+ * @returns The new guest user's id.
+ * @throws {Error} If the API request fails.
+ */
+export const guestLogin = async (): Promise<{ id: string }> => {
+	try {
+		const response = await api.post<{ id: string }>('/user/guest');
+		return response.data;
+	} catch (error: any) {
+		console.error('Guest login API call failed:', error.response?.data || error.message);
+		throw error;
+	}
+};
+
+interface ClaimDetails {
+	email: string;
+	password: string;
+	username?: string;
+}
+
+/**
+ * Converts the currently authenticated ephemeral (guest) user into a
+ * persistent account by attaching email and password credentials.
+ * Relies on the auth_token cookie identifying the ephemeral user.
+ * @throws {Error} If the API request fails (e.g., account already claimed, email in use).
+ */
+export const claimAccount = async (details: ClaimDetails): Promise<void> => {
+	try {
+		await api.post('/user/claim', details);
+	} catch (error: any) {
+		console.error('Claim account API call failed:', error.response?.data || error.message);
+		throw error;
+	}
+};
+
+/**
  * Fetches the currently authenticated user's details from the backend.
  * Relies on the auth_token cookie being sent automatically by the browser.
  * @returns The User object if authenticated, null otherwise (e.g., 401/403 response).

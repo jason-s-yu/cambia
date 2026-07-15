@@ -2,7 +2,7 @@
 // src/stores/authStore.ts
 import { create } from 'zustand';
 import type { User } from '@/types';
-import { loginUser, registerUser, fetchMe, logoutUser } from '@/services/authService';
+import { loginUser, registerUser, fetchMe, logoutUser, guestLogin, claimAccount as claimAccountApi } from '@/services/authService';
 
 interface LoginCredentials {
 	email: string;
@@ -15,6 +15,12 @@ interface RegisterDetails {
 	username: string;
 }
 
+interface ClaimDetails {
+	email: string;
+	password: string;
+	username?: string;
+}
+
 interface AuthState {
 	isAuthenticated: boolean;
 	user: User | null;
@@ -22,6 +28,8 @@ interface AuthState {
 	error: string | null;
 	login: (credentials: LoginCredentials) => Promise<boolean>;
 	register: (details: RegisterDetails) => Promise<boolean>;
+	loginAsGuest: () => Promise<boolean>;
+	claimAccount: (details: ClaimDetails) => Promise<boolean>;
 	logout: () => Promise<void>;
 	checkAuth: () => Promise<void>; // Action to verify authentication status on app load
 	setUser: (user: User | null) => void; // Action to directly set user data (e.g., after WS guest creation)
@@ -76,6 +84,34 @@ export const useAuthStore = create<AuthState>()(
 			} catch (err: any) {
 				console.error('Registration error:', err);
 				set({ error: err.response?.data?.message || 'An unknown error occurred during registration.', isLoading: false });
+				return false;
+			}
+		},
+
+		loginAsGuest: async () => {
+			set({ isLoading: true, error: null });
+			try {
+				await guestLogin();
+				// Backend only returns the new user's id; fetch the full record
+				// (username, is_ephemeral, etc.) to populate the store.
+				await get().checkAuth();
+				return true;
+			} catch (err: any) {
+				console.error('Guest login error:', err);
+				set({ error: err.response?.data?.message || 'An unknown error occurred starting a guest session.', isLoading: false });
+				return false;
+			}
+		},
+
+		claimAccount: async (details) => {
+			set({ isLoading: true, error: null });
+			try {
+				await claimAccountApi(details);
+				await get().checkAuth();
+				return true;
+			} catch (err: any) {
+				console.error('Claim account error:', err);
+				set({ error: err.response?.data?.message || err.response?.data || 'An unknown error occurred claiming this account.', isLoading: false });
 				return false;
 			}
 		},
