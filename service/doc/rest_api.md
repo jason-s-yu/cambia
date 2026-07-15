@@ -10,6 +10,7 @@ Most endpoints require authentication via an `auth_token` JWT cookie sent in the
 * **Ephemeral Guests:** Connecting to a WebSocket endpoint (`/lobby/ws/*` or `/game/ws/*`) *without* a valid `auth_token` cookie will automatically create a temporary guest user, set the `auth_token` cookie, and return the user's ephemeral ID.
 * **Claiming Guests:** Guests can optionally call `POST /user/create` (currently this creates a *new* user, an endpoint like `/user/claim` would be needed to convert the ephemeral user, though `ClaimEphemeralHandler` exists it's not wired to a route).
 * **Token Verification:** The server uses an Ed25519 key pair (generated at runtime by default) to sign and verify JWTs.
+* **Duplicate cookies:** A request can carry more than one `auth_token` cookie (localhost cookies are shared across ports/apps on a multi-app host, and a dev-server restart that rotates the signing key can leave a stale cookie in the jar alongside a fresh one). `middleware.RequireAuth` (used to gate `/training/*` and `/ws/training/*`) checks every `auth_token` cookie on the request and accepts it if any one of them verifies, rather than only the first. Any invalid `auth_token` cookie seen along the way gets an expiring `Set-Cookie` in the response so the browser drops it instead of resending it on every request.
 
 ## HTTP REST Endpoints
 

@@ -3,6 +3,7 @@
 import { create } from 'zustand';
 import type { User } from '@/types';
 import { loginUser, registerUser, fetchMe, logoutUser, guestLogin, claimAccount as claimAccountApi } from '@/services/authService';
+import { authFlightGuard } from '@/lib/axios';
 
 interface LoginCredentials {
 	email: string;
@@ -48,6 +49,7 @@ export const useAuthStore = create<AuthState>()(
 
 		login: async (credentials) => {
 			set({ isLoading: true, error: null });
+			authFlightGuard.begin();
 			try {
 				const success = await loginUser(credentials);
 				if (success) {
@@ -65,6 +67,8 @@ export const useAuthStore = create<AuthState>()(
 				// Display error message from API response or a generic one
 				set({ error: err.response?.data?.message || 'An unknown error occurred during login.', isLoading: false });
 				return false;
+			} finally {
+				authFlightGuard.end();
 			}
 		},
 
@@ -127,6 +131,7 @@ export const useAuthStore = create<AuthState>()(
 
 		checkAuth: async () => {
 			set({ isLoading: true, error: null });
+			authFlightGuard.begin();
 			try {
 				const currentUser = await fetchMe();
 				if (currentUser) {
@@ -140,6 +145,8 @@ export const useAuthStore = create<AuthState>()(
 				// Auth errors (401/403) are typically handled by returning null from fetchMe
 				console.log('Auth check failed:', error);
 				set({ isAuthenticated: false, user: null, isLoading: false });
+			} finally {
+				authFlightGuard.end();
 			}
 		},
 

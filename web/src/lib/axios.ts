@@ -4,6 +4,33 @@ import { useAuthStore } from '@/stores/authStore';
 import { API_URL } from '@/lib/runtimeEnv';
 import type { ApiErrorResponse } from '@/types';
 
+// authFlightGuard tracks whether an auth bootstrap flow (the initial
+// checkAuth call, or a login/register attempt) is currently in flight. A
+// 401/403 seen during this window is an expected "not authenticated yet"
+// outcome, not a session invalidation -- the caller (authStore) already
+// handles it directly, so the interceptor below must not also force a
+// store-wide logout. Without this guard, the interceptor's logout() call
+// races the in-flight login()/checkAuth() call and can clobber the error
+// state login() is about to set, or fire an unnecessary POST /user/logout
+// on first page load before any session exists.
+//
+// A counter (not a boolean) so nested/overlapping flows (login() awaits
+// checkAuth() internally; a double-clicked login button fires two overlapping
+// calls) don't have one call's `end()` prematurely clear the guard for the
+// other still in flight.
+export const authFlightGuard = {
+	count: 0,
+	begin() {
+		this.count += 1;
+	},
+	end() {
+		this.count = Math.max(0, this.count - 1);
+	},
+	get active() {
+		return this.count > 0;
+	},
+};
+
 // Create an Axios instance with default configuration
 const api = axios.create({
 	baseURL: API_URL, // Runtime-resolved base API URL (see src/lib/runtimeEnv.ts)
@@ -43,10 +70,16 @@ api.interceptors.response.use(
 
 		if (response && (response.status === 401 || response.status === 403)) {
 			// Unauthorized or Forbidden response.
-			// Trigger logout action via Zustand store.
-			// Avoid triggering logout if the error came from a logout attempt itself.
 			const requestedUrl = error.config?.url ?? '';
-			if (!requestedUrl.endsWith('/user/logout')) { // Adjust if your logout endpoint differs
+			if (requestedUrl.endsWith('/user/logout')) {
+				// Avoid triggering logout if the error came from a logout attempt itself.
+			} else if (authFlightGuard.active) {
+				// A 401/403 while the initial checkAuth or a login/register attempt is
+				// in flight is an expected "not authenticated yet" outcome that the
+				// caller already handles directly -- don't also force a hard logout.
+				console.warn(`Authentication error (${response.status}) on ${requestedUrl} during auth bootstrap; not forcing logout.`);
+			} else {
+				// Trigger logout action via Zustand store.
 				console.error(`Authentication error (${response.status}) on ${requestedUrl}. Logging out. Message: ${response.data?.message ?? 'N/A'}`);
 				useAuthStore.getState().logout(); // Access Zustand store outside React component
 				// Optionally redirect using window.location or let UI handle redirect based on auth state
