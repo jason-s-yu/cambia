@@ -180,6 +180,24 @@ func (g *CambiaGame) getCurrentObfuscatedGameState(forUser uuid.UUID) ObfGameSta
 						}
 					}
 				}
+			} else {
+				// Opponent view: expose each hand slot as an id+index reference with the face
+				// hidden ALWAYS (Known:false, no rank/suit/value). Card UUIDs are already public
+				// knowledge (draw/discard/special event payloads broadcast them), so id+slot leaks
+				// nothing. This gives the client a real UUID to target opponent-facing abilities
+				// (9/T peek_other, J/Q swap_blind, K swap_peek) instead of fabricating an
+				// unparseable placeholder id (cambia-509).
+				handLen := g.Engine.Players[engineIdx].HandLen
+				ps.RevealedHand = make([]ObfCard, handLen)
+				for j := uint8(0); j < handLen; j++ {
+					cardUUID := g.CardTracker.Players[engineIdx].HandUUIDs[j]
+					idx := int(j)
+					ps.RevealedHand[j] = ObfCard{
+						ID:    cardUUID,
+						Known: false,
+						Idx:   &idx,
+					}
+				}
 			}
 		}
 

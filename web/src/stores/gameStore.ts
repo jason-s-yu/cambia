@@ -152,6 +152,12 @@ export const useGameStore = create<GameState & GameActions>()(
 				state.lastMessageTimestamp = Date.now();
 				state.isProcessingAction = false; // Assume action processed on any message receipt
 
+				// Identify 'self' by the authenticated user id. Opponent hands now also carry a
+				// revealedHand (hidden id references so opponent-targeting abilities have real UUIDs,
+				// cambia-509), so the old "first player with a revealedHand" heuristic no longer picks
+				// out self and must not be used for self-detection.
+				const selfPlayerId = useAuthStore.getState().user?.id ?? null;
+
 				if (!state.gameState && type !== 'private_sync_state') {
 					console.warn(`[GameStore] Received message type ${type} before initial state sync. Ignoring.`);
 					return;
@@ -172,7 +178,7 @@ export const useGameStore = create<GameState & GameActions>()(
 							// Determine pending action based on new state
 							const gs = state.gameState;
 							if (gs) {
-								const userState = gs.players.find(p => p.playerId === gs.players.find(pl => pl.revealedHand !== undefined)?.playerId); // Find 'self'
+								const userState = gs.players.find(p => p.playerId === selfPlayerId); // Find 'self'
 								if (userState?.drawnCard && gs.currentPlayerId === userState.playerId && !gs.gameOver && gs.started) {
 									state.pendingAction = 'discard_replace';
 								}
@@ -225,14 +231,14 @@ export const useGameStore = create<GameState & GameActions>()(
 										state.gameState.discardTop = null; // Simplified: assume next sync will fix it
 									}
 									const player = state.gameState.players.find(p => p.playerId === payload.user?.id);
-									const self = state.gameState.players.find(p => p.revealedHand !== undefined);
+									const self = state.gameState.players.find(p => p.playerId === selfPlayerId);
 									if (player && self && player.playerId !== self.playerId) {
 										// Magnify card back for others
 										state.displayedDrawnCard = { id: payload.card?.id, known: false };
 									}
 								} else { // Private draw
 									// Update the specific player's drawnCard state
-									const player = state.gameState.players.find(p => p.playerId === state.gameState?.players.find(pl => pl.revealedHand !== undefined)?.playerId); // Find 'self'
+									const player = state.gameState.players.find(p => p.playerId === selfPlayerId); // Find 'self'
 									if (player && player.playerId === state.gameState.currentPlayerId) {
 										player.drawnCard = payload.card;
 										state.pendingAction = 'discard_replace'; // Player must now discard/replace
@@ -285,7 +291,7 @@ export const useGameStore = create<GameState & GameActions>()(
 
 						case 'player_special_choice':
 							if (state.gameState) {
-								const player = state.gameState.players.find(p => p.revealedHand !== undefined); // Find 'self'
+								const player = state.gameState.players.find(p => p.playerId === selfPlayerId); // Find 'self'
 								if (player && player.playerId === payload.user?.id) {
 									state.pendingAction = 'special_action'; // Player needs to make choice
 								}
@@ -357,7 +363,7 @@ export const useGameStore = create<GameState & GameActions>()(
 							break;
 						case 'private_snap_penalty': // Private penalty card details
 							if (state.gameState) {
-								const player = state.gameState.players.find(p => p.revealedHand !== undefined); // Find 'self'
+								const player = state.gameState.players.find(p => p.playerId === selfPlayerId); // Find 'self'
 								if (player && player.playerId === state.gameState?.players.find(p => p.playerId === payload.card?.id)?.playerId) { // Check if message is for self? No, need user ID
 									// This logic is tricky without user id in the private message.
 									// Assuming it's for 'self' if received.

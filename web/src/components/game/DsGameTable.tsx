@@ -150,20 +150,23 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     }
   }, [isMyTurn, isProcessing, pendingAction, selectedIdx, selfState, gameState, sendMessage]);
 
-  const handleOpponentCardClick = useCallback((playerId: string, idx: number) => {
+  const handleOpponentCardClick = useCallback((playerId: string, card: ObfCard, idx: number) => {
     if (isProcessing) return;
-    const placeholderId = `${playerId}-card-${idx}`;
+    // Target opponent cards by their real server-assigned UUID (card.id), sourced from the
+    // opponent's revealedHand slot. The server now publishes opponent hand slots as hidden id
+    // references, so the client no longer fabricates an unparseable `${playerId}-card-${idx}`
+    // placeholder that the server would reject (cambia-509).
     if (pendingAction === 'special_action' && specialAction) {
       const rank = specialAction.cardRank;
       if (rank === '9' || rank === 'T') {
-        sendMessage(peekOtherAction(placeholderId, idx, playerId));
+        sendMessage(peekOtherAction(card.id, idx, playerId));
         setSelectedIdx(null);
         return;
       }
       if ((rank === 'J' || rank === 'Q') && selectedIdx !== null) {
         const myCard = selfState?.revealedHand?.[selectedIdx];
         if (myCard && selfId) {
-          sendMessage(blindSwapAction(myCard.id, selectedIdx, selfId, placeholderId, idx, playerId));
+          sendMessage(blindSwapAction(myCard.id, selectedIdx, selfId, card.id, idx, playerId));
           setSelectedIdx(null);
         }
         return;
@@ -171,7 +174,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
       if (rank === 'K' && selectedIdx !== null) {
         const myCard = selfState?.revealedHand?.[selectedIdx];
         if (myCard && selfId) {
-          sendMessage(kingPeekAction(myCard.id, selectedIdx, selfId, placeholderId, idx, playerId));
+          sendMessage(kingPeekAction(myCard.id, selectedIdx, selfId, card.id, idx, playerId));
           setSelectedIdx(null);
         }
         return;
@@ -299,15 +302,22 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
             <div key={opp.playerId} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
               <PlayerSeat username={opp.username} compact handSize={opp.handSize} state={seatStateFor(opp, gameState.currentPlayerId)} />
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, auto)', gap: 5 }}>
-                {Array.from({ length: opp.handSize }).map((_, i) => (
-                  <PlayingCard
-                    key={i}
-                    faceDown
-                    size='sm'
-                    selected={opponentTargetable}
-                    onClick={opponentTargetable ? () => handleOpponentCardClick(opp.playerId, i) : undefined}
-                  />
-                ))}
+                {Array.from({ length: opp.handSize }).map((_, i) => {
+                  // handSize drives the slot count (authoritative even between syncs); the real card
+                  // UUID for targeting comes from the matching revealedHand slot. A slot is only
+                  // clickable once its real id is known - never a fabricated placeholder (cambia-509).
+                  const card = opp.revealedHand?.[i];
+                  const targetable = opponentTargetable && !!card;
+                  return (
+                    <PlayingCard
+                      key={card?.id ?? i}
+                      faceDown
+                      size='sm'
+                      selected={targetable}
+                      onClick={targetable ? () => handleOpponentCardClick(opp.playerId, card!, i) : undefined}
+                    />
+                  );
+                })}
               </div>
             </div>
           ))}
