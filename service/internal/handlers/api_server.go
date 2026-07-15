@@ -168,6 +168,11 @@ func (gs *GameServer) attachOnGameEnd(g *game.CambiaGame, lobbyID uuid.UUID) {
 		// Emit game results to the hub.
 		h, hasHub := gs.HubStore.GetHub(endedLobbyID)
 		if hasHub {
+			// Drive the hub to PhasePostGame so clients leave the live table and reach the
+			// results screen (mirrors the ranked HandleRoundEnd path, cambia-510). Routed through
+			// the hub's own goroutine since OnGameEnd may run on a foreign goroutine (game timers).
+			h.NotifyGameEnded()
+
 			resultMsg := map[string]interface{}{
 				"type":         "game_results",
 				"winner":       winner.String(),

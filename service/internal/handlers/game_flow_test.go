@@ -17,6 +17,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/jason-s-yu/cambia/service/internal/auth"
+	"github.com/jason-s-yu/cambia/service/internal/hub"
 )
 
 // wsEnvelope mirrors the server->client hub.Envelope wire frame for test decoding.
@@ -120,6 +121,33 @@ func (c *wsTestClient) waitForType(msgType string, timeout time.Duration) *wsEnv
 		c.mu.Lock()
 		for i := range c.frames {
 			if c.frames[i].Type == msgType {
+				env := c.frames[i]
+				c.mu.Unlock()
+				return &env
+			}
+		}
+		c.mu.Unlock()
+		time.Sleep(25 * time.Millisecond)
+	}
+	return nil
+}
+
+// waitForPhaseChange polls recorded frames for a phase_change envelope whose payload.phase
+// matches want, up to timeout. Unlike waitForType, this does not stop at the first phase_change
+// frame: a lobby typically emits several (ready -> countdown -> in_game -> ...) before the one
+// under test.
+func (c *wsTestClient) waitForPhaseChange(want string, timeout time.Duration) *wsEnvelope {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		c.mu.Lock()
+		for i := range c.frames {
+			if c.frames[i].Type != "phase_change" {
+				continue
+			}
+			var p struct {
+				Phase string `json:"phase"`
+			}
+			if err := json.Unmarshal(c.frames[i].Payload, &p); err == nil && p.Phase == want {
 				env := c.frames[i]
 				c.mu.Unlock()
 				return &env
@@ -259,6 +287,92 @@ func TestHubLobbyToGameFlow(t *testing.T) {
 	}
 	if p2.waitForType("private_initial_cards", 5*time.Second) == nil {
 		t.Fatalf("player 2 never received private_initial_cards (emitter not wired?)")
+	}
+}
+
+// TestCasualGameEndDrivesHubToPostGame verifies that a casual (non-ranked) game's end reaches
+// the hub's OnGameEnd callback (attachOnGameEnd) drives the hub to PhasePostGame and broadcasts
+// phase_change, matching the ranked HandleRoundEnd pattern. Pre-fix, attachOnGameEnd reset lobby
+// state and emitted game_results but never touched the hub phase, so casual clients stayed on
+// PhaseInGame after the game legitimately ended (cambia-510).
+func TestCasualGameEndDrivesHubToPostGame(t *testing.T) {
+	auth.Init()
+
+	gs := NewGameServer()
+	gs.CountdownDuration = 50 * time.Millisecond
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/lobby/create", CreateLobbyHandler(gs))
+	mux.Handle("/ws/", HubWSHandler(logger, gs))
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	hostID := uuid.New()
+	hostToken, _ := auth.CreateJWT(hostID.String())
+	p2ID := uuid.New()
+	p2Token, _ := auth.CreateJWT(p2ID.String())
+
+	lobUUID := createPublicLobby(t, gs, hostToken)
+	lobbyID := lobUUID.String()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	host := dialWSClient(t, ctx, ts.URL, lobbyID, hostToken)
+	defer host.close()
+	p2 := dialWSClient(t, ctx, ts.URL, lobbyID, p2Token)
+	defer p2.close()
+	host.settle()
+	p2.settle()
+
+	host.sendReliable("ready")
+	host.settle()
+	p2.settle()
+	p2.sendReliable("ready")
+
+	if host.waitForType("game_started", 5*time.Second) == nil {
+		t.Fatalf("host never received game_started")
+	}
+	if p2.waitForType("game_started", 5*time.Second) == nil {
+		t.Fatalf("player 2 never received game_started")
+	}
+	host.settle()
+	p2.settle()
+
+	g := gs.GameStore.GetGameByLobbyID(lobUUID)
+	if g == nil {
+		t.Fatalf("no CambiaGame registered for lobby %s", lobbyID)
+	}
+
+	// Simulate the game legitimately ending (mirrors the evidence log: scores 31/38), invoking
+	// the same OnGameEnd callback the engine calls from endGame() once terminal.
+	g.OnGameEnd(lobUUID, hostID, map[uuid.UUID]int{hostID: 31, p2ID: 38})
+
+	hostPhase := host.waitForPhaseChange("post_game", 5*time.Second)
+	if hostPhase == nil {
+		t.Fatalf("host never received a post_game phase_change after game end")
+	}
+	p2Phase := p2.waitForPhaseChange("post_game", 5*time.Second)
+	if p2Phase == nil {
+		t.Fatalf("player 2 never received a post_game phase_change after game end")
+	}
+
+	// One-seq-per-broadcast invariant (cambia-502): both recipients' copies of this one logical
+	// phase_change broadcast must carry the same seq.
+	if hostPhase.Seq != p2Phase.Seq {
+		t.Fatalf("phase_change seq mismatch: host=%d p2=%d, want equal", hostPhase.Seq, p2Phase.Seq)
+	}
+
+	h, hasHub := gs.HubStore.GetHub(lobUUID)
+	if !hasHub {
+		t.Fatalf("hub for lobby %s no longer exists after game end", lobbyID)
+	}
+	if h.Phase != hub.PhasePostGame {
+		t.Fatalf("hub.Phase = %v, want PhasePostGame", h.Phase)
 	}
 }
 

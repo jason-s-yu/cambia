@@ -11,6 +11,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// payloadOf decodes an envelope's payload into a generic map for field assertions.
+func payloadOf(t *testing.T, env Envelope) map[string]interface{} {
+	t.Helper()
+	var m map[string]interface{}
+	require.NoError(t, json.Unmarshal(env.Payload, &m))
+	return m
+}
+
+// findByType returns the first envelope of the given type, or nil.
+func findByType(envs []Envelope, typ string) *Envelope {
+	for i := range envs {
+		if envs[i].Type == typ {
+			return &envs[i]
+		}
+	}
+	return nil
+}
+
 // newFakeConn builds a Connection backed by a buffered outChan (no real WebSocket). Send and
 // SendEnvelope only touch outChan and cancel, so tests can read the frames the hub emitted.
 func newFakeConn(userID uuid.UUID, username string, isHost bool) *Connection {
@@ -128,4 +146,85 @@ func TestReadyRaceAfterBroadcastAcceptsEachClientEcho(t *testing.T) {
 	assert.False(t, containsType(bFrames, "sync_state"), "client B's ready must not be rejected as stale")
 	assert.True(t, containsType(bFrames, "lobby_state"), "accepted ready should broadcast an updated lobby_state")
 	assert.True(t, lob.ReadyStates[idB], "client B should be marked ready")
+}
+
+// TestGameEndedDrivesPostGameWithSharedSeq verifies that a casual game's end (the "_game_ended"
+// synthetic message NotifyGameEnded queues) transitions the hub to PhasePostGame and emits
+// phase_change to every connection at one shared seq (cambia-510). Pre-fix, attachOnGameEnd never
+// drove this transition at all, so casual clients stayed on PhaseInGame after the game ended.
+func TestGameEndedDrivesPostGameWithSharedSeq(t *testing.T) {
+	idA := uuid.New()
+	idB := uuid.New()
+
+	lob := lobby.NewLobbyWithDefaults(idA)
+	lob.JoinUser(idA)
+	lob.JoinUser(idB)
+
+	h := NewHub(lob)
+	connA := newFakeConn(idA, "A", true)
+	connB := newFakeConn(idB, "B", false)
+	h.conns[idA] = connA
+	h.conns[idB] = connB
+	h.Phase = PhaseInGame
+
+	h.dispatch(ClientMsg{Type: "_game_ended"})
+
+	assert.Equal(t, PhasePostGame, h.Phase, "hub must transition to PhasePostGame when the game ends")
+
+	aFrames := drainEnvelopes(t, connA)
+	bFrames := drainEnvelopes(t, connB)
+
+	aChange := findByType(aFrames, "phase_change")
+	bChange := findByType(bFrames, "phase_change")
+	require.NotNil(t, aChange, "client A must receive phase_change")
+	require.NotNil(t, bChange, "client B must receive phase_change")
+
+	assert.Equal(t, "post_game", payloadOf(t, *aChange)["phase"])
+	assert.Equal(t, "post_game", payloadOf(t, *bChange)["phase"])
+
+	// One-seq-per-broadcast invariant (cambia-502): both recipients' copies of this one logical
+	// phase_change broadcast must carry the same seq, matching h.seq after the emit.
+	assert.Equal(t, aChange.Seq, bChange.Seq, "both clients must observe the same seq for phase_change")
+	assert.Equal(t, h.seq, aChange.Seq, "phase_change seq must match the hub's current seq")
+}
+
+// TestGameEndedIgnoredOutsideInGame guards the phase check in the "_game_ended" dispatch case:
+// a stray or duplicate notification must not clobber a hub that has already moved on.
+func TestGameEndedIgnoredOutsideInGame(t *testing.T) {
+	idA := uuid.New()
+	lob := lobby.NewLobbyWithDefaults(idA)
+	lob.JoinUser(idA)
+
+	h := NewHub(lob)
+	connA := newFakeConn(idA, "A", true)
+	h.conns[idA] = connA
+	h.Phase = PhaseOpen
+
+	h.dispatch(ClientMsg{Type: "_game_ended"})
+
+	assert.Equal(t, PhaseOpen, h.Phase, "_game_ended outside PhaseInGame must be a no-op")
+	assert.False(t, containsType(drainEnvelopes(t, connA), "phase_change"), "no phase_change should fire when the guard rejects the transition")
+}
+
+// TestNotifyGameEndedQueuesSyntheticMessage verifies NotifyGameEnded is the safe cross-goroutine
+// entry point attachOnGameEnd uses: it must enqueue onto h.incoming rather than mutating h.Phase
+// directly, since OnGameEnd can run on a goroutine other than the hub's Run() loop.
+func TestNotifyGameEndedQueuesSyntheticMessage(t *testing.T) {
+	idA := uuid.New()
+	lob := lobby.NewLobbyWithDefaults(idA)
+	lob.JoinUser(idA)
+
+	h := NewHub(lob)
+	h.Phase = PhaseInGame
+
+	h.NotifyGameEnded()
+
+	select {
+	case msg := <-h.incoming:
+		assert.Equal(t, "_game_ended", msg.Type)
+	default:
+		t.Fatal("NotifyGameEnded did not queue a message onto h.incoming")
+	}
+	// h.Phase is untouched until dispatch() (the Run() loop) processes the queued message.
+	assert.Equal(t, PhaseInGame, h.Phase)
 }

@@ -208,6 +208,12 @@ func (h *Hub) dispatch(msg ClientMsg) {
 			h.startNextRound()
 		}
 		return
+	case "_game_ended":
+		if h.Phase == PhaseInGame {
+			h.Phase = PhasePostGame
+			h.Emit("phase_change", map[string]interface{}{"phase": "post_game"})
+		}
+		return
 	}
 
 	// Sequence check: if client is behind, send a sync snapshot and discard.
@@ -818,6 +824,15 @@ func (h *Hub) Leave(userID uuid.UUID) {
 // Shutdown signals the hub to stop.
 func (h *Hub) Shutdown() {
 	close(h.shutdown)
+}
+
+// NotifyGameEnded queues the post-game phase transition (PhaseInGame -> PhasePostGame) onto the
+// hub's incoming channel. The game engine's OnGameEnd callback (see handlers.attachOnGameEnd) can
+// run on a goroutine other than the hub's Run() loop (e.g. a turn-timeout timer), so it must not
+// mutate h.Phase directly; this mirrors the _start_next_round synthetic-message pattern to route
+// the mutation through dispatch() inside Run() instead (cambia-510).
+func (h *Hub) NotifyGameEnded() {
+	h.incoming <- ClientMsg{Type: "_game_ended"}
 }
 
 // Incoming returns the channel for routing inbound ClientMsgs into the hub.

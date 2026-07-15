@@ -20,6 +20,11 @@ interface GameState {
 	// events. Applied to Date.now() when deriving a live turn countdown from gameState.turnDeadline
 	// (cambia-488), so a skewed client clock doesn't distort the remaining-time display.
 	serverClockOffsetMs: number;
+	// Final adjusted scores/winner from the game_end event (userID -> score), populated once the
+	// game ends. Casual (single-game, non-ranked) results have no matchState, so DsResultsView
+	// reads these directly instead (cambia-510).
+	finalScores: Record<string, number> | null;
+	winnerId: string | null;
 }
 
 interface GameActions {
@@ -48,7 +53,9 @@ const initialState: GameState = {
 	pendingAction: null, // e.g., 'discard_replace', 'special_action'
 	isProcessingAction: false,
 	lastMessageTimestamp: 0,
-	serverClockOffsetMs: 0
+	serverClockOffsetMs: 0,
+	finalScores: null,
+	winnerId: null
 };
 
 export const useGameStore = create<GameState & GameActions>()(
@@ -395,10 +402,13 @@ export const useGameStore = create<GameState & GameActions>()(
 								state.gameState.currentPlayerId = null;
 								state.pendingAction = null;
 								state.displayedDrawnCard = null;
-								// Store final scores/winner if needed, maybe trigger modal
-								// state.finalScores = payload.payload?.scores;
-								// state.winnerId = payload.payload?.winner;
 							}
+							// Final scores/winner live under the nested GameEvent payload (the service
+							// wraps { type, payload: {...} } and the hub re-wraps that as the envelope
+							// payload), matching the payload.payload convention used elsewhere in this
+							// switch (e.g. player_draw_stockpile's source/stockpileSize).
+							state.finalScores = payload.payload?.scores ?? null;
+							state.winnerId = payload.payload?.winner ?? null;
 							break;
 
 						case 'error': // Server-sent error message
@@ -429,6 +439,7 @@ export const selectDisplayedDrawnCard = (state: GameState) => state.displayedDra
 export const selectPendingAction = (state: GameState) => state.pendingAction;
 export const selectIsProcessingAction = (state: GameState) => state.isProcessingAction;
 export const selectServerClockOffsetMs = (state: GameState) => state.serverClockOffsetMs;
+export const selectFinalScores = (state: GameState) => state.finalScores;
 export const selectCurrentPlayerId = (state: GameState) => state.gameState?.currentPlayerId;
 export const selectSelfPlayerState = (state: GameState) => {
 	const selfId = useAuthStore.getState().user?.id;

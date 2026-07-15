@@ -3,9 +3,13 @@
 // game) and match_end (ranked circuit) phases. Reads standings from
 // matchState/lobbyDetails and preserves the legacy return-to-lobby behaviour
 // (LobbyPage set phase back to 'open'). No WS message is sent from here.
+// Casual (post_game) standings have no matchState (that's ranked-only, see
+// hub.buildLobbySnapshot), so final scores fall back to gameStore's finalScores,
+// captured off the game_end event (cambia-510).
 import React, { useMemo } from 'react';
 import { useCurrentLobbyStore, type LobbyPhase } from '@/stores/lobbyStore';
 import { useAuthStore } from '@/stores/authStore';
+import { useGameStore, selectFinalScores } from '@/stores/gameStore';
 import Panel from '@/components/ds/chrome/Panel';
 import Button from '@/components/ds/core/Button';
 import Badge from '@/components/ds/core/Badge';
@@ -21,6 +25,7 @@ const DsResultsView: React.FC<DsResultsViewProps> = ({ phase, onReturnToLobby, o
   const matchState = useCurrentLobbyStore((s) => s.matchState);
   const lobbyPlayers = useCurrentLobbyStore((s) => s.lobbyDetails?.lobby_status?.users);
   const selfId = useAuthStore((s) => s.user?.id);
+  const finalScores = useGameStore(selectFinalScores);
 
   const isMatchEnd = phase === 'match_end';
   const title = isMatchEnd ? 'Final standings' : 'Game over';
@@ -38,8 +43,13 @@ const DsResultsView: React.FC<DsResultsViewProps> = ({ phase, onReturnToLobby, o
         .map((id) => ({ id, name: names.get(id) ?? id.substring(0, 6), score: cumulative[id] }))
         .sort((a, b) => a.score - b.score);
     }
+    if (finalScores && Object.keys(finalScores).length > 0) {
+      return Object.keys(finalScores)
+        .map((id) => ({ id, name: names.get(id) ?? id.substring(0, 6), score: finalScores[id] }))
+        .sort((a, b) => a.score - b.score);
+    }
     return (lobbyPlayers ?? []).map((u) => ({ id: u.id, name: u.username, score: null as number | null }));
-  }, [cumulative, names, lobbyPlayers]);
+  }, [cumulative, finalScores, names, lobbyPlayers]);
 
   const ratingChanges = matchState?.ratingChanges;
 
