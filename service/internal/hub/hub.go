@@ -89,7 +89,15 @@ type Hub struct {
 	// CountdownDuration is the delay from countdown start to game creation.
 	CountdownDuration time.Duration
 
-	seq     uint64                    // monotonic; only accessed from Run() goroutine via nextSeq()
+	// seq is the monotonic per-hub sequence stamped on every server->client envelope. Invariant:
+	// one logical broadcast consumes exactly one seq, stamped identically on every recipient's copy
+	// (Emit does this inherently; broadcastLobbyUpdate does it via emitToWithSeq). dispatch() rejects
+	// inbound msgs whose LastSeq < seq, so a per-recipient seq bump on a broadcast would leave every
+	// recipient but the last one spuriously "behind" and drop their next action (cambia-502).
+	// Mutated only via nextSeq() (atomic, for cross-goroutine game-timer emits); read unlocked in
+	// dispatch(), which runs in the single Run() goroutine.
+	seq uint64
+
 	connsMu sync.RWMutex              // guards conns (cross-goroutine emits from game timers)
 	conns   map[uuid.UUID]*Connection // userID → connection
 
@@ -670,8 +678,16 @@ func (h *Hub) Emit(eventType string, payload any) {
 	}
 }
 
-// EmitTo sends an envelope only to the connection matching userID.
+// EmitTo sends an envelope only to the connection matching userID, consuming one seq.
 func (h *Hub) EmitTo(userID uuid.UUID, eventType string, payload any) {
+	h.emitToWithSeq(userID, h.nextSeq(), eventType, payload)
+}
+
+// emitToWithSeq sends an envelope stamped with the caller-supplied seq to userID's connection.
+// Broadcasts that fan a single logical event out per-recipient (buildLobbySnapshot is tailored per
+// user, so they cannot share one Emit) call this with one nextSeq() value across every recipient,
+// keeping the one-seq-per-broadcast invariant documented on Hub.seq (cambia-502).
+func (h *Hub) emitToWithSeq(userID uuid.UUID, seq uint64, eventType string, payload any) {
 	conn := h.getConn(userID)
 	if conn == nil {
 		return
@@ -681,8 +697,7 @@ func (h *Hub) EmitTo(userID uuid.UUID, eventType string, payload any) {
 		log.Printf("hub %s: EmitTo marshal error: %v", h.ID, err)
 		return
 	}
-	env := Envelope{Seq: h.nextSeq(), Type: eventType, Payload: raw}
-	conn.SendEnvelope(env)
+	conn.SendEnvelope(Envelope{Seq: seq, Type: eventType, Payload: raw})
 }
 
 // getConn returns the connection for userID, or nil. Acquires connsMu (read).
@@ -759,10 +774,18 @@ func (h *Hub) sendLobbyState(conn *Connection) {
 	h.EmitTo(conn.UserID, "lobby_state", h.buildLobbySnapshot(conn.UserID))
 }
 
-// broadcastLobbyUpdate sends a lobby_state snapshot to all connected users.
+// broadcastLobbyUpdate sends a per-user lobby_state snapshot to all connected users. All copies of
+// this one logical broadcast share a single seq (see the Hub.seq invariant): otherwise the
+// per-recipient seq bump would leave every recipient but the last one behind h.seq, and dispatch()
+// would drop their next inbound action as stale (cambia-502).
 func (h *Hub) broadcastLobbyUpdate() {
-	for _, userID := range h.connUserIDs() {
-		h.EmitTo(userID, "lobby_state", h.buildLobbySnapshot(userID))
+	userIDs := h.connUserIDs()
+	if len(userIDs) == 0 {
+		return
+	}
+	seq := h.nextSeq()
+	for _, userID := range userIDs {
+		h.emitToWithSeq(userID, seq, "lobby_state", h.buildLobbySnapshot(userID))
 	}
 }
 
