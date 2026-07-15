@@ -129,6 +129,18 @@ func (g *CambiaGame) mapHouseRulesToEngine() engine.HouseRules {
 		AllowReplaceAbilities: g.HouseRules.AllowReplaceAbilities,
 		AllowOpponentSnapping: true,
 		SnapRace:              g.HouseRules.SnapRace,
+		// Service HouseRules has no per-lobby joker toggle, so pin to the RULES.md deck spec
+		// (54 = 52 + 2 Jokers, §1). Left unset this defaults to 0 and NewGame builds a 52-card
+		// deck, which is the cambia-508 bug: live games under-dealt the stockpile by 2.
+		NumJokers: 2,
+		// RULES.md §3C: the Cambia caller's hand is locked from snaps/swaps by default. Service
+		// HouseRules has no per-lobby override for this, so pin to true (tournament mode
+		// explicitly overrides to false via TournamentHouseRules below). Left unset this
+		// defaults to false and callers stayed exposed to snaps/swaps after calling Cambia.
+		LockCallerHand: true,
+		// Deal() sizes hands off Rules.numPlayers(), which treats 0 as 2 (engine/rules.go). Left
+		// unset, any non-circuit lobby with 3+ players would only get 2 hands dealt.
+		NumPlayers: uint8(len(g.Players)),
 		// Each player peeks two cards at game start (RULES.md §2). Left unset this defaults to 0,
 		// which makes Deal() leave InitialPeek at [0,0,...] so the pregame reveal shows slot 0
 		// twice and never slot 1 (the seen-set would then cover only one card). Pin it to 2 to
