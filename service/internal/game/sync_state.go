@@ -84,8 +84,10 @@ func (g *CambiaGame) getCurrentObfuscatedGameState(forUser uuid.UUID) ObfGameSta
 	}
 
 	// Turn deadline: only advertised while a turn timer is actually armed (TurnDeadline is the
-	// zero value otherwise — see scheduleNextTurnTimerEngine).
-	if !g.TurnDeadline.IsZero() {
+	// zero value otherwise — see scheduleNextTurnTimerEngine) AND the game is actually live.
+	// endGame() stops turnTimer but does not clear TurnDeadline, so without the Started/GameOver
+	// guard a finished game would keep echoing its last (never-firing) deadline in sync_state.
+	if g.Started && !obf.GameOver && !g.TurnDeadline.IsZero() {
 		deadlineMs := g.TurnDeadline.UnixMilli()
 		obf.TurnDeadline = &deadlineMs
 	}

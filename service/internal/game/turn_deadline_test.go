@@ -129,6 +129,27 @@ func TestSyncStateIncludesTurnDeadline(t *testing.T) {
 	assert.LessOrEqual(t, remaining, turnDuration+time.Second, "turnDeadline should not be far beyond the configured turn duration")
 }
 
+// TestSyncStateOmitsTurnDeadlineAfterGameOver verifies that a stale TurnDeadline left behind by
+// endGame() (which stops turnTimer but does not clear TurnDeadline) is not echoed back in
+// sync_state once the game has ended — a finished game must not advertise a countdown for a
+// timer that will never fire.
+func TestSyncStateOmitsTurnDeadlineAfterGameOver(t *testing.T) {
+	turnDuration := 5 * time.Second
+	g, ids, _ := buildTimedTestGame(t, turnDuration)
+
+	require.False(t, g.TurnDeadline.IsZero(), "precondition: a live timer should have armed a deadline")
+
+	// Force game-over without going through the full scoring flow (endGame stops turnTimer but
+	// intentionally leaves TurnDeadline untouched; this test exists to guard that gap).
+	g.mu.Lock()
+	g.GameOver = true
+	g.Started = false
+	g.mu.Unlock()
+
+	obf := g.GetCurrentObfuscatedGameState(ids[0])
+	assert.Nil(t, obf.TurnDeadline, "sync_state should omit turnDeadline once the game is over, even if TurnDeadline is stale")
+}
+
 // TestSyncStateOmitsTurnDeadlineWhenTimerDisabled verifies sync_state emits a nil turnDeadline
 // (and thus a JSON-omitted field) for games with no configured turn timer.
 func TestSyncStateOmitsTurnDeadlineWhenTimerDisabled(t *testing.T) {
