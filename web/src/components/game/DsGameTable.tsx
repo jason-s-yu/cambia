@@ -26,7 +26,8 @@ import {
   selectPendingAction,
   selectIsSelfTurn,
   selectIsProcessingAction,
-  selectDisplayedDrawnCard
+  selectDisplayedDrawnCard,
+  selectServerClockOffsetMs
 } from '@/stores/gameStore';
 import { useAuthStore } from '@/stores/authStore';
 import { useCurrentLobbyStore, type LobbyPhase } from '@/stores/lobbyStore';
@@ -81,6 +82,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   const isMyTurn = useGameStore(selectIsSelfTurn);
   const isProcessing = useGameStore(selectIsProcessingAction);
   const displayedDrawnCard = useGameStore(selectDisplayedDrawnCard);
+  const serverClockOffsetMs = useGameStore(selectServerClockOffsetMs);
   const matchState = useCurrentLobbyStore((s) => s.matchState);
   const lobbyPlayers = useCurrentLobbyStore((s) => s.lobbyDetails?.lobby_status?.users);
 
@@ -351,7 +353,15 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
             )}
             {canSkipSpecial && <Button variant='secondary' onClick={() => sendMessage(skipSpecialAction())}>Skip ability</Button>}
             {canCallCambia && <Button variant='cambia' onClick={() => sendMessage(callCambiaAction())}>Call Cambia</Button>}
-            {turnTimerSec > 0 && <TimerBar label='TURN' totalSec={turnTimerSec} remainingSec={turnTimerSec} />}
+            {turnTimerSec > 0 && (
+              <TimerBar
+                label='TURN'
+                totalSec={turnTimerSec}
+                remainingSec={turnTimerSec}
+                deadlineMs={gameState.turnDeadline ?? null}
+                clockOffsetMs={serverClockOffsetMs}
+              />
+            )}
           </div>
         </div>
       </div>

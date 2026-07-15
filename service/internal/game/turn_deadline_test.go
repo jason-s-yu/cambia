@@ -66,8 +66,9 @@ func TestTurnDeadlineEmittedOnTurnStart(t *testing.T) {
 	deadline := time.UnixMilli(deadlineMs)
 	serverNow := time.UnixMilli(serverNowMs)
 
-	// serverNow must fall within the window the event was actually built in.
-	assert.True(t, !serverNow.Before(before) && !serverNow.After(after.Add(50*time.Millisecond)),
+	// serverNow must fall within the window the event was actually built in. UnixMilli truncates
+	// (not rounds), so allow a 1ms slack against the pre-call timestamp.
+	assert.True(t, !serverNow.Before(before.Add(-time.Millisecond)) && !serverNow.After(after.Add(50*time.Millisecond)),
 		"serverNow %v should fall within test execution window [%v, %v]", serverNow, before, after)
 
 	// The deadline should be ~turnDuration after serverNow (within scheduling slack).

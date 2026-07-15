@@ -48,6 +48,11 @@ export interface ObfGameState {
 		cardRank: string;
 		// Add other fields based on spec (e.g., peeked card info for King)
 	} | null;
+	// Absolute server-clock epoch-ms deadline for the current turn's timer (cambia-488).
+	// Null/absent when no turn timer is configured; the UI falls back to an informational render.
+	turnDeadline?: number | null;
+	// Server-clock epoch-ms send time of this snapshot, for client clock-skew correction.
+	serverNow?: number;
 }
 
 // --- Action Payloads (Client -> Server) ---
@@ -109,11 +114,18 @@ export const kingSwapConfirmAction = (card1Id: string, idx1: number, owner1Id: s
 
 // --- Event Payloads (Server -> Client) ---
 
-/** Structure for player turn events */
+/** Structure for player turn events. turn/turnDeadline/serverNow live under `payload` (the
+ *  service's GameEvent.Payload map), not at the top level — mirror this when reading the raw
+ *  envelope (see gameStore.processGameWebSocketMessage's 'game_player_turn' case). */
 export interface GamePlayerTurnEvent {
 	type: 'game_player_turn';
 	user: { id: string };
-	turn: number;
+	payload: {
+		turn: number;
+		// Absent when no turn timer is configured for this game (cambia-488).
+		turnDeadline?: number;
+		serverNow: number;
+	};
 }
 
 /** Structure for private initial card reveal events */

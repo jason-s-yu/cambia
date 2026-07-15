@@ -16,6 +16,10 @@ interface GameState {
 	pendingAction: string | null; // e.g., 'discard_replace', 'special_action'
 	isProcessingAction: boolean; // Indicate if client is waiting for server response after sending action
 	lastMessageTimestamp: number; // Track last message for debugging/staleness
+	// serverNow - clientNow (ms), captured from the serverNow field on sync_state/game_player_turn
+	// events. Applied to Date.now() when deriving a live turn countdown from gameState.turnDeadline
+	// (cambia-488), so a skewed client clock doesn't distort the remaining-time display.
+	serverClockOffsetMs: number;
 }
 
 interface GameActions {
@@ -43,7 +47,8 @@ const initialState: GameState = {
 	displayedDrawnCard: null,
 	pendingAction: null, // e.g., 'discard_replace', 'special_action'
 	isProcessingAction: false,
-	lastMessageTimestamp: 0
+	lastMessageTimestamp: 0,
+	serverClockOffsetMs: 0
 };
 
 export const useGameStore = create<GameState & GameActions>()(
@@ -127,6 +132,9 @@ export const useGameStore = create<GameState & GameActions>()(
 			set((state) => {
 				if (payload?.state) {
 					state.gameState = payload.state;
+					if (typeof payload.state.serverNow === 'number') {
+						state.serverClockOffsetMs = payload.state.serverNow - Date.now();
+					}
 				}
 				if (typeof payload?.seq === 'number') {
 					state.seq = payload.seq;
@@ -157,6 +165,10 @@ export const useGameStore = create<GameState & GameActions>()(
 							state.isConnected = true; // Mark as connected on successful sync
 							state.error = null;
 							state.pendingAction = null; // Clear pending actions on full sync
+							// Recompute clock skew from this snapshot's serverNow (cambia-488).
+							if (typeof payload.state?.serverNow === 'number') {
+								state.serverClockOffsetMs = payload.state.serverNow - Date.now();
+							}
 							// Determine pending action based on new state
 							const gs = state.gameState;
 							if (gs) {
@@ -186,6 +198,17 @@ export const useGameStore = create<GameState & GameActions>()(
 								state.gameState.players.forEach(p => {
 									p.isCurrentTurn = (p.playerId === payload.user?.id);
 								});
+								// Turn deadline + clock skew (cambia-488). turn/turnDeadline/serverNow live
+								// under payload.payload (the service's GameEvent.Payload map) — not at the
+								// top level of the envelope's payload, which is the full GameEvent object.
+								const turnPayload = payload.payload;
+								if (turnPayload && typeof turnPayload.serverNow === 'number') {
+									state.serverClockOffsetMs = turnPayload.serverNow - Date.now();
+								}
+								state.gameState.turnDeadline =
+									(turnPayload && typeof turnPayload.turnDeadline === 'number')
+										? turnPayload.turnDeadline
+										: null;
 							}
 							break;
 
@@ -399,6 +422,7 @@ export const selectGameError = (state: GameState) => state.error;
 export const selectDisplayedDrawnCard = (state: GameState) => state.displayedDrawnCard;
 export const selectPendingAction = (state: GameState) => state.pendingAction;
 export const selectIsProcessingAction = (state: GameState) => state.isProcessingAction;
+export const selectServerClockOffsetMs = (state: GameState) => state.serverClockOffsetMs;
 export const selectCurrentPlayerId = (state: GameState) => state.gameState?.currentPlayerId;
 export const selectSelfPlayerState = (state: GameState) => {
 	const selfId = useAuthStore.getState().user?.id;
