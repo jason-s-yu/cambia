@@ -21,6 +21,40 @@ type CardUUIDTracker struct {
 
 	// Registry maps UUID -> full card details for event payloads.
 	Registry map[uuid.UUID]*models.Card
+
+	// SeenByPlayer[p] is the set of card UUIDs that player p has legitimately observed the
+	// identity of: the two pregame peeks, a card the player personally drew, a peek-own (7/8)
+	// target, and the own card viewed during a King look. Knowledge is keyed by UUID, not slot,
+	// so it travels with the card across moves: a card swapped INTO a hand by a blind swap (J/Q)
+	// or a King swap is absent from the new holder's set and stays hidden, while a card that
+	// leaves a hand simply stops being rendered from that hand. Only own-card observations are
+	// recorded, so an opponent card the actor merely peeked (9/T) or looked at during a King is
+	// not auto-revealed if it later swaps into the actor's hand. Read by
+	// getCurrentObfuscatedGameState to gate the self-view: an own card renders face-up only when
+	// its UUID is in this set; unseen own cards render as backs, exactly like opponent cards.
+	SeenByPlayer [engine.MaxPlayers]map[uuid.UUID]bool
+}
+
+// markCardSeen records that the player at engineIdx has legitimately observed cardUUID's
+// identity. No-op for the nil UUID or an out-of-range index. Assumes the game lock is held.
+func (g *CambiaGame) markCardSeen(engineIdx uint8, cardUUID uuid.UUID) {
+	if cardUUID == uuid.Nil || int(engineIdx) >= engine.MaxPlayers {
+		return
+	}
+	if g.CardTracker.SeenByPlayer[engineIdx] == nil {
+		g.CardTracker.SeenByPlayer[engineIdx] = make(map[uuid.UUID]bool)
+	}
+	g.CardTracker.SeenByPlayer[engineIdx][cardUUID] = true
+}
+
+// hasSeenCard reports whether the player at engineIdx has legitimately observed cardUUID's
+// identity. Assumes the game lock is held.
+func (g *CambiaGame) hasSeenCard(engineIdx uint8, cardUUID uuid.UUID) bool {
+	if int(engineIdx) >= engine.MaxPlayers {
+		return false
+	}
+	m := g.CardTracker.SeenByPlayer[engineIdx]
+	return m != nil && m[cardUUID]
 }
 
 // PlayerUUIDState holds UUID tracking for a single player's cards.
@@ -95,6 +129,11 @@ func (g *CambiaGame) mapHouseRulesToEngine() engine.HouseRules {
 		AllowReplaceAbilities: g.HouseRules.AllowReplaceAbilities,
 		AllowOpponentSnapping: true,
 		SnapRace:              g.HouseRules.SnapRace,
+		// Each player peeks two cards at game start (RULES.md §2). Left unset this defaults to 0,
+		// which makes Deal() leave InitialPeek at [0,0,...] so the pregame reveal shows slot 0
+		// twice and never slot 1 (the seen-set would then cover only one card). Pin it to 2 to
+		// match DefaultHouseRules and reveal indices 0 and 1.
+		InitialViewCount: 2,
 	}
 }
 
@@ -102,6 +141,11 @@ func (g *CambiaGame) mapHouseRulesToEngine() engine.HouseRules {
 func (g *CambiaGame) initCardTracker() {
 	tracker := &g.CardTracker
 	tracker.Registry = make(map[uuid.UUID]*models.Card)
+
+	// Reset per-player seen-own-card knowledge for this deal.
+	for p := uint8(0); p < engine.MaxPlayers; p++ {
+		tracker.SeenByPlayer[p] = make(map[uuid.UUID]bool)
+	}
 
 	// Assign UUIDs to player hands.
 	for p := uint8(0); p < engine.MaxPlayers; p++ {
@@ -144,6 +188,8 @@ func (g *CambiaGame) updateCardTracker(actionIdx uint16, actorEngineIdx uint8, p
 			drawnUUID := tracker.StockUUIDs[preStockLen-1]
 			tracker.Players[actorEngineIdx].DrawnCardUUID = drawnUUID
 			tracker.StockLen = g.Engine.StockLen
+			// The drawer sees the drawn card's face; it stays seen if placed into the hand.
+			g.markCardSeen(actorEngineIdx, drawnUUID)
 		}
 
 	case actionIdx == engine.ActionDrawDiscard:
@@ -152,6 +198,8 @@ func (g *CambiaGame) updateCardTracker(actionIdx uint16, actorEngineIdx uint8, p
 			drawnUUID := tracker.DiscardUUIDs[preDiscardLen-1]
 			tracker.Players[actorEngineIdx].DrawnCardUUID = drawnUUID
 			tracker.DiscardLen = g.Engine.DiscardLen
+			// The drawer sees the drawn card's face; it stays seen if placed into the hand.
+			g.markCardSeen(actorEngineIdx, drawnUUID)
 		}
 
 	case actionIdx == engine.ActionDiscardNoAbility || actionIdx == engine.ActionDiscardWithAbility:
@@ -182,11 +230,13 @@ func (g *CambiaGame) updateCardTracker(actionIdx uint16, actorEngineIdx uint8, p
 			tracker.Players[actorEngineIdx].HandUUIDs[targetIdx] = drawnUUID
 			tracker.Players[actorEngineIdx].DrawnCardUUID = uuid.Nil
 
-		} else if _, ok := engine.ActionIsPeekOwn(actionIdx); ok {
-			// No card movement.
+		} else if targetIdx, ok := engine.ActionIsPeekOwn(actionIdx); ok {
+			// No card movement. The actor sees their own card at targetIdx.
+			g.markCardSeen(actorEngineIdx, tracker.Players[actorEngineIdx].HandUUIDs[targetIdx])
 
 		} else if _, ok := engine.ActionIsPeekOther(actionIdx); ok {
-			// No card movement.
+			// No card movement, and no own-hand knowledge change: peeking an opponent's card does
+			// not reveal any of the actor's own cards.
 
 		} else if ownIdx, oppIdx, ok := engine.ActionIsBlindSwap(actionIdx); ok {
 			// Determine the opponent engine index.
@@ -195,8 +245,11 @@ func (g *CambiaGame) updateCardTracker(actionIdx uint16, actorEngineIdx uint8, p
 			tracker.Players[actorEngineIdx].HandUUIDs[ownIdx], tracker.Players[oppEngineIdx].HandUUIDs[oppIdx] =
 				tracker.Players[oppEngineIdx].HandUUIDs[oppIdx], tracker.Players[actorEngineIdx].HandUUIDs[ownIdx]
 
-		} else if _, _, ok := engine.ActionIsKingLook(actionIdx); ok {
-			// No card movement (peek only).
+		} else if ownIdx, _, ok := engine.ActionIsKingLook(actionIdx); ok {
+			// No card movement (peek only). The actor views their own card at ownIdx (seen) and an
+			// opponent card. Only the own card is recorded: if the actor later swaps for the peeked
+			// opponent card, that incoming card is treated as unseen (see the King swap branch).
+			g.markCardSeen(actorEngineIdx, tracker.Players[actorEngineIdx].HandUUIDs[ownIdx])
 
 		} else if actionIdx == engine.ActionKingSwapNo {
 			// No card movement.

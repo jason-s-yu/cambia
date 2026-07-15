@@ -139,21 +139,30 @@ func (g *CambiaGame) getCurrentObfuscatedGameState(forUser uuid.UUID) ObfGameSta
 			ps.IsCurrentTurn = (g.Engine.ActingPlayer() == engineIdx && g.Started && !obf.GameOver)
 
 			if isSelf {
-				// Reveal hand details for self.
+				// Self-view: expose every hand slot so the client renders a card in each position,
+				// but reveal rank/suit/value ONLY for cards the player has legitimately seen (pregame
+				// peek, own draw, peek-own ability, King look of the own card). Unseen own cards carry
+				// Known:false with no face details, so the client renders a face-down back — exactly
+				// like an opponent's card. This keeps the memory mechanic intact: a fresh game shows
+				// only the two peeked cards, not the full hand (cambia-505).
 				handLen := g.Engine.Players[engineIdx].HandLen
 				ps.RevealedHand = make([]ObfCard, handLen)
 				for j := uint8(0); j < handLen; j++ {
 					card := g.Engine.Players[engineIdx].Hand[j]
 					cardUUID := g.CardTracker.Players[engineIdx].HandUUIDs[j]
 					idx := int(j)
-					ps.RevealedHand[j] = ObfCard{
+					oc := ObfCard{
 						ID:    cardUUID,
-						Known: true,
-						Rank:  engineRankToString(card.Rank()),
-						Suit:  engineSuitToString(card.Suit()),
-						Value: int(card.Value()),
+						Known: false,
 						Idx:   &idx,
 					}
+					if g.hasSeenCard(engineIdx, cardUUID) {
+						oc.Known = true
+						oc.Rank = engineRankToString(card.Rank())
+						oc.Suit = engineSuitToString(card.Suit())
+						oc.Value = int(card.Value())
+					}
+					ps.RevealedHand[j] = oc
 				}
 
 				// Drawn card (pending discard in engine).

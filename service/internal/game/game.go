@@ -264,6 +264,8 @@ func (g *CambiaGame) BeginPreGame() {
 		makeInitialCard := func(slotIdx uint8) *EventCard {
 			cardUUID := g.CardTracker.Players[engineIdx].HandUUIDs[slotIdx]
 			card := g.Engine.Players[engineIdx].Hand[slotIdx]
+			// Record the pregame peek: this card is now legitimately seen by its owner.
+			g.markCardSeen(engineIdx, cardUUID)
 			idx := int(slotIdx)
 			return &EventCard{
 				ID:    cardUUID,
