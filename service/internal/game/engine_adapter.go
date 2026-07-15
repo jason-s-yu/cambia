@@ -1083,6 +1083,8 @@ func (g *CambiaGame) scheduleNextTurnTimerEngine() {
 		g.turnTimer.Stop()
 		g.turnTimer = nil
 	}
+	// Clear any previously advertised deadline; only re-armed below if a timer actually starts.
+	g.TurnDeadline = time.Time{}
 	if g.TurnDuration <= 0 || g.GameOver || !g.Started {
 		return
 	}
@@ -1109,6 +1111,7 @@ func (g *CambiaGame) scheduleNextTurnTimerEngine() {
 
 	curTurnID := g.TurnID
 	capturedPlayerUUID := currentPlayerUUID
+	g.TurnDeadline = time.Now().Add(g.TurnDuration)
 
 	// The AfterFunc runs in its own goroutine, so it acquires mu before reading lifecycle
 	// state and mutating via handleTimeoutEngine. The TurnID guard drops a stale fire whose
@@ -1133,12 +1136,21 @@ func (g *CambiaGame) broadcastPlayerTurnEngine() {
 	actingEngineIdx := g.Engine.ActingPlayer()
 	currentPlayerUUID := g.EngineToPlayer[actingEngineIdx]
 	log.Printf("Game %s: Turn %d starting for player %s (engine idx %d).", g.ID, g.TurnID, currentPlayerUUID, actingEngineIdx)
+
+	// serverNow lets clients compute their clock skew against this event's send time; turnDeadline
+	// (absolute server-clock epoch ms) is only included when a turn timer is actually armed, so
+	// games with TurnTimerSec=0 emit no deadline and the UI falls back to an informational render.
+	payload := map[string]interface{}{
+		"turn":      g.TurnID,
+		"serverNow": time.Now().UnixMilli(),
+	}
+	if !g.TurnDeadline.IsZero() {
+		payload["turnDeadline"] = g.TurnDeadline.UnixMilli()
+	}
 	g.fireEvent(GameEvent{
-		Type: EventGamePlayerTurn,
-		User: &EventUser{ID: currentPlayerUUID},
-		Payload: map[string]interface{}{
-			"turn": g.TurnID,
-		},
+		Type:    EventGamePlayerTurn,
+		User:    &EventUser{ID: currentPlayerUUID},
+		Payload: payload,
 	})
 	g.logAction(currentPlayerUUID, string(EventGamePlayerTurn), map[string]interface{}{"turn": g.TurnID})
 }

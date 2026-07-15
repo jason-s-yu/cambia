@@ -2,6 +2,8 @@
 package game
 
 import (
+	"time"
+
 	engine "github.com/jason-s-yu/cambia/engine"
 	"github.com/google/uuid"
 )
@@ -45,6 +47,13 @@ type ObfGameState struct {
 	CambiaCalled    bool             `json:"cambiaCalled"`
 	CambiaCallerID  uuid.UUID        `json:"cambiaCallerId,omitempty"`
 	HouseRules      HouseRules       `json:"houseRules"`
+	// TurnDeadline is the absolute server-clock epoch-ms time the current turn's timer expires.
+	// Omitted (null) when no turn timer is configured/active, in which case the client falls back
+	// to an informational (non-counting-down) render.
+	TurnDeadline *int64 `json:"turnDeadline,omitempty"`
+	// ServerNow is this snapshot's server-clock epoch-ms send time, letting the client compute a
+	// serverNow-clientNow clock skew offset to apply against TurnDeadline.
+	ServerNow int64 `json:"serverNow"`
 }
 
 // GetCurrentObfuscatedGameState is the public entry point for reading an observer-tailored
@@ -71,6 +80,14 @@ func (g *CambiaGame) getCurrentObfuscatedGameState(forUser uuid.UUID) ObfGameSta
 		DiscardSize:   int(g.Engine.DiscardLen),
 		CambiaCalled:  g.Engine.IsCambiaCalled(),
 		HouseRules:    g.HouseRules,
+		ServerNow:     time.Now().UnixMilli(),
+	}
+
+	// Turn deadline: only advertised while a turn timer is actually armed (TurnDeadline is the
+	// zero value otherwise — see scheduleNextTurnTimerEngine).
+	if !g.TurnDeadline.IsZero() {
+		deadlineMs := g.TurnDeadline.UnixMilli()
+		obf.TurnDeadline = &deadlineMs
 	}
 
 	// Current player.

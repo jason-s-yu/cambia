@@ -142,6 +142,12 @@ type CambiaGame struct {
 	turnTimer    *time.Timer   // Active timer for the current turn.
 	actionIndex  int           // Sequential index for logging actions via historian.
 
+	// TurnDeadline is the absolute server-clock time at which the current turn's timer fires.
+	// Zero value means no timer is active for the current turn (TurnDuration <= 0, game not
+	// started, or game over). Set by scheduleNextTurnTimerEngine, read by broadcastPlayerTurnEngine
+	// and getCurrentObfuscatedGameState to let clients derive a live countdown.
+	TurnDeadline time.Time
+
 	// Game Lifecycle State
 	Started       bool // Has the game started (after pre-game)?
 	GameOver      bool // Has the game finished?
