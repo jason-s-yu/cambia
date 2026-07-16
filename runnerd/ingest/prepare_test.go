@@ -190,6 +190,59 @@ func TestPrepareRejectsReceiptMismatch(t *testing.T) {
 	}
 }
 
+// TestPrepareResetsStaleWorktree: a worktree left behind by an earlier attempt
+// at an older commit (e.g. debug-TTL retention across a purge) must be torn
+// down and re-added at the newly pinned commit, while a same-commit re-prepare
+// keeps it in place (crash-recovery idempotence). Regression: the X2R
+// resubmission executed stale code under a jobspec recording the new commit
+// (cambia-518).
+func TestPrepareResetsStaleWorktree(t *testing.T) {
+	fc := newFakeControl()
+	m, _ := fakeManager(t, fc)
+	src, sha1 := sourceRepo(t, "prod-lock")
+	pushJobRef(t, m, src, sha1, "v0.4-r1")
+
+	prep1, err := m.Prepare(context.Background(), "v0.4-r1", sha1, "train",
+		"cfr/config/prtcfr.yaml", "cpu", "", nil)
+	if err != nil {
+		t.Fatalf("Prepare(sha1): %v", err)
+	}
+
+	// Same-commit re-prepare keeps the worktree in place.
+	marker := filepath.Join(prep1.WorktreeDir, ".kept")
+	mustWrite(t, marker, "x")
+	if _, err := m.Prepare(context.Background(), "v0.4-r1", sha1, "train",
+		"cfr/config/prtcfr.yaml", "cpu", "", nil); err != nil {
+		t.Fatalf("Prepare(sha1, again): %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("same-commit re-prepare tore down the worktree: %v", err)
+	}
+
+	// New commit under the same job id: the worktree must be rebuilt at sha2.
+	mustWrite(t, filepath.Join(src, "cfr", "src", "cli.py"), "# cli v2\n")
+	runGit(t, src, "add", "-A")
+	runGit(t, src, "commit", "-q", "-m", "v2")
+	sha2 := runGit(t, src, "rev-parse", "HEAD")
+	pushJobRef(t, m, src, sha2, "v0.4-r1")
+
+	prep2, err := m.Prepare(context.Background(), "v0.4-r1", sha2, "train",
+		"cfr/config/prtcfr.yaml", "cpu", "", nil)
+	if err != nil {
+		t.Fatalf("Prepare(sha2): %v", err)
+	}
+	if head := runGit(t, prep2.WorktreeDir, "rev-parse", "HEAD"); head != sha2 {
+		t.Fatalf("worktree HEAD = %s, want %s", head, sha2)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("stale worktree was not torn down (marker survived)")
+	}
+	data, err := os.ReadFile(filepath.Join(prep2.WorktreeDir, "cfr", "src", "cli.py"))
+	if err != nil || string(data) != "# cli v2\n" {
+		t.Fatalf("worktree content stale: %q err=%v", data, err)
+	}
+}
+
 func TestPrepareRejectsBadJobID(t *testing.T) {
 	fc := newFakeControl()
 	m, _ := fakeManager(t, fc)

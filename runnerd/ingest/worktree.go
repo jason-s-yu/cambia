@@ -13,11 +13,23 @@ import (
 const debugTTLFile = ".harness_debug_ttl"
 
 // addWorktree adds a detached worktree at commit from the bare mirror (shared
-// object store, checkout-only cost; design 3.2). If the target directory already
-// exists (idempotent re-prepare after a crash mid-stage) it is left in place.
+// object store, checkout-only cost; design 3.2). An existing directory is kept
+// only when its HEAD already matches the pinned commit (idempotent re-prepare
+// after a crash mid-stage); anything else is torn down and re-added, so a job
+// name reused after purge can never execute a tree older than the commit its
+// jobspec and run_db record (commit-pinning invariant, design 3.1; the X2R
+// resubmission ran stale code this way, cambia-518).
 func (m *Manager) addWorktree(ctx context.Context, worktreeDir, commit string) error {
 	if _, err := os.Stat(worktreeDir); err == nil {
-		return nil
+		res, err := m.runner.Run(ctx, Command{
+			Name: "git", Args: []string{"-C", worktreeDir, "rev-parse", "HEAD"},
+		})
+		if err == nil && strings.TrimSpace(string(res.Stdout)) == commit {
+			return nil
+		}
+		if rmErr := m.removeWorktree(ctx, worktreeDir); rmErr != nil {
+			return rmErr
+		}
 	}
 	if err := os.MkdirAll(m.worktreesDir, 0o755); err != nil {
 		return err

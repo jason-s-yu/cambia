@@ -23,14 +23,16 @@ func stageWorktree(t *testing.T, m *Manager, jobID string) (worktreeDir, sha str
 
 func TestAddWorktreeChecksOutSha(t *testing.T) {
 	m, _ := testManager(t, ExecRunner{})
-	wd, _ := stageWorktree(t, m, "job-a")
+	wd, sha := stageWorktree(t, m, "job-a")
 
 	// The checkout must contain the committed tree.
 	if _, err := os.Stat(filepath.Join(wd, "cfr", "uv.lock")); err != nil {
 		t.Fatalf("worktree missing cfr/uv.lock: %v", err)
 	}
-	// Idempotent: a second add over an existing dir is a no-op success.
-	if err := m.addWorktree(context.Background(), wd, ""); err != nil {
+	// Idempotent only at the pinned commit: a second add at the same sha is a
+	// no-op success. A mismatched HEAD is torn down and re-added instead (see
+	// TestPrepareResetsStaleWorktree; cambia-518).
+	if err := m.addWorktree(context.Background(), wd, sha); err != nil {
 		t.Fatalf("re-add: %v", err)
 	}
 }
