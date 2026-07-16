@@ -1,0 +1,20 @@
+# X2 re-spec cell C-rep (cambia-518): run-to-run variance band.
+#
+# Identical to the fresh-run effective config that produced v0.4-x2-fresh-1000-xpu
+# (base cfr/config/x2_tiny_gate.yaml with prt_cfr.iterations=1000 and
+# prt_cfr.stability_stop_mode=plateau, matching that run's jobspec.json overrides
+# and rendered cfr/runs/v0.4-x2-fresh-1000-xpu/config.yaml), with only the seed
+# changed: seed 0 -> seed 1. Purpose (x2-respec-preregistration.md Cells): measure
+# the variance band B = |NashConv(C-rep) - 0.08895| / 0.08895 used by decision
+# rule 1/2.
+#
+# device stays "auto" (resolved at launch: cuda -> xpu -> cpu) rather than the
+# fresh run's harness-injected "xpu" -- that resolution is a runner-time
+# artifact of the jobspec's top-level `device` field, not a config-source knob.
+
+_base: x2_tiny_gate.yaml
+
+prt_cfr:
+  iterations: 1000
+  stability_stop_mode: plateau
+  seed: 1

@@ -1,0 +1,29 @@
+# X2 re-spec cell C0 (cambia-519): coverage restore via samples/iter x2.65.
+#
+# Base: fresh-run effective config (x2_tiny_gate.yaml, iterations 1000,
+# stability_stop_mode plateau -- same as C-rep), seed 0 (matches the fresh run's
+# seed; only the sample-generation knob changes).
+#
+# Knob: prt_cfr.k_games_per_iter is the per-iteration traversal count. Read
+# PRTCFRTinyTrainer.run_iteration (cfr/src/cfr/prtcfr_trainer.py): each iteration
+# runs `for k in range(self.k_games): added += worker.traverse(...)`, i.e.
+# k_games_per_iter traversals of PRTCFRWorker.traverse (external-sampling MCCFR:
+# ALL traverser actions recursed, ONE opponent/chance action sampled per node),
+# and `added` (the logged "samples+=") is the sum of per-traversal reservoir
+# rows appended -- linear in k_games_per_iter for fixed tree/policy. m_rollouts
+# only affects the rollout value estimate at each traverser node, not the
+# per-traversal sample count, so k_games_per_iter is the correct single knob for
+# "trajectories/samples generated per iteration."
+#
+# Fresh run: k_games_per_iter=80, logged ~4.0-4.5k samples+=/iter (avg ~50-56
+# samples/traversal on the corrected {A,6} tree).
+# Scaled: 80 * 2.65 = 212 -> expected ~212 * 52 =~ 11.0k samples/iter (matches
+# the pre-registration's "coverage restore" target, ~2.65x the fresh-run rate).
+
+_base: x2_tiny_gate.yaml
+
+prt_cfr:
+  iterations: 1000
+  stability_stop_mode: plateau
+  seed: 0
+  k_games_per_iter: 212  # 80 * 2.65 = 212.0; was 80

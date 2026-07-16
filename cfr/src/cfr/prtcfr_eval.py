@@ -105,8 +105,13 @@ TINY_N_DEALS = 5
 TINY_SEED0 = 0
 TINY_MAX_NODES_PER_DEAL = 2_000_000
 
-# X2 gate bar (contract.md): neural-policy NashConv strictly below this.
-X2_NASHCONV_BAR = 0.05
+# X2 gate bar: neural-policy NashConv strictly below this. Re-derived for the
+# corrected {A,6} tree per the frozen pre-registration (.docs/v0.4/
+# phase2-throughput-pilot/x2-respec-preregistration.md, cambia-517):
+# bar = 0.0340 * U where U = 1.6727709 (exact uniform-policy NashConv,
+# tools/measure_uniform_nashconv.py). Supersedes the old-tree 0.05; the
+# informal 0.045 was voided for provenance (cambia-516).
+X2_NASHCONV_BAR = 0.057
 
 # SD-CFR snapshot filename pattern: prtcfr_snapshot_iter_{t}.pt
 _SNAPSHOT_RE = re.compile(r"prtcfr_snapshot_iter_(\d+)\.pt$")

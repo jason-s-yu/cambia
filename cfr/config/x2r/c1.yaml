@@ -1,0 +1,31 @@
+# X2 re-spec cell C1 (cambia-520): regret-net parameter count ~x4, width scaling.
+#
+# Base: fresh-run effective config (x2_tiny_gate.yaml, iterations 1000,
+# stability_stop_mode plateau -- same as C-rep), seed 0 (matches the fresh run's
+# seed; only the net architecture changes).
+#
+# Baseline net (cfr/src/cfr/prtcfr_net.py PRTCFRNet defaults: vocab=325,
+# embed_dim=64, hidden_dim=256, num_layers=2, head_hidden_dim=256, NUM_ACTIONS=146)
+# instantiates to 766,674 params (verified by direct instantiation + .num_parameters(),
+# matches the pre-registration's recorded baseline).
+#
+# Width-scaled candidate (num_layers held at 2 -- architecture family unchanged,
+# per the pre-registration's "width scaling preferred"): embed_dim 64->128,
+# hidden_dim 256->512, head_hidden_dim 256->512. Instantiating PRTCFRNet with
+# these dims and calling .num_parameters() gives 2,942,226 params, i.e. 3.838x
+# the 766,674 baseline -- within the target 4x +/-25% band (3x-5x, absolute
+# range [2,300,022, 3,833,370]).
+#
+# gru_vocab_size, gru_dropout, seq_cap are left at base defaults (325, 0.1, 256);
+# only the three width dims below change.
+
+_base: x2_tiny_gate.yaml
+
+prt_cfr:
+  iterations: 1000
+  stability_stop_mode: plateau
+  seed: 0
+  gru_embed_dim: 128    # was 64
+  gru_hidden_dim: 512   # was 256
+  head_hidden_dim: 512  # was 256
+  # num_layers held at 2 (unchanged) -- width scaling, not depth scaling.
