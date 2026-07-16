@@ -40,8 +40,20 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	maxGames     = 2048
-	maxAgents    = 4096
+	// maxGames/maxAgents bound the flat handle pools. Raised from 2048/4096 to
+	// lift the gen_chunk_games ceiling (cambia-534, X3 inference-dominance step
+	// (a)): the old maxGames=2048 capped concurrent games per chunk near 64,
+	// forcing ~128 sequential chunks and mean inference batch 114 (1.4% of
+	// capacity). At 32768 the chunk ceiling rises ~16x.
+	//
+	// Cost: the pools are package-level zero-initialized arrays (BSS), so the
+	// tokenPool reservation is maxAgents * sizeof(TokenStream) = 65536 * 49416B
+	// = 3.02 GiB VIRTUAL. It is demand-zero paged and TokenStream/AgentState are
+	// pointer-free flat value types, so the GC never scans the region: resident
+	// RAM stays ~0 at rest and tracks concurrently-live agents (a 1024-game /
+	// ~2048-agent chunk peaks near 96 MiB). No VRAM cost (host-side only).
+	maxGames     = 32768
+	maxAgents    = 65536
 	maxSnapshots = 256
 	maxSolvers   = 32
 )
@@ -75,7 +87,17 @@ var (
 	// tokenPool holds the per-agent PRT-CFR observation token stream, parallel
 	// to agentPool by handle. Kept outside AgentState so that Go-internal CFR
 	// clone-by-value stays cheap; only FFI clone / state-snapshot copy it.
-	tokenPool [maxAgents]agent.TokenStream
+	//
+	// Heap-backed (allocated once in init below) rather than a BSS array: at
+	// maxAgents=65536 the array is 65536 * sizeof(TokenStream) = 3.02 GiB, which
+	// exceeds the Go linker's hard 2 GB single-symbol limit and fails the
+	// c-shared link. A slice sidesteps that limit; indexing is source-identical
+	// to an array so every call site is unchanged. The backing is demand-zero
+	// paged and TokenStream is a pointer-free flat value type, so the GC marks
+	// the span noscan and never touches it: resident RAM stays ~0 at rest and
+	// tracks concurrently-live agents. TokenStream keeps its inline array, so
+	// stateSnapshot value-copy (state_save/restore/clone) semantics are intact.
+	tokenPool []agent.TokenStream
 
 	snapPool  [maxSnapshots]engine.GameState // Snapshot = GameState copy
 	snapInUse [maxSnapshots]bool
@@ -87,6 +109,12 @@ var (
 	solverPool  [maxSolvers]solverEntry
 	solverInUse [maxSolvers]bool
 )
+
+// init allocates the heap-backed tokenPool once at library load. See the
+// tokenPool declaration for why it is not a BSS array.
+func init() {
+	tokenPool = make([]agent.TokenStream, maxAgents)
+}
 
 // ---------------------------------------------------------------------------
 // Allocation helpers
