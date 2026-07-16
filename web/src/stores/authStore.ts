@@ -37,6 +37,17 @@ interface AuthState {
 	clearError: () => void;
 }
 
+// Module-level single-flight guard for checkAuth. React StrictMode
+// double-invokes the mount effect in useInitializeAuth (effect -> synthetic
+// cleanup -> effect again) before the first fetchMe() call ever settles, so
+// without dedup a single page load fires two (or more, if other consumers
+// mount around the same time) GET /user/me probes instead of one. Reusing
+// the in-flight promise collapses concurrent callers onto a single request.
+// The guard clears once the request settles, so a later login/register/
+// guest-login/claim flow -- which calls checkAuth() again to refresh state
+// -- still issues a fresh check rather than being stuck deduped forever.
+let checkAuthInFlight: Promise<void> | null = null;
+
 export const useAuthStore = create<AuthState>()(
 	// Optionally persist part of the auth state (e.g., isAuthenticated, user)
 	// to localStorage. Be mindful of security implications of storing user data locally.
@@ -129,25 +140,35 @@ export const useAuthStore = create<AuthState>()(
 			set({ isAuthenticated: false, user: null, error: null, isLoading: false });
 		},
 
-		checkAuth: async () => {
-			set({ isLoading: true, error: null });
-			authFlightGuard.begin();
-			try {
-				const currentUser = await fetchMe();
-				if (currentUser) {
-					set({ isAuthenticated: true, user: currentUser, isLoading: false });
-				} else {
-					// No user returned (e.g., 401/403 response, or token invalid)
-					set({ isAuthenticated: false, user: null, isLoading: false });
-				}
-			} catch (error) {
-				// Catch unexpected errors during fetchMe (e.g., network issue)
-				// Auth errors (401/403) are typically handled by returning null from fetchMe
-				console.log('Auth check failed:', error);
-				set({ isAuthenticated: false, user: null, isLoading: false });
-			} finally {
-				authFlightGuard.end();
+		checkAuth: () => {
+			// Single-flight: a concurrent caller reuses the in-flight request instead
+			// of firing a duplicate GET /user/me (see checkAuthInFlight comment above).
+			if (checkAuthInFlight) {
+				return checkAuthInFlight;
 			}
+			const flight = (async () => {
+				set({ isLoading: true, error: null });
+				authFlightGuard.begin();
+				try {
+					const currentUser = await fetchMe();
+					if (currentUser) {
+						set({ isAuthenticated: true, user: currentUser, isLoading: false });
+					} else {
+						// No user returned (e.g., 401/403 response, or token invalid)
+						set({ isAuthenticated: false, user: null, isLoading: false });
+					}
+				} catch (error) {
+					// Catch unexpected errors during fetchMe (e.g., network issue)
+					// Auth errors (401/403) are typically handled by returning null from fetchMe
+					console.log('Auth check failed:', error);
+					set({ isAuthenticated: false, user: null, isLoading: false });
+				} finally {
+					authFlightGuard.end();
+					checkAuthInFlight = null;
+				}
+			})();
+			checkAuthInFlight = flight;
+			return flight;
 		},
 
 		setUser: (user) => {
