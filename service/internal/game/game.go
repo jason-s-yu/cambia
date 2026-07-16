@@ -683,16 +683,27 @@ func (g *CambiaGame) HandlePlayerAction(playerID uuid.UUID, action models.GameAc
 		g.fireEventToPlayer(playerID, GameEvent{Type: EventPrivateSpecialFail, Payload: map[string]interface{}{"message": "You must resolve the special card action first (use action_special with 'skip' or required payload)."}})
 		return
 	}
+	// Whether this player has already drawn and is pending a discard/replace decision.
+	hasPendingDraw := g.Engine.Pending.Type == engine.PendingDiscard && g.Engine.Pending.PlayerID == engineIdx
+
 	// Prevent drawing twice (check engine state).
 	isDrawAction := action.ActionType == "action_draw_stockpile" || action.ActionType == "action_draw_discardpile"
-	if g.Engine.Pending.Type == engine.PendingDiscard && g.Engine.Pending.PlayerID == engineIdx && isDrawAction {
+	if hasPendingDraw && isDrawAction {
 		log.Printf("Game %s: Action %s from %s ignored (already drawn).", g.ID, action.ActionType, playerID)
 		g.fireEventToPlayer(playerID, GameEvent{Type: EventPrivateSpecialFail, Payload: map[string]interface{}{"message": "You have already drawn a card this turn."}})
 		return
 	}
+	// Cambia must be called instead of drawing, at turn start (RULES.md). A player who has
+	// already drawn this turn is still the acting player, so the generic not-your-turn check
+	// above doesn't catch this; without this check the engine's raw pending-action error (which
+	// leaks an internal state code) would surface instead (cambia-507).
+	if hasPendingDraw && action.ActionType == "action_cambia" {
+		log.Printf("Game %s: Action %s from %s ignored (already drawn, cannot call Cambia).", g.ID, action.ActionType, playerID)
+		g.fireEventToPlayer(playerID, GameEvent{Type: EventPrivateSpecialFail, Payload: map[string]interface{}{"message": "Cambia must be called before drawing."}})
+		return
+	}
 	// Prevent discard/replace without drawing first.
 	isDiscardReplace := action.ActionType == "action_discard" || action.ActionType == "action_replace"
-	hasPendingDraw := g.Engine.Pending.Type == engine.PendingDiscard && g.Engine.Pending.PlayerID == engineIdx
 	if !hasPendingDraw && isDiscardReplace && !g.pendingDiscardAbilityChoice {
 		log.Printf("Game %s: Action %s from %s ignored (must draw first).", g.ID, action.ActionType, playerID)
 		g.fireEventToPlayer(playerID, GameEvent{Type: EventPrivateSpecialFail, Payload: map[string]interface{}{"message": "You must draw a card first."}})
