@@ -680,14 +680,28 @@ class Config(_CambiaBaseModel):
         return values
 
 
-def resolve_config_yaml(config_path: Union[str, Path]) -> dict:
+def resolve_config_yaml(
+    config_path: Union[str, Path], _seen: Optional[set] = None
+) -> dict:
     """Read a config YAML and return the merged raw dict (resolves _base + _rule_profile).
 
     _base resolution searches: (1) next to config_path, (2) cfr/config/. The fallback
     lets eval load run-dir configs that retain a _base reference even though the base
     file lives in cfr/config/, not in the run dir.
+
+    _base chains resolve recursively (base-of-base and deeper), with cycle detection.
+    Silently dropping a nested _base once trained the full 54-card game under a
+    tiny-gate config (X2R incident, cambia-518): the chain must merge completely or
+    fail loudly.
     """
     config_path = Path(config_path)
+    resolved_self = config_path.resolve()
+    _seen = set() if _seen is None else _seen
+    if resolved_self in _seen:
+        raise ValueError(
+            f"_base cycle detected: {config_path} already visited in this chain"
+        )
+    _seen.add(resolved_self)
     with open(config_path, encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
     base_path = raw.pop("_base", None)
@@ -702,9 +716,7 @@ def resolve_config_yaml(config_path: Union[str, Path]) -> dict:
                 f"_base '{base_path}' referenced by {config_path} not found in: "
                 f"{[str(c) for c in candidates]}"
             )
-        with open(base_resolved, encoding="utf-8") as bf:
-            base_raw = yaml.safe_load(bf) or {}
-        base_raw.pop("_base", None)
+        base_raw = resolve_config_yaml(base_resolved, _seen)
         raw = _deep_merge(base_raw, raw)
     rule_profile = raw.pop("_rule_profile", None)
     if rule_profile:

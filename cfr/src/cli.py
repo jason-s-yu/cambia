@@ -1655,6 +1655,21 @@ def train_prtcfr(
         )
         from tools.tiny_solver import build_tree as _build_tree
 
+        # Substrate guard (X2R incident, cambia-518): a dropped _base once left
+        # cambia_rules at full-deck defaults and the tiny-gate tree recursed
+        # unbounded. tiny_gate must never run without an explicit tiny deck.
+        _ranks = list(
+            getattr(getattr(cfg, "cambia_rules", None), "deck_ranks", None) or []
+        )
+        if not _ranks or len(_ranks) > 4:
+            print(
+                "ERROR: tiny_gate requires an explicit tiny substrate: "
+                f"cambia_rules.deck_ranks is {_ranks or 'unset (full deck)'}; "
+                "check the config's _base chain resolved completely.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(1)
+
         _root, _isets, _nnodes, _aborted = _build_tree(
             cfg,
             5,

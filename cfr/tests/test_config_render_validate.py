@@ -132,6 +132,45 @@ def test_render_resolves_base(runner, cambia_app, tmp_path):
     assert rendered["prt_cfr"]["seed"] == 42
 
 
+def test_render_resolves_nested_base_chain(runner, cambia_app, tmp_path):
+    # Regression: X2R incident (cambia-518). A base's own _base was popped and
+    # dropped, so grandparent blocks (the tiny-game cambia_rules substrate)
+    # silently vanished and tiny_gate trained the full 54-card game. The chain
+    # must merge completely.
+    grand = tmp_path / "grand.yaml"
+    grand.write_text("cambia_rules:\n  deck_ranks: [A, '6']\n  max_game_turns: 3\n")
+    base = tmp_path / "base.yaml"
+    base.write_text(f"_base: {grand.name}\nprt_cfr:\n  iterations: 10\n")
+    child = tmp_path / "child.yaml"
+    child.write_text(f"_base: {base.name}\nprt_cfr:\n  seed: 42\n")
+
+    out_path = tmp_path / "rendered.yaml"
+    result = runner.invoke(
+        cambia_app,
+        ["config", "render", str(child), "-o", str(out_path)],
+    )
+    assert result.exit_code == 0, result.output
+    rendered = yaml.safe_load(out_path.read_text())
+    assert rendered["cambia_rules"]["deck_ranks"] == ["A", "6"]
+    assert rendered["cambia_rules"]["max_game_turns"] == 3
+    assert rendered["prt_cfr"]["iterations"] == 10
+    assert rendered["prt_cfr"]["seed"] == 42
+
+
+def test_render_base_cycle_exits_nonzero(runner, cambia_app, tmp_path):
+    a = tmp_path / "a.yaml"
+    b = tmp_path / "b.yaml"
+    a.write_text(f"_base: {b.name}\nprt_cfr:\n  seed: 1\n")
+    b.write_text(f"_base: {a.name}\nprt_cfr:\n  iterations: 10\n")
+
+    result = runner.invoke(
+        cambia_app,
+        ["config", "render", str(a), "-o", str(tmp_path / "out.yaml")],
+    )
+    assert result.exit_code != 0
+    assert "cycle" in (result.output or "").lower()
+
+
 def test_render_bad_key_exits_nonzero(runner, cambia_app, tmp_path):
     out_path = tmp_path / "rendered.yaml"
     result = runner.invoke(
