@@ -571,7 +571,10 @@ class PRTCFRConfig(_CambiaBaseModel):
     gen_batched: bool = True
     # Concurrent games per scheduler chunk. Bounds peak simultaneously-live
     # drivers (~gen_chunk_games * max_legal * m_rollouts rollout clones); keep
-    # it under the Go handle pool (maxGames=2048) with margin.
+    # it under the Go handle pool ceiling (maxGames=32768, raised from 2048 in
+    # cambia-534) with margin. The 32768 ceiling is mechanism, not policy: this
+    # default stays 64 (production value pending the X3 P4/P5 GPU-window
+    # validation), and X-cells set it per run-config.
     gen_chunk_games: int = 64
     # Inference precision for the batched sigma service: "bf16" (throughput
     # default, p2-redesign sec 6) or "fp32" (used by the equivalence gate). The
