@@ -293,10 +293,6 @@ func cambia_game_new_with_rules(
 	if h < 0 {
 		return -1
 	}
-	np := uint8(numPlayers)
-	if np < 2 {
-		np = 2
-	}
 	rules := engine.HouseRules{
 		MaxGameTurns:          uint16(maxGameTurns),
 		CardsPerPlayer:        uint8(cardsPerPlayer),
@@ -308,9 +304,18 @@ func cambia_game_new_with_rules(
 		SnapRace:              snapRace != 0,
 		NumJokers:             uint8(numJokers),
 		LockCallerHand:        lockCallerHand != 0,
-		NumPlayers:            np,
+		NumPlayers:            uint8(numPlayers),
 		InitialViewCount:      uint8(initialViewCount),
 		NumDecks:              uint8(numDecks),
+	}
+	// cambia-542 F3: numPlayers arrives here as a raw, externally-supplied
+	// uint8 from Python via the FFI. Reject out-of-range values instead of
+	// silently clamping and succeeding -- Deal() below indexes g.Players[p]
+	// for p in [0, NumPlayers), and that array is fixed at [MaxPlayers]; an
+	// unrejected NumPlayers=9 previously panicked inside libcambia.so.
+	if err := rules.Validate(); err != nil {
+		freeGame(h)
+		return -1
 	}
 	gamePool[h] = engine.NewGame(uint64(seed), rules)
 	gamePool[h].Deal()
@@ -332,10 +337,6 @@ func cambia_game_new_with_deck(
 	if h < 0 {
 		return -1
 	}
-	np := uint8(numPlayers)
-	if np < 2 {
-		np = 2
-	}
 	rules := engine.HouseRules{
 		MaxGameTurns:          uint16(maxGameTurns),
 		CardsPerPlayer:        uint8(cardsPerPlayer),
@@ -347,13 +348,21 @@ func cambia_game_new_with_deck(
 		SnapRace:              snapRace != 0,
 		NumJokers:             uint8(numJokers),
 		LockCallerHand:        lockCallerHand != 0,
-		NumPlayers:            np,
+		NumPlayers:            uint8(numPlayers),
 		InitialViewCount:      uint8(initialViewCount),
 		NumDecks:              uint8(numDecks),
+	}
+	// cambia-542 F3: reject an out-of-range NumPlayers instead of clamping
+	// and continuing -- the round-robin deal loop below indexes g.Players[p]
+	// for p in [0, np), and that array is fixed at [MaxPlayers].
+	if err := rules.Validate(); err != nil {
+		freeGame(h)
+		return -1
 	}
 	// Create a base game state with the right rules (deck contents will be overwritten).
 	gamePool[h] = engine.NewGame(1, rules)
 	g := &gamePool[h]
+	np := g.NumActivePlayers() // applies the documented 0-defaults-to-2 sentinel
 
 	// Load provided deck into stockpile in reverse order so that deck[0] is
 	// the first card popped (i.e., placed at Stockpile[deckLen-1]).
@@ -1004,6 +1013,27 @@ func cambia_agent_nplayer_action_mask(agent_h C.int32_t, game_h C.int32_t, out *
 		}
 	}
 	return 0
+}
+
+// cambia_nplayer_input_dim returns the live Go N-player encoding input
+// dimension (agent.NPlayerInputDim). Paired with cfr/src/constants.py's
+// N_PLAYER_INPUT_DIM; the FFI dim cross-check test asserts these stay equal
+// so bridge.py can single-source its buffer sizes from the Python constant
+// instead of a second hand-maintained literal (cambia-542 F8: bridge.py
+// previously hardcoded a stale 580 here after a MaxPlayers bump).
+//
+//export cambia_nplayer_input_dim
+func cambia_nplayer_input_dim() C.int32_t {
+	return C.int32_t(agent.NPlayerInputDim)
+}
+
+// cambia_nplayer_num_actions returns the live Go N-player action-space size
+// (engine.NPlayerNumActions). Paired with cfr/src/constants.py's
+// N_PLAYER_NUM_ACTIONS (cambia-542 F8).
+//
+//export cambia_nplayer_num_actions
+func cambia_nplayer_num_actions() C.int32_t {
+	return C.int32_t(engine.NPlayerNumActions)
 }
 
 //export cambia_subgame_solve_ranged

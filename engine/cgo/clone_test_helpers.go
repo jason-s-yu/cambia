@@ -75,3 +75,29 @@ func testStateClone(gameH, a0H, a1H int32) (ok bool, newGame, newA0, newA1 int32
 	}
 	return true, int32(cg), int32(ca0), int32(ca1)
 }
+
+// testGameNewWithRules is a minimal test-only wrapper over
+// cambia_game_new_with_rules covering only the fields nplayer_bounds_test.go
+// needs (seed, numPlayers); every other field takes a DefaultHouseRules()-
+// shaped value. Returns the raw handle (or the FFI's -1 failure sentinel).
+func testGameNewWithRules(seed uint64, numPlayers uint8) int32 {
+	return int32(cambia_game_new_with_rules(
+		C.uint64_t(seed),
+		C.uint16_t(46), // maxGameTurns
+		C.uint8_t(4),   // cardsPerPlayer
+		C.uint8_t(0),   // cambiaAllowedRound
+		C.uint8_t(2),   // penaltyDrawCount
+		C.uint8_t(1),   // allowDrawFromDiscard
+		C.uint8_t(0),   // allowReplaceAbilities
+		C.uint8_t(1),   // allowOpponentSnapping
+		C.uint8_t(0),   // snapRace
+		C.uint8_t(2),   // numJokers
+		C.uint8_t(1),   // lockCallerHand
+		C.uint8_t(numPlayers),
+		C.uint8_t(2), // initialViewCount
+		C.uint8_t(1), // numDecks
+	))
+}
+
+func testNPlayerInputDim() int32   { return int32(cambia_nplayer_input_dim()) }
+func testNPlayerNumActions() int32 { return int32(cambia_nplayer_num_actions()) }

@@ -99,6 +99,24 @@ def parse_num_workers(num_workers: Union[str, int]) -> int:
     )
 
 
+def validate_num_players(num_players: int) -> int:
+    """Validate a num_players config value against the engine's supported range.
+
+    Mirrors engine.HouseRules.Validate() (engine/rules.go): NumPlayers must be
+    in [2, MaxPlayers=8]. Config-time validation here, rather than only
+    Go-side FFI rejection, gives a clear error at config load instead of a
+    late failure the first time a GoEngine is constructed (cambia-542 F3).
+    """
+    from src.constants import N_PLAYER_MAX_PLAYERS  # noqa: PLC0415 (avoid import cycle)
+
+    if not (2 <= num_players <= N_PLAYER_MAX_PLAYERS):
+        raise ValueError(
+            f"num_players must be between 2 and {N_PLAYER_MAX_PLAYERS} "
+            f"(MaxPlayers), got {num_players}."
+        )
+    return num_players
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
     """Recursively merge dicts; override wins. Non-dict values replaced."""
     result = dict(base)
@@ -421,6 +439,11 @@ class DeepCfrConfig(_CambiaBaseModel):
     # N-player configuration
     num_players: int = 2
 
+    @field_validator("num_players")
+    @classmethod
+    def _validate_num_players(cls, v: int) -> int:
+        return validate_num_players(v)
+
     # QRE regularization
     qre_lambda_start: float = 0.5
     qre_lambda_end: float = 0.05
@@ -559,6 +582,12 @@ class PRTCFRConfig(_CambiaBaseModel):
     reservoir_dir: Optional[str] = None  # override; default <run_dir>/reservoir
     snapshot_dir: Optional[str] = None  # override; default <run_dir>/snapshots
     num_players: int = 2
+
+    @field_validator("num_players")
+    @classmethod
+    def _validate_num_players(cls, v: int) -> int:
+        return validate_num_players(v)
+
     max_trajectory_steps: int = 4000
     backend: str = "go"  # production GameDriver backend: "go" | "python"
     # --- Batched incremental production generation (S1W15). ---
