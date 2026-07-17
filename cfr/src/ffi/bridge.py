@@ -234,6 +234,11 @@ _ffi.cdef("""
     int32_t cambia_agent_tokens_since(int32_t agent_h, int32_t since, int32_t *out, int32_t max);
     int32_t cambia_games_apply_batch(int32_t *game_hs, int32_t *a0s, int32_t *a1s,
                                      uint16_t *actions, int32_t n);
+    int32_t cambia_games_observe_batch(int32_t *game_hs, int32_t *a0s, int32_t *a1s,
+                                       int32_t n, int32_t tok_cap,
+                                       int8_t *out_terminal, uint8_t *out_actor,
+                                       uint8_t *out_masks, int32_t *out_tok,
+                                       int32_t *out_tok_offsets, int32_t *out_tok_lens);
     int32_t cambia_state_save(int32_t game_h, int32_t a0_h, int32_t a1_h);
     int32_t cambia_state_restore(int32_t game_h, int32_t snap_h, int32_t a0_h, int32_t a1_h);
     void    cambia_state_snapshot_free(int32_t h);
@@ -1598,6 +1603,69 @@ def apply_games_batch(
         )
 
 
+#: NUM_ACTIONS for the 2-player action space (matches GoEngine.NUM_ACTIONS and
+#: the Go agent.NumActions the observe export writes).
+_OBSERVE_NUM_ACTIONS = 146
+
+
+def observe_games_batch(game_handles, a0_handles, a1_handles, seq_cap):
+    """Read terminal flag + acting player + legal mask + acting-player token
+    body for n live games in ONE cgo crossing (cambia_games_observe_batch),
+    fusing the four per-game reads (is_terminal / acting_player / action_mask /
+    agent.tokens). X3 ladder step (d1), cambia-607.
+
+    ADDITIVE PRIMITIVE, not currently wired into the generation hot path: a
+    cross-stream batched observe forces the batched scheduler into an
+    observe/query/apply phasing that fragments its single-drain inference batch
+    (measured ~5x slower gen), and a per-stream n=1 fusion also regressed for an
+    undiagnosed reason on the contended CPU host. Kept because it is byte-identity
+    proven (tests/test_prtcfr_ffi_observe.py) and is the primitive a future,
+    correctly-scheduled consumer needs; see the cambia-607 report for the
+    regression investigation and the follow-up ticket.
+
+    Returns (terminal, actor, masks, tok_flat, tok_offsets, tok_lens):
+      terminal (n,) int8; actor (n,) uint8 (255 if terminal); masks (n,146) uint8;
+      tok_flat packed int32 bodies (game i at tok_flat[off_i:off_i+len_i]);
+      tok_offsets (n,) int32; tok_lens (n,) int32 (TRUE body length -- caller
+      enforces the strict seq_cap-2 budget). Raises on an invalid handle."""
+    n = len(game_handles)
+    if not (len(a0_handles) == n and len(a1_handles) == n):
+        raise ValueError("observe_games_batch: game/a0/a1 lists must be equal length")
+    na = _OBSERVE_NUM_ACTIONS
+    if n == 0:
+        z = np.empty(0, dtype=np.int32)
+        return (np.empty(0, np.int8), np.empty(0, np.uint8),
+                np.empty((0, na), np.uint8), z, z, z)
+    lib = _get_lib()
+    gh = _ffi.new("int32_t[]", [int(x) for x in game_handles])
+    a0 = _ffi.new("int32_t[]", [int(x) for x in a0_handles])
+    a1 = _ffi.new("int32_t[]", [int(x) for x in a1_handles])
+    term = _ffi.new("int8_t[]", n)
+    actor = _ffi.new("uint8_t[]", n)
+    masks = _ffi.new("uint8_t[]", n * na)
+    offsets = _ffi.new("int32_t[]", n)
+    lens = _ffi.new("int32_t[]", n)
+    tok_cap = max(256, n * 64)
+    while True:
+        tok = _ffi.new("int32_t[]", tok_cap)
+        ret = lib.cambia_games_observe_batch(
+            gh, a0, a1, n, tok_cap, term, actor, masks, tok, offsets, lens)
+        if ret == -2:
+            tok_cap *= 2
+            continue
+        if ret < 0:
+            raise RuntimeError(
+                "cambia_games_observe_batch failed (returned %d); invalid handle" % ret)
+        break
+    term_np = np.frombuffer(_ffi.buffer(term, n), dtype=np.int8).copy()
+    actor_np = np.frombuffer(_ffi.buffer(actor, n), dtype=np.uint8).copy()
+    masks_np = np.frombuffer(_ffi.buffer(masks, n * na), dtype=np.uint8).reshape(n, na).copy()
+    offsets_np = np.frombuffer(_ffi.buffer(offsets, n * 4), dtype=np.int32).copy()
+    lens_np = np.frombuffer(_ffi.buffer(lens, n * 4), dtype=np.int32).copy()
+    total = int(offsets_np[-1]) + int(lens_np[-1])
+    tok_np = (np.frombuffer(_ffi.buffer(tok, total * 4), dtype=np.int32).copy()
+              if total > 0 else np.empty(0, dtype=np.int32))
+    return term_np, actor_np, masks_np, tok_np, offsets_np, lens_np
 def state_save(game_h: int, a0_h: int, a1_h: int) -> int:
     """Snapshot a (game, both agents' belief + token) checkpoint. Returns handle."""
     lib = _get_lib()

@@ -204,6 +204,32 @@ class PRTCFRTrainState:
     snapshot_path: str
 
 
+def _build_fit_optimizer(params, lr: float, weight_decay: float, device: torch.device):
+    """Adam optimizer for the regret fit, using the fastest kernel that keeps the
+    update math unchanged (X3 ladder step (f1), cambia-607).
+
+    - CUDA: ``fused=True`` -- a single fused kernel per step instead of a
+      per-parameter-tensor op train. This is the largest non-compute fit cost
+      the P5 profile flagged (766K params spread over the GRU's parameter
+      tensors -> many tiny kernel launches per step without fusion).
+    - CPU / fallback: ``foreach=True`` (vectorized per-tensor ops).
+
+    Both are the plain Adam update per parameter; foreach is bit-identical to the
+    unfused path and fused matches within float tolerance, so the loss trajectory
+    is preserved (verified on a fixed-seed CPU run). ``params`` is materialized to
+    a list because it is consumed twice on the fused->foreach fallback.
+    """
+    params = list(params)
+    if device.type == "cuda":
+        try:
+            return torch.optim.Adam(
+                params, lr=lr, weight_decay=weight_decay, fused=True
+            )
+        except (RuntimeError, ValueError):
+            pass
+    return torch.optim.Adam(params, lr=lr, weight_decay=weight_decay, foreach=True)
+
+
 def _fit_from_scratch(
     net: PRTCFRNet,
     buf: ReservoirBuffer,
@@ -232,12 +258,31 @@ def _fit_from_scratch(
         return 0.0
     device = net.device
     net.train()
-    optimizer = torch.optim.Adam(net.parameters(), lr=lr, weight_decay=weight_decay)
+    # X3 ladder step (f1, cambia-607): use the fused Adam kernel on CUDA (one
+    # kernel for the whole optimizer step instead of a per-parameter-tensor
+    # launch train -- the dominant non-compute cost the P5 fit profile flagged),
+    # foreach on CPU. Both are the SAME Adam update math as the plain optimizer
+    # (per-parameter, elementwise; foreach is bit-identical, fused matches within
+    # float tolerance), so the loss trajectory is preserved. Fused falls back to
+    # foreach if the build/params do not support it.
+    device = torch.device(device) if not isinstance(device, torch.device) else device
+    optimizer = _build_fit_optimizer(net.parameters(), lr, weight_decay, device)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=max(num_steps, 1), eta_min=lr_min
     )
 
-    total_loss = 0.0
+    # X3 ladder step (f1, cambia-607): accumulate the mean loss and the AC2
+    # grad-norm-violation count ON DEVICE and sync ONCE at the end, instead of a
+    # per-step ``loss.item()`` + ``float(total_norm)`` that each force a
+    # device->host stall every step (the "logging overhead" the fit profile
+    # flagged on GPU). The optimizer update, backward, and clip are byte-for-byte
+    # unchanged, so the loss trajectory (training dynamics) is bit-identical; only
+    # the RETURNED mean-loss scalar's float rounding shifts (~1e-6, device float32
+    # sum vs the old python float64 running sum), and the violation count is the
+    # same comparison summed on device. On CPU these reads never stalled, so this
+    # is a pure GPU win with no CPU-visible change.
+    total_loss_t = torch.zeros((), dtype=torch.float64, device=device)
+    viol_t = torch.zeros((), dtype=torch.float64, device=device)
     steps = 0
     for _step in range(num_steps):
         batch = buf.sample_batch(batch_size)
@@ -265,15 +310,17 @@ def _fit_from_scratch(
         # clip_grad_norm_ returns the PRE-clip total norm; a value above
         # grad_clip means clipping fired -> one AC2 grad-norm violation.
         total_norm = torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=grad_clip)
-        if violation_box is not None and float(total_norm) > grad_clip:
-            violation_box[0] += 1
+        if violation_box is not None:
+            viol_t += (total_norm > grad_clip).to(torch.float64)
         optimizer.step()
         scheduler.step()
 
-        total_loss += float(loss.item())
+        total_loss_t += loss.detach().to(torch.float64)
         steps += 1
 
-    return total_loss / max(steps, 1)
+    if violation_box is not None:
+        violation_box[0] += int(viol_t.item())
+    return float(total_loss_t.item()) / max(steps, 1)
 
 
 # ---------------------------------------------------------------------------
