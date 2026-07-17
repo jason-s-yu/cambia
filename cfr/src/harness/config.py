@@ -44,6 +44,15 @@ class AuthConfig:
 
 @dataclass
 class DataPlaneConfig:
+    """ssh_alias (rsync) and mirror_remote_url (git push) are independent
+    targets and may intentionally differ (cambia-551 W2): a mirror-push ssh
+    key restricted to `git-receive-pack` on the mirror repo, and a separate
+    rrsync-restricted key scoped to the runs dir, each bound to its own
+    `~/.ssh/config` host alias. Nothing here requires the two to point at the
+    same host or key; see the two-alias pattern in
+    cfr/config/harness.example.yaml and docs/serving-harness/deploy.md.
+    """
+
     ssh_alias: str  # rsync/ssh target, e.g. "runner"
     runner_runs_dir: str  # remote runsDir, e.g. /srv/cambia/runs
     mirror_remote_url: str  # e.g. cambia@runner:/srv/cambia/mirror.git
@@ -110,6 +119,13 @@ class HarnessConfig:
     data_plane: DataPlaneConfig
     sync: SyncConfig
     hub: Optional[HubConfig] = None
+    # Optional pre-push verify gate (cambia-551 W2). Default off: `submit`'s
+    # existing behavior (push HEAD as-is, no signature check) is unchanged
+    # unless this is explicitly set. When true, `submit` runs `git
+    # verify-commit <sha>` before pushing and refuses to push an unverifiable
+    # commit. Commit signing itself is a repo-config concern (gpg.format=ssh,
+    # user.signingkey, commit.gpgsign=true), not something this client sets up.
+    require_signed_commit: bool = False
     source_path: Optional[str] = None
 
     def normalized_fingerprint(self) -> str:
@@ -136,6 +152,10 @@ class HarnessConfig:
             )
         if self.sync.interval_seconds <= 0:
             raise HarnessConfigError("sync.interval_seconds must be positive")
+        # Note: data_plane.mirror_remote_url (git push) and data_plane.ssh_alias
+        # (rsync) are validated independently and intentionally are not
+        # compared here. They may point at different hosts or restricted ssh
+        # keys (cambia-551 W2 two-alias pattern); that is not a config error.
         if self.hub is not None:
             if not self.hub.url.startswith("https://"):
                 raise HarnessConfigError(
@@ -259,5 +279,6 @@ def from_dict(data: dict, source_path: Optional[str] = None) -> HarnessConfig:
         data_plane=dp_cfg,
         sync=sync_cfg,
         hub=hub_cfg,
+        require_signed_commit=bool(data.get("require_signed_commit", False)),
         source_path=source_path,
     )

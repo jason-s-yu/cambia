@@ -530,3 +530,132 @@ class _FakeCfg:
         origin_host = "runner"
 
     data_plane = _DP()
+    require_signed_commit = False
+
+
+class _FakeCfgSigned(_FakeCfg):
+    require_signed_commit = True
+
+
+# ---------------------------------------------------------------------------
+# Optional pre-push verify gate (cambia-551 W2): `require_signed_commit`,
+# default off, checked via `git verify-commit` between rev-parse and push.
+# ---------------------------------------------------------------------------
+
+
+def test_is_commit_signed_false_for_unsigned_commit(tmp_path):
+    # Real integration check against an actual (unsigned) temp-repo commit:
+    # no gpg/ssh signing is configured for _init_repo, so `git verify-commit`
+    # genuinely fails and _is_commit_signed must report that honestly.
+    from src.harness.cli import _is_commit_signed
+
+    repo = _init_repo(tmp_path)
+    sha = _git_rev_parse_head(repo)
+    assert _is_commit_signed(sha, repo) is False
+
+
+def _git_rev_parse_head(repo):
+    proc = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(repo), capture_output=True, text=True
+    )
+    assert proc.returncode == 0
+    return proc.stdout.strip()
+
+
+def test_submit_signed_gate_off_by_default_never_checks(tmp_path, monkeypatch):
+    # require_signed_commit=False (the default): submit must not even call the
+    # verify helper, and pushes exactly as before.
+    import src.harness.cli as cli
+
+    repo = _init_repo(tmp_path)
+
+    monkeypatch.setattr(cli, "_load_cfg", lambda c: _FakeCfg())
+    monkeypatch.setattr(cli, "_repo_root", lambda: repo)
+
+    def boom(sha, repo):
+        raise AssertionError("verify gate must not run when require_signed_commit is off")
+
+    monkeypatch.setattr(cli, "_is_commit_signed", boom)
+
+    pushes = []
+    real_git = cli._git
+
+    def fake_git(args, cwd):
+        if args[:1] == ["push"]:
+            pushes.append(args)
+            return ""
+        return real_git(args, cwd)
+
+    monkeypatch.setattr(cli, "_git", fake_git)
+
+    class FakeClient:
+        def submit(self, payload, force=False):
+            return {"job_id": payload["name"], "state": "queued", "queue_pos": 0}
+
+    monkeypatch.setattr(cli, "_build_client", lambda cfg: FakeClient())
+
+    spec_file = tmp_path / "job.yaml"
+    spec_file.write_text("kind: train\nname: r3\nconfig: cfr/config/x.yaml\n")
+
+    cli.submit(spec_file=spec_file, force=False, config=None)
+    assert len(pushes) == 1
+
+
+def test_submit_signed_gate_blocks_unverifiable_commit(tmp_path, monkeypatch):
+    import typer
+
+    import src.harness.cli as cli
+
+    repo = _init_repo(tmp_path)
+
+    monkeypatch.setattr(cli, "_load_cfg", lambda c: _FakeCfgSigned())
+    monkeypatch.setattr(cli, "_repo_root", lambda: repo)
+    monkeypatch.setattr(cli, "_is_commit_signed", lambda sha, repo: False)
+
+    pushed = []
+    real_git = cli._git
+    monkeypatch.setattr(
+        cli,
+        "_git",
+        lambda a, cwd: (pushed.append(a) or "") if a[:1] == ["push"] else real_git(a, cwd),
+    )
+
+    spec_file = tmp_path / "job.yaml"
+    spec_file.write_text("kind: train\nname: r4\nconfig: cfr/config/x.yaml\n")
+
+    with pytest.raises(typer.Exit):
+        cli.submit(spec_file=spec_file, force=False, config=None)
+    assert pushed == []  # aborted before the push, not after
+
+
+def test_submit_signed_gate_allows_verified_commit(tmp_path, monkeypatch):
+    import src.harness.cli as cli
+
+    repo = _init_repo(tmp_path)
+
+    monkeypatch.setattr(cli, "_load_cfg", lambda c: _FakeCfgSigned())
+    monkeypatch.setattr(cli, "_repo_root", lambda: repo)
+    monkeypatch.setattr(cli, "_is_commit_signed", lambda sha, repo: True)
+
+    pushes = []
+    real_git = cli._git
+
+    def fake_git(args, cwd):
+        if args[:1] == ["push"]:
+            pushes.append(args)
+            return ""
+        return real_git(args, cwd)
+
+    monkeypatch.setattr(cli, "_git", fake_git)
+
+    class FakeClient:
+        def submit(self, payload, force=False):
+            return {"job_id": payload["name"], "state": "queued", "queue_pos": 0}
+
+    monkeypatch.setattr(cli, "_build_client", lambda cfg: FakeClient())
+
+    spec_file = tmp_path / "job.yaml"
+    spec_file.write_text("kind: train\nname: r5\nconfig: cfr/config/x.yaml\n")
+
+    cli.submit(spec_file=spec_file, force=False, config=None)
+    assert len(pushes) == 1

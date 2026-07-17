@@ -67,6 +67,33 @@ def test_load_missing_config_raises_with_searched_paths(tmp_path, monkeypatch):
     assert "Searched" in str(exc.value)
 
 
+def test_require_signed_commit_defaults_off():
+    cfg = cfgmod.from_dict(_GOOD).validate()
+    assert cfg.require_signed_commit is False
+
+
+def test_require_signed_commit_parses_true():
+    cfg = cfgmod.from_dict({**_GOOD, "require_signed_commit": True}).validate()
+    assert cfg.require_signed_commit is True
+
+
+def test_validate_allows_divergent_data_plane_targets():
+    # ssh_alias (rsync) and mirror_remote_url (git push) may intentionally
+    # point at different hosts/keys (cambia-551 W2 two-alias pattern); this
+    # must not raise.
+    divergent = {
+        **_GOOD,
+        "data_plane": {
+            "ssh_alias": "runs-host",
+            "runner_runs_dir": "/srv/cambia/runs",
+            "mirror_remote_url": "git@mirror-host:/srv/cambia/mirror.git",
+        },
+    }
+    cfg = cfgmod.from_dict(divergent).validate()
+    assert cfg.data_plane.ssh_alias == "runs-host"
+    assert cfg.data_plane.mirror_remote_url == "git@mirror-host:/srv/cambia/mirror.git"
+
+
 def test_load_from_explicit_path(tmp_path):
     import yaml
 
