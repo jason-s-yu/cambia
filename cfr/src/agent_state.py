@@ -75,6 +75,13 @@ class AgentObservation:
     king_swap_indices: Optional[Tuple[int, int]] = (
         None  # (own_idx, opp_idx) for king swap
     )
+    # Race-ON snap (cambia-564). is_race_commit: this observation is an intermediate
+    # commit whose public frames are suppressed (imperfect info). race_resolution:
+    # the per-willing-committer resolution record (in snapper order) whose public
+    # race frames are emitted instead of the normal frames. Mutually exclusive;
+    # both empty/False under race-OFF.
+    is_race_commit: bool = False
+    race_resolution: Optional[List[Dict[str, Any]]] = None
 
 
 @dataclass

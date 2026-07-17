@@ -170,6 +170,17 @@ type SnapState struct {
 	// raw action keeps the commit compact; the (kind, slot, opp-rel) intent is
 	// re-decoded at resolution by DecodeSnapCommit.
 	Commits [MaxPlayers]uint16
+
+	// RaceResolved marks that resolveSnapRace has just drawn a winner and the
+	// resolution record (Commits, Snappers, NumSnappers, RaceWinner) is valid for
+	// the token layer to read this step. It is set by resolveSnapRace and cleared
+	// at the start of the next ApplyAction, so the public race-resolution frame is
+	// emitted exactly for the Observe window following the resolving action. Unlike
+	// the race-OFF endSnapPhase, race resolution preserves the commit record here
+	// rather than zeroing SnapState immediately. RaceWinner is the winning snapper
+	// slot (index into Snappers), valid only when RaceResolved.
+	RaceWinner   uint8
+	RaceResolved bool
 }
 
 // ---------------------------------------------------------------------------

@@ -451,8 +451,20 @@ NUM_PEEK_FRAME_IDS: int = 1
 #: Width (token count) of one peek-result frame: marker + owner + slot + card.
 PEEK_FRAME_WIDTH: int = 4
 
+# Race-resolution block (cambia-564): APPENDED after the peek block so every id
+# above keeps its value. A single marker heads each PUBLIC race-resolution frame,
+# emitted once per willing committer at a race-ON (snapRace) snap resolution; the
+# payload reuses the ACTOR (snapper seat), OUTCOME, SLOT, and CARD blocks:
+# [RACE marker, seat, outcome, slot, card]. Under race-ON every per-commit public
+# frame is suppressed (imperfect info); these are the only public snap-window signal.
+RACE_FRAME_BASE: int = PEEK_FRAME_BASE + NUM_PEEK_FRAME_IDS
+NUM_RACE_FRAME_IDS: int = 1
+
+#: Width (token count) of one race-resolution frame: marker + seat + outcome + slot + card.
+RACE_FRAME_WIDTH: int = 5
+
 #: Total vocabulary size.
-VOCAB_SIZE: int = PEEK_FRAME_BASE + NUM_PEEK_FRAME_IDS
+VOCAB_SIZE: int = RACE_FRAME_BASE + NUM_RACE_FRAME_IDS
 
 
 # Encoders: local id (or sentinel) -> global token id.
@@ -517,6 +529,15 @@ def _peek_frame_tok() -> int:
 
 def _is_peek_frame_marker(tok: int) -> bool:
     return PEEK_FRAME_BASE <= tok < PEEK_FRAME_BASE + NUM_PEEK_FRAME_IDS
+
+
+def _race_frame_tok() -> int:
+    """Marker id heading a public race-resolution frame (cambia-564)."""
+    return RACE_FRAME_BASE
+
+
+def _is_race_frame_marker(tok: int) -> bool:
+    return RACE_FRAME_BASE <= tok < RACE_FRAME_BASE + NUM_RACE_FRAME_IDS
 
 
 # ---------------------------------------------------------------------------
@@ -599,6 +620,27 @@ def observation_frame_groups(observation: Any, observer_id: int) -> List[List[in
     groups: List[List[int]] = []
     actor = observation.acting_player
     action = observation.action
+
+    # Race-ON snap window (cambia-564). An intermediate commit emits nothing
+    # (imperfect info: no committer's choice leaks before resolution). A resolved
+    # race emits one public race frame per willing committer, in snapper order:
+    # [RACE marker, seat, outcome, slot, card] -- and REPLACES the normal frames
+    # for the resolving action. Mirrors the Go tokenizer's putRaceFrames.
+    if getattr(observation, "is_race_commit", False):
+        return groups
+    race_res = getattr(observation, "race_resolution", None)
+    if race_res:
+        for entry in race_res:
+            groups.append(
+                [
+                    _race_frame_tok(),
+                    _actor_tok(entry["seat"]),
+                    _outcome_tok(entry["outcome"]),
+                    _slot_tok_signed(entry["slot"]),
+                    _card_tok(entry["card"]),
+                ]
+            )
+        return groups
 
     # Private own-draw frame (X1 priv_draw): surfaced at the observer's own DRAW
     # event, one event BEFORE the discard/replace decision, so that decision's
@@ -876,6 +918,7 @@ def vocab_summary() -> dict:
             "slot": (SLOT_BASE, NUM_SLOT_IDS),
             "outcome": (OUTCOME_BASE, NUM_SNAP_OUTCOME_IDS),
             "peek": (PEEK_FRAME_BASE, NUM_PEEK_FRAME_IDS),
+            "race": (RACE_FRAME_BASE, NUM_RACE_FRAME_IDS),
         },
         "MAX_SLOTS": MAX_SLOTS,
         "MAX_ACTORS": MAX_ACTORS,

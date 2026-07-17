@@ -43,8 +43,11 @@ from ..constants import (
     ActionDiscard,
     ActionDrawDiscard,
     ActionDrawStockpile,
+    ActionPassSnap,
     ActionReplace,
+    ActionSnapOpponent,
     ActionSnapOpponentMove,
+    ActionSnapOwn,
     DecisionContext,
     GameAction,
 )
@@ -1325,6 +1328,21 @@ def _create_observation(
 
         final_snap_results = snap_results if snap_results else []
 
+        # Race-ON snap (cambia-564). A live race_resolution record on next_state
+        # means this action just resolved a race window: emit the public race frames
+        # (and suppress the normal frames). Otherwise, an intermediate race-ON snap
+        # commit (pass/own/opp) is suppressed entirely (imperfect info). Race-OFF and
+        # non-snap actions leave both cleared.
+        race_resolution = getattr(next_state, "race_resolution", None)
+        is_race_commit = False
+        if race_resolution is None and getattr(
+            next_state.house_rules, "snapRace", False
+        ):
+            if isinstance(
+                action, (ActionPassSnap, ActionSnapOwn, ActionSnapOpponent)
+            ):
+                is_race_commit = True
+
         # Populate king_swap_indices if this action is a performed king swap
         obs_king_swap_indices = king_swap_indices
         if (
@@ -1351,6 +1369,8 @@ def _create_observation(
             is_game_over=game_over,
             current_turn=turn_num,
             king_swap_indices=obs_king_swap_indices,
+            is_race_commit=is_race_commit,
+            race_resolution=race_resolution,
         )
         logger_obs.debug("Created observation: %s", obs)
         return obs

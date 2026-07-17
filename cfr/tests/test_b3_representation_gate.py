@@ -183,6 +183,36 @@ def test_b3_mask_determinism_full_2p_games():
     assert conflicts == 0, f"{conflicts} token prefixes admit two legal masks"
 
 
+def test_b3_mask_determinism_race_on():
+    """Race-ON (snapRace=True, cambia-564): identical token prefix => identical
+    legal mask over full 2-player games. Under race-ON the per-commit public frame
+    is suppressed (imperfect info) and the resolution emits public race frames, so
+    a committer's infoset never reveals another committer's choice; the committer's
+    own mask depends only on the public prefix (its hand + the discarded rank), so
+    prefix->mask determinism must still hold. Regression guard; zero conflicts."""
+
+    def make(seed):
+        game = _setup_python_game_matching_go(seed)
+        game.house_rules = _rules_cls()(
+            allowDrawFromDiscardPile=True,
+            allowOpponentSnapping=True,
+            snapRace=True,
+            max_game_turns=46,
+        )
+        return game
+
+    _, nodes, collisions, conflicts = _collect_prefix_masks(make, range(120), 400)
+    print(
+        f"\n[b3 mask-determinism race-ON] nodes={nodes} collisions={collisions} "
+        f"conflicts={conflicts}"
+    )
+    assert nodes > 1000, f"too few decision nodes ({nodes})"
+    assert conflicts == 0, (
+        f"{conflicts} race-ON token prefixes admit two legal masks -- imperfect-info "
+        f"commit suppression must not make the legal mask prefix-nondeterministic"
+    )
+
+
 # ---------------------------------------------------------------------------
 # (b) Tabular-CFR-on-production-tokens floor (slow / CLI-invokable)
 # ---------------------------------------------------------------------------

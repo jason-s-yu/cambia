@@ -66,7 +66,7 @@ int32 offsets here would silently wrap at production scale, so offsets are
 int64 -- correctness over the literal spec wording (flagged to @chief).
 
 Feature (token) pool dtype is chosen from sequence_encoding.VOCAB_SIZE at
-import time: int16 if the vocabulary fits (it does today: VOCAB_SIZE=326),
+import time: int16 if the vocabulary fits (it does today: VOCAB_SIZE=327),
 else int32, same as the fixed-width design this replaces.
 
 Directory layout (this instance owns ``self.path`` as its storage directory):

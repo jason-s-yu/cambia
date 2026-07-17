@@ -149,13 +149,16 @@ def test_token_vocab_layout_matches_python():
         "SEQ_CAP": se.SEQ_CAP,
         "PEEK_FRAME_BASE": se.PEEK_FRAME_BASE,
         "NUM_PEEK_FRAME_IDS": se.NUM_PEEK_FRAME_IDS,
+        "RACE_FRAME_BASE": se.RACE_FRAME_BASE,
+        "NUM_RACE_FRAME_IDS": se.NUM_RACE_FRAME_IDS,
     }
     for k, want in expected.items():
         assert v[k] == want, f"vocab field {k}: Go={v[k]} Python={want}"
     assert v["GO_TOKEN_STREAM_CAP"] >= se.SEQ_CAP
-    # The peek block is appended at the very end: no id shift below it.
+    # The peek then race blocks are appended at the very end: no id shift below.
     assert se.PEEK_FRAME_BASE == se.OUTCOME_BASE + se.NUM_SNAP_OUTCOME_IDS
-    assert se.VOCAB_SIZE == se.PEEK_FRAME_BASE + se.NUM_PEEK_FRAME_IDS
+    assert se.RACE_FRAME_BASE == se.PEEK_FRAME_BASE + se.NUM_PEEK_FRAME_IDS
+    assert se.VOCAB_SIZE == se.RACE_FRAME_BASE + se.NUM_RACE_FRAME_IDS
 
 
 @skip_if_no_go
