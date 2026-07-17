@@ -19,7 +19,15 @@ func jobRef(jobID string) string {
 // the injected runner and returns trimmed stdout. On failure the error carries
 // stderr for diagnosis.
 func (m *Manager) git(ctx context.Context, args ...string) (string, error) {
-	full := append([]string{"-C", m.mirrorDir}, args...)
+	// core.useReplaceRefs=false: a refs/replace/<obj> ref remaps an object at
+	// read time. Without this, an attacker who can push to the mirror pushes a
+	// genuinely signed commit to the job ref plus a refs/replace/<good-tree> ->
+	// <evil-tree>; verify-commit still passes on the untouched commit while the
+	// worktree checkout materializes the evil tree (cambia-550 review finding).
+	// Disabling replace substitution on every mirror op closes it on both the
+	// verify and the worktree-add path; verifyCommitSignature additionally
+	// rejects outright a mirror that carries any replace ref.
+	full := append([]string{"-C", m.mirrorDir, "-c", "core.useReplaceRefs=false"}, args...)
 	res, err := m.runner.Run(ctx, Command{Name: "git", Args: full})
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(res.Stderr)))
@@ -30,7 +38,9 @@ func (m *Manager) git(ctx context.Context, args ...string) (string, error) {
 // gitRaw runs a git subcommand and returns raw (untrimmed) stdout bytes, used
 // where content bytes matter (blob content hashing).
 func (m *Manager) gitRaw(ctx context.Context, args ...string) ([]byte, error) {
-	full := append([]string{"-C", m.mirrorDir}, args...)
+	// core.useReplaceRefs=false: see m.git; keep content-byte reads immune to
+	// replace-ref remapping too.
+	full := append([]string{"-C", m.mirrorDir, "-c", "core.useReplaceRefs=false"}, args...)
 	res, err := m.runner.Run(ctx, Command{Name: "git", Args: full})
 	if err != nil {
 		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(res.Stderr)))
@@ -105,6 +115,18 @@ func (m *Manager) verifyCommitSignature(ctx context.Context, commit string) erro
 	}
 	if _, err := os.Stat(m.allowedSignersPath); err != nil {
 		return fmt.Errorf("%w: allowed-signers file %q is unreadable: %v", ErrSignatureVerification, m.allowedSignersPath, err)
+	}
+	// Reject a mirror carrying replace refs. m.git already disables replace
+	// substitution (core.useReplaceRefs=false), so a pushed refs/replace/* is
+	// inert for our reads; refusing outright surfaces the tampering loud instead
+	// of silently ignoring it, and defends even a future call site that forgets
+	// the flag. We only ever push refs/harness/*, so a replace ref is never
+	// legitimate here (cambia-550 review finding). for-each-ref lists refs by
+	// name regardless of useReplaceRefs, so detection is unaffected.
+	if refs, err := m.git(ctx, "for-each-ref", "--format=%(refname)", "refs/replace/"); err != nil {
+		return fmt.Errorf("%w: cannot enumerate replace refs: %v", ErrSignatureVerification, err)
+	} else if refs != "" {
+		return fmt.Errorf("%w: mirror carries replace ref(s) [%s]; refusing to stage a possibly-remapped tree", ErrSignatureVerification, strings.ReplaceAll(refs, "\n", ","))
 	}
 	if _, err := m.git(ctx, "-c", "gpg.ssh.allowedSignersFile="+m.allowedSignersPath, "verify-commit", commit); err != nil {
 		return fmt.Errorf("%w: commit %s: %v", ErrSignatureVerification, commit, err)

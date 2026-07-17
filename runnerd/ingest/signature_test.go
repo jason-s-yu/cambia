@@ -243,6 +243,44 @@ func TestPrepareFailsClosedOnEmptySignersPath(t *testing.T) {
 	}
 }
 
+// TestPrepareReplaceRefBypassRejected is the regression guard for the cambia-550
+// review finding: an attacker with only mirror-push access pushes a genuinely
+// signed commit to the job ref, then pushes a refs/replace/<good-tree> ->
+// <evil-tree> that remaps the commit's tree at read time. Without the fix,
+// verify-commit passes on the untouched commit while the worktree checkout
+// materializes the evil tree (RCE). Prepare must reject: the mirror carries a
+// replace ref, and replace substitution is disabled for our reads regardless.
+func TestPrepareReplaceRefBypassRejected(t *testing.T) {
+	requireGitSSHSigning(t)
+	key, pub := genSSHSigningKey(t)
+	signers := writeAllowedSigners(t, "signer@test", pub)
+
+	fc := newFakeControl()
+	m, _ := signingFakeManager(t, fc, true, signers)
+
+	// The good, signed commit the attacker legitimately pushes to the job ref.
+	src, sha := signedSourceRepo(t, "prod-lock", key)
+	pushJobRef(t, m, src, sha, "job-replace")
+
+	// An evil tree with different content; push it into the mirror so its objects
+	// are present, then point a replace ref at the good commit's tree.
+	evilSrc, evilSha := sourceRepo(t, "evil-lock") // distinct content -> distinct tree
+	pushJobRef(t, m, evilSrc, evilSha, "evil-stash")
+
+	goodTree := runGit(t, m.mirrorDir, "rev-parse", sha+"^{tree}")
+	evilTree := runGit(t, m.mirrorDir, "rev-parse", evilSha+"^{tree}")
+	if goodTree == evilTree {
+		t.Fatalf("fixture bug: good and evil trees are identical (%s)", goodTree)
+	}
+	runGit(t, m.mirrorDir, "update-ref", "refs/replace/"+goodTree, evilTree)
+
+	_, err := m.Prepare(context.Background(), "job-replace", sha, "train",
+		"cfr/config/prtcfr.yaml", "cpu", "", nil)
+	if !errors.Is(err, ErrSignatureVerification) {
+		t.Fatalf("want ErrSignatureVerification for a mirror carrying a replace ref, got %v", err)
+	}
+}
+
 // TestPrepareFailsClosedOnMissingSignersFile: enforcement on with a signers path
 // that does not exist rejects rather than silently passing.
 func TestPrepareFailsClosedOnMissingSignersFile(t *testing.T) {
