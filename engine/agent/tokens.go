@@ -431,17 +431,22 @@ func (ts *TokenStream) Observe(g *engine.GameState, observerID uint8) error {
 	actor := g.LastAction.ActingPlayer
 	idx := g.LastAction.ActionIdx
 
-	// 1. Private own-draw frame: only for the actor-observer on Discard/Replace.
-	if actor == observerID {
-		if idx == engine.ActionDiscardNoAbility || idx == engine.ActionDiscardWithAbility {
-			put(frameToken(frameDrawn))
-			put(cardToken(g.DiscardTop()))
-		} else if t, ok := engine.ActionIsReplace(idx); ok {
-			if uint8(t) < g.Players[actor].HandLen {
-				put(frameToken(frameDrawn))
-				put(cardToken(g.Players[actor].Hand[t]))
-			}
-		}
+	// 1. Private own-draw frame: emitted for the actor-observer at the post-draw
+	// decision node (right after a draw action). The freshly drawn card is held
+	// in the pending-discard state (Pending.Data[0]) that drawStockpile/
+	// drawDiscard set before the actor chooses discard vs replace. Surfacing it
+	// here -- one event BEFORE the discard/replace decision, not on the later
+	// Discard/Replace action -- puts the drawn card in the token prefix that
+	// conditions that decision, so the legal-action mask at the post-draw node
+	// is determined by the infoset (cambia-528; re-armed Phase-1 bug #21). The
+	// draw source (stockpile/discard) does not change the frame: both surface
+	// the actor's own drawn card privately. Mirrors sequence_encoding.py's
+	// draw-gated drawn frame byte-for-byte.
+	if actor == observerID &&
+		(idx == engine.ActionDrawStockpile || idx == engine.ActionDrawDiscard) &&
+		g.Pending.Type == engine.PendingDiscard {
+		put(frameToken(frameDrawn))
+		put(cardToken(engine.Card(g.Pending.Data[0])))
 	}
 
 	// 2. Public turn frame: ACTOR, ACTION, CARD(discard top after action).

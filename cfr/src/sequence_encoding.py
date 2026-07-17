@@ -26,13 +26,16 @@ GRU reading the token sequence sees genuine perfect recall:
   - PRIVATE, p's own:
       * peeked initial-hand cards     -> a BOS-anchored prefix of (SLOT, CARD)
                                          frames, one per peeked slot.
-      * own stockpile draws           -> the drawn card's identity, surfaced on
-                                         p's own Discard/Replace event (the
-                                         production observation filter reveals
-                                         drawn_card to the actor exactly there;
-                                         X1 captures the same card from
-                                         pending_action_data at draw time -- same
-                                         content, adjacent event).
+      * own draws                     -> the drawn card's identity, surfaced on
+                                         p's own DRAW event (drawn frame), i.e.
+                                         one event BEFORE the discard/replace
+                                         decision. That ordering puts the drawn
+                                         card in the token prefix conditioning
+                                         the discard/replace decision, so its
+                                         legal-action mask is determined by the
+                                         infoset (cambia-528; re-armed bug #21).
+                                         Matches the X1 pending_action_data
+                                         draw-time capture.
   - PUBLIC, common knowledge (every player's turn):
       * the actor                     -> ACTOR token.
       * the action's public structure -> ACTION token (tag + slot/flag args; never
@@ -51,9 +54,11 @@ Input contract
 Feed this tokenizer the per-player FILTERED observation, i.e.
 ``_filter_observation(_create_observation(prev, action, next, actor, snaps),
 observer_id)`` from src/cfr/worker.py. That is the production information
-boundary: drawn_card present only for the actor on Discard/Replace; peeked_cards
-present only for the actor who peeked; everything else public. The tokenizer is
-driven by the OBSERVATION stream, not by the belief abstraction.
+boundary: drawn_card present for the actor on the draw action (the drawn frame)
+and on Discard/Replace (belief tracking); the tokenizer gates the drawn frame on
+the draw action so it emits once, at draw time. peeked_cards present only for the
+actor who peeked; everything else public. The tokenizer is driven by the
+OBSERVATION stream, not by the belief abstraction.
 
 Vocabulary stability
 --------------------
@@ -564,9 +569,18 @@ def observation_frame_groups(observation: Any, observer_id: int) -> List[List[in
     actor = observation.acting_player
     action = observation.action
 
-    # Private own-draw frame (X1 priv_draw).
+    # Private own-draw frame (X1 priv_draw): surfaced at the observer's own DRAW
+    # event, one event BEFORE the discard/replace decision, so that decision's
+    # legal-action mask is determined by the token prefix (cambia-528; re-armed
+    # Phase-1 bug #21). drawn_card is also populated on Discard/Replace for
+    # belief tracking, so the frame is GATED on the draw action to avoid double
+    # emission and to match the Go tokenizer byte-for-byte.
     drawn = getattr(observation, "drawn_card", None)
-    if drawn is not None and actor == observer_id:
+    if (
+        drawn is not None
+        and actor == observer_id
+        and isinstance(action, (ActionDrawStockpile, ActionDrawDiscard))
+    ):
         groups.append([_frame_tok("drawn"), _card_tok(drawn)])
 
     # Public turn frame (X1 pub_path entry).

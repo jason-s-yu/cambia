@@ -40,6 +40,7 @@ from src.constants import (
     NUM_PLAYERS,
     ActionCallCambia,
     ActionDiscard,
+    ActionDrawDiscard,
     ActionDrawStockpile,
     ActionPassSnap,
     ActionReplace,
@@ -122,9 +123,15 @@ class _GTTrace:
     def record_observation(self, filtered_obs: Any):
         actor = filtered_obs.acting_player
         action = filtered_obs.action
-        # drawn (private) precedes the public frame, matching the tokenizer.
+        # drawn (private) is surfaced at the observer's own DRAW event, one
+        # event before the discard/replace decision (cambia-528), so the GT
+        # gates it on the draw action exactly as observation_frame_groups does.
         drawn = getattr(filtered_obs, "drawn_card", None)
-        if drawn is not None and actor == self.observer_id:
+        if (
+            drawn is not None
+            and actor == self.observer_id
+            and isinstance(action, (ActionDrawStockpile, ActionDrawDiscard))
+        ):
             self.events.append(("drawn", _card_ident(drawn)))
         # public reveal entry
         self.events.append(
@@ -372,6 +379,112 @@ def test_full_2p_roundtrip_lossless():
     assert overall_max <= se.SEQ_CAP, (
         f"full 2P max token length {overall_max} EXCEEDS cap {se.SEQ_CAP}; "
         f"truncation would lose information -- revisit SEQ_CAP or frame width"
+    )
+
+
+def test_post_draw_node_surfaces_drawn_frame_before_decision():
+    """cambia-528: at the post-draw decision node the ACTOR's token prefix
+    already encodes the freshly drawn card (private drawn frame), one event
+    before the discard/replace decision, so that decision's legal-action mask is
+    determined by the infoset (fixes the re-armed Phase-1 bug #21 mask
+    nondeterminism). Asserted live over full games:
+
+      - the actor's prefix ends with (drawn, public): the drawn frame precedes
+        the public draw frame, i.e. the card is in the prefix BEFORE the actor
+        picks discard vs replace;
+      - the drawn frame carries the true pending drawn card, so distinct drawn
+        cards yield distinct prefixes (the mask-determinism precondition);
+      - the frame is actor-private: the opponent's prefix gains no drawn frame.
+
+    Covers both stockpile and discard draws.
+    """
+    seen_stockpile = 0
+    seen_discard = 0
+    for seed in _FULL_SEEDS:
+        game = _setup_python_game_matching_go(seed)
+        rng = random.Random(30_000 + seed)
+        obs_streams: dict = {p: [] for p in range(NUM_PLAYERS)}
+        init_hands = {p: list(game.players[p].hand) for p in range(NUM_PLAYERS)}
+        init_peeks = {
+            p: tuple(game.players[p].initial_peek_indices) for p in range(NUM_PLAYERS)
+        }
+
+        for _ in range(400):
+            if game.is_terminal():
+                break
+            actor = game.get_acting_player()
+            if actor == -1:
+                break
+            legal = list(game.get_legal_actions())
+            if not legal:
+                break
+            action = rng.choice(legal)
+            is_draw = isinstance(action, (ActionDrawStockpile, ActionDrawDiscard))
+
+            game.apply_action(action)
+
+            expected_drawn = None
+            if is_draw:
+                pad = getattr(game, "pending_action_data", None)
+                if pad and getattr(game, "pending_action_player", None) == actor:
+                    expected_drawn = pad.get("drawn_card")
+
+            snap_results = list(getattr(game, "snap_results_log", []) or [])
+            full_obs = _create_observation(None, action, game, actor, snap_results)
+            if full_obs is None:
+                continue
+            for observer in range(NUM_PLAYERS):
+                obs_streams[observer].append(_filter_observation(full_obs, observer))
+
+            if not is_draw or expected_drawn is None:
+                continue
+
+            actor_prefix = se.encode_observation_sequence(
+                init_hands[actor],
+                init_peeks[actor],
+                obs_streams[actor],
+                actor,
+                seq_cap=10**9,
+                add_bos_eos=False,
+            )
+            dec = se.decode_sequence(actor_prefix)
+            assert (
+                len(dec) >= 2
+                and dec[-1].kind == "public"
+                and dec[-2].kind == "drawn"
+            ), (
+                f"seed {seed}: post-draw actor prefix must end with (drawn, public); "
+                f"got tail {[e.kind for e in dec[-3:]]}"
+            )
+            assert _card_ident(dec[-2].drawn_card) == _card_ident(expected_drawn), (
+                f"seed {seed}: drawn frame card {dec[-2].drawn_card} != pending "
+                f"{expected_drawn}"
+            )
+            assert se._card_tok(expected_drawn) in actor_prefix
+
+            opp = 1 - actor
+            opp_prefix = se.encode_observation_sequence(
+                init_hands[opp],
+                init_peeks[opp],
+                obs_streams[opp],
+                opp,
+                seq_cap=10**9,
+                add_bos_eos=False,
+            )
+            odec = se.decode_sequence(opp_prefix)
+            assert odec[-1].kind != "drawn", (
+                f"seed {seed}: opponent's prefix gained a private drawn frame (leak)"
+            )
+
+            if isinstance(action, ActionDrawStockpile):
+                seen_stockpile += 1
+            else:
+                seen_discard += 1
+
+    assert seen_stockpile > 0, "no stockpile-draw post-draw nodes were exercised"
+    print(
+        f"\n[post-draw f1] stockpile-draw nodes={seen_stockpile} "
+        f"discard-draw nodes={seen_discard}"
     )
 
 

@@ -296,6 +296,7 @@ class _GameResult:
         self.max_body = 0
         self.saw_cambia_frame = False
         self.saw_snap_frame = False
+        self.post_draw_verified = 0
         self.init_hands: Dict[int, List[Card]] = {}
         self.init_peeks: Dict[int, Tuple[int, ...]] = {}
         self.obs_streams: Dict[int, List[Any]] = {}
@@ -396,6 +397,14 @@ def _play_lockstep(seed: int, call_cambia_after: int = -1) -> _GameResult:
             pygame.apply_action(py_action)
             apply_games_batch([eng.handle], [a0.handle], [a1.handle], [action_idx])
 
+            # cambia-528: capture the freshly drawn card at a post-draw node so
+            # the drawn frame can be verified in the actor's live Go token body.
+            pend_drawn = None
+            if action_idx in (_DRAW_STOCKPILE_IDX, 1):  # draw stockpile / draw discard
+                pad = getattr(pygame, "pending_action_data", None)
+                if pad and getattr(pygame, "pending_action_player", None) == actor:
+                    pend_drawn = pad.get("drawn_card")
+
             snap_results = list(getattr(pygame, "snap_results_log", []) or [])
             full_obs = _create_observation(None, py_action, pygame, actor, snap_results)
             assert (
@@ -446,6 +455,28 @@ def _play_lockstep(seed: int, call_cambia_after: int = -1) -> _GameResult:
                     res.saw_cambia_frame = True
                 if snap_results:
                     res.saw_snap_frame = True
+                # cambia-528: at a post-draw node the ACTOR's live Go body must
+                # end with (drawn, public) carrying the true pending drawn card,
+                # one event before the discard/replace decision. go_body ==
+                # py_body is already asserted above, so this validates BOTH
+                # tokenizers at the post-draw node.
+                if observer == actor and pend_drawn is not None:
+                    dec = se.decode_sequence(go_body)
+                    assert (
+                        len(dec) >= 2
+                        and dec[-1].kind == "public"
+                        and dec[-2].kind == "drawn"
+                    ), (
+                        f"seed {seed} obs {observer} step {step}: post-draw body "
+                        f"must end with (drawn, public); got {[e.kind for e in dec[-3:]]}"
+                    )
+                    assert se._card_tok(dec[-2].drawn_card) == se._card_tok(
+                        pend_drawn
+                    ), (
+                        f"seed {seed} step {step}: drawn frame card "
+                        f"{dec[-2].drawn_card} != pending {pend_drawn}"
+                    )
+                    res.post_draw_verified += 1
             res.compared += 1
     finally:
         res.init_hands = init_hands
@@ -495,6 +526,23 @@ def test_live_lockstep_token_parity_full_games():
         games_over_cap >= 5
     ), f"only {games_over_cap} games exceeded the cap; long-game coverage too thin"
     assert snap_frames > 0, "no snap frames exercised in any live game"
+
+
+@skip_if_no_go
+def test_live_lockstep_post_draw_drawn_frame_parity():
+    """cambia-528: post-draw nodes are covered explicitly. Over the live lockstep
+    games, every post-draw node has the actor's Go token body ending with
+    (drawn, public) carrying the true pending drawn card (asserted inside
+    _play_lockstep), and Go == Python bytes hold throughout, so both tokenizers
+    put the drawn card in the prefix BEFORE the discard/replace decision."""
+    total_post_draw = 0
+    for seed in _FULL_SEEDS:
+        res = _play_lockstep(seed)
+        total_post_draw += res.post_draw_verified
+    print(f"\n[post-draw parity] verified post-draw nodes={total_post_draw}")
+    assert (
+        total_post_draw >= 20
+    ), f"only {total_post_draw} post-draw nodes verified; coverage too thin"
 
 
 @skip_if_no_go
