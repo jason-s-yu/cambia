@@ -36,7 +36,7 @@ type GameState struct {
 	TurnNumber    uint16                  // 2 bytes
 	Flags         uint16                  // 2 bytes
 	Pending       PendingAction           // 6 bytes
-	Snap          SnapState               // 6 bytes
+	Snap          SnapState               // snap-window state (incl. race-ON commit buffer)
 	LastAction    LastActionInfo          // 12 bytes (estimated)
 	RNG           uint64                  // 8 bytes
 	CambiaCaller  int8                    // 1 byte

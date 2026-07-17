@@ -417,37 +417,234 @@ func TestSnapPenaltyTriggersReshuffle(t *testing.T) {
 	}
 }
 
-// TestSnapRaceEndsAfterFirstSuccess verifies SnapRace rule terminates snap phase early.
-func TestSnapRaceEndsAfterFirstSuccess(t *testing.T) {
+// newSnapRaceGame builds a dealt 2-player race-ON game, seeds both players a
+// matching card at index 0, opens a 2-snapper window (P1 first, then P0), and
+// pushes a matching discard top. Returns the game ready for commit actions.
+func newSnapRaceGame(t *testing.T, seed uint64, allowOpp bool) (GameState, uint8) {
+	t.Helper()
 	rules := DefaultHouseRules()
+	rules.PenaltyDrawCount = 2
+	rules.AllowOpponentSnapping = allowOpp
 	rules.SnapRace = true
-	rules.AllowOpponentSnapping = false
-	gs := NewGame(42, rules)
+	gs := NewGame(seed, rules)
 	gs.Deal()
 
 	targetRank := RankSix
-	snapCard := NewCard(SuitDiamonds, targetRank)
-
-	// Both players have matching cards.
-	gs.Players[0].Hand[0] = snapCard
+	gs.Players[0].Hand[0] = NewCard(SuitDiamonds, targetRank)
 	gs.Players[0].HandLen = 4
 	gs.Players[1].Hand[0] = NewCard(SuitHearts, targetRank)
 	gs.Players[1].HandLen = 4
 
-	// Two snappers: P1 first, then P0.
 	setupSnapPhase(&gs, targetRank, 1, 0, 2)
 	gs.DiscardPile[gs.DiscardLen] = NewCard(SuitClubs, targetRank)
 	gs.DiscardLen++
+	return gs, targetRank
+}
 
-	// P1 snaps own card at index 0 — success.
-	err := gs.ApplyAction(EncodeSnapOwn(0))
-	if err != nil {
-		t.Fatalf("snapOwn (P1) error: %v", err)
+// TestSnapRaceCommitDoesNotMutateUntilResolve verifies the imperfect-info property:
+// the first committer's choice does not change any hand or the discard, so the
+// second committer observes the same state a pre-snap observer would.
+func TestSnapRaceCommitDoesNotMutateUntilResolve(t *testing.T) {
+	gs, _ := newSnapRaceGame(t, 42, false)
+
+	p0Hand0 := gs.Players[0].Hand[0]
+	p1Hand0 := gs.Players[1].Hand[0]
+	discardLen := gs.DiscardLen
+
+	// P1 (snapper slot 0) commits snap-own; must not resolve yet.
+	if err := gs.ApplyAction(EncodeSnapOwn(0)); err != nil {
+		t.Fatalf("P1 commit error: %v", err)
+	}
+	if !gs.Snap.Active {
+		t.Fatal("snap phase must stay active until all snappers commit")
+	}
+	if gs.Snap.CurrentSnapperIdx != 1 {
+		t.Fatalf("CurrentSnapperIdx = %d, want 1 (advanced to P0)", gs.Snap.CurrentSnapperIdx)
+	}
+	if gs.Players[0].HandLen != 4 || gs.Players[1].HandLen != 4 {
+		t.Errorf("hands mutated by a commit: P0 len=%d P1 len=%d, want 4/4",
+			gs.Players[0].HandLen, gs.Players[1].HandLen)
+	}
+	if gs.Players[0].Hand[0] != p0Hand0 || gs.Players[1].Hand[0] != p1Hand0 {
+		t.Error("card 0 mutated by a commit")
+	}
+	if gs.DiscardLen != discardLen {
+		t.Errorf("discard mutated by a commit: len=%d, want %d", gs.DiscardLen, discardLen)
+	}
+	if gs.ActingPlayer() != 0 {
+		t.Errorf("ActingPlayer = %d, want 0 (P0 commits next)", gs.ActingPlayer())
+	}
+}
+
+// TestSnapRaceExactlyOneSuccessLoserPenalized verifies that with two willing
+// committers exactly one snap succeeds (window closes on the single winner) and
+// the losing willing committer draws the penalty.
+func TestSnapRaceExactlyOneSuccessLoserPenalized(t *testing.T) {
+	gs, _ := newSnapRaceGame(t, 42, false)
+
+	if err := gs.ApplyAction(EncodeSnapOwn(0)); err != nil { // P1 commit
+		t.Fatalf("P1 commit error: %v", err)
+	}
+	if err := gs.ApplyAction(EncodeSnapOwn(0)); err != nil { // P0 commit -> resolve
+		t.Fatalf("P0 commit error: %v", err)
 	}
 
-	// With SnapRace=true, snap phase should end immediately after first success.
 	if gs.Snap.Active {
-		t.Error("snap phase should have ended after SnapRace first success")
+		t.Fatal("snap phase should have ended after race resolution")
+	}
+	// Exactly one winner (hand shrank to 3) and one loser (penalized to 6).
+	winners, losers := 0, 0
+	for p := uint8(0); p < 2; p++ {
+		switch gs.Players[p].HandLen {
+		case 3:
+			winners++
+		case 6: // 4 + PenaltyDrawCount(2), capped at MaxHandSize
+			losers++
+		default:
+			t.Errorf("P%d HandLen = %d, want 3 (winner) or 6 (loser)", p, gs.Players[p].HandLen)
+		}
+	}
+	if winners != 1 || losers != 1 {
+		t.Errorf("winners=%d losers=%d, want exactly 1/1", winners, losers)
+	}
+	if !gs.LastAction.SnapSuccess {
+		t.Error("winner's snap should be recorded as a success")
+	}
+}
+
+// TestSnapRaceWinnerNotFixedPriority verifies the race is a true chance draw, not
+// the fixed discarder-first priority of race-OFF: across seeds, both the first-
+// and second-order committers win at least once.
+func TestSnapRaceWinnerNotFixedPriority(t *testing.T) {
+	slot0Wins, slot1Wins := 0, 0
+	for seed := uint64(0); seed < 200; seed++ {
+		gs, _ := newSnapRaceGame(t, seed, false)
+		_ = gs.ApplyAction(EncodeSnapOwn(0)) // P1 = snapper slot 0
+		_ = gs.ApplyAction(EncodeSnapOwn(0)) // P0 = snapper slot 1 -> resolve
+		// Winner's own card 0 was removed (HandLen 3); loser penalized (HandLen 6).
+		switch {
+		case gs.Players[1].HandLen == 3:
+			slot0Wins++
+		case gs.Players[0].HandLen == 3:
+			slot1Wins++
+		default:
+			t.Fatalf("seed %d: no clear winner (P0=%d P1=%d)", seed,
+				gs.Players[0].HandLen, gs.Players[1].HandLen)
+		}
+	}
+	if slot0Wins == 0 || slot1Wins == 0 {
+		t.Errorf("winner is fixed, not a race: slot0Wins=%d slot1Wins=%d (want both > 0)",
+			slot0Wins, slot1Wins)
+	}
+}
+
+// TestSnapRaceAllPassNoPenalty verifies that when every snapper passes, the window
+// closes with no snap and no penalty, and the main turn advances.
+func TestSnapRaceAllPassNoPenalty(t *testing.T) {
+	gs, _ := newSnapRaceGame(t, 42, false)
+	p0Len, p1Len := gs.Players[0].HandLen, gs.Players[1].HandLen
+	discardLen := gs.DiscardLen
+
+	if err := gs.ApplyAction(ActionPassSnap); err != nil { // P1 pass
+		t.Fatalf("P1 pass error: %v", err)
+	}
+	if err := gs.ApplyAction(ActionPassSnap); err != nil { // P0 pass -> resolve
+		t.Fatalf("P0 pass error: %v", err)
+	}
+	if gs.Snap.Active {
+		t.Fatal("snap phase should have ended after all-pass")
+	}
+	if gs.Players[0].HandLen != p0Len || gs.Players[1].HandLen != p1Len {
+		t.Errorf("hands changed on all-pass: P0=%d P1=%d", gs.Players[0].HandLen, gs.Players[1].HandLen)
+	}
+	if gs.DiscardLen != discardLen {
+		t.Errorf("discard changed on all-pass: %d, want %d", gs.DiscardLen, discardLen)
+	}
+}
+
+// TestSnapRaceWrongCardWinnerPenalized verifies a winner who committed a wrong-rank
+// snap is penalized (no card removed) while the passing snapper is untouched.
+func TestSnapRaceWrongCardWinnerPenalized(t *testing.T) {
+	gs, _ := newSnapRaceGame(t, 42, false)
+	// P1 (slot 0) commits a wrong-rank own snap at index 1 (not the seeded rank).
+	gs.Players[1].Hand[1] = NewCard(SuitSpades, RankKing) // != RankSix
+	p1Len := gs.Players[1].HandLen
+	p0Len := gs.Players[0].HandLen
+	discardLen := gs.DiscardLen
+
+	if err := gs.ApplyAction(EncodeSnapOwn(1)); err != nil { // P1 wrong commit
+		t.Fatalf("P1 commit error: %v", err)
+	}
+	if err := gs.ApplyAction(ActionPassSnap); err != nil { // P0 pass -> P1 is sole willing winner
+		t.Fatalf("P0 pass error: %v", err)
+	}
+	if gs.Snap.Active {
+		t.Fatal("snap phase should have ended")
+	}
+	if gs.LastAction.SnapSuccess {
+		t.Error("wrong-rank snap should not succeed")
+	}
+	if gs.Players[1].HandLen != p1Len+2 {
+		t.Errorf("P1 (wrong-card winner) HandLen = %d, want %d (penalized)", gs.Players[1].HandLen, p1Len+2)
+	}
+	if gs.Players[0].HandLen != p0Len {
+		t.Errorf("P0 (passer) HandLen = %d, want %d (untouched)", gs.Players[0].HandLen, p0Len)
+	}
+	if gs.DiscardLen != discardLen {
+		t.Errorf("discard changed on a failed snap: %d, want %d", gs.DiscardLen, discardLen)
+	}
+}
+
+// TestSnapRaceWinningOpponentSnapMove verifies a winning opponent snap opens a
+// PendingSnapMove for the winner, whose move completes the snap and ends the phase.
+func TestSnapRaceWinningOpponentSnapMove(t *testing.T) {
+	gs, target := newSnapRaceGame(t, 42, true)
+	// P1 (slot 0) commits a snap of P0's matching card at index 0; P0 passes.
+	if err := gs.ApplyAction(EncodeSnapOpponent(0)); err != nil {
+		t.Fatalf("P1 opp-snap commit error: %v", err)
+	}
+	if err := gs.ApplyAction(ActionPassSnap); err != nil {
+		t.Fatalf("P0 pass error: %v", err)
+	}
+	// Resolution should have set a PendingSnapMove for the winner (P1).
+	if gs.Pending.Type != PendingSnapMove {
+		t.Fatalf("expected PendingSnapMove after winning opp snap, got %d", gs.Pending.Type)
+	}
+	if gs.Pending.PlayerID != 1 {
+		t.Fatalf("PendingSnapMove player = %d, want 1", gs.Pending.PlayerID)
+	}
+	if gs.DiscardTop().Rank() != target {
+		t.Errorf("snapped card not on discard top: rank %d, want %d", gs.DiscardTop().Rank(), target)
+	}
+	// Winner moves own card 0 into the vacated slot 0.
+	if err := gs.ApplyAction(EncodeSnapOpponentMove(0, 0)); err != nil {
+		t.Fatalf("winner move error: %v", err)
+	}
+	if gs.Snap.Active {
+		t.Error("snap phase should end after the winner's move")
+	}
+}
+
+// TestSnapRaceUndoConsistency verifies that undoing a resolved race and re-applying
+// the same commits reproduces the identical resolution (RNG captured by full-state undo).
+func TestSnapRaceUndoConsistency(t *testing.T) {
+	gs, _ := newSnapRaceGame(t, 7, false)
+	saved := gs // full-state value copy (engine undo semantics)
+
+	_ = gs.ApplyAction(EncodeSnapOwn(0))
+	_ = gs.ApplyAction(EncodeSnapOwn(0))
+	resolved := gs
+
+	// Undo by restoring the saved pre-resolution state, then replay identically.
+	gs = saved
+	_ = gs.ApplyAction(EncodeSnapOwn(0))
+	_ = gs.ApplyAction(EncodeSnapOwn(0))
+
+	if gs.Players[0].HandLen != resolved.Players[0].HandLen ||
+		gs.Players[1].HandLen != resolved.Players[1].HandLen ||
+		gs.DiscardLen != resolved.DiscardLen ||
+		gs.RNG != resolved.RNG {
+		t.Error("race resolution is not deterministic across undo/replay")
 	}
 }
 

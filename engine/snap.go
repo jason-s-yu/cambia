@@ -126,12 +126,6 @@ func (g *GameState) snapOwn(idx uint8) error {
 		g.LastAction.RevealedCard = card
 		g.LastAction.RevealedIdx = idx
 		g.LastAction.RevealedOwner = snapperIdx
-
-		// SnapRace: end snap phase immediately on first success.
-		if g.Rules.SnapRace {
-			g.endSnapPhase()
-			return nil
-		}
 	} else {
 		// FAIL: draw penalty cards.
 		g.LastAction.SnapSuccess = false
@@ -303,9 +297,16 @@ func (g *GameState) drawPenalty(playerIdx uint8) {
 }
 
 // advanceSnapper moves to the next snapper or ends the snap phase if all have acted.
+// Under race-ON (SnapRace) the final advance triggers resolveSnapRace, which draws
+// the winner among willing committers and settles the window; otherwise the phase
+// ends immediately once every sequential snapper has acted (race-OFF).
 func (g *GameState) advanceSnapper() {
 	g.Snap.CurrentSnapperIdx++
 	if g.Snap.CurrentSnapperIdx >= g.Snap.NumSnappers {
+		if g.Rules.SnapRace {
+			g.resolveSnapRace()
+			return
+		}
 		g.endSnapPhase()
 	}
 }

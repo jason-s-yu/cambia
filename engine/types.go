@@ -145,6 +145,16 @@ type PendingAction struct {
 	Data     [4]uint8 // ability-specific data
 }
 
+// Snap commit kinds for the race-ON snap model (HouseRules.SnapRace = true).
+const (
+	SnapCommitPass uint8 = 0 // player passed (not a willing snapper)
+	SnapCommitOwn  uint8 = 1 // committed to snap own card
+	SnapCommitOpp  uint8 = 2 // committed to snap an opponent's card
+)
+
+// SnapCommitNone is the sentinel for an un-recorded commit slot.
+const SnapCommitNone uint16 = 0xFFFF
+
 // SnapState tracks the state of an active snap window.
 type SnapState struct {
 	Active            bool
@@ -152,6 +162,14 @@ type SnapState struct {
 	Snappers          [MaxPlayers]uint8 // up to MaxPlayers snappers
 	NumSnappers       uint8
 	CurrentSnapperIdx uint8
+
+	// Commits is the race-ON commit buffer (HouseRules.SnapRace = true only;
+	// SnapCommitNone-filled and unused under race-OFF). Commits[j] holds the raw
+	// committed action index of Snappers[j], in the driver's action space; slots
+	// 0..CurrentSnapperIdx-1 are filled as commits are recorded. Storing only the
+	// raw action keeps the commit compact; the (kind, slot, opp-rel) intent is
+	// re-decoded at resolution by DecodeSnapCommit.
+	Commits [MaxPlayers]uint16
 }
 
 // ---------------------------------------------------------------------------

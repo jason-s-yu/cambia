@@ -11,7 +11,7 @@ type HouseRules struct {
 	AllowDrawFromDiscard  bool
 	AllowReplaceAbilities bool // if true, replacing also triggers ability
 	AllowOpponentSnapping bool
-	SnapRace              bool  // if true, only one successful snap per discard
+	SnapRace              bool  // snap model: false = race-OFF (sequential discarder-first, the frozen default); true = race-ON, the true N-way race (simultaneous imperfect-info commit, one uniform-random winner among willing snappers, losers penalized) per cambia-564
 	NumJokers             uint8 // 0, 1, or 2 jokers in the deck
 	LockCallerHand        bool  // if true, the Cambia caller cannot replace cards from hand
 	NumPlayers            uint8 // number of active players (2–8); 0 treated as 2

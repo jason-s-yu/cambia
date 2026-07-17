@@ -20,8 +20,13 @@ func (g *GameState) ApplyNPlayerAction(actionIdx uint16) error {
 		return fmt.Errorf("pending snap move: expected NPlayerSnapOpponentMove action, got %d", actionIdx)
 	}
 
-	// Snap phase actions.
+	// Snap phase actions. Under race-ON (SnapRace) the choice is recorded as a
+	// commit and resolved by a uniform-random winner once all snappers commit;
+	// under race-OFF it resolves immediately in sequential discarder-first order.
 	if g.Snap.Active {
+		if g.Rules.SnapRace {
+			return g.recordSnapCommit(actionIdx)
+		}
 		if actionIdx == NPlayerActionPassSnap {
 			return g.passSnap()
 		}
@@ -188,11 +193,6 @@ func (g *GameState) nplayerSnapOpponent(slot, oppRelIdx uint8) error {
 		g.Pending.PlayerID = snapperIdx
 		g.Pending.Data[0] = opponent
 		g.Pending.Data[1] = slot
-
-		if g.Rules.SnapRace {
-			g.endSnapPhase()
-			return nil
-		}
 	} else {
 		g.LastAction.SnapSuccess = false
 		g.LastAction.SnapPenalty = g.Rules.PenaltyDrawCount
