@@ -66,7 +66,7 @@ int32 offsets here would silently wrap at production scale, so offsets are
 int64 -- correctness over the literal spec wording (flagged to @chief).
 
 Feature (token) pool dtype is chosen from sequence_encoding.VOCAB_SIZE at
-import time: int16 if the vocabulary fits (it does today: VOCAB_SIZE=325),
+import time: int16 if the vocabulary fits (it does today: VOCAB_SIZE=326),
 else int32, same as the fixed-width design this replaces.
 
 Directory layout (this instance owns ``self.path`` as its storage directory):
@@ -104,8 +104,9 @@ logger = logging.getLogger(__name__)
 # Feature (token) dtype selection -- asserted at import time.
 # ---------------------------------------------------------------------------
 # Token ids run [0, VOCAB_SIZE). int16 covers ids up to 32767. VOCAB_SIZE is
-# currently 325 (see sequence_encoding.py: 4 special + 5 frame + 8 actor + 240
-# action + 54 card + 9 slot + 5 outcome), comfortably under the int16 ceiling.
+# currently 326 (see sequence_encoding.py: 4 special + 5 frame + 8 actor + 240
+# action + 54 card + 9 slot + 5 outcome + 1 peek-result marker), comfortably
+# under the int16 ceiling.
 # If the vocabulary ever grows past it, fail loudly here rather than silently
 # wrapping/truncating token ids into a too-narrow dtype.
 if VOCAB_SIZE >= 2**31:

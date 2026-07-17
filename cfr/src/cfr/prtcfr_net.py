@@ -35,7 +35,7 @@ from ..encoding import NUM_ACTIONS
 from ..sequence_encoding import PAD_ID, SEQ_CAP, VOCAB_SIZE
 
 # Architecture defaults (pinned by the Phase 1 Sprint 1 interface contract).
-GRU_VOCAB_SIZE: int = VOCAB_SIZE  # 325
+GRU_VOCAB_SIZE: int = VOCAB_SIZE  # 326 (325 + cambia-529 peek-result marker)
 GRU_EMBED_DIM: int = 64
 GRU_HIDDEN_DIM: int = 256
 GRU_NUM_LAYERS: int = 2

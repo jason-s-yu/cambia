@@ -44,6 +44,10 @@ from src.analysis_tools import AnalysisTools
 from src.constants import NUM_PLAYERS, ActionDrawStockpile
 from src.utils import InfosetKey
 from src.sequence_encoding import encode_observation_sequence
+from src.cfr.worker import (
+    _create_observation as _wk_create_observation,
+    _filter_observation as _wk_filter_observation,
+)
 
 
 def _encode_seq(hand, peek_indices, observations, observer_id, seq_cap):
@@ -192,6 +196,7 @@ class Builder:
         tokenize=False,
         seq_cap=256,
         exact_weights=False,
+        production_obs=False,
     ):
         self.cfg = cfg
         self.max_nodes = max_nodes
@@ -201,6 +206,16 @@ class Builder:
         # weights. Default off keeps the hot float builder allocation-identical.
         # See Chance.wfrac and tools/tiny_exact.py (cambia-530).
         self.exact_weights = exact_weights
+        # production_obs (additive, default off): when tokenizing, build obs_path
+        # through the PRODUCTION worker path (src.cfr.worker._create_observation /
+        # _filter_observation) instead of the analysis_tools BR path. The BR path
+        # nulls peeked_cards and surfaces the drawn card at draw time already, so
+        # it does not reflect the cambia-528/529 worker-side fixes; the worker
+        # path does (drawn frame at the post-draw node, ability-peek result
+        # frames). Used by the B3 representation-floor gate to key tabular CFR on
+        # the true production token stream. Default off preserves every existing
+        # caller's behavior byte-for-byte.
+        self.production_obs = production_obs
         # PRT-CFR tokenization (additive, default off). When on, each Decision node
         # gets seq_tokens: the acting player's perfect-recall observation-action token
         # stream, produced by src.sequence_encoding.encode_observation_sequence over the
@@ -414,12 +429,16 @@ class Builder:
         # observation + filter as _advance (the production information boundary).
         pushed_obs = False
         if self.tokenize:
-            obs = AnalysisTools._create_observation_for_br(game, action, acting)
+            if self.production_obs:
+                snaps = list(getattr(game, "snap_results_log", []) or [])
+                obs = _wk_create_observation(None, action, game, acting, snaps)
+                filt = _wk_filter_observation
+            else:
+                obs = AnalysisTools._create_observation_for_br(game, action, acting)
+                filt = AnalysisTools._filter_observation_for_br
             if obs is not None:
                 for pid in (0, 1):
-                    self.obs_path[pid].append(
-                        AnalysisTools._filter_observation_for_br(obs, pid)
-                    )
+                    self.obs_path[pid].append(filt(obs, pid))
                 pushed_obs = True
         child = self._build_decision_or_terminal(game, new_ag, depth + 1)
         if pushed_obs:
@@ -447,6 +466,7 @@ def build_tree(
     seq_cap=256,
     quiet=True,
     exact_weights=False,
+    production_obs=False,
 ):
     """Synthetic root: K deals, each weight 1/K; each is a full chance-tree.
 
@@ -478,6 +498,7 @@ def build_tree(
             tokenize=tokenize,
             seq_cap=seq_cap,
             exact_weights=exact_weights,
+            production_obs=production_obs,
         )
         game = CambiaGameState(
             house_rules=cfg.cambia_rules, _rng=random.Random(seed0 + d)

@@ -513,8 +513,11 @@ class PRTCFRConfig(_CambiaBaseModel):
     the X2 scorer); changing them breaks snapshot/checkpoint compatibility.
     """
 
-    # GRU sequence encoder (pinned).
-    gru_vocab_size: int = 325
+    # GRU sequence encoder (pinned). Vocab = sequence_encoding.VOCAB_SIZE; 326
+    # after the cambia-529 peek-result block was appended (was 325). Growing it
+    # invalidates pre-cambia-529 checkpoints (the token embedding row count
+    # changed): acceptable, X4 is future work.
+    gru_vocab_size: int = 326
     gru_embed_dim: int = 64
     gru_hidden_dim: int = 256
     gru_num_layers: int = 2

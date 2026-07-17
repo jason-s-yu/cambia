@@ -41,6 +41,8 @@ from ..constants import (
     ActionAbilityPeekOtherSelect,
     ActionAbilityPeekOwnSelect,
     ActionDiscard,
+    ActionDrawDiscard,
+    ActionDrawStockpile,
     ActionReplace,
     ActionSnapOpponentMove,
     DecisionContext,
@@ -1229,7 +1231,22 @@ def _create_observation(
 
         # Determine drawn card based on action and NEXT state
         drawn_card_for_obs = None
-        if isinstance(action, ActionDiscard):
+        if isinstance(action, (ActionDrawStockpile, ActionDrawDiscard)):
+            # Surface the freshly drawn card at the post-draw decision node. The
+            # card lives in the post-draw pending state (engine sets
+            # pending_action_data["drawn_card"]); the tokenizer emits it as the
+            # actor-private drawn frame BEFORE the discard/replace decision, so
+            # that decision's legal-action mask is determined by the infoset
+            # (cambia-528). Belief tracking still reads drawn_card on Replace
+            # (populated below); the tokenizer gates the drawn frame on the draw
+            # action, so the two uses do not double-emit.
+            pad = getattr(next_state, "pending_action_data", None)
+            if (
+                pad
+                and getattr(next_state, "pending_action_player", None) == acting_player
+            ):
+                drawn_card_for_obs = pad.get("drawn_card")
+        elif isinstance(action, ActionDiscard):
             # The card just discarded *was* the drawn card. It's now the top of discard.
             drawn_card_for_obs = next_state.get_discard_top()
             if drawn_card_for_obs is None:
@@ -1356,8 +1373,13 @@ def _filter_observation(obs: AgentObservation, observer_id: int) -> AgentObserva
     if obs.drawn_card and obs.acting_player != observer_id:
         filtered_obs.drawn_card = None
     elif obs.drawn_card and obs.acting_player == observer_id:
-        # Keep drawn_card only if the action is Discard or Replace (when agent needs it)
-        if not isinstance(obs.action, (ActionDiscard, ActionReplace)):
+        # Keep drawn_card for the actor on the draw action (the tokenizer's
+        # post-draw private frame, cambia-528) and on Discard/Replace (belief
+        # tracking reads it there). Every other action nulls it.
+        if not isinstance(
+            obs.action,
+            (ActionDiscard, ActionReplace, ActionDrawStockpile, ActionDrawDiscard),
+        ):
             filtered_obs.drawn_card = None
 
     # Filter peeked cards - only pass if observer was the actor performing the peek/look
