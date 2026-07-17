@@ -109,18 +109,19 @@ def test_strategy_uniform_fallback_when_all_advantages_nonpositive():
 
 
 def test_param_count_matches_pinned_architecture():
-    """The architecture is pinned (Embedding(326,64) -> GRU(64,256,2) -> LN;
-    Linear(256,256)->ReLU->Linear(256,146)). That exact architecture is 766,738
+    """The architecture is pinned (Embedding(327,64) -> GRU(64,256,2) -> LN;
+    Linear(256,256)->ReLU->Linear(256,146)). That exact architecture is 766,802
     parameters. The vocab grew 325 -> 326 with the cambia-529 peek-result marker
-    (embedding +64 params; 766,674 -> 766,738), which invalidates pre-cambia-529
+    and 326 -> 327 with the cambia-564 race-resolution marker (embedding +64
+    params each; 766,674 -> 766,738 -> 766,802), which invalidates pre-cambia-529
     checkpoints -- acceptable, X4 is future work. The contract's "~1.2M" is an
     over-estimate; the pin (shared with the X2 scorer's checkpoint loader) is
     authoritative."""
     net = PRTCFRNet(device="cpu")
     n = net.num_parameters()
-    # Embedding 326*64=20864; GRU(64,256,2)=642048; LayerNorm 512;
-    # head 256*256+256 + 256*146+146 = 103314 -> 766738.
-    assert n == 766_738, f"param count {n} != pinned-architecture count 766738"
+    # Embedding 327*64=20928; GRU(64,256,2)=642048; LayerNorm 512;
+    # head 256*256+256 + 256*146+146 = 103314 -> 766802.
+    assert n == 766_802, f"param count {n} != pinned-architecture count 766802"
 
 
 def test_pad_tokens_widths_and_truncation():
