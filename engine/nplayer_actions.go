@@ -11,6 +11,9 @@ func (g *GameState) ApplyNPlayerAction(actionIdx uint16) error {
 	if g.IsGameOver() {
 		return fmt.Errorf("game is already over")
 	}
+	// A race-ON resolution record is live only for the Observe window right after
+	// the resolving action; clear it before applying the next action.
+	g.Snap.RaceResolved = false
 
 	// Snap move resolution takes priority.
 	if g.Pending.Type == PendingSnapMove {

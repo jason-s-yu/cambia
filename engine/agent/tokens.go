@@ -91,6 +91,17 @@ const (
 	// the ACTOR (card owner), SLOT, and CARD blocks: [PEEK, OWNER, SLOT, CARD].
 	numPeekFrameIDs = 1
 	peekFrameWidth  = 4
+
+	// Race-resolution block (cambia-564): APPENDED after the peek block so every
+	// id above keeps its value. One marker heads each PUBLIC race-resolution frame,
+	// emitted once per willing committer at a race-ON snap resolution; the payload
+	// reuses the ACTOR (snapper seat), OUTCOME, SLOT, and CARD blocks:
+	// [RACE, seat, outcome, slot, card]. The card is the snapped card for a winning
+	// committer (EmptyCard/none for a penalized loser or a failed winner). Under
+	// race-ON every per-commit public frame is suppressed (imperfect info); these
+	// resolution frames are the only public snap-window signal.
+	numRaceFrameIDs = 1
+	raceFrameWidth  = 5
 )
 
 // Block bases. FRAME_BASE..OUTCOME_BASE are computed to match Python's fixed
@@ -103,6 +114,7 @@ var (
 	slotBase      int32
 	outcomeBase   int32
 	peekFrameBase int32
+	raceFrameBase int32
 	vocabSize     int32
 
 	// numActionIDs is the total size of the ACTION block (sum of per-tag strides).
@@ -175,7 +187,8 @@ func init() {
 	slotBase = cardBase + numCardIDs
 	outcomeBase = slotBase + tokNumSlotIDs
 	peekFrameBase = outcomeBase + numSnapOutcomeIDs
-	vocabSize = peekFrameBase + numPeekFrameIDs
+	raceFrameBase = peekFrameBase + numPeekFrameIDs
+	vocabSize = raceFrameBase + numRaceFrameIDs
 }
 
 // ---------------------------------------------------------------------------
@@ -254,6 +267,10 @@ func outcomeToken(local int) int32 { return outcomeBase + int32(local) }
 // peekFrameToken returns the marker id heading an actor-private peek-result
 // frame (cambia-529).
 func peekFrameToken() int32 { return peekFrameBase }
+
+// raceFrameToken returns the marker id heading a public race-resolution frame
+// (cambia-564).
+func raceFrameToken() int32 { return raceFrameBase }
 
 // actionLocalTag decodes a 2-player action index into its Python tag name and
 // the relative offset within that tag's stride. It mirrors _action_local_id.
@@ -450,6 +467,27 @@ func (ts *TokenStream) Observe(g *engine.GameState, observerID uint8) error {
 	actor := g.LastAction.ActingPlayer
 	idx := g.LastAction.ActionIdx
 
+	// Race-ON snap-window observation (imperfect info, cambia-564). Per-commit
+	// public frames are suppressed so no committer's choice leaks before the race
+	// resolves; the public race-resolution frames are the only snap-window signal
+	// and are emitted for the resolving action's Observe window (RaceResolved). The
+	// discard that OPENS the window is not a snap action and falls through to normal
+	// emission below.
+	if g.Rules.SnapRace {
+		if g.Snap.RaceResolved {
+			putRaceFrames(g, put)
+			if !ts.appendTokens(scratch[:n]) {
+				return ErrTokenOverflow
+			}
+			return nil
+		}
+		if g.Snap.Active {
+			if _, _, _, ok := engine.DecodeSnapCommit(idx); ok {
+				return nil // suppress an intermediate commit (no observation)
+			}
+		}
+	}
+
 	// 1. Private own-draw frame: emitted for the actor-observer at the post-draw
 	// decision node (right after a draw action). The freshly drawn card is held
 	// in the pending-discard state (Pending.Data[0]) that drawStockpile/
@@ -509,8 +547,10 @@ func (ts *TokenStream) Observe(g *engine.GameState, observerID uint8) error {
 		put(actorToken(caller))
 	}
 
-	// 4. Public snap frames. See the snap lifecycle note above.
-	if g.Snap.Active {
+	// 4. Public snap frames (race-OFF only). Race-ON emits its public snap-window
+	// signal via the race-resolution frames above; the per-action accumulator is
+	// never used under race-ON (snapLen stays 0).
+	if g.Snap.Active && !g.Rules.SnapRace {
 		if isLoggedSnapAction(idx) {
 			outcome, slot := classifySnap(g)
 			frame := [4]int32{
@@ -535,6 +575,50 @@ func (ts *TokenStream) Observe(g *engine.GameState, observerID uint8) error {
 		return ErrTokenOverflow
 	}
 	return nil
+}
+
+// putRaceFrames emits one public race-resolution frame per willing committer of a
+// just-resolved race-ON window (g.Snap.RaceResolved), in snapper order:
+// [RACE, seat, outcome, slot, card]. The winner carries its outcome + snapped card
+// + slot; each losing willing committer carries a penalty with no slot/card.
+// Committers who passed emit nothing. Mirrors sequence_encoding.py race_frames.
+func putRaceFrames(g *engine.GameState, put func(int32)) {
+	n := g.Snap.NumSnappers
+	win := g.Snap.RaceWinner
+	for j := uint8(0); j < n; j++ {
+		kind, _, _, ok := engine.DecodeSnapCommit(g.Snap.Commits[j])
+		if !ok || kind == engine.SnapCommitPass {
+			continue
+		}
+		seat := g.Snap.Snappers[j]
+		put(raceFrameToken())
+		put(actorToken(int(seat)))
+		if j == win {
+			outcome, slot, card := raceWinnerOutcome(g)
+			put(outcomeToken(outcome))
+			put(slotTokenSigned(slot))
+			put(cardToken(card))
+		} else {
+			put(outcomeToken(outcomePenalty))
+			put(slotTokenSigned(-1))
+			put(cardToken(engine.EmptyCard))
+		}
+	}
+}
+
+// raceWinnerOutcome derives the winning committer's (outcome, slot, card) from
+// LastAction (set by resolveWinnerSnapOwn/Opp) and the winner's committed kind.
+// A successful snap carries the snapped card + its slot; a failed winner (wrong
+// card) carries a penalty with no slot/card.
+func raceWinnerOutcome(g *engine.GameState) (outcome int, slot int, card engine.Card) {
+	kind, _, _, _ := engine.DecodeSnapCommit(g.Snap.Commits[g.Snap.RaceWinner])
+	if g.LastAction.SnapSuccess {
+		if kind == engine.SnapCommitOpp {
+			return outcomeSuccessOpp, int(g.LastAction.RevealedIdx), g.LastAction.RevealedCard
+		}
+		return outcomeSuccessOwn, int(g.LastAction.RevealedIdx), g.LastAction.RevealedCard
+	}
+	return outcomePenalty, -1, engine.EmptyCard
 }
 
 // ---------------------------------------------------------------------------
@@ -579,7 +663,7 @@ func (ts *TokenStream) CopySince(since int32, out []int32) int32 {
 // TokenVocabFields is the number of layout integers TokenVocab writes, in a
 // stable positional order asserted against sequence_encoding.py by the
 // constants cross-check test.
-const TokenVocabFields = 23
+const TokenVocabFields = 25
 
 // TokenVocab writes the vocabulary layout constants into out (length >=
 // TokenVocabFields) and returns the number written, or -1 if out is too small.
@@ -611,6 +695,8 @@ func TokenVocab(out []int32) int {
 		MaxTokenStream,    // 20 Go per-agent hard cap
 		peekFrameBase,     // 21 PEEK_FRAME_BASE
 		numPeekFrameIDs,   // 22 NUM_PEEK_FRAME_IDS
+		raceFrameBase,     // 23 RACE_FRAME_BASE
+		numRaceFrameIDs,   // 24 NUM_RACE_FRAME_IDS
 	}
 	copy(out, vals[:])
 	return TokenVocabFields

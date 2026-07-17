@@ -19,6 +19,7 @@ func TestTokenVocabLayoutContiguous(t *testing.T) {
 		{slotBase, slotBase + tokNumSlotIDs},
 		{outcomeBase, outcomeBase + numSnapOutcomeIDs},
 		{peekFrameBase, peekFrameBase + numPeekFrameIDs},
+		{raceFrameBase, raceFrameBase + numRaceFrameIDs},
 	}
 	cursor := int32(0)
 	for _, s := range spans {
@@ -30,13 +31,17 @@ func TestTokenVocabLayoutContiguous(t *testing.T) {
 	if cursor != vocabSize {
 		t.Fatalf("vocab blocks end at %d, vocabSize=%d", cursor, vocabSize)
 	}
-	// Frozen expected values (must match the Python tokenizer): 325 ids before
-	// the cambia-529 peek-result block, +1 marker appended at the end = 326.
-	if vocabSize != 326 {
-		t.Fatalf("vocabSize=%d, want 326", vocabSize)
+	// Frozen expected values (must match the Python tokenizer): 325 ids before the
+	// cambia-529 peek-result block (+1 marker = 326), then the cambia-564 race
+	// block (+1 marker appended at the end = 327).
+	if vocabSize != 327 {
+		t.Fatalf("vocabSize=%d, want 327", vocabSize)
 	}
 	if peekFrameBase != 325 {
 		t.Fatalf("peekFrameBase=%d, want 325 (appended after the outcome block)", peekFrameBase)
+	}
+	if raceFrameBase != 326 {
+		t.Fatalf("raceFrameBase=%d, want 326 (appended after the peek block)", raceFrameBase)
 	}
 	if numActionIDs != 240 {
 		t.Fatalf("numActionIDs=%d, want 240", numActionIDs)

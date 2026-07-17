@@ -143,6 +143,12 @@ class CambiaGameState(QueryMixin, SnapLogicMixin, AbilityMixin):
     # snapper i's committed GameAction. Populated only on the race-ON path; unused
     # (and left empty) under race-OFF. See SnapLogicMixin._handle_snap_race_commit.
     snap_commits: List[Optional[GameAction]] = field(default_factory=list)
+    # Race-ON resolution record for the token layer (mirrors the Go engine's
+    # preserved SnapState + RaceResolved). Set by _resolve_snap_race to a list of
+    # per-willing-committer dicts {seat, outcome, slot, card} in snapper order, and
+    # read by the tokenizer for the Observe window right after the resolving action;
+    # cleared at the start of the next apply_action. None under race-OFF.
+    race_resolution: Optional[List[Dict[str, Any]]] = None
 
     # --- Initialization ---
     def __post_init__(self):
@@ -259,6 +265,10 @@ class CambiaGameState(QueryMixin, SnapLogicMixin, AbilityMixin):
         if self._game_over:
             logger.warning("Attempted action %s on a finished game.", action)
             return [], lambda: None
+
+        # A race-ON resolution record is live only for the Observe window right
+        # after the resolving action; clear it before applying the next action.
+        self.race_resolution = None
 
         acting_player = self.get_acting_player()  # Method from QueryMixin
         if acting_player == -1:

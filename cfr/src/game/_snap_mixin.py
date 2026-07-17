@@ -804,16 +804,38 @@ class SnapLogicMixin:
             )
             delta_list.extend(penalty_deltas)
 
-        winner = self.snap_potential_snappers[win_idx]
+        # Snapshot seats before resolving: a winning opponent snap clears
+        # snap_potential_snappers, so the race-resolution record below must read
+        # from the snapshot, not the (possibly cleared) live list.
+        snappers = list(self.snap_potential_snappers)
+        winner = snappers[win_idx]
         win_action = self.snap_commits[win_idx]
         if isinstance(win_action, ActionSnapOpponent):
-            pending = self._resolve_winner_snap_opp(
+            w_outcome, w_slot, w_card, pending = self._resolve_winner_snap_opp(
                 winner, win_action, undo_stack, delta_list
             )
         else:
-            pending = self._resolve_winner_snap_own(
+            w_outcome, w_slot, w_card = self._resolve_winner_snap_own(
                 winner, win_action, undo_stack, delta_list
             )
+            pending = False
+
+        # Build the public race-resolution record for the token layer, one entry per
+        # willing committer in snapper order: the winner carries its outcome + snapped
+        # card + slot; each losing willing committer carries a penalty. Mirrors the Go
+        # tokenizer's putRaceFrames (which reads the preserved commit record).
+        race_res = []
+        for li in willing:
+            seat = snappers[li]
+            if li == win_idx:
+                race_res.append(
+                    {"seat": seat, "outcome": w_outcome, "slot": w_slot, "card": w_card}
+                )
+            else:
+                race_res.append(
+                    {"seat": seat, "outcome": "penalty", "slot": -1, "card": None}
+                )
+        self.race_resolution = race_res
 
         if pending:
             # Winning opponent snap: the winner's move is pending and the snap phase
@@ -865,9 +887,10 @@ class SnapLogicMixin:
 
     def _resolve_winner_snap_own(
         self: "CambiaGameState", winner, action, undo_stack, delta_list
-    ) -> bool:
-        """Resolve a winning snap-own commit. Returns False (no pending move).
-        Mirrors the race-OFF ActionSnapOwn resolution body."""
+    ):
+        """Resolve a winning snap-own commit. Returns (outcome_name, slot, card):
+        ("success_own", snap_idx, snapped_card) on success, ("penalty", -1, None)
+        on a wrong-card snap. Mirrors the race-OFF ActionSnapOwn resolution body."""
         target_rank = self.snap_discarded_card.rank
         snap_idx = action.own_card_hand_index
         hand = self.players[winner].hand
@@ -932,13 +955,19 @@ class SnapLogicMixin:
                 winner, self.house_rules.penaltyDrawCount, undo_stack
             )
             delta_list.extend(penalty_deltas)
-        return False
+        if snap_success:
+            return ("success_own", snap_idx, card_to_log)
+        return ("penalty", -1, None)
 
     def _resolve_winner_snap_opp(
         self: "CambiaGameState", winner, action, undo_stack, delta_list
-    ) -> bool:
-        """Resolve a winning snap-opponent commit. Returns True if a pending move
-        was set (success), else False. Mirrors the race-OFF ActionSnapOpponent body."""
+    ):
+        """Resolve a winning snap-opponent commit. Returns
+        (outcome_name, slot, card, pending): ("success_opp", opp_slot, snapped_card,
+        True) on success (pending move set), ("penalty", -1, None, False) otherwise.
+        Mirrors the race-OFF ActionSnapOpponent resolution body."""
+        win_slot = -1
+        win_card = None
         target_rank = self.snap_discarded_card.rank
         snap_success = False
         snap_penalty = False
@@ -1015,6 +1044,8 @@ class SnapLogicMixin:
                             delta_list,
                         )
                         snap_success = True
+                        win_slot = target_opp_hand_idx
+                        win_card = card_to_remove
 
                         # Set the pending move, deactivate the snap phase, and clear
                         # snap state so no further committer resumes (the winner's
@@ -1097,7 +1128,9 @@ class SnapLogicMixin:
                 winner, self.house_rules.penaltyDrawCount, undo_stack
             )
             delta_list.extend(penalty_deltas)
-        return pending_set
+        if snap_success:
+            return ("success_opp", win_slot, win_card, True)
+        return ("penalty", -1, None, False)
 
     # --- Snap Phase Initiation and Termination ---
 

@@ -112,6 +112,13 @@ func (g *GameState) resolveSnapRace() {
 	// enumerable chance point. The Python tiny_solver guards against SnapRace=true.
 	winSlot := willing[g.randN(uint64(wc))]
 
+	// Record the resolution for the token layer. RaceResolved is preserved past
+	// the phase end (endSnapRacePhase / the pending-move path) and cleared at the
+	// next ApplyAction, so the public race-resolution frame is emitted exactly for
+	// the Observe window following this resolving action.
+	g.Snap.RaceWinner = winSlot
+	g.Snap.RaceResolved = true
+
 	// Penalize the losing willing committers first. drawPenalty only appends to a
 	// hand (it never shifts existing indices), so the winner's committed slot
 	// indices remain valid regardless of this ordering.
@@ -141,10 +148,24 @@ func (g *GameState) resolveSnapRace() {
 		// Winning opponent snap: the winner must now move a card into the vacated
 		// slot. The phase stays active with PendingSnapMove taking priority; the
 		// winner's SnapOpponentMove action ends the phase (SnapRace branch in
-		// snapOpponentMove / nplayerSnapOpponentMove).
+		// snapOpponentMove / nplayerSnapOpponentMove). The resolution record stays
+		// live (RaceResolved) for the token layer this step. Point CurrentSnapperIdx
+		// at the winner so ActingPlayer/DecisionCtx (which consult Snap before
+		// Pending while Snap.Active) resolve to the winner, not a stale committer.
+		g.Snap.CurrentSnapperIdx = winSlot
 		return
 	}
-	g.endSnapPhase()
+	g.endSnapRacePhase()
+}
+
+// endSnapRacePhase ends a resolved race window while PRESERVING the resolution
+// record (Commits, Snappers, NumSnappers, RaceWinner, RaceResolved) so the token
+// layer can emit the public race-resolution frame for this step's Observe. Unlike
+// endSnapPhase it does not zero SnapState; the record is cleared at the next
+// ApplyAction. Snap.Active is set false so ActingPlayer/DecisionCtx leave the phase.
+func (g *GameState) endSnapRacePhase() {
+	g.Snap.Active = false
+	g.advanceTurn()
 }
 
 // resolveWinnerSnapOwn resolves a winning snap-own commit for player p. It does
