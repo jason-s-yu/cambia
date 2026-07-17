@@ -138,6 +138,11 @@ class CambiaGameState(QueryMixin, SnapLogicMixin, AbilityMixin):
     snap_potential_snappers: List[int] = field(default_factory=list)
     snap_current_snapper_idx: int = 0
     snap_results_log: List[Dict[str, Any]] = field(default_factory=list)
+    # Race-ON commit buffer (house_rules.snapRace only; mirrors the Go engine's
+    # SnapState.Commits). Parallel to snap_potential_snappers: snap_commits[i] is
+    # snapper i's committed GameAction. Populated only on the race-ON path; unused
+    # (and left empty) under race-OFF. See SnapLogicMixin._handle_snap_race_commit.
+    snap_commits: List[Optional[GameAction]] = field(default_factory=list)
 
     # --- Initialization ---
     def __post_init__(self):

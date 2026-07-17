@@ -177,6 +177,16 @@ class SnapLogicMixin:
             acting_player,
             action,
         )
+
+        # Race-ON (snapRace=true): record this snapper's commit without mutating any
+        # hand, then resolve the N-way race once every snapper has committed. This
+        # mirrors the Go engine's dispatcher intercept (ApplyAction -> recordSnapCommit)
+        # and leaves the race-OFF sequential resolution below byte-identical.
+        if self.house_rules.snapRace:
+            return self._handle_snap_race_commit(
+                action, acting_player, undo_stack, delta_list
+            )
+
         target_rank = self.snap_discarded_card.rank
         snap_success = False
         snap_penalty = False
@@ -693,6 +703,401 @@ class SnapLogicMixin:
                     self._end_snap_phase(undo_stack, delta_list)  # Attempt cleanup
 
         return True  # Action was processed (passed, snapped, penalized, or errored out but handled)
+
+    # --- Race-ON (snapRace) snap resolution ---
+    # Mirrors the Go engine's snap_race.go: a true N-way race with a simultaneous
+    # imperfect-info commit (a commit mutates no hand), one uniform-random winner
+    # among the willing committers, and a penalty for every losing willing committer.
+
+    def _handle_snap_race_commit(
+        self: "CambiaGameState",
+        action: GameAction,
+        acting_player: int,
+        undo_stack: Deque,
+        delta_list: StateDelta,
+    ) -> bool:
+        """Record one snapper's commit (no hand mutation) and, once the final
+        snapper has committed, resolve the race. Mirrors Go recordSnapCommit +
+        advanceSnapper."""
+        idx = self.snap_current_snapper_idx
+        n = len(self.snap_potential_snappers)
+
+        # Record the commit into the parallel commit buffer.
+        orig_commits = list(self.snap_commits)
+        if idx == 0 or len(self.snap_commits) != n:
+            base = [None] * n
+        else:
+            base = list(self.snap_commits)
+        new_commits = list(base)
+        if 0 <= idx < n:
+            new_commits[idx] = action
+
+        def change_commit():
+            self.snap_commits = new_commits
+
+        def undo_commit():
+            self.snap_commits = orig_commits
+
+        self._add_change(
+            change_commit,
+            undo_commit,
+            ("snap_race_commit", acting_player, type(action).__name__),
+            undo_stack,
+            delta_list,
+        )
+
+        # Advance to the next committer (mirrors the race-OFF snapper advance).
+        original_idx = idx
+        next_idx = idx + 1
+
+        def change_idx():
+            self.snap_current_snapper_idx = next_idx
+
+        def undo_idx():
+            self.snap_current_snapper_idx = original_idx
+
+        self._add_change(
+            change_idx,
+            undo_idx,
+            ("set_attr", "snap_current_snapper_idx", next_idx, original_idx),
+            undo_stack,
+            delta_list,
+        )
+
+        if next_idx >= n:
+            self._resolve_snap_race(undo_stack, delta_list)
+        return True
+
+    def _resolve_snap_race(
+        self: "CambiaGameState", undo_stack: Deque, delta_list: StateDelta
+    ) -> None:
+        """Draw the uniform-random winner among willing committers, penalize the
+        losers, and resolve the winner's snap. Mirrors Go resolveSnapRace."""
+        n = len(self.snap_potential_snappers)
+        willing = [
+            i
+            for i in range(n)
+            if i < len(self.snap_commits)
+            and self.snap_commits[i] is not None
+            and not isinstance(self.snap_commits[i], ActionPassSnap)
+        ]
+        if not willing:
+            # Everyone passed: no snap, no penalty.
+            self._end_snap_phase(undo_stack, delta_list)
+            return
+
+        # Uniform-random winner among willing committers. randint(0, k-1) is
+        # duck-compatible with both random.Random and GoXorShift64Rng, and on the
+        # Go-synced RNG consumes exactly one draw == Go's randN(len(willing)).
+        win_local = self._rng.randint(0, len(willing) - 1)
+        win_idx = willing[win_local]
+
+        # Penalize the losing willing committers first (matches Go's loser loop),
+        # then resolve the winner. Penalty draws only append to a hand, so the
+        # winner's committed indices stay valid.
+        for li in willing:
+            if li == win_idx:
+                continue
+            loser = self.snap_potential_snappers[li]
+            penalty_deltas = self._apply_penalty(
+                loser, self.house_rules.penaltyDrawCount, undo_stack
+            )
+            delta_list.extend(penalty_deltas)
+
+        winner = self.snap_potential_snappers[win_idx]
+        win_action = self.snap_commits[win_idx]
+        if isinstance(win_action, ActionSnapOpponent):
+            pending = self._resolve_winner_snap_opp(
+                winner, win_action, undo_stack, delta_list
+            )
+        else:
+            pending = self._resolve_winner_snap_own(
+                winner, win_action, undo_stack, delta_list
+            )
+
+        if pending:
+            # Winning opponent snap: the winner's move is pending and the snap phase
+            # is already deactivated; do not end the phase (mirrors Go leaving a
+            # PendingSnapMove that the winner's move then completes).
+            return
+        self._end_snap_phase(undo_stack, delta_list)
+
+    def _log_snap_race_result(
+        self: "CambiaGameState",
+        snapper,
+        action_type_str,
+        target_rank,
+        snap_success,
+        snap_penalty,
+        card_to_log,
+        attempted_card_str,
+        undo_stack,
+        delta_list,
+        removed_own_index=None,
+        removed_opponent_index=None,
+    ) -> None:
+        """Append a snap result to snap_results_log (mirrors the race-OFF logger)."""
+        log_details = {
+            "snapper": snapper,
+            "action_type": action_type_str,
+            "target_rank": target_rank,
+            "success": snap_success,
+            "penalty": snap_penalty,
+        }
+        if card_to_log:
+            log_details["snapped_card"] = serialize_card(card_to_log)
+        if attempted_card_str:
+            log_details["attempted_card_str"] = attempted_card_str
+        if action_type_str == "ActionSnapOwn":
+            log_details["removed_own_index"] = removed_own_index
+        if action_type_str == "ActionSnapOpponent":
+            log_details["removed_opponent_index"] = removed_opponent_index
+
+        def change():
+            self.snap_results_log.append(log_details)
+
+        def undo():
+            self.snap_results_log.pop()
+
+        self._add_change(
+            change, undo, ("snap_log_append", log_details), undo_stack, delta_list
+        )
+
+    def _resolve_winner_snap_own(
+        self: "CambiaGameState", winner, action, undo_stack, delta_list
+    ) -> bool:
+        """Resolve a winning snap-own commit. Returns False (no pending move).
+        Mirrors the race-OFF ActionSnapOwn resolution body."""
+        target_rank = self.snap_discarded_card.rank
+        snap_idx = action.own_card_hand_index
+        hand = self.players[winner].hand
+        original_hand_state = list(hand)
+        snap_success = False
+        snap_penalty = False
+        card_to_log = None
+        attempted_card_str = None
+
+        if not (0 <= snap_idx < len(hand)):
+            snap_penalty = True
+            attempted_card_str = f"Invalid Index {snap_idx}"
+        else:
+            attempted_card = hand[snap_idx]
+            if not isinstance(attempted_card, Card):
+                snap_penalty = True
+                attempted_card_str = repr(attempted_card)
+            elif attempted_card.rank == target_rank:
+                card_to_remove = attempted_card
+                card_to_log = card_to_remove
+
+                def change_snap_own():
+                    if (
+                        0 <= snap_idx < len(self.players[winner].hand)
+                        and self.players[winner].hand[snap_idx] is card_to_remove
+                    ):
+                        removed = self.players[winner].hand.pop(snap_idx)
+                        self.discard_pile.append(removed)
+
+                def undo_snap_own():
+                    assert self.discard_pile and self.discard_pile[-1] is card_to_remove
+                    popped = self.discard_pile.pop()
+                    self.players[winner].hand.insert(snap_idx, popped)
+                    assert self.players[winner].hand == original_hand_state
+
+                self._add_change(
+                    change_snap_own,
+                    undo_snap_own,
+                    ("snap_own_success", winner, snap_idx, serialize_card(card_to_remove)),
+                    undo_stack,
+                    delta_list,
+                )
+                snap_success = True
+            else:
+                snap_penalty = True
+                attempted_card_str = serialize_card(attempted_card)
+
+        self._log_snap_race_result(
+            winner,
+            "ActionSnapOwn",
+            target_rank,
+            snap_success,
+            snap_penalty,
+            card_to_log,
+            attempted_card_str,
+            undo_stack,
+            delta_list,
+            removed_own_index=(snap_idx if snap_success else None),
+        )
+        if snap_penalty:
+            penalty_deltas = self._apply_penalty(
+                winner, self.house_rules.penaltyDrawCount, undo_stack
+            )
+            delta_list.extend(penalty_deltas)
+        return False
+
+    def _resolve_winner_snap_opp(
+        self: "CambiaGameState", winner, action, undo_stack, delta_list
+    ) -> bool:
+        """Resolve a winning snap-opponent commit. Returns True if a pending move
+        was set (success), else False. Mirrors the race-OFF ActionSnapOpponent body."""
+        target_rank = self.snap_discarded_card.rank
+        snap_success = False
+        snap_penalty = False
+        card_to_log = None
+        attempted_card_str = None
+        pending_set = False
+
+        if not self.house_rules.allowOpponentSnapping:
+            snap_penalty = True
+            attempted_card_str = "Disallowed Action"
+        elif len(self.players[winner].hand) == 0:
+            snap_penalty = True
+            attempted_card_str = "No cards to move"
+        else:
+            opp_idx = self.get_opponent_index(winner)
+            if not (
+                0 <= opp_idx < len(self.players)
+                and hasattr(self.players[opp_idx], "hand")
+            ):
+                snap_penalty = True
+                attempted_card_str = f"Invalid Opponent {opp_idx}"
+            else:
+                opp_hand = self.players[opp_idx].hand
+                original_opp_hand_state = list(opp_hand)
+                target_opp_hand_idx = action.opponent_target_hand_index
+                if not (0 <= target_opp_hand_idx < len(opp_hand)):
+                    snap_penalty = True
+                    attempted_card_str = f"Invalid Index {target_opp_hand_idx}"
+                else:
+                    attempted_card = opp_hand[target_opp_hand_idx]
+                    if not isinstance(attempted_card, Card):
+                        snap_penalty = True
+                        attempted_card_str = repr(attempted_card)
+                    elif attempted_card.rank == target_rank:
+                        card_to_remove = attempted_card
+                        card_to_log = card_to_remove
+
+                        def change_snap_opp_remove():
+                            if (
+                                0
+                                <= target_opp_hand_idx
+                                < len(self.players[opp_idx].hand)
+                                and self.players[opp_idx].hand[target_opp_hand_idx]
+                                is card_to_remove
+                            ):
+                                removed = self.players[opp_idx].hand.pop(
+                                    target_opp_hand_idx
+                                )
+                                self.discard_pile.append(removed)
+
+                        def undo_snap_opp_remove():
+                            assert (
+                                self.discard_pile
+                                and self.discard_pile[-1] is card_to_remove
+                            )
+                            self.discard_pile.pop()
+                            self.players[opp_idx].hand.insert(
+                                target_opp_hand_idx, card_to_remove
+                            )
+                            assert (
+                                self.players[opp_idx].hand == original_opp_hand_state
+                            )
+
+                        self._add_change(
+                            change_snap_opp_remove,
+                            undo_snap_opp_remove,
+                            (
+                                "snap_opponent_remove",
+                                opp_idx,
+                                target_opp_hand_idx,
+                                serialize_card(card_to_remove),
+                            ),
+                            undo_stack,
+                            delta_list,
+                        )
+                        snap_success = True
+
+                        # Set the pending move, deactivate the snap phase, and clear
+                        # snap state so no further committer resumes (the winner's
+                        # move completes via the pending-action path).
+                        original_pending = (
+                            self.pending_action,
+                            self.pending_action_player,
+                            copy.deepcopy(self.pending_action_data),
+                        )
+                        original_snap_active = self.snap_phase_active
+                        orig_potentials = list(self.snap_potential_snappers)
+                        orig_card = self.snap_discarded_card
+                        orig_idx = self.snap_current_snapper_idx
+                        next_pending = ActionSnapOpponentMove(
+                            own_card_to_move_hand_index=-1,
+                            target_empty_slot_index=target_opp_hand_idx,
+                        )
+                        new_pending_data = {
+                            "target_empty_slot_index": target_opp_hand_idx
+                        }
+
+                        def change_pending_move():
+                            self.pending_action = next_pending
+                            self.pending_action_player = winner
+                            self.pending_action_data = new_pending_data
+                            self.snap_phase_active = False
+                            self.snap_potential_snappers = []
+                            self.snap_discarded_card = None
+                            self.snap_current_snapper_idx = 0
+
+                        def undo_pending_move():
+                            (
+                                self.pending_action,
+                                self.pending_action_player,
+                                self.pending_action_data,
+                            ) = original_pending
+                            self.snap_phase_active = original_snap_active
+                            self.snap_potential_snappers = orig_potentials
+                            self.snap_discarded_card = orig_card
+                            self.snap_current_snapper_idx = orig_idx
+
+                        self._add_change(
+                            change_pending_move,
+                            undo_pending_move,
+                            (
+                                "set_pending_action",
+                                type(next_pending).__name__,
+                                winner,
+                                new_pending_data,
+                                type(original_pending[0]).__name__
+                                if original_pending[0]
+                                else None,
+                                original_pending[1],
+                                {},
+                            ),
+                            undo_stack,
+                            delta_list,
+                        )
+                        pending_set = True
+                    else:
+                        snap_penalty = True
+                        attempted_card_str = serialize_card(attempted_card)
+
+        self._log_snap_race_result(
+            winner,
+            "ActionSnapOpponent",
+            target_rank,
+            snap_success,
+            snap_penalty,
+            card_to_log,
+            attempted_card_str,
+            undo_stack,
+            delta_list,
+            removed_opponent_index=(
+                action.opponent_target_hand_index if snap_success else None
+            ),
+        )
+        if snap_penalty:
+            penalty_deltas = self._apply_penalty(
+                winner, self.house_rules.penaltyDrawCount, undo_stack
+            )
+            delta_list.extend(penalty_deltas)
+        return pending_set
 
     # --- Snap Phase Initiation and Termination ---
 

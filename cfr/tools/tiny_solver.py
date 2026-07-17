@@ -485,6 +485,23 @@ def build_tree(
     the exact-rational NashConv certifier (tools/tiny_exact.py, cambia-530) reads
     ``wfrac`` so no chance mass is ever a rounded float in the exact path.
     """
+    # CORRECTNESS FENCE (cambia-564): the exact tree builder enumerates chance
+    # branches explicitly (the deal and every stockpile draw). The race-ON snap
+    # model resolves its N-way winner from an ENGINE-INTERNAL RNG draw
+    # (engine race resolveSnapRace / _resolve_snap_race), which this builder cannot
+    # enumerate: it would walk that stochastic transition as a single
+    # sampled-deterministic step and silently corrupt any exact NashConv computed
+    # on the tree. Refuse race-ON until the winner draw is exposed as an enumerable
+    # chance point.
+    if getattr(cfg.cambia_rules, "snapRace", False):
+        raise ValueError(
+            "tiny_solver.build_tree does not support snapRace=true (race-ON): the "
+            "N-way snap winner is an engine-internal RNG draw that this exact tree "
+            "builder cannot enumerate, so an exact tree would treat a stochastic "
+            "transition as sampled-deterministic and corrupt NashConv. Exact "
+            "solving of race-ON requires exposing the winner draw as an enumerable "
+            "chance node first (cambia-564 follow-up)."
+        )
     root = Chance()
     all_isets = {}
     total_nodes = 0

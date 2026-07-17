@@ -1,9 +1,15 @@
 """
 tests/test_snap_race.py
 
-Tests for SnapRace house rule: when snapRace=True, the first successful snap
-ends the snap phase immediately (remaining eligible snappers get no turn).
+Tests for the snapRace house rule (cambia-564). Race-OFF (snapRace=False, the
+default) is the sequential discarder-first model. Race-ON (snapRace=True) is the
+true N-way race: every eligible snapper commits simultaneously (a commit mutates
+no hand), then one uniform-random winner among the willing committers is drawn
+and every losing willing committer draws the snap penalty; at most one snap
+succeeds per discard. Mirrors the Go engine's snap_race.go.
 """
+
+import random
 
 import pytest
 from types import SimpleNamespace
@@ -155,12 +161,13 @@ def test_no_snap_race_both_snappers_exhaust_ends_phase():
 
 
 # ---------------------------------------------------------------------------
-# Behavioral: snapRace=True — first successful snap ends the phase immediately
+# Behavioral: snapRace=True — simultaneous imperfect-info commit + N-way race
 # ---------------------------------------------------------------------------
 
 
-def test_snap_race_own_success_ends_phase_immediately():
-    """With snapRace=True, P0 snapping own card ends snap phase; P1 never gets turn."""
+def test_snap_race_own_commit_defers_and_does_not_mutate():
+    """With snapRace=True, a snap-own is a COMMIT: it advances to the next snapper
+    without ending the phase or mutating any hand (imperfect info)."""
     snap_card = Card("5", "S")
     p0_match = Card("5", "H")
     p1_match = Card("5", "D")
@@ -170,14 +177,13 @@ def test_snap_race_own_success_ends_phase_immediately():
 
     state = build_snap_state(p0_hand, p1_hand, snap_card, snap_race=True)
 
-    # P0 successfully snaps own card
+    # P0 commits a snap-own; the phase must NOT resolve yet (P1 still to commit).
     state.apply_action(ActionSnapOwn(own_card_hand_index=0))
 
-    assert (
-        not state.snap_phase_active
-    ), "Snap phase should end immediately after snap with snapRace=True"
-    # The matched card should have been removed from P0's hand
-    assert p0_match not in state.players[0].hand, "Snapped card should leave P0's hand"
+    assert state.snap_phase_active, "commit must not end the phase before all commit"
+    assert state.snap_current_snapper_idx == 1, "index should advance to P1"
+    assert p0_match in state.players[0].hand, "a commit must not mutate the hand"
+    assert len(state.players[0].hand) == 2 and len(state.players[1].hand) == 2
 
 
 def test_snap_race_pass_does_not_end_phase_early():
@@ -220,28 +226,87 @@ def test_snap_race_second_snapper_success_also_ends_phase():
     ), "Snap phase should end after P1 snaps with snapRace=True"
 
 
-def test_snap_race_failed_snap_does_not_end_phase():
-    """With snapRace=True, a failed (penalty) snap does NOT end phase early."""
+def test_snap_race_commit_defers_penalty_until_resolution():
+    """With snapRace=True, a wrong-card snap commit applies NO penalty until the
+    race resolves; the commit itself only advances to the next snapper."""
     snap_card = Card("5", "S")
     wrong_card = Card("7", "H")  # Wrong rank
     p1_match = Card("5", "D")
 
-    p0_hand = [wrong_card]  # P0 will attempt wrong card
+    p0_hand = [wrong_card]  # P0 commits a wrong card
     p1_hand = [p1_match, Card("9", "C")]
 
     state = build_snap_state(p0_hand, p1_hand, snap_card, snap_race=True)
-
     initial_p0_hand_size = len(state.players[0].hand)
 
-    # P0 attempts snap with wrong card (penalty)
+    # P0 commits a wrong-card snap: no resolution, no penalty yet.
     state.apply_action(ActionSnapOwn(own_card_hand_index=0))
 
-    # Snap phase should still be active for P1 (snap_success was False)
-    assert state.snap_phase_active, "Snap phase should remain active after failed snap"
-    # P0 should have received penalty cards
+    assert state.snap_phase_active, "phase should remain active pending P1's commit"
+    assert state.snap_current_snapper_idx == 1
     assert (
-        len(state.players[0].hand) > initial_p0_hand_size
-    ), "P0 should have penalty cards"
+        len(state.players[0].hand) == initial_p0_hand_size
+    ), "penalty must be deferred to resolution, not applied at commit time"
+
+
+def test_snap_race_exactly_one_success_and_loser_penalized():
+    """With two willing committers, exactly one snap succeeds (window closes on the
+    single winner) and the losing willing committer draws the penalty."""
+    snap_card = Card("5", "S")
+    p0_hand = [Card("5", "H"), Card("7", "C")]
+    p1_hand = [Card("5", "D"), Card("9", "C")]
+
+    state = build_snap_state(p0_hand, p1_hand, snap_card, snap_race=True)
+    state._rng = random.Random(0)
+
+    state.apply_action(ActionSnapOwn(own_card_hand_index=0))  # P0 commit
+    state.apply_action(ActionSnapOwn(own_card_hand_index=0))  # P1 commit -> resolve
+
+    assert not state.snap_phase_active, "phase should end after race resolution"
+    sizes = sorted(len(p.hand) for p in state.players)
+    # Winner snapped away card 0 (2 -> 1); loser drew penaltyDrawCount=2 (2 -> 4).
+    assert sizes == [1, 4], f"expected one winner (1) and one penalized loser (4), got {sizes}"
+
+
+def test_snap_race_winner_not_fixed_priority():
+    """The winner is a uniform chance draw, not the fixed discarder-first priority
+    of race-OFF: across seeds, both committers win at least once."""
+    p0_wins = p1_wins = 0
+    for seed in range(200):
+        snap_card = Card("5", "S")
+        state = build_snap_state(
+            [Card("5", "H"), Card("7", "C")],
+            [Card("5", "D"), Card("9", "C")],
+            snap_card,
+            snap_race=True,
+        )
+        state._rng = random.Random(seed)
+        state.apply_action(ActionSnapOwn(own_card_hand_index=0))
+        state.apply_action(ActionSnapOwn(own_card_hand_index=0))
+        if len(state.players[0].hand) == 1:
+            p0_wins += 1
+        elif len(state.players[1].hand) == 1:
+            p1_wins += 1
+        else:
+            pytest.fail(f"seed {seed}: no clear winner")
+    assert p0_wins > 0 and p1_wins > 0, f"winner is fixed: p0={p0_wins} p1={p1_wins}"
+
+
+def test_snap_race_all_pass_no_penalty():
+    """When every snapper passes, the window closes with no snap and no penalty."""
+    snap_card = Card("5", "S")
+    state = build_snap_state(
+        [Card("7", "D"), Card("8", "C")],
+        [Card("9", "C"), Card("T", "H")],
+        snap_card,
+        snap_race=True,
+    )
+    sizes_before = [len(p.hand) for p in state.players]
+    state.apply_action(ActionPassSnap())  # P0 pass
+    assert state.snap_phase_active
+    state.apply_action(ActionPassSnap())  # P1 pass -> resolve
+    assert not state.snap_phase_active, "phase should end after all-pass"
+    assert [len(p.hand) for p in state.players] == sizes_before, "all-pass must not penalize"
 
 
 def test_snap_race_single_snapper_success_ends_phase():
@@ -308,41 +373,38 @@ def test_snap_race_opponent_snap_deactivates_snap_phase():
 
 
 def test_snap_race_true_vs_false_different_outcomes():
+    """Full-window contrast when both snappers hold a matching card and both snap:
+    - snapRace=False (sequential): BOTH snaps succeed -> both hands shrink by one.
+    - snapRace=True (race): only ONE succeeds -> one hand shrinks, the loser is
+      penalized instead.
     """
-    With 2 eligible snappers and P0 snapping successfully:
-    - snapRace=False: P1 still gets their turn (snap_phase_active=True, idx=1)
-    - snapRace=True: phase ends immediately (snap_phase_active=False)
-    """
-    # Build two independent states
-    snap_card_false = Card("5", "S")
-    p0_match_false = Card("5", "H")
-    p1_match_false = Card("5", "D")
-
+    # Race-OFF: P0 snaps, then P1 snaps; both remove their matching card.
     state_false = build_snap_state(
-        [p0_match_false, Card("7", "C")],
-        [p1_match_false, Card("9", "C")],
-        snap_card_false,
+        [Card("5", "H"), Card("7", "C")],
+        [Card("5", "D"), Card("9", "C")],
+        Card("5", "S"),
         snap_race=False,
     )
-
-    snap_card_true = Card("5", "S")
-    p0_match_true = Card("5", "H")
-    p1_match_true = Card("5", "D")
-
-    state_true = build_snap_state(
-        [p0_match_true, Card("7", "C")],
-        [p1_match_true, Card("9", "C")],
-        snap_card_true,
-        snap_race=True,
+    state_false.apply_action(ActionSnapOwn(own_card_hand_index=0))  # P0 succeeds
+    assert state_false.snap_phase_active and state_false.snap_current_snapper_idx == 1
+    state_false.apply_action(ActionSnapOwn(own_card_hand_index=0))  # P1 succeeds
+    assert not state_false.snap_phase_active
+    assert sorted(len(p.hand) for p in state_false.players) == [1, 1], (
+        "snapRace=False: both snaps succeed"
     )
 
-    # P0 snaps own card in both
-    state_false.apply_action(ActionSnapOwn(own_card_hand_index=0))
-    state_true.apply_action(ActionSnapOwn(own_card_hand_index=0))
-
-    # snapRace=False: P1 should still have their turn
-    assert state_false.snap_phase_active, "snapRace=False: P1 should still get their turn"
-    assert state_false.snap_current_snapper_idx == 1
-
-    # snapRace=True: phase ended, P1 never acts
-    assert not state_true.snap_phase_active, "snapRace=True: phase ended after first snap"
+    # Race-ON: both commit; exactly one wins, the loser is penalized.
+    state_true = build_snap_state(
+        [Card("5", "H"), Card("7", "C")],
+        [Card("5", "D"), Card("9", "C")],
+        Card("5", "S"),
+        snap_race=True,
+    )
+    state_true._rng = random.Random(0)
+    state_true.apply_action(ActionSnapOwn(own_card_hand_index=0))  # commit
+    assert state_true.snap_phase_active, "race-ON: first snap is a commit, not a resolve"
+    state_true.apply_action(ActionSnapOwn(own_card_hand_index=0))  # commit -> resolve
+    assert not state_true.snap_phase_active
+    assert sorted(len(p.hand) for p in state_true.players) == [1, 4], (
+        "snapRace=True: exactly one wins; the loser is penalized"
+    )
