@@ -22,6 +22,22 @@ import (
 // Design constants (mirror sequence_encoding.py)
 // ---------------------------------------------------------------------------
 
+// TokenizerVersion stamps the produced token stream's layout + semantics so a
+// checkpoint trained under one tokenizer is never scored under another (a silent
+// train/eval mismatch, the RC-B failure the X2 gate exists to prevent). Bump it
+// on every change to the produced stream:
+//
+//	v1: pre-F1 baseline -- drawn card surfaced at draw time, no peek-result frame.
+//	v2: F1 post-draw drawn frame + F2 peek-result frame (cambia-528 / cambia-529).
+//	v3: public race-resolution frame under race-ON (cambia-564). CURRENT.
+//
+// Single source, mirrored by cfr/src/sequence_encoding.py::TOKENIZER_VERSION;
+// the FFI cross-check test (test_token_stream_parity) asserts Go == Python, and
+// cambia_tokenizer_version exports it alongside cambia_token_vocab. Recorded in
+// run_meta.json at training time (run_db.write_run_meta_json) so the tiny-game
+// scorer can refuse a version-mismatched checkpoint (cambia-612).
+const TokenizerVersion int32 = 3
+
 const (
 	// MaxTokenStream is the hard per-agent token buffer cap. A stream that would
 	// exceed this is an explicit overflow ERROR, never silent truncation.

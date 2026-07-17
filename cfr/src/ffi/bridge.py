@@ -256,6 +256,7 @@ _ffi.cdef("""
     int32_t cambia_token_encode_card(uint8_t go_card_index);
     int32_t cambia_token_encode_action(uint16_t action_idx);
     int32_t cambia_token_stream_cap(void);
+    int32_t cambia_tokenizer_version(void);
 """)
 
 _LIB = None
@@ -1714,6 +1715,16 @@ def get_token_stream_cap() -> int:
     or PRODUCTION_SEQ_CAP to stay in sync by inspection.
     """
     return int(_get_lib().cambia_token_stream_cap())
+
+
+def get_tokenizer_version() -> int:
+    """Return the live Go tokenizer stream version (agent.TokenizerVersion).
+
+    Paired with cfr/src/sequence_encoding.py::TOKENIZER_VERSION; the cross-check
+    test reads this live rather than trusting the two to stay in sync by
+    inspection. Bumped on every change to the produced token stream (cambia-612).
+    """
+    return int(_get_lib().cambia_tokenizer_version())
 
 
 def get_nplayer_dims() -> Tuple[int, int]:

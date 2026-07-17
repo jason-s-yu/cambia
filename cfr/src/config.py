@@ -8,6 +8,17 @@ import warnings
 import yaml
 from pathlib import Path
 
+try:
+    # Single source of truth for the PRT-CFR net vocab: the tokenizer. Deriving
+    # the gru_vocab_size default from sequence_encoding.VOCAB_SIZE (rather than
+    # re-pinning an int here and in every run YAML) means a vocab bump can never
+    # leave a config building an undersized embedding that then IndexErrors on a
+    # peek/race token (cambia-612). sequence_encoding imports only card/constants,
+    # never config, so this cannot cycle.
+    from src.sequence_encoding import VOCAB_SIZE as _TOKENIZER_VOCAB_SIZE
+except Exception:  # pragma: no cover - fall back to the current vocab if unavailable
+    _TOKENIZER_VOCAB_SIZE = 327
+
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -513,11 +524,13 @@ class PRTCFRConfig(_CambiaBaseModel):
     the X2 scorer); changing them breaks snapshot/checkpoint compatibility.
     """
 
-    # GRU sequence encoder (pinned). Vocab = sequence_encoding.VOCAB_SIZE; 327
-    # after the cambia-564 race-resolution block was appended (325 base, +1
-    # cambia-529 peek, +1 cambia-564 race). Growing it invalidates prior
-    # checkpoints (the token embedding row count changed): acceptable, X4 is future work.
-    gru_vocab_size: int = 327
+    # GRU sequence encoder. Vocab is DERIVED from sequence_encoding.VOCAB_SIZE
+    # (327: 325 base + 1 cambia-529 peek + 1 cambia-564 race), not re-pinned here,
+    # so a tokenizer bump can never leave this default stale (cambia-612). Growing
+    # it invalidates prior checkpoints (the token embedding row count changed):
+    # that mismatch is caught by the tokenizer-version provenance gate, not a raw
+    # torch size error.
+    gru_vocab_size: int = _TOKENIZER_VOCAB_SIZE
     gru_embed_dim: int = 64
     gru_hidden_dim: int = 256
     gru_num_layers: int = 2

@@ -42,8 +42,10 @@ logging:
   log_level_console: "INFO"
 
 prt_cfr:
-  # GRU sequence encoder (pinned; shared with the X2 scorer).
-  gru_vocab_size: 325
+  # GRU sequence encoder (shared with the X2 scorer). gru_vocab_size is NOT pinned
+  # here: it inherits the config default, which derives from the tokenizer's live
+  # VOCAB_SIZE (sequence_encoding.VOCAB_SIZE, currently 327) so a vocab bump never
+  # leaves this config building an undersized embedding (cambia-612).
   gru_embed_dim: 64
   gru_hidden_dim: 256
   gru_num_layers: 2

@@ -65,8 +65,11 @@ SD-CFR averaging, dict materialization, scoring):
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import warnings
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -92,7 +95,7 @@ except Exception:  # noqa: BLE001
 
 from src.config import load_config
 from src.encoding import NUM_ACTIONS, action_to_index, encode_action_mask
-from src.sequence_encoding import PAD_ID, SEQ_CAP
+from src.sequence_encoding import PAD_ID, SEQ_CAP, TOKENIZER_VERSION
 from tools.tiny_solver import build_tree, exploitability
 from tools import tiny_exact
 
@@ -119,6 +122,82 @@ _SNAPSHOT_RE = re.compile(r"prtcfr_snapshot_iter_(\d+)\.pt$")
 
 
 # ---------------------------------------------------------------------------
+# Token-stream provenance gate (cambia-612)
+# ---------------------------------------------------------------------------
+
+
+def _recorded_tokenizer_version(checkpoint_or_snapshot_dir: str) -> Optional[int]:
+    """Read ``tokenizer_version`` from the run_meta.json governing a checkpoint.
+
+    ``checkpoint_or_snapshot_dir`` is a single .pt checkpoint, a snapshot
+    directory, or a run directory. Walks up from it to the nearest ancestor
+    holding a run_meta.json (the run-dir provenance record written by
+    run_db.write_run_meta_json) and returns its integer ``tokenizer_version``.
+
+    Returns None when no run_meta.json is found, or it carries no
+    ``tokenizer_version`` -- the case for every run created before cambia-612
+    stamped it. None means "unknown provenance", handled loudly (not silently)
+    by ``_resolve_scoring_obs_path``.
+    """
+    p = Path(checkpoint_or_snapshot_dir)
+    start = p if p.is_dir() else p.parent
+    for d in (start, *start.parents):
+        meta_path = d / "run_meta.json"
+        if meta_path.is_file():
+            try:
+                with open(meta_path, encoding="utf-8") as f:
+                    meta = json.load(f)
+            except (OSError, ValueError):
+                return None
+            v = meta.get("tokenizer_version")
+            return int(v) if v is not None else None
+    return None
+
+
+def _resolve_scoring_obs_path(recorded_version: Optional[int]) -> bool:
+    """Validate a checkpoint's recorded tokenizer version against the live
+    tokenizer and return the observation path to score it under.
+
+    Returns ``production_obs``: True to build the scorer tree through the
+    production worker observation path (post-draw drawn frame + peek-result
+    frames, cambia-528/529), which is what training tokens carry from v2 on;
+    False for the legacy analysis_tools BR path (matches the pre-F1 v1 stream,
+    which surfaced the drawn card at draw time and dropped peeked cards).
+
+    Version handling:
+      - recorded == live TOKENIZER_VERSION: score on the matching path
+        (production_obs = live >= 2).
+      - recorded != live: hard error. A net trained on one token stream scored
+        on another produces silently-wrong NashConv -- the RC-B train/eval
+        mismatch this gate exists to prevent.
+      - recorded is None (every run predating cambia-612's stamp carries none):
+        unknown provenance. Emit a loud warning and proceed on the legacy path;
+        the pre-F1 pin is handled procedurally (X2R5, note cambia-615).
+    """
+    live = TOKENIZER_VERSION
+    if recorded_version is None:
+        warnings.warn(
+            "TOKENIZER-VERSION PROVENANCE UNKNOWN: this checkpoint's run carries no "
+            f"recorded tokenizer_version (live tokenizer is v{live}). Scoring "
+            "proceeds on the LEGACY observation path; the resulting NashConv is "
+            "trustworthy ONLY if the net was trained under the pre-F1 (v1) "
+            "tokenizer. Confirm the training-era tokenizer before acting on this "
+            "number (cambia-612; pre-F1 pin handled procedurally per X2R5/cambia-615).",
+            stacklevel=2,
+        )
+        return False
+    if recorded_version != live:
+        raise ValueError(
+            f"TOKENIZER-VERSION MISMATCH: this checkpoint was trained under tokenizer "
+            f"v{recorded_version} but the live tokenizer is v{live}. A policy trained on one "
+            f"token stream scored on another yields silently-wrong NashConv. Score "
+            f"this checkpoint with the training-era (v{recorded_version}) code, or retrain "
+            f"under v{live}. Refusing to score (cambia-612)."
+        )
+    return live >= 2
+
+
+# ---------------------------------------------------------------------------
 # Tiny-game construction + infoset enumeration
 # ---------------------------------------------------------------------------
 
@@ -127,6 +206,7 @@ def build_tiny_tree(
     config_path: str = TINY_2CARD_CONFIG,
     seq_cap: int = SEQ_CAP,
     exact_weights: bool = False,
+    production_obs: bool = False,
 ):
     """Build the perfect-recall + tokenized {A,6} tiny tree.
 
@@ -137,6 +217,13 @@ def build_tiny_tree(
     exact_weights (default off): also attach exact-rational chance mass
     (Chance.wfrac) for the NashConv certifier (tools/tiny_exact.py, cambia-530).
     The float ``weights`` used by the fast-path scorer are unchanged.
+
+    production_obs (cambia-612, default off): build each node's token stream
+    through the PRODUCTION worker observation path (peek-result + post-draw drawn
+    frames) instead of the analysis_tools BR path. The scoring entry points set
+    this from the checkpoint's recorded tokenizer version (>= 2 -> True) so the
+    scorer tokens match what the net was trained on; the default preserves every
+    legacy caller's behavior byte-for-byte.
     """
     cfg = load_config(config_path)
     root, isets, nnodes, aborted = build_tree(
@@ -149,6 +236,7 @@ def build_tiny_tree(
         tokenize=True,
         seq_cap=seq_cap,
         exact_weights=exact_weights,
+        production_obs=production_obs,
     )
     if aborted:
         raise RuntimeError(
@@ -624,8 +712,16 @@ def score_policy_on_tiny_game(
     @chief invokes this for the real verdict with a trained snapshot dir.
     """
     snaps = discover_snapshots(checkpoint_or_snapshot_dir)
+    # Provenance gate (cambia-612): refuse a version-mismatched checkpoint before
+    # loading it, and pick the observation path that matches its training-era
+    # tokenizer (>= v2 -> production peek/post-draw frames; unknown -> legacy).
+    production_obs = _resolve_scoring_obs_path(
+        _recorded_tokenizer_version(checkpoint_or_snapshot_dir)
+    )
     nets_by_iter = [(it, _load_net(fp, device=device)) for it, fp in snaps]
-    root, _isets, _n, _ab = build_tiny_tree(config_path, seq_cap=seq_cap)
+    root, _isets, _n, _ab = build_tiny_tree(
+        config_path, seq_cap=seq_cap, production_obs=production_obs
+    )
     # materialize_policy_incremental, not materialize_policy: at production net
     # dims (embed=64, hidden=256) and the real {A,6} tree's 69636 infosets, a
     # single N-row batched forward OOMs (see IncrementalPolicyAccumulator's
@@ -649,13 +745,22 @@ def score_with_loaded_nets(
     config_path: str = TINY_2CARD_CONFIG,
     weighting: str = "linear",
     seq_cap: int = SEQ_CAP,
+    tokenizer_version: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Same as score_policy_on_tiny_game but with nets already in memory.
 
     Used by the plumbing test (random-init net) and any caller that has built
     PRTCFRNet instances directly. ``nets_by_iter`` is [(iter, net), ...].
+
+    tokenizer_version (cambia-612): the version the nets were trained under, so
+    the same provenance gate applies as in the path-based entry points -- hard
+    error on mismatch with the live tokenizer, loud warning + legacy path when
+    None (unknown, the default for in-memory nets with no run_meta to consult).
     """
-    root, _isets, _n, _ab = build_tiny_tree(config_path, seq_cap=seq_cap)
+    production_obs = _resolve_scoring_obs_path(tokenizer_version)
+    root, _isets, _n, _ab = build_tiny_tree(
+        config_path, seq_cap=seq_cap, production_obs=production_obs
+    )
     # See score_policy_on_tiny_game: incremental/chunked, not the single-batch
     # materialize_policy, to stay well under a few GB RSS at production dims.
     policy = materialize_policy_incremental(
@@ -703,9 +808,14 @@ def certify_policy_on_tiny_game(
     gate consumes exact by default.
     """
     snaps = discover_snapshots(checkpoint_or_snapshot_dir)
+    # Provenance gate (cambia-612): same version check + obs-path selection as
+    # score_policy_on_tiny_game, applied to the exact-rational verdict path.
+    production_obs = _resolve_scoring_obs_path(
+        _recorded_tokenizer_version(checkpoint_or_snapshot_dir)
+    )
     nets_by_iter = [(it, _load_net(fp, device=device)) for it, fp in snaps]
     root, _isets, _n, _ab = build_tiny_tree(
-        config_path, seq_cap=seq_cap, exact_weights=True
+        config_path, seq_cap=seq_cap, exact_weights=True, production_obs=production_obs
     )
     policy = materialize_policy_incremental(
         root, nets_by_iter, weighting=weighting, seq_cap=seq_cap

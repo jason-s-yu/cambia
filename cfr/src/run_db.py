@@ -1008,10 +1008,22 @@ def write_run_meta_json(
         (run_id,),
     ).fetchone()
 
+    # Token-stream provenance (cambia-612): stamp the tokenizer version this run's
+    # checkpoints were trained under so the tiny-game scorer (src/cfr/prtcfr_eval.py)
+    # can hard-refuse a version-mismatched checkpoint instead of emitting silently
+    # wrong NashConv. Local import keeps run_meta export decoupled from the token
+    # module's import cost. Only PRT-CFR-family runs carry a token stream; the
+    # field is harmless (unread) for other algorithms.
+    try:  # pragma: no cover - defensive; sequence_encoding is a pure-Python module
+        from src.sequence_encoding import TOKENIZER_VERSION as _tok_version
+    except Exception:  # noqa: BLE001
+        _tok_version = None
+
     meta = {
         "run_id": run_id,
         "name": run_row["name"],
         "algorithm": run_row["algorithm"],
+        "tokenizer_version": _tok_version,
         "status": run_row["status"],
         "config_hash": run_row["config_hash"],
         "house_rules_hash": run_row["house_rules_hash"],

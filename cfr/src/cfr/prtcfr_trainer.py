@@ -47,7 +47,7 @@ import torch
 from ..constants import ActionCallCambia
 from ..encoding import NUM_ACTIONS, action_to_index, encode_action_mask
 from ..reservoir import ColumnarBatch, ReservoirBuffer, ReservoirSample
-from ..sequence_encoding import PAD_ID, SEQ_CAP
+from ..sequence_encoding import PAD_ID, SEQ_CAP, TOKENIZER_VERSION, VOCAB_SIZE
 from .prtcfr_net import (
     PRTCFRNet,
     _regret_match,
@@ -299,6 +299,39 @@ def _fit_from_scratch(
 # carry no state beyond the iteration counter and the requested total.
 
 TINY_RESUME_SCHEMA_VERSION = 1
+
+# Token-embedding row count -> tokenizer version, for naming a resume-time vintage
+# mismatch (cambia-612). The embedding grew 325 (v1) -> 326 (v2, cambia-529 peek)
+# -> 327 (v3, cambia-564 race); the current live vocab is VOCAB_SIZE. Only the
+# vocab-changing bumps appear here (F1's post-draw reshuffle was vocab-invariant).
+_VOCAB_ROWS_TO_TOKENIZER_VERSION = {325: 1, 326: 2, 327: 3}
+
+
+def _assert_resume_tokenizer_compatible(payload: Dict[str, Any]) -> None:
+    """Refuse to resume from a checkpoint whose token embedding was trained under a
+    different tokenizer vocab, raising a clear tokenizer-version provenance error
+    instead of the raw ``load_state_dict`` size mismatch that surfaces deeper in
+    ``load_encoder_head`` (cambia-612). Shape-driven (mirrors prtcfr_eval._load_net,
+    cambia-341): the checkpoint's vocab is read from the saved ``embed.weight`` row
+    count, so no stamped field is required and the pinned checkpoint format is
+    untouched. A same-vocab checkpoint passes through unchanged."""
+    enc = payload.get("encoder_state_dict") or {}
+    emb = enc.get("embed.weight")
+    if emb is None:
+        return  # unexpected shape; let the real load surface it
+    ckpt_vocab = int(emb.shape[0])
+    if ckpt_vocab == VOCAB_SIZE:
+        return
+    ckpt_ver = _VOCAB_ROWS_TO_TOKENIZER_VERSION.get(ckpt_vocab)
+    ckpt_desc = f"v{ckpt_ver}" if ckpt_ver else f"vocab={ckpt_vocab}"
+    raise PRTCFRResumeError(
+        f"TOKENIZER-VERSION MISMATCH on resume: this checkpoint's token embedding "
+        f"has {ckpt_vocab} rows ({ckpt_desc}) but the live tokenizer is "
+        f"v{TOKENIZER_VERSION} ({VOCAB_SIZE} rows). Resuming would fine-tune a net "
+        f"on a token stream it was not built for. Resume with the training-era "
+        f"code, or start a fresh run under the current tokenizer. Refusing to load "
+        f"(cambia-612)."
+    )
 
 
 def _global_rng_save() -> Dict[str, Any]:
@@ -741,6 +774,7 @@ class PRTCFRTinyTrainer:
         # (cambia-552). Compatible with existing checkpoints (prtcfr_mixture
         # already loads this shape under weights_only=True).
         payload = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+        _assert_resume_tokenizer_compatible(payload)
         self.net.load_encoder_head(
             payload["encoder_state_dict"], payload["head_state_dict"]
         )
@@ -2107,6 +2141,7 @@ class PRTCFRProductionTrainer:
                 f"checkpoint save and the resume_state commit; the partial "
                 f"iteration must be discarded before resuming)"
             )
+        _assert_resume_tokenizer_compatible(payload)
         self.net.load_encoder_head(
             payload["encoder_state_dict"], payload["head_state_dict"]
         )
