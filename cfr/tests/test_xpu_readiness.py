@@ -420,6 +420,13 @@ _ALLOWED_CUDA_SUBSTRINGS = {
     "cfr/prtcfr_trainer.py": [
         "(cuda or xpu)",
         "pre-xpu CUDA-only",
+        # cambia-607 f1 fused-Adam optimizer: torch's fused Adam kernel is
+        # cuda-only by design; every other device (cpu, xpu) takes the foreach
+        # path, so the branch is a deliberate cuda fast path, not a cuda-only
+        # capability gate.
+        "CUDA: ``fused=True``",
+        'if device.type == "cuda":',
+        "fused Adam kernel on CUDA",
         'kind == "cuda" and torch.cuda.is_available()',
         '"torch_cuda_rng"',
         "torch.cuda.get_rng_state_all()",
