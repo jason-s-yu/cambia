@@ -27,12 +27,22 @@ auth:
   token_ttl_seconds: 900
 
 data_plane:
+  # Two-alias pattern (cambia-551 W2): ssh_alias (rsync) and mirror_remote_url
+  # (git push) are independent targets. They can point at the same host with
+  # one ssh key (simplest, shown below), or -- for a more restricted server
+  # setup -- at two different `~/.ssh/config` host aliases, each bound to its
+  # own key: a mirror-push key server-side-restricted to
+  # `git-receive-pack '/srv/cambia/mirror.git'` only, and a separate
+  # rrsync-restricted key scoped to just the runs dir. Nothing in this client
+  # requires them to match; see docs/serving-harness/deploy.md.
+  #
   # ssh alias for rsync (data plane is ssh only, no new listener).
   ssh_alias: runner
   # runnerd runsDir on the remote host.
   runner_runs_dir: /srv/cambia/runs
   # git mirror remote URL for `harness submit` commit pushes (pushed to
-  # directly; not a named git remote).
+  # directly; not a named git remote). May use a different ssh alias/key than
+  # ssh_alias above -- e.g. `git@runner-mirror:/srv/cambia/mirror.git`.
   mirror_remote_url: cambia@runner:/srv/cambia/mirror.git
   # origin_host stamped onto reconciled runs (defaults to ssh_alias).
   origin_host: runner
@@ -42,6 +52,16 @@ sync:
   interval_seconds: 60
   # where synced remote run dirs land, relative to cfr/ (flat, like local runs).
   local_runs_dir: runs
+
+# Optional pre-push verify gate (cambia-551 W2). Default false: `submit`
+# pushes the developer's existing HEAD commit as-is and creates no new
+# commit, so this only refuses to push a commit that isn't already signed --
+# it never creates or signs a commit itself. Commit signing is set up
+# separately in the dev repo (gpg.format=ssh, user.signingkey,
+# commit.gpgsign=true). When true, `submit` runs `git verify-commit <sha>`
+# before pushing and aborts locally (rather than pushing a commit the runner
+# would reject) if verification fails.
+# require_signed_commit: true
 
 # Optional Codebridge hub reflection (cambia-353). Omit this whole section to
 # disable reflection (zero behavior change). When present, `harness submit`,

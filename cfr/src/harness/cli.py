@@ -124,6 +124,20 @@ def _is_dirty(repo: Path) -> bool:
     return bool(_git(["status", "--porcelain"], repo))
 
 
+def _is_commit_signed(sha: str, repo: Path) -> bool:
+    """Return True iff `git verify-commit <sha>` succeeds in `repo`.
+
+    Used only by the optional `require_signed_commit` pre-push gate
+    (cambia-551 W2); a False here means the commit has no verifiable
+    signature (unsigned, or signed by a key not in the local trust store),
+    not that verification itself failed to run.
+    """
+    proc = subprocess.run(
+        ["git", "verify-commit", sha], cwd=str(repo), capture_output=True, text=True
+    )
+    return proc.returncode == 0
+
+
 # ---------------------------------------------------------------------------
 # init (first-time client bootstrap: keypair + config scaffold)
 # ---------------------------------------------------------------------------
@@ -243,6 +257,18 @@ def submit(
         _fail(str(exc))
     if spec.commit and spec.commit.lower() != sha.lower():
         _fail(f"spec commit {spec.commit} does not match HEAD {sha}")
+
+    # Optional pre-push verify gate (cambia-551 W2), default off. The client
+    # pushes the developer's existing HEAD commit as-is and creates no new
+    # commit, so this only checks a signature that's already there (repo-config
+    # concern, e.g. commit.gpgsign=true) -- it never signs anything itself.
+    if getattr(cfg, "require_signed_commit", False) and not _is_commit_signed(
+        sha, repo
+    ):
+        _fail(
+            f"commit {sha} is not a verifiable signed commit; sign it or "
+            "disable require_signed_commit"
+        )
 
     job_id = spec.name
     ref = f"refs/harness/{job_id}"

@@ -112,6 +112,33 @@ relevant file under `/srv/cambia/keys/` on the runner before rerunning the
 script, and update the client's `harness.yaml` with the new fingerprint
 and/or key path afterward.
 
+## Restricting the data-plane ssh keys (optional hardening)
+
+`scripts/deploy-runnerd.sh` itself only uses `RUNNER_SSH`, an unrestricted
+admin ssh target for one-shot privileged setup (stages 1 and 4). Day-to-day
+`cambia harness` use is separate: it authenticates to the control plane with
+the JWT keypair (see [keys-and-tls.md](keys-and-tls.md)) and talks to the
+data plane over two independent client config keys, `data_plane.ssh_alias`
+(rsync, runs dir) and `data_plane.mirror_remote_url` (git push, commit
+mirror) -- see `cfr/config/harness.example.yaml`. Nothing requires those two
+to share a host or key; a more restricted server-side setup binds each to
+its own single-purpose ssh key rather than reusing the admin key:
+
+- a **mirror-push key**, restricted in the runner's `authorized_keys` to
+  `git-receive-pack '/srv/cambia/mirror.git'` for that exact command only,
+  used solely for `harness submit`'s push;
+- a **runs-dir key**, restricted to `rrsync /srv/cambia/runs`, used solely
+  for `harness pull`/`push-run` rsync traffic.
+
+Each key gets its own `~/.ssh/config` host alias on the client, and
+`ssh_alias` / `mirror_remote_url` in `harness.yaml` point at the matching
+alias. This is optional: a single shared admin-equivalent key also works,
+it's just a larger blast radius if a client key leaks. See also the
+optional `require_signed_commit` submit gate in
+`cfr/config/harness.example.yaml`, which refuses to push an unsigned HEAD
+commit when enabled; it's a client-local check, not part of this deploy
+script, and does not require the split above.
+
 ## See also
 
 - [host-requirements.md](host-requirements.md) -- what the runner host
