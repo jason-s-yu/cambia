@@ -736,7 +736,11 @@ class PRTCFRTinyTrainer:
         iteration."""
         if self.net is None:
             self.net = self._net_factory()
-        payload = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        # weights_only=True: the pinned payload is plain tensors/ints/dict; a
+        # poisoned pickle rsync-written under runs/ cannot execute on load
+        # (cambia-552). Compatible with existing checkpoints (prtcfr_mixture
+        # already loads this shape under weights_only=True).
+        payload = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         self.net.load_encoder_head(
             payload["encoder_state_dict"], payload["head_state_dict"]
         )
@@ -2083,7 +2087,11 @@ class PRTCFRProductionTrainer:
         # cross-device copy, so this is device-agnostic.
         if self.net is None:
             self.net = self._net_factory()
-        payload = torch.load(ckpt, map_location="cpu", weights_only=False)
+        # weights_only=True: the rolling checkpoint is plain tensors + a
+        # model_dump() config dict + ints; hardened against a poisoned pickle
+        # under runs/ (cambia-552). Load-compatible with in-flight X2R runs
+        # (prtcfr_mixture already reads this exact shape under weights_only=True).
+        payload = torch.load(ckpt, map_location="cpu", weights_only=True)
         # resume_state.json is the commit marker written LAST each iteration; the
         # rolling checkpoint + reservoirs are saved just before it (inside
         # run_iteration). An interrupt in that narrow gap leaves the checkpoint
