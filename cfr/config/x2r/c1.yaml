@@ -16,7 +16,8 @@
 # the 766,674 baseline -- within the target 4x +/-25% band (3x-5x, absolute
 # range [2,300,022, 3,833,370]).
 #
-# gru_vocab_size, gru_dropout, seq_cap are left at base defaults (325, 0.1, 256);
+# gru_vocab_size, gru_dropout, seq_cap are left at base defaults (the live
+# tokenizer vocab -- 327 -- 0.1, 256);
 # only the three width dims below change.
 
 _base: x2_tiny_gate.yaml

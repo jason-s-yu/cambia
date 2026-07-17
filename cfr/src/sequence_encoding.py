@@ -466,6 +466,18 @@ RACE_FRAME_WIDTH: int = 5
 #: Total vocabulary size.
 VOCAB_SIZE: int = RACE_FRAME_BASE + NUM_RACE_FRAME_IDS
 
+#: Tokenizer stream version. Stamps the produced token stream's layout + semantics
+#: so a checkpoint trained under one tokenizer is never scored under another (the
+#: silent train/eval mismatch the X2 gate exists to prevent). Bump on every change
+#: to the produced stream:
+#:   v1: pre-F1 baseline -- drawn card at draw time, no peek-result frame.
+#:   v2: F1 post-draw drawn frame + F2 peek-result frame (cambia-528 / cambia-529).
+#:   v3: public race-resolution frame under race-ON (cambia-564). CURRENT.
+#: Single source, mirrored by engine/agent/tokens.go::TokenizerVersion (the FFI
+#: cross-check test asserts Go == Python). Recorded in run_meta.json at training
+#: time (src/run_db.py) so the tiny-game scorer can refuse a mismatch (cambia-612).
+TOKENIZER_VERSION: int = 3
+
 
 # Encoders: local id (or sentinel) -> global token id.
 def _frame_tok(kind: str) -> int:

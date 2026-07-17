@@ -48,6 +48,16 @@ func TestTokenVocabLayoutContiguous(t *testing.T) {
 	}
 }
 
+// TestTokenizerVersionFrozen pins the tokenizer stream version. Bump it (and the
+// mirror in cfr/src/sequence_encoding.py::TOKENIZER_VERSION) on every change to
+// the produced token stream; the FFI cross-check test asserts Go == Python.
+func TestTokenizerVersionFrozen(t *testing.T) {
+	if TokenizerVersion != 3 {
+		t.Fatalf("TokenizerVersion=%d, want 3 (v3 = cambia-564 race frame; bump "+
+			"with the Python mirror on any token-stream change)", TokenizerVersion)
+	}
+}
+
 // TestActionTokensDistinctAndInRange asserts every 2-player action index maps to
 // a valid, distinct ACTION-block token (the property that makes the public path
 // determine the legal-action count).

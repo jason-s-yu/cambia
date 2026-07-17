@@ -23,6 +23,16 @@ _config_mod = sys.modules.get("src.config")
 if _config_mod is None or not hasattr(_config_mod, "Config"):
     _config_stub = types.ModuleType("src.config")
 
+    # Derive the stub's PRT-CFR net vocab from the LIVE tokenizer (cambia-612):
+    # hardcoding it (was 325) rots the moment the vocab bumps -- a stub net built
+    # at a stale vocab saves checkpoints the real PRTCFRNet (built at the live
+    # vocab) then refuses with a raw torch size mismatch. sequence_encoding is
+    # config-independent, so importing it here cannot recurse into this stub.
+    try:
+        from src.sequence_encoding import VOCAB_SIZE as _LIVE_VOCAB_SIZE
+    except Exception:  # noqa: BLE001 - defensive; fall back to the current vocab
+        _LIVE_VOCAB_SIZE = 327
+
     from pydantic import (
         BaseModel as _BaseModel,
         Field as _Field,
@@ -197,7 +207,7 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
     class _PRTCFRConfig(_BaseModel):
         """Stub for PRTCFRConfig (Phase 1 X2 PRT-CFR)."""
 
-        gru_vocab_size: int = 325
+        gru_vocab_size: int = _LIVE_VOCAB_SIZE
         gru_embed_dim: int = 64
         gru_hidden_dim: int = 256
         gru_num_layers: int = 2

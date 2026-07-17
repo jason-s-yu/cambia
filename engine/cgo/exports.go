@@ -1529,6 +1529,17 @@ func cambia_token_vocab(out *C.int32_t, max C.int32_t) C.int32_t {
 	return C.int32_t(agent.TokenVocab(dst[:]))
 }
 
+// cambia_tokenizer_version returns the tokenizer stream version (agent.
+// TokenizerVersion), exported alongside cambia_token_vocab so Python can assert
+// Go == sequence_encoding.TOKENIZER_VERSION live (cross-check test) and so the
+// tiny-game scorer can refuse a checkpoint recorded under a different version
+// (cambia-612). Bumped on every change to the produced token stream.
+//
+//export cambia_tokenizer_version
+func cambia_tokenizer_version() C.int32_t {
+	return C.int32_t(agent.TokenizerVersion)
+}
+
 // cambia_token_encode_card returns the CARD-block token for a canonical Go card
 // index (suit*13+rank; jokers 52/53). For the constants cross-check test.
 //

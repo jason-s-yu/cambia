@@ -104,6 +104,7 @@ if go_available:
         frame_aligned_window,
         get_token_stream_cap,
         get_token_vocab,
+        get_tokenizer_version,
         python_card_to_go_index,
         state_clone,
         state_clone_wrapped,
@@ -159,6 +160,22 @@ def test_token_vocab_layout_matches_python():
     assert se.PEEK_FRAME_BASE == se.OUTCOME_BASE + se.NUM_SNAP_OUTCOME_IDS
     assert se.RACE_FRAME_BASE == se.PEEK_FRAME_BASE + se.NUM_PEEK_FRAME_IDS
     assert se.VOCAB_SIZE == se.RACE_FRAME_BASE + se.NUM_RACE_FRAME_IDS
+
+
+@skip_if_no_go
+def test_tokenizer_version_go_python_match():
+    """The Go tokenizer stream version (cambia_tokenizer_version) equals the
+    Python single source (sequence_encoding.TOKENIZER_VERSION), and both are the
+    current v3 (cambia-564 race frame). Drift here means a checkpoint trained
+    under one tokenizer could be scored under another -- the exact silent
+    train/eval mismatch cambia-612's provenance gate exists to prevent."""
+    go_v = get_tokenizer_version()
+    assert go_v == se.TOKENIZER_VERSION, (
+        f"tokenizer version drift: Go={go_v} Python={se.TOKENIZER_VERSION}; bump "
+        f"both engine/agent/tokens.go::TokenizerVersion and "
+        f"sequence_encoding.py::TOKENIZER_VERSION together"
+    )
+    assert go_v == 3, f"expected the current v3 tokenizer, got v{go_v}"
 
 
 @skip_if_no_go
