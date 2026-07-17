@@ -2076,10 +2076,13 @@ def info(
             raise typer.Exit(1)
 
     elif suffix == ".joblib":
-        import joblib
+        from .persistence import load_agent_data
 
         try:
-            data = joblib.load(checkpoint)
+            # Hardened loader (cambia-552): reads the current npz agent-data
+            # format and rejects legacy joblib/pickle artifacts with a clear
+            # error instead of executing their pickle payload.
+            data = load_agent_data(str(checkpoint))
 
             table = Table(title=f"Tabular CFR Checkpoint: {checkpoint.name}")
             table.add_column("Property", style="cyan")
@@ -2089,10 +2092,13 @@ def info(
                 table.add_row("Iteration", str(data.get("iteration", "N/A")))
                 table.add_row("Infoset Count", str(len(data.get("regret_sum", {}))))
 
-                if "exploitability_history" in data:
-                    history = data["exploitability_history"]
-                    if history:
-                        table.add_row("Recent Exploitability", f"{history[-1]:.6f}")
+                history = data.get("exploitability_results", [])
+                if history:
+                    last = history[-1]
+                    value = last[1] if isinstance(last, (list, tuple)) else last
+                    table.add_row("Recent Exploitability", f"{float(value):.6f}")
+            elif data is None:
+                table.add_row("Status", "empty or missing")
             else:
                 table.add_row("Type", str(type(data).__name__))
 

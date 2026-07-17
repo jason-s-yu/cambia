@@ -215,12 +215,20 @@ def discover_snapshots(path: str) -> List[Tuple[int, str]]:
 
 
 def _load_net(filepath: str, device: str = "cpu") -> Any:
-    """Load one PRTCFRNet snapshot.
+    """Load one PRTCFRNet snapshot from the pinned checkpoint format.
 
-    The pinned checkpoint format is ``{encoder_state_dict, head_state_dict,
-    iteration}`` (prtcfr_net docstring); loaded via ``PRTCFRNet.load_encoder_head``.
-    A whole-module pickle or a plain combined state_dict are also accepted as
-    fallbacks. This is the only place that touches checkpoint internals.
+    The only accepted format is ``{encoder_state_dict, head_state_dict,
+    iteration}`` (prtcfr_net docstring), loaded via
+    ``PRTCFRNet.load_encoder_head``. This is the only place that touches
+    checkpoint internals.
+
+    Loading is hardened against poisoned pickles rsync-written under ``runs/``
+    (cambia-552): ``weights_only=True`` refuses any pickle that would execute
+    code on load (e.g. a whole ``nn.Module`` via ``__reduce__``), so only plain
+    tensor/state-dict payloads deserialize. Every writer in the repo emits
+    exactly the pinned shape (prtcfr_trainer ``_save_snapshot`` /
+    ``_save_checkpoint``; prtcfr_mixture already loads it under
+    ``weights_only=True``); a file that does not match is rejected, not coerced.
 
     Net dims (embed/hidden/layers/head-hidden) are read back from the loaded
     tensor shapes (cambia-341), not the module's production defaults: a
@@ -237,62 +245,35 @@ def _load_net(filepath: str, device: str = "cpu") -> Any:
             "src.cfr.prtcfr_net.PRTCFRNet unavailable. Core (prtcfr-core) has not "
             "landed; the gate test injects a stub for plumbing runs."
         )
-    obj = torch.load(filepath, map_location=device, weights_only=False)
+    obj = torch.load(filepath, map_location=device, weights_only=True)
 
-    # Pinned format: split encoder/head state dicts.
-    if isinstance(obj, dict) and "encoder_state_dict" in obj and "head_state_dict" in obj:
-        if _build_net_from_state is not None:
-            return _build_net_from_state(
-                obj["encoder_state_dict"], obj["head_state_dict"], device
-            )
-        # Mixture helper unavailable (defensive; e.g. a stubbed core during
-        # parallel dev that lacks _regret_match) -- fall back to the module's
-        # production-default dims, the pre-cambia-341 behavior.
-        net = PRTCFRNet(device=device)
-        net.load_encoder_head(obj["encoder_state_dict"], obj["head_state_dict"])
-        net.eval()
-        return net
+    # Pinned format only: split encoder/head state dicts. The whole-module and
+    # combined-state_dict fallbacks were removed with cambia-552 -- the former
+    # was the RCE landing point (a pickled ``nn.Module``) and is unreachable
+    # under ``weights_only=True`` anyway; neither format is emitted by any
+    # writer in the repo.
+    if not (
+        isinstance(obj, dict)
+        and "encoder_state_dict" in obj
+        and "head_state_dict" in obj
+    ):
+        raise ValueError(
+            f"snapshot {filepath!r} is not in the pinned PRT-CFR format "
+            "{encoder_state_dict, head_state_dict, iteration}; refusing to load "
+            "(security hardening, cambia-552)."
+        )
 
-    # Whole-module pickle.
-    if isinstance(obj, torch.nn.Module):
-        obj.eval()
-        return obj
-
-    # Combined / wrapped state_dict (whole-net ``PRTCFRNet.state_dict()``,
-    # "encoder.*"/"head.*" prefixed keys).
-    state_dict = obj
-    if isinstance(obj, dict) and not _looks_like_state_dict(obj):
-        for key in ("model_state_dict", "state_dict", "net", "policy_state_dict"):
-            if key in obj and isinstance(obj[key], dict):
-                state_dict = obj[key]
-                break
     if _build_net_from_state is not None:
-        encoder_sd = {
-            k[len("encoder.") :]: v
-            for k, v in state_dict.items()
-            if k.startswith("encoder.")
-        }
-        head_sd = {
-            k[len("head.") :]: v for k, v in state_dict.items() if k.startswith("head.")
-        }
-        if encoder_sd and head_sd:
-            return _build_net_from_state(encoder_sd, head_sd, device)
+        return _build_net_from_state(
+            obj["encoder_state_dict"], obj["head_state_dict"], device
+        )
+    # Mixture helper unavailable (defensive; e.g. a stubbed core during
+    # parallel dev that lacks _regret_match) -- fall back to the module's
+    # production-default dims, the pre-cambia-341 behavior.
     net = PRTCFRNet(device=device)
-    net.load_state_dict(state_dict)
+    net.load_encoder_head(obj["encoder_state_dict"], obj["head_state_dict"])
     net.eval()
     return net
-
-
-def _looks_like_state_dict(d: dict) -> bool:
-    """Heuristic: a state_dict maps str -> tensor-like at the top level."""
-    import torch
-
-    if not d:
-        return False
-    return all(
-        isinstance(k, str) and isinstance(v, (torch.Tensor, np.ndarray))
-        for k, v in d.items()
-    )
 
 
 def _pad_tokens(tokens: List[int], seq_cap: int = SEQ_CAP) -> np.ndarray:

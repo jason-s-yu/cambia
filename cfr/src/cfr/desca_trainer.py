@@ -1029,7 +1029,11 @@ class DESCATrainer:
 
     def load_checkpoint(self, path: str) -> None:
         """Load state from a checkpoint previously saved by ``save_checkpoint``."""
-        ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        # weights_only=True: the payload is plain tensors + optimizer state +
+        # a numpy PCG64 bit-generator state dict (ints/strings) + a config dict;
+        # nothing that needs arbitrary unpickling. Hardened against a poisoned
+        # pickle rsync-written under runs/ (cambia-552).
+        ckpt = torch.load(path, map_location=self.device, weights_only=True)
         self.regret_net.load_state_dict(ckpt["regret_state_dict"])
         self.avg_strategy_net.load_state_dict(ckpt["avg_strategy_state_dict"])
         self.history_value_net.load_state_dict(ckpt["history_value_state_dict"])
