@@ -11,14 +11,7 @@ import pytest
 import numpy as np
 from types import SimpleNamespace
 
-# Phase 0 F8 carry-forward: N-player FFI constants stale (580/452 should be 856/620).
-# Constructing GoEngine with num_players=3/4 causes a malloc crash at the Go side.
-# Skip the entire module until Phase 3 fixes the FFI constants.
-pytestmark = pytest.mark.skip(
-    reason="Phase 0 F8 carry-forward: N-player FFI malloc crash (stale constants 580/452 "
-    "should be 856/620). Fix in Phase 3."
-)
-
+from src.constants import N_PLAYER_INPUT_DIM, N_PLAYER_NUM_ACTIONS
 
 # ---------------------------------------------------------------------------
 # Skip guard
@@ -201,7 +194,7 @@ class TestNPlayerUtilityShape:
 class TestNPlayerSampleDimensions:
     @skip_if_no_go
     def test_advantage_sample_feature_dim(self):
-        """Advantage samples have features of shape (580,)."""
+        """Advantage samples have features of shape (N_PLAYER_INPUT_DIM,)."""
         engine, agents = _make_engine_and_agents(num_players=3, seed=55)
         config = _make_config()
         try:
@@ -214,8 +207,12 @@ class TestNPlayerSampleDimensions:
         # There may be 0 samples if updating_player never acts; run until we get some
         # We check all collected samples have correct shape
         for s in advantage_samples:
-            assert s.features.shape == (580,), f"Expected (580,), got {s.features.shape}"
-            assert s.target.shape == (452,), f"Expected (452,), got {s.target.shape}"
+            assert s.features.shape == (
+                N_PLAYER_INPUT_DIM,
+            ), f"Expected ({N_PLAYER_INPUT_DIM},), got {s.features.shape}"
+            assert s.target.shape == (
+                N_PLAYER_NUM_ACTIONS,
+            ), f"Expected ({N_PLAYER_NUM_ACTIONS},), got {s.target.shape}"
 
             # --- Regret mask consistency (N-player) ---
             # Regret targets are zero-initialized; only legal action indices are written.
@@ -227,7 +224,8 @@ class TestNPlayerSampleDimensions:
 
     @skip_if_no_go
     def test_strategy_sample_feature_dim(self):
-        """Strategy samples have features of shape (580,) and targets of shape (452,)."""
+        """Strategy samples have features of shape (N_PLAYER_INPUT_DIM,) and
+        targets of shape (N_PLAYER_NUM_ACTIONS,)."""
         engine, agents = _make_engine_and_agents(num_players=3, seed=77)
         config = _make_config()
         try:
@@ -238,8 +236,12 @@ class TestNPlayerSampleDimensions:
                 a.close()
 
         for s in strategy_samples:
-            assert s.features.shape == (580,), f"Expected (580,), got {s.features.shape}"
-            assert s.target.shape == (452,), f"Expected (452,), got {s.target.shape}"
+            assert s.features.shape == (
+                N_PLAYER_INPUT_DIM,
+            ), f"Expected ({N_PLAYER_INPUT_DIM},), got {s.features.shape}"
+            assert s.target.shape == (
+                N_PLAYER_NUM_ACTIONS,
+            ), f"Expected ({N_PLAYER_NUM_ACTIONS},), got {s.target.shape}"
 
             # --- Strategy probability distribution (N-player) ---
             # OS-MCCFR stores σ(I) at opponent nodes. The strategy over legal

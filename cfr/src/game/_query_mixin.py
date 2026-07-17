@@ -63,7 +63,26 @@ class QueryMixin:
         return []
 
     def get_opponent_index(self, player_index: int) -> int:
-        """Returns the index of the opponent player, assuming 1v1."""
+        """Returns the index of the sole opponent. 2-player games only.
+
+        The Python reference engine still represents ability/snap targeting
+        with single-opponent action types (ActionAbilityPeekOtherSelect,
+        ActionAbilityBlindSwapSelect, ActionAbilityKingLookSelect,
+        ActionSnapOpponent, ActionSnapOpponentMove all carry no target-player
+        field -- only a hand-slot index), so "the opponent" is only a
+        well-defined concept at num_players == 2. This raises instead of
+        returning a sentinel: at least one existing call site indexes
+        ``self.players[opp_idx]`` *before* bounds-checking the return value
+        (cambia-542 audit, _ability_mixin.py BlindSwap/KingSwap execution),
+        and Python's negative-index wraparound means an out-of-range sentinel
+        (e.g. -1) would silently resolve to the *last* player there rather
+        than fail -- a return-based guard cannot be relied on to fail loud at
+        N>2, only a raise can. Use get_opponents() for N-player-aware code;
+        wiring N-player-correct targeting through the call sites above needs
+        the action types themselves extended with a target-player field
+        (extensibility-requirements.md sec 3.1 item 5 -- tracked separately,
+        not part of cambia-542).
+        """
         if not (0 <= player_index < self.num_players):
             logger.error(
                 "QueryMixin: Invalid player index %d for get_opponent_index (Num players: %d)",
@@ -71,7 +90,36 @@ class QueryMixin:
                 self.num_players,
             )
             return -1  # Indicate error
+        if self.num_players != 2:
+            raise NotImplementedError(
+                f"get_opponent_index() assumes a 2-player game (self.num_players="
+                f"{self.num_players}). Use get_opponents() for N-player-aware code."
+            )
         return 1 - player_index
+
+    def get_opponents(self, player_index: int) -> List[int]:
+        """Returns every other player's index, ascending (N-player-aware).
+
+        Mirrors engine.GameState.Opponents() (engine/game.go) exactly: all
+        player indices in [0, num_players) except player_index, in ascending
+        order. Valid at any num_players >= 2 -- the N-aware replacement for
+        get_opponent_index() introduced by cambia-542 F2.
+
+        Note: having a correct list of opponent indices does not by itself
+        make ability/snap targeting N-player-correct, since the relevant
+        action types (see get_opponent_index() docstring) carry no
+        target-player field to select among them. This method exists so
+        N-aware code (e.g. a future target-selection layer) has a correct
+        primitive to build on.
+        """
+        if not (0 <= player_index < self.num_players):
+            logger.error(
+                "QueryMixin: Invalid player index %d for get_opponents (Num players: %d)",
+                player_index,
+                self.num_players,
+            )
+            return []
+        return [i for i in range(self.num_players) if i != player_index]
 
     def get_player_card_count(self, player_index: int) -> int:
         """Returns the number of cards in the player's hand."""

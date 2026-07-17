@@ -17,6 +17,17 @@ import cffi
 import numpy as np
 
 from src.config import CambiaRulesConfig
+from src.constants import (
+    N_PLAYER_INPUT_DIM as _GO_N_PLAYER_INPUT_DIM,
+    N_PLAYER_NUM_ACTIONS as _GO_N_PLAYER_NUM_ACTIONS,
+)
+
+# Word count for the Go N-player legal-actions bitmask: engine.NPlayerLegalActions()
+# (engine/legal.go) returns a fixed [10]uint64 (640 bits, covering 620 actions).
+# Derived here from the single-sourced N_PLAYER_NUM_ACTIONS rather than hardcoded
+# so a future MaxPlayers bump can't silently under-allocate this buffer again the
+# way the 580/452 dims did (cambia-542 F8).
+_NPLAYER_LEGAL_WORDS = (_GO_N_PLAYER_NUM_ACTIONS + 63) // 64
 
 # ---------------------------------------------------------------------------
 # Card index mapping utilities
@@ -201,6 +212,8 @@ _ffi.cdef("""
                                         int8_t drawn_bucket, float *out);
     int32_t cambia_agent_nplayer_action_mask(int32_t agent_h, int32_t game_h,
                                              uint8_t *out);
+    int32_t cambia_nplayer_input_dim(void);
+    int32_t cambia_nplayer_num_actions(void);
 
     /* Subgame solver */
     int32_t cambia_subgame_build(int32_t game_h, int32_t max_depth);
@@ -297,8 +310,15 @@ class GoEngine:
 
     INPUT_DIM: int = 222
     NUM_ACTIONS: int = 146
-    N_PLAYER_INPUT_DIM: int = 580
-    N_PLAYER_NUM_ACTIONS: int = 452
+    # Single-sourced from cfr/src/constants.py (which mirrors the Go
+    # engine/agent constants) rather than hardcoded -- cambia-542 F8: this
+    # module previously hardcoded stale 580/452 values that drifted from the
+    # 856/620 dims after the MaxPlayers 6->8 bump (commit 9073646), causing
+    # malloc-crash buffer overflows in encode_nplayer/nplayer_action_mask/
+    # nplayer_legal_actions_mask. get_nplayer_dims() below cross-checks these
+    # against the live Go values through the FFI.
+    N_PLAYER_INPUT_DIM: int = _GO_N_PLAYER_INPUT_DIM
+    N_PLAYER_NUM_ACTIONS: int = _GO_N_PLAYER_NUM_ACTIONS
     # Encoding v2 (DESCA Phase 0) constants. Kept in sync with the Go
     # constants in engine/agent/constants.go (EPPBSV2InputDim etc.).
     EPPBS_V2_INPUT_DIM: int = 257
@@ -335,8 +355,8 @@ class GoEngine:
         self._mask_buf = _ffi.new("uint8_t[146]")
         self._util_buf = _ffi.new("float[2]")
         # N-player buffers (allocated lazily via properties or always for simplicity)
-        self._nplayer_mask_buf = _ffi.new("uint8_t[452]")
-        self._nplayer_legal_buf = _ffi.new("uint64_t[8]")
+        self._nplayer_mask_buf = _ffi.new(f"uint8_t[{_GO_N_PLAYER_NUM_ACTIONS}]")
+        self._nplayer_legal_buf = _ffi.new(f"uint64_t[{_NPLAYER_LEGAL_WORDS}]")
         self._nplayer_util_buf = _ffi.new(f"float[{self._num_players}]")
 
         if seed is None:
@@ -392,8 +412,8 @@ class GoEngine:
         obj._num_players = 2
         obj._mask_buf = _ffi.new("uint8_t[146]")
         obj._util_buf = _ffi.new("float[2]")
-        obj._nplayer_mask_buf = _ffi.new("uint8_t[452]")
-        obj._nplayer_legal_buf = _ffi.new("uint64_t[8]")
+        obj._nplayer_mask_buf = _ffi.new(f"uint8_t[{_GO_N_PLAYER_NUM_ACTIONS}]")
+        obj._nplayer_legal_buf = _ffi.new(f"uint64_t[{_NPLAYER_LEGAL_WORDS}]")
         obj._nplayer_util_buf = _ffi.new("float[2]")
         obj._closed = False
         obj._owned = owned
@@ -435,8 +455,8 @@ class GoEngine:
 
         obj._mask_buf = _ffi.new("uint8_t[146]")
         obj._util_buf = _ffi.new("float[2]")
-        obj._nplayer_mask_buf = _ffi.new("uint8_t[452]")
-        obj._nplayer_legal_buf = _ffi.new("uint64_t[8]")
+        obj._nplayer_mask_buf = _ffi.new(f"uint8_t[{_GO_N_PLAYER_NUM_ACTIONS}]")
+        obj._nplayer_legal_buf = _ffi.new(f"uint64_t[{_NPLAYER_LEGAL_WORDS}]")
         obj._nplayer_util_buf = _ffi.new(f"float[{obj._num_players}]")
 
         deck_arr = _ffi.new("uint8_t[]", deck_indices)
@@ -687,9 +707,9 @@ class GoEngine:
 
     def nplayer_legal_actions_mask(self) -> np.ndarray:
         """
-        Return a (452,) uint8 numpy array where 1 = legal N-player action.
+        Return a (N_PLAYER_NUM_ACTIONS,) uint8 numpy array where 1 = legal N-player action.
 
-        Uses the 8×uint64 bitmask from Go, expanded to per-action bytes.
+        Uses the _NPLAYER_LEGAL_WORDS-word uint64 bitmask from Go, expanded to per-action bytes.
         Requires an agent handle; uses cambia_game_nplayer_legal_actions for
         the raw bitmask and returns it as a dense byte array.
         """
@@ -711,7 +731,7 @@ class GoEngine:
 
     def apply_nplayer_action(self, action_idx: int) -> None:
         """
-        Apply an N-player action by its integer index in [0, 452).
+        Apply an N-player action by its integer index in [0, N_PLAYER_NUM_ACTIONS).
 
         Raises:
             ValueError: If action_idx is out of range.
@@ -786,11 +806,12 @@ class GoAgentState:
 
         # Pre-allocated reusable encode buffers (T1-2 cffi buffer reuse).
         # encode (222), encode_eppbs (224), encode_eppbs_interleaved_v2 (257),
-        # encode_nplayer (580), plus agent-attr getter buffers.
+        # encode_nplayer (GoEngine.N_PLAYER_INPUT_DIM), plus agent-attr getter
+        # buffers.
         self._encode_buf = _ffi.new("float[222]")
         self._encode_buf_224 = _ffi.new("float[224]")
         self._encode_buf_257 = _ffi.new(f"float[{GoEngine.EPPBS_V2_INPUT_DIM}]")
-        self._encode_buf_580 = None  # lazy alloc only when N-player is used
+        self._encode_buf_nplayer = None  # lazy alloc only when N-player is used
         # Agent-attr getter buffers (training-only path for Python adapters):
         # 6*4 own hand triplets + 6 opp belief bytes + 2 hand-len bytes.
         self._own_hand_buf = _ffi.new(f"uint8_t[{GoEngine.MAX_HAND_SIZE * 4}]")
@@ -825,7 +846,7 @@ class GoAgentState:
         obj._encode_buf = _ffi.new("float[222]")
         obj._encode_buf_224 = _ffi.new("float[224]")
         obj._encode_buf_257 = _ffi.new(f"float[{GoEngine.EPPBS_V2_INPUT_DIM}]")
-        obj._encode_buf_580 = None
+        obj._encode_buf_nplayer = None
         obj._own_hand_buf = _ffi.new(f"uint8_t[{GoEngine.MAX_HAND_SIZE * 4}]")
         obj._opp_belief_buf = _ffi.new(f"uint8_t[{GoEngine.MAX_HAND_SIZE}]")
         obj._hand_lens_buf = _ffi.new("uint8_t[2]")
@@ -878,7 +899,7 @@ class GoAgentState:
         obj._encode_buf = _ffi.new("float[222]")
         obj._encode_buf_224 = _ffi.new("float[224]")
         obj._encode_buf_257 = _ffi.new(f"float[{GoEngine.EPPBS_V2_INPUT_DIM}]")
-        obj._encode_buf_580 = None
+        obj._encode_buf_nplayer = None
         obj._own_hand_buf = _ffi.new(f"uint8_t[{GoEngine.MAX_HAND_SIZE * 4}]")
         obj._opp_belief_buf = _ffi.new(f"uint8_t[{GoEngine.MAX_HAND_SIZE}]")
         obj._hand_lens_buf = _ffi.new("uint8_t[2]")
@@ -941,7 +962,7 @@ class GoAgentState:
         obj._encode_buf = _ffi.new("float[222]")
         obj._encode_buf_224 = _ffi.new("float[224]")
         obj._encode_buf_257 = _ffi.new(f"float[{GoEngine.EPPBS_V2_INPUT_DIM}]")
-        obj._encode_buf_580 = None
+        obj._encode_buf_nplayer = None
         obj._own_hand_buf = _ffi.new(f"uint8_t[{GoEngine.MAX_HAND_SIZE * 4}]")
         obj._opp_belief_buf = _ffi.new(f"uint8_t[{GoEngine.MAX_HAND_SIZE}]")
         obj._hand_lens_buf = _ffi.new("uint8_t[2]")
@@ -1228,25 +1249,31 @@ class GoAgentState:
         drawn_bucket: int = -1,
         out: Optional[np.ndarray] = None,
     ) -> np.ndarray:
-        """N-player encoding via Go FFI. Returns ndarray of shape (580,).
+        """N-player encoding via Go FFI. Returns ndarray of shape (N_PLAYER_INPUT_DIM,).
 
-        Lazy-allocates a 580-float cffi buffer on first call (T1-2 buffer reuse
-        for N-player path). If ``out`` is supplied with matching shape/dtype,
-        the encoded floats are copied into it.
+        Lazy-allocates a N_PLAYER_INPUT_DIM-float cffi buffer on first call
+        (T1-2 buffer reuse for N-player path). If ``out`` is supplied with
+        matching shape/dtype, the encoded floats are copied into it.
         """
-        if self._encode_buf_580 is None:
-            self._encode_buf_580 = _ffi.new("float[580]")
+        if self._encode_buf_nplayer is None:
+            self._encode_buf_nplayer = _ffi.new(f"float[{_GO_N_PLAYER_INPUT_DIM}]")
         rc = self._lib.cambia_agent_encode_nplayer(
-            self._agent_h, int(decision_context), int(drawn_bucket), self._encode_buf_580
+            self._agent_h,
+            int(decision_context),
+            int(drawn_bucket),
+            self._encode_buf_nplayer,
         )
         if rc != 0:
             raise RuntimeError(f"N-player encode failed: {rc}")
-        view = np.frombuffer(_ffi.buffer(self._encode_buf_580, 580 * 4), dtype=np.float32)
+        view = np.frombuffer(
+            _ffi.buffer(self._encode_buf_nplayer, _GO_N_PLAYER_INPUT_DIM * 4),
+            dtype=np.float32,
+        )
         if out is not None:
-            if out.shape != (580,) or out.dtype != np.float32:
+            if out.shape != (_GO_N_PLAYER_INPUT_DIM,) or out.dtype != np.float32:
                 raise ValueError(
                     f"out buffer shape/dtype mismatch: got {out.shape}/{out.dtype}, "
-                    f"expected (580,)/float32"
+                    f"expected ({_GO_N_PLAYER_INPUT_DIM},)/float32"
                 )
             np.copyto(out, view)
             return out
@@ -1319,21 +1346,23 @@ class GoAgentState:
 
     def nplayer_action_mask(self, engine: GoEngine) -> np.ndarray:
         """
-        Return a (452,) uint8 array where 1 = legal N-player action.
+        Return a (N_PLAYER_NUM_ACTIONS,) uint8 array where 1 = legal N-player action.
 
         Args:
             engine: The GoEngine instance for the current game state.
 
         Returns:
-            np.ndarray of shape (452,) with dtype uint8.
+            np.ndarray of shape (N_PLAYER_NUM_ACTIONS,) with dtype uint8.
         """
-        mask_buf = _ffi.new("uint8_t[452]")
+        mask_buf = _ffi.new(f"uint8_t[{_GO_N_PLAYER_NUM_ACTIONS}]")
         rc = self._lib.cambia_agent_nplayer_action_mask(
             self._agent_h, engine.handle, mask_buf
         )
         if rc != 0:
             raise RuntimeError(f"N-player action mask failed: {rc}")
-        return np.frombuffer(_ffi.buffer(mask_buf, 452), dtype=np.uint8).copy()
+        return np.frombuffer(
+            _ffi.buffer(mask_buf, _GO_N_PLAYER_NUM_ACTIONS), dtype=np.uint8
+        ).copy()
 
     # --- Lifecycle ---
 
@@ -1685,6 +1714,20 @@ def get_token_stream_cap() -> int:
     or PRODUCTION_SEQ_CAP to stay in sync by inspection.
     """
     return int(_get_lib().cambia_token_stream_cap())
+
+
+def get_nplayer_dims() -> Tuple[int, int]:
+    """Return the live Go (N_PLAYER_INPUT_DIM, N_PLAYER_NUM_ACTIONS) pair.
+
+    Paired with cfr/src/constants.py's N_PLAYER_INPUT_DIM/N_PLAYER_NUM_ACTIONS
+    (which GoEngine.N_PLAYER_INPUT_DIM/N_PLAYER_NUM_ACTIONS and every N-player
+    buffer allocation in this module derive from). The cross-check test reads
+    this live rather than trusting the two to stay in sync by inspection --
+    cambia-542 F8 was exactly that drift (bridge.py hardcoded 580/452 after
+    the Go side moved to 856/620).
+    """
+    lib = _get_lib()
+    return int(lib.cambia_nplayer_input_dim()), int(lib.cambia_nplayer_num_actions())
 
 
 # Fixed field order of cambia_token_vocab (mirrors agent.TokenVocab). Consumers

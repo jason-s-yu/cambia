@@ -347,3 +347,51 @@ class TestEvalCambiaRulesMismatch:
         _saved_meta = checkpoint.get("metadata", {})
         _saved_rules = (_saved_meta.get("config", {}) or {}).get("cambia_rules", {})
         assert not _saved_rules
+
+
+# ---------------------------------------------------------------------------
+# cambia-542 F3: num_players bounds validation (DeepCfrConfig, PRTCFRConfig)
+# ---------------------------------------------------------------------------
+#
+# No Go-side validation existed prior to cambia-542; a num_players=9 config
+# would sail through Python and panic inside libcambia.so the first time a
+# GoEngine was constructed (array-index panic on the fixed [MaxPlayers]
+# board). These fail fast at config-construction time instead.
+
+
+def _get_real_config_classes():
+    """Import DeepCfrConfig/PRTCFRConfig from the real src.config, bypassing
+    the conftest stub (which stubs num_players with no validation)."""
+    _orig = sys.modules.pop("src.config", None)
+    try:
+        real_mod = importlib.import_module("src.config")
+        return real_mod.DeepCfrConfig, real_mod.PRTCFRConfig
+    finally:
+        if _orig is not None:
+            sys.modules["src.config"] = _orig
+
+
+class TestNumPlayersValidation:
+    @pytest.mark.parametrize("num_players", [2, 4, 8])
+    def test_valid_num_players_accepted(self, num_players):
+        DeepCfrConfig, PRTCFRConfig = _get_real_config_classes()
+        assert DeepCfrConfig(num_players=num_players).num_players == num_players
+        assert PRTCFRConfig(num_players=num_players).num_players == num_players
+
+    @pytest.mark.parametrize("num_players", [0, 1, 9, 255])
+    def test_invalid_num_players_rejected_deep_cfr_config(self, num_players):
+        DeepCfrConfig, _ = _get_real_config_classes()
+        with pytest.raises(Exception):
+            DeepCfrConfig(num_players=num_players)
+
+    @pytest.mark.parametrize("num_players", [0, 1, 9, 255])
+    def test_invalid_num_players_rejected_prtcfr_config(self, num_players):
+        _, PRTCFRConfig = _get_real_config_classes()
+        with pytest.raises(Exception):
+            PRTCFRConfig(num_players=num_players)
+
+    def test_default_num_players_is_valid(self):
+        """The default (2) must itself pass validation."""
+        DeepCfrConfig, PRTCFRConfig = _get_real_config_classes()
+        assert DeepCfrConfig().num_players == 2
+        assert PRTCFRConfig().num_players == 2

@@ -44,13 +44,9 @@ from src.constants import (
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(
-    reason="Phase 0 F8 carry-forward: N-player FFI constants stale (580/452 should be "
-    "856/620). Fix in Phase 3."
-)
 class TestNPlayerEncodingDimension:
-    def test_output_shape_is_580(self):
-        """encode_infoset_nplayer must produce exactly 580-dim vector."""
+    def test_output_shape_is_correct(self):
+        """encode_infoset_nplayer must produce exactly N_PLAYER_INPUT_DIM-dim vector."""
         knowledge_masks = {}
         slot_buckets = {}
         out = encode_infoset_nplayer(
@@ -65,7 +61,9 @@ class TestNPlayerEncodingDimension:
             cambia_state=2,
             drawn_card_bucket=-1,
         )
-        assert out.shape == (N_PLAYER_INPUT_DIM,), f"Expected (580,), got {out.shape}"
+        assert out.shape == (
+            N_PLAYER_INPUT_DIM,
+        ), f"Expected ({N_PLAYER_INPUT_DIM},), got {out.shape}"
         assert out.dtype == np.float32
 
     def test_output_shape_nplayer_6(self):
@@ -81,7 +79,7 @@ class TestNPlayerEncodingDimension:
             decision_context=1,
             cambia_state=2,
         )
-        assert out.shape == (580,)
+        assert out.shape == (N_PLAYER_INPUT_DIM,)
 
     def test_all_zeros_when_no_knowledge(self):
         """Powerset and identity sections zero when no knowledge."""
@@ -106,14 +104,17 @@ class TestNPlayerEncodingDimension:
 
 
 # ---------------------------------------------------------------------------
-# 2. N-player action index round-trip (all 452 indices)
+# 2. N-player action index round-trip (all N_PLAYER_NUM_ACTIONS=620 indices)
 # ---------------------------------------------------------------------------
+#
+# Expected offsets below mirror the Go ground truth (engine/types.go
+# NPlayerActionBase* constants) with MaxOpponents=7 (N_PLAYER_MAX_PLAYERS=8):
+# PeekOther/SnapOpponent widen from 5 to 7 opponents per slot, and every base
+# offset downstream of PeekOther shifts accordingly (cambia-542 F1/F8: these
+# were previously hardcoded against the pre-MaxPlayers-6->8-bump 452-action,
+# 5-opponent layout and had silently drifted from the Go decoder).
 
 
-@pytest.mark.skip(
-    reason="Phase 0 F8 carry-forward: N-player FFI constants stale (580/452 should be "
-    "856/620). Fix in Phase 3."
-)
 class TestNPlayerActionIndices:
     def test_draw_stockpile(self):
         assert nplayer_action_to_index(ActionDrawStockpile()) == 0
@@ -143,70 +144,70 @@ class TestNPlayerActionIndices:
             assert idx == 11 + slot
 
     def test_peek_other_all_combinations(self):
-        # 17 + slot*5 + opp_idx, slot in 0-5, opp_idx in 0-4
+        # 17 + slot*7 + opp_idx, slot in 0-5, opp_idx in 0-6 (7 opponents)
         for slot in range(6):
-            for opp_idx in range(5):
+            for opp_idx in range(7):
                 idx = nplayer_action_to_index(
                     ActionAbilityPeekOtherSelect(target_opponent_hand_index=slot),
                     opp_idx=opp_idx,
                 )
-                expected = 17 + slot * 5 + opp_idx
+                expected = 17 + slot * 7 + opp_idx
                 assert (
                     idx == expected
                 ), f"PeekOther({slot},{opp_idx}): expected {expected}, got {idx}"
 
     def test_blind_swap_range(self):
-        # 47 + own*30 + opp_slot*5 + opp_idx
+        # 59 + own*42 + opp_slot*7 + opp_idx
         idx = nplayer_action_to_index(
             ActionAbilityBlindSwapSelect(own_hand_index=0, opponent_hand_index=0),
             opp_idx=0,
         )
-        assert idx == 47
+        assert idx == 59
         idx = nplayer_action_to_index(
             ActionAbilityBlindSwapSelect(own_hand_index=5, opponent_hand_index=5),
-            opp_idx=4,
+            opp_idx=6,
         )
-        assert idx == 47 + 5 * 30 + 5 * 5 + 4  # 47 + 150 + 25 + 4 = 226
+        assert idx == 59 + 5 * 42 + 5 * 7 + 6  # 59 + 210 + 35 + 6 = 310
 
     def test_king_look_range(self):
         idx = nplayer_action_to_index(
             ActionAbilityKingLookSelect(own_hand_index=0, opponent_hand_index=0),
             opp_idx=0,
         )
-        assert idx == 227
+        assert idx == 311
         idx = nplayer_action_to_index(
             ActionAbilityKingLookSelect(own_hand_index=5, opponent_hand_index=5),
-            opp_idx=4,
+            opp_idx=6,
         )
-        assert idx == 227 + 5 * 30 + 5 * 5 + 4  # 227 + 150 + 25 + 4 = 406
+        assert idx == 311 + 5 * 42 + 5 * 7 + 6  # 311 + 210 + 35 + 6 = 562
 
     def test_king_swap_decision(self):
         assert (
             nplayer_action_to_index(ActionAbilityKingSwapDecision(perform_swap=False))
-            == 407
+            == 563
         )
         assert (
             nplayer_action_to_index(ActionAbilityKingSwapDecision(perform_swap=True))
-            == 408
+            == 564
         )
 
     def test_pass_snap(self):
-        assert nplayer_action_to_index(ActionPassSnap()) == 409
+        assert nplayer_action_to_index(ActionPassSnap()) == 565
 
     def test_snap_own_all_slots(self):
         for slot in range(6):
             idx = nplayer_action_to_index(ActionSnapOwn(own_card_hand_index=slot))
-            assert idx == 410 + slot
+            assert idx == 566 + slot
 
     def test_snap_opponent_all_combinations(self):
-        # 416 + slot*5 + opp_idx
+        # 572 + slot*7 + opp_idx (7 opponents)
         for slot in range(6):
-            for opp_idx in range(5):
+            for opp_idx in range(7):
                 idx = nplayer_action_to_index(
                     ActionSnapOpponent(opponent_target_hand_index=slot),
                     opp_idx=opp_idx,
                 )
-                expected = 416 + slot * 5 + opp_idx
+                expected = 572 + slot * 7 + opp_idx
                 assert idx == expected
 
     def test_snap_opponent_move(self):
@@ -217,10 +218,10 @@ class TestNPlayerActionIndices:
                     target_empty_slot_index=0,
                 )
             )
-            assert idx == 446 + own
+            assert idx == 614 + own
 
     def test_all_indices_within_range(self):
-        """Spot-check that all action indices are in [0, 452)."""
+        """Spot-check that all action indices are in [0, N_PLAYER_NUM_ACTIONS)."""
         test_actions = [
             (ActionDrawStockpile(), {}),
             (ActionDrawDiscard(), {}),
@@ -553,10 +554,6 @@ class TestAgentStateNPlayerMasks:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(
-    reason="Phase 0 F8 carry-forward: N-player FFI constants stale (580/452 should be "
-    "856/620); malloc crash on legal_actions. Fix in Phase 3."
-)
 class TestGoEngineNPlayer:
     @pytest.fixture(autouse=True)
     def skip_if_no_lib(self):
@@ -581,7 +578,7 @@ class TestGoEngineNPlayer:
                 assert game._game_h >= 0
 
     def test_nplayer_legal_actions_mask_shape(self):
-        """nplayer_legal_actions_mask returns (452,) array."""
+        """nplayer_legal_actions_mask returns (N_PLAYER_NUM_ACTIONS,) array."""
         import warnings
         from src.ffi.bridge import GoEngine
 
@@ -589,7 +586,7 @@ class TestGoEngineNPlayer:
             warnings.simplefilter("ignore", DeprecationWarning)
             with GoEngine(seed=42, num_players=4) as game:
                 mask = game.nplayer_legal_actions_mask()
-                assert mask.shape == (452,)
+                assert mask.shape == (N_PLAYER_NUM_ACTIONS,)
                 assert mask.dtype == np.uint8
 
     def test_nplayer_apply_action(self):
@@ -601,7 +598,7 @@ class TestGoEngineNPlayer:
             warnings.simplefilter("ignore", DeprecationWarning)
             with GoEngine(seed=42, num_players=3) as game:
                 with pytest.raises(ValueError):
-                    game.apply_nplayer_action(452)
+                    game.apply_nplayer_action(N_PLAYER_NUM_ACTIONS)
 
 
 # ---------------------------------------------------------------------------
@@ -609,10 +606,6 @@ class TestGoEngineNPlayer:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(
-    reason="Phase 0 F8 carry-forward: N-player FFI constants stale (580/452 should be "
-    "856/620); malloc crash on encode_nplayer. Fix in Phase 3."
-)
 class TestGoAgentStateNPlayer:
     @pytest.fixture(autouse=True)
     def skip_if_no_lib(self):
@@ -634,8 +627,8 @@ class TestGoAgentStateNPlayer:
                 with GoAgentState.new_nplayer(game, player_id=0, num_players=4) as agent:
                     assert agent._agent_h >= 0
 
-    def test_encode_nplayer_returns_580_dims(self):
-        """encode_nplayer returns (580,) float32 array."""
+    def test_encode_nplayer_returns_correct_dims(self):
+        """encode_nplayer returns (N_PLAYER_INPUT_DIM,) float32 array."""
         import warnings
         from src.ffi.bridge import GoEngine, GoAgentState
 
@@ -644,11 +637,11 @@ class TestGoAgentStateNPlayer:
             with GoEngine(seed=456, num_players=4) as game:
                 with GoAgentState.new_nplayer(game, player_id=0, num_players=4) as agent:
                     enc = agent.encode_nplayer(decision_context=0, drawn_bucket=-1)
-                    assert enc.shape == (580,)
+                    assert enc.shape == (N_PLAYER_INPUT_DIM,)
                     assert enc.dtype == np.float32
 
     def test_nplayer_action_mask_shape(self):
-        """nplayer_action_mask returns (452,) uint8 array."""
+        """nplayer_action_mask returns (N_PLAYER_NUM_ACTIONS,) uint8 array."""
         import warnings
         from src.ffi.bridge import GoEngine, GoAgentState
 
@@ -657,5 +650,51 @@ class TestGoAgentStateNPlayer:
             with GoEngine(seed=789, num_players=4) as game:
                 with GoAgentState.new_nplayer(game, player_id=0, num_players=4) as agent:
                     mask = agent.nplayer_action_mask(game)
-                    assert mask.shape == (452,)
+                    assert mask.shape == (N_PLAYER_NUM_ACTIONS,)
                     assert mask.dtype == np.uint8
+
+
+# ---------------------------------------------------------------------------
+# 10. Go<->Python N-player dim cross-check (FFI -- skip if libcambia unavailable)
+# ---------------------------------------------------------------------------
+#
+# cambia-542 F8: bridge.py's N_PLAYER_INPUT_DIM/N_PLAYER_NUM_ACTIONS class
+# attributes are now single-sourced from cfr/src/constants.py, but that alone
+# only guards against the *Python* side drifting from itself -- it can't
+# catch the Go side moving (another MaxPlayers bump, say) without the Python
+# constant being updated too. This queries the live values through the FFI
+# (cambia_nplayer_input_dim/cambia_nplayer_num_actions, added alongside the
+# F8 fix) and asserts equality against both the constants module and
+# GoEngine's class attributes, so a future drift fails a test instead of
+# silently reintroducing the malloc-crash buffer overflow.
+
+
+class TestNPlayerDimCrossCheck:
+    @pytest.fixture(autouse=True)
+    def skip_if_no_lib(self):
+        try:
+            from src.ffi.bridge import _get_lib
+
+            _get_lib()
+        except (FileNotFoundError, OSError):
+            pytest.skip("libcambia.so not available")
+
+    def test_live_dims_match_constants_module(self):
+        from src.ffi.bridge import get_nplayer_dims
+
+        go_input_dim, go_num_actions = get_nplayer_dims()
+        assert go_input_dim == N_PLAYER_INPUT_DIM, (
+            f"Go cambia_nplayer_input_dim()={go_input_dim} != "
+            f"src.constants.N_PLAYER_INPUT_DIM={N_PLAYER_INPUT_DIM}"
+        )
+        assert go_num_actions == N_PLAYER_NUM_ACTIONS, (
+            f"Go cambia_nplayer_num_actions()={go_num_actions} != "
+            f"src.constants.N_PLAYER_NUM_ACTIONS={N_PLAYER_NUM_ACTIONS}"
+        )
+
+    def test_live_dims_match_goengine_class_attrs(self):
+        from src.ffi.bridge import GoEngine, get_nplayer_dims
+
+        go_input_dim, go_num_actions = get_nplayer_dims()
+        assert go_input_dim == GoEngine.N_PLAYER_INPUT_DIM
+        assert go_num_actions == GoEngine.N_PLAYER_NUM_ACTIONS

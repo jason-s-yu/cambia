@@ -191,19 +191,15 @@ class TestActionIndexBijection:
             set(indices)
         ), f"Duplicate indices found: {[i for i in indices if indices.count(i) > 1]}"
 
-    @pytest.mark.skip(
-        reason="Phase 0 F8 carry-forward: N-player FFI constants stale (452 should be 620). "
-        "Fix in Phase 3."
-    )
     def test_nplayer_action_index_exhaustive_range(self):
         """
-        nplayer_action_to_index covers all 452 indices with no gaps.
+        nplayer_action_to_index covers all N_PLAYER_NUM_ACTIONS indices with no gaps.
 
         Generate all valid (action, opp_idx) combinations and verify the returned
-        indices form exactly the set {0, ..., 451}.
+        indices form exactly the set {0, ..., N_PLAYER_NUM_ACTIONS - 1}.
         """
         collected = set()
-        MAX_OPP = 5  # opp_idx in [0, 4]
+        MAX_OPP = 7  # opp_idx in [0, 6] (N_PLAYER_MAX_PLAYERS - 1 opponents)
 
         # Single-target actions (opp_idx irrelevant)
         for act in [
