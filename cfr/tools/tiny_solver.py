@@ -33,6 +33,7 @@ import random
 import sys
 import time
 from collections import defaultdict
+from fractions import Fraction
 
 import numpy as np
 
@@ -115,12 +116,20 @@ class Terminal:
 
 
 class Chance:
-    __slots__ = ("children", "weights")
+    __slots__ = ("children", "weights", "wfrac")
     kind = "C"
 
     def __init__(self):
         self.children = []
         self.weights = []
+        # Exact-rational chance weights (list[fractions.Fraction]), parallel to
+        # ``weights``. Populated only when the tree is built with
+        # ``exact_weights=True`` (default off); None otherwise. The float64 fast
+        # path reads ``weights``; the exact-rational NashConv certifier
+        # (tools/tiny_exact.py, cambia-530) reads ``wfrac`` so chance mass is the
+        # true rational (1/K for deals, cnt/total for draws), never a rounded
+        # float. Kept separate so the hot float builder/scorer is untouched.
+        self.wfrac = None
 
 
 class Decision:
@@ -182,11 +191,16 @@ class Builder:
         perfect_recall=False,
         tokenize=False,
         seq_cap=256,
+        exact_weights=False,
     ):
         self.cfg = cfg
         self.max_nodes = max_nodes
         self.enumerate_draws = enumerate_draws
         self.perfect_recall = perfect_recall
+        # Attach exact-rational chance weights (Chance.wfrac) alongside the float
+        # weights. Default off keeps the hot float builder allocation-identical.
+        # See Chance.wfrac and tools/tiny_exact.py (cambia-530).
+        self.exact_weights = exact_weights
         # PRT-CFR tokenization (additive, default off). When on, each Decision node
         # gets seq_tokens: the acting player's perfect-recall observation-action token
         # stream, produced by src.sequence_encoding.encode_observation_sequence over the
@@ -330,6 +344,8 @@ class Builder:
 
     def _draw_chance(self, game, action, acting, ag, depth):
         ch = Chance()
+        if self.exact_weights:
+            ch.wfrac = []
         distinct = {}
         for c in game.stockpile:
             k = (c.rank, c.suit)
@@ -348,6 +364,11 @@ class Builder:
             game.stockpile[:] = list(orig)
             ch.children.append(child)
             ch.weights.append(cnt / total)
+            if self.exact_weights:
+                # Exact draw-chance mass: multiplicity over stockpile size. Both
+                # are integers read directly from the deck, so this is the true
+                # rational, not the rounded cnt/total float above.
+                ch.wfrac.append(Fraction(cnt, total))
             if self.aborted:
                 break
         return ch
@@ -425,6 +446,7 @@ def build_tree(
     tokenize=False,
     seq_cap=256,
     quiet=True,
+    exact_weights=False,
 ):
     """Synthetic root: K deals, each weight 1/K; each is a full chance-tree.
 
@@ -436,6 +458,12 @@ def build_tree(
     chatty src.* per-node warnings for each deal's expansion (see
     Builder.build_decision_or_terminal / _quiet_src_loggers). Set False to see
     the underlying warnings, e.g. while debugging engine behavior.
+
+    exact_weights (default off): additionally attach exact-rational chance mass
+    (Chance.wfrac) to every chance node: Fraction(1, K) at the deal root and
+    Fraction(cnt, total) at each draw node. The float ``weights`` are unchanged;
+    the exact-rational NashConv certifier (tools/tiny_exact.py, cambia-530) reads
+    ``wfrac`` so no chance mass is ever a rounded float in the exact path.
     """
     root = Chance()
     all_isets = {}
@@ -449,6 +477,7 @@ def build_tree(
             perfect_recall=perfect_recall,
             tokenize=tokenize,
             seq_cap=seq_cap,
+            exact_weights=exact_weights,
         )
         game = CambiaGameState(
             house_rules=cfg.cambia_rules, _rng=random.Random(seed0 + d)
@@ -490,6 +519,11 @@ def build_tree(
             all_isets[k] = v
     s = sum(root.weights)
     root.weights = [w / s for w in root.weights]
+    if exact_weights:
+        # Deal root: K equal-mass children (build appended 1.0 each above).
+        # Exact mass is Fraction(1, K), never the 0.2 float of 1.0/5.
+        k = len(root.children)
+        root.wfrac = [Fraction(1, k)] * k
     return root, all_isets, total_nodes, aborted_deals
 
 

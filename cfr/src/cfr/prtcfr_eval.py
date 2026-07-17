@@ -94,6 +94,7 @@ from src.config import load_config
 from src.encoding import NUM_ACTIONS, action_to_index, encode_action_mask
 from src.sequence_encoding import PAD_ID, SEQ_CAP
 from tools.tiny_solver import build_tree, exploitability
+from tools import tiny_exact
 
 # Tiny {A,6} 2-card plateau game: the EXACT X1 cause-isolation game.
 TINY_2CARD_CONFIG = "config/tiny_2card_plateau.yaml"
@@ -122,12 +123,20 @@ _SNAPSHOT_RE = re.compile(r"prtcfr_snapshot_iter_(\d+)\.pt$")
 # ---------------------------------------------------------------------------
 
 
-def build_tiny_tree(config_path: str = TINY_2CARD_CONFIG, seq_cap: int = SEQ_CAP):
+def build_tiny_tree(
+    config_path: str = TINY_2CARD_CONFIG,
+    seq_cap: int = SEQ_CAP,
+    exact_weights: bool = False,
+):
     """Build the perfect-recall + tokenized {A,6} tiny tree.
 
     Returns (root, isets, n, aborted). Reuses tools.tiny_solver.build_tree with
     ``perfect_recall=True, tokenize=True`` so the tree, its infoset partition, and
     the per-node token streams are identical to what the PRT-CFR worker trains on.
+
+    exact_weights (default off): also attach exact-rational chance mass
+    (Chance.wfrac) for the NashConv certifier (tools/tiny_exact.py, cambia-530).
+    The float ``weights`` used by the fast-path scorer are unchanged.
     """
     cfg = load_config(config_path)
     root, isets, nnodes, aborted = build_tree(
@@ -139,6 +148,7 @@ def build_tiny_tree(config_path: str = TINY_2CARD_CONFIG, seq_cap: int = SEQ_CAP
         perfect_recall=True,
         tokenize=True,
         seq_cap=seq_cap,
+        exact_weights=exact_weights,
     )
     if aborted:
         raise RuntimeError(
@@ -659,4 +669,65 @@ def score_with_loaded_nets(
         "num_snapshots": len(nets_by_iter),
         "snapshot_iters": [it for it, _ in nets_by_iter],
         "passed": bool(nashconv < X2_NASHCONV_BAR),
+    }
+
+
+def certify_policy_on_tiny_game(
+    checkpoint_or_snapshot_dir: str,
+    config_path: str = TINY_2CARD_CONFIG,
+    weighting: str = "linear",
+    device: str = "cpu",
+    seq_cap: int = SEQ_CAP,
+) -> Dict[str, Any]:
+    """Exact-rational X2 verdict: the authoritative scorer for the X2R5 ruling.
+
+    Same load -> enumerate -> tokenize -> SD-CFR average path as
+    ``score_policy_on_tiny_game``, but the tree carries exact-rational chance
+    mass (``build_tiny_tree(exact_weights=True)``) and NashConv is recomputed
+    end-to-end in ``fractions.Fraction`` (tools/tiny_exact.py, cambia-530): no
+    rounding, no ``limit_denominator``, no epsilon anywhere on the exact path.
+    float64 remains the fast path and is reported for the differential, but the
+    verdict (``passed``) is decided on the EXACT NashConv against
+    ``bar_respec = 0.057 = Fraction(57, 1000)``.
+
+    Returns ``score_policy_on_tiny_game``'s keys plus:
+        {"nashconv": float (exact projected),
+         "nashconv_float64": float (fast-path scorer),
+         "nashconv_exact_str": "num/den" (exact rational, lossless),
+         "components_exact_str": (…) exact components as "num/den",
+         "margin_vs_bar": float (exact nashconv - 0.057; <0 => pass),
+         "margin_vs_bar_str": "num/den" exact signed margin,
+         "float_vs_exact_abs": float |float64 - exact|,
+         "bar": float, "passed": bool (exact)}
+    ``passed`` is the exact verdict; ``nashconv`` reports the exact value so the
+    gate consumes exact by default.
+    """
+    snaps = discover_snapshots(checkpoint_or_snapshot_dir)
+    nets_by_iter = [(it, _load_net(fp, device=device)) for it, fp in snaps]
+    root, _isets, _n, _ab = build_tiny_tree(
+        config_path, seq_cap=seq_cap, exact_weights=True
+    )
+    policy = materialize_policy_incremental(
+        root, nets_by_iter, weighting=weighting, seq_cap=seq_cap
+    )
+    nc_f, comp_f = exploitability(root, policy)
+    cert = tiny_exact.certify(root, policy, bar=tiny_exact.BAR_RESPEC)
+    nc_e = cert["nashconv"]
+    return {
+        "nashconv": float(nc_e),
+        "nashconv_float64": float(nc_f),
+        "nashconv_exact_str": f"{nc_e.numerator}/{nc_e.denominator}",
+        "components": cert["components_float"],
+        "components_exact_str": tuple(
+            f"{c.numerator}/{c.denominator}" for c in cert["components"]
+        ),
+        "components_float64": tuple(float(x) for x in comp_f),
+        "margin_vs_bar": cert["margin_float"],
+        "margin_vs_bar_str": f"{cert['margin'].numerator}/{cert['margin'].denominator}",
+        "float_vs_exact_abs": abs(float(nc_f) - float(nc_e)),
+        "num_infosets": len(policy),
+        "num_snapshots": len(snaps),
+        "snapshot_iters": [it for it, _ in snaps],
+        "bar": float(tiny_exact.BAR_RESPEC),
+        "passed": cert["passed"],
     }
