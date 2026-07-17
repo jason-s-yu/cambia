@@ -15,6 +15,7 @@ import os
 import random
 import sys
 
+import numpy as np
 import pytest
 import torch
 
@@ -30,7 +31,7 @@ from src.cfr.prtcfr_worker import (
 )  # noqa: E402
 from src.constants import ActionCallCambia  # noqa: E402
 from src.encoding import NUM_ACTIONS  # noqa: E402
-from src.sequence_encoding import BOS_ID  # noqa: E402
+from src.sequence_encoding import BOS_ID, EOS_ID  # noqa: E402
 
 
 def _small_net() -> PRTCFRNet:
@@ -241,3 +242,141 @@ def test_drop_removes_stream():
     assert len(service) == 1
     service.drop("a")
     assert len(service) == 0
+
+
+# ---------------------------------------------------------------------------
+# cambia-472: vectorized _pad_batch + fused advance_query equivalence
+# ---------------------------------------------------------------------------
+
+
+def test_pad_batch_vectorized_matches_naive():
+    """The vectorized (numpy-scatter) _pad_batch must reproduce the pre-fix
+    per-stream reference grid exactly: right-pad to Lmax with PAD_ID, empty rows
+    clamped to a single PAD (length 1). Ragged widths, an empty row, and a
+    single-token row all exercised."""
+    from src.sequence_encoding import PAD_ID
+
+    net = _small_net()
+    service = PRTCFRInferenceService(net, device="cpu", dtype=torch.float32)
+    token_lists = [[BOS_ID, 5, 6, 7], [9], [], [BOS_ID, 3, 4], [2, 2]]
+
+    batch, lengths = service._pad_batch(token_lists)
+
+    lmax = max(max((len(t) for t in token_lists), default=0), 1)
+    ref = np.full((len(token_lists), lmax), PAD_ID, dtype=np.int64)
+    for i, toks in enumerate(token_lists):
+        if toks:
+            ref[i, : len(toks)] = np.asarray(toks, dtype=np.int64)
+    assert np.array_equal(batch.cpu().numpy(), ref)
+    assert lengths.tolist() == [max(1, len(t)) for t in token_lists]
+
+
+def _drive_two_paths(dtype):
+    """Drive an identical multi-tick (sids, news, transients, masks) schedule
+    through the sequential advance()+query_transient() pair and the fused
+    advance_query(), returning per-tick (ref_strat, fused_strat) and the final
+    carried-hidden dict for each service. The schedule mixes: fresh (absent,
+    non-empty new) streams, continuing streams (non-empty new), present
+    empty-new streams (re-query from carry, no persist), an absent empty-new
+    stream (defensive zero-hidden query path), ragged frame widths, and a
+    fork/drop, so every advance_query branch is exercised."""
+    net = _small_net()
+    svc_ref = PRTCFRInferenceService(net, device="cpu", dtype=dtype)
+    svc_fused = PRTCFRInferenceService(net, device="cpu", dtype=dtype)
+    rng = random.Random(20472)
+    seen: set = set()
+
+    def _mask_tensor(masks_np):
+        return torch.from_numpy(np.stack(masks_np))
+
+    pairs = []
+    saw_empty_present = False
+    saw_absent = False
+    for tick in range(12):
+        active = sorted(rng.sample(range(9), rng.randint(2, 6)))
+        sids, news, transients, masks_np = [], [], [], []
+        for sid in active:
+            if sid not in seen:
+                # Fresh stream: first frame must be non-empty ([BOS]+body), as
+                # the production manager's tokens[:-1] always is on first sight.
+                new = [BOS_ID] + [rng.randint(3, 40) for _ in range(rng.randint(0, 3))]
+                seen.add(sid)
+                saw_absent = True
+            else:
+                # Continuing stream: 0-3 new body frames (0 -> empty-new re-query).
+                k = rng.randint(0, 3)
+                new = [rng.randint(3, 40) for _ in range(k)]
+                if k == 0:
+                    saw_empty_present = True
+            sids.append(sid)
+            news.append(new)
+            transients.append([EOS_ID])
+            m = np.zeros(NUM_ACTIONS, dtype=bool)
+            legal = rng.sample(range(NUM_ACTIONS), rng.randint(1, 5))
+            m[legal] = True
+            masks_np.append(m)
+
+        # One defensive absent-empty-new stream on a middle tick: absent stream
+        # (never seen) with empty new -> query from a zero hidden, no persist.
+        if tick == 5:
+            sids.append(99)
+            news.append([])
+            transients.append([EOS_ID])
+            m = np.zeros(NUM_ACTIONS, dtype=bool)
+            m[:3] = True
+            masks_np.append(m)
+
+        masks = _mask_tensor(masks_np)
+
+        svc_ref.advance(sids, news)
+        ref = svc_ref.query_transient(sids, transients, masks.clone())
+        fused = svc_fused.advance_query(sids, news, transients, masks.clone())
+        pairs.append((ref.detach().cpu().numpy(), fused.detach().cpu().numpy()))
+
+        # A fork + drop mid-run, applied identically to both, so the store's
+        # slot reuse and fork clone interact with the fused path.
+        if tick == 7:
+            for svc in (svc_ref, svc_fused):
+                svc.fork(active[0], 200 + active[0])
+            for svc in (svc_ref, svc_fused):
+                svc.drop(active[-1])
+            seen.discard(active[-1])
+
+    carry_ref = {s: svc_ref._hidden[s].clone() for s in svc_ref._hidden._slot}
+    carry_fused = {s: svc_fused._hidden[s].clone() for s in svc_fused._hidden._slot}
+    return pairs, carry_ref, carry_fused, saw_empty_present, saw_absent
+
+
+def test_advance_query_fused_matches_sequential_fp32():
+    """Fused advance_query() equals sequential advance()+query_transient()
+    bit-close in fp32 (the GRU recurrence over new+transient from h0 has the
+    same top hidden as a transient step from the advanced carry), at every tick
+    and for the final carried hidden state of every stream."""
+    pairs, carry_ref, carry_fused, saw_empty, saw_absent = _drive_two_paths(
+        torch.float32
+    )
+    assert saw_empty and saw_absent, "schedule did not exercise both branches"
+    for i, (ref, fused) in enumerate(pairs):
+        assert ref.shape == fused.shape
+        d = float(np.abs(ref - fused).max())
+        assert d < 1e-6, f"tick {i}: fused strategy diverged from sequential: {d:.2e}"
+    assert set(carry_ref) == set(carry_fused)
+    for s in carry_ref:
+        d = (carry_ref[s] - carry_fused[s]).abs().max().item()
+        assert d < 1e-6, f"stream {s}: carried hidden diverged: {d:.2e}"
+
+
+def test_advance_query_fused_matches_sequential_bf16():
+    """Same fused-vs-sequential equivalence in bf16, within bf16 tolerance
+    (well under the 5e-6 eval-wrapper precedent's spirit; bf16 round-off on the
+    O(1) regret-matched probabilities is the only gap, and the persist carry is
+    bit-identical since both paths run the identical GRU op)."""
+    pairs, carry_ref, carry_fused, _, _ = _drive_two_paths(torch.bfloat16)
+    for i, (ref, fused) in enumerate(pairs):
+        d = float(np.abs(ref - fused).max())
+        assert d < 1e-3, f"tick {i}: fused bf16 strategy diverged: {d:.2e}"
+    assert set(carry_ref) == set(carry_fused)
+    for s in carry_ref:
+        assert torch.equal(carry_ref[s], carry_fused[s]), (
+            f"stream {s}: bf16 carried hidden not bit-identical across paths"
+        )

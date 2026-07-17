@@ -1316,18 +1316,22 @@ class IncrementalSigmaManager:
                 self._carry_len[sid] = 0
             sids.append(sid)
             news.append(body_prefix[cl:])
-        # One batched register/step over the new frames (skips empty streams,
-        # registers fresh ones from a zero hidden -- see service.advance).
-        self.service.advance(sids, news)
+        # Masks: one vectorized stack + a single host-to-device copy (cambia-472,
+        # replacing the pre-fix per-query torch.as_tensor list-build).
+        masks = torch.from_numpy(
+            np.stack([np.asarray(q.mask, dtype=bool) for q in queries])
+        ).to(self.service.device)
+        # FUSED per-tick call (cambia-472): the persist-advance over the new
+        # frames and the transient final-token policy query run as ONE gather /
+        # GRU forward / scatter / head, numerically identical to the pre-fix
+        # advance() then query_transient() pair (registers fresh streams from a
+        # zero hidden, skips empty-new streams from the persist -- see
+        # PRTCFRInferenceService.advance_query).
+        strat = self.service.advance_query(sids, news, transients, masks)
+        strat_np = strat.detach().to("cpu", dtype=torch.float64).numpy()
         for sid, new, q in zip(sids, news, queries):
             self._carry_len[sid] = self._carry_len.get(sid, 0) + len(new)
             self._players_of.setdefault(q.stream, set()).add(q.player)
-        # Transient final-token step -> masked regret-matched strategy, one batch.
-        masks = torch.stack(
-            [torch.as_tensor(np.asarray(q.mask, dtype=bool)) for q in queries]
-        ).to(self.service.device)
-        strat = self.service.query_transient(sids, transients, masks)
-        strat_np = strat.detach().to("cpu", dtype=torch.float64).numpy()
         for i, q in enumerate(queries):
             q.result = strat_np[i]
 
