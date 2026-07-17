@@ -71,7 +71,7 @@ After a "Cambia" call and the final round:
 
 1. Everyone sums their cards.
 2. **Lowest Score Wins.**
-3. If there is a tie among multiple players, the winner is the player who called "cambia," assuming they are among the tied winners.
+3. If there is a tie among multiple players, the winner is the player who called "cambia," assuming they are among the tied winners. This holds for any player count: a caller who ties for lowest wins the tiebreak outright. If the caller is not among the tied lowest, the tied players share the win; a caller who does not have the lowest hand never wins.
 
 ## 7. "House" Rules
 
