@@ -85,6 +85,33 @@ func (m *Manager) verifyReceipt(ctx context.Context, jobID, commit string) error
 	return nil
 }
 
+// verifyCommitSignature enforces ssh commit-signature verification when the
+// runner is configured with RequireSignedCommits (cambia-550, W1). It runs
+// `git -c gpg.ssh.allowedSignersFile=<path> verify-commit <commit>` against the
+// bare mirror, where the object is already receipt-matched and present. A
+// non-zero exit (unsigned, wrong key, or bad signature) rejects the job with
+// ErrSignatureVerification. This one hook covers fresh dispatch, resume, and
+// post-restart reconcile, all of which re-run Prepare.
+//
+// When enforcement is off the git verify never runs, so behavior is
+// byte-for-byte unchanged. Enforcement fails closed: an empty AllowedSignersPath
+// or a missing signers file rejects rather than silently passing.
+func (m *Manager) verifyCommitSignature(ctx context.Context, commit string) error {
+	if !m.requireSignedCommits {
+		return nil
+	}
+	if m.allowedSignersPath == "" {
+		return fmt.Errorf("%w: signed-commit enforcement is on but no allowed-signers path is configured", ErrSignatureVerification)
+	}
+	if _, err := os.Stat(m.allowedSignersPath); err != nil {
+		return fmt.Errorf("%w: allowed-signers file %q is unreadable: %v", ErrSignatureVerification, m.allowedSignersPath, err)
+	}
+	if _, err := m.git(ctx, "-c", "gpg.ssh.allowedSignersFile="+m.allowedSignersPath, "verify-commit", commit); err != nil {
+		return fmt.Errorf("%w: commit %s: %v", ErrSignatureVerification, commit, err)
+	}
+	return nil
+}
+
 // BundleFetch is the file-drop fallback transport (design 3.1): it fetches from a
 // git bundle into the same job-ref shape without force. Because the fetch omits
 // the "+" force prefix, a job ref that already points elsewhere and is not
