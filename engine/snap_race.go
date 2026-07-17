@@ -101,6 +101,15 @@ func (g *GameState) resolveSnapRace() {
 	}
 
 	// Uniform-random winner among the willing committers.
+	//
+	// CORRECTNESS FENCE: this draws the winner from the game RNG as an internal,
+	// outcome-sampled chance transition (no explicit chance node in the tree). That
+	// is correct for MCCFR trajectory sampling, but it is NOT enumerable by an exact
+	// tree builder that walks chance branches explicitly (e.g. the Python
+	// tiny_solver): such a builder would treat this stochastic transition as a
+	// sampled-deterministic step and corrupt any exact NashConv computed on a
+	// race-ON tree. Exact solving of race-ON requires first exposing this draw as an
+	// enumerable chance point. The Python tiny_solver guards against SnapRace=true.
 	winSlot := willing[g.randN(uint64(wc))]
 
 	// Penalize the losing willing committers first. drawPenalty only appends to a
