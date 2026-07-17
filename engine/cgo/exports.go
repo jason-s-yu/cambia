@@ -1398,6 +1398,125 @@ func cambia_games_apply_batch(game_hs *C.int32_t, a0s *C.int32_t, a1s *C.int32_t
 	return 0
 }
 
+// cambia_games_observe_batch reads, for each of n live games in ONE FFI
+// crossing, the four per-tick quantities a generation sampler needs: terminal
+// flag, acting player, legal-action mask, and the acting player's full
+// token-stream body. It fuses what were four separate per-game FFI calls
+// (cambia_game_is_terminal + cambia_game_acting_player + cambia_agent_action_mask
+// + cambia_agent_tokens) into one crossing (X3 ladder step (d1), cambia-607).
+// Additive: the four per-game exports stay unchanged.
+//
+// ADDITIVE PRIMITIVE, not currently wired into the generation hot path (see the
+// cambia-607 report): a cross-stream batched observe forces the batched
+// scheduler into an observe/query/apply phasing that fragments its single-drain
+// inference batch (measured ~5x slower gen), and a per-stream n=1 consumer also
+// regressed for an undiagnosed reason on the contended CPU host. This export is
+// byte-identity proven (tests/test_prtcfr_ffi_observe.py) and kept for a future,
+// correctly-scheduled consumer.
+//
+// Inputs: game_hs / a0s / a1s are length-n handle arrays (a0s[i]/a1s[i] are
+// game i's two agent handles). tok_cap is the TOTAL capacity (int32 elements)
+// of the packed token output buffer out_tok.
+//
+// Outputs (all caller-allocated):
+//
+//	out_terminal[i]  1 if game i is terminal, else 0
+//	out_actor[i]     acting player (0/1) for a live game, 255 if terminal
+//	out_masks[i*NumActions + k]  1 if action k is legal for game i, else 0
+//	                 (all zero for a terminal game)
+//	out_tok[...]     acting-player token bodies PACKED contiguously (game i's
+//	                 body at out_tok[out_tok_offsets[i] : +out_tok_lens[i]]);
+//	                 total volume is sum(out_tok_lens), not n*cap, so a batch of
+//	                 short streams needs only a small buffer
+//	out_tok_offsets[i]  start index of game i's body in out_tok
+//	out_tok_lens[i]  game i's token-body length (0 for a terminal game)
+//
+// Returns 0 on success, -1 on an invalid game/agent handle, -2 if the packed
+// bodies would exceed tok_cap (the caller grows out_tok and retries; the reads
+// are idempotent so a retry recomputes cleanly).
+//
+//export cambia_games_observe_batch
+func cambia_games_observe_batch(
+	game_hs *C.int32_t, a0s *C.int32_t, a1s *C.int32_t, n C.int32_t,
+	tok_cap C.int32_t,
+	out_terminal *C.int8_t,
+	out_actor *C.uint8_t,
+	out_masks *C.uint8_t,
+	out_tok *C.int32_t,
+	out_tok_offsets *C.int32_t,
+	out_tok_lens *C.int32_t,
+) C.int32_t {
+	count := int(n)
+	if count <= 0 {
+		return 0
+	}
+	capTok := int(tok_cap)
+	na := agent.NumActions
+	ghs := (*[1 << 20]C.int32_t)(unsafe.Pointer(game_hs))[:count:count]
+	as0 := (*[1 << 20]C.int32_t)(unsafe.Pointer(a0s))[:count:count]
+	as1 := (*[1 << 20]C.int32_t)(unsafe.Pointer(a1s))[:count:count]
+	term := (*[1 << 20]C.int8_t)(unsafe.Pointer(out_terminal))[:count:count]
+	actor := (*[1 << 20]C.uint8_t)(unsafe.Pointer(out_actor))[:count:count]
+	masks := (*[1 << 27]C.uint8_t)(unsafe.Pointer(out_masks))[: count*na : count*na]
+	offsets := (*[1 << 20]C.int32_t)(unsafe.Pointer(out_tok_offsets))[:count:count]
+	toklens := (*[1 << 20]C.int32_t)(unsafe.Pointer(out_tok_lens))[:count:count]
+	tokBytes := unsafe.Sizeof(C.int32_t(0))
+
+	packOff := 0
+	for i := 0; i < count; i++ {
+		gh := int32(ghs[i])
+		if gh < 0 || gh >= maxGames || !gameInUse[gh] {
+			return -1
+		}
+		g := &gamePool[gh]
+		base := i * na
+		offsets[i] = C.int32_t(packOff)
+		if g.IsTerminal() {
+			term[i] = 1
+			actor[i] = 255
+			toklens[i] = 0
+			for k := 0; k < na; k++ {
+				masks[base+k] = 0
+			}
+			continue
+		}
+		term[i] = 0
+		ap := g.ActingPlayer()
+		actor[i] = C.uint8_t(ap)
+		mask := g.LegalActions()
+		var boolMask [agent.NumActions]bool
+		agent.ActionMask(mask, &boolMask)
+		for k := 0; k < na; k++ {
+			if boolMask[k] {
+				masks[base+k] = 1
+			} else {
+				masks[base+k] = 0
+			}
+		}
+		var ah int32
+		if ap == 0 {
+			ah = int32(as0[i])
+		} else {
+			ah = int32(as1[i])
+		}
+		if ah < 0 || ah >= maxAgents || !agentInUse[ah] {
+			return -1
+		}
+		tl := int(tokenPool[ah].Len())
+		toklens[i] = C.int32_t(tl)
+		if packOff+tl > capTok {
+			return -2 // caller grows out_tok and retries
+		}
+		if tl > 0 {
+			dstPtr := unsafe.Pointer(uintptr(unsafe.Pointer(out_tok)) + uintptr(packOff)*tokBytes)
+			dst := (*[1 << 22]int32)(dstPtr)[:tl:tl]
+			tokenPool[ah].CopyTo(dst)
+			packOff += tl
+		}
+	}
+	return 0
+}
+
 // cambia_state_save snapshots a complete (game, both agents' belief + token
 // state) checkpoint into a new state-snapshot slot and returns its handle, or
 // -1 on error. Additive to cambia_game_save (which is game-only and unchanged).

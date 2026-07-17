@@ -116,11 +116,36 @@ _DEFAULT_BASE_CONFIG = os.path.join(
 # ---------------------------------------------------------------------------
 
 
+#: Fallback nvidia-smi locations for hosts where it is not on PATH. WSL2 ships
+#: the driver shim at /usr/lib/wsl/lib/nvidia-smi but does not always add that
+#: dir to PATH, so the plain "nvidia-smi" lookup fails and the GPU annotation
+#: came back empty (observed on this WSL host during the P5 cell). Try PATH
+#: first, then the known WSL shim path.
+_NVIDIA_SMI_CANDIDATES = ("nvidia-smi", "/usr/lib/wsl/lib/nvidia-smi")
+
+
+def _resolve_nvidia_smi() -> Optional[str]:
+    """Return the first usable nvidia-smi binary: PATH lookup first, then the
+    WSL shim path. None if neither resolves."""
+    import shutil
+
+    for cand in _NVIDIA_SMI_CANDIDATES:
+        resolved = shutil.which(cand)
+        if resolved:
+            return resolved
+        if os.path.isabs(cand) and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
 def _nvidia_smi_snapshot() -> Dict[str, Any]:
+    binary = _resolve_nvidia_smi()
+    if binary is None:
+        return {"error": "nvidia-smi not found on PATH or at /usr/lib/wsl/lib"}
     try:
         out = subprocess.run(
             [
-                "nvidia-smi",
+                binary,
                 "--query-gpu=utilization.gpu,memory.used,memory.free,memory.total",
                 "--format=csv,noheader,nounits",
             ],
