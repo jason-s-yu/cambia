@@ -84,18 +84,26 @@ const (
 	outcomeSuccessOther = 3
 	outcomeFail         = 4
 	numSnapOutcomeIDs   = 5
+
+	// Peek-result block (cambia-529): APPENDED after the snap-outcome block so
+	// every id defined above keeps its value (existing token ids never shift).
+	// One marker heads each actor-private peek-result frame; the payload reuses
+	// the ACTOR (card owner), SLOT, and CARD blocks: [PEEK, OWNER, SLOT, CARD].
+	numPeekFrameIDs = 1
+	peekFrameWidth  = 4
 )
 
 // Block bases. FRAME_BASE..OUTCOME_BASE are computed to match Python's fixed
 // assignment order. numActionIDs is derived from the action spec below.
 var (
-	frameBase   int32 = numSpecial
-	actorBase   int32
-	actionBase  int32
-	cardBase    int32
-	slotBase    int32
-	outcomeBase int32
-	vocabSize   int32
+	frameBase     int32 = numSpecial
+	actorBase     int32
+	actionBase    int32
+	cardBase      int32
+	slotBase      int32
+	outcomeBase   int32
+	peekFrameBase int32
+	vocabSize     int32
 
 	// numActionIDs is the total size of the ACTION block (sum of per-tag strides).
 	numActionIDs int32
@@ -166,7 +174,8 @@ func init() {
 	cardBase = actionBase + numActionIDs
 	slotBase = cardBase + numCardIDs
 	outcomeBase = slotBase + tokNumSlotIDs
-	vocabSize = outcomeBase + numSnapOutcomeIDs
+	peekFrameBase = outcomeBase + numSnapOutcomeIDs
+	vocabSize = peekFrameBase + numPeekFrameIDs
 }
 
 // ---------------------------------------------------------------------------
@@ -241,6 +250,10 @@ func slotTokenSigned(slot int) int32 {
 }
 
 func outcomeToken(local int) int32 { return outcomeBase + int32(local) }
+
+// peekFrameToken returns the marker id heading an actor-private peek-result
+// frame (cambia-529).
+func peekFrameToken() int32 { return peekFrameBase }
 
 // actionLocalTag decodes a 2-player action index into its Python tag name and
 // the relative offset within that tag's stride. It mirrors _action_local_id.
@@ -424,9 +437,15 @@ func (ts *TokenStream) Init(g *engine.GameState, observerID uint8) error {
 // clear-on-phase-start / clear-on-phase-end / append-per-snap-action lifecycle
 // of Python's snap_results_log.
 func (ts *TokenStream) Observe(g *engine.GameState, observerID uint8) error {
-	var scratch [8 + maxSnapFrameTokens]int32
+	var scratch [16 + maxSnapFrameTokens]int32
 	n := 0
 	put := func(v int32) { scratch[n] = v; n++ }
+	putPeek := func(owner uint8, slot uint8, card engine.Card) {
+		put(peekFrameToken())
+		put(actorToken(int(owner)))
+		put(slotToken(int(slot)))
+		put(cardToken(card))
+	}
 
 	actor := g.LastAction.ActingPlayer
 	idx := g.LastAction.ActionIdx
@@ -458,6 +477,27 @@ func (ts *TokenStream) Observe(g *engine.GameState, observerID uint8) error {
 	put(actorToken(int(actor)))
 	put(atok)
 	put(cardToken(g.DiscardTop()))
+
+	// 2b. Private peek-result frames (cambia-529): the card(s) the actor saw via
+	// an own-peek (7/8), other-peek (9/T), or King-look (K) ability. Emitted only
+	// for the actor-observer (the opponent never sees the peeked identities), one
+	// frame per revealed card carrying the card OWNER, its SLOT, and the CARD.
+	// peek_own/peek_other reveal one card, recorded in LastAction (RevealedOwner/
+	// RevealedIdx/RevealedCard). King-look reveals two cards and leaves the state
+	// in PendingKingDecision with both looked cards + slots in Pending.Data (own:
+	// Data[0]/Data[2], opponent: Data[1]/Data[3]); the own card is emitted first,
+	// matching sequence_encoding.py's own-owner-first ordering.
+	if actor == observerID {
+		if _, ok := engine.ActionIsPeekOwn(idx); ok {
+			putPeek(g.LastAction.RevealedOwner, g.LastAction.RevealedIdx, g.LastAction.RevealedCard)
+		} else if _, ok := engine.ActionIsPeekOther(idx); ok {
+			putPeek(g.LastAction.RevealedOwner, g.LastAction.RevealedIdx, g.LastAction.RevealedCard)
+		} else if _, _, ok := engine.ActionIsKingLook(idx); ok && g.Pending.Type == engine.PendingKingDecision {
+			opp := g.OpponentOf(actor)
+			putPeek(actor, g.Pending.Data[0], engine.Card(g.Pending.Data[2]))
+			putPeek(opp, g.Pending.Data[1], engine.Card(g.Pending.Data[3]))
+		}
+	}
 
 	// 3. Public cambia frame: only on the CallCambia action.
 	if idx == engine.ActionCallCambia && g.IsCambiaCalled() {
@@ -539,7 +579,7 @@ func (ts *TokenStream) CopySince(since int32, out []int32) int32 {
 // TokenVocabFields is the number of layout integers TokenVocab writes, in a
 // stable positional order asserted against sequence_encoding.py by the
 // constants cross-check test.
-const TokenVocabFields = 21
+const TokenVocabFields = 23
 
 // TokenVocab writes the vocabulary layout constants into out (length >=
 // TokenVocabFields) and returns the number written, or -1 if out is too small.
@@ -569,6 +609,8 @@ func TokenVocab(out []int32) int {
 		tokMaxSlots,       // 18 MAX_SLOTS
 		TokSeqCap,         // 19 SEQ_CAP
 		MaxTokenStream,    // 20 Go per-agent hard cap
+		peekFrameBase,     // 21 PEEK_FRAME_BASE
+		numPeekFrameIDs,   // 22 NUM_PEEK_FRAME_IDS
 	}
 	copy(out, vals[:])
 	return TokenVocabFields

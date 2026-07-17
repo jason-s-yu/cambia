@@ -38,6 +38,9 @@ from src.card import Card
 from src.config import Config, CambiaRulesConfig, load_config
 from src.constants import (
     NUM_PLAYERS,
+    ActionAbilityKingLookSelect,
+    ActionAbilityPeekOtherSelect,
+    ActionAbilityPeekOwnSelect,
     ActionCallCambia,
     ActionDiscard,
     ActionDrawDiscard,
@@ -142,6 +145,14 @@ class _GTTrace:
                 _card_ident(filtered_obs.discard_top_card),
             )
         )
+        # peek results (private): the cards the actor saw via peek/look (cambia-529),
+        # own-owner first then by slot, matching observation_frame_groups.
+        peeked = getattr(filtered_obs, "peeked_cards", None)
+        if peeked and actor == self.observer_id:
+            for (owner, slot), card in sorted(
+                peeked.items(), key=lambda kv: (kv[0][0] != actor, kv[0][1])
+            ):
+                self.events.append(("peek", owner, slot, _card_ident(card)))
         # cambia (public)
         if getattr(filtered_obs, "did_cambia_get_called", False) and isinstance(
             action, ActionCallCambia
@@ -272,6 +283,15 @@ def _decoded_to_gt_events(
             events.append(("cambia", ev.cambia_caller))
         elif ev.kind == "snap":
             events.append(("snap", ev.snap_actor, ev.snap_outcome, ev.snap_slot))
+        elif ev.kind == "peek":
+            events.append(
+                (
+                    "peek",
+                    ev.peek_owner,
+                    ev.peek_result_slot,
+                    _card_ident(ev.peek_result_card),
+                )
+            )
         else:  # pragma: no cover
             raise AssertionError(f"unexpected decoded kind {ev.kind}")
     return priv_init, events
@@ -485,6 +505,121 @@ def test_post_draw_node_surfaces_drawn_frame_before_decision():
     print(
         f"\n[post-draw f1] stockpile-draw nodes={seen_stockpile} "
         f"discard-draw nodes={seen_discard}"
+    )
+
+
+def test_peek_result_frames_surface_and_round_trip():
+    """cambia-529: own-peek (7/8), other-peek (9/T), and King-look (K) results
+    are tokenized as actor-private peek frames carrying (owner, slot, card), so
+    the peeker's perfect-recall infoset reflects exactly what they learned. Was
+    previously dropped entirely by the tokenizer. Verified live over many games:
+
+      - after a peek/look action the actor's decoded prefix ends with the peek
+        event(s) (own-owner first, matching the tokenizer's King-look ordering),
+        carrying the true revealed cards;
+      - the opponent's prefix gains no peek event (no information leak).
+    """
+    seen_own = seen_other = seen_king = 0
+    for seed in range(60):
+        game = _setup_python_game_matching_go(seed)
+        rng = random.Random(40_000 + seed)
+        obs_streams: dict = {p: [] for p in range(NUM_PLAYERS)}
+        init_hands = {p: list(game.players[p].hand) for p in range(NUM_PLAYERS)}
+        init_peeks = {
+            p: tuple(game.players[p].initial_peek_indices) for p in range(NUM_PLAYERS)
+        }
+
+        for _ in range(400):
+            if game.is_terminal():
+                break
+            actor = game.get_acting_player()
+            if actor == -1:
+                break
+            legal = list(game.get_legal_actions())
+            if not legal:
+                break
+            # Bias toward using abilities so peek/look paths are exercised.
+            ability = [
+                a
+                for a in legal
+                if isinstance(
+                    a,
+                    (
+                        ActionAbilityPeekOwnSelect,
+                        ActionAbilityPeekOtherSelect,
+                        ActionAbilityKingLookSelect,
+                    ),
+                )
+            ]
+            disc_ab = [
+                a
+                for a in legal
+                if isinstance(a, ActionDiscard) and getattr(a, "use_ability", False)
+            ]
+            if ability:
+                pool = ability
+            elif disc_ab and rng.random() < 0.7:
+                pool = disc_ab
+            else:
+                pool = legal
+            action = rng.choice(pool)
+
+            game.apply_action(action)
+            snap_results = list(getattr(game, "snap_results_log", []) or [])
+            full_obs = _create_observation(None, action, game, actor, snap_results)
+            if full_obs is None:
+                continue
+            for observer in range(NUM_PLAYERS):
+                obs_streams[observer].append(_filter_observation(full_obs, observer))
+
+            peeked = getattr(full_obs, "peeked_cards", None)
+            if not peeked:
+                continue
+
+            expected = sorted(
+                peeked.items(), key=lambda kv: (kv[0][0] != actor, kv[0][1])
+            )
+            actor_prefix = se.encode_observation_sequence(
+                init_hands[actor],
+                init_peeks[actor],
+                obs_streams[actor],
+                actor,
+                seq_cap=10**9,
+                add_bos_eos=False,
+            )
+            dec = se.decode_sequence(actor_prefix)
+            tail = dec[-len(expected) :]
+            assert all(
+                e.kind == "peek" for e in tail
+            ), f"seed {seed}: peek frames not at prefix tail: {[e.kind for e in dec[-4:]]}"
+            for e, ((owner, slot), card) in zip(tail, expected):
+                assert e.peek_owner == owner, f"seed {seed}: peek owner mismatch"
+                assert e.peek_result_slot == slot, f"seed {seed}: peek slot mismatch"
+                assert _card_ident(e.peek_result_card) == _card_ident(card), (
+                    f"seed {seed}: peek card {e.peek_result_card} != {card}"
+                )
+
+            # Privacy: the opponent's view of THIS peek action yields no peek
+            # frame (the current actor's peeked identities never reach them).
+            opp = 1 - actor
+            opp_view = se.observation_frames(_filter_observation(full_obs, opp), opp)
+            assert all(
+                ev.kind != "peek" for ev in se.decode_sequence(opp_view)
+            ), f"seed {seed}: opponent saw a peek frame for the actor's peek (leak)"
+
+            if isinstance(action, ActionAbilityPeekOwnSelect):
+                seen_own += 1
+            elif isinstance(action, ActionAbilityPeekOtherSelect):
+                seen_other += 1
+            elif isinstance(action, ActionAbilityKingLookSelect):
+                seen_king += 1
+
+    assert seen_own > 0, "no own-peek (7/8) results exercised"
+    assert seen_other > 0, "no other-peek (9/T) results exercised"
+    assert seen_king > 0, "no King-look (K) results exercised"
+    print(
+        f"\n[peek f2] own-peek={seen_own} other-peek={seen_other} "
+        f"king-look={seen_king}"
     )
 
 

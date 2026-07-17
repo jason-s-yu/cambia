@@ -147,10 +147,15 @@ def test_token_vocab_layout_matches_python():
         "NUM_SNAP_OUTCOME_IDS": se.NUM_SNAP_OUTCOME_IDS,
         "MAX_SLOTS": se.MAX_SLOTS,
         "SEQ_CAP": se.SEQ_CAP,
+        "PEEK_FRAME_BASE": se.PEEK_FRAME_BASE,
+        "NUM_PEEK_FRAME_IDS": se.NUM_PEEK_FRAME_IDS,
     }
     for k, want in expected.items():
         assert v[k] == want, f"vocab field {k}: Go={v[k]} Python={want}"
     assert v["GO_TOKEN_STREAM_CAP"] >= se.SEQ_CAP
+    # The peek block is appended at the very end: no id shift below it.
+    assert se.PEEK_FRAME_BASE == se.OUTCOME_BASE + se.NUM_SNAP_OUTCOME_IDS
+    assert se.VOCAB_SIZE == se.PEEK_FRAME_BASE + se.NUM_PEEK_FRAME_IDS
 
 
 @skip_if_no_go
@@ -239,6 +244,11 @@ def _py_legal_set(pygame) -> set:
 _DRAW_STOCKPILE_IDX = 0
 _REAL_SNAP_MIN = 98  # PassSnap=97; SnapOwn/SnapOpponent/SnapOpponentMove >= 98.
 
+# Peek/look action index ranges (2-player layout, engine/types.go). Own-peek 7/8
+# and other-peek 9/T reveal one card; King-look K reveals two (own then opp).
+_PEEK_SINGLE_RANGE = range(11, 23)  # PeekOwn 11-16, PeekOther 17-22
+_KING_LOOK_RANGE = range(59, 95)  # KingLook 59-94
+
 
 def _is_snap_only(s: set) -> bool:
     return len(s) > 0 and all(i >= _SNAP_MIN for i in s)
@@ -297,6 +307,7 @@ class _GameResult:
         self.saw_cambia_frame = False
         self.saw_snap_frame = False
         self.post_draw_verified = 0
+        self.peek_verified = 0
         self.init_hands: Dict[int, List[Card]] = {}
         self.init_peeks: Dict[int, Tuple[int, ...]] = {}
         self.obs_streams: Dict[int, List[Any]] = {}
@@ -477,6 +488,25 @@ def _play_lockstep(seed: int, call_cambia_after: int = -1) -> _GameResult:
                         f"{dec[-2].drawn_card} != pending {pend_drawn}"
                     )
                     res.post_draw_verified += 1
+
+                # cambia-529: at a peek/look node the ACTOR's live Go body must
+                # end with the peek result frame(s) (1 for own/other, 2 for
+                # King-look, own then opponent). go_body == py_body is asserted
+                # above, so this validates BOTH tokenizers' peek frames.
+                if observer == actor:
+                    n_peek = (
+                        1
+                        if action_idx in _PEEK_SINGLE_RANGE
+                        else (2 if action_idx in _KING_LOOK_RANGE else 0)
+                    )
+                    if n_peek:
+                        dec = se.decode_sequence(go_body)
+                        tail = dec[-n_peek:]
+                        assert all(e.kind == "peek" for e in tail), (
+                            f"seed {seed} step {step}: expected {n_peek} peek "
+                            f"frame(s) at tail; got {[e.kind for e in dec[-3:]]}"
+                        )
+                        res.peek_verified += 1
             res.compared += 1
     finally:
         res.init_hands = init_hands
@@ -543,6 +573,21 @@ def test_live_lockstep_post_draw_drawn_frame_parity():
     assert (
         total_post_draw >= 20
     ), f"only {total_post_draw} post-draw nodes verified; coverage too thin"
+
+
+@skip_if_no_go
+def test_live_lockstep_peek_result_frame_parity():
+    """cambia-529: ability-peek result frames are covered explicitly. Over the
+    live lockstep games, every own-peek/other-peek/King-look node has the actor's
+    Go token body ending with the peek result frame(s) (asserted inside
+    _play_lockstep), and Go == Python bytes hold throughout, so both tokenizers
+    encode the peeked card identities identically."""
+    total_peek = 0
+    for seed in _FULL_SEEDS:
+        res = _play_lockstep(seed)
+        total_peek += res.peek_verified
+    print(f"\n[peek parity] verified peek/look nodes={total_peek}")
+    assert total_peek > 0, "no peek/look nodes exercised in the live parity games"
 
 
 @skip_if_no_go

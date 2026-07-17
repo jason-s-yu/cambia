@@ -36,6 +36,13 @@ GRU reading the token sequence sees genuine perfect recall:
                                          infoset (cambia-528; re-armed bug #21).
                                          Matches the X1 pending_action_data
                                          draw-time capture.
+      * ability peek results          -> the card identities p saw via own-peek
+                                         (7/8), other-peek (9/T), or King-look
+                                         (K): one PEEK frame per revealed card
+                                         (OWNER, SLOT, CARD), actor-private, so
+                                         p's perfect-recall infoset carries what
+                                         p learned (cambia-529). King-look emits
+                                         the own card then the opponent card.
   - PUBLIC, common knowledge (every player's turn):
       * the actor                     -> ACTOR token.
       * the action's public structure -> ACTION token (tag + slot/flag args; never
@@ -433,8 +440,19 @@ CARD_BASE: int = ACTION_BASE + NUM_ACTION_IDS
 SLOT_BASE: int = CARD_BASE + NUM_CARD_IDS
 OUTCOME_BASE: int = SLOT_BASE + NUM_SLOT_IDS
 
+# Peek-result block (cambia-529): APPENDED after the snap-outcome block so every
+# id defined above keeps its value (existing token ids never shift; only new ids
+# are added at the end). A single marker heads each actor-private peek-result
+# frame (own-peek 7/8, other-peek 9/T, King-look), whose payload reuses the
+# ACTOR (card owner), SLOT, and CARD blocks: [PEEK marker, OWNER, SLOT, CARD].
+PEEK_FRAME_BASE: int = OUTCOME_BASE + NUM_SNAP_OUTCOME_IDS
+NUM_PEEK_FRAME_IDS: int = 1
+
+#: Width (token count) of one peek-result frame: marker + owner + slot + card.
+PEEK_FRAME_WIDTH: int = 4
+
 #: Total vocabulary size.
-VOCAB_SIZE: int = OUTCOME_BASE + NUM_SNAP_OUTCOME_IDS
+VOCAB_SIZE: int = PEEK_FRAME_BASE + NUM_PEEK_FRAME_IDS
 
 
 # Encoders: local id (or sentinel) -> global token id.
@@ -492,6 +510,15 @@ def _outcome_tok(name: str) -> int:
     return OUTCOME_BASE + _SNAP_OUTCOME_TO_LOCAL[name]
 
 
+def _peek_frame_tok() -> int:
+    """Marker id heading an actor-private peek-result frame (cambia-529)."""
+    return PEEK_FRAME_BASE
+
+
+def _is_peek_frame_marker(tok: int) -> bool:
+    return PEEK_FRAME_BASE <= tok < PEEK_FRAME_BASE + NUM_PEEK_FRAME_IDS
+
+
 # ---------------------------------------------------------------------------
 # Decoded-frame container (what the round-trip decoder returns)
 # ---------------------------------------------------------------------------
@@ -520,6 +547,10 @@ class DecodedEvent:
     snap_slot: Optional[int] = None
     # cambia
     cambia_caller: Optional[int] = None
+    # peek (ability peek/look result: 7/8 own, 9/T other, K look)
+    peek_owner: Optional[int] = None
+    peek_result_slot: Optional[int] = None
+    peek_result_card: Optional[Card] = None
 
 
 # ---------------------------------------------------------------------------
@@ -594,6 +625,22 @@ def observation_frame_groups(observation: Any, observer_id: int) -> List[List[in
             _card_tok(observation.discard_top_card),
         ]
     )
+
+    # Private peek-result frames (cambia-529): the card identities the actor saw
+    # via an own-peek (7/8), other-peek (9/T), or King-look (K) ability. Present
+    # only for the peeker (the production filter nulls peeked_cards otherwise).
+    # One frame per revealed card: [PEEK marker, OWNER(card owner), SLOT, CARD].
+    # Emitted own-owner first, then by slot, so the order is deterministic and
+    # byte-identical to the Go tokenizer (which emits own then opponent for the
+    # King-look pair).
+    peeked = getattr(observation, "peeked_cards", None)
+    if peeked and actor == observer_id:
+        for (owner, slot), card in sorted(
+            peeked.items(), key=lambda kv: (kv[0][0] != actor, kv[0][1])
+        ):
+            groups.append(
+                [_peek_frame_tok(), _actor_tok(owner), _slot_tok(slot), _card_tok(card)]
+            )
 
     # Public cambia frame.
     if getattr(observation, "did_cambia_get_called", False) and isinstance(
@@ -751,6 +798,22 @@ def decode_sequence(tokens: List[int]) -> List[DecodedEvent]:
         if tok in (PAD_ID, BOS_ID, EOS_ID):
             i += 1
             continue
+        # Peek-result frame (cambia-529): marker lives in its own appended block,
+        # outside the FRAME block, so it is segmented before the frame-kind table.
+        if _is_peek_frame_marker(tok):
+            owner = _decode_actor_tok(tokens[i + 1])
+            slot = tokens[i + 2] - SLOT_BASE
+            card = _decode_card_tok(tokens[i + 3])
+            events.append(
+                DecodedEvent(
+                    kind="peek",
+                    peek_owner=owner,
+                    peek_result_slot=slot,
+                    peek_result_card=card,
+                )
+            )
+            i += PEEK_FRAME_WIDTH
+            continue
         if not (FRAME_BASE <= tok < FRAME_BASE + NUM_FRAME_IDS):
             raise ValueError(
                 f"decode_sequence: expected a FRAME marker at pos {i}, got id {tok}"
@@ -812,6 +875,7 @@ def vocab_summary() -> dict:
             "card": (CARD_BASE, NUM_CARD_IDS),
             "slot": (SLOT_BASE, NUM_SLOT_IDS),
             "outcome": (OUTCOME_BASE, NUM_SNAP_OUTCOME_IDS),
+            "peek": (PEEK_FRAME_BASE, NUM_PEEK_FRAME_IDS),
         },
         "MAX_SLOTS": MAX_SLOTS,
         "MAX_ACTORS": MAX_ACTORS,

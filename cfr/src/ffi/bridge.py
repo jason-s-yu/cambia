@@ -1711,6 +1711,8 @@ TOKEN_VOCAB_FIELDS = [
     "MAX_SLOTS",
     "SEQ_CAP",
     "GO_TOKEN_STREAM_CAP",
+    "PEEK_FRAME_BASE",
+    "NUM_PEEK_FRAME_IDS",
 ]
 
 
@@ -1739,6 +1741,13 @@ def encode_action_token(action_idx: int) -> int:
 # snap, cambia). Structural; matches the decoder in sequence_encoding.py.
 _FRAME_WIDTHS = (3, 4, 2, 4, 2)
 
+# Peek-result frame (cambia-529) lives in its own appended block: one marker id
+# at PEEK_FRAME_BASE, width 4 [PEEK, OWNER, SLOT, CARD]. Paired with
+# sequence_encoding.PEEK_FRAME_BASE / PEEK_FRAME_WIDTH; the constants cross-check
+# test asserts the Go layout matches (get_token_vocab()["PEEK_FRAME_BASE"]).
+_PEEK_FRAME_BASE = 325
+_PEEK_FRAME_WIDTH = 4
+
 
 def frame_aligned_window(
     token_body,
@@ -1748,6 +1757,8 @@ def frame_aligned_window(
     num_frame_ids: int = 5,
     bos_id: int = 1,
     eos_id: int = 2,
+    peek_frame_base: int = _PEEK_FRAME_BASE,
+    peek_frame_width: int = _PEEK_FRAME_WIDTH,
 ) -> List[int]:
     """Frame-aligned keep-most-recent window over a raw token body.
 
@@ -1770,11 +1781,15 @@ def frame_aligned_window(
     while i < n:
         tok = body[i]
         local = tok - frame_base
-        if not (0 <= local < num_frame_ids):
+        if 0 <= local < num_frame_ids:
+            width = _FRAME_WIDTHS[local]
+        elif tok == peek_frame_base:
+            # Peek-result frame (cambia-529): appended-block marker, fixed width.
+            width = peek_frame_width
+        else:
             raise ValueError(
                 f"frame_aligned_window: expected a FRAME marker at pos {i}, got {tok}"
             )
-        width = _FRAME_WIDTHS[local]
         frames.append(body[i : i + width])
         i += width
     budget = seq_cap - (2 if add_bos_eos else 0)
