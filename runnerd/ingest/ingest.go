@@ -75,6 +75,15 @@ type Config struct {
 	DebugTTL time.Duration
 	// Now overrides the clock (TTL math). Default time.Now.
 	Now func() time.Time
+	// RequireSignedCommits gates ssh commit-signature verification in Prepare
+	// (cambia-550, W1). Default false: verify-commit never runs and behavior is
+	// byte-for-byte unchanged. When true, a pinned commit must carry a valid ssh
+	// signature by a key in AllowedSignersPath or the job is rejected.
+	RequireSignedCommits bool
+	// AllowedSignersPath is the git gpg.ssh.allowedSignersFile consulted when
+	// RequireSignedCommits is true. An empty value or a missing file fails
+	// closed (the job is rejected). Ignored when enforcement is off.
+	AllowedSignersPath string
 }
 
 // Manager stages jobs under one BaseDir. It is safe for sequential use by the
@@ -89,6 +98,9 @@ type Manager struct {
 	runner       CommandRunner
 	debugTTL     time.Duration
 	now          func() time.Time
+
+	requireSignedCommits bool
+	allowedSignersPath   string
 }
 
 // New constructs a Manager, applying defaults for unset Config fields.
@@ -125,6 +137,9 @@ func New(cfg Config) *Manager {
 		runner:       cfg.Runner,
 		debugTTL:     cfg.DebugTTL,
 		now:          cfg.Now,
+
+		requireSignedCommits: cfg.RequireSignedCommits,
+		allowedSignersPath:   cfg.AllowedSignersPath,
 	}
 }
 
@@ -164,6 +179,12 @@ func (m *Manager) Prepare(ctx context.Context, jobID, commit, kind, configRel, d
 	}
 	if err := m.verifyReceipt(ctx, jobID, commit); err != nil {
 		return nil, fmt.Errorf("receipt check: %w", err)
+	}
+	// Signature gate (cambia-550, W1): a no-op when RequireSignedCommits is off.
+	// At this point the sha is receipt-matched and the object is present in the
+	// bare mirror, so verify-commit reads a known-local object.
+	if err := m.verifyCommitSignature(ctx, commit); err != nil {
+		return nil, fmt.Errorf("signature verify: %w", err)
 	}
 
 	worktreeDir := m.worktreePath(jobID)

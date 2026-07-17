@@ -19,6 +19,12 @@ var (
 	// ErrReceiptMismatch is returned when the job ref does not resolve to the
 	// spec commit or the object is missing (design 3.1).
 	ErrReceiptMismatch = errors.New("mirror receipt mismatch")
+	// ErrSignatureVerification is returned when RequireSignedCommits is on and
+	// the pinned commit fails ssh signature verification: unsigned, signed by a
+	// key absent from allowed_signers, a bad signature, or an empty/missing
+	// signers file (enforcement fails closed). Default-off, so it never fires
+	// unless a runner sets RUNNERD_REQUIRE_SIGNED_COMMITS (cambia-550, W1).
+	ErrSignatureVerification = errors.New("commit signature verification failed")
 	// ErrPathEscape is returned when a spec path is absolute, contains "..", or
 	// resolves outside its allowed root (design 5.4).
 	ErrPathEscape = errors.New("path escapes containment")

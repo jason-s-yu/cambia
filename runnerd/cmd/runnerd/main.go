@@ -67,6 +67,16 @@ func main() {
 	}
 	allowedDevices := harness.ParseAllowedDevices(envOr("RUNNERD_ALLOWED_DEVICES", "cpu"))
 
+	// Signed-commit enforcement (cambia-550, W1). Default off: an unset or
+	// malformed flag leaves verify-commit disabled, preserving current behavior.
+	requireSignedCommits := false
+	if v := os.Getenv("RUNNERD_REQUIRE_SIGNED_COMMITS"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			requireSignedCommits = b
+		}
+	}
+	allowedSignersPath := os.Getenv("RUNNERD_ALLOWED_SIGNERS_PATH")
+
 	if pubKeyPath == "" {
 		log.Fatal("RUNNERD_JWT_PUBKEY is required (verify-only ed25519 public key)")
 	}
@@ -90,9 +100,11 @@ func main() {
 	pm.SetMaxConcurrent(maxJobs)
 
 	env := ingest.New(ingest.Config{
-		BaseDir:  baseDir,
-		RunsDir:  runsDir,
-		CoresCap: runtime.NumCPU() - 2,
+		BaseDir:              baseDir,
+		RunsDir:              runsDir,
+		CoresCap:             runtime.NumCPU() - 2,
+		RequireSignedCommits: requireSignedCommits,
+		AllowedSignersPath:   allowedSignersPath,
 	})
 	disp := harness.NewDispatcher(pm, env, runsDir, maxJobs, maxQueue, 0)
 
