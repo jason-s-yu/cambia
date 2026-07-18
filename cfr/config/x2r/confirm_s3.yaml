@@ -1,0 +1,11 @@
+# X2 re-spec rule-3 confirm seed B (cambia-521): fresh-run config, seed 3.
+#
+# Twin of cfr/config/x2r/confirm_s2.yaml (see its header for the A3-3 branch
+# condition and regime); only the seed differs.
+
+_base: x2_tiny_gate.yaml
+
+prt_cfr:
+  iterations: 1000
+  stability_stop_mode: divergence
+  seed: 3

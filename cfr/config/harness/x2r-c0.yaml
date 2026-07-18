@@ -1,0 +1,19 @@
+# cfr/config/harness/x2r-c0.yaml
+#
+# X2R cell C0 (coverage restore, cambia-519) as a nash harness train job.
+# Submit ONLY after amendment A3-4 fires (C-rep continuation records no
+# checkpoint <= 0.057 by iteration 700): the capacity/coverage fork
+# resurrects C0/C1 under the A3 read-out regime.
+# The job name was used by the 2026-07-16 submission that was canceled while
+# queued (A3 hold); free it first with
+#   cambia harness cancel --purge v0.4-x2r-c0-xpu
+# (name_collision is never forceable and survives daemon restarts).
+
+kind: train
+name: v0.4-x2r-c0-xpu
+config: cfr/config/x2r/c0.yaml
+device: xpu
+
+resume: false
+priority: normal
+force: false

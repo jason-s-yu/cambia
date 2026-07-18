@@ -1,0 +1,15 @@
+# cfr/config/harness/x2r-confirm-s3.yaml
+#
+# X2R rule-3 confirm seed B (seed 3); twin of x2r-confirm-s2.yaml, same
+# A3-3-only submit condition and operator read-out. Chain behind seed A at
+# submit time (--after v0.4-x2r-confirm-s2-xpu --on-failure run: the cells
+# are independent, a seed-A crash must not skip seed B).
+
+kind: train
+name: v0.4-x2r-confirm-s3-xpu
+config: cfr/config/x2r/confirm_s3.yaml
+device: xpu
+
+resume: false
+priority: normal
+force: false

@@ -1,0 +1,21 @@
+# X2 re-spec rule-3 confirm seed A (cambia-521): fresh-run config, seed 2.
+#
+# Staged for the A3-3 (bar-cross) branch of the X2 verdict program: if the
+# C-rep continuation records NashConv <= bar_respec (0.057) at or before
+# iteration 700, rule 3 requires two additional seeds of the passing config
+# (the fresh-run config; seed 0 = fresh run, seed 1 = C-rep) to read out
+# <= 1.25 * bar_respec = 0.0713. Submit ONLY after A3-3 fires; if the fork
+# resolves to A3-4 instead, this cell is not part of the program.
+#
+# Regime per amendment A3-3 (x2-respec-preregistration.md): divergence stop
+# mode (the plateau rule must not fire; the read-out window is operator-side,
+# checkpoint at or before iteration 700), iterations 1000 so the global_cosine
+# lr curve is bit-identical to the fresh run. Only seed and stop mode differ
+# from cfr/config/x2r/c_rep.yaml.
+
+_base: x2_tiny_gate.yaml
+
+prt_cfr:
+  iterations: 1000
+  stability_stop_mode: divergence
+  seed: 2

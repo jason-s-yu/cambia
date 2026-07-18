@@ -1,0 +1,16 @@
+# cfr/config/harness/x2r-c1.yaml
+#
+# X2R cell C1 (capacity x4, cambia-520) as a nash harness train job; twin of
+# x2r-c0.yaml, same A3-4-only submit condition and name-purge prerequisite
+# (purge v0.4-x2r-c1-xpu). Chain behind C0 at submit time
+# (--after v0.4-x2r-c0-xpu --on-failure run: independent cells, a C0 crash
+# must not skip C1).
+
+kind: train
+name: v0.4-x2r-c1-xpu
+config: cfr/config/x2r/c1.yaml
+device: xpu
+
+resume: false
+priority: normal
+force: false

@@ -1,0 +1,18 @@
+# cfr/config/harness/x2r-confirm-s2.yaml
+#
+# X2R rule-3 confirm seed A (seed 2) as a nash harness train job. Submit ONLY
+# after amendment A3-3 fires (C-rep continuation crosses bar_respec 0.057 at
+# or before iteration 700); see cfr/config/x2r/confirm_s2.yaml.
+# Submit with: cambia harness submit cfr/config/harness/x2r-confirm-s2.yaml
+# Operator read-out: cancel at the crossing of 0.0713 or at the iter-700
+# stability checkpoint, whichever comes first (divergence mode never
+# plateau-stops on its own).
+
+kind: train
+name: v0.4-x2r-confirm-s2-xpu
+config: cfr/config/x2r/confirm_s2.yaml
+device: xpu
+
+resume: false
+priority: normal
+force: false
