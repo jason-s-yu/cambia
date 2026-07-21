@@ -323,3 +323,149 @@ func TestReplaceTriggersKingLook(t *testing.T) {
 	}
 	passSnapPhase(t, &gs)
 }
+
+// ---------------------------------------------------------------------------
+// cambia-653: replace()'s ability-trigger block must route through
+// canUseAbility, not a standalone hand-count switch, so LockCallerHand is
+// respected. Before the fix, a locked opponent-caller scenario set Pending to
+// BlindSwap/KingLook while legalAbilitySelect produced zero legal actions —
+// a non-terminal, deadlocked game.
+// ---------------------------------------------------------------------------
+
+// TestReplaceAbilityLockGating verifies the replace()-triggered ability path
+// mirrors canUseAbility's LockCallerHand gating for BlindSwap/KingLook, leaves
+// peeks unaffected by the lock, and never leaves the game in a deadlocked
+// pending state with zero legal actions.
+func TestReplaceAbilityLockGating(t *testing.T) {
+	cases := []struct {
+		name        string
+		rank        uint8
+		lockOn      bool
+		callerIsOpp bool // true: player 1 (opponent) is Cambia caller; false: player 0 (acting) is
+		wantPend    PendingType
+	}{
+		// Item 1: lock on, opponent is caller -> BlindSwap/KingLook fizzle.
+		{"jack_locked_opponent_caller_fizzles", RankJack, true, true, PendingNone},
+		{"queen_locked_opponent_caller_fizzles", RankQueen, true, true, PendingNone},
+		{"king_locked_opponent_caller_fizzles", RankKing, true, true, PendingNone},
+
+		// Item 2: lock off -> ability triggers normally despite a Cambia caller.
+		{"jack_unlocked_enters_pending", RankJack, false, true, PendingBlindSwap},
+		{"king_unlocked_enters_pending", RankKing, false, true, PendingKingLook},
+
+		// Item 3: lock on but the acting player (not the opponent) is the
+		// caller -> unaffected, ability enters pending normally.
+		{"jack_locked_acting_is_caller_enters_pending", RankJack, true, false, PendingBlindSwap},
+		{"king_locked_acting_is_caller_enters_pending", RankKing, true, false, PendingKingLook},
+
+		// Item 4: peeks are never lock-gated, even with lock on and the
+		// opponent as caller.
+		{"seven_locked_opponent_caller_enters_pending", RankSeven, true, true, PendingPeekOwn},
+		{"eight_locked_opponent_caller_enters_pending", RankEight, true, true, PendingPeekOwn},
+		{"nine_locked_opponent_caller_enters_pending", RankNine, true, true, PendingPeekOther},
+		{"ten_locked_opponent_caller_enters_pending", RankTen, true, true, PendingPeekOther},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rules := DefaultHouseRules()
+			rules.AllowReplaceAbilities = true
+			rules.LockCallerHand = tc.lockOn
+			gs := NewGame(42, rules)
+			gs.Deal()
+			gs.CurrentPlayer = 0
+
+			if tc.callerIsOpp {
+				gs.CambiaCaller = 1
+			} else {
+				gs.CambiaCaller = 0
+			}
+			gs.Flags |= FlagCambiaCalled
+
+			abilityCard := NewCard(SuitClubs, tc.rank)
+			gs.Players[0].Hand[0] = abilityCard
+			gs.Stockpile[gs.StockLen] = NewCard(SuitDiamonds, RankAce)
+			gs.StockLen++
+
+			if err := gs.ApplyAction(ActionDrawStockpile); err != nil {
+				t.Fatalf("DrawStockpile: %v", err)
+			}
+			if err := gs.ApplyAction(EncodeReplace(0)); err != nil {
+				t.Fatalf("Replace: %v", err)
+			}
+
+			if gs.Pending.Type != tc.wantPend {
+				t.Fatalf("Pending.Type: want %d, got %d", tc.wantPend, gs.Pending.Type)
+			}
+
+			// Whichever branch was taken, the game must never deadlock: some
+			// legal action must exist next (ability-select actions if
+			// pending, or snap/start-turn actions if fizzled).
+			actions := gs.LegalActionsList()
+			if len(actions) == 0 {
+				t.Fatal("deadlock: LegalActions is empty after Replace")
+			}
+
+			switch tc.wantPend {
+			case PendingBlindSwap:
+				if !containsAction(actions, EncodeBlindSwap(0, 0)) {
+					t.Error("expected BlindSwap(0,0) to be a legal select action")
+				}
+			case PendingKingLook:
+				if !containsAction(actions, EncodeKingLook(0, 0)) {
+					t.Error("expected KingLook(0,0) to be a legal select action")
+				}
+			case PendingPeekOwn:
+				if !containsAction(actions, EncodePeekOwn(0)) {
+					t.Error("expected PeekOwn(0) to be a legal select action")
+				}
+			case PendingPeekOther:
+				if !containsAction(actions, EncodePeekOther(0)) {
+					t.Error("expected PeekOther(0) to be a legal select action")
+				}
+			}
+		})
+	}
+}
+
+// TestReplaceAbilityHandCountFizzleUnchanged is a regression test: routing
+// replace()'s ability trigger through canUseAbility must preserve the
+// pre-existing hand-count fizzle behavior (empty opponent hand) independent
+// of LockCallerHand.
+func TestReplaceAbilityHandCountFizzleUnchanged(t *testing.T) {
+	cases := []struct {
+		name string
+		rank uint8
+	}{
+		{"nine_opponent_hand_empty_fizzles", RankNine},
+		{"jack_opponent_hand_empty_fizzles", RankJack},
+		{"king_opponent_hand_empty_fizzles", RankKing},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rules := DefaultHouseRules()
+			rules.AllowReplaceAbilities = true
+			gs := NewGame(42, rules)
+			gs.Deal()
+			gs.CurrentPlayer = 0
+			gs.Players[1].HandLen = 0 // opponent has no cards to target
+
+			abilityCard := NewCard(SuitClubs, tc.rank)
+			gs.Players[0].Hand[0] = abilityCard
+			gs.Stockpile[gs.StockLen] = NewCard(SuitDiamonds, RankAce)
+			gs.StockLen++
+
+			if err := gs.ApplyAction(ActionDrawStockpile); err != nil {
+				t.Fatalf("DrawStockpile: %v", err)
+			}
+			if err := gs.ApplyAction(EncodeReplace(0)); err != nil {
+				t.Fatalf("Replace: %v", err)
+			}
+
+			if gs.Pending.Type == PendingPeekOther || gs.Pending.Type == PendingBlindSwap || gs.Pending.Type == PendingKingLook {
+				t.Errorf("rank %s: ability should have fizzled with an empty opponent hand, got Pending.Type=%d", rankName(tc.rank), gs.Pending.Type)
+			}
+		})
+	}
+}
