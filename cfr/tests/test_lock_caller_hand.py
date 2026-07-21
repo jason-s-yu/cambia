@@ -19,6 +19,18 @@ from src.constants import (
     ActionReplace,
     ActionAbilityBlindSwapSelect,
     ActionAbilityKingLookSelect,
+    JACK,
+    QUEEN,
+    KING,
+    TWO,
+    THREE,
+    FOUR,
+    FIVE,
+    SIX,
+    HEARTS,
+    CLUBS,
+    DIAMONDS,
+    SPADES,
 )
 from src.game.engine import CambiaGameState
 from src.game.player_state import PlayerState
@@ -355,6 +367,142 @@ class TestLockCallerHandKingLook:
         assert (
             len(king_look_actions) == 16
         ), f"Expected 16 KingLook actions when lock disabled, got: {len(king_look_actions)}"
+
+
+# ---------------------------------------------------------------------------
+# cambia-650: _trigger_discard_ability fizzle-at-trigger regression
+#
+# Reaching a pending BlindSwapSelect/KingLookSelect with the opponent locked
+# used to deadlock: the ability-select legal generator (tested above) already
+# refused to emit actions for a locked opponent, but the trigger path that
+# *sets* the pending state (_trigger_discard_ability) only checked hand
+# counts, not the lock, so it entered the pending state anyway -> empty legal
+# set on a non-terminal state.
+#
+# This is only reachable via the AllowReplaceAbilities house rule: the
+# post-draw immediate-discard-with-ability path already excluded the ability
+# from the legal action set when the opponent was locked (see
+# _get_legal_pending_actions' ActionDiscard branch), so it never called
+# _trigger_discard_ability with a locked opponent. AllowReplaceAbilities'
+# replaced-card ability trigger has no such upstream gate.
+# ---------------------------------------------------------------------------
+
+
+def make_replace_ability_rules(lock: bool) -> CambiaRulesConfig:
+    return CambiaRulesConfig(
+        lockCallerHand=lock,
+        allowDrawFromDiscardPile=False,
+        allowReplaceAbilities=True,
+        snapRace=False,
+        penaltyDrawCount=2,
+        allowOpponentSnapping=False,
+        use_jokers=2,
+        cards_per_player=4,
+        initial_view_count=2,
+        cambia_allowed_round=0,
+        max_game_turns=300,
+    )
+
+
+def build_replace_trigger_state(
+    caller: int, lock: bool, ability_rank: str
+) -> CambiaGameState:
+    """
+    Build a state where the non-caller (acting = 1 - caller) is at the start
+    of their turn, about to draw from the stockpile and replace hand[0] (an
+    `ability_rank` card) with the drawn card. AllowReplaceAbilities=True, so
+    replacing hand[0] discards `ability_rank` and (attempts to) trigger its
+    ability. Stockpile top is a plain non-ability card so only the
+    replace-triggered ability is exercised.
+    """
+    rules = make_replace_ability_rules(lock=lock)
+    acting = 1 - caller
+
+    ability_card = Card(rank=ability_rank, suit=HEARTS)
+    acting_filler = [
+        Card(rank=TWO, suit=CLUBS),
+        Card(rank=THREE, suit=DIAMONDS),
+        Card(rank=FOUR, suit=SPADES),
+    ]
+    opp_hand = [
+        Card(rank=FIVE, suit=CLUBS),
+        Card(rank=SIX, suit=DIAMONDS),
+        Card(rank=TWO, suit=SPADES),
+        Card(rank=THREE, suit=HEARTS),
+    ]
+
+    hands = [None, None]
+    hands[acting] = [ability_card] + acting_filler
+    hands[caller] = opp_hand
+
+    stockpile = [Card(rank=FOUR, suit=CLUBS), Card(rank=FIVE, suit=SPADES)]
+
+    players = [
+        PlayerState(hand=hands[0], initial_peek_indices=(0, 1)),
+        PlayerState(hand=hands[1], initial_peek_indices=(0, 1)),
+    ]
+    return CambiaGameState(
+        players=players,
+        stockpile=stockpile,
+        discard_pile=[Card(rank=SIX, suit=SPADES)],
+        current_player_index=acting,
+        house_rules=rules,
+        cambia_caller_id=caller,
+    )
+
+
+class TestLockCallerHandReplaceTriggerFizzle:
+    @pytest.mark.parametrize("rank", [JACK, QUEEN, KING])
+    def test_ability_fizzles_at_trigger_when_locked(self, rank):
+        """cambia-650(a): with lockCallerHand=True and the opponent (the acting
+        player's target) being the Cambia caller, discarding J/Q/K via the
+        AllowReplaceAbilities trigger must fizzle with NO pending state -
+        the turn advances instead of deadlocking on an empty legal set."""
+        game = build_replace_trigger_state(caller=0, lock=True, ability_rank=rank)
+
+        game.apply_action(ActionDrawStockpile())
+        game.apply_action(ActionReplace(target_hand_index=0))
+
+        assert game.pending_action is None, (
+            f"rank={rank}: expected ability to fizzle (no pending state) when "
+            f"opponent is locked, got pending_action={game.pending_action!r}"
+        )
+        assert game.pending_action_player is None
+
+        # Game must continue legally: non-terminal, non-empty legal actions,
+        # and no dangling ability-select actions.
+        assert not game.is_terminal()
+        legal = game.get_legal_actions()
+        assert len(legal) > 0, f"rank={rank}: game deadlocked with empty legal set"
+        ability_types = (ActionAbilityBlindSwapSelect, ActionAbilityKingLookSelect)
+        for a in legal:
+            assert not isinstance(
+                a, ability_types
+            ), f"rank={rank}: unexpected dangling ability action {a!r}"
+
+    @pytest.mark.parametrize("rank", [JACK, QUEEN, KING])
+    def test_ability_pending_when_lock_disabled(self, rank):
+        """cambia-650(b): with lockCallerHand=False, the same replace-triggered
+        J/Q/K ability enters its normal pending select state with actions."""
+        game = build_replace_trigger_state(caller=0, lock=False, ability_rank=rank)
+
+        game.apply_action(ActionDrawStockpile())
+        game.apply_action(ActionReplace(target_hand_index=0))
+
+        assert game.pending_action is not None, (
+            f"rank={rank}: expected pending ability-select state when lock "
+            f"disabled, got None"
+        )
+        legal = game.get_legal_actions()
+        assert len(legal) > 0, f"rank={rank}: expected select actions, got none"
+        if rank in (JACK, QUEEN):
+            assert all(
+                isinstance(a, ActionAbilityBlindSwapSelect) for a in legal
+            ), f"rank={rank}: expected only BlindSwap select actions, got {legal}"
+        else:
+            assert all(
+                isinstance(a, ActionAbilityKingLookSelect) for a in legal
+            ), f"rank={rank}: expected only KingLook select actions, got {legal}"
 
 
 # ---------------------------------------------------------------------------
