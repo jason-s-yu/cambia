@@ -25,6 +25,7 @@ import numpy as np
 
 from .encoding import INPUT_DIM, NUM_ACTIONS
 from .cfr.exceptions import ReservoirIOError
+from .npz_size_guard import guard_npz_size
 
 logger = logging.getLogger(__name__)
 
@@ -323,6 +324,10 @@ class ReservoirBuffer:
                 filepath = filepath.with_suffix(".npz")
             if not str(path).endswith(".npz") and not filepath.exists():
                 filepath = Path(str(path) + ".npz")
+
+            # Decompression-bomb guard (cambia-559): validate declared array
+            # sizes before np.load allocates anything.
+            guard_npz_size(filepath, label=f"reservoir buffer {filepath}")
 
             data = np.load(str(filepath))
 

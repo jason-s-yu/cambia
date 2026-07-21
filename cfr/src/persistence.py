@@ -7,6 +7,8 @@ import tempfile
 
 import numpy as np
 
+from .npz_size_guard import guard_npz_size
+
 # Assuming InfosetKey is properly imported elsewhere or defined if needed directly
 # from .utils import InfosetKey
 
@@ -275,6 +277,11 @@ def load_agent_data(filepath: str) -> Optional[Dict[str, Any]]:
             "unrestricted pickle. Retrain or re-export; tabular CFR is legacy, "
             "prefer the deep PRT-CFR pipeline."
         )
+
+    # Decompression-bomb guard (cambia-559): validate declared array sizes
+    # before np.load allocates anything. Raised outside the except tuple
+    # below so it propagates loudly rather than being swallowed to None.
+    guard_npz_size(filepath, label=f"agent data file {filepath}")
 
     try:
         with open(filepath, "rb") as fh:

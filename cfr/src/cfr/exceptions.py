@@ -173,6 +173,20 @@ class ReservoirIOError(StorageError):
     """
 
 
+class NpzSizeGuardError(StorageError):
+    """
+    Raised when an ``.npz`` archive under ``runs/`` declares array sizes that
+    fail the decompression-bomb size guard (cambia-559).
+
+    ``np.load`` allocates an array's full declared size before reading any
+    data, so a crafted archive can declare a multi-GB shape from a
+    few-MB file and OOM-kill the process. The guard reads member headers only
+    and raises this before any array is materialized; the attacker model
+    (rsync write access to ``runs/``) already permits writing large files, so
+    this bounds the failure to a loud, typed error instead of an OOM kill.
+    """
+
+
 # ============================================================================
 # Configuration Errors
 # ============================================================================
