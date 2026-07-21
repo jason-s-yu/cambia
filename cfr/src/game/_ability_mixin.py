@@ -203,13 +203,24 @@ class AbilityMixin:
                                 )
                             )
                 else:
-                    logger.debug(
-                        "Cannot generate BlindSwap actions: P%d has %d cards, Opponent has %d cards.",
+                    # cambia-650: after the _trigger_discard_ability fizzle-at-trigger
+                    # fix, a pending BlindSwapSelect reaching here with zero legal
+                    # actions should be unreachable in normal play -- the trigger
+                    # already checks the same hand-count and lock conditions before
+                    # ever setting this pending state. This branch is kept only as a
+                    # select-stage defense-in-depth mirror of Go's legalAbilitySelect.
+                    # If it fires outside of tests that deliberately construct this
+                    # state, it signals a real trigger/select-stage divergence.
+                    logger.error(
+                        "Pending BlindSwapSelect for P%d produced zero legal actions "
+                        "(P%d cards=%d, opp cards=%d, opp_locked=%s). Should be "
+                        "unreachable after cambia-650's trigger-time fizzle fix.",
+                        player,
                         player,
                         player_hand_count,
                         opponent_hand_count,
+                        opp_is_locked,
                     )
-                    # Ability fizzles
 
             elif isinstance(action_type, ActionAbilityKingLookSelect):  # K Look Choice
                 opp_is_locked = (
@@ -230,13 +241,18 @@ class AbilityMixin:
                                 )
                             )
                 else:
-                    logger.debug(
-                        "Cannot generate KingLook actions: P%d has %d cards, Opponent has %d cards.",
+                    # cambia-650: same defense-in-depth rationale as BlindSwapSelect
+                    # above -- should be unreachable after the trigger-time fix.
+                    logger.error(
+                        "Pending KingLookSelect for P%d produced zero legal actions "
+                        "(P%d cards=%d, opp cards=%d, opp_locked=%s). Should be "
+                        "unreachable after cambia-650's trigger-time fizzle fix.",
+                        player,
                         player,
                         player_hand_count,
                         opponent_hand_count,
+                        opp_is_locked,
                     )
-                    # Ability fizzles
 
             elif isinstance(
                 action_type, ActionAbilityKingSwapDecision
@@ -1309,13 +1325,25 @@ class AbilityMixin:
         next_pending_action: Optional[GameAction] = None
 
         # Check if ability requires action based on current game state
+        opponent_id = self.get_opponent_index(player_index)
         player_hand_count = self.get_player_card_count(player_index)
-        opponent_hand_count = self.get_player_card_count(
-            self.get_opponent_index(player_index)
-        )
+        opponent_hand_count = self.get_player_card_count(opponent_id)
         can_peek_own = player_hand_count > 0
         can_peek_opp = opponent_hand_count > 0
-        can_swap = can_peek_own and can_peek_opp
+        # cambia-650: mirrors Go engine/legal.go canUseAbility. When
+        # lockCallerHand is true and the opponent is the Cambia caller,
+        # BlindSwap/KingLook cannot target them and must fizzle here, at
+        # trigger time -- not just at the select-stage legal generator
+        # (_get_legal_pending_actions below), which cannot itself emit any
+        # action once we are already in a locked BlindSwap/KingLook pending
+        # state. Go does not gate PeekOther on the lock, so PeekOther
+        # (can_peek_opp alone) is intentionally left out of this condition.
+        opp_is_locked = (
+            getattr(getattr(self, "house_rules", None), "lockCallerHand", False)
+            and self.cambia_caller_id is not None
+            and self.cambia_caller_id == opponent_id
+        )
+        can_swap = can_peek_own and can_peek_opp and not opp_is_locked
 
         if rank in [SEVEN, EIGHT] and can_peek_own:
             next_pending_action = ActionAbilityPeekOwnSelect(-1)
@@ -1327,12 +1355,14 @@ class AbilityMixin:
             next_pending_action = ActionAbilityKingLookSelect(-1, -1)
         else:
             logger.debug(
-                "Card %s ability requires no action or cannot be performed (Hand sizes: P%d=%d, P%d=%d). Fizzles.",
+                "Card %s ability requires no action or cannot be performed "
+                "(Hand sizes: P%d=%d, P%d=%d, opp_locked=%s). Fizzles.",
                 discarded_card,
                 player_index,
                 player_hand_count,
-                self.get_opponent_index(player_index),
+                opponent_id,
                 opponent_hand_count,
+                opp_is_locked,
             )
 
         if next_pending_action:
