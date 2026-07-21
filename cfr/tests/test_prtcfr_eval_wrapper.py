@@ -13,8 +13,10 @@ per EPISODE proportional to w_t = t, NOT by per-decision averaging, and the
 policy query is byte-identical to the training-time sigma^t / inference service.
 """
 
+import json
 import logging
 import os
+import subprocess
 import sys
 import random
 from collections import Counter
@@ -446,6 +448,194 @@ def test_end_to_end_argmax_mode_smoke(tmp_path):
     finally:
         logging.disable(logging.NOTSET)
     assert res.get("Errors", 0) == 0
+
+
+# ---------------------------------------------------------------------------
+# cambia-651: cross-process eval determinism (RC-A crn_identity + RC-B action
+# RNGs). Root cause was diagnosed and ablation-proven in a prior read-only
+# investigation (hub note key root-cause-diagnosis on cambia-651); these tests
+# verify the two independently-sufficient fixes.
+# ---------------------------------------------------------------------------
+
+# Chosen deterministic-and-deadlock-free: crn_seed_base=1 with this exact
+# fixture (snapshot iters [1, 2] / checkpoint at iter 2, _write_fast_config's
+# max_game_turns=15) is already exercised by test_end_to_end_eval_smoke above
+# without hitting the separate cambia-650 pending-ability deadlock, so this
+# reuses that known-safe combination rather than probing a new one.
+_DETERMINISM_CRN_SEED_BASE = 1
+_DETERMINISM_CRN_IDENTITY = "cambia-651-determinism-check"
+
+_DETERMINISM_SUBPROCESS_SCRIPT = """
+import json
+import logging
+logging.disable(logging.CRITICAL)
+from src.evaluate_agents import run_evaluation
+
+res = run_evaluation(
+    {cfgpath!r},
+    "prt_cfr",
+    "random_no_cambia",
+    4,
+    None,
+    checkpoint_path={checkpoint_path!r},
+    device="cpu",
+    crn_seed_base={crn_seed_base!r},
+    crn_identity={crn_identity!r},
+)
+print(json.dumps({{"counter": dict(res), "stats": res.stats}}, sort_keys=True))
+"""
+
+
+def _run_eval_in_subprocess(cfgpath, checkpoint_path, crn_seed_base, crn_identity):
+    """Runs the determinism script in a FRESH subprocess (not in-process) --
+    cross-process is required to prove the fix: an in-process double-run
+    would still share the parent's already-consumed global RNG state and
+    would not catch the module-global-RNG root cause (RC-B)."""
+    script = _DETERMINISM_SUBPROCESS_SCRIPT.format(
+        cfgpath=cfgpath,
+        checkpoint_path=checkpoint_path,
+        crn_seed_base=crn_seed_base,
+        crn_identity=crn_identity,
+    )
+    env = dict(os.environ)
+    env["PYTHONHASHSEED"] = "0"  # fixed and IDENTICAL across both runs
+    env["PYTHONPATH"] = PROJECT_ROOT
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=PROJECT_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, (
+        f"eval subprocess failed: stdout={result.stdout!r} "
+        f"stderr={result.stderr[-4000:]!r}"
+    )
+    lines = [ln for ln in result.stdout.strip().splitlines() if ln.strip()]
+    assert lines, f"eval subprocess produced no output: stderr={result.stderr!r}"
+    return json.loads(lines[-1])
+
+
+def test_eval_is_byte_identical_across_processes_at_fixed_crn(tmp_path):
+    """The point of cambia-651: the same eval, at a fixed crn_seed_base and a
+    fixed (explicit) crn_identity, run TWICE in two SEPARATE subprocesses,
+    must produce byte-identical result Counters. Before the RC-A/RC-B fixes
+    this varied run to run even with PYTHONHASHSEED pinned identically in
+    both processes, because (RC-B) action sampling drew from unseeded
+    module-global RNGs whose state depended on process-level draw order."""
+    snapdir = _make_run_dir(tmp_path, [1, 2], best_iteration=2)
+    cfgpath = _write_fast_config(tmp_path)
+    checkpoint_path = str(snapdir / "prtcfr_snapshot_iter_2.pt")
+
+    out_a = _run_eval_in_subprocess(
+        cfgpath, checkpoint_path, _DETERMINISM_CRN_SEED_BASE, _DETERMINISM_CRN_IDENTITY
+    )
+    out_b = _run_eval_in_subprocess(
+        cfgpath, checkpoint_path, _DETERMINISM_CRN_SEED_BASE, _DETERMINISM_CRN_IDENTITY
+    )
+
+    assert out_a["counter"] == out_b["counter"], (
+        "eval result Counter differs across separate processes at fixed "
+        f"crn_seed_base/crn_identity (cambia-651 regression): {out_a['counter']!r} "
+        f"vs {out_b['counter']!r}"
+    )
+    assert out_a["stats"] == out_b["stats"], (
+        "eval result stats differ across separate processes at fixed "
+        f"crn_seed_base/crn_identity (cambia-651 regression): {out_a['stats']!r} "
+        f"vs {out_b['stats']!r}"
+    )
+    # Sanity: the run actually produced games (not a degenerate all-error run
+    # that would trivially match).
+    total = sum(
+        out_a["counter"].get(k, 0) for k in ("P0 Wins", "P1 Wins", "Ties", "MaxTurnTies")
+    )
+    assert total == 4
+    assert out_a["counter"].get("Errors", 0) == 0
+
+
+def test_crn_identity_explicit_pins_deck_seed_across_checkpoint_paths(tmp_path):
+    """RC-A unit test. run_evaluation folded checkpoint_path into the deck-seed
+    hash unconditionally, so a tmpdir checkpoint (whose path differs per
+    process/run) moved deck seeds even at a fixed crn_seed_base. Two calls
+    differing ONLY in checkpoint_path location, both passing the same
+    explicit crn_identity, must produce identical outcomes (same deck
+    seeds); baseline-vs-baseline agents are used so no real checkpoint file
+    needs to exist -- checkpoint_path is only consumed by the deck-seed hash
+    default here, never opened."""
+    from src.evaluate_agents import run_evaluation
+
+    cfgpath = _write_fast_config(tmp_path)
+    ckpt_a = str(tmp_path / "run_dir_a" / "prtcfr_checkpoint.pt")
+    ckpt_b = str(tmp_path / "somewhere_else_entirely" / "prtcfr_checkpoint.pt")
+    assert ckpt_a != ckpt_b
+
+    logging.disable(logging.CRITICAL)
+    try:
+        res_a = run_evaluation(
+            cfgpath,
+            "random_no_cambia",
+            "random_late_cambia",
+            4,
+            None,
+            checkpoint_path=ckpt_a,
+            device="cpu",
+            crn_seed_base=7,
+            crn_identity="pinned-identity",
+        )
+        res_b = run_evaluation(
+            cfgpath,
+            "random_no_cambia",
+            "random_late_cambia",
+            4,
+            None,
+            checkpoint_path=ckpt_b,
+            device="cpu",
+            crn_seed_base=7,
+            crn_identity="pinned-identity",
+        )
+    finally:
+        logging.disable(logging.NOTSET)
+
+    assert dict(res_a) == dict(res_b), (
+        "explicit crn_identity did not pin the deck-seed sequence across "
+        f"differing checkpoint_path locations: {dict(res_a)!r} vs {dict(res_b)!r}"
+    )
+
+    # Default (crn_identity=None) must preserve the prior behavior: falling
+    # back to checkpoint_path. So passing crn_identity=None with ckpt_a must
+    # match explicitly passing crn_identity=ckpt_a.
+    logging.disable(logging.CRITICAL)
+    try:
+        res_default = run_evaluation(
+            cfgpath,
+            "random_no_cambia",
+            "random_late_cambia",
+            4,
+            None,
+            checkpoint_path=ckpt_a,
+            device="cpu",
+            crn_seed_base=7,
+            crn_identity=None,
+        )
+        res_explicit_same_as_default = run_evaluation(
+            cfgpath,
+            "random_no_cambia",
+            "random_late_cambia",
+            4,
+            None,
+            checkpoint_path=ckpt_a,
+            device="cpu",
+            crn_seed_base=7,
+            crn_identity=ckpt_a,
+        )
+    finally:
+        logging.disable(logging.NOTSET)
+
+    assert dict(res_default) == dict(res_explicit_same_as_default), (
+        "crn_identity=None must default to checkpoint_path (prior behavior); "
+        f"{dict(res_default)!r} vs {dict(res_explicit_same_as_default)!r}"
+    )
 
 
 # ---------------------------------------------------------------------------

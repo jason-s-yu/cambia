@@ -64,6 +64,23 @@ class BaseAgent(ABC):
 class RandomAgent(BaseAgent):
     """An agent that chooses actions randomly from the legal set."""
 
+    def __init__(self, player_id: int, config: Config, seed: Optional[int] = None):
+        super().__init__(player_id, config)
+        # RNG source (cambia-651 RC-B2): choose_action previously drew from
+        # the `random` module's global instance unconditionally, which is
+        # unseeded and order-dependent across processes -- eval outcomes
+        # varied run to run even at a fixed crn_seed_base. An explicit seed
+        # gets a dedicated per-instance RNG, decoupled from whatever else
+        # touches the global module during a run (run_evaluation threads
+        # crn_seed_base + player_id through here). seed=None falls back to
+        # the global `random` module itself (not a fresh entropy-seeded
+        # instance), preserving the pre-existing contract several callers
+        # rely on: src.cfr.lbr.collect_infosets reseeds the shared global
+        # module before a deterministic run and expects RandomAgent (built
+        # with no seed) to draw from that same reseeded stream
+        # (tests/test_baseline_agent_hashseed_determinism.py pins this).
+        self._rng = random if seed is None else random.Random(seed)
+
     def choose_action(
         self, game_state: CambiaGameState, legal_actions: Set[GameAction]
     ) -> GameAction:
@@ -82,7 +99,7 @@ class RandomAgent(BaseAgent):
             )
 
         action_list = list(legal_actions)
-        chosen_action = random.choice(action_list)
+        chosen_action = self._rng.choice(action_list)
         logger.debug("RandomAgent P%d chose action: %s", self.player_id, chosen_action)
         return chosen_action
 
@@ -954,8 +971,14 @@ class RandomLateCambiaAgent(RandomAgent):
     """RandomAgent that suppresses CallCambia until game turn >= n_turns.
     After n_turns, behaves like normal RandomAgent (including CallCambia)."""
 
-    def __init__(self, player_id: int, config: Config, n_turns: int = 8):
-        super().__init__(player_id, config)
+    def __init__(
+        self,
+        player_id: int,
+        config: Config,
+        n_turns: int = 8,
+        seed: Optional[int] = None,
+    ):
+        super().__init__(player_id, config, seed=seed)
         self.n_turns = n_turns
 
     def choose_action(
