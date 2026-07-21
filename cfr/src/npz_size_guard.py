@@ -44,17 +44,18 @@ PathLike = Union[str, Path]
 # training host's RAM.
 RUNS_NPZ_MAX_DECLARED_BYTES = 32 * 1024**3
 
-# Secondary heuristic: a member whose declared size is wildly disproportionate
-# to its on-disk (compressed) footprint is the signature of a truncated/empty
-# bomb payload -- np.empty(shape) OOMs before any real data needs to exist.
-# Legitimate float32/bool reservoir data compresses modestly (rarely more than
-# ~10x); 500x is generous headroom against false positives on real
-# sparse/degenerate arrays (e.g. an all-False mask column) while still
-# catching a near-empty declared-huge member. Only applied above a floor so
-# tiny legitimate scalar/metadata members (meta, has_mask, input_dim, ...)
+# Secondary check: a member whose declared size exceeds what DEFLATE can
+# possibly inflate from its on-disk compressed footprint must have
+# truncated/missing data -- the signature of a bomb whose header alone drives
+# np.load's allocation. DEFLATE's compression ratio is bounded at ~1032:1
+# (each symbol emits at most 258 bytes from ~2 bits), so a fully-present
+# member -- even a degenerate-but-real one like a constant-valued int64
+# iterations column -- can never exceed ~1032x; 2048x therefore has zero
+# false positives on archives whose data actually exists. Only applied above
+# a floor so tiny scalar/metadata members (meta, has_mask, input_dim, ...)
 # are never flagged.
 _RATIO_CHECK_MIN_DECLARED_BYTES = 1 * 1024 * 1024
-_MAX_DECLARED_TO_COMPRESSED_RATIO = 500
+_MAX_DECLARED_TO_COMPRESSED_RATIO = 2048
 
 
 def _read_member_declared_bytes(member, label: str, member_name: str) -> int:
@@ -75,8 +76,24 @@ def _read_member_declared_bytes(member, label: str, member_name: str) -> int:
             f"format version {version}; refusing to load without validating "
             "its declared size (cambia-559)."
         )
-    count = int(np.multiply.reduce(shape, dtype=np.int64)) if shape else 1
-    return count * dtype.itemsize
+    try:
+        count = int(np.multiply.reduce(shape, dtype=np.int64)) if shape else 1
+        declared = count * dtype.itemsize
+    except (OverflowError, ValueError) as e:
+        # Header shape fields are attacker-controlled; a dimension too large
+        # for int64 conversion is itself a bomb signature.
+        raise NpzSizeGuardError(
+            f"{label}: archive member {member_name!r} declares shape {shape!r} "
+            f"whose size cannot be computed ({e}); refusing to load as a "
+            "likely decompression bomb (cambia-559)."
+        ) from e
+    if declared < 0:
+        raise NpzSizeGuardError(
+            f"{label}: archive member {member_name!r} declares shape {shape!r} "
+            "whose byte size overflows; refusing to load as a likely "
+            "decompression bomb (cambia-559)."
+        )
+    return declared
 
 
 def guard_npz_size(path: PathLike, *, label: str = "") -> None:
