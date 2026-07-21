@@ -2420,6 +2420,7 @@ class PRTCFRAgentWrapper(NeuralAgentWrapper):
         use_argmax: bool = False,
         weighting: str = "linear",
         mixture_seed: Optional[int] = None,
+        crn_seed_base: Optional[int] = None,
     ):
         super().__init__(player_id, config, device=device, use_argmax=use_argmax)
         from src.cfr.prtcfr_mixture import PRTCFRMixture
@@ -2445,6 +2446,19 @@ class PRTCFRAgentWrapper(NeuralAgentWrapper):
             else 0x9E3779B1 ^ (player_id * 0x85EBCA77)
         ) & 0xFFFF_FFFF
         self._episode_rng = np.random.default_rng(seed)
+        # Per-instance action-sampling RNG (cambia-651 RC-B1): choose_action
+        # previously drew from np.random.choice/random.choice against their
+        # respective module-global RNGs, which are unseeded and order-
+        # dependent across processes -- the same crn_seed_base then still
+        # produced different sampled actions run to run. Seeded with the same
+        # convention as _episode_rng (deterministic per seat, optionally
+        # salted with crn_seed_base so varying the CRN base also varies the
+        # action-sampling stream), but a different magic constant so the two
+        # streams don't mirror each other.
+        action_seed = (
+            (crn_seed_base or 0) ^ 0xC2B2AE3D ^ (player_id * 0x27D4EB2F)
+        ) & 0xFFFF_FFFF
+        self._action_rng = np.random.default_rng(action_seed)
         # Per-episode token-stream state (populated in initialize_state).
         self._init_hand: list = []
         self._init_peeks: tuple = ()
@@ -2612,6 +2626,18 @@ class PRTCFRAgentWrapper(NeuralAgentWrapper):
         tokens = self._encode_tokens()
         return self._mixture.strategy(tokens, mask)
 
+    def _action_rng_choice(self, items: List[GameAction]) -> GameAction:
+        """Choose one item uniformly via the per-instance action RNG.
+
+        Indexes rather than passing ``items`` straight to
+        ``np.random.Generator.choice``: the elements are ``GameAction``
+        ``NamedTuple``s, and numpy coerces a list of tuples into a 2D array
+        (one row per tuple) instead of an object array of single items, which
+        would silently return a numpy array instead of a ``GameAction``.
+        """
+        idx = int(self._action_rng.integers(len(items)))
+        return items[idx]
+
     def choose_action(self, game_state, legal_actions: Set[GameAction]) -> GameAction:
         """Query the episode's sampled snapshot with the engine token prefix."""
         from src.encoding import encode_action_mask, index_to_action
@@ -2627,11 +2653,11 @@ class PRTCFRAgentWrapper(NeuralAgentWrapper):
             probs = self._strategy_for_mask(mask)  # (146,) float64
         except Exception as e:  # JUSTIFIED: evaluation resilience
             logger.error("PRTCFRAgent P%d policy error: %s", self.player_id, e)
-            return random.choice(legal_list)
+            return self._action_rng_choice(legal_list)
 
         legal_indices = np.where(np.asarray(mask, dtype=bool))[0]
         if len(legal_indices) == 0:
-            return random.choice(legal_list)
+            return self._action_rng_choice(legal_list)
         legal_probs = probs[legal_indices]
         prob_sum = legal_probs.sum()
         if prob_sum <= 0:
@@ -2642,12 +2668,12 @@ class PRTCFRAgentWrapper(NeuralAgentWrapper):
         if self._use_argmax:
             chosen_local = int(np.argmax(legal_probs))
         else:
-            chosen_local = int(np.random.choice(len(legal_indices), p=legal_probs))
+            chosen_local = int(self._action_rng.choice(len(legal_indices), p=legal_probs))
         chosen_global_idx = int(legal_indices[chosen_local])
         try:
             return index_to_action(chosen_global_idx, legal_list)
         except ActionEncodingError:
-            return random.choice(legal_list)
+            return self._action_rng_choice(legal_list)
 
 
 # --- Constants ---
@@ -2770,11 +2796,29 @@ def get_agent(agent_type: str, player_id: int, config, **kwargs) -> BaseAgent:
             raise ValueError("PRTCFRAgentWrapper requires 'checkpoint_path'.")
         device = kwargs.get("device", "cpu")
         use_argmax = kwargs.get("use_argmax", False)
+        crn_seed_base = kwargs.get("crn_seed_base")
         return PRTCFRAgentWrapper(
-            player_id, config, checkpoint_path, device=device, use_argmax=use_argmax
+            player_id,
+            config,
+            checkpoint_path,
+            device=device,
+            use_argmax=use_argmax,
+            crn_seed_base=crn_seed_base,
         )
     else:
-        # Pass config to baseline agents as well
+        # Pass config to baseline agents as well. RandomAgent (and its
+        # subclasses) accept a per-instance seed (cambia-651 RC-B2); derive it
+        # from crn_seed_base + player_id when the caller supplied a CRN base,
+        # else leave it None (entropy-seeded, matching prior behavior).
+        if isinstance(agent_class, type) and issubclass(agent_class, RandomAgent):
+            crn_seed_base = kwargs.get("crn_seed_base")
+            seed = (
+                None
+                if crn_seed_base is None
+                else (crn_seed_base ^ 0xB5297A4D ^ (player_id * 0x68E31DA4))
+                & 0xFFFF_FFFF
+            )
+            return agent_class(player_id, config, seed=seed)
         return agent_class(player_id, config)
 
 
@@ -2793,6 +2837,7 @@ def run_evaluation(
     use_argmax: bool = False,
     seat_scheme: str = "alternated",
     crn_seed_base: Optional[int] = None,
+    crn_identity: Optional[str] = None,
 ) -> Counter:
     """Runs head-to-head evaluation between two agents. Returns results Counter.
 
@@ -2812,6 +2857,13 @@ def run_evaluation(
             deterministic deck seed so the agent under test faces an identical
             deal from both seats (common random numbers). None leaves the deck
             unseeded (process entropy), preserving prior behavior.
+        crn_identity: Stable string folded into the deck-seed hash alongside
+            crn_seed_base (cambia-651 RC-A). Defaults to checkpoint_path (or
+            agent1_type), which moves per process for a tmpdir checkpoint
+            path and made the deck sequence non-reproducible across runs.
+            Callers running from a non-stable path should pass an explicit
+            constant here instead; the hash formula itself is unchanged, so
+            recorded deck seeds for stable run-dir paths are unaffected.
     """
     seat_scheme = (seat_scheme or "alternated").lower()
     if seat_scheme not in ("alternated", "fixed"):
@@ -2897,6 +2949,12 @@ def run_evaluation(
                 "device": device,
                 "use_argmax": use_argmax,
             }
+        # Threaded through unconditionally: get_agent only consumes this key
+        # for agent types that accept a seed (prt_cfr's action-sampling RNG,
+        # RandomAgent's per-instance RNG -- cambia-651 RC-B1/RC-B2); other
+        # agent types ignore it via kwargs.get.
+        agent1_kwargs["crn_seed_base"] = crn_seed_base
+        agent2_kwargs["crn_seed_base"] = crn_seed_base
 
         # Build each side at the seat(s) it will occupy. A wrapper's player_id is
         # baked in at construction and threaded into its AgentState, so swapping
@@ -2931,8 +2989,13 @@ def run_evaluation(
         sys.exit(1)
 
     # Stable string identifying the agent under test, used in the CRN seed hash so
-    # the deck sequence is deterministic per (agent, baseline) matchup.
-    crn_identity = checkpoint_path or agent1_type
+    # the deck sequence is deterministic per (agent, baseline) matchup. Defaults to
+    # checkpoint_path (or agent1_type) for stable run-dir paths (unchanged prior
+    # behavior); a caller running from a non-stable path (e.g. a tmpdir checkpoint)
+    # may pass an explicit crn_identity so the deck-seed hash doesn't move per
+    # process (cambia-651 RC-A). The hash formula below is unchanged either way.
+    if crn_identity is None:
+        crn_identity = checkpoint_path or agent1_type
 
     results: Counter = Counter()
     start_time = time.perf_counter()
