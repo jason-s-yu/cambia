@@ -395,3 +395,170 @@ class TestNumPlayersValidation:
         DeepCfrConfig, PRTCFRConfig = _get_real_config_classes()
         assert DeepCfrConfig().num_players == 2
         assert PRTCFRConfig().num_players == 2
+
+
+# ---------------------------------------------------------------------------
+# cambia-640: prt_cfr config validator hygiene
+#
+# Two silent-failure modes traced from the x2r-staged-config-verify workflow:
+#   1. PRTCFRConfig inherited extra="ignore" from _CambiaBaseModel, so a
+#      typo'd key under prt_cfr passed `cambia config validate` with OK and
+#      silently no-opped to the field's default.
+#   2. stability_stop_mode (and sibling fields with the same raise-at-
+#      construction pattern: lr_schedule, backend, stability_metric_mode)
+#      were plain str with no Literal constraint, so an invalid value passed
+#      validation and only failed later, at trainer/controller construction.
+# ---------------------------------------------------------------------------
+
+
+def _get_real_config_module():
+    """Import the real src.config module, bypassing the conftest stub."""
+    _orig = sys.modules.pop("src.config", None)
+    try:
+        return importlib.import_module("src.config")
+    finally:
+        if _orig is not None:
+            sys.modules["src.config"] = _orig
+
+
+class TestPRTCFRConfigUnknownKeysRejected:
+    def test_bogus_key_rejected_at_construction(self):
+        _, PRTCFRConfig = _get_real_config_classes()
+        with pytest.raises(Exception, match="totally_bogus_prt_cfr_option"):
+            PRTCFRConfig(totally_bogus_prt_cfr_option=True)
+
+    def test_typo_key_rejected_via_config_validate(self, tmp_path):
+        """Mirrors `cambia config validate`: a typo'd key under prt_cfr (here,
+        stabilty_stop_mode instead of stability_stop_mode) must fail loudly
+        instead of silently no-opping to the default."""
+        real_mod = _get_real_config_module()
+        cfg = {"prt_cfr": {"iterations": 10, "stabilty_stop_mode": "plateau"}}
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.dump(cfg))
+
+        with pytest.raises(Exception, match="stabilty_stop_mode"):
+            raw = real_mod.resolve_config_yaml(str(config_file))
+            real_mod.Config.model_validate(raw)
+
+    def test_known_keys_still_accepted_via_config_validate(self, tmp_path):
+        """A realistic prt_cfr block (shape of config/prtcfr_production.yaml)
+        must still validate cleanly -- extra="forbid" must not reject real
+        fields."""
+        real_mod = _get_real_config_module()
+        cfg = {
+            "prt_cfr": {
+                "iterations": 100,
+                "backend": "go",
+                "lr_schedule": "global_cosine",
+                "stability_enabled": True,
+                "stability_metric_mode": "min",
+                "stability_metric_name": "nashconv",
+                "stability_stop_mode": "plateau",
+            }
+        }
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.dump(cfg))
+
+        raw = real_mod.resolve_config_yaml(str(config_file))
+        validated = real_mod.Config.model_validate(raw)
+        assert validated.prt_cfr.stability_stop_mode == "plateau"
+        assert validated.prt_cfr.lr_schedule == "global_cosine"
+        assert validated.prt_cfr.backend == "go"
+
+
+class TestPRTCFREnumFieldsConstrained:
+    @pytest.mark.parametrize("bad_mode", ["invalid", "diverge", "Plateau", ""])
+    def test_invalid_stability_stop_mode_rejected(self, bad_mode):
+        _, PRTCFRConfig = _get_real_config_classes()
+        with pytest.raises(Exception) as exc_info:
+            PRTCFRConfig(stability_stop_mode=bad_mode)
+        msg = str(exc_info.value)
+        assert "divergence" in msg
+        assert "plateau" in msg
+
+    @pytest.mark.parametrize("mode", ["divergence", "plateau"])
+    def test_valid_stability_stop_mode_accepted(self, mode):
+        _, PRTCFRConfig = _get_real_config_classes()
+        assert PRTCFRConfig(stability_stop_mode=mode).stability_stop_mode == mode
+
+    @pytest.mark.parametrize("bad_schedule", ["cosine", "linear", "Restart", ""])
+    def test_invalid_lr_schedule_rejected(self, bad_schedule):
+        _, PRTCFRConfig = _get_real_config_classes()
+        with pytest.raises(Exception) as exc_info:
+            PRTCFRConfig(lr_schedule=bad_schedule)
+        msg = str(exc_info.value)
+        assert "restart" in msg
+        assert "global_cosine" in msg
+
+    @pytest.mark.parametrize("schedule", ["restart", "global_cosine"])
+    def test_valid_lr_schedule_accepted(self, schedule):
+        _, PRTCFRConfig = _get_real_config_classes()
+        assert PRTCFRConfig(lr_schedule=schedule).lr_schedule == schedule
+
+    @pytest.mark.parametrize("bad_backend", ["rust", "Go", "GO", ""])
+    def test_invalid_backend_rejected(self, bad_backend):
+        _, PRTCFRConfig = _get_real_config_classes()
+        with pytest.raises(Exception) as exc_info:
+            PRTCFRConfig(backend=bad_backend)
+        msg = str(exc_info.value)
+        assert "go" in msg
+        assert "python" in msg
+
+    @pytest.mark.parametrize("backend", ["go", "python"])
+    def test_valid_backend_accepted(self, backend):
+        _, PRTCFRConfig = _get_real_config_classes()
+        assert PRTCFRConfig(backend=backend).backend == backend
+
+    @pytest.mark.parametrize("bad_mode", ["minimum", "MAX", "average", ""])
+    def test_invalid_stability_metric_mode_rejected(self, bad_mode):
+        _, PRTCFRConfig = _get_real_config_classes()
+        with pytest.raises(Exception) as exc_info:
+            PRTCFRConfig(stability_metric_mode=bad_mode)
+        msg = str(exc_info.value)
+        assert "min" in msg
+        assert "max" in msg
+
+    @pytest.mark.parametrize("mode", ["min", "max"])
+    def test_valid_stability_metric_mode_accepted(self, mode):
+        _, PRTCFRConfig = _get_real_config_classes()
+        assert (
+            PRTCFRConfig(stability_metric_mode=mode).stability_metric_mode == mode
+        )
+
+    def test_defaults_still_valid(self):
+        """The field defaults (used by every existing run/test that doesn't
+        override these fields) must themselves pass validation."""
+        _, PRTCFRConfig = _get_real_config_classes()
+        cfg = PRTCFRConfig()
+        assert cfg.stability_stop_mode == "divergence"
+        assert cfg.lr_schedule == "restart"
+        assert cfg.backend == "go"
+        assert cfg.stability_metric_mode == "min"
+
+
+class TestShippedPRTCFRConfigsStillValidate:
+    """cambia-640 hard compat constraint: the X2R/A3 experiment program is
+    live, so every shipped config under cfr/config/ (and any local run-dir
+    config.yaml) must still pass `cambia config validate` after tightening
+    PRTCFRConfig. A dedicated sweep (not this file) covers the full config/
+    tree; this test spot-checks the two files that exercise the fields
+    tightened here (x2_tiny_gate.yaml: lr_schedule/stability_metric_mode;
+    x2r/c0.yaml, x2r/confirm_s2.yaml: stability_stop_mode)."""
+
+    @pytest.mark.parametrize(
+        "rel_path",
+        [
+            "config/x2_tiny_gate.yaml",
+            "config/x2r/c0.yaml",
+            "config/x2r/c1.yaml",
+            "config/x2r/confirm_s2.yaml",
+            "config/x2r/confirm_s3.yaml",
+            "config/x2r/c_rep.yaml",
+            "config/prtcfr_production.yaml",
+        ],
+    )
+    def test_shipped_config_validates(self, rel_path):
+        real_mod = _get_real_config_module()
+        cfr_root = Path(__file__).resolve().parent.parent
+        raw = real_mod.resolve_config_yaml(str(cfr_root / rel_path))
+        real_mod.Config.model_validate(raw)  # must not raise

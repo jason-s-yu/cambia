@@ -153,10 +153,19 @@ class _CambiaBaseModel(BaseModel):
             # Convert "CambiaRulesConfig" → "cambia_rules" for readable warning
             raw_name = re.sub(r"Config$", "", cls.__name__)
             section_name = re.sub(r"(?<!^)(?=[A-Z])", "_", raw_name).lower()
+            # extra="forbid" models (cambia-640) reject unknown keys outright
+            # via pydantic's own extra-field check right after this validator
+            # runs, so the log line here must say so instead of the generic
+            # "will be ignored" (true only for the default extra="ignore").
+            disposition = (
+                "will be rejected"
+                if cls.model_config.get("extra") == "forbid"
+                else "will be ignored"
+            )
             for key in values:
                 if key not in known:
                     log.warning(
-                        "Unknown %s key '%s' — will be ignored", section_name, key
+                        "Unknown %s key '%s' — %s", section_name, key, disposition
                     )
         return values
 
@@ -524,6 +533,16 @@ class PRTCFRConfig(_CambiaBaseModel):
     the X2 scorer); changing them breaks snapshot/checkpoint compatibility.
     """
 
+    # extra="forbid" (cambia-640): a typo'd or bogus key under prt_cfr (e.g. a
+    # renamed field, or a run config drafted against a since-changed name) must
+    # fail `cambia config validate` loudly rather than silently no-op to the
+    # field's default, which risks silently invalidating a pre-registered
+    # experiment cell (X2R/A3). Swept clean against every shipped prt_cfr block
+    # in cfr/config/**/*.yaml and every local cfr/runs/*/config.yaml at the time
+    # of this change (cambia-640); a future field rename must ship an alias or
+    # accept that old configs referencing the old name now fail validation.
+    model_config = ConfigDict(extra="forbid")
+
     # GRU sequence encoder. Vocab is DERIVED from sequence_encoding.VOCAB_SIZE
     # (327: 325 base + 1 cambia-529 peek + 1 cambia-564 race), not re-pinned here,
     # so a tokenizer bump can never leave this default stale (cambia-612). Growing
@@ -568,22 +587,34 @@ class PRTCFRConfig(_CambiaBaseModel):
     # defaults would break the tiny gate reproduction (e.g. stability-OFF tests)
     # and force the 256-wide tiny reservoir to a 12288-wide allocation.
     lr_min: float = 0.0
-    lr_schedule: str = "restart"  # "restart" | "global_cosine"
+    # "restart" (default): per-iteration cosine warm-restart to the same peak.
+    # "global_cosine": peak decays cosine-wise across the whole run to lr_min.
+    # See _peak_lr_for_iter (prtcfr_trainer.py), which raises ValueError for
+    # any other value -- constrained here (cambia-640) so a typo fails
+    # `cambia config validate` instead of surviving to trainer construction.
+    lr_schedule: Literal["restart", "global_cosine"] = "restart"
     reanchor_every: int = 0
     stability_enabled: bool = False
     stability_eval_every: int = 10
     stability_patience: int = 3
     stability_rel_tolerance: float = 0.15
     stability_min_iters: int = 10
-    stability_metric_mode: str = "min"
+    # "min" (default, e.g. exploitability/NashConv/fit loss) or "max"
+    # (win-rate-style signals). BestSnapshotController.__post_init__
+    # (prtcfr_stability.py) raises ValueError for any other value --
+    # constrained here (cambia-640) for the same reason as stability_stop_mode.
+    stability_metric_mode: Literal["min", "max"] = "min"
     stability_metric_name: str = "nashconv"
     # Early-stop rule (cambia-341). "divergence" (default) is the patience/
     # tolerance rule above and reproduces every existing run byte-for-byte;
     # "plateau" stops on trailing-window relative-improvement stagnation
     # instead (for future gate runs that flatten without diverging -- see
     # prtcfr_stability module docstring). Additive: switching stop_mode does
-    # not change the other stability_* fields' meaning.
-    stability_stop_mode: str = "divergence"  # "divergence" | "plateau"
+    # not change the other stability_* fields' meaning. Constrained to a
+    # Literal (cambia-640): previously a plain str, so an invalid value passed
+    # `cambia config validate` and only failed at BestSnapshotController
+    # construction (prtcfr_stability.py).
+    stability_stop_mode: Literal["divergence", "plateau"] = "divergence"
     stability_plateau_window_iters: int = 50
     stability_plateau_step_iters: int = 10
     stability_plateau_rel_improvement: float = 0.005
@@ -605,7 +636,10 @@ class PRTCFRConfig(_CambiaBaseModel):
         return validate_num_players(v)
 
     max_trajectory_steps: int = 4000
-    backend: str = "go"  # production GameDriver backend: "go" | "python"
+    # Production GameDriver backend. new_production_driver (prtcfr_worker.py)
+    # raises ValueError for any other value -- constrained here (cambia-640)
+    # for the same reason as stability_stop_mode.
+    backend: Literal["go", "python"] = "go"
     # --- Batched incremental production generation (S1W15). ---
     # gen_batched=True routes production generation through the batched
     # incremental PRTCFRInferenceService (all live games + their m rollouts
