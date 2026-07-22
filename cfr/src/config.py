@@ -655,6 +655,13 @@ class PRTCFRConfig(_CambiaBaseModel):
     # default stays 64 (production value pending the X3 P4/P5 GPU-window
     # validation), and X-cells set it per run-config.
     gen_chunk_games: int = 64
+    # Go apply-batch fan-out width (cambia-656). 1 (default) keeps the serial
+    # cambia_games_apply_batch loop -- the exact historical behavior. A value >1
+    # lets a large per-tick apply batch split into up to N goroutine-parallel
+    # chunks inside the Go engine (set once via cambia_set_batch_workers at
+    # production sampler init). Off by default; a production run opts in per
+    # run-config once an uncontended-window benchmark justifies a width.
+    batch_workers: int = Field(1, ge=1)
     # Inference precision for the batched sigma service: "bf16" (throughput
     # default, p2-redesign sec 6) or "fp32" (used by the equivalence gate). The
     # carry-vs-reencode identity holds at either precision; bf16 is an

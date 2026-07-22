@@ -1786,6 +1786,14 @@ class PRTCFRProductionTrainer:
         self.gen_batched = bool(getattr(config, "gen_batched", True))
         self.gen_chunk_games = int(getattr(config, "gen_chunk_games", 64))
         self.infer_dtype = str(getattr(config, "infer_dtype", "bf16"))
+        # Go apply-batch fan-out width (cambia-656). Default 1 keeps the serial
+        # apply loop (byte-identical to prior behavior); a width >1 is applied
+        # process-wide, once, here at trainer init. Opt-in only.
+        self.batch_workers = int(getattr(config, "batch_workers", 1))
+        if self.batch_workers > 1:
+            from ..ffi import bridge
+
+            bridge.set_batch_workers(self.batch_workers)
 
         # Stability controller (production default ON; config-gated).
         self.stability_enabled = bool(getattr(config, "stability_enabled", True))

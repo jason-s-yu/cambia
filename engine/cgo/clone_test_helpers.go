@@ -46,6 +46,38 @@ func testApplyOne(gameH, a0H, a1H int32, action uint16) int32 {
 	return int32(cambia_games_apply_batch(&gh, &a0, &a1, &act, 1))
 }
 
+// testSetBatchWorkers drives cambia_set_batch_workers from Go tests.
+func testSetBatchWorkers(n int32) { cambia_set_batch_workers(C.int32_t(n)) }
+
+// testApplyBatch drives cambia_games_apply_batch over length-len(ghs) handle and
+// action slices, returning the export's status code.
+func testApplyBatch(ghs, a0s, a1s []int32, acts []uint16) int32 {
+	n := len(ghs)
+	if n == 0 {
+		return 0
+	}
+	cgh := make([]C.int32_t, n)
+	ca0 := make([]C.int32_t, n)
+	ca1 := make([]C.int32_t, n)
+	cac := make([]C.uint16_t, n)
+	for i := 0; i < n; i++ {
+		cgh[i] = C.int32_t(ghs[i])
+		ca0[i] = C.int32_t(a0s[i])
+		ca1[i] = C.int32_t(a1s[i])
+		cac[i] = C.uint16_t(acts[i])
+	}
+	return int32(cambia_games_apply_batch(&cgh[0], &ca0[0], &ca1[0], &cac[0], C.int32_t(n)))
+}
+
+// testAgentEncode writes the agent's InputDim-length legacy encoding into out
+// (caller-sized) and returns the export's status code.
+func testAgentEncode(ah int32, ctx uint8, drawn int8, out []float32) int32 {
+	if len(out) == 0 {
+		return -1
+	}
+	return int32(cambia_agent_encode(C.int32_t(ah), C.uint8_t(ctx), C.int8_t(drawn), (*C.float)(&out[0])))
+}
+
 func testAgentTokenLen(h int32) int32 {
 	return int32(cambia_agent_token_len(C.int32_t(h)))
 }
