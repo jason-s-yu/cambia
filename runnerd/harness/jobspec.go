@@ -120,6 +120,16 @@ type JobSpec struct {
 	// JobView, letting the client-side reflector link a job's note to a hub item
 	// (recoverable from a pulled run dir). Empty means an unlinked job.
 	HubItem string `json:"hub_item,omitempty"`
+	// Exclusive marks a timing-sensitive job that must run alone (cambia-655): the
+	// dispatcher launches it only when no other job is active and holds every other
+	// job while it prepares or runs. Absent decodes false (a normal job that shares
+	// the concurrency pool). A deferred exclusive job at the queue head barriers the
+	// later ready jobs of that dispatch pass so a stream of small jobs cannot pass
+	// it and starve it (see dispatchLocked). The submit path never uses
+	// DisallowUnknownFields, so an old client (no field) still submits and a new
+	// client against an old daemon is the only degradation: the field is dropped
+	// and the job runs shared.
+	Exclusive bool `json:"exclusive,omitempty"`
 }
 
 // onFailureOrDefault returns the spec's on_failure policy, defaulting to skip.

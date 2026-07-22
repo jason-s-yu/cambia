@@ -213,6 +213,13 @@ def submit(
         "--on-failure",
         help="Parent-failure policy: skip (default) | run | fail. Requires --after.",
     ),
+    exclusive: bool = typer.Option(
+        False,
+        "--exclusive",
+        help="Run this job alone: the runner launches it only into an idle daemon "
+        "and holds every other job while it runs (cambia-655). For timing-"
+        "sensitive measurement jobs.",
+    ),
     config: Optional[str] = _CONFIG_OPT,
 ):
     """Push the pinned commit to the runner mirror and submit a job."""
@@ -225,10 +232,14 @@ def submit(
     # provided" just like a real CLI invocation's None default.
     after_flag = after if isinstance(after, str) else None
     on_failure_flag = on_failure if isinstance(on_failure, str) else None
+    # --exclusive is a set-only flag: it forces exclusivity on, additive over the
+    # spec file (there is no way to unset a spec-file exclusive:true from the CLI).
+    # The OptionInfo sentinel of a direct call is not a bool, so it counts as unset.
+    exclusive_flag = bool(exclusive) if isinstance(exclusive, bool) else False
     try:
-        if after_flag is not None or on_failure_flag is not None:
-            # CLI flags override the spec-file keys for the dependency gate; re-parse
-            # the raw mapping with them applied so the same validation runs.
+        if after_flag is not None or on_failure_flag is not None or exclusive_flag:
+            # CLI flags override the spec-file keys; re-parse the raw mapping with
+            # them applied so the same validation runs.
             import yaml
 
             with open(spec_file, "r", encoding="utf-8") as fh:
@@ -239,6 +250,8 @@ def submit(
                 raw["after"] = after_flag
             if on_failure_flag is not None:
                 raw["on_failure"] = on_failure_flag
+            if exclusive_flag:
+                raw["exclusive"] = True
             spec = JobSpec.parse(raw)
         else:
             spec = parse_spec_file(str(spec_file))
