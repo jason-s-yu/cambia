@@ -247,6 +247,7 @@ _ffi.cdef("""
     int32_t cambia_agent_tokens_since(int32_t agent_h, int32_t since, int32_t *out, int32_t max);
     int32_t cambia_games_apply_batch(int32_t *game_hs, int32_t *a0s, int32_t *a1s,
                                      uint16_t *actions, int32_t n);
+    void    cambia_set_batch_workers(int32_t n);
     int32_t cambia_games_observe_batch(int32_t *game_hs, int32_t *a0s, int32_t *a1s,
                                        int32_t n, int32_t tok_cap,
                                        int8_t *out_terminal, uint8_t *out_actor,
@@ -1587,6 +1588,18 @@ def get_handle_pool_stats() -> dict:
 # ---------------------------------------------------------------------------
 # PRT-CFR event-stream token FFI (S1W2, additive)
 # ---------------------------------------------------------------------------
+
+
+def set_batch_workers(n: int) -> None:
+    """Set the cambia_games_apply_batch fan-out width (cambia-656).
+
+    n<=1 (the default) keeps the serial apply loop, byte-identical to the
+    historical behavior. n>1 lets a large per-tick batch split into up to n
+    goroutine-parallel chunks inside the Go engine. Process-wide; call once at
+    sampler init. Parallel mode is opt-in only.
+    """
+    lib = _get_lib()
+    lib.cambia_set_batch_workers(int(n))
 
 
 def apply_games_batch(

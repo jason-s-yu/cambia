@@ -9,6 +9,8 @@
 //	  - read the full stream / an incremental tail.
 //	cambia_games_apply_batch - vectorized apply + per-game agent belief+token
 //	  update, O(n) with no per-game Python roundtrip.
+//	cambia_set_batch_workers - opt-in parallel fan-out width for
+//	  cambia_games_apply_batch (cambia-656); default 1 keeps the serial path.
 //	cambia_state_save / cambia_state_restore / cambia_state_snapshot_free -
 //	  token-inclusive (game, both-agents) checkpoint pair (additive to the
 //	  game-only cambia_game_save/restore, which are unchanged).
@@ -29,6 +31,7 @@ import "C"
 import (
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	engine "github.com/jason-s-yu/cambia/engine"
@@ -110,10 +113,24 @@ var (
 	solverInUse [maxSolvers]bool
 )
 
+// batchWorkers is the cambia_games_apply_batch fan-out knob (cambia-656). The
+// default 1 keeps the historical serial loop as the exact, byte-identical code
+// path; a value >1 enables chunked per-game parallel apply. It is read on every
+// batch and set (rarely, at sampler init) via cambia_set_batch_workers, so the
+// access is atomic to stay race-detector clean if the setter and a batch overlap.
+var batchWorkers atomic.Int32
+
+// minBatchChunk is the smallest per-worker game count for the parallel path. A
+// batch below 2*minBatchChunk, or one that would yield a single effective
+// worker, stays on the serial path, so n=1 applies and tiny batches never pay
+// goroutine setup and keep today's behavior exactly.
+const minBatchChunk = 64
+
 // init allocates the heap-backed tokenPool once at library load. See the
 // tokenPool declaration for why it is not a BSS array.
 func init() {
 	tokenPool = make([]agent.TokenStream, maxAgents)
+	batchWorkers.Store(1)
 }
 
 // ---------------------------------------------------------------------------
@@ -1350,17 +1367,56 @@ func cambia_agent_tokens_since(agent_h C.int32_t, since C.int32_t, out *C.int32_
 	return C.int32_t(tokenPool[agent_h].CopySince(int32(since), dst))
 }
 
+// cambia_set_batch_workers sets the cambia_games_apply_batch fan-out width
+// (cambia-656). n<=1 (the default) keeps the serial loop, which is the exact,
+// byte-identical code path and error contract described on
+// cambia_games_apply_batch. n>1 lets a sufficiently large batch split into up to
+// n contiguous chunks applied on separate goroutines (each chunk stays >=
+// minBatchChunk games; tiny batches and n=1 applies stay serial regardless).
+//
+// Per-game state is disjoint by design: each game carries its own RNG (a
+// GameState field, not a package global), the token-vocab tables are init-only
+// and read-only thereafter, and Update/Observe mutate only the receiver
+// AgentState/TokenStream at that game's own handles. The one caller precondition
+// is that game and agent handles are disjoint across the batch (the production
+// sampler holds this); aliased handles across games would race under n>1.
+//
+// The knob is global and process-wide; set it once at sampler init. Parallel
+// mode is opt-in only: nothing sets it above 1 by default.
+//
+//export cambia_set_batch_workers
+func cambia_set_batch_workers(n C.int32_t) {
+	w := int32(n)
+	if w < 1 {
+		w = 1
+	}
+	batchWorkers.Store(w)
+}
+
 // cambia_games_apply_batch applies one action to each of n games and updates
 // that game's two agents (belief state + token stream) in a single FFI call,
 // keeping per-call overhead O(n) with no per-game Python roundtrip. game_hs,
 // a0s, a1s, actions are length-n arrays. An agent handle of -1 skips that agent.
 //
-// Returns 0 on success. On the first failing game it returns:
+// Returns 0 on success and, on failure:
 //
 //	-1  invalid game/agent handle or apply error
 //	-2  token stream overflow (hard cap exceeded)
 //
-// Games before the failure are already applied.
+// Serial mode (batch-workers <= 1, the default): games are applied strictly in
+// index order; the first failing game returns immediately and games after it are
+// NOT applied (games before it already are).
+//
+// Parallel mode (batch-workers > 1, set via cambia_set_batch_workers, and only
+// when the batch is large enough to split into >=2 chunks of >=minBatchChunk):
+// all game/agent handles are validated serially up front, so a bad handle still
+// returns -1 at the lowest offending index and applies nothing. After validation
+// the batch fans out over contiguous chunks; every valid game is attempted (a
+// per-game apply/overflow error in one chunk does NOT stop the others), and the
+// return is the error code of the lowest failing game index. This diverges from
+// serial prefix semantics -- on error, parallel mode may have applied games both
+// before and after the reported index -- but both error classes are fatal to the
+// sampler in practice, which never proceeds past a nonzero return.
 //
 //export cambia_games_apply_batch
 func cambia_games_apply_batch(game_hs *C.int32_t, a0s *C.int32_t, a1s *C.int32_t, actions *C.uint16_t, n C.int32_t) C.int32_t {
@@ -1373,6 +1429,15 @@ func cambia_games_apply_batch(game_hs *C.int32_t, a0s *C.int32_t, a1s *C.int32_t
 	as1 := (*[1 << 20]C.int32_t)(unsafe.Pointer(a1s))[:count:count]
 	acts := (*[1 << 20]C.uint16_t)(unsafe.Pointer(actions))[:count:count]
 
+	if workers := int(batchWorkers.Load()); workers > 1 && count >= 2*minBatchChunk {
+		if maxByChunk := count / minBatchChunk; workers > maxByChunk {
+			workers = maxByChunk
+		}
+		// workers is now >= 2 (count >= 2*minBatchChunk => maxByChunk >= 2).
+		return applyBatchParallel(ghs, as0, as1, acts, count, workers)
+	}
+
+	// Serial path -- byte-identical to the original loop and error contract.
 	for i := 0; i < count; i++ {
 		gh := int32(ghs[i])
 		if gh < 0 || gh >= maxGames || !gameInUse[gh] {
@@ -1393,6 +1458,89 @@ func cambia_games_apply_batch(game_hs *C.int32_t, a0s *C.int32_t, a1s *C.int32_t
 			if tokenPool[ah].Observe(g, agentPool[ah].PlayerID) != nil {
 				return -2
 			}
+		}
+	}
+	return 0
+}
+
+// chunkResult carries a worker chunk's lowest failing game index (idx, -1 if the
+// chunk had no failure) and that failure's error code.
+type chunkResult struct {
+	idx  int
+	code int32
+}
+
+// applyBatchParallel is the n>1 fan-out path for cambia_games_apply_batch. It
+// validates every handle up front, then applies contiguous index chunks on
+// separate goroutines. Because per-game state (game RNG, agent belief, token
+// stream) lives at disjoint handles, chunks touch disjoint memory and need no
+// locking. See cambia_games_apply_batch for the full error contract.
+func applyBatchParallel(ghs, as0, as1 []C.int32_t, acts []C.uint16_t, count, workers int) C.int32_t {
+	// Validate all handles serially and in index order, so a bad handle returns
+	// -1 at the lowest offending index (matching serial's lowest-index report for
+	// the handle-error class) before any game is touched.
+	for i := 0; i < count; i++ {
+		gh := int32(ghs[i])
+		if gh < 0 || gh >= maxGames || !gameInUse[gh] {
+			return -1
+		}
+		if a := int32(as0[i]); a >= 0 && (a >= maxAgents || !agentInUse[a]) {
+			return -1
+		}
+		if a := int32(as1[i]); a >= 0 && (a >= maxAgents || !agentInUse[a]) {
+			return -1
+		}
+	}
+
+	chunkSize := (count + workers - 1) / workers
+	results := make([]chunkResult, workers)
+	var wg sync.WaitGroup
+	for c := 0; c < workers; c++ {
+		lo := c * chunkSize
+		if lo >= count {
+			results[c].idx = -1
+			continue
+		}
+		hi := lo + chunkSize
+		if hi > count {
+			hi = count
+		}
+		wg.Add(1)
+		go func(c, lo, hi int) {
+			defer wg.Done()
+			res := &results[c]
+			res.idx = -1
+			for i := lo; i < hi; i++ {
+				gh := int32(ghs[i])
+				if gamePool[gh].ApplyAction(uint16(acts[i])) != nil {
+					if res.idx < 0 {
+						res.idx, res.code = i, -1
+					}
+					continue
+				}
+				g := &gamePool[gh]
+				for _, ah := range [2]int32{int32(as0[i]), int32(as1[i])} {
+					if ah < 0 {
+						continue
+					}
+					agentPool[ah].Update(g)
+					if tokenPool[ah].Observe(g, agentPool[ah].PlayerID) != nil {
+						if res.idx < 0 {
+							res.idx, res.code = i, -2
+						}
+						break
+					}
+				}
+			}
+		}(c, lo, hi)
+	}
+	wg.Wait()
+
+	// Chunks cover ordered, contiguous index ranges, so the first chunk (in chunk
+	// order) that recorded a failure holds the globally lowest failing index.
+	for c := 0; c < workers; c++ {
+		if results[c].idx >= 0 {
+			return C.int32_t(results[c].code)
 		}
 	}
 	return 0
