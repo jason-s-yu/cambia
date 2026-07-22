@@ -108,6 +108,26 @@ def test_hub_item_must_be_nonempty_string():
         JobSpec.parse(_train_spec(hub_item=123))
 
 
+# exclusive run-alone flag (cambia-655): allowed on every kind, default false,
+# forwarded to the payload only when set.
+def test_exclusive_defaults_false_and_omitted():
+    spec = JobSpec.parse(_train_spec())
+    assert spec.exclusive is False
+    assert "exclusive" not in spec.to_payload("a" * 40)
+
+
+def test_exclusive_round_trips_spec_to_payload():
+    spec = JobSpec.parse(_train_spec(exclusive=True))
+    assert spec.exclusive is True
+    assert spec.to_payload("a" * 40)["exclusive"] is True
+
+
+def test_exclusive_allowed_on_every_kind():
+    spec = JobSpec.parse(_eval_spec(exclusive=True))
+    assert spec.exclusive is True
+    assert spec.to_payload("f" * 40)["exclusive"] is True
+
+
 def test_parse_kind_allowlist_exact():
     assert set(ALLOWED_KINDS) == {"train", "evaluate", "head-to-head", "bench"}
 
@@ -521,6 +541,38 @@ def test_submit_after_flag_overrides_and_posts(tmp_path, monkeypatch):
 
     assert posted["payload"]["after"] == "parent-run"
     assert posted["payload"]["on_failure"] == "run"
+
+
+def test_submit_exclusive_flag_overrides_and_posts(tmp_path, monkeypatch):
+    # The --exclusive CLI flag forces exclusivity on a spec file that omits it and
+    # reaches the posted payload (cambia-655).
+    import src.harness.cli as cli
+
+    repo = _init_repo(tmp_path)  # clean
+
+    monkeypatch.setattr(cli, "_load_cfg", lambda c: _FakeCfg())
+    monkeypatch.setattr(cli, "_repo_root", lambda: repo)
+
+    real_git = cli._git
+    monkeypatch.setattr(
+        cli, "_git", lambda a, cwd: "" if a[:1] == ["push"] else real_git(a, cwd)
+    )
+
+    posted = {}
+
+    class FakeClient:
+        def submit(self, payload, force=False):
+            posted["payload"] = payload
+            return {"job_id": payload["name"], "state": "queued", "queue_pos": 0}
+
+    monkeypatch.setattr(cli, "_build_client", lambda cfg: FakeClient())
+
+    spec_file = tmp_path / "job.yaml"
+    spec_file.write_text("kind: train\nname: r4\nconfig: cfr/config/x.yaml\n")
+
+    cli.submit(spec_file=spec_file, force=False, exclusive=True, config=None)
+
+    assert posted["payload"]["exclusive"] is True
 
 
 class _FakeCfg:

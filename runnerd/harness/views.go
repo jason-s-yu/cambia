@@ -14,6 +14,10 @@ type JobView struct {
 	Config   string `json:"config,omitempty"`
 	Resume   bool   `json:"resume,omitempty"`
 	After    string `json:"after,omitempty"`
+	// Exclusive echoes the accepted spec's run-alone flag (cambia-655) so an
+	// operator listing jobs sees which one holds (or will hold) the daemon. Omitted
+	// when false (a normal, concurrency-shared job).
+	Exclusive bool `json:"exclusive,omitempty"`
 	// HubItem echoes the accepted spec's Codebridge hub link (cambia-353) so the
 	// client-side reflector reads it from a single list_jobs poll, no run-dir read
 	// required. Telemetry-only; empty for an unlinked job.
@@ -53,6 +57,7 @@ func (d *Dispatcher) pendingViewLocked(name string) JobView {
 		Config:    j.spec.Config,
 		Resume:    j.resume,
 		After:     j.spec.After,
+		Exclusive: j.spec.Exclusive,
 		HubItem:   j.spec.HubItem,
 		CreatedAt: j.submitAt,
 	}
@@ -108,6 +113,7 @@ func (d *Dispatcher) resolveView(name string) (JobView, bool) {
 		v.Priority = spec.Priority
 		v.Resume = spec.Resume
 		v.After = spec.After
+		v.Exclusive = spec.Exclusive
 		v.HubItem = spec.HubItem
 	}
 	if pending {

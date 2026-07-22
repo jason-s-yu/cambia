@@ -110,6 +110,10 @@ class JobSpec:
     # persisted into jobspec.json/env.json so the link survives a run-dir pull.
     # An unlinked job (hub_item omitted) reflects onto the config collector item.
     hub_item: Optional[str] = None
+    # Run-alone flag (cambia-655): a timing-sensitive job the runner launches only
+    # into an idle daemon and holds every other job around. Default false (a normal
+    # job that shares the concurrency pool). Allowed on every kind.
+    exclusive: bool = False
 
     _KNOWN_KEYS = frozenset(
         {
@@ -130,6 +134,7 @@ class JobSpec:
             "after",
             "on_failure",
             "hub_item",
+            "exclusive",
         }
     )
 
@@ -269,6 +274,7 @@ class JobSpec:
             after=after,
             on_failure=on_failure,
             hub_item=hub_item,
+            exclusive=bool(raw.get("exclusive", False)),
         )
 
     def to_payload(self, commit: str) -> Dict[str, Any]:
@@ -308,6 +314,9 @@ class JobSpec:
         # into jobspec.json/env.json for a pulled-run-dir link recovery.
         if self.hub_item is not None:
             payload["hub_item"] = self.hub_item
+        # exclusive is only forwarded when set; absent, the runner defaults false.
+        if self.exclusive:
+            payload["exclusive"] = True
         return payload
 
 

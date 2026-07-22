@@ -62,12 +62,18 @@ type Dispatcher struct {
 	maxQueue int           // queue depth cap (429 when exceeded)
 	poll     time.Duration // process-liveness poll interval for monitor
 
-	mu           sync.Mutex
-	pending      map[string]*job // queued + preparing
-	queue        []string        // FIFO of queued ids
-	active       int             // preparing + running slots this daemon drives
-	subs         map[chan QueueSnapshot]struct{}
-	reconciledAt string
+	mu      sync.Mutex
+	pending map[string]*job // queued + preparing
+	queue   []string        // FIFO of queued ids
+	active  int             // preparing + running slots this daemon drives
+	// activeExclusive is true while an exclusive job (cambia-655) holds the daemon:
+	// it is set when an exclusive job is launched or when a running exclusive job is
+	// reattached at Reconcile, and cleared when that job releases its slot (runJob)
+	// or a reattached one is observed terminal (watchExclusiveReattach). While set,
+	// no other job launches; an exclusive job itself launches only when active==0.
+	activeExclusive bool
+	subs            map[chan QueueSnapshot]struct{}
+	reconciledAt    string
 	// nextSeq is the next submit sequence to assign (cambia-352). It is seeded to
 	// max(persisted submit_seq)+1 at Reconcile so restarts never reuse a seq, and
 	// increments under d.mu on every Submit.
@@ -158,16 +164,21 @@ const (
 
 // dispatchLocked scans the queue in submit_seq order and, for each queued job,
 // evaluates its dependency gate against the parent's current state. Ready jobs
-// launch while a slot is free; a job whose parent has not yet reached a terminal
-// stays queued but does NOT block later ready jobs (a first-ready scan, a
-// documented deviation from strict FIFO); a job whose parent failed is resolved
-// to skipped/failed per its on_failure policy without consuming a slot. Callers
-// hold d.mu. The prepare+launch+monitor work runs in a per-job goroutine; the
-// bounded parent process.json reads happen under d.mu. Skip/fail transitions are
-// persisted inline (filesystem only, no broadcast, no d.mu re-entry); the
-// caller's post-unlock broadcast publishes them.
+// launch while admission allows (canLaunchLocked); a job whose parent has not yet
+// reached a terminal stays queued but does NOT block later ready jobs (a
+// first-ready scan, a documented deviation from strict FIFO); a job whose parent
+// failed is resolved to skipped/failed per its on_failure policy without
+// consuming a slot. Exclusive admission (cambia-655): an exclusive job launches
+// only into an idle daemon and, once launched, holds every other job; when an
+// exclusive job at the queue head is deferred for occupancy it barriers the later
+// ready jobs of this pass, so a stream of small jobs cannot pass it and starve
+// it. Callers hold d.mu. The prepare+launch+monitor work runs in a per-job
+// goroutine; the bounded parent process.json reads happen under d.mu. Skip/fail
+// transitions are persisted inline (filesystem only, no broadcast, no d.mu
+// re-entry); the caller's post-unlock broadcast publishes them.
 func (d *Dispatcher) dispatchLocked() {
 	var next []string
+	barrier := false // set once a deferred exclusive head defers all later ready jobs this pass
 	for _, id := range d.queue {
 		j := d.pending[id]
 		if j == nil {
@@ -189,16 +200,54 @@ func (d *Dispatcher) dispatchLocked() {
 			j.cancel()
 			d.writeGateTerminalLocked(id, StateFailed, "parent "+j.spec.After+" did not succeed (on_failure=fail)")
 		case gateLaunch:
-			if d.maxJobs > 0 && d.active >= d.maxJobs {
-				next = append(next, id) // ready but no free slot: keep in place
+			if barrier || !d.canLaunchLocked(j) {
+				next = append(next, id) // held: no slot, exclusive gate, or behind a deferred exclusive head
+				if j.spec.Exclusive {
+					// A deferred exclusive job barriers every later ready job this
+					// pass so no small job passes over it into a free slot.
+					barrier = true
+				}
 				continue
 			}
 			j.state = StatePreparing
-			d.active++
+			d.claimSlotLocked(j)
 			go d.runJob(j)
 		}
 	}
 	d.queue = next
+}
+
+// canLaunchLocked reports whether a gate-passed (ready) job may claim a slot now
+// under the exclusive-admission rules (cambia-655). Callers hold d.mu. While an
+// exclusive job is active nothing else launches; an exclusive job launches only
+// into an idle daemon (active==0); a normal job launches while a concurrency slot
+// is free. maxJobs<=0 means unlimited concurrency.
+func (d *Dispatcher) canLaunchLocked(j *job) bool {
+	if d.activeExclusive {
+		return false
+	}
+	if j.spec.Exclusive {
+		return d.active == 0
+	}
+	return d.maxJobs <= 0 || d.active < d.maxJobs
+}
+
+// claimSlotLocked reserves a slot for a launching job and, for an exclusive job,
+// raises the exclusive hold. Callers hold d.mu.
+func (d *Dispatcher) claimSlotLocked(j *job) {
+	d.active++
+	if j.spec.Exclusive {
+		d.activeExclusive = true
+	}
+}
+
+// releaseSlotLocked frees the slot a preparing/running job held and, for an
+// exclusive job, drops the exclusive hold. Callers hold d.mu.
+func (d *Dispatcher) releaseSlotLocked(j *job) {
+	d.active--
+	if j.spec.Exclusive {
+		d.activeExclusive = false
+	}
 }
 
 // gateDecisionLocked resolves whether a queued job may launch, from its `after`
@@ -305,7 +354,7 @@ func (d *Dispatcher) runJob(j *job) {
 			return
 		}
 		d.mu.Lock()
-		d.active--
+		d.releaseSlotLocked(j)
 		delete(d.pending, name)
 		d.dispatchLocked()
 		d.mu.Unlock()
@@ -377,7 +426,7 @@ func (d *Dispatcher) runJob(j *job) {
 	d.monitor(name)
 
 	d.mu.Lock()
-	d.active--
+	d.releaseSlotLocked(j)
 	d.dispatchLocked()
 	d.mu.Unlock()
 	d.broadcast()
@@ -713,7 +762,9 @@ func (d *Dispatcher) Resume(name string) (JobView, error) {
 // from scratch; a `created` row whose spec is missing or corrupt is an aborted
 // admission and is failed (per-file isolated). The submit_seq counter is seeded
 // past every persisted spec so post-restart submits never reuse a seq. Live job
-// ids are handed to the ingest StartupSweep. Reconcile itself never forks; the
+// ids are handed to the ingest StartupSweep. A reattached running exclusive job
+// (cambia-655) restores the exclusive hold so no other job launches alongside it,
+// and a watcher clears the hold when it exits. Reconcile itself never forks; the
 // re-enqueued jobs launch through the normal dispatch scan (dependency-gated).
 func (d *Dispatcher) Reconcile() {
 	d.pm.Reconcile()
@@ -721,16 +772,18 @@ func (d *Dispatcher) Reconcile() {
 	states, _ := procmgr.ScanProcessStates(d.runsDir)
 	var live []string
 	var reenq []*job
+	var reattachedExclusive []string
 	var maxSeq int64
 	for _, st := range states {
-		// Seed the submit_seq high-water mark from every persisted spec (not just
-		// created rows) so a new submit after restart never collides with a seq a
-		// still-created job carries.
-		if spec := readJobSpec(d.runDir(st.Name)); spec != nil && spec.SubmitSeq > maxSeq {
+		// One spec read per row: seed the submit_seq high-water mark (from every
+		// persisted spec, not just created rows, so a new submit after restart never
+		// collides with a seq a still-created job carries), re-enqueue created rows,
+		// and detect a reattached exclusive hold.
+		spec := readJobSpec(d.runDir(st.Name))
+		if spec != nil && spec.SubmitSeq > maxSeq {
 			maxSeq = spec.SubmitSeq
 		}
 		if st.Status == procmgr.StatusCreated {
-			spec := readJobSpec(d.runDir(st.Name))
 			if spec == nil {
 				// created row with no readable spec: admission aborted mid-write.
 				st.Status = StateFailed
@@ -748,6 +801,9 @@ func (d *Dispatcher) Reconcile() {
 		switch procmgr.EffectiveStatus(st) {
 		case procmgr.StatusRunning, procmgr.StatusStopping:
 			live = append(live, st.Name)
+			if spec != nil && spec.Exclusive {
+				reattachedExclusive = append(reattachedExclusive, st.Name)
+			}
 		}
 	}
 	_ = d.env.StartupSweep(live)
@@ -767,8 +823,51 @@ func (d *Dispatcher) Reconcile() {
 		d.pending[j.spec.Name] = j
 		d.queue = append(d.queue, j.spec.Name)
 	}
+	// A reattached running exclusive job holds the daemon: no re-enqueued job may
+	// launch alongside it. Set before dispatchLocked so the sweep cannot admit a
+	// job into the exclusive window; watchExclusiveReattach clears it on exit.
+	if len(reattachedExclusive) > 0 {
+		d.activeExclusive = true
+	}
 	d.dispatchLocked()
 	d.reconciledAt = procmgr.NowRFC3339()
+	d.mu.Unlock()
+	if len(reattachedExclusive) > 0 {
+		go d.watchExclusiveReattach(reattachedExclusive)
+	}
+	d.broadcast()
+}
+
+// watchExclusiveReattach clears the exclusive hold once every reattached running
+// exclusive job (adopted at Reconcile, not driven by this daemon's runJob loop)
+// has reached a terminal status, then re-dispatches so held jobs admit
+// (cambia-655). A reattached job's OS process was forked by a prior daemon
+// incarnation, so this daemon cannot waitpid it: termination is observed through
+// pid liveness (EffectiveStatus), and a purged run dir (GetState not found) counts
+// as gone. names is normally a single job (the exclusivity invariant admits at
+// most one exclusive job at a time); the multi-name form is a defensive backstop
+// that holds until the last one exits.
+func (d *Dispatcher) watchExclusiveReattach(names []string) {
+	for {
+		anyLive := false
+		for _, name := range names {
+			st, ok := d.pm.GetState(name)
+			if !ok {
+				continue // run dir gone (purged): treat as no longer holding
+			}
+			if !isTerminal(procmgr.EffectiveStatus(st)) {
+				anyLive = true
+				break
+			}
+		}
+		if !anyLive {
+			break
+		}
+		time.Sleep(d.poll)
+	}
+	d.mu.Lock()
+	d.activeExclusive = false
+	d.dispatchLocked()
 	d.mu.Unlock()
 	d.broadcast()
 }
