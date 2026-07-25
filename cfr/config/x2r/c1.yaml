@@ -1,8 +1,17 @@
 # X2 re-spec cell C1 (cambia-520): regret-net parameter count ~x4, width scaling.
 #
-# Base: fresh-run effective config (x2_tiny_gate.yaml, iterations 1000,
-# stability_stop_mode plateau -- same as C-rep), seed 0 (matches the fresh run's
-# seed; only the net architecture changes).
+# Base: fresh-run effective config (x2_tiny_gate.yaml, iterations 1000), seed 0
+# (matches the fresh run's seed; only the net architecture changes).
+#
+# Stop regime per amendment A3-3 (x2-respec-preregistration.md): stop-inert for
+# the full 1000-iteration horizon. Every observed C-rep trajectory shares an
+# iteration-linked transient flat at ~330-350 iters that both stop rules fire
+# inside (plateau at iter 240 nashconv=0.10246; divergence at iter 340
+# nashconv=0.09572, using the plateau-authored rel_tolerance 0.005 as a
+# divergence noise band it's too tight for). stability_stop_mode: divergence +
+# stability_min_iters: 1001 (> the 1000-iter horizon) makes the trigger
+# unreachable while leaving the every-10-iter eval cadence and best-tracking
+# untouched.
 #
 # Baseline net (cfr/src/cfr/prtcfr_net.py PRTCFRNet defaults: vocab=325,
 # embed_dim=64, hidden_dim=256, num_layers=2, head_hidden_dim=256, NUM_ACTIONS=146)
@@ -24,7 +33,8 @@ _base: x2_tiny_gate.yaml
 
 prt_cfr:
   iterations: 1000
-  stability_stop_mode: plateau
+  stability_stop_mode: divergence  # was plateau; see A3-3 note above
+  stability_min_iters: 1001        # stop-inert through the full 1000-iter horizon
   seed: 0
   gru_embed_dim: 128    # was 64
   gru_hidden_dim: 512   # was 256

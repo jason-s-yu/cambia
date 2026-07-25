@@ -7,15 +7,25 @@
 # <= 1.25 * bar_respec = 0.0713. Submit ONLY after A3-3 fires; if the fork
 # resolves to A3-4 instead, this cell is not part of the program.
 #
-# Regime per amendment A3-3 (x2-respec-preregistration.md): divergence stop
-# mode (the plateau rule must not fire; the read-out window is operator-side,
-# checkpoint at or before iteration 700), iterations 1000 so the global_cosine
-# lr curve is bit-identical to the fresh run. Only seed and stop mode differ
-# from cfr/config/x2r/c_rep.yaml.
+# Regime per amendment A3-3 (x2-respec-preregistration.md): stop-inert for the
+# full 1000-iteration horizon (the read-out window is operator-side, checkpoint
+# at or before iteration 700), iterations 1000 so the global_cosine lr curve is
+# bit-identical to the fresh run. Only seed and stop mode differ from
+# cfr/config/x2r/c_rep.yaml.
+#
+# stability_stop_mode: divergence alone is not enough: it inherits
+# stability_rel_tolerance 0.005 / stability_patience 5 from x2_tiny_gate.yaml,
+# values authored as a plateau threshold, and every observed C-rep trajectory
+# shares an iteration-linked transient flat at ~330-350 iters that trips
+# divergence under that tolerance too (iter 340, nashconv=0.09572).
+# stability_min_iters: 1001 (> the 1000-iter horizon) makes the trigger
+# unreachable while leaving the every-10-iter eval cadence and best-tracking
+# untouched.
 
 _base: x2_tiny_gate.yaml
 
 prt_cfr:
   iterations: 1000
   stability_stop_mode: divergence
+  stability_min_iters: 1001  # stop-inert through the full 1000-iter horizon
   seed: 2
