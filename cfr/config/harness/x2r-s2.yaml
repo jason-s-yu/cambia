@@ -1,0 +1,22 @@
+# cfr/config/harness/x2r-s2.yaml
+#
+# X2R seed cell s2 (cambia-521) as a nash harness train job: fresh-run config,
+# seed 2, stop-inert through the 1000-iteration horizon.
+#
+# Purpose per the 2026-07-27 user ruling (x2-respec-preregistration.md Results
+# append): informational between-seed variance measurement at decision depth,
+# NOT a rule-3 confirm seed (A3-3 did not fire; the A3-4 fork stands). Read-out
+# is the deep tail at FIXED iterations 920/940/1000 against C-rep's matched
+# values, not argmin and not the 0.07125 confirm bar. Submit gated:
+#   cambia harness submit cfr/config/harness/x2r-s2.yaml \
+#     --after v0.4-x2r-c0-xpu --on-failure run
+# The gate is serial A310 occupancy only; s2 has no data dependency on C0.
+
+kind: train
+name: v0.4-x2r-s2-xpu
+config: cfr/config/x2r/confirm_s2.yaml
+device: xpu
+
+resume: false
+priority: normal
+force: false
