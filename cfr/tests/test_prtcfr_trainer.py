@@ -109,6 +109,56 @@ def test_buffer_accumulates_across_iterations(tiny_tree, tmp_path):
     assert s2.buffer_size == s1.samples_added + s2.samples_added
 
 
+def test_device_supports_fp64_cpu_cuda():
+    from src.cfr import prtcfr_trainer as mod
+
+    assert mod._device_supports_fp64("cpu") is True
+    if torch.cuda.is_available():
+        assert mod._device_supports_fp64("cuda") is True
+    if not (hasattr(torch, "xpu") and torch.xpu.is_available()):
+        # no xpu device present: the probe must swallow the failure, not raise
+        assert mod._device_supports_fp64("xpu") is False
+
+
+def test_fit_accumulator_fp32_fallback_matches_fp64(tiny_tree, tmp_path, monkeypatch):
+    """Devices without fp64 kernels fall back to float32 accumulators. The
+    accumulator dtype never touches training dynamics, so the returned mean
+    loss matches the fp64 path to float rounding and the AC2 violation count
+    is identical."""
+    from src.cfr import prtcfr_trainer as mod
+    from src.cfr.prtcfr_net import build_prtcfr_net
+
+    cfg = _fast_config()
+    trainer = PRTCFRTinyTrainer(tiny_tree, cfg, str(tmp_path / "snaps"))
+    trainer.run_iteration(t=1)  # populate the reservoir
+    assert len(trainer.buffer) > 0
+
+    def fit_once(supports_fp64):
+        monkeypatch.setattr(mod, "_device_supports_fp64", lambda _s: supports_fp64)
+        torch.manual_seed(7)
+        import numpy as np
+
+        np.random.seed(7)
+        net = build_prtcfr_net(device=_DEVICE)
+        box = [0]
+        loss = mod._fit_from_scratch(
+            net,
+            trainer.buffer,
+            lr=1e-3,
+            batch_size=64,
+            num_steps=10,
+            grad_clip=0.05,  # low clip so the violation counter exercises both dtypes
+            violation_box=box,
+        )
+        return loss, box[0]
+
+    loss64, viol64 = fit_once(True)
+    loss32, viol32 = fit_once(False)
+    assert viol64 == viol32
+    assert viol64 > 0
+    assert loss32 == pytest.approx(loss64, rel=1e-5)
+
+
 def test_warm_start_carries_net_forward(tiny_tree, tmp_path):
     """warm_start gates the per-iteration re-init.
 

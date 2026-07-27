@@ -29,6 +29,7 @@ so the worker's per-node sigma lookup is O(1) and exactly the fixed sigma^t.
 
 from __future__ import annotations
 
+import functools
 import glob
 import json
 import logging
@@ -204,6 +205,36 @@ class PRTCFRTrainState:
     snapshot_path: str
 
 
+@functools.lru_cache(maxsize=None)
+def _device_supports_fp64(device_str: str) -> bool:
+    """Whether float64 kernels execute on this device. Consumer Arc GPUs on the
+    xpu backend lack the SYCL fp64 aspect, so any fp64 fill or cast raises
+    "Required aspect fp64 is not supported on the device" (the v0.4-x2r-c0-xpu
+    launch crash). cpu/cuda always support fp64; other backends are probed once
+    per device string with a synced scalar op."""
+    device = torch.device(device_str)
+    if device.type in ("cpu", "cuda"):
+        return True
+    supported = None
+    if device.type == "xpu":
+        try:
+            supported = bool(torch.xpu.get_device_properties(device).has_fp64)
+        except Exception:
+            supported = None
+    if supported is None:
+        try:
+            (torch.ones((), dtype=torch.float64, device=device) + 1).item()
+            supported = True
+        except Exception:
+            supported = False
+    if not supported:
+        logger.info(
+            "device %s lacks fp64 kernels; fit accumulators fall back to float32",
+            device_str,
+        )
+    return supported
+
+
 def _build_fit_optimizer(params, lr: float, weight_decay: float, device: torch.device):
     """Adam optimizer for the regret fit, using the fastest kernel that keeps the
     update math unchanged (X3 ladder step (f1), cambia-607).
@@ -222,9 +253,7 @@ def _build_fit_optimizer(params, lr: float, weight_decay: float, device: torch.d
     params = list(params)
     if device.type == "cuda":
         try:
-            return torch.optim.Adam(
-                params, lr=lr, weight_decay=weight_decay, fused=True
-            )
+            return torch.optim.Adam(params, lr=lr, weight_decay=weight_decay, fused=True)
         except (RuntimeError, ValueError):
             pass
     return torch.optim.Adam(params, lr=lr, weight_decay=weight_decay, foreach=True)
@@ -280,9 +309,13 @@ def _fit_from_scratch(
     # the RETURNED mean-loss scalar's float rounding shifts (~1e-6, device float32
     # sum vs the old python float64 running sum), and the violation count is the
     # same comparison summed on device. On CPU these reads never stalled, so this
-    # is a pure GPU win with no CPU-visible change.
-    total_loss_t = torch.zeros((), dtype=torch.float64, device=device)
-    viol_t = torch.zeros((), dtype=torch.float64, device=device)
+    # is a pure GPU win with no CPU-visible change. Devices without fp64 kernels
+    # (consumer Arc via xpu) fall back to float32 accumulators: both values are
+    # diagnostics (returned mean loss; violation count, exact in float32 to 2^24
+    # steps), so only the logged scalar's rounding shifts.
+    accum_dtype = torch.float64 if _device_supports_fp64(str(device)) else torch.float32
+    total_loss_t = torch.zeros((), dtype=accum_dtype, device=device)
+    viol_t = torch.zeros((), dtype=accum_dtype, device=device)
     steps = 0
     for _step in range(num_steps):
         batch = buf.sample_batch(batch_size)
@@ -311,11 +344,11 @@ def _fit_from_scratch(
         # grad_clip means clipping fired -> one AC2 grad-norm violation.
         total_norm = torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=grad_clip)
         if violation_box is not None:
-            viol_t += (total_norm > grad_clip).to(torch.float64)
+            viol_t += (total_norm > grad_clip).to(accum_dtype)
         optimizer.step()
         scheduler.step()
 
-        total_loss_t += loss.detach().to(torch.float64)
+        total_loss_t += loss.detach().to(accum_dtype)
         steps += 1
 
     if violation_box is not None:
