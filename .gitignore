@@ -17,7 +17,10 @@ go.work.sum
 .idea/
 
 # Local dev environment
-.codebridge/
+# .codebridge/: commit only the hub binding (config.yaml); manifests, previews
+# and state under it stay local.
+.codebridge/*
+!.codebridge/config.yaml
 .docker/
 certs/
 docs-gen/

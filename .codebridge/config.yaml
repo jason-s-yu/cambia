@@ -1,0 +1,42 @@
+# Codebridge project<->hub binding - read by codebridge-resolve (the cb plugin's _codebridge/resolve.sh).
+# Flat top-level keys so the resolver parses them without a YAML dependency.
+# Commit this file; the manifest/preview/mirror under .codebridge/ stay gitignored.
+project: cambia
+hub_url: https://codebridge.pangu.home.jasonyu.io
+
+# Ingest path rules. cambia versioning is non-monotonic: v0.4 (PRT-CFR) is the
+# re-keyed LATEST, superseding the older v2 and v3 trees. The default integer
+# version_dir_pattern reads v3 as the max live version (v0.4 fails the ^v\d+$
+# match), so it would wrongly keep v3/ active. The overrides below pin reality:
+#   - v3/* (DESCA, gate-failed) -> superseded by the cfr-ceiling research + v0.4
+#   - index.md -> active (false CLOSED-marker archive; it is the live doc index)
+#   - roadmap.md -> superseded (historical SoG/GT-CFR direction)
+# v2/* archives by the version rule (path_version 2 < max 3); archive/* by prefix.
+ingest:
+  archive_prefixes: ["archive/", "archived/", "deprecated/", ".superseded/"]
+  version_dir_pattern: "^v(\\d+)$"
+  overrides:
+    index.md: { lifecycle_status: active }
+    v0.4/phase2-throughput-pilot/sprint-1-plan.md: { lifecycle_status: active }
+    roadmap.md: { lifecycle_status: superseded }
+    v3/design-overview.md: { lifecycle_status: superseded }
+    v3/research-report.md: { lifecycle_status: superseded }
+    v3/spec.md: { lifecycle_status: superseded }
+    v3/phase0-foundation/audit.md: { lifecycle_status: superseded }
+    v3/phase0-foundation/contract.md: { lifecycle_status: superseded }
+    v3/phase0-foundation/sprint-1-plan.md: { lifecycle_status: superseded }
+    v3/phase1-dense-escher/audit.md: { lifecycle_status: superseded }
+    v3/phase1-dense-escher/contract.md: { lifecycle_status: superseded }
+    v3/phase1-dense-escher/sprint-1-plan.md: { lifecycle_status: superseded }
+    v3/phase1-dense-escher/sprint-2-plan.md: { lifecycle_status: superseded }
+    v3/phase2-decision-search/contract.md: { lifecycle_status: superseded }
+    v3/phase3-nplayer/contract.md: { lifecycle_status: superseded }
+    v3/phase4-advanced/contract.md: { lifecycle_status: superseded }
+    v3/pre-research/research-request-cfr-direction.md: { lifecycle_status: superseded }
+    v3/pre-research/reviewer-1.md: { lifecycle_status: superseded }
+    v3/pre-research/reviewer-2.md: { lifecycle_status: superseded }
+    v3/research/cpu-cache-refactor-plan.md: { lifecycle_status: superseded }
+
+# Memory auto-capture (cbmcp-125): backfilled fleet-wide under cbmcp-1173 (2026-07-17).
+# Reversible: set `capture: off`.
+capture: on
