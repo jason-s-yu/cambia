@@ -66,7 +66,7 @@ func TestExclusiveAdmissionUnit(t *testing.T) {
 	}
 
 	disp.active = 0
-	disp.activeExclusive = true
+	disp.exclusiveHolds = 1
 	if disp.canLaunchLocked(norm) {
 		t.Fatal("normal job must not launch while an exclusive job is active")
 	}
@@ -74,7 +74,7 @@ func TestExclusiveAdmissionUnit(t *testing.T) {
 		t.Fatal("second exclusive must not launch while an exclusive job is active")
 	}
 
-	disp.activeExclusive = false
+	disp.exclusiveHolds = 0
 	disp.active = 3
 	if disp.canLaunchLocked(norm) {
 		t.Fatal("normal job must not launch when full (3>=3)")

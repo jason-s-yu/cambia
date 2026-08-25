@@ -51,6 +51,7 @@ Four environment variables are required; the daemon exits immediately if any is 
 | `RUNNERD_MIN_FREE_DISK_GB` | no | `20.0` | admission preflight floor for free disk on the runs directory's filesystem |
 | `RUNNERD_ALLOWED_DEVICES` | no | `cpu` | comma-separated device capability gate (`cpu`, `cuda`, `xpu`); a job whose device is not in this set is rejected at submit as `device_unsupported`, not forceable |
 | `RUNNERD_ORIGIN_HOST` | no | the daemon's hostname | overrides the `origin_host` value stamped into each job's `env.json` provenance record |
+| `RUNNERD_KILL_JOBS_ON_STOP` | no | unset (false) | when true, `SIGTERM` kills the job process groups instead of detaching from them; see Restart semantics |
 
 ## TLS and authentication
 
@@ -70,7 +71,7 @@ ExecStart=/usr/local/bin/cambia-runnerd --listen 192.0.2.10:8090
 Environment=RUNNERD_ALLOWED_ORIGIN=https://your-dashboard-host.example
 ```
 
-Notable settings baked into the unit: `KillMode=mixed` and `TimeoutStopSec=35` back up the daemon's own signal handling (see Shutdown below); `NoNewPrivileges=yes` and `PrivateTmp=yes` sandbox the process; `Restart=on-failure` with a 5s backoff recovers from crashes, relying on reconcile-on-boot rather than in-place state recovery.
+Notable settings baked into the unit: `KillMode=process`, `PrivateTmp=no`, and `TimeoutStopSec=35` are what make a restart job-preserving (see Restart semantics below) -- do not change `KillMode` or `PrivateTmp` without reading that section; `NoNewPrivileges=yes` sandboxes the process; `Restart=on-failure` with a 5s backoff recovers from crashes, relying on reconcile-on-boot rather than in-place state recovery.
 
 ## API endpoints
 
@@ -82,7 +83,7 @@ Notable settings baked into the unit: `KillMode=mixed` and `TimeoutStopSec=35` b
 | `DELETE /harness/jobs/{id}` | cancel (`?force=true` for SIGKILL instead of SIGINT + 30s grace) or, with `?purge=true`, remove a terminal job's run directory |
 | `POST /harness/jobs/{id}/resume` | re-enqueue a terminal train job as a new launch from its rolling checkpoint |
 | `GET /harness/jobs/{id}/artifacts` | manifest of every file under the job's run directory: relative path, size, sha256, mtime |
-| `GET /harness/health` | `reconciled_at`, `jobs_running`, `queue_depth`, `free_ram_gb`, `free_disk_gb` |
+| `GET /harness/health` | `reconciled_at`, `jobs_running`, `queue_depth`, `free_ram_gb`, `free_disk_gb`, `restart_preserves_jobs`, `build_commit` |
 | `GET /ws/harness/queue` | WebSocket: a queue/active snapshot on connect, then a fresh snapshot on every state change |
 | `GET /ws/harness/jobs/{id}/logs` | WebSocket: backfills recent `training.log` lines, then streams new ones as they're written |
 
@@ -108,9 +109,26 @@ Each job's per-lock `uv` venv is additionally keyed by its device: a `cuda` or `
 
 `POST .../{id}/resume` requires both `snapshots/prtcfr_checkpoint.pt` and `resume_state.json` in the run directory; absent either, it returns `409 no_resumable_state`. Resume is a new launch, not a state transition -- it goes back through the queue -- and only train jobs are resumable in v1.
 
-## Shutdown and reconciliation
+## Restart semantics
 
-On SIGINT or SIGTERM, runnerd SIGKILLs every job process group immediately rather than attempting a graceful stop; recovery happens on the next boot's reconcile, not in place. The systemd unit's `KillMode=mixed` and `TimeoutStopSec=35` sit above this as a backstop.
+Restarting the daemon does not stop the jobs it supervises. Training runs here are measured in days or weeks, so a redeploy, a `systemctl restart`, or a unit reload leaves the job processes running and hands them to the next daemon incarnation.
+
+**Signals.** On `SIGTERM` -- what systemd sends on every stop and restart -- runnerd logs how many job process groups it is leaving behind and exits without signalling them. On `SIGINT` (an interactive Ctrl-C on a foreground dev daemon, where an orphaned job would be a surprise) it SIGKILLs every job process group as before. Setting `RUNNERD_KILL_JOBS_ON_STOP=1` makes `SIGTERM` behave like `SIGINT`; `GET /harness/health` reports the active policy as `restart_preserves_jobs`, alongside a `build_commit` identifying the serving binary.
+
+**The unit file is load-bearing.** `KillMode=process` is what keeps systemd from SIGKILLing the leftover jobs itself: under `KillMode=mixed` (or the `control-group` default) systemd kills everything remaining in the service cgroup once the main process exits, which is every job. `PrivateTmp=no` matters for the same reason: a private `/tmp` is a per-incarnation mount namespace whose backing directory systemd deletes on stop, which would leave every surviving job with a `/tmp` pointing at a deleted directory, so the daemon and its jobs share the host `/tmp` (the runner is a single-purpose unprivileged container).
+
+**Reattach.** At startup the dispatcher adopts every local `process.json` row still live: each one claims a concurrency slot (so admission does not over-subscribe the runner with jobs this daemon did not launch) and, if it was submitted `exclusive`, re-raises the exclusive hold. A watcher polls each adopted job's PID and finalizes the row when the process exits, then frees the slot and re-dispatches, so a queued dependent gated on `after: <job>` still launches.
+
+**Exit-status inference.** An adopted process was forked by a previous incarnation, so this daemon can never `waitpid` it and its true exit code is unrecoverable. The outcome is read off two witnesses, in order:
+
+1. A row sitting at `stopping` means an operator stopped the job through the API (`DELETE .../{id}` records the request before signalling the process group). It is finalized `canceled` with no exit code -- the same terminal any other operator-requested stop produces -- rather than looking like a crash.
+2. Otherwise the run's own journal (`runs/<name>/run_db.sqlite`) decides, read read-only: a `runs.status` of `completed` means the trainer finished cleanly, and the job is recorded `stopped` with `exit_code: 0` so a dependent's success gate fires. Anything else -- `interrupted`, `running`, no journal, an unreadable one -- is recorded `crashed` with **no** exit code rather than a fabricated one, the conservative verdict under every `on_failure` policy.
+
+In every case `last_error` says the status was inferred and quotes what was observed, and dependents gate on the result by their `on_failure` policy exactly as they would on a normally-terminated parent.
+
+Jobs are stopped deliberately, through the control-plane API (`DELETE .../{id}`), never as a side effect of a daemon restart.
+
+## Reconciliation
 
 On startup, before serving any request, the dispatcher reconciles inherited state: any `process.json` row left `running`/`starting`/`stopping` with no live PID is flipped to `crashed`; any `created` row with no live process and no pending queue entry is flipped to `failed` as orphaned. It never auto-launches a queued or resumable job -- an operator resumes explicitly via the API once the daemon is confirmed healthy.
 

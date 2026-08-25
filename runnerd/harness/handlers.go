@@ -285,16 +285,23 @@ func (s *Server) handleResumeJob(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleHealth is GET /harness/health.
+// handleHealth is GET /harness/health. restart_preserves_jobs tells a monitoring
+// consumer (and an operator about to redeploy) whether a daemon stop leaves the
+// job process groups running for reattach; it is false only when the operator
+// set RUNNERD_KILL_JOBS_ON_STOP. build_commit identifies the serving binary.
+// Both are non-sensitive by design: this route is deliberately token-free, so
+// nothing job-identifying (ids, commits, configs) may be added to it.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	snap := s.disp.Snapshot()
 	freeRAM, _ := s.ramQuery()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"reconciled_at": snap.ReconciledAt,
-		"jobs_running":  snap.JobsRunning,
-		"queue_depth":   snap.QueueDepth,
-		"free_ram_gb":   round1(freeRAM),
-		"free_disk_gb":  round1(diskFreeGB(s.runsDir)),
+		"reconciled_at":          snap.ReconciledAt,
+		"jobs_running":           snap.JobsRunning,
+		"queue_depth":            snap.QueueDepth,
+		"free_ram_gb":            round1(freeRAM),
+		"free_disk_gb":           round1(diskFreeGB(s.runsDir)),
+		"restart_preserves_jobs": !s.killJobsOnStop,
+		"build_commit":           s.buildCommit,
 	})
 }
 

@@ -65,15 +65,33 @@ type Dispatcher struct {
 	mu      sync.Mutex
 	pending map[string]*job // queued + preparing
 	queue   []string        // FIFO of queued ids
-	active  int             // preparing + running slots this daemon drives
-	// activeExclusive is true while an exclusive job (cambia-655) holds the daemon:
-	// it is set when an exclusive job is launched or when a running exclusive job is
-	// reattached at Reconcile, and cleared when that job releases its slot (runJob)
-	// or a reattached one is observed terminal (watchExclusiveReattach). While set,
-	// no other job launches; an exclusive job itself launches only when active==0.
-	activeExclusive bool
-	subs            map[chan QueueSnapshot]struct{}
-	reconciledAt    string
+	// active is the count of slots this daemon drives: preparing + running jobs it
+	// launched, plus every live job it reattached at Reconcile (cambia-723 -- a
+	// reattached job occupies the runner exactly like a launched one, so admission
+	// must see it).
+	active int
+	// exclusiveHolds counts the exclusive jobs (cambia-655) currently holding the
+	// daemon: incremented when an exclusive job is launched or reattached at
+	// Reconcile, decremented when it releases its slot (runJob, or watchReattached
+	// for a reattached one). While it is non-zero no other job launches; an
+	// exclusive job itself launches only when active==0. It is a count rather than
+	// a flag so the defensive multi-reattach case holds until the LAST exclusive
+	// job exits.
+	exclusiveHolds int
+	// purging holds the names whose run dir is being removed by Purge (the
+	// RemoveAll runs outside d.mu). A reattach watcher finalizing the same job
+	// checks it before writing process.json, so a finalize racing a purge cannot
+	// recreate the run dir it just deleted.
+	purging map[string]struct{}
+	// reattachDone is set the first time Reconcile adopts the live rows it found.
+	// Reconcile runs once at daemon start, but it is exported and its
+	// re-enqueue half is deliberately written to tolerate a repeat call; the
+	// reattach half must too, since claiming a second slot (and spawning a
+	// second watcher) for a job already accounted for would leak `active` and
+	// `exclusiveHolds` permanently.
+	reattachDone bool
+	subs         map[chan QueueSnapshot]struct{}
+	reconciledAt string
 	// nextSeq is the next submit sequence to assign (cambia-352). It is seeded to
 	// max(persisted submit_seq)+1 at Reconcile so restarts never reuse a seq, and
 	// increments under d.mu on every Submit.
@@ -101,6 +119,7 @@ func NewDispatcher(pm *procmgr.ProcessManager, env Environment, runsDir string, 
 		maxQueue: maxQueue,
 		poll:     poll,
 		pending:  make(map[string]*job),
+		purging:  make(map[string]struct{}),
 		subs:     make(map[chan QueueSnapshot]struct{}),
 		nextSeq:  1,
 	}
@@ -223,7 +242,7 @@ func (d *Dispatcher) dispatchLocked() {
 // into an idle daemon (active==0); a normal job launches while a concurrency slot
 // is free. maxJobs<=0 means unlimited concurrency.
 func (d *Dispatcher) canLaunchLocked(j *job) bool {
-	if d.activeExclusive {
+	if d.exclusiveHolds > 0 {
 		return false
 	}
 	if j.spec.Exclusive {
@@ -232,21 +251,21 @@ func (d *Dispatcher) canLaunchLocked(j *job) bool {
 	return d.maxJobs <= 0 || d.active < d.maxJobs
 }
 
-// claimSlotLocked reserves a slot for a launching job and, for an exclusive job,
-// raises the exclusive hold. Callers hold d.mu.
+// claimSlotLocked reserves a slot for a launching or reattached job and, for an
+// exclusive job, raises the exclusive hold. Callers hold d.mu.
 func (d *Dispatcher) claimSlotLocked(j *job) {
 	d.active++
 	if j.spec.Exclusive {
-		d.activeExclusive = true
+		d.exclusiveHolds++
 	}
 }
 
-// releaseSlotLocked frees the slot a preparing/running job held and, for an
-// exclusive job, drops the exclusive hold. Callers hold d.mu.
+// releaseSlotLocked frees the slot a preparing/running/reattached job held and,
+// for an exclusive job, drops its exclusive hold. Callers hold d.mu.
 func (d *Dispatcher) releaseSlotLocked(j *job) {
 	d.active--
-	if j.spec.Exclusive {
-		d.activeExclusive = false
+	if j.spec.Exclusive && d.exclusiveHolds > 0 {
+		d.exclusiveHolds--
 	}
 }
 
@@ -696,9 +715,17 @@ func (d *Dispatcher) Purge(name string, cascade bool) error {
 	}
 	d.removeFromQueueLocked(name)
 	delete(d.pending, name)
+	// Guard the RemoveAll (which runs outside d.mu) against a reattach watcher
+	// finalizing the same job: without this, a finalize that read process.json
+	// just before the delete would rewrite it afterwards and resurrect the dir.
+	d.purging[name] = struct{}{}
 	d.mu.Unlock()
-	if err := os.RemoveAll(d.runDir(name)); err != nil {
-		return err
+	rmErr := os.RemoveAll(d.runDir(name))
+	d.mu.Lock()
+	delete(d.purging, name)
+	d.mu.Unlock()
+	if rmErr != nil {
+		return rmErr
 	}
 	// The run dir is gone, so the pinned commit no longer needs its gc anchor.
 	_ = d.env.PurgeRef(name)
@@ -762,23 +789,27 @@ func (d *Dispatcher) Resume(name string) (JobView, error) {
 // from scratch; a `created` row whose spec is missing or corrupt is an aborted
 // admission and is failed (per-file isolated). The submit_seq counter is seeded
 // past every persisted spec so post-restart submits never reuse a seq. Live job
-// ids are handed to the ingest StartupSweep. A reattached running exclusive job
-// (cambia-655) restores the exclusive hold so no other job launches alongside it,
-// and a watcher clears the hold when it exits. Reconcile itself never forks; the
-// re-enqueued jobs launch through the normal dispatch scan (dependency-gated).
+// ids are handed to the ingest StartupSweep. Every reattached live LOCAL job
+// claims a slot (cambia-723: a job this daemon did not launch occupies the runner
+// exactly like one it did, so admission must count it) and gets a watcher that
+// finalizes it and frees the slot when its process exits; an exclusive one
+// (cambia-655) also restores the exclusive hold for as long as it lives. A remote
+// row is another host's projection: its pid is in a foreign pid space, so it is
+// never counted or watched here. Reconcile itself never forks; the re-enqueued
+// jobs launch through the normal dispatch scan (dependency-gated).
 func (d *Dispatcher) Reconcile() {
 	d.pm.Reconcile()
 
 	states, _ := procmgr.ScanProcessStates(d.runsDir)
 	var live []string
 	var reenq []*job
-	var reattachedExclusive []string
+	var reattached []*job
 	var maxSeq int64
 	for _, st := range states {
 		// One spec read per row: seed the submit_seq high-water mark (from every
 		// persisted spec, not just created rows, so a new submit after restart never
 		// collides with a seq a still-created job carries), re-enqueue created rows,
-		// and detect a reattached exclusive hold.
+		// and build the reattach set (with its exclusive flag).
 		spec := readJobSpec(d.runDir(st.Name))
 		if spec != nil && spec.SubmitSeq > maxSeq {
 			maxSeq = spec.SubmitSeq
@@ -801,9 +832,19 @@ func (d *Dispatcher) Reconcile() {
 		switch procmgr.EffectiveStatus(st) {
 		case procmgr.StatusRunning, procmgr.StatusStopping:
 			live = append(live, st.Name)
-			if spec != nil && spec.Exclusive {
-				reattachedExclusive = append(reattachedExclusive, st.Name)
+			// A remote row's pid names a process on ANOTHER host (see
+			// procmgr.ProcessState.Host): it consumes none of this runner's
+			// capacity and a local pid probe on it is the cross-host pid-reuse
+			// bug, so it is neither counted nor watched.
+			if st.Host != "" {
+				continue
 			}
+			rj := &job{spec: JobSpec{Name: st.Name, Kind: st.Algorithm}, state: st.Status}
+			if spec != nil {
+				rj.spec = *spec
+				rj.spec.Name = st.Name
+			}
+			reattached = append(reattached, rj)
 		}
 	}
 	_ = d.env.StartupSweep(live)
@@ -823,53 +864,126 @@ func (d *Dispatcher) Reconcile() {
 		d.pending[j.spec.Name] = j
 		d.queue = append(d.queue, j.spec.Name)
 	}
-	// A reattached running exclusive job holds the daemon: no re-enqueued job may
-	// launch alongside it. Set before dispatchLocked so the sweep cannot admit a
-	// job into the exclusive window; watchExclusiveReattach clears it on exit.
-	if len(reattachedExclusive) > 0 {
-		d.activeExclusive = true
+	// Every reattached live job holds a slot (and, if exclusive, the daemon).
+	// Claimed before dispatchLocked so the sweep cannot over-admit past the
+	// concurrency cap or into an exclusive window; watchReattached releases each
+	// one when its process exits. Adoption happens once: a repeat Reconcile
+	// re-finds the same live rows, and re-claiming them would leak slots.
+	if d.reattachDone {
+		reattached = nil
+	}
+	d.reattachDone = true
+	for _, rj := range reattached {
+		d.claimSlotLocked(rj)
 	}
 	d.dispatchLocked()
 	d.reconciledAt = procmgr.NowRFC3339()
 	d.mu.Unlock()
-	if len(reattachedExclusive) > 0 {
-		go d.watchExclusiveReattach(reattachedExclusive)
+	for _, rj := range reattached {
+		go d.watchReattached(rj)
 	}
 	d.broadcast()
 }
 
-// watchExclusiveReattach clears the exclusive hold once every reattached running
-// exclusive job (adopted at Reconcile, not driven by this daemon's runJob loop)
-// has reached a terminal status, then re-dispatches so held jobs admit
-// (cambia-655). A reattached job's OS process was forked by a prior daemon
-// incarnation, so this daemon cannot waitpid it: termination is observed through
-// pid liveness (EffectiveStatus), and a purged run dir (GetState not found) counts
-// as gone. names is normally a single job (the exclusivity invariant admits at
-// most one exclusive job at a time); the multi-name form is a defensive backstop
-// that holds until the last one exits.
-func (d *Dispatcher) watchExclusiveReattach(names []string) {
+// watchReattached stands in for runJob's monitor over a job adopted at Reconcile
+// (cambia-655/cambia-723). A reattached job's OS process was forked by a prior
+// daemon incarnation, so this daemon cannot waitpid it and procmgr's waitFor
+// never runs for it: termination is observed through pid liveness
+// (EffectiveStatus, starttime-validated), and a purged run dir (GetState not
+// found) counts as gone. On exit it finalizes the row (process.json is still
+// `running` -- nothing else will ever write its terminal state), cleans up the
+// staged environment as monitor does, releases the slot and any exclusive hold,
+// and re-dispatches so a dependent gated on this job admits.
+func (d *Dispatcher) watchReattached(j *job) {
+	name := j.spec.Name
 	for {
-		anyLive := false
-		for _, name := range names {
-			st, ok := d.pm.GetState(name)
-			if !ok {
-				continue // run dir gone (purged): treat as no longer holding
-			}
-			if !isTerminal(procmgr.EffectiveStatus(st)) {
-				anyLive = true
-				break
-			}
+		st, ok := d.pm.GetState(name)
+		if !ok {
+			break // run dir gone (purged): nothing left to hold or finalize
 		}
-		if !anyLive {
+		if isTerminal(procmgr.EffectiveStatus(st)) {
 			break
 		}
 		time.Sleep(d.poll)
 	}
+	final := d.finalizeReattached(name)
+	_ = d.env.Cleanup(name, final == procmgr.StatusCrashed)
+
 	d.mu.Lock()
-	d.activeExclusive = false
+	d.releaseSlotLocked(j)
 	d.dispatchLocked()
 	d.mu.Unlock()
 	d.broadcast()
+}
+
+// finalizeReattached persists the terminal process.json row of a reattached job
+// whose process is gone, and returns the state it settled on ("" if there was
+// nothing to write). The exit code is unrecoverable -- this daemon never
+// waitpid'd the process -- so the outcome is read off two witnesses, in order:
+//
+//   - `stopping` on the row means an operator stopped it through the API, so it
+//     is recorded canceled (no exit code) rather than crashed;
+//   - otherwise the run's own journal (runs/<name>/run_db.sqlite, design 4.2)
+//     decides: a `completed` run exited cleanly and is recorded stopped with
+//     exit_code 0, so a dependent's success gate fires; anything else
+//     (interrupted, running, absent, unreadable) is recorded crashed with NO
+//     exit code rather than a fabricated one, the conservative verdict under
+//     every on_failure policy.
+//
+// A row that is already terminal is left alone: a Cancel/Stop that landed while
+// the process was dying is the authoritative outcome. A name being purged (the
+// RemoveAll runs outside d.mu) is skipped, so this can never recreate the run dir
+// Purge just removed.
+func (d *Dispatcher) finalizeReattached(name string) string {
+	// Read the journal before taking d.mu: the process is already gone, so its
+	// status is stable, and a busy/locked sqlite open must not stall dispatch.
+	dbStatus := runDBRunStatus(d.runDir(name), name)
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, purging := d.purging[name]; purging {
+		return ""
+	}
+	runDir := d.runDir(name)
+	st, err := procmgr.ReadProcessState(runDir)
+	if err != nil {
+		return "" // run dir gone out from under the watcher
+	}
+	if isTerminal(st.Status) {
+		return st.Status
+	}
+	switch {
+	case st.Status == procmgr.StatusStopping:
+		// An operator asked for this exit through the API: procmgr's
+		// unsupervised Stop branch records `stopping` before signalling the
+		// group, and nothing else writes that status to a reattached row. The
+		// exit code is still unrecoverable, but the outcome is not a crash, so
+		// it is recorded the way every other operator-requested terminal is and
+		// a dependent gates on it as a canceled parent. This branch outranks the
+		// run_db one: a run the operator aborted did not reach its own end,
+		// whatever its journal last managed to write.
+		st.Status = StateCanceled
+		st.ExitCode = nil
+		st.LastError = "reattached: stopped by operator request; exit status unknown"
+	case dbStatus == runDBStatusCompleted:
+		zero := 0
+		st.Status = procmgr.StatusStopped
+		st.ExitCode = &zero
+		st.LastError = "reattached: exit code inferred from run_db status completed"
+	default:
+		shown := dbStatus
+		if shown == "" {
+			shown = "absent"
+		}
+		st.Status = procmgr.StatusCrashed
+		st.ExitCode = nil
+		st.LastError = "reattached: process exited; exit status unknown (run_db status=" + shown + ")"
+	}
+	if st.FinishedAt == "" {
+		st.FinishedAt = procmgr.NowRFC3339()
+	}
+	_ = procmgr.WriteProcessState(runDir, st)
+	return st.Status
 }
 
 // removeFromQueueLocked drops name from the FIFO queue. Callers hold d.mu.

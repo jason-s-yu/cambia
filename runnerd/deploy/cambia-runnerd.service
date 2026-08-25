@@ -27,8 +27,21 @@ ExecStart=/usr/local/bin/cambia-runnerd --listen 0.0.0.0:8090
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=yes
-PrivateTmp=yes
-KillMode=mixed
+# PrivateTmp is OFF for the same reason KillMode is `process`: jobs outlive the
+# daemon incarnation that launched them. PrivateTmp binds every child into a
+# per-incarnation mount namespace whose backing directory systemd deletes when
+# that incarnation stops, so a surviving job would be left with a /tmp pointing
+# at a deleted directory. The runner is a single-purpose unprivileged container,
+# so the daemon and its jobs share the host /tmp instead.
+PrivateTmp=no
+# Job-preserving restart (cambia-655). SIGTERM detaches the daemon from its
+# jobs: it exits without signalling them and the next incarnation re-adopts
+# them at Reconcile, where a watcher finalizes each one when its process exits.
+# KillMode=process is what makes that hold -- under mixed (or control-group)
+# systemd SIGKILLs everything left in the service cgroup once the main process
+# exits, which is every training job. A stop must never kill a training job;
+# jobs are stopped only through the control-plane API.
+KillMode=process
 TimeoutStopSec=35
 
 [Install]

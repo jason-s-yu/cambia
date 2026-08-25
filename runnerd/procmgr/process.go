@@ -211,6 +211,17 @@ func (m *ProcessManager) SetMaxConcurrent(max int) {
 	m.maxConcurrent = max
 }
 
+// SupervisedCount returns how many process groups this manager is currently
+// supervising (the in-flight launches whose wait goroutines are still running).
+// It is the N in the daemon's shutdown log line: on a detaching stop those
+// process groups are deliberately left running for the next incarnation to
+// reattach.
+func (m *ProcessManager) SupervisedCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.procs)
+}
+
 // KillAll force-terminates every process group this manager is currently
 // supervising with SIGKILL and no grace period. It is the abrupt-shutdown path;
 // callers wanting a graceful stop use Stop per run. Safe to call when no
@@ -517,20 +528,38 @@ func (m *ProcessManager) Stop(name string, force bool) (*ProcessState, error) {
 	p, ok := m.procs[name]
 	if !ok {
 		// Not supervised by this instance: it already exited (terminal state on
-		// disk) or was never started. Return the on-disk state; if a stale live
-		// pid is recorded, signal its group best-effort.
+		// disk), was never started, or was forked by a previous daemon
+		// incarnation and reattached at Reconcile. Return the on-disk state; if
+		// a live pid is recorded, signal its group best-effort.
 		st, err := ReadProcessState(m.runDir(name))
 		if err != nil {
 			return nil, fmt.Errorf("read process state for %q: %w", name, err)
 		}
-		if pidAlive(st) && st.PGID > 0 {
-			sig := syscall.SIGINT
-			if force {
-				sig = syscall.SIGKILL
-			}
-			_ = killGroupFunc(st.PGID, sig)
+		if !pidAlive(st) || st.PGID <= 0 {
+			return st, nil
 		}
-		return st, nil
+		// Record the request BEFORE signalling, as the supervised branch does.
+		// This instance has no wait goroutine for the process, so `stopping` is
+		// the only durable trace that the exit about to happen was asked for
+		// rather than a crash; the dispatcher's reattach watcher reads it back
+		// to finalize the row as canceled instead of crashed (cambia-655).
+		// Recording first also keeps a process that dies instantly on the signal
+		// from being finalized as a crash before the request is written down.
+		// Only running/starting advance: a row that reached a terminal status in
+		// the gap since pidAlive must never be resurrected to a non-terminal
+		// one, which would strand it with no watcher left to finalize it.
+		_ = m.mutateStateLocked(name, func(s *ProcessState) {
+			switch s.Status {
+			case StatusRunning, StatusStarting:
+				s.Status = StatusStopping
+			}
+		})
+		sig := syscall.SIGINT
+		if force {
+			sig = syscall.SIGKILL
+		}
+		_ = killGroupFunc(st.PGID, sig)
+		return ReadProcessState(m.runDir(name))
 	}
 
 	p.stopRequested = true

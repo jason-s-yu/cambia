@@ -32,6 +32,16 @@ type ServerConfig struct {
 	// a job whose device is not a key here is rejected at submit as
 	// device_unsupported, not forceable. Defaults to cpu-only.
 	AllowedDevices map[string]bool
+	// BuildCommit is the daemon's source commit, stamped at link time and
+	// echoed by GET /harness/health so an operator can tell which binary is
+	// serving. Empty renders as "dev".
+	BuildCommit string
+	// KillJobsOnStop mirrors the daemon's RUNNERD_KILL_JOBS_ON_STOP override
+	// (cambia-655): when set, SIGTERM kills the job process groups instead of
+	// detaching, so health reports restart_preserves_jobs=false. The zero value
+	// is the default job-preserving restart, which is what health reports for
+	// any caller that does not set it.
+	KillJobsOnStop bool
 	// GPUQuery/RAMQuery/RenderNodeGlob/XPUQuery are seams so tests inject
 	// preflight inputs without touching real hardware.
 	GPUQuery       procmgr.GPUQueryFunc
@@ -69,6 +79,8 @@ type Server struct {
 	minVRAMGB      float64
 	algos          map[string][]string
 	allowedDevices map[string]bool
+	buildCommit    string
+	killJobsOnStop bool
 	gpuQuery       procmgr.GPUQueryFunc
 	ramQuery       RAMQueryFunc
 	renderNodeGlob procmgr.RenderNodeGlobFunc
@@ -117,6 +129,10 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if xq == nil {
 		xq = procmgr.DefaultXPUQuery
 	}
+	commit := cfg.BuildCommit
+	if commit == "" {
+		commit = "dev"
+	}
 	return &Server{
 		disp:           cfg.Dispatcher,
 		verifier:       cfg.Verifier,
@@ -127,6 +143,8 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		minVRAMGB:      procmgr.DefaultMinVRAMGB,
 		algos:          algos,
 		allowedDevices: devices,
+		buildCommit:    commit,
+		killJobsOnStop: cfg.KillJobsOnStop,
 		gpuQuery:       gq,
 		ramQuery:       rq,
 		renderNodeGlob: rng,

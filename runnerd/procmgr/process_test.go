@@ -532,6 +532,16 @@ func TestProcessStopRefusesSignalOnStarttimeMismatch(t *testing.T) {
 	if signaled {
 		t.Error("Stop signaled a pid it could not verify by starttime (pid-reuse guard failed)")
 	}
+	// Nothing was signalled, so nothing was requested of the process: the row
+	// must not be advanced to `stopping` either. A false `stopping` on an
+	// unverifiable row would be read downstream as an operator stop.
+	st, err := ReadProcessState(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Status != StatusRunning {
+		t.Errorf("status = %q, want running (unsignalled row must not be marked stopping)", st.Status)
+	}
 }
 
 // TestProcessStopSignalsOnStarttimeMatch is the positive-path complement: Stop
@@ -571,6 +581,16 @@ func TestProcessStopSignalsOnStarttimeMatch(t *testing.T) {
 	}
 	if !signaled {
 		t.Error("Stop did not signal a pid whose starttime matches")
+	}
+	// The untracked path has no wait goroutine, so `stopping` on the row is the
+	// only durable trace that the exit to come was requested rather than a
+	// crash; the dispatcher's reattach watcher reads it back (cambia-655).
+	st, err := ReadProcessState(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Status != StatusStopping {
+		t.Errorf("status = %q, want stopping after an untracked Stop signalled the group", st.Status)
 	}
 }
 

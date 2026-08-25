@@ -65,8 +65,12 @@ func TestHealthIsTokenFree(t *testing.T) {
 	// EXACTLY these keys and nothing else: the route is token-free, so any new
 	// field is exposed unauthenticated — a regression to writeJSON(w, 200, snap)
 	// would leak queue/active JobViews (job IDs, commits, configs) while a
-	// presence-only check stayed green.
-	want := []string{"reconciled_at", "jobs_running", "queue_depth", "free_ram_gb", "free_disk_gb"}
+	// presence-only check stayed green. restart_preserves_jobs and build_commit
+	// (cambia-655) are deliberate additions: neither identifies a job.
+	want := []string{
+		"reconciled_at", "jobs_running", "queue_depth", "free_ram_gb", "free_disk_gb",
+		"restart_preserves_jobs", "build_commit",
+	}
 	for _, k := range want {
 		if _, ok := body[k]; !ok {
 			t.Fatalf("health body missing key %q: %v", k, body)
@@ -74,6 +78,34 @@ func TestHealthIsTokenFree(t *testing.T) {
 	}
 	if len(body) != len(want) {
 		t.Fatalf("token-free health body must carry exactly %d counter keys, got %d: %v", len(want), len(body), body)
+	}
+}
+
+// TestHealthRestartSemanticsFields pins the two cambia-655 health fields an
+// operator reads before a redeploy: restart_preserves_jobs must be a bool that
+// tracks the daemon's kill-on-stop policy (true for the job-preserving default),
+// and build_commit a string identifying the serving binary ("dev" when the
+// binary was not stamped with -X main.buildCommit).
+func TestHealthRestartSemanticsFields(t *testing.T) {
+	// Default daemon: SIGTERM detaches, so health advertises job preservation.
+	r := newRig(t, rigConfig{})
+	body := r.healthBody()
+	if preserves, ok := body["restart_preserves_jobs"].(bool); !ok || !preserves {
+		t.Fatalf("restart_preserves_jobs = %v, want bool true", body["restart_preserves_jobs"])
+	}
+	if commit, ok := body["build_commit"].(string); !ok || commit != "dev" {
+		t.Fatalf("build_commit = %v, want \"dev\" for an unstamped build", body["build_commit"])
+	}
+
+	// A daemon started with RUNNERD_KILL_JOBS_ON_STOP reports the opposite, so a
+	// monitoring consumer is never told jobs survive a stop when they do not.
+	killer := newRig(t, rigConfig{killJobsOnStop: true, buildCommit: "deadbeef"})
+	kbody := killer.healthBody()
+	if preserves, _ := kbody["restart_preserves_jobs"].(bool); preserves {
+		t.Fatal("restart_preserves_jobs = true with KillJobsOnStop set, want false")
+	}
+	if commit, _ := kbody["build_commit"].(string); commit != "deadbeef" {
+		t.Fatalf("build_commit = %v, want the stamped sha", kbody["build_commit"])
 	}
 }
 

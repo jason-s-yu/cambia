@@ -116,6 +116,11 @@ type rigConfig struct {
 	allowedDevices map[string]bool
 	renderNodeGlob procmgr.RenderNodeGlobFunc
 	xpuQuery       procmgr.XPUQueryFunc
+	// killJobsOnStop / buildCommit mirror the daemon flags GET /harness/health
+	// reports (cambia-655); both zero values are the production default
+	// (job-preserving restart, unstamped "dev" build).
+	killJobsOnStop bool
+	buildCommit    string
 }
 
 type testRig struct {
@@ -201,6 +206,8 @@ func newRig(t *testing.T, cfg rigConfig) *testRig {
 		RAMQuery:       cfg.ramQuery,
 		RenderNodeGlob: cfg.renderNodeGlob,
 		XPUQuery:       cfg.xpuQuery,
+		BuildCommit:    cfg.buildCommit,
+		KillJobsOnStop: cfg.killJobsOnStop,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -356,6 +363,21 @@ func (r *testRig) getState(id string) (string, bool) {
 	var jr jobResp
 	decodeBody(r.t, resp, &jr)
 	return jr.Job.State, true
+}
+
+// healthBody fetches GET /harness/health token-free and decodes it.
+func (r *testRig) healthBody() map[string]any {
+	r.t.Helper()
+	resp := r.doTok(http.MethodGet, "/harness/health", nil, "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		r.t.Fatalf("health: got %d, want 200", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		r.t.Fatalf("decode health body: %v", err)
+	}
+	return body
 }
 
 // waitForState polls until the job reaches want or the timeout elapses.

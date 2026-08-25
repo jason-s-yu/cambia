@@ -23,6 +23,30 @@ import (
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 )
 
+// buildCommit is the runnerd source commit, stamped at link time with
+// -ldflags "-X main.buildCommit=<sha>" and reported by GET /harness/health so an
+// operator can tell which binary a running daemon is. It stays "dev" for an
+// unstamped local build.
+var buildCommit = "dev"
+
+// killJobsOnSignal decides whether a shutdown signal takes the job process
+// groups down with the daemon (cambia-655). SIGTERM is systemd's stop/restart
+// signal: a redeploy must never kill a training job, so it detaches and leaves
+// the process groups running for the next incarnation to reattach at Reconcile.
+// SIGINT is the interactive Ctrl-C of a foreground dev daemon, where an orphaned
+// job would be a surprise, so it keeps the abrupt SIGKILL behavior. env is
+// RUNNERD_KILL_JOBS_ON_STOP: a true value restores kill-on-SIGTERM for an
+// operator who wants a stop to take everything down.
+func killJobsOnSignal(sig os.Signal, env string) bool {
+	if sig == syscall.SIGINT {
+		return true
+	}
+	if b, err := strconv.ParseBool(env); err == nil && b {
+		return true
+	}
+	return false
+}
+
 func main() {
 	listen := flag.String("listen", envOr("RUNNERD_LISTEN", "127.0.0.1:8090"),
 		"control-plane listen address (dev default 127.0.0.1:8090; prod binds the runner's LAN address)")
@@ -120,20 +144,30 @@ func main() {
 		MinFreeDiskGB:  minDisk,
 		Algos:          harness.HarnessAlgorithms(),
 		AllowedDevices: allowedDevices,
+		BuildCommit:    buildCommit,
+		KillJobsOnStop: killJobsOnSignal(syscall.SIGTERM, os.Getenv("RUNNERD_KILL_JOBS_ON_STOP")),
 	})
 	if err != nil {
 		log.Fatalf("build server: %v", err)
 	}
 
-	// Best-effort abrupt stop on signal (design 6): SIGKILL job process groups so
-	// they do not outlive the daemon; recovery is reconcile-on-next-boot. systemd
-	// KillMode=mixed + TimeoutStopSec=35 sits above the 30s per-job grace.
+	// Job-preserving restart (cambia-655): SIGTERM (systemd stop/restart) detaches
+	// the daemon from its jobs and exits without signalling them, so a redeploy
+	// never kills a multi-week training run; the next incarnation reattaches them
+	// at Reconcile and a watcher finalizes each one when its process exits. Jobs
+	// are stopped only through the API. SIGINT (interactive) still kills the
+	// process groups. systemd KillMode=process keeps the unit stop from killing
+	// the children the daemon deliberately left behind.
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		<-stop
-		log.Print("shutdown signal received; killing job process groups")
-		pm.KillAll()
+		sig := <-stop
+		if killJobsOnSignal(sig, os.Getenv("RUNNERD_KILL_JOBS_ON_STOP")) {
+			log.Printf("shutdown (%s): killing %d job process groups", sig, pm.SupervisedCount())
+			pm.KillAll()
+		} else {
+			log.Printf("shutdown (%s): leaving %d job process groups running for reattach", sig, pm.SupervisedCount())
+		}
 		os.Exit(0)
 	}()
 
