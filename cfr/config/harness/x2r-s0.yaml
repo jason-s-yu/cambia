@@ -1,0 +1,18 @@
+# cfr/config/harness/x2r-s0.yaml
+#
+# X2R matrix cell s0 (cambia-225, user ruling 2026-08-25) as a nash harness
+# train job: fresh-run config, seed 0, current lineage, stop-inert through the
+# 1000-iteration horizon. C1's strict control and the cambia-694 C0
+# discriminator (see cfr/config/x2r/s0.yaml). Submit gated on C1 finishing:
+#   cambia harness submit cfr/config/harness/x2r-s0.yaml \
+#     --after v0.4-x2r-c1-xpu --on-failure run
+# The gate is serial A310 occupancy only; s0 has no data dependency on C1.
+
+kind: train
+name: v0.4-x2r-s0-xpu
+config: cfr/config/x2r/s0.yaml
+device: xpu
+
+resume: false
+priority: normal
+force: false

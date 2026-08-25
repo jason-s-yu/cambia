@@ -1,0 +1,24 @@
+# X2 re-spec matrix cell s0 (cambia-225, user ruling 2026-08-25; report
+# .docs/v0.4/phase2-throughput-pilot/x2r-intermediate-analysis-2026-08-25/report.md R5):
+# fresh-run config, seed 0, on the current code lineage.
+#
+# Purpose: the missing matrix cell. Identical to confirm_s2.yaml except seed, so
+# it is at once (a) C1's strict control (same seed 0, same k=80, same pin lineage;
+# only the net width differs), (b) the C0 discriminator for cambia-694 (same seed
+# 0, same lineage; only k_games_per_iter differs, 80 vs 212), and (c) the seed-0
+# leg of the base config run to horizon 1000 on the post-69c3338 lineage (the
+# fresh run, seed 0, was stop-killed at 330 on pin f052fcb).
+#
+# Regime per amendment A3-3 (x2-respec-preregistration.md): stop-inert for the
+# full 1000-iteration horizon (stability_stop_mode divergence +
+# stability_min_iters 1001 > horizon), iterations 1000 so the global_cosine lr
+# curve is bit-identical to the fresh run and the other cells. Read-out is
+# informational unless a later amendment assigns it decision weight.
+
+_base: x2_tiny_gate.yaml
+
+prt_cfr:
+  iterations: 1000
+  stability_stop_mode: divergence
+  stability_min_iters: 1001  # stop-inert through the full 1000-iter horizon
+  seed: 0
