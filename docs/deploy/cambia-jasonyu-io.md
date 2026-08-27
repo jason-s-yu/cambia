@@ -49,6 +49,10 @@ Until the first successful pipeline run, `https://cambia.jasonyu.io/` serves 500
 4. `curl https://cambia.jasonyu.io/healthz` returns healthy.
 5. Play a full game end to end over `wss://cambia.jasonyu.io` to confirm the WebSocket path through nginx and the reverse proxy works, not just the health check.
 
+## Operational notes
+
+- `/opt/cambia/.env` on hawking holds the only copy of the production `POSTGRES_PASSWORD` (minted on-host 2026-08-27; it never left hawking). Losing the file while the postgres volume survives means resetting the password inside the container (`ALTER USER`) before the stack can reconnect. Treat the file and the `postgres_data` volume as a pair.
+
 ## Rollback
 
 Two options, in order of preference:

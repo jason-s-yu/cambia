@@ -800,15 +800,25 @@ func (h *Hub) sendSyncState(userID uuid.UUID) {
 	if h.getConn(userID) == nil {
 		return
 	}
+	// Stamp the current seq WITHOUT consuming one: this is a private repair
+	// message, and the whole point is to catch the recipient up to h.seq. If
+	// it bumped the sequence, every repair would re-stale every other client,
+	// and two clients failing the dispatch() staleness gate concurrently would
+	// livelock feeding each other sync_states forever (observed live
+	// 2026-08-27: a fresh 2-client lobby drove seq past 19000). Same
+	// one-seq-per-broadcast reasoning as cambia-502.
+	seq := atomic.LoadUint64(&h.seq)
 	payload := h.buildLobbySnapshot(userID)
-	payload["seq"] = h.seq
-	h.EmitTo(userID, "sync_state", payload)
+	payload["seq"] = seq
+	h.emitToWithSeq(userID, seq, "sync_state", payload)
 }
 
-// errEnvelope builds an error envelope (without consuming seq).
+// errEnvelope builds an error envelope. Like sendSyncState, it is a private
+// per-connection reply and must not consume a seq: a rejected action that
+// advanced the global sequence would mark every other client stale.
 func (h *Hub) errEnvelope(msg string) Envelope {
 	raw, _ := json.Marshal(map[string]string{"error": msg})
-	return Envelope{Seq: h.nextSeq(), Type: "error", Payload: raw}
+	return Envelope{Seq: atomic.LoadUint64(&h.seq), Type: "error", Payload: raw}
 }
 
 // Join sends a Connection to the hub's join channel.

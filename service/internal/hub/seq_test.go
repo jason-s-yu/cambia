@@ -228,3 +228,49 @@ func TestNotifyGameEndedQueuesSyntheticMessage(t *testing.T) {
 	// h.Phase is untouched until dispatch() (the Run() loop) processes the queued message.
 	assert.Equal(t, PhaseInGame, h.Phase)
 }
+
+// TestSyncStateRepairDoesNotConsumeSeq guards the desync-repair path against re-staling other
+// clients: sendSyncState (and the private error envelope) must stamp the CURRENT seq without
+// consuming one. Pre-fix, each repair bumped h.seq, so two clients failing the staleness gate
+// concurrently fed each other sync_states forever (live livelock, seq past 19000 in a fresh
+// 2-client lobby, 2026-08-27).
+func TestSyncStateRepairDoesNotConsumeSeq(t *testing.T) {
+	idA := uuid.New()
+	idB := uuid.New()
+
+	lob := lobby.NewLobbyWithDefaults(idA)
+	lob.LobbySettings.AutoStart = false
+	lob.JoinUser(idA)
+	lob.JoinUser(idB)
+
+	h := NewHub(lob)
+	connA := newFakeConn(idA, "A", true)
+	connB := newFakeConn(idB, "B", false)
+	h.conns[idA] = connA
+	h.conns[idB] = connB
+
+	h.broadcastLobbyUpdate()
+	drainEnvelopes(t, connA)
+	drainEnvelopes(t, connB)
+	seqBefore := h.seq
+
+	// A stale message from A is rejected with a sync_state repair. The repair must carry the
+	// current seq and must not advance it.
+	h.dispatch(ClientMsg{UserID: idA, LastSeq: 0, Type: "ready"})
+	aFrames := drainEnvelopes(t, connA)
+	sync := findByType(aFrames, "sync_state")
+	require.NotNil(t, sync, "stale message should be answered with sync_state")
+	assert.Equal(t, seqBefore, sync.Seq, "sync_state must carry the current seq")
+	assert.Equal(t, seqBefore, h.seq, "the repair must not consume a seq")
+	assert.False(t, lob.ReadyStates[idA], "the stale ready itself stays dropped")
+
+	// B gets repaired too; still no seq movement, so neither client re-stales the other.
+	h.dispatch(ClientMsg{UserID: idB, LastSeq: 0, Type: "ready"})
+	require.NotNil(t, findByType(drainEnvelopes(t, connB), "sync_state"))
+	assert.Equal(t, seqBefore, h.seq, "repeated repairs must not move the sequence")
+
+	// A message echoing the repair's seq is now accepted.
+	h.dispatch(ClientMsg{UserID: idA, LastSeq: sync.Seq, Type: "ready"})
+	assert.True(t, lob.ReadyStates[idA], "a ready echoing the repair's seq must be accepted")
+	assert.False(t, containsType(drainEnvelopes(t, connA), "sync_state"), "the caught-up ready must not be rejected again")
+}
