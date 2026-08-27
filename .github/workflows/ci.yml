@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+    paths-ignore:
+      - 'cfr/**'
+      - '.docs/**'
+      - 'docs/**'
+  push:
+    branches: [master]
+    paths-ignore:
+      - 'cfr/**'
+      - '.docs/**'
+      - 'docs/**'
+
+jobs:
+  go-tests:
+    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: false
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.environment }}-go-${{ hashFiles('go.work.sum', 'engine/go.sum', 'service/go.sum') }}
+          restore-keys: |
+            ${{ runner.environment }}-go-
+
+      - name: Engine tests
+        run: cd engine && go test ./...
+
+      - name: Service tests
+        run: cd service && go test ./...
+
+  web:
+    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.environment }}-npm-${{ hashFiles('web/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.environment }}-npm-
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
