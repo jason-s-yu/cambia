@@ -91,6 +91,9 @@ func newHandlerFixture(t *testing.T) *handlerFixture {
 		RunsDir:       runsDir,
 		TemplateDir:   templateDir,
 		MaxConcurrent: 10,
+		// Tiny positive floor keeps the disk preflight hermetic: the default
+		// 5 GiB floor fails on CI runners with less free disk than that.
+		MinDiskGB: 0.001,
 	})
 	ph.gpuQuery = fakeQuery("", exec.ErrNotFound) // CPU host
 

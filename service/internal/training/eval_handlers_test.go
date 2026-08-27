@@ -39,7 +39,7 @@ func newEvalHandlerFixture(t *testing.T, stubBody string) *evalHandlerFixture {
 		t.Fatal(err)
 	}
 	mgr := NewEvalManager(runsDir, cfrDir, stub)
-	h := NewEvalHandlers(EvalHandlersConfig{Manager: mgr, RunsDir: runsDir})
+	h := NewEvalHandlers(EvalHandlersConfig{Manager: mgr, RunsDir: runsDir, MinDiskGB: 0.001})
 	h.gpuQuery = fakeQuery("", exec.ErrNotFound) // CPU host by default
 	return &evalHandlerFixture{h: h, mgr: mgr, runsDir: runsDir}
 }
@@ -156,7 +156,7 @@ func TestEvalHandlerCapReached(t *testing.T) {
 	}
 	mgr := NewEvalManager(runsDir, cfrDir, stub)
 	mgr.SetMaxConcurrent(1)
-	h := NewEvalHandlers(EvalHandlersConfig{Manager: mgr, RunsDir: runsDir})
+	h := NewEvalHandlers(EvalHandlersConfig{Manager: mgr, RunsDir: runsDir, MinDiskGB: 0.001})
 	h.gpuQuery = fakeQuery("", exec.ErrNotFound)
 	seedCheckpoint(t, runsDir, "cap-a", "snapshots", "prtcfr_checkpoint.pt")
 	seedCheckpoint(t, runsDir, "cap-b", "snapshots", "prtcfr_checkpoint.pt")
