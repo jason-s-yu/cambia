@@ -39,13 +39,7 @@ func EnsureEphemeralUser(w http.ResponseWriter, r *http.Request) (uuid.UUID, err
 			// Attempt to clean up the created user if JWT creation fails? Complex.
 			return uuid.Nil, fmt.Errorf("failed to create JWT for ephemeral user: %w", err)
 		}
-		http.SetCookie(w, &http.Cookie{
-			Name:     "auth_token",
-			Value:    newToken,
-			HttpOnly: true,
-			Path:     "/",
-			MaxAge:   auth.TOKEN_EXPIRE_TIME_SEC, // Use configured expiry.
-		})
+		auth.SetAuthTokenCookie(w, newToken, auth.TOKEN_EXPIRE_TIME_SEC)
 		log.Printf("Created ephemeral user %s and set auth cookie.", ephemeralUser.ID)
 		return ephemeralUser.ID, nil
 	}
@@ -166,13 +160,7 @@ func ClaimEphemeralHandler(w http.ResponseWriter, r *http.Request) {
 
 // LogoutHandler clears the auth_token cookie, effectively logging the user out.
 func LogoutHandler(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     "auth_token",
-		Value:    "",
-		HttpOnly: true,
-		Path:     "/",
-		MaxAge:   -1,
-	})
+	auth.ExpireAuthTokenCookie(w)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -263,16 +251,8 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set the JWT as an HttpOnly cookie.
-	http.SetCookie(w, &http.Cookie{
-		Name:     "auth_token",
-		Value:    token,
-		HttpOnly: true,                       // Important for security.
-		Path:     "/",                        // Cookie applies to all paths.
-		MaxAge:   auth.TOKEN_EXPIRE_TIME_SEC, // Use configured expiry.
-		// Secure: true, // Uncomment in production when using HTTPS.
-		// SameSite: http.SameSiteLaxMode, // Or SameSiteStrictMode depending on needs.
-	})
+	// Set the JWT as an HttpOnly cookie. Secure/SameSite come from COOKIE_SECURE.
+	auth.SetAuthTokenCookie(w, token, auth.TOKEN_EXPIRE_TIME_SEC)
 
 	// Return the token in the response body as well.
 	resp := loginResponse{Token: token}

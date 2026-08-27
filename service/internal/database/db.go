@@ -39,6 +39,8 @@ func ConnectDB() {
 	}
 
 	log.Printf("Connected to database at %s", connStr)
+
+	MigrateIfEnabled()
 }
 
 // ConnectDBAsync continuously attempts to establish and maintain a database connection.

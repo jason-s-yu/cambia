@@ -1,0 +1,27 @@
+# Build context for service/Dockerfile is the repo root: go.mod resolves only
+# under go.work, so go.work, engine/, runnerd/ and service/ must stay reachable.
+# Everything below is irrelevant to the Go image build.
+
+.git
+.gitignore
+
+# Python CFR pipeline and its artifacts
+cfr/
+runs/
+*.so
+
+# Web client (built separately by web/Dockerfile)
+web/node_modules
+web/dist
+
+# Agent and documentation trees
+.claude/
+.docs/
+docs-gen/
+
+# Never bake secrets into an image layer
+.env
+.env.*
+**/.env
+**/.env.*
+!**/.env.template

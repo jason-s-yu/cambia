@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jason-s-yu/cambia/service/internal/database"
 	"github.com/jason-s-yu/cambia/service/internal/hub"
+	"github.com/jason-s-yu/cambia/service/internal/wsopts"
 	"github.com/sirupsen/logrus"
 )
 
@@ -60,10 +61,7 @@ func HubWSHandler(logger *logrus.Logger, gs *GameServer) http.HandlerFunc {
 		}
 
 		// 5. Upgrade WebSocket with subprotocol "cambia"
-		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-			Subprotocols:   []string{"cambia"},
-			OriginPatterns: []string{"*"},
-		})
+		c, err := websocket.Accept(w, r, wsopts.AcceptOptions("cambia"))
 		if err != nil {
 			logger.Warnf("ws: accept error for lobby %s: %v", lobbyID, err)
 			return

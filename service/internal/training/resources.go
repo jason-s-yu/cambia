@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/jason-s-yu/cambia/service/internal/wsopts"
 )
 
 // Resource monitor tuning constants.
@@ -161,9 +162,7 @@ func (m *ResourceMonitor) HandleSnapshot(w http.ResponseWriter, r *http.Request)
 // starts the sampler if it was idle; disconnecting stops it when it was the last
 // client.
 func (m *ResourceMonitor) HandleWS(w http.ResponseWriter, r *http.Request) {
-	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		OriginPatterns: []string{"*"},
-	})
+	c, err := websocket.Accept(w, r, wsopts.AcceptOptions())
 	if err != nil {
 		return
 	}

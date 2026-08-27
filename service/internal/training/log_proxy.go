@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/jason-s-yu/cambia/service/internal/wsopts"
 )
 
 // remoteRetryBackoff is the pause before the single reconnect attempt after a
@@ -20,9 +21,7 @@ const remoteRetryBackoff = 1 * time.Second
 // validity is checked only at the runner's upgrade; a tail outliving the token
 // TTL is fine.
 func (s *TrainingStore) serveRemoteLogs(w http.ResponseWriter, r *http.Request, name string) {
-	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		OriginPatterns: []string{"*"},
-	})
+	c, err := websocket.Accept(w, r, wsopts.AcceptOptions())
 	if err != nil {
 		return
 	}

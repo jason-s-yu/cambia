@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -42,7 +44,18 @@ type HistorianService struct {
 	batch    []GameActionRecord
 	ctx      context.Context
 	cancelFn context.CancelFunc
+
+	// readerDone closes when readRedisLoop has stopped appending, so the final
+	// flush cannot race a record popped just before cancellation. stopped closes
+	// once that flush has been written, which is what Stop waits on.
+	readerDone chan struct{}
+	stopped    chan struct{}
 }
+
+// shutdownDrainTimeout bounds the wait for the Redis reader to exit before the
+// final flush. A reader wedged in a network call must not hold shutdown open
+// past the container's stop grace period.
+const shutdownDrainTimeout = 5 * time.Second
 
 // NewHistorianService constructs a HistorianService instance from environment variables or defaults.
 func NewHistorianService() *HistorianService {
@@ -64,6 +77,8 @@ func NewHistorianService() *HistorianService {
 		batch:       make([]GameActionRecord, 0, batchSize),
 		ctx:         ctx,
 		cancelFn:    cancel,
+		readerDone:  make(chan struct{}),
+		stopped:     make(chan struct{}),
 	}
 }
 
@@ -81,10 +96,20 @@ func (hs *HistorianService) Run() {
 	log.Println("cambia-historian service started.")
 	<-hs.ctx.Done()
 	log.Println("cambia-historian shutting down.")
+
+	select {
+	case <-hs.readerDone:
+	case <-time.After(shutdownDrainTimeout):
+		log.Println("cambia-historian: redis reader did not stop in time, flushing anyway.")
+	}
+	hs.flushBatchToDB()
+	close(hs.stopped)
 }
 
 // readRedisLoop continuously uses BLPop to retrieve messages from the Redis queue.
 func (hs *HistorianService) readRedisLoop() {
+	defer close(hs.readerDone)
+
 	ticker := time.NewTicker(hs.flushDelay)
 	defer ticker.Stop()
 
@@ -127,27 +152,39 @@ func (hs *HistorianService) readRedisLoop() {
 }
 
 // appendToBatch adds a record to the in-memory batch and flushes if the threshold is reached.
+// The flush happens after the lock is dropped: batchMu is not reentrant, and it
+// must not be held across a database round trip.
 func (hs *HistorianService) appendToBatch(record GameActionRecord) {
 	hs.batchMu.Lock()
-	defer hs.batchMu.Unlock()
-
 	hs.batch = append(hs.batch, record)
-	if len(hs.batch) >= hs.batchSize {
+	full := len(hs.batch) >= hs.batchSize
+	hs.batchMu.Unlock()
+
+	if full {
 		hs.flushBatchToDB()
 	}
 }
 
-// flushBatchToDB flushes the current batch to the database in a single transaction.
-func (hs *HistorianService) flushBatchToDB() {
+// takeBatch removes and returns the accumulated records, or nil if there are none.
+func (hs *HistorianService) takeBatch() []GameActionRecord {
 	hs.batchMu.Lock()
 	defer hs.batchMu.Unlock()
 
 	if len(hs.batch) == 0 {
-		return
+		return nil
 	}
 	batchCopy := make([]GameActionRecord, len(hs.batch))
 	copy(batchCopy, hs.batch)
 	hs.batch = hs.batch[:0]
+	return batchCopy
+}
+
+// flushBatchToDB flushes the current batch to the database in a single transaction.
+func (hs *HistorianService) flushBatchToDB() {
+	batchCopy := hs.takeBatch()
+	if len(batchCopy) == 0 {
+		return
+	}
 
 	ctx := context.Background()
 	err := beginTxFunc(ctx, database.DB, pgx.TxOptions{}, func(tx pgx.Tx) error {
@@ -272,9 +309,12 @@ func beginTxFunc(ctx context.Context, pool *pgxpool.Pool, txOptions pgx.TxOption
 	return tx.Commit(ctx)
 }
 
-// Stop gracefully stops the historian service.
+// Stop gracefully stops the historian service and blocks until Run has written
+// the final batch, so records already popped off the Redis queue are not lost
+// on SIGTERM.
 func (hs *HistorianService) Stop() {
 	hs.cancelFn()
+	<-hs.stopped
 }
 
 // main is the entrypoint.
@@ -284,8 +324,7 @@ func main() {
 
 	// Block until an OS signal is received.
 	sigChan := make(chan os.Signal, 1)
-	// Uncomment the following lines and import "os/signal" and "syscall" if you want to trap signals.
-	// signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	<-sigChan
 	hs.Stop()

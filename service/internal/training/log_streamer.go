@@ -13,6 +13,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/fsnotify/fsnotify"
+	"github.com/jason-s-yu/cambia/service/internal/wsopts"
 )
 
 const logBackfillLines = 200
@@ -50,9 +51,7 @@ func (s *TrainingStore) HandleLogStream(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		OriginPatterns: []string{"*"},
-	})
+	c, err := websocket.Accept(w, r, wsopts.AcceptOptions())
 	if err != nil {
 		return
 	}

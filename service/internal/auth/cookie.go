@@ -1,10 +1,50 @@
 // internal/auth/cookie.go
 package auth
 
-import "net/http"
+import (
+	"net/http"
+	"os"
+)
 
 // AuthCookieName is the name of the cookie carrying the signed session JWT.
 const AuthCookieName = "auth_token"
+
+// cookieSecure reports whether COOKIE_SECURE requests the HTTPS transport
+// flags. Browsers reject Secure cookies over plain http, so an unset variable
+// must keep the dev behavior (http://localhost) byte-identical.
+func cookieSecure() bool {
+	switch os.Getenv("COOKIE_SECURE") {
+	case "true", "1":
+		return true
+	}
+	return false
+}
+
+// NewAuthTokenCookie builds the auth_token cookie, applying the deployment's
+// transport flags. maxAge follows net/http semantics: 0 leaves the cookie
+// session-scoped, a negative value deletes it.
+//
+// Every site that issues or clears auth_token goes through here so the Secure
+// and SameSite flags cannot drift between the login, guest, and logout paths.
+func NewAuthTokenCookie(value string, maxAge int) *http.Cookie {
+	ck := &http.Cookie{
+		Name:     AuthCookieName,
+		Value:    value,
+		HttpOnly: true,
+		Path:     "/",
+		MaxAge:   maxAge,
+	}
+	if cookieSecure() {
+		ck.Secure = true
+		ck.SameSite = http.SameSiteLaxMode
+	}
+	return ck
+}
+
+// SetAuthTokenCookie writes an auth_token Set-Cookie header on w.
+func SetAuthTokenCookie(w http.ResponseWriter, value string, maxAge int) {
+	http.SetCookie(w, NewAuthTokenCookie(value, maxAge))
+}
 
 // ResolveAuthTokenCookie walks every AuthCookieName cookie present on the
 // request and returns the "sub" (user ID) claim of the first one that
@@ -57,11 +97,5 @@ func ResolveAuthTokenCookie(w http.ResponseWriter, r *http.Request) (userID stri
 // cookie is issued), so a stale or invalid copy in the browser's cookie jar
 // is removed rather than continuing to shadow future valid cookies.
 func ExpireAuthTokenCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     AuthCookieName,
-		Value:    "",
-		HttpOnly: true,
-		Path:     "/",
-		MaxAge:   -1,
-	})
+	SetAuthTokenCookie(w, "", -1)
 }

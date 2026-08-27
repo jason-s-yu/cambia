@@ -3,13 +3,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
@@ -55,6 +58,9 @@ func main() {
 	logger.SetLevel(logrus.DebugLevel)
 
 	mux := http.NewServeMux()
+
+	// liveness/readiness probe (unauthenticated)
+	mux.HandleFunc("/healthz", healthzHandler)
 
 	// user endpoints
 	mux.HandleFunc("/user/create", handlers.CreateUserHandler)
@@ -249,10 +255,90 @@ func main() {
 	if port := os.Getenv("PORT"); port != "" {
 		addr = ":" + port
 	}
+
+	// Signal handling is armed before the listener so a SIGTERM arriving during
+	// startup is still caught. stop() is called explicitly after the first
+	// signal so a second one kills the process instead of being swallowed by a
+	// drain that is taking too long.
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	httpSrv := &http.Server{Addr: addr, Handler: mux}
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- httpSrv.ListenAndServe()
+	}()
 	logger.Infof("Running on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		log.Fatalf("server exited: %v", err)
+
+	select {
+	case err := <-serveErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("server exited: %v", err)
+		}
+	case <-sigCtx.Done():
+		stop()
+		logger.Info("Shutdown signal received, draining connections")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+			logger.Warnf("Graceful shutdown did not finish cleanly: %v", err)
+		}
+		logger.Info("Server stopped")
 	}
+}
+
+// shutdownTimeout bounds the connection drain on SIGTERM. WebSocket gameplay
+// connections are long-lived and will not close on their own, so the drain is
+// expected to hit this bound whenever players are connected.
+const shutdownTimeout = 10 * time.Second
+
+// healthzHandler serves the unauthenticated liveness probe. It always reports
+// 200 while the process is up: the db and redis booleans describe dependency
+// state so an orchestrator can distinguish "process wedged" from "Postgres is
+// restarting", without a dependency blip causing a restart loop.
+func healthzHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	resp := struct {
+		Status string `json:"status"`
+		DB     bool   `json:"db"`
+		Redis  bool   `json:"redis"`
+	}{
+		Status: "ok",
+		DB:     pingDB(r.Context()),
+		Redis:  pingRedis(r.Context()),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Printf("healthz: failed to write response: %v", err)
+	}
+}
+
+// healthPingTimeout keeps a probe cheap: a dependency that cannot answer this
+// fast is reported down rather than stalling the probe.
+const healthPingTimeout = 2 * time.Second
+
+func pingDB(ctx context.Context) bool {
+	if database.DB == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, healthPingTimeout)
+	defer cancel()
+	return database.DB.Ping(ctx) == nil
+}
+
+func pingRedis(ctx context.Context) bool {
+	if cache.Rdb == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, healthPingTimeout)
+	defer cancel()
+	return cache.Rdb.Ping(ctx).Err() == nil
 }
 
 // registerTrainingRoutes wires every /training and /ws/training endpoint onto mux

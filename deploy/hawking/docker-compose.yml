@@ -1,0 +1,106 @@
+# Production stack for cambia.jasonyu.io on the hawking host.
+#
+# TLS termination and the static frontend live in the hawking host's nginx, not
+# here. This stack publishes exactly one port, bound to loopback, for nginx to
+# proxy: 127.0.0.1:3200 -> server:8080. Postgres and Redis are reachable only on
+# the compose network and are never published to the host.
+#
+# Secrets come from a .env file alongside this file. POSTGRES_PASSWORD has no
+# default: the stack refuses to start without it.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: cambia-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cambia}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in deploy/hawking/.env}
+      POSTGRES_DB: ${PG_DATABASE:-cambia}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cambia} -d ${PG_DATABASE:-cambia}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: cambia-redis
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  server:
+    image: ghcr.io/jason-s-yu/cambia-server:${CAMBIA_IMAGE_TAG:-latest}
+    container_name: cambia-server
+    command: ["cambia-server"]
+    ports:
+      # Loopback only: the host nginx is the sole entrypoint from the network.
+      - "127.0.0.1:3200:8080"
+    environment:
+      PORT: "8080"
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      PG_DATABASE: ${PG_DATABASE:-cambia}
+      POSTGRES_USER: ${POSTGRES_USER:-cambia}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in deploy/hawking/.env}
+      REDIS_ADDR: redis:6379
+      # The server owns the schema: it applies any un-applied migration at boot
+      # and dies rather than serving a schema it does not match.
+      RUN_MIGRATIONS: "true"
+      COOKIE_SECURE: "true"
+      ALLOWED_WS_ORIGINS: https://cambia.jasonyu.io
+      TOKEN_EXPIRE_TIME: ${TOKEN_EXPIRE_TIME:-720h}
+      # JWT signing keys are generated on first boot and must survive a restart,
+      # or every existing session cookie is invalidated.
+      DATA_DIR: /app/data
+    volumes:
+      - server_data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Must exceed the server's own 10s drain budget, or Docker's default 10s
+    # stop timeout SIGKILLs the process at the exact moment the drain expires.
+    stop_grace_period: 15s
+    restart: unless-stopped
+
+  historian:
+    image: ghcr.io/jason-s-yu/cambia-server:${CAMBIA_IMAGE_TAG:-latest}
+    container_name: cambia-historian
+    command: ["cambia-historian"]
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      PG_DATABASE: ${PG_DATABASE:-cambia}
+      POSTGRES_USER: ${POSTGRES_USER:-cambia}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in deploy/hawking/.env}
+      REDIS_ADDR: redis:6379
+      # RUN_MIGRATIONS is deliberately absent: the server is the only migrator.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Room for the reader drain plus the final batch write on SIGTERM.
+    stop_grace_period: 15s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  server_data:
