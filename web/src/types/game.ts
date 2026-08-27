@@ -265,6 +265,30 @@ export interface GameErrorEvent {
 	code?: string; // Optional error code (e.g., 'invalid_action')
 }
 
+/** Structure for game_started events (public). Sent by Hub.Emit directly with a plain map (no
+ *  GameEvent wrapper, unlike most events above), so its fields sit at the top level of the
+ *  envelope payload rather than nested under a `payload` sub-object. Fires once per game AND
+ *  again for every subsequent round in multi-round/ranked matches (hub.startNextRound re-calls
+ *  createAndStartGame), while the previous round's ObfGameState is still in the store — see
+ *  gameStore's handling for the resulting reset. */
+export interface GameStartedEvent {
+	type: 'game_started';
+	game_id: string;
+	players: string[]; // Participant user IDs.
+}
+
+/** Structure for game_results events (public). Also a plain-map Hub.Emit (fields at the
+ *  envelope payload's top level, no `payload` sub-object). Emitted right after game_end from
+ *  the same adjusted scores/winner, plus a lobby_status snapshot that is lobbyStore's domain,
+ *  not this store's — gameStore treats this as a documented no-op since game_end already
+ *  populates finalScores/winnerId. */
+export interface GameResultsEvent {
+	type: 'game_results';
+	winner: string;
+	scores: Record<string, number>;
+	lobby_status: unknown;
+}
+
 // --- Union Type for Server Events ---
 
 export type ServerGameEvent =
@@ -285,6 +309,8 @@ export type ServerGameEvent =
 	| PrivateSnapPenaltyEvent
 	| PlayerCambiaEvent
 	| GameEndEvent
+	| GameStartedEvent
+	| GameResultsEvent
 	| GameErrorEvent; // Add other event types here
 
 // --- Utility Functions ---

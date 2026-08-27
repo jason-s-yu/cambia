@@ -188,9 +188,15 @@ export const useGameStore = create<GameState & GameActions>()(
 								const userState = gs.players.find(p => p.playerId === selfPlayerId); // Find 'self'
 								if (userState?.drawnCard && gs.currentPlayerId === userState.playerId && !gs.gameOver && gs.started) {
 									state.pendingAction = 'discard_replace';
+								} else if (gs.specialAction?.active && gs.specialAction.playerId === selfPlayerId && !gs.gameOver && gs.started) {
+									// NB: the service's ObfGameState (service/internal/game/sync_state.go) never
+									// serializes SpecialActionState into private_sync_state today, so
+									// gs.specialAction is always undefined on a real resync and this branch is
+									// presently unreachable. Kept so the derivation is correct and this activates
+									// automatically once the server adds that field (see worker report finding).
+									state.pendingAction = 'special_action';
 								}
 							}
-							// TODO: Add logic for pending special action based on state.gameState.specialAction
 							break;
 						}
 
@@ -415,6 +421,62 @@ export const useGameStore = create<GameState & GameActions>()(
 							state.error = `Game Error: ${payload.message ?? payload.error ?? 'Unknown error'}`;
 							state.isProcessingAction = false; // Allow new actions after error
 							// Should we clear pending state on error? Depends on the error.
+							break;
+
+						case 'game_started': {
+							// Plain Hub.Emit map (game_id, players at the top level of payload, no
+							// GameEvent wrapper - see hub.createAndStartGame). Fires once per game AND
+							// again for every subsequent round in multi-round/ranked matches
+							// (hub.startNextRound re-invokes createAndStartGame) while this store still
+							// holds the previous round's terminal gameState. Reset it so LobbyPage's
+							// `!gameState` guard renders a loading state instead of flashing the finished
+							// round's game-over UI until the new round's private_sync_state /
+							// private_initial_cards arrive.
+							state.gameState = null;
+							state.pendingAction = null;
+							state.displayedDrawnCard = null;
+							state.finalScores = null;
+							state.winnerId = null;
+							state.isLoading = true;
+							state.isProcessingAction = false;
+							break;
+						}
+
+						// --- Historian-only action markers: never delivered over WebSocket ---
+						// These strings are logAction()'d to the historian/Redis pipeline (service
+						// game.go / engine_adapter.go) for the game_actions replay table. That pipeline
+						// is unrelated to the Emitter/fireEvent path real WS events use, so despite
+						// sharing the game_/player_ naming convention with actual GameEventType members,
+						// none of these can ever actually reach this switch. Everything they would
+						// represent already arrives via events already handled above: players[].connected
+						// via private_sync_state (player_add/disconnect/reconnect/reconnect_fail),
+						// turn-advance/forced-discard via game_player_turn/player_discard
+						// (player_timeout/player_timeout_discard), and per-card penalty details via
+						// player_snap_penalty/private_snap_penalty (player_snap_penalty_applied).
+						// Documented no-op instead of falling to the default warn.
+						case 'game_pregame_start':
+						case 'player_add':
+						case 'player_disconnect':
+						case 'player_reconnect':
+						case 'player_reconnect_fail':
+						case 'player_timeout':
+						case 'player_timeout_discard':
+						case 'player_snap_penalty_applied':
+							break;
+
+						// game_reshuffle_stockpile (EventGameReshuffleStockpile in service game.go) is a
+						// declared GameEventType with zero emission call sites anywhere in the service -
+						// dead protocol surface that has never actually been broadcast. No-op until the
+						// server wires up a reshuffle emitter.
+						case 'game_reshuffle_stockpile':
+							break;
+
+						// game_results duplicates game_end's winner/scores (both derived from the same
+						// adjustedScores computed once in CambiaGame.endGame, game.go) and additionally
+						// carries a lobby_status snapshot that belongs to lobbyStore, not this store -
+						// client-side routing (useSocket.ts isGameType) sends it here exclusively since it
+						// starts with "game_". finalScores/winnerId are already set by game_end; no-op.
+						case 'game_results':
 							break;
 
 						default:
