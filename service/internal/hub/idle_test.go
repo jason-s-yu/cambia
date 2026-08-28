@@ -11,6 +11,7 @@ import (
 	"context"
 	"log"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,6 +21,30 @@ import (
 
 	"github.com/jason-s-yu/cambia/service/internal/lobby"
 )
+
+// syncLogBuffer captures redirected log.Writer() output behind a mutex. log.SetOutput swaps the
+// package-global logger, and Shutdown only closes a channel: it does not wait for a hub's
+// ReadPump/WritePump goroutines to actually exit, and an earlier test's straggler can still be
+// mid log.Printf (e.g. "hub: ReadPump exiting...") when a later test redirects that same global
+// logger into its own buffer. A bare bytes.Buffer has no protection against that goroutine's
+// Write racing this test's own String() read, so both go through the same lock here (cambia-907
+// F2).
+type syncLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncLogBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncLogBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
 
 // newIdleHub starts a running hub with a short idle window and a recording OnIdle.
 func newIdleHub(t *testing.T, ttl time.Duration) (*Hub, uuid.UUID, chan uuid.UUID) {
@@ -217,7 +242,7 @@ func TestHandleIdleReapLogsTheArmedWindow(t *testing.T) {
 	h.EmptyIdleTTL = 9 * time.Second
 	h.IdleTTL = 10 * time.Second
 
-	var buf bytes.Buffer
+	var buf syncLogBuffer
 	prevOutput := log.Writer()
 	prevFlags := log.Flags()
 	log.SetOutput(&buf)

@@ -61,9 +61,6 @@ func CreateLobbyHandler(gs *GameServer) http.HandlerFunc {
 			if reqMode, ok := reqBody["gameMode"].(string); ok {
 				lob.GameMode = reqMode // Explicitly set gameMode if provided directly.
 			}
-			if vis, ok := reqBody["visibility"].(string); ok {
-				lob.Visibility = vis
-			}
 			if mode, ok := reqBody["mode"].(string); ok {
 				lob.Mode = mode
 			}
@@ -330,7 +327,6 @@ func ListLobbiesHandler(gs *GameServer) http.HandlerFunc {
 				HouseRules:    lob.HouseRules,
 				Circuit:       lob.Circuit,
 				LobbySettings: lob.LobbySettings,
-				Visibility:    lob.Visibility,
 				Mode:          lob.Mode,
 				QueueID:       lob.QueueID,
 				Searching:     lob.Searching,

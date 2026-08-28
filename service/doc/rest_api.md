@@ -185,13 +185,23 @@ Handled by `internal/handlers/lobby.go`. These manage *ephemeral* in-memory lobb
         "hostUserID": "{uuid}",
         "type": "private",
         "gameMode": "head_to_head",
+        "name": "",
+        "gameId": "00000000-0000-0000-0000-000000000000",
         "inGame": false,
         "createdAt": "{RFC3339 timestamp}",
         "houseRules": { ... }, // Full HouseRules object
         "circuit": { ... }, // Full Circuit object
-        "lobbySettings": { ... } // Full LobbySettings object
+        "lobbySettings": { ... }, // Full LobbySettings object
+        "mode": "casual",
+        "searching": false
     }
     ```
+    `name` is the host-supplied display name (empty string when omitted from the request), and
+    `mode`/`searching` always serialize. `gameId` always serializes too despite its `omitempty`
+    tag: `GameID` is a `uuid.UUID` (a fixed-size byte array), and Go's `encoding/json` only treats
+    a pointer, slice, map, or string as "empty" for that tag, never a fixed-size array - so a
+    lobby with no game yet reports the nil UUID rather than omitting the key. `queueID` is the one
+    field that genuinely omits: it is a plain string, empty until a queue is selected.
 * **Response (Error):** `400 Bad Request` (invalid type/mode/payload), `401 Unauthorized`, `403 Forbidden`, `500 Internal Server Error`.
 
 #### `GET /lobby/list`
@@ -210,17 +220,23 @@ Handled by `internal/handlers/lobby.go`. These manage *ephemeral* in-memory lobb
           "hostUserID": "{uuid}",
           "type": "public",
           "gameMode": "head_to_head",
+          "name": "Friday Night Cambia",
+          "gameId": "00000000-0000-0000-0000-000000000000",
           "inGame": false,
           "createdAt": "{RFC3339 timestamp}",
           "houseRules": { ... },
           "circuit": { ... },
-          "lobbySettings": { ... }
+          "lobbySettings": { ... },
+          "mode": "casual",
+          "searching": false
         },
         "playerCount": 1,
         "maxPlayers": 2
       }
     }
     ```
+    Same fields as the `POST /lobby/create` response above, since `ListLobbiesResponse.Lobby` is
+    the same struct; see that entry's note on `name`, `gameId`, and `queueID`.
 * **Response (Error):** `500 Internal Server Error`.
 
 ---

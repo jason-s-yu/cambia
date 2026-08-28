@@ -46,10 +46,12 @@ type Lobby struct {
 
 	LobbySettings LobbySettings `json:"lobbySettings"`
 
-	Visibility string `json:"visibility"` // "private" or "public"
-	Mode       string `json:"mode"`       // "casual" or "ranked"
-	QueueID    string `json:"queueID,omitempty"`
-	Searching  bool   `json:"searching"`
+	// Mode and QueueID/Searching serve matchmaking; Type alone (see above) carries
+	// public/private, so there is no separate visibility field to hold in sync with it
+	// (cambia-907 F1).
+	Mode      string `json:"mode"` // "casual" or "ranked"
+	QueueID   string `json:"queueID,omitempty"`
+	Searching bool   `json:"searching"`
 
 	// OnEmpty is called when all users have left.
 	OnEmpty func(lobbyID uuid.UUID) `json:"-"`
@@ -101,8 +103,7 @@ func NewLobbyWithDefaults(hostID uuid.UUID) *Lobby {
 		LobbySettings: LobbySettings{
 			AutoStart: true,
 		},
-		Visibility: "private",
-		Mode:       "casual",
+		Mode: "casual",
 	}
 }
 
