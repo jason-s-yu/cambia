@@ -139,6 +139,38 @@ Each status carries three tokens: the foreground, a tinted `-bg`, and a `-border
 
 `--tier-bronze` through `--tier-grandmaster` are set per theme: the dark values are lifted for a dark ground, the light values darkened for contrast on paper.
 
+#### Card states
+
+`ds/game/PlayingCard` has four states and they never collapse into each other: a card the player has chosen must not look like one that is merely legal.
+
+|State|Prop|Edge and shadow|Position|
+|-|-|-|-|
+|Idle|none|`--card-face-edge` face up, `--border-strong` face down, plus `--shadow-playing-card`|Resting|
+|Targetable|`highlight`|`--card-targetable-ring` edge and a 2px ring in the same gold|Resting|
+|Selected|`selected`|`--border-accent` edge and the `--focus-ring` gold ring|Raised 6px|
+|Disabled|`dimmed`|Idle edge at 55% opacity|Resting|
+
+`--card-targetable-ring` is its own token because the ring is drawn on the felt, not on a neutral surface: it runs light-on-green in both themes (`--gold-400` dark, `--gold-300` light) instead of following `--border-accent`, which goes darker in light and lands at 1.84:1 on the felt, under the idle edge. The token holds the 3:1 non-text floor against `--surface-felt` in both themes and `check-theme-tokens` measures it, so the state cannot fade back out.
+
+Focus is a fifth layer, not a state: a card that takes a click is a real `<button>`, so Enter and Space activate it and the global `:focus-visible` outline rings it in `--focus-ring-color` outside whatever state it is in. A card that takes no click is not a button and not focusable; it carries `role="img"` with its name so a screen reader still reads it.
+
+#### Card and pile names
+
+Every card and pile on the table is named for the keyboard and the screen reader, owner first, then position, then face. Nothing is named by its position in the DOM.
+
+|Surface|Accessible name|
+|-|-|
+|Own card, face down|`Your card 2, face down`|
+|Own card, face up|`Your card 2: 9 of clubs`|
+|Opponent card|`Guest-AB12 card 3, face down` / `Guest-AB12 card 3: king of hearts`|
+|Drawn card|`Drawn card: 9 of clubs` / `Drawn card, face down`|
+|Stockpile|`Stockpile, 43 cards` / `Stockpile, empty`|
+|Discard|`Discard pile, top 9 of diamonds` / `Discard pile, empty`|
+
+Positions are 1-based in the name because they are read aloud. Ranks are spoken, not printed: `king of hearts`, not `K of hearts`. `aria-pressed` reports the state of a card that is picked and unpicked (own-hand selection, an opponent card picked for a snap) and is left off a card whose click commits an action.
+
+`data-testid` is the stable e2e hook and is separate from the name: `card-<seatIndex>-<slot>` (both 0-based, over `gameState.players` and the hand array), `card-drawn`, `pile-stock`, `pile-discard`, and `action-*` on the table's buttons (`action-draw-stock`, `action-take-discard`, `action-discard-drawn`, `action-snap`, `action-cancel-snap`, `action-king-swap`, `action-king-keep`, `action-skip-ability`, `action-cambia`, `action-leave`).
+
 ## Typography
 
 One family for the whole app: **Archivo Variable**, self-hosted through `@fontsource-variable/archivo` and imported in `src/main.tsx`. Chosen because it is a neutral grotesque with slightly narrow proportions that stay readable at 11 to 13px in dense leaderboards and score readouts, ships a 100 to 900 weight axis so hierarchy needs no second family, and carries a real `tnum` feature for tabular figures. It is not on the AI-default shortlist.

@@ -47,7 +47,7 @@ import PlayingCard from '@/components/ds/game/PlayingCard';
 import PlayerSeat, { type PlayerSeatState } from '@/components/ds/game/PlayerSeat';
 import ScorePill from '@/components/ds/game/ScorePill';
 import TimerBar from '@/components/ds/game/TimerBar';
-import { toDsCardFace } from './dsCardMap';
+import { toDsCardFace, cardFaceName } from './dsCardMap';
 
 interface DsGameTableProps {
   gameState: ObfGameState;
@@ -242,24 +242,28 @@ const FELT_LABEL: React.CSSProperties = {
   whiteSpace: 'nowrap'
 };
 
-/** Outlined empty pile slot: same footprint as a md card, hairline on the felt. */
-const EmptySlot: React.FC<{ onClick?: () => void; highlight?: boolean; label?: string }> = ({ onClick, highlight, label }) => (
-  <div
-    role={onClick ? 'button' : undefined}
-    tabIndex={onClick ? 0 : undefined}
-    aria-label={label}
-    onClick={onClick}
-    onKeyDown={onClick ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } } : undefined}
-    style={{
-      width: 'var(--card-w-md)',
-      height: 'var(--card-h-md)',
-      boxSizing: 'border-box',
-      borderRadius: 'var(--radius-playing-card)',
-      border: '1px dashed ' + (highlight ? 'var(--border-accent)' : 'var(--border-on-felt)'),
-      cursor: onClick ? 'pointer' : 'default'
-    }}
-  />
-);
+/**
+ * Outlined empty pile slot: same footprint as a md card, hairline on the felt.
+ * A clickable slot is a real button, so it keeps the pile's name and its
+ * keyboard activation when the pile runs empty (cambia-959).
+ */
+const EmptySlot: React.FC<{ onClick?: () => void; highlight?: boolean; label?: string; testId?: string }> = ({ onClick, highlight, label, testId }) => {
+  const box: React.CSSProperties = {
+    appearance: 'none',
+    margin: 0,
+    padding: 0,
+    display: 'block',
+    background: 'transparent',
+    width: 'var(--card-w-md)',
+    height: 'var(--card-h-md)',
+    boxSizing: 'border-box',
+    borderRadius: 'var(--radius-playing-card)',
+    border: '1px dashed ' + (highlight ? 'var(--card-targetable-ring)' : 'var(--border-on-felt)'),
+    cursor: onClick ? 'pointer' : 'default'
+  };
+  if (onClick) return <button type='button' aria-label={label} data-testid={testId} onClick={onClick} style={box} />;
+  return <div role={label ? 'img' : undefined} aria-label={label} data-testid={testId} style={box} />;
+};
 
 const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage, onLeave, connected = true, connectionError = null }) => {
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
@@ -321,6 +325,10 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     return m;
   }, [gameState.players, lobbyPlayers, selfId, authName]);
   const nameOf = useCallback((id: string | null | undefined) => (id ? names.get(id) : undefined) ?? 'Player', [names]);
+  // Seat index over gameState.players: the stable half of the card test ids
+  // (`card-<seatIndex>-<slot>`, both 0-based), so an e2e driver names a card
+  // instead of counting DOM nodes (cambia-959).
+  const seatIndexOf = useCallback((id: string | null | undefined) => gameState.players.findIndex((p) => p.playerId === id), [gameState.players]);
   const notice = useTableNotice(gameState, selfId, names);
 
   // --- Interaction handlers (semantics unchanged from GameBoard) ---
@@ -522,6 +530,12 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     if (specialRank === 'J' || specialRank === 'Q' || specialRank === 'K') return selectedIdx === null;
     return false;
   })();
+  // What an own-hand click does right now, split so the card is only focusable when the
+  // click lands and aria-pressed is only set where the card is a pick, not a commit
+  // (cambia-959). Mirrors handlePlayerCardClick exactly: outside these two the handler
+  // returns without touching state, and an inert card is not a button.
+  const ownCommits = !busy && (pendingAction === 'discard_replace' || specialRank === '7' || specialRank === '8');
+  const ownSelects = !busy && (pendingAction === null || ((specialRank === 'J' || specialRank === 'Q' || specialRank === 'K') && selectedIdx === null));
 
   const hint = useMemo(() => {
     if (gaveUp) return 'Connection lost. Leave the table and rejoin from the dashboard.';
@@ -574,8 +588,13 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
 
   const renderHand = () => {
     const hand = selfState?.revealedHand ?? [];
+    const seat = seatIndexOf(selfId);
     const known = hand.map((card, i) => {
       const face = toDsCardFace(card);
+      const spoken = cardFaceName(face);
+      // aria-pressed tracks what the eye sees: the King's own card stays picked
+      // through the confirm step, which is why `selected` covers it too.
+      const picked = selectedIdx === i || (kingConfirm && kingPair?.myIdx === i);
       return (
         <PlayingCard
           key={card.id || i}
@@ -583,10 +602,12 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
           rank={face?.rank}
           suit={face?.suit}
           size='md'
-          selected={selectedIdx === i || (kingConfirm && kingPair?.myIdx === i)}
+          selected={picked}
           highlight={ownTargetable && selectedIdx !== i}
-          label={face ? `Your card ${i + 1}: ${face.rank}${face.suit ? ' of ' + face.suit : ''}` : `Your card ${i + 1}, face down`}
-          onClick={() => handlePlayerCardClick(card, i)}
+          label={spoken ? `Your card ${i + 1}: ${spoken}` : `Your card ${i + 1}, face down`}
+          pressed={ownSelects ? picked : undefined}
+          testId={`card-${seat}-${i}`}
+          onClick={ownCommits || ownSelects ? () => handlePlayerCardClick(card, i) : undefined}
         />
       );
     });
@@ -595,7 +616,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     // and take no click until the next sync fills them in.
     const extra = Math.max(0, (selfState?.handSize ?? 0) - hand.length);
     const padding = Array.from({ length: extra }).map((_, j) => (
-      <PlayingCard key={`pad-${j}`} faceDown size='md' label={`Your card ${hand.length + j + 1}, face down`} />
+      <PlayingCard key={`pad-${j}`} faceDown size='md' label={`Your card ${hand.length + j + 1}, face down`} testId={`card-${seat}-${hand.length + j}`} />
     ));
     return [...known, ...padding];
   };
@@ -672,6 +693,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                       const snappable = opponentSnappable && !!card;
                       const picked = !!card && snapTarget?.cardId === card.id;
                       const shown = card ? toDsCardFace(revealById.get(card.id)) : null;
+                      const spoken = cardFaceName(shown);
                       const who = nameOf(opp.playerId);
                       return (
                         <PlayingCard
@@ -683,7 +705,11 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                           selected={!!shown || picked}
                           highlight={targetable}
                           dimmed={!!specialRank && !targetable && !shown}
-                          label={shown ? `${who} card ${i + 1}, revealed: ${shown.rank}${shown.suit ? ' of ' + shown.suit : ''}` : `${who} card ${i + 1}`}
+                          label={spoken ? `${who} card ${i + 1}: ${spoken}` : `${who} card ${i + 1}, face down`}
+                          // An ability click commits on the card it lands on; a snap pick is the
+                          // one opponent click that toggles, so it is the one that is pressed.
+                          pressed={snappable && !targetable ? picked : undefined}
+                          testId={`card-${seatIndexOf(opp.playerId)}-${i}`}
                           onClick={targetable || snappable ? () => handleOpponentCardClick(opp.playerId, card!, i) : undefined}
                         />
                       );
@@ -724,9 +750,16 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
           <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'flex-start', gap: 28, flexWrap: 'wrap' }}>
             <div style={{ textAlign: 'center' }}>
               {gameState.stockpileSize > 0 ? (
-                <PlayingCard faceDown size='md' highlight={deckInteractive} label='Stockpile' onClick={deckInteractive ? handleDeckClick : undefined} />
+                <PlayingCard
+                  faceDown
+                  size='md'
+                  highlight={deckInteractive}
+                  label={`Stockpile, ${gameState.stockpileSize} ${gameState.stockpileSize === 1 ? 'card' : 'cards'}`}
+                  testId='pile-stock'
+                  onClick={deckInteractive ? handleDeckClick : undefined}
+                />
               ) : (
-                <EmptySlot label='Stockpile, empty' />
+                <EmptySlot label='Stockpile, empty' testId='pile-stock' />
               )}
               <div style={FELT_LABEL}>Stock · {gameState.stockpileSize}</div>
             </div>
@@ -737,17 +770,26 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                   suit={discardFace.suit}
                   size='md'
                   highlight={discardInteractive}
-                  label={`Discard pile, top card ${discardFace.rank}`}
+                  label={`Discard pile, top ${cardFaceName(discardFace)}`}
+                  testId='pile-discard'
                   onClick={discardInteractive ? handleDiscardClick : undefined}
                 />
               ) : (
-                <EmptySlot label='Discard pile, empty' highlight={discardInteractive} onClick={discardInteractive ? handleDiscardClick : undefined} />
+                <EmptySlot label='Discard pile, empty' testId='pile-discard' highlight={discardInteractive} onClick={discardInteractive ? handleDiscardClick : undefined} />
               )}
               <div style={FELT_LABEL}>Discard · {gameState.discardSize}</div>
             </div>
             {drawnCard && (
               <div style={{ textAlign: 'center' }}>
-                <PlayingCard faceDown={!drawnFace} rank={drawnFace?.rank} suit={drawnFace?.suit} size='md' selected label='Drawn card' />
+                <PlayingCard
+                  faceDown={!drawnFace}
+                  rank={drawnFace?.rank}
+                  suit={drawnFace?.suit}
+                  size='md'
+                  selected
+                  label={drawnFace ? `Drawn card: ${cardFaceName(drawnFace)}` : 'Drawn card, face down'}
+                  testId='card-drawn'
+                />
                 <div style={{ ...FELT_LABEL, color: 'var(--text-on-green)' }}>Drawn</div>
               </div>
             )}
@@ -769,19 +811,19 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: '1 1 220px', maxWidth: 280, paddingBottom: 2 }}>
               <p style={{ margin: 0, minHeight: 20, textAlign: 'center', fontSize: 'var(--ds-text-sm)', lineHeight: 'var(--ds-leading-snug)', color: 'var(--text-on-green)' }}>{hint}</p>
-              {deckInteractive && <Button onClick={handleDeckClick}>Draw from stock</Button>}
-              {canTakeDiscard && <Button variant='secondary' onClick={handleDiscardClick}>Take discard</Button>}
+              {deckInteractive && <Button testId='action-draw-stock' onClick={handleDeckClick}>Draw from stock</Button>}
+              {canTakeDiscard && <Button variant='secondary' testId='action-take-discard' onClick={handleDiscardClick}>Take discard</Button>}
               {pendingAction === 'discard_replace' && selfState?.drawnCard && (
-                <Button variant='secondary' onClick={() => { sendMessage(discardAction(selfState.drawnCard!.id)); setSelectedIdx(null); }}>Discard drawn card</Button>
+                <Button variant='secondary' testId='action-discard-drawn' onClick={() => { sendMessage(discardAction(selfState.drawnCard!.id)); setSelectedIdx(null); }}>Discard drawn card</Button>
               )}
-              {canSnap && <Button onClick={snapSelected}>Snap selected card</Button>}
+              {canSnap && <Button testId='action-snap' onClick={snapSelected}>Snap selected card</Button>}
               {/* Ghost carries --text-secondary, a page-surface token that measures 1.41:1 against
                   the felt in the light theme. On the felt the label takes the felt's own token. */}
-              {canSnap && <Button variant='ghost' style={{ color: 'var(--text-on-green)' }} onClick={() => { setSelectedIdx(null); setSnapTarget(null); }}>Cancel</Button>}
-              {kingConfirm && <Button onClick={() => confirmKingSwap(true)}>Swap cards</Button>}
-              {kingConfirm && <Button variant='secondary' onClick={() => confirmKingSwap(false)}>Keep cards</Button>}
-              {canSkipSpecial && <Button variant='secondary' onClick={() => sendMessage(skipSpecialAction())}>Skip ability</Button>}
-              {canCallCambia && <Button variant='cambia' onClick={() => sendMessage(callCambiaAction())}>Call Cambia</Button>}
+              {canSnap && <Button variant='ghost' testId='action-cancel-snap' style={{ color: 'var(--text-on-green)' }} onClick={() => { setSelectedIdx(null); setSnapTarget(null); }}>Cancel</Button>}
+              {kingConfirm && <Button testId='action-king-swap' onClick={() => confirmKingSwap(true)}>Swap cards</Button>}
+              {kingConfirm && <Button variant='secondary' testId='action-king-keep' onClick={() => confirmKingSwap(false)}>Keep cards</Button>}
+              {canSkipSpecial && <Button variant='secondary' testId='action-skip-ability' onClick={() => sendMessage(skipSpecialAction())}>Skip ability</Button>}
+              {canCallCambia && <Button variant='cambia' testId='action-cambia' onClick={() => sendMessage(callCambiaAction())}>Call Cambia</Button>}
               {turnTimerSec > 0 && !roundOver && !preGame && (
                 <TimerBar
                   label='Turn'
@@ -833,7 +875,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
               {offline ? (gaveUp ? 'Disconnected.' : 'Reconnecting.') : roundOver ? (phase === 'round_end' ? 'Round over.' : 'Game over.') : preGame ? 'Pre-game peek.' : isMyTurn ? 'Your turn.' : currentPlayer ? `${nameOf(currentPlayer.playerId)} to act.` : 'Waiting for the next turn.'}
             </div>
           </div>
-          <Button size='sm' variant='ghost' onClick={onLeave} style={{ marginTop: 12 }}>Leave table</Button>
+          <Button size='sm' variant='ghost' testId='action-leave' onClick={onLeave} style={{ marginTop: 12 }}>Leave table</Button>
         </Panel>
       </div>
     </div>

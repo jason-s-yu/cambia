@@ -31,3 +31,16 @@ export function toDsCardFace(card: ObfCard | null | undefined): DsCardFace | nul
   const suit = card.suit ? SUIT_MAP[card.suit.toUpperCase()] : undefined;
   return { rank: displayRank, suit };
 }
+
+/** Spoken rank: a screen reader reads the printed 'K' as the letter, not the card (cambia-959). */
+const SPOKEN_RANK: Record<string, string> = { A: 'ace', J: 'jack', Q: 'queen', K: 'king', JOKER: 'joker' };
+
+/**
+ * The face as an accessible name fragment: '9 of clubs', 'king of hearts',
+ * 'joker'. Used inside the card and pile names, never drawn on screen.
+ */
+export function cardFaceName(face: DsCardFace | null | undefined): string | null {
+  if (!face) return null;
+  const rank = SPOKEN_RANK[face.rank] ?? face.rank;
+  return face.suit ? `${rank} of ${face.suit}` : rank;
+}
