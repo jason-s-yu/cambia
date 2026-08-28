@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"runtime/debug"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -259,47 +260,94 @@ func (h *Hub) Run(ctx context.Context) {
 	// here rather than waiting for a departure.
 	h.armIdleReap()
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case conn := <-h.join:
-			h.cancelIdleReap()
-			h.connsMu.Lock()
-			h.conns[conn.UserID] = conn
-			h.connsMu.Unlock()
-			h.sendLobbyState(conn)
-			h.broadcastLobbyUpdate()
-			h.notePlayerReconnected(conn.UserID)
-		case userID := <-h.leave:
-			// Connection-level only: the user keeps their lobby membership, because this fires
-			// for a dropped socket just as it does for a deliberate leave (which releases
-			// membership over HTTP before signalling the hub). See lobby.RemoveUser.
-			h.connsMu.Lock()
-			conn, ok := h.conns[userID]
-			if ok {
-				delete(h.conns, userID)
-			}
-			h.connsMu.Unlock()
-			if ok {
-				conn.Close()
-			}
-			h.broadcastLobbyUpdate()
-			h.notePlayerDisconnected(userID)
-			if h.connCount() == 0 {
-				h.armIdleReap()
-			}
-		case msg := <-h.incoming:
-			h.dispatch(msg)
-		case notice := <-h.matched:
-			h.handleMatchFound(notice)
-		case state := <-h.searchState:
-			h.applySearchState(state)
-		case gen := <-h.idleReap:
-			h.handleIdleReap(gen)
-		case <-h.shutdown:
+		if h.runStep(ctx) {
 			return
 		}
 	}
+}
+
+// runStep waits for the hub's next event and handles it, reporting whether the loop must end.
+//
+// Every handler runs under a recover boundary. A panic in one hub's message handling used to
+// unwind past Run and kill the process, so a single game's bug took down every other lobby's
+// game with it: a 4-player table's opponent-targeting ability panicked the shared service and
+// ended every concurrent match (cambia-946). A recovered panic is logged with its stack, this
+// hub tells its own clients the session cannot continue, and only this hub dissolves, through
+// Run's normal exit path (exit -> OnDissolve -> cleanup).
+//
+// The recovery leaves no lock held: the game's own mutex is taken and released by defer inside
+// CambiaGame's public entry points (HandlePlayerAction, ProcessSpecialAction), so the unwind
+// releases it before it ever reaches this boundary, and the hub's own state belongs to this
+// goroutine, which is exiting.
+func (h *Hub) runStep(ctx context.Context) (stop bool) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		log.Printf("hub %s: panic while handling an event: %v\n%s", h.ID, r, debug.Stack())
+		h.reportFatalPanic()
+		stop = true
+	}()
+
+	select {
+	case <-ctx.Done():
+		return true
+	case conn := <-h.join:
+		h.cancelIdleReap()
+		h.connsMu.Lock()
+		h.conns[conn.UserID] = conn
+		h.connsMu.Unlock()
+		h.sendLobbyState(conn)
+		h.broadcastLobbyUpdate()
+		h.notePlayerReconnected(conn.UserID)
+	case userID := <-h.leave:
+		// Connection-level only: the user keeps their lobby membership, because this fires
+		// for a dropped socket just as it does for a deliberate leave (which releases
+		// membership over HTTP before signalling the hub). See lobby.RemoveUser.
+		h.connsMu.Lock()
+		conn, ok := h.conns[userID]
+		if ok {
+			delete(h.conns, userID)
+		}
+		h.connsMu.Unlock()
+		if ok {
+			conn.Close()
+		}
+		h.broadcastLobbyUpdate()
+		h.notePlayerDisconnected(userID)
+		if h.connCount() == 0 {
+			h.armIdleReap()
+		}
+	case msg := <-h.incoming:
+		h.dispatch(msg)
+	case notice := <-h.matched:
+		h.handleMatchFound(notice)
+	case state := <-h.searchState:
+		h.applySearchState(state)
+	case gen := <-h.idleReap:
+		h.handleIdleReap(gen)
+	case <-h.shutdown:
+		return true
+	}
+	return false
+}
+
+// reportFatalPanic tells this hub's own clients that their session cannot continue, just before
+// the hub dissolves. Best-effort by construction: it runs on the way out of a panic, so it takes
+// its own recover boundary rather than risking a second unwind, and it touches nothing but the
+// connection set (the game's state is whatever the panic left behind, and is not read here).
+func (h *Hub) reportFatalPanic() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("hub %s: panic while reporting a fatal error: %v", h.ID, r)
+		}
+	}()
+	h.Emit("error", map[string]interface{}{
+		"code":    "hub_fatal",
+		"message": "This game hit an internal error and has ended. Other games are unaffected.",
+		"fatal":   true,
+	})
 }
 
 // notePlayerDisconnected tells a running game that one of its players lost their socket.
