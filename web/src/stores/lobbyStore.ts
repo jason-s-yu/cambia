@@ -268,8 +268,14 @@ export const useCurrentLobbyStore = create<CurrentLobbyState>((set, get) => ({
 						const newPhase = message.phase as LobbyPhase;
 						if (newPhase && newPhase !== state.phase) {
 							const updates: any = { phase: newPhase };
-							// Clear countdown on phase transitions out of countdown
-							if (newPhase !== 'countdown') {
+							if (newPhase === 'countdown') {
+								// hub.go's beginCountdown emits phase_change{phase:"countdown", seconds:N}
+								// (whole seconds); start the client-side countdown from here since the
+								// server never emits a separate lobby_countdown_start message.
+								updates.countdownStartTime = Date.now();
+								updates.countdownDuration = typeof message.seconds === 'number' ? message.seconds : null;
+							} else {
+								// Clear countdown on phase transitions out of countdown (cancel/abort/start).
 								updates.countdownStartTime = null;
 								updates.countdownDuration = null;
 							}
