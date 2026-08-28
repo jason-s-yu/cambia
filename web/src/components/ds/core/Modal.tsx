@@ -6,16 +6,18 @@
 // behind the scrim marked inert so its controls leave the tab order. The panel
 // is portalled to the body because the inert page is the tree the modal is
 // rendered from, and inert cannot be lifted by a descendant (cambia-892, DL-7).
-// inline=true renders the panel only, no scrim and no modal behaviour
-// (specimens and embeds).
+// inline=true renders the panel only: no scrim, no modal behaviour and no
+// dialog semantics, since a specimen embedded in a page is not a dialog
+// (cambia-914, DL-8 R4).
 import React, { useCallback, useEffect, useId, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import { getAppRoot } from '@/lib/appRoot';
 
 export interface ModalProps {
   open?: boolean;
   title?: React.ReactNode;
   onClose?: () => void;
-  /** Action row (Buttons), right-aligned on a raised strip. */
+  /** Action row (Buttons), right-aligned on a raised strip. Its last control is the confirm action and takes focus on open. */
   footer?: React.ReactNode;
   /** Render panel only, no fixed overlay. */
   inline?: boolean;
@@ -32,9 +34,36 @@ const FOCUSABLE = [
   '[tabindex]:not([tabindex="-1"])'
 ].join(', ');
 
+// Open modals, innermost last. Escape is listened for at document capture, so
+// without a stack every mounted modal answered the same keypress and a nested
+// dialog closed its parent along with itself (cambia-914, DL-8 R2).
+const modalStack: symbol[] = [];
+
+// inert on the app mount is one attribute shared by every open modal, so it is
+// refcounted: the first modal sets it, only the last one clears it. Setting and
+// clearing per modal let an inner dialog's unmount hand the page back while an
+// outer dialog still covered it (cambia-914, DL-8 R2).
+let inertDepth = 0;
+
+function acquireInert(): void {
+  const page = getAppRoot();
+  if (!page) return;
+  if (inertDepth === 0) page.setAttribute('inert', '');
+  inertDepth++;
+}
+
+function releaseInert(): void {
+  const page = getAppRoot();
+  if (!page) return;
+  inertDepth = Math.max(0, inertDepth - 1);
+  if (inertDepth === 0) page.removeAttribute('inert');
+}
+
 /** Centered dialog on a raised flat surface; inline=true renders the panel without the fixed scrim (specimens/embeds). */
 const Modal: React.FC<ModalProps> = ({ open = true, title, onClose, footer, inline = false, width = 440, children }) => {
   const panelRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const footerRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
   const isModal = open && !inline;
 
@@ -48,23 +77,38 @@ const Modal: React.FC<ModalProps> = ({ open = true, title, onClose, footer, inli
   // element. Splitting them runs the cleanups in the wrong order.
   useEffect(() => {
     if (!isModal) return;
+    const token = Symbol('ds-modal');
+    modalStack.push(token);
     const opener = document.activeElement as HTMLElement | null;
-    const page = document.getElementById('root');
-    page?.setAttribute('inert', '');
-    const first = panelRef.current?.querySelector<HTMLElement>(FOCUSABLE);
-    (first ?? panelRef.current)?.focus();
+    acquireInert();
+    // Focus the confirm action, not the Close X: the dialog opens on the choice
+    // it exists to take, and Tab still reaches the close control (cambia-914,
+    // DL-8 R9; the DsResultsView precedent from cambia-848). The action row's
+    // last control is the confirm one; a dialog without a footer falls back to
+    // the first control in its body, then to the panel.
+    const footerControls = footerRef.current ? Array.from(footerRef.current.querySelectorAll<HTMLElement>(FOCUSABLE)) : [];
+    const initial = footerControls[footerControls.length - 1]
+      ?? bodyRef.current?.querySelector<HTMLElement>(FOCUSABLE)
+      ?? panelRef.current;
+    initial?.focus();
     // Escape listens on the document rather than the panel: a scrim click puts
     // focus on the body, and the key still has to reach the dialog from there.
+    // Only the topmost modal answers it.
     const onEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && onCloseRef.current) {
-        e.stopPropagation();
-        onCloseRef.current();
-      }
+      if (e.key !== 'Escape') return;
+      if (modalStack[modalStack.length - 1] !== token) return;
+      if (!onCloseRef.current) return;
+      e.stopPropagation();
+      onCloseRef.current();
     };
     document.addEventListener('keydown', onEscape, true);
     return () => {
       document.removeEventListener('keydown', onEscape, true);
-      page?.removeAttribute('inert');
+      // Unmount order is not guaranteed to be LIFO, so the token is removed by
+      // identity rather than popped.
+      const i = modalStack.lastIndexOf(token);
+      if (i >= 0) modalStack.splice(i, 1);
+      releaseInert();
       if (opener && document.contains(opener)) opener.focus();
     };
   }, [isModal]);
@@ -94,15 +138,22 @@ const Modal: React.FC<ModalProps> = ({ open = true, title, onClose, footer, inli
   const panel = (
     <div
       ref={panelRef}
-      role='dialog'
+      role={inline ? undefined : 'dialog'}
       aria-modal={isModal ? 'true' : undefined}
-      aria-labelledby={title ? titleId : undefined}
-      aria-label={title ? undefined : 'Dialog'}
-      tabIndex={-1}
+      aria-labelledby={!inline && title ? titleId : undefined}
+      aria-label={!inline && !title ? 'Dialog' : undefined}
+      tabIndex={inline ? undefined : -1}
       onKeyDown={onKeyDown}
       style={{
         width: inline ? '100%' : width,
         maxWidth: '92vw',
+        // A dialog taller than the viewport clipped its own footer against
+        // overflow:hidden while the page behind it was inert, leaving no way to
+        // reach the actions. The panel is capped to the viewport less its
+        // gutter and the body scrolls instead (cambia-914, DL-8 R5).
+        maxHeight: inline ? undefined : 'calc(100dvh - 2 * var(--space-6))',
+        display: 'flex',
+        flexDirection: 'column',
         background: 'var(--surface-1)',
         border: '1px solid var(--border-default)',
         borderRadius: 'var(--ds-radius-lg)',
@@ -111,7 +162,7 @@ const Modal: React.FC<ModalProps> = ({ open = true, title, onClose, footer, inli
         overflow: 'hidden'
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px 12px' }}>
+      <div style={{ flex: '0 0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px 12px' }}>
         {/* The title is the dialog's name, so it is a heading with an id, not a
             styled div; an omitted title falls back to aria-label. */}
         {title
@@ -140,9 +191,9 @@ const Modal: React.FC<ModalProps> = ({ open = true, title, onClose, footer, inli
           </button>
         )}
       </div>
-      <div style={{ padding: '0 20px 18px', fontSize: 'var(--text-md)', color: 'var(--text-secondary)' }}>{children}</div>
+      <div ref={bodyRef} style={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '0 20px 18px', fontSize: 'var(--text-md)', color: 'var(--text-secondary)' }}>{children}</div>
       {footer && (
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, padding: '14px 20px', borderTop: '1px solid var(--border-subtle)', background: 'var(--surface-2)' }}>
+        <div ref={footerRef} style={{ flex: '0 0 auto', display: 'flex', justifyContent: 'flex-end', gap: 10, padding: '14px 20px', borderTop: '1px solid var(--border-subtle)', background: 'var(--surface-2)' }}>
           {footer}
         </div>
       )}
@@ -151,10 +202,10 @@ const Modal: React.FC<ModalProps> = ({ open = true, title, onClose, footer, inli
   if (inline) return panel;
   return createPortal(
     <div
-      style={{ position: 'fixed', inset: 0, zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--surface-overlay)' }}
+      style={{ position: 'fixed', inset: 0, zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 'var(--space-6)', background: 'var(--surface-overlay)' }}
       onClick={onClose}
     >
-      <div onClick={(e) => e.stopPropagation()}>{panel}</div>
+      <div onClick={(e) => e.stopPropagation()} style={{ display: 'flex', minHeight: 0, maxHeight: '100%' }}>{panel}</div>
     </div>,
     document.body
   );

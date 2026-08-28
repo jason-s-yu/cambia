@@ -7,8 +7,9 @@ import '@fontsource-variable/archivo/wght.css';
 import './index.css'; // Import Tailwind CSS / global styles
 import 'uplot/dist/uPlot.min.css';
 import { BrowserRouter } from 'react-router-dom';
+import { APP_ROOT_ID } from '@/lib/appRoot';
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
+ReactDOM.createRoot(document.getElementById(APP_ROOT_ID)!).render(
   <React.StrictMode>
     <BrowserRouter>
       <App />
