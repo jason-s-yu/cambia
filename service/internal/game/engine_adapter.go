@@ -455,6 +455,24 @@ func (g *CambiaGame) applyEngineAction(actionIdx uint16, actorID uuid.UUID) erro
 	// Snapshot pre-action state for diffing.
 	preStockLen := g.Engine.StockLen
 	preDiscardLen := g.Engine.DiscardLen
+	stockpileWasEmpty := actionIdx == engine.ActionDrawStockpile && preStockLen == 0
+
+	// A stockpile draw off an empty stockpile forces the engine to reshuffle the discard pile
+	// back into the stockpile before drawing (engine/actions.go drawStockpile -> attemptReshuffle).
+	// Drive that reshuffle here, ahead of the draw, the same way cambia-799's handleSnapFailure
+	// drives it for penalty draws: snapshot the discard mirror before the engine scrambles it and
+	// rebuild the tracker against it, then let preStockLen carry the just-reshuffled count into the
+	// draw below. That keeps updateCardTracker's existing `tracker.StockUUIDs[preStockLen-1]`
+	// lookup resolving the drawn card out of the freshly rebuilt mirror instead of skipping the
+	// update outright (cambia-819: the `if preStockLen > 0` guard used to skip this branch
+	// whenever the draw reshuffled, leaving DrawnCardUUID stale and StockUUIDs never rebuilt).
+	if stockpileWasEmpty {
+		prevDiscardUUIDs := append([]uuid.UUID(nil), g.CardTracker.DiscardUUIDs[:preDiscardLen]...)
+		if g.Engine.AttemptReshuffle() {
+			g.mirrorReshuffleIntoTracker(prevDiscardUUIDs)
+			preStockLen = g.Engine.StockLen
+		}
+	}
 
 	// Apply to engine.
 	if err := g.Engine.ApplyAction(actionIdx); err != nil {
@@ -476,11 +494,10 @@ func (g *CambiaGame) applyEngineAction(actionIdx uint16, actorID uuid.UUID) erro
 	// back into the stockpile first (engine drawStockpile -> attemptReshuffle, engine/actions.go:
 	// StockLen==0 triggers the reshuffle unconditionally before the draw). Broadcast it so clients
 	// correct their locally-tracked discard/stockpile counts immediately instead of drifting until
-	// the next full sync_state (cambia-763 F3). Engine state (StockLen/DiscardLen) is authoritative
-	// here regardless of the CardUUIDTracker mirror, so the counts are correct even though the
-	// tracker's per-card UUID slots for the reshuffled cards are not (separate, pre-existing gap;
-	// harmless for this event since reshuffled stockpile cards are never individually addressed).
-	if actionIdx == engine.ActionDrawStockpile && preStockLen == 0 {
+	// the next full sync_state (cambia-763 F3). Checked against stockpileWasEmpty (the original
+	// pre-reshuffle preStockLen==0 signal) rather than preStockLen itself, since the block above
+	// may have already advanced preStockLen to the post-reshuffle count by this point.
+	if stockpileWasEmpty {
 		g.fireEvent(GameEvent{
 			Type: EventGameReshuffleStockpile,
 			Payload: map[string]interface{}{

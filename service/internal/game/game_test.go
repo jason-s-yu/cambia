@@ -290,6 +290,61 @@ func TestStockpileDrawReshuffleEmitsEvent(t *testing.T) {
 	assert.Nil(t, mb.findEventByType(EventGameReshuffleStockpile), "a draw with cards already in the stockpile must not emit a reshuffle event")
 }
 
+// TestStockpileDrawReshuffleUpdatesTracker verifies that a stockpile draw which forces a reshuffle
+// rebuilds the CardUUIDTracker mirror instead of leaving it stale (cambia-819). Before this fix,
+// updateCardTracker's `if preStockLen > 0` guard skipped the tracker update outright whenever a
+// draw reshuffled, so DrawnCardUUID kept its previous value and StockUUIDs/StockLen were never
+// rebuilt: the drawn card would reach the client under a nil or duplicate UUID.
+func TestStockpileDrawReshuffleUpdatesTracker(t *testing.T) {
+	g, _, _ := setupTestGame(t, 2, &HouseRules{TurnTimerSec: 0, PenaltyDrawCount: 2})
+	actor := currentTurnPlayer(g)
+	engineIdx := g.PlayerToEngine[actor.ID]
+
+	// Collect every UUID already tracked elsewhere (both hands) before the draw, so the drawn
+	// card's UUID can be checked against them for uniqueness after the reshuffle.
+	preexisting := map[uuid.UUID]bool{}
+	for _, p := range g.CardTracker.Players {
+		for i := uint8(0); i < engine.MaxHandSize; i++ {
+			if id := p.HandUUIDs[i]; id != uuid.Nil {
+				preexisting[id] = true
+			}
+		}
+	}
+
+	// Pull 2 still-undealt cards straight off the current stockpile (guaranteed distinct from
+	// every hand and already registered by initCardTracker) and move them into the discard pile,
+	// then empty the stockpile. Reshuffle keeps the top card and moves the other 1 back into the
+	// stockpile, leaving a 1-card stockpile the draw immediately empties (StockLen 0 -> 0 through
+	// a reshuffle, exercising the smallest non-trivial mirror rebuild).
+	nonTopCard, nonTopUUID := g.Engine.Stockpile[0], g.CardTracker.StockUUIDs[0]
+	topCard, topUUID := g.Engine.Stockpile[1], g.CardTracker.StockUUIDs[1]
+	require.NotEqual(t, uuid.Nil, nonTopUUID)
+	require.NotEqual(t, uuid.Nil, topUUID)
+
+	g.Engine.StockLen = 0
+	g.CardTracker.StockLen = 0
+	g.Engine.DiscardPile[0], g.CardTracker.DiscardUUIDs[0] = nonTopCard, nonTopUUID
+	g.Engine.DiscardPile[1], g.CardTracker.DiscardUUIDs[1] = topCard, topUUID // top
+	g.Engine.DiscardLen = 2
+	g.CardTracker.DiscardLen = g.Engine.DiscardLen
+	preexisting[topUUID] = true
+
+	g.HandlePlayerAction(actor.ID, models.GameAction{ActionType: "action_draw_stockpile"})
+
+	drawnUUID := g.CardTracker.Players[engineIdx].DrawnCardUUID
+	assert.NotEqual(t, uuid.Nil, drawnUUID, "drawn card's UUID must not be nil after a reshuffling draw")
+	assert.False(t, preexisting[drawnUUID], "drawn card's UUID must not be shared with any other previously tracked card")
+	assert.Equal(t, g.Engine.StockLen, g.CardTracker.StockLen, "CardTracker.StockLen must match the post-reshuffle-and-draw stockpile length")
+	assert.EqualValues(t, 0, g.Engine.StockLen, "the single reshuffled stockpile card should have been drawn, leaving the stockpile empty")
+
+	// The drawn card's identity should be the same UUID the non-top discard card carried before
+	// the reshuffle (identity travels with the UUID across a reshuffle), not a stale slot or a
+	// freshly minted placeholder.
+	assert.Equal(t, nonTopUUID, drawnUUID, "the reshuffled non-top discard card should be the one drawn, under its pre-reshuffle UUID")
+	drawnDetails := g.CardTracker.Registry[drawnUUID]
+	require.NotNil(t, drawnDetails, "drawn card must have a registry entry")
+}
+
 // TestBasicDrawReplace verifies the draw -> replace card flow.
 func TestBasicDrawReplace(t *testing.T) {
 	g, players, mb := setupTestGame(t, 2, testHouseRules(0, 2))
