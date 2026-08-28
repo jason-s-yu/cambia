@@ -20,6 +20,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/jason-s-yu/cambia/service/internal/database"
+
 	"github.com/jason-s-yu/cambia/service/internal/auth"
 )
 
@@ -233,7 +235,7 @@ func TestE2ETwoFreshGuestsGetDistinctUsernames(t *testing.T) {
 	if !dbAvailable {
 		t.Skip("skipping: no Postgres reachable via PG_HOST/PG_PORT/POSTGRES_USER/POSTGRES_PASSWORD/PG_DATABASE (see service/.env.template)")
 	}
-	database.ConnectDB()
+	ensureTestDB(t)
 	auth.Init()
 
 	gs, ts := newForfeitTestServer(t)
@@ -285,7 +287,7 @@ func TestClaimEphemeralPersistsChosenUsername(t *testing.T) {
 	if !dbAvailable {
 		t.Skip("skipping: no Postgres reachable via PG_HOST/PG_PORT/POSTGRES_USER/POSTGRES_PASSWORD/PG_DATABASE (see service/.env.template)")
 	}
-	database.ConnectDB()
+	ensureTestDB(t)
 	auth.Init()
 
 	guestID, guestToken := createGuestSession(t)
