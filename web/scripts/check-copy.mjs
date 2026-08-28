@@ -43,7 +43,7 @@ function collectFiles(path) {
 
 const files = TARGETS.flatMap(collectFiles);
 if (files.length === 0) {
-    console.error('check-copy: scanned 0 files across all targets; refusing to report a silent pass');
+    console.error('check-copy: scanned 0 files across all targets; no files were scanned, so the target list is wrong');
     process.exit(1);
 }
 const hits = [];
