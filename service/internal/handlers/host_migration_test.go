@@ -43,7 +43,7 @@ func (c *wsTestClient) sendWith(msgType string, extra map[string]interface{}) {
 }
 
 // sendReliableWith is sendReliable for a message with a payload: it retries past the hub's
-// staleness gate, which private frames to other users can trip.
+// staleness gate, which a broadcast landing between the client's last frame and its send can trip.
 func (c *wsTestClient) sendReliableWith(msgType string, extra map[string]interface{}) {
 	for attempt := 0; attempt < 8; attempt++ {
 		before := c.countType("sync_state")

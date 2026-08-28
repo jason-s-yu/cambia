@@ -90,10 +90,11 @@ func (c *wsTestClient) send(msgType string) {
 	}
 }
 
-// sendReliable sends a message and, if the hub bounces it with a sync_state (the client's
-// echoed seq was behind the global counter, which private frames to other users advance),
-// updates its seq from that snapshot and retries. This mirrors how a real client recovers
-// from the staleness gate. Returns once the message is accepted (no fresh sync_state bounce).
+// sendReliable sends a message and, if the hub bounces it with a sync_state (the client's echoed
+// seq trailed the global counter, which a broadcast landing between the client's last frame and
+// its send is enough to do), updates its seq from that snapshot and retries. This mirrors how a
+// real client recovers from the staleness gate. Returns once the message is accepted (no fresh
+// sync_state bounce). Private frames to other users no longer move the counter (cambia-878).
 func (c *wsTestClient) sendReliable(msgType string) {
 	for attempt := 0; attempt < 8; attempt++ {
 		before := c.countType("sync_state")
