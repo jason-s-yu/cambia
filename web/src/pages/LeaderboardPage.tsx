@@ -1,43 +1,18 @@
 // src/pages/LeaderboardPage.tsx
 import React, { useEffect } from 'react';
-import TierBadge, { type Tier } from '@/components/ds/data/TierBadge';
+import TierBadge from '@/components/ds/data/TierBadge';
 import Panel from '@/components/ds/chrome/Panel';
 import Spinner from '@/components/ds/core/Spinner';
 import { useLeaderboardStore, type LeaderboardPool } from '@/stores/leaderboardStore';
 import type { LeaderboardRow } from '@/services/leaderboardService';
+import { RATING_POOLS, formatRating, tierFromRating } from '@/utils/ratingPool';
 
 const GRID_WITH_PEAK = '56px 1fr 150px 130px 70px 130px';
 const GRID_NO_PEAK = '56px 1fr 150px 130px 70px';
 
-const TIER_CUTOFFS: Array<[number, Tier]> = [
-	[2000, 'grandmaster'],
-	[1850, 'master'],
-	[1700, 'diamond'],
-	[1550, 'platinum'],
-	[1400, 'gold'],
-	[1250, 'silver']
-];
-
-/**
- * Client-side rating -> tier bucketing. The server contract carries only
- * numeric rating/rd, no tier field, so tiers are derived here for display.
- * All pools rank on the same Glicko-2 elo scale (the per-pool elo and phi
- * user columns), so one cutoff table applies until the server exposes tiers.
- */
-const tierFromRating = (rating: number): Tier => {
-	for (const [cutoff, tier] of TIER_CUTOFFS) {
-		if (rating >= cutoff) return tier;
-	}
-	return 'bronze';
-};
-
-const formatRating = (rating: number, rd: number): string => `${Math.round(rating)} ± ${Math.round(rd)}`;
-
-const POOLS: Array<[LeaderboardPool, string]> = [
-	['1v1', 'Head to Head'],
-	['4p', '4 Player'],
-	['7p8p', '7-8 Player']
-];
+// Pool list, labels, tier cutoffs and rating formatting live in utils/ratingPool so
+// this page and the profile rating summary cannot drift apart on any of them.
+const POOLS: Array<[LeaderboardPool, string]> = RATING_POOLS;
 
 interface LbRowProps {
 	r: LeaderboardRow;

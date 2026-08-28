@@ -3,10 +3,13 @@ import { create } from 'zustand';
 import type { AxiosError } from 'axios';
 import type { ApiErrorResponse } from '@/types';
 import { fetchLeaderboard, type LeaderboardRow } from '@/services/leaderboardService';
+import type { RatingPool } from '@/utils/ratingPool';
 
 // Pool identifiers match the service's rating pools (validLeaderboardPools in
-// service/internal/handlers/leaderboard.go): the elo_*/phi_* column pairs.
-export type LeaderboardPool = '1v1' | '4p' | '7p8p';
+// service/internal/handlers/leaderboard.go): the elo_*/phi_* column pairs. Aliased
+// to the shared RatingPool so the leaderboard and the profile rating summary are
+// typed against one definition of the pool set.
+export type LeaderboardPool = RatingPool;
 
 interface LeaderboardPoolState {
 	rows: LeaderboardRow[];

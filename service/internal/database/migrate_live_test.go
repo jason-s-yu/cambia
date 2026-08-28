@@ -95,10 +95,24 @@ func TestLiveMigratePartialCatchUp(t *testing.T) {
 	if err := Migrate(ctx, pool); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	// Forget the last file, as if the image shipped a new migration.
+	// Forget one recorded file and undo its effect, as if the image shipped it as a new
+	// migration. Named explicitly rather than taken as "the last file": the assertion
+	// below observes a table this specific migration creates, so appending any migration
+	// without one (an index-only file, say) would quietly turn this into a test of
+	// nothing.
+	const pending = "5_add_lobby_persistence.sql"
 	files, _ := migrationFiles()
-	last := files[len(files)-1]
-	if _, err := pool.Exec(ctx, "DELETE FROM schema_migrations WHERE version=$1", last); err != nil {
+	found := false
+	for _, f := range files {
+		if f == pending {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("%s is no longer an embedded migration; retarget this test", pending)
+	}
+	if _, err := pool.Exec(ctx, "DELETE FROM schema_migrations WHERE version=$1", pending); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	// The enum has to go too: 5_add_lobby_persistence.sql creates lobby_type
@@ -113,8 +127,8 @@ func TestLiveMigratePartialCatchUp(t *testing.T) {
 	if !exists(t, pool, "lobbies") {
 		t.Fatal("expected the pending migration to be re-applied")
 	}
-	if n := count(t, pool, "SELECT count(*) FROM schema_migrations WHERE version=$1", last); n != 1 {
-		t.Fatalf("expected %s recorded once, got %d", last, n)
+	if n := count(t, pool, "SELECT count(*) FROM schema_migrations WHERE version=$1", pending); n != 1 {
+		t.Fatalf("expected %s recorded once, got %d", pending, n)
 	}
 }
 

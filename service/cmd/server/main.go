@@ -69,6 +69,8 @@ func main() {
 	mux.HandleFunc("/user/logout", handlers.LogoutHandler)
 	mux.HandleFunc("/user/me", handlers.MeHandler)
 	mux.HandleFunc("/user/claim", handlers.ClaimEphemeralHandler)
+	mux.HandleFunc("/user/history", handlers.GameHistoryHandler)
+	mux.HandleFunc("/user/ratings", handlers.RatingSummaryHandler)
 
 	// friend endpoints
 	mux.HandleFunc("/friends/add", handlers.AddFriendHandler)
