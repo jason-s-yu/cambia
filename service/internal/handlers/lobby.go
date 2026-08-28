@@ -280,6 +280,11 @@ const lobbyListingCreationGrace = 30 * time.Second
 // ListLobbiesHandler returns a map of currently joinable ephemeral lobbies from the store.
 // For each lobby, it includes player count and calculated max player count based on game mode.
 //
+// Only lobbies of type "public" are listed. A private lobby's id, host id, host-typed name and
+// house rules are not meant for a caller who was never invited, and the list carries no identity
+// requirement below to tell an invited caller from an uninvited one anyway; a member reaches
+// their own private lobby through GET /lobby/active instead (cambia-900 L1).
+//
 // A lobby with no game in progress and no live WebSocket connection is left out entirely rather
 // than listed as inactive. playerCount reports membership, and only a deliberate leave releases
 // membership (cambia-807), so a table that finished a game and closed its tabs kept listing
@@ -321,7 +326,7 @@ func ListLobbiesHandler(gs *GameServer) http.HandlerFunc {
 				Name:          lob.Name,
 				GameID:        lob.GameID,
 				InGame:        lob.InGame,
-				CreatedAt:     lob.CreatedAt,
+				CreatedAt:     createdAt,
 				HouseRules:    lob.HouseRules,
 				Circuit:       lob.Circuit,
 				LobbySettings: lob.LobbySettings,
@@ -331,6 +336,16 @@ func ListLobbiesHandler(gs *GameServer) http.HandlerFunc {
 				Searching:     lob.Searching,
 			}
 			lob.Mu.Unlock() // Unlock after reading.
+
+			// Skip non-public lobbies. This list carries no identity requirement (see doc
+			// above) and answers "what can anyone join right now"; a private lobby's id, host
+			// id, host-typed name and house rules are not meant for that audience, and its
+			// members already have their own way back through GET /lobby/active (cambia-900
+			// L1). Read under the same lock as inGame/createdAt above rather than re-reading
+			// lob.Type here, unlocked.
+			if lobbyCopy.Type != "public" {
+				continue
+			}
 
 			// Skip lobbies nobody is connected to, unless a running game keeps its listing
 			// (players are mid-table and expected back, the same exemption the idle reaper
