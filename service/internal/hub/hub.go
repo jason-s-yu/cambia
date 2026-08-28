@@ -216,6 +216,7 @@ func (h *Hub) Run(ctx context.Context) {
 			h.connsMu.Unlock()
 			h.sendLobbyState(conn)
 			h.broadcastLobbyUpdate()
+			h.notePlayerReconnected(conn.UserID)
 		case userID := <-h.leave:
 			// Connection-level only: the user keeps their lobby membership, because this fires
 			// for a dropped socket just as it does for a deliberate leave (which releases
@@ -230,6 +231,7 @@ func (h *Hub) Run(ctx context.Context) {
 				conn.Close()
 			}
 			h.broadcastLobbyUpdate()
+			h.notePlayerDisconnected(userID)
 			if h.connCount() == 0 {
 				h.armIdleReap()
 			}
@@ -243,6 +245,40 @@ func (h *Hub) Run(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// notePlayerDisconnected tells a running game that one of its players lost their socket.
+// game.HandleDisconnect had no callers at all before this: a mid-game drop never marked the
+// player disconnected, so the ForfeitOnDisconnect house rule was dead, circuit grace timers never
+// armed, and a turn timer running out was the only thing that ever noticed (cambia-837).
+//
+// This is a connection-level event and stays one. Lobby membership is untouched, so the player
+// keeps their seat and their resume entry and can reconnect into the game: the transient-versus-
+// deliberate distinction cambia-807 drew. A deliberate leave cannot reach here mid-game anyway,
+// since the leave endpoint refuses one.
+//
+// Run() goroutine only, and safe there: h.Phase and h.Game belong to it, and HandleDisconnect
+// takes the game's own mutex, which nothing on this path holds (connsMu is released above).
+func (h *Hub) notePlayerDisconnected(userID uuid.UUID) {
+	if h.Phase != PhaseInGame || h.Game == nil || !h.Game.HasPlayer(userID) {
+		return
+	}
+	h.Game.HandleDisconnect(userID)
+}
+
+// notePlayerReconnected is the counterpart: it restores the seat, sends the returning player the
+// sync state they need to draw the table again, reschedules their turn timer if the game was
+// waiting on them, and cancels a circuit grace timer before the AI takes over.
+//
+// The game is handed no socket of its own. models.Player.Conn is only ever written and never
+// read - every event a game sends goes out through the hub Emitter - and passing the raw
+// WebSocket would give HandleReconnect's not-a-player path the power to close a connection the
+// hub is still serving.
+func (h *Hub) notePlayerReconnected(userID uuid.UUID) {
+	if h.Phase != PhaseInGame || h.Game == nil || !h.Game.HasPlayer(userID) {
+		return
+	}
+	h.Game.HandleReconnect(userID, nil)
 }
 
 // armIdleReap opens a fresh idle window. Called from Run() only, so idleTimer and idleGen need no
@@ -1125,8 +1161,23 @@ func (h *Hub) Alive() bool {
 // run on a goroutine other than the hub's Run() loop (e.g. a turn-timeout timer), so it must not
 // mutate h.Phase directly; this mirrors the _start_next_round synthetic-message pattern to route
 // the mutation through dispatch() inside Run() instead (cambia-510).
+//
+// The send never blocks the caller. Since cambia-837 the caller can be the Run goroutine itself:
+// a drop under ForfeitOnDisconnect ends the game inside the leave case, and a blocking send onto
+// a full incoming queue would park the only goroutine that drains it. A full queue hands the send
+// to a goroutine that can park harmlessly, so the transition is deferred rather than dropped, and
+// released by shutdown if the hub stops first.
 func (h *Hub) NotifyGameEnded() {
-	h.incoming <- ClientMsg{Type: "_game_ended"}
+	select {
+	case h.incoming <- ClientMsg{Type: "_game_ended"}:
+	default:
+		go func() {
+			select {
+			case h.incoming <- ClientMsg{Type: "_game_ended"}:
+			case <-h.shutdown:
+			}
+		}()
+	}
 }
 
 // Incoming returns the channel for routing inbound ClientMsgs into the hub.
