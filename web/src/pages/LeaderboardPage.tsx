@@ -1,5 +1,5 @@
 // src/pages/LeaderboardPage.tsx
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import TierBadge from '@/components/ds/data/TierBadge';
 import Panel from '@/components/ds/chrome/Panel';
 import Spinner from '@/components/ds/core/Spinner';
@@ -7,12 +7,47 @@ import { useLeaderboardStore, type LeaderboardPool } from '@/stores/leaderboardS
 import type { LeaderboardRow } from '@/services/leaderboardService';
 import { RATING_POOLS, formatRating, tierFromRating } from '@/utils/ratingPool';
 
-const GRID_WITH_PEAK = '56px 1fr 150px 130px 70px 130px';
-const GRID_NO_PEAK = '56px 1fr 150px 130px 70px';
+// Row grid. Narrow viewports collapse to rank / player / rating, with the tier under
+// the name and the game count under the rating; from the sm breakpoint every column
+// gets its own track. Full class strings so Tailwind's scanner sees each candidate.
+const GRID_BASE = 'grid items-center gap-2.5 grid-cols-[40px_minmax(0,1fr)_auto]';
+const GRID_WITH_PEAK = `${GRID_BASE} sm:grid-cols-[56px_minmax(0,1fr)_140px_130px_70px_130px]`;
+const GRID_NO_PEAK = `${GRID_BASE} sm:grid-cols-[56px_minmax(0,1fr)_140px_130px_70px]`;
 
 // Pool list, labels, tier cutoffs and rating formatting live in utils/ratingPool so
 // this page and the profile rating summary cannot drift apart on any of them.
 const POOLS: Array<[LeaderboardPool, string]> = RATING_POOLS;
+
+const CELL_PAD: React.CSSProperties = { padding: '9px 14px' };
+
+const PoolTab: React.FC<{ label: string; active: boolean; onSelect: () => void }> = ({ label, active, onSelect }) => {
+	const [hover, setHover] = useState(false);
+	return (
+		<button
+			type='button'
+			role='tab'
+			aria-selected={active}
+			onClick={onSelect}
+			onMouseEnter={() => setHover(true)}
+			onMouseLeave={() => setHover(false)}
+			style={{
+				padding: '5px 14px',
+				borderRadius: 'var(--radius-pill)',
+				cursor: 'pointer',
+				fontFamily: 'var(--font-sans)',
+				fontWeight: 'var(--weight-bold)',
+				fontSize: 'var(--ds-text-sm)',
+				whiteSpace: 'nowrap',
+				background: active ? 'var(--accent-gold)' : hover ? 'var(--interactive-hover)' : 'transparent',
+				color: active ? 'var(--text-on-gold)' : 'var(--text-secondary)',
+				border: '1px solid transparent',
+				transition: 'background var(--dur-fast) var(--ds-ease-out), color var(--dur-fast) var(--ds-ease-out)'
+			}}
+		>
+			{label}
+		</button>
+	);
+};
 
 interface LbRowProps {
 	r: LeaderboardRow;
@@ -21,31 +56,67 @@ interface LbRowProps {
 }
 
 const LbRow: React.FC<LbRowProps> = ({ r, showPeak, you = false }) => {
+	const tier = tierFromRating(r.rating);
 	return (
 		<div
+			className={showPeak ? GRID_WITH_PEAK : GRID_NO_PEAK}
 			style={{
-				display: 'grid',
-				gridTemplateColumns: showPeak ? GRID_WITH_PEAK : GRID_NO_PEAK,
-				alignItems: 'center',
-				gap: 10,
-				padding: '9px 14px',
-				background: you ? 'rgba(223,174,71,0.08)' : 'transparent',
-				borderTop: '1px solid var(--border-subtle)',
-				border: you ? '1.5px solid var(--honey-600)' : undefined,
+				...CELL_PAD,
+				fontVariantNumeric: 'tabular-nums',
+				background: you ? 'var(--interactive-selected)' : 'transparent',
+				borderTop: you ? undefined : '1px solid var(--border-subtle)',
+				border: you ? '1px solid var(--border-accent)' : undefined,
 				borderRadius: you ? 'var(--ds-radius-md)' : 0
 			}}
 		>
-			<span style={{ fontFamily: 'var(--ds-font-mono)', fontWeight: 'var(--weight-bold)', color: r.rank <= 3 ? 'var(--honey-400)' : 'var(--text-tertiary)' }}>#{r.rank}</span>
-			<span style={{ display: 'flex', alignItems: 'center', gap: 9, fontWeight: 'var(--weight-bold)', minWidth: 0 }}>
-				<span style={{ width: 24, height: 24, flex: 'none', borderRadius: '50%', background: 'var(--surface-inset)', border: '1.5px solid var(--outline-ink)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, color: 'var(--text-primary)' }}>{(r.username[0] ?? '?').toUpperCase()}</span>
-				<span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.username}{you ? ' (you)' : ''}</span>
+			<span style={{ fontWeight: 'var(--weight-bold)', fontSize: 'var(--ds-text-sm)', color: r.rank <= 3 ? 'var(--accent-gold)' : 'var(--text-tertiary)' }}>
+				#{r.rank}
 			</span>
-			<TierBadge tier={tierFromRating(r.rating)} size='sm' />
-			<span style={{ fontFamily: 'var(--ds-font-mono)', fontSize: 'var(--ds-text-sm)' }}>{formatRating(r.rating, r.rd)}</span>
-			<span style={{ fontFamily: 'var(--ds-font-mono)', fontSize: 'var(--ds-text-xs)', color: 'var(--text-secondary)' }}>{r.games}</span>
-			{showPeak && (r.peak != null
-				? <TierBadge tier={tierFromRating(r.peak)} size='sm' />
-				: <span style={{ color: 'var(--text-tertiary)' }}>—</span>)}
+			<span style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: 0 }}>
+				<span
+					aria-hidden
+					style={{
+						width: 24,
+						height: 24,
+						flex: 'none',
+						borderRadius: '50%',
+						background: 'var(--surface-inset)',
+						border: '1px solid var(--border-default)',
+						display: 'inline-flex',
+						alignItems: 'center',
+						justifyContent: 'center',
+						fontSize: 'var(--text-2xs)',
+						fontWeight: 'var(--weight-bold)',
+						color: 'var(--text-primary)'
+					}}
+				>
+					{(r.username[0] ?? '?').toUpperCase()}
+				</span>
+				<span style={{ display: 'flex', flexDirection: 'column', minWidth: 0, gap: 2 }}>
+					<span style={{ fontWeight: 'var(--weight-bold)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+						{r.username}{you ? ' (you)' : ''}
+					</span>
+					{/* Narrow-viewport placement of the tier chip; the sm+ grid gives it a column. */}
+					<span className='flex sm:hidden'>
+						<TierBadge tier={tier} size='sm' style={{ gap: 5 }} />
+					</span>
+				</span>
+			</span>
+			<span className='hidden sm:flex'>
+				<TierBadge tier={tier} size='sm' />
+			</span>
+			<span className='flex flex-col items-end gap-0.5 sm:items-start' style={{ fontSize: 'var(--ds-text-sm)' }}>
+				<span style={{ fontWeight: 'var(--weight-medium)' }}>{formatRating(r.rating, r.rd)}</span>
+				<span className='sm:hidden' style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-tertiary)' }}>{r.games} games</span>
+			</span>
+			<span className='hidden sm:block' style={{ fontSize: 'var(--ds-text-sm)', color: 'var(--text-secondary)' }}>{r.games}</span>
+			{showPeak && (
+				<span className='hidden sm:flex'>
+					{r.peak != null
+						? <TierBadge tier={tierFromRating(r.peak)} size='sm' />
+						: <span style={{ color: 'var(--text-tertiary)' }}>-</span>}
+				</span>
+			)}
 		</div>
 	);
 };
@@ -57,7 +128,7 @@ const LbRow: React.FC<LbRowProps> = ({ r, showPeak, you = false }) => {
  * the mock H2H_ROWS/YOU_ROW sample data.
  */
 const LeaderboardPage: React.FC = () => {
-	const [pool, setPool] = React.useState<LeaderboardPool>('1v1');
+	const [pool, setPool] = useState<LeaderboardPool>('1v1');
 	const fetchPool = useLeaderboardStore((state) => state.fetchPool);
 	const poolState = useLeaderboardStore((state) => state.pools[pool]);
 
@@ -68,55 +139,69 @@ const LeaderboardPage: React.FC = () => {
 	const { rows, you, isLoading, error } = poolState;
 	const showPeak = rows.some((r) => r.peak != null) || (you?.peak != null);
 
+	const headerCell: React.CSSProperties = { fontSize: 'var(--text-2xs)', fontWeight: 'var(--weight-bold)', letterSpacing: 'var(--tracking-caps)', textTransform: 'uppercase', color: 'var(--text-tertiary)' };
+
 	return (
-		<div style={{ padding: 22, maxWidth: 1000, margin: '0 auto', width: '100%' }}>
-			<div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+		<div style={{ padding: 'var(--space-6) var(--space-5)', maxWidth: 1000, margin: '0 auto', width: '100%' }}>
+			<div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
 				<div>
-					<h1 style={{ margin: 0, fontFamily: 'var(--font-display)', fontSize: 'var(--ds-text-3xl)', fontWeight: 'var(--weight-regular)' }}>Leaderboard</h1>
-					<p style={{ margin: '4px 0 0', color: 'var(--text-secondary)' }}>Glicko-2 ratings by pool · updated after every rated game</p>
+					<h1
+						style={{
+							margin: 0,
+							fontSize: 'var(--ds-text-2xl)',
+							fontWeight: 'var(--weight-bold)',
+							letterSpacing: 'var(--ds-tracking-tight)',
+							lineHeight: 'var(--ds-leading-tight)'
+						}}
+					>
+						Leaderboard
+					</h1>
+					<p style={{ margin: '4px 0 0', color: 'var(--text-secondary)', fontSize: 'var(--text-md)' }}>Glicko-2 ratings by pool. Updated after every rated game.</p>
 				</div>
-				<div style={{ display: 'flex', gap: 6, background: 'var(--surface-inset)', border: '1.5px solid var(--border-default)', borderRadius: 'var(--radius-pill)', padding: 4 }}>
+				<div
+					role='tablist'
+					aria-label='Rating pool'
+					style={{
+						display: 'flex',
+						gap: 4,
+						maxWidth: '100%',
+						background: 'var(--surface-inset)',
+						border: '1px solid var(--border-default)',
+						borderRadius: 'var(--radius-pill)',
+						padding: 3
+					}}
+				>
 					{POOLS.map(([id, label]) => (
-						<button
-							key={id}
-							onClick={() => setPool(id)}
-							style={{
-								padding: '6px 16px',
-								borderRadius: 'var(--radius-pill)',
-								cursor: 'pointer',
-								fontFamily: 'var(--font-ui)',
-								fontWeight: 'var(--weight-bold)',
-								fontSize: 'var(--ds-text-sm)',
-								whiteSpace: 'nowrap',
-								background: pool === id ? 'var(--ember-500)' : 'transparent',
-								color: pool === id ? 'var(--text-on-ember)' : 'var(--text-secondary)',
-								border: pool === id ? '1.5px solid var(--outline-ink)' : '1.5px solid transparent'
-							}}
-						>{label}</button>
+						<PoolTab key={id} label={label} active={pool === id} onSelect={() => setPool(id)} />
 					))}
 				</div>
 			</div>
-			<Panel style={{ marginTop: 18, padding: '6px 4px' }}>
+			<Panel style={{ marginTop: 'var(--space-5)', padding: 'var(--space-2) var(--space-1)' }}>
 				{isLoading && (
 					<div style={{ display: 'flex', justifyContent: 'center', padding: '32px 14px' }}>
-						<Spinner label='Loading leaderboard…' />
+						<Spinner label='Loading leaderboard' />
 					</div>
 				)}
 				{!isLoading && error && (
 					<div style={{ padding: '24px 14px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 'var(--ds-text-sm)' }}>{error}</div>
 				)}
 				{!isLoading && !error && rows.length === 0 && (
-					<div style={{ padding: '24px 14px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 'var(--ds-text-sm)' }}>No ranked players yet for this pool.</div>
+					<div style={{ padding: '24px 14px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 'var(--ds-text-sm)' }}>No ranked players in this pool yet.</div>
 				)}
 				{!isLoading && !error && rows.length > 0 && (
 					<>
-						<div style={{ display: 'grid', gridTemplateColumns: showPeak ? GRID_WITH_PEAK : GRID_NO_PEAK, gap: 10, padding: '8px 14px', fontSize: 'var(--text-2xs)', fontWeight: 'var(--weight-black)', letterSpacing: 'var(--tracking-caps)', textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>
-							<span>Rank</span><span>Player</span><span>Tier</span><span>Rating</span><span>Games</span>{showPeak && <span>Peak</span>}
+						<div className={showPeak ? GRID_WITH_PEAK : GRID_NO_PEAK} style={{ padding: '8px 14px' }}>
+							<span style={headerCell}>Rank</span>
+							<span style={headerCell}>Player</span>
+							<span className='hidden sm:block' style={headerCell}>Tier</span>
+							<span className='text-right sm:text-left' style={headerCell}>Rating</span>
+							<span className='hidden sm:block' style={headerCell}>Games</span>
+							{showPeak && <span className='hidden sm:block' style={headerCell}>Peak</span>}
 						</div>
 						{rows.map((r) => <LbRow key={r.userId} r={r} showPeak={showPeak} />)}
 						{you && (
 							<>
-								<div style={{ padding: '10px 14px', textAlign: 'center', color: 'var(--text-tertiary)', fontFamily: 'var(--ds-font-mono)', fontSize: 'var(--ds-text-xs)' }}>···</div>
+								<div style={{ padding: '8px 14px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 'var(--ds-text-xs)', letterSpacing: 'var(--ds-tracking-wide)' }}>···</div>
 								<LbRow r={you} showPeak={showPeak} you />
 							</>
 						)}

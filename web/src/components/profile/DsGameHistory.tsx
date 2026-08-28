@@ -53,11 +53,11 @@ const GameRow: React.FC<{ game: HistoryGame }> = ({ game }) => {
 			<span
 				aria-hidden
 				style={{
-					width: 4,
+					width: 3,
 					alignSelf: 'stretch',
 					flex: 'none',
 					borderRadius: 2,
-					background: won ? 'var(--moss-500)' : lost ? 'var(--berry-500)' : 'var(--border-strong)'
+					background: won ? 'var(--status-success)' : lost ? 'var(--status-danger)' : 'var(--border-strong)'
 				}}
 			/>
 			<div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 5 }}>
@@ -66,7 +66,7 @@ const GameRow: React.FC<{ game: HistoryGame }> = ({ game }) => {
 					{lost && <Badge tone='danger'>loss</Badge>}
 					{game.didWin === null && <Badge tone='neutral'>no result</Badge>}
 					{game.rated ? <Badge tone='gold'>ranked</Badge> : <Badge tone='neutral'>casual</Badge>}
-					<span style={{ fontSize: 'var(--ds-text-xs)', color: 'var(--text-tertiary)' }}>{tableLabel(game.playerCount)}</span>
+					<span style={{ fontSize: 'var(--ds-text-xs)', color: 'var(--text-tertiary)', fontVariantNumeric: 'tabular-nums' }}>{tableLabel(game.playerCount)}</span>
 				</div>
 				<div style={{ fontSize: 'var(--ds-text-sm)', color: 'var(--text-secondary)', overflowWrap: 'anywhere' }}>
 					{game.opponents.length > 0
@@ -74,21 +74,21 @@ const GameRow: React.FC<{ game: HistoryGame }> = ({ game }) => {
 						: <span style={{ color: 'var(--text-tertiary)' }}>Opponents not recorded</span>}
 				</div>
 				{game.rating && (
-					<div style={{ fontSize: 'var(--ds-text-xs)', color: 'var(--text-tertiary)', fontFamily: 'var(--ds-font-mono)' }}>
+					<div style={{ fontSize: 'var(--ds-text-xs)', color: 'var(--text-tertiary)', fontVariantNumeric: 'tabular-nums' }}>
 						{ratingPoolLabel(game.rating.pool)} {Math.round(game.rating.old)} -&gt; {Math.round(game.rating.new)}
 					</div>
 				)}
 			</div>
-			<div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flex: 'none' }}>
-				<span style={{ fontFamily: 'var(--ds-font-mono)', fontWeight: 'var(--weight-bold)', fontSize: 'var(--text-md)' }}>
-					{game.score != null ? game.score : '—'}
+			<div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flex: 'none', fontVariantNumeric: 'tabular-nums' }}>
+				<span style={{ fontWeight: 'var(--weight-black)', fontSize: 'var(--ds-text-lg)', lineHeight: 'var(--ds-leading-tight)', color: 'var(--text-primary)' }}>
+					{game.score != null ? game.score : '-'}
 				</span>
 				{delta != null && (
 					<span
 						style={{
-							fontFamily: 'var(--ds-font-mono)',
 							fontSize: 'var(--ds-text-xs)',
-							color: delta >= 0 ? 'var(--moss-400)' : 'var(--berry-400)'
+							fontWeight: 'var(--weight-medium)',
+							color: delta >= 0 ? 'var(--status-success)' : 'var(--status-danger)'
 						}}
 					>
 						{delta >= 0 ? '+' : ''}{delta}
@@ -122,11 +122,11 @@ const DsGameHistory: React.FC<DsGameHistoryProps> = ({ games, total, isLoading, 
 	return (
 		<Panel
 			title='Match history'
-			action={total > 0 ? <Badge tone='neutral' mono>{total}</Badge> : undefined}
+			action={total > 0 ? <Badge tone='neutral'>{total}</Badge> : undefined}
 		>
 			{initialLoading && (
 				<div style={{ display: 'flex', justifyContent: 'center', padding: '20px 0' }}>
-					<Spinner label='Loading match history…' />
+					<Spinner label='Loading history' />
 				</div>
 			)}
 
@@ -136,9 +136,9 @@ const DsGameHistory: React.FC<DsGameHistoryProps> = ({ games, total, isLoading, 
 
 			{!isLoading && !error && loaded && games.length === 0 && (
 				<div style={{ padding: '18px 0', textAlign: 'center' }}>
-					<p style={{ margin: 0, fontSize: 'var(--ds-text-sm)', color: 'var(--text-secondary)' }}>No games played yet.</p>
+					<p style={{ margin: 0, fontSize: 'var(--ds-text-sm)', color: 'var(--text-secondary)' }}>No games yet.</p>
 					<p style={{ margin: '4px 0 0', fontSize: 'var(--ds-text-xs)', color: 'var(--text-tertiary)' }}>
-						Finished games show up here with your score, your opponents, and any rating change.
+						Finished games land here with your score, the table, and any rating change.
 					</p>
 				</div>
 			)}
@@ -150,13 +150,13 @@ const DsGameHistory: React.FC<DsGameHistoryProps> = ({ games, total, isLoading, 
 			)}
 
 			{error && games.length > 0 && (
-				<div style={{ padding: '10px 0 0', textAlign: 'center', color: 'var(--berry-400)', fontSize: 'var(--ds-text-xs)' }}>{error}</div>
+				<div style={{ padding: '10px 0 0', textAlign: 'center', color: 'var(--status-danger)', fontSize: 'var(--ds-text-xs)' }}>{error}</div>
 			)}
 
 			{hasMore && (
 				<div style={{ display: 'flex', justifyContent: 'center', paddingTop: 12 }}>
 					{isLoading && games.length > 0
-						? <Spinner size={18} label='Loading…' />
+						? <Spinner size={18} label='Loading' />
 						: <Button variant='ghost' size='sm' onClick={onLoadMore}>Load more</Button>}
 				</div>
 			)}

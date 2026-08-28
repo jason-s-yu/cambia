@@ -3,11 +3,32 @@ import React, { useEffect, useState } from 'react';
 import { Navigate } from 'react-router-dom';
 import { useAuthStore } from '@/stores/authStore';
 import { useHistoryStore } from '@/stores/historyStore';
-import Input from '@/components/common/Input';
-import Button from '@/components/common/Button';
-import ErrorMessage from '@/components/common/ErrorMessage';
+import Panel from '@/components/ds/chrome/Panel';
+import Badge from '@/components/ds/core/Badge';
+import Button from '@/components/ds/core/Button';
+import Input from '@/components/ds/core/Input';
+import Spinner from '@/components/ds/core/Spinner';
 import DsRatingSummary from '@/components/profile/DsRatingSummary';
 import DsGameHistory from '@/components/profile/DsGameHistory';
+
+/** Eyebrow label over a plain value, for the account panel's identity fields. */
+const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
+	<div style={{ minWidth: 0 }}>
+		<p
+			style={{
+				margin: '0 0 4px',
+				fontSize: 'var(--text-2xs)',
+				fontWeight: 'var(--weight-bold)',
+				letterSpacing: 'var(--tracking-caps)',
+				textTransform: 'uppercase',
+				color: 'var(--text-tertiary)'
+			}}
+		>
+			{label}
+		</p>
+		<p style={{ margin: 0, fontSize: 'var(--text-md)', color: 'var(--text-primary)', overflowWrap: 'anywhere' }}>{children}</p>
+	</div>
+);
 
 const ProfilePage: React.FC = () => {
 	const user = useAuthStore((state) => state.user);
@@ -54,10 +75,10 @@ const ProfilePage: React.FC = () => {
 		await claimAccount({ email: claimEmail, password: claimPassword, username: claimUsername || undefined });
 	};
 
-	if (isLoading) {
+	if (isLoading && !user) {
 		return (
-			<div className="flex justify-center items-center h-48">
-				<p className="text-gray-500 dark:text-gray-400">Loading...</p>
+			<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', padding: 'var(--space-16) var(--space-5)' }}>
+				<Spinner label='Loading profile' />
 			</div>
 		);
 	}
@@ -67,44 +88,67 @@ const ProfilePage: React.FC = () => {
 	}
 
 	const formatDate = (iso?: string) => {
-		if (!iso) return '—';
+		if (!iso) return 'Unknown';
 		return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
 	};
 
 	return (
-		<div className="max-w-3xl mx-auto space-y-6">
-			<h2 className="text-2xl font-semibold text-gray-800 dark:text-gray-100">Profile</h2>
-
-			<div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 space-y-4">
-				{user.is_ephemeral && (
-					<div className="bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-700 rounded px-3 py-2 text-sm text-amber-800 dark:text-amber-200">
-						Playing as guest. This account is tied to your browser and can be lost — claim it below to keep it permanently.
-					</div>
-				)}
-				<div>
-					<p className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">Username</p>
-					<p className="text-lg font-medium text-gray-800 dark:text-gray-100">{user.username}</p>
+		<div
+			style={{
+				padding: 'var(--space-6) var(--space-5)',
+				maxWidth: 820,
+				margin: '0 auto',
+				width: '100%',
+				display: 'flex',
+				flexDirection: 'column',
+				gap: 'var(--space-5)'
+			}}
+		>
+			<div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', flexWrap: 'wrap', gap: 'var(--space-3)' }}>
+				<div style={{ minWidth: 0 }}>
+					<h1
+						style={{
+							margin: 0,
+							fontSize: 'var(--ds-text-2xl)',
+							fontWeight: 'var(--weight-bold)',
+							letterSpacing: 'var(--ds-tracking-tight)',
+							lineHeight: 'var(--ds-leading-tight)',
+							overflowWrap: 'anywhere'
+						}}
+					>
+						{user.username}
+					</h1>
+					<p style={{ margin: '4px 0 0', color: 'var(--text-secondary)', fontSize: 'var(--text-md)' }}>
+						Ratings, record and match history.
+					</p>
 				</div>
-
-				{user.email && (
-					<div>
-						<p className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">Email</p>
-						<p className="text-gray-800 dark:text-gray-100">{user.email}</p>
-					</div>
-				)}
-
-				<hr className="border-gray-200 dark:border-gray-700" />
-
-				<div>
-					<p className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">Member Since</p>
-					<p className="text-gray-800 dark:text-gray-100">{formatDate(user.created_at)}</p>
-				</div>
-
-				<div>
-					<p className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">Last Login</p>
-					<p className="text-gray-800 dark:text-gray-100">{formatDate(user.last_login)}</p>
-				</div>
+				{user.is_ephemeral ? <Badge tone='warning'>guest</Badge> : <Badge tone='neutral'>account</Badge>}
 			</div>
+
+			<Panel title='Account'>
+				{user.is_ephemeral && (
+					<div
+						style={{
+							marginBottom: 'var(--space-4)',
+							padding: '10px 12px',
+							background: 'var(--status-warning-bg)',
+							border: '1px solid var(--status-warning-border)',
+							borderRadius: 'var(--ds-radius-md)',
+							color: 'var(--status-warning)',
+							fontSize: 'var(--ds-text-sm)',
+							lineHeight: 'var(--ds-leading-snug)'
+						}}
+					>
+						Guest account. It lives in this browser only. Claim it below to keep it.
+					</div>
+				)}
+				<div className="grid gap-4 sm:grid-cols-2">
+					<Field label='Username'>{user.username}</Field>
+					{user.email && <Field label='Email'>{user.email}</Field>}
+					<Field label='Member since'>{formatDate(user.created_at)}</Field>
+					<Field label='Last login'>{formatDate(user.last_login)}</Field>
+				</div>
+			</Panel>
 
 			<DsRatingSummary summary={ratings} error={ratingsError} />
 
@@ -118,52 +162,76 @@ const ProfilePage: React.FC = () => {
 			/>
 
 			{user.is_ephemeral && (
-				<div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 space-y-4">
-					<div>
-						<h3 className="text-lg font-semibold text-gray-800 dark:text-gray-100">Claim this account</h3>
-						<p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
-							Add an email and password to keep this account and its ratings permanently.
-						</p>
-					</div>
-					<form onSubmit={handleClaim} className="space-y-4">
-						<ErrorMessage message={error} onClear={clearError} />
+				<Panel title='Claim account'>
+					<p style={{ margin: '0 0 var(--space-4)', fontSize: 'var(--ds-text-sm)', color: 'var(--text-secondary)' }}>
+						Add an email and password to keep this account and its ratings.
+					</p>
+					<form onSubmit={handleClaim} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+						{error && (
+							<div
+								role='alert'
+								style={{
+									display: 'flex',
+									alignItems: 'flex-start',
+									gap: 'var(--space-3)',
+									padding: '10px 12px',
+									background: 'var(--status-danger-bg)',
+									border: '1px solid var(--status-danger-border)',
+									borderRadius: 'var(--ds-radius-md)',
+									color: 'var(--status-danger)',
+									fontSize: 'var(--ds-text-sm)',
+									lineHeight: 'var(--ds-leading-snug)'
+								}}
+							>
+								<span style={{ flex: 1 }}>{error}</span>
+								<button
+									type='button'
+									onClick={clearError}
+									aria-label='Dismiss error'
+									style={{
+										flex: 'none',
+										background: 'transparent',
+										border: 'none',
+										padding: 0,
+										cursor: 'pointer',
+										color: 'inherit',
+										fontSize: 'var(--ds-text-lg)',
+										lineHeight: 1
+									}}
+								>
+									&times;
+								</button>
+							</div>
+						)}
 						<Input
-							label="Username"
-							id="claim-username"
-							type="text"
+							label='Username'
+							type='text'
 							value={claimUsername}
 							onChange={(e) => setClaimUsername(e.target.value)}
-							autoComplete="username"
 							placeholder={user.username}
 							disabled={isLoading}
 						/>
 						<Input
-							label="Email Address"
-							id="claim-email"
-							type="email"
+							label='Email'
+							type='email'
 							value={claimEmail}
 							onChange={(e) => setClaimEmail(e.target.value)}
-							required
-							autoComplete="email"
-							placeholder="you@example.com"
+							placeholder='you@example.com'
 							disabled={isLoading}
 						/>
 						<Input
-							label="Password"
-							id="claim-password"
-							type="password"
+							label='Password'
+							type='password'
 							value={claimPassword}
 							onChange={(e) => setClaimPassword(e.target.value)}
-							required
-							autoComplete="new-password"
-							placeholder="Create a password"
+							placeholder='Create a password'
 							disabled={isLoading}
 						/>
-						<Button type="submit" isLoading={isLoading} disabled={isLoading}>
-							Claim Account
-						</Button>
+						<div>
+							<Button disabled={isLoading}>{isLoading ? 'Claiming' : 'Claim account'}</Button>
+						</div>
 					</form>
-				</div>
+				</Panel>
 			)}
 		</div>
 	);
