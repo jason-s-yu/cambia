@@ -130,17 +130,24 @@ func startTwoPlayerGame(t *testing.T) (*game.CambiaGame, uuid.UUID, uuid.UUID, *
 	p2ID := uuid.New()
 	p2Token, _ := auth.CreateJWT(p2ID.String())
 
+	lobUUID := createPublicLobby(t, gs, hostToken)
+	lobbyID := lobUUID.String()
+
 	// Neither test built on this helper waits for game_results itself: their game ends only
 	// incidentally, when the host/p2 close cleanups below drop the last connected socket during
-	// teardown. Registering this cleanup first (t.Cleanup is LIFO, so it runs after every
-	// cleanup registered below it) means it runs after the host/p2 close cleanups, once those
-	// sockets have actually closed, so there is something to wait for - but still before
-	// newForfeitTestServer's own t.Cleanup(ts.Close), registered earlier still (before this
-	// function runs), which tears down the test server last of all. It polls for the
-	// resulting forfeit's GameOver rather than calling awaitGameEndPersistence directly: GameOver
-	// is set under the same lock endGame holds for its whole call, including
-	// persistFinalGameState's WaitGroup.Add, so observing it proves Add already ran and this can
-	// never Wait ahead of it (cambia-908).
+	// teardown. t.Cleanup is LIFO, so registering this here puts it after the host/p2 close
+	// cleanups registered below (it runs once those sockets have actually closed, so there is
+	// something to wait for) and before createPublicLobby's cleanupLobbyDBRows registered just
+	// above, whose DELETE must not run while a write is still in flight - registering it ahead
+	// of createPublicLobby, as this originally did, inverted that and let the DELETE go first
+	// (cambia-942 F4). newForfeitTestServer's own t.Cleanup(ts.Close), registered before this
+	// function ran, still tears down the test server last of all.
+	//
+	// It polls for the resulting forfeit's GameOver rather than calling awaitGameEndPersistence
+	// directly: GameOver is set under the same lock endGame holds for its whole call, including
+	// persistFinalGameState's WaitGroup.Add, so observing it proves that Add already ran and
+	// this can never Wait ahead of it (cambia-908; see awaitGameEndPersistence for the full
+	// ordering rule).
 	var g *game.CambiaGame
 	t.Cleanup(func() {
 		if g == nil {
@@ -155,9 +162,6 @@ func startTwoPlayerGame(t *testing.T) (*game.CambiaGame, uuid.UUID, uuid.UUID, *
 		}
 		awaitGameEndPersistence(t, gs)
 	})
-
-	lobUUID := createPublicLobby(t, gs, hostToken)
-	lobbyID := lobUUID.String()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	t.Cleanup(cancel)

@@ -39,10 +39,11 @@ func newForfeitTestServer(t *testing.T) (*GameServer, *httptest.Server) {
 	gs := NewGameServer()
 	gs.CountdownDuration = 30 * time.Millisecond
 	gs.PreGameDuration = 30 * time.Millisecond
-	// Every game this server creates registers its persistFinalGameState background DB-write
-	// goroutines here, so awaitGameEndPersistence (called once a test has confirmed its game
-	// ended) can drain them deterministically instead of leaving them to outlive the test and
-	// race a later test's database.ConnectDB() reassigning the shared pool (cambia-908).
+	// Every game this server creates registers its background DB-write goroutines here (the
+	// initial-state upsert and both game-end writes), so awaitGameEndPersistence and
+	// cleanupLobbyDBRows can drain them deterministically instead of leaving them to outlive the
+	// test and race a later test's database.ConnectDB() reassigning the shared pool (cambia-908)
+	// or a cleanup DELETE against rows a write is still landing (cambia-942 F4).
 	gs.PersistWG = &sync.WaitGroup{}
 
 	logger := logrus.New()
@@ -58,12 +59,29 @@ func newForfeitTestServer(t *testing.T) (*GameServer, *httptest.Server) {
 }
 
 // awaitGameEndPersistence blocks, bounded by a 5s timeout, until every background DB-write
-// goroutine persistFinalGameState has launched for games created by gs completes. Callers must
-// already know the relevant game has ended - by having received its game_results broadcast, or
-// by having called CambiaGame.EndGame themselves - before calling this: persistFinalGameState's
-// WaitGroup.Add and both of those signals happen inside the same endGame call under the game's
-// lock, so observing either one first guarantees Add already ran and this can never Wait ahead
-// of it (see sync.WaitGroup's own Add/Wait ordering requirement).
+// goroutine launched by a game created by gs completes: persistFinalGameState's two (final
+// state, then game_results + ratings) and persistInitialGameState's one.
+//
+// sync.WaitGroup requires that an Add taking the counter up from zero happen before a
+// concurrent Wait, so this helper is safe only when both of these hold (cambia-942 F3 restates
+// the argument cambia-908 L1 invalidated by putting the initial-state write on this same
+// WaitGroup, where the original wording accounted for persistFinalGameState's Add alone):
+//
+//  1. The caller already knows the relevant game has ended - by having received its
+//     game_results broadcast, by having polled GameOver, or by having called EndGame itself.
+//     persistFinalGameState's Add and all of those signals happen inside the same endGame call
+//     under the game's lock, so observing any one of them proves that Add already ran.
+//  2. No other game on the same GameServer can still be starting. persistInitialGameState's Add
+//     runs under the same lock inside BeginPreGame; for the game the caller observed that is
+//     strictly earlier than its end, but for a second game on the same server it is not ordered
+//     against this Wait at all. Every caller drives exactly one game per GameServer, which is
+//     what makes this hold today; a multi-game test would need to observe every game's end
+//     first, or its own WaitGroup per game.
+//
+// The two writes stay on one WaitGroup rather than splitting the initial-state write onto its
+// own: cleanupLobbyDBRows has to drain both before deleting the lobbies row (cambia-942 F4), so
+// a split would only make every waiter wait on two groups, and it would not remove the ordering
+// constraint above - it would just move it onto whichever group the second game touched first.
 func awaitGameEndPersistence(t *testing.T, gs *GameServer) {
 	t.Helper()
 	if gs.PersistWG == nil {

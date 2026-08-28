@@ -9,8 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/google/uuid"
 	"github.com/jason-s-yu/cambia/service/internal/auth"
 	"github.com/jason-s-yu/cambia/service/internal/database"
 	"github.com/jason-s-yu/cambia/service/internal/models"
@@ -26,17 +26,12 @@ func setupFriendTest(t *testing.T) {
 	// Connect to the test database exactly once for the whole package (cambia-908), skipping
 	// cleanly up front if no DB is reachable (ensure .env points to a test DB).
 	ensureTestDB(t)
-	// Optional: Clean up tables before test if needed.
-	// clearFriendTables(t)
 }
 
-// clearFriendTables is a helper to clear relevant tables (useful for isolated tests).
-func clearFriendTables(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, err := database.DB.Exec(ctx, "DELETE FROM friends; DELETE FROM users;")
-	require.NoError(t, err, "Failed to clear friend/user tables")
-}
+// Isolation comes from per-run fixture rows and their registered cleanups, not from clearing
+// tables: the `DELETE FROM friends; DELETE FROM users;` helper that used to sit here (unused,
+// commented out at both call sites) would have wiped every account in the shared dev database,
+// the same class of over-deletion cambia-942 F5 fixes in createTestUser below.
 
 // createTestUser is a helper to create a user directly in the database for testing. Registers
 // a t.Cleanup deleting the created row (and anything a test drove it to accumulate: hosted
@@ -58,11 +53,17 @@ func createTestUser(t *testing.T, email, pass, uname string) models.User {
 		t.Logf("Created test user %s (%s)", uname, u.ID)
 		t.Cleanup(func() { cleanupTestUserRows(t, u.ID) })
 	} else {
-		// If user already exists from previous run, fetch them.
+		// The email is already taken, so this call created nothing: reuse the existing row and
+		// register no cleanup for it (cambia-942 F5). Registering one here made the suite delete
+		// an account it did not create - along with its lobbies, games, game_results and ratings,
+		// which cleanupTestUserRows cascades - whenever a real account happened to hold a fixture
+		// address; the fixed alice@example.com / bob@example.com and lb-*@example.com pairs made
+		// that reachable, and every caller now passes a per-run address instead. The row is left
+		// behind rather than deleted, so this branch is a last-resort path, not a cleanup route.
 		existingUser, fetchErr := database.GetUserByEmail(ctx, email)
 		require.NoError(t, fetchErr, "Failed to fetch existing user")
 		require.NotNil(t, existingUser, "Existing user should not be nil")
-		t.Cleanup(func() { cleanupTestUserRows(t, existingUser.ID) })
+		t.Logf("reusing pre-existing user %s (%s); not registering cleanup for a row this test did not create", uname, existingUser.ID)
 		return *existingUser
 	}
 	return u
@@ -71,12 +72,14 @@ func createTestUser(t *testing.T, email, pass, uname string) models.User {
 // TestFriendFlow is an integration test covering the friend request -> accept -> list flow.
 func TestFriendFlow(t *testing.T) {
 	setupFriendTest(t)
-	// Optional: Defer cleanup if needed.
-	// defer clearFriendTables(t)
 
 	// 1. Create two users.
-	userAlice := createTestUser(t, "alice@example.com", "password123", "alice")
-	userBob := createTestUser(t, "bob@example.com", "password456", "bob")
+	// Per-run email addresses, for the reason in createTestUser's fallback branch: the fixed
+	// alice@example.com / bob@example.com pair collided with whatever account already held those
+	// addresses, and the test then ran against - and used to delete - rows it never created
+	// (cambia-942 F5). The usernames stay fixed; the assertions below read those.
+	userAlice := createTestUser(t, "alice-"+uuid.NewString()+"@example.com", "password123", "alice")
+	userBob := createTestUser(t, "bob-"+uuid.NewString()+"@example.com", "password456", "bob")
 
 	// 2. Generate JWT tokens for authentication.
 	aliceToken, err := auth.CreateJWT(userAlice.ID.String())
