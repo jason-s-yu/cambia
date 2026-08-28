@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -603,6 +604,13 @@ func CancelSearchHandler(gs *GameServer) http.HandlerFunc {
 
 // ListQueuesHandler handles GET /matchmaking/queues.
 // Returns all configured queues with live stats.
+//
+// The response is sorted by each queue's matchmaking.QueueConfig.Order (ties broken by
+// QueueID), not by ranging over matchmaking.QueueConfigs directly: Go re-randomizes map
+// iteration order on every range statement, so two calls in the same process - not just
+// across restarts - could return different sequences, which previously left the six queue
+// cards reordering themselves between dashboard loads with nothing wrong to look at
+// (cambia-957).
 func ListQueuesHandler(gs *GameServer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -635,8 +643,25 @@ func ListQueuesHandler(gs *GameServer) http.HandlerFunc {
 			"ffa4_classical": "FFA-4 Classical",
 		}
 
-		var queues []queueResponse
-		for id, cfg := range matchmaking.QueueConfigs {
+		// Range over the map to collect ids, then sort before building the response: the
+		// map itself carries no order, and building queueResponse entries in iteration
+		// order (the previous bug, cambia-957) would still leave a JSON array whose
+		// element order Go never promises to repeat.
+		ids := make([]string, 0, len(matchmaking.QueueConfigs))
+		for id := range matchmaking.QueueConfigs {
+			ids = append(ids, id)
+		}
+		sort.Slice(ids, func(i, j int) bool {
+			oi, oj := matchmaking.QueueConfigs[ids[i]].Order, matchmaking.QueueConfigs[ids[j]].Order
+			if oi != oj {
+				return oi < oj
+			}
+			return ids[i] < ids[j]
+		})
+
+		queues := make([]queueResponse, 0, len(ids))
+		for _, id := range ids {
+			cfg := matchmaking.QueueConfigs[id]
 			stat := stats[id]
 			queues = append(queues, queueResponse{
 				QueueID:      id,
