@@ -20,6 +20,10 @@ import (
 // game being created. Tests may lower GameServer.CountdownDuration for speed.
 const defaultCountdownDuration = 3 * time.Second
 
+// defaultPostGameDuration is how long a lobby shows end-of-game results before its hub returns
+// to the open phase for the next game. Tests may lower GameServer.PostGameDuration for speed.
+const defaultPostGameDuration = 10 * time.Second
+
 // GameServer manages the central stores for active lobbies and games.
 type GameServer struct {
 	Mutex        sync.Mutex
@@ -32,6 +36,10 @@ type GameServer struct {
 	// CountdownDuration is copied onto each hub at creation so the lobby -> game
 	// countdown length is configurable (production default; shortened in tests).
 	CountdownDuration time.Duration
+
+	// PostGameDuration is copied onto each hub at creation so the results-screen interval
+	// before the lobby reopens is configurable (production default; shortened in tests).
+	PostGameDuration time.Duration
 }
 
 // NewGameServer initializes a new GameServer with empty, ephemeral stores.
@@ -43,6 +51,7 @@ func NewGameServer() *GameServer {
 		HubStore:          hub.NewHubStore(),
 		Matchmaker:        matchmaking.NewMatchmaker(),
 		CountdownDuration: defaultCountdownDuration,
+		PostGameDuration:  defaultPostGameDuration,
 	}
 }
 

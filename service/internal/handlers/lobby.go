@@ -110,6 +110,9 @@ func CreateLobbyHandler(gs *GameServer) http.HandlerFunc {
 		if gs.CountdownDuration > 0 {
 			h.CountdownDuration = gs.CountdownDuration
 		}
+		if gs.PostGameDuration > 0 {
+			h.PostGameDuration = gs.PostGameDuration
+		}
 		gs.HubStore.CreateHub(h)
 		go h.Run(context.Background())
 
