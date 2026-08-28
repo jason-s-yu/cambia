@@ -238,10 +238,13 @@ export interface PlayerSnapPenaltyEvent {
 	payload: { count: number; total: number };
 }
 
-/** Structure for private penalty draw events */
+/**
+ * Structure for private penalty draw events. Card carries the id and the hand slot only: a penalty
+ * card is drawn unseen, so its face never crosses the wire (cambia-820).
+ */
 export interface PrivateSnapPenaltyEvent {
 	type: 'private_snap_penalty';
-	card: ObfCard; // Revealed penalty card details
+	card: { id: string; idx: number };
 	payload: { count: number; total: number };
 }
 

@@ -1140,11 +1140,16 @@ func (g *CambiaGame) handleSnapFailure(playerID uuid.UUID, engineIdx uint8, atte
 			},
 		})
 
-		// Private penalty event with card details.
+		// Private penalty event. It names the new card and where it landed, never its face: a
+		// penalty card is drawn unseen, so its rank stays hidden from the penalized player exactly
+		// as it is from everyone else. doc/game_actions.md has said so since this event was
+		// specified ("Note that no card details are to be revealed, just the new cards"), and the
+		// client, the engine's agent state and the CFR reference all already model it that way.
+		// Only this emitter disagreed, leaking a face nothing consumed (cambia-820).
 		privateIdx := int(handLen)
 		g.fireEventToPlayer(playerID, GameEvent{
 			Type: EventPrivateSnapPenalty,
-			Card: &EventCard{ID: penaltyUUID, Idx: &privateIdx, Rank: penaltyCard.Rank, Suit: penaltyCard.Suit, Value: penaltyCard.Value},
+			Card: &EventCard{ID: penaltyUUID, Idx: &privateIdx},
 			Payload: map[string]interface{}{
 				"count": i + 1,
 				"total": penaltyCount,
