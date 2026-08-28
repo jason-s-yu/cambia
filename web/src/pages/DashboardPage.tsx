@@ -22,7 +22,14 @@ import type { ActiveSession, ApiErrorResponse, LobbyState } from '@/types';
 import { gameModeLabel } from '@/utils/gameMode';
 import { ratingPoolLabel, tierFromRating } from '@/utils/ratingPool';
 
-/** Queues considered "flagship" for the primary/highlighted card treatment. */
+/**
+ * Queues considered "flagship" for the primary/highlighted card treatment. This is a display
+ * flag only - it does not move a card earlier in the grid. Card order comes straight from
+ * GET /matchmaking/queues (queues.map below, no client-side sort) and is deterministic
+ * server-side as of cambia-957 (QueueConfig.Order); do not add a sort here that reads this set,
+ * or the two flagship cards would stop appearing where the server placed them relative to the
+ * other four.
+ */
 const PRIMARY_QUEUE_IDS = new Set(['h2h_rapid', 'ffa4_standard']);
 
 /**

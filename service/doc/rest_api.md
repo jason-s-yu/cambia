@@ -312,6 +312,39 @@ Handled by `internal/handlers/lobby.go`. These manage *ephemeral* in-memory lobb
 
 ---
 
+### Matchmaking Endpoints
+
+Handled by `internal/handlers/lobby.go` (`ListQueuesHandler`), registered at `/matchmaking/queues` in `cmd/server/main.go`.
+
+#### `GET /matchmaking/queues`
+
+* **Description:** Lists all configured matchmaking queues with live stats. Requires no authentication: the handler reads no identity, so the list is the same for every caller.
+* **Request Body:** None.
+* **Response (Success: 200 OK):** `application/json` - an array with one entry per queue in `matchmaking.QueueConfigs` (`internal/matchmaking/validation.go`):
+    ```json
+    [
+      {
+        "queueId": "h2h_quickplay",
+        "name": "H2H Quick",
+        "players": 2,
+        "rounds": 1,
+        "ratingPool": "h2h_qp",
+        "ranked": true,
+        "hiddenRating": true,
+        "playerCount": 0,
+        "avgWaitSec": 0
+      }
+    ]
+    ```
+    `playerCount` and `avgWaitSec` come from the matchmaker's live in-memory queue state, not the queue config.
+    The array order is fixed by each queue's `QueueConfig.Order` (ties broken by `queueId`), currently `h2h_quickplay`,
+    `h2h_blitz`, `h2h_rapid`, `h2h_classical`, `ffa4_standard`, `ffa4_classical` - not by ranging over the config map
+    directly, since Go randomizes map iteration order per process run and the response previously reordered itself
+    between calls with nothing actually changed (cambia-957).
+* **Response (Error):** `405 Method Not Allowed` for anything but `GET`.
+
+---
+
 ### Game Endpoints (Legacy/Debug)
 
 Handled by `internal/handlers/game.go`.
