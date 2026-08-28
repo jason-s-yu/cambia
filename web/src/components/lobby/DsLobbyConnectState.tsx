@@ -7,6 +7,7 @@
 import React from 'react';
 import Spinner from '@/components/ds/core/Spinner';
 import Button from '@/components/ds/core/Button';
+import { EYEBROW } from '@/components/ds/eyebrow';
 
 export interface DsLobbyConnectAction {
   label: string;
@@ -44,7 +45,9 @@ const DsLobbyConnectState: React.FC<DsLobbyConnectStateProps> = ({ message, erro
       >
         {error ? (
           <>
-            <span style={{ fontSize: 'var(--text-2xs)', fontWeight: 'var(--weight-bold)', letterSpacing: 'var(--tracking-caps)', textTransform: 'uppercase', color: 'var(--status-danger)' }}>
+            {/* Shared eyebrow, danger colour: the local copy dropped wordSpacing and
+                'Lobby error' rendered as LOBBYERROR (cambia-892, DL-7 F1). */}
+            <span style={{ ...EYEBROW, color: 'var(--status-danger)' }}>
               Lobby error
             </span>
             <span style={{ fontSize: 'var(--text-md)', color: 'var(--text-primary)', lineHeight: 'var(--ds-leading-snug)' }}>{error}</span>

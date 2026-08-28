@@ -217,6 +217,15 @@ const DashboardPage: React.FC = () => {
   // the same way the profile does.
   const neverPlayed = !ratings || ratings.record.games === 0;
 
+  // The headline number is always the 1v1 pool, so it only earns the slot when
+  // that pool has games, or when nothing has been played at all and the panel
+  // would otherwise be one hint line. FFA games with no 1v1 games used to print
+  // an 'Unrated' headline over a 'Head to Head  Unrated' row saying the same
+  // thing; there the rows carry the panel on their own. Headlining whichever
+  // pool has games is the wrong repair: the headline shows no pool label, and
+  // the header chip (AppLayout) reads 1v1 (cambia-892, DL-7 F3).
+  const showHeadline = hasHeadline || neverPlayed;
+
   return (
     <div className='grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_320px] gap-5 p-4 sm:p-[22px] max-w-[1240px] mx-auto w-full'>
       {activeSession && !resumeDismissed && (
@@ -332,19 +341,21 @@ const DashboardPage: React.FC = () => {
           )}
           {ratings && (
             <>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 6 }}>
-                {hasHeadline
-                  ? <TierBadge tier={tierFromRating(headlinePool!.rating)} />
-                  : <Badge tone='neutral'>Unranked</Badge>}
-                <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 6, fontVariantNumeric: 'tabular-nums' }}>
-                  <span style={{ fontWeight: 'var(--weight-black)', fontSize: 'var(--ds-text-2xl)', letterSpacing: 'var(--ds-tracking-tight)', lineHeight: 1 }}>
-                    {hasHeadline ? Math.round(headlinePool!.rating) : 'Unrated'}
+              {showHeadline && (
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 6 }}>
+                  {hasHeadline
+                    ? <TierBadge tier={tierFromRating(headlinePool!.rating)} />
+                    : <Badge tone='neutral'>Unranked</Badge>}
+                  <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 6, fontVariantNumeric: 'tabular-nums' }}>
+                    <span style={{ fontWeight: 'var(--weight-black)', fontSize: 'var(--ds-text-2xl)', letterSpacing: 'var(--ds-tracking-tight)', lineHeight: 1 }}>
+                      {hasHeadline ? Math.round(headlinePool!.rating) : 'Unrated'}
+                    </span>
+                    {hasHeadline && (
+                      <span style={{ color: 'var(--text-tertiary)', fontSize: 'var(--ds-text-xs)' }}>± {Math.round(headlinePool!.rd)}</span>
+                    )}
                   </span>
-                  {hasHeadline && (
-                    <span style={{ color: 'var(--text-tertiary)', fontSize: 'var(--ds-text-xs)' }}>± {Math.round(headlinePool!.rd)}</span>
-                  )}
-                </span>
-              </div>
+                </div>
+              )}
               {/* Nothing played: the headline already says Unrated, so the rows would
                   be four more copies of it. One line explains the state instead
                   (cambia-876, DL-2 review F6). */}
@@ -352,8 +363,8 @@ const DashboardPage: React.FC = () => {
                 <Note style={{ fontSize: 'var(--ds-text-xs)' }}>Play a ranked game to start a rating.</Note>
               ) : (
                 <>
-                  {/* The headline is the 1v1 pool; its row would repeat it verbatim. */}
-                  {ratings.pools.filter((pool) => !(hasHeadline && pool.pool === '1v1')).map((pool) => (
+                  {/* The 1v1 row is dropped only when the headline rendered its number. */}
+                  {ratings.pools.filter((pool) => !(showHeadline && pool.pool === '1v1')).map((pool) => (
                     <StatRow
                       key={pool.pool}
                       label={ratingPoolLabel(pool.pool)}

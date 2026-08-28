@@ -97,18 +97,24 @@ for (const key of SEMANTIC) {
     rows.push(`ok       ${name}  dark=${d}  light=${l}`);
 }
 
+// The SHARED failures keep their own counter: folding them into `missing`
+// printed a theme-stable failure under the semantic headline, where the count
+// could exceed the number of semantic tokens the line claims to describe
+// (cambia-892, DL-7 F4). The light side is checked for UNRESOLVED too, since
+// light inherits dark's map and an unresolved pair matches itself.
 let shared = 0;
+let sharedFailed = 0;
 for (const key of SHARED) {
     const name = '--' + key;
     const d = resolve(dark, dark[name]);
     const l = resolve(light, light[name]);
-    if (d === undefined || l === undefined || String(d).startsWith('UNRESOLVED')) {
-        missing++;
+    if (d === undefined || l === undefined || String(d).startsWith('UNRESOLVED') || String(l).startsWith('UNRESOLVED')) {
+        sharedFailed++;
         rows.push(`MISSING  ${name}  dark=${d} light=${l}`);
         continue;
     }
     if (d !== l) {
-        missing++;
+        sharedFailed++;
         rows.push(`SPLIT    ${name}  dark=${d} light=${l} (declared theme-stable)`);
         continue;
     }
@@ -118,7 +124,7 @@ for (const key of SHARED) {
 
 console.log(rows.join('\n'));
 console.log(`\n${SEMANTIC.length} semantic tokens checked: ${missing} unresolved, ${identical} identical across themes`);
-console.log(`${SHARED.length} theme-stable tokens checked: ${shared} identical as declared`);
+console.log(`${SHARED.length} theme-stable tokens checked: ${shared} identical as declared, ${sharedFailed} unresolved or split`);
 
 // Font check: no serif family and none of the banned faces may survive
 // anywhere in the built CSS, the UI face must be the self-hosted one, and no
@@ -138,5 +144,5 @@ console.log(`banned faces present: ${banned.length ? banned.join(', ') : 'none'}
 console.log(`Archivo Variable declared: ${hasArchivo}`);
 console.log(`remote font host referenced: ${hasRemoteFont}`);
 
-const failed = missing > 0 || identical > 0 || serif.length > 0 || banned.length > 0 || !hasArchivo || hasRemoteFont;
+const failed = missing > 0 || identical > 0 || sharedFailed > 0 || serif.length > 0 || banned.length > 0 || !hasArchivo || hasRemoteFont;
 process.exit(failed ? 1 : 0);

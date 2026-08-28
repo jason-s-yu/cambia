@@ -560,9 +560,13 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
             <span style={{ ...FELT_LABEL, marginTop: 0 }}>
               {[matchState ? `Round ${matchState.currentRound}/${matchState.totalRounds}` : null, turnNo !== null ? `Turn ${turnNo}` : null].filter(Boolean).join(' · ')}
             </span>
+            {/* Shared eyebrow for the caps run: the inline copy dropped wordSpacing
+                and the chip read CAMBIACALLED (cambia-892, DL-7 F1). Size and
+                colour stay the chip's own. */}
             {gameState.cambiaCalled && (
               <span
                 style={{
+                  ...EYEBROW,
                   display: 'inline-flex',
                   alignItems: 'center',
                   gap: 8,
@@ -572,13 +576,10 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                   border: '1px solid var(--accent-danger)',
                   borderRadius: 'var(--radius-pill)',
                   fontSize: 'var(--ds-text-xs)',
-                  fontWeight: 'var(--weight-bold)',
-                  letterSpacing: 'var(--tracking-caps)',
-                  textTransform: 'uppercase',
                   whiteSpace: 'nowrap'
                 }}
               >
-                Cambia called{cambiaCaller && <span style={{ textTransform: 'none', letterSpacing: 0, fontWeight: 'var(--weight-medium)' }}>by {nameOf(cambiaCaller.playerId)}</span>}
+                Cambia called{cambiaCaller && <span style={{ textTransform: 'none', letterSpacing: 0, wordSpacing: 'normal', fontWeight: 'var(--weight-medium)' }}>by {nameOf(cambiaCaller.playerId)}</span>}
               </span>
             )}
             {offline && <FeltChip tone={gaveUp ? 'danger' : 'warning'}>{gaveUp ? 'Disconnected' : 'Reconnecting'}</FeltChip>}

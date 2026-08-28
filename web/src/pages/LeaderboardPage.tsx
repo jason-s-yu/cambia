@@ -144,7 +144,9 @@ const LeaderboardPage: React.FC = () => {
 	const { rows, you, isLoading, error } = poolState;
 	const showPeak = rows.some((r) => r.peak != null) || (you?.peak != null);
 
-	const headerCell: React.CSSProperties = EYEBROW;
+	// A copy, not the shared object: an alias hands every eyebrow in the app to
+	// whatever this page later adds to its header cells (cambia-892, DL-7 F5).
+	const headerCell: React.CSSProperties = { ...EYEBROW };
 
 	return (
 		<div style={{ padding: 'var(--space-6) var(--space-5)', maxWidth: 1000, margin: '0 auto', width: '100%' }}>
