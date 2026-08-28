@@ -117,9 +117,10 @@ func main() {
 		}
 	}
 
-	// Wire matchmaker callback before starting Run. The handler owns it (and is covered by the
-	// handlers tests) because forming a match spans both parties' lobbies, not just the host's.
-	srv.Matchmaker.OnMatchFormed = srv.HandleMatchFormed
+	// Wire the matchmaker's callbacks before starting Run. The handlers own them (and are covered
+	// by the handlers tests) because forming a match spans both parties' lobbies, not just the
+	// host's, and judging a party live means reading its hub.
+	srv.WireMatchmaker()
 
 	go srv.Matchmaker.Run(context.Background())
 

@@ -25,30 +25,56 @@ const matchNoticeSendTimeout = 2 * time.Second
 // go there. Before cambia-933 only the host hub was notified, and the second party was left
 // sitting in its own lobby with no way to reach the match.
 //
+// A party whose members all closed their tabs is not seated: consolidating it would move the
+// live players into a ready check the absent side can never answer, and nothing times that check
+// out (cambia-933 F1). When that leaves the match short, no notice goes out at all and the
+// surviving parties go back in the queue with their original queue time.
+//
 // Runs on the matchmaker's goroutine, so it touches only lock-guarded lobby state and the hubs'
 // channel API, never hub fields.
 func (gs *GameServer) HandleMatchFormed(result matchmaking.MatchResult) {
+	// One entry per party lobby, in the matchmaker's order, so the host lobby's own members
+	// come first and seating stays deterministic.
+	lobbyIDs := make([]uuid.UUID, 0, len(result.Parties))
+	seen := make(map[uuid.UUID]bool, len(result.Parties))
+	seatable := make([]matchmaking.QueuedLobby, 0, len(result.Parties))
+	seats := 0
+	for _, party := range result.Parties {
+		if party.LobbyID == uuid.Nil || seen[party.LobbyID] {
+			continue
+		}
+		seen[party.LobbyID] = true
+
+		// The matchmaker holds dormant parties out of matching already; this catches the one
+		// that lost its last connection between that check and this callback.
+		if live, serving := gs.HubStore.LiveConnections(party.LobbyID); !serving || live == 0 {
+			log.Printf("Match in queue %s: party lobby %s has nobody connected; it is not being seated", result.QueueID, party.LobbyID)
+			continue
+		}
+		lobbyIDs = append(lobbyIDs, party.LobbyID)
+		seatable = append(seatable, party)
+		seats += party.PlayerCount
+	}
+
+	// The match is played in the host party's lobby, so a dormant host is as fatal as a short
+	// table however the remaining seats add up.
+	if seats < result.TargetCount || !containsLobby(lobbyIDs, result.HostLobbyID) {
+		log.Printf("Match in queue %s abandoned: %d of %d seats still connected; requeueing the live parties",
+			result.QueueID, seats, result.TargetCount)
+		gs.requeueParties(result, seatable)
+		return
+	}
+
 	hostLob, ok := gs.LobbyStore.GetLobby(result.HostLobbyID)
 	if !ok {
 		log.Printf("Match formed in queue %s but host lobby %s is gone", result.QueueID, result.HostLobbyID)
+		gs.requeueParties(result, seatable)
 		return
 	}
 
 	hostLob.Mu.Lock()
 	hostUserID := hostLob.HostUserID
 	hostLob.Mu.Unlock()
-
-	// One entry per party lobby, in the matchmaker's order, so the host lobby's own members
-	// come first and seating stays deterministic.
-	lobbyIDs := make([]uuid.UUID, 0, len(result.Players))
-	seen := make(map[uuid.UUID]bool, len(result.Players))
-	for _, p := range result.Players {
-		if p.LobbyID == uuid.Nil || seen[p.LobbyID] {
-			continue
-		}
-		seen[p.LobbyID] = true
-		lobbyIDs = append(lobbyIDs, p.LobbyID)
-	}
 
 	players := make([]hub.MatchedPlayer, 0, len(lobbyIDs))
 	for _, lobbyID := range lobbyIDs {
@@ -97,4 +123,61 @@ func (gs *GameServer) HandleMatchFormed(result matchmaking.MatchResult) {
 			log.Printf("Match in queue %s: hub %s did not take the match notice within %s", result.QueueID, lobbyID, matchNoticeSendTimeout)
 		}
 	}
+}
+
+// containsLobby reports whether id is in the list.
+func containsLobby(ids []uuid.UUID, id uuid.UUID) bool {
+	for _, candidate := range ids {
+		if candidate == id {
+			return true
+		}
+	}
+	return false
+}
+
+// requeueParties puts the still-connected parties of an abandoned match back in their queue,
+// keeping their original queue time so a party does not lose its place in line over somebody
+// else's closed tab. Their lobbies stay searching: nothing was sent to them, so from the client's
+// side the search simply continues.
+//
+// Party size is re-read from the lobby rather than taken from the stale queue entry, since
+// members may have left while the match was being assembled. Dormant parties are left alone here:
+// their hubs' idle window is the single authority on when a lobby with no connections is really
+// gone (cambia-884), and it is what holds the grace period a page refresh needs.
+func (gs *GameServer) requeueParties(result matchmaking.MatchResult, parties []matchmaking.QueuedLobby) {
+	for _, party := range parties {
+		lob, exists := gs.LobbyStore.GetLobby(party.LobbyID)
+		if !exists {
+			continue
+		}
+		lob.Mu.Lock()
+		party.PlayerCount = lob.JoinedCount()
+		searching := lob.Searching
+		lob.Mu.Unlock()
+
+		if !searching || party.PlayerCount <= 0 {
+			log.Printf("Match in queue %s: lobby %s is no longer a queueable party; leaving it out",
+				result.QueueID, party.LobbyID)
+			continue
+		}
+		entry := party
+		if err := gs.Matchmaker.Enqueue(&entry); err != nil {
+			log.Printf("Match in queue %s: could not requeue lobby %s: %v", result.QueueID, party.LobbyID, err)
+		}
+	}
+}
+
+// PartyIsLive is the Matchmaker's PartyLive predicate: a queued party counts as live while its
+// hub still holds at least one WebSocket connection. Membership alone cannot answer it, since a
+// lobby keeps its members across a dropped socket (cambia-807, cambia-884).
+func (gs *GameServer) PartyIsLive(lobbyID uuid.UUID) bool {
+	live, serving := gs.HubStore.LiveConnections(lobbyID)
+	return serving && live > 0
+}
+
+// WireMatchmaker binds the matchmaker's callbacks to this server. Both are set together so a
+// caller cannot take the match callback without the liveness gate it relies on (cambia-933 F1).
+func (gs *GameServer) WireMatchmaker() {
+	gs.Matchmaker.OnMatchFormed = gs.HandleMatchFormed
+	gs.Matchmaker.PartyLive = gs.PartyIsLive
 }

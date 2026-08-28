@@ -232,6 +232,23 @@ Handled by `internal/handlers/lobby.go`. These manage *ephemeral* in-memory lobb
     field that genuinely omits: it is a plain string, empty until a queue is selected.
 * **Response (Error):** `400 Bad Request` (invalid type/mode/payload), `401 Unauthorized`, `403 Forbidden`, `500 Internal Server Error`.
 
+#### `POST /lobby/{id}/search` and `DELETE /lobby/{id}/search`
+
+* **Description:** Puts the lobby's party into its `queueID` queue, or takes it back out. Host only.
+* **Response (Success: 200 OK):** `{"status":"searching","queue_id":"<id>"}` for the POST,
+    `{"status":"cancelled"}` for the DELETE.
+* **Response (Error):** `400 Bad Request` (`No queue selected for this lobby`, `Unknown queue ID`,
+    or a matchmaker rejection such as an empty party), `403 Forbidden` (not the host),
+    `404 Not Found`, `409 Conflict` (already searching).
+* **Who gets matched:** a queued party is only paired while at least one of its members holds a
+    WebSocket connection. A party whose members all closed their tabs keeps its place in the queue,
+    since membership survives a dropped socket by design and a page refresh must not cost a place
+    in line, but it is passed over until somebody reconnects and is released by the lobby's idle
+    window if nobody does. Pairing such a party would drop the connected side into a ready check
+    the absent side can never answer (cambia-933). A match that turns out to be short when it is
+    consolidated is abandoned: no client is told anything, and the still-connected parties go back
+    in the queue with their original queue time, so their search simply continues.
+
 #### `GET /lobby/list`
 
 * **Description:** Lists public lobbies a caller can currently join. Requires no authentication: the handler reads no identity, so the list is the same for every caller. Three filters apply beyond simple membership:

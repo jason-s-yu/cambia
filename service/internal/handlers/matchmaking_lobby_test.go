@@ -203,7 +203,7 @@ func TestMatchmakingMatchMovesBothPlayersToOneLobby(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	gs.Matchmaker.OnMatchFormed = gs.HandleMatchFormed
+	gs.WireMatchmaker()
 	go gs.Matchmaker.Run(ctx)
 
 	tokenA, _ := auth.CreateJWT(uuid.New().String())
