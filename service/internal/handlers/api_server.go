@@ -24,9 +24,13 @@ const defaultCountdownDuration = 3 * time.Second
 // to the open phase for the next game. Tests may lower GameServer.PostGameDuration for speed.
 const defaultPostGameDuration = 10 * time.Second
 
-// defaultLobbyIdleTTL is how long a lobby may hold no live connections before its hub reaps it
-// (cambia-836). Tests may lower GameServer.LobbyIdleTTL for speed.
+// defaultLobbyIdleTTL is how long a lobby whose game is in progress may hold no live connections
+// before its hub reaps it (cambia-836). Tests may lower GameServer.LobbyIdleTTL for speed.
 const defaultLobbyIdleTTL = 45 * time.Minute
+
+// defaultLobbyEmptyIdleTTL is the same window for a lobby with no game in progress (cambia-884).
+// Tests may lower GameServer.LobbyEmptyIdleTTL for speed.
+const defaultLobbyEmptyIdleTTL = 5 * time.Minute
 
 // defaultPreGameDuration is how long a fresh game holds the initial card-reveal phase before
 // StartGame flips it live. Tests may lower GameServer.PreGameDuration for speed.
@@ -49,10 +53,16 @@ type GameServer struct {
 	// before the lobby reopens is configurable (production default; shortened in tests).
 	PostGameDuration time.Duration
 
-	// LobbyIdleTTL is copied onto each hub at creation: how long a lobby may hold no live
-	// connections, with no game in progress, before its hub tears it down (cambia-836).
+	// LobbyIdleTTL is copied onto each hub at creation: how long a lobby whose game is in
+	// progress may hold no live connections before its hub tears it down (cambia-836).
 	// Overridable per deployment via CAMBIA_LOBBY_IDLE_TTL; shortened in tests.
 	LobbyIdleTTL time.Duration
+
+	// LobbyEmptyIdleTTL is copied onto each hub alongside LobbyIdleTTL and is the window that
+	// applies while no game is in progress: an abandoned pre-game or post-game lobby is released
+	// in minutes rather than sitting out the game grace (cambia-884). Overridable per deployment
+	// via CAMBIA_LOBBY_EMPTY_IDLE_TTL; shortened in tests.
+	LobbyEmptyIdleTTL time.Duration
 
 	// PreGameDuration is copied onto each CambiaGame at creation (CreateGameInstance) so the
 	// pre-game card-reveal window before Started flips true is configurable (production
@@ -71,6 +81,7 @@ func NewGameServer() *GameServer {
 		CountdownDuration: defaultCountdownDuration,
 		PostGameDuration:  defaultPostGameDuration,
 		LobbyIdleTTL:      defaultLobbyIdleTTL,
+		LobbyEmptyIdleTTL: defaultLobbyEmptyIdleTTL,
 		PreGameDuration:   defaultPreGameDuration,
 	}
 }

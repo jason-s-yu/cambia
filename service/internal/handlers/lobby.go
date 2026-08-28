@@ -123,6 +123,9 @@ func CreateLobbyHandler(gs *GameServer) http.HandlerFunc {
 		if gs.LobbyIdleTTL > 0 {
 			h.IdleTTL = gs.LobbyIdleTTL
 		}
+		if gs.LobbyEmptyIdleTTL > 0 {
+			h.EmptyIdleTTL = gs.LobbyEmptyIdleTTL
+		}
 		gs.HubStore.CreateHub(h)
 		go h.Run(context.Background())
 
@@ -264,8 +267,17 @@ type ListLobbiesResponse struct {
 	MaxPlayers  int          `json:"maxPlayers"`
 }
 
-// ListLobbiesHandler returns a map of currently active ephemeral lobbies from the store.
+// ListLobbiesHandler returns a map of currently joinable ephemeral lobbies from the store.
 // For each lobby, it includes player count and calculated max player count based on game mode.
+//
+// A lobby with no game in progress and no live WebSocket connection is left out entirely rather
+// than listed as inactive. playerCount reports membership, and only a deliberate leave releases
+// membership (cambia-807), so a table that finished a game and closed its tabs kept listing
+// itself at 2/2 - rendered "Full", unjoinable, nobody there - for the whole idle window
+// (cambia-884). Excluding is the honest answer because the list answers one question, "what can
+// I join right now", and a lobby with nobody in it answers it no better with a label on it. The
+// people who hold membership lose nothing: GET /lobby/active still offers them the lobby back
+// for as long as the idle reaper leaves it standing.
 func ListLobbiesHandler(gs *GameServer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Authentication is optional for listing lobbies, but included for consistency.
@@ -282,8 +294,9 @@ func ListLobbiesHandler(gs *GameServer) http.HandlerFunc {
 			lob.Mu.Lock() // Lock lobby to safely read its current state.
 			count := lob.JoinedCount()
 			gameMode := lob.GameMode
+			inGame := lob.InGame
 			// Copy only the fields the response needs. Users, ReadyStates,
-			// GameInstanceCreated, CountdownTimer, and OnEmpty are left at
+			// GameInstanceCreated, CountdownTimer, OnEmpty and Mu are left at
 			// their zero value: the JSON encoding already ignores them via
 			// `json:"-"`, and skipping them avoids copying lob.Mu (assigning
 			// a sync.Mutex trips go vet's copylocks check and would leave
@@ -305,6 +318,13 @@ func ListLobbiesHandler(gs *GameServer) http.HandlerFunc {
 				Searching:     lob.Searching,
 			}
 			lob.Mu.Unlock() // Unlock after reading.
+
+			// Skip lobbies nobody is connected to. A running game keeps its listing whatever the
+			// socket count: its players are mid-table and are expected back, the same exemption
+			// the idle reaper makes.
+			if live, serving := gs.HubStore.LiveConnections(id); !inGame && (!serving || live == 0) {
+				continue
+			}
 
 			// Determine max players based on game mode.
 			maxPlayers := 4 // Default max players.

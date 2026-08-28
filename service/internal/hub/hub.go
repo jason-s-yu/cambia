@@ -27,9 +27,15 @@ const defaultCountdownDuration = 3 * time.Second
 const defaultPostGameResultsDuration = 10 * time.Second
 
 // defaultIdleTTL is how long a hub may sit with no connections before it reaps its own lobby,
-// used when the GameServer does not override IdleTTL. Long enough that a table stepping away
-// between games keeps its lobby, short enough that abandoned lobbies do not accumulate.
+// used when the GameServer does not override IdleTTL. It applies while a game is in progress,
+// long enough that a table that all dropped mid-game can come back to it.
 const defaultIdleTTL = 45 * time.Minute
+
+// defaultEmptyIdleTTL is the same window for a hub with no game in progress, used when the
+// GameServer does not override EmptyIdleTTL. A pre-game or post-game lobby whose members have
+// all closed their tabs holds nothing worth waiting out the long window for, and until
+// cambia-884 it sat in the public list for the best part of an hour.
+const defaultEmptyIdleTTL = 5 * time.Minute
 
 // GameFactory builds and registers a CambiaGame for the given players, wiring emitter as
 // the event sink. The returned game is registered but not begun (the hub calls BeginPreGame
@@ -104,8 +110,13 @@ type Hub struct {
 	PostGameDuration time.Duration
 
 	// IdleTTL is how long the hub may hold no connections before it reaps its own lobby through
-	// OnIdle. Zero disables reaping.
+	// OnIdle. Zero disables reaping, whatever EmptyIdleTTL says.
 	IdleTTL time.Duration
+
+	// EmptyIdleTTL is the idle window that applies while no game is in progress: a lobby waiting
+	// to start, or one whose game has finished, is reclaimed on this shorter window instead of
+	// the game's grace (cambia-884). Zero, or any value above IdleTTL, leaves IdleTTL in force.
+	EmptyIdleTTL time.Duration
 
 	// OnIdle tears the lobby down when the idle window elapses. Injected by the owner and
 	// pointed at the same teardown the last deliberate leave runs (cambia-807), so a lobby
@@ -177,6 +188,7 @@ func NewHub(lob *lobby.Lobby) *Hub {
 		CountdownDuration: defaultCountdownDuration,
 		PostGameDuration:  defaultPostGameResultsDuration,
 		IdleTTL:           defaultIdleTTL,
+		EmptyIdleTTL:      defaultEmptyIdleTTL,
 		conns:             make(map[uuid.UUID]*Connection),
 		CumulativeScores:  make(map[uuid.UUID]int),
 		RoundHistory:      make([]map[uuid.UUID]int, 0),
@@ -291,12 +303,31 @@ func (h *Hub) armIdleReap() {
 		return
 	}
 	gen := h.idleGen
-	h.idleTimer = time.AfterFunc(h.IdleTTL, func() {
+	h.idleTimer = time.AfterFunc(h.idleWindow(), func() {
 		select {
 		case h.idleReap <- gen:
 		case <-h.shutdown:
 		}
 	})
+}
+
+// idleWindow returns the window that applies to the hub's current state: the full IdleTTL while
+// a game is in progress, and the shorter EmptyIdleTTL otherwise (cambia-884).
+//
+// The split is what a lobby with nobody in it is worth. A game still running has to be able to
+// end on its own terms and its players have to be able to come back to it, so it keeps the long
+// grace; a lobby waiting to start, or one whose game has finished, holds nothing but membership
+// its members can re-establish by opening a new one. While a game is in progress the long window
+// doubles as the interval at which the reap decision is reconsidered, so a game that ends with
+// nobody connected is reclaimed at the end of that window rather than the short one.
+//
+// EmptyIdleTTL never lengthens the window: a deployment that lowers IdleTTL below it, and every
+// test that shortens only IdleTTL, gets the lower of the two.
+func (h *Hub) idleWindow() time.Duration {
+	if h.EmptyIdleTTL > 0 && h.EmptyIdleTTL < h.IdleTTL && !h.inGame() {
+		return h.EmptyIdleTTL
+	}
+	return h.IdleTTL
 }
 
 // cancelIdleReap closes the current window. The generation bump is the part that matters: Stop()
@@ -329,7 +360,7 @@ func (h *Hub) handleIdleReap(gen uint64) {
 		h.armIdleReap()
 		return
 	}
-	log.Printf("hub %s: no connections for %s and no game in progress; reaping lobby.", h.ID, h.IdleTTL)
+	log.Printf("hub %s: no connections for %s and no game in progress; reaping lobby.", h.ID, h.idleWindow())
 	h.OnIdle(h.ID)
 }
 

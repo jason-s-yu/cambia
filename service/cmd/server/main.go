@@ -80,15 +80,28 @@ func main() {
 
 	srv := handlers.NewGameServer()
 
-	// How long an abandoned lobby survives before its hub reaps it (cambia-836). Left at the
-	// 45 minute default unless the deployment says otherwise; a value that does not parse, or is
-	// not positive, is ignored rather than silently switching the reaper off.
+	// How long a lobby whose game is in progress survives with nothing connected before its hub
+	// reaps it (cambia-836). Left at the 45 minute default unless the deployment says otherwise;
+	// a value that does not parse, or is not positive, is ignored rather than silently switching
+	// the reaper off.
 	if v := os.Getenv("CAMBIA_LOBBY_IDLE_TTL"); v != "" {
 		if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
 			srv.LobbyIdleTTL = d
 			log.Printf("Lobby idle TTL set to %s from CAMBIA_LOBBY_IDLE_TTL", d)
 		} else {
 			log.Printf("Ignoring CAMBIA_LOBBY_IDLE_TTL=%q: expected a positive Go duration", v)
+		}
+	}
+
+	// The same window for a lobby with no game in progress (cambia-884): an abandoned pre-game or
+	// post-game lobby is released on this one, which defaults to 5 minutes. A value above
+	// CAMBIA_LOBBY_IDLE_TTL has no effect, since the shorter of the two always wins.
+	if v := os.Getenv("CAMBIA_LOBBY_EMPTY_IDLE_TTL"); v != "" {
+		if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
+			srv.LobbyEmptyIdleTTL = d
+			log.Printf("Empty-lobby idle TTL set to %s from CAMBIA_LOBBY_EMPTY_IDLE_TTL", d)
+		} else {
+			log.Printf("Ignoring CAMBIA_LOBBY_EMPTY_IDLE_TTL=%q: expected a positive Go duration", v)
 		}
 	}
 
