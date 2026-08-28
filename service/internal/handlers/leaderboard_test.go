@@ -54,20 +54,32 @@ func TestLeaderboardRankingAndYou(t *testing.T) {
 
 	// Three rated (1v1) users with descending elo, one unrated user with no rows
 	// in the ratings table for this pool.
-	top := createTestUser(t, "lb-top@example.com", "pw", "lb-top")
-	mid := createTestUser(t, "lb-mid@example.com", "pw", "lb-mid")
-	low := createTestUser(t, "lb-low@example.com", "pw", "lb-low")
-	unrated := createTestUser(t, "lb-unrated@example.com", "pw", "lb-unrated")
+	// Per-run email addresses (the pattern history_test.go already uses): a fixed address makes
+	// every run after the first reuse whatever account happens to hold it, which now means no
+	// cleanup is registered for it (cambia-942 F5) and each run leaks another three ratings rows
+	// onto a user it does not own. Creating its own rows keeps the run self-contained.
+	top := createTestUser(t, "lb-top-"+uuid.NewString()+"@example.com", "pw", "lb-top")
+	mid := createTestUser(t, "lb-mid-"+uuid.NewString()+"@example.com", "pw", "lb-mid")
+	low := createTestUser(t, "lb-low-"+uuid.NewString()+"@example.com", "pw", "lb-low")
+	unrated := createTestUser(t, "lb-unrated-"+uuid.NewString()+"@example.com", "pw", "lb-unrated")
 
-	require.NoError(t, database.UpdateUser1v1Rating(ctx, top.ID, 2000))
-	require.NoError(t, database.UpdateUser1v1Rating(ctx, mid.ID, 1700))
-	require.NoError(t, database.UpdateUser1v1Rating(ctx, low.ID, 1400))
+	// Ratings are placed above every account already in the pool rather than at fixed values:
+	// the leaderboard ranks globally over a shared dev database, so a hard-coded 2000 ties with
+	// any leftover row at 2000 (an aborted run's fixtures, a real account) and "top ranks first"
+	// then depends on how the tie breaks. Reading the current maximum first makes the three
+	// fixtures deterministically the top three (cambia-942 F5 follow-up: they no longer reuse -
+	// and delete - whatever account held a fixed fixture address, so leftovers can coexist).
+	var maxElo int
+	require.NoError(t, database.DB.QueryRow(ctx, `SELECT COALESCE(MAX(elo_1v1), 0) FROM users`).Scan(&maxElo))
+	require.NoError(t, database.UpdateUser1v1Rating(ctx, top.ID, maxElo+300))
+	require.NoError(t, database.UpdateUser1v1Rating(ctx, mid.ID, maxElo+200))
+	require.NoError(t, database.UpdateUser1v1Rating(ctx, low.ID, maxElo+100))
 
 	// ratings.game_id is nullable and FK-constrained to games(id); insert directly
 	// with a NULL game_id rather than fabricating a games row this test doesn't need.
-	insertRatingRow(t, ctx, top.ID, 1500, 2000, "1v1")
-	insertRatingRow(t, ctx, mid.ID, 1500, 1700, "1v1")
-	insertRatingRow(t, ctx, low.ID, 1500, 1400, "1v1")
+	insertRatingRow(t, ctx, top.ID, 1500, maxElo+300, "1v1")
+	insertRatingRow(t, ctx, mid.ID, 1500, maxElo+200, "1v1")
+	insertRatingRow(t, ctx, low.ID, 1500, maxElo+100, "1v1")
 
 	// low, limit=1: low is outside the top 1 (top has the highest rating) but "you"
 	// must still report low's true rank and a nonzero games count.

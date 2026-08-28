@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -42,7 +43,7 @@ func newRunningLobby(t *testing.T, gs *GameServer, hostToken, body string) (*lob
 	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
 		t.Fatalf("failed to decode created lobby: %v", err)
 	}
-	t.Cleanup(func() { cleanupLobbyDBRows(t, created.ID) })
+	t.Cleanup(func() { cleanupLobbyDBRows(t, gs, created.ID) })
 	lob, exists := gs.LobbyStore.GetLobby(created.ID)
 	if !exists {
 		t.Fatalf("lobby %s missing from store after create", created.ID)
@@ -361,4 +362,91 @@ func startTestGame(t *testing.T, gs *GameServer, lob *lobby.Lobby, playerIDs []u
 	lob.Mu.Unlock()
 
 	return g
+}
+
+// rawActiveSession drives ActiveSessionHandler and returns the status code and the exact
+// response body, unparsed. getActiveSession above decodes into ActiveSessionResponse, which
+// silently tolerates renamed, added or dropped JSON keys; the doc-sample test below needs the
+// wire bytes themselves.
+func rawActiveSession(t *testing.T, gs *GameServer, token string) (int, []byte) {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/lobby/active", nil)
+	if token != "" {
+		req.Header.Set("Cookie", "auth_token="+token)
+	}
+	w := httptest.NewRecorder()
+	ActiveSessionHandler(gs).ServeHTTP(w, req)
+	return w.Code, w.Body.Bytes()
+}
+
+// TestActiveSessionDocSample is the test service/doc/rest_api.md's GET /lobby/active samples
+// cite (cambia-942 F7). The doc claimed its bodies were captured from TestActiveSessionInGame,
+// which decodes into a typed struct and never sees a raw body, so nothing tied the documented
+// wire shape to the handler and the samples could drift silently. This asserts all three
+// documented bodies: the in-game session's exact key set, the empty case, and the 401 text.
+func TestActiveSessionDocSample(t *testing.T) {
+	auth.Init()
+	gs := NewGameServer()
+
+	hostID := uuid.New()
+	hostToken, _ := auth.CreateJWT(hostID.String())
+	playerID := uuid.New()
+	playerToken, _ := auth.CreateJWT(playerID.String())
+
+	lob, _, _ := newRunningLobby(t, gs, hostToken, `{"type":"public","gameMode":"head_to_head"}`)
+	joinLobbyAs(t, gs, lob.ID, hostToken)
+	joinLobbyAs(t, gs, lob.ID, playerToken)
+	startTestGame(t, gs, lob, []uuid.UUID{hostID, playerID})
+
+	code, body := rawActiveSession(t, gs, playerToken)
+	if code != http.StatusOK {
+		t.Fatalf("expected 200 for a seated player, got %d: %s", code, body)
+	}
+	var envelope struct {
+		Active map[string]json.RawMessage `json:"active"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		t.Fatalf("decode active session body %s: %v", body, err)
+	}
+	// The lobby is unnamed, so `name` is legitimately absent (omitempty) - the doc sample omits
+	// it too. Every other key the sample shows must be present, and no key it does not show may
+	// appear.
+	want := map[string]bool{
+		"lobbyId": true, "lobbyType": true, "gameMode": true,
+		"phase": true, "gameId": true, "seated": true, "playerCount": true,
+	}
+	for key := range want {
+		if _, present := envelope.Active[key]; !present {
+			t.Fatalf("documented field %q is missing from the in-game response: %s", key, body)
+		}
+	}
+	for key := range envelope.Active {
+		if !want[key] {
+			t.Fatalf("field %q appears in the in-game response but not in the rest_api.md sample: %s", key, body)
+		}
+	}
+
+	// The empty case: a token with no lobby membership documents an explicit null, not an
+	// absent key or an empty object.
+	idleToken, _ := auth.CreateJWT(uuid.New().String())
+	code, body = rawActiveSession(t, gs, idleToken)
+	if code != http.StatusOK {
+		t.Fatalf("expected 200 for a caller with no membership, got %d: %s", code, body)
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, body); err != nil {
+		t.Fatalf("compact empty-case body %s: %v", body, err)
+	}
+	if got := compact.String(); got != `{"active":null}` {
+		t.Fatalf("empty-case body = %s, want %s", got, `{"active":null}`)
+	}
+
+	// The documented 401 body.
+	code, body = rawActiveSession(t, gs, "")
+	if code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without an auth cookie, got %d: %s", code, body)
+	}
+	if got := strings.TrimSpace(string(body)); got != "Missing authentication token" {
+		t.Fatalf("401 body = %q, want %q", got, "Missing authentication token")
+	}
 }

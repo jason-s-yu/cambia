@@ -77,7 +77,9 @@ type GameServer struct {
 	// PersistWG is copied onto each CambiaGame at creation (CreateGameInstance) as its
 	// PersistWG (test-only; nil in production). See game.CambiaGame.PersistWG for what it
 	// tracks and cambia-908 for why: it lets a test drain a game's background persistence
-	// goroutines before returning instead of leaving them to outlive it.
+	// goroutines before returning instead of leaving them to outlive it. One group is shared by
+	// every game this server creates, so a Wait covers all of them, and a caller must have
+	// ordered its Wait after every Add it means to cover (cambia-942 F3).
 	PersistWG *sync.WaitGroup
 }
 

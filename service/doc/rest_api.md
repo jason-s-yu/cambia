@@ -289,7 +289,7 @@ Handled by `internal/handlers/lobby.go`. These manage *ephemeral* in-memory lobb
 
 * **Description:** Returns the single lobby or in-progress game the authenticated caller should be offered to resume - the home screen's answer to "what was I doing" after a refresh or a lost tab. Scans every lobby the caller has joined whose hub is still alive (a hub whose last connection left has dissolved its `Run` loop even though it stays registered, so it is excluded rather than offered as a dead resume target) and returns the highest-ranked candidate: a game in progress outranks a matchmaking search, which outranks an idle open lobby; ties break on the lower lobby UUID for a stable answer across calls. A private lobby is included here - `GET /lobby/list` excludes it from the public list, but a caller resuming their own membership is not the "uninvited caller" that filter guards against.
 * **Request Body:** None.
-* **Response (Success: 200 OK):** `application/json` - `active` is `null` when the caller belongs to no live lobby, otherwise the resumable session. Captured from a handler test run (`internal/handlers/active_session_test.go`'s `TestActiveSessionInGame` scenario: two players seated in a `head_to_head` game).
+* **Response (Success: 200 OK):** `application/json` - `active` is `null` when the caller belongs to no live lobby, otherwise the resumable session. The bodies below model two players seated in a `head_to_head` game; their shape is asserted against the live handler by `internal/handlers/active_session_test.go`'s `TestActiveSessionDocSample`, which fails if the field set here drifts from what the endpoint emits. The uuids are illustrative.
     ```json
     {
       "active": {
@@ -303,12 +303,12 @@ Handled by `internal/handlers/lobby.go`. These manage *ephemeral* in-memory lobb
       }
     }
     ```
-    The empty case, captured the same run for a token with no lobby membership:
+    The empty case, for a token with no lobby membership (asserted byte for byte by the same test):
     ```json
     { "active": null }
     ```
     `name` (the lobby's display name) and `gameId` both carry `omitempty` here - unlike `Lobby.GameID` above, this `GameID` is a plain `string`, empty until a live game is attached, so the tag actually omits the key rather than serializing a nil UUID. `phase` is one of `"open"`, `"searching"`, or `"in_game"`, derived from lobby/game state rather than read off the hub's own `Phase` field (which mutates only inside the hub's `Run` goroutine and would race here). `seated` is `false` for a lobby member who holds no seat in a game already dealt (joined after the deal); `playerCount` is the seated count while in game, otherwise the joined lobby member count.
-* **Response (Error):** `401 Unauthorized` (no `auth_token` cookie present) - captured the same run: body `Missing authentication token`. `403 Forbidden` (cookie present but invalid, expired, or carrying an unparseable user id). `405 Method Not Allowed` for anything but `GET`.
+* **Response (Error):** `401 Unauthorized` (no `auth_token` cookie present) - body `Missing authentication token`, also asserted by `TestActiveSessionDocSample`. `403 Forbidden` (cookie present but invalid, expired, or carrying an unparseable user id). `405 Method Not Allowed` for anything but `GET`.
 
 ---
 

@@ -38,7 +38,7 @@ func createPrivateLobby(t *testing.T, gs *GameServer, hostToken string) uuid.UUI
 	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
 		t.Fatalf("decode created lobby: %v", err)
 	}
-	t.Cleanup(func() { cleanupLobbyDBRows(t, created.ID) })
+	t.Cleanup(func() { cleanupLobbyDBRows(t, gs, created.ID) })
 	return created.ID
 }
 

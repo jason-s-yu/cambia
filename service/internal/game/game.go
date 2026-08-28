@@ -175,13 +175,20 @@ type CambiaGame struct {
 
 	// PersistWG, when set (test-only; production games leave it nil, copied from
 	// GameServer.PersistWG at creation - see CreateGameInstance), is Add(1)'d once per
-	// background DB-write goroutine persistFinalGameState launches and Done()'d when that
-	// goroutine returns. It lets a caller that already knows the game has ended (via a
-	// happens-before edge through g.mu or an observed game_results broadcast, both of which
-	// endGame produces only after persistFinalGameState's Add already ran) Wait() for every
-	// write to finish before proceeding, instead of leaving them to outlive it (cambia-908: an
-	// unwaited goroutine from one test's game end raced a later test's database.ConnectDB
-	// reassigning the shared pool, under -race).
+	// background DB-write goroutine this game launches - persistInitialGameState's upsert and
+	// persistFinalGameState's two - and Done()'d when that goroutine returns. It lets a caller
+	// Wait() for every write to finish before proceeding, instead of leaving them to outlive it
+	// (cambia-908: an unwaited goroutine from one test's game end raced a later test's
+	// database.ConnectDB reassigning the shared pool, under -race).
+	//
+	// Every Add runs under g.mu, inside BeginPreGame (initial state) or endGame (final state),
+	// so a caller holding a happens-before edge to the write it cares about - an observed
+	// GameOver, a received game_results broadcast, or its own EndGame call - is guaranteed the
+	// matching Add already ran. That edge is required: sync.WaitGroup forbids an Add that takes
+	// the counter up from zero from racing a concurrent Wait, and one GameServer's WaitGroup is
+	// shared by every game it creates, so a Wait issued for one game and an Add issued by
+	// another game's start are ordered only by whatever the caller establishes itself (cambia-942
+	// F3; see handlers.awaitGameEndPersistence for the test-side statement of that rule).
 	PersistWG *sync.WaitGroup
 
 	// Special Action State - kept for backward compatibility with ProcessSpecialAction routing.

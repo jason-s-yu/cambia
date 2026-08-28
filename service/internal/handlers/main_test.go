@@ -123,8 +123,20 @@ func cleanupTestUserRows(t *testing.T, userID uuid.UUID) {
 // token has to exist first), so this cleanup is always registered after theirs - and t.Cleanup
 // runs cleanups in LIFO order, so this one fires first, clearing any game_results/game_actions
 // row a participant's cleanupTestUserRows might otherwise race against before it ever runs.
-func cleanupLobbyDBRows(t *testing.T, lobbyID uuid.UUID) {
+//
+// The DELETE is preceded by drainLobbyPersistence (cambia-942 F4): the writes this deletes are
+// issued by fire-and-forget goroutines, so deleting first leaves a still-running write to fail
+// on the vanished FK target or, worse, to re-insert the lobbies/games rows straight after the
+// DELETE and strand them. That was the pre-fix ordering: registering this inside the lobby
+// helpers put the DELETE ahead of startTwoPlayerGame's drain under t.Cleanup LIFO, so a late
+// UpsertInitialGameState or RecordGameAndResults could land behind it and leave a whole
+// lobbies/games/game_results triple; the host's cleanupTestUserRows then fails its users DELETE
+// on lobbies.host_user_id (that FK has no cascade), only t.Logf's, and leaks the fixture user
+// too. Measure that shape on a database this suite has to itself: cambia-dev also carries rows
+// from any dev server running against it, so a row-count delta there proves nothing.
+func cleanupLobbyDBRows(t *testing.T, gs *GameServer, lobbyID uuid.UUID) {
 	t.Helper()
+	drainLobbyPersistence(t, gs, lobbyID)
 	if database.DB == nil {
 		return
 	}
@@ -132,6 +144,55 @@ func cleanupLobbyDBRows(t *testing.T, lobbyID uuid.UUID) {
 	defer cancel()
 	if _, err := database.DB.Exec(ctx, `DELETE FROM lobbies WHERE id = $1`, lobbyID); err != nil {
 		t.Logf("cleanupLobbyDBRows: delete lobby %s: %v", lobbyID, err)
+	}
+}
+
+// drainLobbyPersistence waits out the background DB writes a game on this lobby may still have
+// in flight, so a caller can delete the lobby's rows without racing them (cambia-942 F4).
+//
+// A no-op unless the server tracks its persistence goroutines (gs.PersistWG; only test servers
+// set it - see newForfeitTestServer). Otherwise it works off whether the lobby's game is still
+// registered, which is exactly the signal needed for sync.WaitGroup's Add-before-Wait rule:
+//
+//   - Still registered: the game has not ended, so persistFinalGameState's Add has not run and
+//     a bare Wait would see a zero counter and return ahead of it. Poll GameOver first (endGame
+//     sets it under the game's lock, in the same call that Adds), then Wait.
+//   - Not registered: endGame already ran. It calls persistFinalGameState, and only afterwards
+//     OnGameEnd, whose last act is GameStore.DeleteGame - so reading the game's absence through
+//     the store's own mutex is itself proof that both game-end Adds already happened, as is the
+//     initial-state Add from BeginPreGame, earlier still. Wait alone is correct here, and this
+//     is the common case: the store drops a game as soon as it ends.
+//
+// Both phases are deadline-bounded, since a test may legitimately end while its game is still
+// running; in that case only the initial-state upsert is outstanding and Wait covers it.
+func drainLobbyPersistence(t *testing.T, gs *GameServer, lobbyID uuid.UUID) {
+	t.Helper()
+	if gs == nil || gs.PersistWG == nil {
+		return
+	}
+	if g := gs.GameStore.GetGameByLobbyID(lobbyID); g != nil {
+		deadline := time.Now().Add(5 * time.Second)
+		// forUser is irrelevant here: ObfGameState.GameOver is derived from engine/game state,
+		// not from the requesting player's view.
+		for !g.GetCurrentObfuscatedGameState(uuid.Nil).GameOver {
+			if time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		gs.PersistWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		// Errorf, not Fatalf: this runs from t.Cleanup, and the DELETE that follows is still
+		// worth attempting. A test that reaches this has an undrained write and its cleanup is
+		// no longer race-free, so it must not pass silently.
+		t.Errorf("cambia-942 F4: persistence goroutines for lobby %s did not finish within 5s; deleting its rows anyway", lobbyID)
 	}
 }
 
