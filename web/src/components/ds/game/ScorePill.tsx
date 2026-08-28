@@ -4,7 +4,8 @@ export interface ScorePillProps {
   /** Uppercase micro-label, e.g. "ROUND", "TOTAL". */
   label?: string;
   value?: React.ReactNode;
-  tone?: 'neutral' | 'gold' | 'berry' | 'moss';
+  /** 'success' and 'danger' carry a delta's sign; 'gold' marks the headline number. */
+  tone?: 'neutral' | 'gold' | 'success' | 'danger';
   big?: boolean;
   style?: React.CSSProperties;
 }
@@ -17,8 +18,8 @@ interface ToneSpec {
 const TONES: Record<NonNullable<ScorePillProps['tone']>, ToneSpec> = {
   neutral: { color: 'var(--text-primary)', border: 'var(--border-default)' },
   gold: { color: 'var(--accent-gold)', border: 'var(--border-accent)' },
-  berry: { color: 'var(--status-danger)', border: 'var(--status-danger-border)' },
-  moss: { color: 'var(--status-success)', border: 'var(--status-success-border)' }
+  success: { color: 'var(--status-success)', border: 'var(--status-success-border)' },
+  danger: { color: 'var(--status-danger)', border: 'var(--status-danger-border)' }
 };
 
 /** Tabular number in an inset pill: scores, round counters, ratings, timers. */
@@ -34,6 +35,7 @@ const ScorePill: React.FC<ScorePillProps> = ({ label, value, tone = 'neutral', b
         background: 'var(--surface-inset)',
         border: '1px solid ' + t.border,
         borderRadius: 'var(--radius-pill)',
+        whiteSpace: 'nowrap',
         ...style
       }}
     >

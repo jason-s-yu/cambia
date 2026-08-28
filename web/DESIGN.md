@@ -38,6 +38,17 @@ Names that would collide with a Tailwind v4 default theme key carry a `--ds-` pr
 
 Surfaces step in one direction only. A panel on `--surface-1` puts its nested rows on `--surface-2`, never back down to `--surface-0`.
 
+The felt is the only saturated ground and the only surface that stays green in both themes. The rail is a solid ring of `--surface-felt-deep` around the felt with a 1px border on each edge; there is no gradient vignette. Chips that sit on the felt (a notice, a seat) use `--surface-1` or `--surface-2` with the standard border, so they read as pieces placed on the table rather than as part of it.
+
+### On-felt
+
+Text and hairlines drawn directly on the felt cannot use the neutral tiers, which flip with the theme. These two stay light-on-green in both themes and only shift alpha (cambia-848).
+
+|Token|Dark|Light|Use|
+|-|-|-|-|
+|`--text-on-felt-muted`|`rgba(240,247,243,.68)`|`rgba(240,247,243,.78)`|Pile labels and counts, secondary lines on the felt. `--text-on-green` is the primary tier.|
+|`--border-on-felt`|`rgba(240,247,243,.22)`|`rgba(240,247,243,.30)`|Empty pile slot outline, the felt's own 1px edge.|
+
 ### Text tiers
 
 |Token|Dark|Light|Use|
