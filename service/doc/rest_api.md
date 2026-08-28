@@ -197,11 +197,12 @@ Handled by `internal/handlers/lobby.go`. These manage *ephemeral* in-memory lobb
     }
     ```
     `name` is the host-supplied display name (empty string when omitted from the request), and
-    `mode`/`searching` always serialize. `gameId` always serializes too despite its `omitempty`
-    tag: `GameID` is a `uuid.UUID` (a fixed-size byte array), and Go's `encoding/json` only treats
-    a pointer, slice, map, or string as "empty" for that tag, never a fixed-size array - so a
-    lobby with no game yet reports the nil UUID rather than omitting the key. `queueID` is the one
-    field that genuinely omits: it is a plain string, empty until a queue is selected.
+    `mode`/`searching` always serialize. `gameId` carries no `omitempty` tag: `GameID` is a
+    `uuid.UUID` (a fixed-size byte array), and Go's `encoding/json` only treats a pointer, slice,
+    map, or string as "empty" for that tag, never a fixed-size array - the tag would have been a
+    no-op, so a lobby with no game yet always reports the nil UUID rather than omitting the key.
+    `queueID` is the one field that genuinely omits: it is a plain string, empty until a queue is
+    selected.
 * **Response (Error):** `400 Bad Request` (invalid type/mode/payload), `401 Unauthorized`, `403 Forbidden`, `500 Internal Server Error`.
 
 #### `GET /lobby/list`
@@ -238,6 +239,31 @@ Handled by `internal/handlers/lobby.go`. These manage *ephemeral* in-memory lobb
     Same fields as the `POST /lobby/create` response above, since `ListLobbiesResponse.Lobby` is
     the same struct; see that entry's note on `name`, `gameId`, and `queueID`.
 * **Response (Error):** `500 Internal Server Error`.
+
+#### `GET /lobby/active`
+
+* **Description:** Returns the single lobby or in-progress game the authenticated caller should be offered to resume - the home screen's answer to "what was I doing" after a refresh or a lost tab. Scans every lobby the caller has joined whose hub is still alive (a hub whose last connection left has dissolved its `Run` loop even though it stays registered, so it is excluded rather than offered as a dead resume target) and returns the highest-ranked candidate: a game in progress outranks a matchmaking search, which outranks an idle open lobby; ties break on the lower lobby UUID for a stable answer across calls. A private lobby is included here - `GET /lobby/list` excludes it from the public list, but a caller resuming their own membership is not the "uninvited caller" that filter guards against.
+* **Request Body:** None.
+* **Response (Success: 200 OK):** `application/json` - `active` is `null` when the caller belongs to no live lobby, otherwise the resumable session. Captured from a handler test run (`internal/handlers/active_session_test.go`'s `TestActiveSessionInGame` scenario: two players seated in a `head_to_head` game).
+    ```json
+    {
+      "active": {
+        "lobbyId": "c1f77934-17a4-473f-a324-2925546b4e1c",
+        "lobbyType": "public",
+        "gameMode": "head_to_head",
+        "phase": "in_game",
+        "gameId": "aabb1965-6ef7-400e-8fff-2d16b430d137",
+        "seated": true,
+        "playerCount": 2
+      }
+    }
+    ```
+    The empty case, captured the same run for a token with no lobby membership:
+    ```json
+    { "active": null }
+    ```
+    `name` (the lobby's display name) and `gameId` both carry `omitempty` here - unlike `Lobby.GameID` above, this `GameID` is a plain `string`, empty until a live game is attached, so the tag actually omits the key rather than serializing a nil UUID. `phase` is one of `"open"`, `"searching"`, or `"in_game"`, derived from lobby/game state rather than read off the hub's own `Phase` field (which mutates only inside the hub's `Run` goroutine and would race here). `seated` is `false` for a lobby member who holds no seat in a game already dealt (joined after the deal); `playerCount` is the seated count while in game, otherwise the joined lobby member count.
+* **Response (Error):** `401 Unauthorized` (no `auth_token` cookie present) - captured the same run: body `Missing authentication token`. `403 Forbidden` (cookie present but invalid, expired, or carrying an unparseable user id). `405 Method Not Allowed` for anything but `GET`.
 
 ---
 

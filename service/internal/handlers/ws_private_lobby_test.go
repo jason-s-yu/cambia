@@ -20,6 +20,9 @@ import (
 
 // createPrivateLobby drives POST /lobby/create with type "private" and returns the new
 // lobby id.
+// createPrivateLobby drives POST /lobby/create and returns the new lobby id. Registers a
+// t.Cleanup that best-effort deletes any lobbies row this lobby ends up persisting once a game
+// starts against it (cambia-890 F4; see cleanupLobbyDBRows).
 func createPrivateLobby(t *testing.T, gs *GameServer, hostToken string) uuid.UUID {
 	t.Helper()
 	req := httptest.NewRequest("POST", "/lobby/create", bytes.NewBufferString(`{"type":"private","gameMode":"head_to_head"}`))
@@ -35,6 +38,7 @@ func createPrivateLobby(t *testing.T, gs *GameServer, hostToken string) uuid.UUI
 	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
 		t.Fatalf("decode created lobby: %v", err)
 	}
+	t.Cleanup(func() { cleanupLobbyDBRows(t, created.ID) })
 	return created.ID
 }
 

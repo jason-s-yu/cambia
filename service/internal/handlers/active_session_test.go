@@ -24,6 +24,9 @@ import (
 // newRunningLobby creates a lobby through the real create handler (which registers the lobby,
 // creates its hub and starts the hub's Run loop) and waits until that hub reports alive. The
 // returned stop function dissolves the hub; it is idempotent and also runs at test cleanup.
+// Also registers a t.Cleanup that best-effort deletes any lobbies row this lobby ends up
+// persisting once a game starts against it via startTestGame below (cambia-890 F4; see
+// cleanupLobbyDBRows).
 func newRunningLobby(t *testing.T, gs *GameServer, hostToken, body string) (*lobby.Lobby, *hub.Hub, func()) {
 	t.Helper()
 
@@ -39,6 +42,7 @@ func newRunningLobby(t *testing.T, gs *GameServer, hostToken, body string) (*lob
 	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
 		t.Fatalf("failed to decode created lobby: %v", err)
 	}
+	t.Cleanup(func() { cleanupLobbyDBRows(t, created.ID) })
 	lob, exists := gs.LobbyStore.GetLobby(created.ID)
 	if !exists {
 		t.Fatalf("lobby %s missing from store after create", created.ID)

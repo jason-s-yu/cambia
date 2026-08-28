@@ -77,7 +77,10 @@ func awaitGameEndPersistence(t *testing.T, gs *GameServer) {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Errorf("cambia-908: game-end persistence goroutines did not finish within 5s")
+		// Fatal, not Errorf: a caller past this point assumes persistence already landed (e.g.
+		// re-reading the row a background goroutine is still writing). Errorf would let that
+		// caller run its assertions against a half-written row instead of stopping here.
+		t.Fatalf("cambia-908: game-end persistence goroutines did not finish within 5s")
 	}
 }
 

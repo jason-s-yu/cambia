@@ -404,7 +404,14 @@ func (g *CambiaGame) persistInitialGameState() {
 
 	if database.DB != nil {
 		gameID, lobbyID, hostUserID, lobbyType, rated := g.ID, g.LobbyID, g.HostUserID, g.LobbyType, g.Rated
+		wg := g.PersistWG
+		if wg != nil {
+			wg.Add(1)
+		}
 		go func() {
+			if wg != nil {
+				defer wg.Done()
+			}
 			if err := database.UpsertInitialGameState(context.Background(), gameID, lobbyID, hostUserID, lobbyType, rated, snap); err != nil {
 				log.Printf("Game %s: failed to persist initial game state: %v", gameID, err)
 			}

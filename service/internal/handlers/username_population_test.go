@@ -150,7 +150,8 @@ func TestE2EGameCarriesRealUsernames(t *testing.T) {
 
 // createGuestSession drives GuestHandler directly (no route registration needed) and returns
 // the new ephemeral user's id and auth token, mirroring how a real unauthenticated client's
-// first GET /user/guest precedes opening its WS connection.
+// first GET /user/guest precedes opening its WS connection. Registers a t.Cleanup deleting the
+// created row (cambia-890 F4; see createTestUser and cleanupTestUserRows).
 func createGuestSession(t *testing.T) (uuid.UUID, string) {
 	t.Helper()
 	r := httptest.NewRequest("GET", "/user/guest", nil)
@@ -169,6 +170,7 @@ func createGuestSession(t *testing.T) (uuid.UUID, string) {
 	if err != nil {
 		t.Fatalf("parse guest id %q: %v", body.ID, err)
 	}
+	t.Cleanup(func() { cleanupTestUserRows(t, id) })
 	var token string
 	for _, c := range w.Result().Cookies() {
 		if c.Name == auth.AuthCookieName {
@@ -229,7 +231,7 @@ func assertDistinctLobbyUsernames(t *testing.T, env *wsEnvelope, source string) 
 // (existing rows are left as-is per the ticket):
 //
 //	UPDATE users
-//	SET username = 'Guest-' || upper(substr(replace(id::text, '-', ''), 1, 6))
+//	SET username = 'Guest-' || upper(substr(replace(id::text, '-', ''), 1, 8))
 //	WHERE is_ephemeral AND username = 'Guest';
 func TestE2ETwoFreshGuestsGetDistinctUsernames(t *testing.T) {
 	if !dbAvailable {
@@ -280,7 +282,7 @@ func TestE2ETwoFreshGuestsGetDistinctUsernames(t *testing.T) {
 // ClaimEphemeralHandler sets u.Username = req.Username in memory (internal/handlers/user.go)
 // before calling database.UpdateUserCredentials, but that function's UPDATE statement carried
 // no username column, so a claiming player's chosen name was silently dropped and the row kept
-// its id-derived guest label ("Guest-A1B2C3") permanently, with is_ephemeral flipped to false.
+// its id-derived guest label ("Guest-A1B2C3D4") permanently, with is_ephemeral flipped to false.
 // Drives POST /user/claim directly, then re-reads the row from the DB (not the in-memory
 // *models.User ClaimEphemeralHandler already mutated) to confirm the write actually landed.
 func TestClaimEphemeralPersistsChosenUsername(t *testing.T) {
