@@ -123,15 +123,17 @@ func (g *CambiaGame) doPeekSelfEngine(playerID uuid.UUID, engineIdx uint8, card1
 
 // doPeekOtherEngine handles 9/T peek other using engine action.
 func (g *CambiaGame) doPeekOtherEngine(playerID uuid.UUID, engineIdx uint8, card1Data map[string]interface{}) {
-	_, _, idx, ok := parseCardTarget(card1Data)
+	cardID, ownerID, idx, ok := parseCardTarget(card1Data)
 	if !ok || idx < 0 {
 		g.RejectSpecialAction(playerID, "Invalid card specified for peek_other.")
 		return
 	}
-	// Bounds-check the opponent slot before touching engine state (reject-and-wait; see cambia-509).
-	oppEngineIdx := uint8(1 - int(engineIdx))
-	if idx >= int(g.Engine.Players[oppEngineIdx].HandLen) {
-		g.RejectSpecialAction(playerID, "Card index out of range for peek_other.")
+	// Resolve the seat the client named from the target card's owner, and bounds-check its slot,
+	// before touching engine state (reject-and-wait; see cambia-509). The seat used to be derived
+	// as `1 - engineIdx`, which wraps past seat 1 and panicked at a 4-seat table (cambia-946).
+	oppEngineIdx, oppSlot, reason, ok := g.resolveOpponentTarget(engineIdx, ownerID, cardID, idx)
+	if !ok {
+		g.RejectSpecialAction(playerID, reason)
 		return
 	}
 
@@ -144,52 +146,29 @@ func (g *CambiaGame) doPeekOtherEngine(playerID uuid.UUID, engineIdx uint8, card
 		}
 	}
 
-	// Apply PeekOther.
+	// Apply PeekOther against the resolved seat.
 	g.SpecialAction = SpecialActionState{}
-	if err := g.applyEngineAction(engine.EncodePeekOther(uint8(idx)), playerID); err != nil {
+	if err := g.applyEngineActionSeat(engine.EncodePeekOther(oppSlot), playerID, oppEngineIdx); err != nil {
 		return
 	}
 }
 
 // doSwapBlindEngine handles J/Q blind swap using engine action.
 func (g *CambiaGame) doSwapBlindEngine(playerID uuid.UUID, engineIdx uint8, card1Data, card2Data map[string]interface{}) {
-	_, owner1ID, idx1, ok1 := parseCardTarget(card1Data)
-	_, owner2ID, idx2, ok2 := parseCardTarget(card2Data)
-
-	if !ok1 || !ok2 || idx1 < 0 || idx2 < 0 {
-		g.RejectSpecialAction(playerID, "Invalid card specification for swap_blind.")
-		return
-	}
-
-	// Determine own/opp indices.
-	var ownIdx, oppIdx uint8
-	if owner1ID == playerID {
-		ownIdx = uint8(idx1)
-		oppIdx = uint8(idx2)
-	} else {
-		ownIdx = uint8(idx2)
-		oppIdx = uint8(idx1)
-	}
-
-	// Bounds-check both slots before any engine mutation or HandUUIDs read (the fixed array would
-	// panic on an out-of-range index). An invalid slot must reject-and-wait, never mutate the
-	// engine (reject-and-wait; see cambia-509).
-	oppEngineIdx := uint8(1 - int(engineIdx))
-	if int(ownIdx) >= int(g.Engine.Players[engineIdx].HandLen) ||
-		int(oppIdx) >= int(g.Engine.Players[oppEngineIdx].HandLen) {
-		g.RejectSpecialAction(playerID, "Card index out of range for swap_blind.")
+	pair, ok := g.resolveSwapPair(playerID, engineIdx, card1Data, card2Data, "swap_blind")
+	if !ok {
 		return
 	}
 
 	// Check Cambia lock.
-	opp1 := g.getPlayerByID(owner1ID)
-	opp2 := g.getPlayerByID(owner2ID)
+	opp1 := g.getPlayerByID(pair.ownOwnerID)
+	opp2 := g.getPlayerByID(pair.oppOwnerID)
 	if opp1 != nil && opp1.HasCalledCambia || opp2 != nil && opp2.HasCalledCambia {
-		idx1v := idx1
-		idx2v := idx2
+		ownIdxV := int(pair.ownSlot)
+		oppIdxV := int(pair.oppSlot)
 		g.FireEventPrivateSpecialActionFail(playerID, "Cannot swap cards with a player who has called Cambia.", "swap_blind",
-			buildEventCard(&models.Card{ID: g.CardTracker.Players[engineIdx].HandUUIDs[ownIdx]}, &idx1v, owner1ID, false),
-			buildEventCard(&models.Card{ID: g.CardTracker.Players[1-engineIdx].HandUUIDs[oppIdx]}, &idx2v, owner2ID, false))
+			buildEventCard(&models.Card{ID: g.CardTracker.Players[engineIdx].HandUUIDs[pair.ownSlot]}, &ownIdxV, pair.ownOwnerID, false),
+			buildEventCard(&models.Card{ID: g.CardTracker.Players[pair.oppSeat].HandUUIDs[pair.oppSlot]}, &oppIdxV, pair.oppOwnerID, false))
 		g.scheduleNextTurnTimer()
 		return
 	}
@@ -203,44 +182,95 @@ func (g *CambiaGame) doSwapBlindEngine(playerID uuid.UUID, engineIdx uint8, card
 		}
 	}
 
-	// Apply BlindSwap.
+	// Apply BlindSwap against the resolved seat.
 	g.SpecialAction = SpecialActionState{}
-	if err := g.applyEngineAction(engine.EncodeBlindSwap(ownIdx, oppIdx), playerID); err != nil {
+	if err := g.applyEngineActionSeat(engine.EncodeBlindSwap(pair.ownSlot, pair.oppSlot), playerID, pair.oppSeat); err != nil {
 		return
 	}
 }
 
-// doKingLookEngine handles King's first step (look) using engine action.
-func (g *CambiaGame) doKingLookEngine(playerID uuid.UUID, engineIdx uint8, card1Data, card2Data map[string]interface{}) {
-	_, owner1ID, idx1, ok1 := parseCardTarget(card1Data)
-	_, _, idx2, ok2 := parseCardTarget(card2Data)
+// swapTarget is a resolved two-card ability target: the actor's own slot and the opponent seat,
+// slot and owner the client named.
+type swapTarget struct {
+	ownSlot    uint8
+	ownOwnerID uuid.UUID
+	oppSeat    uint8
+	oppSlot    uint8
+	oppOwnerID uuid.UUID
+}
+
+// resolveSwapPair resolves the own/opponent pair a two-card ability (J/Q blind swap, King look)
+// names, rejecting the action and firing the private fail when either half does not resolve.
+// Nothing here touches engine state, so a rejected target reject-and-waits with the buffered
+// discard intact (cambia-509), and the opponent seat comes from the payload's owner id rather than
+// `1 - engineIdx`, which only holds at a 2-seat table (cambia-946).
+func (g *CambiaGame) resolveSwapPair(playerID uuid.UUID, engineIdx uint8, card1Data, card2Data map[string]interface{}, special string) (swapTarget, bool) {
+	card1ID, owner1ID, idx1, ok1 := parseCardTarget(card1Data)
+	card2ID, owner2ID, idx2, ok2 := parseCardTarget(card2Data)
 
 	if !ok1 || !ok2 || idx1 < 0 || idx2 < 0 {
-		g.RejectSpecialAction(playerID, "Invalid card specification for King peek.")
-		return
+		g.RejectSpecialAction(playerID, fmt.Sprintf("Invalid card specification for %s.", special))
+		return swapTarget{}, false
 	}
 
-	// Determine own/opp indices.
-	var ownIdx, oppIdx uint8
-	if owner1ID == playerID {
-		ownIdx = uint8(idx1)
-		oppIdx = uint8(idx2)
-	} else {
-		ownIdx = uint8(idx2)
-		oppIdx = uint8(idx1)
+	// The actor owns exactly one of the two cards. The owner ids the client sends decide which;
+	// when neither payload carries one, the card that is actually in the actor's hand does.
+	ownFirst := owner1ID == playerID
+	if owner1ID == uuid.Nil && owner2ID == uuid.Nil {
+		_, ownFirst = g.slotOfCard(engineIdx, card1ID)
 	}
 
-	// Bounds-check both slots before any engine mutation or HandUUIDs read (the fixed array would
-	// panic on an out-of-range index). An out-of-range slot must reject-and-wait so the buffered
-	// discard stays unapplied and the turn never advances against an unmoved engine (the cambia-509
-	// King wedge): validating here, before FirstStepDone is set and before the discard is applied,
-	// keeps engine and service state in lockstep.
-	oppEngineIdx := uint8(1 - int(engineIdx))
-	if int(ownIdx) >= int(g.Engine.Players[engineIdx].HandLen) ||
-		int(oppIdx) >= int(g.Engine.Players[oppEngineIdx].HandLen) {
-		g.RejectSpecialAction(playerID, "Card index out of range for King peek.")
+	ownCardID, ownIdx, ownOwnerID := card2ID, idx2, owner2ID
+	oppCardID, oppIdx, oppOwnerID := card1ID, idx1, owner1ID
+	if ownFirst {
+		ownCardID, ownIdx, ownOwnerID = card1ID, idx1, owner1ID
+		oppCardID, oppIdx, oppOwnerID = card2ID, idx2, owner2ID
+	}
+	if ownOwnerID == uuid.Nil {
+		ownOwnerID = playerID
+	}
+	if ownOwnerID != playerID {
+		g.RejectSpecialAction(playerID, fmt.Sprintf("One of the two cards must be your own for %s.", special))
+		return swapTarget{}, false
+	}
+
+	ownSlot, ok := g.resolveOwnSlot(engineIdx, ownCardID, ownIdx)
+	if !ok {
+		g.RejectSpecialAction(playerID, fmt.Sprintf("Card index out of range for %s.", special))
+		return swapTarget{}, false
+	}
+
+	oppSeat, oppSlot, reason, ok := g.resolveOpponentTarget(engineIdx, oppOwnerID, oppCardID, oppIdx)
+	if !ok {
+		g.RejectSpecialAction(playerID, reason)
+		return swapTarget{}, false
+	}
+	if oppOwnerID == uuid.Nil {
+		oppOwnerID = g.EngineToPlayer[oppSeat]
+	}
+
+	return swapTarget{
+		ownSlot:    ownSlot,
+		ownOwnerID: ownOwnerID,
+		oppSeat:    oppSeat,
+		oppSlot:    oppSlot,
+		oppOwnerID: oppOwnerID,
+	}, true
+}
+
+// doKingLookEngine handles King's first step (look) using engine action.
+func (g *CambiaGame) doKingLookEngine(playerID uuid.UUID, engineIdx uint8, card1Data, card2Data map[string]interface{}) {
+	// Resolve both halves before any engine mutation or HandUUIDs read (the fixed array would panic
+	// on an out-of-range index, and the seat used to be derived as `1 - engineIdx`, which wraps past
+	// seat 1: cambia-946). An unresolved target must reject-and-wait so the buffered discard stays
+	// unapplied and the turn never advances against an unmoved engine (the cambia-509 King wedge):
+	// resolving here, before FirstStepDone is set and before the discard is applied, keeps engine
+	// and service state in lockstep.
+	pair, ok := g.resolveSwapPair(playerID, engineIdx, card1Data, card2Data, "King peek")
+	if !ok {
 		return
 	}
+	ownIdx, oppIdx, oppEngineIdx := pair.ownSlot, pair.oppSlot, pair.oppSeat
 
 	// Store context for second step.
 	g.SpecialAction.FirstStepDone = true
@@ -259,8 +289,8 @@ func (g *CambiaGame) doKingLookEngine(playerID uuid.UUID, engineIdx uint8, card1
 		}
 	}
 
-	// Apply KingLook.
-	if err := g.applyEngineAction(engine.EncodeKingLook(ownIdx, oppIdx), playerID); err != nil {
+	// Apply KingLook against the resolved seat.
+	if err := g.applyEngineActionSeat(engine.EncodeKingLook(ownIdx, oppIdx), playerID, oppEngineIdx); err != nil {
 		g.SpecialAction = SpecialActionState{}
 		return
 	}
@@ -277,16 +307,24 @@ func (g *CambiaGame) doKingSwapYesEngine(playerID uuid.UUID) {
 }
 
 // applyEngineActionRaw applies an engine action without full event emission (for buffered discard).
+// At a 3+ seat table the action routes through the engine's N-player entry point, so
+// DiscardWithAbility arms the ability against every opponent instead of only seat `1 - acting`
+// (engine/abilities.go discardWithAbilityNPlayer, cambia-946).
 func (g *CambiaGame) applyEngineActionRaw(actionIdx uint16, actorID uuid.UUID, actorEngineIdx uint8) error {
 	preStockLen := g.Engine.StockLen
 	preDiscardLen := g.Engine.DiscardLen
 
-	if err := g.Engine.ApplyAction(actionIdx); err != nil {
+	engineActionIdx, useNPlayer, err := g.engineActionForSeat(actionIdx, actorEngineIdx, engineSeatNone)
+	if err != nil {
+		log.Printf("Game %s: cannot encode raw action %d for seat %d: %v", g.ID, actionIdx, actorEngineIdx, err)
+		return err
+	}
+	if err := g.applyToEngine(engineActionIdx, useNPlayer); err != nil {
 		log.Printf("Game %s: Engine error for raw action %d: %v", g.ID, actionIdx, err)
 		return err
 	}
 
-	g.updateCardTracker(actionIdx, actorEngineIdx, preStockLen, preDiscardLen)
+	g.updateCardTracker(actionIdx, actorEngineIdx, engineSeatNone, preStockLen, preDiscardLen)
 	g.syncPlayerHandsFromEngine()
 	return nil
 }

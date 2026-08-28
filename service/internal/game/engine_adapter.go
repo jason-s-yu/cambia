@@ -194,7 +194,12 @@ func (g *CambiaGame) initCardTracker() {
 
 // updateCardTracker updates the UUID tracker after an engine action is applied.
 // preStock/preDiscard are the stockpile/discard lengths before the action.
-func (g *CambiaGame) updateCardTracker(actionIdx uint16, actorEngineIdx uint8, preStockLen uint8, preDiscardLen uint8) {
+//
+// oppEngineIdx is the seat the action targeted, resolved from the client payload before the action
+// was applied (engineSeatNone when the action targets no opponent). Every opponent-facing branch
+// below reads it instead of deriving `1 - actorEngineIdx`, which only holds at a 2-seat table
+// (cambia-946).
+func (g *CambiaGame) updateCardTracker(actionIdx uint16, actorEngineIdx uint8, oppEngineIdx uint8, preStockLen uint8, preDiscardLen uint8) {
 	tracker := &g.CardTracker
 
 	switch {
@@ -255,8 +260,9 @@ func (g *CambiaGame) updateCardTracker(actionIdx uint16, actorEngineIdx uint8, p
 			// not reveal any of the actor's own cards.
 
 		} else if ownIdx, oppIdx, ok := engine.ActionIsBlindSwap(actionIdx); ok {
-			// Determine the opponent engine index.
-			oppEngineIdx := uint8(1 - int(actorEngineIdx))
+			if !g.trackerSeatOK(oppEngineIdx, "blind swap") {
+				return
+			}
 			// Swap UUIDs.
 			tracker.Players[actorEngineIdx].HandUUIDs[ownIdx], tracker.Players[oppEngineIdx].HandUUIDs[oppIdx] =
 				tracker.Players[oppEngineIdx].HandUUIDs[oppIdx], tracker.Players[actorEngineIdx].HandUUIDs[ownIdx]
@@ -274,7 +280,9 @@ func (g *CambiaGame) updateCardTracker(actionIdx uint16, actorEngineIdx uint8, p
 			// Swap based on Pending.Data from BEFORE the action (stored in LastAction).
 			ownIdx := g.Engine.LastAction.SwapOwnIdx
 			oppIdx := g.Engine.LastAction.SwapOppIdx
-			oppEngineIdx := uint8(1 - int(actorEngineIdx))
+			if !g.trackerSeatOK(oppEngineIdx, "king swap") {
+				return
+			}
 			tracker.Players[actorEngineIdx].HandUUIDs[ownIdx], tracker.Players[oppEngineIdx].HandUUIDs[oppIdx] =
 				tracker.Players[oppEngineIdx].HandUUIDs[oppIdx], tracker.Players[actorEngineIdx].HandUUIDs[ownIdx]
 
@@ -285,12 +293,16 @@ func (g *CambiaGame) updateCardTracker(actionIdx uint16, actorEngineIdx uint8, p
 			g.updateTrackerForSnap(actorEngineIdx, targetIdx, true, preStockLen)
 
 		} else if targetIdx, ok := engine.ActionIsSnapOpponent(actionIdx); ok {
-			oppEngineIdx := uint8(1 - int(actorEngineIdx))
+			if !g.trackerSeatOK(oppEngineIdx, "snap opponent") {
+				return
+			}
 			g.updateTrackerForSnapOpponent(actorEngineIdx, oppEngineIdx, targetIdx, preStockLen)
 
 		} else if ownIdx, slotIdx, ok := engine.ActionIsSnapOpponentMove(actionIdx); ok {
 			// Move own hand card to opponent's hand.
-			oppEngineIdx := uint8(1 - int(actorEngineIdx))
+			if !g.trackerSeatOK(oppEngineIdx, "snap opponent move") {
+				return
+			}
 			movedUUID := tracker.Players[actorEngineIdx].HandUUIDs[ownIdx]
 			// Remove from own hand (shift).
 			for i := int(ownIdx); i < int(g.Engine.Players[actorEngineIdx].HandLen); i++ {
@@ -444,12 +456,63 @@ func (g *CambiaGame) discardTopCard() (*models.Card, uuid.UUID) {
 	return engineCardToDetails(topCard, topUUID), topUUID
 }
 
-// applyEngineAction applies an engine action, updates UUID tracker, emits events.
-// Returns any error from the engine.
+// applyToEngine hands an already-translated action index to the engine entry point that decodes
+// that action space: the N-player (620) space at a 3+ seat table, the legacy 146 space at a
+// 2-seat one.
+func (g *CambiaGame) applyToEngine(engineActionIdx uint16, useNPlayer bool) error {
+	if useNPlayer {
+		return g.Engine.ApplyNPlayerAction(engineActionIdx)
+	}
+	return g.Engine.ApplyAction(engineActionIdx)
+}
+
+// trackerSeatOK reports whether an opponent-facing tracker branch has a real seat to work with.
+// An unresolved seat means the caller lost the target between resolution and application; the
+// branch is skipped and logged rather than indexing a wrapped seat (cambia-946).
+func (g *CambiaGame) trackerSeatOK(oppEngineIdx uint8, what string) bool {
+	if oppEngineIdx == engineSeatNone || int(oppEngineIdx) >= engine.MaxPlayers {
+		log.Printf("Game %s: %s has no resolved target seat; card tracker left untouched.", g.ID, what)
+		return false
+	}
+	return true
+}
+
+// applyEngineAction applies an engine action that targets no opponent seat.
 func (g *CambiaGame) applyEngineAction(actionIdx uint16, actorID uuid.UUID) error {
+	return g.applyEngineActionSeat(actionIdx, actorID, engineSeatNone)
+}
+
+// applyEngineActionSeat applies an engine action, updates the UUID tracker and emits events.
+// Returns any error from the engine.
+//
+// actionIdx is always in the engine's 2-player (146) action space, the adapter's internal
+// representation. targetSeat is the opponent seat the client named for an opponent-facing ability
+// or snap, resolved before this call (engineSeatNone for everything else); at a 3+ seat table the
+// action is translated into the engine's N-player space so the engine mutates that seat instead of
+// `1 - actingSeat` (cambia-946).
+func (g *CambiaGame) applyEngineActionSeat(actionIdx uint16, actorID uuid.UUID, targetSeat uint8) error {
 	engineIdx, ok := g.PlayerToEngine[actorID]
 	if !ok {
 		engineIdx = g.Engine.ActingPlayer()
+	}
+
+	// The King's swap decision carries no target of its own: it settles the pair the look bound,
+	// so the seat is read back out of the engine's pending decision state before it is cleared.
+	if targetSeat == engineSeatNone &&
+		(actionIdx == engine.ActionKingSwapYes || actionIdx == engine.ActionKingSwapNo) {
+		targetSeat = g.kingDecisionSeat(engineIdx)
+	}
+
+	oppEngineIdx, _ := g.opponentSeatForAction(engineIdx, targetSeat)
+
+	engineActionIdx, useNPlayer, err := g.engineActionForSeat(actionIdx, engineIdx, targetSeat)
+	if err != nil {
+		log.Printf("Game %s: cannot target action %d from seat %d: %v", g.ID, actionIdx, engineIdx, err)
+		g.fireEventToPlayer(actorID, GameEvent{
+			Type:    EventPrivateSpecialFail,
+			Payload: map[string]interface{}{"message": "Invalid target for that action."},
+		})
+		return err
 	}
 
 	// Snapshot pre-action state for diffing.
@@ -475,7 +538,7 @@ func (g *CambiaGame) applyEngineAction(actionIdx uint16, actorID uuid.UUID) erro
 	}
 
 	// Apply to engine.
-	if err := g.Engine.ApplyAction(actionIdx); err != nil {
+	if err := g.applyToEngine(engineActionIdx, useNPlayer); err != nil {
 		log.Printf("Game %s: Engine error for action %d: %v", g.ID, actionIdx, err)
 		g.fireEventToPlayer(actorID, GameEvent{
 			Type:    EventPrivateSpecialFail,
@@ -485,7 +548,7 @@ func (g *CambiaGame) applyEngineAction(actionIdx uint16, actorID uuid.UUID) erro
 	}
 
 	// Update UUID tracker.
-	g.updateCardTracker(actionIdx, engineIdx, preStockLen, preDiscardLen)
+	g.updateCardTracker(actionIdx, engineIdx, oppEngineIdx, preStockLen, preDiscardLen)
 
 	// Sync Player model hands (keeps service-level code working).
 	g.syncPlayerHandsFromEngine()
@@ -508,7 +571,7 @@ func (g *CambiaGame) applyEngineAction(actionIdx uint16, actorID uuid.UUID) erro
 	}
 
 	// Emit WebSocket events.
-	g.emitEventsForAction(actionIdx, actorID, engineIdx, preStockLen, preDiscardLen)
+	g.emitEventsForAction(actionIdx, actorID, engineIdx, oppEngineIdx, preStockLen, preDiscardLen)
 
 	// Check for game end.
 	if g.Engine.IsTerminal() {
@@ -564,7 +627,9 @@ func (g *CambiaGame) applyEngineAction(actionIdx uint16, actorID uuid.UUID) erro
 }
 
 // emitEventsForAction sends the appropriate WebSocket events for a completed engine action.
-func (g *CambiaGame) emitEventsForAction(actionIdx uint16, actorID uuid.UUID, actorEngineIdx uint8, preStockLen uint8, preDiscardLen uint8) {
+// oppEngineIdx is the seat the action targeted (engineSeatNone when it targeted no opponent), so
+// every event names the player the client actually targeted at a 3+ seat table (cambia-946).
+func (g *CambiaGame) emitEventsForAction(actionIdx uint16, actorID uuid.UUID, actorEngineIdx uint8, oppEngineIdx uint8, preStockLen uint8, preDiscardLen uint8) {
 	switch {
 	case actionIdx == engine.ActionDrawStockpile:
 		// Public draw event (card ID only).
@@ -682,7 +747,9 @@ func (g *CambiaGame) emitEventsForAction(actionIdx uint16, actorID uuid.UUID, ac
 			}
 
 		} else if targetIdx, ok := engine.ActionIsPeekOther(actionIdx); ok {
-			oppEngineIdx := uint8(1 - int(actorEngineIdx))
+			if !g.trackerSeatOK(oppEngineIdx, "peek other event") {
+				return
+			}
 			oppID := g.EngineToPlayer[oppEngineIdx]
 			cardUUID := g.CardTracker.Players[oppEngineIdx].HandUUIDs[targetIdx]
 			card := g.CardTracker.Registry[cardUUID]
@@ -705,7 +772,9 @@ func (g *CambiaGame) emitEventsForAction(actionIdx uint16, actorID uuid.UUID, ac
 			}
 
 		} else if ownIdx, oppIdx, ok := engine.ActionIsBlindSwap(actionIdx); ok {
-			oppEngineIdx := uint8(1 - int(actorEngineIdx))
+			if !g.trackerSeatOK(oppEngineIdx, "blind swap event") {
+				return
+			}
 			oppID := g.EngineToPlayer[oppEngineIdx]
 			// After swap, UUIDs are already swapped in tracker.
 			ownCardUUID := g.CardTracker.Players[actorEngineIdx].HandUUIDs[ownIdx]
@@ -724,7 +793,9 @@ func (g *CambiaGame) emitEventsForAction(actionIdx uint16, actorID uuid.UUID, ac
 			})
 
 		} else if ownIdx, oppIdx, ok := engine.ActionIsKingLook(actionIdx); ok {
-			oppEngineIdx := uint8(1 - int(actorEngineIdx))
+			if !g.trackerSeatOK(oppEngineIdx, "king look event") {
+				return
+			}
 			oppID := g.EngineToPlayer[oppEngineIdx]
 			ownCardUUID := g.CardTracker.Players[actorEngineIdx].HandUUIDs[ownIdx]
 			oppCardUUID := g.CardTracker.Players[oppEngineIdx].HandUUIDs[oppIdx]
@@ -756,7 +827,9 @@ func (g *CambiaGame) emitEventsForAction(actionIdx uint16, actorID uuid.UUID, ac
 		} else if actionIdx == engine.ActionKingSwapYes {
 			ownIdx := g.Engine.LastAction.SwapOwnIdx
 			oppIdx := g.Engine.LastAction.SwapOppIdx
-			oppEngineIdx := uint8(1 - int(actorEngineIdx))
+			if !g.trackerSeatOK(oppEngineIdx, "king swap event") {
+				return
+			}
 			oppID := g.EngineToPlayer[oppEngineIdx]
 			// After swap, UUIDs already updated.
 			ownCardUUID := g.CardTracker.Players[actorEngineIdx].HandUUIDs[ownIdx]
@@ -1001,46 +1074,48 @@ func (g *CambiaGame) handleSnapViaEngine(playerID uuid.UUID, engineIdx uint8, pa
 		}
 	}
 
-	// Check opponent's hand.
-	oppEngineIdx := uint8(1 - int(engineIdx))
-	for i := uint8(0); i < g.Engine.Players[oppEngineIdx].HandLen; i++ {
-		if g.CardTracker.Players[oppEngineIdx].HandUUIDs[i] == cardID {
-			cardRank := g.Engine.Players[oppEngineIdx].Hand[i].Rank()
-			if cardRank == discardTopRank {
-				// Successful snap from opponent's hand.
-				if g.HouseRules.SnapRace {
-					g.snapUsedForThisDiscard = true
-				}
-
-				// Directly remove card from opponent's hand and add to discard pile.
-				// Cannot use engine.ApplyAction since snap actions require snap phase.
-				snapCard := g.Engine.Players[oppEngineIdx].Hand[i]
-				oppHandLen := g.Engine.Players[oppEngineIdx].HandLen
-				// Shift remaining hand cards left.
-				for k := i; k < oppHandLen-1; k++ {
-					g.Engine.Players[oppEngineIdx].Hand[k] = g.Engine.Players[oppEngineIdx].Hand[k+1]
-					g.CardTracker.Players[oppEngineIdx].HandUUIDs[k] = g.CardTracker.Players[oppEngineIdx].HandUUIDs[k+1]
-				}
-				g.Engine.Players[oppEngineIdx].Hand[oppHandLen-1] = engine.EmptyCard
-				g.CardTracker.Players[oppEngineIdx].HandUUIDs[oppHandLen-1] = uuid.Nil
-				g.Engine.Players[oppEngineIdx].HandLen--
-
-				// Add card to discard pile.
-				discardPos := g.Engine.DiscardLen
-				g.Engine.DiscardPile[discardPos] = snapCard
-				g.Engine.DiscardLen++
-				g.CardTracker.DiscardUUIDs[discardPos] = cardID
-				g.CardTracker.DiscardLen = g.Engine.DiscardLen
-				g.snapUsedForThisDiscard = true
-
-				g.syncPlayerHandsFromEngine()
-				g.emitSnapSuccessEvents(playerID, g.EngineToPlayer[oppEngineIdx], cardID, cardRank, int(i))
-				_ = snapCard
-				return
-			}
+	// Check every other seat's hand. The snap payload carries only the card id (the client sends
+	// the card that was clicked, cambia-913), so the owner is whichever seat currently holds that
+	// id: searching seat `1 - engineIdx` only ever found one opponent, so at a 3+ seat table a
+	// third player's card fell through to the failed-snap penalty, and from seat 2 the subtraction
+	// wrapped to seat 255 and panicked the process (cambia-946).
+	oppEngineIdx, i, foundOpp := g.seatHoldingCard(cardID)
+	if foundOpp && oppEngineIdx != engineIdx {
+		cardRank := g.Engine.Players[oppEngineIdx].Hand[i].Rank()
+		if cardRank != discardTopRank {
 			g.handleSnapFailure(playerID, engineIdx, &cardID)
 			return
 		}
+
+		// Successful snap from that seat's hand.
+		if g.HouseRules.SnapRace {
+			g.snapUsedForThisDiscard = true
+		}
+
+		// Directly remove card from the owner's hand and add to discard pile.
+		// Cannot use engine.ApplyAction since snap actions require snap phase.
+		snapCard := g.Engine.Players[oppEngineIdx].Hand[i]
+		oppHandLen := g.Engine.Players[oppEngineIdx].HandLen
+		// Shift remaining hand cards left.
+		for k := i; k < oppHandLen-1; k++ {
+			g.Engine.Players[oppEngineIdx].Hand[k] = g.Engine.Players[oppEngineIdx].Hand[k+1]
+			g.CardTracker.Players[oppEngineIdx].HandUUIDs[k] = g.CardTracker.Players[oppEngineIdx].HandUUIDs[k+1]
+		}
+		g.Engine.Players[oppEngineIdx].Hand[oppHandLen-1] = engine.EmptyCard
+		g.CardTracker.Players[oppEngineIdx].HandUUIDs[oppHandLen-1] = uuid.Nil
+		g.Engine.Players[oppEngineIdx].HandLen--
+
+		// Add card to discard pile.
+		discardPos := g.Engine.DiscardLen
+		g.Engine.DiscardPile[discardPos] = snapCard
+		g.Engine.DiscardLen++
+		g.CardTracker.DiscardUUIDs[discardPos] = cardID
+		g.CardTracker.DiscardLen = g.Engine.DiscardLen
+		g.snapUsedForThisDiscard = true
+
+		g.syncPlayerHandsFromEngine()
+		g.emitSnapSuccessEvents(playerID, g.EngineToPlayer[oppEngineIdx], cardID, cardRank, int(i))
+		return
 	}
 
 	// Card not found in any hand.
@@ -1277,11 +1352,16 @@ func (g *CambiaGame) autoProcessSnapPhase() {
 		preStock := g.Engine.StockLen
 		preDiscard := g.Engine.DiscardLen
 
-		if err := g.Engine.ApplyAction(engine.ActionPassSnap); err != nil {
+		passIdx, useNPlayer, err := g.engineActionForSeat(engine.ActionPassSnap, snapperEngineIdx, engineSeatNone)
+		if err != nil {
+			log.Printf("Game %s: cannot encode PassSnap for seat %d: %v", g.ID, snapperEngineIdx, err)
+			break
+		}
+		if err := g.applyToEngine(passIdx, useNPlayer); err != nil {
 			log.Printf("Game %s: Engine PassSnap error: %v", g.ID, err)
 			break
 		}
-		g.updateCardTracker(engine.ActionPassSnap, snapperEngineIdx, preStock, preDiscard)
+		g.updateCardTracker(engine.ActionPassSnap, snapperEngineIdx, engineSeatNone, preStock, preDiscard)
 		_ = snapperUUID // Snap phase silently passed.
 	}
 }
