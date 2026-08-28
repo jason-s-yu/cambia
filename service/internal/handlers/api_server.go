@@ -121,13 +121,19 @@ func (gs *GameServer) CreateGameInstance(ctx context.Context, lobbyID, hostID uu
 		g.HouseRules = houseRules
 	}
 
+	// hubFetchUsername (guests included: it resolves to whatever name was generated for
+	// them at account creation) is the same lookup a connection uses to populate
+	// hub.Connection.Username; sourcing Player.User.Username from it here means
+	// ObfPlayerState.username (sync_state) and the game_results roster below both read a
+	// real username instead of the zero value CreateGameInstance previously left it at
+	// (cambia-877).
 	var players []*models.Player
 	for _, uid := range playerIDs {
 		players = append(players, &models.Player{
 			ID:        uid,
 			Connected: true,
 			Hand:      []*models.Card{},
-			User:      &models.User{ID: uid},
+			User:      &models.User{ID: uid, Username: hubFetchUsername(uid)},
 		})
 	}
 	if len(players) < 2 {
@@ -205,7 +211,7 @@ func (gs *GameServer) hubGameFactory() hub.GameFactory {
 
 // attachOnGameEnd wires the OnGameEnd callback that resets lobby state and emits results.
 func (gs *GameServer) attachOnGameEnd(g *game.CambiaGame, lobbyID uuid.UUID) {
-	g.OnGameEnd = func(endedLobbyID uuid.UUID, winner uuid.UUID, scores map[uuid.UUID]int) {
+	g.OnGameEnd = func(endedLobbyID uuid.UUID, winner uuid.UUID, scores map[uuid.UUID]int, usernames map[uuid.UUID]string) {
 		log.Printf("Game %s ended. OnGameEnd executing for lobby %s.", g.ID, endedLobbyID)
 
 		lobInstance, exists := gs.LobbyStore.GetLobby(endedLobbyID)
@@ -223,6 +229,25 @@ func (gs *GameServer) attachOnGameEnd(g *game.CambiaGame, lobbyID uuid.UUID) {
 		}
 		statusPayload := lobInstance.GetLobbyStatusPayloadUnsafe()
 		lobInstance.Mu.Unlock()
+
+		// Enrich the roster with usernames sourced from the game's own player list (populated
+		// at creation time from the authenticated user, cambia-877), not live hub connections:
+		// a forfeiting player's socket is already closed by the time OnGameEnd fires, so a
+		// connection-keyed lookup (buildLobbySnapshot's approach for the live lobby_state) would
+		// silently miss exactly the player this roster most needs to name correctly. usernames
+		// comes from the OnGameEnd callback itself (built while endGame still holds g.mu) rather
+		// than a fresh call back into the game here, which would self-deadlock that same lock.
+		if users, ok := statusPayload["users"].([]map[string]interface{}); ok {
+			for _, u := range users {
+				if uidStr, ok := u["id"].(string); ok {
+					if uid, err := uuid.Parse(uidStr); err == nil {
+						if uname, found := usernames[uid]; found {
+							u["username"] = uname
+						}
+					}
+				}
+			}
+		}
 
 		// Emit game results to the hub.
 		h, hasHub := gs.HubStore.GetHub(endedLobbyID)
