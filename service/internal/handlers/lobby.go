@@ -86,6 +86,14 @@ func CreateLobbyHandler(gs *GameServer) http.HandlerFunc {
 			return
 		}
 
+		// Auto-invite the host to their own lobby. lob.Users tracks who is allowed to join
+		// (map presence, joined=true or invited=false) and HubWSHandler's private-lobby gate
+		// checks that same membership before allowing the WS upgrade. Without this, a private
+		// lobby's own creator has no entry in lob.Users and no self-invite path, so the gate
+		// refuses their own connection (cambia-771). This is safe to call unlocked: the lobby
+		// has not yet been added to the store or hub, so nothing else can observe it.
+		lob.InviteUser(userID)
+
 		// Configure the OnEmpty callback to remove the lobby from the store when it becomes empty.
 		lob.OnEmpty = func(lobbyID uuid.UUID) {
 			gs.LobbyStore.DeleteLobby(lobbyID)
