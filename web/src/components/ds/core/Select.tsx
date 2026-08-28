@@ -26,7 +26,7 @@ const Select: React.FC<SelectProps> = ({ label, value, defaultValue, options = [
             display: 'block',
             marginBottom: 6,
             fontSize: 'var(--text-2xs)',
-            fontWeight: 'var(--weight-black)',
+            fontWeight: 'var(--weight-bold)',
             letterSpacing: 'var(--tracking-caps)',
             textTransform: 'uppercase',
             color: 'var(--text-tertiary)'
@@ -46,19 +46,19 @@ const Select: React.FC<SelectProps> = ({ label, value, defaultValue, options = [
           style={{
             width: '100%',
             height: 'var(--control-h-md)',
-            padding: '0 34px 0 12px',
-            fontFamily: 'var(--font-ui)',
+            padding: '0 32px 0 10px',
+            fontFamily: 'var(--font-sans)',
             fontSize: 'var(--text-md)',
             fontWeight: 'var(--weight-medium)',
-            color: 'var(--text-primary)',
+            color: disabled ? 'var(--text-disabled)' : 'var(--text-primary)',
             background: 'var(--surface-inset)',
-            border: '1.5px solid ' + (focus ? 'var(--honey-500)' : 'var(--border-default)'),
+            border: '1px solid ' + (focus ? 'var(--focus-ring-color)' : 'var(--border-default)'),
             borderRadius: 'var(--ds-radius-sm)',
             outline: 'none',
             appearance: 'none',
             WebkitAppearance: 'none',
             boxShadow: focus ? 'var(--focus-ring)' : 'none',
-            opacity: disabled ? 0.45 : 1,
+            opacity: disabled ? 0.55 : 1,
             cursor: disabled ? 'not-allowed' : 'pointer'
           }}
         >

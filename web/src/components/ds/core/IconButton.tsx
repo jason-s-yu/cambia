@@ -11,9 +11,9 @@ export interface IconButtonProps {
   style?: React.CSSProperties;
 }
 
-const SIZE_PX: Record<NonNullable<IconButtonProps['size']>, number> = { sm: 30, md: 40, lg: 48 };
+const SIZE_PX: Record<NonNullable<IconButtonProps['size']>, number> = { sm: 28, md: 36, lg: 44 };
 
-/** Square icon-only button; pass a Lucide icon or inline SVG as children. */
+/** Flat square icon-only button; pass a Lucide icon or inline SVG as children. */
 const IconButton: React.FC<IconButtonProps> = ({ size = 'md', variant = 'secondary', disabled = false, onClick, title, children, style }) => {
   const [hover, setHover] = useState(false);
   const [press, setPress] = useState(false);
@@ -40,15 +40,21 @@ const IconButton: React.FC<IconButtonProps> = ({ size = 'md', variant = 'seconda
         width: px,
         height: px,
         flex: 'none',
-        color: 'var(--text-primary)',
-        background: solid ? (hover ? 'var(--bark-700)' : 'var(--surface-raised)') : hover ? 'rgba(243,236,218,0.07)' : 'transparent',
-        border: solid ? 'var(--line-thick) solid var(--border-strong)' : 'var(--line-thick) solid transparent',
+        color: disabled ? 'var(--text-disabled)' : 'var(--text-primary)',
+        background: down
+          ? 'var(--interactive-active)'
+          : solid
+            ? hover
+              ? 'var(--surface-3)'
+              : 'var(--surface-2)'
+            : hover
+              ? 'var(--interactive-hover)'
+              : 'transparent',
+        border: '1px solid ' + (solid ? 'var(--border-default)' : 'transparent'),
         borderRadius: 'var(--ds-radius-md)',
-        boxShadow: solid && !down ? 'var(--shadow-piece)' : 'none',
-        transform: down ? 'translateY(2px)' : 'none',
         cursor: disabled ? 'not-allowed' : 'pointer',
-        opacity: disabled ? 0.45 : 1,
-        transition: 'background var(--dur-fast) var(--ds-ease-out), transform var(--dur-fast) var(--ds-ease-out)',
+        opacity: disabled ? 0.55 : 1,
+        transition: 'background var(--dur-fast) var(--ds-ease-out), color var(--dur-fast) var(--ds-ease-out)',
         ...style
       }}
     >

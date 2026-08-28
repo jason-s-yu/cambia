@@ -76,9 +76,9 @@ const AppLayout: React.FC = () => {
 				minHeight: '100vh',
 				display: 'flex',
 				flexDirection: 'column',
-				background: 'var(--surface-page)',
+				background: 'var(--surface-0)',
 				color: 'var(--text-primary)',
-				fontFamily: 'var(--font-ui)'
+				fontFamily: 'var(--font-sans)'
 			}}
 		>
 			<TopBar

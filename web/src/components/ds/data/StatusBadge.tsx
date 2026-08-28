@@ -13,19 +13,24 @@ interface StatusSpec {
   border: string;
 }
 
+const SUCCESS: StatusSpec = { color: 'var(--status-success)', bg: 'var(--status-success-bg)', border: 'var(--status-success-border)' };
+const INFO: StatusSpec = { color: 'var(--status-info)', bg: 'var(--status-info-bg)', border: 'var(--status-info-border)' };
+const WARNING: StatusSpec = { color: 'var(--status-warning)', bg: 'var(--status-warning-bg)', border: 'var(--status-warning-border)' };
+const DANGER: StatusSpec = { color: 'var(--status-danger)', bg: 'var(--status-danger-bg)', border: 'var(--status-danger-border)' };
+
 const MAP: Record<Status, StatusSpec> = {
-  running: { color: 'var(--moss-400)', bg: 'rgba(79,138,94,0.18)', border: 'var(--moss-600)' },
-  succeeded: { color: 'var(--moss-400)', bg: 'rgba(79,138,94,0.18)', border: 'var(--moss-600)' },
-  created: { color: 'var(--dusk-400)', bg: 'rgba(92,127,163,0.16)', border: 'var(--dusk-600)' },
-  queued: { color: 'var(--dusk-400)', bg: 'rgba(92,127,163,0.16)', border: 'var(--dusk-600)' },
-  starting: { color: 'var(--honey-400)', bg: 'rgba(223,174,71,0.14)', border: 'var(--honey-600)' },
-  stopping: { color: 'var(--honey-400)', bg: 'rgba(223,174,71,0.14)', border: 'var(--honey-600)' },
-  stopped: { color: 'var(--text-secondary)', bg: 'var(--surface-raised)', border: 'var(--border-strong)' },
-  crashed: { color: 'var(--berry-400)', bg: 'rgba(179,58,53,0.16)', border: 'var(--berry-600)' },
-  failed: { color: 'var(--berry-400)', bg: 'rgba(179,58,53,0.16)', border: 'var(--berry-600)' }
+  running: SUCCESS,
+  succeeded: SUCCESS,
+  created: INFO,
+  queued: INFO,
+  starting: WARNING,
+  stopping: WARNING,
+  stopped: { color: 'var(--text-secondary)', bg: 'var(--surface-2)', border: 'var(--border-default)' },
+  crashed: DANGER,
+  failed: DANGER
 };
 
-/** Process/eval status pill (training dashboard): mono uppercase + dot. */
+/** Process/eval status pill (training dashboard): uppercase label + dot. */
 const StatusBadge: React.FC<StatusBadgeProps> = ({ status = 'created', style }) => {
   const m = MAP[status] || MAP.created;
   return (
@@ -34,16 +39,16 @@ const StatusBadge: React.FC<StatusBadgeProps> = ({ status = 'created', style }) 
         display: 'inline-flex',
         alignItems: 'center',
         gap: 6,
-        padding: '2px 10px',
+        padding: '2px 9px',
         borderRadius: 'var(--radius-pill)',
         background: m.bg,
-        border: '1.5px solid ' + m.border,
+        border: '1px solid ' + m.border,
         color: m.color,
-        fontFamily: 'var(--ds-font-mono)',
+        fontFamily: 'var(--font-sans)',
         fontSize: 'var(--text-2xs)',
-        fontWeight: 700,
+        fontWeight: 'var(--weight-bold)',
         textTransform: 'uppercase',
-        letterSpacing: '0.06em',
+        letterSpacing: 'var(--tracking-caps)',
         whiteSpace: 'nowrap',
         ...style
       }}

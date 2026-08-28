@@ -11,7 +11,7 @@ export interface QueueCardProps {
   minutes?: number;
   /** Rating pool label, e.g. "Glicko-2" or "OpenSkill". */
   pool?: string;
-  /** Primary queue: honey border + PRIMARY badge + ember Play. */
+  /** Primary queue: gold border + PRIMARY badge + gold Play. */
   primary?: boolean;
   ranked?: boolean;
   onPlay?: () => void;
@@ -34,11 +34,10 @@ const QueueCard: React.FC<QueueCardProps> = ({
   return (
     <div
       style={{
-        background: 'var(--surface-card)',
-        border: primary ? 'var(--line-thick) solid var(--honey-600)' : '1.5px solid var(--border-default)',
+        background: 'var(--surface-1)',
+        border: '1px solid ' + (primary ? 'var(--border-accent)' : 'var(--border-default)'),
         borderRadius: 'var(--ds-radius-lg)',
-        boxShadow: 'var(--shadow-card)',
-        padding: '16px 18px',
+        padding: 'var(--space-4) var(--space-5)',
         display: 'flex',
         flexDirection: 'column',
         gap: 10,
@@ -47,12 +46,12 @@ const QueueCard: React.FC<QueueCardProps> = ({
     >
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--ds-text-xl)', lineHeight: 1.15 }}>{name}</div>
+          <div style={{ fontSize: 'var(--ds-text-lg)', fontWeight: 'var(--weight-bold)', letterSpacing: 'var(--ds-tracking-tight)', lineHeight: 'var(--ds-leading-tight)' }}>{name}</div>
           {tagline && <div style={{ fontSize: 'var(--ds-text-xs)', color: 'var(--text-secondary)', marginTop: 2 }}>{tagline}</div>}
         </div>
         {ranked ? <Badge tone={primary ? 'gold' : 'warning'}>{primary ? 'PRIMARY' : 'Ranked'}</Badge> : <Badge>Casual</Badge>}
       </div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', minWidth: 0, gap: '4px 14px', fontFamily: 'var(--ds-font-mono)', fontSize: 'var(--ds-text-xs)', color: 'var(--text-secondary)' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', minWidth: 0, gap: '4px 14px', fontSize: 'var(--ds-text-xs)', fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
         <span>{players}p</span>
         <span>
           {rounds} {rounds === 1 ? 'round' : 'rounds'}

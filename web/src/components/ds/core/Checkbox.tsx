@@ -11,7 +11,7 @@ export interface CheckboxProps {
   style?: React.CSSProperties;
 }
 
-/** Chunky game-piece checkbox with label + optional description (house rules). */
+/** Flat checkbox with label and optional description (house rules). */
 const Checkbox: React.FC<CheckboxProps> = ({ label, description, checked, defaultChecked, disabled = false, onChange, style }) => {
   const [internal, setInternal] = useState(!!defaultChecked);
   const isOn = checked !== undefined ? checked : internal;
@@ -23,32 +23,31 @@ const Checkbox: React.FC<CheckboxProps> = ({ label, description, checked, defaul
   return (
     <div
       onClick={toggle}
-      style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.45 : 1, ...style }}
+      style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.55 : 1, ...style }}
     >
       <span
         style={{
-          width: 22,
-          height: 22,
+          width: 18,
+          height: 18,
           flex: 'none',
-          marginTop: 1,
+          marginTop: 2,
           display: 'inline-flex',
           alignItems: 'center',
           justifyContent: 'center',
-          background: isOn ? 'var(--ember-500)' : 'var(--surface-inset)',
-          border: 'var(--line-thick) solid ' + (isOn ? 'var(--outline-ink)' : 'var(--border-strong)'),
-          borderRadius: 7,
-          boxShadow: isOn ? 'var(--shadow-piece)' : 'none',
-          color: 'var(--text-on-ember)',
-          fontSize: 14,
-          fontWeight: 800,
+          background: isOn ? 'var(--accent-gold)' : 'var(--surface-inset)',
+          border: '1px solid ' + (isOn ? 'var(--accent-gold)' : 'var(--border-strong)'),
+          borderRadius: 'var(--ds-radius-sm)',
+          color: 'var(--text-on-gold)',
+          fontSize: 12,
+          fontWeight: 'var(--weight-black)',
           lineHeight: 1,
-          transition: 'background var(--dur-fast) var(--ds-ease-out)'
+          transition: 'background var(--dur-fast) var(--ds-ease-out), border-color var(--dur-fast) var(--ds-ease-out)'
         }}
       >
         {isOn ? '✓' : ''}
       </span>
       <span style={{ flex: 1, minWidth: 0 }}>
-        {label && <span style={{ display: 'block', fontWeight: 'var(--weight-bold)', fontSize: 'var(--text-md)', lineHeight: 1.3 }}>{label}</span>}
+        {label && <span style={{ display: 'block', fontWeight: 'var(--weight-medium)', fontSize: 'var(--text-md)', lineHeight: 1.35 }}>{label}</span>}
         {description && <span style={{ display: 'block', fontSize: 'var(--ds-text-xs)', color: 'var(--text-secondary)', marginTop: 2 }}>{description}</span>}
       </span>
     </div>

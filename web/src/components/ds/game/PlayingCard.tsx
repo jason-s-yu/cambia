@@ -8,7 +8,7 @@ export interface PlayingCardProps {
   suit?: PlayingCardSuit;
   faceDown?: boolean;
   size?: 'sm' | 'md' | 'lg';
-  /** Lifted with honey ring (targeting / chosen). */
+  /** Lifted with a gold focus ring (targeting / chosen). */
   selected?: boolean;
   onClick?: () => void;
   style?: React.CSSProperties;
@@ -31,12 +31,12 @@ const DIMS: Record<NonNullable<PlayingCardProps['size']>, Dims> = {
   lg: { w: 'var(--card-w-lg)', h: 'var(--card-h-lg)', idx: 20, pip: 44, star: 38 }
 };
 
-/** Playing card: parchment face with ink/berry pips, or ember lattice back. */
+/** Playing card: flat cream face with ink/red pips, or a green back with a gold hairline frame. */
 const PlayingCard: React.FC<PlayingCardProps> = ({ rank, suit, faceDown = false, size = 'md', selected = false, onClick, style }) => {
   const d = DIMS[size] || DIMS.md;
   const joker = rank === 'JOKER';
   const glyph = joker ? '★' : suit ? GLYPHS[suit] || '' : '';
-  const color = joker ? 'var(--honey-600)' : suit && RED[suit] ? 'var(--suit-red)' : 'var(--suit-black)';
+  const color = joker ? 'var(--gold-600)' : suit && RED[suit] ? 'var(--suit-red)' : 'var(--suit-black)';
   const base: React.CSSProperties = {
     width: d.w,
     height: d.h,
@@ -56,15 +56,12 @@ const PlayingCard: React.FC<PlayingCardProps> = ({ rank, suit, faceDown = false,
         onClick={onClick}
         style={{
           ...base,
-          background: 'repeating-linear-gradient(45deg, var(--card-back), var(--card-back) 5px, transparent 5px, transparent 9px), var(--ember-600)',
-          backgroundColor: 'var(--card-back)',
-          backgroundImage:
-            'repeating-linear-gradient(45deg, transparent, transparent 5px, var(--card-back-line) 5px, var(--card-back-line) 6.5px), repeating-linear-gradient(-45deg, transparent, transparent 5px, var(--card-back-line) 5px, var(--card-back-line) 6.5px)',
-          border: 'var(--line-thick) solid var(--outline-ink)',
+          background: 'var(--card-back)',
+          border: '1px solid var(--border-strong)',
           boxSizing: 'border-box'
         }}
       >
-        <div style={{ position: 'absolute', inset: 3, borderRadius: 6, border: '1.5px solid var(--card-back-line)', pointerEvents: 'none' }}></div>
+        <div style={{ position: 'absolute', inset: 4, borderRadius: 4, border: '1px solid var(--card-back-line)', pointerEvents: 'none' }}></div>
       </div>
     );
   }
@@ -74,22 +71,24 @@ const PlayingCard: React.FC<PlayingCardProps> = ({ rank, suit, faceDown = false,
       style={{
         ...base,
         background: 'var(--card-face)',
-        border: '1.5px solid var(--card-face-edge)',
+        border: '1px solid var(--card-face-edge)',
+        boxSizing: 'border-box',
         color,
-        fontFamily: 'var(--font-ui)'
+        fontFamily: 'var(--font-sans)',
+        fontVariantNumeric: 'tabular-nums'
       }}
     >
-      <div style={{ position: 'absolute', top: 4, left: 6, textAlign: 'center', lineHeight: 1, fontWeight: 800, fontSize: d.idx }}>
+      <div style={{ position: 'absolute', top: 4, left: 6, textAlign: 'center', lineHeight: 1, fontWeight: 'var(--weight-black)', fontSize: d.idx }}>
         <div>{joker ? '★' : rank}</div>
         {!joker && <div style={{ fontSize: d.idx - 2 }}>{glyph}</div>}
       </div>
-      <div style={{ position: 'absolute', bottom: 4, right: 6, textAlign: 'center', lineHeight: 1, fontWeight: 800, fontSize: d.idx, transform: 'rotate(180deg)' }}>
+      <div style={{ position: 'absolute', bottom: 4, right: 6, textAlign: 'center', lineHeight: 1, fontWeight: 'var(--weight-black)', fontSize: d.idx, transform: 'rotate(180deg)' }}>
         <div>{joker ? '★' : rank}</div>
         {!joker && <div style={{ fontSize: d.idx - 2 }}>{glyph}</div>}
       </div>
       <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2 }}>
         <span style={{ fontSize: joker ? d.star : d.pip, lineHeight: 1 }}>{glyph}</span>
-        {joker && <span style={{ fontSize: Math.max(8, d.idx - 5), fontWeight: 800, letterSpacing: '0.12em' }}>JOKER</span>}
+        {joker && <span style={{ fontSize: Math.max(8, d.idx - 5), fontWeight: 'var(--weight-black)', letterSpacing: 'var(--ds-tracking-wide)' }}>JOKER</span>}
       </div>
     </div>
   );
