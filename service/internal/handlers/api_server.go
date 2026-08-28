@@ -253,7 +253,7 @@ func (gs *GameServer) hubGameFactory() hub.GameFactory {
 
 // attachOnGameEnd wires the OnGameEnd callback that resets lobby state and emits results.
 func (gs *GameServer) attachOnGameEnd(g *game.CambiaGame, lobbyID uuid.UUID) {
-	g.OnGameEnd = func(endedLobbyID uuid.UUID, winner uuid.UUID, scores map[uuid.UUID]int, usernames map[uuid.UUID]string) {
+	g.OnGameEnd = func(endedLobbyID uuid.UUID, winner uuid.UUID, scores map[uuid.UUID]int, usernames map[uuid.UUID]string, rawScores map[uuid.UUID]int, cambiaCallerID uuid.UUID) {
 		log.Printf("Game %s ended. OnGameEnd executing for lobby %s.", g.ID, endedLobbyID)
 
 		lobInstance, exists := gs.LobbyStore.GetLobby(endedLobbyID)
@@ -310,17 +310,24 @@ func (gs *GameServer) attachOnGameEnd(g *game.CambiaGame, lobbyID uuid.UUID) {
 			}
 			h.Emit("game_results", resultMsg)
 
-			// Circuit round/completion events.
+			// Circuit round/completion events. RecordRound gets rawScores (pre-WinBonus/
+			// FalseCambiaPenalty, cambia-1009) and the real Cambia caller mapped to its engine
+			// seat (cambia-1008), not the display-adjusted scores or the -1 "no caller" sentinel
+			// this used to hardcode.
 			if g.Circuit.Enabled && gs.CircuitStore != nil {
 				circuitState, playerMap := gs.CircuitStore.Get(endedLobbyID)
 				if circuitState != nil && playerMap != nil {
 					engineScores := make(map[int]int)
-					for playerUUID, score := range scores {
+					for playerUUID, score := range rawScores {
 						if engineID, ok := playerMap[playerUUID]; ok {
 							engineScores[engineID] = score
 						}
 					}
-					if err := circuitState.RecordRound(engineScores, -1); err != nil {
+					engineCallerID := -1
+					if eid, ok := playerMap[cambiaCallerID]; ok {
+						engineCallerID = eid
+					}
+					if err := circuitState.RecordRound(engineScores, engineCallerID); err != nil {
 						log.Printf("Circuit round error for lobby %s: %v", endedLobbyID, err)
 					} else if circuitState.IsComplete() {
 						h.Emit("circuit_complete", map[string]interface{}{"standings": circuitState.GetStandings()})

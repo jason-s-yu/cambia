@@ -17,12 +17,17 @@ import (
 )
 
 // OnGameEndFunc defines the signature for a callback function executed when a game ends.
-// It receives the lobby ID, the primary winner's ID (can be Nil), the final scores, and each
-// participant's username keyed by player ID (cambia-877). usernames is supplied here, rather
-// than left for the callback to look up, because endGame calls this synchronously while g.mu is
-// still held (see EndGame): any lookup that re-acquires it - including GetCurrentObfuscatedGameState
-// - would self-deadlock the caller's own goroutine.
-type OnGameEndFunc func(lobbyID uuid.UUID, winner uuid.UUID, scores map[uuid.UUID]int, usernames map[uuid.UUID]string)
+// It receives the lobby ID, the primary winner's ID (can be Nil), the final (display-adjusted)
+// scores, and each participant's username keyed by player ID (cambia-877). usernames is supplied
+// here, rather than left for the callback to look up, because endGame calls this synchronously
+// while g.mu is still held (see EndGame): any lookup that re-acquires it - including
+// GetCurrentObfuscatedGameState - would self-deadlock the caller's own goroutine.
+//
+// rawScores and cambiaCallerID (cambia-1008/1009) are the pre-WinBonus/FalseCambiaPenalty hand
+// scores and the real Cambia caller (uuid.Nil if none): a circuit's cumulative totals must be
+// built from these, never from scores, since WinBonus/FalseCambiaPenalty are single-game display
+// adjustments with no rulebook standing in circuit scoring (RULES.md has no such knobs).
+type OnGameEndFunc func(lobbyID uuid.UUID, winner uuid.UUID, scores map[uuid.UUID]int, usernames map[uuid.UUID]string, rawScores map[uuid.UUID]int, cambiaCallerID uuid.UUID)
 
 // GameEventType represents the type of a game-related event broadcast via WebSockets.
 type GameEventType string
@@ -1049,7 +1054,10 @@ func (g *CambiaGame) endGame() {
 		adjustedScores[id] = score
 	}
 
-	// Apply Cambia caller penalty if needed.
+	// Apply Cambia caller penalty and circuit win bonus below. Both are single-game display
+	// adjustments only: they land in adjustedScores (the game_results payload and the value
+	// handed to OnGameEnd's scores param) but never reach circuit cumulative scoring, which reads
+	// finalScores (raw, pre-adjustment) via OnGameEnd's rawScores param instead (cambia-1009).
 	if penaltyApplies && callerID != uuid.Nil {
 		if _, ok := adjustedScores[callerID]; ok {
 			penaltyValue := 1 // Default penalty.
@@ -1116,7 +1124,7 @@ func (g *CambiaGame) endGame() {
 				usernames[p.ID] = p.User.Username
 			}
 		}
-		g.OnGameEnd(g.LobbyID, firstWinner, adjustedScores, usernames)
+		g.OnGameEnd(g.LobbyID, firstWinner, adjustedScores, usernames, finalScores, callerID)
 	}
 
 	log.Printf("Game %s: Ended. Winner(s): %v. Final Scores (Adj): %v", g.ID, winners, adjustedScores)
