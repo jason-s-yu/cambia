@@ -20,7 +20,7 @@ export interface TimerBarProps {
   style?: React.CSSProperties;
 }
 
-/** Turn timer: honey bar that turns berry in the last quarter; mono countdown. */
+/** Turn timer: gold bar that turns danger-red in the last quarter; tabular countdown. */
 const TimerBar: React.FC<TimerBarProps> = ({
   totalSec = 30,
   remainingSec = 30,
@@ -55,22 +55,22 @@ const TimerBar: React.FC<TimerBarProps> = ({
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 10, ...style }}>
       {label && (
-        <span style={{ fontSize: 'var(--text-2xs)', fontWeight: 800, letterSpacing: 'var(--tracking-caps)', textTransform: 'uppercase', color: 'var(--text-tertiary)', flex: 'none' }}>
+        <span style={{ fontSize: 'var(--text-2xs)', fontWeight: 'var(--weight-bold)', letterSpacing: 'var(--tracking-caps)', textTransform: 'uppercase', color: 'var(--text-tertiary)', flex: 'none' }}>
           {label}
         </span>
       )}
-      <div style={{ flex: 1, height: 10, background: 'var(--surface-inset)', border: '1.5px solid var(--border-default)', borderRadius: 'var(--radius-pill)', overflow: 'hidden' }}>
+      <div style={{ flex: 1, height: 6, background: 'var(--surface-inset)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-pill)', overflow: 'hidden' }}>
         <div
           style={{
             width: frac * 100 + '%',
             height: '100%',
-            background: low ? 'var(--berry-500)' : 'var(--honey-500)',
+            background: low ? 'var(--accent-danger)' : 'var(--accent-gold)',
             borderRadius: 'var(--radius-pill)',
             transition: 'width 1s linear, background var(--dur-med) var(--ds-ease-out)'
           }}
         ></div>
       </div>
-      <span style={{ fontFamily: 'var(--ds-font-mono)', fontWeight: 700, fontSize: 'var(--ds-text-sm)', color: low ? 'var(--berry-400)' : 'var(--honey-400)', flex: 'none' }}>
+      <span style={{ fontWeight: 'var(--weight-bold)', fontVariantNumeric: 'tabular-nums', fontSize: 'var(--ds-text-sm)', color: low ? 'var(--status-danger)' : 'var(--text-primary)', flex: 'none' }}>
         {mm}:{ss}
       </span>
     </div>

@@ -7,16 +7,16 @@ export interface InputProps {
   defaultValue?: string;
   placeholder?: string;
   type?: string;
-  /** Space Mono for codes/seeds/numbers. */
+  /** Monospace for codes, seeds and ids. */
   mono?: boolean;
-  /** Error message below the field (berry). */
+  /** Error message below the field. */
   error?: string;
   disabled?: boolean;
   onChange?: (e: React.ChangeEvent<HTMLInputElement>) => void;
   style?: React.CSSProperties;
 }
 
-/** Text input on inset surface; honey focus ring, berry error state. */
+/** Text input on an inset well; gold focus ring, danger-token error state. */
 const Input: React.FC<InputProps> = ({ label, value, defaultValue, placeholder, type = 'text', mono = false, error, disabled = false, onChange, style }) => {
   const [focus, setFocus] = useState(false);
   return (
@@ -27,7 +27,7 @@ const Input: React.FC<InputProps> = ({ label, value, defaultValue, placeholder, 
             display: 'block',
             marginBottom: 6,
             fontSize: 'var(--text-2xs)',
-            fontWeight: 'var(--weight-black)',
+            fontWeight: 'var(--weight-bold)',
             letterSpacing: 'var(--tracking-caps)',
             textTransform: 'uppercase',
             color: 'var(--text-tertiary)'
@@ -48,20 +48,21 @@ const Input: React.FC<InputProps> = ({ label, value, defaultValue, placeholder, 
         style={{
           width: '100%',
           height: 'var(--control-h-md)',
-          padding: '0 12px',
-          fontFamily: mono ? 'var(--ds-font-mono)' : 'var(--font-ui)',
+          padding: '0 10px',
+          fontFamily: mono ? 'var(--ds-font-mono)' : 'var(--font-sans)',
           fontSize: 'var(--text-md)',
-          color: 'var(--text-primary)',
+          fontVariantNumeric: 'tabular-nums',
+          color: disabled ? 'var(--text-disabled)' : 'var(--text-primary)',
           background: 'var(--surface-inset)',
-          border: '1.5px solid ' + (error ? 'var(--berry-500)' : focus ? 'var(--honey-500)' : 'var(--border-default)'),
+          border: '1px solid ' + (error ? 'var(--status-danger)' : focus ? 'var(--focus-ring-color)' : 'var(--border-default)'),
           borderRadius: 'var(--ds-radius-sm)',
           outline: 'none',
           boxShadow: focus ? 'var(--focus-ring)' : 'none',
-          opacity: disabled ? 0.45 : 1,
+          opacity: disabled ? 0.55 : 1,
           transition: 'border-color var(--dur-fast) var(--ds-ease-out), box-shadow var(--dur-fast) var(--ds-ease-out)'
         }}
       />
-      {error && <span style={{ display: 'block', marginTop: 5, fontSize: 'var(--ds-text-xs)', color: 'var(--berry-400)', fontWeight: 'var(--weight-bold)' }}>{error}</span>}
+      {error && <span style={{ display: 'block', marginTop: 5, fontSize: 'var(--ds-text-xs)', color: 'var(--status-danger)', fontWeight: 'var(--weight-medium)' }}>{error}</span>}
     </label>
   );
 };

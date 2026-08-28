@@ -1,22 +1,30 @@
 import React from 'react';
 
 export interface WordmarkProps {
-  /** Wordmark font size in px. The heart glyph scales to 0.6x. */
+  /** Wordmark font size in px. The suit glyph scales to 0.62x. */
   size?: number;
   style?: React.CSSProperties;
 }
 
 /**
- * Cambia wordmark: display-serif name with a berry heart.
- *
- * Adapted from design-system-import/ui_kits/platform/shared.jsx Wordmark for
- * the additive DS preview (cambia-438). Presentational only.
+ * Cambia wordmark: the UI sans at black weight with tight tracking, plus a
+ * gold diamond. Presentational only.
  */
-const Wordmark: React.FC<WordmarkProps> = ({ size = 26, style }) => {
+const Wordmark: React.FC<WordmarkProps> = ({ size = 22, style }) => {
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 7, ...style }}>
-      <span style={{ fontFamily: 'var(--font-display)', fontSize: size, lineHeight: 1 }}>Cambia</span>
-      <span style={{ color: 'var(--berry-400)', fontSize: size * 0.6 }}>&#9829;</span>
+    <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 6, ...style }}>
+      <span
+        style={{
+          fontFamily: 'var(--font-sans)',
+          fontSize: size,
+          fontWeight: 'var(--weight-black)',
+          letterSpacing: 'var(--ds-tracking-tight)',
+          lineHeight: 1
+        }}
+      >
+        Cambia
+      </span>
+      <span style={{ color: 'var(--accent-gold)', fontSize: size * 0.62, lineHeight: 1 }}>&#9670;</span>
     </span>
   );
 };

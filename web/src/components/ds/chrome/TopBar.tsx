@@ -46,9 +46,9 @@ const TopBar: React.FC<TopBarProps> = ({ items, activePath, onNav, light, onTogg
         display: 'flex',
         alignItems: 'center',
         gap: 22,
-        padding: '0 22px',
-        background: 'var(--surface-card)',
-        borderBottom: '1.5px solid var(--border-default)',
+        padding: '0 20px',
+        background: 'var(--surface-1)',
+        borderBottom: '1px solid var(--border-subtle)',
         flex: 'none',
         ...style
       }}
@@ -64,15 +64,16 @@ const TopBar: React.FC<TopBarProps> = ({ items, activePath, onNav, light, onTogg
               key={item.path}
               onClick={() => onNav(item.path)}
               style={{
-                padding: '7px 14px',
-                fontFamily: 'var(--font-ui)',
+                padding: '6px 12px',
+                fontFamily: 'var(--font-sans)',
                 fontSize: 'var(--text-md)',
-                fontWeight: 'var(--weight-bold)',
+                fontWeight: active ? 'var(--weight-bold)' : 'var(--weight-medium)',
                 cursor: 'pointer',
                 borderRadius: 'var(--ds-radius-md)',
-                background: active ? 'var(--surface-raised)' : 'transparent',
+                background: active ? 'var(--surface-2)' : 'transparent',
                 color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
-                border: active ? '1.5px solid var(--border-strong)' : '1.5px solid transparent'
+                border: '1px solid ' + (active ? 'var(--border-default)' : 'transparent'),
+                transition: 'background var(--dur-fast) var(--ds-ease-out), color var(--dur-fast) var(--ds-ease-out)'
               }}
             >
               {item.label}
@@ -100,32 +101,31 @@ const TopBar: React.FC<TopBarProps> = ({ items, activePath, onNav, light, onTogg
           display: 'flex',
           alignItems: 'center',
           gap: 9,
-          padding: '5px 12px 5px 6px',
-          background: 'var(--surface-raised)',
-          border: '1.5px solid var(--border-default)',
+          padding: '4px 12px 4px 5px',
+          background: 'var(--surface-2)',
+          border: '1px solid var(--border-default)',
           borderRadius: 'var(--radius-pill)'
         }}
       >
         <span
           style={{
-            width: 26,
-            height: 26,
+            width: 24,
+            height: 24,
             borderRadius: '50%',
-            background: 'var(--dusk-500)',
-            border: '1.5px solid var(--outline-ink)',
+            background: 'var(--accent-gold)',
             display: 'inline-flex',
             alignItems: 'center',
             justifyContent: 'center',
             fontWeight: 'var(--weight-black)',
             fontSize: 12,
-            color: 'var(--text-on-ember)'
+            color: 'var(--text-on-gold)'
           }}
         >
           {(user.name[0] || '?').toUpperCase()}
         </span>
-        <span style={{ lineHeight: 1.15 }}>
-          <span style={{ display: 'block', fontWeight: 'var(--weight-bold)', fontSize: 'var(--ds-text-sm)' }}>{user.name}</span>
-          <span style={{ display: 'block', fontFamily: 'var(--ds-font-mono)', fontSize: 10, color: 'var(--text-tertiary)' }}>{user.rating}</span>
+        <span style={{ lineHeight: 1.2 }}>
+          <span style={{ display: 'block', fontWeight: 'var(--weight-medium)', fontSize: 'var(--ds-text-sm)', color: 'var(--text-primary)' }}>{user.name}</span>
+          <span style={{ display: 'block', fontSize: 10, fontVariantNumeric: 'tabular-nums', color: 'var(--text-tertiary)' }}>{user.rating}</span>
         </span>
       </div>
       <Button variant="secondary" size="sm" onClick={onLogout}>

@@ -12,7 +12,7 @@ export interface ModalProps {
   children?: React.ReactNode;
 }
 
-/** Centered dialog with display-serif title; inline=true renders the panel without the fixed scrim (specimens/embeds). */
+/** Centered dialog on a raised flat surface; inline=true renders the panel without the fixed scrim (specimens/embeds). */
 const Modal: React.FC<ModalProps> = ({ open = true, title, onClose, footer, inline = false, width = 440, children }) => {
   if (!open) return null;
   const panel = (
@@ -20,15 +20,15 @@ const Modal: React.FC<ModalProps> = ({ open = true, title, onClose, footer, inli
       style={{
         width: inline ? '100%' : width,
         maxWidth: '92vw',
-        background: 'var(--surface-card)',
-        border: 'var(--line-thick) solid var(--outline-ink)',
-        borderRadius: 'var(--ds-radius-xl)',
-        boxShadow: 'var(--shadow-overlay)',
+        background: 'var(--surface-1)',
+        border: '1px solid var(--border-default)',
+        borderRadius: 'var(--ds-radius-lg)',
+        boxShadow: inline ? 'none' : 'var(--shadow-overlay)',
         overflow: 'hidden'
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px 12px' }}>
-        <div style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--ds-text-xl)', lineHeight: 1.15 }}>{title}</div>
+        <div style={{ fontSize: 'var(--ds-text-lg)', fontWeight: 'var(--weight-bold)', letterSpacing: 'var(--ds-tracking-tight)', color: 'var(--text-primary)', lineHeight: 'var(--ds-leading-tight)' }}>{title}</div>
         {onClose && (
           <button
             onClick={onClose}
@@ -53,7 +53,7 @@ const Modal: React.FC<ModalProps> = ({ open = true, title, onClose, footer, inli
       </div>
       <div style={{ padding: '0 20px 18px', fontSize: 'var(--text-md)', color: 'var(--text-secondary)' }}>{children}</div>
       {footer && (
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, padding: '14px 20px', borderTop: '1.5px solid var(--border-subtle)', background: 'var(--surface-raised)' }}>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, padding: '14px 20px', borderTop: '1px solid var(--border-subtle)', background: 'var(--surface-2)' }}>
           {footer}
         </div>
       )}

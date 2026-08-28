@@ -10,31 +10,28 @@ export interface PanelProps {
 }
 
 /**
- * Card surface with an optional uppercase title row and action slot.
- *
- * Adapted from design-system-import/ui_kits/platform/shared.jsx Panel for the
- * additive DS preview (cambia-438). Uses the collision-prefixed --ds- radius
- * token so it coexists with Tailwind's default scale.
+ * Flat card surface with an optional uppercase title row and action slot.
+ * Separation comes from the ground/surface step plus a 1px border, not from
+ * a shadow.
  */
 const Panel: React.FC<PanelProps> = ({ title, action, children, style }) => {
   return (
     <section
       style={{
-        background: 'var(--surface-card)',
-        border: '1.5px solid var(--border-default)',
+        background: 'var(--surface-1)',
+        border: '1px solid var(--border-default)',
         borderRadius: 'var(--ds-radius-lg)',
-        boxShadow: 'var(--shadow-card)',
-        padding: '16px 18px',
+        padding: 'var(--space-4) var(--space-5)',
         ...style
       }}
     >
       {(title || action) && (
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 'var(--space-3)' }}>
           <h3
             style={{
               margin: 0,
               fontSize: 'var(--text-2xs)',
-              fontWeight: 'var(--weight-black)',
+              fontWeight: 'var(--weight-bold)',
               letterSpacing: 'var(--tracking-caps)',
               textTransform: 'uppercase',
               color: 'var(--text-tertiary)'

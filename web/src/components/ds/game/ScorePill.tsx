@@ -15,13 +15,13 @@ interface ToneSpec {
 }
 
 const TONES: Record<NonNullable<ScorePillProps['tone']>, ToneSpec> = {
-  neutral: { color: 'var(--text-primary)', border: 'var(--border-strong)' },
-  gold: { color: 'var(--honey-400)', border: 'var(--honey-600)' },
-  berry: { color: 'var(--berry-400)', border: 'var(--berry-600)' },
-  moss: { color: 'var(--moss-400)', border: 'var(--moss-600)' }
+  neutral: { color: 'var(--text-primary)', border: 'var(--border-default)' },
+  gold: { color: 'var(--accent-gold)', border: 'var(--border-accent)' },
+  berry: { color: 'var(--status-danger)', border: 'var(--status-danger-border)' },
+  moss: { color: 'var(--status-success)', border: 'var(--status-success-border)' }
 };
 
-/** Mono number in an inset pill: scores, round counters, ratings, timers. */
+/** Tabular number in an inset pill: scores, round counters, ratings, timers. */
 const ScorePill: React.FC<ScorePillProps> = ({ label, value, tone = 'neutral', big = false, style }) => {
   const t = TONES[tone] || TONES.neutral;
   return (
@@ -30,17 +30,17 @@ const ScorePill: React.FC<ScorePillProps> = ({ label, value, tone = 'neutral', b
         display: 'inline-flex',
         alignItems: 'baseline',
         gap: 8,
-        padding: big ? '8px 16px' : '4px 12px',
+        padding: big ? '7px 15px' : '3px 11px',
         background: 'var(--surface-inset)',
-        border: '1.5px solid ' + t.border,
+        border: '1px solid ' + t.border,
         borderRadius: 'var(--radius-pill)',
         ...style
       }}
     >
       {label && (
-        <span style={{ fontSize: 'var(--text-2xs)', fontWeight: 800, letterSpacing: 'var(--tracking-caps)', textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>{label}</span>
+        <span style={{ fontSize: 'var(--text-2xs)', fontWeight: 'var(--weight-bold)', letterSpacing: 'var(--tracking-caps)', textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>{label}</span>
       )}
-      <span style={{ fontFamily: 'var(--ds-font-mono)', fontWeight: 700, fontSize: big ? 'var(--ds-text-xl)' : 'var(--text-md)', color: t.color }}>{value}</span>
+      <span style={{ fontWeight: 'var(--weight-black)', fontVariantNumeric: 'tabular-nums', fontSize: big ? 'var(--ds-text-xl)' : 'var(--text-md)', color: t.color }}>{value}</span>
     </span>
   );
 };

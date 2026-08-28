@@ -6,15 +6,15 @@ export interface PlayerSeatProps {
   username?: string;
   state?: PlayerSeatState;
   isYou?: boolean;
-  /** Displayed rating (mono). */
+  /** Displayed rating (tabular figures). */
   rating?: number | string;
-  /** Card count in hand (mono). */
+  /** Card count in hand (tabular figures). */
   handSize?: number;
   compact?: boolean;
   style?: React.CSSProperties;
 }
 
-const AVATAR_COLORS = ['var(--ember-500)', 'var(--dusk-500)', 'var(--moss-500)', 'var(--honey-500)', 'var(--berry-500)', 'var(--tier-platinum)'];
+const AVATAR_COLORS = ['var(--gold-500)', 'var(--blue-500)', 'var(--green-500)', 'var(--red-500)', 'var(--tier-platinum)', 'var(--tier-master)'];
 
 function colorFor(name: string): string {
   let h = 0;
@@ -28,13 +28,13 @@ interface StateSpec {
 }
 
 const STATES: Record<PlayerSeatState, StateSpec> = {
-  turn: { label: 'Their turn', color: 'var(--honey-400)' },
-  ready: { label: 'Ready', color: 'var(--moss-400)' },
-  cambia: { label: 'Called Cambia', color: 'var(--berry-400)' },
+  turn: { label: 'Their turn', color: 'var(--accent-gold)' },
+  ready: { label: 'Ready', color: 'var(--status-success)' },
+  cambia: { label: 'Called Cambia', color: 'var(--status-danger)' },
   disconnected: { label: 'Reconnecting…', color: 'var(--text-tertiary)' }
 };
 
-/** Player chip: initial avatar + name + state line. Honey ring = their turn; berry ring = called Cambia. */
+/** Player chip: initial avatar + name + state line. Gold border = their turn; danger border = called Cambia. */
 const PlayerSeat: React.FC<PlayerSeatProps> = ({ username = 'Player', state, isYou = false, rating, handSize, compact = false, style }) => {
   const s = state ? STATES[state] : undefined;
   const isTurn = state === 'turn';
@@ -45,11 +45,11 @@ const PlayerSeat: React.FC<PlayerSeatProps> = ({ username = 'Player', state, isY
         alignItems: 'center',
         gap: 10,
         padding: compact ? '5px 12px 5px 6px' : '7px 14px 7px 8px',
-        background: 'var(--surface-raised)',
-        border: 'var(--line-thick) solid ' + (isTurn ? 'var(--honey-500)' : state === 'cambia' ? 'var(--berry-500)' : 'var(--border-default)'),
+        background: isTurn ? 'var(--interactive-selected)' : 'var(--surface-2)',
+        border: '1px solid ' + (isTurn ? 'var(--accent-gold)' : state === 'cambia' ? 'var(--accent-danger)' : 'var(--border-default)'),
         borderRadius: 'var(--radius-pill)',
-        boxShadow: isTurn ? '0 2px 0 var(--outline-ink), 0 0 14px rgba(223,174,71,0.25)' : 'var(--shadow-piece)',
         opacity: state === 'disconnected' ? 0.6 : 1,
+        transition: 'background var(--dur-med) var(--ds-ease-out), border-color var(--dur-med) var(--ds-ease-out)',
         ...style
       }}
     >
@@ -60,26 +60,25 @@ const PlayerSeat: React.FC<PlayerSeatProps> = ({ username = 'Player', state, isY
           flex: 'none',
           borderRadius: '50%',
           background: colorFor(username),
-          border: '1.5px solid var(--outline-ink)',
           display: 'inline-flex',
           alignItems: 'center',
           justifyContent: 'center',
-          color: 'var(--text-on-ember)',
-          fontWeight: 800,
+          color: 'var(--text-on-gold)',
+          fontWeight: 'var(--weight-black)',
           fontSize: compact ? 12 : 14
         }}
       >
         {(username[0] || '?').toUpperCase()}
       </span>
       <span style={{ lineHeight: 1.2 }}>
-        <span style={{ display: 'block', fontWeight: 'var(--weight-bold)', fontSize: compact ? 'var(--ds-text-sm)' : 'var(--text-md)' }}>
+        <span style={{ display: 'block', fontWeight: 'var(--weight-medium)', fontSize: compact ? 'var(--ds-text-sm)' : 'var(--text-md)' }}>
           {username}
           {isYou ? ' (you)' : ''}
         </span>
-        <span style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 'var(--text-2xs)' }}>
-          {s && <span style={{ color: s.color, fontWeight: 800 }}>{s.label}</span>}
-          {rating !== undefined && <span style={{ fontFamily: 'var(--ds-font-mono)', color: 'var(--text-tertiary)' }}>{rating}</span>}
-          {handSize !== undefined && <span style={{ fontFamily: 'var(--ds-font-mono)', color: 'var(--text-tertiary)' }}>{handSize} cards</span>}
+        <span style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 'var(--text-2xs)', fontVariantNumeric: 'tabular-nums' }}>
+          {s && <span style={{ color: s.color, fontWeight: 'var(--weight-bold)' }}>{s.label}</span>}
+          {rating !== undefined && <span style={{ color: 'var(--text-tertiary)' }}>{rating}</span>}
+          {handSize !== undefined && <span style={{ color: 'var(--text-tertiary)' }}>{handSize} cards</span>}
         </span>
       </span>
     </div>
