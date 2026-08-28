@@ -90,10 +90,10 @@ type AbilityType uint8
 
 const (
 	AbilityNone      AbilityType = iota // 0
-	AbilityPeekOwn                      // 1 - Seven, Eight
-	AbilityPeekOther                    // 2 - Nine, Ten
-	AbilityBlindSwap                    // 3 - Jack, Queen
-	AbilityKingLook                     // 4 - King
+	AbilityPeekOwn                      // 1: Seven, Eight
+	AbilityPeekOther                    // 2: Nine, Ten
+	AbilityBlindSwap                    // 3: Jack, Queen
+	AbilityKingLook                     // 4: King
 )
 
 // Ability returns the ability associated with discarding this card.

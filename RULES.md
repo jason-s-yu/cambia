@@ -120,8 +120,8 @@ To mathematically offset the statistical risk of calling Cambia, fixed score red
 | :-------- | :------- | :----------- | :------------------ |
 | 1st       | −3       | −5           | −5                  |
 | 2nd       | 0        | −2           | −2                  |
-| 3rd       | -        | 0            | −1                  |
-| 4th+      | -        | 0            | 0                   |
+| 3rd       | n/a      | 0            | −1                  |
+| 4th+      | n/a      | 0            | 0                   |
 
 **H2H subsidy is −3/0** (vs. −5/−2 in FFA-4) because the caller faces only one opponent's final turn in H2H, making the call inherently less risky.
 

@@ -218,8 +218,8 @@ Applied to cumulative totals after each round. Not applicable to Quick Play (Bo1
 | :-------- | :------- | :--------- |
 | 1st       | −3       | −5         |
 | 2nd       | 0        | −2         |
-| 3rd       | -        | 0          |
-| 4th       | -        | 0          |
+| 3rd       | n/a      | 0          |
+| 4th       | n/a      | 0          |
 
 **H2H subsidy is −3/0** (vs. −5/−2 in FFA-4) because the Cambia caller in H2H faces only one opponent's final turn, making the call inherently less risky. The smaller subsidy maintains incentive without over-rewarding.
 
