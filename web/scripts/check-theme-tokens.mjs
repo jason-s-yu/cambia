@@ -5,7 +5,10 @@
 //   1. every semantic token resolves to a literal color, and
 //   2. dark and light differ on every one of them.
 //
-// Run after `npm run build`:  node scripts/check-theme-tokens.mjs
+// Run after `npm run build`:  npm run check-tokens
+
+/* global process, console */
+
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
