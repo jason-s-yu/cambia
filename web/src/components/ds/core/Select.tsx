@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { EYEBROW } from '../eyebrow';
 
 export interface SelectOption {
   value: string;
@@ -20,21 +21,7 @@ const Select: React.FC<SelectProps> = ({ label, value, defaultValue, options = [
   const [focus, setFocus] = useState(false);
   return (
     <label style={{ display: 'block', position: 'relative', ...style }}>
-      {label && (
-        <span
-          style={{
-            display: 'block',
-            marginBottom: 6,
-            fontSize: 'var(--text-2xs)',
-            fontWeight: 'var(--weight-bold)',
-            letterSpacing: 'var(--tracking-caps)',
-            textTransform: 'uppercase',
-            color: 'var(--text-tertiary)'
-          }}
-        >
-          {label}
-        </span>
-      )}
+      {label && <span style={{ display: 'block', marginBottom: 6, ...EYEBROW }}>{label}</span>}
       <span style={{ position: 'relative', display: 'block' }}>
         <select
           value={value}

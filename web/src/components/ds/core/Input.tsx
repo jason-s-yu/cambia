@@ -1,9 +1,14 @@
 import React, { useState } from 'react';
+import { EYEBROW } from '../eyebrow';
 
 /**
  * Native input attributes pass straight through to the <input> (id, name,
  * autoComplete, required, inputMode, aria-*), so forms keep their
  * autofill and validation semantics. The wrapper owns `style`.
+ *
+ * A field with no `label` has no accessible name of its own: `aria-label` is
+ * the passthrough that gives it one, and the placeholder is not a substitute
+ * (cambia-876, DL-3 review F6).
  */
 export interface InputProps extends Omit<React.InputHTMLAttributes<HTMLInputElement>, 'onChange' | 'style' | 'type' | 'value' | 'defaultValue'> {
   /** Uppercase eyebrow label above the field. */
@@ -27,19 +32,7 @@ const Input: React.FC<InputProps> = ({ label, value, defaultValue, placeholder, 
   return (
     <label style={{ display: 'block', ...style }}>
       {label && (
-        <span
-          style={{
-            display: 'block',
-            marginBottom: 6,
-            fontSize: 'var(--text-2xs)',
-            fontWeight: 'var(--weight-bold)',
-            letterSpacing: 'var(--tracking-caps)',
-            textTransform: 'uppercase',
-            color: 'var(--text-tertiary)'
-          }}
-        >
-          {label}
-        </span>
+        <span style={{ display: 'block', marginBottom: 6, ...EYEBROW }}>{label}</span>
       )}
       <input
         {...rest}

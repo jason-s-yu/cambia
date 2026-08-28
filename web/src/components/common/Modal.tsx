@@ -24,12 +24,16 @@ const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children }) => {
       <div
         role='dialog'
         aria-modal='true'
-        aria-label={title}
+        aria-label={title || 'Dialog'}
         className='relative w-full max-w-md bg-surface-1 border border-border-default rounded-ds-lg shadow-ds-overlay text-text-primary'
         onClick={(e) => e.stopPropagation()}
       >
+        {/* title is optional, so the heading renders only when there is one: an
+            empty <h2> is a heading that names nothing (cambia-876, DL-2 review F7). */}
         <div className='flex items-center justify-between gap-3 px-5 pt-4 pb-3'>
-          <h2 className='m-0 text-ds-lg font-ds-bold tracking-ds-tight leading-ds-tight'>{title}</h2>
+          {title
+            ? <h2 className='m-0 text-ds-lg font-ds-bold tracking-ds-tight leading-ds-tight'>{title}</h2>
+            : <span></span>}
           <button
             type='button'
             onClick={onClose}

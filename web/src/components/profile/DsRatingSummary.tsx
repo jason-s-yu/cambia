@@ -5,6 +5,7 @@
 // shape instead of appearing and disappearing row by row.
 import React from 'react';
 import Panel from '@/components/ds/chrome/Panel';
+import { EYEBROW } from '@/components/ds/eyebrow';
 import Spinner from '@/components/ds/core/Spinner';
 import Badge from '@/components/ds/core/Badge';
 import TierBadge from '@/components/ds/data/TierBadge';
@@ -18,7 +19,8 @@ const winRate = (wins: number, games: number): string =>
 /** Eyebrow over a tabular value, one cell of the pool card's stat strip. */
 const Stat: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
 	<span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-		<span style={{ fontSize: 'var(--text-2xs)', letterSpacing: 'var(--tracking-caps)', textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>{label}</span>
+		{/* The stat strip's lighter eyebrow: shared style, its own weight. */}
+		<span style={{ ...EYEBROW, fontWeight: 'var(--weight-regular)' }}>{label}</span>
 		<span style={{ fontSize: 'var(--ds-text-sm)', fontWeight: 'var(--weight-medium)', color: 'var(--text-primary)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{children}</span>
 	</span>
 );

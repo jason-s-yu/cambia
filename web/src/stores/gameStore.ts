@@ -268,17 +268,21 @@ export const useGameStore = create<GameState & GameActions>()(
 						case 'game_player_turn':
 							if (state.gameState) {
 								state.gameState.currentPlayerId = payload.user?.id;
-								state.gameState.turnId = payload.turn;
 								state.pendingAction = null; // New turn clears pending actions
 								state.displayedDrawnCard = null; // Clear magnified card
 								// Update isCurrentTurn for all players
 								state.gameState.players.forEach(p => {
 									p.isCurrentTurn = (p.playerId === payload.user?.id);
 								});
-								// Turn deadline + clock skew (cambia-488). turn/turnDeadline/serverNow live
-								// under payload.payload (the service's GameEvent.Payload map) — not at the
-								// top level of the envelope's payload, which is the full GameEvent object.
+								// Turn number, deadline + clock skew (cambia-488). turn/turnDeadline/serverNow
+								// live under payload.payload (the service's GameEvent.Payload map, built in
+								// engine_adapter.go broadcastPlayerTurnEngine), not at the top level of the
+								// envelope's payload, which is the full GameEvent object. turn was being read
+								// off the envelope, so turnId stayed undefined and the table's Turn readout
+								// never rendered (cambia-876, DL-4 review F7).
 								const turnPayload = payload.payload;
+								const turnNo = turnPayload?.turn ?? payload.turn;
+								if (typeof turnNo === 'number') state.gameState.turnId = turnNo;
 								if (turnPayload && typeof turnPayload.serverNow === 'number') {
 									state.serverClockOffsetMs = turnPayload.serverNow - Date.now();
 								}

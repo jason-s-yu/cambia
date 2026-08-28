@@ -2,6 +2,7 @@
 import React, { useEffect, useState } from 'react';
 import TierBadge from '@/components/ds/data/TierBadge';
 import Panel from '@/components/ds/chrome/Panel';
+import { EYEBROW } from '@/components/ds/eyebrow';
 import Spinner from '@/components/ds/core/Spinner';
 import { useLeaderboardStore, type LeaderboardPool } from '@/stores/leaderboardStore';
 import type { LeaderboardRow } from '@/services/leaderboardService';
@@ -20,13 +21,16 @@ const POOLS: Array<[LeaderboardPool, string]> = RATING_POOLS;
 
 const CELL_PAD: React.CSSProperties = { padding: '9px 14px' };
 
+// A segmented control, announced as pressed buttons. It was carrying role='tab'
+// with aria-selected but none of the rest of the pattern (no tabpanel, no roving
+// tabindex, no arrow keys), so it promised a keyboard model it did not have;
+// aria-pressed describes what these actually are (cambia-876, DL-5 review F5).
 const PoolTab: React.FC<{ label: string; active: boolean; onSelect: () => void }> = ({ label, active, onSelect }) => {
 	const [hover, setHover] = useState(false);
 	return (
 		<button
 			type='button'
-			role='tab'
-			aria-selected={active}
+			aria-pressed={active}
 			onClick={onSelect}
 			onMouseEnter={() => setHover(true)}
 			onMouseLeave={() => setHover(false)}
@@ -34,7 +38,6 @@ const PoolTab: React.FC<{ label: string; active: boolean; onSelect: () => void }
 				padding: '5px 14px',
 				borderRadius: 'var(--radius-pill)',
 				cursor: 'pointer',
-				fontFamily: 'var(--font-sans)',
 				fontWeight: 'var(--weight-bold)',
 				fontSize: 'var(--ds-text-sm)',
 				whiteSpace: 'nowrap',
@@ -112,9 +115,11 @@ const LbRow: React.FC<LbRowProps> = ({ r, showPeak, you = false }) => {
 			<span className='hidden sm:block' style={{ fontSize: 'var(--ds-text-sm)', color: 'var(--text-secondary)' }}>{r.games}</span>
 			{showPeak && (
 				<span className='hidden sm:flex'>
+					{/* A bare hyphen in a column of real values reads as a stray mark;
+					    say what is missing (cambia-876, DL-5 review F6). */}
 					{r.peak != null
 						? <TierBadge tier={tierFromRating(r.peak)} size='sm' />
-						: <span style={{ color: 'var(--text-tertiary)' }}>-</span>}
+						: <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-tertiary)' }}>none yet</span>}
 				</span>
 			)}
 		</div>
@@ -139,7 +144,7 @@ const LeaderboardPage: React.FC = () => {
 	const { rows, you, isLoading, error } = poolState;
 	const showPeak = rows.some((r) => r.peak != null) || (you?.peak != null);
 
-	const headerCell: React.CSSProperties = { fontSize: 'var(--text-2xs)', fontWeight: 'var(--weight-bold)', letterSpacing: 'var(--tracking-caps)', textTransform: 'uppercase', color: 'var(--text-tertiary)' };
+	const headerCell: React.CSSProperties = EYEBROW;
 
 	return (
 		<div style={{ padding: 'var(--space-6) var(--space-5)', maxWidth: 1000, margin: '0 auto', width: '100%' }}>
@@ -159,7 +164,7 @@ const LeaderboardPage: React.FC = () => {
 					<p style={{ margin: '4px 0 0', color: 'var(--text-secondary)', fontSize: 'var(--text-md)' }}>Glicko-2 ratings by pool. Updated after every rated game.</p>
 				</div>
 				<div
-					role='tablist'
+					role='group'
 					aria-label='Rating pool'
 					style={{
 						display: 'flex',

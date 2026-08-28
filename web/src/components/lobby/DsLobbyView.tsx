@@ -10,6 +10,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useCurrentLobbyStore, type LobbyPhase } from '@/stores/lobbyStore';
 import { useAuthStore } from '@/stores/authStore';
 import Panel from '@/components/ds/chrome/Panel';
+import { EYEBROW } from '@/components/ds/eyebrow';
 import Button from '@/components/ds/core/Button';
 import Badge from '@/components/ds/core/Badge';
 import Input from '@/components/ds/core/Input';
@@ -29,14 +30,6 @@ interface LobbyStatusSpec {
   text: string;
   value?: string;
 }
-
-const EYEBROW: React.CSSProperties = {
-  fontSize: 'var(--text-2xs)',
-  fontWeight: 'var(--weight-bold)',
-  letterSpacing: 'var(--tracking-caps)',
-  textTransform: 'uppercase',
-  color: 'var(--text-tertiary)'
-};
 
 const MUTED: React.CSSProperties = {
   fontSize: 'var(--ds-text-sm)',
@@ -116,14 +109,21 @@ const DsLobbyView: React.FC<DsLobbyViewProps> = ({ lobbyId, phase, sendMessage, 
     }
   };
 
+  // With auto-start on, the server begins the countdown the moment every seat is
+  // ready (lobby.MarkUserReadyUnsafe returns true on allReady && AutoStart), so
+  // nobody is waiting on the host (cambia-876, DL-3 review F8).
+  const autoStart = !!(lobbyDetails?.lobbySettings ?? lobbyDetails?.settings)?.autoStart;
+
   const status: LobbyStatusSpec = (() => {
+    // 'Starting' carries the announcement; the seconds are the aria-hidden
+    // readout, so the countdown does not narrate itself once a second.
     if (remaining !== null && remaining > 0) {
-      return { tone: 'gold', text: 'Starting in', value: `${remaining}s` };
+      return { tone: 'gold', text: 'Starting', value: `${remaining}s` };
     }
     if (phase === 'searching') return { tone: 'info', text: 'Searching for a match' };
     if (phase === 'ready_check') return { tone: 'gold', text: 'Match found. Ready up to begin.' };
     if (players.length < 2) return { tone: 'info', text: 'Waiting for players. Share the invite link.' };
-    if (allReady) return { tone: 'success', text: isHost ? 'All players ready.' : 'All players ready. Waiting on the host.' };
+    if (allReady) return { tone: 'success', text: isHost || autoStart ? 'All players ready.' : 'All players ready. Waiting on the host.' };
     return { tone: 'info', text: `Waiting on ${waiting.join(', ')}.` };
   })();
 
@@ -147,7 +147,10 @@ const DsLobbyView: React.FC<DsLobbyViewProps> = ({ lobbyId, phase, sendMessage, 
             <Badge tone='neutral'>{TYPE_LABELS[lobbyType] ?? lobbyType}</Badge>
           </div>
           <div style={{ marginTop: 'var(--space-2)', display: 'flex', alignItems: 'center', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
-            <span style={EYEBROW}>Invite code</span>
+            {/* Not 'Invite code': nothing takes a code. Joining goes through the
+                dashboard list or the copied link, so the id is labelled as what it
+                is (cambia-876, DL-3 review F10). */}
+            <span style={EYEBROW}>Lobby id</span>
             <Badge mono>{shortId}</Badge>
             <Button size='sm' variant='ghost' onClick={copyInvite}>{copied ? 'Link copied' : 'Copy link'}</Button>
           </div>
@@ -222,6 +225,7 @@ const DsLobbyView: React.FC<DsLobbyViewProps> = ({ lobbyId, phase, sendMessage, 
           style={{ display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-3)' }}
         >
           <Input
+            aria-label='Chat message'
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             placeholder='Message the lobby'

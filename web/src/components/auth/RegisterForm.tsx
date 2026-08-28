@@ -13,19 +13,28 @@ const RegisterForm: React.FC = () => {
   const isLoading = useAuthStore((state) => state.isLoading);
   const error = useAuthStore((state) => state.error);
   const clearError = useAuthStore((state) => state.clearError);
+  // Two error slots, one message each: form-wide problems go to the strip,
+  // a problem with one field goes under that field. The mismatch used to fill
+  // both and printed itself twice (cambia-876, DL-2 review F2).
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [confirmError, setConfirmError] = useState<string | null>(null);
+
+  const clearErrors = () => {
+    clearError();
+    setValidationError(null);
+    setConfirmError(null);
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    clearError();
-    setValidationError(null);
+    clearErrors();
 
     if (!username || !email || !password || !confirmPassword) {
       setValidationError('Fill in every field.');
       return;
     }
     if (password !== confirmPassword) {
-      setValidationError('Passwords do not match.');
+      setConfirmError('Passwords do not match.');
       return;
     }
 
@@ -35,7 +44,7 @@ const RegisterForm: React.FC = () => {
 
   return (
     <form onSubmit={handleSubmit} className='flex flex-col gap-4'>
-      <ErrorMessage message={error || validationError} onClear={() => { clearError(); setValidationError(null); }} />
+      <ErrorMessage message={error || validationError} onClear={clearErrors} />
       <Input
         label='Username'
         id='username'
@@ -80,7 +89,7 @@ const RegisterForm: React.FC = () => {
         autoComplete='new-password'
         disabled={isLoading}
         className='mb-0'
-        error={validationError && validationError.includes('Passwords do not match') ? validationError : undefined}
+        error={confirmError ?? undefined}
       />
       <Button type='submit' className='w-full mt-2' isLoading={isLoading} disabled={isLoading}>
         Create account

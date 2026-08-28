@@ -38,6 +38,7 @@ import { useCurrentLobbyStore, type LobbyPhase } from '@/stores/lobbyStore';
 import Button from '@/components/ds/core/Button';
 import Badge from '@/components/ds/core/Badge';
 import Panel from '@/components/ds/chrome/Panel';
+import { EYEBROW } from '@/components/ds/eyebrow';
 import PlayingCard from '@/components/ds/game/PlayingCard';
 import PlayerSeat, { type PlayerSeatState } from '@/components/ds/game/PlayerSeat';
 import ScorePill from '@/components/ds/game/ScorePill';
@@ -195,11 +196,8 @@ const FeltChip: React.FC<{ tone: 'warning' | 'danger' | 'info' | 'success'; chil
 );
 
 const FELT_LABEL: React.CSSProperties = {
+  ...EYEBROW,
   marginTop: 8,
-  fontSize: 'var(--text-2xs)',
-  fontWeight: 'var(--weight-bold)',
-  letterSpacing: 'var(--tracking-caps)',
-  textTransform: 'uppercase',
   color: 'var(--text-on-felt-muted)',
   fontVariantNumeric: 'tabular-nums',
   whiteSpace: 'nowrap'
@@ -251,7 +249,10 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   const specialRank = pendingAction === 'special_action' && specialAction ? specialAction.cardRank : null;
   const turnTimerSec = gameState.houseRules?.turnTimerSec ?? 0;
   const currentPlayer = gameState.players.find((p) => p.playerId === gameState.currentPlayerId);
-  const turnNo = typeof gameState.turnId === 'number' && gameState.turnId > 0 ? gameState.turnId : null;
+  // turnId is 0-based at both sources (the adapter's g.TurnID on game_player_turn,
+  // the engine's TurnNumber on a sync), so the opening turn arrives as 0 and the
+  // old `> 0` guard hid it. Display the ordinal (cambia-876, DL-4 review F7).
+  const turnNo = gameState.started && typeof gameState.turnId === 'number' && gameState.turnId >= 0 ? gameState.turnId + 1 : null;
   const preGame = !!gameState.preGameActive && !gameState.started;
 
   // Display names: the game snapshot's username, then the lobby roster, then the signed-in
@@ -450,7 +451,14 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     if (gaveUp) return 'Connection lost. Leave the table and rejoin from the dashboard.';
     if (offline) return 'Connection lost. Reconnecting.';
     if (roundOver) return phase === 'round_end' ? 'Round over. Waiting for the next round.' : 'Game over.';
-    if (preGame) return 'Memorize your peeked cards. Play starts when the timer runs out.';
+    // No pre-game deadline reaches the client, so the table shows no countdown
+    // during the peek window and the copy must not point at one (cambia-876,
+    // DL-4 review F5).
+    if (preGame) return 'Memorize your peeked cards. Play starts in a moment.';
+    // A snap selection is actionable out of turn (snapping is), so it outranks
+    // the whose-turn line, which otherwise sat above the Snap button that the
+    // selection had just enabled (cambia-876, DL-4 review F6).
+    if (selectedIdx !== null && pendingAction === null) return 'Snap the selected card onto the discard, or pick another card.';
     if (!isMyTurn) {
       if (specialAction?.active && currentPlayer && specialAction.playerId === currentPlayer.playerId) {
         return `${nameOf(currentPlayer.playerId)} is choosing a target for ${abilityName(specialAction.cardRank)?.toLowerCase() ?? 'an ability'}.`;
@@ -463,7 +471,6 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     if (kingConfirm) return 'King: both cards are face up. Swap them, or keep them where they are.';
     if (specialRank === 'K') return selectedIdx === null ? 'King: choose one of your cards.' : 'King: now choose the opponent card to look at.';
     if (pendingAction === 'discard_replace') return 'Swap the drawn card into a slot, or discard it.';
-    if (selectedIdx !== null) return 'Snap the selected card onto the discard, or pick another card.';
     if (gameState.cambiaCalled) return canTakeDiscard ? 'Last turn. Draw from the stock or take the discard.' : 'Last turn. Draw from the stock.';
     return canTakeDiscard ? 'Your turn. Draw from the stock or take the discard.' : 'Your turn. Draw from the stock.';
   }, [gaveUp, offline, roundOver, phase, preGame, isMyTurn, specialAction, currentPlayer, nameOf, specialRank, kingConfirm, selectedIdx, pendingAction, gameState.cambiaCalled, canTakeDiscard]);
@@ -569,7 +576,10 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
           {/* Opponent seats and hand backs. */}
           <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'flex-start', gap: 28, flexWrap: 'wrap' }}>
             {opponents.map((opp) => {
-              const acting = !!specialAction?.active && specialAction.playerId === opp.playerId;
+              // The store keeps specialAction after game_end, so an ungated note left
+              // a stale 'Look and swap' under the seat behind the results overlay
+              // (cambia-876, DL-4 review F12).
+              const acting = !roundOver && !!specialAction?.active && specialAction.playerId === opp.playerId;
               const note = acting ? abilityName(specialAction?.cardRank) ?? undefined : undefined;
               return (
                 <div key={opp.playerId} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
@@ -720,7 +730,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
               </div>
             ))}
           </div>
-          <div style={{ marginTop: 10, fontSize: 'var(--text-2xs)', color: 'var(--text-tertiary)', letterSpacing: 'var(--tracking-caps)', textTransform: 'uppercase' }}>
+          <div style={{ ...EYEBROW, marginTop: 10, fontWeight: 'var(--weight-regular)' }}>
             {hasTotals ? 'Total score, lower wins' : 'Cards in hand'}
           </div>
         </Panel>
