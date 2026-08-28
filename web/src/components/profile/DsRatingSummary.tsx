@@ -103,16 +103,25 @@ const DsRatingSummary: React.FC<DsRatingSummaryProps> = ({ summary, error }) => 
 	const { record } = summary;
 	const neverPlayed = record.games === 0;
 
+	// record.games (lifetime, rated or not) and a pool's games (rated only) come from
+	// separate queries and can disagree, e.g. a rated pool seeded without a matching
+	// game_results row. hasRatedPool checks the pools directly so the badge and the
+	// onboarding paragraph never claim no rating exists while a pool card below is
+	// printing a real one. Requiring both (rather than !hasRatedPool alone) keeps a
+	// real lifetime record on unranked-only play from being replaced by the "no games
+	// yet" state (cambia-929 F5, cambia-949 CP4).
+	const hasRatedPool = summary.pools.some((pool) => pool.games > 0);
+
 	return (
 		<Panel
 			title='Ratings'
 			action={
-				neverPlayed
+				neverPlayed && !hasRatedPool
 					? <Badge tone='neutral'>no games yet</Badge>
 					: <Badge tone='info'>{record.wins}W · {record.games - record.wins}L</Badge>
 			}
 		>
-			{neverPlayed && (
+			{neverPlayed && !hasRatedPool && (
 				<p style={{ margin: '0 0 12px', fontSize: 'var(--ds-text-sm)', color: 'var(--text-secondary)' }}>
 					Ranked games set your rating. Everyone starts at 1500 with a wide deviation that narrows as you play.
 				</p>

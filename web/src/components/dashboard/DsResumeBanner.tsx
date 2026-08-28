@@ -17,12 +17,12 @@ export interface DsResumeBannerProps {
 /** Headline copy per session shape: a seat in a running game is the urgent case. */
 function headline(session: ActiveSession): string {
   if (session.phase === 'in_game') {
-    return session.seated ? 'Your game is in progress' : 'A game is running in your lobby';
+    return session.seated ? 'Game in progress' : 'Game running in your lobby';
   }
   if (session.phase === 'searching') {
-    return 'Your lobby is searching for a match';
+    return 'Searching for a match';
   }
-  return 'Your lobby is still open';
+  return 'Lobby open';
 }
 
 function badgeTone(session: ActiveSession): 'warning' | 'info' | 'neutral' {
