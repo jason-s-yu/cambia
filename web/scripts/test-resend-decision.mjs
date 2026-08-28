@@ -4,7 +4,9 @@
 //
 // The two failure modes this pins down are opposite: never resending loses the player's
 // action silently (the pre-cambia-891 behaviour), and always resending re-fires an action
-// whose meaning has changed, which for a snap is a penalty draw.
+// whose meaning has changed: for a snap a penalty draw, for a slot-addressed frame (replace,
+// every ability step) a hit on whatever card now sits in that slot, since the server resolves
+// those by index and never reads the card id back.
 
 /* global console */
 
@@ -30,6 +32,7 @@ function ctx(over = {}) {
         drawnCardId: null,
         cambiaCalled: false,
         cardIds: ['my-0', 'my-1', 'opp-0', 'discard-7'],
+        slots: { [`${SELF}:my-0`]: 0, [`${SELF}:my-1`]: 1, [`${OPP}:opp-0`]: 0 },
         phase: 'in_game',
         selfId: SELF,
         ...over
@@ -46,14 +49,14 @@ test('a repair stamped at or below the send seq never resends', () => {
     // h.seq is monotonic and dispatch is serialized, so a sync_state carrying seq <= last_seq
     // cannot have been produced after our frame was rejected: it answers an earlier one, and
     // ours may have been applied. Resending there would double-apply.
-    const rec = record('action_snap', { cardRefs: ['my-0'] });
+    const rec = record('action_snap', { cardRefs: [{ id: 'my-0' }] });
     assert.equal(decideResend(rec, ctx(), 10), 'drop');
     assert.equal(decideResend(rec, ctx(), 9), 'drop');
     assert.equal(decideResend(rec, ctx(), 11), 'resend');
 });
 
 test('a frame is resent at most once, then the player is told', () => {
-    const rec = record('action_snap', { cardRefs: ['my-0'], attempt: 1 });
+    const rec = record('action_snap', { cardRefs: [{ id: 'my-0' }], attempt: 1 });
     assert.equal(decideResend(rec, ctx(), 11), 'notify');
     assert.equal(decideResend(record('chat', { attempt: 1 }), ctx(), 11), 'drop');
 });
@@ -61,11 +64,11 @@ test('a frame is resent at most once, then the player is told', () => {
 // --- Snap --------------------------------------------------------------------------------
 
 test('snap resends while the discard top and the turn are unmoved', () => {
-    const rec = record('action_snap', { cardRefs: ['my-0'] });
+    const rec = record('action_snap', { cardRefs: [{ id: 'my-0' }] });
     assert.equal(decideResend(rec, ctx(), 11), 'resend');
     // Out of turn is fine for a snap: it is legal any time (game.go HandlePlayerAction).
     assert.equal(decideResend(
-        record('action_snap', { cardRefs: ['my-0'], ctx: ctx({ currentPlayerId: OPP }) }),
+        record('action_snap', { cardRefs: [{ id: 'my-0' }], ctx: ctx({ currentPlayerId: OPP }) }),
         ctx({ currentPlayerId: OPP }),
         11
     ), 'resend');
@@ -74,18 +77,18 @@ test('snap resends while the discard top and the turn are unmoved', () => {
 test('snap notifies once the discard top has moved', () => {
     // Same card id, different meaning: the server would score it against the new top and draw
     // a penalty (engine_adapter.go handleSnapViaEngine -> handleSnapFailure).
-    const rec = record('action_snap', { cardRefs: ['my-0'] });
+    const rec = record('action_snap', { cardRefs: [{ id: 'my-0' }] });
     const moved = ctx({ discardTopId: 'discard-9', cardIds: ['my-0', 'my-1', 'opp-0', 'discard-9'] });
     assert.equal(decideResend(rec, moved, 11), 'notify');
 });
 
 test('snap notifies once the turn has moved on', () => {
-    const rec = record('action_snap', { cardRefs: ['my-0'] });
+    const rec = record('action_snap', { cardRefs: [{ id: 'my-0' }] });
     assert.equal(decideResend(rec, ctx({ turnId: 5, currentPlayerId: OPP }), 11), 'notify');
 });
 
 test('snap notifies when the snapped card is no longer in play', () => {
-    const rec = record('action_snap', { cardRefs: ['my-0'] });
+    const rec = record('action_snap', { cardRefs: [{ id: 'my-0' }] });
     assert.equal(decideResend(rec, ctx({ cardIds: ['my-1', 'opp-0', 'discard-7'] }), 11), 'notify');
 });
 
@@ -109,11 +112,11 @@ test('taking the discard is bound to the card that was on top', () => {
 
 test('discard and replace resend only against the same pending draw', () => {
     const drew = ctx({ pendingAction: 'discard_replace', drawnCardId: 'drawn-1', cardIds: ['my-0', 'my-1', 'drawn-1', 'discard-7'] });
-    const rec = { type: 'action_discard', cardRefs: ['drawn-1'], sentSeq: 10, attempt: 0, ctx: drew };
+    const rec = { type: 'action_discard', cardRefs: [{ id: 'drawn-1' }], sentSeq: 10, attempt: 0, ctx: drew };
     assert.equal(decideResend(rec, drew, 11), 'resend');
     // The turn timer discarded for us: nothing is pending any more.
     assert.equal(decideResend(rec, ctx({ turnId: 5, currentPlayerId: OPP }), 11), 'notify');
-    const replace = { ...rec, type: 'action_replace', cardRefs: ['my-0'] };
+    const replace = { ...rec, type: 'action_replace', cardRefs: [{ id: 'my-0' }] };
     assert.equal(decideResend(replace, drew, 11), 'resend');
     assert.equal(decideResend(replace, ctx(), 11), 'notify');
 });
@@ -122,7 +125,7 @@ test('discard and replace resend only against the same pending draw', () => {
 
 test('ability steps resend only against the same pending special', () => {
     const king = ctx({ pendingAction: 'special_action', specialRank: 'K' });
-    const rec = { type: 'action_special', cardRefs: ['my-0', 'opp-0'], sentSeq: 10, attempt: 0, ctx: king };
+    const rec = { type: 'action_special', cardRefs: [{ id: 'my-0', idx: 0 }, { id: 'opp-0', idx: 0, ownerId: OPP }], sentSeq: 10, attempt: 0, ctx: king };
     assert.equal(decideResend(rec, king, 11), 'resend');
     assert.equal(decideResend(rec, ctx({ pendingAction: 'special_action', specialRank: 'Q' }), 11), 'notify');
     assert.equal(decideResend(rec, ctx(), 11), 'notify');
@@ -135,10 +138,58 @@ test('Cambia resends only while it is still callable', () => {
     assert.equal(decideResend(rec, ctx({ drawnCardId: 'drawn-1', pendingAction: 'discard_replace' }), 11), 'notify');
 });
 
+// --- Slot safety (the shifted-hand resend) ------------------------------------------------
+
+test('a slot-addressed frame notifies when its card has moved slot', () => {
+    // The server takes payload["idx"] and never checks the id (engine_adapter.go
+    // handleReplaceViaEngine; special_actions.go parseCardTarget for every ability step), so a
+    // resend against a hand that shifted under the drop would replace the wrong card. Nothing
+    // else in the decision sees it: a snap by either player leaves turnId, currentPlayerId,
+    // pendingAction and the drawn card exactly as they were.
+    const drew = ctx({ pendingAction: 'discard_replace', drawnCardId: 'drawn-1', cardIds: ['my-0', 'my-1', 'opp-0', 'drawn-1', 'discard-7'] });
+    const rec = { type: 'action_replace', cardRefs: [{ id: 'my-1', idx: 1 }], sentSeq: 10, attempt: 0, ctx: drew };
+    assert.equal(decideResend(rec, drew, 11), 'resend');
+
+    const shifted = { ...drew, slots: { [`${SELF}:my-1`]: 0, [`${OPP}:opp-0`]: 0 } };
+    assert.equal(decideResend(rec, shifted, 11), 'notify');
+});
+
+test('an ability step checks the opponent slot under its owner', () => {
+    const king = ctx({ pendingAction: 'special_action', specialRank: 'K' });
+    const rec = { type: 'action_special', cardRefs: [{ id: 'my-0', idx: 0 }, { id: 'opp-0', idx: 0, ownerId: OPP }], sentSeq: 10, attempt: 0, ctx: king };
+    assert.equal(decideResend(rec, king, 11), 'resend');
+
+    // The opponent's hand shifted: same id, slot 1 now.
+    const oppShifted = { ...king, slots: { ...king.slots, [`${OPP}:opp-0`]: 1 } };
+    assert.equal(decideResend(rec, oppShifted, 11), 'notify');
+
+    // Same slot number, wrong owner: the id has to sit under the owner the frame named.
+    const wrongOwner = { ...king, slots: { [`${SELF}:my-0`]: 0, [`${SELF}:opp-0`]: 0 } };
+    assert.equal(decideResend(rec, wrongOwner, 11), 'notify');
+
+    // A client hand model that lost its slots fails closed rather than resending blind.
+    assert.equal(decideResend(rec, { ...king, slots: {} }, 11), 'notify');
+});
+
+test('an id-addressed frame is not slot-checked', () => {
+    // A snap carries no idx: the server searches both hands by UUID, so a shifted hand does not
+    // change its meaning (only a moved discard top does, and that is checked).
+    const rec = record('action_snap', { cardRefs: [{ id: 'my-0' }] });
+    assert.equal(decideResend(rec, ctx({ slots: {} }), 11), 'resend');
+});
+
+test('a moved discard top stops every game action, not just the two that read it', () => {
+    // The top is the witness that no hand shifted: a successful snap always pushes the snapped
+    // card onto the discard. Checking it does not depend on the client's own slot bookkeeping.
+    const moved = ctx({ discardTopId: 'discard-9', cardIds: ['my-0', 'my-1', 'opp-0', 'discard-9'] });
+    assert.equal(decideResend(record('action_draw_stockpile'), moved, 11), 'notify');
+    assert.equal(decideResend(record('action_cambia'), moved, 11), 'notify');
+});
+
 // --- Table lifecycle ---------------------------------------------------------------------
 
 test('a finished or replaced game says nothing', () => {
-    const rec = record('action_snap', { cardRefs: ['my-0'] });
+    const rec = record('action_snap', { cardRefs: [{ id: 'my-0' }] });
     assert.equal(decideResend(rec, ctx({ gameOver: true }), 11), 'drop');
     assert.equal(decideResend(rec, ctx({ gameId: 'game-2' }), 11), 'drop');
     assert.equal(decideResend(rec, ctx({ gameId: null, started: false }), 11), 'drop');
@@ -174,11 +225,15 @@ test('tableContext reads the snapshot the way the table does', () => {
         specialAction: { active: true, playerId: SELF, cardRank: 'K' },
         players: [
             { playerId: SELF, revealedHand: [{ id: 'my-0' }, { id: 'my-1' }], drawnCard: { id: 'drawn-1' } },
-            { playerId: OPP, revealedHand: [{ id: 'opp-0' }] }
+            { playerId: OPP, revealedHand: [{ id: 'opp-0', idx: 7 }] }
         ]
     };
     const c = tableContext(gs, 'special_action', 'in_game', SELF);
     assert.equal(c.discardTopId, 'discard-7');
+    // Slots come from the server's ObfCard.idx where it is present (sync_state.go fills it for
+    // the self view and the opponent view alike) and from the array position otherwise.
+    assert.equal(c.slots[`${SELF}:my-1`], 1);
+    assert.equal(c.slots[`${OPP}:opp-0`], 7);
     assert.equal(c.drawnCardId, 'drawn-1');
     assert.equal(c.specialRank, 'K');
     assert.deepEqual(c.cardIds.sort(), ['discard-7', 'drawn-1', 'my-0', 'my-1', 'opp-0']);
@@ -190,11 +245,18 @@ test('tableContext reads the snapshot the way the table does', () => {
     const empty = tableContext(null, null, 'open', SELF);
     assert.equal(empty.gameId, null);
     assert.deepEqual(empty.cardIds, []);
+    assert.deepEqual(empty.slots, {});
 });
 
-test('cardRefsOf collects every card the frame names', () => {
-    assert.deepEqual(cardRefsOf({ type: 'action_snap', card: { id: 'a' } }), ['a']);
-    assert.deepEqual(cardRefsOf({ card1: { id: 'a' }, card2: { id: 'b' } }), ['a', 'b']);
+test('cardRefsOf keeps the slot and the owner the frame addressed', () => {
+    // A snap names an id only; the server finds it in either hand by UUID.
+    assert.deepEqual(cardRefsOf({ type: 'action_snap', card: { id: 'a' } }), [{ id: 'a' }]);
+    // A replace names a slot in the sender's own hand; an ability step names both sides.
+    assert.deepEqual(cardRefsOf({ card: { id: 'a', idx: 2 } }), [{ id: 'a', idx: 2 }]);
+    assert.deepEqual(
+        cardRefsOf({ card1: { id: 'a', idx: 1 }, card2: { id: 'b', idx: 3, user: { id: OPP } } }),
+        [{ id: 'a', idx: 1 }, { id: 'b', idx: 3, ownerId: OPP }]
+    );
     assert.deepEqual(cardRefsOf({ type: 'ready' }), []);
 });
 

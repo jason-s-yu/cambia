@@ -25,9 +25,11 @@ interface OutboundMessage {
 	type: string;
 	body?: unknown;
 	special?: string;
-	card?: { id?: string };
-	card1?: { id?: string };
-	card2?: { id?: string };
+	/** Slot-addressed frames carry idx (and, for a two-sided ability, the owner); the resend
+	 *  decision needs both, since the server resolves those frames by index alone. */
+	card?: { id?: string; idx?: number; user?: { id?: string } };
+	card1?: { id?: string; idx?: number; user?: { id?: string } };
+	card2?: { id?: string; idx?: number; user?: { id?: string } };
 }
 
 /** Lobby-phase message types routed to lobbyStore */
