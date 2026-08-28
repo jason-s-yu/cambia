@@ -3,12 +3,16 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/sirupsen/logrus"
+
 	"github.com/jason-s-yu/cambia/service/internal/auth"
 	"github.com/jason-s-yu/cambia/service/internal/lobby"
 )
@@ -58,9 +62,21 @@ func TestLobbyCreate(t *testing.T) {
 // TestLobbyCreateWithName checks that an optional "name" in the create request is
 // stored on the lobby and carried through to GET /lobby/list, and that omitting it
 // leaves the name as an empty string rather than absent.
+//
+// The listing half needs a live connection: since cambia-884 the list carries only lobbies
+// somebody is actually connected to, so the host joins over the WebSocket the way the web
+// client does after creating a lobby.
 func TestLobbyCreateWithName(t *testing.T) {
 	auth.Init()
 	gs := NewGameServer()
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+
+	mux := http.NewServeMux()
+	mux.Handle("/ws/", HubWSHandler(logger, gs))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
 
 	uHost := uuid.New()
 	token, _ := auth.CreateJWT(uHost.String())
@@ -82,22 +98,19 @@ func TestLobbyCreateWithName(t *testing.T) {
 		t.Fatalf("expected lobby name %q, got %q", "Friday Night Cambia", newLobby.Name)
 	}
 
-	// The name must also appear in /lobby/list.
-	listReq := httptest.NewRequest("GET", "/lobby/list", nil)
-	listReq.Header.Set("Cookie", "auth_token="+token)
-	listW := httptest.NewRecorder()
-	ListLobbiesHandler(gs).ServeHTTP(listW, listReq)
-	if listW.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK from /lobby/list, got %d: %s", listW.Code, listW.Body.String())
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	client := dialWSClient(t, ctx, ts.URL, newLobby.ID.String(), token)
+	defer client.close()
+	if client.waitForType("lobby_state", 5*time.Second) == nil {
+		t.Fatalf("connection never received lobby_state")
 	}
-	var listResp map[string]ListLobbiesResponse
-	if err := json.Unmarshal(listW.Body.Bytes(), &listResp); err != nil {
-		t.Fatalf("failed to decode lobby list: %v", err)
-	}
-	entry, ok := listResp[newLobby.ID.String()]
-	if !ok {
+	if !waitListed(t, gs, token, newLobby.ID, true, 2*time.Second) {
 		t.Fatalf("lobby %s missing from /lobby/list response", newLobby.ID)
 	}
+
+	// The name must also appear in GET /lobby/list.
+	entry := listLobbies(t, gs, token)[newLobby.ID.String()]
 	if entry.Lobby.Name != "Friday Night Cambia" {
 		t.Fatalf("expected listed lobby name %q, got %q", "Friday Night Cambia", entry.Lobby.Name)
 	}

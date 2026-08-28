@@ -53,7 +53,11 @@ type Lobby struct {
 	joinOrder map[uuid.UUID]uint64
 	joinSeq   uint64
 
-	Mu sync.Mutex
+	// Mu guards every mutable field above. Marked `json:"-"` because the struct doubles as the
+	// REST payload for a lobby (POST /lobby/create, GET /lobby/list): an exported sync.Mutex
+	// serialises as an empty "Mu" object, which no client reads and nothing should ship
+	// (cambia-884).
+	Mu sync.Mutex `json:"-"`
 }
 
 // LobbySettings holds lobby-level behavior settings.

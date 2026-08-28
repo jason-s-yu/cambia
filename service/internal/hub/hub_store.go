@@ -42,6 +42,21 @@ func (s *HubStore) DeleteHub(id uuid.UUID) {
 	delete(s.hubs, id)
 }
 
+// LiveConnections reports how many WebSocket connections the hub for the given lobby currently
+// holds, and whether a hub is registered and still serving that lobby at all. Safe from any
+// goroutine.
+//
+// This is the difference between a lobby somebody is sitting in and one whose members all closed
+// their tabs: membership survives a dropped socket by design (cambia-807), so member counts
+// cannot answer it (cambia-884).
+func (s *HubStore) LiveConnections(lobbyID uuid.UUID) (int, bool) {
+	h, ok := s.GetHub(lobbyID)
+	if !ok || !h.Alive() {
+		return 0, false
+	}
+	return h.connCount(), true
+}
+
 // ListPublicHubs returns all hubs whose lobby type is not "private".
 func (s *HubStore) ListPublicHubs() []*Hub {
 	s.mu.Lock()

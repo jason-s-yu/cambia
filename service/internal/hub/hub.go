@@ -26,10 +26,17 @@ const defaultCountdownDuration = 3 * time.Second
 // PostGameDuration on the hub. It matches the between-rounds interval in HandleRoundEnd.
 const defaultPostGameResultsDuration = 10 * time.Second
 
-// defaultIdleTTL is how long a hub may sit with no connections before it reaps its own lobby,
-// used when the GameServer does not override IdleTTL. Long enough that a table stepping away
-// between games keeps its lobby, short enough that abandoned lobbies do not accumulate.
+// defaultIdleTTL is the longest an idle window may run, used when the GameServer does not
+// override IdleTTL. What carries a table that all dropped mid-game is not this length but the
+// reap-time exemption in handleIdleReap, which never reaps a hub whose game is still running; with
+// both defaults in force EmptyIdleTTL is the window that actually reaps (cambia-884).
 const defaultIdleTTL = 45 * time.Minute
+
+// defaultEmptyIdleTTL is the same window for a hub with no game in progress, used when the
+// GameServer does not override EmptyIdleTTL. A pre-game or post-game lobby whose members have
+// all closed their tabs holds nothing worth waiting out the long window for, and until
+// cambia-884 it sat in the public list for the best part of an hour.
+const defaultEmptyIdleTTL = 5 * time.Minute
 
 // GameFactory builds and registers a CambiaGame for the given players, wiring emitter as
 // the event sink. The returned game is registered but not begun (the hub calls BeginPreGame
@@ -103,9 +110,16 @@ type Hub struct {
 	// returns itself to PhaseOpen (see returnToLobby).
 	PostGameDuration time.Duration
 
-	// IdleTTL is how long the hub may hold no connections before it reaps its own lobby through
-	// OnIdle. Zero disables reaping.
+	// IdleTTL bounds the idle window: it is the reap deadline while EmptyIdleTTL is unset or
+	// longer, and the ceiling on it otherwise. Zero disables reaping, whatever EmptyIdleTTL says.
+	// It is not what holds a live game's lobby open; handleIdleReap's exemption is (cambia-884).
 	IdleTTL time.Duration
+
+	// EmptyIdleTTL is the shorter idle window from cambia-884. With no game in progress it is the
+	// reap deadline: a lobby waiting to start, or one whose game has finished, is reclaimed on it
+	// rather than sitting out the long TTL. While a game is in progress it is how often the reap
+	// decision is reconsidered. Zero, or any value above IdleTTL, leaves IdleTTL in force.
+	EmptyIdleTTL time.Duration
 
 	// OnIdle tears the lobby down when the idle window elapses. Injected by the owner and
 	// pointed at the same teardown the last deliberate leave runs (cambia-807), so a lobby
@@ -177,6 +191,7 @@ func NewHub(lob *lobby.Lobby) *Hub {
 		CountdownDuration: defaultCountdownDuration,
 		PostGameDuration:  defaultPostGameResultsDuration,
 		IdleTTL:           defaultIdleTTL,
+		EmptyIdleTTL:      defaultEmptyIdleTTL,
 		conns:             make(map[uuid.UUID]*Connection),
 		CumulativeScores:  make(map[uuid.UUID]int),
 		RoundHistory:      make([]map[uuid.UUID]int, 0),
@@ -291,12 +306,33 @@ func (h *Hub) armIdleReap() {
 		return
 	}
 	gen := h.idleGen
-	h.idleTimer = time.AfterFunc(h.IdleTTL, func() {
+	h.idleTimer = time.AfterFunc(h.idleWindow(), func() {
 		select {
 		case h.idleReap <- gen:
 		case <-h.shutdown:
 		}
 	})
+}
+
+// idleWindow returns how long the next window runs: the shorter of the two TTLs, since
+// EmptyIdleTTL never lengthens one. A deployment that lowers IdleTTL below it, and every test that
+// shortens only IdleTTL, gets IdleTTL.
+//
+// The window carries two meanings and the fire decides which, not the arm (cambia-884):
+//
+//   - No game in progress: it is the reap deadline. A lobby waiting to start, or one whose game
+//     has finished, holds nothing but membership its members can re-establish by opening a new
+//     lobby, and until cambia-884 it sat in the public list for the best part of an hour.
+//   - Game in progress: it is a re-check interval, because handleIdleReap declines to reap a live
+//     game whatever the window says. Arming the long TTL here instead would put the reap decision
+//     out of reach for the rest of it, and since nothing re-arms when a game ends, a table that
+//     all dropped mid-game would keep its lobby for the full long window after the game was over:
+//     exactly the dead lobby the short window exists to clear.
+func (h *Hub) idleWindow() time.Duration {
+	if h.EmptyIdleTTL > 0 && h.EmptyIdleTTL < h.IdleTTL {
+		return h.EmptyIdleTTL
+	}
+	return h.IdleTTL
 }
 
 // cancelIdleReap closes the current window. The generation bump is the part that matters: Stop()
@@ -316,7 +352,10 @@ func (h *Hub) cancelIdleReap() {
 // the process. Reaping goes through OnIdle, the same whole-lobby teardown the last leave runs.
 //
 // A running game is never idle, whatever the socket count: its turn timers and the forfeit rule
-// (cambia-837) still have to reach their own end, and the lobby is reconsidered a window later.
+// (cambia-837) still have to reach their own end. That exemption, rather than the length of
+// IdleTTL, is what carries a live game across a disconnect; the lobby is reconsidered one window
+// later, and that window is the shorter of the two, so the reap follows shortly after the game
+// ends rather than at the end of a grace nothing needs any more.
 func (h *Hub) handleIdleReap(gen uint64) {
 	if gen != h.idleGen || h.OnIdle == nil {
 		return
@@ -329,7 +368,8 @@ func (h *Hub) handleIdleReap(gen uint64) {
 		h.armIdleReap()
 		return
 	}
-	log.Printf("hub %s: no connections for %s and no game in progress; reaping lobby.", h.ID, h.IdleTTL)
+	// At least one window, and more where an earlier fire found a game still running.
+	log.Printf("hub %s: no connections for at least %s and no game in progress; reaping lobby.", h.ID, h.idleWindow())
 	h.OnIdle(h.ID)
 }
 
