@@ -216,11 +216,15 @@ export interface PrivateSpecialActionFailEvent {
 	card2?: { id: string; idx?: number; user?: { id: string } };
 }
 
-/** Structure for player snap success events (public) */
+/**
+ * Structure for player snap success events (public). `user` is the snapper; `card.user` is the
+ * owner of the hand the card left and `card.idx` its slot in that hand, which differ from the
+ * snapper on an opponent snap (cambia-913).
+ */
 export interface PlayerSnapSuccessEvent {
 	type: 'player_snap_success';
 	user: { id: string };
-	card: ObfCard; // Card that was snapped (full details)
+	card: EventCard; // Card that was snapped (rank and suit, plus its owner and slot)
 }
 
 /** Structure for player snap fail events (public) */

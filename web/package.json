@@ -12,6 +12,8 @@
     "preview": "vite preview",
     "check-tokens": "node scripts/check-theme-tokens.mjs",
     "test:resend": "node --test scripts/test-resend-decision.mjs",
+    "test:snap": "node --test scripts/test-snap-success.mjs",
+    "test": "node --test scripts/test-resend-decision.mjs scripts/test-snap-success.mjs",
     "measure-dev-transfer": "node scripts/measure-dev-transfer.mjs"
   },
   "dependencies": {

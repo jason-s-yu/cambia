@@ -32,7 +32,8 @@ import {
   selectDisplayedDrawnCard,
   selectServerClockOffsetMs,
   selectAbilityReveal,
-  selectDroppedActionNonce
+  selectDroppedActionNonce,
+  selectLastSnap
 } from '@/stores/gameStore';
 import { useAuthStore } from '@/stores/authStore';
 import { useCurrentLobbyStore, type LobbyPhase } from '@/stores/lobbyStore';
@@ -114,8 +115,10 @@ interface PileSnapshot {
 /**
  * Transient table notice derived from state deltas. A hand that grows is a snap
  * penalty (nothing else adds a card to a hand mid-game; the drawn card is held
- * apart from the hand), a hand that shrinks as the discard top changes is a
- * successful snap, and a stockpile that grows is a reshuffle. Each notice
+ * apart from the hand) and a stockpile that grows is a reshuffle. A successful
+ * snap is read from the event instead (see the lastSnap effect): the seat that
+ * shrinks is the card's owner, who on an opponent snap is not the player who
+ * acted, so a hand delta cannot say who snapped (cambia-913). Each notice
  * clears itself after a few seconds. Penalty cards are drawn unseen, so this
  * never names a face (cambia-820).
  */
@@ -133,6 +136,24 @@ function useTableNotice(gs: ObfGameState, selfId: string | undefined, names: Map
     seenDrop.current = droppedNonce;
     setNotice({ id: Date.now(), tone: 'warning', text: 'That did not go through.' });
   }, [droppedNonce]);
+
+  // A successful snap names two players: the one who snapped and the one whose card left.
+  const lastSnap = useGameStore(selectLastSnap);
+  const seenSnap = useRef(lastSnap?.nonce ?? 0);
+  useEffect(() => {
+    if (!lastSnap || lastSnap.nonce === seenSnap.current) return;
+    seenSnap.current = lastSnap.nonce;
+    const byYou = lastSnap.snapperId === selfId;
+    const onYou = lastSnap.ownerId === selfId;
+    const snapper = names.get(lastSnap.snapperId ?? '') ?? 'Opponent';
+    const owner = names.get(lastSnap.ownerId ?? '') ?? 'Opponent';
+    const text = byYou && onYou ? 'Snap. Your card matched the discard.'
+      : byYou ? `Snap. You matched ${owner}'s card.`
+        : onYou ? `Snap. ${snapper} matched your card.`
+          : lastSnap.snapperId === lastSnap.ownerId ? `Snap. ${snapper} matched the discard.`
+            : `Snap. ${snapper} matched ${owner}'s card.`;
+    setNotice({ id: Date.now(), tone: onYou && !byYou ? 'warning' : 'success', text });
+  }, [lastSnap, selfId, names]);
 
   useEffect(() => {
     const snap: PileSnapshot = {
@@ -153,9 +174,6 @@ function useTableNotice(gs: ObfGameState, selfId: string | undefined, names: Map
       if (p.handSize > was) {
         const who = names.get(p.playerId) ?? 'Opponent';
         next = { tone: 'danger', text: you ? 'Snap missed. A penalty card joins your hand.' : `Snap missed. ${who} draws a penalty card.` };
-      } else if (p.handSize < was && snap.discardTopId !== before.discardTopId) {
-        const who = names.get(p.playerId) ?? 'Opponent';
-        next = { tone: 'success', text: you ? 'Snap. Your card matched the discard.' : `Snap. ${who} matched the discard.` };
       }
     }
     if (snap.stock > before.stock) {
