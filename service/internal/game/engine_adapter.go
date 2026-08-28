@@ -127,7 +127,7 @@ func (g *CambiaGame) mapHouseRulesToEngine() engine.HouseRules {
 		PenaltyDrawCount:      penaltyCount,
 		AllowDrawFromDiscard:  g.HouseRules.AllowDrawFromDiscardPile,
 		AllowReplaceAbilities: g.HouseRules.AllowReplaceAbilities,
-		AllowOpponentSnapping: true,
+		AllowOpponentSnapping: g.HouseRules.AllowOpponentSnapping,
 		SnapRace:              g.HouseRules.SnapRace,
 		// Service HouseRules has no per-lobby joker toggle, so pin to the RULES.md deck spec
 		// (54 = 52 + 2 Jokers, §1). Left unset this defaults to 0 and NewGame builds a 52-card
