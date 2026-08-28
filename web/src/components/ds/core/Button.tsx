@@ -8,6 +8,8 @@ export interface ButtonProps {
   fullWidth?: boolean;
   onClick?: () => void;
   children?: React.ReactNode;
+  /** Stable e2e hook, e.g. `action-snap` (cambia-959). */
+  testId?: string;
   style?: React.CSSProperties;
 }
 
@@ -87,7 +89,7 @@ const DISABLED: VariantSpec = {
 const DISABLED_GHOST: VariantSpec = { ...DISABLED, bg: 'transparent', hover: 'transparent', active: 'transparent', border: '1px solid transparent' };
 
 /** Flat action button: solid fill or 1px border, no offset shadow. */
-const Button: React.FC<ButtonProps> = ({ variant = 'primary', size = 'md', disabled = false, fullWidth = false, onClick, children, style }) => {
+const Button: React.FC<ButtonProps> = ({ variant = 'primary', size = 'md', disabled = false, fullWidth = false, onClick, children, testId, style }) => {
   const [hover, setHover] = useState(false);
   const [press, setPress] = useState(false);
   const base = VARIANTS[variant] || VARIANTS.primary;
@@ -98,6 +100,7 @@ const Button: React.FC<ButtonProps> = ({ variant = 'primary', size = 'md', disab
     <button
       onClick={disabled ? undefined : onClick}
       disabled={disabled}
+      data-testid={testId}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => {
         setHover(false);
