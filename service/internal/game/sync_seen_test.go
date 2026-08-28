@@ -200,6 +200,51 @@ func TestKingLookMarksOwnSeenThenSwapInHidden(t *testing.T) {
 	assert.Empty(t, afterSwap[2].Rank, "hidden swapped-in card must not leak a rank")
 }
 
+// TestSyncStateSerializesPendingSpecialAction verifies a reconnecting client's sync_state carries
+// the pending special action (cambia-763 F1): before it, ObfGameState never surfaced
+// SpecialActionState, so a client resyncing mid-King could not restore its pendingAction UI.
+func TestSyncStateSerializesPendingSpecialAction(t *testing.T) {
+	g, _, _ := setupTestGame(t, 2, &HouseRules{TurnTimerSec: 0, PenaltyDrawCount: 2})
+
+	actor := currentTurnPlayer(g)
+	engineIdx := g.PlayerToEngine[actor.ID]
+	oppEngineIdx := uint8(1 - int(engineIdx))
+	oppID := g.EngineToPlayer[oppEngineIdx]
+
+	// Precondition: no special action pending yet, so sync_state must omit it entirely.
+	preState := g.GetCurrentObfuscatedGameState(actor.ID)
+	require.Nil(t, preState.SpecialAction, "sync_state must not report a special action before one is pending")
+
+	// Force a King (look-and-swap ability) as the drawn card, then discard it.
+	kUUID := forceStockTop(g, engine.NewCard(engine.SuitSpades, engine.RankKing))
+	g.HandlePlayerAction(actor.ID, models.GameAction{ActionType: "action_draw_stockpile"})
+	require.Equal(t, kUUID, g.CardTracker.Players[engineIdx].DrawnCardUUID, "drawn card should be the forced King")
+	g.HandlePlayerAction(actor.ID, models.GameAction{
+		ActionType: "action_discard",
+		Payload:    map[string]interface{}{"id": kUUID.String()},
+	})
+	require.True(t, g.SpecialAction.Active, "King discard should activate a special action")
+
+	// Both the acting player's and the opponent's sync_state must now report the pending action
+	// (it is public-safe: who owes an action and which rank triggered it, no peeked card values).
+	actorState := g.GetCurrentObfuscatedGameState(actor.ID)
+	require.NotNil(t, actorState.SpecialAction, "acting player's sync_state must report the pending special action")
+	assert.True(t, actorState.SpecialAction.Active)
+	assert.Equal(t, actor.ID, actorState.SpecialAction.PlayerID)
+	assert.Equal(t, "K", actorState.SpecialAction.CardRank)
+
+	oppState := g.GetCurrentObfuscatedGameState(oppID)
+	require.NotNil(t, oppState.SpecialAction, "opponent's sync_state must also report the pending special action")
+	assert.Equal(t, actor.ID, oppState.SpecialAction.PlayerID)
+	assert.Equal(t, "K", oppState.SpecialAction.CardRank)
+
+	// Resolving the action (skip) must clear it from the next sync_state.
+	g.ProcessSpecialAction(actor.ID, "skip", nil, nil)
+	require.False(t, g.SpecialAction.Active, "skip should resolve the pending special action")
+	afterState := g.GetCurrentObfuscatedGameState(actor.ID)
+	assert.Nil(t, afterState.SpecialAction, "sync_state must omit the special action once it resolves")
+}
+
 // TestSnapRemovalDropsSeenCardFromView verifies a seen own card that is snapped away no longer
 // appears face-up in the owner's self view.
 func TestSnapRemovalDropsSeenCardFromView(t *testing.T) {

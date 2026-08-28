@@ -189,11 +189,9 @@ export const useGameStore = create<GameState & GameActions>()(
 								if (userState?.drawnCard && gs.currentPlayerId === userState.playerId && !gs.gameOver && gs.started) {
 									state.pendingAction = 'discard_replace';
 								} else if (gs.specialAction?.active && gs.specialAction.playerId === selfPlayerId && !gs.gameOver && gs.started) {
-									// NB: the service's ObfGameState (service/internal/game/sync_state.go) never
-									// serializes SpecialActionState into private_sync_state today, so
-									// gs.specialAction is always undefined on a real resync and this branch is
-									// presently unreachable. Kept so the derivation is correct and this activates
-									// automatically once the server adds that field (see worker report finding).
+									// The service's ObfGameState (service/internal/game/sync_state.go) serializes
+									// SpecialActionState into private_sync_state (cambia-763 F1), so a client that
+									// resyncs mid-action (reconnect, tab refresh) restores pendingAction here.
 									state.pendingAction = 'special_action';
 								}
 							}
