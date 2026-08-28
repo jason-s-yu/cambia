@@ -88,7 +88,7 @@ func EnsureEphemeralUser(w http.ResponseWriter, r *http.Request) (uuid.UUID, err
 }
 
 // GuestHandler provisions an ephemeral guest session via REST (no WebSocket required).
-// GET /user/guest — if the caller already has a valid auth_token cookie, returns
+// GET /user/guest - if the caller already has a valid auth_token cookie, returns
 // the existing user; otherwise creates a new ephemeral user and sets the cookie.
 func GuestHandler(w http.ResponseWriter, r *http.Request) {
 	userID, err := EnsureEphemeralUser(w, r)

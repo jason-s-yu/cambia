@@ -4,7 +4,7 @@ import engine "github.com/jason-s-yu/cambia/engine"
 
 // CardBucket represents abstract categories that cards are mapped into.
 // Values match the Python CardBucket enum in cfr/src/constants.py (0-8 for known
-// buckets, 9 for unknown — compacted from Python's 99 to fit uint8 iota).
+// buckets, 9 for unknown - compacted from Python's 99 to fit uint8 iota).
 type CardBucket uint8
 
 const (

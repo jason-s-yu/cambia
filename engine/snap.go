@@ -8,7 +8,7 @@ import "fmt"
 func (g *GameState) initiateSnapPhase(discardedCard Card) {
 	g.Snap.DiscardedRank = discardedCard.Rank()
 
-	// The acting player just discarded — they are the "discarder".
+	// The acting player just discarded - they are the "discarder".
 	// Build the snapper list: discarder first, then all others in turn order.
 	// Skip anyone who called Cambia.
 	// NOTE: Per RULES.md the non-discarder should go first, but Python's
@@ -64,7 +64,7 @@ func (g *GameState) initiateSnapPhase(discardedCard Card) {
 	}
 
 	if count == 0 {
-		// No eligible snappers — skip snap phase entirely.
+		// No eligible snappers - skip snap phase entirely.
 		g.advanceTurn()
 		return
 	}
@@ -107,7 +107,7 @@ func (g *GameState) snapOwn(idx uint8) error {
 	g.LastAction.ActingPlayer = snapperIdx
 
 	if idx >= handLen {
-		// Invalid index — treat as failed snap.
+		// Invalid index - treat as failed snap.
 		g.LastAction.SnapSuccess = false
 		g.LastAction.SnapPenalty = g.Rules.PenaltyDrawCount
 		g.drawPenalty(snapperIdx)
@@ -166,7 +166,7 @@ func (g *GameState) snapOpponent(oppIdx uint8) error {
 	}
 
 	if oppIdx >= oppHandLen {
-		// Invalid index — treat as failed snap.
+		// Invalid index - treat as failed snap.
 		g.LastAction.SnapSuccess = false
 		g.LastAction.SnapPenalty = g.Rules.PenaltyDrawCount
 		g.drawPenalty(snapperIdx)

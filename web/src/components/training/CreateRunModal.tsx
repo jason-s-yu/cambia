@@ -101,7 +101,7 @@ const CreateRunModal: React.FC<CreateRunModalProps> = ({ isOpen, onClose, onCrea
 			// createRun (and the other process actions) resolve void and swallow
 			// their own errors into store state rather than rejecting, so success
 			// is detected by whether a run with this name is newly present
-			// afterward (not merely present -- a name collision means it was
+			// afterward (not merely present - a name collision means it was
 			// already there beforehand and should still surface as an error).
 			const before = new Set(useTrainingStore.getState().runs.map((r) => r.name));
 			await createRun(req);

@@ -124,7 +124,7 @@ func TestMemoryHumanLike_CapacityLimit(t *testing.T) {
 	a.MemoryArchetype = MemoryHumanLike
 	a.MemoryCapacity = 3
 
-	// Use a larger active mask for this test — directly set 6 slots.
+	// Use a larger active mask for this test - directly set 6 slots.
 	// We need to override MaxActiveMask (3) for testing purposes by directly
 	// manipulating the internal fields. Since the mask is [MaxActiveMask]uint8 = [3]uint8,
 	// we can only set 3 entries via OwnActiveMask. Instead, we test via ApplyMemoryDecay
@@ -155,7 +155,7 @@ func TestMemoryHumanLike_SaliencyEviction(t *testing.T) {
 	a.MemoryArchetype = MemoryHumanLike
 	a.MemoryCapacity = 2
 
-	// Slot 0: BucketAce (saliency 3.5) — LOWEST, evict first
+	// Slot 0: BucketAce (saliency 3.5) - LOWEST, evict first
 	// Slot 1: BucketHighKing (saliency 8.5)
 	// Slot 2: BucketZero (saliency 4.5)
 	a.SlotTags[0] = TagPrivOwn

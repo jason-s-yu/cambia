@@ -450,7 +450,7 @@ If the card discarded in the previous step has a special action which can be uti
     ```json: client -> server (decides to swap)
     {
       "type": "action_special",
-      "special": "swap_peek_swap", // or, if they decide to cancel, just "skip" -- in which case there is no further payload required
+      "special": "swap_peek_swap", // or, if they decide to cancel, just "skip" - in which case there is no further payload required
       "card1": {
         "id": "{uuid}",
         "user": {

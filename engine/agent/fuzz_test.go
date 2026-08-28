@@ -62,7 +62,7 @@ func checkInvariants(t *testing.T, g *engine.GameState, a *AgentState, seed, ste
 		failures++
 	}
 
-	// INV2: Known Card Consistency — if agent claims to know a card, it must match actual.
+	// INV2: Known Card Consistency - if agent claims to know a card, it must match actual.
 	for i := uint8(0); i < a.OwnHandLen; i++ {
 		if a.OwnHand[i].Card != engine.EmptyCard {
 			actual := g.Players[a.PlayerID].Hand[i]
@@ -71,7 +71,7 @@ func checkInvariants(t *testing.T, g *engine.GameState, a *AgentState, seed, ste
 					label, i, a.OwnHand[i].Card, actual)
 				failures++
 			}
-			// INV3: Bucket self-consistency — bucket must match CardToBucket(card).
+			// INV3: Bucket self-consistency - bucket must match CardToBucket(card).
 			if a.OwnHand[i].Bucket != CardToBucket(actual) {
 				t.Errorf("%s INV3: OwnHand[%d].Bucket=%d, expected=%d (card=%v)",
 					label, i, a.OwnHand[i].Bucket, CardToBucket(actual), actual)
@@ -133,7 +133,7 @@ func checkInvariants(t *testing.T, g *engine.GameState, a *AgentState, seed, ste
 		failures++
 	}
 
-	// INV10: Opponent Belief Range — each OppBelief value must be in [0,13].
+	// INV10: Opponent Belief Range - each OppBelief value must be in [0,13].
 	for i := uint8(0); i < a.OppHandLen; i++ {
 		v := uint8(a.OppBelief[i])
 		if v > 13 {

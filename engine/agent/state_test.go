@@ -310,7 +310,7 @@ func TestUpdateBlindSwap(t *testing.T) {
 	applyAndUpdate(t, &g, engine.EncodeBlindSwap(ownIdx, oppIdx), &a0, &a1)
 
 	// For a0 (the acting player):
-	// - own card at ownIdx should be UNKNOWN (got opponent's card — unknown to us).
+	// - own card at ownIdx should be UNKNOWN (got opponent's card - unknown to us).
 	if a0.OwnHand[ownIdx].Bucket != BucketUnknown {
 		t.Errorf("After blind swap (acting), a0.OwnHand[%d].Bucket = %d, want BucketUnknown",
 			ownIdx, a0.OwnHand[ownIdx].Bucket)
@@ -481,7 +481,7 @@ func TestUpdateSnapFail(t *testing.T) {
 
 	// If rank has ability, use DiscardWithAbility; otherwise DiscardNoAbility.
 	if injectCard.Rank() >= engine.RankSeven && injectCard.Rank() <= engine.RankKing {
-		// Has ability — discard with ability to trigger snap after resolving.
+		// Has ability - discard with ability to trigger snap after resolving.
 		applyAndUpdate(t, &g, engine.ActionDiscardWithAbility, &a0, &a1)
 		// Resolve the ability quickly (peek own slot 0 or similar).
 		switch injectCard.Ability() {

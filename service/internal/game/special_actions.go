@@ -265,7 +265,7 @@ func (g *CambiaGame) doKingLookEngine(playerID uuid.UUID, engineIdx uint8, card1
 		return
 	}
 
-	// After KingLook, don't advance turn — wait for swap decision.
+	// After KingLook, don't advance turn - wait for swap decision.
 	// The SpecialAction state (with FirstStepDone=true) signals the second step.
 	g.scheduleNextTurnTimer()
 }

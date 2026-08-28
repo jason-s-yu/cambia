@@ -250,7 +250,7 @@ func TestKingLookThenSwap(t *testing.T) {
 
 	turnBefore := g.TurnNumber
 
-	// King Swap Decision — choose to swap.
+	// King Swap Decision - choose to swap.
 	if err := g.ApplyAction(ActionKingSwapYes); err != nil {
 		t.Fatalf("KingSwapYes failed: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestKingLookThenNoSwap(t *testing.T) {
 
 	turnBefore := g.TurnNumber
 
-	// King Swap Decision — choose NOT to swap.
+	// King Swap Decision - choose NOT to swap.
 	if err := g.ApplyAction(ActionKingSwapNo); err != nil {
 		t.Fatalf("KingSwapNo failed: %v", err)
 	}
@@ -345,7 +345,7 @@ func TestAbilityNotTriggeredFromDiscardDraw(t *testing.T) {
 
 	turnBefore := g.TurnNumber
 
-	// Discard with ability=true — but it was drawn from discard, so no ability.
+	// Discard with ability=true - but it was drawn from discard, so no ability.
 	if err := g.ApplyAction(ActionDiscardWithAbility); err != nil {
 		t.Fatalf("DiscardWithAbility failed: %v", err)
 	}
@@ -379,7 +379,7 @@ func TestDiscardWithAbilityNoAbilityCard(t *testing.T) {
 				t.Fatalf("DiscardWithAbility on low card failed: %v", err)
 			}
 
-			// No ability — snap phase for the discarded card, then turn advances.
+			// No ability - snap phase for the discarded card, then turn advances.
 			if g.Pending.Type != PendingNone {
 				t.Errorf("expected PendingNone for no-ability card, got %d", g.Pending.Type)
 			}

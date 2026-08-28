@@ -99,7 +99,7 @@ func TestEPPBSFIFOEviction(t *testing.T) {
 	a.OppActiveMask[2] = 8
 	a.OppActiveMaskLen = 3
 
-	// Append slot 9 — should evict slot 6 (oldest).
+	// Append slot 9 - should evict slot 6 (oldest).
 	a.SlotTags[9] = TagUnk
 	a.appendOppActive(9)
 
@@ -308,23 +308,23 @@ func TestEPPBSSlotIdentityZeroing(t *testing.T) {
 	a.OwnHandLen = 3
 	a.OppHandLen = 2
 
-	// Slot 0: TagPrivOwn, BucketAce — identity should be encoded at index 2 (BucketAce=2).
+	// Slot 0: TagPrivOwn, BucketAce - identity should be encoded at index 2 (BucketAce=2).
 	a.SlotTags[0] = TagPrivOwn
 	a.SlotBuckets[0] = BucketAce
 
-	// Slot 1: TagUnk — identity should be all zeros.
+	// Slot 1: TagUnk - identity should be all zeros.
 	a.SlotTags[1] = TagUnk
 	a.SlotBuckets[1] = 0
 
-	// Slot 2: TagPub, BucketHighKing — identity encoded at index 8.
+	// Slot 2: TagPub, BucketHighKing - identity encoded at index 8.
 	a.SlotTags[2] = TagPub
 	a.SlotBuckets[2] = BucketHighKing
 
-	// Slot 6 (opp 0): TagPrivOpp — identity should be all zeros.
+	// Slot 6 (opp 0): TagPrivOpp - identity should be all zeros.
 	a.SlotTags[6] = TagPrivOpp
 	a.SlotBuckets[6] = 0
 
-	// Slot 7 (opp 1): TagPub, BucketZero — identity encoded at index 0.
+	// Slot 7 (opp 1): TagPub, BucketZero - identity encoded at index 0.
 	a.SlotTags[7] = TagPub
 	a.SlotBuckets[7] = BucketZero
 

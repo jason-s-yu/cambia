@@ -1,4 +1,4 @@
-# service/Dockerfile — multi-stage build for the Go game server
+# service/Dockerfile - multi-stage build for the Go game server
 FROM golang:1.26-alpine AS builder
 
 RUN apk add --no-cache git

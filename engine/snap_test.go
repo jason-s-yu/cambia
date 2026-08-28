@@ -349,7 +349,7 @@ func TestCambiaBothExcluded(t *testing.T) {
 	// Make P0 the Cambia caller and P1 also the Cambia caller (impossible in practice,
 	// but we simulate by setting CambiaCaller to cover both effectively).
 	// Actually, CambiaCaller can only be one player. Let's test: P0 discards, P0 is Cambia caller.
-	// P1 is also excluded by setting CambiaCaller = -1 would include both — not possible.
+	// P1 is also excluded by setting CambiaCaller = -1 would include both - not possible.
 	// Instead, test that when both players are the same as CambiaCaller (only 1 player left
 	// could snap but they're also excluded), snap is skipped.
 	// Simplest: set CambiaCaller = 1, P0 is the discarder. P1 (non-discarder) is excluded.
@@ -365,7 +365,7 @@ func TestCambiaBothExcluded(t *testing.T) {
 
 	// Only P0 is eligible (P1 is excluded as Cambia caller).
 	if !gs.Snap.Active {
-		// This is valid if snap phase was skipped — but P0 should be a snapper.
+		// This is valid if snap phase was skipped - but P0 should be a snapper.
 		// Since P0 is the discarder (not the Cambia caller), snap phase should start.
 		// If it advanced turn, TurnNumber would have incremented.
 		if gs.TurnNumber != turnBefore+1 {

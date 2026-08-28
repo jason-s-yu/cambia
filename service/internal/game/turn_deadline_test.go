@@ -133,7 +133,7 @@ func TestSyncStateIncludesTurnDeadline(t *testing.T) {
 
 // TestSyncStateOmitsTurnDeadlineAfterGameOver verifies that a stale TurnDeadline left behind by
 // endGame() (which stops turnTimer but does not clear TurnDeadline) is not echoed back in
-// sync_state once the game has ended — a finished game must not advertise a countdown for a
+// sync_state once the game has ended - a finished game must not advertise a countdown for a
 // timer that will never fire.
 func TestSyncStateOmitsTurnDeadlineAfterGameOver(t *testing.T) {
 	turnDuration := 5 * time.Second

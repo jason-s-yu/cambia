@@ -115,7 +115,7 @@ export const kingSwapConfirmAction = (card1Id: string, idx1: number, owner1Id: s
 // --- Event Payloads (Server -> Client) ---
 
 /** Structure for player turn events. turn/turnDeadline/serverNow live under `payload` (the
- *  service's GameEvent.Payload map), not at the top level — mirror this when reading the raw
+ *  service's GameEvent.Payload map), not at the top level - mirror this when reading the raw
  *  envelope (see gameStore.processGameWebSocketMessage's 'game_player_turn' case). */
 export interface GamePlayerTurnEvent {
 	type: 'game_player_turn';
@@ -279,7 +279,7 @@ export interface GameErrorEvent {
  *  GameEvent wrapper, unlike most events above), so its fields sit at the top level of the
  *  envelope payload rather than nested under a `payload` sub-object. Fires once per game AND
  *  again for every subsequent round in multi-round/ranked matches (hub.startNextRound re-calls
- *  createAndStartGame), while the previous round's ObfGameState is still in the store — see
+ *  createAndStartGame), while the previous round's ObfGameState is still in the store - see
  *  gameStore's handling for the resulting reset. */
 export interface GameStartedEvent {
 	type: 'game_started';
@@ -290,7 +290,7 @@ export interface GameStartedEvent {
 /** Structure for game_results events (public). Also a plain-map Hub.Emit (fields at the
  *  envelope payload's top level, no `payload` sub-object). Emitted right after game_end from
  *  the same adjusted scores/winner, plus a lobby_status snapshot that is lobbyStore's domain,
- *  not this store's — gameStore treats this as a documented no-op since game_end already
+ *  not this store's - gameStore treats this as a documented no-op since game_end already
  *  populates finalScores/winnerId. */
 export interface GameResultsEvent {
 	type: 'game_results';

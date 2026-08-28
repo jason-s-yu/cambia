@@ -7,7 +7,7 @@ import { useUiStore, type Theme } from '@/stores/uiStore';
  * Reads preference from Zustand store (persisted to localStorage).
  * Detects system preference using `matchMedia`.
  * Writes the resolved theme to the `data-theme` attribute on the `<html>`
- * element -- the single theme mechanism: the design-system color tokens key
+ * element - the single theme mechanism: the design-system color tokens key
  * light mode off `[data-theme="light"]`, and the Tailwind `dark:` variant is
  * bound to `[data-theme="dark"]` (see src/index.css). A 'system' preference is
  * resolved to an explicit 'light'/'dark' value here so the attribute is never

@@ -154,7 +154,7 @@ func TestLegalActionsStartTurnCambiaRound(t *testing.T) {
 	g := NewGame(42, rules)
 	g.Deal()
 
-	// Round 0 — Cambia not yet allowed.
+	// Round 0 - Cambia not yet allowed.
 	actions := g.LegalActionsList()
 	if containsAction(actions, ActionCallCambia) {
 		t.Error("expected CallCambia illegal before allowed round")
@@ -195,7 +195,7 @@ func TestLegalActionsPostDraw(t *testing.T) {
 
 	// DiscardWithAbility: depends on drawn card having ability AND from stockpile.
 	if drawnCard.HasAbility() {
-		// Also need ability to be usable — default game has cards, so it should be usable.
+		// Also need ability to be usable - default game has cards, so it should be usable.
 		if !containsAction(actions, ActionDiscardWithAbility) {
 			t.Logf("drawn card %v has ability but DiscardWithAbility not legal (hands may be empty?)", drawnCard)
 		}

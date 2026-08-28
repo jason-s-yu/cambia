@@ -7,7 +7,7 @@ import type { ApiErrorResponse } from '@/types';
 // authFlightGuard tracks whether an auth bootstrap flow (the initial
 // checkAuth call, or a login/register attempt) is currently in flight. A
 // 401/403 seen during this window is an expected "not authenticated yet"
-// outcome, not a session invalidation -- the caller (authStore) already
+// outcome, not a session invalidation - the caller (authStore) already
 // handles it directly, so the interceptor below must not also force a
 // store-wide logout. Without this guard, the interceptor's logout() call
 // races the in-flight login()/checkAuth() call and can clobber the error
@@ -76,7 +76,7 @@ api.interceptors.response.use(
 			} else if (authFlightGuard.active) {
 				// A 401/403 while the initial checkAuth or a login/register attempt is
 				// in flight is an expected "not authenticated yet" outcome that the
-				// caller already handles directly -- don't also force a hard logout.
+				// caller already handles directly - don't also force a hard logout.
 				console.warn(`Authentication error (${response.status}) on ${requestedUrl} during auth bootstrap; not forcing logout.`);
 			} else {
 				// Trigger logout action via Zustand store.

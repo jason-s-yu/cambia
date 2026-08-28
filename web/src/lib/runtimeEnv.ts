@@ -17,7 +17,7 @@
 // what actually executes for real production builds and the
 // `dev:remote-lite` build lane, where that `define` replacement does not
 // apply (esbuild's build-time `define` validator rejects the non-literal
-// origin-derivation expression -- see vite.config.js and README.md).
+// origin-derivation expression - see vite.config.js and README.md).
 function nonEmpty(value: string | undefined): value is string {
 	return typeof value === 'string' && value.trim() !== '';
 }

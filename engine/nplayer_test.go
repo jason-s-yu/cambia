@@ -29,7 +29,7 @@ func playNPlayerRandom(t *testing.T, seed uint64, n uint8) *GameState {
 		}
 		actions := g.NPlayerLegalActionsList()
 		if len(actions) == 0 {
-			// No legal actions — game should be terminal.
+			// No legal actions - game should be terminal.
 			t.Fatalf("no legal actions but game not terminal (step=%d, flags=%d)", step, g.Flags)
 		}
 		// Pick pseudo-random action using game RNG.

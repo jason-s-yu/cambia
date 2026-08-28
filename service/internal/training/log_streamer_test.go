@@ -175,7 +175,7 @@ func TestFindLogFile(t *testing.T) {
 		t.Errorf("expected %s, got %s", logPath, got)
 	}
 
-	// Create train.log in run root — training.log should still take priority.
+	// Create train.log in run root - training.log should still take priority.
 	trainLog := filepath.Join(tmpDir, "test-run-1", "train.log")
 	if err := os.WriteFile(trainLog, []byte("test2"), 0644); err != nil {
 		t.Fatal(err)
@@ -184,7 +184,7 @@ func TestFindLogFile(t *testing.T) {
 		t.Errorf("training.log should take priority, got %s", got)
 	}
 
-	// Remove training.log — should fall back to train.log.
+	// Remove training.log - should fall back to train.log.
 	os.Remove(logPath)
 	if got := store.findLogFile("test-run-1"); got != trainLog {
 		t.Errorf("expected train.log fallback, got %s", got)

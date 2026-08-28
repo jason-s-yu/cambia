@@ -207,7 +207,7 @@ func (g *GameState) nplayerSnapOpponent(slot, oppRelIdx uint8) error {
 }
 
 // nplayerSnapOpponentMove moves snapper's card to fill the vacated opponent slot.
-// In N-player, SnapOpponentMove only encodes ownIdx (not the slot — slot is in Pending.Data[1]).
+// In N-player, SnapOpponentMove only encodes ownIdx (not the slot - slot is in Pending.Data[1]).
 func (g *GameState) nplayerSnapOpponentMove(ownIdx uint8) error {
 	if g.Pending.Type != PendingSnapMove {
 		return fmt.Errorf("no pending snap move action")

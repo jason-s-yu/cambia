@@ -6,7 +6,7 @@ import (
 
 // newCloneTestTriple creates a fresh game + two agents via the real exported
 // entry points (through the plain-Go testGameNew/testAgentNew wrappers in
-// clone_test_helpers.go -- Go does not permit `import "C"` in _test.go files,
+// clone_test_helpers.go - Go does not permit `import "C"` in _test.go files,
 // so the C ABI calls live there instead) and returns their handles.
 func newCloneTestTriple(t *testing.T, seed uint64) (gh, a0h, a1h int32) {
 	t.Helper()

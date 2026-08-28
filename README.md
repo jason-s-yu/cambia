@@ -4,10 +4,10 @@ A real-time multiplayer card game (also known as Cabo/Cambio) with AI opponents 
 
 ## Components
 
-- **[engine/](engine/)** -- Cambia game engine (Go). Core game rules, agent belief state, and tensor encoding. Builds to a shared library for FFI.
-- **[service/](service/)** -- Multiplayer game server (Go). WebSocket gameplay, REST API, auth, matchmaking.
-- **[cfr/](cfr/)** -- Deep CFR training pipeline (Python). Neural network training, outcome/external sampling MCCFR.
-- **[web/](web/)** -- Web client (React/TypeScript). Real-time game UI.
+- **[engine/](engine/)**: Cambia game engine (Go). Core game rules, agent belief state, and tensor encoding. Builds to a shared library for FFI.
+- **[service/](service/)**: Multiplayer game server (Go). WebSocket gameplay, REST API, auth, matchmaking.
+- **[cfr/](cfr/)**: Deep CFR training pipeline (Python). Neural network training, outcome/external sampling MCCFR.
+- **[web/](web/)**: Web client (React/TypeScript). Real-time game UI.
 
 ## Quick Start
 

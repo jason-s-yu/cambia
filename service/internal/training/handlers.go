@@ -45,8 +45,8 @@ func (s *TrainingStore) HandleGetRun(w http.ResponseWriter, r *http.Request) {
 
 // HandleGetMetrics returns evaluation metrics for a run.
 // Query params:
-//   - aggregate=mean_imp — return mean_imp points instead of raw metrics
-//   - baseline=X — filter by baseline name
+//   - aggregate=mean_imp - return mean_imp points instead of raw metrics
+//   - baseline=X - filter by baseline name
 func (s *TrainingStore) HandleGetMetrics(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

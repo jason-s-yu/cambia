@@ -1,7 +1,7 @@
 # CAMBIA (a.k.a. Cabo, Cambio) RULES
 
 **Objective:** End the game with the lowest total score.
-**Players:** 2–6
+**Players:** 2-6
 **Deck:** Standard 52-card deck + 2 Jokers.
 
 ## 1. Card Values
@@ -108,7 +108,7 @@ A multi-round competitive format where cumulative score determines the overall c
 
 * To guarantee positional equity, round counts are strict multiples of 4. See MATCHMAKING.md §4 for the full time-control schedule and statistical justification.
   * H2H Blitz (4 Rounds): ~20 min (Reliability: 0.33)
-  * H2H Rapid / FFA-4 Standard (8 Rounds): ~40–55 min (Reliability: 0.41–0.50) — **primary queues**
+  * H2H Rapid / FFA-4 Standard (8 Rounds): ~40-55 min (Reliability: 0.41-0.50) - **primary queues**
   * H2H Classical (16 Rounds): ~80 min (Reliability: 0.66)
   * FFA-4 Classical (12 Rounds): ~85 min (Reliability: 0.51)
 
@@ -116,12 +116,12 @@ A multi-round competitive format where cumulative score determines the overall c
 
 To mathematically offset the statistical risk of calling Cambia, fixed score reductions are applied immediately after each round to the cumulative totals of the top finishers. Subsidies differ by format (see MATCHMAKING.md §5.3 for rationale):
 
-| Placement | H2H (2p) | FFA-4 (3–4p) | 5+ players (casual) |
+| Placement | H2H (2p) | FFA-4 (3-4p) | 5+ players (casual) |
 | :-------- | :------- | :----------- | :------------------ |
 | 1st       | −3       | −5           | −5                  |
 | 2nd       | 0        | −2           | −2                  |
-| 3rd       | —        | 0            | −1                  |
-| 4th+      | —        | 0            | 0                   |
+| 3rd       | -        | 0            | −1                  |
+| 4th+      | -        | 0            | 0                   |
 
 **H2H subsidy is −3/0** (vs. −5/−2 in FFA-4) because the caller faces only one opponent's final turn in H2H, making the call inherently less risky.
 

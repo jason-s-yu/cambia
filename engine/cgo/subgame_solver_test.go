@@ -144,7 +144,7 @@ func TestCFRConvergence(t *testing.T) {
 	root, numLeaves := BuildSubgameTree(g, 2)
 
 	if numLeaves == 0 {
-		t.Skip("no leaf nodes — game terminates before depth 2")
+		t.Skip("no leaf nodes - game terminates before depth 2")
 	}
 
 	// Provide neutral leaf values (zero-sum, slight bias).
@@ -284,7 +284,7 @@ func TestRootValuesAveragedVsSingleIter(t *testing.T) {
 	// If numLeaves > 1 with varied values, averaged should differ from single.
 	// We only assert they are not identical when there is meaningful structure.
 	if numLeaves > 1 && diff < 1e-9 {
-		t.Errorf("averaged rootValues identical to single iteration — averaging may not be working")
+		t.Errorf("averaged rootValues identical to single iteration - averaging may not be working")
 	}
 }
 

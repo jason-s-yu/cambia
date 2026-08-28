@@ -327,7 +327,7 @@ func cambia_game_new_with_rules(
 	}
 	// cambia-542 F3: numPlayers arrives here as a raw, externally-supplied
 	// uint8 from Python via the FFI. Reject out-of-range values instead of
-	// silently clamping and succeeding -- Deal() below indexes g.Players[p]
+	// silently clamping and succeeding - Deal() below indexes g.Players[p]
 	// for p in [0, NumPlayers), and that array is fixed at [MaxPlayers]; an
 	// unrejected NumPlayers=9 previously panicked inside libcambia.so.
 	if err := rules.Validate(); err != nil {
@@ -370,7 +370,7 @@ func cambia_game_new_with_deck(
 		NumDecks:              uint8(numDecks),
 	}
 	// cambia-542 F3: reject an out-of-range NumPlayers instead of clamping
-	// and continuing -- the round-robin deal loop below indexes g.Players[p]
+	// and continuing - the round-robin deal loop below indexes g.Players[p]
 	// for p in [0, np), and that array is fixed at [MaxPlayers].
 	if err := rules.Validate(); err != nil {
 		freeGame(h)
@@ -1111,7 +1111,7 @@ func cambia_subgame_solve_ranged(
 		}
 	}
 
-	// Write root CFVs: [2 * nht] floats — p0 values then p1 values.
+	// Write root CFVs: [2 * nht] floats - p0 values then p1 values.
 	cfvOut := (*[1 << 16]C.float)(unsafe.Pointer(root_cfvs_out))
 	for h := 0; h < nht; h++ {
 		cfvOut[h] = C.float(rootCFVs[0][h])
@@ -1414,8 +1414,8 @@ func cambia_set_batch_workers(n C.int32_t) {
 // the batch fans out over contiguous chunks; every valid game is attempted (a
 // per-game apply/overflow error in one chunk does NOT stop the others), and the
 // return is the error code of the lowest failing game index. This diverges from
-// serial prefix semantics -- on error, parallel mode may have applied games both
-// before and after the reported index -- but both error classes are fatal to the
+// serial prefix semantics - on error, parallel mode may have applied games both
+// before and after the reported index - but both error classes are fatal to the
 // sampler in practice, which never proceeds past a nonzero return.
 //
 //export cambia_games_apply_batch
@@ -1437,7 +1437,7 @@ func cambia_games_apply_batch(game_hs *C.int32_t, a0s *C.int32_t, a1s *C.int32_t
 		return applyBatchParallel(ghs, as0, as1, acts, count, workers)
 	}
 
-	// Serial path -- byte-identical to the original loop and error contract.
+	// Serial path - byte-identical to the original loop and error contract.
 	for i := 0; i < count; i++ {
 		gh := int32(ghs[i])
 		if gh < 0 || gh >= maxGames || !gameInUse[gh] {
@@ -1735,7 +1735,7 @@ func cambia_state_snapshot_free(h C.int32_t) {
 //
 // Writes the new handles to *out_game_h/*out_a0_h/*out_a1_h on success (0).
 // On allocation failure (pool exhaustion) returns -1 and frees any handles
-// already allocated for this call -- never leaks a partial clone; the out
+// already allocated for this call - never leaks a partial clone; the out
 // pointers are left unwritten and must not be read by the caller on error.
 //
 //export cambia_state_clone

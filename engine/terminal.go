@@ -10,7 +10,7 @@ import (
 
 // remainingDeck returns a copy of the cards currently in the stockpile.
 // These are the cards not yet assigned to any player's hand or on the discard
-// pile — the pool from which unknown card slots are sampled.
+// pile - the pool from which unknown card slots are sampled.
 func (g *GameState) remainingDeck() []Card {
 	n := int(g.StockLen)
 	out := make([]Card, n)
@@ -62,7 +62,7 @@ func (g *GameState) gameStateHash() uint64 {
 }
 
 // ---------------------------------------------------------------------------
-// TerminalEvalLinear — O(1) linear evaluation via linearity of expectation
+// TerminalEvalLinear - O(1) linear evaluation via linearity of expectation
 // ---------------------------------------------------------------------------
 
 // TerminalEvalLinear computes expected utility using linearity of expectation.
@@ -128,7 +128,7 @@ func (g *GameState) TerminalEvalLinear(evaluatingPlayer uint8) float32 {
 }
 
 // ---------------------------------------------------------------------------
-// TerminalEvalDP — exact 1D DP convolution for 2P games
+// TerminalEvalDP - exact 1D DP convolution for 2P games
 // ---------------------------------------------------------------------------
 
 // TerminalEvalDP computes the exact expected utility for 2-player games using
@@ -249,7 +249,7 @@ func (g *GameState) TerminalEvalDP(evaluatingPlayer uint8) float32 {
 }
 
 // ---------------------------------------------------------------------------
-// TerminalEvalMC — Monte Carlo evaluation for N≥3 games
+// TerminalEvalMC - Monte Carlo evaluation for N≥3 games
 // ---------------------------------------------------------------------------
 
 // TerminalEvalMC estimates expected utility via Monte Carlo sampling.
@@ -264,7 +264,7 @@ func (g *GameState) TerminalEvalDP(evaluatingPlayer uint8) float32 {
 //	seed := g.gameStateHash()
 //	rng := rand.New(rand.NewPCG(seed, seed^0xdeadbeefcafe1234))
 //
-// numSamples of 50–100 provides good accuracy for N≥3 games.
+// numSamples of 50-100 provides good accuracy for N≥3 games.
 func (g *GameState) TerminalEvalMC(evaluatingPlayer uint8, numSamples int, rng *rand.Rand) float32 {
 	if numSamples <= 0 {
 		return 0

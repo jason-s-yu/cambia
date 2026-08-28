@@ -391,9 +391,9 @@ func pingRedis(ctx context.Context) bool {
 }
 
 // registerTrainingRoutes wires every /training and /ws/training endpoint onto mux
-// behind authWrap. It is split out of main so the routing rules -- the
+// behind authWrap. It is split out of main so the routing rules - the
 // /training/runs sub-router (including the eval GET/POST case), the resources and
-// compare endpoints, and the /ws/training resources-vs-logs disambiguation -- are
+// compare endpoints, and the /ws/training resources-vs-logs disambiguation - are
 // exercised by a wiring test without standing up the full server.
 func registerTrainingRoutes(
 	mux *http.ServeMux,
