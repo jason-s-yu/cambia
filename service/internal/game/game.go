@@ -33,7 +33,6 @@ const (
 	EventPlayerDrawStockpile    GameEventType = "player_draw_stockpile"          // Public: Player drew a card (ID only).
 	EventPrivateDrawStockpile   GameEventType = "private_draw_stockpile"         // Private: Details of the card drawn.
 	EventPlayerDiscard          GameEventType = "player_discard"                 // Public: Player discarded a card (details revealed).
-	EventPlayerReplace          GameEventType = "player_replace"                 // DEPRECATED? Sends EventPlayerDiscard instead.
 	EventPlayerSpecialChoice    GameEventType = "player_special_choice"          // Public: Player can now use a special ability.
 	EventPlayerSpecialAction    GameEventType = "player_special_action"          // Public: Player used a special ability (obfuscated details).
 	EventPrivateSpecialSuccess  GameEventType = "private_special_action_success" // Private: Details of successful special action.

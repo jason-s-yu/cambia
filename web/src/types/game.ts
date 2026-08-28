@@ -169,14 +169,6 @@ export interface PlayerDiscardEvent {
 	card: ObfCard; // Full details revealed on discard
 }
 
-/** Structure for player replace events (public) */
-export interface PlayerReplaceEvent {
-	type: 'player_replace'; // DEPRECATED? Server might just send player_discard
-	user: { id: string };
-	card: ObfCard; // Card being discarded (full details)
-	// replacedWithCardId: string; // ID of the card that took its place in hand
-}
-
 /** Structure for special choice events (public) */
 export interface PlayerSpecialChoiceEvent {
 	type: 'player_special_choice';
@@ -298,7 +290,6 @@ export type ServerGameEvent =
 	| PlayerDrawStockpileEvent
 	| PrivateDrawStockpileEvent
 	| PlayerDiscardEvent
-	| PlayerReplaceEvent
 	| PlayerSpecialChoiceEvent
 	| PlayerSpecialActionEvent
 	| PrivateSpecialActionSuccessEvent

@@ -16,9 +16,7 @@ const INITIAL_RETRY_DELAY = 1000;
 
 /** Lobby-phase message types routed to lobbyStore */
 const LOBBY_TYPES = new Set([
-	'lobby_state', 'lobby_update', 'phase_change', 'ready_update',
-	'lobby_rules_updated', 'chat', 'lobby_countdown_start',
-	'lobby_countdown_cancel', 'lobby_invite', 'game_start',
+	'lobby_state', 'phase_change', 'chat', 'game_start',
 ]);
 
 /** Game-phase message types routed to gameStore */
