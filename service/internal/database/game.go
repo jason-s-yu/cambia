@@ -85,9 +85,46 @@ func RecordGameAndResults(ctx context.Context, gameID uuid.UUID, players []*mode
 		return nil
 	}
 
+	playerIDs := make([]uuid.UUID, len(players))
+	for i, p := range players {
+		playerIDs[i] = p.ID
+	}
+	return applyRatingUpdate(ctx, gameID, playerIDs, finalScores)
+}
+
+// RecordCircuitRatings applies the one rating update a circuit tournament produces, from its
+// final cumulative scores (subsidies included). RULES.md T6 and MATCHMAKING.md 6.2/6.3 rate a
+// multi-round format strictly once, at its conclusion: the rounds themselves are recorded as
+// games and displayed as results but never rated (see game.persistFinalGameState), and this is
+// the update that stands in for all of them.
+//
+// gameID is the circuit's final round, the game whose completion triggers this; it is what the
+// ratings rows are attributed to, since ratings.game_id references an existing games row and a
+// circuit has no row of its own. playerIDs is the circuit roster (its length selects the rating
+// pool, as it does per game) and cumulativeScores maps each of them to its final cumulative
+// total, lower being better.
+//
+// Cumulative totals within CircuitTieMargin points of each other are recorded as a tie
+// (rating.CircuitRankScores); everything past that is the same pool-aware path a per-game rating
+// takes, writing the same users columns and ratings rows.
+func RecordCircuitRatings(ctx context.Context, gameID uuid.UUID, playerIDs []uuid.UUID, cumulativeScores map[uuid.UUID]int) error {
+	if len(playerIDs) == 0 {
+		return nil
+	}
+	return applyRatingUpdate(ctx, gameID, playerIDs, rating.CircuitRankScores(playerIDs, cumulativeScores))
+}
+
+// applyRatingUpdate runs one pool-aware Glicko-2 update for playerIDs from scores (lower is
+// better) and persists it: the users elo/phi/sigma columns for the pool the roster size selects,
+// plus one ratings row per player attributed to gameID.
+//
+// Rating is gated on supported roster sizes: 2 => "1v1", 4 => "4p", 7 or 8 => "7p8p", anything
+// else => no rating update. A player whose user row cannot be loaded is dropped from the update
+// rather than failing it.
+func applyRatingUpdate(ctx context.Context, gameID uuid.UUID, playerIDs []uuid.UUID, scores map[uuid.UUID]int) error {
 	// figure out rating mode
 	var ratingMode rating.RatingMode
-	switch len(players) {
+	switch len(playerIDs) {
 	case 2:
 		ratingMode = rating.Mode1v1
 	case 4:
@@ -99,32 +136,32 @@ func RecordGameAndResults(ctx context.Context, gameID uuid.UUID, players []*mode
 	}
 
 	if ratingMode == "" {
-		log.Printf("No rating update for %d-player game.\n", len(players))
+		log.Printf("No rating update for %d-player game.\n", len(playerIDs))
 		return nil
 	}
 
 	// load user objects from DB for rating
 	var userList []models.User
-	for _, p := range players {
-		u, err := GetUserByID(ctx, p.ID)
+	for _, id := range playerIDs {
+		u, err := GetUserByID(ctx, id)
 		if err != nil {
-			log.Printf("user not found for rating: %v\n", p.ID)
+			log.Printf("user not found for rating: %v\n", id)
 			continue
 		}
 		userList = append(userList, *u)
 	}
 
-	// build finalScores => userID => score
+	// build scores => userID => score
 	smap := make(map[uuid.UUID]int)
-	for _, p := range players {
-		smap[p.ID] = finalScores[p.ID]
+	for _, id := range playerIDs {
+		smap[id] = scores[id]
 	}
 
 	// finalize rating
 	updated := rating.FinalizeRatings(userList, smap, ratingMode)
 
 	// store updated rating (elo, phi, sigma) for each user + rating record
-	err = pgx.BeginTxFunc(ctx, DB, pgx.TxOptions{}, func(tx pgx.Tx) error {
+	err := pgx.BeginTxFunc(ctx, DB, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		for i, uNew := range updated {
 			uOld := userList[i]
 			oldElo, _, _ := rating.PoolFields(uOld, ratingMode)

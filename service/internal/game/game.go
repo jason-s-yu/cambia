@@ -1208,6 +1208,17 @@ func (g *CambiaGame) findWinnersWithCambiaLogicEngine(scores map[uuid.UUID]int, 
 	return potentialWinners, false
 }
 
+// ratePerGame reports whether this game's own result feeds the rating system as it ends.
+//
+// A rated game does, except when it is one round of a circuit: RULES.md T6 and MATCHMAKING.md
+// 6.2/6.3 rate a multi-round format strictly once, at its conclusion, from the final cumulative
+// scores. The round is still recorded and displayed like any other game; only its rating update
+// is withheld, deferring to the single one the circuit's completion triggers
+// (handlers.finalizeCircuitRatings -> database.RecordCircuitRatings).
+func (g *CambiaGame) ratePerGame() bool {
+	return g.Rated && !g.Circuit.Enabled
+}
+
 // persistFinalGameState saves final hands and winners to the database.
 // Assumes lock is held by caller.
 func (g *CambiaGame) persistFinalGameState(finalScores map[uuid.UUID]int, winners []uuid.UUID) {
@@ -1271,7 +1282,12 @@ func (g *CambiaGame) persistFinalGameState(finalScores map[uuid.UUID]int, winner
 		// caller of RecordGameAndResults (cambia-450); it previously had none, so ratings never
 		// updated after real games despite the pool-aware persistence logic existing.
 		players := g.Players
-		rated := g.Rated
+		rated := g.ratePerGame()
+		if g.Rated && !rated {
+			// Logged separately so a circuit round is distinguishable from a genuinely unrated
+			// game downstream, where RecordGameAndResults reports both as "unrated".
+			log.Printf("Game %s: circuit round; per-game rating deferred to the circuit's conclusion.", gameID)
+		}
 		go func() {
 			if wg != nil {
 				defer wg.Done()

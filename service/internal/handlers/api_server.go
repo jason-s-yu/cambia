@@ -330,6 +330,11 @@ func (gs *GameServer) attachOnGameEnd(g *game.CambiaGame, lobbyID uuid.UUID) {
 					if err := circuitState.RecordRound(engineScores, engineCallerID); err != nil {
 						log.Printf("Circuit round error for lobby %s: %v", endedLobbyID, err)
 					} else if circuitState.IsComplete() {
+						// The circuit's one rating update, read off the final standings before the
+						// state is dropped (RULES.md T6): the rounds themselves rate nothing. The
+						// database work runs on its own goroutine, so this does not block OnGameEnd
+						// under the game mutex.
+						gs.finalizeCircuitRatings(g, circuitState.GetStandings(), playerMap)
 						h.Emit("circuit_complete", map[string]interface{}{"standings": circuitState.GetStandings()})
 						gs.CircuitStore.Delete(endedLobbyID)
 					} else {
