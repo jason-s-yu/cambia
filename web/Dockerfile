@@ -1,4 +1,4 @@
-# web/Dockerfile — build React frontend, output to /dist for nginx
+# web/Dockerfile - build React frontend, output to /dist for nginx
 FROM node:22-alpine AS builder
 WORKDIR /app
 COPY package.json package-lock.json ./

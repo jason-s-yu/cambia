@@ -154,7 +154,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 
 // Handler returns the routed control-plane handler with Bearer auth on every
 // route except GET /harness/health, which serves read-only capacity counters
-// token-free for LAN monitoring (engelbart tile; cambia-330/network-552 —
+// token-free for LAN monitoring (engelbart tile; cambia-330/network-552:
 // reachability is already LAN-scoped by the host firewall). Routes use
 // go1.22+ method+path patterns; {id} is the validated run name.
 func (s *Server) Handler() http.Handler {

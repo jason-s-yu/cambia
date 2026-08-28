@@ -12,7 +12,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 const ROOT = process.cwd();
-const EM_DASH = '—';
+const EM_DASH = String.fromCharCode(0x2014); // U+2014, built from its code point so this file is not a hit
 
 const TARGETS = [join(ROOT, 'src'), join(ROOT, 'index.html'), join(ROOT, 'DESIGN.md')];
 

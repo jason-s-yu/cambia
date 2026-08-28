@@ -1,5 +1,5 @@
 // Package hygiene holds repo-hygiene checks that run as part of the normal
-// service test suite rather than a separate script.
+// runnerd test suite rather than a separate script.
 package hygiene
 
 import (
@@ -87,14 +87,14 @@ func walkFiles(root string) ([]string, error) {
 	return files, err
 }
 
-// TestNoEmDash scans the service module's own text files and fails on any
+// TestNoEmDash scans the runnerd module's own text files and fails on any
 // U+2014 (em dash), reporting file:line. CLAUDE.md bans em dashes in all
 // generated text (code comments included); this is the mechanical backstop
 // (cambia-927).
 func TestNoEmDash(t *testing.T) {
-	root, err := filepath.Abs("../..")
+	root, err := filepath.Abs("..")
 	if err != nil {
-		t.Fatalf("resolve service root: %v", err)
+		t.Fatalf("resolve runnerd root: %v", err)
 	}
 
 	files, ok := repoFiles(root)
