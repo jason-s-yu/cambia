@@ -339,8 +339,8 @@ Handled by `internal/handlers/lobby.go` (`ListQueuesHandler`), registered at `/m
     `playerCount` and `avgWaitSec` come from the matchmaker's live in-memory queue state, not the queue config.
     The array order is fixed by each queue's `QueueConfig.Order` (ties broken by `queueId`), currently `h2h_quickplay`,
     `h2h_blitz`, `h2h_rapid`, `h2h_classical`, `ffa4_standard`, `ffa4_classical` - not by ranging over the config map
-    directly, since Go randomizes map iteration order per process run and the response previously reordered itself
-    between calls with nothing actually changed (cambia-957).
+    directly, since Go re-randomizes map iteration order on every range statement and the response previously
+    reordered itself between calls with nothing actually changed (cambia-957).
 * **Response (Error):** `405 Method Not Allowed` for anything but `GET`.
 
 ---

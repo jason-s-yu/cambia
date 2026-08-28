@@ -11,10 +11,12 @@ type QueueConfig struct {
 	Ranked       bool
 	HiddenRating bool // true for h2h_quickplay
 	// Order is the queue's fixed position in any list presented to a caller (lowest first).
-	// Go map iteration order is randomized per run, so anything that ranges over QueueConfigs
-	// for display - GET /matchmaking/queues chief among them - must sort on this field rather
-	// than rely on iteration order (cambia-957). Values are spaced by 10 to leave room for a
-	// queue inserted between two existing ones without renumbering the rest.
+	// Go re-randomizes map iteration order on every range statement, so two ranges over
+	// QueueConfigs in the same process - even back to back - can return different sequences.
+	// Anything that ranges over QueueConfigs for display - GET /matchmaking/queues chief among
+	// them - must sort on this field rather than rely on iteration order (cambia-957). Values
+	// are spaced by 10 to leave room for a queue inserted between two existing ones without
+	// renumbering the rest.
 	Order int
 }
 

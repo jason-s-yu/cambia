@@ -606,9 +606,11 @@ func CancelSearchHandler(gs *GameServer) http.HandlerFunc {
 // Returns all configured queues with live stats.
 //
 // The response is sorted by each queue's matchmaking.QueueConfig.Order (ties broken by
-// QueueID), not by ranging over matchmaking.QueueConfigs directly: Go randomizes map
-// iteration order per process run, which previously left the six queue cards reordering
-// themselves between dashboard loads with nothing wrong to look at (cambia-957).
+// QueueID), not by ranging over matchmaking.QueueConfigs directly: Go re-randomizes map
+// iteration order on every range statement, so two calls in the same process - not just
+// across restarts - could return different sequences, which previously left the six queue
+// cards reordering themselves between dashboard loads with nothing wrong to look at
+// (cambia-957).
 func ListQueuesHandler(gs *GameServer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

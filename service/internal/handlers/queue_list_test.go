@@ -1,8 +1,9 @@
 // internal/handlers/queue_list_test.go
 //
 // GET /matchmaking/queues ordering (cambia-957). ListQueuesHandler used to range over
-// matchmaking.QueueConfigs directly, and Go randomizes map iteration order per process run, so
-// the six queue cards on the dashboard reordered themselves between loads with nothing actually
+// matchmaking.QueueConfigs directly, and Go re-randomizes map iteration order on every range
+// statement, so consecutive calls in the same process could return different sequences and the
+// six queue cards on the dashboard reordered themselves between loads with nothing actually
 // changed. The handler now sorts by matchmaking.QueueConfig.Order (ties broken by QueueID)
 // before encoding the response; these tests pin that ordering rather than trusting it stays
 // implicit.
@@ -63,10 +64,11 @@ func expectedQueueOrder(t *testing.T) []string {
 }
 
 // TestListQueuesOrderIsDeterministicAcrossCalls asserts two consecutive calls return the
-// identical sequence. Before cambia-957 this was flaky by construction: map iteration order is
-// randomized per Go process, so a run could pass or fail depending on the runtime's internal
-// hash seed rather than on any code defect, which is exactly the bug report (the dashboard
-// visibly reordering between loads with no state change).
+// identical sequence. Against the sorted handler this is deterministic on every run. Run
+// against the pre-cambia-957 handler (range straight over matchmaking.QueueConfigs, no sort),
+// it fails: Go re-randomizes map iteration order on each range statement, so each call in the
+// loop draws its own order and diverges from call 0 - a real code defect, not test flake, and
+// exactly the bug report (the dashboard visibly reordering between loads with no state change).
 func TestListQueuesOrderIsDeterministicAcrossCalls(t *testing.T) {
 	gs := NewGameServer()
 
