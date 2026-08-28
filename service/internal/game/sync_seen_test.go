@@ -49,7 +49,7 @@ func cardTarget(id, owner uuid.UUID, idx int) map[string]interface{} {
 // TestPregameSyncRevealsOnlyPeekedCards verifies a fresh game exposes exactly the two pregame
 // peeks as Known and every other own card as a hidden back.
 func TestPregameSyncRevealsOnlyPeekedCards(t *testing.T) {
-	g, players, _ := setupTestGame(t, 2, &HouseRules{TurnTimerSec: 0, PenaltyDrawCount: 2})
+	g, players, _ := setupTestGame(t, 2, testHouseRules(0, 2))
 
 	for _, p := range players {
 		engineIdx := g.PlayerToEngine[p.ID]
@@ -83,7 +83,7 @@ func TestPregameSyncRevealsOnlyPeekedCards(t *testing.T) {
 
 // TestReplaceFromDrawMarksNewCardSeen verifies the card placed into a hand from a draw is seen.
 func TestReplaceFromDrawMarksNewCardSeen(t *testing.T) {
-	g, _, _ := setupTestGame(t, 2, &HouseRules{TurnTimerSec: 0, PenaltyDrawCount: 2})
+	g, _, _ := setupTestGame(t, 2, testHouseRules(0, 2))
 
 	actor := currentTurnPlayer(g)
 	engineIdx := g.PlayerToEngine[actor.ID]
@@ -113,7 +113,7 @@ func TestReplaceFromDrawMarksNewCardSeen(t *testing.T) {
 // TestBlindSwapInYieldsUnknown verifies a card moved into a hand by a J/Q blind swap is hidden,
 // even though the outgoing pregame-peeked card was seen.
 func TestBlindSwapInYieldsUnknown(t *testing.T) {
-	g, _, _ := setupTestGame(t, 2, &HouseRules{TurnTimerSec: 0, PenaltyDrawCount: 2})
+	g, _, _ := setupTestGame(t, 2, testHouseRules(0, 2))
 
 	actor := currentTurnPlayer(g)
 	engineIdx := g.PlayerToEngine[actor.ID]
@@ -156,7 +156,7 @@ func TestBlindSwapInYieldsUnknown(t *testing.T) {
 // TestKingLookMarksOwnSeenThenSwapInHidden verifies a King look reveals the actor's own looked
 // card, but a subsequent King swap moves an unseen opponent card into the hand.
 func TestKingLookMarksOwnSeenThenSwapInHidden(t *testing.T) {
-	g, _, _ := setupTestGame(t, 2, &HouseRules{TurnTimerSec: 0, PenaltyDrawCount: 2})
+	g, _, _ := setupTestGame(t, 2, testHouseRules(0, 2))
 
 	actor := currentTurnPlayer(g)
 	engineIdx := g.PlayerToEngine[actor.ID]
@@ -203,7 +203,7 @@ func TestKingLookMarksOwnSeenThenSwapInHidden(t *testing.T) {
 // TestSnapRemovalDropsSeenCardFromView verifies a seen own card that is snapped away no longer
 // appears face-up in the owner's self view.
 func TestSnapRemovalDropsSeenCardFromView(t *testing.T) {
-	g, players, mb := setupTestGame(t, 2, &HouseRules{TurnTimerSec: 0, PenaltyDrawCount: 2})
+	g, players, mb := setupTestGame(t, 2, testHouseRules(0, 2))
 
 	// Force a 7 onto the discard top so a matching 7 snaps successfully.
 	sevenTop := engine.NewCard(engine.SuitHearts, engine.RankSeven)

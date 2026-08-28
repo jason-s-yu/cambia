@@ -112,7 +112,7 @@ func TestEndGameRecordsResultsAndRating(t *testing.T) {
 	g.HostUserID = userA.ID
 	g.LobbyType = "private"
 	g.Rated = true
-	g.HouseRules = HouseRules{TurnTimerSec: 0, PenaltyDrawCount: 2}
+	g.HouseRules = *testHouseRules(0, 2)
 	g.TurnDuration = 0
 
 	playerA := &models.Player{ID: userA.ID, Connected: true, User: &models.User{ID: userA.ID}}

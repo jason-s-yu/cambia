@@ -60,13 +60,26 @@ These messages are typically broadcast to all users in the lobby unless specifie
 {
   "allowDrawFromDiscardPile": bool,
   "allowReplaceAbilities": bool,
+  "allowOpponentSnapping": bool,
   "snapRace": bool,
+  "lockCallerHand": bool,
   "forfeitOnDisconnect": bool,
   "penaltyDrawCount": int,
-  "autoKickTurnCount": int,
-  "turnTimerSec": int
+  "turnTimerSec": int,
+  "maxGameTurns": int,
+  "cardsPerPlayer": int,
+  "cambiaAllowedRound": int,
+  "numJokers": int,
+  "numDecks": int,
+  "initialViewCount": int
 }
 ```
+
+Numeric rules are range-checked server-side and an out-of-range value rejects the whole
+`update_rules` message, leaving the lobby's rules unchanged. The accepted ranges follow the
+engine's own limits: `penaltyDrawCount` 0-6, `turnTimerSec` 0-86400, `maxGameTurns` 0-65535
+(0 = unlimited), `cardsPerPlayer` 1-6, `cambiaAllowedRound` 0-255, `numJokers` 0-2,
+`numDecks` 1-4, `initialViewCount` 0-2.
 
 **`Circuit` Object Structure (within `lobby_state`, `lobby_rules_updated`, used by `update_rules`):**
 (See `internal/game/game.go` for field definitions)

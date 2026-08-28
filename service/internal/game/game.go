@@ -186,16 +186,7 @@ func NewCambiaGame() *CambiaGame {
 		TurnID:                 0,
 		PlayerToEngine:         make(map[uuid.UUID]uint8),
 		// Initialize HouseRules with standard defaults.
-		HouseRules: HouseRules{
-			AllowDrawFromDiscardPile: false,
-			AllowReplaceAbilities:    false,
-			AllowOpponentSnapping:    true,
-			SnapRace:                 false,
-			ForfeitOnDisconnect:      true,
-			PenaltyDrawCount:         2,
-			AutoKickTurnCount:        3,
-			TurnTimerSec:             15,
-		},
+		HouseRules:          DefaultHouseRules(),
 		Circuit:             Circuit{Enabled: false}, // Circuit mode disabled by default.
 		circuitGraceTimers:  make(map[uuid.UUID]*time.Timer),
 		circuitAIControlled: make(map[uuid.UUID]bool),
@@ -257,7 +248,10 @@ func (g *CambiaGame) BeginPreGame() {
 	// private_initial_cards / game_player_turn events land on already-populated client state.
 	g.broadcastSyncStateToAll()
 
-	// Privately reveal the initial two cards (indices 0, 1) to each player.
+	// Privately reveal each player's pregame peek. Deal() decides how many slots that is from
+	// the initialViewCount house rule (clamped to the hand size) and records them in
+	// InitialPeek/InitialPeekCount, so the count is read from the engine rather than assumed:
+	// a lobby that peeks one card, or none at all, must not have slot 0 revealed anyway.
 	for _, p := range g.Players {
 		engineIdx := g.PlayerToEngine[p.ID]
 		peekIdxs := g.Engine.Players[engineIdx].InitialPeek
@@ -279,17 +273,24 @@ func (g *CambiaGame) BeginPreGame() {
 		}
 
 		handLen := g.Engine.Players[engineIdx].HandLen
-		if handLen >= 2 {
-			g.firePrivateInitialCards(p.ID,
-				makeInitialCard(peekIdxs[0]),
-				makeInitialCard(peekIdxs[1]),
-			)
-		} else if handLen == 1 {
-			g.firePrivateInitialCards(p.ID, makeInitialCard(0), nil)
-		} else {
+		if handLen == 0 {
 			log.Printf("Warning: Player %s has 0 cards during pregame reveal in game %s.", p.ID, g.ID)
 			g.firePrivateInitialCards(p.ID, nil, nil)
+			continue
 		}
+
+		peekCount := g.Engine.Players[engineIdx].InitialPeekCount
+		if peekCount > handLen {
+			peekCount = handLen
+		}
+		var card1, card2 *EventCard
+		if peekCount > 0 {
+			card1 = makeInitialCard(peekIdxs[0])
+		}
+		if peekCount > 1 {
+			card2 = makeInitialCard(peekIdxs[1])
+		}
+		g.firePrivateInitialCards(p.ID, card1, card2)
 	}
 
 	// Schedule the transition to the main game phase.

@@ -87,6 +87,18 @@ func (mb *mockBroadcaster) findEventByType(eventType GameEventType) *GameEvent {
 	return nil
 }
 
+// testHouseRules returns the service defaults with the turn timer and invalid-snap penalty
+// overridden, the two knobs these fixtures vary. It builds on DefaultHouseRules rather than a
+// bare literal so the deal knobs (cards per player, jokers, decks, pregame peek count) hold the
+// values a real lobby starts with: a bare HouseRules literal zeroes them, which since cambia-782
+// means a peek-less, joker-less deal rather than the old hardcoded engine config.
+func testHouseRules(turnTimerSec, penaltyDrawCount int) *HouseRules {
+	hr := DefaultHouseRules()
+	hr.TurnTimerSec = turnTimerSec
+	hr.PenaltyDrawCount = penaltyDrawCount
+	return &hr
+}
+
 // setupTestGame initializes a CambiaGame instance with mock players and broadcasters for testing.
 func setupTestGame(t *testing.T, numPlayers int, rules *HouseRules) (*CambiaGame, []*models.Player, *mockBroadcaster) {
 	if numPlayers < 2 {
@@ -151,7 +163,7 @@ func getPlayerIndex(g *CambiaGame, playerID uuid.UUID) int {
 
 // TestBasicDrawDiscard verifies the standard draw from stockpile -> discard flow.
 func TestBasicDrawDiscard(t *testing.T) {
-	g, players, mb := setupTestGame(t, 2, &HouseRules{TurnTimerSec: 0, PenaltyDrawCount: 2})
+	g, players, mb := setupTestGame(t, 2, testHouseRules(0, 2))
 	playerA := players[0]
 	playerB := players[1]
 
@@ -225,7 +237,7 @@ func TestBasicDrawDiscard(t *testing.T) {
 
 // TestBasicDrawReplace verifies the draw -> replace card flow.
 func TestBasicDrawReplace(t *testing.T) {
-	g, players, mb := setupTestGame(t, 2, &HouseRules{TurnTimerSec: 0, PenaltyDrawCount: 2})
+	g, players, mb := setupTestGame(t, 2, testHouseRules(0, 2))
 	playerA := players[0]
 	playerB := players[1]
 
@@ -296,7 +308,7 @@ func TestBasicDrawReplace(t *testing.T) {
 
 // TestSnapSuccess verifies a correct snap action.
 func TestSnapSuccess(t *testing.T) {
-	g, players, mb := setupTestGame(t, 2, &HouseRules{TurnTimerSec: 0, PenaltyDrawCount: 2})
+	g, players, mb := setupTestGame(t, 2, testHouseRules(0, 2))
 	playerA := players[0]
 	playerB := players[1]
 
@@ -368,7 +380,7 @@ func TestSnapSuccess(t *testing.T) {
 
 // TestSnapFailPenalty verifies penalties for incorrect snaps (wrong rank).
 func TestSnapFailPenalty(t *testing.T) {
-	g, players, mb := setupTestGame(t, 2, &HouseRules{PenaltyDrawCount: 2, TurnTimerSec: 0})
+	g, players, mb := setupTestGame(t, 2, testHouseRules(0, 2))
 	playerA := players[0]
 	playerB := players[1]
 	penaltyCount := g.HouseRules.PenaltyDrawCount
@@ -459,7 +471,7 @@ func TestSnapFailPenalty(t *testing.T) {
 // TestCambiaCallAndEndgame verifies calling Cambia and the subsequent final round logic.
 // Engine only supports 2 players, so this tests the 2-player Cambia flow.
 func TestCambiaCallAndEndgame(t *testing.T) {
-	g, players, mb := setupTestGame(t, 2, &HouseRules{TurnTimerSec: 0, PenaltyDrawCount: 2})
+	g, players, mb := setupTestGame(t, 2, testHouseRules(0, 2))
 	playerA := players[0]
 	playerB := players[1]
 
@@ -532,7 +544,9 @@ func TestCambiaCallAndEndgame(t *testing.T) {
 
 // TestCambiaLock verifies that swapping with a player who has called Cambia fails.
 func TestCambiaLock(t *testing.T) {
-	g, players, mb := setupTestGame(t, 2, &HouseRules{AllowDrawFromDiscardPile: true, TurnTimerSec: 0, PenaltyDrawCount: 2})
+	hr := testHouseRules(0, 2)
+	hr.AllowDrawFromDiscardPile = true
+	g, players, mb := setupTestGame(t, 2, hr)
 	playerA := players[0]
 	playerB := players[1]
 

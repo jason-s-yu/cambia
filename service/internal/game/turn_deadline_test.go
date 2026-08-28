@@ -21,7 +21,8 @@ func buildTimedTestGame(t *testing.T, turnDuration time.Duration) (*CambiaGame, 
 	g := NewCambiaGame()
 	mb := newMockBroadcaster()
 	g.Emitter = mb
-	g.HouseRules = HouseRules{TurnTimerSec: 5, PenaltyDrawCount: 2, ForfeitOnDisconnect: false}
+	g.HouseRules = *testHouseRules(5, 2)
+	g.HouseRules.ForfeitOnDisconnect = false
 
 	ids := make([]uuid.UUID, 2)
 	for i := range ids {
@@ -86,7 +87,8 @@ func TestTurnDeadlineOmittedWhenTimerDisabled(t *testing.T) {
 	g := NewCambiaGame()
 	mb := newMockBroadcaster()
 	g.Emitter = mb
-	g.HouseRules = HouseRules{TurnTimerSec: 0, PenaltyDrawCount: 2, ForfeitOnDisconnect: false}
+	g.HouseRules = *testHouseRules(0, 2)
+	g.HouseRules.ForfeitOnDisconnect = false
 
 	ids := make([]uuid.UUID, 2)
 	for i := range ids {
@@ -156,7 +158,8 @@ func TestSyncStateOmitsTurnDeadlineWhenTimerDisabled(t *testing.T) {
 	g := NewCambiaGame()
 	mb := newMockBroadcaster()
 	g.Emitter = mb
-	g.HouseRules = HouseRules{TurnTimerSec: 0, PenaltyDrawCount: 2, ForfeitOnDisconnect: false}
+	g.HouseRules = *testHouseRules(0, 2)
+	g.HouseRules.ForfeitOnDisconnect = false
 
 	ids := make([]uuid.UUID, 2)
 	for i := range ids {
