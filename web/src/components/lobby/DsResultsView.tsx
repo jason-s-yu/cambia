@@ -10,7 +10,11 @@
 // When the finished table is still in the store the results render as an
 // overlay above it, so the last board state stays visible under the scrim.
 // Without one (a reload straight into post_game) the card sits on the ground.
-import React, { useMemo } from 'react';
+//
+// Over the table the card is a modal: aria-modal, focus moves to the primary
+// action on mount, Tab cycles inside the card, and the table underneath is
+// inert so its cards and leave control drop out of the tab order (cambia-848).
+import React, { useEffect, useMemo, useRef } from 'react';
 import { useCurrentLobbyStore, type LobbyPhase } from '@/stores/lobbyStore';
 import { useAuthStore } from '@/stores/authStore';
 import { useGameStore, selectFinalScores } from '@/stores/gameStore';
@@ -46,6 +50,30 @@ const DsResultsView: React.FC<DsResultsViewProps> = ({ phase, onReturnToLobby, o
 
   const isMatchEnd = phase === 'match_end';
   const title = isMatchEnd ? 'Final standings' : 'Game over';
+  const overTable = !!gameState && !!sendMessage;
+
+  const cardRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    cardRef.current?.querySelector<HTMLElement>('button')?.focus();
+  }, []);
+
+  // Keep Tab inside the card while it covers the table. The table is inert, but the app
+  // chrome above it is not, and a modal must not hand focus to what its scrim hides.
+  const trapTab = (e: React.KeyboardEvent<HTMLElement>) => {
+    if (!overTable || e.key !== 'Tab' || !cardRef.current) return;
+    const focusable = Array.from(cardRef.current.querySelectorAll<HTMLElement>('button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'));
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey && (active === first || !cardRef.current.contains(active))) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && (active === last || !cardRef.current.contains(active))) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
 
   // Display names: lobby roster, then the game snapshot (its username can arrive empty),
   // then the signed-in user's own name, then a seat number.
@@ -83,8 +111,11 @@ const DsResultsView: React.FC<DsResultsViewProps> = ({ phase, onReturnToLobby, o
 
   const card = (
     <section
+      ref={cardRef}
       role='dialog'
+      aria-modal={overTable ? 'true' : undefined}
       aria-labelledby='results-title'
+      onKeyDown={trapTab}
       style={{
         width: '100%',
         maxWidth: 520,
@@ -172,7 +203,9 @@ const DsResultsView: React.FC<DsResultsViewProps> = ({ phase, onReturnToLobby, o
   if (gameState && sendMessage) {
     return (
       <>
-        <DsGameTable gameState={gameState} phase={phase} sendMessage={sendMessage} onLeave={onLeave} />
+        <div inert style={{ display: 'contents' }}>
+          <DsGameTable gameState={gameState} phase={phase} sendMessage={sendMessage} onLeave={onLeave} />
+        </div>
         <div
           style={{
             position: 'fixed',

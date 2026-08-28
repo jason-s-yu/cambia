@@ -48,6 +48,13 @@ interface DsGameTableProps {
   phase: LobbyPhase;
   sendMessage: (msg: ClientGameAction) => void;
   onLeave: () => void;
+  /**
+   * Socket state from the page. While false the table stays mounted with every control
+   * locked and a reconnect notice in the top strip; the hook reconnects on its own.
+   */
+  connected?: boolean;
+  /** The hook's last connection error, used to tell a live retry from a dead socket. */
+  connectionError?: string | null;
 }
 
 /** Ability name by the discarded rank, for seat notes and prompts. */
@@ -185,7 +192,7 @@ const EmptySlot: React.FC<{ onClick?: () => void; highlight?: boolean; label?: s
   />
 );
 
-const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage, onLeave }) => {
+const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage, onLeave, connected = true, connectionError = null }) => {
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
   const [kingPair, setKingPair] = useState<KingPair | null>(null);
 
@@ -194,6 +201,12 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   const pendingAction = useGameStore(selectPendingAction);
   const isMyTurn = useGameStore(selectIsSelfTurn);
   const isProcessing = useGameStore(selectIsProcessingAction);
+  // Every interaction gate reads `busy`: an action in flight or a dropped socket both lock
+  // the felt. The hook retries a dropped socket by itself, so the notice says so unless it
+  // reported that it stopped (cambia-848 F1).
+  const offline = !connected;
+  const gaveUp = offline && !!connectionError && /stopped|after \d+ retries/i.test(connectionError);
+  const busy = isProcessing || offline;
   const displayedDrawnCard = useGameStore(selectDisplayedDrawnCard);
   const serverClockOffsetMs = useGameStore(selectServerClockOffsetMs);
   const matchState = useCurrentLobbyStore((s) => s.matchState);
@@ -225,7 +238,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   // --- Interaction handlers (semantics unchanged from GameBoard) ---
 
   const handlePlayerCardClick = useCallback((card: ObfCard, idx: number) => {
-    if (isProcessing) return;
+    if (busy) return;
     if (pendingAction === 'discard_replace') {
       sendMessage(replaceAction(card.id, idx));
       setSelectedIdx(null);
@@ -250,15 +263,15 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     if (pendingAction === null) {
       setSelectedIdx((prev) => (prev === idx ? null : idx));
     }
-  }, [isProcessing, pendingAction, specialAction, selectedIdx, sendMessage]);
+  }, [busy, pendingAction, specialAction, selectedIdx, sendMessage]);
 
   const handleDeckClick = useCallback(() => {
-    if (!isMyTurn || pendingAction !== null || isProcessing) return;
+    if (!isMyTurn || pendingAction !== null || busy) return;
     sendMessage(drawStockpileAction());
-  }, [isMyTurn, pendingAction, isProcessing, sendMessage]);
+  }, [isMyTurn, pendingAction, busy, sendMessage]);
 
   const handleDiscardClick = useCallback(() => {
-    if (isProcessing) return;
+    if (busy) return;
     if (isMyTurn && pendingAction === null) {
       if (gameState.houseRules.allowDrawFromDiscardPile && gameState.discardTop) {
         sendMessage(drawDiscardPileAction());
@@ -279,10 +292,10 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
         setSelectedIdx(null);
       }
     }
-  }, [isMyTurn, isProcessing, pendingAction, selectedIdx, selfState, gameState, sendMessage]);
+  }, [isMyTurn, busy, pendingAction, selectedIdx, selfState, gameState, sendMessage]);
 
   const handleOpponentCardClick = useCallback((playerId: string, card: ObfCard, idx: number) => {
-    if (isProcessing) return;
+    if (busy) return;
     // Target opponent cards by their real server-assigned UUID (card.id), sourced from the
     // opponent's revealedHand slot (hidden id references, cambia-509).
     if (pendingAction === 'special_action' && specialAction) {
@@ -322,16 +335,16 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
         }
       }
     }
-  }, [isProcessing, pendingAction, specialAction, selectedIdx, selfState, selfId, gameState, sendMessage]);
+  }, [busy, pendingAction, specialAction, selectedIdx, selfState, selfId, gameState, sendMessage]);
 
   const snapSelected = useCallback(() => {
-    if (isProcessing || selectedIdx === null || pendingAction !== null) return;
+    if (busy || selectedIdx === null || pendingAction !== null) return;
     const selectedCard = selfState?.revealedHand?.[selectedIdx];
     if (selectedCard) {
       sendMessage(snapAction(selectedCard.id));
       setSelectedIdx(null);
     }
-  }, [isProcessing, selectedIdx, pendingAction, selfState, sendMessage]);
+  }, [busy, selectedIdx, pendingAction, selfState, sendMessage]);
 
   // The King's second step is over once the ability resolves or the turn moves on.
   useEffect(() => {
@@ -339,32 +352,32 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   }, [pendingAction, specialAction]);
 
   const confirmKingSwap = useCallback((swap: boolean) => {
-    if (!kingPair || !selfId || isProcessing) return;
+    if (!kingPair || !selfId || busy) return;
     sendMessage(swap
       ? kingSwapConfirmAction(kingPair.myId, kingPair.myIdx, selfId, kingPair.oppId, kingPair.oppIdx, kingPair.oppOwner)
       : skipSpecialAction());
     setKingPair(null);
-  }, [kingPair, selfId, isProcessing, sendMessage]);
+  }, [kingPair, selfId, busy, sendMessage]);
 
   // --- Derived flags ---
 
   const roundOver = phase === 'round_end' || gameState.gameOver;
-  const canTakeDiscard = isMyTurn && pendingAction === null && !isProcessing && !!gameState.houseRules.allowDrawFromDiscardPile && !!gameState.discardTop;
-  const deckInteractive = isMyTurn && pendingAction === null && !isProcessing && gameState.stockpileSize > 0;
+  const canTakeDiscard = isMyTurn && pendingAction === null && !busy && !!gameState.houseRules.allowDrawFromDiscardPile && !!gameState.discardTop;
+  const deckInteractive = isMyTurn && pendingAction === null && !busy && gameState.stockpileSize > 0;
   const discardInteractive =
     canTakeDiscard ||
     (pendingAction === 'discard_replace' && !!selfState?.drawnCard) ||
     (selectedIdx !== null && pendingAction === null);
-  const canSnap = selectedIdx !== null && pendingAction === null && !isProcessing;
-  const canCallCambia = isMyTurn && pendingAction === null && !isProcessing && !gameState.cambiaCalled && gameState.started && !gameState.gameOver;
-  const kingConfirm = !!kingPair && specialRank === 'K' && isMyTurn && !isProcessing;
-  const canSkipSpecial = isMyTurn && pendingAction === 'special_action' && !isProcessing && !kingConfirm;
+  const canSnap = selectedIdx !== null && pendingAction === null && !busy;
+  const canCallCambia = isMyTurn && pendingAction === null && !busy && !gameState.cambiaCalled && gameState.started && !gameState.gameOver;
+  const kingConfirm = !!kingPair && specialRank === 'K' && isMyTurn && !busy;
+  const canSkipSpecial = isMyTurn && pendingAction === 'special_action' && !busy && !kingConfirm;
   const allowOpponentSnapping = gameState.houseRules.allowOpponentSnapping ?? true;
 
   // Legal-target highlighting. The click handlers above already no-op outside these
   // cases; this only decides what the felt shows as a target.
   const opponentTargetable = (() => {
-    if (isProcessing || kingConfirm) return false;
+    if (busy || kingConfirm) return false;
     if (specialRank) {
       if (specialRank === '9' || specialRank === 'T') return true;
       if (specialRank === 'J' || specialRank === 'Q' || specialRank === 'K') return selectedIdx !== null;
@@ -373,7 +386,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     return selectedIdx !== null && pendingAction === null && allowOpponentSnapping;
   })();
   const ownTargetable = (() => {
-    if (isProcessing || kingConfirm) return false;
+    if (busy || kingConfirm) return false;
     if (pendingAction === 'discard_replace') return true;
     if (specialRank === '7' || specialRank === '8') return true;
     if (specialRank === 'J' || specialRank === 'Q' || specialRank === 'K') return selectedIdx === null;
@@ -381,6 +394,8 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   })();
 
   const hint = useMemo(() => {
+    if (gaveUp) return 'Connection lost. Leave the table and rejoin from the dashboard.';
+    if (offline) return 'Connection lost. Reconnecting.';
     if (roundOver) return phase === 'round_end' ? 'Round over. Waiting for the next round.' : 'Game over.';
     if (preGame) return 'Memorize your peeked cards. Play starts when the timer runs out.';
     if (!isMyTurn) {
@@ -398,7 +413,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     if (selectedIdx !== null) return 'Snap the selected card onto the discard, or pick another card.';
     if (gameState.cambiaCalled) return canTakeDiscard ? 'Last turn. Draw from the stock or take the discard.' : 'Last turn. Draw from the stock.';
     return canTakeDiscard ? 'Your turn. Draw from the stock or take the discard.' : 'Your turn. Draw from the stock.';
-  }, [roundOver, phase, preGame, isMyTurn, specialAction, currentPlayer, nameOf, specialRank, kingConfirm, selectedIdx, pendingAction, gameState.cambiaCalled, canTakeDiscard]);
+  }, [gaveUp, offline, roundOver, phase, preGame, isMyTurn, specialAction, currentPlayer, nameOf, specialRank, kingConfirm, selectedIdx, pendingAction, gameState.cambiaCalled, canTakeDiscard]);
 
   const discardFace = toDsCardFace(gameState.discardTop);
   const drawnCard = selfState?.drawnCard ?? displayedDrawnCard;
@@ -494,6 +509,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                 Cambia called{cambiaCaller && <span style={{ textTransform: 'none', letterSpacing: 0, fontWeight: 'var(--weight-medium)' }}>by {nameOf(cambiaCaller.playerId)}</span>}
               </span>
             )}
+            {offline && <Badge tone={gaveUp ? 'danger' : 'warning'} dot>{gaveUp ? 'Disconnected' : 'Reconnecting'}</Badge>}
             {roundOver && <Badge tone='warning'>{phase === 'round_end' ? 'Round over' : 'Game over'}</Badge>}
           </div>
 
@@ -600,7 +616,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                 isYou
                 compact
                 handSize={selfState?.handSize}
-                state={seatStateFor(selfState ?? ({ playerId: selfId ?? '', connected: true, hasCalledCambia: false } as ObfPlayerState), gameState.currentPlayerId)}
+                state={offline ? 'disconnected' : seatStateFor(selfState ?? ({ playerId: selfId ?? '', connected: true, hasCalledCambia: false } as ObfPlayerState), gameState.currentPlayerId)}
               />
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: '1 1 220px', maxWidth: 280, paddingBottom: 2 }}>
@@ -623,7 +639,8 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                   remainingSec={turnTimerSec}
                   deadlineMs={gameState.turnDeadline ?? null}
                   clockOffsetMs={serverClockOffsetMs}
-                  style={{ marginTop: 4, color: 'var(--text-on-green)' }}
+                  onFelt
+                  style={{ marginTop: 4 }}
                 />
               )}
             </div>
@@ -663,7 +680,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
               {gameState.houseRules.snapRace && <Badge>Snap race</Badge>}
             </div>
             <div style={{ fontSize: 'var(--ds-text-sm)', color: 'var(--text-secondary)' }}>
-              {roundOver ? (phase === 'round_end' ? 'Round over.' : 'Game over.') : preGame ? 'Pre-game peek.' : isMyTurn ? 'Your turn.' : currentPlayer ? `${nameOf(currentPlayer.playerId)} to act.` : 'Waiting for the next turn.'}
+              {offline ? (gaveUp ? 'Disconnected.' : 'Reconnecting.') : roundOver ? (phase === 'round_end' ? 'Round over.' : 'Game over.') : preGame ? 'Pre-game peek.' : isMyTurn ? 'Your turn.' : currentPlayer ? `${nameOf(currentPlayer.playerId)} to act.` : 'Waiting for the next turn.'}
             </div>
           </div>
           <Button size='sm' variant='ghost' onClick={onLeave} style={{ marginTop: 12 }}>Leave table</Button>

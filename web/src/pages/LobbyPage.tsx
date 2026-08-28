@@ -83,7 +83,12 @@ const LobbyPage: React.FC = () => {
     useCurrentLobbyStore.getState().setPhase('open');
   };
 
-  const shouldRedirectToDash = !isValidLobbyId || (!!storeError && !isStoreLoading && !isConnected);
+  // A table in hand: a dropped socket mid-game must not bounce the player to the dashboard.
+  // The hook keeps retrying, the table renders its reconnect state, and a dead socket still
+  // has the table's own leave control (cambia-848 F1).
+  const gameLive = (phase === 'in_game' || phase === 'round_end') && !!gameState;
+
+  const shouldRedirectToDash = !isValidLobbyId || (!!storeError && !isStoreLoading && !isConnected && !gameLive);
 
   // Bounced off a broken or unreachable lobby. Local state only: this is not a deliberate
   // leave, so the membership stays and the lobby remains resumable once it is reachable again.
@@ -100,6 +105,22 @@ const LobbyPage: React.FC = () => {
 
   // --- Pre-connection / error states (Tailwind chrome) ---
   if (!isValidLobbyId) return <div className='flex items-center justify-center h-screen'><LoadingSpinner /></div>;
+
+  // --- Phase: live game (in_game / round_end) with a table in hand ---
+  // Ahead of the connection chrome so a socket drop keeps the table mounted; the table shows
+  // the reconnect state itself and locks its controls until the hook is back (cambia-848 F1).
+  if (gameLive && gameState) {
+    return (
+      <DsGameTable
+        gameState={gameState}
+        phase={phase}
+        sendMessage={sendMessage}
+        onLeave={handleLeaveLobby}
+        connected={isConnected}
+        connectionError={storeError}
+      />
+    );
+  }
   if (isLoading) return (
     <div className='flex flex-col items-center justify-center h-full pt-10'>
       <LoadingSpinner />
@@ -150,17 +171,16 @@ const LobbyPage: React.FC = () => {
     );
   }
 
-  // --- Phase: live game (in_game / round_end) ---
+  // --- Phase: live game (in_game / round_end) before the first sync ---
+  // The table itself renders above, ahead of the connection chrome; this is the gap between
+  // game_started and the first private_sync_state.
   if (phase === 'in_game' || phase === 'round_end') {
-    if (!gameState) {
-      return (
-        <div className='flex flex-col items-center justify-center h-full pt-10'>
-          <LoadingSpinner />
-          <p className='mt-2' style={{ color: 'var(--text-secondary)', fontVariantNumeric: 'tabular-nums' }}>Setting the table.</p>
-        </div>
-      );
-    }
-    return <DsGameTable gameState={gameState} phase={phase} sendMessage={sendMessage} onLeave={handleLeaveLobby} />;
+    return (
+      <div className='flex flex-col items-center justify-center h-full pt-10'>
+        <LoadingSpinner />
+        <p className='mt-2' style={{ color: 'var(--text-secondary)', fontVariantNumeric: 'tabular-nums' }}>Setting the table.</p>
+      </div>
+    );
   }
 
   // --- Phase: lobby (open / searching / ready_check / countdown) ---
