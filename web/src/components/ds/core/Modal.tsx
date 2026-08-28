@@ -12,13 +12,21 @@
 import React, { useCallback, useEffect, useId, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { getAppRoot } from '@/lib/appRoot';
+import { pickInitialFocus, type ModalFocusTarget } from '@/lib/modalFocus';
 
 export interface ModalProps {
   open?: boolean;
   title?: React.ReactNode;
   onClose?: () => void;
-  /** Action row (Buttons), right-aligned on a raised strip. Its last control is the confirm action and takes focus on open. */
+  /** Action row (Buttons), right-aligned on a raised strip. */
   footer?: React.ReactNode;
+  /**
+   * Where focus lands on open: 'confirm' (last footer control), 'dismiss'
+   * (first), 'body' (first field), 'panel' (nothing armed), or a ref to any
+   * control in the panel. Default: the first footer control that is not
+   * destructive, then the first body control, then the panel.
+   */
+  initialFocus?: ModalFocusTarget | React.RefObject<HTMLElement | null>;
   /** Render panel only, no fixed overlay. */
   inline?: boolean;
   width?: number;
@@ -60,7 +68,7 @@ function releaseInert(): void {
 }
 
 /** Centered dialog on a raised flat surface; inline=true renders the panel without the fixed scrim (specimens/embeds). */
-const Modal: React.FC<ModalProps> = ({ open = true, title, onClose, footer, inline = false, width = 440, children }) => {
+const Modal: React.FC<ModalProps> = ({ open = true, title, onClose, footer, initialFocus, inline = false, width = 440, children }) => {
   const panelRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const footerRef = useRef<HTMLDivElement>(null);
@@ -72,6 +80,10 @@ const Modal: React.FC<ModalProps> = ({ open = true, title, onClose, footer, inli
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
+  // Same reason: the target is read once, when the dialog opens.
+  const initialFocusRef = useRef(initialFocus);
+  initialFocusRef.current = initialFocus;
+
   // One effect for focus and inert: on close the page has to come back out of
   // inert before the opener is focused, since focus does not land on an inert
   // element. Splitting them runs the cleanups in the wrong order.
@@ -81,15 +93,21 @@ const Modal: React.FC<ModalProps> = ({ open = true, title, onClose, footer, inli
     modalStack.push(token);
     const opener = document.activeElement as HTMLElement | null;
     acquireInert();
-    // Focus the confirm action, not the Close X: the dialog opens on the choice
-    // it exists to take, and Tab still reaches the close control (cambia-914,
-    // DL-8 R9; the DsResultsView precedent from cambia-848). The action row's
-    // last control is the confirm one; a dialog without a footer falls back to
-    // the first control in its body, then to the panel.
+    // Focus lands in the panel, not on the Close X, and the caller says where:
+    // the old rule took the last control in the action row, which reads as the
+    // confirm action only while the confirm action is drawn last, and armed a
+    // trailing destructive control under Enter (cambia-935, F6; the
+    // confirm-on-open precedent from cambia-914 DL-8 R9 survives as an explicit
+    // initialFocus='confirm' at the call site that wanted it).
     const footerControls = footerRef.current ? Array.from(footerRef.current.querySelectorAll<HTMLElement>(FOCUSABLE)) : [];
-    const initial = footerControls[footerControls.length - 1]
-      ?? bodyRef.current?.querySelector<HTMLElement>(FOCUSABLE)
-      ?? panelRef.current;
+    const bodyControls = bodyRef.current ? Array.from(bodyRef.current.querySelectorAll<HTMLElement>(FOCUSABLE)) : [];
+    const target = initialFocusRef.current;
+    const initial = (typeof target === 'object' && target !== null ? target.current : null)
+      ?? pickInitialFocus(
+        typeof target === 'string' ? target : undefined,
+        { footer: footerControls, body: bodyControls, panel: panelRef.current },
+        (el) => el.closest('[data-destructive]') !== null
+      );
     initial?.focus();
     // Escape listens on the document rather than the panel: a scrim click puts
     // focus on the body, and the key still has to reach the dialog from there.

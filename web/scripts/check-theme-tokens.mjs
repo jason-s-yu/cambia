@@ -141,7 +141,11 @@ console.log(`${SHARED.length} theme-stable tokens checked: ${shared} identical a
 // in", "Creating") without letting it compete with live text.
 //
 // Translucent foregrounds are composited over their ground first, so the
-// on-felt tiers are measured as rendered rather than as declared.
+// on-felt tiers are measured as rendered rather than as declared. A translucent
+// ground is measured the same way once the pair names the opaque surface it is
+// painted on (`over`): the tint is flattened onto that surface, then the text is
+// flattened onto the result. Without an `over` a translucent ground stays a hard
+// failure, since there is nothing to measure it against (cambia-935, F5).
 //
 // --accent-green-hover is the one accent fill left out: no surface pairs text
 // with it (the green accent appears only as an avatar disc), and its dark value
@@ -203,7 +207,37 @@ const PAIRS = [
     { fg: 'text-on-danger', bg: 'accent-danger-hover', min: 4.5, use: 'Cambia call, hovered' },
     { fg: 'text-on-felt-muted', bg: 'surface-felt', min: 4.5, use: 'pile labels and counts' },
     { fg: 'text-disabled', bg: 'surface-disabled', min: 3, use: 'disabled control label (WCAG exempts it; house floor 3:1)' },
-    { fg: 'text-disabled', bg: 'surface-2', min: 3, use: 'disabled text on a raised row (house floor 3:1)' }
+    { fg: 'text-disabled', bg: 'surface-2', min: 3, use: 'disabled text on a raised row (house floor 3:1)' },
+    // The tertiary tier was the one text tier with no pair here, and it sat
+    // under AA in both themes (cambia-935, F4). The three grounds below are the
+    // ones it is drawn on, enumerated rather than bounded: contrast moves in
+    // opposite directions per theme, so --surface-2 is the dark worst case of
+    // the three and --surface-inset the light one, with --surface-0 and
+    // --surface-1 inside that span. The claim stops there. Grounds outside the
+    // list carry no tertiary text: --surface-3 is a button hover fill under
+    // --text-primary, and the two selected grounds sit lighter still in dark,
+    // so the metadata on them steps up to --text-secondary and is measured as
+    // that tier below (cambia-935, R1).
+    { fg: 'text-tertiary', bg: 'surface-1', min: 4.5, use: 'eyebrows and metadata on a card' },
+    { fg: 'text-tertiary', bg: 'surface-2', min: 4.5, use: 'metadata on a raised row (the lightest ground it sits on in dark)' },
+    { fg: 'text-tertiary', bg: 'surface-inset', min: 4.5, use: 'input placeholder (the darkest ground it sits on in light)' },
+    // Tinted fills. A badge lands on a card or on a raised row, so the tint is
+    // measured over both (cambia-935, F5).
+    { fg: 'accent-gold-text', bg: 'accent-gold-soft', over: 'surface-1', min: 4.5, use: 'gold badge label on a card' },
+    { fg: 'accent-gold-text', bg: 'accent-gold-soft', over: 'surface-2', min: 4.5, use: 'gold badge label on a raised row' },
+    { fg: 'text-primary', bg: 'accent-gold-soft', over: 'surface-1', min: 4.5, use: 'selected text (::selection in index.css)' },
+    // Selected grounds. The gold selection tint lands lighter than any neutral
+    // dark surface, which put --text-tertiary at 3.74:1 on the active-turn seat
+    // and 4.14:1 on the own leaderboard row; both now draw their metadata in
+    // --text-secondary (cambia-935, R1). --surface-selected is the tint
+    // flattened onto --surface-2 and painted opaque, so the seat stays solid
+    // over the felt; the leaderboard keeps the tint live over --surface-1.
+    { fg: 'text-primary', bg: 'surface-selected', min: 4.5, use: 'player name on the active-turn seat' },
+    { fg: 'text-secondary', bg: 'surface-selected', min: 4.5, use: 'rating and hand size on the active-turn seat' },
+    { fg: 'accent-gold-text', bg: 'surface-selected', min: 4.5, use: 'the turn label on the active-turn seat' },
+    { fg: 'text-primary', bg: 'interactive-selected', over: 'surface-1', min: 4.5, use: 'own name on the leaderboard row' },
+    { fg: 'text-secondary', bg: 'interactive-selected', over: 'surface-1', min: 4.5, use: 'rank and counts on the own leaderboard row' },
+    { fg: 'accent-gold-text', bg: 'interactive-selected', over: 'surface-1', min: 4.5, use: 'a top-three rank on the own leaderboard row' }
 ];
 
 let contrastFailed = 0;
@@ -213,20 +247,37 @@ for (const theme of ['dark', 'light']) {
     for (const pair of PAIRS) {
         const fgRaw = resolve(map, map['--' + pair.fg]);
         const bgRaw = resolve(map, map['--' + pair.bg]);
+        const overRaw = pair.over ? resolve(map, map['--' + pair.over]) : null;
         const fg = parseColor(fgRaw);
         const bg = parseColor(bgRaw);
-        const label = `${theme.padEnd(5)} ${pair.fg} on ${pair.bg}`;
-        if (!fg || !bg) {
+        const over = pair.over ? parseColor(overRaw) : null;
+        const label = `${theme.padEnd(5)} ${pair.fg} on ${pair.bg}${pair.over ? ` over ${pair.over}` : ''}`;
+        if (!fg || !bg || (pair.over && !over)) {
             contrastFailed++;
-            contrastRows.push(`UNPARSED ${label}  fg=${fgRaw} bg=${bgRaw}`);
+            contrastRows.push(`UNPARSED ${label}  fg=${fgRaw} bg=${bgRaw}${pair.over ? ` over=${overRaw}` : ''}`);
             continue;
         }
+        let ground = bg;
         if (bg[3] !== 1) {
+            if (!over) {
+                contrastFailed++;
+                contrastRows.push(`TRANSLUCENT-BG ${label}  bg=${bgRaw} (a translucent ground needs an \`over\` surface to be measured)`);
+                continue;
+            }
+            if (over[3] !== 1) {
+                contrastFailed++;
+                contrastRows.push(`TRANSLUCENT-OVER ${label}  over=${overRaw} (the surface a tint is flattened onto has to be opaque)`);
+                continue;
+            }
+            ground = [...composite(bg, over), 1];
+        } else if (over) {
+            // An `over` on an opaque ground is a stale declaration, not a
+            // no-op: the pair reads as measured on a tint it no longer has.
             contrastFailed++;
-            contrastRows.push(`TRANSLUCENT-BG ${label}  bg=${bgRaw} (a ground has to be opaque to be measured)`);
+            contrastRows.push(`OPAQUE-BG ${label}  bg=${bgRaw} (\`over\` belongs on a translucent ground only)`);
             continue;
         }
-        const ratio = contrast(fg[3] === 1 ? fg : composite(fg, bg), bg);
+        const ratio = contrast(fg[3] === 1 ? fg : composite(fg, ground), ground);
         const shown = ratio.toFixed(2).padStart(5);
         if (ratio < pair.min) {
             contrastFailed++;

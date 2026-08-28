@@ -60,6 +60,11 @@ interface LbRowProps {
 
 const LbRow: React.FC<LbRowProps> = ({ r, showPeak, you = false }) => {
 	const tier = tierFromRating(r.rating);
+	// The own row is painted --interactive-selected, a gold tint that lands
+	// lighter than the card in dark; --text-tertiary fell to 4.14:1 on it. The
+	// emphasized row steps its metadata up a tier rather than lifting the tier
+	// everywhere it is used (cambia-935, R1).
+	const meta = you ? 'var(--text-secondary)' : 'var(--text-tertiary)';
 	return (
 		<div
 			className={showPeak ? GRID_WITH_PEAK : GRID_NO_PEAK}
@@ -72,7 +77,9 @@ const LbRow: React.FC<LbRowProps> = ({ r, showPeak, you = false }) => {
 				borderRadius: you ? 'var(--ds-radius-md)' : 0
 			}}
 		>
-			<span style={{ fontWeight: 'var(--weight-bold)', fontSize: 'var(--ds-text-sm)', color: r.rank <= 3 ? 'var(--accent-gold)' : 'var(--text-tertiary)' }}>
+			{/* Gold as text takes --accent-gold-text: the fill token measures 2.45:1
+			    on the own row in light, the text token 5.79:1 (cambia-935, R1). */}
+			<span style={{ fontWeight: 'var(--weight-bold)', fontSize: 'var(--ds-text-sm)', color: r.rank <= 3 ? 'var(--accent-gold-text)' : meta }}>
 				#{r.rank}
 			</span>
 			<span style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: 0 }}>
@@ -110,7 +117,7 @@ const LbRow: React.FC<LbRowProps> = ({ r, showPeak, you = false }) => {
 			</span>
 			<span className='flex flex-col items-end gap-0.5 sm:items-start' style={{ fontSize: 'var(--ds-text-sm)' }}>
 				<span style={{ fontWeight: 'var(--weight-medium)' }}>{formatRating(r.rating, r.rd)}</span>
-				<span className='sm:hidden' style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-tertiary)' }}>{r.games} games</span>
+				<span className='sm:hidden' style={{ fontSize: 'var(--text-2xs)', color: meta }}>{r.games} games</span>
 			</span>
 			<span className='hidden sm:block' style={{ fontSize: 'var(--ds-text-sm)', color: 'var(--text-secondary)' }}>{r.games}</span>
 			{showPeak && (
@@ -119,7 +126,7 @@ const LbRow: React.FC<LbRowProps> = ({ r, showPeak, you = false }) => {
 					    say what is missing (cambia-876, DL-5 review F6). */}
 					{r.peak != null
 						? <TierBadge tier={tierFromRating(r.peak)} size='sm' />
-						: <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-tertiary)' }}>none yet</span>}
+						: <span style={{ fontSize: 'var(--text-2xs)', color: meta }}>none yet</span>}
 				</span>
 			)}
 		</div>

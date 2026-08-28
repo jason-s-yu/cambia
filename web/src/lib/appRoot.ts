@@ -8,8 +8,9 @@ export const APP_ROOT_ID = 'root';
 
 /**
  * Resolves the app mount. Returns null and reports it if the element is gone:
- * callers degrade (the modal skips inert), and the console carries the reason
- * rather than the behaviour disappearing without a trace.
+ * callers degrade (the modal skips inert, main.tsx mounts nothing), and the
+ * console carries the reason rather than the behaviour disappearing without a
+ * trace.
  */
 export function getAppRoot(): HTMLElement | null {
   const el = document.getElementById(APP_ROOT_ID);

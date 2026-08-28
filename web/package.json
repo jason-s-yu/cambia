@@ -14,7 +14,8 @@
     "check-copy": "node scripts/check-copy.mjs",
     "test:resend": "node --test scripts/test-resend-decision.mjs",
     "test:snap": "node --test scripts/test-snap-success.mjs",
-    "test": "node --test scripts/test-resend-decision.mjs scripts/test-snap-success.mjs",
+    "test:modal-focus": "node --test scripts/test-modal-focus.mjs",
+    "test": "node --test scripts/test-resend-decision.mjs scripts/test-snap-success.mjs scripts/test-modal-focus.mjs",
     "measure-dev-transfer": "node scripts/measure-dev-transfer.mjs"
   },
   "dependencies": {

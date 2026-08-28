@@ -118,7 +118,12 @@
   /* Text tiers */
   --text-primary: #edf2ef;
   --text-secondary: #a9b8b1;
-  --text-tertiary: #74857d;
+  /* Raised from #74857d, which held AA on the card but fell to 4.17:1 on
+     --surface-2, the lightest neutral ground an eyebrow or a metadata line
+     sits on in dark. 4.77:1 there, 5.22:1 on the card (cambia-935, F4). The
+     selected grounds below sit lighter still; metadata on those steps up to
+     --text-secondary rather than pulling this tier toward it (cambia-935, R1). */
+  --text-tertiary: #7e8f87;
   /* Raised from #4d5b55, which sat at 2.28:1 on the disabled fill. A disabled
      label is still read ("Signing in", "Creating"), so it holds the 3:1 house
      floor while staying a tier below --text-tertiary (cambia-914, DL-8 R8). */
@@ -141,7 +146,8 @@
   /* Opaque form of the selected tint: --interactive-selected flattened onto
      --surface-2. For a resting surface that must stay solid over the felt (the
      active-turn player seat), where a translucent tint muddies against green
-     (cambia-876, DL-4 review F11). */
+     (cambia-876, DL-4 review F11). Lighter than every neutral surface, so text
+     on it starts at --text-secondary (cambia-935, R1). */
   --surface-selected: #2f351f;
   --focus-ring-color: var(--gold-400);
 
@@ -217,7 +223,11 @@
 
   --text-primary: var(--ink-900);
   --text-secondary: var(--ink-700);
-  --text-tertiary: var(--ink-500);
+  /* Darkened from --ink-500 #6b7972, which sat at 4.34:1 on the card and
+     3.63:1 on --surface-inset, the input ground its placeholder is drawn on.
+     4.58:1 there, 5.48:1 on the card. A literal, since the ramp's next step
+     down is --ink-700, the secondary tier (cambia-935, F4). */
+  --text-tertiary: #5b6962;
   /* Darkened from #9aa5a0 (2.02:1 on the disabled fill) to hold the same 3:1
      house floor as the dark tier (cambia-914, DL-8 R8). */
   --text-disabled: #76827b;
@@ -229,12 +239,14 @@
   --border-subtle: rgba(22, 33, 29, 0.09);
   --border-default: rgba(22, 33, 29, 0.17);
   --border-strong: rgba(22, 33, 29, 0.32);
+  /* Ramp gold, not the lifted --accent-gold: see the light gold note below. */
   --border-accent: var(--gold-600);
 
   --interactive-hover: rgba(22, 33, 29, 0.05);
   --interactive-active: rgba(22, 33, 29, 0.1);
   --interactive-selected: rgba(171, 133, 38, 0.14);
   --surface-selected: #f3eee1;
+  /* Ramp gold, not the lifted --accent-gold: see the light gold note below. */
   --focus-ring-color: var(--gold-600);
 
   /* Light gold runs one step brighter than the primitive ramp and moves the
@@ -242,7 +254,15 @@
      darkened on both, which dropped the CTA label (--text-on-gold #241c05) to
      3.35:1 hovered and 2.40:1 pressed, under AA. These three measure 5.68,
      7.09 and 4.79 (cambia-914, DL-8 R8); check-theme-tokens holds the floor.
-     Literals, since the values sit between the ramp's 600 and 500 steps. */
+     Literals, since the values sit between the ramp's 600 and 500 steps.
+
+     The lift stops at the three fills that carry text. Light gold that draws no
+     text (--border-accent, --focus-ring-color, --accent-gold-soft and the
+     --interactive-selected tint) stays on --gold-600, because the requirement
+     there runs the other way: a hairline and a ring are measured against the
+     surface behind them (3:1, WCAG 1.4.11), and lifting them lightens gold
+     toward the paper. --gold-600 measures 3.27:1 on --surface-1 and 3.43:1 on
+     --surface-2, the lifted #b89026 only 2.83 and 2.98 (cambia-935, F3). */
   --accent-gold: #b89026;
   --accent-gold-hover: #cba32e;
   --accent-gold-active: #a98325;

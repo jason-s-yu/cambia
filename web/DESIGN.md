@@ -56,7 +56,7 @@ Text and hairlines drawn directly on the felt cannot use the neutral tiers, whic
 |-|-|-|-|
 |`--text-primary`|`#edf2ef`|`#16211d`|Body copy, headings, values.|
 |`--text-secondary`|`#a9b8b1`|`#3f4d47`|Labels, supporting lines, inactive nav.|
-|`--text-tertiary`|`#74857d`|`#6b7972`|Eyebrows, units, metadata, placeholders.|
+|`--text-tertiary`|`#7e8f87`|`#5b6962`|Eyebrows, units, metadata, placeholders. Holds AA on the card, the raised row and the input ground.|
 |`--text-disabled`|`#63726b`|`#76827b`|Disabled control text. Holds 3:1 on `--surface-disabled` in both themes.|
 |`--text-inverse`|`#0b1210`|`#fbf9f5`|Text on a filled neutral of the opposite theme.|
 |`--text-on-gold`|`#070d0b`|`#241c05`|Text and icons on `--accent-gold`.|
@@ -85,6 +85,8 @@ Text and hairlines drawn directly on the felt cannot use the neutral tiers, whic
 
 Every focusable control shows a focus ring. Keyboard focus falls back to the global `:focus-visible` outline in `index.css`; controls that already own their `box-shadow` (Input, Select) set `--focus-ring` instead.
 
+A dialog takes focus into its panel on open, never onto the close control. Where it lands is the call site's choice (`initialFocus` on `ds/core/Modal`: `confirm`, `dismiss`, `body`, `panel`, or a ref); the default is the first action-row control that is not destructive. The danger button variants carry `data-destructive`, so the rule reads a marker rather than a label or a position.
+
 Press states change color, never position. The previous language translated buttons downward on press; the flat language does not move them.
 
 A disabled control is a neutral fill, never a faded accent: `--surface-disabled` with `--border-default` and `--text-disabled`. Gold at half opacity still reads as the CTA and put its label at 1.15:1 in light. `ds/core/Button` and `common/Button` own this; a ghost control keeps its transparent shell and only drops to `--text-disabled`.
@@ -99,18 +101,26 @@ One family. Gold is the CTA and the highlight; green is the table and the affirm
 |`--accent-gold-hover`|`#dcb84a`|`#cba32e`|Hover fill. Lighter than the resting fill in both themes.|
 |`--accent-gold-active`|`#ab8526`|`#a98325`|Pressed fill. Darker than the resting fill in both themes.|
 |`--accent-gold-soft`|`rgba(201,162,39,.16)`|`rgba(171,133,38,.14)`|Gold-tinted fill behind a badge or selection.|
-|`--accent-gold-text`|`#c9a227`|`#6f5518`|Gold as text: on `--accent-gold-soft`, on a neutral surface (status strip, gold badge, own name in chat). `--accent-gold` is a fill; as light-theme text it sits under 3:1.|
+|`--accent-gold-text`|`#c9a227`|`#6f5518`|Gold as text: on `--accent-gold-soft`, on a neutral surface (status strip, gold badge, own name in chat), on a selected ground (turn label, top-three rank). `--accent-gold` is a fill; as light-theme text it sits under 3:1.|
 |`--accent-green`|`#1a6d49`|`#14563a`|Affirmative fill, ready state.|
 |`--accent-danger`|`#c4362f`|`#a92c26`|Cambia call, destructive action.|
 |`--accent-danger-hover`|`#a92c26`|`#8e2420`|Hover fill. Darker than the resting fill in both themes: `--text-on-danger` is near-white and theme-stable, so contrast comes from a deeper red.|
 
 The light gold trio runs one step brighter than the `--gold-*` ramp and moves the same direction as dark: lighter on hover, darker on press. The earlier light ramp darkened on both, and `--text-on-gold` fell to 3.35:1 on the hover fill and 2.40:1 pressed.
 
+The lift stops at those three fills. Light gold that carries no text stays on the ramp's `--gold-600` `#ab8526`: `--border-accent`, `--focus-ring-color`, `--accent-gold-soft` and the `--interactive-selected` tint. A hairline and a ring are measured against the surface behind them (3:1, WCAG 1.4.11) rather than against a label on top of them, so the two requirements pull opposite ways: `--gold-600` measures 3.27:1 on `--surface-1` and 3.43:1 on `--surface-2`, the lifted `#b89026` only 2.83 and 2.98. Follow the trio with them and the ring loses its edge on paper.
+
 ### Contrast
 
 Every text tier paired with a ground by name above holds AA (4.5:1) in both themes, measured with the WCAG 2.1 relative-luminance formula and, for translucent tiers, on the composited color. The exception is the two disabled pairs, which hold 3:1: WCAG exempts inactive controls, but a disabled label is still read ("Signing in", "Creating"), so the house floor keeps it legible without letting it compete with live text.
 
-`npm run check-tokens` measures the pairs and fails under the floor, and CI runs it after the web build, so a token change that breaks one is visible before merge. The pairs it holds: `--text-on-gold` on each of `--accent-gold`, `--accent-gold-hover`, `--accent-gold-active`; `--text-on-danger` on `--accent-danger` and `--accent-danger-hover`; `--text-on-green` on `--accent-green`; `--text-primary`, `--text-secondary` and `--accent-gold-text` on `--surface-1`; `--text-on-green` and `--text-on-felt-muted` on `--surface-felt`; `--text-disabled` on `--surface-disabled` and `--surface-2`. `--accent-green-hover` is out: nothing draws text on it.
+`npm run check-tokens` measures the pairs and fails under the floor, and CI runs it after the web build, so a token change that breaks one is visible before merge. The pairs it holds: `--text-on-gold` on each of `--accent-gold`, `--accent-gold-hover`, `--accent-gold-active`; `--text-on-danger` on `--accent-danger` and `--accent-danger-hover`; `--text-on-green` on `--accent-green`; `--text-primary`, `--text-secondary` and `--accent-gold-text` on `--surface-1`; `--text-tertiary` on `--surface-1`, `--surface-2` and `--surface-inset`; `--text-on-green` and `--text-on-felt-muted` on `--surface-felt`; `--text-disabled` on `--surface-disabled` and `--surface-2`; `--accent-gold-text` on `--accent-gold-soft` over `--surface-1` and over `--surface-2`, and `--text-primary` on `--accent-gold-soft` over `--surface-1` (the `::selection` fill); `--text-primary`, `--text-secondary` and `--accent-gold-text` on `--surface-selected` and on `--interactive-selected` over `--surface-1`. `--accent-green-hover` is out: nothing draws text on it.
+
+A tinted fill is a ground like any other: the pair names the opaque surface the tint is painted on (`over`), the gate flattens the tint onto it, then flattens the text onto the result. A translucent ground with no `over` named stays a hard failure, so a pair cannot claim a measurement it has no ground for.
+
+The tertiary tier is measured on the three grounds it is drawn on, not on a bound over the whole surface set: contrast moves in opposite directions per theme, so `--surface-2` is the dark worst case of the three and `--surface-inset`, the input fill under a placeholder, the light one, with `--surface-0` and `--surface-1` inside that span. Nothing outside those three draws tertiary text. `--surface-3` is a button hover fill and carries `--text-primary`.
+
+Text on a selected ground steps up a tier. The gold selection tint lands lighter than any neutral dark surface, which put `--text-tertiary` at 3.74:1 on the active-turn seat and 4.14:1 on the own leaderboard row, so metadata on both is `--text-secondary` (6.17:1 and 6.83:1 dark, 7.67:1 and 7.32:1 light). Gold on a selected ground is `--accent-gold-text` for the same reason the badge label is: the fill token measures 2.57:1 there in light.
 
 ### Status
 

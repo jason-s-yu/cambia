@@ -7,12 +7,18 @@ import '@fontsource-variable/archivo/wght.css';
 import './index.css'; // Import Tailwind CSS / global styles
 import 'uplot/dist/uPlot.min.css';
 import { BrowserRouter } from 'react-router-dom';
-import { APP_ROOT_ID } from '@/lib/appRoot';
+import { getAppRoot } from '@/lib/appRoot';
 
-ReactDOM.createRoot(document.getElementById(APP_ROOT_ID)!).render(
-  <React.StrictMode>
-    <BrowserRouter>
-      <App />
-    </BrowserRouter>
-  </React.StrictMode>
-);
+// Through getAppRoot, the same lookup ds/core/Modal uses: a rename in
+// index.html reports which two files disagree instead of throwing React's
+// "Target container is not a DOM element" (cambia-935, F7).
+const mount = getAppRoot();
+if (mount) {
+  ReactDOM.createRoot(mount).render(
+    <React.StrictMode>
+      <BrowserRouter>
+        <App />
+      </BrowserRouter>
+    </React.StrictMode>
+  );
+}

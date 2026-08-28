@@ -98,6 +98,10 @@ const Button: React.FC<ButtonProps> = ({ variant = 'primary', size = 'md', disab
     <button
       onClick={disabled ? undefined : onClick}
       disabled={disabled}
+      // The marker a dialog reads to keep initial focus off a destructive
+      // action (lib/modalFocus, cambia-935 F6). On the element itself, so the
+      // rule holds wherever the button is placed.
+      data-destructive={variant === 'cambia' ? '' : undefined}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => {
         setHover(false);
