@@ -9,6 +9,7 @@
 import React, { useEffect, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useCurrentLobbyStore } from '@/stores/lobbyStore';
+import { leaveLobby as apiLeaveLobby } from '@/services/lobbyService';
 import { useSocket } from '@/hooks/useSocket';
 import { useGameStore, selectGameState } from '@/stores/gameStore';
 import DsLobbyView from '@/components/lobby/DsLobbyView';
@@ -59,8 +60,21 @@ const LobbyPage: React.FC = () => {
 
   const lobbyShortId = useMemo(() => (urlLobbyId ? urlLobbyId.substring(0, 8) : '...'), [urlLobbyId]);
 
-  const handleLeaveLobby = () => {
+  // Deliberate leave: release the server-side membership as well as the local state, so the
+  // lobby stops being offered by GET /lobby/active and is torn down once its last member goes
+  // (cambia-807). The socket closes first, because connecting to a lobby joins it and the
+  // reconnect logic would otherwise re-add the membership this call just released. The request
+  // is best-effort: a 404 (lobby already gone) or 409 (game in progress, where leaving is a
+  // disconnect rather than a membership change) must still take the user back to the dashboard.
+  const handleLeaveLobby = async () => {
     closeSocket();
+    if (urlLobbyId) {
+      try {
+        await apiLeaveLobby(urlLobbyId);
+      } catch {
+        // Already reported by the service layer; navigating away is the point.
+      }
+    }
     leaveLobby();
     navigate('/dashboard', { replace: true });
   };
@@ -71,6 +85,8 @@ const LobbyPage: React.FC = () => {
 
   const shouldRedirectToDash = !isValidLobbyId || (!!storeError && !isStoreLoading && !isConnected);
 
+  // Bounced off a broken or unreachable lobby. Local state only: this is not a deliberate
+  // leave, so the membership stays and the lobby remains resumable once it is reachable again.
   useEffect(() => {
     if (shouldRedirectToDash) {
       if (storeError) clearStoreError();

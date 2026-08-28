@@ -96,12 +96,26 @@ func (l *Lobby) JoinUser(userID uuid.UUID) {
 	}
 }
 
-// RemoveUser removes a user's state and calls OnEmpty if the lobby is empty. Acquires lock.
-func (l *Lobby) RemoveUser(userID uuid.UUID) {
+// RemoveUser releases a user's membership and calls OnEmpty when the last joined member is
+// gone. Acquires lock. Returns false when the user held no membership, in which case nothing
+// was changed and OnEmpty is not fired: a repeated leave must not run teardown twice.
+//
+// This is the deliberate-leave path only (POST /lobby/{id}/leave). A dropped WebSocket must
+// never reach it: membership is what lets a member reconnect and what GET /lobby/active
+// reports as resumable (cambia-783), so a transient disconnect has to leave it intact.
+//
+// Emptiness counts joined members, not map entries. A lobby whose remaining entries are all
+// invitations nobody accepted has no one left to play: the host is auto-invited at creation
+// (cambia-771) and hosts that never connect would otherwise pin a lobby open forever.
+func (l *Lobby) RemoveUser(userID uuid.UUID) bool {
 	l.Mu.Lock()
+	if _, present := l.Users[userID]; !present {
+		l.Mu.Unlock()
+		return false
+	}
 	delete(l.Users, userID)
 	delete(l.ReadyStates, userID)
-	isEmpty := len(l.Users) == 0
+	isEmpty := l.JoinedCount() == 0
 	onEmpty := l.OnEmpty
 	if l.CountdownTimer != nil {
 		l.CancelCountdownUnsafe()
@@ -112,6 +126,7 @@ func (l *Lobby) RemoveUser(userID uuid.UUID) {
 		log.Printf("Lobby %s is now empty. Triggering OnEmpty.", l.ID)
 		onEmpty(l.ID)
 	}
+	return true
 }
 
 // InviteUser marks a user as invited (Users[userID] = false) if not already present.

@@ -111,10 +111,14 @@ type Hub struct {
 	conns   map[uuid.UUID]*Connection // userID → connection
 
 	// alive reports whether Run() is still serving this hub. Set when Run starts, cleared
-	// when it returns (last connection left, Shutdown, or ctx cancel). A dissolved hub stays
-	// registered in the HubStore, so callers outside the Run goroutine need this to tell a
-	// hub that can still answer a reconnect from one that can no longer be resumed.
+	// when it returns (Shutdown or ctx cancel). Callers outside the Run goroutine need this
+	// to tell a hub that can still answer a reconnect from one that can no longer be resumed.
 	alive atomic.Bool
+
+	// OnDissolve is called once, from Run()'s exit path, so the owner can drop this hub from
+	// its registry. A hub that has stopped serving must not stay discoverable: a WebSocket
+	// routed to it would be accepted and then never answered (cambia-808).
+	OnDissolve func(hubID uuid.UUID)
 
 	// Match state (ranked/circuit)
 	QueueID     string
@@ -135,6 +139,10 @@ type Hub struct {
 	leave    chan uuid.UUID
 	incoming chan ClientMsg
 	shutdown chan struct{}
+
+	// shutdownOnce guards close(shutdown): Run()'s exit path closes the channel to release
+	// everything parked on it, and an owner tearing the hub down closes it too.
+	shutdownOnce sync.Once
 }
 
 // NewHub creates a new hub for the given lobby.
@@ -158,10 +166,16 @@ func NewHub(lob *lobby.Lobby) *Hub {
 
 // Run is the hub's main goroutine. It serializes all state access.
 // Call this in its own goroutine.
+//
+// The loop outlives its connections. A hub used to return once its last connection left, which
+// left it registered but unable to answer anything: the next WebSocket to that lobby was
+// accepted and then hung forever (cambia-808). It also threw away state only the hub holds -
+// the phase, the routing to a live CambiaGame, and a ranked match's cumulative scores - which
+// a restarted hub could not reconstruct. The hub now runs for as long as its lobby exists and
+// stops only when the owner tears the lobby down (Shutdown) or the context is cancelled.
 func (h *Hub) Run(ctx context.Context) {
 	h.alive.Store(true)
-	defer h.alive.Store(false)
-	defer h.cleanup()
+	defer h.exit()
 	for {
 		select {
 		case <-ctx.Done():
@@ -173,18 +187,17 @@ func (h *Hub) Run(ctx context.Context) {
 			h.sendLobbyState(conn)
 			h.broadcastLobbyUpdate()
 		case userID := <-h.leave:
+			// Connection-level only: the user keeps their lobby membership, because this fires
+			// for a dropped socket just as it does for a deliberate leave (which releases
+			// membership over HTTP before signalling the hub). See lobby.RemoveUser.
 			h.connsMu.Lock()
 			conn, ok := h.conns[userID]
 			if ok {
 				delete(h.conns, userID)
 			}
-			remaining := len(h.conns)
 			h.connsMu.Unlock()
 			if ok {
 				conn.Close()
-			}
-			if remaining == 0 {
-				return // dissolve hub
 			}
 			h.broadcastLobbyUpdate()
 		case msg := <-h.incoming:
@@ -197,7 +210,22 @@ func (h *Hub) Run(ctx context.Context) {
 	}
 }
 
-// cleanup closes all remaining connections when the hub exits.
+// exit runs on Run()'s way out, in an order the rest of the package depends on: the hub stops
+// being discoverable, then publishes that it is no longer alive, then releases everything
+// parked on it. Join() reads the shutdown channel after handing over a connection, so closing
+// it before cleanup drains the join queue is what guarantees every accepted socket is either
+// served or closed.
+func (h *Hub) exit() {
+	if h.OnDissolve != nil {
+		h.OnDissolve(h.ID)
+	}
+	h.alive.Store(false)
+	h.Shutdown()
+	h.cleanup()
+}
+
+// cleanup closes every connection the hub still owns, including connections that were handed
+// to Join but never registered.
 func (h *Hub) cleanup() {
 	h.connsMu.Lock()
 	conns := make([]*Connection, 0, len(h.conns))
@@ -206,6 +234,17 @@ func (h *Hub) cleanup() {
 	}
 	h.conns = make(map[uuid.UUID]*Connection)
 	h.connsMu.Unlock()
+
+drained:
+	for {
+		select {
+		case conn := <-h.join:
+			conns = append(conns, conn)
+		default:
+			break drained
+		}
+	}
+
 	for _, conn := range conns {
 		conn.Close()
 	}
@@ -266,8 +305,10 @@ func (h *Hub) dispatch(msg ClientMsg) {
 	}
 }
 
-// handleLobbyMsg handles lobby-phase messages (ready, chat, rules, etc.).
-// Runs inside the hub's Run() goroutine — no external lock needed.
+// handleLobbyMsg handles lobby-phase messages (ready, chat, rules, etc.). Runs inside the hub's
+// Run() goroutine, so hub state needs no lock, but the lobby does: its Users, ReadyStates and
+// rules are shared with the HTTP handlers that join, leave and search on their own goroutines,
+// and the lobby's *Unsafe methods assume the caller holds Lobby.Mu.
 func (h *Hub) handleLobbyMsg(msg ClientMsg) {
 	conn := h.getConn(msg.UserID)
 	if conn == nil {
@@ -276,16 +317,20 @@ func (h *Hub) handleLobbyMsg(msg ClientMsg) {
 
 	switch msg.Type {
 	case "ready":
-		// MarkUserReady returns true only when every joined user is ready and the lobby is
+		// MarkUserReadyUnsafe returns true only when every joined user is ready and the lobby is
 		// set to auto-start: that is the signal to begin the countdown to game creation.
-		allReadyAutoStart := h.Lobby.MarkUserReady(msg.UserID)
+		h.Lobby.Mu.Lock()
+		allReadyAutoStart := h.Lobby.MarkUserReadyUnsafe(msg.UserID)
+		h.Lobby.Mu.Unlock()
 		h.broadcastLobbyUpdate()
 		if allReadyAutoStart {
 			h.beginCountdown()
 		}
 
 	case "unready":
-		h.Lobby.MarkUserUnready(msg.UserID)
+		h.Lobby.Mu.Lock()
+		h.Lobby.MarkUserUnreadyUnsafe(msg.UserID)
+		h.Lobby.Mu.Unlock()
 		// Unreadying during the countdown aborts the pending start: the scheduled _begin_game
 		// then no-ops because the phase is no longer countdown.
 		if h.Phase == PhaseCountdown {
@@ -307,11 +352,15 @@ func (h *Hub) handleLobbyMsg(msg ClientMsg) {
 			conn.SendEnvelope(h.errEnvelope("invalid userID format"))
 			return
 		}
+		h.Lobby.Mu.Lock()
 		h.Lobby.InviteUser(targetID)
+		h.Lobby.Mu.Unlock()
 
-	case "leave_lobby":
-		// Enqueue a leave; hub will handle removal in the main select.
-		h.leave <- msg.UserID
+	// No leave here on purpose. Leaving a lobby releases membership, and membership must not
+	// be released by anything a lost socket can also trigger; a client that sent a leave frame
+	// and closed its socket in the same breath would also race its own disconnect through this
+	// loop. POST /lobby/{id}/leave owns the deliberate leave, on the same surface that granted
+	// membership in the first place (cambia-807).
 
 	case "chat":
 		var payload struct {
@@ -338,7 +387,10 @@ func (h *Hub) handleLobbyMsg(msg ClientMsg) {
 			conn.SendEnvelope(h.errEnvelope("invalid update_rules payload"))
 			return
 		}
-		if err := h.Lobby.UpdateUnsafe(payload.Rules); err != nil {
+		h.Lobby.Mu.Lock()
+		err := h.Lobby.UpdateUnsafe(payload.Rules)
+		h.Lobby.Mu.Unlock()
+		if err != nil {
 			log.Printf("hub %s: UpdateUnsafe error: %v", h.ID, err)
 			conn.SendEnvelope(h.errEnvelope("failed to apply rule updates"))
 		}
@@ -796,26 +848,18 @@ func (h *Hub) connUserIDs() []uuid.UUID {
 	return ids
 }
 
-// buildLobbySnapshot builds a JSON-friendly lobby state payload for the given user.
-// Must be called from within the Run() goroutine (no lock needed on hub state).
+// buildLobbySnapshot builds a JSON-friendly lobby state payload for the given user. Hub fields
+// are read unlocked because this runs in the Run() goroutine that owns them; the lobby is not
+// hub-owned, so every lobby field is read under its lock. The HTTP handlers write that state
+// from their own goroutines - joining, leaving (cambia-807) and searching all mutate the same
+// maps - and iterating lob.Users unlocked against a concurrent delete is a fatal map fault, not
+// a stale read. The connection lookups that enrich the roster run after the lobby lock is
+// released, so the two locks are taken in sequence and never nested.
 func (h *Hub) buildLobbySnapshot(forUserID uuid.UUID) map[string]interface{} {
 	lob := h.Lobby
+
+	lob.Mu.Lock()
 	lobbyStatus := lob.GetLobbyStatusPayloadUnsafe()
-
-	// Enrich user entries with username from connections
-	if users, ok := lobbyStatus["users"].([]map[string]interface{}); ok {
-		for _, u := range users {
-			if uidStr, ok := u["id"].(string); ok {
-				uid, err := uuid.Parse(uidStr)
-				if err == nil {
-					if conn := h.getConn(uid); conn != nil {
-						u["username"] = conn.Username
-					}
-				}
-			}
-		}
-	}
-
 	snapshot := map[string]interface{}{
 		"lobby_id":     lob.ID.String(),
 		"host_id":      lob.HostUserID.String(),
@@ -830,6 +874,22 @@ func (h *Hub) buildLobbySnapshot(forUserID uuid.UUID) map[string]interface{} {
 		"phase":        h.Phase.String(),
 		"your_id":      forUserID.String(),
 		"your_is_host": forUserID == lob.HostUserID,
+	}
+	lob.Mu.Unlock()
+
+	// Enrich user entries with username from connections. lobbyStatus is freshly built above
+	// and owned by this call, so it is safe to fill in after the lobby lock is released.
+	if users, ok := lobbyStatus["users"].([]map[string]interface{}); ok {
+		for _, u := range users {
+			if uidStr, ok := u["id"].(string); ok {
+				uid, err := uuid.Parse(uidStr)
+				if err == nil {
+					if conn := h.getConn(uid); conn != nil {
+						u["username"] = conn.Username
+					}
+				}
+			}
+		}
 	}
 
 	if h.IsRanked && h.TotalRounds > 1 {
@@ -893,25 +953,45 @@ func (h *Hub) errEnvelope(msg string) Envelope {
 	return Envelope{Seq: atomic.LoadUint64(&h.seq), Type: "error", Payload: raw}
 }
 
-// Join sends a Connection to the hub's join channel.
+// Join hands a Connection to the hub's Run loop, or closes it if this hub has stopped. Never
+// parks a connection on a hub that will not serve it: that hang is the failure cambia-808 is
+// about. The post-handover check covers the narrow window where Run exits between the send and
+// the return - exit() closes the shutdown channel before cleanup drains the join queue, so a
+// connection this sees as shut down is either already closed by cleanup or closed here, and
+// closing a connection twice is harmless.
 func (h *Hub) Join(conn *Connection) {
-	h.join <- conn
+	select {
+	case h.join <- conn:
+	case <-h.shutdown:
+		conn.Close()
+		return
+	}
+	select {
+	case <-h.shutdown:
+		conn.Close()
+	default:
+	}
 }
 
-// Leave sends a userID to the hub's leave channel.
+// Leave asks the hub to drop userID's connection. It does not touch lobby membership: this
+// fires for a dropped socket as well as a deliberate leave. Returns as soon as the hub has
+// stopped, so a WebSocket handler goroutine never parks on a hub that is gone.
 func (h *Hub) Leave(userID uuid.UUID) {
-	h.leave <- userID
+	select {
+	case h.leave <- userID:
+	case <-h.shutdown:
+	}
 }
 
-// Shutdown signals the hub to stop.
+// Shutdown signals the hub to stop. Idempotent: the owner tearing a lobby down and Run()'s own
+// exit path both close the channel, and a second close would panic.
 func (h *Hub) Shutdown() {
-	close(h.shutdown)
+	h.shutdownOnce.Do(func() { close(h.shutdown) })
 }
 
 // Alive reports whether the Run() loop is still serving this hub. Safe to call from any
-// goroutine. False for a hub whose Run() has returned (it dissolves when its last connection
-// leaves) and for one that was never started, i.e. a hub that would accept a WebSocket without
-// ever answering it.
+// goroutine. False for a hub whose Run() has returned (its lobby was torn down) and for one
+// that was never started, i.e. a hub that would accept a WebSocket without ever answering it.
 func (h *Hub) Alive() bool {
 	return h.alive.Load()
 }

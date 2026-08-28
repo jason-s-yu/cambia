@@ -117,7 +117,7 @@ func main() {
 		handlers.ActiveSessionHandler(srv),
 	)))
 
-	// lobby action router (join, search)
+	// lobby action router (join, leave, search)
 	mux.Handle("/lobby/", middleware.LogMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 		if len(parts) >= 3 {
@@ -133,6 +133,9 @@ func main() {
 				return
 			case "join":
 				handlers.JoinLobbyHandler(srv)(w, r)
+				return
+			case "leave":
+				handlers.LeaveLobbyHandler(srv)(w, r)
 				return
 			}
 		}

@@ -32,9 +32,14 @@ func HubWSHandler(logger *logrus.Logger, gs *GameServer) http.HandlerFunc {
 			return
 		}
 
-		// 2. Look up hub from HubStore
-		h, exists := gs.HubStore.GetHub(lobbyID)
-		if !exists {
+		// 2. Look up the lobby, then its hub. The lobby store is the authority on whether this
+		// URL still means anything: a teardown deletes the lobby before it stops the hub, and a
+		// hub deregisters itself the moment its Run loop exits (cambia-808), so a lobby id that
+		// resolves to a registered hub here is one that can still be served. A stale URL gets a
+		// 404 refusal instead of an accepted socket nobody answers.
+		lob, lobbyExists := gs.LobbyStore.GetLobby(lobbyID)
+		h, hubExists := gs.HubStore.GetHub(lobbyID)
+		if !lobbyExists || !hubExists {
 			http.Error(w, "lobby not found", http.StatusNotFound)
 			return
 		}
@@ -47,15 +52,17 @@ func HubWSHandler(logger *logrus.Logger, gs *GameServer) http.HandlerFunc {
 			return
 		}
 
-		// 4. Check private lobby access
-		lob := h.Lobby
+		// 4. Check private lobby access. The host passes regardless of the membership map: they
+		// own the lobby, and leaving their own private lobby (cambia-807) drops the entry that
+		// the auto-invite at creation put there (cambia-771), which would otherwise lock them
+		// out of a lobby other members are still sitting in.
 		lob.Mu.Lock()
 		_, isInUsers := lob.Users[userID]
 		lobType := lob.Type
 		isHost := lob.HostUserID == userID
 		lob.Mu.Unlock()
 
-		if lobType == "private" && !isInUsers {
+		if lobType == "private" && !isInUsers && !isHost {
 			http.Error(w, "not invited to private lobby", http.StatusForbidden)
 			return
 		}
@@ -71,7 +78,10 @@ func HubWSHandler(logger *logrus.Logger, gs *GameServer) http.HandlerFunc {
 		// 6. Fetch username (fallback to short UUID prefix)
 		username := hubFetchUsername(userID)
 
-		// 7. Add user to lobby's Users map if not present, then create Connection
+		// 7. Connecting joins the lobby: it upgrades an invite to a joined membership and is how
+		// a public lobby is entered without a prior POST /lobby/{id}/join. A client that has
+		// just left must therefore close its socket before releasing membership, or its own
+		// reconnect would hand the membership straight back (see the web client's leave path).
 		lob.Mu.Lock()
 		if lob.Users == nil {
 			lob.Users = make(map[uuid.UUID]bool)
@@ -93,7 +103,9 @@ func HubWSHandler(logger *logrus.Logger, gs *GameServer) http.HandlerFunc {
 		// 10. Run read pump (blocks until disconnect or context done)
 		conn.ReadPump(ctx, h.Incoming())
 
-		// 11. Cleanup
+		// 11. Cleanup. Connection-level only: the user stays a lobby member, so a dropped socket
+		// or a closed tab can reconnect and still shows up in GET /lobby/active (cambia-783).
+		// Only POST /lobby/{id}/leave releases membership.
 		logger.Infof("ws: user %s disconnected from hub %s", userID, lobbyID)
 		h.Leave(userID)
 		cancel()
