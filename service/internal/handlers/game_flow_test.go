@@ -90,6 +90,17 @@ func (c *wsTestClient) send(msgType string) {
 	}
 }
 
+// sendStale writes a message carrying an explicitly stale last_seq (always 0), forcing the
+// hub's staleness gate (dispatch's `msg.LastSeq < h.seq && h.seq > 0` check) to reply with a
+// private sync_state repair frame regardless of what this client has actually observed. Used by
+// tests that want a sync_state frame on demand rather than waiting for a real desync.
+func (c *wsTestClient) sendStale(msgType string) {
+	frame, _ := json.Marshal(map[string]interface{}{"type": msgType, "last_seq": 0})
+	if err := c.conn.Write(c.ctx, websocket.MessageText, frame); err != nil {
+		c.t.Fatalf("ws stale write %q: %v", msgType, err)
+	}
+}
+
 // sendReliable sends a message and, if the hub bounces it with a sync_state (the client's echoed
 // seq trailed the global counter, which a broadcast landing between the client's last frame and
 // its send is enough to do), updates its seq from that snapshot and retries. This mirrors how a
