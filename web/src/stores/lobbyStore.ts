@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // src/stores/lobbyStore.ts
 import { create } from 'zustand';
-import type { LobbyState, ChatMessage, CircuitSettings, User, LobbyUser, MatchState, LobbyListEntry } from '@/types/index';
+import type { LobbyState, ChatMessage, User, LobbyUser, MatchState, LobbyListEntry } from '@/types/index';
 import { listLobbies, createLobby as apiCreateLobby } from '@/services/lobbyService';
 import { useAuthStore } from './authStore';
 import { NIL as NIL_UUID } from 'uuid';
@@ -243,27 +243,6 @@ export const useCurrentLobbyStore = create<CurrentLobbyState>((set, get) => ({
 						return phaseUpdate;
 					}
 
-					case 'lobby_update': {
-						if (!newLobbyDetails) return {};
-						const newUsersUpdate = mapLobbyUsers(message.lobby_status?.users);
-						const newLobbyStatusUpdate = { users: newUsersUpdate };
-						const updatedLobbySettings = message.settings ?? newLobbyDetails.lobbySettings;
-
-						const updatedDetails: LobbyState = {
-							...newLobbyDetails,
-							lobby_status: newLobbyStatusUpdate,
-							hostUserID: message.host_id ?? newLobbyDetails.hostUserID,
-							host_id: message.host_id ?? newLobbyDetails.host_id,
-							your_is_host: message.host_id ? (newLobbyDetails.your_id === message.host_id) : newLobbyDetails.your_is_host,
-							lobbySettings: updatedLobbySettings,
-							settings: message.settings ?? newLobbyDetails.settings
-						};
-						if (!deepEqual(state.lobbyDetails, updatedDetails)) {
-							return { lobbyDetails: updatedDetails };
-						}
-						return {};
-					}
-
 					case 'phase_change': {
 						const newPhase = message.phase as LobbyPhase;
 						if (newPhase && newPhase !== state.phase) {
@@ -281,69 +260,6 @@ export const useCurrentLobbyStore = create<CurrentLobbyState>((set, get) => ({
 							}
 							return updates;
 						}
-						return {};
-					}
-
-					case 'ready_update': {
-						if (!newLobbyDetails?.lobby_status?.users) return {};
-						let changed = false;
-						const newUsersReady = newLobbyDetails.lobby_status.users.map(u => {
-							if (u.id === message.user_id) {
-								if (u.is_ready !== message.is_ready) {
-									changed = true;
-									return { ...u, is_ready: message.is_ready, username: message.username || u.username };
-								}
-							}
-							return u;
-						});
-						if (changed) {
-							return {
-								lobbyDetails: {
-									...newLobbyDetails,
-									lobby_status: { users: newUsersReady }
-								},
-								countdownStartTime: message.is_ready ? state.countdownStartTime : null,
-								countdownDuration: message.is_ready ? state.countdownDuration : null
-							};
-						}
-						return {};
-					}
-
-					case 'lobby_rules_updated': {
-						if (!newLobbyDetails) return {};
-						if (!message.rules || typeof message.rules !== 'object') return {};
-
-						const incomingRules = message.rules;
-						const incomingHouseRules = incomingRules.house_rules || {};
-						const incomingCircuit = incomingRules.circuit || {};
-						const incomingSettings = incomingRules.settings || {};
-
-						const potentialDetails: LobbyState = { ...newLobbyDetails };
-						let updated = false;
-
-						const updatedHouseRules = { ...potentialDetails.houseRules, ...incomingHouseRules };
-						if (!deepEqual(potentialDetails.houseRules, updatedHouseRules)) {
-							potentialDetails.houseRules = updatedHouseRules;
-							updated = true;
-						}
-
-						const updatedCircuit: CircuitSettings = { ...potentialDetails.circuit, ...incomingCircuit };
-						if (incomingCircuit.rules) {
-							updatedCircuit.rules = { ...(potentialDetails.circuit?.rules || {}), ...incomingCircuit.rules };
-						}
-						if (!deepEqual(potentialDetails.circuit, updatedCircuit)) {
-							potentialDetails.circuit = updatedCircuit;
-							updated = true;
-						}
-
-						const updatedSettings = { ...(potentialDetails.lobbySettings || {}), ...incomingSettings };
-						if (!deepEqual(potentialDetails.lobbySettings, updatedSettings)) {
-							potentialDetails.lobbySettings = updatedSettings;
-							potentialDetails.settings = updatedSettings;
-							updated = true;
-						}
-
-						if (updated) return { lobbyDetails: potentialDetails };
 						return {};
 					}
 
@@ -382,23 +298,6 @@ export const useCurrentLobbyStore = create<CurrentLobbyState>((set, get) => ({
 						}
 						return {};
 					}
-
-					case 'lobby_countdown_start': {
-						const duration = typeof message.seconds === 'number' ? message.seconds : 0;
-						return {
-							countdownStartTime: Date.now(),
-							countdownDuration: duration
-						};
-					}
-					case 'lobby_countdown_cancel': {
-						return {
-							countdownStartTime: null,
-							countdownDuration: null
-						};
-					}
-
-					case 'lobby_invite':
-						return {};
 
 					case 'search_status': {
 						const searching = message.searching === true;
@@ -475,8 +374,8 @@ export const useCurrentLobbyStore = create<CurrentLobbyState>((set, get) => ({
 						// phase locally with no resync, so without this the next lobby view would keep
 						// serving stale pre-game ready state. Fields sit at the top level of the
 						// envelope payload (plain hub.Emit map, not a GameEvent wrapper), matching
-						// lobby_state/lobby_update above rather than the nested payload.payload
-						// convention used by GameEvent-sourced messages.
+						// lobby_state above rather than the nested payload.payload convention used
+						// by GameEvent-sourced messages.
 						const updates: Partial<CurrentLobbyState> = { phase: 'post_game' as LobbyPhase };
 						if (newLobbyDetails && message.lobby_status) {
 							updates.lobbyDetails = {
