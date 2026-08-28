@@ -1,46 +1,35 @@
 import React from 'react';
 
 interface LoadingSpinnerProps {
-    size?: 'sm' | 'md' | 'lg';
-    color?: string;
-    className?: string;
+  size?: 'sm' | 'md' | 'lg';
+  /** Tailwind text color class for the arc; defaults to the gold accent. */
+  color?: string;
+  className?: string;
 }
 
-const LoadingSpinner: React.FC<LoadingSpinnerProps> = ({
-    size = 'md',
-    color = 'text-blue-600 dark:text-blue-400',
-    className = ''
-}) => {
-    const sizeClasses = {
-        sm: 'h-5 w-5',
-        md: 'h-8 w-8',
-        lg: 'h-12 w-12'
-    };
+const SIZE_PX: Record<NonNullable<LoadingSpinnerProps['size']>, number> = { sm: 20, md: 32, lg: 48 };
 
-    return (
-        <svg
-            className={`animate-spin ${sizeClasses[size]} ${color} ${className}`}
-            xmlns="http://www.w3.org/2000/svg"
-            fill="none"
-            viewBox="0 0 24 24"
-            aria-label="Loading..."
-            role="status"
-        >
-            <circle
-                className="opacity-25"
-                cx="12"
-                cy="12"
-                r="10"
-                stroke="currentColor"
-                strokeWidth="4"
-            ></circle>
-            <path
-                className="opacity-75"
-                fill="currentColor"
-                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-            ></path>
-        </svg>
-    );
+/**
+ * Loading spinner: a 1px-track ring with a gold arc, the same drawing as
+ * ds/core/Spinner, kept under this legacy name and class-based API for the
+ * route guards and pages that already use it. Uses the ds-spin keyframe
+ * declared in styles/design-tokens.css.
+ */
+const LoadingSpinner: React.FC<LoadingSpinnerProps> = ({ size = 'md', color = 'text-accent-gold', className = '' }) => {
+  const px = SIZE_PX[size] || SIZE_PX.md;
+  return (
+    <span
+      role='status'
+      aria-label='Loading'
+      className={`inline-block rounded-full border-border-default border-t-current ${color} ${className}`}
+      style={{
+        width: px,
+        height: px,
+        borderWidth: Math.max(2, Math.round(px / 10)),
+        animation: 'ds-spin 0.9s linear infinite'
+      }}
+    />
+  );
 };
 
 export default LoadingSpinner;

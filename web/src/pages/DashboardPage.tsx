@@ -5,6 +5,7 @@ import Button from '@/components/ds/core/Button';
 import Badge from '@/components/ds/core/Badge';
 import Modal from '@/components/ds/core/Modal';
 import Select from '@/components/ds/core/Select';
+import Spinner from '@/components/ds/core/Spinner';
 import QueueCard from '@/components/ds/data/QueueCard';
 import TierBadge from '@/components/ds/data/TierBadge';
 import StatRow from '@/components/ds/data/StatRow';
@@ -18,7 +19,7 @@ import { joinLobby as apiJoinPublicLobby, getActiveSession } from '@/services/lo
 import type { QueueInfo } from '@/services/matchmakingService';
 import type { ActiveSession, ApiErrorResponse, LobbyState } from '@/types';
 import { gameModeLabel } from '@/utils/gameMode';
-import { tierFromRating } from '@/utils/ratingPool';
+import { ratingPoolLabel, tierFromRating } from '@/utils/ratingPool';
 
 /** Queues considered "flagship" for the primary/highlighted card treatment. */
 const PRIMARY_QUEUE_IDS = new Set(['h2h_rapid', 'ffa4_standard']);
@@ -38,11 +39,20 @@ function lobbyFallbackName(lobbyId: string): string {
   return `Lobby ${lobbyId.substring(0, 6)}`;
 }
 
+/** Secondary-tier inline notice (loading, empty) under a panel title. */
+const Note: React.FC<{ children: React.ReactNode; style?: React.CSSProperties }> = ({ children, style }) => (
+  <p style={{ margin: 0, color: 'var(--text-tertiary)', fontSize: 'var(--ds-text-sm)', ...style }}>{children}</p>
+);
+
+/** Inline error line in the danger status color. */
+const ErrorLine: React.FC<{ children: React.ReactNode; style?: React.CSSProperties }> = ({ children, style }) => (
+  <p role='alert' style={{ margin: 0, color: 'var(--status-danger)', fontSize: 'var(--ds-text-sm)', ...style }}>{children}</p>
+);
+
 /**
- * Design-system home screen (cambia-483), wired to real data in place of the
- * pages/ds/HomeScreen.tsx preview mocks: matchmaking queues + join/search
- * flow (queueStore), public lobbies (useLobbyListStore), friends
- * (friendsStore) and the authenticated user's ratings (authStore).
+ * Home screen (cambia-483), wired to real data: matchmaking queues +
+ * join/search flow (queueStore), public lobbies (useLobbyListStore), friends
+ * (friendsStore) and the authenticated user's ratings (historyStore).
  */
 const DashboardPage: React.FC = () => {
   const navigate = useNavigate();
@@ -51,6 +61,7 @@ const DashboardPage: React.FC = () => {
   // for the whole authenticated app); this reads that shared state rather
   // than fetching again.
   const ratings = useHistoryStore((state) => state.ratings);
+  const ratingsError = useHistoryStore((state) => state.ratingsError);
 
   const queues = useQueueStore((state) => state.queues);
   const queuesLoading = useQueueStore((state) => state.isLoading);
@@ -161,7 +172,7 @@ const DashboardPage: React.FC = () => {
       const settings: Partial<LobbyState> = { type: createLobbyType, gameMode: createGameMode };
       const lobbyId = await createAndJoinLobby(settings);
       if (!lobbyId) {
-        setCreateError('Failed to create lobby.');
+        setCreateError('Could not create the lobby.');
       }
       // Navigation on success is handled by the effect above.
     } finally {
@@ -184,7 +195,7 @@ const DashboardPage: React.FC = () => {
       navigate(`/lobby/${lobbyId}`);
     } catch (err) {
       const error = err as AxiosError<ApiErrorResponse>;
-      setJoinLobbyError(error.response?.data?.message || error.message || 'Failed to join lobby.');
+      setJoinLobbyError(error.response?.data?.message || error.message || 'Could not join the lobby.');
     }
   }, [navigate]);
 
@@ -200,17 +211,14 @@ const DashboardPage: React.FC = () => {
   // in the pool shows 'Unrated' rather than a fake number.
   const headlinePool = ratings?.pools.find((p) => p.pool === '1v1') ?? null;
   const hasHeadline = !!headlinePool && headlinePool.games > 0;
-  const ratingValue = hasHeadline ? `${Math.round(headlinePool!.rating)}` : 'Unrated';
-  const ratingBand = hasHeadline ? `± ${Math.round(headlinePool!.rd)}` : '';
 
   // OpenSkill is circuit-wide (not per-pool); gate on lifetime record games,
   // matching DsRatingSummary's neverPlayed check, and format to 2 decimals
   // the same way the profile does.
   const neverPlayed = !ratings || ratings.record.games === 0;
-  const ffaValue = neverPlayed ? 'Unrated' : ratings!.openSkill.mu.toFixed(2);
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 20, padding: 22, maxWidth: 1240, margin: '0 auto', width: '100%' }}>
+    <div className='grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_320px] gap-5 p-4 sm:p-[22px] max-w-[1240px] mx-auto w-full'>
       {activeSession && !resumeDismissed && (
         <div style={{ gridColumn: '1 / -1' }}>
           <DsResumeBanner
@@ -223,14 +231,16 @@ const DashboardPage: React.FC = () => {
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 20, minWidth: 0 }}>
         <div>
-          <h1 style={{ margin: 0, fontFamily: 'var(--font-display)', fontSize: 'var(--ds-text-3xl)', fontWeight: 'var(--weight-regular)', lineHeight: 'var(--ds-leading-tight)' }}>Lowest score wins.</h1>
-          <p style={{ margin: '6px 0 0', color: 'var(--text-secondary)', fontSize: 'var(--text-md)' }}>Pick a queue — the forest remembers your discards.</p>
+          <h1 style={{ margin: 0, fontSize: 'var(--ds-text-3xl)', fontWeight: 'var(--weight-bold)', letterSpacing: 'var(--ds-tracking-tight)', lineHeight: 'var(--ds-leading-tight)' }}>
+            Lowest score wins.
+          </h1>
+          <p style={{ margin: '6px 0 0', color: 'var(--text-secondary)', fontSize: 'var(--text-md)' }}>Pick a queue or open a lobby.</p>
         </div>
 
-        {queuesError && <p style={{ margin: 0, color: 'var(--berry-400)', fontSize: 'var(--ds-text-sm)' }}>{queuesError}</p>}
-        {queuesLoading && queues.length === 0 && <p style={{ margin: 0, color: 'var(--text-tertiary)', fontSize: 'var(--ds-text-sm)' }}>Loading queues...</p>}
+        {queuesError && <ErrorLine>{queuesError}</ErrorLine>}
+        {queuesLoading && queues.length === 0 && <Spinner label='Loading queues' />}
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 14 }}>
+        <div className='grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3.5'>
           {queues.map((queue) => {
             const isSearchingThis = searchingQueueId === queue.queueId;
             const disabled = !!searchingQueueId && !isSearchingThis;
@@ -239,21 +249,20 @@ const DashboardPage: React.FC = () => {
                 <div
                   key={queue.queueId}
                   style={{
-                    background: 'var(--surface-card)',
-                    border: '1.5px solid var(--border-default)',
+                    background: 'var(--surface-1)',
+                    border: '1px solid var(--border-strong)',
                     borderRadius: 'var(--ds-radius-lg)',
-                    boxShadow: 'var(--shadow-card)',
-                    padding: '16px 18px',
+                    padding: 'var(--space-4) var(--space-5)',
                     display: 'flex',
                     flexDirection: 'column',
                     gap: 10
                   }}
                 >
                   <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
-                    <div style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--ds-text-xl)', lineHeight: 1.15 }}>{queue.name}</div>
-                    <Badge tone='info'>Searching</Badge>
+                    <div style={{ fontSize: 'var(--ds-text-lg)', fontWeight: 'var(--weight-bold)', letterSpacing: 'var(--ds-tracking-tight)', lineHeight: 'var(--ds-leading-tight)' }}>{queue.name}</div>
+                    <Badge tone='info' dot>Searching</Badge>
                   </div>
-                  <div style={{ fontFamily: 'var(--ds-font-mono)', fontSize: 'var(--ds-text-xs)', color: 'var(--text-secondary)' }}>
+                  <div style={{ fontSize: 'var(--ds-text-xs)', fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
                     {Math.floor(searchElapsed / 60)}:{String(searchElapsed % 60).padStart(2, '0')} elapsed
                   </div>
                   <Button variant='cambia' fullWidth onClick={handleCancelSearch}>
@@ -281,11 +290,11 @@ const DashboardPage: React.FC = () => {
         </div>
 
         <Panel title='Public lobbies' action={<Button size='sm' onClick={handleOpenCreate}>Create lobby</Button>}>
-          {lobbiesError && <p style={{ margin: '0 0 8px', color: 'var(--berry-400)', fontSize: 'var(--ds-text-sm)' }}>{lobbiesError}</p>}
-          {joinLobbyError && <p style={{ margin: '0 0 8px', color: 'var(--berry-400)', fontSize: 'var(--ds-text-sm)' }}>{joinLobbyError}</p>}
-          {lobbiesLoading && publicLobbies.length === 0 && <p style={{ margin: 0, color: 'var(--text-tertiary)', fontSize: 'var(--ds-text-sm)' }}>Loading lobbies...</p>}
+          {lobbiesError && <ErrorLine style={{ marginBottom: 8 }}>{lobbiesError}</ErrorLine>}
+          {joinLobbyError && <ErrorLine style={{ marginBottom: 8 }}>{joinLobbyError}</ErrorLine>}
+          {lobbiesLoading && publicLobbies.length === 0 && <Note>Loading lobbies</Note>}
           {!lobbiesLoading && publicLobbies.length === 0 && !lobbiesError && (
-            <p style={{ margin: 0, color: 'var(--text-tertiary)', fontSize: 'var(--ds-text-sm)' }}>No public lobbies right now. Start one.</p>
+            <Note>No public lobbies right now. Start one.</Note>
           )}
           <div style={{ display: 'flex', flexDirection: 'column' }}>
             {publicLobbies.map(([lobbyId, entry], i) => {
@@ -293,10 +302,10 @@ const DashboardPage: React.FC = () => {
               const displayName = entry.name || lobbyFallbackName(lobbyId);
               const full = entry.playerCount >= entry.maxPlayers;
               return (
-                <div key={lobbyId} style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '10px 2px', borderTop: i ? '1px solid var(--border-subtle)' : 'none' }}>
+                <div key={lobbyId} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 2px', borderTop: i ? '1px solid var(--border-subtle)' : 'none' }}>
                   <span style={{ fontWeight: 'var(--weight-bold)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayName}</span>
                   <Badge>{gameModeLabel(lobby?.gameMode)}</Badge>
-                  <span style={{ fontFamily: 'var(--ds-font-mono)', fontSize: 'var(--ds-text-xs)', color: 'var(--text-secondary)', width: 42, textAlign: 'right' }}>
+                  <span style={{ fontSize: 'var(--ds-text-xs)', fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)', minWidth: 30, textAlign: 'right', whiteSpace: 'nowrap' }}>
                     {entry.playerCount}/{entry.maxPlayers}
                   </span>
                   <Button size='sm' variant='secondary' disabled={full} onClick={() => handleJoinPublicLobby(lobbyId)}>
@@ -309,34 +318,70 @@ const DashboardPage: React.FC = () => {
         </Panel>
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 20, minWidth: 0 }}>
         <Panel title='Your ratings'>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-            {hasHeadline
-              ? <TierBadge tier={tierFromRating(headlinePool!.rating)} />
-              : <Badge tone='neutral'>unranked</Badge>}
-            <span style={{ fontFamily: 'var(--ds-font-mono)', fontWeight: 'var(--weight-bold)', fontSize: 'var(--ds-text-lg)' }}>{ratingValue} {ratingBand && <span style={{ color: 'var(--text-tertiary)', fontSize: 'var(--ds-text-xs)' }}>{ratingBand}</span>}</span>
-          </div>
-          <StatRow label='H2H Ranked · Glicko-2' value={ratingValue} delta='+12' />
-          <StatRow label='FFA-4 Ranked · OpenSkill' value={ffaValue} unit='7/10 games' />
-          <StatRow label='Season peak' value='Gold II' />
-          <p style={{ margin: '10px 0 0', fontSize: 'var(--ds-text-xs)', color: 'var(--text-tertiary)' }}>Season 4 ends in 23 days. Peak tier is kept as a badge.</p>
+          {!ratings && ratingsError && <Note>{ratingsError}</Note>}
+          {!ratings && !ratingsError && (
+            <div style={{ display: 'flex', justifyContent: 'center', padding: '12px 0' }}>
+              <Spinner label='Loading ratings' />
+            </div>
+          )}
+          {ratings && (
+            <>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 6 }}>
+                {hasHeadline
+                  ? <TierBadge tier={tierFromRating(headlinePool!.rating)} />
+                  : <Badge tone='neutral'>Unranked</Badge>}
+                <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 6, fontVariantNumeric: 'tabular-nums' }}>
+                  <span style={{ fontWeight: 'var(--weight-black)', fontSize: 'var(--ds-text-2xl)', letterSpacing: 'var(--ds-tracking-tight)', lineHeight: 1 }}>
+                    {hasHeadline ? Math.round(headlinePool!.rating) : 'Unrated'}
+                  </span>
+                  {hasHeadline && (
+                    <span style={{ color: 'var(--text-tertiary)', fontSize: 'var(--ds-text-xs)' }}>± {Math.round(headlinePool!.rd)}</span>
+                  )}
+                </span>
+              </div>
+              {ratings.pools.map((pool) => (
+                <StatRow
+                  key={pool.pool}
+                  label={ratingPoolLabel(pool.pool)}
+                  value={pool.games > 0 ? Math.round(pool.rating) : 'Unrated'}
+                  unit={pool.games > 0 ? `± ${Math.round(pool.rd)}` : undefined}
+                />
+              ))}
+              <StatRow
+                label='OpenSkill'
+                value={neverPlayed ? 'Unrated' : ratings.openSkill.mu.toFixed(2)}
+                unit={neverPlayed ? undefined : `± ${ratings.openSkill.sigma.toFixed(2)}`}
+              />
+              <StatRow
+                label='Record'
+                value={neverPlayed ? 'No games' : `${ratings.record.wins}W ${ratings.record.games - ratings.record.wins}L`}
+                style={{ borderBottom: 'none' }}
+              />
+              {neverPlayed && (
+                <Note style={{ marginTop: 10, fontSize: 'var(--ds-text-xs)' }}>
+                  Play a ranked game to start a rating.
+                </Note>
+              )}
+            </>
+          )}
         </Panel>
 
         <Panel title='Friends'>
-          {friendsError && <p style={{ margin: '0 0 8px', color: 'var(--berry-400)', fontSize: 'var(--ds-text-sm)' }}>{friendsError}</p>}
-          {friendsLoading && friends.length === 0 && <p style={{ margin: 0, color: 'var(--text-tertiary)', fontSize: 'var(--ds-text-sm)' }}>Loading friends...</p>}
+          {friendsError && <ErrorLine style={{ marginBottom: 8 }}>{friendsError}</ErrorLine>}
+          {friendsLoading && friends.length === 0 && <Note>Loading friends</Note>}
           {!friendsLoading && friends.length === 0 && !friendsError && (
-            <p style={{ margin: 0, color: 'var(--text-tertiary)', fontSize: 'var(--ds-text-sm)' }}>No friends yet.</p>
+            <Note>No friends yet.</Note>
           )}
           <div style={{ display: 'flex', flexDirection: 'column' }}>
             {friends.map((f, i) => {
-              const dotColor = f.online === true ? 'var(--moss-500)' : f.online === false ? 'var(--border-strong)' : 'var(--text-tertiary)';
+              const dotColor = f.online === true ? 'var(--status-success)' : f.online === false ? 'var(--border-strong)' : 'var(--text-tertiary)';
               return (
                 <div key={f.userId} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 2px', borderTop: i ? '1px solid var(--border-subtle)' : 'none' }}>
                   <span style={{ width: 8, height: 8, borderRadius: '50%', flex: 'none', background: dotColor }}></span>
-                  <span style={{ lineHeight: 1.2, flex: 1 }}>
-                    <span style={{ display: 'block', fontWeight: 'var(--weight-bold)', fontSize: 'var(--ds-text-sm)' }}>{f.username}</span>
+                  <span style={{ lineHeight: 'var(--ds-leading-snug)', flex: 1, minWidth: 0 }}>
+                    <span style={{ display: 'block', fontWeight: 'var(--weight-bold)', fontSize: 'var(--ds-text-sm)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.username}</span>
                     <span style={{ display: 'block', fontSize: 'var(--text-2xs)', color: 'var(--text-tertiary)' }}>{f.status}</span>
                   </span>
                   {f.online === true && <Button size='sm' variant='ghost'>Invite</Button>}
@@ -347,14 +392,14 @@ const DashboardPage: React.FC = () => {
         </Panel>
       </div>
 
-      <Modal open={createOpen} title='Create New Lobby' onClose={handleCloseCreate} footer={(
+      <Modal open={createOpen} title='New lobby' onClose={handleCloseCreate} footer={(
         <>
           <Button variant='secondary' onClick={handleCloseCreate} disabled={creating}>Cancel</Button>
-          <Button variant='primary' onClick={handleCreateLobby} disabled={creating}>{creating ? 'Creating...' : 'Create Lobby'}</Button>
+          <Button variant='primary' onClick={handleCreateLobby} disabled={creating}>{creating ? 'Creating' : 'Create'}</Button>
         </>
       )}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          {createError && <p style={{ margin: 0, color: 'var(--berry-400)', fontSize: 'var(--ds-text-sm)' }}>{createError}</p>}
+          {createError && <ErrorLine>{createError}</ErrorLine>}
           <Select
             label='Lobby type'
             value={createLobbyType}
@@ -362,7 +407,7 @@ const DashboardPage: React.FC = () => {
             onChange={(e) => setCreateLobbyType(e.target.value as 'private' | 'public')}
             options={[
               { value: 'public', label: 'Public' },
-              { value: 'private', label: 'Private' },
+              { value: 'private', label: 'Private' }
             ]}
           />
           <Select
@@ -372,7 +417,7 @@ const DashboardPage: React.FC = () => {
             onChange={(e) => setCreateGameMode(e.target.value)}
             options={[
               { value: 'head_to_head', label: gameModeLabel('head_to_head') },
-              { value: 'group_of_4', label: gameModeLabel('group_of_4') },
+              { value: 'group_of_4', label: gameModeLabel('group_of_4') }
             ]}
           />
         </div>

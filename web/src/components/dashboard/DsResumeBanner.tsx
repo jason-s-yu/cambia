@@ -22,7 +22,7 @@ function headline(session: ActiveSession): string {
   if (session.phase === 'searching') {
     return 'Your lobby is searching for a match';
   }
-  return 'You are still in a lobby';
+  return 'Your lobby is still open';
 }
 
 function badgeTone(session: ActiveSession): 'warning' | 'info' | 'neutral' {
@@ -40,7 +40,8 @@ function badgeLabel(session: ActiveSession): string {
 /**
  * Home-screen affordance for returning to the lobby or game the server still counts you in
  * (cambia-783). Rendered only when GET /lobby/active reports a session, so it is absent for a
- * user with nothing to resume.
+ * user with nothing to resume. The border steps up to strong for attention; the gold accent
+ * stays on the resume button alone.
  */
 const DsResumeBanner: React.FC<DsResumeBannerProps> = ({ session, onResume, onDismiss }) => {
   const lobbyLabel = session.name || `Lobby ${session.lobbyId.substring(0, 6)}`;
@@ -50,20 +51,24 @@ const DsResumeBanner: React.FC<DsResumeBannerProps> = ({ session, onResume, onDi
     <Panel style={{ borderColor: 'var(--border-strong)' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
         <Badge tone={badgeTone(session)} dot>{badgeLabel(session)}</Badge>
-        <div style={{ flex: 1, minWidth: 200, lineHeight: 1.3 }}>
-          <div style={{ fontFamily: 'var(--font-display)', fontSize: 'var(--ds-text-lg)' }}>{headline(session)}</div>
-          <div style={{ fontSize: 'var(--ds-text-sm)', color: 'var(--text-secondary)' }}>
+        <div style={{ flex: 1, minWidth: 200, lineHeight: 'var(--ds-leading-snug)' }}>
+          <div style={{ fontSize: 'var(--ds-text-lg)', fontWeight: 'var(--weight-bold)', letterSpacing: 'var(--ds-tracking-tight)', color: 'var(--text-primary)' }}>
+            {headline(session)}
+          </div>
+          <div style={{ fontSize: 'var(--ds-text-sm)', color: 'var(--text-secondary)', fontVariantNumeric: 'tabular-nums' }}>
             {lobbyLabel} · {gameModeLabel(session.gameMode)} · {players}
           </div>
         </div>
-        <Button variant='primary' onClick={onResume}>
-          {session.phase === 'in_game' && session.seated ? 'Rejoin game' : 'Return to lobby'}
-        </Button>
-        <IconButton size='sm' variant='ghost' title='Dismiss' onClick={onDismiss}>
-          <svg width='14' height='14' viewBox='0 0 14 14' fill='none' stroke='currentColor' strokeWidth='2' strokeLinecap='round'>
-            <path d='M2 2 L12 12 M12 2 L2 12' />
-          </svg>
-        </IconButton>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto' }}>
+          <Button variant='primary' onClick={onResume}>
+            {session.phase === 'in_game' && session.seated ? 'Rejoin game' : 'Back to lobby'}
+          </Button>
+          <IconButton variant='ghost' title='Dismiss' onClick={onDismiss}>
+            <svg width='14' height='14' viewBox='0 0 14 14' fill='none' stroke='currentColor' strokeWidth='2' strokeLinecap='round' aria-hidden='true'>
+              <path d='M2 2 L12 12 M12 2 L2 12' />
+            </svg>
+          </IconButton>
+        </div>
       </div>
     </Panel>
   );

@@ -17,9 +17,10 @@ const NAV_ITEMS: TopBarNavItem[] = [
 
 /**
  * Main application layout for authenticated users, built on the design-system
- * chrome (TopBar + Wordmark). The TopBar carries navigation, the theme switch,
- * the profile chip and logout; nested routes render full-bleed into the Outlet
- * and manage their own padding, matching the design-system screen contract.
+ * chrome (TopBar + Wordmark). The TopBar carries navigation, the theme toggle,
+ * the identity chip and log out; nested routes render full-bleed into the
+ * Outlet and manage their own padding, matching the design-system screen
+ * contract.
  */
 const AppLayout: React.FC = () => {
 	const navigate = useNavigate();
@@ -42,8 +43,8 @@ const AppLayout: React.FC = () => {
 		fetchRatings();
 	}, [userId, fetchRatings]);
 
-	// Effective light flag for the day/night switch, resolving 'system' against
-	// the OS preference so the switch reflects what is actually on screen.
+	// Effective light flag for the theme toggle, resolving 'system' against
+	// the OS preference so the toggle reflects what is actually on screen.
 	const [light, setLight] = useState(false);
 	useEffect(() => {
 		const mq = window.matchMedia('(prefers-color-scheme: dark)');
@@ -61,13 +62,13 @@ const AppLayout: React.FC = () => {
 	// Headline rating: the 1v1 (head-to-head) pool, matching the dashboard hero
 	// and formatted the same way (utils/ratingPool) as the profile page so the
 	// number agrees everywhere it appears. Zero games in the pool, or the fetch
-	// not having resolved yet, both fall back to 'unrated' rather than a guess.
+	// not having resolved yet, both fall back to 'Unrated' rather than a guess.
 	const headlinePool = ratings?.pools.find((p) => p.pool === '1v1') ?? null;
 	const topBarUser: TopBarUser = {
 		name: user?.username || 'Player',
 		rating: headlinePool && headlinePool.games > 0
 			? formatRating(headlinePool.rating, headlinePool.rd)
-			: 'unrated'
+			: 'Unrated'
 	};
 
 	return (
@@ -77,8 +78,7 @@ const AppLayout: React.FC = () => {
 				display: 'flex',
 				flexDirection: 'column',
 				background: 'var(--surface-0)',
-				color: 'var(--text-primary)',
-				fontFamily: 'var(--font-sans)'
+				color: 'var(--text-primary)'
 			}}
 		>
 			<TopBar

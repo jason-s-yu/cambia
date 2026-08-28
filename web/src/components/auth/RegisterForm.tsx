@@ -15,15 +15,14 @@ const RegisterForm: React.FC = () => {
   const clearError = useAuthStore((state) => state.clearError);
   const [validationError, setValidationError] = useState<string | null>(null);
 
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     clearError();
     setValidationError(null);
 
     if (!username || !email || !password || !confirmPassword) {
-        setValidationError('Please fill in all fields.');
-        return;
+      setValidationError('Fill in every field.');
+      return;
     }
     if (password !== confirmPassword) {
       setValidationError('Passwords do not match.');
@@ -35,58 +34,57 @@ const RegisterForm: React.FC = () => {
   };
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
+    <form onSubmit={handleSubmit} className='flex flex-col gap-4'>
       <ErrorMessage message={error || validationError} onClear={() => { clearError(); setValidationError(null); }} />
-       <Input
-        label="Username"
-        id="username"
-        type="text"
+      <Input
+        label='Username'
+        id='username'
+        type='text'
         value={username}
         onChange={(e) => setUsername(e.target.value)}
         required
-        autoComplete="username"
-        placeholder="Choose a username"
+        autoComplete='username'
         disabled={isLoading}
+        className='mb-0'
       />
       <Input
-        label="Email Address"
-        id="email"
-        type="email"
+        label='Email'
+        id='email'
+        type='email'
         value={email}
         onChange={(e) => setEmail(e.target.value)}
         required
-        autoComplete="email"
-        placeholder="you@example.com"
+        autoComplete='email'
+        placeholder='you@example.com'
         disabled={isLoading}
+        className='mb-0'
       />
       <Input
-        label="Password"
-        id="password"
-        type="password"
+        label='Password'
+        id='password'
+        type='password'
         value={password}
         onChange={(e) => setPassword(e.target.value)}
         required
-        autoComplete="new-password"
-        placeholder="Create a password"
+        autoComplete='new-password'
         disabled={isLoading}
+        className='mb-0'
       />
-       <Input
-        label="Confirm Password"
-        id="confirm-password"
-        type="password"
+      <Input
+        label='Confirm password'
+        id='confirm-password'
+        type='password'
         value={confirmPassword}
         onChange={(e) => setConfirmPassword(e.target.value)}
         required
-        autoComplete="new-password"
-        placeholder="Confirm your password"
+        autoComplete='new-password'
         disabled={isLoading}
+        className='mb-0'
         error={validationError && validationError.includes('Passwords do not match') ? validationError : undefined}
       />
-      <div>
-        <Button type="submit" className="w-full justify-center mt-2" isLoading={isLoading} disabled={isLoading}>
-          Register
-        </Button>
-      </div>
+      <Button type='submit' className='w-full mt-2' isLoading={isLoading} disabled={isLoading}>
+        Create account
+      </Button>
     </form>
   );
 };

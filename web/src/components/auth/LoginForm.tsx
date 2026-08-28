@@ -13,13 +13,12 @@ const LoginForm: React.FC = () => {
   const error = useAuthStore((state) => state.error);
   const clearError = useAuthStore((state) => state.clearError);
 
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     clearError(); // Clear previous errors before attempting login
     if (!email || !password) {
-        useAuthStore.setState({ error: 'Please enter both email and password.' });
-        return;
+      useAuthStore.setState({ error: 'Enter your email and password.' });
+      return;
     }
     await login({ email, password });
     // Navigation is handled by the App component based on isAuthenticated state
@@ -32,56 +31,52 @@ const LoginForm: React.FC = () => {
   };
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-6">
-       <ErrorMessage message={error} onClear={clearError} />
+    <form onSubmit={handleSubmit} className='flex flex-col gap-4'>
+      <ErrorMessage message={error} onClear={clearError} />
       <Input
-        label="Email Address"
-        id="email"
-        type="email"
+        label='Email'
+        id='email'
+        type='email'
         value={email}
         onChange={(e) => setEmail(e.target.value)}
         required
-        autoComplete="email"
-        placeholder="you@example.com"
+        autoComplete='email'
+        placeholder='you@example.com'
         disabled={isLoading}
+        className='mb-0'
       />
       <Input
-        label="Password"
-        id="password"
-        type="password"
+        label='Password'
+        id='password'
+        type='password'
         value={password}
         onChange={(e) => setPassword(e.target.value)}
         required
-        autoComplete="current-password"
-        placeholder="••••••••"
+        autoComplete='current-password'
         disabled={isLoading}
+        className='mb-0'
       />
-      <div>
-        <Button type="submit" className="w-full justify-center" isLoading={isLoading} disabled={isLoading}>
-          Sign In
-        </Button>
-      </div>
-      <div className="relative">
-        <div className="absolute inset-0 flex items-center">
-          <div className="w-full border-t border-gray-300 dark:border-gray-600" />
-        </div>
-        <div className="relative flex justify-center text-sm">
-          <span className="px-2 bg-white dark:bg-gray-800 text-gray-500 dark:text-gray-400">or</span>
-        </div>
+      <Button type='submit' className='w-full mt-2' isLoading={isLoading} disabled={isLoading}>
+        Sign in
+      </Button>
+      <div className='flex items-center gap-3 text-2xs font-ds-bold tracking-caps uppercase text-text-tertiary'>
+        <span className='flex-1 border-t border-border-subtle' />
+        or
+        <span className='flex-1 border-t border-border-subtle' />
       </div>
       <div>
         <Button
-          type="button"
-          variant="secondary"
-          className="w-full justify-center"
+          type='button'
+          variant='secondary'
+          className='w-full'
           onClick={handleGuestLogin}
           isLoading={isLoading}
           disabled={isLoading}
         >
-          Continue as Guest
+          Play as guest
         </Button>
-        <p className="mt-2 text-center text-xs text-gray-500 dark:text-gray-400">
-          No account needed. You can claim this account later from your profile.
+        <p className='mt-2 mb-0 text-center text-ds-xs text-text-tertiary'>
+          No account needed. Claim it later from your profile.
         </p>
       </div>
     </form>
