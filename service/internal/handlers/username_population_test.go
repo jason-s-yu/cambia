@@ -18,7 +18,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jason-s-yu/cambia/service/internal/auth"
-	"github.com/jason-s-yu/cambia/service/internal/database"
 )
 
 // TestE2EGameCarriesRealUsernames drives a real two-player game to Started and then to
@@ -27,10 +26,7 @@ import (
 // roster (game_results' lobby_status.users), instead of arriving empty and forcing the web
 // client's own User_xxxx placeholder (web/src/stores/lobbyStore.ts).
 func TestE2EGameCarriesRealUsernames(t *testing.T) {
-	if !dbAvailable {
-		t.Skip("skipping: no Postgres reachable via PG_HOST/PG_PORT/POSTGRES_USER/POSTGRES_PASSWORD/PG_DATABASE (see service/.env.template)")
-	}
-	database.ConnectDB()
+	ensureTestDB(t) // dbAvailable gate + single package-wide database.ConnectDB() (cambia-908).
 
 	runID := uuid.New().String()
 	hostUser := createTestUser(t, fmt.Sprintf("cambia877-host-%s@test.local", runID), "pw12345678", "cambia877_host")
@@ -118,6 +114,7 @@ func TestE2EGameCarriesRealUsernames(t *testing.T) {
 	if results == nil {
 		t.Fatalf("host never received game_results")
 	}
+	awaitGameEndPersistence(t, gs)
 	var resultsPayload struct {
 		LobbyStatus struct {
 			Users []struct {

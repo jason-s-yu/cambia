@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -38,6 +39,11 @@ func newForfeitTestServer(t *testing.T) (*GameServer, *httptest.Server) {
 	gs := NewGameServer()
 	gs.CountdownDuration = 30 * time.Millisecond
 	gs.PreGameDuration = 30 * time.Millisecond
+	// Every game this server creates registers its persistFinalGameState background DB-write
+	// goroutines here, so awaitGameEndPersistence (called once a test has confirmed its game
+	// ended) can drain them deterministically instead of leaving them to outlive the test and
+	// race a later test's database.ConnectDB() reassigning the shared pool (cambia-908).
+	gs.PersistWG = &sync.WaitGroup{}
 
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
@@ -49,6 +55,30 @@ func newForfeitTestServer(t *testing.T) (*GameServer, *httptest.Server) {
 	t.Cleanup(ts.Close)
 
 	return gs, ts
+}
+
+// awaitGameEndPersistence blocks, bounded by a 5s timeout, until every background DB-write
+// goroutine persistFinalGameState has launched for games created by gs completes. Callers must
+// already know the relevant game has ended - by having received its game_results broadcast, or
+// by having called CambiaGame.EndGame themselves - before calling this: persistFinalGameState's
+// WaitGroup.Add and both of those signals happen inside the same endGame call under the game's
+// lock, so observing either one first guarantees Add already ran and this can never Wait ahead
+// of it (see sync.WaitGroup's own Add/Wait ordering requirement).
+func awaitGameEndPersistence(t *testing.T, gs *GameServer) {
+	t.Helper()
+	if gs.PersistWG == nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		gs.PersistWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Errorf("cambia-908: game-end persistence goroutines did not finish within 5s")
+	}
 }
 
 // TestE2EMidGameDropForfeitsAndOmitsScores drives a two-player game past the (shortened)
@@ -110,6 +140,7 @@ func TestE2EMidGameDropForfeitsAndOmitsScores(t *testing.T) {
 	if results == nil {
 		t.Fatalf("host never received game_results after the mid-game drop")
 	}
+	awaitGameEndPersistence(t, gs)
 	var payload gameResultsPayload
 	if err := json.Unmarshal(results.Payload, &payload); err != nil {
 		t.Fatalf("decode game_results payload: %v", err)
@@ -223,6 +254,7 @@ func TestE2EReconnectBeforeForfeitKeepsGameRunning(t *testing.T) {
 	if results == nil {
 		t.Fatalf("host never received game_results after EndGame")
 	}
+	awaitGameEndPersistence(t, gs)
 	var payload gameResultsPayload
 	if err := json.Unmarshal(results.Payload, &payload); err != nil {
 		t.Fatalf("decode game_results payload: %v", err)

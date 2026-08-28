@@ -130,6 +130,29 @@ func startTwoPlayerGame(t *testing.T) (*game.CambiaGame, uuid.UUID, uuid.UUID, *
 	p2ID := uuid.New()
 	p2Token, _ := auth.CreateJWT(p2ID.String())
 
+	// Neither test built on this helper waits for game_results itself: their game ends only
+	// incidentally, when the host/p2 close cleanups below drop the last connected socket during
+	// teardown. Registering this cleanup first means it runs last (t.Cleanup is LIFO), after
+	// those sockets have actually closed, so there is something to wait for. It polls for the
+	// resulting forfeit's GameOver rather than calling awaitGameEndPersistence directly: GameOver
+	// is set under the same lock endGame holds for its whole call, including
+	// persistFinalGameState's WaitGroup.Add, so observing it proves Add already ran and this can
+	// never Wait ahead of it (cambia-908).
+	var g *game.CambiaGame
+	t.Cleanup(func() {
+		if g == nil {
+			return
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for !g.GetCurrentObfuscatedGameState(hostID).GameOver {
+			if time.Now().After(deadline) {
+				return // this run's game never ended; nothing was persisted, nothing to wait for.
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		awaitGameEndPersistence(t, gs)
+	})
+
 	lobUUID := createPublicLobby(t, gs, hostToken)
 	lobbyID := lobUUID.String()
 
@@ -157,7 +180,7 @@ func startTwoPlayerGame(t *testing.T) (*game.CambiaGame, uuid.UUID, uuid.UUID, *
 	host.settle()
 	p2.settle()
 
-	g := gs.GameStore.GetGameByLobbyID(lobUUID)
+	g = gs.GameStore.GetGameByLobbyID(lobUUID)
 	if g == nil {
 		t.Fatalf("no CambiaGame registered for lobby %s", lobbyID)
 	}

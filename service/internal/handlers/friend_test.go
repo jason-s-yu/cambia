@@ -21,13 +21,11 @@ import (
 
 // setupFriendTest initializes the database and auth for friend tests.
 func setupFriendTest(t *testing.T) {
-	if !dbAvailable {
-		t.Skip("skipping: no Postgres reachable via PG_HOST/PG_PORT/POSTGRES_USER/POSTGRES_PASSWORD/PG_DATABASE (see service/.env.template); set these to point at a running dev database to run this test")
-	}
 	// Initialize authentication (generates keys).
 	auth.Init()
-	// Connect to the test database (ensure .env points to a test DB).
-	database.ConnectDB()
+	// Connect to the test database exactly once for the whole package (cambia-908), skipping
+	// cleanly up front if no DB is reachable (ensure .env points to a test DB).
+	ensureTestDB(t)
 	// Optional: Clean up tables before test if needed.
 	// clearFriendTables(t)
 }

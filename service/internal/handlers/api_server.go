@@ -73,6 +73,12 @@ type GameServer struct {
 	// pre-game card-reveal window before Started flips true is configurable (production
 	// default; shortened in tests). Overridable per deployment via CAMBIA_PREGAME_DURATION.
 	PreGameDuration time.Duration
+
+	// PersistWG is copied onto each CambiaGame at creation (CreateGameInstance) as its
+	// PersistWG (test-only; nil in production). See game.CambiaGame.PersistWG for what it
+	// tracks and cambia-908 for why: it lets a test drain a game's background persistence
+	// goroutines before returning instead of leaving them to outlive it.
+	PersistWG *sync.WaitGroup
 }
 
 // NewGameServer initializes a new GameServer with empty, ephemeral stores.
@@ -129,6 +135,7 @@ func (gs *GameServer) CreateGameInstance(ctx context.Context, lobbyID, hostID uu
 	if gs.PreGameDuration > 0 {
 		g.PreGameDuration = gs.PreGameDuration
 	}
+	g.PersistWG = gs.PersistWG
 	g.Circuit = circuit
 	if circuit.Enabled {
 		g.HouseRules = houseRules
