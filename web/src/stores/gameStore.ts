@@ -4,6 +4,7 @@ import { create } from 'zustand';
 import type { ObfGameState, ObfCard, EventCard } from '@/types/game';
 import { immer } from 'zustand/middleware/immer';
 import { useAuthStore } from './authStore';
+import { applySnapSuccess } from '@/lib/snapSuccess';
 
 /** A face shown to this client by an ability (7/8 own card, 9/T opponent card, King both). */
 export interface RevealedCard {
@@ -56,6 +57,11 @@ interface GameState {
 	// could not safely resend (cambia-891). The table watches the number and shows a notice; it
 	// carries no text so the surface owns the copy.
 	droppedActionNonce: number;
+	// The most recent successful snap: who snapped, and whose hand the card left. The two differ
+	// on an opponent snap, and a hand-size delta cannot tell them apart, so the table reads this
+	// rather than inferring the actor from the seat that shrank (cambia-913). Ids only; the
+	// surface owns the copy.
+	lastSnap: { nonce: number; snapperId: string | null; ownerId: string | null } | null;
 }
 
 interface GameActions {
@@ -90,7 +96,8 @@ const initialState: GameState = {
 	winnerId: null,
 	seenFaces: {},
 	abilityReveal: null,
-	droppedActionNonce: 0
+	droppedActionNonce: 0,
+	lastSnap: null
 };
 
 export const useGameStore = create<GameState & GameActions>()(
@@ -458,23 +465,17 @@ export const useGameStore = create<GameState & GameActions>()(
 
 						// --- Snap Events ---
 						case 'player_snap_success':
+							// The card leaves its OWNER's hand (payload.card.user), which is the snapper
+							// (payload.user) only when someone snapped their own card. Applying it to the
+							// snapper shrank the wrong seat on every screen after an opponent snap
+							// (cambia-913); see lib/snapSuccess.ts for the rest of the reasoning.
 							if (state.gameState) {
-								const player = state.gameState.players.find(p => p.playerId === payload.user?.id);
-								if (player) {
-									player.handSize--; // Update hand size
-									// Remove card from revealedHand if it's 'self'
-									if (player.revealedHand && payload.card?.idx !== undefined) {
-										player.revealedHand.splice(payload.card.idx, 1);
-										// Adjust indices of subsequent cards
-										for (let i = payload.card.idx; i < player.revealedHand.length; i++) {
-											if (player.revealedHand[i].idx !== undefined) {
-												player.revealedHand[i].idx!--;
-											}
-										}
-									}
-								}
-								state.gameState.discardSize++;
-								state.gameState.discardTop = payload.card;
+								const ownerId = applySnapSuccess(state.gameState, payload);
+								state.lastSnap = {
+									nonce: (state.lastSnap?.nonce ?? 0) + 1,
+									snapperId: payload.user?.id ?? null,
+									ownerId
+								};
 							}
 							break;
 						case 'player_snap_fail':
@@ -642,6 +643,7 @@ export const selectIsProcessingAction = (state: GameState) => state.isProcessing
 export const selectServerClockOffsetMs = (state: GameState) => state.serverClockOffsetMs;
 export const selectAbilityReveal = (state: GameState) => state.abilityReveal;
 export const selectDroppedActionNonce = (state: GameState) => state.droppedActionNonce;
+export const selectLastSnap = (state: GameState) => state.lastSnap;
 export const selectFinalScores = (state: GameState) => state.finalScores;
 export const selectCurrentPlayerId = (state: GameState) => state.gameState?.currentPlayerId;
 export const selectSelfPlayerState = (state: GameState) => {

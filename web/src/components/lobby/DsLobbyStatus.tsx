@@ -6,7 +6,7 @@
 // (match found, starting).
 import React from 'react';
 
-export type LobbyStatusTone = 'info' | 'success' | 'gold';
+export type LobbyStatusTone = 'info' | 'success' | 'gold' | 'warning';
 
 export interface DsLobbyStatusProps {
   tone: LobbyStatusTone;
@@ -26,7 +26,10 @@ interface ToneSpec {
 const TONES: Record<LobbyStatusTone, ToneSpec> = {
   info: { bg: 'var(--status-info-bg)', border: 'var(--status-info-border)', color: 'var(--status-info)' },
   success: { bg: 'var(--status-success-bg)', border: 'var(--status-success-border)', color: 'var(--status-success)' },
-  gold: { bg: 'var(--accent-gold-soft)', border: 'var(--border-accent)', color: 'var(--accent-gold-text)' }
+  gold: { bg: 'var(--accent-gold-soft)', border: 'var(--border-accent)', color: 'var(--accent-gold-text)' },
+  // Something the player did not land, in the table's voice for the same event
+  // (DsGameTable's notice line, cambia-913 F4).
+  warning: { bg: 'var(--status-warning-bg)', border: 'var(--status-warning-border)', color: 'var(--status-warning)' }
 };
 
 const DsLobbyStatus: React.FC<DsLobbyStatusProps> = ({ tone, text, value, style }) => {

@@ -17,8 +17,10 @@
 //   dispatch saw h.seq <= L too, and any sync_state they produced carries S <= L. Contrapositive:
 //   S > L can only be produced after our message was dispatched and rejected. Resending on
 //   S > sentSeq therefore never re-applies an action the server already applied.
-// The record is the LAST outbound frame of any kind (a game action or a lobby frame): tracking
-// only game actions would let a later dropped chat's repair resend an action that had landed.
+// Records cover outbound frames of any kind (game actions and lobby frames alike): tracking only
+// game actions would let a later dropped chat's repair resend an action that had landed. They are
+// held in a small outbox rather than a single slot, because one repair window can swallow more
+// than one frame; see The outbox at the foot of this file.
 //
 // The seq proof only shows the frame was not applied; it says nothing about what applying it
 // now would mean. A frame that addresses a hand SLOT (replace, every ability step) is resolved
@@ -108,6 +110,8 @@ export interface OutboundRecord {
 	sentSeq: number;
 	/** 0 for the original send. A frame is resent at most once, then the player is told. */
 	attempt: number;
+	/** Date.now() at send time. Used only to expire an outbox entry no repair ever answered. */
+	sentAt?: number;
 	ctx: TableContext;
 }
 
@@ -207,11 +211,16 @@ export function decideResend(rec: OutboundRecord, now: TableContext, syncSeq: nu
 	// This repair answers an older frame; ours may well have landed. Never resend on it.
 	if (syncSeq <= rec.sentSeq) return 'drop';
 
-	// One retry. A frame dropped twice means the table moved on under it.
-	if (rec.attempt > 0) return isGameAction ? 'notify' : 'drop';
+	// One retry. A frame dropped twice means the table moved on under it. A lobby frame is told
+	// about too: a ready or a chat line that never landed is exactly as invisible as a lost
+	// action, and the lobby now has somewhere to say so (cambia-913 F4).
+	if (rec.attempt > 0) return isGameAction || LOBBY_ACTION_TYPES.has(rec.type) ? 'notify' : 'drop';
 
 	if (LOBBY_ACTION_TYPES.has(rec.type)) {
-		return now.phase === rec.ctx.phase ? 'resend' : 'drop';
+		// The phase moved under the frame: ready in an open lobby means nothing once the
+		// countdown started, and start_game after that is not the same instruction. Nothing can
+		// be resent, so the player is told rather than left watching an unchanged lobby.
+		return now.phase === rec.ctx.phase ? 'resend' : 'notify';
 	}
 	if (!isGameAction) return 'drop';
 
@@ -292,4 +301,179 @@ export function decideResend(rec: OutboundRecord, now: TableContext, syncSeq: nu
 		default:
 			return 'drop';
 	}
+}
+
+// --- The outbox --------------------------------------------------------------------------
+//
+// One slot is not enough (cambia-913 F2). The hub answers EVERY discarded frame with its own
+// sync_state, and that repair consumes no seq (hub.go sendSyncState), so two frames sent inside
+// one repair window are both discarded and both answered, with the same seq on each repair.
+// Holding only the newest frame decided that one and lost the older one in silence: the exact
+// failure cambia-891 set out to end.
+//
+// A repair names no frame, so each entry is judged on its own sentSeq. Entries the repair cannot
+// speak to (syncSeq <= sentSeq) stay for a later one.
+//
+// It holds UNANSWERED frames, and that word is doing work (cambia-913 R1). Since a repair names
+// no frame, every entry still in the outbox when one arrives is judged against it: an entry the
+// hub had already ACCEPTED would be judged too, and neither answer is right. 'notify' tells the
+// player an action failed that in fact landed; 'resend' puts an accepted chat line on the wire a
+// second time. Acking is what keeps accepted frames out of that decision: see ackedType below.
+
+/** How many unacknowledged frames the outbox holds. Past this the oldest is evicted, silently. */
+export const OUTBOX_LIMIT = 8;
+
+/**
+ * How long an entry no repair and no ack ever answered stays eligible for a decision. A repair is
+ * produced by the same dispatch that discarded the frame, so it lands within one round trip; past
+ * a few seconds of silence the frame was accepted by a hub that broadcast nothing for it (today
+ * update_rules is the only such frame), and its intent is no longer worth re-deciding.
+ */
+export const OUTBOX_TTL_MS = 5000;
+
+/** A frame on the wire: what was sent, and what the decision needs in order to judge it. */
+export interface OutboxEntry<M = unknown> {
+	message: M;
+	record: OutboundRecord;
+}
+
+/** What one repair does to the outbox. */
+export interface OutboxOutcome<M = unknown> {
+	/** Entries this repair does not answer; they stay in the outbox, in send order. */
+	pending: OutboxEntry<M>[];
+	/** Entries to put back on the wire, in send order, each at attempt + 1. */
+	resend: OutboxEntry<M>[];
+	/** Records the player should be told about. Lobby and game frames are told in different places. */
+	notify: OutboundRecord[];
+}
+
+/** Appends a sent frame, evicting the oldest once the outbox is full. */
+export function recordOutbound<M>(outbox: OutboxEntry<M>[], entry: OutboxEntry<M>): OutboxEntry<M>[] {
+	const next = [...outbox, entry];
+	return next.length > OUTBOX_LIMIT ? next.slice(next.length - OUTBOX_LIMIT) : next;
+}
+
+/**
+ * The outbound frame type an inbound server frame proves the hub acted on, or null.
+ *
+ * The hub never replies to a frame by name: an accepted frame is answered by the events applying
+ * it produces, so those events are the acknowledgement. Each case below is the emitter that fires
+ * for exactly one client frame, with the actor on it:
+ *
+ *   player_draw_stockpile   engine_adapter.go emitEventsForAction, User = the actor, and
+ *                           payload.source separates the stock draw from the discard draw (the
+ *                           discard draw reuses the same event type).
+ *   player_discard          fired for a discard (no idx) and for a replace (Card.Idx = the slot
+ *                           replaced), which is what tells the two frames apart.
+ *   player_cambia           the call.
+ *   player_snap_success /
+ *   player_snap_fail        User = the SNAPPER on both, so either one answers our snap.
+ *   player_special_action   the public half of an ability step; the private success/fail halves
+ *                           reach the actor alone (fireEventToPlayer), so they need no User.
+ *   chat                    hub.go handleLobbyMsg, payload.userID = the author.
+ *   lobby_state             broadcastLobbyUpdate after a ready or an unready; the self entry's
+ *                           is_ready is the flag the frame was asking for. A snapshot broadcast
+ *                           for some other reason can only ack a frame whose flag already holds,
+ *                           which is a frame that asked for nothing.
+ *   phase_change countdown  beginCountdown, reached from start_game and from the ready that
+ *                           completes an auto-start lobby (MarkUserReadyUnsafe all-ready).
+ *
+ * update_rules has no case because an accepted one emits nothing at all (handleLobbyMsg applies
+ * the rules and broadcasts no snapshot); OUTBOX_TTL_MS is what bounds it.
+ */
+export function ackedType(type: string, payload: unknown, selfId: string | null): string | null {
+	const p = (payload ?? {}) as {
+		user?: { id?: string };
+		card?: { idx?: number };
+		payload?: { source?: string };
+		userID?: string;
+		phase?: string;
+		lobby_status?: { users?: { id?: string; is_ready?: boolean }[] };
+	};
+	const mine = !!selfId && p.user?.id === selfId;
+
+	switch (type) {
+		case 'player_draw_stockpile':
+			if (!mine) return null;
+			return p.payload?.source === 'discardpile' ? 'action_draw_discardpile' : 'action_draw_stockpile';
+		case 'player_discard':
+			if (!mine) return null;
+			return typeof p.card?.idx === 'number' ? 'action_replace' : 'action_discard';
+		case 'player_cambia':
+			return mine ? 'action_cambia' : null;
+		case 'player_snap_success':
+		case 'player_snap_fail':
+			return mine ? 'action_snap' : null;
+		case 'player_special_action':
+			return mine ? 'action_special' : null;
+		case 'private_special_action_success':
+		case 'private_special_action_fail':
+			return 'action_special';
+		case 'chat':
+			return !!selfId && p.userID === selfId ? 'chat' : null;
+		case 'lobby_state': {
+			const self = (p.lobby_status?.users ?? []).find((u) => u.id === selfId);
+			if (!self) return null;
+			return self.is_ready ? 'ready' : 'unready';
+		}
+		case 'phase_change':
+			return p.phase === 'countdown' ? 'start_game' : null;
+		default:
+			return null;
+	}
+}
+
+/**
+ * Removes the oldest frame this inbound envelope answers. One event acks one frame: two draws
+ * cannot both have landed on one broadcast, and the outbox is in send order, so the oldest match
+ * is the one that produced it.
+ *
+ * A countdown also acks a 'ready', not only the 'start_game' that usually causes it: an
+ * auto-start lobby begins the countdown on the last ready, and that ready was ours if the hub
+ * counted every seat as ready.
+ */
+export function ackOutbound<M>(
+	outbox: OutboxEntry<M>[],
+	type: string,
+	payload: unknown,
+	selfId: string | null
+): OutboxEntry<M>[] {
+	const acked = ackedType(type, payload, selfId);
+	if (!acked) return outbox;
+	const alsoReady = acked === 'start_game';
+	const at = outbox.findIndex((e) => e.record.type === acked || (alsoReady && e.record.type === 'ready'));
+	if (at < 0) return outbox;
+	return [...outbox.slice(0, at), ...outbox.slice(at + 1)];
+}
+
+/**
+ * Decides every outstanding frame against one sync_state repair. `now` is this client's state
+ * after the repair was applied; `syncSeq` is the seq the repair carries.
+ */
+export function resolveOutbox<M>(
+	outbox: OutboxEntry<M>[],
+	now: TableContext,
+	syncSeq: number,
+	nowMs: number = Date.now()
+): OutboxOutcome<M> {
+	const out: OutboxOutcome<M> = { pending: [], resend: [], notify: [] };
+	for (const entry of outbox) {
+		const rec = entry.record;
+		const expired = typeof rec.sentAt === 'number' && nowMs - rec.sentAt > OUTBOX_TTL_MS;
+		if (expired) continue;
+		// Not an answer to this frame: keep it, a later repair may be.
+		if (syncSeq <= rec.sentSeq) {
+			out.pending.push(entry);
+			continue;
+		}
+		const verdict = decideResend(rec, now, syncSeq);
+		if (verdict === 'resend') out.resend.push(entry);
+		else if (verdict === 'notify') out.notify.push(rec);
+	}
+	return out;
+}
+
+/** True for a frame whose notice belongs in the lobby rather than on the table. */
+export function isLobbyFrame(rec: OutboundRecord): boolean {
+	return LOBBY_ACTION_TYPES.has(rec.type);
 }

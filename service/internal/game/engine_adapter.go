@@ -991,7 +991,7 @@ func (g *CambiaGame) handleSnapViaEngine(playerID uuid.UUID, engineIdx uint8, pa
 				g.snapUsedForThisDiscard = true
 
 				g.syncPlayerHandsFromEngine()
-				g.emitSnapSuccessEvents(playerID, cardID, cardRank, int(i))
+				g.emitSnapSuccessEvents(playerID, playerID, cardID, cardRank, int(i))
 				_ = snapCard
 				return
 			}
@@ -1034,7 +1034,7 @@ func (g *CambiaGame) handleSnapViaEngine(playerID uuid.UUID, engineIdx uint8, pa
 				g.snapUsedForThisDiscard = true
 
 				g.syncPlayerHandsFromEngine()
-				g.emitSnapSuccessEvents(playerID, cardID, cardRank, int(i))
+				g.emitSnapSuccessEvents(playerID, g.EngineToPlayer[oppEngineIdx], cardID, cardRank, int(i))
 				_ = snapCard
 				return
 			}
@@ -1047,21 +1047,26 @@ func (g *CambiaGame) handleSnapViaEngine(playerID uuid.UUID, engineIdx uint8, pa
 	g.handleSnapFailure(playerID, engineIdx, nil)
 }
 
-// emitSnapSuccessEvents fires public snap success event.
-func (g *CambiaGame) emitSnapSuccessEvents(playerID uuid.UUID, cardID uuid.UUID, rank uint8, idx int) {
+// emitSnapSuccessEvents fires the public snap success event. playerID is the snapper; ownerID owns
+// the hand the card left, which is the snapper only for an own-hand snap. Both ride the event: the
+// snapper names who acted, the owner tells every client which hand shrank and at which slot, since
+// idx indexes the OWNER's hand. Without the owner a client can only assume the snapper, and an
+// opponent snap left the victim's hand a card too long on every screen until the next
+// private_sync_state (cambia-913).
+func (g *CambiaGame) emitSnapSuccessEvents(playerID uuid.UUID, ownerID uuid.UUID, cardID uuid.UUID, rank uint8, idx int) {
 	card := g.CardTracker.Registry[cardID]
 	rankStr := engineRankToString(rank)
 	ev := GameEvent{
 		Type: EventPlayerSnapSuccess,
 		User: &EventUser{ID: playerID},
-		Card: &EventCard{ID: cardID, Rank: rankStr, Idx: &idx},
+		Card: &EventCard{ID: cardID, Rank: rankStr, Idx: &idx, User: &EventUser{ID: ownerID}},
 	}
 	if card != nil {
 		ev.Card.Suit = card.Suit
 		ev.Card.Value = card.Value
 	}
 	g.fireEvent(ev)
-	g.logAction(playerID, string(EventPlayerSnapSuccess), map[string]interface{}{"cardId": cardID, "rank": rankStr})
+	g.logAction(playerID, string(EventPlayerSnapSuccess), map[string]interface{}{"cardId": cardID, "rank": rankStr, "ownerId": ownerID})
 }
 
 // handleSnapFailure processes a failed snap and applies penalties.

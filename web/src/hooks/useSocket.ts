@@ -6,7 +6,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { useCurrentLobbyStore } from '@/stores/lobbyStore';
 import { useGameStore } from '@/stores/gameStore';
 import { WS_URL } from '@/lib/runtimeEnv';
-import { cardRefsOf, decideResend, tableContext, type OutboundRecord } from '@/lib/resendDecision';
+import { ackOutbound, cardRefsOf, isLobbyFrame, recordOutbound, resolveOutbox, tableContext, type OutboxEntry } from '@/lib/resendDecision';
 const MAX_RETRIES = 5;
 const INITIAL_RETRY_DELAY = 1000;
 
@@ -50,8 +50,10 @@ export function useSocket(lobbyId: string | null | undefined) {
 	const isConnecting = useRef<boolean>(false);
 	const shouldBeConnected = useRef<boolean>(false);
 	const lastSeqRef = useRef<number>(0);
-	/** The last frame sent, held until the hub either acts on it or answers it with a repair. */
-	const lastSentRef = useRef<{ message: OutboundMessage; record: OutboundRecord } | null>(null);
+	/** Frames the hub has neither applied nor answered. A repair window can swallow more than
+	 *  one, so this is a queue rather than a slot (cambia-913 F2), and the events an accepted
+	 *  frame produces take it back out (cambia-913 R1). Reasoning: resendDecision.ts. */
+	const outboxRef = useRef<OutboxEntry<OutboundMessage>[]>([]);
 
 	const userId = useAuthStore((state) => state.user?.id);
 
@@ -78,16 +80,17 @@ export function useSocket(lobbyId: string | null | undefined) {
 			console.error('[useSocket] Failed to send message:', error);
 			return false;
 		}
-		lastSentRef.current = {
+		outboxRef.current = recordOutbound(outboxRef.current, {
 			message,
 			record: {
 				type: message.type,
 				cardRefs: cardRefsOf(message),
 				sentSeq,
 				attempt,
+				sentAt: Date.now(),
 				ctx: context()
 			}
-		};
+		});
 		return true;
 	}, [context]);
 
@@ -139,7 +142,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 		shouldBeConnected.current = true;
 		managedLobbyId.current = targetLobbyId;
 		lastSeqRef.current = 0;
-		lastSentRef.current = null;
+		outboxRef.current = [];
 
 		if (useCurrentLobbyStore.getState().currentLobbyId === targetLobbyId) {
 			lobbyActions.setLoading(true);
@@ -184,6 +187,16 @@ export function useSocket(lobbyId: string | null | undefined) {
 					lastSeqRef.current = Math.max(lastSeqRef.current, seq);
 				}
 
+				// An accepted frame is answered by the events applying it produces, never by a
+				// reply naming it, so those events are its acknowledgement and they take it out
+				// of the outbox. Without this a later repair would judge frames the hub had
+				// already applied and call them dropped (cambia-913 R1). The hub dispatches on
+				// one goroutine and each connection is FIFO, so an accepted frame's events reach
+				// this client ahead of any repair produced after them.
+				if (outboxRef.current.length > 0) {
+					outboxRef.current = ackOutbound(outboxRef.current, type, payload, useAuthStore.getState().user?.id ?? null);
+				}
+
 				// Route by message type
 				if (type === 'sync_state') {
 					// Desync recovery. The repair carries the hub's lobby snapshot and the seq to
@@ -193,19 +206,22 @@ export function useSocket(lobbyId: string | null | undefined) {
 					useCurrentLobbyStore.getState().forceSync(payload);
 					useGameStore.getState().forceSync(payload);
 
-					// The frame the hub discarded. Without a resend the player's action is simply
+					// The frames the hub discarded. Without a resend the player's action is simply
 					// gone (cambia-891); with a stale one it can mean something else entirely, so
-					// decideResend re-checks the intent against the repaired board.
-					const sent = lastSentRef.current;
-					if (sent) {
+					// every outstanding frame is re-checked against the repaired board. A window
+					// can hold more than one frame and each gets its own answer (cambia-913 F2).
+					if (outboxRef.current.length > 0) {
 						const syncSeq = typeof payload?.seq === 'number' ? payload.seq : lastSeqRef.current;
-						const verdict = decideResend(sent.record, context(), syncSeq);
-						if (verdict === 'resend') {
-							if (!send(sent.message, sent.record.attempt + 1)) lastSentRef.current = null;
-						} else {
-							lastSentRef.current = null;
-							if (verdict === 'notify') useGameStore.getState().noteDroppedAction();
+						const { pending, resend, notify } = resolveOutbox(outboxRef.current, context(), syncSeq);
+						outboxRef.current = pending;
+						// A lost lobby frame is told about in the lobby, a lost action on the table:
+						// the player is looking at one of the two (cambia-913 F4).
+						for (const rec of notify) {
+							if (isLobbyFrame(rec)) useCurrentLobbyStore.getState().noteDroppedAction();
+							else useGameStore.getState().noteDroppedAction();
 						}
+						// send() puts each one back in the outbox at its new seq.
+						for (const entry of resend) send(entry.message, entry.record.attempt + 1);
 					}
 				} else if (type === 'error') {
 					// Errors go to both stores
@@ -363,7 +379,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 	/** Explicitly close the connection. */
 	const closeSocket = useCallback(() => {
 		shouldBeConnected.current = false;
-		lastSentRef.current = null;
+		outboxRef.current = [];
 
 		if (reconnectTimeoutId.current) {
 			clearTimeout(reconnectTimeoutId.current);

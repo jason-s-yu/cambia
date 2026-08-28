@@ -4,10 +4,12 @@
 // PlayingCard, ScorePill, TimerBar) on the felt tokens. Interaction and every
 // outgoing WS action are the same as the legacy GameBoard: clicking the
 // stockpile, discard pile, own cards and opponent cards drives draw / discard /
-// replace / snap / special / Cambia via the same action constructors. Snap,
-// penalty and reshuffle feedback is derived from state deltas the store already
-// applies (player_snap_success, player_snap_penalty, game_reshuffle_stockpile),
-// so no store or protocol change rides with this file.
+// replace / snap / special / Cambia via the same action constructors. One
+// exception, and it is a fix: a click on an opponent card snaps THAT card rather
+// than the sender's own selection, which is what the server resolves and what
+// makes the opponent-snap path reachable at all (cambia-913). Snap, penalty and
+// reshuffle feedback is derived from events the store already applies
+// (player_snap_success, player_snap_penalty, game_reshuffle_stockpile).
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ObfCard, ObfGameState, ObfPlayerState, ClientGameAction } from '@/types/game';
 import {
@@ -32,7 +34,8 @@ import {
   selectDisplayedDrawnCard,
   selectServerClockOffsetMs,
   selectAbilityReveal,
-  selectDroppedActionNonce
+  selectDroppedActionNonce,
+  selectLastSnap
 } from '@/stores/gameStore';
 import { useAuthStore } from '@/stores/authStore';
 import { useCurrentLobbyStore, type LobbyPhase } from '@/stores/lobbyStore';
@@ -114,8 +117,10 @@ interface PileSnapshot {
 /**
  * Transient table notice derived from state deltas. A hand that grows is a snap
  * penalty (nothing else adds a card to a hand mid-game; the drawn card is held
- * apart from the hand), a hand that shrinks as the discard top changes is a
- * successful snap, and a stockpile that grows is a reshuffle. Each notice
+ * apart from the hand) and a stockpile that grows is a reshuffle. A successful
+ * snap is read from the event instead (see the lastSnap effect): the seat that
+ * shrinks is the card's owner, who on an opponent snap is not the player who
+ * acted, so a hand delta cannot say who snapped (cambia-913). Each notice
  * clears itself after a few seconds. Penalty cards are drawn unseen, so this
  * never names a face (cambia-820).
  */
@@ -133,6 +138,24 @@ function useTableNotice(gs: ObfGameState, selfId: string | undefined, names: Map
     seenDrop.current = droppedNonce;
     setNotice({ id: Date.now(), tone: 'warning', text: 'That did not go through.' });
   }, [droppedNonce]);
+
+  // A successful snap names two players: the one who snapped and the one whose card left.
+  const lastSnap = useGameStore(selectLastSnap);
+  const seenSnap = useRef(lastSnap?.nonce ?? 0);
+  useEffect(() => {
+    if (!lastSnap || lastSnap.nonce === seenSnap.current) return;
+    seenSnap.current = lastSnap.nonce;
+    const byYou = lastSnap.snapperId === selfId;
+    const onYou = lastSnap.ownerId === selfId;
+    const snapper = names.get(lastSnap.snapperId ?? '') ?? 'Opponent';
+    const owner = names.get(lastSnap.ownerId ?? '') ?? 'Opponent';
+    const text = byYou && onYou ? 'Snap. Your card matched the discard.'
+      : byYou ? `Snap. You matched ${owner}'s card.`
+        : onYou ? `Snap. ${snapper} matched your card.`
+          : lastSnap.snapperId === lastSnap.ownerId ? `Snap. ${snapper} matched the discard.`
+            : `Snap. ${snapper} matched ${owner}'s card.`;
+    setNotice({ id: Date.now(), tone: onYou && !byYou ? 'warning' : 'success', text });
+  }, [lastSnap, selfId, names]);
 
   useEffect(() => {
     const snap: PileSnapshot = {
@@ -153,9 +176,6 @@ function useTableNotice(gs: ObfGameState, selfId: string | undefined, names: Map
       if (p.handSize > was) {
         const who = names.get(p.playerId) ?? 'Opponent';
         next = { tone: 'danger', text: you ? 'Snap missed. A penalty card joins your hand.' : `Snap missed. ${who} draws a penalty card.` };
-      } else if (p.handSize < was && snap.discardTopId !== before.discardTopId) {
-        const who = names.get(p.playerId) ?? 'Opponent';
-        next = { tone: 'success', text: you ? 'Snap. Your card matched the discard.' : `Snap. ${who} matched the discard.` };
       }
     }
     if (snap.stock > before.stock) {
@@ -237,6 +257,15 @@ const EmptySlot: React.FC<{ onClick?: () => void; highlight?: boolean; label?: s
 const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage, onLeave, connected = true, connectionError = null }) => {
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
   const [kingPair, setKingPair] = useState<KingPair | null>(null);
+  /**
+   * An opponent card picked out for a snap (cambia-913 R2). A snap names the card that is being
+   * snapped: the server resolves action_snap by card UUID, searching the sender's hand first and
+   * the opponent's second (engine_adapter.go handleSnapViaEngine), so a frame carrying one of our
+   * own cards could only ever resolve in our own hand and the opponent branch was unreachable
+   * from the felt. Held like the own-hand selection so the move stays two steps: pick the card,
+   * then commit on the discard or the Snap button.
+   */
+  const [snapTarget, setSnapTarget] = useState<{ playerId: string; cardId: string; idx: number } | null>(null);
 
   const selfId = useAuthStore((s) => s.user?.id);
   const authName = useAuthStore((s) => s.user?.username);
@@ -307,6 +336,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
       }
     }
     if (pendingAction === null) {
+      setSnapTarget(null);
       setSelectedIdx((prev) => (prev === idx ? null : idx));
     }
   }, [busy, pendingAction, specialAction, selectedIdx, sendMessage]);
@@ -331,6 +361,11 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
         return;
       }
     }
+    if (snapTarget && pendingAction === null) {
+      sendMessage(snapAction(snapTarget.cardId));
+      setSnapTarget(null);
+      return;
+    }
     if (selectedIdx !== null && pendingAction === null) {
       const selectedCard = selfState?.revealedHand?.[selectedIdx];
       if (selectedCard) {
@@ -338,7 +373,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
         setSelectedIdx(null);
       }
     }
-  }, [isMyTurn, busy, pendingAction, selectedIdx, selfState, gameState, sendMessage]);
+  }, [isMyTurn, busy, pendingAction, selectedIdx, snapTarget, selfState, gameState, sendMessage]);
 
   const handleOpponentCardClick = useCallback((playerId: string, card: ObfCard, idx: number) => {
     if (busy) return;
@@ -371,26 +406,38 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
         return;
       }
     }
-    if (selectedIdx !== null && pendingAction === null) {
-      const allowOpponentSnapping = gameState.houseRules.allowOpponentSnapping ?? true;
-      if (allowOpponentSnapping) {
-        const selectedCard = selfState?.revealedHand?.[selectedIdx];
-        if (selectedCard) {
-          sendMessage(snapAction(selectedCard.id));
-          setSelectedIdx(null);
-        }
-      }
+    if (pendingAction === null && (gameState.houseRules.allowOpponentSnapping ?? true)) {
+      // Pick this card for the snap; the commit is the discard or the Snap button, the same two
+      // steps an own-hand snap takes.
+      setSelectedIdx(null);
+      setSnapTarget((prev) => (prev?.cardId === card.id ? null : { playerId, cardId: card.id, idx }));
     }
   }, [busy, pendingAction, specialAction, selectedIdx, selfState, selfId, gameState, sendMessage]);
 
   const snapSelected = useCallback(() => {
-    if (busy || selectedIdx === null || pendingAction !== null) return;
+    if (busy || pendingAction !== null) return;
+    if (snapTarget) {
+      sendMessage(snapAction(snapTarget.cardId));
+      setSnapTarget(null);
+      return;
+    }
+    if (selectedIdx === null) return;
     const selectedCard = selfState?.revealedHand?.[selectedIdx];
     if (selectedCard) {
       sendMessage(snapAction(selectedCard.id));
       setSelectedIdx(null);
     }
-  }, [busy, selectedIdx, pendingAction, selfState, sendMessage]);
+  }, [busy, selectedIdx, snapTarget, pendingAction, selfState, sendMessage]);
+
+  // A picked opponent card can leave the table under us: its owner may snap it first, an ability
+  // may move it, the game may end. Drop the pick rather than let the commit fire at a card that
+  // is no longer where it was clicked.
+  useEffect(() => {
+    if (!snapTarget) return;
+    const owner = gameState.players.find((p) => p.playerId === snapTarget.playerId);
+    const held = owner?.revealedHand?.some((c) => c.id === snapTarget.cardId);
+    if (!held || pendingAction !== null || gameState.gameOver) setSnapTarget(null);
+  }, [snapTarget, gameState.players, gameState.gameOver, pendingAction]);
 
   // The King's second step is over once the ability resolves or the turn moves on.
   useEffect(() => {
@@ -413,8 +460,8 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   const discardInteractive =
     canTakeDiscard ||
     (pendingAction === 'discard_replace' && !!selfState?.drawnCard) ||
-    (selectedIdx !== null && pendingAction === null);
-  const canSnap = selectedIdx !== null && pendingAction === null && !busy;
+    ((selectedIdx !== null || !!snapTarget) && pendingAction === null);
+  const canSnap = (selectedIdx !== null || !!snapTarget) && pendingAction === null && !busy;
   const canCallCambia = isMyTurn && pendingAction === null && !busy && !gameState.cambiaCalled && gameState.started && !gameState.gameOver;
   const kingConfirm = !!kingPair && specialRank === 'K' && isMyTurn && !busy;
   const canSkipSpecial = isMyTurn && pendingAction === 'special_action' && !busy && !kingConfirm;
@@ -440,17 +487,21 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     return m;
   }, [revealShown, abilityReveal]);
 
-  // Legal-target highlighting. The click handlers above already no-op outside these
-  // cases; this only decides what the felt shows as a target.
+  // Legal-target highlighting for an ability step. The click handlers above already no-op
+  // outside these cases; this only decides what the felt shows as a target. Opponent snapping
+  // used to ride this flag, which is where its select-your-own-card-first precondition came
+  // from; the snap now names the card that was clicked (cambia-913 R2).
   const opponentTargetable = (() => {
-    if (busy || kingConfirm) return false;
-    if (specialRank) {
-      if (specialRank === '9' || specialRank === 'T') return true;
-      if (specialRank === 'J' || specialRank === 'Q' || specialRank === 'K') return selectedIdx !== null;
-      return false;
-    }
-    return selectedIdx !== null && pendingAction === null && allowOpponentSnapping;
+    if (busy || kingConfirm || !specialRank) return false;
+    if (specialRank === '9' || specialRank === 'T') return true;
+    if (specialRank === 'J' || specialRank === 'Q' || specialRank === 'K') return selectedIdx !== null;
+    return false;
   })();
+  // Snapping an opponent is legal out of turn and takes no selection first, so their cards stay
+  // clickable for the whole hand. They are not ringed for it: a ring that never goes out is not
+  // a highlight, and an opponent snap is a claim to know the card, not a prompt.
+  const opponentSnappable =
+    !busy && !roundOver && !preGame && pendingAction === null && allowOpponentSnapping && !!gameState.discardTop;
   const ownTargetable = (() => {
     if (busy || kingConfirm) return false;
     if (pendingAction === 'discard_replace') return true;
@@ -470,6 +521,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     // A snap selection is actionable out of turn (snapping is), so it outranks
     // the whose-turn line, which otherwise sat above the Snap button that the
     // selection had just enabled (cambia-876, DL-4 review F6).
+    if (snapTarget && pendingAction === null) return `Snap ${nameOf(snapTarget.playerId)}'s card onto the discard, or pick another card.`;
     if (selectedIdx !== null && pendingAction === null) return 'Snap the selected card onto the discard, or pick another card.';
     if (!isMyTurn) {
       if (specialAction?.active && currentPlayer && specialAction.playerId === currentPlayer.playerId) {
@@ -485,7 +537,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     if (pendingAction === 'discard_replace') return 'Swap the drawn card into a slot, or discard it.';
     if (gameState.cambiaCalled) return canTakeDiscard ? 'Last turn. Draw from the stock or take the discard.' : 'Last turn. Draw from the stock.';
     return canTakeDiscard ? 'Your turn. Draw from the stock or take the discard.' : 'Your turn. Draw from the stock.';
-  }, [gaveUp, offline, roundOver, phase, preGame, isMyTurn, specialAction, currentPlayer, nameOf, specialRank, kingConfirm, selectedIdx, pendingAction, gameState.cambiaCalled, canTakeDiscard]);
+  }, [gaveUp, offline, roundOver, phase, preGame, isMyTurn, specialAction, currentPlayer, nameOf, specialRank, kingConfirm, selectedIdx, snapTarget, pendingAction, gameState.cambiaCalled, canTakeDiscard]);
 
   const discardFace = toDsCardFace(gameState.discardTop);
   const drawnCard = selfState?.drawnCard ?? displayedDrawnCard;
@@ -604,6 +656,8 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                       // clickable once its real id is known (cambia-509).
                       const card = opp.revealedHand?.[i];
                       const targetable = opponentTargetable && !!card;
+                      const snappable = opponentSnappable && !!card;
+                      const picked = !!card && snapTarget?.cardId === card.id;
                       const shown = card ? toDsCardFace(revealById.get(card.id)) : null;
                       const who = nameOf(opp.playerId);
                       return (
@@ -613,11 +667,11 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                           rank={shown?.rank}
                           suit={shown?.suit}
                           size='sm'
-                          selected={!!shown}
+                          selected={!!shown || picked}
                           highlight={targetable}
                           dimmed={!!specialRank && !targetable && !shown}
                           label={shown ? `${who} card ${i + 1}, revealed: ${shown.rank}${shown.suit ? ' of ' + shown.suit : ''}` : `${who} card ${i + 1}`}
-                          onClick={targetable ? () => handleOpponentCardClick(opp.playerId, card!, i) : undefined}
+                          onClick={targetable || snappable ? () => handleOpponentCardClick(opp.playerId, card!, i) : undefined}
                         />
                       );
                     })}
@@ -708,7 +762,9 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                 <Button variant='secondary' onClick={() => { sendMessage(discardAction(selfState.drawnCard!.id)); setSelectedIdx(null); }}>Discard drawn card</Button>
               )}
               {canSnap && <Button onClick={snapSelected}>Snap selected card</Button>}
-              {canSnap && <Button variant='ghost' onClick={() => setSelectedIdx(null)}>Cancel</Button>}
+              {/* Ghost carries --text-secondary, a page-surface token that measures 1.41:1 against
+                  the felt in the light theme. On the felt the label takes the felt's own token. */}
+              {canSnap && <Button variant='ghost' style={{ color: 'var(--text-on-green)' }} onClick={() => { setSelectedIdx(null); setSnapTarget(null); }}>Cancel</Button>}
               {kingConfirm && <Button onClick={() => confirmKingSwap(true)}>Swap cards</Button>}
               {kingConfirm && <Button variant='secondary' onClick={() => confirmKingSwap(false)}>Keep cards</Button>}
               {canSkipSpecial && <Button variant='secondary' onClick={() => sendMessage(skipSpecialAction())}>Skip ability</Button>}

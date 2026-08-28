@@ -33,6 +33,10 @@ interface CurrentLobbyState {
 	countdownStartTime: number | null; // System timestamp (ms) when countdown started
 	countdownDuration: number | null; // Duration in seconds
 	matchState: MatchState | null;
+	// Bumped once per outbound lobby frame the hub discarded on its staleness gate that the
+	// client could not safely resend (cambia-913 F4). The lobby view watches the number and
+	// shows a notice; it carries no text so the surface owns the copy, as the table's does.
+	droppedActionNonce: number;
 	setCurrentLobbyId: (lobbyId: string | null) => void;
 	processLobbyWebSocketMessage: (type: string, payload: any) => void; // Envelope-unwrapped: type + payload
 	addChatMessage: (message: ChatMessage) => void;
@@ -41,6 +45,7 @@ interface CurrentLobbyState {
 	setError: (error: string | null) => void;
 	clearError: () => void;
 	clearChat: () => void;
+	noteDroppedAction: () => void;
 	setPhase: (phase: LobbyPhase) => void;
 	forceSync: (state: any) => void; // Full state replacement from sync_state
 	createAndJoinLobby: (settings: Partial<LobbyState>) => Promise<string | null>;
@@ -126,8 +131,11 @@ export const useCurrentLobbyStore = create<CurrentLobbyState>((set, get) => ({
 	countdownStartTime: null,
 	countdownDuration: null,
 	matchState: null,
+	droppedActionNonce: 0,
 
 	setPhase: (phase) => set({ phase }),
+
+	noteDroppedAction: () => set((state) => ({ droppedActionNonce: state.droppedActionNonce + 1 })),
 
 	forceSync: (payload) => {
 		set((state) => {
