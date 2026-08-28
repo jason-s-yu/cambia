@@ -258,7 +258,7 @@ const EmptySlot: React.FC<{ onClick?: () => void; highlight?: boolean; label?: s
     height: 'var(--card-h-md)',
     boxSizing: 'border-box',
     borderRadius: 'var(--radius-playing-card)',
-    border: '1px dashed ' + (highlight ? 'var(--border-accent)' : 'var(--border-on-felt)'),
+    border: '1px dashed ' + (highlight ? 'var(--card-targetable-ring)' : 'var(--border-on-felt)'),
     cursor: onClick ? 'pointer' : 'default'
   };
   if (onClick) return <button type='button' aria-label={label} data-testid={testId} onClick={onClick} style={box} />;

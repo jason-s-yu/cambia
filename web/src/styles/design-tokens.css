@@ -182,6 +182,13 @@
   --card-face-edge: #cdc7b7;
   --card-back: var(--green-700);
   --card-back-line: rgba(201, 162, 39, 0.42);
+  /* Edge and ring of a card or pile that is a legal target. It is drawn on the
+     felt, so it belongs to the on-felt family and runs light-on-green in both
+     themes rather than following the neutral border tiers. The soft gold tint
+     it replaced measured 1.03:1 on the felt and read as nothing; this holds the
+     3:1 non-text floor (4.54:1 dark, 4.17:1 light), checked by
+     check-theme-tokens (cambia-959, review F1). */
+  --card-targetable-ring: var(--gold-400);
   --suit-red: var(--red-500);
   --suit-black: var(--ink-900);
 
@@ -270,6 +277,10 @@
   --card-face-edge: var(--paper-300);
   --card-back: var(--green-600);
   --card-back-line: rgba(201, 162, 39, 0.55);
+  /* One step brighter than dark: the light felt is lighter, so the ring
+     separates by going up, not down. --gold-600, the light border accent, sits
+     at 1.84:1 here, below the idle edge. */
+  --card-targetable-ring: var(--gold-300);
   --suit-red: var(--red-600);
   --suit-black: var(--ink-900);
 

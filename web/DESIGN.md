@@ -136,9 +136,11 @@ Each status carries three tokens: the foreground, a tinted `-bg`, and a `-border
 |State|Prop|Edge and shadow|Position|
 |-|-|-|-|
 |Idle|none|`--card-face-edge` face up, `--border-strong` face down, plus `--shadow-playing-card`|Resting|
-|Targetable|`highlight`|`--border-accent` edge and a 2px `--accent-gold-soft` outline|Resting|
+|Targetable|`highlight`|`--card-targetable-ring` edge and a 2px ring in the same gold|Resting|
 |Selected|`selected`|`--border-accent` edge and the `--focus-ring` gold ring|Raised 6px|
 |Disabled|`dimmed`|Idle edge at 55% opacity|Resting|
+
+`--card-targetable-ring` is its own token because the ring is drawn on the felt, not on a neutral surface: it runs light-on-green in both themes (`--gold-400` dark, `--gold-300` light) instead of following `--border-accent`, which goes darker in light and lands at 1.84:1 on the felt, under the idle edge. The token holds the 3:1 non-text floor against `--surface-felt` in both themes and `check-theme-tokens` measures it, so the state cannot fade back out.
 
 Focus is a fifth layer, not a state: a card that takes a click is a real `<button>`, so Enter and Space activate it and the global `:focus-visible` outline rings it in `--focus-ring-color` outside whatever state it is in. A card that takes no click is not a button and not focusable; it carries `role="img"` with its name so a screen reader still reads it.
 

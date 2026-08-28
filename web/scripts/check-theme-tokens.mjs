@@ -5,8 +5,9 @@
 //   1. every semantic token resolves to a literal color,
 //   2. dark and light differ on every one of them,
 //   3. the tokens declared theme-stable (SHARED) resolve and stay identical, and
-//   4. every documented text/ground pair clears its contrast floor in both
-//      themes (cambia-914).
+//   4. every documented text/ground pair, and the one state indicator drawn
+//      straight on the felt, clears its contrast floor in both themes
+//      (cambia-914, cambia-959).
 //
 // Run after `npm run build`:  npm run check-tokens
 
@@ -69,7 +70,7 @@ const SEMANTIC = [
     'status-danger', 'status-danger-bg', 'status-danger-border',
     'status-warning', 'status-warning-bg', 'status-warning-border',
     'status-info', 'status-info-bg', 'status-info-border',
-    'card-face', 'card-face-edge', 'card-back', 'card-back-line', 'suit-red',
+    'card-face', 'card-face-edge', 'card-back', 'card-back-line', 'card-targetable-ring', 'suit-red',
     'tier-bronze', 'tier-silver', 'tier-gold', 'tier-platinum', 'tier-diamond', 'tier-master', 'tier-grandmaster'
 ];
 
@@ -140,6 +141,12 @@ console.log(`${SHARED.length} theme-stable tokens checked: ${shared} identical a
 // the house floor for them is 3:1, enough to read a disabled label ("Signing
 // in", "Creating") without letting it compete with live text.
 //
+// The last pair is not text: it is the ring that marks a card or pile as a
+// legal target, and it takes the 3:1 non-text floor of WCAG 1.4.11. It is
+// measured because the state shipped as a 16% gold tint that came out at
+// 1.03:1 on the felt, a state indicator that indicated nothing (cambia-959,
+// review F1).
+//
 // Translucent foregrounds are composited over their ground first, so the
 // on-felt tiers are measured as rendered rather than as declared.
 //
@@ -203,7 +210,8 @@ const PAIRS = [
     { fg: 'text-on-danger', bg: 'accent-danger-hover', min: 4.5, use: 'Cambia call, hovered' },
     { fg: 'text-on-felt-muted', bg: 'surface-felt', min: 4.5, use: 'pile labels and counts' },
     { fg: 'text-disabled', bg: 'surface-disabled', min: 3, use: 'disabled control label (WCAG exempts it; house floor 3:1)' },
-    { fg: 'text-disabled', bg: 'surface-2', min: 3, use: 'disabled text on a raised row (house floor 3:1)' }
+    { fg: 'text-disabled', bg: 'surface-2', min: 3, use: 'disabled text on a raised row (house floor 3:1)' },
+    { fg: 'card-targetable-ring', bg: 'surface-felt', min: 3, use: 'targetable card and pile ring (non-text indicator, WCAG 1.4.11 3:1)' }
 ];
 
 let contrastFailed = 0;

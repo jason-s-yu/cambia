@@ -10,7 +10,7 @@ export interface PlayingCardProps {
   size?: 'sm' | 'md' | 'lg';
   /** Lifted with a gold ring: the chosen card, or the card being shown. */
   selected?: boolean;
-  /** Soft gold outline without the lift: a legal target or an actionable pile. */
+  /** Gold edge and ring without the lift: a legal target or an actionable pile. */
   highlight?: boolean;
   /** Faded: not a legal target right now. */
   dimmed?: boolean;
@@ -50,9 +50,11 @@ const DIMS: Record<NonNullable<PlayingCardProps['size']>, Dims> = {
  * hairline frame. 1px border, one hairline lift.
  *
  * Four states, kept apart so a chosen card never looks like a merely legal one
- * (cambia-959): idle is the plain edge; `highlight` (targetable) recolors the
- * edge and adds a soft gold outline, no lift; `selected` rings the card in gold
- * and raises it; `dimmed` fades a card that is not a target right now.
+ * (cambia-959): idle is the plain edge; `highlight` (targetable) draws a solid
+ * --card-targetable-ring edge and a 2px ring in the same gold, no lift;
+ * `selected` rings the card in gold and raises it; `dimmed` fades a card that is
+ * not a target right now. The targetable ring is opaque because the tint it
+ * replaced measured 1.03:1 on the felt (review F1).
  *
  * A card that takes a click is a real <button>, so Enter and Space activate it
  * natively and it takes the global :focus-visible ring. A card that takes no
@@ -80,11 +82,11 @@ const PlayingCard: React.FC<PlayingCardProps> = ({ rank, suit, faceDown = false,
     position: 'relative',
     boxSizing: 'border-box',
     borderRadius: 'var(--radius-playing-card)',
-    border: '1px solid ' + (selected || highlight ? 'var(--border-accent)' : edge),
+    border: '1px solid ' + (selected ? 'var(--border-accent)' : highlight ? 'var(--card-targetable-ring)' : edge),
     boxShadow: selected
       ? 'var(--focus-ring), var(--shadow-playing-card)'
       : highlight
-        ? '0 0 0 2px var(--accent-gold-soft), var(--shadow-playing-card)'
+        ? '0 0 0 2px var(--card-targetable-ring), var(--shadow-playing-card)'
         : 'var(--shadow-playing-card)',
     transform: selected ? 'translateY(-6px)' : 'none',
     opacity: dimmed ? 0.55 : 1,
