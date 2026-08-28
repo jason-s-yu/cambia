@@ -5,6 +5,24 @@ import type { ObfGameState, ObfCard, EventCard } from '@/types/game';
 import { immer } from 'zustand/middleware/immer';
 import { useAuthStore } from './authStore';
 
+/** A face shown to this client by an ability (7/8 own card, 9/T opponent card, King both). */
+export interface RevealedCard {
+	id: string;
+	rank?: string;
+	suit?: string;
+	value?: number;
+	idx?: number;
+	ownerId?: string;
+}
+
+/** The most recent ability reveal, kept so the table can show the faces while the ability plays out. */
+export interface AbilityReveal {
+	special: string;
+	/** Client receipt time; the table holds a peek on screen for a beat past this. */
+	at: number;
+	cards: RevealedCard[];
+}
+
 interface GameState {
 	gameId: string | null;
 	gameState: ObfGameState | null;
@@ -25,6 +43,15 @@ interface GameState {
 	// reads these directly instead (cambia-510).
 	finalScores: Record<string, number> | null;
 	winnerId: string | null;
+	// Faces revealed to this client by abilities (cambia-848 F3). The service's
+	// private_special_action_success is the only carrier of a peeked face: own cards it names
+	// are marked seen server-side (CardTracker.SeenByPlayer) and come back known on the next
+	// sync, so they are folded into revealedHand here as well; opponent faces never appear in
+	// a sync, so they live only in these two fields. seenFaces accumulates every face by card
+	// id for the life of the game so a swap that moves a looked-at card into the own hand
+	// keeps its face; abilityReveal is the latest reveal, for the table's transient display.
+	seenFaces: Record<string, RevealedCard>;
+	abilityReveal: AbilityReveal | null;
 }
 
 interface GameActions {
@@ -55,7 +82,9 @@ const initialState: GameState = {
 	lastMessageTimestamp: 0,
 	serverClockOffsetMs: 0,
 	finalScores: null,
-	winnerId: null
+	winnerId: null,
+	seenFaces: {},
+	abilityReveal: null
 };
 
 export const useGameStore = create<GameState & GameActions>()(
@@ -73,6 +102,8 @@ export const useGameStore = create<GameState & GameActions>()(
 					state.displayedDrawnCard = null;
 					state.pendingAction = null;
 					state.isProcessingAction = false;
+					state.seenFaces = {};
+					state.abilityReveal = null;
 				}
 				state.gameId = id;
 			});
@@ -148,6 +179,7 @@ export const useGameStore = create<GameState & GameActions>()(
 				}
 				state.pendingAction = null;
 				state.displayedDrawnCard = null;
+				state.abilityReveal = null;
 				state.isLoading = false;
 				state.isConnected = true;
 				state.error = null;
@@ -178,6 +210,7 @@ export const useGameStore = create<GameState & GameActions>()(
 							state.isConnected = true; // Mark as connected on successful sync
 							state.error = null;
 							state.pendingAction = null; // Clear pending actions on full sync
+							state.abilityReveal = null;
 							// Recompute clock skew from this snapshot's serverNow (cambia-488).
 							if (typeof payload.state?.serverNow === 'number') {
 								state.serverClockOffsetMs = payload.state.serverNow - Date.now();
@@ -186,6 +219,9 @@ export const useGameStore = create<GameState & GameActions>()(
 							const gs = state.gameState;
 							if (gs) {
 								const userState = gs.players.find(p => p.playerId === selfPlayerId); // Find 'self'
+								for (const c of userState?.revealedHand ?? []) {
+									if (c.known && c.rank) state.seenFaces[c.id] = { id: c.id, rank: c.rank, suit: c.suit, value: c.value, idx: c.idx, ownerId: selfPlayerId ?? undefined };
+								}
 								if (userState?.drawnCard && gs.currentPlayerId === userState.playerId && !gs.gameOver && gs.started) {
 									state.pendingAction = 'discard_replace';
 								} else if (gs.specialAction?.active && gs.specialAction.playerId === selfPlayerId && !gs.gameOver && gs.started) {
@@ -223,6 +259,7 @@ export const useGameStore = create<GameState & GameActions>()(
 										value: card.value,
 										idx: card.idx
 									};
+									state.seenFaces[card.id] = { id: card.id, rank: card.rank, suit: card.suit, value: card.value, idx: card.idx, ownerId: selfPlayerId ?? undefined };
 								}
 							}
 							break;
@@ -269,6 +306,9 @@ export const useGameStore = create<GameState & GameActions>()(
 									if (player && self && player.playerId !== self.playerId) {
 										// Magnify card back for others
 										state.displayedDrawnCard = { id: payload.card?.id, known: false };
+										// Hold the id on the player too: a replace moves it into their hand slot
+										// (player_discard below), and abilities target opponent cards by id.
+										if (payload.card?.id) player.drawnCard = { id: payload.card.id, known: false };
 									}
 								} else { // Private draw
 									// Update the specific player's drawnCard state
@@ -277,6 +317,9 @@ export const useGameStore = create<GameState & GameActions>()(
 										player.drawnCard = payload.card;
 										state.pendingAction = 'discard_replace'; // Player must now discard/replace
 										state.displayedDrawnCard = payload.card; // Magnify revealed card for self
+										if (payload.card?.id && payload.card.rank) {
+											state.seenFaces[payload.card.id] = { id: payload.card.id, rank: payload.card.rank, suit: payload.card.suit, value: payload.card.value, ownerId: selfPlayerId ?? undefined };
+										}
 									}
 									// Update stockpile/discard size based on source
 									if (payload.payload?.source === 'stockpile') {
@@ -294,9 +337,22 @@ export const useGameStore = create<GameState & GameActions>()(
 								// Update discard pile
 								state.gameState.discardSize++;
 								state.gameState.discardTop = payload.card;
-								// Clear drawn card for the discarding player
+								// Clear drawn card for the discarding player. A replace carries the slot the
+								// discarded card left (card.idx, see the engine adapter's replace branch); the
+								// drawn card takes that slot, with its face for the own hand and as an id
+								// reference for an opponent's. No sync follows a replace, so without this the
+								// slot keeps showing (and targeting) the card that just hit the discard pile
+								// (cambia-848 F3). A plain discard carries no idx and leaves the hand alone.
 								const player = state.gameState.players.find(p => p.playerId === payload.user?.id);
 								if (player) {
+									const idx = payload.card?.idx;
+									const drawn = player.drawnCard;
+									if (typeof idx === 'number' && drawn?.id && player.revealedHand && idx >= 0 && idx < player.revealedHand.length) {
+										const face = player.playerId === selfPlayerId ? (drawn.rank ? drawn : state.seenFaces[drawn.id]) : undefined;
+										player.revealedHand[idx] = face
+											? { id: drawn.id, known: true, rank: face.rank, suit: face.suit, value: face.value, idx }
+											: { id: drawn.id, known: false, idx };
+									}
 									player.drawnCard = null;
 								}
 								state.displayedDrawnCard = null; // Clear magnified card
@@ -328,14 +384,49 @@ export const useGameStore = create<GameState & GameActions>()(
 								}
 								// If it was swap_peek_reveal, the action is still pending (waiting for swap/skip)
 								// UI might update based on card1/card2 info (e.g., highlight targets)
+								if (payload.special === 'swap_blind' || payload.special === 'swap_peek_swap') {
+									// The event carries the post-swap slots: card1 is the actor's, card2 the
+									// target's, each with the id now sitting there. No sync follows a swap,
+									// so move the ids in both hands here or a later snap or ability would
+									// target the card that left, and a reveal keyed by id would land on the
+									// wrong slot. An own slot keeps a face only when this client has seen it
+									// (a King look, or an earlier peek of that card); opponent slots are id
+									// references and stay face down (cambia-848 F3).
+									for (const c of [payload.card1, payload.card2] as (EventCard | undefined)[]) {
+										if (!c?.user?.id || typeof c.idx !== 'number') continue;
+										const owner = state.gameState.players.find(p => p.playerId === c.user!.id);
+										if (!owner?.revealedHand || c.idx < 0 || c.idx >= owner.revealedHand.length) continue;
+										const face = owner.playerId === selfPlayerId ? state.seenFaces[c.id] : undefined;
+										owner.revealedHand[c.idx] = face
+											? { id: c.id, known: true, rank: face.rank, suit: face.suit, value: face.value, idx: c.idx }
+											: { id: c.id, known: false, idx: c.idx };
+									}
+								}
 							}
 							break;
 
 						// --- Private Events ---
-						case 'private_special_action_success':
-							// UI might use this to show revealed cards temporarily
-							// state updates handled by public events or sync
+						case 'private_special_action_success': {
+							// The looked-at faces: card1 for a 7/8 or 9/T peek, card1 (own) and card2
+							// (opponent) for a King look. See the seenFaces note on the state shape.
+							const revealed = ([payload.card1, payload.card2] as (EventCard | undefined)[])
+								.filter((c): c is EventCard => !!c && !!c.id)
+								.map((c): RevealedCard => ({ id: c.id, rank: c.rank, suit: c.suit, value: c.value, idx: c.idx, ownerId: c.user?.id }));
+							for (const c of revealed) state.seenFaces[c.id] = c;
+							state.abilityReveal = revealed.length > 0
+								? { special: typeof payload.special === 'string' ? payload.special : '', at: Date.now(), cards: revealed }
+								: null;
+							const self = state.gameState?.players.find(p => p.playerId === selfPlayerId);
+							if (self?.revealedHand) {
+								for (const c of revealed) {
+									if (c.ownerId !== selfPlayerId) continue;
+									const slot = self.revealedHand.findIndex(h => h.id === c.id);
+									if (slot < 0) continue;
+									self.revealedHand[slot] = { ...self.revealedHand[slot], known: true, rank: c.rank, suit: c.suit, value: c.value };
+								}
+							}
 							break;
+						}
 						case 'private_special_action_fail':
 							// Show error message to the user
 							// state.error = `Special action failed: ${payload.message}`; // Maybe too aggressive?
@@ -450,6 +541,8 @@ export const useGameStore = create<GameState & GameActions>()(
 							state.displayedDrawnCard = null;
 							state.finalScores = null;
 							state.winnerId = null;
+							state.seenFaces = {};
+							state.abilityReveal = null;
 							state.isLoading = true;
 							state.isProcessingAction = false;
 							break;
@@ -525,6 +618,7 @@ export const selectDisplayedDrawnCard = (state: GameState) => state.displayedDra
 export const selectPendingAction = (state: GameState) => state.pendingAction;
 export const selectIsProcessingAction = (state: GameState) => state.isProcessingAction;
 export const selectServerClockOffsetMs = (state: GameState) => state.serverClockOffsetMs;
+export const selectAbilityReveal = (state: GameState) => state.abilityReveal;
 export const selectFinalScores = (state: GameState) => state.finalScores;
 export const selectCurrentPlayerId = (state: GameState) => state.gameState?.currentPlayerId;
 export const selectSelfPlayerState = (state: GameState) => {

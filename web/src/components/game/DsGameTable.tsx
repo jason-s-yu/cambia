@@ -30,7 +30,8 @@ import {
   selectIsSelfTurn,
   selectIsProcessingAction,
   selectDisplayedDrawnCard,
-  selectServerClockOffsetMs
+  selectServerClockOffsetMs,
+  selectAbilityReveal
 } from '@/stores/gameStore';
 import { useAuthStore } from '@/stores/authStore';
 import { useCurrentLobbyStore, type LobbyPhase } from '@/stores/lobbyStore';
@@ -91,6 +92,9 @@ interface KingPair {
   oppIdx: number;
   oppOwner: string;
 }
+
+/** How long a peeked opponent face stays up once the ability itself has resolved. */
+const REVEAL_HOLD_MS = 6000;
 
 interface TableNotice {
   id: number;
@@ -237,6 +241,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   const busy = isProcessing || offline;
   const displayedDrawnCard = useGameStore(selectDisplayedDrawnCard);
   const serverClockOffsetMs = useGameStore(selectServerClockOffsetMs);
+  const abilityReveal = useGameStore(selectAbilityReveal);
   const matchState = useCurrentLobbyStore((s) => s.matchState);
   const lobbyPlayers = useCurrentLobbyStore((s) => s.lobbyDetails?.lobby_status?.users);
 
@@ -402,6 +407,26 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   const canSkipSpecial = isMyTurn && pendingAction === 'special_action' && !busy && !kingConfirm;
   const allowOpponentSnapping = gameState.houseRules.allowOpponentSnapping ?? true;
 
+  // Ability reveals (cambia-848 F3). Own faces are durable in revealedHand (the store folds
+  // them in), so the table only has to show an opponent face: for the whole King confirm,
+  // and for a short hold after a 9/T peek or a settled King. A tick re-renders once the hold
+  // ends so the face goes back down without another store event.
+  const [, setRevealTick] = useState(0);
+  useEffect(() => {
+    if (!abilityReveal) return;
+    const left = REVEAL_HOLD_MS - (Date.now() - abilityReveal.at);
+    if (left <= 0) return;
+    const t = window.setTimeout(() => setRevealTick((n) => n + 1), left + 30);
+    return () => window.clearTimeout(t);
+  }, [abilityReveal]);
+  const revealShown = !!abilityReveal && !roundOver && (kingConfirm || Date.now() - abilityReveal.at < REVEAL_HOLD_MS);
+  const revealById = useMemo(() => {
+    const m = new Map<string, ObfCard>();
+    if (!revealShown || !abilityReveal) return m;
+    for (const c of abilityReveal.cards) m.set(c.id, { id: c.id, known: true, rank: c.rank, suit: c.suit, value: c.value, idx: c.idx });
+    return m;
+  }, [revealShown, abilityReveal]);
+
   // Legal-target highlighting. The click handlers above already no-op outside these
   // cases; this only decides what the felt shows as a target.
   const opponentTargetable = (() => {
@@ -435,7 +460,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     if (specialRank === '7' || specialRank === '8') return 'Peek: choose one of your cards to look at.';
     if (specialRank === '9' || specialRank === 'T') return 'Peek: choose an opponent card to look at.';
     if (specialRank === 'J' || specialRank === 'Q') return selectedIdx === null ? 'Blind swap: choose one of your cards.' : 'Blind swap: now choose the opponent card.';
-    if (kingConfirm) return 'King: swap the two cards, or keep them where they are.';
+    if (kingConfirm) return 'King: both cards are face up. Swap them, or keep them where they are.';
     if (specialRank === 'K') return selectedIdx === null ? 'King: choose one of your cards.' : 'King: now choose the opponent card to look at.';
     if (pendingAction === 'discard_replace') return 'Swap the drawn card into a slot, or discard it.';
     if (selectedIdx !== null) return 'Snap the selected card onto the discard, or pick another card.';
@@ -474,7 +499,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
           rank={face?.rank}
           suit={face?.suit}
           size='md'
-          selected={selectedIdx === i}
+          selected={selectedIdx === i || (kingConfirm && kingPair?.myIdx === i)}
           highlight={ownTargetable && selectedIdx !== i}
           label={face ? `Your card ${i + 1}: ${face.rank}${face.suit ? ' of ' + face.suit : ''}` : `Your card ${i + 1}, face down`}
           onClick={() => handlePlayerCardClick(card, i)}
@@ -556,14 +581,19 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                       // clickable once its real id is known (cambia-509).
                       const card = opp.revealedHand?.[i];
                       const targetable = opponentTargetable && !!card;
+                      const shown = card ? toDsCardFace(revealById.get(card.id)) : null;
+                      const who = nameOf(opp.playerId);
                       return (
                         <PlayingCard
                           key={card?.id ?? i}
-                          faceDown
+                          faceDown={!shown}
+                          rank={shown?.rank}
+                          suit={shown?.suit}
                           size='sm'
+                          selected={!!shown}
                           highlight={targetable}
-                          dimmed={!!specialRank && !targetable}
-                          label={`${nameOf(opp.playerId)} card ${i + 1}`}
+                          dimmed={!!specialRank && !targetable && !shown}
+                          label={shown ? `${who} card ${i + 1}, revealed: ${shown.rank}${shown.suit ? ' of ' + shown.suit : ''}` : `${who} card ${i + 1}`}
                           onClick={targetable ? () => handleOpponentCardClick(opp.playerId, card!, i) : undefined}
                         />
                       );
