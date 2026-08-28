@@ -279,21 +279,42 @@ func (g *GameState) removeCardFromHand(playerIdx, cardIdx uint8) Card {
 func (g *GameState) drawPenalty(playerIdx uint8) {
 	count := g.Rules.PenaltyDrawCount
 	for i := uint8(0); i < count; i++ {
-		if g.Players[playerIdx].HandLen >= MaxHandSize {
+		if !g.DrawPenaltyCard(playerIdx) {
 			break
 		}
-		if g.StockLen == 0 {
-			g.attemptReshuffle()
-		}
-		if g.StockLen == 0 {
-			break // No cards left at all.
-		}
-		g.StockLen--
-		card := g.Stockpile[g.StockLen]
-		handLen := g.Players[playerIdx].HandLen
-		g.Players[playerIdx].Hand[handLen] = card
-		g.Players[playerIdx].HandLen++
 	}
+}
+
+// DrawPenaltyCard draws a single snap-penalty card from the stockpile into the player's hand,
+// reshuffling the discard pile back into the stockpile first when the stockpile has run dry.
+// It reports whether a card was drawn: false when the hand already holds MaxHandSize cards, or
+// when the deck is exhausted (empty stockpile and a discard pile too thin to reshuffle), which
+// is how a penalty is paid short.
+//
+// Exported for adapters that cannot drive the engine's sequential snap phase and would otherwise
+// hand-roll the penalty draw: the service answers snaps asynchronously, so its snap window has
+// already closed by the time a client's snap arrives and snapOwn/snapOpponent (which draw the
+// penalty themselves) are no longer applicable. Routing that path through this primitive keeps
+// the penalty draw rules, the reshuffle included, defined here only.
+func (g *GameState) DrawPenaltyCard(playerIdx uint8) bool {
+	if int(playerIdx) >= MaxPlayers {
+		return false
+	}
+	if g.Players[playerIdx].HandLen >= MaxHandSize {
+		return false
+	}
+	if g.StockLen == 0 {
+		g.attemptReshuffle()
+	}
+	if g.StockLen == 0 {
+		return false // No cards left at all.
+	}
+	g.StockLen--
+	card := g.Stockpile[g.StockLen]
+	handLen := g.Players[playerIdx].HandLen
+	g.Players[playerIdx].Hand[handLen] = card
+	g.Players[playerIdx].HandLen++
+	return true
 }
 
 // advanceSnapper moves to the next snapper or ends the snap phase if all have acted.

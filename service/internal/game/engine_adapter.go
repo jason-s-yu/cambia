@@ -1052,31 +1052,58 @@ func (g *CambiaGame) handleSnapFailure(playerID uuid.UUID, engineIdx uint8, atte
 	}
 	g.fireEvent(failEvent)
 
-	// Apply penalty draws.
+	// Apply penalty draws. This path cannot go through engine.ApplyAction: the engine draws snap
+	// penalties inside its snap actions (engine/snap.go snapOwn/snapOpponent -> drawPenalty), but
+	// the service answers snaps asynchronously and applyEngineAction already drained the engine's
+	// sequential snap phase (autoProcessSnapPhase) when the discard opened it, so Snap.Active is
+	// false here and a snap action would be rejected. Each penalty card is therefore drawn through
+	// the engine's exported per-card primitive, which keeps the engine the single authority on the
+	// penalty rules: the hand-size cap, the empty-stockpile reshuffle, and paying a short penalty
+	// when the deck is genuinely exhausted. The hand-rolled draw this replaced never reshuffled, so
+	// a penalty owed on an empty stockpile was silently skipped instead (cambia-799).
 	penaltyCount := g.HouseRules.PenaltyDrawCount
 	if penaltyCount <= 0 {
 		return
 	}
 	log.Printf("Game %s: Applying %d penalty cards to player %s.", g.ID, penaltyCount, playerID)
 
+	reshuffled := false
 	for i := 0; i < penaltyCount; i++ {
-		if g.Engine.StockLen == 0 {
+		// The draw below would reshuffle on its own, but the UUID mirror has to be rebuilt against
+		// the discard pile as it stood before the reshuffle, so drive it here instead. The
+		// conditions match the engine's own order (hand cap first, then an empty stockpile), which
+		// keeps the service from reshuffling on a draw the engine would refuse. Once this has run,
+		// the draw finds a stocked pile and reshuffles nothing.
+		if g.Engine.Players[engineIdx].HandLen < engine.MaxHandSize && g.Engine.StockLen == 0 {
+			prevDiscardUUIDs := append([]uuid.UUID(nil), g.CardTracker.DiscardUUIDs[:g.Engine.DiscardLen]...)
+			if g.Engine.AttemptReshuffle() {
+				g.mirrorReshuffleIntoTracker(prevDiscardUUIDs)
+				reshuffled = true
+			}
+		}
+
+		handLen := g.Engine.Players[engineIdx].HandLen
+		if !g.Engine.DrawPenaltyCard(engineIdx) {
+			// Hand is full, or the deck is exhausted (empty stockpile and a discard pile too thin to
+			// reshuffle). Either way the penalty is paid short, exactly as the engine pays it.
 			break
 		}
-		if g.Engine.Players[engineIdx].HandLen >= engine.MaxHandSize {
-			break // Hand is full — cannot add more penalty cards.
-		}
-		preStock := g.Engine.StockLen
-		// Draw from stockpile into player's hand by modifying engine directly.
-		// We use the engine's internal state since there's no ApplyAction for penalty in isolation.
-		stockCard := g.Engine.Stockpile[preStock-1]
-		g.Engine.StockLen--
-		handLen := g.Engine.Players[engineIdx].HandLen
-		g.Engine.Players[engineIdx].Hand[handLen] = stockCard
-		g.Engine.Players[engineIdx].HandLen++
 
-		// Update tracker.
-		penaltyUUID := g.CardTracker.StockUUIDs[preStock-1]
+		// The engine popped the stockpile's top card into hand slot handLen.
+		stockIdx := g.Engine.StockLen
+		drawnCard := g.Engine.Players[engineIdx].Hand[handLen]
+
+		// Update tracker. The mirror should already name this card; when it does not, mint a fresh
+		// identity instead of handing the client an ID that belongs to a card sitting elsewhere, and
+		// log it, since a mismatch means some other path moved cards without mirroring them.
+		penaltyUUID := g.CardTracker.StockUUIDs[stockIdx]
+		penaltyCard := g.CardTracker.Registry[penaltyUUID]
+		if penaltyUUID == uuid.Nil || penaltyCard == nil || !registryCardMatches(penaltyCard, drawnCard) {
+			log.Printf("Game %s: stockpile UUID mirror drift at slot %d; minting an ID for the penalty card.", g.ID, stockIdx)
+			penaltyUUID, _ = uuid.NewRandom()
+			penaltyCard = engineCardToDetails(drawnCard, penaltyUUID)
+			g.CardTracker.Registry[penaltyUUID] = penaltyCard
+		}
 		g.CardTracker.Players[engineIdx].HandUUIDs[handLen] = penaltyUUID
 		g.CardTracker.StockLen = g.Engine.StockLen
 
@@ -1092,27 +1119,95 @@ func (g *CambiaGame) handleSnapFailure(playerID uuid.UUID, engineIdx uint8, atte
 		})
 
 		// Private penalty event with card details.
-		if penaltyCard := g.CardTracker.Registry[penaltyUUID]; penaltyCard == nil {
-			// Register the card.
-			g.CardTracker.Registry[penaltyUUID] = engineCardToDetails(stockCard, penaltyUUID)
-		}
-		penaltyCard := g.CardTracker.Registry[penaltyUUID]
 		privateIdx := int(handLen)
-		if penaltyCard != nil {
-			g.fireEventToPlayer(playerID, GameEvent{
-				Type: EventPrivateSnapPenalty,
-				Card: &EventCard{ID: penaltyUUID, Idx: &privateIdx, Rank: penaltyCard.Rank, Suit: penaltyCard.Suit, Value: penaltyCard.Value},
-				Payload: map[string]interface{}{
-					"count": i + 1,
-					"total": penaltyCount,
-				},
-			})
-		}
+		g.fireEventToPlayer(playerID, GameEvent{
+			Type: EventPrivateSnapPenalty,
+			Card: &EventCard{ID: penaltyUUID, Idx: &privateIdx, Rank: penaltyCard.Rank, Suit: penaltyCard.Suit, Value: penaltyCard.Value},
+			Payload: map[string]interface{}{
+				"count": i + 1,
+				"total": penaltyCount,
+			},
+		})
 	}
 
 	// Sync player models.
 	g.syncPlayerHandsFromEngine()
+
+	// Tell clients about the reshuffle once the penalty has settled, so the counts carried here are
+	// the post-reshuffle-and-draw ones. The penalty events themselves carry no pile sizes, so
+	// without this a client's stockpile and discard counts would stay wrong until the next full
+	// sync_state.
+	if reshuffled {
+		g.fireEvent(GameEvent{
+			Type: EventGameReshuffleStockpile,
+			Payload: map[string]interface{}{
+				"stockpileSize": int(g.Engine.StockLen),
+				"discardSize":   int(g.Engine.DiscardLen),
+			},
+		})
+	}
+
 	g.logAction(playerID, "player_snap_penalty_applied", map[string]interface{}{"count": penaltyCount})
+}
+
+// mirrorReshuffleIntoTracker rebuilds the CardUUIDTracker's stockpile and discard mirrors after the
+// engine reshuffled the discard pile back into the stockpile. prevDiscardUUIDs holds the discard
+// pile's UUIDs as they stood immediately before the reshuffle, index-aligned with the engine's
+// pre-reshuffle discard pile.
+//
+// The engine shuffles the cards it moves, so the mirror cannot follow them positionally: each new
+// stockpile slot is matched back to the UUID of the identical card in the pre-reshuffle discard
+// pile. Identity travels with the UUID, so seen-sets and registry lookups stay valid across the
+// reshuffle. Without this the tracker keeps the stale UUIDs of cards drawn out of the stockpile
+// long ago, and the next card off the stockpile is handed to a client under an ID that already
+// belongs to a card sitting in someone's hand.
+func (g *CambiaGame) mirrorReshuffleIntoTracker(prevDiscardUUIDs []uuid.UUID) {
+	if len(prevDiscardUUIDs) == 0 {
+		return
+	}
+	tracker := &g.CardTracker
+
+	// The engine leaves the top discard card in place and moves every card below it.
+	pool := prevDiscardUUIDs[:len(prevDiscardUUIDs)-1]
+	used := make([]bool, len(pool))
+
+	for i := uint8(0); i < g.Engine.StockLen; i++ {
+		card := g.Engine.Stockpile[i]
+		assigned := uuid.Nil
+		for j, id := range pool {
+			if used[j] {
+				continue
+			}
+			if details := tracker.Registry[id]; details != nil && registryCardMatches(details, card) {
+				used[j] = true
+				assigned = id
+				break
+			}
+		}
+		if assigned == uuid.Nil {
+			// The tracker never held an identity for this card. Mint one rather than leave a nil or
+			// recycled ID in the mirror.
+			assigned, _ = uuid.NewRandom()
+			tracker.Registry[assigned] = engineCardToDetails(card, assigned)
+		}
+		tracker.StockUUIDs[i] = assigned
+	}
+	tracker.StockLen = g.Engine.StockLen
+
+	// The discard pile is left holding only the card that was on top.
+	top := prevDiscardUUIDs[len(prevDiscardUUIDs)-1]
+	for i := 1; i < len(prevDiscardUUIDs); i++ {
+		tracker.DiscardUUIDs[i] = uuid.Nil
+	}
+	tracker.DiscardUUIDs[0] = top
+	tracker.DiscardLen = g.Engine.DiscardLen
+}
+
+// registryCardMatches reports whether a registry entry describes the given engine card. Rank and
+// suit identify a card within a deck; with several decks in play the identical cards are
+// interchangeable, so matching any one of them preserves identity.
+func registryCardMatches(details *models.Card, c engine.Card) bool {
+	return details.Rank == engineRankToString(c.Rank()) && details.Suit == engineSuitToString(c.Suit())
 }
 
 // autoProcessSnapPhase immediately passes all snappers through the engine's snap phase.

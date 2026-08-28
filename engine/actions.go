@@ -290,6 +290,17 @@ func (g *GameState) checkGameEnd() {
 	}
 }
 
+// AttemptReshuffle moves all discard cards (except the top) back into the stockpile and shuffles,
+// reporting whether any card moved (false when the discard pile holds one card or fewer, which
+// leaves the deck exhausted). Exported for adapters that keep their own per-card mirror of the
+// piles: they have to rebuild that mirror against the pre-reshuffle discard pile, which means
+// driving the reshuffle explicitly instead of letting it happen inside a later draw.
+func (g *GameState) AttemptReshuffle() bool {
+	preStockLen := g.StockLen
+	g.attemptReshuffle()
+	return g.StockLen != preStockLen
+}
+
 // attemptReshuffle moves all discard cards (except the top) back into the stockpile and shuffles.
 func (g *GameState) attemptReshuffle() {
 	// Need at least 2 cards in discard (one stays, rest go to stockpile).
