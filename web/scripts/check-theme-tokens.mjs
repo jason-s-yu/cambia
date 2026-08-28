@@ -142,6 +142,11 @@ console.log(`${SHARED.length} theme-stable tokens checked: ${shared} identical a
 //
 // Translucent foregrounds are composited over their ground first, so the
 // on-felt tiers are measured as rendered rather than as declared.
+//
+// --accent-green-hover is the one accent fill left out: no surface pairs text
+// with it (the green accent appears only as an avatar disc), and its dark value
+// sits at 4.07:1 under the shared near-white label. Pair text with it and it
+// joins this list, with the fill deepening the way --accent-danger-hover did.
 
 function parseColor(value) {
     const s = String(value).trim();
@@ -193,6 +198,9 @@ const PAIRS = [
     { fg: 'text-secondary', bg: 'surface-1', min: 4.5, use: 'labels on a card' },
     { fg: 'accent-gold-text', bg: 'surface-1', min: 4.5, use: 'gold as text on a card' },
     { fg: 'text-on-green', bg: 'surface-felt', min: 4.5, use: 'primary tier on the felt' },
+    { fg: 'text-on-green', bg: 'accent-green', min: 4.5, use: 'label on an affirmative fill' },
+    { fg: 'text-on-danger', bg: 'accent-danger', min: 4.5, use: 'Cambia call and destructive label' },
+    { fg: 'text-on-danger', bg: 'accent-danger-hover', min: 4.5, use: 'Cambia call, hovered' },
     { fg: 'text-on-felt-muted', bg: 'surface-felt', min: 4.5, use: 'pile labels and counts' },
     { fg: 'text-disabled', bg: 'surface-disabled', min: 3, use: 'disabled control label (WCAG exempts it; house floor 3:1)' },
     { fg: 'text-disabled', bg: 'surface-2', min: 3, use: 'disabled text on a raised row (house floor 3:1)' }

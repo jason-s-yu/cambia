@@ -102,6 +102,7 @@ One family. Gold is the CTA and the highlight; green is the table and the affirm
 |`--accent-gold-text`|`#c9a227`|`#6f5518`|Gold as text: on `--accent-gold-soft`, on a neutral surface (status strip, gold badge, own name in chat). `--accent-gold` is a fill; as light-theme text it sits under 3:1.|
 |`--accent-green`|`#1a6d49`|`#14563a`|Affirmative fill, ready state.|
 |`--accent-danger`|`#c4362f`|`#a92c26`|Cambia call, destructive action.|
+|`--accent-danger-hover`|`#a92c26`|`#8e2420`|Hover fill. Darker than the resting fill in both themes: `--text-on-danger` is near-white and theme-stable, so contrast comes from a deeper red.|
 
 The light gold trio runs one step brighter than the `--gold-*` ramp and moves the same direction as dark: lighter on hover, darker on press. The earlier light ramp darkened on both, and `--text-on-gold` fell to 3.35:1 on the hover fill and 2.40:1 pressed.
 
@@ -109,7 +110,7 @@ The light gold trio runs one step brighter than the `--gold-*` ramp and moves th
 
 Every text tier paired with a ground by name above holds AA (4.5:1) in both themes, measured with the WCAG 2.1 relative-luminance formula and, for translucent tiers, on the composited color. The exception is the two disabled pairs, which hold 3:1: WCAG exempts inactive controls, but a disabled label is still read ("Signing in", "Creating"), so the house floor keeps it legible without letting it compete with live text.
 
-`npm run check-tokens` measures the pairs and fails under the floor, so a token change that breaks one is visible at build time. The pairs it holds: `--text-on-gold` on each of `--accent-gold`, `--accent-gold-hover`, `--accent-gold-active`; `--text-primary`, `--text-secondary` and `--accent-gold-text` on `--surface-1`; `--text-on-green` and `--text-on-felt-muted` on `--surface-felt`; `--text-disabled` on `--surface-disabled` and `--surface-2`.
+`npm run check-tokens` measures the pairs and fails under the floor, and CI runs it after the web build, so a token change that breaks one is visible before merge. The pairs it holds: `--text-on-gold` on each of `--accent-gold`, `--accent-gold-hover`, `--accent-gold-active`; `--text-on-danger` on `--accent-danger` and `--accent-danger-hover`; `--text-on-green` on `--accent-green`; `--text-primary`, `--text-secondary` and `--accent-gold-text` on `--surface-1`; `--text-on-green` and `--text-on-felt-muted` on `--surface-felt`; `--text-disabled` on `--surface-disabled` and `--surface-2`. `--accent-green-hover` is out: nothing draws text on it.
 
 ### Status
 

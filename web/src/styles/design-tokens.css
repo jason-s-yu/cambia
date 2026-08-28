@@ -157,7 +157,11 @@
   --accent-green: var(--green-600);
   --accent-green-hover: var(--green-500);
   --accent-danger: var(--red-500);
-  --accent-danger-hover: var(--red-400);
+  /* Darker than the resting fill, the direction light already ran. The danger
+     family carries near-white --text-on-danger, which is theme-stable, so a
+     lighter hover drops the label: --red-400 measured 3.36:1 (cambia-914,
+     DL-8 review F1). */
+  --accent-danger-hover: var(--red-600);
 
   /* Status */
   --status-success: var(--green-400);
