@@ -270,6 +270,22 @@ func TestBeginPreGame_HonorsExposedDealRules(t *testing.T) {
 		assert.Equal(t, uint8(2*52-18-1), g.Engine.StockLen)
 	})
 
+	t.Run("the largest legal deal fits the engine and the UUID tracker", func(t *testing.T) {
+		hr := testHouseRules(0, 2)
+		hr.NumDecks = 4
+		hr.NumJokers = 2
+		hr.CardsPerPlayer = 6
+		g, players, _ := setupTestGame(t, engine.MaxPlayers, hr)
+
+		// 4 * 54 is exactly engine.MaxDeckSize, the ceiling numDecks is validated against.
+		assert.Equal(t, uint8(engine.MaxDeckSize-8*6-1), g.Engine.StockLen)
+		assert.Len(t, g.CardTracker.Registry, engine.MaxDeckSize, "every dealt card needs a UUID")
+		for i, p := range players {
+			engineIdx := g.PlayerToEngine[p.ID]
+			assert.Equal(t, uint8(6), g.Engine.Players[engineIdx].HandLen, "player %d hand size", i)
+		}
+	})
+
 	t.Run("initial view count drives the pregame reveal", func(t *testing.T) {
 		hr := testHouseRules(0, 2)
 		hr.InitialViewCount = 1
