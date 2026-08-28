@@ -9,6 +9,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -274,6 +275,49 @@ func TestE2ETwoFreshGuestsGetDistinctUsernames(t *testing.T) {
 		t.Fatalf("host never received a sync_state with 2 users")
 	}
 	assertDistinctLobbyUsernames(t, syncEnv, "sync_state")
+}
+
+// TestClaimEphemeralPersistsChosenUsername is a regression test for cambia-890 finding F1.
+// ClaimEphemeralHandler sets u.Username = req.Username in memory (internal/handlers/user.go)
+// before calling database.UpdateUserCredentials, but that function's UPDATE statement carried
+// no username column, so a claiming player's chosen name was silently dropped and the row kept
+// its id-derived guest label ("Guest-A1B2C3") permanently, with is_ephemeral flipped to false.
+// Drives POST /user/claim directly, then re-reads the row from the DB (not the in-memory
+// *models.User ClaimEphemeralHandler already mutated) to confirm the write actually landed.
+func TestClaimEphemeralPersistsChosenUsername(t *testing.T) {
+	if !dbAvailable {
+		t.Skip("skipping: no Postgres reachable via PG_HOST/PG_PORT/POSTGRES_USER/POSTGRES_PASSWORD/PG_DATABASE (see service/.env.template)")
+	}
+	database.ConnectDB()
+	auth.Init()
+
+	guestID, guestToken := createGuestSession(t)
+
+	runID := uuid.New().String()
+	chosenUsername := "ClaimedName_" + runID[:8]
+	body, _ := json.Marshal(map[string]string{
+		"email":    fmt.Sprintf("cambia890-claim-%s@test.local", runID),
+		"password": "pw12345678",
+		"username": chosenUsername,
+	})
+	r := httptest.NewRequest("POST", "/user/claim", bytes.NewReader(body))
+	r.AddCookie(&http.Cookie{Name: auth.AuthCookieName, Value: guestToken})
+	w := httptest.NewRecorder()
+	ClaimEphemeralHandler(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("claim handler: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	persisted, err := database.GetUserByID(context.Background(), guestID)
+	if err != nil {
+		t.Fatalf("re-fetch claimed user: %v", err)
+	}
+	if persisted.IsEphemeral {
+		t.Fatalf("claimed user %s still carries is_ephemeral=true", guestID)
+	}
+	if persisted.Username != chosenUsername {
+		t.Fatalf("claimed user %s username = %q, want %q (chosen username was not persisted)", guestID, persisted.Username, chosenUsername)
+	}
 }
 
 // waitForLobbyRoster polls c's recorded frames for one of msgType whose lobby_status.users
