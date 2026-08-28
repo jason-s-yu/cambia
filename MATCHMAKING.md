@@ -221,7 +221,7 @@ Applied to cumulative totals after each round. Not applicable to Quick Play (Bo1
 | 3rd       | n/a      | 0          |
 | 4th       | n/a      | 0          |
 
-**H2H subsidy is −3/0** (vs. −5/−2 in FFA-4) because the Cambia caller in H2H faces only one opponent's final turn, making the call inherently less risky. The smaller subsidy maintains incentive without over-rewarding.
+**H2H subsidy is −3/0** (vs. −5/−2 in FFA-4) because the Cambia caller in H2H faces only one opponent's final turn, making the call inherently less risky. The schedule is simulation-validated (2026-08, ~900k games: heuristic self-play at 2p/4p plus best-response call-threshold sweeps, `engine/cmd/subsidysim` and `cfr/scripts/subsidy_sim_2p.py`): the caller's raw-score risk premium at competent call spots measures under ~0.3 points per round, and −3/0 lands the caller's net expected margin within ±0.16 of zero. In 2p only the spread (1st minus 2nd) carries incentive, so −3/0 and −5/−2 are incentive-identical there and −3/0 is kept for its smaller cumulative drift; no schedule in the −2..−6 spread range moves the best-response call threshold, so the subsidy maintains the call incentive without over-rewarding loose calls.
 
 Tiebreaker: The Cambia caller wins ties for bonus distribution. If neither tied player called, both receive the higher placement bonus.
 
