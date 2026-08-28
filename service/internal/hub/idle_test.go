@@ -230,10 +230,22 @@ func TestHandleIdleReapLogsTheArmedWindow(t *testing.T) {
 	h.handleIdleReap(h.idleGen)
 
 	assert.Equal(t, 1, reaped, "the reap decision must still fire OnIdle")
-	logged := buf.String()
-	assert.Contains(t, logged, "50ms", "the reap log must name the window the timer was armed with")
-	assert.False(t, strings.Contains(logged, "9s") || strings.Contains(logged, "10s"),
-		"the reap log must not name a window recomputed from fields mutated after arming, got: %s", logged)
+
+	// Scope both assertions to the reap line itself, not the whole captured buffer: an
+	// unrelated goroutine sharing the redirected global logger could write a line of its own
+	// into buf, and a bare substring check over the full buffer would trip on it (cambia-900
+	// L3).
+	var reapLine string
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(line, "reaping lobby") {
+			reapLine = line
+			break
+		}
+	}
+	require.NotEmpty(t, reapLine, "expected a log line reporting the reap, got: %s", buf.String())
+	assert.Contains(t, reapLine, "50ms", "the reap log must name the window the timer was armed with")
+	assert.False(t, strings.Contains(reapLine, "9s") || strings.Contains(reapLine, "10s"),
+		"the reap log must not name a window recomputed from fields mutated after arming, got: %s", reapLine)
 }
 
 // TestIdleReapDroppedByShutdown guards the timer contract the postgame reset already follows: a

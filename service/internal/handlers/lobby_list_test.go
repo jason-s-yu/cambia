@@ -200,6 +200,49 @@ func TestListLobbiesHidesLobbyPastCreationGraceWithNoConnections(t *testing.T) {
 	}
 }
 
+// TestListLobbiesExcludesPrivateLobby is the cambia-900 L1 case: ListLobbiesHandler applied no
+// visibility filter, so a private lobby's id, host id, host-typed name and house rules leaked to
+// any unauthenticated caller polling the public list. The lobby is kept inside its creation
+// grace and given a live connection, the exact state that keeps a public lobby listed, to prove
+// the exclusion is driven by type rather than by presence or the grace window. Its member still
+// reaches it through the dedicated resume endpoint (createPrivateLobby is defined in
+// ws_private_lobby_test.go).
+func TestListLobbiesExcludesPrivateLobby(t *testing.T) {
+	auth.Init()
+	gs := NewGameServer()
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/lobby/create", CreateLobbyHandler(gs))
+	mux.Handle("/ws/", HubWSHandler(logger, gs))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	hostID := uuid.New()
+	hostToken, _ := auth.CreateJWT(hostID.String())
+
+	lobbyID := createPrivateLobby(t, gs, hostToken)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	client := dialWSClient(t, ctx, ts.URL, lobbyID.String(), hostToken)
+	defer client.close()
+	if client.waitForType("lobby_state", 5*time.Second) == nil {
+		t.Fatalf("connection never received lobby_state")
+	}
+
+	if _, listed := listLobbies(t, gs, hostToken)[lobbyID.String()]; listed {
+		t.Fatalf("private lobby %s leaked into the public /lobby/list", lobbyID)
+	}
+
+	resp := getActiveSession(t, gs, hostToken)
+	if resp.Active == nil || resp.Active.LobbyID != lobbyID.String() {
+		t.Fatalf("expected the private lobby to stay resumable for its member via /lobby/active, got %+v", resp.Active)
+	}
+}
+
 // TestListLobbiesUnauthenticatedReturnsWellFormedBody is the F4 case: GET /lobby/list carries no
 // identity requirement (the handler never reads one), so an unauthenticated caller must get the
 // same single well-formed JSON body as an authenticated one, not the auth helper's 401 text

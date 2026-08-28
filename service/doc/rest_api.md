@@ -163,7 +163,7 @@ Handled by `internal/handlers/friend.go`. Require `auth_token` cookie.
 
 ### Lobby Endpoints
 
-Handled by `internal/handlers/lobby.go`. Require `auth_token` cookie. These manage *ephemeral* in-memory lobbies.
+Handled by `internal/handlers/lobby.go`. These manage *ephemeral* in-memory lobbies. Every endpoint below requires the `auth_token` cookie except `GET /lobby/list`, which carries no identity requirement (see that entry).
 
 #### `POST /lobby/create`
 
@@ -186,6 +186,7 @@ Handled by `internal/handlers/lobby.go`. Require `auth_token` cookie. These mana
         "type": "private",
         "gameMode": "head_to_head",
         "inGame": false,
+        "createdAt": "{RFC3339 timestamp}",
         "houseRules": { ... }, // Full HouseRules object
         "circuit": { ... }, // Full Circuit object
         "lobbySettings": { ... } // Full LobbySettings object
@@ -195,16 +196,32 @@ Handled by `internal/handlers/lobby.go`. Require `auth_token` cookie. These mana
 
 #### `GET /lobby/list`
 
-* **Description:** Lists all currently active ephemeral lobbies stored in memory. (Primarily for debugging).
+* **Description:** Lists public lobbies a caller can currently join. Requires no authentication: the handler reads no identity, so the list is the same for every caller. Three filters apply beyond simple membership:
+    * **Type:** only lobbies of type `"public"` appear. A private lobby's id, host id, host-typed name and house rules are never included here regardless of who asks; its own members reach it through `GET /lobby/active` instead.
+    * **Presence:** a lobby with no game in progress and no live WebSocket connection is left out entirely, unless it is still within `lobbyListingCreationGrace` (30 seconds) of its own creation - the gap between `POST /lobby/create` and the host's first WebSocket upgrade, plus room for a brief reconnect blip.
+    * **In-game exemption:** a lobby with a game in progress stays listed even with nobody currently connected, mirroring the idle reaper's own exemption.
 * **Request Body:** None.
-* **Response (Success: 200 OK):** `application/json` - Returns a map where keys are lobby UUIDs and values are lobby objects.
+* **Response (Success: 200 OK):** `application/json` - Returns a map where keys are lobby UUIDs and values wrap the lobby object with player counts.
     ```json
     {
-      "{lobby_uuid_1}": { ... lobby object ... },
-      "{lobby_uuid_2}": { ... lobby object ... }
+      "{lobby_uuid_1}": {
+        "lobby": {
+          "id": "{uuid}",
+          "hostUserID": "{uuid}",
+          "type": "public",
+          "gameMode": "head_to_head",
+          "inGame": false,
+          "createdAt": "{RFC3339 timestamp}",
+          "houseRules": { ... },
+          "circuit": { ... },
+          "lobbySettings": { ... }
+        },
+        "playerCount": 1,
+        "maxPlayers": 2
+      }
     }
     ```
-* **Response (Error):** `401 Unauthorized`, `403 Forbidden`, `500 Internal Server Error`.
+* **Response (Error):** `500 Internal Server Error`.
 
 ---
 
