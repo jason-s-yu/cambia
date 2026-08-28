@@ -145,6 +145,100 @@ func TestCircuitRecordRound_Subsidies5P(t *testing.T) {
 	}
 }
 
+// TestCircuitRecordRound_SubsidiesH2H verifies the 2-player (H2H) subsidy schedule is
+// -3/0 per RULES.md T3, not the FFA {-5,-2} schedule that used to be hardcoded for every
+// sub-5-player circuit (cambia-1008/1009).
+func TestCircuitRecordRound_SubsidiesH2H(t *testing.T) {
+	cfg := makeConfig(2, 2, []int{1, 2})
+	cs, err := NewCircuit(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scores := map[int]int{1: 5, 2: 10}
+	if err := cs.RecordRound(scores, -1); err != nil {
+		t.Fatal(err)
+	}
+
+	result := cs.Rounds[0]
+	wantSubsidies := map[int]int{1: -3, 2: 0}
+	for pid, want := range wantSubsidies {
+		got := result.Subsidies[pid]
+		if got != want {
+			t.Errorf("player %d subsidy: want %d, got %d", pid, want, got)
+		}
+	}
+}
+
+// TestCircuitRecordRound_CallerTieBreakPaysFirstPlace verifies that in a 3-way tie the
+// Cambia caller is placed first and paid the 1st-place subsidy, even though other tied
+// players share the same raw score.
+func TestCircuitRecordRound_CallerTieBreakPaysFirstPlace(t *testing.T) {
+	cfg := makeConfig(5, 10, []int{1, 2, 3, 4, 5})
+	cs, err := NewCircuit(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Players 1, 2, 3 tied at 8; player 2 called Cambia.
+	scores := map[int]int{1: 8, 2: 8, 3: 8, 4: 15, 5: 20}
+	if err := cs.RecordRound(scores, 2); err != nil {
+		t.Fatal(err)
+	}
+
+	result := cs.Rounds[0]
+	if result.Placements[0] != 2 {
+		t.Errorf("expected Cambia caller (2) first in placements, got %d", result.Placements[0])
+	}
+	if result.Subsidies[2] != -5 {
+		t.Errorf("Cambia caller (2) subsidy: want -5 (1st place), got %d", result.Subsidies[2])
+	}
+	// The other two tied non-callers both fall to the next placement's bonus (-2).
+	if result.Subsidies[1] != -2 {
+		t.Errorf("player 1 subsidy: want -2, got %d", result.Subsidies[1])
+	}
+	if result.Subsidies[3] != -2 {
+		t.Errorf("player 3 subsidy: want -2, got %d", result.Subsidies[3])
+	}
+}
+
+// TestCircuitRecordRound_CumulativeDeltaExact verifies that each round's cumulative score
+// delta equals the raw score plus subsidy exactly, across several rounds with a caller.
+func TestCircuitRecordRound_CumulativeDeltaExact(t *testing.T) {
+	cfg := makeConfig(4, 8, []int{1, 2, 3, 4})
+	cs, err := NewCircuit(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rounds := []struct {
+		scores map[int]int
+		caller int
+	}{
+		{map[int]int{1: 5, 2: 10, 3: 15, 4: 20}, 1},
+		{map[int]int{1: 12, 2: 12, 3: 30, 4: 40}, 2}, // tie between 1 and 2, 2 is caller
+		{map[int]int{1: 9, 2: 9, 3: 9, 4: 50}, -1},   // 3-way true tie, no caller
+	}
+
+	prevCumulative := map[int]int{1: 0, 2: 0, 3: 0, 4: 0}
+	for _, r := range rounds {
+		if err := cs.RecordRound(r.scores, r.caller); err != nil {
+			t.Fatal(err)
+		}
+		result := cs.Rounds[len(cs.Rounds)-1]
+		for i := range cs.Players {
+			p := cs.Players[i]
+			wantDelta := r.scores[p.PlayerID] + result.Subsidies[p.PlayerID]
+			gotDelta := p.CumulativeScore - prevCumulative[p.PlayerID]
+			if gotDelta != wantDelta {
+				t.Errorf("player %d cumulative delta: want %d (score %d + subsidy %d), got %d",
+					p.PlayerID, wantDelta, r.scores[p.PlayerID], result.Subsidies[p.PlayerID], gotDelta)
+			}
+			prevCumulative[p.PlayerID] = p.CumulativeScore
+		}
+	}
+}
+
 // TestCircuitRecordRound_TieBreaking verifies Cambia caller wins ties for placement.
 func TestCircuitRecordRound_TieBreaking(t *testing.T) {
 	cfg := makeConfig(4, 12, []int{1, 2, 3, 4})

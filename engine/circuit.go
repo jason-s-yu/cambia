@@ -184,53 +184,43 @@ func (cs *CircuitState) RecordRound(scores map[int]int, cambiaCallerID int) erro
 		return activePlayers[i] < activePlayers[j]
 	})
 
-	// Build subsidy table based on placement
-	subsidies := make(map[int]int)
+	// Build subsidy table based on placement. The format-aware schedule and tie handling
+	// live in one place, ComputeAggressionSubsidy (RULES.md T3): H2H (<=2p) -3/0, FFA-4
+	// (<=4p) -5/-2/0/0, 5+ -5/-2/-1/0. There is no separate inline table here (cambia-1009).
 	n := len(activePlayers)
 
-	// Determine subsidy schedule
-	var scheduleBase []int
-	if n >= 5 {
-		scheduleBase = []int{-5, -2, -1}
-	} else {
-		scheduleBase = []int{-5, -2}
-	}
-	subsidyByPlacement := make([]int, n) // index=placement(0-based), value=subsidy
-	for i := range subsidyByPlacement {
-		if i < len(scheduleBase) {
-			subsidyByPlacement[i] = scheduleBase[i]
+	// competitionPlacements is 0-indexed with tied players sharing the leading index of
+	// their score group (e.g. [0, 1, 1, 3]), which is what ComputeAggressionSubsidy expects
+	// so its tie rule (Cambia caller wins ties; two tied non-callers both get the higher
+	// bonus) applies uniformly across every tied player in the group.
+	competitionPlacements := make([]int, n)
+	for idx, pid := range activePlayers {
+		if idx > 0 && scores[pid] == scores[activePlayers[idx-1]] {
+			competitionPlacements[idx] = competitionPlacements[idx-1]
+		} else {
+			competitionPlacements[idx] = idx
 		}
-		// rest are 0
 	}
 
-	// Assign subsidies with tie handling:
-	// If two players are tied (same score), and neither called Cambia, BOTH get the higher placement's bonus.
-	// Cambia caller wins the tie and gets their earned placement bonus.
+	callerIdx := -1
+	for idx, pid := range activePlayers {
+		if pid == cambiaCallerID {
+			callerIdx = idx
+			break
+		}
+	}
+
+	subsidyByActiveIdx := ComputeAggressionSubsidy(n, competitionPlacements, callerIdx)
+	subsidies := make(map[int]int, n)
+	for idx, pid := range activePlayers {
+		subsidies[pid] = subsidyByActiveIdx[idx]
+	}
+
+	// placement tracks each player's 0-based sorted position (Cambia caller first on a
+	// tie), independent of the subsidy schedule above; it feeds RoundPlacements/H2H below.
 	placement := make(map[int]int) // playerID -> 0-based placement
 	for idx, pid := range activePlayers {
 		placement[pid] = idx
-	}
-
-	for idx, pid := range activePlayers {
-		score := scores[pid]
-		sub := subsidyByPlacement[idx]
-
-		// Check if there's a tie partner who also didn't call cambia
-		for jdx, opid := range activePlayers {
-			if jdx == idx {
-				continue
-			}
-			if scores[opid] == score && pid != cambiaCallerID && opid != cambiaCallerID {
-				// Both tied, neither called Cambia - both get higher placement bonus
-				higherPlacement := idx
-				if jdx < higherPlacement {
-					higherPlacement = jdx
-				}
-				sub = subsidyByPlacement[higherPlacement]
-				break
-			}
-		}
-		subsidies[pid] = sub
 	}
 
 	// Update player states
