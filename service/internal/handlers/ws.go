@@ -77,7 +77,7 @@ func HubWSHandler(logger *logrus.Logger, gs *GameServer) http.HandlerFunc {
 		defer c.Close(websocket.StatusInternalError, "handler exit")
 
 		// 6. Fetch username (fallback to short UUID prefix)
-		username := hubFetchUsername(userID)
+		username := hubFetchUsername(r.Context(), userID)
 
 		// 7. Connecting joins the lobby: it upgrades an invite to a joined membership and is how
 		// a public lobby is entered without a prior POST /lobby/{id}/join. A client that has
@@ -110,15 +110,17 @@ func HubWSHandler(logger *logrus.Logger, gs *GameServer) http.HandlerFunc {
 	}
 }
 
-// hubFetchUsername retrieves the username for a user ID from the database,
-// falling back to a short UUID prefix on error.
-func hubFetchUsername(userID uuid.UUID) string {
+// hubFetchUsername retrieves the username for a user ID from the database, falling back to a
+// short UUID prefix on error. Bounded by both ctx and an internal 3s cap (the shorter of the two
+// wins), so a caller's own deadline (a dropped client, a request timeout) is honored rather than
+// this call outliving it.
+func hubFetchUsername(ctx context.Context, userID uuid.UUID) string {
 	// No database configured (or unreachable): fall back to a short UUID prefix rather than
 	// dereferencing a nil pool, which would panic the WS handler.
 	if database.DB == nil {
 		return "User_" + userID.String()[:4]
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	user, err := database.GetUserByID(ctx, userID)
 	if err != nil {

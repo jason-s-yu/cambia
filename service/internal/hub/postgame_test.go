@@ -101,7 +101,7 @@ func TestSecondGameStartsAfterPostGameReset(t *testing.T) {
 	defer h.Shutdown() // releases the parked countdown timers
 
 	created := 0
-	h.CreateGame = func(_ *lobby.Lobby, playerIDs []uuid.UUID, emitter game.Emitter) *game.CambiaGame {
+	h.CreateGame = func(_ *lobby.Lobby, playerIDs []uuid.UUID, _ map[uuid.UUID]string, emitter game.Emitter) *game.CambiaGame {
 		created++
 		g := game.NewCambiaGame()
 		g.LobbyID = lob.ID

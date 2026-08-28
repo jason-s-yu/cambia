@@ -81,7 +81,7 @@ func NewGameServer() *GameServer {
 // is registered in the GameStore with its OnGameEnd callback and Emitter wired, but is NOT
 // yet begun: the caller sets any routing it needs and then calls BeginPreGame so the
 // pre-game reveal reaches clients through the emitter.
-func (gs *GameServer) NewCambiaGameFromLobby(ctx context.Context, lob *lobby.Lobby, playerIDs []uuid.UUID, emitter game.Emitter) *game.CambiaGame {
+func (gs *GameServer) NewCambiaGameFromLobby(ctx context.Context, lob *lobby.Lobby, playerIDs []uuid.UUID, usernames map[uuid.UUID]string, emitter game.Emitter) *game.CambiaGame {
 	lob.Mu.Lock()
 	lobbyID := lob.ID
 	hostID := lob.HostUserID
@@ -92,17 +92,19 @@ func (gs *GameServer) NewCambiaGameFromLobby(ctx context.Context, lob *lobby.Lob
 	circuit := lob.Circuit
 	lob.Mu.Unlock()
 
-	return gs.CreateGameInstance(ctx, lobbyID, hostID, gameMode, lobbyType, rated, houseRules, circuit, playerIDs, emitter)
+	return gs.CreateGameInstance(ctx, lobbyID, hostID, gameMode, lobbyType, rated, houseRules, circuit, playerIDs, usernames, emitter)
 }
 
 // CreateGameInstance creates a game from pre-extracted parameters and registers it in the
 // GameStore with its OnGameEnd callback and Emitter wired. playerIDs lists the UUIDs of all
 // players joining the game. lobbyType must be a valid lobby_type enum value
 // ("private"/"public"/"matchmaking"); rated marks whether results feed the rating system
-// (cambia-450). emitter is the sink for all game events (the owning hub). The game is not
-// begun here: the caller invokes BeginPreGame once routing is in place. Returns nil if
-// fewer than two players are supplied.
-func (gs *GameServer) CreateGameInstance(ctx context.Context, lobbyID, hostID uuid.UUID, gameMode, lobbyType string, rated bool, houseRules game.HouseRules, circuit game.Circuit, playerIDs []uuid.UUID, emitter game.Emitter) *game.CambiaGame {
+// (cambia-450). usernames supplies each player's already-known username (sourced from the hub's
+// live connections, cambia-877); an id missing from the map falls back to a DB lookup bounded by
+// ctx, for a caller with no live connection to read from (e.g. a test harness). emitter is the
+// sink for all game events (the owning hub). The game is not begun here: the caller invokes
+// BeginPreGame once routing is in place. Returns nil if fewer than two players are supplied.
+func (gs *GameServer) CreateGameInstance(ctx context.Context, lobbyID, hostID uuid.UUID, gameMode, lobbyType string, rated bool, houseRules game.HouseRules, circuit game.Circuit, playerIDs []uuid.UUID, usernames map[uuid.UUID]string, emitter game.Emitter) *game.CambiaGame {
 	g := game.NewCambiaGame()
 	g.LobbyID = lobbyID
 	g.HostUserID = hostID
@@ -121,19 +123,24 @@ func (gs *GameServer) CreateGameInstance(ctx context.Context, lobbyID, hostID uu
 		g.HouseRules = houseRules
 	}
 
-	// hubFetchUsername (guests included: it resolves to whatever name was generated for
-	// them at account creation) is the same lookup a connection uses to populate
-	// hub.Connection.Username; sourcing Player.User.Username from it here means
-	// ObfPlayerState.username (sync_state) and the game_results roster below both read a
-	// real username instead of the zero value CreateGameInstance previously left it at
-	// (cambia-877).
+	// usernames is populated from live hub connections by the caller (hub.createAndStartGame);
+	// hubFetchUsername (guests included: it resolves to whatever name was generated for them at
+	// account creation) is only a fallback for an id with no live connection to read from, so a
+	// caller like startTestGame that has no hub in the loop still gets a real answer rather than
+	// a panic on a nil map lookup. Either way, Player.User.Username ends up populated: that means
+	// ObfPlayerState.username (sync_state) and the game_results roster below both read a real
+	// username instead of the zero value CreateGameInstance previously left it at (cambia-877).
 	var players []*models.Player
 	for _, uid := range playerIDs {
+		username, known := usernames[uid]
+		if !known {
+			username = hubFetchUsername(ctx, uid)
+		}
 		players = append(players, &models.Player{
 			ID:        uid,
 			Connected: true,
 			Hand:      []*models.Card{},
-			User:      &models.User{ID: uid, Username: hubFetchUsername(uid)},
+			User:      &models.User{ID: uid, Username: username},
 		})
 	}
 	if len(players) < 2 {
@@ -204,8 +211,8 @@ func (gs *GameServer) tearDownLobby(lobbyID uuid.UUID) {
 // the GameServer's stores (GameStore/CircuitStore/HubStore) so the hub stays decoupled from
 // them: the hub supplies its live lobby and connected player set, the GameServer owns creation.
 func (gs *GameServer) hubGameFactory() hub.GameFactory {
-	return func(lob *lobby.Lobby, playerIDs []uuid.UUID, emitter game.Emitter) *game.CambiaGame {
-		return gs.NewCambiaGameFromLobby(context.Background(), lob, playerIDs, emitter)
+	return func(lob *lobby.Lobby, playerIDs []uuid.UUID, usernames map[uuid.UUID]string, emitter game.Emitter) *game.CambiaGame {
+		return gs.NewCambiaGameFromLobby(context.Background(), lob, playerIDs, usernames, emitter)
 	}
 }
 
