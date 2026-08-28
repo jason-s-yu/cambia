@@ -179,6 +179,13 @@ type Hub struct {
 	idleTimer *time.Timer
 	idleGen   uint64
 
+	// idleArmed is the window armIdleReap actually armed the current idleTimer with. handleIdleReap
+	// logs this rather than recomputing idleWindow() at fire time: EmptyIdleTTL/IdleTTL are not
+	// reassigned once a hub is running in production, but a test - or a future reconfiguration path
+	// - that changes them between arm and fire would otherwise leave the reap log naming a window
+	// that was never the one actually running (cambia-887 F2).
+	idleArmed time.Duration
+
 	// Channels for Run() select loop
 	join     chan *Connection
 	leave    chan uuid.UUID
@@ -315,7 +322,9 @@ func (h *Hub) armIdleReap() {
 		return
 	}
 	gen := h.idleGen
-	h.idleTimer = time.AfterFunc(h.idleWindow(), func() {
+	window := h.idleWindow()
+	h.idleArmed = window
+	h.idleTimer = time.AfterFunc(window, func() {
 		select {
 		case h.idleReap <- gen:
 		case <-h.shutdown:
@@ -378,7 +387,7 @@ func (h *Hub) handleIdleReap(gen uint64) {
 		return
 	}
 	// At least one window, and more where an earlier fire found a game still running.
-	log.Printf("hub %s: no connections for at least %s and no game in progress; reaping lobby.", h.ID, h.idleWindow())
+	log.Printf("hub %s: no connections for at least %s and no game in progress; reaping lobby.", h.ID, h.idleArmed)
 	h.OnIdle(h.ID)
 }
 

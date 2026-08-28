@@ -267,6 +267,16 @@ type ListLobbiesResponse struct {
 	MaxPlayers  int          `json:"maxPlayers"`
 }
 
+// lobbyListingCreationGrace keeps a just-created lobby listed for a short window regardless of
+// live-connection presence (cambia-887 F3). A lobby's host has to POST /lobby/create and then
+// open their own WebSocket as two separate round trips; without a grace, the lobby is invisible
+// to everyone else's list for that gap, and a brief blip in the host's own socket right after
+// connecting flickers it back out. The window is generous enough to absorb both without masking
+// a genuinely abandoned lobby for long: ListQueuesHandler is the sibling that answers a similar
+// "what can I join" question with a bare cross-section and no such grace, because a queue has no
+// per-entry creation moment to protect.
+const lobbyListingCreationGrace = 30 * time.Second
+
 // ListLobbiesHandler returns a map of currently joinable ephemeral lobbies from the store.
 // For each lobby, it includes player count and calculated max player count based on game mode.
 //
@@ -277,16 +287,17 @@ type ListLobbiesResponse struct {
 // (cambia-884). Excluding is the honest answer because the list answers one question, "what can
 // I join right now", and a lobby with nobody in it answers it no better with a label on it. The
 // people who hold membership lose nothing: GET /lobby/active still offers them the lobby back
-// for as long as the idle reaper leaves it standing.
+// for as long as the idle reaper leaves it standing. A lobby inside lobbyListingCreationGrace of
+// its own creation is exempt from this filter regardless of presence (cambia-887 F3).
+//
+// The list carries no identity requirement: nothing below reads the caller's user ID, so the
+// list is public the same way ListQueuesHandler is, and the handler makes no auth call at all
+// rather than authenticating and discarding the result. A discarded-but-attempted auth call
+// used to leave an unauthenticated GET with a malformed body - authenticateAndGetUser's 401
+// text, followed by this handler's own JSON encoding, both written to the same response body
+// with no early return between them (cambia-887 F4).
 func ListLobbiesHandler(gs *GameServer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Authentication is optional for listing lobbies, but included for consistency.
-		_, ok := authenticateAndGetUser(w, r)
-		if !ok {
-			// If auth is required for listing, return here.
-			// Currently, let it proceed even if auth fails.
-		}
-
 		lobbiesMap := gs.LobbyStore.GetLobbies() // Retrieve all active lobbies.
 		responseMap := make(map[string]ListLobbiesResponse)
 
@@ -295,6 +306,7 @@ func ListLobbiesHandler(gs *GameServer) http.HandlerFunc {
 			count := lob.JoinedCount()
 			gameMode := lob.GameMode
 			inGame := lob.InGame
+			createdAt := lob.CreatedAt
 			// Copy only the fields the response needs. Users, ReadyStates,
 			// GameInstanceCreated, CountdownTimer, OnEmpty and Mu are left at
 			// their zero value: the JSON encoding already ignores them via
@@ -309,6 +321,7 @@ func ListLobbiesHandler(gs *GameServer) http.HandlerFunc {
 				Name:          lob.Name,
 				GameID:        lob.GameID,
 				InGame:        lob.InGame,
+				CreatedAt:     lob.CreatedAt,
 				HouseRules:    lob.HouseRules,
 				Circuit:       lob.Circuit,
 				LobbySettings: lob.LobbySettings,
@@ -319,11 +332,14 @@ func ListLobbiesHandler(gs *GameServer) http.HandlerFunc {
 			}
 			lob.Mu.Unlock() // Unlock after reading.
 
-			// Skip lobbies nobody is connected to. A running game keeps its listing whatever the
-			// socket count: its players are mid-table and are expected back, the same exemption
-			// the idle reaper makes.
+			// Skip lobbies nobody is connected to, unless a running game keeps its listing
+			// (players are mid-table and expected back, the same exemption the idle reaper
+			// makes) or the lobby is still inside its creation grace (its host may simply not
+			// have opened their WebSocket yet, or just blipped it).
 			if live, serving := gs.HubStore.LiveConnections(id); !inGame && (!serving || live == 0) {
-				continue
+				if time.Since(createdAt) >= lobbyListingCreationGrace {
+					continue
+				}
 			}
 
 			// Determine max players based on game mode.

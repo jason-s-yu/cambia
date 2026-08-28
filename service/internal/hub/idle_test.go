@@ -7,7 +7,10 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"log"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,6 +190,50 @@ func TestStaleIdleFireIsDiscarded(t *testing.T) {
 	h.armIdleReap()
 	h.handleIdleReap(h.idleGen)
 	assert.Equal(t, 1, reaped, "the current window's fire must reap")
+}
+
+// TestHandleIdleReapLogsTheArmedWindow pins F2 (cambia-887): the reap log must name the window
+// the fire's timer was actually armed with, not h.idleWindow() recomputed at fire time. The two
+// diverge whenever EmptyIdleTTL/IdleTTL change between arm and fire - exactly the kind of drift a
+// reconfiguration or a race could cause - and the log should describe what happened, not what the
+// hub's current fields say now.
+func TestHandleIdleReapLogsTheArmedWindow(t *testing.T) {
+	host := uuid.New()
+	lob := lobby.NewLobbyWithDefaults(host)
+
+	h := NewHub(lob)
+	h.IdleTTL = time.Hour
+	h.EmptyIdleTTL = 50 * time.Millisecond // armIdleReap arms this, the shorter of the two
+	reaped := 0
+	h.OnIdle = func(uuid.UUID) { reaped++ }
+	defer h.Shutdown()
+
+	h.armIdleReap()
+	require.NotNil(t, h.idleTimer, "arming with a positive IdleTTL and a non-nil OnIdle must start a timer")
+	h.idleTimer.Stop() // the test fires handleIdleReap directly; the real timer must not race it
+
+	// Mutate the TTLs after arming, before the fire: idleWindow() recomputed now would report a
+	// different window than the one actually armed.
+	h.EmptyIdleTTL = 9 * time.Second
+	h.IdleTTL = 10 * time.Second
+
+	var buf bytes.Buffer
+	prevOutput := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(prevOutput)
+		log.SetFlags(prevFlags)
+	}()
+
+	h.handleIdleReap(h.idleGen)
+
+	assert.Equal(t, 1, reaped, "the reap decision must still fire OnIdle")
+	logged := buf.String()
+	assert.Contains(t, logged, "50ms", "the reap log must name the window the timer was armed with")
+	assert.False(t, strings.Contains(logged, "9s") || strings.Contains(logged, "10s"),
+		"the reap log must not name a window recomputed from fields mutated after arming, got: %s", logged)
 }
 
 // TestIdleReapDroppedByShutdown guards the timer contract the postgame reset already follows: a

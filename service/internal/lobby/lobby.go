@@ -31,6 +31,14 @@ type Lobby struct {
 	GameID              uuid.UUID `json:"gameId,omitempty"`
 	InGame              bool      `json:"inGame"`
 
+	// CreatedAt is stamped once at construction and never mutated after (mutation in tests
+	// aside, to simulate age). GET /lobby/list reads it to grant a fresh lobby a short creation
+	// grace before the presence filter applies (cambia-887 F3), and it is json-tagged rather
+	// than internal-only because, unlike Mu/Users/ReadyStates, it is a plain value with no
+	// invariant a client could violate by reading it, and a lobby browser is a reasonable place
+	// to show how long a table has been open.
+	CreatedAt time.Time `json:"createdAt"`
+
 	CountdownTimer *time.Timer `json:"-"`
 
 	HouseRules game.HouseRules `json:"houseRules"`
@@ -84,6 +92,7 @@ func NewLobbyWithDefaults(hostID uuid.UUID) *Lobby {
 		HostUserID:  hostID,
 		Type:        "private",
 		GameMode:    "head_to_head",
+		CreatedAt:   time.Now(),
 		Users:       make(map[uuid.UUID]bool),
 		ReadyStates: make(map[uuid.UUID]bool),
 		joinOrder:   make(map[uuid.UUID]uint64),
