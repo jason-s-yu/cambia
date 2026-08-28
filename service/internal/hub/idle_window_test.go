@@ -3,8 +3,8 @@
 // Two idle windows (cambia-884). The 45 minute window from cambia-836 exists to carry a live
 // game across a disconnect, but it was also what an abandoned pre-game or post-game lobby sat
 // through, leaving dead lobbies on the dashboard for the best part of an hour. A hub with no
-// game in progress now reaps on the much shorter EmptyIdleTTL, and only a running game still
-// gets the long grace.
+// game in progress now reaps on the much shorter EmptyIdleTTL, and a running game is exempt from
+// the reap decision itself for as long as it runs.
 package hub
 
 import (
@@ -53,14 +53,15 @@ func TestEmptyLobbyReapsOnTheShortWindow(t *testing.T) {
 	assert.Equal(t, h.ID, id)
 }
 
-// TestInGameLobbyKeepsTheLongWindow is the guard the short window needs: a table whose players
-// all dropped mid-game keeps its long grace, so the turn timers and the forfeit rule
-// (cambia-837) still get to finish the game.
-func TestInGameLobbyKeepsTheLongWindow(t *testing.T) {
+// TestInGameLobbyIsNeverReapedWhileItsGameRuns is the guard the short window needs: a table whose
+// players all dropped mid-game is not reclaimed under them, so the turn timers and the forfeit
+// rule (cambia-837) still get to finish the game. What protects it is the reap-time exemption and
+// not the length of the window: many short windows elapse here and each fire declines and re-arms.
+func TestInGameLobbyIsNeverReapedWhileItsGameRuns(t *testing.T) {
 	_, _, reaped := newWindowHub(t, 30*time.Second, 40*time.Millisecond, true)
 
 	if id, ok := awaitReap(reaped, 500*time.Millisecond); ok {
-		t.Fatalf("lobby %s was reaped on the short window while its game was in progress", id)
+		t.Fatalf("lobby %s was reaped while its game was in progress", id)
 	}
 }
 
@@ -82,6 +83,33 @@ func TestShortWindowAppliesOnceTheGameEnds(t *testing.T) {
 
 	id, ok := awaitReap(reaped, 2*time.Second)
 	require.True(t, ok, "an abandoned post-game lobby must reap on the short window")
+	assert.Equal(t, h.ID, id)
+}
+
+// TestShortWindowAppliesWhenTheGameEndsAfterTheDrop is the ordering an arm-time choice of window
+// used to miss: the table drops first, so the window opens while the game is still in progress,
+// and the game ends later with nobody connected. Nothing re-arms on that transition, so a hub that
+// had armed the long TTL would hold the finished game's lobby for the whole of it.
+func TestShortWindowAppliesWhenTheGameEndsAfterTheDrop(t *testing.T) {
+	h, host, reaped := newWindowHub(t, 30*time.Second, 50*time.Millisecond, true)
+
+	conn := newFakeConn(host, "host")
+	h.Join(conn)
+	require.NotNil(t, waitEnvelope(t, conn, "lobby_state", time.Second))
+
+	h.Leave(host) // the window opens here, with the game still running
+
+	if id, ok := awaitReap(reaped, 300*time.Millisecond); ok {
+		t.Fatalf("lobby %s was reaped while its game was still in progress", id)
+	}
+
+	// The game ends with nobody connected and nothing else to notice it.
+	h.Lobby.Mu.Lock()
+	h.Lobby.InGame = false
+	h.Lobby.Mu.Unlock()
+
+	id, ok := awaitReap(reaped, 2*time.Second)
+	require.True(t, ok, "a game ending after its table dropped must not hold the lobby for the long window")
 	assert.Equal(t, h.ID, id)
 }
 

@@ -24,8 +24,10 @@ const defaultCountdownDuration = 3 * time.Second
 // to the open phase for the next game. Tests may lower GameServer.PostGameDuration for speed.
 const defaultPostGameDuration = 10 * time.Second
 
-// defaultLobbyIdleTTL is how long a lobby whose game is in progress may hold no live connections
-// before its hub reaps it (cambia-836). Tests may lower GameServer.LobbyIdleTTL for speed.
+// defaultLobbyIdleTTL bounds a lobby's idle window (cambia-836): the reap deadline where
+// defaultLobbyEmptyIdleTTL does not apply, the ceiling on it where it does. A lobby whose game is
+// still running is not reaped on it at all (cambia-884). Tests may lower GameServer.LobbyIdleTTL
+// for speed.
 const defaultLobbyIdleTTL = 45 * time.Minute
 
 // defaultLobbyEmptyIdleTTL is the same window for a lobby with no game in progress (cambia-884).
@@ -53,15 +55,18 @@ type GameServer struct {
 	// before the lobby reopens is configurable (production default; shortened in tests).
 	PostGameDuration time.Duration
 
-	// LobbyIdleTTL is copied onto each hub at creation: how long a lobby whose game is in
-	// progress may hold no live connections before its hub tears it down (cambia-836).
-	// Overridable per deployment via CAMBIA_LOBBY_IDLE_TTL; shortened in tests.
+	// LobbyIdleTTL is copied onto each hub at creation and bounds its idle window (cambia-836):
+	// the reap deadline while LobbyEmptyIdleTTL is unset or longer, the ceiling on it otherwise,
+	// zero to disable reaping. Overridable per deployment via CAMBIA_LOBBY_IDLE_TTL; shortened in
+	// tests.
 	LobbyIdleTTL time.Duration
 
 	// LobbyEmptyIdleTTL is copied onto each hub alongside LobbyIdleTTL and is the window that
-	// applies while no game is in progress: an abandoned pre-game or post-game lobby is released
-	// in minutes rather than sitting out the game grace (cambia-884). Overridable per deployment
-	// via CAMBIA_LOBBY_EMPTY_IDLE_TTL; shortened in tests.
+	// reaps while no game is in progress: an abandoned pre-game or post-game lobby is released in
+	// minutes rather than sitting out the long TTL (cambia-884). While a game is in progress it is
+	// how often the hub reconsiders, so a game that ends after its table dropped is followed by
+	// the reap within one of these. Overridable per deployment via CAMBIA_LOBBY_EMPTY_IDLE_TTL;
+	// shortened in tests.
 	LobbyEmptyIdleTTL time.Duration
 
 	// PreGameDuration is copied onto each CambiaGame at creation (CreateGameInstance) so the
