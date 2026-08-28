@@ -3,8 +3,10 @@
 // Parses the built stylesheet, resolves the dark (:root) and light
 // ([data-theme=light]) custom-property sets, and asserts that:
 //   1. every semantic token resolves to a literal color,
-//   2. dark and light differ on every one of them, and
-//   3. the tokens declared theme-stable (SHARED) resolve and stay identical.
+//   2. dark and light differ on every one of them,
+//   3. the tokens declared theme-stable (SHARED) resolve and stay identical, and
+//   4. every documented text/ground pair clears its contrast floor in both
+//      themes (cambia-914).
 //
 // Run after `npm run build`:  npm run check-tokens
 
@@ -55,7 +57,7 @@ function resolve(map, value, depth = 0) {
 }
 
 const SEMANTIC = [
-    'surface-0', 'surface-1', 'surface-2', 'surface-3', 'surface-inset', 'surface-overlay',
+    'surface-0', 'surface-1', 'surface-2', 'surface-3', 'surface-inset', 'surface-disabled', 'surface-overlay',
     'surface-felt', 'surface-felt-deep', 'surface-selected',
     'text-on-felt-muted', 'border-on-felt',
     'text-primary', 'text-secondary', 'text-tertiary', 'text-disabled', 'text-inverse', 'text-on-gold',
@@ -126,6 +128,117 @@ console.log(rows.join('\n'));
 console.log(`\n${SEMANTIC.length} semantic tokens checked: ${missing} unresolved, ${identical} identical across themes`);
 console.log(`${SHARED.length} theme-stable tokens checked: ${shared} identical as declared, ${sharedFailed} unresolved or split`);
 
+// ---- Contrast gate (cambia-914, DL-8 R8) ----
+//
+// The token layer documents which text tier sits on which ground; nothing
+// checked that the pair was legible, so a light-theme CTA shipped with its
+// label at 3.35:1 on the hover fill. Every pair DESIGN.md pairs by name is
+// measured here with the WCAG 2.1 relative-luminance formula, in both themes.
+//
+// Floors: 4.5:1, the AA body-text minimum, everywhere except the disabled
+// pairs. WCAG 1.4.3 exempts inactive controls from any contrast requirement;
+// the house floor for them is 3:1, enough to read a disabled label ("Signing
+// in", "Creating") without letting it compete with live text.
+//
+// Translucent foregrounds are composited over their ground first, so the
+// on-felt tiers are measured as rendered rather than as declared.
+//
+// --accent-green-hover is the one accent fill left out: no surface pairs text
+// with it (the green accent appears only as an avatar disc), and its dark value
+// sits at 4.07:1 under the shared near-white label. Pair text with it and it
+// joins this list, with the fill deepening the way --accent-danger-hover did.
+
+function parseColor(value) {
+    const s = String(value).trim();
+    // The minifier rewrites rgba() as 4- or 8-digit hex, so alpha arrives in
+    // either notation.
+    const h = s.match(/^#([0-9a-f]{3,8})$/i);
+    if (h && [3, 4, 6, 8].includes(h[1].length)) {
+        const d = h[1].length <= 4 ? h[1].split('').map((c) => c + c).join('') : h[1];
+        const a = d.length === 8 ? parseInt(d.slice(6, 8), 16) / 255 : 1;
+        return [parseInt(d.slice(0, 2), 16), parseInt(d.slice(2, 4), 16), parseInt(d.slice(4, 6), 16), a];
+    }
+    const f = s.match(/^rgba?\(([^)]+)\)$/i);
+    if (f) {
+        const parts = f[1].split(/[,/]+/).map((p) => p.trim()).filter(Boolean);
+        if (parts.length < 3) return null;
+        const [r, g, b] = parts.slice(0, 3).map(Number);
+        const a = parts.length > 3 ? Number(parts[3]) : 1;
+        if ([r, g, b, a].some((n) => Number.isNaN(n))) return null;
+        return [r, g, b, a];
+    }
+    return null;
+}
+
+/** Flattens a translucent foreground onto an opaque ground. */
+function composite(fg, bg) {
+    const a = fg[3];
+    return [0, 1, 2].map((i) => fg[i] * a + bg[i] * (1 - a));
+}
+
+function relativeLuminance([r, g, b]) {
+    const lin = [r, g, b].map((c) => {
+        const s = c / 255;
+        return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+    });
+    return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+}
+
+function contrast(fg, bg) {
+    const a = relativeLuminance(fg);
+    const b = relativeLuminance(bg);
+    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+}
+
+const PAIRS = [
+    { fg: 'text-on-gold', bg: 'accent-gold', min: 4.5, use: 'primary CTA label' },
+    { fg: 'text-on-gold', bg: 'accent-gold-hover', min: 4.5, use: 'primary CTA, hovered' },
+    { fg: 'text-on-gold', bg: 'accent-gold-active', min: 4.5, use: 'primary CTA, pressed' },
+    { fg: 'text-primary', bg: 'surface-1', min: 4.5, use: 'body copy on a card' },
+    { fg: 'text-secondary', bg: 'surface-1', min: 4.5, use: 'labels on a card' },
+    { fg: 'accent-gold-text', bg: 'surface-1', min: 4.5, use: 'gold as text on a card' },
+    { fg: 'text-on-green', bg: 'surface-felt', min: 4.5, use: 'primary tier on the felt' },
+    { fg: 'text-on-green', bg: 'accent-green', min: 4.5, use: 'label on an affirmative fill' },
+    { fg: 'text-on-danger', bg: 'accent-danger', min: 4.5, use: 'Cambia call and destructive label' },
+    { fg: 'text-on-danger', bg: 'accent-danger-hover', min: 4.5, use: 'Cambia call, hovered' },
+    { fg: 'text-on-felt-muted', bg: 'surface-felt', min: 4.5, use: 'pile labels and counts' },
+    { fg: 'text-disabled', bg: 'surface-disabled', min: 3, use: 'disabled control label (WCAG exempts it; house floor 3:1)' },
+    { fg: 'text-disabled', bg: 'surface-2', min: 3, use: 'disabled text on a raised row (house floor 3:1)' }
+];
+
+let contrastFailed = 0;
+const contrastRows = [];
+for (const theme of ['dark', 'light']) {
+    const map = theme === 'dark' ? dark : light;
+    for (const pair of PAIRS) {
+        const fgRaw = resolve(map, map['--' + pair.fg]);
+        const bgRaw = resolve(map, map['--' + pair.bg]);
+        const fg = parseColor(fgRaw);
+        const bg = parseColor(bgRaw);
+        const label = `${theme.padEnd(5)} ${pair.fg} on ${pair.bg}`;
+        if (!fg || !bg) {
+            contrastFailed++;
+            contrastRows.push(`UNPARSED ${label}  fg=${fgRaw} bg=${bgRaw}`);
+            continue;
+        }
+        if (bg[3] !== 1) {
+            contrastFailed++;
+            contrastRows.push(`TRANSLUCENT-BG ${label}  bg=${bgRaw} (a ground has to be opaque to be measured)`);
+            continue;
+        }
+        const ratio = contrast(fg[3] === 1 ? fg : composite(fg, bg), bg);
+        const shown = ratio.toFixed(2).padStart(5);
+        if (ratio < pair.min) {
+            contrastFailed++;
+            contrastRows.push(`FAIL ${shown}:1 (min ${pair.min}) ${label}  -- ${pair.use}`);
+        } else {
+            contrastRows.push(`ok   ${shown}:1 (min ${pair.min}) ${label}`);
+        }
+    }
+}
+console.log('\n' + contrastRows.join('\n'));
+console.log(`\n${PAIRS.length * 2} contrast pairs checked (${PAIRS.length} per theme): ${contrastFailed} under the floor`);
+
 // Font check: no serif family and none of the banned faces may survive
 // anywhere in the built CSS, the UI face must be the self-hosted one, and no
 // font may be fetched from a remote host. The `serif` lookbehind lets the
@@ -144,5 +257,5 @@ console.log(`banned faces present: ${banned.length ? banned.join(', ') : 'none'}
 console.log(`Archivo Variable declared: ${hasArchivo}`);
 console.log(`remote font host referenced: ${hasRemoteFont}`);
 
-const failed = missing > 0 || identical > 0 || sharedFailed > 0 || serif.length > 0 || banned.length > 0 || !hasArchivo || hasRemoteFont;
+const failed = missing > 0 || identical > 0 || sharedFailed > 0 || contrastFailed > 0 || serif.length > 0 || banned.length > 0 || !hasArchivo || hasRemoteFont;
 process.exit(failed ? 1 : 0);

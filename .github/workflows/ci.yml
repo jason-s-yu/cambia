@@ -63,3 +63,5 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run build
+      # Reads dist/, so it has to follow the build (cambia-914, DL-8 review F2).
+      - run: npm run check-tokens

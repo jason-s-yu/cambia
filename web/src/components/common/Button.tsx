@@ -25,8 +25,10 @@ const VARIANT_CLASS: Record<NonNullable<ButtonProps['variant']>, string> = {
 // in-flight submit), and LoginForm, RegisterForm and CreateRunModal all render
 // their in-flight submit through it. Same neutral fill as ds/core/Button, and
 // ghost keeps its transparent shell so a disabled ghost control does not grow a
-// chip (cambia-892, DL-7 F2).
-const DISABLED_CLASS = 'bg-surface-2 text-text-disabled border-border-default';
+// chip (cambia-892, DL-7 F2). The fill is --surface-disabled rather than
+// --surface-2, which resolves to white in light and made the disabled control
+// read as a hole in the card behind it (cambia-914, DL-8 R7).
+const DISABLED_CLASS = 'bg-surface-disabled text-text-disabled border-border-default';
 const DISABLED_GHOST_CLASS = 'bg-transparent text-text-disabled border-transparent';
 
 const SIZE_CLASS: Record<NonNullable<ButtonProps['size']>, string> = {

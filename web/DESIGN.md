@@ -32,6 +32,7 @@ Names that would collide with a Tailwind v4 default theme key carry a `--ds-` pr
 |`--surface-2`|`#16231e`|`#ffffff`|Raised: row hover, table header, modal footer, chips.|
 |`--surface-3`|`#1c2c26`|`#ffffff`|Highest: menu, popover, hovered raised control.|
 |`--surface-inset`|`#070d0b`|`#e9e5db`|Wells: text inputs, log panes, score pills.|
+|`--surface-disabled`|`#16231e`|`#e9e5db`|Fill of a disabled control. Dark raises one step; light recesses to the well tone, because its raised step is white and a white fill on warm paper reads as a hole in the card.|
 |`--surface-overlay`|`rgba(4,8,7,.72)`|`rgba(22,33,29,.42)`|Scrim behind a dialog.|
 |`--surface-felt`|`#14563a`|`#1a6d49`|The game table.|
 |`--surface-felt-deep`|`#0f3d2a`|`#14563a`|Table rail and vignette.|
@@ -46,7 +47,7 @@ Text and hairlines drawn directly on the felt cannot use the neutral tiers, whic
 
 |Token|Dark|Light|Use|
 |-|-|-|-|
-|`--text-on-felt-muted`|`rgba(240,247,243,.68)`|`rgba(240,247,243,.78)`|Pile labels and counts, secondary lines on the felt. `--text-on-green` is the primary tier.|
+|`--text-on-felt-muted`|`rgba(240,247,243,.68)`|`rgba(240,247,243,.86)`|Pile labels and counts, secondary lines on the felt. `--text-on-green` is the primary tier.|
 |`--border-on-felt`|`rgba(240,247,243,.22)`|`rgba(240,247,243,.30)`|Empty pile slot outline, the felt's own 1px edge.|
 
 ### Text tiers
@@ -56,7 +57,7 @@ Text and hairlines drawn directly on the felt cannot use the neutral tiers, whic
 |`--text-primary`|`#edf2ef`|`#16211d`|Body copy, headings, values.|
 |`--text-secondary`|`#a9b8b1`|`#3f4d47`|Labels, supporting lines, inactive nav.|
 |`--text-tertiary`|`#74857d`|`#6b7972`|Eyebrows, units, metadata, placeholders.|
-|`--text-disabled`|`#4d5b55`|`#9aa5a0`|Disabled control text.|
+|`--text-disabled`|`#63726b`|`#76827b`|Disabled control text. Holds 3:1 on `--surface-disabled` in both themes.|
 |`--text-inverse`|`#0b1210`|`#fbf9f5`|Text on a filled neutral of the opposite theme.|
 |`--text-on-gold`|`#070d0b`|`#241c05`|Text and icons on `--accent-gold`.|
 |`--text-on-danger`|`#fdf1ef`|`#fdf1ef`|Text on `--accent-danger`.|
@@ -86,7 +87,7 @@ Every focusable control shows a focus ring. Keyboard focus falls back to the glo
 
 Press states change color, never position. The previous language translated buttons downward on press; the flat language does not move them.
 
-A disabled control is a neutral fill, never a faded accent: `--surface-2` with `--border-default` and `--text-disabled`. Gold at half opacity still reads as the CTA and put its label at 1.15:1 in light. `ds/core/Button` owns this; a ghost control keeps its transparent shell and only drops to `--text-disabled`.
+A disabled control is a neutral fill, never a faded accent: `--surface-disabled` with `--border-default` and `--text-disabled`. Gold at half opacity still reads as the CTA and put its label at 1.15:1 in light. `ds/core/Button` and `common/Button` own this; a ghost control keeps its transparent shell and only drops to `--text-disabled`.
 
 ### Accents
 
@@ -94,13 +95,22 @@ One family. Gold is the CTA and the highlight; green is the table and the affirm
 
 |Token|Dark|Light|Use|
 |-|-|-|-|
-|`--accent-gold`|`#c9a227`|`#ab8526`|Primary button fill, active toggle, wordmark diamond.|
-|`--accent-gold-hover`|`#dcb84a`|`#8a6a1f`|Hover fill.|
-|`--accent-gold-active`|`#ab8526`|`#6f5518`|Pressed fill.|
+|`--accent-gold`|`#c9a227`|`#b89026`|Primary button fill, active toggle, wordmark diamond.|
+|`--accent-gold-hover`|`#dcb84a`|`#cba32e`|Hover fill. Lighter than the resting fill in both themes.|
+|`--accent-gold-active`|`#ab8526`|`#a98325`|Pressed fill. Darker than the resting fill in both themes.|
 |`--accent-gold-soft`|`rgba(201,162,39,.16)`|`rgba(171,133,38,.14)`|Gold-tinted fill behind a badge or selection.|
 |`--accent-gold-text`|`#c9a227`|`#6f5518`|Gold as text: on `--accent-gold-soft`, on a neutral surface (status strip, gold badge, own name in chat). `--accent-gold` is a fill; as light-theme text it sits under 3:1.|
 |`--accent-green`|`#1a6d49`|`#14563a`|Affirmative fill, ready state.|
 |`--accent-danger`|`#c4362f`|`#a92c26`|Cambia call, destructive action.|
+|`--accent-danger-hover`|`#a92c26`|`#8e2420`|Hover fill. Darker than the resting fill in both themes: `--text-on-danger` is near-white and theme-stable, so contrast comes from a deeper red.|
+
+The light gold trio runs one step brighter than the `--gold-*` ramp and moves the same direction as dark: lighter on hover, darker on press. The earlier light ramp darkened on both, and `--text-on-gold` fell to 3.35:1 on the hover fill and 2.40:1 pressed.
+
+### Contrast
+
+Every text tier paired with a ground by name above holds AA (4.5:1) in both themes, measured with the WCAG 2.1 relative-luminance formula and, for translucent tiers, on the composited color. The exception is the two disabled pairs, which hold 3:1: WCAG exempts inactive controls, but a disabled label is still read ("Signing in", "Creating"), so the house floor keeps it legible without letting it compete with live text.
+
+`npm run check-tokens` measures the pairs and fails under the floor, and CI runs it after the web build, so a token change that breaks one is visible before merge. The pairs it holds: `--text-on-gold` on each of `--accent-gold`, `--accent-gold-hover`, `--accent-gold-active`; `--text-on-danger` on `--accent-danger` and `--accent-danger-hover`; `--text-on-green` on `--accent-green`; `--text-primary`, `--text-secondary` and `--accent-gold-text` on `--surface-1`; `--text-on-green` and `--text-on-felt-muted` on `--surface-felt`; `--text-disabled` on `--surface-disabled` and `--surface-2`. `--accent-green-hover` is out: nothing draws text on it.
 
 ### Status
 

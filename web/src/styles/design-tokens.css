@@ -98,6 +98,11 @@
   --surface-2: var(--felt-800);
   --surface-3: var(--felt-750);
   --surface-inset: var(--felt-950);
+  /* Fill of a disabled control. Dark raises one step, the same ground a
+     resting raised control uses; light cannot, because its raised step is
+     white and a white fill on warm paper reads as a hole punched in the card
+     (cambia-914, DL-8 R7). */
+  --surface-disabled: var(--felt-800);
   --surface-overlay: rgba(4, 8, 7, 0.72);
   --surface-felt: var(--green-700);
   --surface-felt-deep: var(--green-800);
@@ -114,7 +119,10 @@
   --text-primary: #edf2ef;
   --text-secondary: #a9b8b1;
   --text-tertiary: #74857d;
-  --text-disabled: #4d5b55;
+  /* Raised from #4d5b55, which sat at 2.28:1 on the disabled fill. A disabled
+     label is still read ("Signing in", "Creating"), so it holds the 3:1 house
+     floor while staying a tier below --text-tertiary (cambia-914, DL-8 R8). */
+  --text-disabled: #63726b;
   --text-inverse: var(--felt-900);
   --text-on-gold: var(--felt-950);
   --text-on-danger: #fdf1ef;
@@ -149,7 +157,11 @@
   --accent-green: var(--green-600);
   --accent-green-hover: var(--green-500);
   --accent-danger: var(--red-500);
-  --accent-danger-hover: var(--red-400);
+  /* Darker than the resting fill, the direction light already ran. The danger
+     family carries near-white --text-on-danger, which is theme-stable, so a
+     lighter hover drops the label: --red-400 measured 3.36:1 (cambia-914,
+     DL-8 review F1). */
+  --accent-danger-hover: var(--red-600);
 
   /* Status */
   --status-success: var(--green-400);
@@ -193,6 +205,7 @@
   --surface-2: var(--paper-0);
   --surface-3: var(--paper-0);
   --surface-inset: var(--paper-200);
+  --surface-disabled: var(--paper-200);
   --surface-overlay: rgba(22, 33, 29, 0.42);
   --surface-felt: var(--green-600);
   --surface-felt-deep: var(--green-700);
@@ -205,7 +218,9 @@
   --text-primary: var(--ink-900);
   --text-secondary: var(--ink-700);
   --text-tertiary: var(--ink-500);
-  --text-disabled: #9aa5a0;
+  /* Darkened from #9aa5a0 (2.02:1 on the disabled fill) to hold the same 3:1
+     house floor as the dark tier (cambia-914, DL-8 R8). */
+  --text-disabled: #76827b;
   --text-inverse: var(--paper-50);
   --text-on-gold: #241c05;
   --text-on-danger: #fdf1ef;
@@ -222,9 +237,15 @@
   --surface-selected: #f3eee1;
   --focus-ring-color: var(--gold-600);
 
-  --accent-gold: var(--gold-600);
-  --accent-gold-hover: var(--gold-700);
-  --accent-gold-active: #6f5518;
+  /* Light gold runs one step brighter than the primitive ramp and moves the
+     same direction as dark: lighter on hover, darker on press. The old ramp
+     darkened on both, which dropped the CTA label (--text-on-gold #241c05) to
+     3.35:1 hovered and 2.40:1 pressed, under AA. These three measure 5.68,
+     7.09 and 4.79 (cambia-914, DL-8 R8); check-theme-tokens holds the floor.
+     Literals, since the values sit between the ramp's 600 and 500 steps. */
+  --accent-gold: #b89026;
+  --accent-gold-hover: #cba32e;
+  --accent-gold-active: #a98325;
   --accent-gold-soft: rgba(171, 133, 38, 0.14);
   --accent-gold-text: #6f5518;
   --accent-green: var(--green-700);
@@ -441,6 +462,7 @@
   --color-surface-2: var(--surface-2);
   --color-surface-3: var(--surface-3);
   --color-surface-inset: var(--surface-inset);
+  --color-surface-disabled: var(--surface-disabled);
   --color-surface-overlay: var(--surface-overlay);
   --color-surface-felt: var(--surface-felt);
   --color-surface-felt-deep: var(--surface-felt-deep);

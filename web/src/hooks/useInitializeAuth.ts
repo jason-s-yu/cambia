@@ -3,9 +3,7 @@ import { useEffect } from 'react';
 import { useAuthStore } from '@/stores/authStore';
 
 /**
- * Checks authentication status via the auth store when the application loads.
- * It triggers the `checkAuth` action only if the state is currently loading
- * and the user isn't already marked as authenticated.
+ * Runs the initial authentication check once, when the application loads.
  *
  * @returns `initialised`: false until the first check settles. Callers gate the
  * app shell on this, never on `isLoading`, which every later auth call raises
@@ -13,17 +11,19 @@ import { useAuthStore } from '@/stores/authStore';
  */
 export function useInitializeAuth() {
 	const checkAuth = useAuthStore((state) => state.checkAuth);
-	const isLoading = useAuthStore((state) => state.isLoading);
 	const initialised = useAuthStore((state) => state.initialised);
-	const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
 
 	useEffect(() => {
-		// Only check auth if not already authenticated and store indicates initial loading.
-		// This prevents redundant checks after login/logout actions manage state directly.
-		if (!isAuthenticated && isLoading) {
+		// Gated on `initialised`, the flag the first settled check sets, not on
+		// `isLoading`. Every later auth call raises isLoading too, so this effect
+		// re-fired during a login POST and sent a GET /user/me alongside it; the
+		// probe settled first, cleared isLoading while the POST was still in
+		// flight, and the form's submit button came back to life mid-request
+		// (cambia-914, DL-8 R6).
+		if (!initialised) {
 			checkAuth();
 		}
-	}, [checkAuth, isAuthenticated, isLoading]); // Dependencies ensure effect runs only when these change
+	}, [checkAuth, initialised]);
 
 	return { initialised };
 }
