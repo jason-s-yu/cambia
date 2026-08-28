@@ -223,6 +223,61 @@ func TestBasicDrawDiscard(t *testing.T) {
 	}
 }
 
+// TestStockpileDrawReshuffleEmitsEvent verifies that a stockpile draw off an empty stockpile
+// (which forces the engine to reshuffle the discard pile back into the stockpile first, see
+// engine.attemptReshuffle) broadcasts EventGameReshuffleStockpile with the post-reshuffle counts
+// (cambia-763 F3). Before this, the constant had zero emission call sites and client-side discard
+// counts only corrected on the next full sync_state.
+func TestStockpileDrawReshuffleEmitsEvent(t *testing.T) {
+	g, _, mb := setupTestGame(t, 2, &HouseRules{TurnTimerSec: 0, PenaltyDrawCount: 2})
+	actor := currentTurnPlayer(g)
+
+	// Force an empty stockpile with a 4-card discard pile so the next stockpile draw must
+	// reshuffle: attemptReshuffle keeps the top card and moves the other 3 into the stockpile,
+	// then the draw itself pops one of those 3, leaving StockLen=2, DiscardLen=1.
+	g.Engine.StockLen = 0
+	g.CardTracker.StockLen = 0
+	discardCards := []engine.Card{
+		engine.NewCard(engine.SuitHearts, engine.RankFive),
+		engine.NewCard(engine.SuitClubs, engine.RankSix),
+		engine.NewCard(engine.SuitDiamonds, engine.RankSeven),
+		engine.NewCard(engine.SuitSpades, engine.RankEight), // top
+	}
+	for i, c := range discardCards {
+		g.Engine.DiscardPile[i] = c
+		id := uuid.New()
+		g.CardTracker.DiscardUUIDs[i] = id
+		g.CardTracker.Registry[id] = engineCardToDetails(c, id)
+	}
+	g.Engine.DiscardLen = uint8(len(discardCards))
+	g.CardTracker.DiscardLen = g.Engine.DiscardLen
+
+	mb.clear()
+	g.HandlePlayerAction(actor.ID, models.GameAction{ActionType: "action_draw_stockpile"})
+
+	reshuffleEvent := mb.findEventByType(EventGameReshuffleStockpile)
+	require.NotNil(t, reshuffleEvent, "a stockpile draw off an empty stockpile must emit a reshuffle event")
+	require.NotNil(t, reshuffleEvent.Payload, "reshuffle event must carry corrected counts")
+	assert.EqualValues(t, 2, reshuffleEvent.Payload["stockpileSize"], "post-reshuffle stockpile size should reflect the 3 moved cards minus the 1 just drawn")
+	assert.EqualValues(t, 1, reshuffleEvent.Payload["discardSize"], "post-reshuffle discard size should be just the preserved top card")
+	assert.EqualValues(t, g.Engine.StockLen, reshuffleEvent.Payload["stockpileSize"])
+	assert.EqualValues(t, g.Engine.DiscardLen, reshuffleEvent.Payload["discardSize"])
+
+	// A subsequent draw (stockpile no longer empty) must not fire a spurious reshuffle event.
+	discardUUID := g.CardTracker.Players[g.PlayerToEngine[actor.ID]].DrawnCardUUID
+	g.HandlePlayerAction(actor.ID, models.GameAction{
+		ActionType: "action_discard",
+		Payload:    map[string]interface{}{"id": discardUUID.String()},
+	})
+	if g.SpecialAction.Active && g.SpecialAction.PlayerID == actor.ID {
+		g.ProcessSpecialAction(actor.ID, "skip", nil, nil)
+	}
+	nextActor := currentTurnPlayer(g)
+	mb.clear()
+	g.HandlePlayerAction(nextActor.ID, models.GameAction{ActionType: "action_draw_stockpile"})
+	assert.Nil(t, mb.findEventByType(EventGameReshuffleStockpile), "a draw with cards already in the stockpile must not emit a reshuffle event")
+}
+
 // TestBasicDrawReplace verifies the draw -> replace card flow.
 func TestBasicDrawReplace(t *testing.T) {
 	g, players, mb := setupTestGame(t, 2, &HouseRules{TurnTimerSec: 0, PenaltyDrawCount: 2})

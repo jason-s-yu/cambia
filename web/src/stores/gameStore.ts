@@ -189,11 +189,9 @@ export const useGameStore = create<GameState & GameActions>()(
 								if (userState?.drawnCard && gs.currentPlayerId === userState.playerId && !gs.gameOver && gs.started) {
 									state.pendingAction = 'discard_replace';
 								} else if (gs.specialAction?.active && gs.specialAction.playerId === selfPlayerId && !gs.gameOver && gs.started) {
-									// NB: the service's ObfGameState (service/internal/game/sync_state.go) never
-									// serializes SpecialActionState into private_sync_state today, so
-									// gs.specialAction is always undefined on a real resync and this branch is
-									// presently unreachable. Kept so the derivation is correct and this activates
-									// automatically once the server adds that field (see worker report finding).
+									// The service's ObfGameState (service/internal/game/sync_state.go) serializes
+									// SpecialActionState into private_sync_state (cambia-763 F1), so a client that
+									// resyncs mid-action (reconnect, tab refresh) restores pendingAction here.
 									state.pendingAction = 'special_action';
 								}
 							}
@@ -464,18 +462,29 @@ export const useGameStore = create<GameState & GameActions>()(
 						case 'player_snap_penalty_applied':
 							break;
 
-						// game_reshuffle_stockpile (EventGameReshuffleStockpile in service game.go) is a
-						// declared GameEventType with zero emission call sites anywhere in the service -
-						// dead protocol surface that has never actually been broadcast. No-op until the
-						// server wires up a reshuffle emitter.
+						// game_reshuffle_stockpile (EventGameReshuffleStockpile): fired when a stockpile
+						// draw starts with an empty stockpile, forcing the engine to reshuffle the
+						// discard pile back into the stockpile first (cambia-763 F3). The counts sent
+						// here are already post-reshuffle-and-draw (server engine state), so apply them
+						// directly rather than incrementally: without this, discardSize in particular
+						// would drift (the plain draw-from-stockpile handling below only ever updates
+						// stockpileSize) until the next full sync_state.
 						case 'game_reshuffle_stockpile':
+							if (state.gameState) {
+								if (typeof payload.payload?.stockpileSize === 'number') {
+									state.gameState.stockpileSize = payload.payload.stockpileSize;
+								}
+								if (typeof payload.payload?.discardSize === 'number') {
+									state.gameState.discardSize = payload.payload.discardSize;
+								}
+							}
 							break;
 
 						// game_results duplicates game_end's winner/scores (both derived from the same
-						// adjustedScores computed once in CambiaGame.endGame, game.go) and additionally
-						// carries a lobby_status snapshot that belongs to lobbyStore, not this store -
-						// client-side routing (useSocket.ts isGameType) sends it here exclusively since it
-						// starts with "game_". finalScores/winnerId are already set by game_end; no-op.
+						// adjustedScores computed once in CambiaGame.endGame, game.go); finalScores/winnerId
+						// are already set by game_end, so this store no-ops on it. Its lobby_status
+						// snapshot is lobbyStore's domain and is dual-routed there by useSocket.ts
+						// (cambia-763 F2).
 						case 'game_results':
 							break;
 

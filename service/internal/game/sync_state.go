@@ -32,6 +32,17 @@ type ObfPlayerState struct {
 	DrawnCard *ObfCard `json:"drawnCard,omitempty"`
 }
 
+// ObfSpecialActionState is the public-safe projection of SpecialActionState serialized into
+// sync_state: which player owes a pending multi-step special action and what rank triggered it.
+// Peeked card values (SpecialActionState.Card1/Card2) are intentionally omitted here — those are
+// private to the acting player and already delivered via private_special_action_success; leaking
+// them through a state any client can request would break the King/peek information model.
+type ObfSpecialActionState struct {
+	Active   bool      `json:"active"`
+	PlayerID uuid.UUID `json:"playerId"`
+	CardRank string    `json:"cardRank"`
+}
+
 // ObfGameState represents the overall game state, obfuscated for a specific observer.
 type ObfGameState struct {
 	GameID          uuid.UUID        `json:"gameId"`
@@ -47,6 +58,12 @@ type ObfGameState struct {
 	CambiaCalled    bool             `json:"cambiaCalled"`
 	CambiaCallerID  uuid.UUID        `json:"cambiaCallerId,omitempty"`
 	HouseRules      HouseRules       `json:"houseRules"`
+	// SpecialAction reports a pending multi-step special action (e.g. a King's look-then-swap),
+	// letting a client that resyncs mid-action (reconnect, tab refresh) restore its pendingAction
+	// UI instead of waiting for the next event. Nil/omitted when no special action is pending
+	// (cambia-763 F1: previously never serialized, so reconnecting mid-action left the client
+	// unable to restore its pendingAction state).
+	SpecialAction *ObfSpecialActionState `json:"specialAction,omitempty"`
 	// TurnDeadline is the absolute server-clock epoch-ms time the current turn's timer expires.
 	// Omitted (null) when no turn timer is configured/active, in which case the client falls back
 	// to an informational (non-counting-down) render.
@@ -103,6 +120,15 @@ func (g *CambiaGame) getCurrentObfuscatedGameState(forUser uuid.UUID) ObfGameSta
 	// Cambia caller.
 	if g.Engine.CambiaCaller >= 0 && int(g.Engine.CambiaCaller) < engine.MaxPlayers {
 		obf.CambiaCallerID = g.EngineToPlayer[uint8(g.Engine.CambiaCaller)]
+	}
+
+	// Pending special action (cambia-763 F1). Public-safe projection only; see ObfSpecialActionState.
+	if g.SpecialAction.Active {
+		obf.SpecialAction = &ObfSpecialActionState{
+			Active:   true,
+			PlayerID: g.SpecialAction.PlayerID,
+			CardRank: g.SpecialAction.CardRank,
+		}
 	}
 
 	// Discard top card (always public knowledge).
