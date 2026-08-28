@@ -10,9 +10,11 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
+    "check-tokens": "node scripts/check-theme-tokens.mjs",
     "measure-dev-transfer": "node scripts/measure-dev-transfer.mjs"
   },
   "dependencies": {
+    "@fontsource-variable/archivo": "^5.3.0",
     "axios": "^1.8.4",
     "date-fns": "^4.1.0",
     "framer-motion": "^12.34.3",

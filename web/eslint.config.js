@@ -11,9 +11,7 @@ import prettierConfig from 'eslint-config-prettier'; // Needs to be last in exte
 export default tseslint.config(
   // Global ignores
   {
-    // design-system-import/ is a verbatim, read-only reference snapshot
-    // (cambia-437) -- not app source, not meant to be edited or linted.
-    ignores: ['dist', 'node_modules', '.env', '*.config.js', '*.config.ts', 'design-system-import']
+    ignores: ['dist', 'node_modules', '.env', '*.config.js', '*.config.ts']
   },
 
   // Base ESLint recommended config
