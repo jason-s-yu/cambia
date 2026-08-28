@@ -77,7 +77,10 @@ api.interceptors.response.use(
 				// A 401/403 while the initial checkAuth or a login/register attempt is
 				// in flight is an expected "not authenticated yet" outcome that the
 				// caller already handles directly - don't also force a hard logout.
-				console.warn(`Authentication error (${response.status}) on ${requestedUrl} during auth bootstrap; not forcing logout.`);
+				// Logged at debug level, not warn: the anonymous cold start takes this
+				// branch on every first paint, and a warn there is noise, not a signal
+				// (cambia-958 D5). Control flow is unchanged: no logout, still rejects.
+				console.debug(`Authentication error (${response.status}) on ${requestedUrl} during auth bootstrap; not forcing logout.`);
 			} else {
 				// Trigger logout action via Zustand store.
 				console.error(`Authentication error (${response.status}) on ${requestedUrl}. Logging out. Message: ${response.data?.message ?? 'N/A'}`);
