@@ -275,3 +275,43 @@ func TestSyncStateRepairDoesNotConsumeSeq(t *testing.T) {
 	assert.True(t, lob.ReadyStates[idA], "a ready echoing the repair's seq must be accepted")
 	assert.False(t, containsType(drainEnvelopes(t, connA), "sync_state"), "the caught-up ready must not be rejected again")
 }
+
+// TestPrivateEmitDoesNotConsumeSeq pins the unit-level half of cambia-878: EmitTo delivers to one
+// connection, so consuming a seq for it strands every other client behind h.seq with no frame that
+// could ever tell them the new number, and dispatch() then drops their next action. Every private
+// game event rides this path (private_snap_penalty, private_special_action_success,
+// private_draw_stockpile), which is why a failed snap cost the other player their next draw.
+func TestPrivateEmitDoesNotConsumeSeq(t *testing.T) {
+	idA := uuid.New()
+	idB := uuid.New()
+
+	lob := lobby.NewLobbyWithDefaults(idA)
+	lob.LobbySettings.AutoStart = false
+	lob.JoinUser(idA)
+	lob.JoinUser(idB)
+
+	h := NewHub(lob)
+	connA := newFakeConn(idA, "A")
+	connB := newFakeConn(idB, "B")
+	h.conns[idA] = connA
+	h.conns[idB] = connB
+
+	h.broadcastLobbyUpdate()
+	drainEnvelopes(t, connA)
+	drainEnvelopes(t, connB)
+	seqBefore := h.seq
+
+	h.EmitTo(idA, "private_snap_penalty", map[string]interface{}{"count": 1})
+
+	priv := findByType(drainEnvelopes(t, connA), "private_snap_penalty")
+	require.NotNil(t, priv, "the private event must reach its recipient")
+	assert.Equal(t, seqBefore, priv.Seq, "a private frame must carry the current seq")
+	assert.Equal(t, seqBefore, h.seq, "a private frame must not consume a seq")
+	assert.Empty(t, drainEnvelopes(t, connB), "a private frame must not reach the peer")
+
+	// B never saw that frame. Its next action still echoes the last broadcast's seq and must be
+	// applied, not answered with a sync_state repair and dropped.
+	h.dispatch(ClientMsg{UserID: idB, LastSeq: seqBefore, Type: "ready"})
+	assert.True(t, lob.ReadyStates[idB], "the peer's next action must be applied, not gated as stale")
+	assert.False(t, containsType(drainEnvelopes(t, connB), "sync_state"), "the peer must not be repaired for a frame it was never owed")
+}
