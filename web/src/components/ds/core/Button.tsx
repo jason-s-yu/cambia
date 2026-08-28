@@ -98,6 +98,7 @@ const Button: React.FC<ButtonProps> = ({ variant = 'primary', size = 'md', disab
         fontSize: s.fontSize,
         fontWeight: 'var(--weight-bold)',
         letterSpacing: 'var(--ds-tracking-tight)',
+        whiteSpace: 'nowrap',
         color: disabled ? 'var(--text-disabled)' : v.color,
         background: down ? v.active : hover && !disabled ? v.hover : v.bg,
         border: v.border,

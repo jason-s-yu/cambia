@@ -91,7 +91,9 @@ const NavTab: React.FC<{ label: string; active: boolean; onClick: () => void }> 
  * Above the md breakpoint the nav sits inline beside the wordmark. Below it
  * the tabs drop to a second, horizontally scrollable row and the log out
  * control collapses to an icon, so the bar fits a 390px viewport without
- * truncating the identity chip.
+ * truncating the identity chip. Between md and lg the bar tightens its gaps:
+ * the identity chip is the only item that shrinks (name ellipsis), every
+ * other item keeps its intrinsic width, so the log out label never wraps.
  */
 const TopBar: React.FC<TopBarProps> = ({ items, activePath, onNav, light, onToggleTheme, user, onLogout, style }) => {
   const tabs = items.map((item) => (
@@ -107,7 +109,7 @@ const TopBar: React.FC<TopBarProps> = ({ items, activePath, onNav, light, onTogg
         ...style
       }}
     >
-      <div className='flex items-center gap-2 md:gap-5 px-4 md:px-5' style={{ height: 'var(--topbar-h)' }}>
+      <div className='flex items-center gap-2 md:gap-3 lg:gap-5 px-4 md:px-5' style={{ height: 'var(--topbar-h)' }}>
         <a
           onClick={() => onNav(items[0]?.path ?? '/dashboard')}
           aria-label='Cambia home'
@@ -180,7 +182,7 @@ const TopBar: React.FC<TopBarProps> = ({ items, activePath, onNav, light, onTogg
             </span>
           </span>
         </div>
-        <span className='hidden md:inline-flex'>
+        <span className='hidden md:inline-flex' style={{ flex: 'none' }}>
           <Button variant='secondary' onClick={onLogout}>
             Log out
           </Button>
