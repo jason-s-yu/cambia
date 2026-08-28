@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // src/stores/gameStore.ts
 import { create } from 'zustand';
-import type { ObfGameState, ObfCard } from '@/types/game';
+import type { ObfGameState, ObfCard, EventCard } from '@/types/game';
 import { immer } from 'zustand/middleware/immer';
 import { useAuthStore } from './authStore';
 
@@ -198,12 +198,35 @@ export const useGameStore = create<GameState & GameActions>()(
 							break;
 						}
 
-						case 'private_initial_cards':
-							// This is mainly for the client to "remember" cards.
-							// We don't usually update the main ObfGameState based on this,
-							// but could store it separately if needed for UI hints.
-							console.log('[GameStore] Received initial cards:', payload.card1, payload.card2);
+						case 'private_initial_cards': {
+							// Pregame peek reveal, own hand only. The event carries one entry per peeked
+							// slot under `cards` (cambia-817); the count is the initialViewCount house
+							// rule, up to cardsPerPlayer, so nothing here may assume two.
+							//
+							// The service fires this right after the opening private_sync_state, which it
+							// builds before marking these cards seen: that snapshot therefore shows every
+							// own slot face-down. Apply the reveal to revealedHand here so the peek is
+							// visible for the whole pregame window instead of only from the next full sync
+							// at game start.
+							const cards = Array.isArray(payload.cards) ? (payload.cards as EventCard[]) : [];
+							const self = state.gameState?.players.find(p => p.playerId === selfPlayerId);
+							if (self?.revealedHand) {
+								for (const card of cards) {
+									if (!card || typeof card.idx !== 'number') continue;
+									const slot = self.revealedHand.findIndex(c => c.idx === card.idx);
+									if (slot < 0) continue;
+									self.revealedHand[slot] = {
+										id: card.id,
+										known: true,
+										rank: card.rank,
+										suit: card.suit,
+										value: card.value,
+										idx: card.idx
+									};
+								}
+							}
 							break;
+						}
 
 						case 'game_player_turn':
 							if (state.gameState) {

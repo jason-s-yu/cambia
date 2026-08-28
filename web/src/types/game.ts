@@ -128,11 +128,24 @@ export interface GamePlayerTurnEvent {
 	};
 }
 
-/** Structure for private initial card reveal events */
+/** A card as it appears inside a GameEvent payload (service EventCard). */
+export interface EventCard {
+	id: string;
+	rank?: string;
+	suit?: string;
+	value?: number;
+	idx?: number;
+	user?: { id: string };
+}
+
+/**
+ * Structure for private initial card reveal events. One entry per peeked hand slot: the length is
+ * the initialViewCount house rule, which runs from 0 up to cardsPerPlayer, so the reveal ships as a
+ * list rather than the fixed card1/card2 pair it used to carry (cambia-817).
+ */
 export interface PrivateInitialCardsEvent {
 	type: 'private_initial_cards';
-	card1?: ObfCard | null;
-	card2?: ObfCard | null;
+	cards?: EventCard[];
 }
 
 /** Structure for full state sync events */

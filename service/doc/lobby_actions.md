@@ -79,7 +79,9 @@ Numeric rules are range-checked server-side and an out-of-range value rejects th
 `update_rules` message, leaving the lobby's rules unchanged. The accepted ranges follow the
 engine's own limits: `penaltyDrawCount` 0-6, `turnTimerSec` 0-86400, `maxGameTurns` 0-65535
 (0 = unlimited), `cardsPerPlayer` 1-6, `cambiaAllowedRound` 0-255, `numJokers` 0-2,
-`numDecks` 1-4, `initialViewCount` 0-2.
+`numDecks` 1-4, `initialViewCount` 0-6. `initialViewCount` additionally may not exceed
+`cardsPerPlayer`: the pregame peek cannot cover more cards than the hand holds, and the pair is
+checked after the whole update is applied, so both keys may move in one message.
 
 **`Circuit` Object Structure (within `lobby_state`, `lobby_rules_updated`, used by `update_rules`):**
 (See `internal/game/game.go` for field definitions)
