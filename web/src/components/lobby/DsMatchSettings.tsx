@@ -9,6 +9,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import type { LobbyState, HouseRules, CircuitSettings, LobbySettings } from '@/types';
 import Panel from '@/components/ds/chrome/Panel';
+import { EYEBROW } from '@/components/ds/eyebrow';
 import Input from '@/components/ds/core/Input';
 import Checkbox from '@/components/ds/core/Checkbox';
 import Switch from '@/components/ds/core/Switch';
@@ -25,14 +26,6 @@ interface DsMatchSettingsProps {
 function jsonEqual(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
-
-const EYEBROW: React.CSSProperties = {
-  fontSize: 'var(--text-2xs)',
-  fontWeight: 'var(--weight-bold)',
-  letterSpacing: 'var(--tracking-caps)',
-  textTransform: 'uppercase',
-  color: 'var(--text-tertiary)'
-};
 
 const HINT: React.CSSProperties = {
   fontSize: 'var(--ds-text-xs)',
@@ -209,7 +202,7 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
       action={<Badge tone='info'>{gameModeLabel(currentSettings.gameMode)}</Badge>}
       style={{ minWidth: 0 }}
     >
-      <RuleGroup title='Pace' hint='0 turns the clock or the cap off' first>
+      <RuleGroup title='Pace' hint='Set 0 to turn the clock or the cap off' first>
         <div style={FIELD_GRID}>
           {numField('Turn clock (sec)', houseRules?.turnTimerSec, (raw) => setRule('turnTimerSec', clamped(raw, 0, 86400, 0)))}
           {numField('Turn cap', houseRules?.maxGameTurns, (raw) => setRule('maxGameTurns', clamped(raw, 0, 65535, 46)))}

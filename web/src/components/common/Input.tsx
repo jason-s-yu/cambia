@@ -1,5 +1,6 @@
 // src/components/common/Input.tsx
 import React, { forwardRef } from 'react';
+import { EYEBROW } from '@/components/ds/eyebrow';
 
 interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
   label?: string;
@@ -27,7 +28,7 @@ const Input = forwardRef<HTMLInputElement, InputProps>(
     return (
       <div className={margin}>
         {label && (
-          <label htmlFor={id} className='block mb-1.5 text-2xs font-ds-bold tracking-caps uppercase text-text-tertiary'>
+          <label htmlFor={id} className='block mb-1.5' style={EYEBROW}>
             {label}
           </label>
         )}

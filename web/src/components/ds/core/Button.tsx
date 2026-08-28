@@ -68,11 +68,27 @@ const VARIANTS: Record<NonNullable<ButtonProps['variant']>, VariantSpec> = {
   }
 };
 
+// Disabled is its own fill, not a faded accent. Gold at 50% opacity put the
+// label at 1.15:1 in light and 1.84:1 in dark, and a washed CTA still reads as
+// the CTA; a neutral surface with the standard border reads as "not now"
+// (cambia-876, DL-3 review F12). Ghost keeps its transparent shell so a
+// disabled ghost control does not grow a chip on a bare surface.
+const DISABLED: VariantSpec = {
+  bg: 'var(--surface-2)',
+  hover: 'var(--surface-2)',
+  active: 'var(--surface-2)',
+  color: 'var(--text-disabled)',
+  border: '1px solid var(--border-default)'
+};
+
+const DISABLED_GHOST: VariantSpec = { ...DISABLED, bg: 'transparent', hover: 'transparent', active: 'transparent', border: '1px solid transparent' };
+
 /** Flat action button: solid fill or 1px border, no offset shadow. */
 const Button: React.FC<ButtonProps> = ({ variant = 'primary', size = 'md', disabled = false, fullWidth = false, onClick, children, style }) => {
   const [hover, setHover] = useState(false);
   const [press, setPress] = useState(false);
-  const v = VARIANTS[variant] || VARIANTS.primary;
+  const base = VARIANTS[variant] || VARIANTS.primary;
+  const v = disabled ? (variant === 'ghost' ? DISABLED_GHOST : DISABLED) : base;
   const s = SIZES[size] || SIZES.md;
   const down = press && !disabled;
   return (
@@ -99,12 +115,11 @@ const Button: React.FC<ButtonProps> = ({ variant = 'primary', size = 'md', disab
         fontWeight: 'var(--weight-bold)',
         letterSpacing: 'var(--ds-tracking-tight)',
         whiteSpace: 'nowrap',
-        color: disabled ? 'var(--text-disabled)' : v.color,
+        color: v.color,
         background: down ? v.active : hover && !disabled ? v.hover : v.bg,
         border: v.border,
         borderRadius: 'var(--ds-radius-md)',
         cursor: disabled ? 'not-allowed' : 'pointer',
-        opacity: disabled ? 0.5 : 1,
         transition: 'background var(--dur-fast) var(--ds-ease-out), color var(--dur-fast) var(--ds-ease-out)',
         ...style
       }}

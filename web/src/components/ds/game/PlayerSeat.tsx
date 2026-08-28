@@ -51,15 +51,15 @@ const PlayerSeat: React.FC<PlayerSeatProps> = ({ username = 'Player', state, isY
         alignItems: 'center',
         gap: 10,
         padding: compact ? '5px 12px 5px 6px' : '7px 14px 7px 8px',
-        background: 'var(--surface-2)',
-        // The active-turn tint is an inset fill over the opaque surface, so the chip reads
-        // the same on the felt as on a panel; a translucent tint straight over green muddies.
-        boxShadow: isTurn ? 'inset 0 0 0 999px var(--interactive-selected)' : 'none',
+        // The active-turn fill is its own opaque token, so the chip reads the same on the
+        // felt as on a panel; a translucent tint straight over green muddies. It used to be
+        // an inset box-shadow faking a fill on a resting surface (cambia-876, DL-4 review F11).
+        background: isTurn ? 'var(--surface-selected)' : 'var(--surface-2)',
         border: '1px solid ' + (isTurn ? 'var(--accent-gold)' : state === 'cambia' ? 'var(--accent-danger)' : 'var(--border-default)'),
         borderRadius: 'var(--radius-pill)',
         color: 'var(--text-primary)',
         opacity: state === 'disconnected' ? 0.6 : 1,
-        transition: 'box-shadow var(--dur-med) var(--ds-ease-out), border-color var(--dur-med) var(--ds-ease-out)',
+        transition: 'background var(--dur-med) var(--ds-ease-out), border-color var(--dur-med) var(--ds-ease-out)',
         ...style
       }}
     >

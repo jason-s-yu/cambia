@@ -1,4 +1,5 @@
 import React from 'react';
+import { EYEBROW } from '../eyebrow';
 
 export interface PanelProps {
   /** Uppercase eyebrow heading. Omit for a bare card. */
@@ -27,18 +28,7 @@ const Panel: React.FC<PanelProps> = ({ title, action, children, style }) => {
     >
       {(title || action) && (
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 'var(--space-3)' }}>
-          <h3
-            style={{
-              margin: 0,
-              fontSize: 'var(--text-2xs)',
-              fontWeight: 'var(--weight-bold)',
-              letterSpacing: 'var(--tracking-caps)',
-              textTransform: 'uppercase',
-              color: 'var(--text-tertiary)'
-            }}
-          >
-            {title}
-          </h3>
+          <h3 style={{ margin: 0, ...EYEBROW }}>{title}</h3>
           {action}
         </div>
       )}

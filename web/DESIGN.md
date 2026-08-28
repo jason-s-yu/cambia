@@ -78,12 +78,15 @@ Text and hairlines drawn directly on the felt cannot use the neutral tiers, whic
 |`--interactive-hover`|`rgba(237,242,239,.06)`|`rgba(22,33,29,.05)`|Hover wash on a transparent or ghost control.|
 |`--interactive-active`|`rgba(237,242,239,.11)`|`rgba(22,33,29,.10)`|Pressed wash.|
 |`--interactive-selected`|`rgba(201,162,39,.14)`|`rgba(171,133,38,.14)`|Selected or active-turn tint.|
+|`--surface-selected`|`#2f351f`|`#f3eee1`|The same tint flattened onto `--surface-2`, opaque. For a resting surface that must not let its ground through: the active-turn player seat sits on the felt.|
 |`--focus-ring-color`|`#dcb84a`|`#ab8526`|The focus ring hue.|
 |`--focus-ring`|composed|composed|Ready-made `box-shadow`: 2px ground gap, then 2px ring.|
 
 Every focusable control shows a focus ring. Keyboard focus falls back to the global `:focus-visible` outline in `index.css`; controls that already own their `box-shadow` (Input, Select) set `--focus-ring` instead.
 
 Press states change color, never position. The previous language translated buttons downward on press; the flat language does not move them.
+
+A disabled control is a neutral fill, never a faded accent: `--surface-2` with `--border-default` and `--text-disabled`. Gold at half opacity still reads as the CTA and put its label at 1.15:1 in light. `ds/core/Button` owns this; a ghost control keeps its transparent shell and only drops to `--text-disabled`.
 
 ### Accents
 
@@ -152,6 +155,10 @@ Weights: `--weight-regular` 400 (body), `--weight-medium` 500 (labels, nav, cont
 Line height: `--ds-leading-tight` 1.15 for headings, `--ds-leading-snug` 1.35 for compact multi-line labels, `--ds-leading-normal` 1.55 for body.
 
 Tracking: `--ds-tracking-tight` -0.01em on headings 16px and up, `--tracking-caps` 0.08em on uppercase eyebrows, `--ds-tracking-wide` 0.14em on uppercase display text such as JOKER.
+
+### Eyebrows
+
+One style, exported as `EYEBROW` from `components/ds/eyebrow.ts`: 11px, `--weight-bold`, `--tracking-caps`, uppercase, `--text-tertiary`, and `word-spacing: 0.12em`. Spread it (`{ ...EYEBROW }`) and override only the color or weight a surface genuinely needs; do not restate the five declarations. The word spacing is the reason it is shared: at 11px with 0.08em tracking the inter-word gap disappears into the letter gaps and a two-word eyebrow reads as one run (RULESHEET).
 
 ### Numerals
 

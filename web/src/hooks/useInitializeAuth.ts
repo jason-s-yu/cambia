@@ -7,11 +7,14 @@ import { useAuthStore } from '@/stores/authStore';
  * It triggers the `checkAuth` action only if the state is currently loading
  * and the user isn't already marked as authenticated.
  *
- * @returns An object containing the current `isLoading` status from the auth store.
+ * @returns `initialised`: false until the first check settles. Callers gate the
+ * app shell on this, never on `isLoading`, which every later auth call raises
+ * too (cambia-876).
  */
 export function useInitializeAuth() {
 	const checkAuth = useAuthStore((state) => state.checkAuth);
 	const isLoading = useAuthStore((state) => state.isLoading);
+	const initialised = useAuthStore((state) => state.initialised);
 	const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
 
 	useEffect(() => {
@@ -22,5 +25,5 @@ export function useInitializeAuth() {
 		}
 	}, [checkAuth, isAuthenticated, isLoading]); // Dependencies ensure effect runs only when these change
 
-	return { isLoading };
+	return { initialised };
 }

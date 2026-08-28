@@ -240,7 +240,9 @@ const DashboardPage: React.FC = () => {
         {queuesError && <ErrorLine>{queuesError}</ErrorLine>}
         {queuesLoading && queues.length === 0 && <Spinner label='Loading queues' />}
 
-        <div className='grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3.5'>
+        {/* 3-up only above ~1200px: with the lg sidebar in place, md:grid-cols-3 left
+            ~200px queue cards whose titles wrapped (cambia-876, DL-2 review F8). */}
+        <div className='grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3.5'>
           {queues.map((queue) => {
             const isSearchingThis = searchingQueueId === queue.queueId;
             const disabled = !!searchingQueueId && !isSearchingThis;
@@ -320,7 +322,9 @@ const DashboardPage: React.FC = () => {
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 20, minWidth: 0 }}>
         <Panel title='Your ratings'>
-          {!ratings && ratingsError && <Note>{ratingsError}</Note>}
+          {/* A failed fetch is an error, not a note: every other panel on this page
+              reports one through ErrorLine (cambia-876, DL-2 review F3). */}
+          {!ratings && ratingsError && <ErrorLine>{ratingsError}</ErrorLine>}
           {!ratings && !ratingsError && (
             <div style={{ display: 'flex', justifyContent: 'center', padding: '12px 0' }}>
               <Spinner label='Loading ratings' />
@@ -341,28 +345,29 @@ const DashboardPage: React.FC = () => {
                   )}
                 </span>
               </div>
-              {ratings.pools.map((pool) => (
-                <StatRow
-                  key={pool.pool}
-                  label={ratingPoolLabel(pool.pool)}
-                  value={pool.games > 0 ? Math.round(pool.rating) : 'Unrated'}
-                  unit={pool.games > 0 ? `± ${Math.round(pool.rd)}` : undefined}
-                />
-              ))}
-              <StatRow
-                label='OpenSkill'
-                value={neverPlayed ? 'Unrated' : ratings.openSkill.mu.toFixed(2)}
-                unit={neverPlayed ? undefined : `± ${ratings.openSkill.sigma.toFixed(2)}`}
-              />
-              <StatRow
-                label='Record'
-                value={neverPlayed ? 'No games' : `${ratings.record.wins}W ${ratings.record.games - ratings.record.wins}L`}
-                style={{ borderBottom: 'none' }}
-              />
-              {neverPlayed && (
-                <Note style={{ marginTop: 10, fontSize: 'var(--ds-text-xs)' }}>
-                  Play a ranked game to start a rating.
-                </Note>
+              {/* Nothing played: the headline already says Unrated, so the rows would
+                  be four more copies of it. One line explains the state instead
+                  (cambia-876, DL-2 review F6). */}
+              {neverPlayed ? (
+                <Note style={{ fontSize: 'var(--ds-text-xs)' }}>Play a ranked game to start a rating.</Note>
+              ) : (
+                <>
+                  {/* The headline is the 1v1 pool; its row would repeat it verbatim. */}
+                  {ratings.pools.filter((pool) => !(hasHeadline && pool.pool === '1v1')).map((pool) => (
+                    <StatRow
+                      key={pool.pool}
+                      label={ratingPoolLabel(pool.pool)}
+                      value={pool.games > 0 ? Math.round(pool.rating) : 'Unrated'}
+                      unit={pool.games > 0 ? `± ${Math.round(pool.rd)}` : undefined}
+                    />
+                  ))}
+                  <StatRow label='OpenSkill' value={ratings.openSkill.mu.toFixed(2)} unit={`± ${ratings.openSkill.sigma.toFixed(2)}`} />
+                  <StatRow
+                    label='Record'
+                    value={`${ratings.record.wins}W ${ratings.record.games - ratings.record.wins}L`}
+                    style={{ borderBottom: 'none' }}
+                  />
+                </>
               )}
             </>
           )}
@@ -384,7 +389,8 @@ const DashboardPage: React.FC = () => {
                     <span style={{ display: 'block', fontWeight: 'var(--weight-bold)', fontSize: 'var(--ds-text-sm)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.username}</span>
                     <span style={{ display: 'block', fontSize: 'var(--text-2xs)', color: 'var(--text-tertiary)' }}>{f.status}</span>
                   </span>
-                  {f.online === true && <Button size='sm' variant='ghost'>Invite</Button>}
+                  {/* No invite control here: the button had no handler on any branch,
+                      and the real invite is the lobby link (cambia-876). */}
                 </div>
               );
             })}

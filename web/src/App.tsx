@@ -19,11 +19,15 @@ import LoadingSpinner from './components/common/LoadingSpinner';
 import { useTheme } from './hooks/useTheme';
 
 function App() {
-	const { isLoading } = useInitializeAuth(); // Check auth status on load
+	// Gate on the initial auth check only. isLoading also covers login, guest
+	// login and claim, and blocking the router on those unmounted the page that
+	// issued the request: its own in-flight state never rendered and a failed
+	// claim came back with the typed values cleared (cambia-876).
+	const { initialised } = useInitializeAuth();
 	const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
 	useTheme(); // Initialize and manage theme
 
-	if (isLoading) {
+	if (!initialised) {
 		return (
 			<div className='flex items-center justify-center h-screen'>
 				<LoadingSpinner />

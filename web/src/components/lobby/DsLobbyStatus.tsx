@@ -11,7 +11,8 @@ export type LobbyStatusTone = 'info' | 'success' | 'gold';
 export interface DsLobbyStatusProps {
   tone: LobbyStatusTone;
   text: string;
-  /** Live numeric readout, right-aligned in tabular figures (the countdown). */
+  /** Live numeric readout, right-aligned in tabular figures (the countdown). Visual
+   *  only: it is aria-hidden, so `text` has to stand on its own. */
   value?: string;
   style?: React.CSSProperties;
 }
@@ -32,8 +33,6 @@ const DsLobbyStatus: React.FC<DsLobbyStatusProps> = ({ tone, text, value, style 
   const t = TONES[tone] || TONES.info;
   return (
     <div
-      role='status'
-      aria-live='polite'
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -51,9 +50,13 @@ const DsLobbyStatus: React.FC<DsLobbyStatusProps> = ({ tone, text, value, style 
         ...style
       }}
     >
-      <span>{text}</span>
+      {/* The live region is the state text, which changes when the state does. The
+          value ticks once a second, so it stays out of it: announcing '3s', '2s',
+          '1s' is noise, not status (cambia-876, DL-3 review F7). */}
+      <span role='status' aria-live='polite'>{text}</span>
       {value !== undefined && (
         <span
+          aria-hidden='true'
           style={{
             flex: 'none',
             fontSize: 'var(--ds-text-xl)',

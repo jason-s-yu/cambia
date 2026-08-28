@@ -26,6 +26,15 @@ interface AuthState {
 	isAuthenticated: boolean;
 	user: User | null;
 	isLoading: boolean; // Tracks initial auth check and ongoing auth operations
+	/**
+	 * True once the first checkAuth() has settled, whatever its outcome. The app
+	 * shell gates its full-screen spinner on this rather than on isLoading, which
+	 * every later auth call (login, claim, guest) also raises: gating the router on
+	 * isLoading unmounted the whole page mid-request, so a failed claim came back
+	 * with its typed values gone and page-level loading states never rendered
+	 * (cambia-876, DL-5 review F3).
+	 */
+	initialised: boolean;
 	error: string | null;
 	login: (credentials: LoginCredentials) => Promise<boolean>;
 	register: (details: RegisterDetails) => Promise<boolean>;
@@ -56,6 +65,7 @@ export const useAuthStore = create<AuthState>()(
 		isAuthenticated: false,
 		user: null,
 		isLoading: true, // Assume loading initially until checkAuth completes
+		initialised: false,
 		error: null,
 
 		login: async (credentials) => {
@@ -163,6 +173,8 @@ export const useAuthStore = create<AuthState>()(
 					console.log('Auth check failed:', error);
 					set({ isAuthenticated: false, user: null, isLoading: false });
 				} finally {
+					// The first settled check unblocks the app shell, pass or fail.
+					set({ initialised: true });
 					authFlightGuard.end();
 					checkAuthInFlight = null;
 				}

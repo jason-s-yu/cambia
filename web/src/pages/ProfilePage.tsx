@@ -4,6 +4,7 @@ import { Navigate } from 'react-router-dom';
 import { useAuthStore } from '@/stores/authStore';
 import { useHistoryStore } from '@/stores/historyStore';
 import Panel from '@/components/ds/chrome/Panel';
+import { EYEBROW } from '@/components/ds/eyebrow';
 import Badge from '@/components/ds/core/Badge';
 import Button from '@/components/ds/core/Button';
 import Input from '@/components/ds/core/Input';
@@ -14,18 +15,7 @@ import DsGameHistory from '@/components/profile/DsGameHistory';
 /** Eyebrow label over a plain value, for the account panel's identity fields. */
 const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
 	<div style={{ minWidth: 0 }}>
-		<p
-			style={{
-				margin: '0 0 4px',
-				fontSize: 'var(--text-2xs)',
-				fontWeight: 'var(--weight-bold)',
-				letterSpacing: 'var(--tracking-caps)',
-				textTransform: 'uppercase',
-				color: 'var(--text-tertiary)'
-			}}
-		>
-			{label}
-		</p>
+		<p style={{ margin: '0 0 4px', ...EYEBROW }}>{label}</p>
 		<p style={{ margin: 0, fontSize: 'var(--text-md)', color: 'var(--text-primary)', overflowWrap: 'anywhere' }}>{children}</p>
 	</div>
 );

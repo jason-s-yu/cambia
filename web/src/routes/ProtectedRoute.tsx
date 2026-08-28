@@ -14,9 +14,12 @@ interface ProtectedRouteProps {
  */
 const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
 	const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
-	const isLoading = useAuthStore((state) => state.isLoading); // Check loading state
+	// Initial check only: a later auth call (login, guest, claim) raises isLoading
+	// too, and swapping the page for a spinner mid-request threw away the form
+	// state the request came from (cambia-876).
+	const initialised = useAuthStore((state) => state.initialised);
 
-	if (isLoading) {
+	if (!initialised) {
 		// Show loading indicator while checking auth status on initial load.
 		return (
 			<div className="flex items-center justify-center h-screen">

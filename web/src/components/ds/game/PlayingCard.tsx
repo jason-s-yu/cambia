@@ -79,7 +79,12 @@ const PlayingCard: React.FC<PlayingCardProps> = ({ rank, suit, faceDown = false,
           }
         }
       }
-    : { 'aria-label': label };
+    // A label on a bare div names nothing: a generic element takes no accessible
+    // name, so a non-clickable card that carries one gets role='img' to be
+    // announced at all (cambia-876, DL-4 review F13).
+    : label
+      ? { role: 'img' as const, 'aria-label': label }
+      : {};
   if (faceDown) {
     return (
       <div {...interactive} style={{ ...base, background: 'var(--card-back)' }}>
@@ -94,7 +99,6 @@ const PlayingCard: React.FC<PlayingCardProps> = ({ rank, suit, faceDown = false,
         ...base,
         background: 'var(--card-face)',
         color,
-        fontFamily: 'var(--font-sans)',
         fontVariantNumeric: 'tabular-nums'
       }}
     >

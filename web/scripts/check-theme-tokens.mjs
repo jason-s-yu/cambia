@@ -2,8 +2,9 @@
 //
 // Parses the built stylesheet, resolves the dark (:root) and light
 // ([data-theme=light]) custom-property sets, and asserts that:
-//   1. every semantic token resolves to a literal color, and
-//   2. dark and light differ on every one of them.
+//   1. every semantic token resolves to a literal color,
+//   2. dark and light differ on every one of them, and
+//   3. the tokens declared theme-stable (SHARED) resolve and stay identical.
 //
 // Run after `npm run build`:  npm run check-tokens
 
@@ -55,7 +56,8 @@ function resolve(map, value, depth = 0) {
 
 const SEMANTIC = [
     'surface-0', 'surface-1', 'surface-2', 'surface-3', 'surface-inset', 'surface-overlay',
-    'surface-felt', 'surface-felt-deep',
+    'surface-felt', 'surface-felt-deep', 'surface-selected',
+    'text-on-felt-muted', 'border-on-felt',
     'text-primary', 'text-secondary', 'text-tertiary', 'text-disabled', 'text-inverse', 'text-on-gold',
     'border-subtle', 'border-default', 'border-strong', 'border-accent',
     'interactive-hover', 'interactive-active', 'interactive-selected', 'focus-ring-color',
@@ -68,6 +70,12 @@ const SEMANTIC = [
     'card-face', 'card-face-edge', 'card-back', 'card-back-line', 'suit-red',
     'tier-bronze', 'tier-silver', 'tier-gold', 'tier-platinum', 'tier-diamond', 'tier-master', 'tier-grandmaster'
 ];
+
+// Semantic tokens that are deliberately theme-stable: text drawn on a fill that
+// keeps its hue in both themes. They still have to resolve to a literal, but
+// dark == light is the contract, not a drift. Listing them here is what stops
+// the token count from quietly excluding them (cambia-876, DL-4 review F9).
+const SHARED = ['text-on-green', 'text-on-danger'];
 
 let missing = 0;
 let identical = 0;
@@ -89,8 +97,28 @@ for (const key of SEMANTIC) {
     rows.push(`ok       ${name}  dark=${d}  light=${l}`);
 }
 
+let shared = 0;
+for (const key of SHARED) {
+    const name = '--' + key;
+    const d = resolve(dark, dark[name]);
+    const l = resolve(light, light[name]);
+    if (d === undefined || l === undefined || String(d).startsWith('UNRESOLVED')) {
+        missing++;
+        rows.push(`MISSING  ${name}  dark=${d} light=${l}`);
+        continue;
+    }
+    if (d !== l) {
+        missing++;
+        rows.push(`SPLIT    ${name}  dark=${d} light=${l} (declared theme-stable)`);
+        continue;
+    }
+    shared++;
+    rows.push(`shared   ${name}  ${d}`);
+}
+
 console.log(rows.join('\n'));
 console.log(`\n${SEMANTIC.length} semantic tokens checked: ${missing} unresolved, ${identical} identical across themes`);
+console.log(`${SHARED.length} theme-stable tokens checked: ${shared} identical as declared`);
 
 // Font check: no serif family and none of the banned faces may survive
 // anywhere in the built CSS, the UI face must be the self-hosted one, and no

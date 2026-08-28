@@ -80,9 +80,15 @@ const GameRow: React.FC<{ game: HistoryGame }> = ({ game }) => {
 				)}
 			</div>
 			<div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flex: 'none', fontVariantNumeric: 'tabular-nums' }}>
-				<span style={{ fontWeight: 'var(--weight-black)', fontSize: 'var(--ds-text-lg)', lineHeight: 'var(--ds-leading-tight)', color: 'var(--text-primary)' }}>
-					{game.score != null ? game.score : '-'}
-				</span>
+				{/* A bare hyphen at display weight next to real scores reads as a stray
+				    mark, so an unscored row says so (cambia-876, DL-5 review F6). */}
+				{game.score != null ? (
+					<span style={{ fontWeight: 'var(--weight-black)', fontSize: 'var(--ds-text-lg)', lineHeight: 'var(--ds-leading-tight)', color: 'var(--text-primary)' }}>
+						{game.score}
+					</span>
+				) : (
+					<span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-tertiary)' }}>no score</span>
+				)}
 				{delta != null && (
 					<span
 						style={{

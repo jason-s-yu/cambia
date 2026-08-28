@@ -130,6 +130,11 @@
   --interactive-hover: rgba(237, 242, 239, 0.06);
   --interactive-active: rgba(237, 242, 239, 0.11);
   --interactive-selected: rgba(201, 162, 39, 0.14);
+  /* Opaque form of the selected tint: --interactive-selected flattened onto
+     --surface-2. For a resting surface that must stay solid over the felt (the
+     active-turn player seat), where a translucent tint muddies against green
+     (cambia-876, DL-4 review F11). */
+  --surface-selected: #2f351f;
   --focus-ring-color: var(--gold-400);
 
   /* Accents */
@@ -192,7 +197,9 @@
   --surface-felt: var(--green-600);
   --surface-felt-deep: var(--green-700);
 
-  --text-on-felt-muted: rgba(240, 247, 243, 0.78);
+  /* .78 measured 4.25:1 on the lighter light-theme felt, under AA for the 11px
+     pile labels; .86 puts it at ~4.9:1 (cambia-876, DL-4 review F8). */
+  --text-on-felt-muted: rgba(240, 247, 243, 0.86);
   --border-on-felt: rgba(240, 247, 243, 0.3);
 
   --text-primary: var(--ink-900);
@@ -212,6 +219,7 @@
   --interactive-hover: rgba(22, 33, 29, 0.05);
   --interactive-active: rgba(22, 33, 29, 0.1);
   --interactive-selected: rgba(171, 133, 38, 0.14);
+  --surface-selected: #f3eee1;
   --focus-ring-color: var(--gold-600);
 
   --accent-gold: var(--gold-600);
@@ -436,6 +444,7 @@
   --color-surface-overlay: var(--surface-overlay);
   --color-surface-felt: var(--surface-felt);
   --color-surface-felt-deep: var(--surface-felt-deep);
+  --color-surface-selected: var(--surface-selected);
 
   --color-text-primary: var(--text-primary);
   --color-text-secondary: var(--text-secondary);

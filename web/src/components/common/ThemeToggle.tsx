@@ -38,7 +38,9 @@ const ThemeToggle: React.FC = () => {
   const icon = theme === 'light' ? <SunIcon /> : theme === 'dark' ? <MoonIcon /> : <SystemIcon />;
 
   return (
-    <IconButton variant='ghost' onClick={cycleTheme} title={`Theme: ${LABEL[theme]}`}>
+    // The name is the action, not the state: 'Theme: Dark' announced a status
+    // where a control belongs (cambia-876, DL-2 review F5).
+    <IconButton variant='ghost' onClick={cycleTheme} title={`Switch theme (now ${LABEL[theme]})`}>
       {icon}
     </IconButton>
   );

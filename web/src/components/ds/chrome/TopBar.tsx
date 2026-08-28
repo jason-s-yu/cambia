@@ -110,13 +110,17 @@ const TopBar: React.FC<TopBarProps> = ({ items, activePath, onNav, light, onTogg
       }}
     >
       <div className='flex items-center gap-2 md:gap-3 lg:gap-5 px-4 md:px-5' style={{ height: 'var(--topbar-h)' }}>
-        <a
+        {/* A button, not an <a> without href: the anchor carried the click but no
+            href, so it sat outside the tab order and the keyboard could not reach
+            home (cambia-876, DL-2 review F4). */}
+        <button
+          type='button'
           onClick={() => onNav(items[0]?.path ?? '/dashboard')}
           aria-label='Cambia home'
-          style={{ cursor: 'pointer', color: 'var(--text-primary)', textDecoration: 'none', flex: 'none' }}
+          style={{ display: 'inline-flex', alignItems: 'center', padding: 0, background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-primary)', flex: 'none' }}
         >
           <Wordmark />
-        </a>
+        </button>
         <nav aria-label='Primary' className='hidden md:flex items-center gap-1'>
           {tabs}
         </nav>

@@ -61,14 +61,17 @@ const AppLayout: React.FC = () => {
 
 	// Headline rating: the 1v1 (head-to-head) pool, matching the dashboard hero
 	// and formatted the same way (utils/ratingPool) as the profile page so the
-	// number agrees everywhere it appears. Zero games in the pool, or the fetch
-	// not having resolved yet, both fall back to 'Unrated' rather than a guess.
+	// number agrees everywhere it appears. 'Unrated' is a fact about the player
+	// and is only claimed once the ratings actually arrive; while the fetch is
+	// pending or failed the chip says nothing (cambia-876, DL-2 review F3).
 	const headlinePool = ratings?.pools.find((p) => p.pool === '1v1') ?? null;
 	const topBarUser: TopBarUser = {
 		name: user?.username || 'Player',
-		rating: headlinePool && headlinePool.games > 0
-			? formatRating(headlinePool.rating, headlinePool.rd)
-			: 'Unrated'
+		rating: !ratings
+			? '--'
+			: headlinePool && headlinePool.games > 0
+				? formatRating(headlinePool.rating, headlinePool.rd)
+				: 'Unrated'
 	};
 
 	return (

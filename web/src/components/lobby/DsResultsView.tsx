@@ -21,6 +21,7 @@ import { useGameStore, selectFinalScores } from '@/stores/gameStore';
 import type { ClientGameAction, ObfGameState } from '@/types/game';
 import Button from '@/components/ds/core/Button';
 import Badge from '@/components/ds/core/Badge';
+import { EYEBROW } from '@/components/ds/eyebrow';
 import ScorePill from '@/components/ds/game/ScorePill';
 import DsGameTable from '@/components/game/DsGameTable';
 
@@ -32,14 +33,6 @@ interface DsResultsViewProps {
   gameState?: ObfGameState | null;
   sendMessage?: (msg: ClientGameAction) => void;
 }
-
-const EYEBROW: React.CSSProperties = {
-  fontSize: 'var(--text-2xs)',
-  fontWeight: 'var(--weight-bold)',
-  letterSpacing: 'var(--tracking-caps)',
-  textTransform: 'uppercase',
-  color: 'var(--text-tertiary)'
-};
 
 const DsResultsView: React.FC<DsResultsViewProps> = ({ phase, onReturnToLobby, onLeave, gameState, sendMessage }) => {
   const matchState = useCurrentLobbyStore((s) => s.matchState);
@@ -108,6 +101,9 @@ const DsResultsView: React.FC<DsResultsViewProps> = ({ phase, onReturnToLobby, o
   const own = standings.find((r) => r.id === selfId) ?? null;
   const ownWon = !!winner && winner.id === selfId;
   const caller = gameState?.cambiaCalled ? names.get(gameState.cambiaCallerId ?? '') : undefined;
+  // Ids, not display names: two seats can carry the same name, and a seat whose
+  // name fell back to a placeholder never matches (cambia-876, DL-4 review F12).
+  const callerIsSelf = !!selfId && gameState?.cambiaCallerId === selfId;
 
   const card = (
     <section
@@ -137,7 +133,7 @@ const DsResultsView: React.FC<DsResultsViewProps> = ({ phase, onReturnToLobby, o
         <h1 id='results-title' style={{ margin: 0, fontSize: 'var(--ds-text-2xl)', fontWeight: 'var(--weight-bold)', letterSpacing: 'var(--ds-tracking-tight)', lineHeight: 'var(--ds-leading-tight)' }}>{title}</h1>
         {winner && (
           <div style={{ fontSize: 'var(--ds-text-sm)', color: 'var(--text-secondary)' }}>
-            {ownWon ? 'You win.' : `${winner.name} wins.`}{caller ? ` Cambia was called by ${caller === own?.name ? 'you' : caller}.` : ''}
+            {ownWon ? 'You win.' : `${winner.name} wins.`}{caller ? ` Cambia was called by ${callerIsSelf ? 'you' : caller}.` : ''}
           </div>
         )}
       </div>
