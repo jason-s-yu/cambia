@@ -189,6 +189,7 @@ func NewCambiaGame() *CambiaGame {
 		HouseRules: HouseRules{
 			AllowDrawFromDiscardPile: false,
 			AllowReplaceAbilities:    false,
+			AllowOpponentSnapping:    true,
 			SnapRace:                 false,
 			ForfeitOnDisconnect:      true,
 			PenaltyDrawCount:         2,

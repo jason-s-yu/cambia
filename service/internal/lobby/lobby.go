@@ -60,6 +60,7 @@ func NewLobbyWithDefaults(hostID uuid.UUID) *Lobby {
 	defaultHouseRules := game.HouseRules{
 		AllowDrawFromDiscardPile: false,
 		AllowReplaceAbilities:    false,
+		AllowOpponentSnapping:    true,
 		SnapRace:                 false,
 		ForfeitOnDisconnect:      true,
 		PenaltyDrawCount:         2,

@@ -82,6 +82,48 @@ func TestMapHouseRulesToEngine_NonCircuit_PenaltyDrawDefault(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
+// TestMapHouseRulesToEngine_AllowOpponentSnapping_UpdateRules pins the allowOpponentSnapping
+// house rule end to end: HouseRules.Update (the same call path as the "update_rules" WS message)
+// through mapHouseRulesToEngine's non-circuit output (cambia-781: engine_adapter.go previously
+// hardcoded AllowOpponentSnapping: true regardless of what update_rules set, making the client
+// checkbox a no-op).
+func TestMapHouseRulesToEngine_AllowOpponentSnapping_UpdateRules(t *testing.T) {
+	t.Run("defaults true when never set", func(t *testing.T) {
+		g := NewCambiaGame()
+		addTestPlayers(g, 2)
+
+		got := g.mapHouseRulesToEngine()
+
+		assert.True(t, got.AllowOpponentSnapping)
+	})
+
+	t.Run("update_rules false lands false in engine config", func(t *testing.T) {
+		g := NewCambiaGame()
+		addTestPlayers(g, 2)
+
+		err := g.HouseRules.Update(map[string]interface{}{"allowOpponentSnapping": false})
+		assert.NoError(t, err)
+
+		got := g.mapHouseRulesToEngine()
+
+		assert.False(t, got.AllowOpponentSnapping)
+	})
+
+	t.Run("update_rules true survives round trip", func(t *testing.T) {
+		g := NewCambiaGame()
+		addTestPlayers(g, 2)
+
+		err := g.HouseRules.Update(map[string]interface{}{"allowOpponentSnapping": false})
+		assert.NoError(t, err)
+		err = g.HouseRules.Update(map[string]interface{}{"allowOpponentSnapping": true})
+		assert.NoError(t, err)
+
+		got := g.mapHouseRulesToEngine()
+
+		assert.True(t, got.AllowOpponentSnapping)
+	})
+}
+
 // TestMapHouseRulesToEngine_Circuit_MatchesServiceRules pins the circuit-mode mapping so the two
 // literals stay consistent: circuit already derives NumPlayers from len(g.Players) and inherits
 // NumJokers/LockCallerHand/NumDecks/InitialViewCount from engine.TournamentHouseRules. This locks

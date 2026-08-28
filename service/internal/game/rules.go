@@ -7,6 +7,7 @@ import "fmt"
 type HouseRules struct {
 	AllowDrawFromDiscardPile bool `json:"allowDrawFromDiscardPile"` // Allow players to draw from the discard pile instead of the stockpile.
 	AllowReplaceAbilities    bool `json:"allowReplaceAbilities"`    // Allow cards discarded via replacement to trigger their special abilities.
+	AllowOpponentSnapping    bool `json:"allowOpponentSnapping"`    // Allow snapping a matching card out of an opponent's hand.
 	SnapRace                 bool `json:"snapRace"`                 // Only the first player to successfully snap gets the benefit; others are penalized.
 	ForfeitOnDisconnect      bool `json:"forfeitOnDisconnect"`      // If a player disconnects, their game is forfeited. If false, they can rejoin.
 	PenaltyDrawCount         int  `json:"penaltyDrawCount"`         // Number of cards to draw as penalty for an invalid snap.
@@ -65,6 +66,9 @@ func (rules *HouseRules) Update(newRules map[string]interface{}) error {
 		return err
 	}
 	if err = assignBool(&rules.AllowReplaceAbilities, "allowReplaceAbilities"); err != nil {
+		return err
+	}
+	if err = assignBool(&rules.AllowOpponentSnapping, "allowOpponentSnapping"); err != nil {
 		return err
 	}
 	if err = assignBool(&rules.SnapRace, "snapRace"); err != nil {
