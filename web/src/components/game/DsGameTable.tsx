@@ -253,6 +253,12 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   const serverClockOffsetMs = useGameStore(selectServerClockOffsetMs);
   const abilityReveal = useGameStore(selectAbilityReveal);
   const matchState = useCurrentLobbyStore((s) => s.matchState);
+  // A round counter only says something in a match that runs more than one round. A single-round
+  // queue (h2h_quickplay) now carries match state into the game, and it read "Round 0/1" the
+  // whole way through (cambia-933).
+  const roundCounter = matchState && matchState.totalRounds > 1
+    ? `Round ${matchState.currentRound}/${matchState.totalRounds}`
+    : null;
   const lobbyPlayers = useCurrentLobbyStore((s) => s.lobbyDetails?.lobby_status?.users);
 
   const selfState = gameState.players.find((p) => p.playerId === selfId);
@@ -558,7 +564,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
           {/* Top strip: turn readout, Cambia call. */}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', minHeight: 24 }}>
             <span style={{ ...FELT_LABEL, marginTop: 0 }}>
-              {[matchState ? `Round ${matchState.currentRound}/${matchState.totalRounds}` : null, turnNo !== null ? `Turn ${turnNo}` : null].filter(Boolean).join(' · ')}
+              {[roundCounter, turnNo !== null ? `Turn ${turnNo}` : null].filter(Boolean).join(' · ')}
             </span>
             {/* Shared eyebrow for the caps run: the inline copy dropped wordSpacing
                 and the chip read CAMBIACALLED (cambia-892, DL-7 F1). Size and
@@ -731,7 +737,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
 
       {/* Side column: standings and table facts. */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16, minHeight: 0 }}>
-        <Panel title={hasTotals ? 'Standings' : 'Players'} action={matchState ? <Badge tone='info'>Round {matchState.currentRound}/{matchState.totalRounds}</Badge> : undefined}>
+        <Panel title={hasTotals ? 'Standings' : 'Players'} action={roundCounter ? <Badge tone='info'>{roundCounter}</Badge> : undefined}>
           <div style={{ display: 'flex', flexDirection: 'column' }}>
             {standings.map((row, i) => (
               <div key={row.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 2px', borderTop: i ? '1px solid var(--border-subtle)' : 'none' }}>

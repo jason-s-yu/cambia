@@ -173,11 +173,39 @@ Handled by `internal/handlers/lobby.go`. These manage *ephemeral* in-memory lobb
     {
       "type": "private" | "public" | "matchmaking", // string, optional (default: "private")
       "gameMode": "head_to_head" | "group_of_4" | ..., // string, optional (default: "head_to_head")
+      "queueID": "h2h_quickplay", // string, required for type "matchmaking", optional otherwise
       // Partial houseRules, circuit, or lobbySettings objects can be included
       "houseRules": { "turnTimerSec": 30 }, // optional
       "lobbySettings": { "autoStart": false } // optional
     }
     ```
+    **Matchmaking lobbies** are defined by their queue, not by a game mode: send
+    `{"type":"matchmaking","queueID":"<queue id>"}` and the handler derives the rest from that
+    queue's config (`internal/matchmaking/validation.go`, the same one `POST /lobby/{id}/search`
+    reads later, so the two never disagree):
+    * `gameMode`: `head_to_head` for a 2-player queue, `group_of_4` for a 4-player one. A
+      multi-round queue keeps the player-count mode until the round lifecycle lands (cambia-466).
+    * `mode`: `ranked` for a ranked queue, otherwise `casual`.
+    * `queueID`: echoed back, and it is what the search endpoint queues the lobby into. Round
+      count and ranked-ness are not stored a second time on the lobby; the hub reads them from
+      the queue config at search time.
+
+    The host is a joined member of a matchmaking lobby from creation (a party of one), so
+    `POST /lobby/{id}/search` succeeds without a WebSocket connection in between.
+
+    A `queueID` on a `public` or `private` lobby is accepted and validated: the search endpoint
+    gates on host, `searching` and `queueID` alone, so a standing lobby can queue its party
+    without being typed `matchmaking`.
+
+    Transitional shape (remove after 2026-10-01): `{"type":"matchmaking","gameMode":"<queue id>"}`
+    with no `queueID`, which is what web bundles cached from before cambia-933 send, is read as
+    that queue id and logged as deprecated.
+* **Matchmaking 400 bodies:**
+    * `Matchmaking lobby requires queueID` - type `matchmaking` with no `queueID` (and no queue id
+      in `gameMode`). There is no default queue.
+    * `Unknown matchmaking queue: <id>` - the `queueID` (on any lobby type) names no configured queue.
+    * `Matchmaking queue <id> has an unsupported player count: <n>` - the queue config asks for a
+      player count no game mode covers.
 * **Response (Success: 200 OK):** `application/json` - Returns the full state of the created lobby.
     ```json
     {

@@ -87,6 +87,9 @@ export interface LobbyState {
   your_id?: string;       // From WS
   your_is_host?: boolean; // From WS
   // Matchmaking fields (from WS or REST)
+  /** Queue this lobby is (or will be) searching in. Sent on POST /lobby/create for a
+   *  matchmaking lobby and echoed back by the service as `queueID` (omitted when empty). */
+  queueID?: string;
   queueId?: string;
   mode?: 'casual' | 'ranked';
   isRanked?: boolean;
@@ -146,6 +149,9 @@ export interface FriendRelationship {
 
 /** Match state for multi-round ranked matches */
 export interface MatchState {
+  /** The lobby the match is played in, from match_found. A party that did not host the match
+   *  reaches it only through this id. */
+  lobbyId?: string;
   queueId: string;
   isRanked: boolean;
   totalRounds: number;

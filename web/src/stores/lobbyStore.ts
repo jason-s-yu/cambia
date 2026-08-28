@@ -305,17 +305,25 @@ export const useCurrentLobbyStore = create<CurrentLobbyState>((set, get) => ({
 					}
 
 					case 'match_found': {
-						return {
-							phase: 'ready_check' as LobbyPhase,
-							matchState: {
-								queueId: message.queue_id ?? '',
-								isRanked: message.is_ranked ?? false,
-								totalRounds: message.total_rounds ?? 1,
-								currentRound: 0,
-								roundScores: [],
-								cumulativeScores: {},
-							},
+						// lobby_id is the lobby the match is played in. A match is formed out of one
+						// lobby per party and only one of them holds the game, so a party that did not
+						// host it has to move there; the dashboard reads this id to send them
+						// (cambia-933). Only the hosting lobby enters ready_check, so a notice pointing
+						// elsewhere leaves the phase to the phase_change that accompanies it.
+						const matchedLobbyId: string | undefined = message.lobby_id ?? undefined;
+						const hosting = !matchedLobbyId || matchedLobbyId === state.currentLobbyId;
+						const matchState = {
+							lobbyId: matchedLobbyId,
+							queueId: message.queue_id ?? '',
+							isRanked: message.is_ranked ?? false,
+							totalRounds: message.total_rounds ?? 1,
+							currentRound: 0,
+							roundScores: [],
+							cumulativeScores: {},
 						};
+						return hosting
+							? { phase: 'ready_check' as LobbyPhase, matchState }
+							: { matchState };
 					}
 
 					case 'round_start': {

@@ -12,6 +12,7 @@ import StatRow from '@/components/ds/data/StatRow';
 import Panel from '@/components/ds/chrome/Panel';
 import DsResumeBanner from '@/components/dashboard/DsResumeBanner';
 import { useCurrentLobbyStore, useLobbyListStore } from '@/stores/lobbyStore';
+import { useSocket } from '@/hooks/useSocket';
 import { useQueueStore } from '@/stores/queueStore';
 import { useFriendsStore } from '@/stores/friendsStore';
 import { useHistoryStore } from '@/stores/historyStore';
@@ -82,8 +83,17 @@ const DashboardPage: React.FC = () => {
   const friendsError = useFriendsStore((state) => state.error);
   const fetchFriends = useFriendsStore((state) => state.fetchFriends);
 
+  const searchLobbyId = useQueueStore((state) => state.searchLobbyId);
+  const finishSearch = useQueueStore((state) => state.finishSearch);
+
   const createAndJoinLobby = useCurrentLobbyStore((state) => state.createAndJoinLobby);
   const currentLobbyId = useCurrentLobbyStore((state) => state.currentLobbyId);
+  const matchedLobbyId = useCurrentLobbyStore((state) => state.matchState?.lobbyId);
+
+  // A search runs from a real lobby, and the hub announces the match over that lobby's socket:
+  // without a connection the player waits on the dashboard forever while the match they were
+  // put in starts without them (cambia-933). The socket lives for the search only.
+  const { closeSocket: closeSearchSocket } = useSocket(searchLobbyId);
 
   const [searchElapsed, setSearchElapsed] = useState(0);
   const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -143,6 +153,17 @@ const DashboardPage: React.FC = () => {
       }
     };
   }, [searchingQueueId, searchStartTime]);
+
+  // A found match names the lobby it is played in, which is the searching lobby only for the
+  // party that hosts the match; everyone else moves there. The socket is closed first and by
+  // hand: the lobby page opens its own, and a second connection for the same user would take
+  // the live one down with it when the hub evicts it.
+  useEffect(() => {
+    if (!searchLobbyId || !matchedLobbyId) return;
+    closeSearchSocket();
+    void finishSearch(matchedLobbyId);
+    navigate(`/lobby/${matchedLobbyId}`);
+  }, [searchLobbyId, matchedLobbyId, closeSearchSocket, finishSearch, navigate]);
 
   // Navigate into the lobby once creation succeeds while the create modal is open.
   useEffect(() => {
