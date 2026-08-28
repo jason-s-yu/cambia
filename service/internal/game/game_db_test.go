@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -57,21 +58,89 @@ func pingTestDB() bool {
 	return pool.Ping(ctx) == nil
 }
 
-// setupGameDBTest skips the test when no dev Postgres is reachable, otherwise connects.
+// gameDBOnce guards the single database.ConnectDB() call this package's test binary makes,
+// mirroring internal/handlers/main_test.go's dbOnce/ensureTestDB (cambia-908): every DB-backed
+// test used to call database.ConnectDB() itself, which reassigns the package-level database.DB
+// pool on every call, so a later test's call could race under -race against a background
+// goroutine from an earlier test's game-end persistence still reading the pool it was about to
+// replace. Connecting exactly once for the whole binary removes that race regardless of how many
+// DB-backed tests this package grows.
+var gameDBOnce sync.Once
+
+// setupGameDBTest skips the test when no dev Postgres is reachable, otherwise connects via
+// database.ConnectDB exactly once for the whole package (gameDBOnce).
 func setupGameDBTest(t *testing.T) {
 	if !dbAvailable {
 		t.Skip("skipping: no Postgres reachable via PG_HOST/PG_PORT/POSTGRES_USER/POSTGRES_PASSWORD/PG_DATABASE (see service/.env.template); set these to point at a running dev database to run this test")
 	}
-	database.ConnectDB()
+	gameDBOnce.Do(database.ConnectDB)
+}
+
+// awaitPersistence blocks, bounded by timeout, until every background DB-write goroutine
+// tracked by wg (persistInitialGameState, persistFinalGameState) completes. RecordGameAndResults
+// runs the game_results insert and the games.status='completed' update in one transaction and
+// the rating (users elo/phi/sigma + ratings row) update in a second, separate transaction, both
+// inside the same goroutine persistFinalGameState launches; polling games.status alone observes
+// only the first transaction; waiting on wg (Add'd before the goroutine launches, Done'd when it
+// returns - see CambiaGame.PersistWG) is what actually proves the rating write has landed before
+// a caller reads it (cambia-908 L4).
+func awaitPersistence(t *testing.T, wg *sync.WaitGroup, timeout time.Duration) {
+	t.Helper()
+	if wg == nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		t.Fatalf("cambia-908: game-end persistence goroutines did not finish within %s", timeout)
+	}
 }
 
 // createGameDBTestUser inserts a bare user (unique random username, no email) for use as a
-// rating-update participant.
+// rating-update participant. Registers a t.Cleanup deleting the created row - and anything a
+// test drove it to accumulate as a lobby host or game participant - in FK-safe order, mirroring
+// internal/handlers/main_test.go's cleanupTestUserRows (cambia-890 F4 spirit: this package's own
+// DB-backed test leaked a user, a lobby, a game, two game_results rows and two ratings rows per
+// run before this fix, confirmed by comparing `select count(*)` across those tables before and
+// after a run).
 func createGameDBTestUser(t *testing.T, uname string) models.User {
 	u := models.User{Username: uname}
 	err := database.CreateUser(context.Background(), &u)
 	require.NoError(t, err, "CreateUser failed")
+	t.Cleanup(func() { cleanupGameDBTestUserRows(t, u.ID) })
 	return u
+}
+
+// cleanupGameDBTestUserRows deletes every row this package's DB-backed test could have left
+// behind for a single test-created user, in FK-safe order, then the user row itself: game_results
+// (by player_id, which carries no cascade from users) first, then lobbies (by host_user_id, which
+// cascades lobby_participants and games - which in turn cascades game_actions, game_results, and
+// ratings for that game_id), then the user row itself (which cascades friends and any remaining
+// ratings row via user_id).
+func cleanupGameDBTestUserRows(t *testing.T, userID uuid.UUID) {
+	t.Helper()
+	if database.DB == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := database.DB.Exec(ctx, `DELETE FROM game_actions WHERE actor_user_id = $1`, userID); err != nil {
+		t.Logf("cleanupGameDBTestUserRows: delete game_actions for %s: %v", userID, err)
+	}
+	if _, err := database.DB.Exec(ctx, `DELETE FROM game_results WHERE player_id = $1`, userID); err != nil {
+		t.Logf("cleanupGameDBTestUserRows: delete game_results for %s: %v", userID, err)
+	}
+	if _, err := database.DB.Exec(ctx, `DELETE FROM lobbies WHERE host_user_id = $1`, userID); err != nil {
+		t.Logf("cleanupGameDBTestUserRows: delete lobbies hosted by %s: %v", userID, err)
+	}
+	if _, err := database.DB.Exec(ctx, `DELETE FROM users WHERE id = $1`, userID); err != nil {
+		t.Logf("cleanupGameDBTestUserRows: delete user %s: %v", userID, err)
+	}
 }
 
 // waitForGameStatus polls games.status until it matches want or the timeout elapses.
@@ -114,6 +183,10 @@ func TestEndGameRecordsResultsAndRating(t *testing.T) {
 	g.Rated = true
 	g.HouseRules = *testHouseRules(0, 2)
 	g.TurnDuration = 0
+	// Tracks persistInitialGameState's and persistFinalGameState's background DB-write
+	// goroutines so the test can wait for them deterministically instead of polling a single
+	// column that only one of the goroutine's two transactions actually touches (cambia-908 L4).
+	g.PersistWG = &sync.WaitGroup{}
 
 	playerA := &models.Player{ID: userA.ID, Connected: true, User: &models.User{ID: userA.ID}}
 	playerB := &models.Player{ID: userB.ID, Connected: true, User: &models.User{ID: userB.ID}}
@@ -159,7 +232,11 @@ func TestEndGameRecordsResultsAndRating(t *testing.T) {
 
 	require.True(t, g.GameOver, "game should be over after the final turn")
 
-	waitForGameStatus(t, g.ID, "completed", 2*time.Second)
+	// Waits for persistFinalGameState's goroutine to finish both of RecordGameAndResults'
+	// transactions (game_results + games.status, then the separate rating transaction), not just
+	// the first: waitForGameStatus("completed") alone would only prove the first transaction
+	// landed, racing the rating assertions below against the second (cambia-908 L4).
+	awaitPersistence(t, g.PersistWG, 5*time.Second)
 
 	rows, err := database.DB.Query(context.Background(), `SELECT player_id, did_win FROM game_results WHERE game_id = $1`, g.ID)
 	require.NoError(t, err)

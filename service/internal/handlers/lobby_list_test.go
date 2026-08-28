@@ -316,6 +316,13 @@ func TestListLobbiesOmitsInternalLobbyFields(t *testing.T) {
 			t.Fatalf("internal field %q is serialised in the lobby list payload", internal)
 		}
 	}
+	// A separate lobby.Visibility field was retired (cambia-907 F1): Type alone carries
+	// public/private, so a reintroduced visibility field would be redundant state that could
+	// drift out of sync with it. Guard against that regression directly rather than only via
+	// the internal-field loop above, since "visibility" was never an internal-only field name.
+	if _, leaked := entry.Lobby["visibility"]; leaked {
+		t.Fatalf("field %q is serialised in the lobby list payload; lobby.Type alone carries public/private (cambia-907 F1)", "visibility")
+	}
 	// Everything the web client reads off an entry (web/src/types LobbyState) stays.
 	for _, want := range []string{"id", "hostUserID", "type", "gameMode", "inGame", "houseRules", "circuit", "lobbySettings", "mode", "name"} {
 		if _, present := entry.Lobby[want]; !present {

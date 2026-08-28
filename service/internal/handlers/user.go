@@ -18,14 +18,18 @@ import (
 )
 
 // newGuestUsername derives a short, readable, per-user guest display name from a freshly
-// generated user id, e.g. "Guest-A1B2C3". The id already guarantees uniqueness (it is the
-// user's primary key), so a compact hex slice of it is collision-free by construction: no DB
-// round trip or uniqueness check is needed the way it would be for an independently chosen name
-// (cambia-890 - every ephemeral user previously stored the fixed string "Guest", so a table of
-// guests rendered identical labels in every seat, in the lobby list, chat, and results).
+// generated user id, e.g. "Guest-A1B2C3D4". The id itself guarantees uniqueness (it is the
+// user's primary key), but the displayed name is a truncated 32-bit slice of it (8 hex chars)
+// and users.username carries no UNIQUE constraint, so two guests CAN show the same label: by
+// the birthday approximation (n ~= 1.18 * sqrt(2^32)), a 50% chance of at least one collision
+// arrives around 77,000 guest rows, and a 1% chance around 9,300. That is an acceptable
+// display-only collision rate for a lobby-scale app; it is not a substitute for a real
+// uniqueness guarantee (cambia-890 - every ephemeral user previously stored the fixed string
+// "Guest", so a table of guests rendered identical labels in every seat, in the lobby list,
+// chat, and results).
 func newGuestUsername(id uuid.UUID) string {
 	hex := strings.ReplaceAll(id.String(), "-", "")
-	return "Guest-" + strings.ToUpper(hex[:6])
+	return "Guest-" + strings.ToUpper(hex[:8])
 }
 
 // EnsureEphemeralUser checks for an existing `auth_token` cookie.

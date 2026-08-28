@@ -38,7 +38,10 @@ func clearFriendTables(t *testing.T) {
 	require.NoError(t, err, "Failed to clear friend/user tables")
 }
 
-// createTestUser is a helper to create a user directly in the database for testing.
+// createTestUser is a helper to create a user directly in the database for testing. Registers
+// a t.Cleanup deleting the created row (and anything a test drove it to accumulate: hosted
+// lobbies/games/game_results, ratings, friends) so repeated runs against the shared dev DB do
+// not grow those tables without bound (cambia-890 F4).
 func createTestUser(t *testing.T, email, pass, uname string) models.User {
 	u := models.User{
 		Email:       email,
@@ -53,11 +56,13 @@ func createTestUser(t *testing.T, email, pass, uname string) models.User {
 		require.NoError(t, err, "CreateUser failed unexpectedly")
 	} else if err == nil {
 		t.Logf("Created test user %s (%s)", uname, u.ID)
+		t.Cleanup(func() { cleanupTestUserRows(t, u.ID) })
 	} else {
 		// If user already exists from previous run, fetch them.
 		existingUser, fetchErr := database.GetUserByEmail(ctx, email)
 		require.NoError(t, fetchErr, "Failed to fetch existing user")
 		require.NotNil(t, existingUser, "Existing user should not be nil")
+		t.Cleanup(func() { cleanupTestUserRows(t, existingUser.ID) })
 		return *existingUser
 	}
 	return u

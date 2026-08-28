@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -57,21 +58,72 @@ func pingTestDB() bool {
 	return pool.Ping(ctx) == nil
 }
 
-// setupGameTest skips the test when no dev Postgres is reachable, otherwise connects.
+// dbOnce guards the single ConnectDB() call this package's test binary makes, mirroring
+// internal/handlers/main_test.go's dbOnce/ensureTestDB and internal/game/game_db_test.go's
+// gameDBOnce/setupGameDBTest (cambia-908, cambia-915 F1): ConnectDB reassigns the package-level
+// DB pool on every call, so every DB-backed test in this package used to reconnect on its own -
+// harmless serially, but a needless reconnect all the same, and the one place in the tree left
+// diverging from the connect-once pattern the rest of the package tests already established.
+var dbOnce sync.Once
+
+// setupGameTest skips the test when no dev Postgres is reachable, otherwise connects via
+// ConnectDB exactly once for the whole package (dbOnce).
 func setupGameTest(t *testing.T) {
 	if !dbAvailable {
 		t.Skip("skipping: no Postgres reachable via PG_HOST/PG_PORT/POSTGRES_USER/POSTGRES_PASSWORD/PG_DATABASE (see service/.env.template); set these to point at a running dev database to run this test")
 	}
-	ConnectDB()
+	dbOnce.Do(ConnectDB)
 }
 
 // createGameTestUser inserts a bare user (unique random username, no email) directly via
-// CreateUser for use as a rating-update participant.
+// CreateUser for use as a rating-update participant. Registers a t.Cleanup deleting the created
+// row - and anything a test drove it to accumulate as a lobby host or game participant, via
+// seedGameRow - in FK-safe order (cambia-890 F4 spirit, cambia-915 F1): this package's own
+// DB-backed tests leaked a user, a lobby, a game, and their game_results/ratings rows per game
+// seeded before this fix, confirmed by comparing row counts across those tables before and after
+// a run of this package alone.
 func createGameTestUser(t *testing.T, uname string) models.User {
 	u := models.User{Username: uname}
 	err := CreateUser(context.Background(), &u)
 	require.NoError(t, err, "CreateUser failed")
+	t.Cleanup(func() { cleanupGameTestUserRows(t, u.ID) })
 	return u
+}
+
+// cleanupGameTestUserRows deletes every row this package's DB-backed tests could have left
+// behind for a single test-created user, in FK-safe order, then the user row itself, mirroring
+// internal/handlers/main_test.go's cleanupTestUserRows and internal/game/game_db_test.go's
+// cleanupGameDBTestUserRows.
+//
+// Self-contained regardless of t.Cleanup's LIFO ordering relative to any other test-created
+// user's cleanup: game_results.player_id and game_actions.actor_user_id carry no ON DELETE
+// CASCADE from users (only game_id cascades from games, and lobbies.host_user_id is a plain NO
+// ACTION reference to users), so deleting a user row while another user's still-pending cleanup
+// owns a game_results row referencing this user as a non-host *participant* would fail the
+// delete were that not cleared here first, independent of the lobby's own cascade delete below.
+func cleanupGameTestUserRows(t *testing.T, userID uuid.UUID) {
+	t.Helper()
+	if DB == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := DB.Exec(ctx, `DELETE FROM game_actions WHERE actor_user_id = $1`, userID); err != nil {
+		t.Logf("cleanupGameTestUserRows: delete game_actions for %s: %v", userID, err)
+	}
+	if _, err := DB.Exec(ctx, `DELETE FROM game_results WHERE player_id = $1`, userID); err != nil {
+		t.Logf("cleanupGameTestUserRows: delete game_results for %s: %v", userID, err)
+	}
+	// Cascades lobby_participants, and games (which in turn cascades game_actions,
+	// game_results, and ratings tied to that game_id) for any lobby this user hosted -
+	// including every lobby seedGameRow created with this user as hostUserID.
+	if _, err := DB.Exec(ctx, `DELETE FROM lobbies WHERE host_user_id = $1`, userID); err != nil {
+		t.Logf("cleanupGameTestUserRows: delete lobbies hosted by %s: %v", userID, err)
+	}
+	// Cascades friends (user1_id and user2_id) and any remaining ratings row (user_id).
+	if _, err := DB.Exec(ctx, `DELETE FROM users WHERE id = $1`, userID); err != nil {
+		t.Logf("cleanupGameTestUserRows: delete user %s: %v", userID, err)
+	}
 }
 
 // seedGameRow inserts a lobby and a games row for gameID directly, bypassing the normal

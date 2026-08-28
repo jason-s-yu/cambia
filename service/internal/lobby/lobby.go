@@ -27,9 +27,13 @@ type Lobby struct {
 	// ReadyStates holds userID -> bool for "is ready".
 	ReadyStates map[uuid.UUID]bool `json:"-"`
 
-	GameInstanceCreated bool      `json:"-"`
-	GameID              uuid.UUID `json:"gameId,omitempty"`
-	InGame              bool      `json:"inGame"`
+	GameInstanceCreated bool `json:"-"`
+	// GameID carries no omitempty: uuid.UUID is a fixed-size [16]byte array, a type
+	// encoding/json's omitempty never treats as empty (unlike a slice, map, string, pointer, or
+	// numeric/bool zero value), so a zero GameID would still serialize as
+	// "gameId":"00000000-0000-0000-0000-000000000000" either way (cambia-907 L3).
+	GameID uuid.UUID `json:"gameId"`
+	InGame bool      `json:"inGame"`
 
 	// CreatedAt is stamped once at construction and never mutated after (mutation in tests
 	// aside, to simulate age). GET /lobby/list reads it to grant a fresh lobby a short creation

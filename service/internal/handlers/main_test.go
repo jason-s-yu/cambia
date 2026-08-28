@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jason-s-yu/cambia/service/internal/database"
@@ -64,6 +65,73 @@ func TestEnsureTestDBConnectsOnce(t *testing.T) {
 	ensureTestDB(t)
 	if database.DB != pool {
 		t.Fatalf("a second ensureTestDB call reassigned database.DB: got %p, want the original %p", database.DB, pool)
+	}
+}
+
+// cleanupTestUserRows deletes every row this package's DB-backed tests could have left behind
+// for a single test-created user, in FK-safe order, then the user row itself (cambia-890 F4).
+// Registered via t.Cleanup by every helper that inserts a real users row (createTestUser,
+// createGuestSession), so repeated test runs against the shared dev DB do not grow users,
+// lobbies, games, game_results, or ratings without bound.
+//
+// Self-contained regardless of t.Cleanup's LIFO ordering relative to any other test-created
+// user's cleanup or a lobby's own cleanup (cleanupLobbyDBRows below): game_results.player_id and
+// game_actions.actor_user_id carry no ON DELETE CASCADE from users (only game_id cascades from
+// games, and lobbies.host_user_id/game_results.player_id/game_actions.actor_user_id are all plain
+// NO ACTION references to users), so deleting a user row while an unrelated cleanup still owns a
+// row that references it as a *participant* (not host) would fail the delete. Explicitly clearing
+// game_actions/game_results by this user's id first - not just lobbies by host_user_id - makes
+// that failure impossible no matter which cleanup happens to run first. ratings.user_id and
+// friends.user1_id/user2_id do carry ON DELETE CASCADE from users, so those need no explicit
+// delete here.
+func cleanupTestUserRows(t *testing.T, userID uuid.UUID) {
+	t.Helper()
+	if database.DB == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := database.DB.Exec(ctx, `DELETE FROM game_actions WHERE actor_user_id = $1`, userID); err != nil {
+		t.Logf("cleanupTestUserRows: delete game_actions for %s: %v", userID, err)
+	}
+	if _, err := database.DB.Exec(ctx, `DELETE FROM game_results WHERE player_id = $1`, userID); err != nil {
+		t.Logf("cleanupTestUserRows: delete game_results for %s: %v", userID, err)
+	}
+	// Cascades lobby_participants, and games (which in turn cascades game_actions,
+	// game_results, and ratings tied to that game_id) for any lobby this user hosted.
+	if _, err := database.DB.Exec(ctx, `DELETE FROM lobbies WHERE host_user_id = $1`, userID); err != nil {
+		t.Logf("cleanupTestUserRows: delete lobbies hosted by %s: %v", userID, err)
+	}
+	// Cascades friends (user1_id and user2_id) and any remaining ratings row (user_id).
+	if _, err := database.DB.Exec(ctx, `DELETE FROM users WHERE id = $1`, userID); err != nil {
+		t.Logf("cleanupTestUserRows: delete user %s: %v", userID, err)
+	}
+}
+
+// cleanupLobbyDBRows best-effort deletes the lobbies row (if any) a test-driven POST
+// /lobby/create ended up persisting, by lobby id (cambia-890 F4). CreateLobbyHandler itself
+// writes nothing to Postgres - the row exists only once a game actually starts against the
+// lobby (game.persistInitialGameState -> database.UpsertInitialGameState upserts it to satisfy
+// games.lobby_id's FK) - so this is a 0-row no-op for the many callers (most of this package's
+// hub/lobby protocol tests) that never drive a lobby that far, and reaches the DB at all only
+// once some earlier test in this binary has connected it (database.DB != nil): plain in-memory
+// lobby/hub tests never acquire a DB dependency they did not already have.
+//
+// Deleting by lobby id cascades lobby_participants and games (which cascades game_actions,
+// game_results, ratings for that game_id) without needing to know which users were involved.
+// A test always creates its users before calling createPublicLobby/createPrivateLobby (the host
+// token has to exist first), so this cleanup is always registered after theirs - and t.Cleanup
+// runs cleanups in LIFO order, so this one fires first, clearing any game_results/game_actions
+// row a participant's cleanupTestUserRows might otherwise race against before it ever runs.
+func cleanupLobbyDBRows(t *testing.T, lobbyID uuid.UUID) {
+	t.Helper()
+	if database.DB == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := database.DB.Exec(ctx, `DELETE FROM lobbies WHERE id = $1`, lobbyID); err != nil {
+		t.Logf("cleanupLobbyDBRows: delete lobby %s: %v", lobbyID, err)
 	}
 }
 

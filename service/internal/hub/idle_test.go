@@ -23,12 +23,13 @@ import (
 )
 
 // syncLogBuffer captures redirected log.Writer() output behind a mutex. log.SetOutput swaps the
-// package-global logger, and Shutdown only closes a channel: it does not wait for a hub's
-// ReadPump/WritePump goroutines to actually exit, and an earlier test's straggler can still be
-// mid log.Printf (e.g. "hub: ReadPump exiting...") when a later test redirects that same global
-// logger into its own buffer. A bare bytes.Buffer has no protection against that goroutine's
-// Write racing this test's own String() read, so both go through the same lock here (cambia-907
-// F2).
+// package-global logger, and Shutdown only closes a channel: it does not wait for the hub's own
+// Run() goroutine (started with `go h.Run(ctx)` in newIdleHub) to actually return, and an earlier
+// test's straggler Run() can still be mid log.Printf (e.g. handleIdleReap's "hub %s: no
+// connections for at least %s and no game in progress; reaping lobby.") when a later test
+// redirects that same global logger into its own buffer. A bare bytes.Buffer has no protection
+// against that goroutine's Write racing this test's own String() read, so both go through the
+// same lock here (cambia-907 F2).
 type syncLogBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
