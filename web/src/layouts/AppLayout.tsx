@@ -4,6 +4,8 @@ import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import TopBar, { type TopBarNavItem, type TopBarUser } from '@/components/ds/chrome/TopBar';
 import { useAuthStore } from '@/stores/authStore';
 import { useUiStore } from '@/stores/uiStore';
+import { useHistoryStore } from '@/stores/historyStore';
+import { formatRating } from '@/utils/ratingPool';
 
 /** Primary navigation for authenticated users. */
 const NAV_ITEMS: TopBarNavItem[] = [
@@ -26,6 +28,19 @@ const AppLayout: React.FC = () => {
 	const user = useAuthStore((state) => state.user);
 	const theme = useUiStore((state) => state.theme);
 	const setTheme = useUiStore((state) => state.setTheme);
+	const ratings = useHistoryStore((state) => state.ratings);
+	const fetchRatings = useHistoryStore((state) => state.fetchRatings);
+
+	// AppLayout wraps every authenticated route and stays mounted across
+	// navigation, so this is the single place the app fetches the caller's
+	// ratings for the session: once on login/account-switch (keyed on user id),
+	// not on every render. Nested pages (DashboardPage) read the same
+	// historyStore state rather than fetching again.
+	const userId = user?.id;
+	useEffect(() => {
+		if (!userId) return;
+		fetchRatings();
+	}, [userId, fetchRatings]);
 
 	// Effective light flag for the day/night switch, resolving 'system' against
 	// the OS preference so the switch reflects what is actually on screen.
@@ -43,9 +58,16 @@ const AppLayout: React.FC = () => {
 		navigate('/login');
 	};
 
+	// Headline rating: the 1v1 (head-to-head) pool, matching the dashboard hero
+	// and formatted the same way (utils/ratingPool) as the profile page so the
+	// number agrees everywhere it appears. Zero games in the pool, or the fetch
+	// not having resolved yet, both fall back to 'unrated' rather than a guess.
+	const headlinePool = ratings?.pools.find((p) => p.pool === '1v1') ?? null;
 	const topBarUser: TopBarUser = {
 		name: user?.username || 'Player',
-		rating: user?.elo !== undefined ? `${Math.round(user.elo)} ± ${Math.round(user.rd ?? 0)}` : 'unrated'
+		rating: headlinePool && headlinePool.games > 0
+			? formatRating(headlinePool.rating, headlinePool.rd)
+			: 'unrated'
 	};
 
 	return (

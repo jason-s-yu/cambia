@@ -7,11 +7,6 @@ export interface User {
   is_ephemeral: boolean;
   is_admin?: boolean; // Optional, might not always be present
   email?: string;
-  elo?: number;
-  rd?: number;
-  volatility?: number;
-  open_skill_mu?: number;
-  open_skill_sigma?: number;
   created_at?: string;
   last_login?: string;
 }

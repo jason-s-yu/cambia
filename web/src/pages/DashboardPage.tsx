@@ -10,14 +10,15 @@ import TierBadge from '@/components/ds/data/TierBadge';
 import StatRow from '@/components/ds/data/StatRow';
 import Panel from '@/components/ds/chrome/Panel';
 import DsResumeBanner from '@/components/dashboard/DsResumeBanner';
-import { useAuthStore } from '@/stores/authStore';
 import { useCurrentLobbyStore, useLobbyListStore } from '@/stores/lobbyStore';
 import { useQueueStore } from '@/stores/queueStore';
 import { useFriendsStore } from '@/stores/friendsStore';
+import { useHistoryStore } from '@/stores/historyStore';
 import { joinLobby as apiJoinPublicLobby, getActiveSession } from '@/services/lobbyService';
 import type { QueueInfo } from '@/services/matchmakingService';
 import type { ActiveSession, ApiErrorResponse, LobbyState } from '@/types';
 import { gameModeLabel } from '@/utils/gameMode';
+import { tierFromRating } from '@/utils/ratingPool';
 
 /** Queues considered "flagship" for the primary/highlighted card treatment. */
 const PRIMARY_QUEUE_IDS = new Set(['h2h_rapid', 'ffa4_standard']);
@@ -45,7 +46,11 @@ function lobbyFallbackName(lobbyId: string): string {
  */
 const DashboardPage: React.FC = () => {
   const navigate = useNavigate();
-  const authUser = useAuthStore((state) => state.user);
+
+  // Ratings are fetched once per session by AppLayout (which wraps this page
+  // for the whole authenticated app); this reads that shared state rather
+  // than fetching again.
+  const ratings = useHistoryStore((state) => state.ratings);
 
   const queues = useQueueStore((state) => state.queues);
   const queuesLoading = useQueueStore((state) => state.isLoading);
@@ -189,9 +194,20 @@ const DashboardPage: React.FC = () => {
 
   const publicLobbies = Object.entries(lobbies).filter(([, entry]) => entry.lobby?.type === 'public');
 
-  const ratingValue = authUser?.elo !== undefined ? `${Math.round(authUser.elo)}` : '1520';
-  const ratingBand = authUser?.rd !== undefined ? `± ${Math.round(authUser.rd)}` : '± 140';
-  const ffaValue = authUser?.open_skill_mu !== undefined ? authUser.open_skill_mu.toFixed(1) : 'Placement';
+  // Headline rating: the 1v1 (head-to-head) pool, the same pool AppLayout's
+  // header chip shows, formatted with the shared utils/ratingPool helpers so
+  // the number agrees with the profile page everywhere it appears. Zero games
+  // in the pool shows 'Unrated' rather than a fake number.
+  const headlinePool = ratings?.pools.find((p) => p.pool === '1v1') ?? null;
+  const hasHeadline = !!headlinePool && headlinePool.games > 0;
+  const ratingValue = hasHeadline ? `${Math.round(headlinePool!.rating)}` : 'Unrated';
+  const ratingBand = hasHeadline ? `± ${Math.round(headlinePool!.rd)}` : '';
+
+  // OpenSkill is circuit-wide (not per-pool); gate on lifetime record games,
+  // matching DsRatingSummary's neverPlayed check, and format to 2 decimals
+  // the same way the profile does.
+  const neverPlayed = !ratings || ratings.record.games === 0;
+  const ffaValue = neverPlayed ? 'Unrated' : ratings!.openSkill.mu.toFixed(2);
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 20, padding: 22, maxWidth: 1240, margin: '0 auto', width: '100%' }}>
@@ -296,8 +312,10 @@ const DashboardPage: React.FC = () => {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
         <Panel title='Your ratings'>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-            <TierBadge tier='gold' />
-            <span style={{ fontFamily: 'var(--ds-font-mono)', fontWeight: 'var(--weight-bold)', fontSize: 'var(--ds-text-lg)' }}>{ratingValue} <span style={{ color: 'var(--text-tertiary)', fontSize: 'var(--ds-text-xs)' }}>{ratingBand}</span></span>
+            {hasHeadline
+              ? <TierBadge tier={tierFromRating(headlinePool!.rating)} />
+              : <Badge tone='neutral'>unranked</Badge>}
+            <span style={{ fontFamily: 'var(--ds-font-mono)', fontWeight: 'var(--weight-bold)', fontSize: 'var(--ds-text-lg)' }}>{ratingValue} {ratingBand && <span style={{ color: 'var(--text-tertiary)', fontSize: 'var(--ds-text-xs)' }}>{ratingBand}</span>}</span>
           </div>
           <StatRow label='H2H Ranked · Glicko-2' value={ratingValue} delta='+12' />
           <StatRow label='FFA-4 Ranked · OpenSkill' value={ffaValue} unit='7/10 games' />
