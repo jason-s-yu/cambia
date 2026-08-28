@@ -229,7 +229,12 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
           {flag('Snap other hands', "Snap a matching card out of another player's hand.", houseRules?.allowOpponentSnapping ?? true, (v) => setRule('allowOpponentSnapping', v))}
           {flag('Snap race', 'Only the first snap counts. Later snaps take the penalty.', !!houseRules?.snapRace, (v) => setRule('snapRace', v))}
           {flag("Lock caller's hand", "The Cambia caller's hand is safe from snaps and swaps.", houseRules?.lockCallerHand ?? true, (v) => setRule('lockCallerHand', v))}
+        </div>
+        {/* The forfeit rule and the window it waits out are one setting in two controls, so they
+            share a row rather than sitting in the flag grid and the numeric grid apart. */}
+        <div style={{ ...RULE_GRID, alignItems: 'start', marginTop: 'var(--space-3)' }}>
           {flag('Forfeit on disconnect', 'A dropped player forfeits instead of rejoining.', !!houseRules?.forfeitOnDisconnect, (v) => setRule('forfeitOnDisconnect', v))}
+          {numField('Reconnect grace (sec)', houseRules?.disconnectGraceSec, (raw) => setRule('disconnectGraceSec', clamped(raw, 0, 3600, 60)))}
         </div>
       </RuleGroup>
 

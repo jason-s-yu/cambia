@@ -33,8 +33,9 @@ type endedGame struct {
 // does not start Run(). Tests that drive the hub's own helpers directly use this, so hub fields
 // the Run goroutine would otherwise own can be set from the test. turnDuration overrides the
 // duration BeginPreGame derives from TurnTimerSec, so a timer-backed test does not have to wait
-// whole seconds.
-func newInGameHubStopped(t *testing.T, playerCount int, forfeit bool, turnTimerSec int, turnDuration time.Duration) (*Hub, []uuid.UUID, *game.CambiaGame, chan endedGame) {
+// whole seconds; grace does the same for the reconnect window derived from DisconnectGraceSec,
+// and grace 0 is the immediate forfeit the rule performed before cambia-955.
+func newInGameHubStopped(t *testing.T, playerCount int, forfeit bool, turnTimerSec int, turnDuration, grace time.Duration) (*Hub, []uuid.UUID, *game.CambiaGame, chan endedGame) {
 	t.Helper()
 
 	ids := make([]uuid.UUID, playerCount)
@@ -56,6 +57,15 @@ func newInGameHubStopped(t *testing.T, playerCount int, forfeit bool, turnTimerS
 	rules := game.DefaultHouseRules()
 	rules.ForfeitOnDisconnect = forfeit
 	rules.TurnTimerSec = turnTimerSec
+	// The rule is carried in whole seconds and the event payload quotes it, so a sub-second test
+	// window still advertises at least one second; g.DisconnectGrace below is what actually times.
+	rules.DisconnectGraceSec = 0
+	if grace > 0 {
+		rules.DisconnectGraceSec = int(grace / time.Second)
+		if rules.DisconnectGraceSec == 0 {
+			rules.DisconnectGraceSec = 1
+		}
+	}
 	g.HouseRules = rules
 
 	ended := make(chan endedGame, 4)
@@ -75,6 +85,7 @@ func newInGameHubStopped(t *testing.T, playerCount int, forfeit bool, turnTimerS
 	if turnDuration > 0 {
 		g.TurnDuration = turnDuration
 	}
+	g.DisconnectGrace = grace
 	g.StartGame()
 
 	h.Game = g
@@ -94,10 +105,10 @@ func newInGameHubStopped(t *testing.T, playerCount int, forfeit bool, turnTimerS
 
 // newInGameHub is newInGameHubStopped with the Run loop started and every player connected: the
 // state a mid-game drop has to be tested against.
-func newInGameHub(t *testing.T, playerCount int, forfeit bool, turnTimerSec int, turnDuration time.Duration) (*Hub, []uuid.UUID, *game.CambiaGame, chan endedGame) {
+func newInGameHub(t *testing.T, playerCount int, forfeit bool, turnTimerSec int, turnDuration, grace time.Duration) (*Hub, []uuid.UUID, *game.CambiaGame, chan endedGame) {
 	t.Helper()
 
-	h, ids, g, ended := newInGameHubStopped(t, playerCount, forfeit, turnTimerSec, turnDuration)
+	h, ids, g, ended := newInGameHubStopped(t, playerCount, forfeit, turnTimerSec, turnDuration, grace)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -142,7 +153,7 @@ func waitDisconnected(t *testing.T, g *game.CambiaGame, observer, subject uuid.U
 // ForfeitOnDisconnect on, a two-player game whose second player drops ends there, and the
 // forfeiting player is left out of the scoring.
 func TestMidGameDropForfeitsWhenTheRuleIsOn(t *testing.T) {
-	h, ids, g, ended := newInGameHub(t, 2, true, 0, 0)
+	h, ids, g, ended := newInGameHub(t, 2, true, 0, 0, 0)
 
 	h.Leave(ids[1]) // the socket drops; nothing releases lobby membership
 
@@ -162,7 +173,7 @@ func TestMidGameDropForfeitsWhenTheRuleIsOn(t *testing.T) {
 // TestMidGameDropKeepsLobbyMembership holds the cambia-807 line: a lost socket is transient, so
 // the player keeps their seat and their resume entry even as the game marks them gone.
 func TestMidGameDropKeepsLobbyMembership(t *testing.T) {
-	h, ids, g, _ := newInGameHub(t, 3, true, 0, 0)
+	h, ids, g, _ := newInGameHub(t, 3, true, 0, 0, 0)
 
 	h.Leave(ids[2])
 	require.True(t, waitDisconnected(t, g, ids[0], ids[2], 2*time.Second),
@@ -181,7 +192,7 @@ func TestMidGameDropKeepsLobbyMembership(t *testing.T) {
 // engine's scheduler declines to arm a timer for a disconnected acting player, so dropping the
 // player on turn would prove nothing about the timer still running.
 func TestMidGameDropWithoutForfeitKeepsTheGameRunning(t *testing.T) {
-	h, ids, g, ended := newInGameHub(t, 2, false, 1, 300*time.Millisecond)
+	h, ids, g, ended := newInGameHub(t, 2, false, 1, 300*time.Millisecond, 0)
 
 	state := g.GetCurrentObfuscatedGameState(ids[0])
 	victim, observer := ids[1], ids[0]
@@ -215,7 +226,7 @@ func TestMidGameDropWithoutForfeitKeepsTheGameRunning(t *testing.T) {
 // three-player game one drop is not yet fatal, and a player who comes back before the game ends is
 // scored like everyone else.
 func TestReconnectBeforeTheForfeitLandsCancelsIt(t *testing.T) {
-	h, ids, g, ended := newInGameHub(t, 3, true, 0, 0)
+	h, ids, g, ended := newInGameHub(t, 3, true, 0, 0, 0)
 
 	h.Leave(ids[2])
 	require.True(t, waitDisconnected(t, g, ids[0], ids[2], 2*time.Second), "the drop must reach the game")
@@ -253,7 +264,7 @@ func TestReconnectBeforeTheForfeitLandsCancelsIt(t *testing.T) {
 // TestPlayerWhoNeverReconnectsIsForfeited is the control for the test above: without the
 // reconnect, the same game leaves the dropped player out of the scoring.
 func TestPlayerWhoNeverReconnectsIsForfeited(t *testing.T) {
-	h, ids, g, ended := newInGameHub(t, 3, true, 0, 0)
+	h, ids, g, ended := newInGameHub(t, 3, true, 0, 0, 0)
 
 	h.Leave(ids[2])
 	require.True(t, waitDisconnected(t, g, ids[0], ids[2], 2*time.Second), "the drop must reach the game")
@@ -319,7 +330,7 @@ func TestNotifyGameEndedNeverBlocksItsCaller(t *testing.T) {
 // member who arrived after the deal holds no seat, and their socket dropping must not disturb the
 // table or write a player_disconnect into a game they were never in.
 func TestNonParticipantDropLeavesTheGameAlone(t *testing.T) {
-	h, ids, g, ended := newInGameHub(t, 2, true, 0, 0)
+	h, ids, g, ended := newInGameHub(t, 2, true, 0, 0, 0)
 
 	stranger := uuid.New()
 	h.Lobby.JoinUser(stranger)
@@ -344,7 +355,7 @@ func TestNonParticipantDropLeavesTheGameAlone(t *testing.T) {
 // stale sync state out to everyone else. Driven directly because h.Phase belongs to the Run
 // goroutine.
 func TestDropOutsideTheInGamePhaseIsIgnored(t *testing.T) {
-	h, ids, g, _ := newInGameHubStopped(t, 2, true, 0, 0)
+	h, ids, g, _ := newInGameHubStopped(t, 2, true, 0, 0, 0)
 	h.Phase = PhasePostGame
 
 	h.notePlayerDisconnected(ids[1])

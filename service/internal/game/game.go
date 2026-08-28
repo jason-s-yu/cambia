@@ -46,6 +46,15 @@ const (
 	EventPrivateSyncState       GameEventType = "private_sync_state"             // Private: Full game state sync for a player.
 	EventPrivateInitialCards    GameEventType = "private_initial_cards"          // Private: Pregame peek cards revealed to their owner.
 	EventGameEnd                GameEventType = "game_end"                       // Public: Game has ended, includes results.
+
+	// Disconnect grace (cambia-955). A dropped socket no longer forfeits on the spot: the seat is
+	// held for HouseRules.DisconnectGraceSec and these three events report where a player stands
+	// in that window. player_reconnecting carries the deadline so clients can count it down;
+	// player_forfeited fires when the window closes and is what tells a client to stop showing a
+	// seat as merely away.
+	EventPlayerReconnecting GameEventType = "player_reconnecting" // Public: Player's socket dropped; their seat is held until the grace expires.
+	EventPlayerReconnected  GameEventType = "player_reconnected"  // Public: Player returned inside the grace window.
+	EventPlayerForfeited    GameEventType = "player_forfeited"    // Public: Grace window expired; the player forfeited.
 )
 
 // EventUser identifies a user within a GameEvent payload.
@@ -196,6 +205,32 @@ type CambiaGame struct {
 	// Circuit-mode disconnect handling (T5)
 	circuitGraceTimers  map[uuid.UUID]*time.Timer // 60s grace timers per disconnected player
 	circuitAIControlled map[uuid.UUID]bool        // Players currently under AI control
+
+	// DisconnectGrace is how long a dropped player keeps their seat before ForfeitOnDisconnect
+	// takes it (RULES.md T5, MATCHMAKING.md 8). Derived in BeginPreGame from
+	// HouseRules.DisconnectGraceSec, the same way TurnDuration is derived from TurnTimerSec, so a
+	// test can shorten it to milliseconds after BeginPreGame. Zero forfeits on the drop itself,
+	// which is what the rule did before cambia-955.
+	DisconnectGrace time.Duration
+
+	// disconnectGraceTimers holds the armed grace timer per dropped player and graceDeadlines the
+	// wall-clock time it fires at, published in sync_state so a client that resyncs mid-window
+	// (including the dropped player's own reload) can render the same countdown as everyone else.
+	// Both are cleared by a reconnect and by the forfeit itself.
+	disconnectGraceTimers map[uuid.UUID]*time.Timer
+	graceDeadlines        map[uuid.UUID]time.Time
+
+	// graceGen stamps each arming of a player's window. Timer.Stop cannot un-fire a callback
+	// already waiting on g.mu, so a player who drops, returns and drops again inside one grace
+	// would otherwise have the first window's stale callback forfeit them against the second
+	// window's clock. The callback compares the generation it was armed with and returns.
+	graceGen map[uuid.UUID]uint64
+
+	// forfeited records who actually forfeited, which is no longer the same question as who is
+	// disconnected: inside the grace window a player is gone but still in the game, and their hand
+	// is still scored if the table finishes without them (MATCHMAKING.md 8, "score counts
+	// normally"). Scoring reads this rather than Player.Connected (cambia-955).
+	forfeited map[uuid.UUID]bool
 }
 
 // NewCambiaGame creates a new game instance with default settings.
@@ -216,6 +251,11 @@ func NewCambiaGame() *CambiaGame {
 		Circuit:             Circuit{Enabled: false}, // Circuit mode disabled by default.
 		circuitGraceTimers:  make(map[uuid.UUID]*time.Timer),
 		circuitAIControlled: make(map[uuid.UUID]bool),
+
+		disconnectGraceTimers: make(map[uuid.UUID]*time.Timer),
+		graceDeadlines:        make(map[uuid.UUID]time.Time),
+		graceGen:              make(map[uuid.UUID]uint64),
+		forfeited:             make(map[uuid.UUID]bool),
 	}
 	return g
 }
@@ -237,6 +277,13 @@ func (g *CambiaGame) BeginPreGame() {
 		g.TurnDuration = time.Duration(g.HouseRules.TurnTimerSec) * time.Second
 	} else {
 		g.TurnDuration = 0 // Disable timer if set to 0.
+	}
+
+	// Same derivation for the reconnect grace: 0 means a drop forfeits immediately.
+	if g.HouseRules.DisconnectGraceSec > 0 {
+		g.DisconnectGrace = time.Duration(g.HouseRules.DisconnectGraceSec) * time.Second
+	} else {
+		g.DisconnectGrace = 0
 	}
 
 	// Validate player count: 2 to engine.MaxPlayers.
@@ -561,15 +608,20 @@ func (g *CambiaGame) HandleDisconnect(playerID uuid.UUID) {
 	}
 
 	shouldAdvanceTurn := false
-	shouldEndGame := false
+	shouldForfeit := false
 
 	if g.Started && !g.GameOver {
 		// Check if game ends due to forfeit rule.
 		if g.HouseRules.ForfeitOnDisconnect {
-			log.Printf("Game %s: Player %s disconnected, forfeiting due to house rules.", g.ID, playerID)
-			if g.countConnectedPlayers() <= 1 {
-				log.Printf("Game %s: Only %d player(s) left connected after forfeit. Ending game.", g.ID, g.countConnectedPlayers())
-				shouldEndGame = true
+			// The grace window (cambia-955): the seat is held, the table keeps playing, and the
+			// forfeit only lands if nobody comes back. A reload takes a second or two, and before
+			// this the drop forfeited inside a few hundred milliseconds, which in a two-player
+			// game ended it outright before the returning client could resume (cambia-783).
+			if g.DisconnectGrace > 0 {
+				g.armDisconnectGrace(playerID)
+			} else {
+				log.Printf("Game %s: Player %s disconnected, forfeiting due to house rules.", g.ID, playerID)
+				shouldForfeit = true
 			}
 		} else {
 			// If no forfeit, check if the current player disconnected.
@@ -585,13 +637,120 @@ func (g *CambiaGame) HandleDisconnect(playerID uuid.UUID) {
 	// Broadcast updated state to remaining players *before* ending or advancing.
 	g.broadcastSyncStateToAll()
 
-	if shouldEndGame {
-		if !g.GameOver {
-			g.endGame() // End the game immediately.
-		}
+	if shouldForfeit {
+		g.forfeitPlayer(playerID)
 	} else if shouldAdvanceTurn {
 		g.advanceTurn() // Advance turn if current player left.
 	}
+}
+
+// armDisconnectGrace starts (or restarts) playerID's reconnect window and tells everyone the seat
+// is being held. Assumes lock is held by caller.
+//
+// The turn timer is deliberately left running for a player inside their window: RULES.md T5 and
+// MATCHMAKING.md 8 have the table play on ("AI plays defensively", score counts normally on
+// return), and pausing it instead would let anyone freeze a game for the length of the grace by
+// pulling their network out. The existing turn timeout - draw and discard the drawn card, hand
+// untouched - is that defensive play, so scheduleNextTurnTimerEngine now arms for a disconnected
+// player under the forfeit rule rather than declining to.
+func (g *CambiaGame) armDisconnectGrace(playerID uuid.UUID) {
+	if t, ok := g.disconnectGraceTimers[playerID]; ok {
+		t.Stop()
+	}
+	grace := g.DisconnectGrace
+	deadline := time.Now().Add(grace)
+	g.graceDeadlines[playerID] = deadline
+	g.graceGen[playerID]++
+	gen := g.graceGen[playerID]
+	log.Printf("Game %s: Player %s disconnected; holding their seat for %s before the forfeit.", g.ID, playerID, grace)
+	g.logAction(playerID, string(EventPlayerReconnecting), map[string]interface{}{"graceSeconds": g.HouseRules.DisconnectGraceSec})
+
+	g.disconnectGraceTimers[playerID] = time.AfterFunc(grace, func() {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		// Stop() cannot un-fire a callback already in flight, so a reconnect that beat this to the
+		// lock is caught by the map entry it deleted, and a second drop that re-armed the window
+		// in the meantime is caught by the generation.
+		if _, still := g.disconnectGraceTimers[playerID]; !still || g.graceGen[playerID] != gen {
+			return
+		}
+		delete(g.disconnectGraceTimers, playerID)
+		delete(g.graceDeadlines, playerID)
+		if g.GameOver || !g.Started {
+			return
+		}
+		log.Printf("Game %s: Player %s did not return within %s. Forfeiting.", g.ID, playerID, grace)
+		g.forfeitPlayer(playerID)
+	})
+
+	g.fireEvent(GameEvent{
+		Type: EventPlayerReconnecting,
+		User: &EventUser{ID: playerID},
+		Payload: map[string]interface{}{
+			"graceSeconds": g.HouseRules.DisconnectGraceSec,
+			"deadline":     deadline.UnixMilli(),
+			"serverNow":    time.Now().UnixMilli(),
+		},
+	})
+}
+
+// cancelDisconnectGrace closes an open reconnect window without forfeiting. Reports whether one
+// was actually open, which is what separates a return inside the window from a socket that comes
+// back after the seat was already given up. Assumes lock is held by caller.
+func (g *CambiaGame) cancelDisconnectGrace(playerID uuid.UUID) bool {
+	t, ok := g.disconnectGraceTimers[playerID]
+	if !ok {
+		return false
+	}
+	t.Stop()
+	delete(g.disconnectGraceTimers, playerID)
+	delete(g.graceDeadlines, playerID)
+	return true
+}
+
+// forfeitPlayer records the forfeit and runs the consequences: the player drops out of scoring
+// (computeScoresFromEngine reads g.forfeited, not Player.Connected) and the game ends if it has
+// nobody left to play it. Assumes lock is held by caller.
+func (g *CambiaGame) forfeitPlayer(playerID uuid.UUID) {
+	if g.GameOver || g.forfeited[playerID] {
+		return
+	}
+	g.forfeited[playerID] = true
+	g.logAction(playerID, string(EventPlayerForfeited), nil)
+	g.fireEvent(GameEvent{Type: EventPlayerForfeited, User: &EventUser{ID: playerID}})
+
+	if g.countConnectedPlayers() <= 1 {
+		log.Printf("Game %s: Only %d player(s) left connected after forfeit. Ending game.", g.ID, g.countConnectedPlayers())
+		g.endGame()
+		return
+	}
+	// More than one player is still here, so the table plays on without the forfeited seat; its
+	// turns are auto-played by the turn timer exactly as they were during the grace.
+	g.broadcastSyncStateToAll()
+}
+
+// IsGameOver reports whether this game has finished. Public entry point: acquires mu.
+func (g *CambiaGame) IsGameOver() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.GameOver
+}
+
+// IsForfeited reports whether playerID has forfeited (their grace window closed, or the rule
+// forfeits on the drop itself). Public entry point: acquires mu.
+func (g *CambiaGame) IsForfeited(playerID uuid.UUID) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.forfeited[playerID]
+}
+
+// ReconnectDeadline returns the wall-clock time playerID's grace window closes, and whether one
+// is open at all. Public entry point: acquires mu.
+func (g *CambiaGame) ReconnectDeadline(playerID uuid.UUID) (time.Time, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	d, ok := g.graceDeadlines[playerID]
+	return d, ok
 }
 
 // HandleReconnect marks a player as connected and sends them the current game state.
@@ -616,11 +775,31 @@ func (g *CambiaGame) HandleReconnect(playerID uuid.UUID, conn *websocket.Conn) {
 
 			g.logAction(playerID, "player_reconnect", map[string]interface{}{"username": g.Players[i].User.Username})
 
+			// Close the reconnect window before anything is sent: the returning player is back
+			// inside it, so the forfeit that was pending on it must not land (cambia-955).
+			inGrace := g.cancelDisconnectGrace(playerID)
+
+			// A player who returns to a game that is still running takes their seat back even if
+			// the window had already closed: RULES.md T5 forfeits a round to somebody who misses
+			// it, not to somebody who was away for part of it, and this is also the pre-cambia-955
+			// behaviour, where scoring simply asked who was connected at the final whistle. Once
+			// the game is over there is nothing to return to: endGame has already scored it.
+			resumed := false
+			if g.Started && !g.GameOver && g.forfeited[playerID] {
+				delete(g.forfeited, playerID)
+				resumed = true
+				log.Printf("Game %s: Player %s returned to a game still in progress; their forfeit is lifted.", g.ID, playerID)
+			}
+
 			// Send sync state immediately to the reconnected player.
 			g.sendSyncState(playerID)
 
 			// Broadcast updated state to others.
 			g.broadcastSyncStateToAll()
+
+			if inGrace || resumed {
+				g.fireEvent(GameEvent{Type: EventPlayerReconnected, User: &EventUser{ID: playerID}})
+			}
 
 			// Circuit mode: cancel grace timer, restore player control.
 			if g.Circuit.Enabled {
@@ -833,6 +1012,13 @@ func (g *CambiaGame) endGame() {
 		g.preGameTimer.Stop()
 		g.preGameTimer = nil
 	}
+	// A reconnect window must not outlive the game it belonged to: the callback re-checks
+	// GameOver, but leaving the fire pending serves nothing (cambia-955).
+	for id, t := range g.disconnectGraceTimers {
+		t.Stop()
+		delete(g.disconnectGraceTimers, id)
+		delete(g.graceDeadlines, id)
+	}
 
 	// --- Scoring and Winner Determination ---
 	// Compute scores from engine hand state.
@@ -930,8 +1116,12 @@ func (g *CambiaGame) computeScoresFromEngine() map[uuid.UUID]int {
 		if player == nil {
 			continue
 		}
-		// Score only connected players or if disconnect doesn't forfeit.
-		if player.Connected || !g.HouseRules.ForfeitOnDisconnect {
+		// Score everyone who did not forfeit. Being disconnected is not the same as having
+		// forfeited since cambia-955: a player inside their reconnect window still holds their
+		// seat, and a table that finishes without them scores their hand normally
+		// (MATCHMAKING.md 8). With the grace at 0 the two coincide, which is the pre-cambia-955
+		// behaviour.
+		if !g.forfeited[playerUUID] {
 			score := 0
 			for j := uint8(0); j < g.Engine.Players[i].HandLen; j++ {
 				score += int(g.Engine.Players[i].Hand[j].Value())

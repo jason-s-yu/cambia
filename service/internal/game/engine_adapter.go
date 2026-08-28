@@ -1329,10 +1329,13 @@ func (g *CambiaGame) scheduleNextTurnTimerEngine() {
 		return
 	}
 
-	if !currentPlayer.Connected {
-		log.Printf("Game %s: Current player %s is disconnected. Advancing turn.", g.ID, currentPlayerUUID)
-		// Apply a no-op to advance (or end game).
-		// For simplicity: just skip their turn by applying ActionDrawStockpile + ActionDiscardNoAbility.
+	// A disconnected player under the forfeit rule still gets a timer: while their reconnect
+	// window is open the table has to keep playing (RULES.md T5, MATCHMAKING.md 8), and once it
+	// closes their turns still have to resolve for the remaining players to finish the game. The
+	// timeout path draws and discards without touching their hand, which is the defensive play
+	// those rules describe. Without an armed timer the turn simply never ends (cambia-955).
+	if !currentPlayer.Connected && !g.HouseRules.ForfeitOnDisconnect {
+		log.Printf("Game %s: Current player %s is disconnected and the forfeit rule is off; leaving the turn unarmed.", g.ID, currentPlayerUUID)
 		return
 	}
 

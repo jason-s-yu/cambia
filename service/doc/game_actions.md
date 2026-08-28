@@ -528,3 +528,63 @@ Every time someone's turn is over, the server should automatically increment the
   }
 }
 ```
+
+## Disconnect grace
+
+A dropped socket does not forfeit on the spot. The seat is held for the lobby's
+`disconnectGraceSec` house rule (default 60 seconds; 0 restores the immediate forfeit), and only
+when that window closes does `forfeitOnDisconnect` take it. Three public events report where a
+player stands, alongside the `connected`, `forfeited` and `reconnectDeadline` fields every
+`private_sync_state` carries, so a client that joins or resyncs mid-window renders the same state
+as one that watched it happen.
+
+The table keeps playing throughout: the turn timer stays armed for a player inside their window
+and its timeout draws and discards without touching their hand, which is the defensive play
+RULES.md T5 and MATCHMAKING.md 8 describe. Pausing it instead would let any player freeze a game
+for the length of the grace by pulling their network out.
+
+```json: server -> all clients (socket dropped, seat held)
+{
+  "type": "player_reconnecting",
+  "user": { "id": "{id}" },
+  "payload": {
+    "graceSeconds": 60,
+    "deadline": 1756400000000,
+    "serverNow": 1756399940000
+  }
+}
+```
+
+`deadline` is the absolute server-clock epoch-ms time the window closes and `serverNow` this
+event's send time, the same skew-correction pair `game_player_turn` uses for the turn clock.
+
+```json: server -> all clients (returned inside the window)
+{
+  "type": "player_reconnected",
+  "user": { "id": "{id}" }
+}
+```
+
+The returning player is separately sent a `private_sync_state` with the table as they left it:
+same hand, same stockpile, same turn.
+
+```json: server -> all clients (window closed with nobody there)
+{
+  "type": "player_forfeited",
+  "user": { "id": "{id}" }
+}
+```
+
+A forfeited player drops out of the final scoring, and the game ends there if it leaves one
+player or fewer connected. A player who was away but had not yet forfeited is scored normally if
+the table finishes without them, and one who comes back to a game that is still running takes
+their seat back: the forfeit only sticks once the game itself is over.
+
+## Reconnecting to a finished game
+
+A hub holds its finished game for the post-game results interval, so a client that reconnects in
+that window (a reload after the game ended, or the forfeited player's own tab coming back) is
+sent the finished table's `private_sync_state` and then the terminal results frame again:
+`game_results`, or `match_end` for a ranked circuit. Nothing else re-sends those scores: the
+lobby snapshot a joining connection gets carries the phase but no results, which is why such a
+reload used to land on a results screen with no winner and no scores.
