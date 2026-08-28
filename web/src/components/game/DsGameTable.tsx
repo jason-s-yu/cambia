@@ -152,7 +152,7 @@ function useTableNotice(gs: ObfGameState, selfId: string | undefined, names: Map
       const you = p.playerId === selfId;
       if (p.handSize > was) {
         const who = names.get(p.playerId) ?? 'Opponent';
-        next = { tone: 'danger', text: you ? 'Snap missed. A penalty card joins your hand.' : `Snap missed. ${who} draws a penalty card.` };
+        next = { tone: 'danger', text: you ? 'Snap missed. You draw a penalty card.' : `Snap missed. ${who} draws a penalty card.` };
       } else if (p.handSize < was && snap.discardTopId !== before.discardTopId) {
         const who = names.get(p.playerId) ?? 'Opponent';
         next = { tone: 'success', text: you ? 'Snap. Your card matched the discard.' : `Snap. ${who} matched the discard.` };

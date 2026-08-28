@@ -209,7 +209,7 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
         </div>
       </RuleGroup>
 
-      <RuleGroup title='Deal' hint='The peek never exceeds the hand'>
+      <RuleGroup title='Deal' hint='Opening peek is capped at the hand size'>
         <div style={DEAL_GRID}>
           {numField('Cards per hand', houseRules?.cardsPerPlayer, (raw) => setCardsPerPlayer(clamped(raw, 1, 6, 4)))}
           {numField('Opening peek', houseRules?.initialViewCount, (raw) => setRule('initialViewCount', clamped(raw, 0, houseRules?.cardsPerPlayer ?? 4, 2)))}
