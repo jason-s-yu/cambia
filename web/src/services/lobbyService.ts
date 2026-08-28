@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import api from '@/lib/axios';
-import type { LobbyState, LobbyListEntry } from '@/types';
+import type { ActiveSession, LobbyState, LobbyListEntry } from '@/types';
 
 /**
  * Creates a new lobby via the backend API.
@@ -29,6 +29,22 @@ export const joinLobby = async (lobbyId: string): Promise<void> => {
 		await api.post(`/lobby/${lobbyId}/join`);
 	} catch (error: any) {
 		console.error('Join Lobby API call failed:', error.response?.data || error.message, error);
+		throw error;
+	}
+};
+
+/**
+ * Fetches the lobby or in-progress game the signed-in user can rejoin, for the home screen's
+ * resume affordance. Resolves to null when there is nothing to resume, which is the common
+ * case and is not an error.
+ * @throws {Error} If the API request fails.
+ */
+export const getActiveSession = async (): Promise<ActiveSession | null> => {
+	try {
+		const response = await api.get<{ active: ActiveSession | null }>('/lobby/active');
+		return response.data?.active ?? null;
+	} catch (error: any) {
+		console.error('Active Session API call failed:', error.response?.data || error.message, error);
 		throw error;
 	}
 };

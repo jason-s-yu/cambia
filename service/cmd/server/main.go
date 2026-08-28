@@ -109,6 +109,11 @@ func main() {
 	mux.Handle("/lobby/list", middleware.LogMiddleware(logger)(http.HandlerFunc(
 		handlers.ListLobbiesHandler(srv),
 	)))
+	// Active-session lookup for resuming a lobby/game after a refresh or lost tab
+	// (cambia-783). Exact match, so it wins over the /lobby/ action router below.
+	mux.Handle("/lobby/active", middleware.LogMiddleware(logger)(http.HandlerFunc(
+		handlers.ActiveSessionHandler(srv),
+	)))
 
 	// lobby action router (join, search)
 	mux.Handle("/lobby/", middleware.LogMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
