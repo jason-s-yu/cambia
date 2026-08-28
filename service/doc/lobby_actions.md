@@ -16,7 +16,7 @@ This document describes the JSON payloads used for WebSocket communication on th
 | Mark Ready               | `ready`          | *(None)* | `internal/handlers/lobby_ws.go`  | Marks sender as ready. May trigger countdown if autoStart. |
 | Mark Unready             | `unready`        | *(None)* | `internal/handlers/lobby_ws.go`  | Marks sender as unready. Cancels any active countdown.     |
 | Invite User              | `invite`         | `{ "userID": "{uuid}" }`                                                                               | `internal/handlers/lobby_ws.go`  | Invites another user to a private lobby.                   |
-| Leave Lobby              | `leave_lobby`    | *(None)* | `internal/handlers/lobby_ws.go`  | Sender leaves the lobby.                                   |
+| Leave Lobby              | *(not a WS message)* | *(None)* | `internal/handlers/lobby.go` | `POST /lobby/{id}/leave`. Leaving releases membership, which nothing a lost socket can also trigger may do, so it is an HTTP call rather than a frame (cambia-807). Refused with 409 while the lobby's game is in progress. |
 | Send Chat Message        | `chat`           | `{ "msg": "Your message here" }`                                                                       | `internal/handlers/lobby_ws.go`  | Sends a chat message to the lobby.                         |
 | Update Rules (Host Only) | `update_rules`   | `{ "rules": { ... partial HouseRules object ... } }` (See `internal/game/rules.go` for fields)       | `internal/handlers/lobby_ws.go`  | Host updates lobby's house rules or circuit settings.    |
 | Force Start (Host Only)  | `start_game`     | *(None)* | `internal/handlers/lobby_ws.go`  | Host attempts to start the game manually (if all ready).   |

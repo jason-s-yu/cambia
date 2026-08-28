@@ -133,10 +133,14 @@ func (c *Connection) Send(data []byte) {
 	}
 }
 
-// Close cancels the connection's context and closes the WebSocket.
+// Close cancels the connection's context and closes the WebSocket. Safe to call more than once
+// (the hub closes queued connections on the way out and may double up with its own cleanup) and
+// on a Connection carrying no socket.
 func (c *Connection) Close() {
 	c.cancel()
-	c.ws.Close(websocket.StatusGoingAway, "connection closed")
+	if c.ws != nil {
+		c.ws.Close(websocket.StatusGoingAway, "connection closed")
+	}
 }
 
 // SendEnvelope marshals an Envelope and sends it via Send.

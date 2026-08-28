@@ -94,10 +94,10 @@ func CreateLobbyHandler(gs *GameServer) http.HandlerFunc {
 		// has not yet been added to the store or hub, so nothing else can observe it.
 		lob.InviteUser(userID)
 
-		// Configure the OnEmpty callback to remove the lobby from the store when it becomes empty.
-		lob.OnEmpty = func(lobbyID uuid.UUID) {
-			gs.LobbyStore.DeleteLobby(lobbyID)
-		}
+		// Configure the OnEmpty callback to release the lobby and its hub once the last joined
+		// member leaves. Reachable only from lobby.RemoveUser, i.e. from a deliberate leave: a
+		// dropped WebSocket keeps its membership (cambia-807).
+		lob.OnEmpty = gs.tearDownLobby
 
 		// Add the configured lobby to the central store.
 		gs.LobbyStore.AddLobby(lob)
@@ -107,6 +107,9 @@ func CreateLobbyHandler(gs *GameServer) http.HandlerFunc {
 		// the lobby countdown elapses (cambia-458).
 		h := hub.NewHub(lob)
 		h.CreateGame = gs.hubGameFactory()
+		// A hub that has stopped serving must not stay discoverable, or the next WebSocket to
+		// this lobby is accepted and never answered (cambia-808).
+		h.OnDissolve = gs.HubStore.DeleteHub
 		if gs.CountdownDuration > 0 {
 			h.CountdownDuration = gs.CountdownDuration
 		}
@@ -169,6 +172,80 @@ func JoinLobbyHandler(gs *GameServer) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"lobby_id": lobbyID.String()})
+	}
+}
+
+// LeaveLobbyHandler handles POST /lobby/{id}/leave: the deliberate counterpart to
+// /lobby/{id}/join. Membership is released here, on the surface that granted it, and not over
+// the WebSocket, for two reasons. A lost socket must never release membership, because
+// reconnecting and the resume banner both key off it (cambia-783). And a client that sends a
+// leave frame and closes its socket in the same breath races its own disconnect through the
+// hub's select, so the release would land only sometimes.
+//
+// Leaving mid-game is refused: a seat in a running game is not something a lobby-level leave
+// can release, and abandoning a game is what a disconnect already means. The lobby's InGame
+// flag is the gate rather than the hub phase, which only the hub's Run goroutine may read.
+//
+// The response is 200 for a caller who holds no membership: leaving twice, or leaving a lobby
+// somebody else already emptied, is not an error the client should surface.
+func LeaveLobbyHandler(gs *GameServer) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		userID, ok := authenticateAndGetUser(w, r)
+		if !ok {
+			return
+		}
+
+		// Path: /lobby/{id}/leave
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) < 3 || parts[2] != "leave" {
+			http.NotFound(w, r)
+			return
+		}
+		lobbyID, err := uuid.Parse(parts[1])
+		if err != nil {
+			http.Error(w, "Invalid lobby ID", http.StatusBadRequest)
+			return
+		}
+
+		lob, exists := gs.LobbyStore.GetLobby(lobbyID)
+		if !exists {
+			http.Error(w, "Lobby not found", http.StatusNotFound)
+			return
+		}
+
+		lob.Mu.Lock()
+		_, isMember := lob.Users[userID]
+		inGame := lob.InGame
+		lob.Mu.Unlock()
+
+		if inGame {
+			http.Error(w, "Cannot leave a lobby while its game is in progress", http.StatusConflict)
+			return
+		}
+		if !isMember {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"status": "left", "removed": false})
+			return
+		}
+
+		// RemoveUser fires OnEmpty (gs.tearDownLobby) when the last joined member goes, which
+		// deletes the lobby and stops its hub.
+		removed := lob.RemoveUser(userID)
+
+		// Drop the leaver's live connection and refresh the roster everyone else sees. Routed
+		// through the hub's leave channel because hub state belongs to its Run goroutine; a
+		// no-op once the hub has stopped, which is the case that just tore the lobby down.
+		if h, hasHub := gs.HubStore.GetHub(lobbyID); hasHub {
+			h.Leave(userID)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": "left", "removed": removed})
 	}
 }
 

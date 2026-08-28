@@ -144,6 +144,33 @@ func (gs *GameServer) CreateGameInstance(ctx context.Context, lobbyID, hostID uu
 	return g
 }
 
+// tearDownLobby releases every trace of a lobby whose last joined member left. It is the
+// lobby's OnEmpty callback (see CreateLobbyHandler) and runs on whichever goroutine released
+// that membership, so it touches only lock-guarded stores and the hub's own channel API - never
+// hub fields, which belong to the hub's Run goroutine.
+//
+// The hub is shut down as well as deregistered: it runs for as long as its lobby exists
+// (cambia-808), so nothing else would ever stop it, and its Run loop deregisters itself on the
+// way out. Deleting the entry here too covers a hub that was registered but never started.
+func (gs *GameServer) tearDownLobby(lobbyID uuid.UUID) {
+	gs.LobbyStore.DeleteLobby(lobbyID)
+
+	if h, ok := gs.HubStore.GetHub(lobbyID); ok {
+		h.Shutdown()
+	}
+	gs.HubStore.DeleteHub(lobbyID)
+
+	// A lobby that dissolves while queued would otherwise still be matchable, and its circuit
+	// standings would outlive every player who could read them.
+	if gs.Matchmaker != nil {
+		gs.Matchmaker.Dequeue(lobbyID)
+	}
+	if gs.CircuitStore != nil {
+		gs.CircuitStore.Delete(lobbyID)
+	}
+	log.Printf("Lobby %s torn down: store entry, hub and queue state released.", lobbyID)
+}
+
 // hubGameFactory returns the hub.GameFactory a hub uses to build its backing game. It binds
 // the GameServer's stores (GameStore/CircuitStore/HubStore) so the hub stays decoupled from
 // them: the hub supplies its live lobby and connected player set, the GameServer owns creation.
