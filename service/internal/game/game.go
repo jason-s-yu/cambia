@@ -146,6 +146,12 @@ type CambiaGame struct {
 	turnTimer    *time.Timer   // Active timer for the current turn.
 	actionIndex  int           // Sequential index for logging actions via historian.
 
+	// PreGameDuration is how long BeginPreGame holds the initial card-reveal phase before
+	// StartGame flips Started true. Set from GameServer.PreGameDuration at creation
+	// (CreateGameInstance); defaults to 10s here so a game built directly (tests, or any
+	// caller that skips CreateGameInstance) still gets a sane duration.
+	PreGameDuration time.Duration
+
 	// TurnDeadline is the absolute server-clock time at which the current turn's timer fires.
 	// Zero value means no timer is active for the current turn (TurnDuration <= 0, game not
 	// started, or game over). Set by scheduleNextTurnTimerEngine, read by broadcastPlayerTurnEngine
@@ -185,6 +191,7 @@ func NewCambiaGame() *CambiaGame {
 		ID:                     id,
 		lastSeen:               make(map[uuid.UUID]time.Time),
 		TurnDuration:           15 * time.Second, // Default turn duration.
+		PreGameDuration:        10 * time.Second, // Default pre-game reveal duration.
 		snapUsedForThisDiscard: false,
 		actionIndex:            0,
 		TurnID:                 0,
@@ -294,8 +301,13 @@ func (g *CambiaGame) BeginPreGame() {
 		g.firePrivateInitialCards(p.ID, cards)
 	}
 
-	// Schedule the transition to the main game phase.
-	preGameDuration := 10 * time.Second // Standard pre-game duration.
+	// Schedule the transition to the main game phase. PreGameDuration is configurable (see
+	// GameServer.PreGameDuration / CAMBIA_PREGAME_DURATION); fall back to the 10s default if a
+	// caller left it unset entirely (zero value).
+	preGameDuration := g.PreGameDuration
+	if preGameDuration <= 0 {
+		preGameDuration = 10 * time.Second
+	}
 	g.preGameTimer = time.AfterFunc(preGameDuration, func() {
 		g.StartGame() // Call StartGame after the timer.
 	})

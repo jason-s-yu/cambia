@@ -28,6 +28,10 @@ const defaultPostGameDuration = 10 * time.Second
 // (cambia-836). Tests may lower GameServer.LobbyIdleTTL for speed.
 const defaultLobbyIdleTTL = 45 * time.Minute
 
+// defaultPreGameDuration is how long a fresh game holds the initial card-reveal phase before
+// StartGame flips it live. Tests may lower GameServer.PreGameDuration for speed.
+const defaultPreGameDuration = 10 * time.Second
+
 // GameServer manages the central stores for active lobbies and games.
 type GameServer struct {
 	Mutex        sync.Mutex
@@ -49,6 +53,11 @@ type GameServer struct {
 	// connections, with no game in progress, before its hub tears it down (cambia-836).
 	// Overridable per deployment via CAMBIA_LOBBY_IDLE_TTL; shortened in tests.
 	LobbyIdleTTL time.Duration
+
+	// PreGameDuration is copied onto each CambiaGame at creation (CreateGameInstance) so the
+	// pre-game card-reveal window before Started flips true is configurable (production
+	// default; shortened in tests). Overridable per deployment via CAMBIA_PREGAME_DURATION.
+	PreGameDuration time.Duration
 }
 
 // NewGameServer initializes a new GameServer with empty, ephemeral stores.
@@ -62,6 +71,7 @@ func NewGameServer() *GameServer {
 		CountdownDuration: defaultCountdownDuration,
 		PostGameDuration:  defaultPostGameDuration,
 		LobbyIdleTTL:      defaultLobbyIdleTTL,
+		PreGameDuration:   defaultPreGameDuration,
 	}
 }
 
@@ -98,6 +108,9 @@ func (gs *GameServer) CreateGameInstance(ctx context.Context, lobbyID, hostID uu
 	g.HostUserID = hostID
 	g.LobbyType = lobbyType
 	g.Rated = rated
+	if gs.PreGameDuration > 0 {
+		g.PreGameDuration = gs.PreGameDuration
+	}
 	g.Circuit = circuit
 	if circuit.Enabled {
 		g.HouseRules = houseRules

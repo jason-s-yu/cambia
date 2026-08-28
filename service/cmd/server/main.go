@@ -92,6 +92,18 @@ func main() {
 		}
 	}
 
+	// How long a fresh game holds the initial card-reveal phase before Started flips true. Left
+	// at the 10 second default unless the deployment says otherwise; a value that does not parse,
+	// or is not positive, is ignored.
+	if v := os.Getenv("CAMBIA_PREGAME_DURATION"); v != "" {
+		if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
+			srv.PreGameDuration = d
+			log.Printf("Pre-game duration set to %s from CAMBIA_PREGAME_DURATION", d)
+		} else {
+			log.Printf("Ignoring CAMBIA_PREGAME_DURATION=%q: expected a positive Go duration", v)
+		}
+	}
+
 	// Wire matchmaker callback before starting Run.
 	srv.Matchmaker.OnMatchFormed = func(result matchmaking.MatchResult) {
 		h, ok := srv.HubStore.GetHub(result.HostLobbyID)
