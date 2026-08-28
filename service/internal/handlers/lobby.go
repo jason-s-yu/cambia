@@ -110,11 +110,18 @@ func CreateLobbyHandler(gs *GameServer) http.HandlerFunc {
 		// A hub that has stopped serving must not stay discoverable, or the next WebSocket to
 		// this lobby is accepted and never answered (cambia-808).
 		h.OnDissolve = gs.HubStore.DeleteHub
+		// Reaping an abandoned lobby runs the same teardown as the last member leaving. Nothing
+		// else reclaims one: closing a tab is not a leave, so membership survives and OnEmpty is
+		// never reached, and the hub now runs for the lobby's lifetime (cambia-836).
+		h.OnIdle = gs.tearDownLobby
 		if gs.CountdownDuration > 0 {
 			h.CountdownDuration = gs.CountdownDuration
 		}
 		if gs.PostGameDuration > 0 {
 			h.PostGameDuration = gs.PostGameDuration
+		}
+		if gs.LobbyIdleTTL > 0 {
+			h.IdleTTL = gs.LobbyIdleTTL
 		}
 		gs.HubStore.CreateHub(h)
 		go h.Run(context.Background())

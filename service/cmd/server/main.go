@@ -80,6 +80,18 @@ func main() {
 
 	srv := handlers.NewGameServer()
 
+	// How long an abandoned lobby survives before its hub reaps it (cambia-836). Left at the
+	// 45 minute default unless the deployment says otherwise; a value that does not parse, or is
+	// not positive, is ignored rather than silently switching the reaper off.
+	if v := os.Getenv("CAMBIA_LOBBY_IDLE_TTL"); v != "" {
+		if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
+			srv.LobbyIdleTTL = d
+			log.Printf("Lobby idle TTL set to %s from CAMBIA_LOBBY_IDLE_TTL", d)
+		} else {
+			log.Printf("Ignoring CAMBIA_LOBBY_IDLE_TTL=%q: expected a positive Go duration", v)
+		}
+	}
+
 	// Wire matchmaker callback before starting Run.
 	srv.Matchmaker.OnMatchFormed = func(result matchmaking.MatchResult) {
 		h, ok := srv.HubStore.GetHub(result.HostLobbyID)
