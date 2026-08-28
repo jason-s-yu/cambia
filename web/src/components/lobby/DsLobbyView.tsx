@@ -1,18 +1,21 @@
 // src/components/lobby/DsLobbyView.tsx
-// DS-styled pre-game lobby (cambia-484). Re-skins the legacy LobbyPage lobby UI
-// (PlayerList / ReadyButton / HostControls / ChatWindow / settings / countdown)
-// onto the design-system LobbyScreen, wired to useCurrentLobbyStore. Every
-// outgoing WS message matches what the legacy components sent: `ready`/`unready`
-// (ReadyButton), `start_game` (HostControls), `chat` (ChatWindow), `update_rules`
-// (settings, via DsMatchSettings). No protocol change.
+// DS-styled pre-game lobby (cambia-484), swept onto the flat card-room language
+// in cambia-847. Re-skins the legacy LobbyPage lobby UI (PlayerList /
+// ReadyButton / HostControls / ChatWindow / settings / countdown) onto the
+// design-system primitives, wired to useCurrentLobbyStore. Every outgoing WS
+// message matches what the legacy components sent: `ready`/`unready`
+// (ReadyButton), `start_game` (HostControls), `chat` (ChatWindow),
+// `update_rules` (settings, via DsMatchSettings). No protocol change.
 import React, { useEffect, useMemo, useState } from 'react';
 import { useCurrentLobbyStore, type LobbyPhase } from '@/stores/lobbyStore';
 import { useAuthStore } from '@/stores/authStore';
 import Panel from '@/components/ds/chrome/Panel';
 import Button from '@/components/ds/core/Button';
 import Badge from '@/components/ds/core/Badge';
+import Input from '@/components/ds/core/Input';
 import PlayerSeat from '@/components/ds/game/PlayerSeat';
 import DsMatchSettings from './DsMatchSettings';
+import DsLobbyStatus, { type LobbyStatusTone } from './DsLobbyStatus';
 
 interface DsLobbyViewProps {
   lobbyId: string;
@@ -20,6 +23,31 @@ interface DsLobbyViewProps {
   sendMessage: (message: { type: string; body?: unknown }) => void;
   onLeave: () => void;
 }
+
+interface LobbyStatusSpec {
+  tone: LobbyStatusTone;
+  text: string;
+  value?: string;
+}
+
+const EYEBROW: React.CSSProperties = {
+  fontSize: 'var(--text-2xs)',
+  fontWeight: 'var(--weight-bold)',
+  letterSpacing: 'var(--tracking-caps)',
+  textTransform: 'uppercase',
+  color: 'var(--text-tertiary)'
+};
+
+const MUTED: React.CSSProperties = {
+  fontSize: 'var(--ds-text-sm)',
+  color: 'var(--text-tertiary)'
+};
+
+const TYPE_LABELS: Record<string, string> = {
+  private: 'Private',
+  public: 'Public',
+  matchmaking: 'Matchmaking'
+};
 
 /** Live seconds remaining for the start countdown, or null when inactive. */
 function useCountdownRemaining(): number | null {
@@ -46,7 +74,6 @@ const DsLobbyView: React.FC<DsLobbyViewProps> = ({ lobbyId, phase, sendMessage, 
   const lobbyDetails = useCurrentLobbyStore((s) => s.lobbyDetails);
   const chatMessages = useCurrentLobbyStore((s) => s.chatMessages);
   const selfId = useAuthStore((s) => s.user?.id);
-  const selfName = useAuthStore((s) => s.user?.username) || 'You';
   const remaining = useCountdownRemaining();
   const [draft, setDraft] = useState('');
   const [copied, setCopied] = useState(false);
@@ -59,6 +86,7 @@ const DsLobbyView: React.FC<DsLobbyViewProps> = ({ lobbyId, phase, sendMessage, 
   const canStart = players.length >= 2 && allReady;
   const waiting = players.filter((p) => !p.is_ready).map((p) => p.username);
   const shortId = lobbyId.substring(0, 8);
+  const lobbyType = lobbyDetails?.type ?? 'private';
 
   const toggleReady = () => sendMessage({ type: isReady ? 'unready' : 'ready' });
   const startGame = () => sendMessage({ type: 'start_game' });
@@ -80,63 +108,75 @@ const DsLobbyView: React.FC<DsLobbyViewProps> = ({ lobbyId, phase, sendMessage, 
     }
   };
 
-  const banner = (() => {
+  const status: LobbyStatusSpec = (() => {
     if (remaining !== null && remaining > 0) {
-      return { tone: 'gold' as const, text: `Game starting in ${remaining}s…` };
+      return { tone: 'gold', text: 'Starting in', value: `${remaining}s` };
     }
-    if (phase === 'searching') return { tone: 'info' as const, text: 'Searching for a match…' };
-    if (phase === 'ready_check') return { tone: 'gold' as const, text: 'Match found — ready up to begin.' };
-    if (players.length < 2) return { tone: 'info' as const, text: 'Waiting for more players to join.' };
-    if (allReady) return { tone: 'moss' as const, text: 'Everyone is ready.' };
-    return { tone: 'gold' as const, text: `Waiting on ${waiting.join(', ')} — starting when everyone is ready.` };
+    if (phase === 'searching') return { tone: 'info', text: 'Searching for a match' };
+    if (phase === 'ready_check') return { tone: 'gold', text: 'Match found. Ready up to begin.' };
+    if (players.length < 2) return { tone: 'info', text: 'Waiting for players. Share the invite link.' };
+    if (allReady) return { tone: 'success', text: isHost ? 'All players ready.' : 'All players ready. Waiting on the host.' };
+    return { tone: 'info', text: `Waiting on ${waiting.join(', ')}.` };
   })();
 
-  const bannerColors: Record<string, { bg: string; border: string; color: string }> = {
-    gold: { bg: 'rgba(223,174,71,0.1)', border: 'var(--honey-600)', color: 'var(--honey-400)' },
-    info: { bg: 'rgba(92,127,163,0.14)', border: 'var(--dusk-600)', color: 'var(--dusk-400)' },
-    moss: { bg: 'rgba(79,138,94,0.16)', border: 'var(--moss-600)', color: 'var(--moss-400)' }
-  };
-  const bc = bannerColors[banner.tone];
-
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(280px, 340px) minmax(0, 1fr) minmax(240px, 300px)', gap: 20, padding: 22, maxWidth: 1280, margin: '0 auto', width: '100%', alignItems: 'start' }}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+    <div className='grid w-full max-w-[1280px] mx-auto items-start gap-5 p-4 md:p-6 grid-cols-1 lg:grid-cols-[minmax(280px,340px)_minmax(0,1fr)_minmax(240px,300px)]'>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)', minWidth: 0 }}>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-            <h1 style={{ margin: 0, fontFamily: 'var(--font-display)', fontSize: 'var(--ds-text-2xl)', fontWeight: 'var(--weight-regular)' }}>Lobby</h1>
-            <Badge tone='info'>{lobbyDetails?.type ?? 'private'}</Badge>
+            <h1
+              style={{
+                margin: 0,
+                fontSize: 'var(--ds-text-2xl)',
+                fontWeight: 'var(--weight-bold)',
+                letterSpacing: 'var(--ds-tracking-tight)',
+                lineHeight: 'var(--ds-leading-tight)',
+                color: 'var(--text-primary)'
+              }}
+            >
+              Lobby
+            </h1>
+            <Badge tone='neutral'>{TYPE_LABELS[lobbyType] ?? lobbyType}</Badge>
           </div>
-          <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8, fontFamily: 'var(--ds-font-mono)', fontSize: 'var(--ds-text-sm)', color: 'var(--text-secondary)' }}>
-            <span>code: {shortId}</span>
-            <Button size='sm' variant='ghost' onClick={copyInvite}>{copied ? 'Copied' : 'Copy invite'}</Button>
+          <div style={{ marginTop: 'var(--space-2)', display: 'flex', alignItems: 'center', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+            <span style={EYEBROW}>Invite code</span>
+            <Badge mono>{shortId}</Badge>
+            <Button size='sm' variant='ghost' onClick={copyInvite}>{copied ? 'Link copied' : 'Copy link'}</Button>
           </div>
         </div>
 
-        <Panel title={`Players · ${players.length}`}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <Panel title='Players' action={<Badge tone='neutral'>{players.length} seated</Badge>}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
             {players.map((p) => (
-              <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <PlayerSeat username={p.username} isYou={p.id === selfId} state={p.is_ready ? 'ready' : undefined} style={{ flex: 1 }} />
-                {p.is_host && <Badge tone='ember'>HOST</Badge>}
-                {!p.is_ready && !p.is_host && <Badge>not ready</Badge>}
+              <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+                {/* The seat keeps its natural width so a long name never wraps inside the pill;
+                    the badge group drops to its own right-aligned line when the row is short. */}
+                <PlayerSeat
+                  username={p.username}
+                  isYou={p.id === selfId}
+                  state={p.is_ready ? 'ready' : undefined}
+                  style={{ flex: '1 1 auto' }}
+                />
+                {(p.is_host || !p.is_ready) && (
+                  <div style={{ display: 'flex', gap: 'var(--space-2)', marginLeft: 'auto' }}>
+                    {p.is_host && <Badge tone='gold'>Host</Badge>}
+                    {!p.is_ready && <Badge tone='neutral'>Not ready</Badge>}
+                  </div>
+                )}
               </div>
             ))}
-            {players.length === 0 && (
-              <div style={{ fontSize: 'var(--ds-text-sm)', color: 'var(--text-tertiary)' }}>No players yet.</div>
-            )}
+            {players.length === 0 && <div style={MUTED}>No one seated yet.</div>}
           </div>
 
-          <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div style={{ padding: '8px 12px', borderRadius: 'var(--ds-radius-md)', background: bc.bg, border: `1.5px solid ${bc.border}`, fontSize: 'var(--ds-text-sm)', color: bc.color, fontWeight: 'var(--weight-bold)' }}>
-              {banner.text}
-            </div>
+          <div style={{ marginTop: 'var(--space-4)', display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+            <DsLobbyStatus tone={status.tone} text={status.text} value={status.value} />
             {self && (
               <Button variant={isReady ? 'secondary' : 'primary'} fullWidth onClick={toggleReady}>
-                {isReady ? 'Mark as not ready' : 'Mark as ready'}
+                {isReady ? 'Unready' : 'Ready up'}
               </Button>
             )}
             {isHost && (
-              <Button variant='gold' fullWidth disabled={!canStart} onClick={startGame}>
+              <Button variant='primary' fullWidth disabled={!canStart} onClick={startGame}>
                 Start game
               </Button>
             )}
@@ -148,37 +188,39 @@ const DsLobbyView: React.FC<DsLobbyViewProps> = ({ lobbyId, phase, sendMessage, 
       {lobbyDetails ? (
         <DsMatchSettings currentSettings={lobbyDetails} isHost={isHost} sendMessage={sendMessage} />
       ) : (
-        <Panel title='Match settings'>
-          <div style={{ fontSize: 'var(--ds-text-sm)', color: 'var(--text-tertiary)' }}>Loading settings…</div>
+        <Panel title='Rule sheet'>
+          <div style={MUTED}>Loading rules</div>
         </Panel>
       )}
 
-      <Panel title='Lobby chat' style={{ display: 'flex', flexDirection: 'column', minHeight: 420 }}>
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 8, overflowY: 'auto' }}>
-          {chatMessages.length === 0 && (
-            <div style={{ fontSize: 'var(--ds-text-sm)', color: 'var(--text-tertiary)' }}>No messages yet.</div>
-          )}
+      <Panel title='Lobby chat' style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minHeight: 240, maxHeight: 360, overflowY: 'auto' }}>
+          {chatMessages.length === 0 && <div style={MUTED}>No messages yet.</div>}
           {chatMessages.map((c, i) => {
             const mine = c.user_id === selfId;
             return (
-              <div key={`${c.user_id}-${c.ts}-${i}`} style={{ fontSize: 'var(--ds-text-sm)', lineHeight: 1.4 }}>
-                <span style={{ fontWeight: 'var(--weight-black)', color: mine ? 'var(--ember-400)' : 'var(--dusk-400)' }}>{c.username}</span>
+              <div key={`${c.user_id}-${c.ts}-${i}`} style={{ fontSize: 'var(--ds-text-sm)', lineHeight: 'var(--ds-leading-snug)', overflowWrap: 'anywhere' }}>
+                <span style={{ fontWeight: 'var(--weight-bold)', color: mine ? 'var(--accent-gold)' : 'var(--text-primary)' }}>{c.username}</span>
                 <span style={{ color: 'var(--text-secondary)' }}> {c.msg}</span>
               </div>
             );
           })}
         </div>
-        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-          <input
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            sendChat();
+          }}
+          style={{ display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-3)' }}
+        >
+          <Input
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') sendChat(); }}
-            placeholder={`Message as ${selfName}…`}
-            aria-label='Chat message input'
-            style={{ flex: 1, height: 'var(--control-h-sm)', padding: '0 10px', fontFamily: 'var(--font-ui)', fontSize: 'var(--ds-text-sm)', color: 'var(--text-primary)', background: 'var(--surface-inset)', border: '1.5px solid var(--border-default)', borderRadius: 'var(--ds-radius-sm)', outline: 'none' }}
+            placeholder='Message the lobby'
+            style={{ flex: 1, minWidth: 0 }}
           />
-          <Button size='sm' variant='secondary' onClick={sendChat}>Send</Button>
-        </div>
+          <Button variant='secondary'>Send</Button>
+        </form>
       </Panel>
     </div>
   );

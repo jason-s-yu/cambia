@@ -1,7 +1,8 @@
 // src/components/lobby/DsMatchSettings.tsx
-// DS-styled match-settings panel for the live lobby (cambia-484). Re-skins the
-// legacy LobbySettingsPanel / LobbySettingsView pair: hosts edit a local buffer
-// and Save emits the exact `update_rules` WS message the legacy panel sent
+// DS-styled rule sheet for the live lobby (cambia-484, swept onto the flat
+// card-room language in cambia-847). Re-skins the legacy LobbySettingsPanel /
+// LobbySettingsView pair: hosts edit a local buffer and Save emits the exact
+// `update_rules` WS message the legacy panel sent
 // ({ rules: { houseRules, circuit, settings } }); non-hosts see the same fields
 // disabled. No WS protocol change.
 import React, { useEffect, useMemo, useState } from 'react';
@@ -12,6 +13,7 @@ import Checkbox from '@/components/ds/core/Checkbox';
 import Switch from '@/components/ds/core/Switch';
 import Badge from '@/components/ds/core/Badge';
 import Button from '@/components/ds/core/Button';
+import { gameModeLabel } from '@/utils/gameMode';
 
 interface DsMatchSettingsProps {
   currentSettings: LobbyState;
@@ -23,13 +25,50 @@ function jsonEqual(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-const CAPS_LABEL: React.CSSProperties = {
+const EYEBROW: React.CSSProperties = {
   fontSize: 'var(--text-2xs)',
-  fontWeight: 'var(--weight-black)',
+  fontWeight: 'var(--weight-bold)',
   letterSpacing: 'var(--tracking-caps)',
   textTransform: 'uppercase',
   color: 'var(--text-tertiary)'
 };
+
+const HINT: React.CSSProperties = {
+  fontSize: 'var(--ds-text-xs)',
+  color: 'var(--text-tertiary)'
+};
+
+const FIELD_GRID: React.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+  gap: 'var(--space-3)'
+};
+
+const RULE_GRID: React.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+  gap: 'var(--space-3) var(--space-5)'
+};
+
+const DIVIDER: React.CSSProperties = {
+  borderTop: '1px solid var(--border-subtle)',
+  marginTop: 'var(--space-4)',
+  paddingTop: 'var(--space-4)'
+};
+
+/** One titled group of the rule sheet: eyebrow, optional hint, fields. */
+const RuleGroup: React.FC<{ title: string; hint?: string; action?: React.ReactNode; first?: boolean; children?: React.ReactNode }> = ({ title, hint, action, first = false, children }) => (
+  <div style={first ? undefined : DIVIDER}>
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--space-3)', marginBottom: 'var(--space-3)', flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+        <span style={EYEBROW}>{title}</span>
+        {hint && <span style={HINT}>{hint}</span>}
+      </div>
+      {action}
+    </div>
+    {children}
+  </div>
+);
 
 const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHost, sendMessage }) => {
   const initialLobbySettings = currentSettings.lobbySettings ?? currentSettings.settings ?? { autoStart: false };
@@ -99,141 +138,141 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
 
   return (
     <Panel
-      title={isHost ? 'Match settings · host' : 'Match settings'}
-      action={<Badge tone='info'>{currentSettings.gameMode || 'unknown'}</Badge>}
+      title='Rule sheet'
+      action={<Badge tone='info'>{gameModeLabel(currentSettings.gameMode)}</Badge>}
+      style={{ minWidth: 0 }}
     >
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 14, marginBottom: 16 }}>
-        <Input
-          label='Turn timer (sec)'
-          mono
-          type='number'
-          disabled={ro}
-          value={num(houseRules?.turnTimerSec)}
-          onChange={(e) => setRule('turnTimerSec', clamped(e.target.value, 0, 86400, 0))}
-        />
-        <Input
-          label='Penalty draw count'
-          mono
-          type='number'
-          disabled={ro}
-          value={num(houseRules?.penaltyDrawCount)}
-          onChange={(e) => setRule('penaltyDrawCount', clamped(e.target.value, 0, 6, 2))}
-        />
-        <Input
-          label='Max game turns'
-          mono
-          type='number'
-          disabled={ro}
-          value={num(houseRules?.maxGameTurns)}
-          onChange={(e) => setRule('maxGameTurns', clamped(e.target.value, 0, 65535, 46))}
-        />
-      </div>
+      <RuleGroup title='Pace' hint='0 turns the clock or the cap off' first>
+        <div style={FIELD_GRID}>
+          <Input
+            label='Turn clock (sec)'
+            type='number'
+            disabled={ro}
+            value={num(houseRules?.turnTimerSec)}
+            onChange={(e) => setRule('turnTimerSec', clamped(e.target.value, 0, 86400, 0))}
+          />
+          <Input
+            label='Turn cap'
+            type='number'
+            disabled={ro}
+            value={num(houseRules?.maxGameTurns)}
+            onChange={(e) => setRule('maxGameTurns', clamped(e.target.value, 0, 65535, 46))}
+          />
+        </div>
+      </RuleGroup>
 
-      <div style={{ ...CAPS_LABEL, margin: '2px 0 10px' }}>Deal</div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 14, marginBottom: 16 }}>
-        <Input
-          label='Cards per player'
-          mono
-          type='number'
-          disabled={ro}
-          value={num(houseRules?.cardsPerPlayer)}
-          onChange={(e) => setCardsPerPlayer(clamped(e.target.value, 1, 6, 4))}
-        />
-        <Input
-          label='Initial peek'
-          mono
-          type='number'
-          disabled={ro}
-          value={num(houseRules?.initialViewCount)}
-          onChange={(e) => setRule('initialViewCount', clamped(e.target.value, 0, houseRules?.cardsPerPlayer ?? 4, 2))}
-        />
-        <Input
-          label='Jokers per deck'
-          mono
-          type='number'
-          disabled={ro}
-          value={num(houseRules?.numJokers)}
-          onChange={(e) => setRule('numJokers', clamped(e.target.value, 0, 2, 2))}
-        />
-        <Input
-          label='Decks'
-          mono
-          type='number'
-          disabled={ro}
-          value={num(houseRules?.numDecks)}
-          onChange={(e) => setRule('numDecks', clamped(e.target.value, 1, 4, 1))}
-        />
-        <Input
-          label='Cambia from round'
-          mono
-          type='number'
-          disabled={ro}
-          value={num(houseRules?.cambiaAllowedRound)}
-          onChange={(e) => setRule('cambiaAllowedRound', clamped(e.target.value, 0, 255, 0))}
-        />
-      </div>
+      <RuleGroup title='Deal' hint='The peek never exceeds the hand'>
+        <div style={FIELD_GRID}>
+          <Input
+            label='Cards per hand'
+            type='number'
+            disabled={ro}
+            value={num(houseRules?.cardsPerPlayer)}
+            onChange={(e) => setCardsPerPlayer(clamped(e.target.value, 1, 6, 4))}
+          />
+          <Input
+            label='Opening peek'
+            type='number'
+            disabled={ro}
+            value={num(houseRules?.initialViewCount)}
+            onChange={(e) => setRule('initialViewCount', clamped(e.target.value, 0, houseRules?.cardsPerPlayer ?? 4, 2))}
+          />
+          <Input
+            label='Decks'
+            type='number'
+            disabled={ro}
+            value={num(houseRules?.numDecks)}
+            onChange={(e) => setRule('numDecks', clamped(e.target.value, 1, 4, 1))}
+          />
+          <Input
+            label='Jokers per deck'
+            type='number'
+            disabled={ro}
+            value={num(houseRules?.numJokers)}
+            onChange={(e) => setRule('numJokers', clamped(e.target.value, 0, 2, 2))}
+          />
+        </div>
+      </RuleGroup>
 
-      <div style={{ ...CAPS_LABEL, margin: '2px 0 10px' }}>House rules</div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '12px 18px' }}>
-        <Checkbox
-          disabled={ro}
-          checked={!!houseRules?.allowDrawFromDiscardPile}
-          onChange={(v) => setRule('allowDrawFromDiscardPile', v)}
-          label='Draw from discard pile'
-          description='allowDrawFromDiscardPile'
-        />
-        <Checkbox
-          disabled={ro}
-          checked={!!houseRules?.allowReplaceAbilities}
-          onChange={(v) => setRule('allowReplaceAbilities', v)}
-          label='Replace abilities'
-          description='allowReplaceAbilities'
-        />
-        <Checkbox
-          disabled={ro}
-          checked={houseRules?.allowOpponentSnapping ?? true}
-          onChange={(v) => setRule('allowOpponentSnapping', v)}
-          label='Opponent snapping'
-          description='allowOpponentSnapping'
-        />
-        <Checkbox
-          disabled={ro}
-          checked={!!houseRules?.snapRace}
-          onChange={(v) => setRule('snapRace', v)}
-          label='Snap race'
-          description='snapRace — only the first snap wins'
-        />
-        <Checkbox
-          disabled={ro}
-          checked={houseRules?.lockCallerHand ?? true}
-          onChange={(v) => setRule('lockCallerHand', v)}
-          label='Lock caller hand'
-          description='lockCallerHand — the Cambia caller is safe from snaps and swaps'
-        />
-        <Checkbox
-          disabled={ro}
-          checked={!!houseRules?.forfeitOnDisconnect}
-          onChange={(v) => setRule('forfeitOnDisconnect', v)}
-          label='Forfeit on disconnect'
-          description='forfeitOnDisconnect'
-        />
-      </div>
+      <RuleGroup title='Play'>
+        <div style={{ ...FIELD_GRID, marginBottom: 'var(--space-4)' }}>
+          <Input
+            label='Cambia from round'
+            type='number'
+            disabled={ro}
+            value={num(houseRules?.cambiaAllowedRound)}
+            onChange={(e) => setRule('cambiaAllowedRound', clamped(e.target.value, 0, 255, 0))}
+          />
+          <Input
+            label='Snap penalty (cards)'
+            type='number'
+            disabled={ro}
+            value={num(houseRules?.penaltyDrawCount)}
+            onChange={(e) => setRule('penaltyDrawCount', clamped(e.target.value, 0, 6, 2))}
+          />
+        </div>
+        <div style={RULE_GRID}>
+          <Checkbox
+            disabled={ro}
+            checked={!!houseRules?.allowDrawFromDiscardPile}
+            onChange={(v) => setRule('allowDrawFromDiscardPile', v)}
+            label='Draw from discard'
+            description='The discard pile is a legal draw.'
+          />
+          <Checkbox
+            disabled={ro}
+            checked={!!houseRules?.allowReplaceAbilities}
+            onChange={(v) => setRule('allowReplaceAbilities', v)}
+            label='Replace abilities'
+            description='A card discarded by replacing still fires its ability.'
+          />
+          <Checkbox
+            disabled={ro}
+            checked={houseRules?.allowOpponentSnapping ?? true}
+            onChange={(v) => setRule('allowOpponentSnapping', v)}
+            label='Snap other hands'
+            description="Snap a matching card out of another player's hand."
+          />
+          <Checkbox
+            disabled={ro}
+            checked={!!houseRules?.snapRace}
+            onChange={(v) => setRule('snapRace', v)}
+            label='Snap race'
+            description='Only the first snap counts. Later snaps take the penalty.'
+          />
+          <Checkbox
+            disabled={ro}
+            checked={houseRules?.lockCallerHand ?? true}
+            onChange={(v) => setRule('lockCallerHand', v)}
+            label="Lock caller's hand"
+            description="The Cambia caller's hand is safe from snaps and swaps."
+          />
+          <Checkbox
+            disabled={ro}
+            checked={!!houseRules?.forfeitOnDisconnect}
+            onChange={(v) => setRule('forfeitOnDisconnect', v)}
+            label='Forfeit on disconnect'
+            description='A dropped player forfeits instead of rejoining.'
+          />
+        </div>
+      </RuleGroup>
 
-      <div style={{ borderTop: '1.5px solid var(--border-subtle)', marginTop: 16, paddingTop: 14 }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-          <span style={CAPS_LABEL}>Circuit scoring</span>
+      <RuleGroup
+        title='Circuit scoring'
+        hint='Rounds accumulate toward a target'
+        action={
           <Switch
             disabled={ro}
             checked={!!circuit?.enabled}
             onChange={(v) => { setCircuit((prev) => ({ ...prev, enabled: v })); setSaveStatus('idle'); }}
-            label={circuit?.enabled ? 'Enabled' : 'Off'}
+            label={circuit?.enabled ? 'On' : 'Off'}
           />
-        </div>
+        }
+      >
         {circuit?.enabled && (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 14 }}>
+          <div style={FIELD_GRID}>
             <Input
               label='Target score'
-              mono
               type='number'
               disabled={ro}
               value={num(circuit?.rules?.targetScore)}
@@ -241,7 +280,6 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
             />
             <Input
               label='Win bonus'
-              mono
               type='number'
               disabled={ro}
               value={num(circuit?.rules?.winBonus)}
@@ -249,7 +287,6 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
             />
             <Input
               label='False Cambia penalty'
-              mono
               type='number'
               disabled={ro}
               value={num(circuit?.rules?.falseCambiaPenalty)}
@@ -257,19 +294,21 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
             />
           </div>
         )}
-      </div>
+      </RuleGroup>
 
-      <div style={{ borderTop: '1.5px solid var(--border-subtle)', marginTop: 16, paddingTop: 14, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+      <div style={{ ...DIVIDER, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--space-3)', flexWrap: 'wrap' }}>
         <Switch
           disabled={ro}
           checked={!!lobbySettings?.autoStart}
           onChange={(v) => { setLobbySettings((prev) => ({ ...prev, autoStart: v })); setSaveStatus('idle'); }}
-          label='Auto start when everyone is ready'
+          label='Auto-start when all ready'
         />
-        {isHost && (
-          <Button variant='secondary' size='sm' disabled={!hasChanges} onClick={save}>
-            {saveStatus === 'saved' ? 'Saved' : 'Save settings'}
+        {isHost ? (
+          <Button variant='primary' size='sm' disabled={!hasChanges} onClick={save}>
+            {saveStatus === 'saved' ? 'Saved' : 'Save rules'}
           </Button>
+        ) : (
+          <span style={{ fontSize: 'var(--ds-text-sm)', color: 'var(--text-tertiary)' }}>Host sets the rules</span>
         )}
       </div>
     </Panel>
