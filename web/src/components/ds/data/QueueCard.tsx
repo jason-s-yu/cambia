@@ -11,7 +11,7 @@ export interface QueueCardProps {
   minutes?: number;
   /** Rating pool label, e.g. "Glicko-2" or "OpenSkill". */
   pool?: string;
-  /** Primary queue: gold border + PRIMARY badge + gold Play. */
+  /** Primary queue: gold border + gold Ranked badge + gold Play. */
   primary?: boolean;
   ranked?: boolean;
   onPlay?: () => void;
@@ -24,7 +24,7 @@ const QueueCard: React.FC<QueueCardProps> = ({
   tagline,
   players = 2,
   rounds = 8,
-  minutes = 40,
+  minutes = 20,
   pool,
   primary = false,
   ranked = true,
@@ -49,7 +49,7 @@ const QueueCard: React.FC<QueueCardProps> = ({
           <div style={{ fontSize: 'var(--ds-text-lg)', fontWeight: 'var(--weight-bold)', letterSpacing: 'var(--ds-tracking-tight)', lineHeight: 'var(--ds-leading-tight)' }}>{name}</div>
           {tagline && <div style={{ fontSize: 'var(--ds-text-xs)', color: 'var(--text-secondary)', marginTop: 2 }}>{tagline}</div>}
         </div>
-        {ranked ? <Badge tone={primary ? 'gold' : 'warning'}>{primary ? 'PRIMARY' : 'Ranked'}</Badge> : <Badge>Casual</Badge>}
+        {ranked ? <Badge tone={primary ? 'gold' : 'warning'}>Ranked</Badge> : <Badge>Casual</Badge>}
       </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', minWidth: 0, gap: '4px 14px', fontSize: 'var(--ds-text-xs)', fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
         <span>{players}p</span>

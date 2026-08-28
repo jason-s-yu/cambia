@@ -34,12 +34,13 @@ const PRIMARY_QUEUE_IDS = new Set(['h2h_rapid', 'ffa4_standard']);
 
 /**
  * Rough estimated match length in minutes from queue shape, since the
- * matchmaking queues endpoint does not return one directly. FFA queues
- * (>2 players) run longer per round than head-to-head.
+ * matchmaking queues endpoint does not return one directly. Grounded on the
+ * default 15s turn timer: a head-to-head round runs ~2-3 minutes, an FFA
+ * round (>2 players) ~4-5.
  */
 function estimateMinutes(queue: QueueInfo): number {
-  const perRound = queue.players > 2 ? 7 : 5;
-  return Math.max(perRound, Math.round(queue.rounds * perRound));
+  const perRound = queue.players > 2 ? 5 : 2.5;
+  return Math.max(2, Math.round(queue.rounds * perRound));
 }
 
 /** Short fallback label for a lobby without a display name. */
