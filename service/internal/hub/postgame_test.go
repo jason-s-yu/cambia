@@ -27,8 +27,8 @@ func newPostGameHub(t *testing.T) (*Hub, uuid.UUID, uuid.UUID, *Connection, *Con
 	lob.JoinUser(idB)
 
 	h := NewHub(lob)
-	connA := newFakeConn(idA, "A", true)
-	connB := newFakeConn(idB, "B", false)
+	connA := newFakeConn(idA, "A")
+	connB := newFakeConn(idB, "B")
 	h.conns[idA] = connA
 	h.conns[idB] = connB
 
@@ -109,8 +109,8 @@ func TestSecondGameStartsAfterPostGameReset(t *testing.T) {
 		return g
 	}
 
-	connA := newFakeConn(idA, "A", true)
-	connB := newFakeConn(idB, "B", false)
+	connA := newFakeConn(idA, "A")
+	connB := newFakeConn(idB, "B")
 	h.conns[idA] = connA
 	h.conns[idB] = connB
 
@@ -156,8 +156,8 @@ func TestGameEndedSchedulesPostGameReset(t *testing.T) {
 
 	h := NewHub(lob)
 	h.PostGameDuration = 20 * time.Millisecond
-	h.conns[idA] = newFakeConn(idA, "A", true)
-	h.conns[idB] = newFakeConn(idB, "B", false)
+	h.conns[idA] = newFakeConn(idA, "A")
+	h.conns[idB] = newFakeConn(idB, "B")
 	h.Phase = PhaseInGame
 
 	h.dispatch(ClientMsg{Type: "_game_ended"})
@@ -179,7 +179,7 @@ func TestPostGameResetCancelledByShutdown(t *testing.T) {
 	h := NewHub(lob)
 	h.PostGameDuration = time.Hour // never fires on its own
 	h.Phase = PhaseInGame
-	h.conns[idA] = newFakeConn(idA, "A", true)
+	h.conns[idA] = newFakeConn(idA, "A")
 
 	h.dispatch(ClientMsg{Type: "_game_ended"})
 	h.Shutdown()
@@ -202,7 +202,7 @@ func TestReturnToLobbyIgnoredOutsidePostGame(t *testing.T) {
 	lob.JoinUser(idB)
 
 	h := NewHub(lob)
-	connA := newFakeConn(idA, "A", true)
+	connA := newFakeConn(idA, "A")
 	h.conns[idA] = connA
 	h.Phase = PhaseInGame
 	live := game.NewCambiaGame()

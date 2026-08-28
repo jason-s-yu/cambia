@@ -167,7 +167,7 @@ func JoinLobbyHandler(gs *GameServer) http.HandlerFunc {
 			http.Error(w, "Not invited to this private lobby", http.StatusForbidden)
 			return
 		}
-		lob.Users[userID] = true
+		lob.MarkJoinedUnsafe(userID)
 		lob.Mu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")

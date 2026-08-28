@@ -66,7 +66,7 @@ func TestHubSurvivesLastConnectionLeaving(t *testing.T) {
 	waitAlive(t, h, true)
 	defer h.Shutdown()
 
-	first := newFakeConn(host, "host", true)
+	first := newFakeConn(host, "host")
 	h.Join(first)
 	require.NotNil(t, waitEnvelope(t, first, "lobby_state", time.Second), "the first connection must be served")
 
@@ -77,7 +77,7 @@ func TestHubSurvivesLastConnectionLeaving(t *testing.T) {
 	assert.True(t, h.Alive(), "a hub whose lobby still exists must keep running with no connections")
 
 	// And the reconnect that used to hang is served.
-	second := newFakeConn(host, "host", true)
+	second := newFakeConn(host, "host")
 	h.Join(second)
 	assert.NotNil(t, waitEnvelope(t, second, "lobby_state", time.Second),
 		"a reconnect after every client dropped must be answered, not swallowed")
@@ -102,13 +102,13 @@ func TestHubKeepsMatchStateAcrossFullDisconnect(t *testing.T) {
 	waitAlive(t, h, true)
 	defer h.Shutdown()
 
-	conn := newFakeConn(host, "host", true)
+	conn := newFakeConn(host, "host")
 	h.Join(conn)
 	require.NotNil(t, waitEnvelope(t, conn, "lobby_state", time.Second))
 	h.Leave(host)
 	time.Sleep(50 * time.Millisecond)
 
-	rejoin := newFakeConn(host, "host", true)
+	rejoin := newFakeConn(host, "host")
 	h.Join(rejoin)
 	env := waitEnvelope(t, rejoin, "lobby_state", time.Second)
 	require.NotNil(t, env, "the reconnect must be served")
@@ -174,7 +174,7 @@ func TestJoinOnStoppedHubClosesConnection(t *testing.T) {
 	waitAlive(t, h, false)
 
 	closed := make(chan struct{})
-	conn := newFakeConn(host, "host", true)
+	conn := newFakeConn(host, "host")
 	conn.cancel = func() { close(closed) }
 
 	h.Join(conn)
@@ -197,7 +197,7 @@ func TestCleanupClosesQueuedConnections(t *testing.T) {
 	h := NewHub(lob)
 
 	closed := make(chan struct{})
-	queued := newFakeConn(host, "host", true)
+	queued := newFakeConn(host, "host")
 	queued.cancel = func() { close(closed) }
 	h.join <- queued // Run() is not started: the connection is queued and nothing will pick it up
 
@@ -241,7 +241,7 @@ func TestLeaveDoesNotTouchMembership(t *testing.T) {
 	waitAlive(t, h, true)
 	defer h.Shutdown()
 
-	conn := newFakeConn(other, "other", false)
+	conn := newFakeConn(other, "other")
 	h.Join(conn)
 	require.NotNil(t, waitEnvelope(t, conn, "lobby_state", time.Second))
 

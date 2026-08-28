@@ -376,7 +376,7 @@ func (h *Hub) handleLobbyMsg(msg ClientMsg) {
 		})
 
 	case "update_rules":
-		if !conn.IsHost {
+		if !h.isHost(msg.UserID) {
 			conn.SendEnvelope(h.errEnvelope("only the host can update rules"))
 			return
 		}
@@ -396,7 +396,7 @@ func (h *Hub) handleLobbyMsg(msg ClientMsg) {
 		}
 
 	case "start_game":
-		if !conn.IsHost {
+		if !h.isHost(msg.UserID) {
 			conn.SendEnvelope(h.errEnvelope("only the host can start the game"))
 			return
 		}
@@ -474,7 +474,7 @@ func (h *Hub) handleSearchingMsg(msg ClientMsg) {
 	}
 	switch msg.Type {
 	case "cancel_search":
-		if !conn.IsHost {
+		if !h.isHost(msg.UserID) {
 			conn.SendEnvelope(h.errEnvelope("only the host can cancel search"))
 			return
 		}
@@ -828,6 +828,19 @@ func (h *Hub) emitToWithSeq(userID uuid.UUID, seq uint64, eventType string, payl
 		return
 	}
 	conn.SendEnvelope(Envelope{Seq: seq, Type: eventType, Payload: raw})
+}
+
+// isHost reports whether userID holds the host role right now. Derived from the lobby at
+// permission-check time rather than cached on the connection: the role migrates to a remaining
+// member when a host leaves (cambia-835), and a flag stamped on the socket at accept time would
+// leave the promoted host refused and the departed one still authorised.
+func (h *Hub) isHost(userID uuid.UUID) bool {
+	if h.Lobby == nil {
+		return false
+	}
+	h.Lobby.Mu.Lock()
+	defer h.Lobby.Mu.Unlock()
+	return h.Lobby.HostUserID == userID
 }
 
 // getConn returns the connection for userID, or nil. Acquires connsMu (read).

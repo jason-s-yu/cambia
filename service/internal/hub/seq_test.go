@@ -30,13 +30,14 @@ func findByType(envs []Envelope, typ string) *Envelope {
 }
 
 // newFakeConn builds a Connection backed by a buffered outChan (no real WebSocket). Send and
-// SendEnvelope only touch outChan and cancel, so tests can read the frames the hub emitted.
-func newFakeConn(userID uuid.UUID, username string, isHost bool) *Connection {
+// SendEnvelope only touch outChan and cancel, so tests can read the frames the hub emitted. It
+// takes no host flag: the hub reads the host role off the lobby (cambia-835), so a connection is
+// the host's exactly when its user is the lobby's HostUserID.
+func newFakeConn(userID uuid.UUID, username string) *Connection {
 	return &Connection{
 		ID:       uuid.New(),
 		UserID:   userID,
 		Username: username,
-		IsHost:   isHost,
 		outChan:  make(chan []byte, 32),
 		cancel:   func() {},
 	}
@@ -89,8 +90,8 @@ func TestBroadcastLobbyUpdateStampsSharedSeq(t *testing.T) {
 	lob.JoinUser(idB)
 
 	h := NewHub(lob)
-	connA := newFakeConn(idA, "A", true)
-	connB := newFakeConn(idB, "B", false)
+	connA := newFakeConn(idA, "A")
+	connB := newFakeConn(idB, "B")
 	h.conns[idA] = connA
 	h.conns[idB] = connB
 
@@ -119,8 +120,8 @@ func TestReadyRaceAfterBroadcastAcceptsEachClientEcho(t *testing.T) {
 	lob.JoinUser(idB)
 
 	h := NewHub(lob)
-	connA := newFakeConn(idA, "A", true)
-	connB := newFakeConn(idB, "B", false)
+	connA := newFakeConn(idA, "A")
+	connB := newFakeConn(idB, "B")
 	h.conns[idA] = connA
 	h.conns[idB] = connB
 
@@ -161,8 +162,8 @@ func TestGameEndedDrivesPostGameWithSharedSeq(t *testing.T) {
 	lob.JoinUser(idB)
 
 	h := NewHub(lob)
-	connA := newFakeConn(idA, "A", true)
-	connB := newFakeConn(idB, "B", false)
+	connA := newFakeConn(idA, "A")
+	connB := newFakeConn(idB, "B")
 	h.conns[idA] = connA
 	h.conns[idB] = connB
 	h.Phase = PhaseInGame
@@ -196,7 +197,7 @@ func TestGameEndedIgnoredOutsideInGame(t *testing.T) {
 	lob.JoinUser(idA)
 
 	h := NewHub(lob)
-	connA := newFakeConn(idA, "A", true)
+	connA := newFakeConn(idA, "A")
 	h.conns[idA] = connA
 	h.Phase = PhaseOpen
 
@@ -244,8 +245,8 @@ func TestSyncStateRepairDoesNotConsumeSeq(t *testing.T) {
 	lob.JoinUser(idB)
 
 	h := NewHub(lob)
-	connA := newFakeConn(idA, "A", true)
-	connB := newFakeConn(idB, "B", false)
+	connA := newFakeConn(idA, "A")
+	connB := newFakeConn(idB, "B")
 	h.conns[idA] = connA
 	h.conns[idB] = connB
 
