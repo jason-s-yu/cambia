@@ -235,7 +235,9 @@ export interface PlayerSnapPenaltyEvent {
 	type: 'player_snap_penalty';
 	user: { id: string };
 	card: { id: string }; // Obfuscated card ID drawn
-	payload: { count: number; total: number };
+	// stockpileSize/discardSize are the server's counts after this card was drawn, including any
+	// reshuffle the draw forced (cambia-821). Both piles are public, so they ride the public event.
+	payload: { count: number; total: number; stockpileSize: number; discardSize: number };
 }
 
 /**

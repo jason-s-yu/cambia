@@ -373,7 +373,18 @@ export const useGameStore = create<GameState & GameActions>()(
 								if (player) {
 									player.handSize++; // Increment hand size
 								}
-								state.gameState.stockpileSize--; // Decrement stockpile
+								// Pile sizes are the server's post-draw counts (cambia-821), the same shape
+								// game_reshuffle_stockpile carries, so apply them rather than subtracting.
+								// A penalty draw is not always one card off the stockpile: the engine can
+								// reshuffle the discard pile back in mid-penalty, which grows the stockpile
+								// and empties the discard, and neither is something a client can derive from
+								// the event alone.
+								if (typeof payload.payload?.stockpileSize === 'number') {
+									state.gameState.stockpileSize = payload.payload.stockpileSize;
+								}
+								if (typeof payload.payload?.discardSize === 'number') {
+									state.gameState.discardSize = payload.payload.discardSize;
+								}
 							}
 							break;
 						case 'private_snap_penalty': // Private penalty card details

@@ -89,9 +89,19 @@ additionally, the `penalizeSnapFail()` function in `internal/game/game.go` calls
   },
   "card": {
     "id": "{uuid}"
+  },
+  "payload": {
+    "count": 1,
+    "total": 2,
+    "stockpileSize": 29,
+    "discardSize": 4
   }
 }
 ```
+
+`stockpileSize` and `discardSize` are the pile sizes after this penalty card was drawn, including
+any reshuffle the draw forced. Clients set their displayed counts from these rather than
+subtracting one per event: a penalty draw is not always one card off the stockpile.
 
 and privately ONLY to the player being penalized:
 
