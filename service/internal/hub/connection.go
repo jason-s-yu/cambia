@@ -12,23 +12,26 @@ import (
 )
 
 // Connection represents a single client WebSocket connection to a hub.
+//
+// It carries no host flag on purpose. The host role is not a property of a socket: it migrates
+// when a host leaves (cambia-835), and a flag captured at accept time would freeze whatever was
+// true then - leaving a promoted host unable to change anything and a demoted one still able to.
+// Hub.isHost reads the lobby at permission-check time instead.
 type Connection struct {
 	ID       uuid.UUID
 	UserID   uuid.UUID
 	Username string
-	IsHost   bool
 	ws       *websocket.Conn
 	outChan  chan []byte // buffered 32, pre-marshaled JSON
 	cancel   context.CancelFunc
 }
 
 // NewConnection creates a new Connection.
-func NewConnection(id, userID uuid.UUID, username string, isHost bool, ws *websocket.Conn, cancel context.CancelFunc) *Connection {
+func NewConnection(id, userID uuid.UUID, username string, ws *websocket.Conn, cancel context.CancelFunc) *Connection {
 	return &Connection{
 		ID:       id,
 		UserID:   userID,
 		Username: username,
-		IsHost:   isHost,
 		ws:       ws,
 		outChan:  make(chan []byte, 32),
 		cancel:   cancel,

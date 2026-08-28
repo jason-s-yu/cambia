@@ -52,17 +52,18 @@ func HubWSHandler(logger *logrus.Logger, gs *GameServer) http.HandlerFunc {
 			return
 		}
 
-		// 4. Check private lobby access. The host passes regardless of the membership map: they
-		// own the lobby, and leaving their own private lobby (cambia-807) drops the entry that
-		// the auto-invite at creation put there (cambia-771), which would otherwise lock them
-		// out of a lobby other members are still sitting in.
+		// 4. Check private lobby access: membership is the whole gate. The host is auto-invited at
+		// creation (cambia-771), so they hold an entry from the moment the lobby exists; once they
+		// deliberately leave they hold none, and the host role has already moved to a remaining
+		// member (cambia-835). cambia-807 let the host past this gate regardless of the map, to
+		// keep a lobby whose HostUserID was orphaned on a departed host reachable by its owner;
+		// with migration in place that allowance can only re-admit somebody who left.
 		lob.Mu.Lock()
 		_, isInUsers := lob.Users[userID]
 		lobType := lob.Type
-		isHost := lob.HostUserID == userID
 		lob.Mu.Unlock()
 
-		if lobType == "private" && !isInUsers && !isHost {
+		if lobType == "private" && !isInUsers {
 			http.Error(w, "not invited to private lobby", http.StatusForbidden)
 			return
 		}
@@ -83,15 +84,12 @@ func HubWSHandler(logger *logrus.Logger, gs *GameServer) http.HandlerFunc {
 		// just left must therefore close its socket before releasing membership, or its own
 		// reconnect would hand the membership straight back (see the web client's leave path).
 		lob.Mu.Lock()
-		if lob.Users == nil {
-			lob.Users = make(map[uuid.UUID]bool)
-		}
-		lob.Users[userID] = true
+		lob.MarkJoinedUnsafe(userID)
 		lob.Mu.Unlock()
 
 		ctx, cancel := context.WithCancel(r.Context())
 		connID, _ := uuid.NewRandom()
-		conn := hub.NewConnection(connID, userID, username, isHost, c, cancel)
+		conn := hub.NewConnection(connID, userID, username, c, cancel)
 
 		// 8. Register with hub
 		h.Join(conn)

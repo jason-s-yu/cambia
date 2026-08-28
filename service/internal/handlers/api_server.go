@@ -24,6 +24,10 @@ const defaultCountdownDuration = 3 * time.Second
 // to the open phase for the next game. Tests may lower GameServer.PostGameDuration for speed.
 const defaultPostGameDuration = 10 * time.Second
 
+// defaultLobbyIdleTTL is how long a lobby may hold no live connections before its hub reaps it
+// (cambia-836). Tests may lower GameServer.LobbyIdleTTL for speed.
+const defaultLobbyIdleTTL = 45 * time.Minute
+
 // GameServer manages the central stores for active lobbies and games.
 type GameServer struct {
 	Mutex        sync.Mutex
@@ -40,6 +44,11 @@ type GameServer struct {
 	// PostGameDuration is copied onto each hub at creation so the results-screen interval
 	// before the lobby reopens is configurable (production default; shortened in tests).
 	PostGameDuration time.Duration
+
+	// LobbyIdleTTL is copied onto each hub at creation: how long a lobby may hold no live
+	// connections, with no game in progress, before its hub tears it down (cambia-836).
+	// Overridable per deployment via CAMBIA_LOBBY_IDLE_TTL; shortened in tests.
+	LobbyIdleTTL time.Duration
 }
 
 // NewGameServer initializes a new GameServer with empty, ephemeral stores.
@@ -52,6 +61,7 @@ func NewGameServer() *GameServer {
 		Matchmaker:        matchmaking.NewMatchmaker(),
 		CountdownDuration: defaultCountdownDuration,
 		PostGameDuration:  defaultPostGameDuration,
+		LobbyIdleTTL:      defaultLobbyIdleTTL,
 	}
 }
 

@@ -46,6 +46,13 @@ type Lobby struct {
 	// OnEmpty is called when all users have left.
 	OnEmpty func(lobbyID uuid.UUID) `json:"-"`
 
+	// joinOrder stamps each member with the order in which they first joined, and joinSeq is
+	// the counter it draws from. Users is a map, so its iteration order is deliberately
+	// randomised and nothing about it is stable enough to pick a successor host from; join
+	// order is what makes migration on a host's departure deterministic (see nextHostUnsafe).
+	joinOrder map[uuid.UUID]uint64
+	joinSeq   uint64
+
 	Mu sync.Mutex
 }
 
@@ -75,6 +82,7 @@ func NewLobbyWithDefaults(hostID uuid.UUID) *Lobby {
 		GameMode:    "head_to_head",
 		Users:       make(map[uuid.UUID]bool),
 		ReadyStates: make(map[uuid.UUID]bool),
+		joinOrder:   make(map[uuid.UUID]uint64),
 		HouseRules:  defaultHouseRules,
 		Circuit:     defaultCircuit,
 		LobbySettings: LobbySettings{
@@ -90,9 +98,33 @@ func NewLobbyWithDefaults(hostID uuid.UUID) *Lobby {
 func (l *Lobby) JoinUser(userID uuid.UUID) {
 	l.Mu.Lock()
 	defer l.Mu.Unlock()
+	l.MarkJoinedUnsafe(userID)
+}
+
+// MarkJoinedUnsafe promotes a user to a fully joined member, initialises their ready state and
+// stamps their join order the first time they join. Assumes the lock is held.
+//
+// Every path that grants membership goes through here - POST /lobby/{id}/join, the WebSocket
+// upgrade, and JoinUser - so that join order is recorded once and stays recorded across a
+// reconnect. Losing a socket does not release membership (cambia-807), so it must not restamp
+// the order either: the successor host is the member who has been here longest.
+func (l *Lobby) MarkJoinedUnsafe(userID uuid.UUID) {
+	if l.Users == nil {
+		l.Users = make(map[uuid.UUID]bool)
+	}
+	if l.ReadyStates == nil {
+		l.ReadyStates = make(map[uuid.UUID]bool)
+	}
+	if l.joinOrder == nil {
+		l.joinOrder = make(map[uuid.UUID]uint64)
+	}
 	l.Users[userID] = true
 	if _, ok := l.ReadyStates[userID]; !ok {
 		l.ReadyStates[userID] = false
+	}
+	if _, ok := l.joinOrder[userID]; !ok {
+		l.joinSeq++
+		l.joinOrder[userID] = l.joinSeq
 	}
 }
 
@@ -107,6 +139,10 @@ func (l *Lobby) JoinUser(userID uuid.UUID) {
 // Emptiness counts joined members, not map entries. A lobby whose remaining entries are all
 // invitations nobody accepted has no one left to play: the host is auto-invited at creation
 // (cambia-771) and hosts that never connect would otherwise pin a lobby open forever.
+//
+// A departing host hands the role on. HostUserID is what every host-gated action is checked
+// against - rules, start, search, and the private-lobby WebSocket gate - so a host that left
+// without migrating left the remaining members with a lobby nobody could change (cambia-835).
 func (l *Lobby) RemoveUser(userID uuid.UUID) bool {
 	l.Mu.Lock()
 	if _, present := l.Users[userID]; !present {
@@ -115,7 +151,14 @@ func (l *Lobby) RemoveUser(userID uuid.UUID) bool {
 	}
 	delete(l.Users, userID)
 	delete(l.ReadyStates, userID)
+	delete(l.joinOrder, userID)
 	isEmpty := l.JoinedCount() == 0
+	if !isEmpty && l.HostUserID == userID {
+		if next := l.nextHostUnsafe(); next != uuid.Nil {
+			l.HostUserID = next
+			log.Printf("Lobby %s: host %s left; host migrated to %s.", l.ID, userID, next)
+		}
+	}
 	onEmpty := l.OnEmpty
 	if l.CountdownTimer != nil {
 		l.CancelCountdownUnsafe()
@@ -127,6 +170,28 @@ func (l *Lobby) RemoveUser(userID uuid.UUID) bool {
 		onEmpty(l.ID)
 	}
 	return true
+}
+
+// nextHostUnsafe picks the successor host: the joined member who joined earliest, with the lower
+// user id breaking a tie (entries that predate join-order tracking all carry sequence zero).
+// Returns uuid.Nil when no joined member remains. Assumes the lock is held.
+//
+// Earliest joiner rather than, say, the lowest id: the role should land on whoever has been in
+// the lobby longest, which is both predictable to the people in it and stable under reconnects,
+// since a lost socket never restamps join order.
+func (l *Lobby) nextHostUnsafe() uuid.UUID {
+	var best uuid.UUID
+	var bestSeq uint64
+	for uid, joined := range l.Users {
+		if !joined {
+			continue
+		}
+		seq := l.joinOrder[uid]
+		if best == uuid.Nil || seq < bestSeq || (seq == bestSeq && uid.String() < best.String()) {
+			best, bestSeq = uid, seq
+		}
+	}
+	return best
 }
 
 // InviteUser marks a user as invited (Users[userID] = false) if not already present.

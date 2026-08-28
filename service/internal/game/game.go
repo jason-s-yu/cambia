@@ -470,6 +470,19 @@ func (g *CambiaGame) advanceTurn() {
 	g.onTurnAdvanced()
 }
 
+// HasPlayer reports whether playerID holds a seat in this game.
+// Public entry point: acquires mu.
+//
+// The hub gates its connect/disconnect wiring on this so those paths only ever reach actual
+// participants: a lobby member who arrived after the deal has no seat, and routing their socket
+// through HandleDisconnect would write a player_disconnect into the game's action log for
+// somebody who was never in the game.
+func (g *CambiaGame) HasPlayer(playerID uuid.UUID) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.getPlayerByID(playerID) != nil
+}
+
 // HandleDisconnect marks a player as disconnected and handles game state consequences.
 // Public entry point: acquires mu.
 func (g *CambiaGame) HandleDisconnect(playerID uuid.UUID) {

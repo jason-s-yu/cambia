@@ -26,6 +26,11 @@ const defaultCountdownDuration = 3 * time.Second
 // PostGameDuration on the hub. It matches the between-rounds interval in HandleRoundEnd.
 const defaultPostGameResultsDuration = 10 * time.Second
 
+// defaultIdleTTL is how long a hub may sit with no connections before it reaps its own lobby,
+// used when the GameServer does not override IdleTTL. Long enough that a table stepping away
+// between games keeps its lobby, short enough that abandoned lobbies do not accumulate.
+const defaultIdleTTL = 45 * time.Minute
+
 // GameFactory builds and registers a CambiaGame for the given players, wiring emitter as
 // the event sink. The returned game is registered but not begun (the hub calls BeginPreGame
 // after routing is in place). Returns nil if the game could not be created (e.g. <2 players).
@@ -98,6 +103,15 @@ type Hub struct {
 	// returns itself to PhaseOpen (see returnToLobby).
 	PostGameDuration time.Duration
 
+	// IdleTTL is how long the hub may hold no connections before it reaps its own lobby through
+	// OnIdle. Zero disables reaping.
+	IdleTTL time.Duration
+
+	// OnIdle tears the lobby down when the idle window elapses. Injected by the owner and
+	// pointed at the same teardown the last deliberate leave runs (cambia-807), so a lobby
+	// everyone abandoned is released exactly like one everyone left. Nil disables reaping.
+	OnIdle func(lobbyID uuid.UUID)
+
 	// seq is the monotonic per-hub sequence stamped on every server->client envelope. Invariant:
 	// one logical broadcast consumes exactly one seq, stamped identically on every recipient's copy
 	// (Emit does this inherently; broadcastLobbyUpdate does it via emitToWithSeq). dispatch() rejects
@@ -134,10 +148,19 @@ type Hub struct {
 	// Matchmaker integration
 	matched chan []MatchedPlayer // matchmaker sends matched players here
 
+	// idleTimer/idleGen own the idle window. Both belong to the Run() goroutine. Stopping a
+	// time.Timer does not un-fire one that already ran, so every fire carries the generation it
+	// was armed with and handleIdleReap discards a superseded one: that is what makes a
+	// reconnect genuinely reset the clock rather than leave an older timer to fire on the
+	// lobby's new occupants.
+	idleTimer *time.Timer
+	idleGen   uint64
+
 	// Channels for Run() select loop
 	join     chan *Connection
 	leave    chan uuid.UUID
 	incoming chan ClientMsg
+	idleReap chan uint64
 	shutdown chan struct{}
 
 	// shutdownOnce guards close(shutdown): Run()'s exit path closes the channel to release
@@ -153,6 +176,7 @@ func NewHub(lob *lobby.Lobby) *Hub {
 		Lobby:             lob,
 		CountdownDuration: defaultCountdownDuration,
 		PostGameDuration:  defaultPostGameResultsDuration,
+		IdleTTL:           defaultIdleTTL,
 		conns:             make(map[uuid.UUID]*Connection),
 		CumulativeScores:  make(map[uuid.UUID]int),
 		RoundHistory:      make([]map[uuid.UUID]int, 0),
@@ -160,6 +184,7 @@ func NewHub(lob *lobby.Lobby) *Hub {
 		join:              make(chan *Connection, 8),
 		leave:             make(chan uuid.UUID, 8),
 		incoming:          make(chan ClientMsg, 64),
+		idleReap:          make(chan uint64, 1),
 		shutdown:          make(chan struct{}),
 	}
 }
@@ -172,20 +197,26 @@ func NewHub(lob *lobby.Lobby) *Hub {
 // accepted and then hung forever (cambia-808). It also threw away state only the hub holds -
 // the phase, the routing to a live CambiaGame, and a ranked match's cumulative scores - which
 // a restarted hub could not reconstruct. The hub now runs for as long as its lobby exists and
-// stops only when the owner tears the lobby down (Shutdown) or the context is cancelled.
+// stops only when the owner tears the lobby down (Shutdown), the idle window elapses with
+// nothing connected (cambia-836), or the context is cancelled.
 func (h *Hub) Run(ctx context.Context) {
 	h.alive.Store(true)
 	defer h.exit()
+	// A lobby whose members never connect at all is idle from birth, so the first window opens
+	// here rather than waiting for a departure.
+	h.armIdleReap()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case conn := <-h.join:
+			h.cancelIdleReap()
 			h.connsMu.Lock()
 			h.conns[conn.UserID] = conn
 			h.connsMu.Unlock()
 			h.sendLobbyState(conn)
 			h.broadcastLobbyUpdate()
+			h.notePlayerReconnected(conn.UserID)
 		case userID := <-h.leave:
 			// Connection-level only: the user keeps their lobby membership, because this fires
 			// for a dropped socket just as it does for a deliberate leave (which releases
@@ -200,14 +231,121 @@ func (h *Hub) Run(ctx context.Context) {
 				conn.Close()
 			}
 			h.broadcastLobbyUpdate()
+			h.notePlayerDisconnected(userID)
+			if h.connCount() == 0 {
+				h.armIdleReap()
+			}
 		case msg := <-h.incoming:
 			h.dispatch(msg)
 		case players := <-h.matched:
 			h.handleMatchFound(players)
+		case gen := <-h.idleReap:
+			h.handleIdleReap(gen)
 		case <-h.shutdown:
 			return
 		}
 	}
+}
+
+// notePlayerDisconnected tells a running game that one of its players lost their socket.
+// game.HandleDisconnect had no callers at all before this: a mid-game drop never marked the
+// player disconnected, so the ForfeitOnDisconnect house rule was dead, circuit grace timers never
+// armed, and a turn timer running out was the only thing that ever noticed (cambia-837).
+//
+// This is a connection-level event and stays one. Lobby membership is untouched, so the player
+// keeps their seat and their resume entry and can reconnect into the game: the transient-versus-
+// deliberate distinction cambia-807 drew. A deliberate leave cannot reach here mid-game anyway,
+// since the leave endpoint refuses one.
+//
+// Run() goroutine only, and safe there: h.Phase and h.Game belong to it, and HandleDisconnect
+// takes the game's own mutex, which nothing on this path holds (connsMu is released above).
+func (h *Hub) notePlayerDisconnected(userID uuid.UUID) {
+	if h.Phase != PhaseInGame || h.Game == nil || !h.Game.HasPlayer(userID) {
+		return
+	}
+	h.Game.HandleDisconnect(userID)
+}
+
+// notePlayerReconnected is the counterpart: it restores the seat, sends the returning player the
+// sync state they need to draw the table again, reschedules their turn timer if the game was
+// waiting on them, and cancels a circuit grace timer before the AI takes over.
+//
+// The game is handed no socket of its own. models.Player.Conn is only ever written and never
+// read - every event a game sends goes out through the hub Emitter - and passing the raw
+// WebSocket would give HandleReconnect's not-a-player path the power to close a connection the
+// hub is still serving.
+func (h *Hub) notePlayerReconnected(userID uuid.UUID) {
+	if h.Phase != PhaseInGame || h.Game == nil || !h.Game.HasPlayer(userID) {
+		return
+	}
+	h.Game.HandleReconnect(userID, nil)
+}
+
+// armIdleReap opens a fresh idle window. Called from Run() only, so idleTimer and idleGen need no
+// lock. The timer posts back into the Run() loop rather than acting on its own, the same shape as
+// scheduleGameStart and schedulePostGameReset (cambia-793): the reap decision reads h.Phase, which
+// belongs to the Run goroutine, and a shutdown drops the pending fire.
+func (h *Hub) armIdleReap() {
+	h.cancelIdleReap()
+	if h.IdleTTL <= 0 || h.OnIdle == nil {
+		return
+	}
+	gen := h.idleGen
+	h.idleTimer = time.AfterFunc(h.IdleTTL, func() {
+		select {
+		case h.idleReap <- gen:
+		case <-h.shutdown:
+		}
+	})
+}
+
+// cancelIdleReap closes the current window. The generation bump is the part that matters: Stop()
+// cannot un-fire a timer that already ran, so a fire already in flight is invalidated here and
+// discarded by handleIdleReap instead of reaping a lobby somebody just reconnected to.
+func (h *Hub) cancelIdleReap() {
+	if h.idleTimer != nil {
+		h.idleTimer.Stop()
+		h.idleTimer = nil
+	}
+	h.idleGen++
+}
+
+// handleIdleReap runs the reap decision in the Run() goroutine. A lobby whose members all closed
+// their tabs keeps its membership - only a deliberate leave releases that (cambia-807) - so
+// nothing else would ever reclaim it, and post-cambia-808 its hub goroutine parks for the life of
+// the process. Reaping goes through OnIdle, the same whole-lobby teardown the last leave runs.
+//
+// A running game is never idle, whatever the socket count: its turn timers and the forfeit rule
+// (cambia-837) still have to reach their own end, and the lobby is reconsidered a window later.
+func (h *Hub) handleIdleReap(gen uint64) {
+	if gen != h.idleGen || h.OnIdle == nil {
+		return
+	}
+	h.idleTimer = nil
+	if h.connCount() > 0 {
+		return // somebody is here; their departure opens the next window
+	}
+	if h.inGame() {
+		h.armIdleReap()
+		return
+	}
+	log.Printf("hub %s: no connections for %s and no game in progress; reaping lobby.", h.ID, h.IdleTTL)
+	h.OnIdle(h.ID)
+}
+
+// inGame reports whether a game is under way, from the hub's phase and the lobby's own flag. The
+// two are cleared at different moments - OnGameEnd clears the lobby while the hub moves to
+// PhasePostGame - so the exemption holds while either says a game is live.
+func (h *Hub) inGame() bool {
+	if h.Phase == PhaseInGame || h.Phase == PhaseRoundEnd {
+		return true
+	}
+	if h.Lobby == nil {
+		return false
+	}
+	h.Lobby.Mu.Lock()
+	defer h.Lobby.Mu.Unlock()
+	return h.Lobby.InGame
 }
 
 // exit runs on Run()'s way out, in an order the rest of the package depends on: the hub stops
@@ -225,8 +363,10 @@ func (h *Hub) exit() {
 }
 
 // cleanup closes every connection the hub still owns, including connections that were handed
-// to Join but never registered.
+// to Join but never registered, and releases the idle window.
 func (h *Hub) cleanup() {
+	h.cancelIdleReap()
+
 	h.connsMu.Lock()
 	conns := make([]*Connection, 0, len(h.conns))
 	for _, conn := range h.conns {
@@ -376,7 +516,7 @@ func (h *Hub) handleLobbyMsg(msg ClientMsg) {
 		})
 
 	case "update_rules":
-		if !conn.IsHost {
+		if !h.isHost(msg.UserID) {
 			conn.SendEnvelope(h.errEnvelope("only the host can update rules"))
 			return
 		}
@@ -396,7 +536,7 @@ func (h *Hub) handleLobbyMsg(msg ClientMsg) {
 		}
 
 	case "start_game":
-		if !conn.IsHost {
+		if !h.isHost(msg.UserID) {
 			conn.SendEnvelope(h.errEnvelope("only the host can start the game"))
 			return
 		}
@@ -474,7 +614,7 @@ func (h *Hub) handleSearchingMsg(msg ClientMsg) {
 	}
 	switch msg.Type {
 	case "cancel_search":
-		if !conn.IsHost {
+		if !h.isHost(msg.UserID) {
 			conn.SendEnvelope(h.errEnvelope("only the host can cancel search"))
 			return
 		}
@@ -830,11 +970,31 @@ func (h *Hub) emitToWithSeq(userID uuid.UUID, seq uint64, eventType string, payl
 	conn.SendEnvelope(Envelope{Seq: seq, Type: eventType, Payload: raw})
 }
 
+// isHost reports whether userID holds the host role right now. Derived from the lobby at
+// permission-check time rather than cached on the connection: the role migrates to a remaining
+// member when a host leaves (cambia-835), and a flag stamped on the socket at accept time would
+// leave the promoted host refused and the departed one still authorised.
+func (h *Hub) isHost(userID uuid.UUID) bool {
+	if h.Lobby == nil {
+		return false
+	}
+	h.Lobby.Mu.Lock()
+	defer h.Lobby.Mu.Unlock()
+	return h.Lobby.HostUserID == userID
+}
+
 // getConn returns the connection for userID, or nil. Acquires connsMu (read).
 func (h *Hub) getConn(userID uuid.UUID) *Connection {
 	h.connsMu.RLock()
 	defer h.connsMu.RUnlock()
 	return h.conns[userID]
+}
+
+// connCount returns how many connections the hub currently holds. Acquires connsMu (read).
+func (h *Hub) connCount() int {
+	h.connsMu.RLock()
+	defer h.connsMu.RUnlock()
+	return len(h.conns)
 }
 
 // connUserIDs returns a snapshot of the currently connected user IDs. Acquires connsMu (read).
@@ -1001,8 +1161,23 @@ func (h *Hub) Alive() bool {
 // run on a goroutine other than the hub's Run() loop (e.g. a turn-timeout timer), so it must not
 // mutate h.Phase directly; this mirrors the _start_next_round synthetic-message pattern to route
 // the mutation through dispatch() inside Run() instead (cambia-510).
+//
+// The send never blocks the caller. Since cambia-837 the caller can be the Run goroutine itself:
+// a drop under ForfeitOnDisconnect ends the game inside the leave case, and a blocking send onto
+// a full incoming queue would park the only goroutine that drains it. A full queue hands the send
+// to a goroutine that can park harmlessly, so the transition is deferred rather than dropped, and
+// released by shutdown if the hub stops first.
 func (h *Hub) NotifyGameEnded() {
-	h.incoming <- ClientMsg{Type: "_game_ended"}
+	select {
+	case h.incoming <- ClientMsg{Type: "_game_ended"}:
+	default:
+		go func() {
+			select {
+			case h.incoming <- ClientMsg{Type: "_game_ended"}:
+			case <-h.shutdown:
+			}
+		}()
+	}
 }
 
 // Incoming returns the channel for routing inbound ClientMsgs into the hub.
