@@ -241,9 +241,8 @@ const DashboardPage: React.FC = () => {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 20, minWidth: 0 }}>
         <div>
           <h1 style={{ margin: 0, fontSize: 'var(--ds-text-3xl)', fontWeight: 'var(--weight-bold)', letterSpacing: 'var(--ds-tracking-tight)', lineHeight: 'var(--ds-leading-tight)' }}>
-            Lowest score wins.
+            Quick play
           </h1>
-          <p style={{ margin: '6px 0 0', color: 'var(--text-secondary)', fontSize: 'var(--text-md)' }}>Pick a queue or open a lobby.</p>
         </div>
 
         {queuesError && <ErrorLine>{queuesError}</ErrorLine>}
