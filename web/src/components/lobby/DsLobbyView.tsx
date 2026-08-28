@@ -63,11 +63,36 @@ function useCountdownRemaining(): number | null {
   return remaining;
 }
 
+/** How long the dropped-frame notice stays up. Matches the table's notice line. */
+const DROP_NOTICE_MS = 4500;
+
+/**
+ * True while a lobby frame the hub discarded and the client could not resend is worth telling
+ * the player about (cambia-913 F4). useSocket counts them; the copy lives here, as it does on
+ * the table: a ready or a chat line that never landed leaves a lobby that simply does not react.
+ */
+function useDroppedNotice(): boolean {
+  const nonce = useCurrentLobbyStore((s) => s.droppedActionNonce);
+  const seen = useRef(nonce);
+  const [showing, setShowing] = useState(false);
+
+  useEffect(() => {
+    if (nonce === seen.current) return;
+    seen.current = nonce;
+    setShowing(true);
+    const t = window.setTimeout(() => setShowing(false), DROP_NOTICE_MS);
+    return () => window.clearTimeout(t);
+  }, [nonce]);
+
+  return showing;
+}
+
 const DsLobbyView: React.FC<DsLobbyViewProps> = ({ lobbyId, phase, sendMessage, onLeave }) => {
   const lobbyDetails = useCurrentLobbyStore((s) => s.lobbyDetails);
   const chatMessages = useCurrentLobbyStore((s) => s.chatMessages);
   const selfId = useAuthStore((s) => s.user?.id);
   const remaining = useCountdownRemaining();
+  const dropped = useDroppedNotice();
   const [draft, setDraft] = useState('');
   const [copied, setCopied] = useState(false);
   const chatListRef = useRef<HTMLDivElement>(null);
@@ -181,6 +206,7 @@ const DsLobbyView: React.FC<DsLobbyViewProps> = ({ lobbyId, phase, sendMessage, 
 
           <div style={{ marginTop: 'var(--space-4)', display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
             <DsLobbyStatus tone={status.tone} text={status.text} value={status.value} />
+            {dropped && <DsLobbyStatus tone='warning' text='That did not go through.' />}
             {self && (
               <Button variant={isReady ? 'secondary' : 'primary'} fullWidth onClick={toggleReady}>
                 {isReady ? 'Unready' : 'Ready up'}

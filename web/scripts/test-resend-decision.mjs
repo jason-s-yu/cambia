@@ -13,7 +13,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { decideResend, tableContext, cardRefsOf } from '../src/lib/resendDecision.ts';
+import {
+    decideResend,
+    tableContext,
+    cardRefsOf,
+    recordOutbound,
+    resolveOutbox,
+    isLobbyFrame,
+    OUTBOX_LIMIT,
+    OUTBOX_TTL_MS
+} from '../src/lib/resendDecision.ts';
 
 const SELF = 'self-id';
 const OPP = 'opp-id';
@@ -40,7 +49,7 @@ function ctx(over = {}) {
 }
 
 function record(type, over = {}) {
-    return { type, cardRefs: [], sentSeq: 10, attempt: 0, ctx: ctx(), ...over };
+    return { type, cardRefs: [], sentSeq: 10, attempt: 0, sentAt: 1000, ctx: ctx(), ...over };
 }
 
 // --- The staleness proof -----------------------------------------------------------------
@@ -58,7 +67,9 @@ test('a repair stamped at or below the send seq never resends', () => {
 test('a frame is resent at most once, then the player is told', () => {
     const rec = record('action_snap', { cardRefs: [{ id: 'my-0' }], attempt: 1 });
     assert.equal(decideResend(rec, ctx(), 11), 'notify');
-    assert.equal(decideResend(record('chat', { attempt: 1 }), ctx(), 11), 'drop');
+    // A lobby frame is told about too (cambia-913 F4): a chat line dropped twice is as invisible
+    // as a lost action, and the lobby now has a place to say so.
+    assert.equal(decideResend(record('chat', { attempt: 1 }), ctx(), 11), 'notify');
 });
 
 // --- Snap --------------------------------------------------------------------------------
@@ -197,18 +208,23 @@ test('a finished or replaced game says nothing', () => {
 
 // --- Lobby frames -------------------------------------------------------------------------
 
-test('lobby frames resend while the phase holds', () => {
+test('lobby frames resend while the phase holds, and are reported once it moves', () => {
     // The staleness gate sits above the phase switch in hub.go dispatch(), so ready, chat,
-    // start_game and update_rules are dropped by exactly the same rule.
+    // start_game and update_rules are dropped by exactly the same rule. A phase that moved makes
+    // the frame unresendable ('ready' in an open lobby is not 'ready' in a countdown), and the
+    // player is told rather than left watching a lobby that did not react (cambia-913 F4).
     for (const type of ['chat', 'ready', 'unready', 'start_game', 'update_rules']) {
         const rec = record(type, { ctx: ctx({ phase: 'open' }) });
         assert.equal(decideResend(rec, ctx({ phase: 'open' }), 11), 'resend', type);
-        assert.equal(decideResend(rec, ctx({ phase: 'countdown' }), 11), 'drop', type);
+        assert.equal(decideResend(rec, ctx({ phase: 'countdown' }), 11), 'notify', type);
+        assert.equal(isLobbyFrame(rec), true, type);
     }
+    assert.equal(isLobbyFrame(record('action_snap')), false);
 });
 
 test('an unknown frame type is never resent', () => {
     assert.equal(decideResend(record('ping'), ctx(), 11), 'drop');
+    assert.equal(decideResend(record('ping', { attempt: 1 }), ctx(), 11), 'drop');
 });
 
 // --- Context derivation --------------------------------------------------------------------
@@ -258,6 +274,93 @@ test('cardRefsOf keeps the slot and the owner the frame addressed', () => {
         [{ id: 'a', idx: 1 }, { id: 'b', idx: 3, ownerId: OPP }]
     );
     assert.deepEqual(cardRefsOf({ type: 'ready' }), []);
+});
+
+// --- The outbox (more than one frame per repair window) -------------------------------------
+
+/** An outbox entry: what went on the wire, plus the record the decision reads. */
+function entry(type, over = {}) {
+    return { message: { type }, record: record(type, over) };
+}
+
+test('both frames dropped in one window are decided, not just the newest', () => {
+    // The hub answers every discarded frame with its own sync_state and that repair consumes no
+    // seq (hub.go sendSyncState), so a window can swallow two frames and answer both with the
+    // same seq. The single slot this replaced decided the newest and lost the older in silence,
+    // which is the failure cambia-891 set out to end (cambia-913 F2).
+    const snap = entry('action_snap', { cardRefs: [{ id: 'my-0' }] });
+    const chat = entry('chat', { ctx: ctx({ phase: 'open' }) });
+    const outbox = recordOutbound(recordOutbound([], snap), chat);
+    assert.equal(outbox.length, 2);
+
+    const out = resolveOutbox(outbox, ctx({ phase: 'open' }), 11, 1000);
+    assert.deepEqual(out.resend.map((e) => e.record.type), ['action_snap', 'chat']);
+    assert.deepEqual(out.pending, []);
+    assert.deepEqual(out.notify, []);
+});
+
+test('each frame is judged on its own intent, not the newest one\'s', () => {
+    // A snap whose discard top moved is stale; a chat sent in the same window is not.
+    const snap = entry('action_snap', { cardRefs: [{ id: 'my-0' }] });
+    const chat = entry('chat', { ctx: ctx({ phase: 'open' }) });
+    const moved = ctx({ phase: 'open', discardTopId: 'discard-9', cardIds: ['my-0', 'my-1', 'opp-0', 'discard-9'] });
+
+    const out = resolveOutbox([snap, chat], moved, 11, 1000);
+    assert.deepEqual(out.resend.map((e) => e.record.type), ['chat']);
+    assert.deepEqual(out.notify.map((r) => r.type), ['action_snap']);
+});
+
+test('a repair older than a frame leaves it in the outbox for the next one', () => {
+    const older = entry('action_snap', { cardRefs: [{ id: 'my-0' }], sentSeq: 10 });
+    const newer = entry('chat', { sentSeq: 12, ctx: ctx({ phase: 'open' }) });
+
+    const out = resolveOutbox([older, newer], ctx({ phase: 'open' }), 11, 1000);
+    assert.deepEqual(out.resend.map((e) => e.record.type), ['action_snap']);
+    assert.deepEqual(out.pending.map((e) => e.record.type), ['chat'], 'seq 11 cannot answer a frame sent at 12');
+    // The later repair answers it.
+    const next = resolveOutbox(out.pending, ctx({ phase: 'open' }), 13, 1000);
+    assert.deepEqual(next.resend.map((e) => e.record.type), ['chat']);
+    assert.deepEqual(next.pending, []);
+});
+
+test('the outbox is bounded and keeps the newest frames', () => {
+    let outbox = [];
+    for (let i = 0; i < OUTBOX_LIMIT + 3; i++) {
+        outbox = recordOutbound(outbox, entry('chat', { sentSeq: i, ctx: ctx({ phase: 'open' }) }));
+    }
+    assert.equal(outbox.length, OUTBOX_LIMIT);
+    assert.equal(outbox[0].record.sentSeq, 3, 'the oldest three were evicted');
+});
+
+test('a frame no repair ever answered ages out instead of being resurrected', () => {
+    // An accepted frame is never answered, so its entry would sit there forever and a repair
+    // minutes later would judge an intent nobody remembers forming.
+    const old = entry('chat', { sentAt: 1000, ctx: ctx({ phase: 'open' }) });
+    const fresh = entry('chat', { sentAt: 1000 + OUTBOX_TTL_MS, ctx: ctx({ phase: 'open' }) });
+    const at = 1000 + OUTBOX_TTL_MS + 1;
+
+    const out = resolveOutbox([old, fresh], ctx({ phase: 'open' }), 11, at);
+    assert.deepEqual(out.resend.map((e) => e.record.sentAt), [1000 + OUTBOX_TTL_MS]);
+    assert.deepEqual(out.notify, [], 'an expired frame is not worth a notice either');
+    assert.deepEqual(out.pending, []);
+});
+
+test('a repair that answers nothing changes nothing', () => {
+    const rec = entry('action_snap', { cardRefs: [{ id: 'my-0' }], sentSeq: 20 });
+    const out = resolveOutbox([rec], ctx(), 11, 1000);
+    assert.deepEqual(out.pending.length, 1);
+    assert.deepEqual(out.resend, []);
+    assert.deepEqual(out.notify, []);
+    assert.deepEqual(resolveOutbox([], ctx(), 11, 1000), { pending: [], resend: [], notify: [] });
+});
+
+test('a dropped game action and a dropped lobby frame are reported separately', () => {
+    // The two notices land in different surfaces, so the caller has to be able to tell them
+    // apart from the record alone.
+    const snap = entry('action_snap', { cardRefs: [{ id: 'my-0' }], attempt: 1 });
+    const ready = entry('ready', { attempt: 1, ctx: ctx({ phase: 'open' }) });
+    const out = resolveOutbox([snap, ready], ctx({ phase: 'open' }), 11, 1000);
+    assert.deepEqual(out.notify.map((r) => [r.type, isLobbyFrame(r)]), [['action_snap', false], ['ready', true]]);
 });
 
 console.log('resend decision: all assertions defined');
