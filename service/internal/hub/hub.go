@@ -92,6 +92,26 @@ type MatchedPlayer struct {
 	IsHost   bool
 }
 
+// MatchNotice tells a searching hub what the matchmaker did with its players.
+//
+// LobbyID is the lobby the match is played in. The hub whose own id it carries hosts the match
+// and runs the ready check; every other hub in the group forwards the notice to its clients so
+// they can move there, because a match is formed out of one lobby per party and only one of
+// those lobbies can hold the game (cambia-933).
+type MatchNotice struct {
+	LobbyID uuid.UUID
+	Players []MatchedPlayer
+}
+
+// SearchState is a requested matchmaking phase change: entering the queue carries that queue's
+// parameters, leaving it carries nothing but the flag. See SetSearchState.
+type SearchState struct {
+	Searching   bool
+	QueueID     string
+	IsRanked    bool
+	TotalRounds int
+}
+
 // Hub manages a single lobby's lifecycle through a single goroutine.
 // Phase and lobby/game state are mutated only from the Run() select loop. The conns map is
 // the exception: an in-progress CambiaGame emits events from its own timer goroutines
@@ -169,7 +189,8 @@ type Hub struct {
 	DealerSeatIdx    int                 // rotates each round
 
 	// Matchmaker integration
-	matched chan []MatchedPlayer // matchmaker sends matched players here
+	matched     chan MatchNotice // matchmaker sends the formed match here
+	searchState chan SearchState // the search endpoints send phase changes here
 
 	// idleTimer/idleGen own the idle window. Both belong to the Run() goroutine. Stopping a
 	// time.Timer does not un-fire one that already ran, so every fire carries the generation it
@@ -211,7 +232,8 @@ func NewHub(lob *lobby.Lobby) *Hub {
 		conns:             make(map[uuid.UUID]*Connection),
 		CumulativeScores:  make(map[uuid.UUID]int),
 		RoundHistory:      make([]map[uuid.UUID]int, 0),
-		matched:           make(chan []MatchedPlayer, 1),
+		matched:           make(chan MatchNotice, 1),
+		searchState:       make(chan SearchState, 4),
 		join:              make(chan *Connection, 8),
 		leave:             make(chan uuid.UUID, 8),
 		incoming:          make(chan ClientMsg, 64),
@@ -268,8 +290,10 @@ func (h *Hub) Run(ctx context.Context) {
 			}
 		case msg := <-h.incoming:
 			h.dispatch(msg)
-		case players := <-h.matched:
-			h.handleMatchFound(players)
+		case notice := <-h.matched:
+			h.handleMatchFound(notice)
+		case state := <-h.searchState:
+			h.applySearchState(state)
 		case gen := <-h.idleReap:
 			h.handleIdleReap(gen)
 		case <-h.shutdown:
@@ -693,21 +717,86 @@ func (h *Hub) handleSearchingMsg(msg ClientMsg) {
 	}
 }
 
-// handleMatchFound transitions the hub to ready-check when the matchmaker finds players.
-func (h *Hub) handleMatchFound(players []MatchedPlayer) {
-	h.Phase = PhaseReadyCheck
-	h.Emit("phase_change", map[string]interface{}{"phase": "ready_check"})
+// handleMatchFound reacts to a formed match. The hub hosting it runs the ready check; a hub
+// whose players are moving to another lobby stops searching and reopens, since it is no longer
+// part of any queue. Either way its clients get one match_found naming the lobby the match is
+// played in, which is the only thing that tells a non-hosting party where to go (cambia-933).
+func (h *Hub) handleMatchFound(notice MatchNotice) {
+	destination := notice.LobbyID
+	if destination == uuid.Nil {
+		destination = h.ID
+	}
+	hosting := destination == h.ID
+
+	if hosting {
+		h.Phase = PhaseReadyCheck
+	} else {
+		h.Phase = PhaseOpen
+	}
+	// The lobby has left the queue whichever side of the match it is on; leaving Searching set
+	// would have it advertise a search the matchmaker has already resolved.
+	if h.Lobby != nil {
+		h.Lobby.Mu.Lock()
+		h.Lobby.Searching = false
+		h.Lobby.Mu.Unlock()
+	}
+
+	h.Emit("phase_change", map[string]interface{}{"phase": h.Phase.String()})
 	h.Emit("match_found", map[string]interface{}{
+		"lobby_id":     destination.String(),
 		"queue_id":     h.QueueID,
 		"total_rounds": h.TotalRounds,
 		"is_ranked":    h.IsRanked,
-		"players":      players,
+		"players":      notice.Players,
 	})
 }
 
-// Matched returns a send-only channel that the matchmaker uses to deliver matched players.
-func (h *Hub) Matched() chan<- []MatchedPlayer {
+// Matched returns a send-only channel that the matchmaker uses to deliver a formed match.
+func (h *Hub) Matched() chan<- MatchNotice {
 	return h.matched
+}
+
+// SetSearchState asks the hub to enter or leave the searching phase, carrying the parameters of
+// the queue the lobby entered. Callable from any goroutine: the change is applied in the Run
+// loop, where Phase, QueueID, IsRanked and TotalRounds belong. The search endpoints used to
+// assign those four fields directly from their HTTP goroutine, which raced the Run loop's own
+// reads of Phase the moment anyone was connected (cambia-933).
+//
+// Never blocks: a hub that has stopped serving, or one somehow behind on the queue, drops the
+// notice with a log rather than parking the request handler.
+func (h *Hub) SetSearchState(state SearchState) {
+	select {
+	case h.searchState <- state:
+	default:
+		log.Printf("hub %s: dropped a search state change (searching=%v, queue=%q)", h.ID, state.Searching, state.QueueID)
+	}
+}
+
+// applySearchState performs the phase change SetSearchState asked for. Run() goroutine only.
+func (h *Hub) applySearchState(state SearchState) {
+	if state.Searching {
+		h.Phase = PhaseSearching
+		h.QueueID = state.QueueID
+		h.IsRanked = state.IsRanked
+		h.TotalRounds = state.TotalRounds
+		h.Emit("phase_change", map[string]interface{}{"phase": "searching"})
+		h.Emit("search_status", map[string]interface{}{"searching": true, "queue_id": state.QueueID})
+		return
+	}
+	h.Phase = PhaseOpen
+	h.Emit("phase_change", map[string]interface{}{"phase": "open"})
+	h.Emit("search_status", map[string]interface{}{"searching": false})
+}
+
+// UsernameOf returns the display name a connected user authenticated with, or "" when that user
+// has no live connection to this hub. Read under connsMu, so it is safe from any goroutine.
+func (h *Hub) UsernameOf(userID uuid.UUID) string {
+	h.connsMu.RLock()
+	defer h.connsMu.RUnlock()
+	if conn, ok := h.conns[userID]; ok {
+		return conn.Username
+	}
+	return ""
 }
 
 // HandleRoundEnd is called when a game ends during a ranked multi-round match.

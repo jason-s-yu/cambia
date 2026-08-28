@@ -34,7 +34,10 @@ interface OutboundMessage {
 
 /** Lobby-phase message types routed to lobbyStore */
 const LOBBY_TYPES = new Set([
-	'lobby_state', 'phase_change', 'chat', 'game_start',
+	// search_status and match_found are the matchmaking pair: the hub emits both, lobbyStore has
+	// always handled both, and until cambia-933 neither was routed here, so a found match reached
+	// the client as an "Unknown message type" warning and the search never resolved.
+	'lobby_state', 'phase_change', 'chat', 'game_start', 'search_status', 'match_found',
 ]);
 
 /** Game-phase message types routed to gameStore */

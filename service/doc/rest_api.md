@@ -173,11 +173,39 @@ Handled by `internal/handlers/lobby.go`. These manage *ephemeral* in-memory lobb
     {
       "type": "private" | "public" | "matchmaking", // string, optional (default: "private")
       "gameMode": "head_to_head" | "group_of_4" | ..., // string, optional (default: "head_to_head")
+      "queueID": "h2h_quickplay", // string, required for type "matchmaking", optional otherwise
       // Partial houseRules, circuit, or lobbySettings objects can be included
       "houseRules": { "turnTimerSec": 30 }, // optional
       "lobbySettings": { "autoStart": false } // optional
     }
     ```
+    **Matchmaking lobbies** are defined by their queue, not by a game mode: send
+    `{"type":"matchmaking","queueID":"<queue id>"}` and the handler derives the rest from that
+    queue's config (`internal/matchmaking/validation.go`, the same one `POST /lobby/{id}/search`
+    reads later, so the two never disagree):
+    * `gameMode`: `head_to_head` for a 2-player queue, `group_of_4` for a 4-player one. A
+      multi-round queue keeps the player-count mode until the round lifecycle lands (cambia-466).
+    * `mode`: `ranked` for a ranked queue, otherwise `casual`.
+    * `queueID`: echoed back, and it is what the search endpoint queues the lobby into. Round
+      count and ranked-ness are not stored a second time on the lobby; the hub reads them from
+      the queue config at search time.
+
+    The host is a joined member of a matchmaking lobby from creation (a party of one), so
+    `POST /lobby/{id}/search` succeeds without a WebSocket connection in between.
+
+    A `queueID` on a `public` or `private` lobby is accepted and validated: the search endpoint
+    gates on host, `searching` and `queueID` alone, so a standing lobby can queue its party
+    without being typed `matchmaking`.
+
+    Transitional shape (remove after 2026-10-01): `{"type":"matchmaking","gameMode":"<queue id>"}`
+    with no `queueID`, which is what web bundles cached from before cambia-933 send, is read as
+    that queue id and logged as deprecated.
+* **Matchmaking 400 bodies:**
+    * `Matchmaking lobby requires queueID` - type `matchmaking` with no `queueID` (and no queue id
+      in `gameMode`). There is no default queue.
+    * `Unknown matchmaking queue: <id>` - the `queueID` (on any lobby type) names no configured queue.
+    * `Matchmaking queue <id> has an unsupported player count: <n>` - the queue config asks for a
+      player count no game mode covers.
 * **Response (Success: 200 OK):** `application/json` - Returns the full state of the created lobby.
     ```json
     {
@@ -204,6 +232,23 @@ Handled by `internal/handlers/lobby.go`. These manage *ephemeral* in-memory lobb
     `queueID` is the one field that genuinely omits: it is a plain string, empty until a queue is
     selected.
 * **Response (Error):** `400 Bad Request` (invalid type/mode/payload), `401 Unauthorized`, `403 Forbidden`, `500 Internal Server Error`.
+
+#### `POST /lobby/{id}/search` and `DELETE /lobby/{id}/search`
+
+* **Description:** Puts the lobby's party into its `queueID` queue, or takes it back out. Host only.
+* **Response (Success: 200 OK):** `{"status":"searching","queue_id":"<id>"}` for the POST,
+    `{"status":"cancelled"}` for the DELETE.
+* **Response (Error):** `400 Bad Request` (`No queue selected for this lobby`, `Unknown queue ID`,
+    or a matchmaker rejection such as an empty party), `403 Forbidden` (not the host),
+    `404 Not Found`, `409 Conflict` (already searching).
+* **Who gets matched:** a queued party is only paired while at least one of its members holds a
+    WebSocket connection. A party whose members all closed their tabs keeps its place in the queue,
+    since membership survives a dropped socket by design and a page refresh must not cost a place
+    in line, but it is passed over until somebody reconnects and is released by the lobby's idle
+    window if nobody does. Pairing such a party would drop the connected side into a ready check
+    the absent side can never answer (cambia-933). A match that turns out to be short when it is
+    consolidated is abandoned: no client is told anything, and the still-connected parties go back
+    in the queue with their original queue time, so their search simply continues.
 
 #### `GET /lobby/list`
 

@@ -15,27 +15,30 @@ import (
 // QueuedLobby represents a lobby (party) waiting in a matchmaking queue.
 type QueuedLobby struct {
 	LobbyID     uuid.UUID
-	PlayerCount int       // current party size
-	QueueID     string    // e.g. "h2h_rapid", "ffa4_standard"
-	TargetCount int       // players needed (2 for h2h, 4 for ffa4)
-	AvgRating   float64   // avg party rating
-	MaxRD       float64   // worst RD in party
+	PlayerCount int     // current party size
+	QueueID     string  // e.g. "h2h_rapid", "ffa4_standard"
+	TargetCount int     // players needed (2 for h2h, 4 for ffa4)
+	AvgRating   float64 // avg party rating
+	MaxRD       float64 // worst RD in party
 	QueuedAt    time.Time
 	IsRanked    bool
-}
 
-// MatchedPlayer is a player included in a formed match.
-type MatchedPlayer struct {
-	UserID   uuid.UUID
-	Username string
-	LobbyID  uuid.UUID // which lobby they came from
+	// dormantLogged records that this party was already reported as having no live connection,
+	// so a party that sits dormant across many ticks is logged once rather than every tick.
+	// Written and read on the matchmaking goroutine only.
+	dormantLogged bool
 }
 
 // MatchResult is emitted via OnMatchFormed when a match is complete.
+//
+// Parties carries a copy of each party's queue entry, not just its id: a callback that finds the
+// match no longer playable puts the surviving parties straight back in the queue from these
+// entries, with their original queue time intact (cambia-933 F1).
 type MatchResult struct {
 	HostLobbyID uuid.UUID
-	Players     []MatchedPlayer
+	Parties     []QueuedLobby
 	QueueID     string
+	TargetCount int
 	IsRanked    bool
 }
 
@@ -52,6 +55,15 @@ type Matchmaker struct {
 
 	// OnMatchFormed is called (under mu released) when a match is formed.
 	OnMatchFormed func(result MatchResult)
+
+	// PartyLive reports whether a queued party still has somebody connected. A dormant party
+	// stays in the queue, because lobby membership outlives a dropped socket by design
+	// (cambia-807) and a page refresh must not cost a place in line, but it is not matchable:
+	// pairing it drops the live side into a ready check the absent side can never answer
+	// (cambia-933 F1). A dormant lobby is released by its hub's idle window, not from here.
+	//
+	// Called on the matchmaking goroutine with mu released. Left nil, every party counts live.
+	PartyLive func(lobbyID uuid.UUID) bool
 }
 
 // NewMatchmaker creates a Matchmaker with empty queues.
@@ -137,10 +149,33 @@ func (m *Matchmaker) processQueues() {
 		m.mu.Lock()
 		entries := make([]*QueuedLobby, len(m.queues[qid]))
 		copy(entries, m.queues[qid])
+		live := m.PartyLive
 		m.mu.Unlock()
 
-		m.tryMatchQueue(qid, entries)
+		m.tryMatchQueue(qid, matchableEntries(qid, entries, live))
 	}
+}
+
+// matchableEntries drops the parties that currently have nobody connected. They keep their place
+// in the queue, so a party that reconnects resumes its search where it left off; they are only
+// held back from being grouped while dormant (see Matchmaker.PartyLive).
+func matchableEntries(queueID string, entries []*QueuedLobby, live func(uuid.UUID) bool) []*QueuedLobby {
+	if live == nil {
+		return entries
+	}
+	matchable := entries[:0]
+	for _, e := range entries {
+		if live(e.LobbyID) {
+			e.dormantLogged = false
+			matchable = append(matchable, e)
+			continue
+		}
+		if !e.dormantLogged {
+			e.dormantLogged = true
+			log.Printf("matchmaking: lobby %s in queue %s has no live connection; holding it out of matching", e.LobbyID, queueID)
+		}
+	}
+	return matchable
 }
 
 // minQuality returns the minimum acceptable match quality based on wait time.
@@ -241,18 +276,18 @@ func (m *Matchmaker) commitMatch(queueID string, group []*QueuedLobby, matched m
 	hostLobbyID := group[0].LobbyID
 	isRanked := group[0].IsRanked
 
-	// Build players list (lobby-level only; per-player details populated by caller).
-	var players []MatchedPlayer
+	// One entry per party lobby, in group order, so the host party comes first. The caller
+	// populates per-player detail from the lobbies themselves.
+	parties := make([]QueuedLobby, 0, len(group))
 	for _, e := range group {
-		players = append(players, MatchedPlayer{
-			LobbyID: e.LobbyID,
-		})
+		parties = append(parties, *e)
 	}
 
 	result := MatchResult{
 		HostLobbyID: hostLobbyID,
-		Players:     players,
+		Parties:     parties,
 		QueueID:     queueID,
+		TargetCount: group[0].TargetCount,
 		IsRanked:    isRanked,
 	}
 

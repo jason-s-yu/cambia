@@ -21,8 +21,6 @@ import (
 	"github.com/jason-s-yu/cambia/service/internal/database"
 	"github.com/jason-s-yu/cambia/service/internal/handlers"
 	"github.com/jason-s-yu/cambia/service/internal/harnessproxy"
-	"github.com/jason-s-yu/cambia/service/internal/hub"
-	"github.com/jason-s-yu/cambia/service/internal/matchmaking"
 	"github.com/jason-s-yu/cambia/service/internal/middleware"
 	"github.com/jason-s-yu/cambia/service/internal/training"
 	_ "github.com/joho/godotenv/autoload"
@@ -119,22 +117,10 @@ func main() {
 		}
 	}
 
-	// Wire matchmaker callback before starting Run.
-	srv.Matchmaker.OnMatchFormed = func(result matchmaking.MatchResult) {
-		h, ok := srv.HubStore.GetHub(result.HostLobbyID)
-		if !ok {
-			log.Printf("Match formed but host hub %s not found", result.HostLobbyID)
-			return
-		}
-		players := make([]hub.MatchedPlayer, len(result.Players))
-		for i, p := range result.Players {
-			players[i] = hub.MatchedPlayer{
-				UserID:   p.UserID,
-				Username: p.Username,
-			}
-		}
-		h.Matched() <- players
-	}
+	// Wire the matchmaker's callbacks before starting Run. The handlers own them (and are covered
+	// by the handlers tests) because forming a match spans both parties' lobbies, not just the
+	// host's, and judging a party live means reading its hub.
+	srv.WireMatchmaker()
 
 	go srv.Matchmaker.Run(context.Background())
 

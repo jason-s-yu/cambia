@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -27,6 +29,27 @@ var validGameModes = map[string]bool{
 	"circuit_4p":   true,
 	"circuit_7p8p": true,
 	"custom":       true, // Allow custom mode if needed.
+}
+
+// matchmakingQueueID resolves the queue a matchmaking lobby is being created for.
+//
+// The current shape carries it in queueID. The transitional one carries it in gameMode: the web
+// bundle shipped before cambia-933 sent {type:"matchmaking", gameMode:"<queue id>"} and no
+// queueID at all, and a tab holding that cached bundle keeps sending it after the deploy. That
+// shape is accepted and logged as deprecated so those tabs keep working; remove it, and this
+// fallback, after 2026-10-01.
+//
+// A game mode in gameMode is not a queue id and never becomes one: with no queueID the caller
+// gets the missing-queue error rather than a silent default.
+func matchmakingQueueID(lob *lobby.Lobby, userID uuid.UUID) (string, error) {
+	if lob.QueueID != "" {
+		return lob.QueueID, nil
+	}
+	if _, known := matchmaking.GetQueueConfig(lob.GameMode); known {
+		log.Printf("lobby create: deprecated matchmaking shape from user %s: queue id %q sent as gameMode; send queueID instead", userID, lob.GameMode)
+		return lob.GameMode, nil
+	}
+	return "", errors.New("Matchmaking lobby requires queueID")
 }
 
 // CreateLobbyHandler handles requests to create a new ephemeral lobby.
@@ -73,11 +96,63 @@ func CreateLobbyHandler(gs *GameServer) http.HandlerFunc {
 			lob.Update(reqBody) // Apply overrides for rules/settings.
 		}
 
-		// Validate final lobby type and game mode.
+		// Validate the lobby type before anything derived from it.
 		if !validGameTypes[lob.Type] {
 			http.Error(w, "Invalid lobby type specified", http.StatusBadRequest)
 			return
 		}
+
+		// A matchmaking lobby is defined by its queue, not by a client-supplied game mode: the
+		// queue config carries the player count, the round count and whether the queue is
+		// ranked, and SearchLobbyHandler reads that same config again from lob.QueueID when the
+		// lobby enters the queue. Deriving the mode-shaped fields here is what keeps the two
+		// halves from disagreeing; before cambia-933 the client sent the queue id as gameMode
+		// and every Play click 400'd on "Invalid game mode specified".
+		if lob.Type == "matchmaking" {
+			queueID, derr := matchmakingQueueID(lob, userID)
+			if derr != nil {
+				http.Error(w, derr.Error(), http.StatusBadRequest)
+				return
+			}
+			cfg, known := matchmaking.GetQueueConfig(queueID)
+			if !known {
+				http.Error(w, "Unknown matchmaking queue: "+queueID, http.StatusBadRequest)
+				return
+			}
+			// The queue's player count picks the game mode. Rounds and ranked-ness are
+			// deliberately NOT copied onto a second home on the lobby: the hub reads them from
+			// the queue config at search time (SearchLobbyHandler sets h.TotalRounds and
+			// h.IsRanked from it), so the config stays the single source of truth. A
+			// multi-round queue therefore keeps the player-count mode rather than a circuit_*
+			// one until the round lifecycle lands (cambia-466).
+			switch cfg.Players {
+			case 2:
+				lob.GameMode = "head_to_head"
+			case 4:
+				lob.GameMode = "group_of_4"
+			default:
+				http.Error(w, fmt.Sprintf("Matchmaking queue %s has an unsupported player count: %d", queueID, cfg.Players), http.StatusBadRequest)
+				return
+			}
+			lob.QueueID = queueID
+			if cfg.Ranked {
+				lob.Mode = "ranked"
+			} else {
+				lob.Mode = "casual"
+			}
+		} else if lob.QueueID != "" {
+			// A public or private lobby may legitimately carry a queue id: SearchLobbyHandler
+			// gates on host, Searching and QueueID alone, so a standing lobby can queue its
+			// party without being typed "matchmaking". The id is kept, and validated here so a
+			// bogus one fails at create time rather than at search time.
+			if _, known := matchmaking.GetQueueConfig(lob.QueueID); !known {
+				http.Error(w, "Unknown matchmaking queue: "+lob.QueueID, http.StatusBadRequest)
+				return
+			}
+		}
+
+		// Validate the final game mode. For a matchmaking lobby this now checks a value this
+		// handler derived, not one the client sent.
 		if !validGameModes[lob.GameMode] {
 			http.Error(w, "Invalid game mode specified", http.StatusBadRequest)
 			return
@@ -90,6 +165,16 @@ func CreateLobbyHandler(gs *GameServer) http.HandlerFunc {
 		// refuses their own connection (cambia-771). This is safe to call unlocked: the lobby
 		// has not yet been added to the store or hub, so nothing else can observe it.
 		lob.InviteUser(userID)
+
+		// A matchmaking lobby's host is its party of one, so they join it outright rather than
+		// only being invited. SearchLobbyHandler sizes the party from JoinedCount and the
+		// matchmaker refuses a party of zero, while the client queues straight from the
+		// dashboard: with an invite alone every search 400'd on "PlayerCount must be > 0", since
+		// the WebSocket upgrade is the only other thing that promotes an invite to a join
+		// (cambia-933).
+		if lob.Type == "matchmaking" {
+			lob.JoinUser(userID)
+		}
 
 		// Configure the OnEmpty callback to release the lobby and its hub once the last joined
 		// member leaves. Reachable only from lobby.RemoveUser, i.e. from a deliberate leave: a
@@ -450,14 +535,15 @@ func SearchLobbyHandler(gs *GameServer) http.HandlerFunc {
 		lob.Searching = true
 		lob.Mu.Unlock()
 
-		h, hasHub := gs.HubStore.GetHub(lobbyID)
-		if hasHub {
-			h.Phase = hub.PhaseSearching
-			h.QueueID = queueID
-			h.IsRanked = queueCfg.Ranked
-			h.TotalRounds = queueCfg.Rounds
-			h.Emit("phase_change", map[string]interface{}{"phase": "searching"})
-			h.Emit("search_status", map[string]interface{}{"searching": true, "queue_id": queueID})
+		// The hub's phase and match parameters belong to its Run goroutine, so the change is
+		// handed to it rather than written from this one (cambia-933).
+		if h, hasHub := gs.HubStore.GetHub(lobbyID); hasHub {
+			h.SetSearchState(hub.SearchState{
+				Searching:   true,
+				QueueID:     queueID,
+				IsRanked:    queueCfg.Ranked,
+				TotalRounds: queueCfg.Rounds,
+			})
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -506,11 +592,8 @@ func CancelSearchHandler(gs *GameServer) http.HandlerFunc {
 
 		gs.Matchmaker.Dequeue(lobbyID)
 
-		h, hasHub := gs.HubStore.GetHub(lobbyID)
-		if hasHub {
-			h.Phase = hub.PhaseOpen
-			h.Emit("phase_change", map[string]interface{}{"phase": "open"})
-			h.Emit("search_status", map[string]interface{}{"searching": false})
+		if h, hasHub := gs.HubStore.GetHub(lobbyID); hasHub {
+			h.SetSearchState(hub.SearchState{Searching: false})
 		}
 
 		w.Header().Set("Content-Type", "application/json")
