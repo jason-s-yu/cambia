@@ -5,23 +5,29 @@ interface ErrorMessageProps {
   onClear?: () => void;
 }
 
+/** Inline error strip on the danger status tint, with an optional dismiss. */
 const ErrorMessage: React.FC<ErrorMessageProps> = ({ message, onClear }) => {
   if (!message) return null;
 
   return (
-    <div className="bg-red-100 border border-red-400 text-red-700 dark:bg-red-900 dark:border-red-700 dark:text-red-200 px-4 py-3 rounded relative mb-4" role="alert">
-      <strong className="font-bold">Error: </strong>
-      <span className="block sm:inline">{message}</span>
+    <div
+      role='alert'
+      className='flex items-start gap-3 px-3.5 py-2.5 mb-4 rounded-ds-md border text-ds-sm font-ds-medium'
+      style={{ background: 'var(--status-danger-bg)', borderColor: 'var(--status-danger-border)', color: 'var(--status-danger)' }}
+    >
+      <span className='flex-1 min-w-0 leading-ds-snug'>{message}</span>
       {onClear && (
-         <button
-             onClick={onClear}
-             className="absolute top-0 bottom-0 right-0 px-4 py-3 text-red-500 hover:text-red-700 dark:text-red-300 dark:hover:text-red-100"
-             aria-label="Clear error"
-         >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-         </button>
+        <button
+          type='button'
+          onClick={onClear}
+          aria-label='Dismiss error'
+          className='inline-flex items-center justify-center w-5 h-5 flex-none rounded-ds-sm bg-transparent border-0 cursor-pointer opacity-70 hover:opacity-100'
+          style={{ color: 'inherit' }}
+        >
+          <svg width='12' height='12' viewBox='0 0 14 14' fill='none' stroke='currentColor' strokeWidth='2' strokeLinecap='round' aria-hidden='true'>
+            <path d='M2 2 L12 12 M12 2 L2 12' />
+          </svg>
+        </button>
       )}
     </div>
   );

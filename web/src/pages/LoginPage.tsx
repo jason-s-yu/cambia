@@ -1,19 +1,20 @@
 import React from 'react';
-import LoginForm from '@/components/auth/LoginForm';
 import { Link } from 'react-router-dom';
+import LoginForm from '@/components/auth/LoginForm';
 
 /**
- * Page component for user login. Displays the LoginForm
- * and provides a link to the registration page.
+ * Sign-in page: heading, the LoginForm, and the path to registration.
+ * Rendered inside AuthLayout's centered card.
  */
 const LoginPage: React.FC = () => {
 	return (
 		<div>
+			<h1 className='m-0 mb-5 text-ds-xl font-ds-bold tracking-ds-tight leading-ds-tight text-text-primary'>Sign in</h1>
 			<LoginForm />
-			<p className="mt-6 text-center text-sm text-gray-600 dark:text-gray-400">
-				Don&apos;t have an account?{' '}
-				<Link to="/register" className="font-medium text-blue-600 hover:text-blue-500 dark:text-blue-400 dark:hover:text-blue-300">
-					Register here
+			<p className='mt-6 mb-0 text-center text-ds-sm text-text-secondary'>
+				No account?{' '}
+				<Link to='/register' className='font-ds-medium text-text-primary underline underline-offset-4'>
+					Register
 				</Link>
 			</p>
 		</div>

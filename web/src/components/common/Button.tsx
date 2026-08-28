@@ -6,6 +6,26 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   isLoading?: boolean;
 }
 
+/**
+ * Attribute-passthrough button for forms and legacy call sites (type=submit,
+ * aria-*, className). Same visual spec as ds/core/Button, expressed through
+ * the token utilities: solid gold primary, bordered secondary, red danger,
+ * transparent ghost; 1px borders, no offset shadow, color-only press state.
+ * New non-form markup composes ds/core/Button directly.
+ */
+const VARIANT_CLASS: Record<NonNullable<ButtonProps['variant']>, string> = {
+  primary: 'bg-accent-gold text-text-on-gold border-transparent hover:bg-accent-gold-hover active:bg-[var(--accent-gold-active)]',
+  secondary: 'bg-surface-2 text-text-primary border-border-default hover:bg-surface-3 active:bg-surface-1',
+  danger: 'bg-accent-danger text-[var(--text-on-danger)] border-transparent hover:bg-[var(--accent-danger-hover)]',
+  ghost: 'bg-transparent text-text-secondary border-transparent hover:bg-[var(--interactive-hover)] hover:text-text-primary active:bg-[var(--interactive-active)]'
+};
+
+const SIZE_CLASS: Record<NonNullable<ButtonProps['size']>, string> = {
+  sm: 'h-[var(--control-h-sm)] px-3 text-ds-sm',
+  md: 'h-[var(--control-h-md)] px-4 text-ds-md',
+  lg: 'h-[var(--control-h-lg)] px-[22px] text-ds-lg'
+};
+
 const Button: React.FC<ButtonProps> = ({
   children,
   variant = 'primary',
@@ -15,38 +35,23 @@ const Button: React.FC<ButtonProps> = ({
   disabled,
   ...props
 }) => {
-  const baseStyle = 'font-semibold rounded focus:outline-none focus:ring-2 focus:ring-offset-2 dark:focus:ring-offset-gray-800 transition duration-150 ease-in-out';
-  const variantStyles = {
-    primary: 'bg-blue-600 hover:bg-blue-700 text-white focus:ring-blue-500 disabled:bg-blue-300 dark:disabled:bg-blue-800 dark:disabled:text-gray-400',
-    secondary: 'bg-gray-200 hover:bg-gray-300 text-gray-800 focus:ring-gray-400 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-gray-100 dark:focus:ring-gray-500 disabled:bg-gray-100 dark:disabled:bg-gray-600 dark:disabled:text-gray-400',
-    danger: 'bg-red-600 hover:bg-red-700 text-white focus:ring-red-500 disabled:bg-red-300',
-    ghost: 'bg-transparent hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 focus:ring-gray-400 disabled:text-gray-400'
-  };
-  const sizeStyles = {
-    sm: 'px-3 py-1.5 text-sm',
-    md: 'px-4 py-2 text-base',
-    lg: 'px-6 py-3 text-lg'
-  };
-  const loadingStyle = isLoading ? 'opacity-75 cursor-not-allowed' : '';
-  const disabledStyle = disabled || isLoading ? 'opacity-75 cursor-not-allowed' : '';
+  const base = 'inline-flex items-center justify-center gap-2 border rounded-ds-md font-sans font-ds-bold tracking-ds-tight whitespace-nowrap cursor-pointer transition-colors duration-[var(--dur-fast)] disabled:opacity-50 disabled:cursor-not-allowed';
 
   return (
     <button
-      className={`${baseStyle} ${variantStyles[variant]} ${sizeStyles[size]} ${loadingStyle} ${disabledStyle} ${className}`}
+      className={`${base} ${VARIANT_CLASS[variant]} ${SIZE_CLASS[size]} ${className}`}
       disabled={disabled || isLoading}
+      aria-busy={isLoading || undefined}
       {...props}
     >
-      {isLoading ? (
-         <span className='flex items-center justify-center'>
-            <svg className="animate-spin -ml-1 mr-2 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-             </svg>
-             Loading...
-         </span>
-      ) : (
-        children
+      {isLoading && (
+        <span
+          aria-hidden='true'
+          className='inline-block w-3.5 h-3.5 rounded-full border-2 border-current border-t-transparent opacity-70'
+          style={{ animation: 'ds-spin 0.9s linear infinite' }}
+        />
       )}
+      {children}
     </button>
   );
 };
