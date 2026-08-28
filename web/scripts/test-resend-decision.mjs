@@ -20,6 +20,8 @@ import {
     recordOutbound,
     resolveOutbox,
     isLobbyFrame,
+    ackedType,
+    ackOutbound,
     OUTBOX_LIMIT,
     OUTBOX_TTL_MS
 } from '../src/lib/resendDecision.ts';
@@ -361,6 +363,105 @@ test('a dropped game action and a dropped lobby frame are reported separately', 
     const ready = entry('ready', { attempt: 1, ctx: ctx({ phase: 'open' }) });
     const out = resolveOutbox([snap, ready], ctx({ phase: 'open' }), 11, 1000);
     assert.deepEqual(out.notify.map((r) => [r.type, isLobbyFrame(r)]), [['action_snap', false], ['ready', true]]);
+});
+
+// --- Acknowledgement (the outbox holds UNANSWERED frames) -----------------------------------
+
+test('an accepted frame is acked by the events it produced', () => {
+    // The failure this closes (cambia-913 R1): the draw landed and the discard sent a second
+    // later was dropped. Its repair carries a seq above BOTH sentSeqs, so without an ack the
+    // accepted draw is judged too, hits the `drawnCardId !== null` guard and tells the player
+    // an action failed that in fact went through.
+    const drew = ctx({ pendingAction: 'discard_replace', drawnCardId: 'drawn-1', cardIds: ['my-0', 'drawn-1', 'discard-7'] });
+    const draw = entry('action_draw_stockpile', { sentSeq: 10 });
+    const discard = entry('action_discard', { cardRefs: [{ id: 'drawn-1' }], sentSeq: 10, ctx: drew });
+    let outbox = recordOutbound(recordOutbound([], draw), discard);
+
+    // The public draw broadcast reaches this client before the repair (one hub goroutine, FIFO
+    // per connection).
+    outbox = ackOutbound(outbox, 'player_draw_stockpile', { user: { id: SELF }, payload: { source: 'stockpile' } }, SELF);
+    assert.deepEqual(outbox.map((e) => e.record.type), ['action_discard']);
+
+    const out = resolveOutbox(outbox, drew, 11, 1000);
+    assert.deepEqual(out.resend.map((e) => e.record.type), ['action_discard']);
+    assert.deepEqual(out.notify, [], 'the accepted draw is gone, so nothing false is reported');
+});
+
+test('an accepted chat is acked instead of being sent twice', () => {
+    // Same shape on the lobby side, where the wrong answer is a duplicate line rather than a
+    // false notice: a chat that landed has no board state to fail a guard.
+    let outbox = recordOutbound([], entry('chat', { ctx: ctx({ phase: 'open' }) }));
+    outbox = ackOutbound(outbox, 'chat', { userID: SELF, msg: 'hi' }, SELF);
+    assert.deepEqual(outbox, []);
+    assert.deepEqual(resolveOutbox(outbox, ctx({ phase: 'open' }), 11, 1000).resend, []);
+});
+
+test('an event from someone else acks nothing', () => {
+    assert.equal(ackedType('player_draw_stockpile', { user: { id: OPP }, payload: { source: 'stockpile' } }, SELF), null);
+    assert.equal(ackedType('player_snap_success', { user: { id: OPP } }, SELF), null);
+    assert.equal(ackedType('player_cambia', { user: { id: OPP } }, SELF), null);
+    assert.equal(ackedType('chat', { userID: OPP }, SELF), null);
+    // An opponent's snap of OUR card still names them as the snapper, so it is not our ack.
+    assert.equal(ackedType('player_snap_success', { user: { id: OPP }, card: { id: 'my-0', user: { id: SELF } } }, SELF), null);
+});
+
+test('each accepted frame is recognised by the event that carries it', () => {
+    const mine = { user: { id: SELF } };
+    // The discard draw reuses the stock draw's event type; payload.source is what separates them
+    // (engine_adapter.go emitEventsForAction).
+    assert.equal(ackedType('player_draw_stockpile', { ...mine, payload: { source: 'stockpile' } }, SELF), 'action_draw_stockpile');
+    assert.equal(ackedType('player_draw_stockpile', { ...mine, payload: { source: 'discardpile' } }, SELF), 'action_draw_discardpile');
+    // A replace names the slot it replaced; a discard of the drawn card names no slot.
+    assert.equal(ackedType('player_discard', { ...mine, card: { id: 'my-0', idx: 1 } }, SELF), 'action_replace');
+    assert.equal(ackedType('player_discard', { ...mine, card: { id: 'drawn-1' } }, SELF), 'action_discard');
+    assert.equal(ackedType('player_cambia', mine, SELF), 'action_cambia');
+    // Either answer to a snap is an answer: both name the snapper.
+    assert.equal(ackedType('player_snap_success', mine, SELF), 'action_snap');
+    assert.equal(ackedType('player_snap_fail', mine, SELF), 'action_snap');
+    assert.equal(ackedType('player_special_action', mine, SELF), 'action_special');
+    // The private halves of an ability reach the actor alone, so they carry no user.
+    assert.equal(ackedType('private_special_action_success', { special: 'peek_self' }, SELF), 'action_special');
+    assert.equal(ackedType('private_special_action_fail', { payload: { message: 'no' } }, SELF), 'action_special');
+    // Nothing else answers a frame; a repair least of all.
+    assert.equal(ackedType('sync_state', { seq: 11 }, SELF), null);
+    assert.equal(ackedType('game_player_turn', mine, SELF), null);
+    assert.equal(ackedType('player_snap_penalty', mine, SELF), null);
+});
+
+test('a lobby snapshot acks the ready it shows, and a countdown acks the frame that began it', () => {
+    const snapshot = (ready) => ({ your_id: SELF, lobby_status: { users: [{ id: SELF, is_ready: ready }, { id: OPP, is_ready: true }] } });
+    assert.equal(ackedType('lobby_state', snapshot(true), SELF), 'ready');
+    assert.equal(ackedType('lobby_state', snapshot(false), SELF), 'unready');
+    // A snapshot that does not list us says nothing about our frame.
+    assert.equal(ackedType('lobby_state', { lobby_status: { users: [{ id: OPP, is_ready: true }] } }, SELF), null);
+    // beginCountdown is reached from start_game and from the ready that completes an auto-start
+    // lobby, so the countdown answers either one.
+    assert.equal(ackedType('phase_change', { phase: 'countdown' }, SELF), 'start_game');
+    assert.equal(ackedType('phase_change', { phase: 'in_game' }, SELF), null);
+    let outbox = recordOutbound([], entry('ready', { ctx: ctx({ phase: 'open' }) }));
+    assert.deepEqual(ackOutbound(outbox, 'phase_change', { phase: 'countdown' }, SELF), []);
+    outbox = recordOutbound([], entry('start_game', { ctx: ctx({ phase: 'open' }) }));
+    assert.deepEqual(ackOutbound(outbox, 'phase_change', { phase: 'countdown' }, SELF), []);
+});
+
+test('one event acks one frame, the oldest of its kind', () => {
+    // Two chat lines cannot both have landed on one broadcast, and the outbox is in send order.
+    const first = entry('chat', { sentSeq: 10, ctx: ctx({ phase: 'open' }) });
+    const second = entry('chat', { sentSeq: 11, ctx: ctx({ phase: 'open' }) });
+    const left = ackOutbound([first, second], 'chat', { userID: SELF }, SELF);
+    assert.deepEqual(left.map((e) => e.record.sentSeq), [11]);
+    // Nothing of that kind outstanding: the outbox is returned untouched.
+    const snap = [entry('action_snap', { cardRefs: [{ id: 'my-0' }] })];
+    assert.equal(ackOutbound(snap, 'chat', { userID: SELF }, SELF), snap);
+});
+
+test('a frame the hub answers with nothing ages out', () => {
+    // update_rules is the one accepted frame that emits no event at all (hub.go handleLobbyMsg
+    // applies the rules and broadcasts no snapshot), so nothing can ack it and the age limit is
+    // the whole bound on how long a repair can still judge it.
+    let outbox = recordOutbound([], entry('update_rules', { sentAt: 1000, ctx: ctx({ phase: 'open' }) }));
+    assert.equal(ackOutbound(outbox, 'lobby_state', { lobby_status: { users: [] } }, SELF).length, 1);
+    assert.equal(resolveOutbox(outbox, ctx({ phase: 'open' }), 11, 1000 + OUTBOX_TTL_MS + 1).resend.length, 0);
 });
 
 console.log('resend decision: all assertions defined');

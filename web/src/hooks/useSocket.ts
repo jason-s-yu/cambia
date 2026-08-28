@@ -6,7 +6,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { useCurrentLobbyStore } from '@/stores/lobbyStore';
 import { useGameStore } from '@/stores/gameStore';
 import { WS_URL } from '@/lib/runtimeEnv';
-import { cardRefsOf, isLobbyFrame, recordOutbound, resolveOutbox, tableContext, type OutboxEntry } from '@/lib/resendDecision';
+import { ackOutbound, cardRefsOf, isLobbyFrame, recordOutbound, resolveOutbox, tableContext, type OutboxEntry } from '@/lib/resendDecision';
 const MAX_RETRIES = 5;
 const INITIAL_RETRY_DELAY = 1000;
 
@@ -50,8 +50,9 @@ export function useSocket(lobbyId: string | null | undefined) {
 	const isConnecting = useRef<boolean>(false);
 	const shouldBeConnected = useRef<boolean>(false);
 	const lastSeqRef = useRef<number>(0);
-	/** Frames sent and not yet answered by a repair. A window can swallow more than one, so this
-	 *  is a queue, not a slot (cambia-913 F2; the reasoning lives in resendDecision.ts). */
+	/** Frames the hub has neither applied nor answered. A repair window can swallow more than
+	 *  one, so this is a queue rather than a slot (cambia-913 F2), and the events an accepted
+	 *  frame produces take it back out (cambia-913 R1). Reasoning: resendDecision.ts. */
 	const outboxRef = useRef<OutboxEntry<OutboundMessage>[]>([]);
 
 	const userId = useAuthStore((state) => state.user?.id);
@@ -184,6 +185,16 @@ export function useSocket(lobbyId: string | null | undefined) {
 				// Update seq tracking
 				if (typeof seq === 'number') {
 					lastSeqRef.current = Math.max(lastSeqRef.current, seq);
+				}
+
+				// An accepted frame is answered by the events applying it produces, never by a
+				// reply naming it, so those events are its acknowledgement and they take it out
+				// of the outbox. Without this a later repair would judge frames the hub had
+				// already applied and call them dropped (cambia-913 R1). The hub dispatches on
+				// one goroutine and each connection is FIFO, so an accepted frame's events reach
+				// this client ahead of any repair produced after them.
+				if (outboxRef.current.length > 0) {
+					outboxRef.current = ackOutbound(outboxRef.current, type, payload, useAuthStore.getState().user?.id ?? null);
 				}
 
 				// Route by message type

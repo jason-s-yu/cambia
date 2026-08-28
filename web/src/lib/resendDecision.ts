@@ -314,25 +314,22 @@ export function decideResend(rec: OutboundRecord, now: TableContext, syncSeq: nu
 // A repair names no frame, so each entry is judged on its own sentSeq. Entries the repair cannot
 // speak to (syncSeq <= sentSeq) stay for a later one.
 //
-// The one ambiguity, stated rather than hidden: a repair triggered by a LATER frame also clears
-// syncSeq > sentSeq for an earlier frame that was accepted, in the case where the broadcast that
-// frame caused had not reached this client before the later frame went out. Per-connection FIFO
-// puts that broadcast ahead of the repair, so by the time the entry is judged the board already
-// shows the accepted frame's effect and its own state guard answers 'notify', never 'resend': a
-// draw has a drawn card, a snap moved the discard top, an ability step cleared the pending
-// special. A lobby frame has no board to check, so in that race an accepted chat can go out
-// twice. A duplicate line is the smaller harm against losing the frame with nothing said, which
-// is what the single slot did.
-//
-// An accepted frame is never answered at all, so its entry would sit in the outbox indefinitely
-// and a repair minutes later would judge an intent nobody remembers forming. The cap and the age
-// limit are what keep that from happening; neither is a correctness knob.
+// It holds UNANSWERED frames, and that word is doing work (cambia-913 R1). Since a repair names
+// no frame, every entry still in the outbox when one arrives is judged against it: an entry the
+// hub had already ACCEPTED would be judged too, and neither answer is right. 'notify' tells the
+// player an action failed that in fact landed; 'resend' puts an accepted chat line on the wire a
+// second time. Acking is what keeps accepted frames out of that decision: see ackedType below.
 
 /** How many unacknowledged frames the outbox holds. Past this the oldest is evicted, silently. */
 export const OUTBOX_LIMIT = 8;
 
-/** How long an entry no repair ever answered stays eligible for a decision. */
-export const OUTBOX_TTL_MS = 15000;
+/**
+ * How long an entry no repair and no ack ever answered stays eligible for a decision. A repair is
+ * produced by the same dispatch that discarded the frame, so it lands within one round trip; past
+ * a few seconds of silence the frame was accepted by a hub that broadcast nothing for it (today
+ * update_rules is the only such frame), and its intent is no longer worth re-deciding.
+ */
+export const OUTBOX_TTL_MS = 5000;
 
 /** A frame on the wire: what was sent, and what the decision needs in order to judge it. */
 export interface OutboxEntry<M = unknown> {
@@ -354,6 +351,99 @@ export interface OutboxOutcome<M = unknown> {
 export function recordOutbound<M>(outbox: OutboxEntry<M>[], entry: OutboxEntry<M>): OutboxEntry<M>[] {
 	const next = [...outbox, entry];
 	return next.length > OUTBOX_LIMIT ? next.slice(next.length - OUTBOX_LIMIT) : next;
+}
+
+/**
+ * The outbound frame type an inbound server frame proves the hub acted on, or null.
+ *
+ * The hub never replies to a frame by name: an accepted frame is answered by the events applying
+ * it produces, so those events are the acknowledgement. Each case below is the emitter that fires
+ * for exactly one client frame, with the actor on it:
+ *
+ *   player_draw_stockpile   engine_adapter.go emitEventsForAction, User = the actor, and
+ *                           payload.source separates the stock draw from the discard draw (the
+ *                           discard draw reuses the same event type).
+ *   player_discard          fired for a discard (no idx) and for a replace (Card.Idx = the slot
+ *                           replaced), which is what tells the two frames apart.
+ *   player_cambia           the call.
+ *   player_snap_success /
+ *   player_snap_fail        User = the SNAPPER on both, so either one answers our snap.
+ *   player_special_action   the public half of an ability step; the private success/fail halves
+ *                           reach the actor alone (fireEventToPlayer), so they need no User.
+ *   chat                    hub.go handleLobbyMsg, payload.userID = the author.
+ *   lobby_state             broadcastLobbyUpdate after a ready or an unready; the self entry's
+ *                           is_ready is the flag the frame was asking for. A snapshot broadcast
+ *                           for some other reason can only ack a frame whose flag already holds,
+ *                           which is a frame that asked for nothing.
+ *   phase_change countdown  beginCountdown, reached from start_game and from the ready that
+ *                           completes an auto-start lobby (MarkUserReadyUnsafe all-ready).
+ *
+ * update_rules has no case because an accepted one emits nothing at all (handleLobbyMsg applies
+ * the rules and broadcasts no snapshot); OUTBOX_TTL_MS is what bounds it.
+ */
+export function ackedType(type: string, payload: unknown, selfId: string | null): string | null {
+	const p = (payload ?? {}) as {
+		user?: { id?: string };
+		card?: { idx?: number };
+		payload?: { source?: string };
+		userID?: string;
+		phase?: string;
+		lobby_status?: { users?: { id?: string; is_ready?: boolean }[] };
+	};
+	const mine = !!selfId && p.user?.id === selfId;
+
+	switch (type) {
+		case 'player_draw_stockpile':
+			if (!mine) return null;
+			return p.payload?.source === 'discardpile' ? 'action_draw_discardpile' : 'action_draw_stockpile';
+		case 'player_discard':
+			if (!mine) return null;
+			return typeof p.card?.idx === 'number' ? 'action_replace' : 'action_discard';
+		case 'player_cambia':
+			return mine ? 'action_cambia' : null;
+		case 'player_snap_success':
+		case 'player_snap_fail':
+			return mine ? 'action_snap' : null;
+		case 'player_special_action':
+			return mine ? 'action_special' : null;
+		case 'private_special_action_success':
+		case 'private_special_action_fail':
+			return 'action_special';
+		case 'chat':
+			return !!selfId && p.userID === selfId ? 'chat' : null;
+		case 'lobby_state': {
+			const self = (p.lobby_status?.users ?? []).find((u) => u.id === selfId);
+			if (!self) return null;
+			return self.is_ready ? 'ready' : 'unready';
+		}
+		case 'phase_change':
+			return p.phase === 'countdown' ? 'start_game' : null;
+		default:
+			return null;
+	}
+}
+
+/**
+ * Removes the oldest frame this inbound envelope answers. One event acks one frame: two draws
+ * cannot both have landed on one broadcast, and the outbox is in send order, so the oldest match
+ * is the one that produced it.
+ *
+ * A countdown also acks a 'ready', not only the 'start_game' that usually causes it: an
+ * auto-start lobby begins the countdown on the last ready, and that ready was ours if the hub
+ * counted every seat as ready.
+ */
+export function ackOutbound<M>(
+	outbox: OutboxEntry<M>[],
+	type: string,
+	payload: unknown,
+	selfId: string | null
+): OutboxEntry<M>[] {
+	const acked = ackedType(type, payload, selfId);
+	if (!acked) return outbox;
+	const alsoReady = acked === 'start_game';
+	const at = outbox.findIndex((e) => e.record.type === acked || (alsoReady && e.record.type === 'ready'));
+	if (at < 0) return outbox;
+	return [...outbox.slice(0, at), ...outbox.slice(at + 1)];
 }
 
 /**
