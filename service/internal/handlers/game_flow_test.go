@@ -350,7 +350,7 @@ func TestCasualGameEndDrivesHubToPostGame(t *testing.T) {
 
 	// Simulate the game legitimately ending (mirrors the evidence log: scores 31/38), invoking
 	// the same OnGameEnd callback the engine calls from endGame() once terminal.
-	g.OnGameEnd(lobUUID, hostID, map[uuid.UUID]int{hostID: 31, p2ID: 38})
+	g.OnGameEnd(lobUUID, hostID, map[uuid.UUID]int{hostID: 31, p2ID: 38}, map[uuid.UUID]string{})
 
 	hostPhase := host.waitForPhaseChange("post_game", 5*time.Second)
 	if hostPhase == nil {
@@ -434,7 +434,7 @@ func TestLobbyStartsSecondGameAfterPostGame(t *testing.T) {
 	}
 
 	// End game one through the engine's own callback, as endGame() does once terminal.
-	firstGame.OnGameEnd(lobUUID, hostID, map[uuid.UUID]int{hostID: 31, p2ID: 38})
+	firstGame.OnGameEnd(lobUUID, hostID, map[uuid.UUID]int{hostID: 31, p2ID: 38}, map[uuid.UUID]string{})
 
 	if host.waitForPhaseChange("post_game", 5*time.Second) == nil {
 		t.Fatalf("host never received a post_game phase_change after game one ended")

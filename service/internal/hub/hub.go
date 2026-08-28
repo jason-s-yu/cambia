@@ -39,9 +39,13 @@ const defaultIdleTTL = 45 * time.Minute
 const defaultEmptyIdleTTL = 5 * time.Minute
 
 // GameFactory builds and registers a CambiaGame for the given players, wiring emitter as
-// the event sink. The returned game is registered but not begun (the hub calls BeginPreGame
-// after routing is in place). Returns nil if the game could not be created (e.g. <2 players).
-type GameFactory func(lob *lobby.Lobby, playerIDs []uuid.UUID, emitter game.Emitter) *game.CambiaGame
+// the event sink. usernames carries the authenticated (or guest-generated) username already
+// known for each connected player id, sourced from the hub's own connections (cambia-877): the
+// factory reads it instead of re-fetching from the database, since createAndStartGame runs on
+// the hub's Run goroutine and a DB round trip there would stall the entire lobby's event loop.
+// The returned game is registered but not begun (the hub calls BeginPreGame after routing is in
+// place). Returns nil if the game could not be created (e.g. <2 players).
+type GameFactory func(lob *lobby.Lobby, playerIDs []uuid.UUID, usernames map[uuid.UUID]string, emitter game.Emitter) *game.CambiaGame
 
 // LobbyPhase represents the current lifecycle state of a hub.
 type LobbyPhase int
@@ -906,7 +910,17 @@ func (h *Hub) createAndStartGame(playerIDs []uuid.UUID) bool {
 	if h.Game != nil {
 		return false
 	}
-	g := h.CreateGame(h.Lobby, playerIDs, h)
+
+	// Every id in playerIDs is a currently connected participant (connectedPlayerIDs reads the
+	// live connection set), so its Username - populated at connect time from the authenticated
+	// user (see ws.go's HubWSHandler) - is already known here without touching the database.
+	usernames := make(map[uuid.UUID]string, len(playerIDs))
+	for _, uid := range playerIDs {
+		if conn := h.getConn(uid); conn != nil {
+			usernames[uid] = conn.Username
+		}
+	}
+	g := h.CreateGame(h.Lobby, playerIDs, usernames, h)
 	if g == nil {
 		return false
 	}

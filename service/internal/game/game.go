@@ -17,8 +17,12 @@ import (
 )
 
 // OnGameEndFunc defines the signature for a callback function executed when a game ends.
-// It receives the lobby ID, the primary winner's ID (can be Nil), and the final scores.
-type OnGameEndFunc func(lobbyID uuid.UUID, winner uuid.UUID, scores map[uuid.UUID]int)
+// It receives the lobby ID, the primary winner's ID (can be Nil), the final scores, and each
+// participant's username keyed by player ID (cambia-877). usernames is supplied here, rather
+// than left for the callback to look up, because endGame calls this synchronously while g.mu is
+// still held (see EndGame): any lookup that re-acquires it - including GetCurrentObfuscatedGameState
+// - would self-deadlock the caller's own goroutine.
+type OnGameEndFunc func(lobbyID uuid.UUID, winner uuid.UUID, scores map[uuid.UUID]int, usernames map[uuid.UUID]string)
 
 // GameEventType represents the type of a game-related event broadcast via WebSockets.
 type GameEventType string
@@ -883,7 +887,13 @@ func (g *CambiaGame) endGame() {
 
 	// Trigger external callback (e.g., update lobby).
 	if g.OnGameEnd != nil {
-		g.OnGameEnd(g.LobbyID, firstWinner, adjustedScores)
+		usernames := make(map[uuid.UUID]string, len(g.Players))
+		for _, p := range g.Players {
+			if p.User != nil {
+				usernames[p.ID] = p.User.Username
+			}
+		}
+		g.OnGameEnd(g.LobbyID, firstWinner, adjustedScores, usernames)
 	}
 
 	log.Printf("Game %s: Ended. Winner(s): %v. Final Scores (Adj): %v", g.ID, winners, adjustedScores)

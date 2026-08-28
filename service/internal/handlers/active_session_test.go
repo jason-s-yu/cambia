@@ -345,7 +345,7 @@ func startTestGame(t *testing.T, gs *GameServer, lob *lobby.Lobby, playerIDs []u
 	houseRules, circuit := lob.HouseRules, lob.Circuit
 	lob.Mu.Unlock()
 
-	g := gs.CreateGameInstance(context.Background(), lobbyID, hostID, gameMode, lobbyType, false, houseRules, circuit, playerIDs, nil)
+	g := gs.CreateGameInstance(context.Background(), lobbyID, hostID, gameMode, lobbyType, false, houseRules, circuit, playerIDs, nil, nil)
 	if g == nil {
 		t.Fatalf("failed to create game instance for lobby %s", lobbyID)
 	}

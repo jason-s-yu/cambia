@@ -59,7 +59,7 @@ func newInGameHubStopped(t *testing.T, playerCount int, forfeit bool, turnTimerS
 	g.HouseRules = rules
 
 	ended := make(chan endedGame, 4)
-	g.OnGameEnd = func(_ uuid.UUID, winner uuid.UUID, scores map[uuid.UUID]int) {
+	g.OnGameEnd = func(_ uuid.UUID, winner uuid.UUID, scores map[uuid.UUID]int, _ map[uuid.UUID]string) {
 		ended <- endedGame{winner: winner, scores: scores}
 	}
 
