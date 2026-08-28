@@ -119,8 +119,10 @@
   --text-primary: #edf2ef;
   --text-secondary: #a9b8b1;
   /* Raised from #74857d, which held AA on the card but fell to 4.17:1 on
-     --surface-2, the lightest ground an eyebrow or a metadata line sits on in
-     dark. 4.77:1 there, 5.22:1 on the card (cambia-935, F4). */
+     --surface-2, the lightest neutral ground an eyebrow or a metadata line
+     sits on in dark. 4.77:1 there, 5.22:1 on the card (cambia-935, F4). The
+     selected grounds below sit lighter still; metadata on those steps up to
+     --text-secondary rather than pulling this tier toward it (cambia-935, R1). */
   --text-tertiary: #7e8f87;
   /* Raised from #4d5b55, which sat at 2.28:1 on the disabled fill. A disabled
      label is still read ("Signing in", "Creating"), so it holds the 3:1 house
@@ -144,7 +146,8 @@
   /* Opaque form of the selected tint: --interactive-selected flattened onto
      --surface-2. For a resting surface that must stay solid over the felt (the
      active-turn player seat), where a translucent tint muddies against green
-     (cambia-876, DL-4 review F11). */
+     (cambia-876, DL-4 review F11). Lighter than every neutral surface, so text
+     on it starts at --text-secondary (cambia-935, R1). */
   --surface-selected: #2f351f;
   --focus-ring-color: var(--gold-400);
 

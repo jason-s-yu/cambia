@@ -33,7 +33,10 @@ interface StateSpec {
 }
 
 const STATES: Record<PlayerSeatState, StateSpec> = {
-  turn: { label: 'Their turn', youLabel: 'Your turn', color: 'var(--accent-gold)' },
+  // The turn label is gold as text, not a gold fill, and it lands on
+  // --surface-selected: --accent-gold measures 2.57:1 there in light, the text
+  // token 6.07:1. Dark is unchanged, the two resolve to --gold-500 (cambia-935, R1).
+  turn: { label: 'Their turn', youLabel: 'Your turn', color: 'var(--accent-gold-text)' },
   ready: { label: 'Ready', youLabel: 'Ready', color: 'var(--status-success)' },
   cambia: { label: 'Called Cambia', youLabel: 'Called Cambia', color: 'var(--status-danger)' },
   disconnected: { label: 'Reconnecting', youLabel: 'Reconnecting', color: 'var(--text-tertiary)' }
@@ -43,6 +46,10 @@ const STATES: Record<PlayerSeatState, StateSpec> = {
 const PlayerSeat: React.FC<PlayerSeatProps> = ({ username = 'Player', state, isYou = false, rating, handSize, note, compact = false, style }) => {
   const s = state ? STATES[state] : undefined;
   const isTurn = state === 'turn';
+  // The active-turn fill is the lightest ground in the dark theme, and
+  // --text-tertiary fell to 3.74:1 on it. The emphasized seat steps its
+  // metadata up a tier instead of lifting the tier everywhere (cambia-935, R1).
+  const meta = isTurn ? 'var(--text-secondary)' : 'var(--text-tertiary)';
   const stateLabel = note ?? (s ? (isYou ? s.youLabel : s.label) : undefined);
   return (
     <div
@@ -87,8 +94,8 @@ const PlayerSeat: React.FC<PlayerSeatProps> = ({ username = 'Player', state, isY
         </span>
         <span style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 'var(--text-2xs)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
           {stateLabel && <span style={{ color: s?.color ?? 'var(--text-secondary)', fontWeight: 'var(--weight-bold)' }}>{stateLabel}</span>}
-          {rating !== undefined && <span style={{ color: 'var(--text-tertiary)' }}>{rating}</span>}
-          {handSize !== undefined && <span style={{ color: 'var(--text-tertiary)' }}>{handSize} {handSize === 1 ? 'card' : 'cards'}</span>}
+          {rating !== undefined && <span style={{ color: meta }}>{rating}</span>}
+          {handSize !== undefined && <span style={{ color: meta }}>{handSize} {handSize === 1 ? 'card' : 'cards'}</span>}
         </span>
       </span>
     </div>
