@@ -542,7 +542,9 @@ func ListQueuesHandler(gs *GameServer) http.HandlerFunc {
 		}
 
 		names := map[string]string{
-			"h2h_quickplay":  "Quick Play",
+			// Family-prefixed like the other five so the card label does not read as
+			// the dashboard heading (cambia-922 F1: hero/queue name collision).
+			"h2h_quickplay":  "H2H Quick",
 			"h2h_blitz":      "H2H Blitz",
 			"h2h_rapid":      "H2H Rapid",
 			"h2h_classical":  "H2H Classical",
