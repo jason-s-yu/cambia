@@ -175,7 +175,14 @@ function useTableNotice(gs: ObfGameState, selfId: string | undefined, names: Map
       const you = p.playerId === selfId;
       if (p.handSize > was) {
         const who = names.get(p.playerId) ?? 'Opponent';
-        next = { tone: 'danger', text: you ? 'Snap missed. A penalty card joins your hand.' : `Snap missed. ${who} draws a penalty card.` };
+        // The count comes from the house rule, not from the hand delta: the service fires one
+        // snap-penalty event per card (engine_adapter.go), so a two-card penalty arrives as two
+        // +1 deltas and a delta would read "1 penalty card" both times. The rule count is also
+        // the number the Table panel's penalty pill prints. It overstates only a penalty paid
+        // short at MaxHandSize or on an exhausted deck.
+        const n = gs.houseRules.penaltyDrawCount;
+        const cards = `${n} penalty card${n === 1 ? '' : 's'}`;
+        next = { tone: 'danger', text: you ? `Snap missed. You draw ${cards}.` : `Snap missed. ${who} draws ${cards}.` };
       }
     }
     if (snap.stock > before.stock) {
@@ -800,7 +807,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
             ))}
           </div>
           <div style={{ ...EYEBROW, marginTop: 10, fontWeight: 'var(--weight-regular)' }}>
-            {hasTotals ? 'Total score, lower wins' : 'Cards in hand'}
+            {hasTotals ? 'Total score' : 'Cards in hand'}
           </div>
         </Panel>
         <Panel title='Table' style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>

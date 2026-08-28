@@ -217,6 +217,12 @@ const DashboardPage: React.FC = () => {
   // the same way the profile does.
   const neverPlayed = !ratings || ratings.record.games === 0;
 
+  // record.games (lifetime, rated or not) and a pool's games (rated only) come from
+  // separate queries and can disagree, e.g. a rated pool seeded without matching
+  // game_results rows. hasRatedPool checks the pools directly so the hint below
+  // never claims no rating exists while the headline is printing one (cambia-929).
+  const hasRatedPool = !!ratings && ratings.pools.some((pool) => pool.games > 0);
+
   // The headline number is always the 1v1 pool, so it only earns the slot when
   // that pool has games, or when nothing has been played at all and the panel
   // would otherwise be one hint line. FFA games with no 1v1 games used to print
@@ -355,10 +361,12 @@ const DashboardPage: React.FC = () => {
                   </span>
                 </div>
               )}
-              {/* Nothing played: the headline already says Unrated, so the rows would
+              {/* Nothing rated: the headline already says Unrated, so the rows would
                   be four more copies of it. One line explains the state instead
-                  (cambia-876, DL-2 review F6). */}
-              {neverPlayed ? (
+                  (cambia-876, DL-2 review F6). Gated on hasRatedPool too, so the
+                  hint never sits under a headline that is printing a real rating
+                  (cambia-929). */}
+              {neverPlayed && !hasRatedPool ? (
                 <Note style={{ fontSize: 'var(--ds-text-xs)' }}>Play a ranked game to start a rating.</Note>
               ) : (
                 <>

@@ -148,7 +148,7 @@ const DsResultsView: React.FC<DsResultsViewProps> = ({ phase, onReturnToLobby, o
       )}
 
       <div style={{ borderTop: '1px solid var(--border-subtle)', padding: '12px 20px 16px' }}>
-        <div style={{ ...EYEBROW, marginBottom: 6 }}>{isMatchEnd ? 'Standings, lower wins' : 'Scores, lower wins'}</div>
+        <div style={{ ...EYEBROW, marginBottom: 6 }}>{isMatchEnd ? 'Standings' : 'Scores'}</div>
         <div style={{ display: 'flex', flexDirection: 'column' }}>
           {standings.map((row, i) => (
             <div key={row.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderTop: i ? '1px solid var(--border-subtle)' : 'none' }}>
