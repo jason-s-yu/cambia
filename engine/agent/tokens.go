@@ -27,7 +27,7 @@ import (
 // train/eval mismatch, the RC-B failure the X2 gate exists to prevent). Bump it
 // on every change to the produced stream:
 //
-//	v1: pre-F1 baseline -- drawn card surfaced at draw time, no peek-result frame.
+//	v1: pre-F1 baseline - drawn card surfaced at draw time, no peek-result frame.
 //	v2: F1 post-draw drawn frame + F2 peek-result frame (cambia-528 / cambia-529).
 //	v3: public race-resolution frame under race-ON (cambia-564). CURRENT.
 //
@@ -43,14 +43,14 @@ const (
 	// exceed this is an explicit overflow ERROR, never silent truncation.
 	//
 	// PAIRED CONSTANT: cfr/src/cfr/prtcfr_worker.py::PRODUCTION_SEQ_CAP (12288).
-	// This value MUST stay >= PRODUCTION_SEQ_CAP -- the durable invariant is
+	// This value MUST stay >= PRODUCTION_SEQ_CAP - the durable invariant is
 	// asserted live by cfr/tests/test_prtcfr_go_bridge_integration.py::
 	// test_go_token_stream_cap_at_least_production_cap (reads this value via
 	// the cambia_token_stream_cap FFI export, never hardcodes it). Raised
 	// 4096 -> 12288 in S1W12 after S1W3's real P100 instrumentation
 	// (scripts/prtcfr_p100_instrument.py, ~8800 games, production 300-turn
 	// rule profile, avoid_cambia cohort) measured worst-case token length 7284
-	// and rising with sample size at n=10000 -- the original 4096 cap (built
+	// and rising with sample size at n=10000 - the original 4096 cap (built
 	// from the pre-P100 "~726 mean, ~1200 worst" estimate in
 	// sequence_encoding.py, measured under the SHORTER 46-turn tiny/test rule
 	// profile, not the 300-turn production one) was already below production
@@ -508,8 +508,8 @@ func (ts *TokenStream) Observe(g *engine.GameState, observerID uint8) error {
 	// decision node (right after a draw action). The freshly drawn card is held
 	// in the pending-discard state (Pending.Data[0]) that drawStockpile/
 	// drawDiscard set before the actor chooses discard vs replace. Surfacing it
-	// here -- one event BEFORE the discard/replace decision, not on the later
-	// Discard/Replace action -- puts the drawn card in the token prefix that
+	// here - one event BEFORE the discard/replace decision, not on the later
+	// Discard/Replace action - puts the drawn card in the token prefix that
 	// conditions that decision, so the legal-action mask at the post-draw node
 	// is determined by the infoset (cambia-528; re-armed Phase-1 bug #21). The
 	// draw source (stockpile/discard) does not change the frame: both surface

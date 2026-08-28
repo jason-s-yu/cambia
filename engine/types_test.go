@@ -77,10 +77,10 @@ func TestCardAbility(t *testing.T) {
 		want AbilityType
 	}
 	cases := []tc{
-		// Jokers — no ability
+		// Jokers - no ability
 		{SuitRedJoker, RankJoker, AbilityNone},
 		{SuitBlackJoker, RankJoker, AbilityNone},
-		// Ace through Six — no ability
+		// Ace through Six - no ability
 		{SuitHearts, RankAce, AbilityNone},
 		{SuitHearts, RankTwo, AbilityNone},
 		{SuitHearts, RankThree, AbilityNone},
@@ -124,11 +124,11 @@ func TestEmptyCard(t *testing.T) {
 	_ = c.Ability()
 }
 
-// TestActionIndexRoundTrip verifies encode→decode for every action index 0–145.
+// TestActionIndexRoundTrip verifies encode→decode for every action index 0-145.
 func TestActionIndexRoundTrip(t *testing.T) {
 	// For each action category, encode then decode and verify identity.
 
-	// Replace: indices 5–10
+	// Replace: indices 5-10
 	for i := uint8(0); i < 6; i++ {
 		idx := EncodeReplace(i)
 		got, ok := ActionIsReplace(idx)
@@ -137,7 +137,7 @@ func TestActionIndexRoundTrip(t *testing.T) {
 		}
 	}
 
-	// PeekOwn: indices 11–16
+	// PeekOwn: indices 11-16
 	for i := uint8(0); i < 6; i++ {
 		idx := EncodePeekOwn(i)
 		got, ok := ActionIsPeekOwn(idx)
@@ -146,7 +146,7 @@ func TestActionIndexRoundTrip(t *testing.T) {
 		}
 	}
 
-	// PeekOther: indices 17–22
+	// PeekOther: indices 17-22
 	for i := uint8(0); i < 6; i++ {
 		idx := EncodePeekOther(i)
 		got, ok := ActionIsPeekOther(idx)
@@ -155,7 +155,7 @@ func TestActionIndexRoundTrip(t *testing.T) {
 		}
 	}
 
-	// BlindSwap: indices 23–58
+	// BlindSwap: indices 23-58
 	for own := uint8(0); own < 6; own++ {
 		for opp := uint8(0); opp < 6; opp++ {
 			idx := EncodeBlindSwap(own, opp)
@@ -166,7 +166,7 @@ func TestActionIndexRoundTrip(t *testing.T) {
 		}
 	}
 
-	// KingLook: indices 59–94
+	// KingLook: indices 59-94
 	for own := uint8(0); own < 6; own++ {
 		for opp := uint8(0); opp < 6; opp++ {
 			idx := EncodeKingLook(own, opp)
@@ -185,7 +185,7 @@ func TestActionIndexRoundTrip(t *testing.T) {
 		t.Errorf("KingSwapYes roundtrip failed: swap=%v ok=%v", swap, ok)
 	}
 
-	// SnapOwn: indices 98–103
+	// SnapOwn: indices 98-103
 	for i := uint8(0); i < 6; i++ {
 		idx := EncodeSnapOwn(i)
 		got, ok := ActionIsSnapOwn(idx)
@@ -194,7 +194,7 @@ func TestActionIndexRoundTrip(t *testing.T) {
 		}
 	}
 
-	// SnapOpponent: indices 104–109
+	// SnapOpponent: indices 104-109
 	for i := uint8(0); i < 6; i++ {
 		idx := EncodeSnapOpponent(i)
 		got, ok := ActionIsSnapOpponent(idx)
@@ -203,7 +203,7 @@ func TestActionIndexRoundTrip(t *testing.T) {
 		}
 	}
 
-	// SnapOpponentMove: indices 110–145
+	// SnapOpponentMove: indices 110-145
 	for own := uint8(0); own < 6; own++ {
 		for slot := uint8(0); slot < 6; slot++ {
 			idx := EncodeSnapOpponentMove(own, slot)

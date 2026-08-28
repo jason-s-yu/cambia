@@ -14,7 +14,7 @@ All three pools use score-differential linear utility for rating updates. Each p
 
 **H2H Quick Play** is a single-game (Bo1) queue with hidden MMR used exclusively for skill-based matchmaking. No rank is displayed. At $R = 0.11$ per game (~89% noise), single-game outcomes are too volatile for meaningful visible ratings. This pool may be surfaced as a visible rank in a future season if population health supports it (target: median player has 50+ games/season).
 
-**Unranked/casual modes** may support 3, 5, or 6 players (single deck up to 4; double deck for 5–8) but carry no rating implications. Lobbies can be created and open for public matchmaking as desired for unranked modes.
+**Unranked/casual modes** may support 3, 5, or 6 players (single deck up to 4; double deck for 5-8) but carry no rating implications. Lobbies can be created and open for public matchmaking as desired for unranked modes.
 
 ### 1.1 Deck Scaling (Reference)
 
@@ -23,8 +23,8 @@ All three pools use score-differential linear utility for rating updates. Each p
 | 2       | 1     | 54          | 46            | Ranked |
 | 3       | 1     | 54          | 42            | Casual only |
 | 4       | 1     | 54          | 38            | Ranked |
-| 5–8     | 2     | 108         | 88–68         | Casual only |
-| 9–12    | 3     | 162         | 126–114       | Party mode |
+| 5-8     | 2     | 108         | 88-68         | Casual only |
+| 9-12    | 3     | 162         | 126-114       | Party mode |
 
 ## 2. All circuit rounds take place in multiples of 4.
 
@@ -52,7 +52,7 @@ $$\text{Var}(\hat{\mu}_i) = \frac{\sigma^2_\varepsilon}{4k}$$
 
 | Cycles $k$ | Rounds | Properties |
 | :---------- | :----- | :--------- |
-| $k = 1$ | 4 | Positional equity achieved, but **zero within-position replication**. Position effects are perfectly confounded with round-specific noise — you cannot distinguish "position 1 is advantaged" from "round 1 had favorable draws." |
+| $k = 1$ | 4 | Positional equity achieved, but **zero within-position replication**. Position effects are perfectly confounded with round-specific noise: you cannot distinguish "position 1 is advantaged" from "round 1 had favorable draws." |
 | $k = 2$ | 8 | **Minimum replication.** Each position is observed twice per player. One degree of freedom per position enables partial separation of position effects from round noise. Estimation variance halved vs. $k=1$. |
 | $k = 3$ | 12 | Further variance reduction ($1/3$ of $k=1$). Sufficient for robust position-effect estimation. |
 | $k = 4$ | 16 | Diminishing marginal returns begin. Each additional cycle buys less than the previous. |
@@ -65,12 +65,12 @@ From the Spearman-Brown reliability analysis, the marginal reliability gain per 
 
 $$\frac{dR}{dn} = \frac{r(1-r)}{(1+(n-1)r)^2}$$
 
-drops below 0.03 (the practical "not worth another 5–7 minutes" threshold) at:
+drops below 0.03 (the practical "not worth another 5-7 minutes" threshold) at:
 
 | Format | $r$ (score-diff) | Knee (rounds) | Nearest $4k$ |
 | :----- | :---------------- | :------------ | :------------ |
 | H2H    | 0.110             | ~8            | **8**         |
-| FFA-4  | 0.080             | ~10–12        | **8 or 12**   |
+| FFA-4  | 0.080             | ~10-12        | **8 or 12**   |
 
 The efficiency knee naturally aligns with multiples of 4.
 
@@ -105,7 +105,7 @@ $$R(n) = \frac{n \cdot r}{1 + (n-1) \cdot r}$$
 
 | Rounds | $R(n)$ | $\Delta R$ per round | Time (~5 min/rd) |
 | :----- | :----- | :------------------- | :---------------- |
-| 1      | 0.110  | —                    | ~5 min            |
+| 1      | 0.110  | -                    | ~5 min            |
 | 4      | 0.331  | 0.055                | ~20 min           |
 | **8**  | **0.497** | **0.042**         | **~40 min**       |
 | 12     | 0.597  | 0.025                | ~60 min           |
@@ -218,8 +218,8 @@ Applied to cumulative totals after each round. Not applicable to Quick Play (Bo1
 | :-------- | :------- | :--------- |
 | 1st       | −3       | −5         |
 | 2nd       | 0        | −2         |
-| 3rd       | —        | 0          |
-| 4th       | —        | 0          |
+| 3rd       | -        | 0          |
+| 4th       | -        | 0          |
 
 **H2H subsidy is −3/0** (vs. −5/−2 in FFA-4) because the Cambia caller in H2H faces only one opponent's final turn, making the call inherently less risky. The smaller subsidy maintains incentive without over-rewarding.
 
@@ -248,7 +248,7 @@ The Quick Play pool may be surfaced as a visible rank in a future season if all 
 
 ### 6.2 H2H Ranked Uses Glicko-2
 
-Glicko-2's three-parameter model ($\mu$, $\phi$, $\sigma$) is ideal for Cambia's high-variance environment. The volatility parameter $\sigma$ distinguishes consistent grinders from volatile players — a distinction invisible to two-parameter systems.
+Glicko-2's three-parameter model ($\mu$, $\phi$, $\sigma$) is ideal for Cambia's high-variance environment. The volatility parameter $\sigma$ distinguishes consistent grinders from volatile players: a distinction invisible to two-parameter systems.
 
 #### Parameters
 
@@ -282,7 +282,7 @@ For multi-round matches (Blitz/Rapid/Classical), the cumulative score across **a
 | Condition                  | Display |
 | :------------------------- | :------ |
 | < 15 matches               | "Placement: X/15 games remaining" |
-| 15–30 matches              | Rating with wide confidence band ($\mu \pm 2\phi$) |
+| 15-30 matches              | Rating with wide confidence band ($\mu \pm 2\phi$) |
 | 30+ matches, $\phi < 100$  | Settled rating with narrow band |
 
 Confidence intervals are always visible (e.g., "1520 ± 140").
@@ -310,7 +310,7 @@ One update upon match conclusion, using **final cumulative scores** (including a
 | Condition                     | Display |
 | :---------------------------- | :------ |
 | < 10 matches                  | "Placement: X/10 games remaining" |
-| 10–25 matches                 | Rating with confidence band ($\mu \pm 2\sigma$) |
+| 10-25 matches                 | Rating with confidence band ($\mu \pm 2\sigma$) |
 | 25+ matches, $\sigma < 3.0$  | Settled rating |
 
 ### 6.4 Rating Pool Structure
@@ -345,9 +345,9 @@ Target match quality degrades over time to prevent indefinite waits:
 
 | Time in Queue | Minimum $Q$ |
 | :------------ | :---------- |
-| 0–30 sec      | 0.80        |
-| 30–60 sec     | 0.70        |
-| 60–120 sec    | 0.55        |
+| 0-30 sec      | 0.80        |
+| 30-60 sec     | 0.70        |
+| 60-120 sec    | 0.55        |
 | 120+ sec      | 0.40        |
 
 ### 7.3 FFA-4 Lobby Formation
@@ -371,7 +371,7 @@ Target match quality degrades over time to prevent indefinite waits:
 | :---- | :--- | :---- |
 | Disconnect < 60 sec | AI plays defensively. Score counts normally upon reconnection. | Same. |
 | Disconnect > 60 sec | Round forfeited. Player receives **41 points** ($+2\sigma$ blind hand maximum). | Same. |
-| Miss 2+ consecutive rounds | — | Tournament abandonment. Remaining rounds scored as 41. 15-min queue lockout. |
+| Miss 2+ consecutive rounds | - | Tournament abandonment. Remaining rounds scored as 41. 15-min queue lockout. |
 | Full match abandonment | Remaining rounds scored as 41. Rating updated normally (massive loss). | Same as above. |
 
 ## 9. Turn Order
@@ -398,12 +398,12 @@ Initial estimates:
 
 | Tier        | Percentile | Approx. $\mu$ |
 | :---------- | :--------- | :------------- |
-| Bronze      | 0–25%      | < 1400         |
-| Silver      | 25–50%     | 1400–1500      |
-| Gold        | 50–75%     | 1500–1600      |
-| Platinum    | 75–90%     | 1600–1720      |
-| Diamond     | 90–97%     | 1720–1850      |
-| Master      | 97–99.5%   | 1850–2000      |
+| Bronze      | 0-25%      | < 1400         |
+| Silver      | 25-50%     | 1400-1500      |
+| Gold        | 50-75%     | 1500-1600      |
+| Platinum    | 75-90%     | 1600-1720      |
+| Diamond     | 90-97%     | 1720-1850      |
+| Master      | 97-99.5%   | 1850-2000      |
 | Grandmaster | 99.5%+     | 2000+          |
 
 ### 10.2 FFA-4 (OpenSkill)
@@ -412,12 +412,12 @@ Initial estimates:
 
 | Tier        | Percentile | Approx. $\mu$ |
 | :---------- | :--------- | :------------- |
-| Bronze      | 0–25%      | < 22           |
-| Silver      | 25–50%     | 22–25          |
-| Gold        | 50–75%     | 25–28          |
-| Platinum    | 75–90%     | 28–32          |
-| Diamond     | 90–97%     | 32–37          |
-| Master      | 97–99.5%   | 37–42          |
+| Bronze      | 0-25%      | < 22           |
+| Silver      | 25-50%     | 22-25          |
+| Gold        | 50-75%     | 25-28          |
+| Platinum    | 75-90%     | 28-32          |
+| Diamond     | 90-97%     | 32-37          |
+| Master      | 97-99.5%   | 37-42          |
 | Grandmaster | 99.5%+     | 42+            |
 
 ## 11. Ranked Seasons

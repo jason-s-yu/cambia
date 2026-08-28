@@ -9,7 +9,7 @@ const (
 	MaxPlayers      = 8
 	MaxHandSize     = 6
 	StandardDeckSize = 54
-	MaxDeckSize     = 216 // 4 × 54 — supports up to 4 decks shuffled together
+	MaxDeckSize     = 216 // 4 × 54 - supports up to 4 decks shuffled together
 )
 
 // PlayerState holds one player's hand and initial peek information.
@@ -58,7 +58,7 @@ func (g *GameState) IsGameOver() bool     { return g.Flags&FlagGameOver != 0 }
 func (g *GameState) IsCambiaCalled() bool { return g.Flags&FlagCambiaCalled != 0 }
 
 // ---------------------------------------------------------------------------
-// xorshift64 RNG — inline, no interface
+// xorshift64 RNG - inline, no interface
 // ---------------------------------------------------------------------------
 
 func (g *GameState) nextRand() uint64 {

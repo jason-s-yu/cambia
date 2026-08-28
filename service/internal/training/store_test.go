@@ -131,7 +131,7 @@ func setupTestDB(t *testing.T) (*TrainingStore, string) {
 		t.Fatal(err)
 	}
 
-	// Insert eval results for run 1 at iteration 100 — all 5 baselines.
+	// Insert eval results for run 1 at iteration 100 - all 5 baselines.
 	for _, b := range meanImpBaselines {
 		_, err = db.Exec(`INSERT INTO eval_results (run_id, iteration, baseline, win_rate, ci_low, ci_high, games_played, adv_loss, strat_loss, timestamp)
 			VALUES (1, 100, ?, 0.40, 0.38, 0.42, 5000, 0.5, 0.3, '2026-03-01T01:00:00Z')`, b)

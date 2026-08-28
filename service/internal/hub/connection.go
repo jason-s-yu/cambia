@@ -69,7 +69,7 @@ func (c *Connection) ReadPump(ctx context.Context, incoming chan<- ClientMsg) {
 
 		body := raw.Body
 		if len(body) == 0 {
-			// No explicit "body" field — use the full frame so handlers
+			// No explicit "body" field - use the full frame so handlers
 			// can parse top-level fields (e.g. { type: "chat", msg: "hi" }).
 			body = json.RawMessage(data)
 		}

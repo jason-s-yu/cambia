@@ -69,7 +69,7 @@ func buildNode(state engine.GameState, maxDepth, depth int, counter *leafCounter
 	}
 
 	if len(legalActions) == 0 {
-		// No legal actions but not terminal — treat as leaf.
+		// No legal actions but not terminal - treat as leaf.
 		node.IsLeaf = true
 		node.LeafIndex = counter.count
 		counter.count++

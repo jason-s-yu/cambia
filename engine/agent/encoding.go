@@ -201,7 +201,7 @@ func (a *AgentState) EncodeEPPBS(ctx engine.DecisionContext, drawnCardBucket int
 		}
 		offset += 9
 	}
-	// offset = 196 — [196-199] were padding; now extended.
+	// offset = 196 - [196-199] were padding; now extended.
 	a.writeHistoryFeatures(out)
 }
 
@@ -305,7 +305,7 @@ func (a *AgentState) EncodeEPPBSDealiased(ctx engine.DecisionContext, drawnCardB
 		if slotInHand < int(handSize) {
 			out[offset+int(a.SlotTags[i])] = 1.0
 		}
-		// else: empty slot — leave all-zeros (de-aliasing fix)
+		// else: empty slot - leave all-zeros (de-aliasing fix)
 		offset += 4
 	}
 	// offset = 88
@@ -330,7 +330,7 @@ func (a *AgentState) EncodeEPPBSDealiased(ctx engine.DecisionContext, drawnCardB
 				}
 			}
 		}
-		// else: empty slot — leave all-zeros (de-aliasing fix)
+		// else: empty slot - leave all-zeros (de-aliasing fix)
 		offset += 9
 	}
 	// offset = 196
@@ -415,7 +415,7 @@ func (a *AgentState) EncodeEPPBSInterleaved(ctx engine.DecisionContext, drawnCar
 
 		slotBase := 42 + i*13
 		if slotInHand >= int(handSize) {
-			// Empty slot — leave all zeros.
+			// Empty slot - leave all zeros.
 			continue
 		}
 
@@ -423,7 +423,7 @@ func (a *AgentState) EncodeEPPBSInterleaved(ctx engine.DecisionContext, drawnCar
 		// Write tag one-hot (4 dims).
 		out[slotBase+int(tag)] = 1.0
 
-		// Write identity bucket one-hot (9 dims) — only when known.
+		// Write identity bucket one-hot (9 dims) - only when known.
 		if tag == TagPrivOwn || tag == TagPub {
 			b := a.SlotBuckets[i]
 			if b < BucketUnknown {
@@ -431,7 +431,7 @@ func (a *AgentState) EncodeEPPBSInterleaved(ctx engine.DecisionContext, drawnCar
 			}
 		}
 	}
-	// offset after slots = 42 + 12*13 = 198 — [198-199] padding (already zero).
+	// offset after slots = 42 + 12*13 = 198 - [198-199] padding (already zero).
 	_ = offset
 
 	// [200-223]: history features.

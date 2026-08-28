@@ -13,11 +13,11 @@
  * Tailwind's `dark:` variant to [data-theme="dark"].
  *
  * Layers, in order:
- *   1. Primitive ramps  -- raw hues, never referenced by components.
- *   2. Semantic tokens  -- the component contract (--surface-*, --text-*,
+ *   1. Primitive ramps : raw hues, never referenced by components.
+ *   2. Semantic tokens : the component contract (--surface-*, --text-*,
  *                          --border-*, --accent-*, --status-*).
- *   3. Scale tokens     -- type, spacing, radius, elevation, motion.
- *   4. Legacy aliases   -- old token names kept alive so pages still on the
+ *   3. Scale tokens    : type, spacing, radius, elevation, motion.
+ *   4. Legacy aliases  : old token names kept alive so pages still on the
  *                          previous language render in the new palette until
  *                          the DL-2..5 sweeps retire them. Do not use in new
  *                          code; DESIGN.md carries the removal checklist.
@@ -87,7 +87,7 @@
   --blue-400: #6aa5cf;
 }
 
-/* ================ 2. SEMANTIC TOKENS -- DARK (default) ================ */
+/* ================ 2. SEMANTIC TOKENS : DARK (default) ================ */
 
 :root {
   color-scheme: dark;
@@ -195,7 +195,7 @@
   --tier-grandmaster: #e0645a;
 }
 
-/* ===================== 2b. SEMANTIC TOKENS -- LIGHT ==================== */
+/* ===================== 2b. SEMANTIC TOKENS : LIGHT ==================== */
 
 [data-theme='light'] {
   color-scheme: light;

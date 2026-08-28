@@ -62,7 +62,7 @@ func TestReplaceNoAbilityByDefault(t *testing.T) {
 				t.Fatalf("Replace: %v", err)
 			}
 
-			// Should NOT be in any ability pending state — just snap phase.
+			// Should NOT be in any ability pending state - just snap phase.
 			if gs.Pending.Type != PendingNone && !gs.Snap.Active {
 				t.Errorf("rank %s: expected PendingNone or snap phase, got Pending.Type=%d", rankName(rank), gs.Pending.Type)
 			}
@@ -103,7 +103,7 @@ func TestReplaceFromDiscardNoAbility(t *testing.T) {
 		t.Fatalf("Replace: %v", err)
 	}
 
-	// Should NOT trigger ability — drawn from discard, not stockpile.
+	// Should NOT trigger ability - drawn from discard, not stockpile.
 	if gs.Pending.Type == PendingPeekOwn {
 		t.Error("PeekOwn ability should NOT trigger when replacing with discard-drawn card")
 	}
@@ -133,7 +133,7 @@ func TestReplaceNonAbilityCardNoTrigger(t *testing.T) {
 		t.Fatalf("Replace: %v", err)
 	}
 
-	// Neither the drawn card nor the old card has ability — no ability pending.
+	// Neither the drawn card nor the old card has ability - no ability pending.
 	if gs.Pending.Type == PendingPeekOwn || gs.Pending.Type == PendingPeekOther ||
 		gs.Pending.Type == PendingBlindSwap || gs.Pending.Type == PendingKingLook {
 		t.Error("ability should NOT trigger when replacing a non-ability card")
@@ -328,7 +328,7 @@ func TestReplaceTriggersKingLook(t *testing.T) {
 // cambia-653: replace()'s ability-trigger block must route through
 // canUseAbility, not a standalone hand-count switch, so LockCallerHand is
 // respected. Before the fix, a locked opponent-caller scenario set Pending to
-// BlindSwap/KingLook while legalAbilitySelect produced zero legal actions —
+// BlindSwap/KingLook while legalAbilitySelect produced zero legal actions -
 // a non-terminal, deadlocked game.
 // ---------------------------------------------------------------------------
 

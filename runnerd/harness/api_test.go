@@ -48,7 +48,7 @@ func TestAuthRequiredOnEveryRoute(t *testing.T) {
 
 // TestHealthIsTokenFree pins the one deliberate exception to bearer-on-every-
 // route: GET /harness/health serves read-only counters without a token (LAN
-// monitoring consumer; cambia-330/network-552). Everything else stays gated —
+// monitoring consumer; cambia-330/network-552). Everything else stays gated;
 // see TestAuthRequiredOnEveryRoute.
 func TestHealthIsTokenFree(t *testing.T) {
 	r := newRig(t, rigConfig{})
@@ -63,7 +63,7 @@ func TestHealthIsTokenFree(t *testing.T) {
 	}
 	resp.Body.Close()
 	// EXACTLY these keys and nothing else: the route is token-free, so any new
-	// field is exposed unauthenticated — a regression to writeJSON(w, 200, snap)
+	// field is exposed unauthenticated: a regression to writeJSON(w, 200, snap)
 	// would leak queue/active JobViews (job IDs, commits, configs) while a
 	// presence-only check stayed green. restart_preserves_jobs and build_commit
 	// (cambia-655) are deliberate additions: neither identifies a job.

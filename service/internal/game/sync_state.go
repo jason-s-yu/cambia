@@ -34,7 +34,7 @@ type ObfPlayerState struct {
 
 // ObfSpecialActionState is the public-safe projection of SpecialActionState serialized into
 // sync_state: which player owes a pending multi-step special action and what rank triggered it.
-// Peeked card values (SpecialActionState.Card1/Card2) are intentionally omitted here — those are
+// Peeked card values (SpecialActionState.Card1/Card2) are intentionally omitted here - those are
 // private to the acting player and already delivered via private_special_action_success; leaking
 // them through a state any client can request would break the King/peek information model.
 type ObfSpecialActionState struct {
@@ -101,7 +101,7 @@ func (g *CambiaGame) getCurrentObfuscatedGameState(forUser uuid.UUID) ObfGameSta
 	}
 
 	// Turn deadline: only advertised while a turn timer is actually armed (TurnDeadline is the
-	// zero value otherwise — see scheduleNextTurnTimerEngine) AND the game is actually live.
+	// zero value otherwise - see scheduleNextTurnTimerEngine) AND the game is actually live.
 	// endGame() stops turnTimer but does not clear TurnDeadline, so without the Started/GameOver
 	// guard a finished game would keep echoing its last (never-firing) deadline in sync_state.
 	if g.Started && !obf.GameOver && !g.TurnDeadline.IsZero() {
@@ -168,7 +168,7 @@ func (g *CambiaGame) getCurrentObfuscatedGameState(forUser uuid.UUID) ObfGameSta
 				// Self-view: expose every hand slot so the client renders a card in each position,
 				// but reveal rank/suit/value ONLY for cards the player has legitimately seen (pregame
 				// peek, own draw, peek-own ability, King look of the own card). Unseen own cards carry
-				// Known:false with no face details, so the client renders a face-down back — exactly
+				// Known:false with no face details, so the client renders a face-down back - exactly
 				// like an opponent's card. This keeps the memory mechanic intact: a fresh game shows
 				// only the two peeked cards, not the full hand (cambia-505).
 				handLen := g.Engine.Players[engineIdx].HandLen

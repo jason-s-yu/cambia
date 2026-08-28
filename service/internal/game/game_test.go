@@ -28,7 +28,7 @@ func newMockBroadcaster() *mockBroadcaster {
 	}
 }
 
-// Emit implements Emitter — captures broadcast events.
+// Emit implements Emitter - captures broadcast events.
 func (mb *mockBroadcaster) Emit(eventType string, payload any) {
 	ev, ok := payload.(GameEvent)
 	if !ok {
@@ -39,7 +39,7 @@ func (mb *mockBroadcaster) Emit(eventType string, payload any) {
 	mb.allEvents = append(mb.allEvents, ev)
 }
 
-// EmitTo implements Emitter — captures per-player events.
+// EmitTo implements Emitter - captures per-player events.
 func (mb *mockBroadcaster) EmitTo(playerID uuid.UUID, eventType string, payload any) {
 	ev, ok := payload.(GameEvent)
 	if !ok {
@@ -219,7 +219,7 @@ func TestBasicDrawDiscard(t *testing.T) {
 	nextTurnPlayer := currentTurnPlayer(g)
 
 	if specialActive {
-		// Special was triggered — skip it.
+		// Special was triggered - skip it.
 		lastPublicEvent = mb.getLastEvent()
 		require.NotNil(t, lastPublicEvent)
 		assert.Equal(t, EventPlayerSpecialChoice, lastPublicEvent.Type)
@@ -228,7 +228,7 @@ func TestBasicDrawDiscard(t *testing.T) {
 		nextTurnPlayer = currentTurnPlayer(g)
 		assert.Equal(t, otherPlayer.ID, nextTurnPlayer.ID, "Turn should advance to other player after skip")
 	} else {
-		// No special — check turn advanced and discard pile grew.
+		// No special - check turn advanced and discard pile grew.
 		newDiscardLen := int(g.Engine.DiscardLen)
 		assert.Greater(t, newDiscardLen, preDiscardLen, "Discard pile should have grown")
 		assert.Equal(t, otherPlayer.ID, nextTurnPlayer.ID, "Turn should have advanced to other player")

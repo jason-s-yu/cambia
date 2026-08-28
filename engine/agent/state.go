@@ -44,7 +44,7 @@ func (b BeliefValue) Bucket() CardBucket { return CardBucket(b) }
 func (b BeliefValue) Decay() DecayCategory { return DecayCategory(uint8(b) - BeliefOffsetDecay) }
 
 // AgentState holds the complete belief state for one player in a two-player game.
-// It is a flat value type — no pointers, no maps, no slices — so it can be
+// It is a flat value type - no pointers, no maps, no slices - so it can be
 // copied with =, saved on the stack, and used in zero-allocation CFR traversal.
 type AgentState struct {
 	PlayerID       uint8
@@ -52,11 +52,11 @@ type AgentState struct {
 	MemoryLevel    uint8 // 0, 1, or 2
 	TimeDecayTurns uint8
 
-	// Own hand beliefs — indexed 0..OwnHandLen-1
+	// Own hand beliefs - indexed 0..OwnHandLen-1
 	OwnHand    [engine.MaxHandSize]KnownCardInfo
 	OwnHandLen uint8
 
-	// Opponent beliefs — indexed 0..OppHandLen-1
+	// Opponent beliefs - indexed 0..OppHandLen-1
 	OppBelief      [engine.MaxHandSize]BeliefValue
 	OppLastSeen    [engine.MaxHandSize]uint16
 	OppHasLastSeen [engine.MaxHandSize]bool
@@ -373,7 +373,7 @@ func (a *AgentState) processReplace(g *engine.GameState, isSelf bool, targetIdx 
 		// EP-PBS: we know the new card at own slot targetIdx.
 		a.eppbsForceOwnSlotKnown(uint8(targetIdx), CardToBucket(card))
 	} else {
-		// Opponent replaced one of their cards — event decay on that slot.
+		// Opponent replaced one of their cards - event decay on that slot.
 		a.triggerEventDecay(targetIdx)
 		// EP-PBS: opp knows their new card at opp slot; we don't.
 		a.eppbsForceOppSlotPrivOpp(OppSlotsStart + uint8(targetIdx))
@@ -479,7 +479,7 @@ func (a *AgentState) processKingSwapYes(g *engine.GameState, isSelf bool) {
 
 	if isSelf {
 		// We decided to swap: our card at ownIdx went to opponent, opponent's oppIdx came to us.
-		// We no longer know what's at our ownIdx (we got the opponent's old card — but wait,
+		// We no longer know what's at our ownIdx (we got the opponent's old card - but wait,
 		// we DID look at it during king look). However, the belief update tracks the post-swap
 		// state: our ownIdx now contains the opponent's card, which we SAW during king look.
 		// But the king look already updated beliefs, and now we performed the swap.
@@ -491,7 +491,7 @@ func (a *AgentState) processKingSwapYes(g *engine.GameState, isSelf bool) {
 			LastSeenTurn: a.CurrentTurn,
 			Card:         engine.EmptyCard,
 		}
-		// Opponent's oppIdx now has our old card — trigger event decay.
+		// Opponent's oppIdx now has our old card - trigger event decay.
 		a.triggerEventDecay(oppIdx)
 		// EP-PBS: swap the epistemic state of both slots (we know both from king look).
 		a.eppbsSwapSlots(ownIdx, OppSlotsStart+oppIdx)
@@ -527,7 +527,7 @@ func (a *AgentState) processSnapOwn(g *engine.GameState, isSelf bool, targetIdx 
 			a.removeOppCard(targetIdx)
 		}
 	} else {
-		// Snap failed — penalty cards are drawn.
+		// Snap failed - penalty cards are drawn.
 		penaltyCount := snapPenalty
 		if isSelf {
 			for i := uint8(0); i < penaltyCount; i++ {
@@ -556,7 +556,7 @@ func (a *AgentState) processSnapOpponent(g *engine.GameState, isSelf bool, oppId
 			a.removeOwnCard(oppIdx)
 		}
 	} else {
-		// Snap failed — penalty cards for the snapper.
+		// Snap failed - penalty cards for the snapper.
 		penaltyCount := snapPenalty
 		if isSelf {
 			for i := uint8(0); i < penaltyCount; i++ {
@@ -855,7 +855,7 @@ func (a *AgentState) Clone() AgentState { return *a }
 func (a *AgentState) ApplyMemoryDecay(rng *rand.Rand) {
 	switch a.MemoryArchetype {
 	case MemoryPerfect:
-		// No decay — retain all observations indefinitely.
+		// No decay - retain all observations indefinitely.
 		return
 
 	case MemoryDecaying:
@@ -876,7 +876,7 @@ func (a *AgentState) ApplyMemoryDecay(rng *rand.Rand) {
 				a.OwnActiveMaskLen--
 				a.OwnActiveMask[i] = a.OwnActiveMask[a.OwnActiveMaskLen]
 				a.OwnActiveMask[a.OwnActiveMaskLen] = 0
-				// Do NOT increment i — recheck this position.
+				// Do NOT increment i - recheck this position.
 			} else {
 				i++
 			}
@@ -1143,7 +1143,7 @@ func (a *AgentState) nplayerProcessBlindSwap(g *engine.GameState, actingPlayer, 
 	}
 	slotA := nplayerSlot(actingPlayer, ownSlot)
 	slotB := nplayerSlot(targetPlayer, oppSlot)
-	// Swap all knowledge bits — both slots physically moved.
+	// Swap all knowledge bits - both slots physically moved.
 	a.nplayerSwapKnowledge(slotA, slotB)
 	// After a blind swap, neither actor knows what they received (they didn't look).
 	// Clear both slots' knowledge (the swap was blind).
@@ -1192,10 +1192,10 @@ func (a *AgentState) nplayerProcessSnapOwn(g *engine.GameState, actingPlayer, sl
 	// We just clear knowledge of that slot; hand shrinks (tracked via OwnHandLen update above).
 	globalSlot := nplayerSlot(actingPlayer, slot)
 	if g.LastAction.SnapSuccess {
-		// Card is now gone — mark all knowledge cleared.
+		// Card is now gone - mark all knowledge cleared.
 		a.nplayerClearKnowledge(globalSlot)
 	}
-	// If snap failed: penalty cards added (unknown) — OwnHandLen already updated.
+	// If snap failed: penalty cards added (unknown) - OwnHandLen already updated.
 }
 
 func (a *AgentState) nplayerProcessSnapOpponent(g *engine.GameState, actingPlayer, slot, oppIdx uint8) {
@@ -1212,7 +1212,7 @@ func (a *AgentState) nplayerProcessSnapOpponent(g *engine.GameState, actingPlaye
 func (a *AgentState) nplayerProcessSnapOpponentMove(g *engine.GameState, actingPlayer, ownIdx uint8) {
 	// Acting player moves their card at ownIdx to a target player's hand.
 	globalSlot := nplayerSlot(actingPlayer, ownIdx)
-	// Card moves out of actingPlayer's hand — clear its knowledge.
+	// Card moves out of actingPlayer's hand - clear its knowledge.
 	a.nplayerClearKnowledge(globalSlot)
 	// Target player gains a card (unknown position), tracked via hand length.
 }

@@ -221,7 +221,7 @@ func (cs *CircuitState) RecordRound(scores map[int]int, cambiaCallerID int) erro
 				continue
 			}
 			if scores[opid] == score && pid != cambiaCallerID && opid != cambiaCallerID {
-				// Both tied, neither called Cambia — both get higher placement bonus
+				// Both tied, neither called Cambia - both get higher placement bonus
 				higherPlacement := idx
 				if jdx < higherPlacement {
 					higherPlacement = jdx
@@ -271,7 +271,7 @@ func (cs *CircuitState) RecordRound(scores map[int]int, cambiaCallerID int) erro
 				// opid wins
 				cs.updateH2H(pid, opid, false)
 			} else {
-				// Tied — Cambia caller wins
+				// Tied - Cambia caller wins
 				if pid == cambiaCallerID {
 					cs.updateH2H(pid, opid, true)
 				} else if opid == cambiaCallerID {

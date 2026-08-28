@@ -107,7 +107,7 @@ func TestSeriesCumulativeScoring(t *testing.T) {
 	standings := ts.GetStandings()
 	// Cumulative_score: higher is better.
 	// p20: 7+6=13 points, p30: 5+4=9, p10: 3+3=6
-	// But standings depend on what we actually passed — let's just verify ordering.
+	// But standings depend on what we actually passed - let's just verify ordering.
 	if len(standings) != 3 {
 		t.Fatalf("expected 3 standings, got %d", len(standings))
 	}

@@ -121,7 +121,7 @@ func (s *TrainingStore) streamLocalFile(ctx context.Context, c *websocket.Conn, 
 				}
 			}
 			if event.Has(fsnotify.Remove) || event.Has(fsnotify.Create) {
-				// Log rotation — re-watch if possible.
+				// Log rotation - re-watch if possible.
 				_ = watcher.Remove(logPath)
 				time.Sleep(100 * time.Millisecond)
 				if err := watcher.Add(logPath); err == nil {

@@ -190,7 +190,7 @@ func (m *Matchmaker) tryMatchQueue(queueID string, entries []*QueuedLobby) {
 			continue
 		}
 		if anchor.PlayerCount == target {
-			// Solo lobby exactly fills the target — match immediately.
+			// Solo lobby exactly fills the target - match immediately.
 			m.commitMatch(queueID, []*QueuedLobby{anchor}, matched)
 			continue
 		}

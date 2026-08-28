@@ -3,13 +3,13 @@
 //
 // Crawls a running dev/preview server starting from `/`, discovers the entry
 // scripts and stylesheets from the served HTML, then recursively walks the
-// non-dynamic import graph of any JS it fetches (regex-based -- this is a rough
+// non-dynamic import graph of any JS it fetches (regex-based - this is a rough
 // crawler, not a real parser or bundler; dynamic `import()` calls are
 // intentionally not followed, matching what a browser's initial cold-load
 // waterfall actually requests before anything is interacted with).
 //
 // Zero new deps: only Node's built-in http/https/zlib/url modules. Node's
-// global `fetch` (undici) is deliberately NOT used here -- it transparently
+// global `fetch` (undici) is deliberately NOT used here - it transparently
 // decompresses gzip/br response bodies, which would hide the actual
 // over-the-wire byte counts this script exists to measure. Raw sockets via
 // `http`/`https` give us the untouched compressed bytes instead.

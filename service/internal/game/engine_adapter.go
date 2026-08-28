@@ -1,4 +1,4 @@
-// engine_adapter.go — Bridge between engine.GameState and CambiaGame.
+// engine_adapter.go - Bridge between engine.GameState and CambiaGame.
 package game
 
 import (
@@ -783,7 +783,7 @@ func (g *CambiaGame) emitEventsForAction(actionIdx uint16, actorID uuid.UUID, ac
 func (g *CambiaGame) handleDiscardViaEngine(playerID uuid.UUID, engineIdx uint8, payload map[string]interface{}) {
 	// Validate engine state: player must have a drawn card pending.
 	if g.Engine.Pending.Type != engine.PendingDiscard || g.Engine.Pending.PlayerID != engineIdx {
-		log.Printf("Game %s: Player %s discard ignored — no pending drawn card in engine.", g.ID, playerID)
+		log.Printf("Game %s: Player %s discard ignored - no pending drawn card in engine.", g.ID, playerID)
 		g.fireEventToPlayer(playerID, GameEvent{
 			Type:    EventPrivateSpecialFail,
 			Payload: map[string]interface{}{"message": "You must draw a card first."},
@@ -820,7 +820,7 @@ func (g *CambiaGame) handleDiscardViaEngine(playerID uuid.UUID, engineIdx uint8,
 	hasAbility := drawnCard.HasAbility() && drawnFrom == engine.DrawnFromStockpile
 
 	if hasAbility {
-		// Buffer the discard — fire special choice event, wait for ability decision.
+		// Buffer the discard - fire special choice event, wait for ability decision.
 		g.pendingDiscardAbilityChoice = true
 		g.pendingDiscardCardID = cardID
 
@@ -853,7 +853,7 @@ func (g *CambiaGame) handleDiscardViaEngine(playerID uuid.UUID, engineIdx uint8,
 
 		g.scheduleNextTurnTimer()
 	} else {
-		// No ability — apply directly.
+		// No ability - apply directly.
 		g.applyEngineAction(engine.ActionDiscardNoAbility, playerID)
 	}
 }
@@ -894,7 +894,7 @@ func (g *CambiaGame) handleReplaceViaEngine(playerID uuid.UUID, engineIdx uint8,
 	if g.HouseRules.AllowReplaceAbilities {
 		oldCard := g.Engine.Players[engineIdx].Hand[targetIdx]
 		if oldCard.HasAbility() {
-			// Buffer replace with ability — for simplicity, apply replace then trigger special.
+			// Buffer replace with ability - for simplicity, apply replace then trigger special.
 			// Actually the engine handles this through ActionDiscardWithAbility flow for replace.
 			// For now, apply replace (which puts old card to discard) and then trigger special.
 			if err := g.applyEngineAction(engine.EncodeReplace(targetIdx), playerID); err != nil {
@@ -995,7 +995,7 @@ func (g *CambiaGame) handleSnapViaEngine(playerID uuid.UUID, engineIdx uint8, pa
 				_ = snapCard
 				return
 			}
-			// Found card but wrong rank — fail.
+			// Found card but wrong rank - fail.
 			g.handleSnapFailure(playerID, engineIdx, &cardID)
 			return
 		}
@@ -1320,7 +1320,7 @@ func (g *CambiaGame) scheduleNextTurnTimerEngine() {
 	// Find player by UUID.
 	currentPlayer := g.getPlayerByID(currentPlayerUUID)
 	if currentPlayer == nil {
-		log.Printf("Game %s: Cannot schedule timer — acting player %s not found.", g.ID, currentPlayerUUID)
+		log.Printf("Game %s: Cannot schedule timer - acting player %s not found.", g.ID, currentPlayerUUID)
 		return
 	}
 
@@ -1410,7 +1410,7 @@ func (g *CambiaGame) handleTimeoutEngine(playerID uuid.UUID) {
 		return
 	}
 
-	// Player timed out without drawing — draw and immediately discard.
+	// Player timed out without drawing - draw and immediately discard.
 	log.Printf("Game %s: Player %s timed out without drawing. Drawing and discarding.", g.ID, playerID)
 	if err := g.applyEngineAction(engine.ActionDrawStockpile, playerID); err != nil {
 		return

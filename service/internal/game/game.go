@@ -134,7 +134,7 @@ type CambiaGame struct {
 
 	Players []*models.Player // List of players in the game.
 
-	// Engine integration — authoritative game state.
+	// Engine integration - authoritative game state.
 	Engine         engine.GameState             // The authoritative game state.
 	CardTracker    CardUUIDTracker              // UUID tracking for all cards.
 	PlayerToEngine map[uuid.UUID]uint8          // Service player UUID -> engine index.
@@ -169,7 +169,7 @@ type CambiaGame struct {
 
 	lastSeen map[uuid.UUID]time.Time // Tracks last activity time for players (potential future use).
 
-	// Communication — all events go through the hub's Emitter.
+	// Communication - all events go through the hub's Emitter.
 	Emitter   Emitter       // Set by the hub after game creation; nil-safe (events dropped if unset).
 	OnGameEnd OnGameEndFunc // Callback executed when the game finishes.
 
@@ -184,7 +184,7 @@ type CambiaGame struct {
 	// reassigning the shared pool, under -race).
 	PersistWG *sync.WaitGroup
 
-	// Special Action State — kept for backward compatibility with ProcessSpecialAction routing.
+	// Special Action State - kept for backward compatibility with ProcessSpecialAction routing.
 	SpecialAction SpecialActionState // Holds state for pending multi-step special actions.
 
 	// Snap State

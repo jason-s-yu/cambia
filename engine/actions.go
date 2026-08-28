@@ -153,7 +153,7 @@ func (g *GameState) callCambia() error {
 	g.LastAction.ActionIdx = ActionCallCambia
 	g.LastAction.ActingPlayer = g.CurrentPlayer
 
-	// Calling Cambia counts as a turn — advance so other player gets final turn.
+	// Calling Cambia counts as a turn - advance so other player gets final turn.
 	g.advanceTurn()
 	return nil
 }

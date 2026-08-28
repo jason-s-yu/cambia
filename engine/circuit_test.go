@@ -170,7 +170,7 @@ func TestCircuitRecordRound_TieBreaking(t *testing.T) {
 
 	// Player 2 gets -5 subsidy (1st place), player 1 gets -2 (2nd place)
 	// But wait: tied players without Cambia both get higher placement bonus.
-	// Here, player 2 IS the Cambia caller, so player 2 wins the tie — gets their earned placement.
+	// Here, player 2 IS the Cambia caller, so player 2 wins the tie - gets their earned placement.
 	// Player 1 (non-caller) also tied with p2, but p2 called Cambia so the tie-both rule doesn't apply.
 	if result.Subsidies[2] != -5 {
 		t.Errorf("Cambia caller (2) subsidy: want -5, got %d", result.Subsidies[2])
@@ -188,7 +188,7 @@ func TestCircuitRecordRound_TieBothGetBonus(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Players 1 and 2 tied at 5; no Cambia caller — both should get 1st-place bonus (-5)
+	// Players 1 and 2 tied at 5; no Cambia caller - both should get 1st-place bonus (-5)
 	scores := map[int]int{1: 5, 2: 5, 3: 15, 4: 20}
 	if err := cs.RecordRound(scores, -1); err != nil {
 		t.Fatal(err)
@@ -334,7 +334,7 @@ func TestCircuitGetStandings_BestRound(t *testing.T) {
 	_ = cs.RecordRound(map[int]int{1: 10, 2: 10}, -1)
 
 	standings := cs.GetStandings()
-	// All tied — final tiebreak by PlayerID ascending
+	// All tied - final tiebreak by PlayerID ascending
 	if standings[0].PlayerID != 1 {
 		t.Errorf("final tiebreak should give PlayerID=1 first, got %d", standings[0].PlayerID)
 	}

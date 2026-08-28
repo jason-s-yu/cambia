@@ -178,7 +178,7 @@ func checkEncoding(t *testing.T, a *AgentState, ctx engine.DecisionContext, draw
 	// INV-E10: Cambia state one-hot (3 values at offset 219).
 	failures += checkOneHotGroup(t, out[:], 219, 3, prefix, "INV-E10-cambia")
 
-	// INV-E14: Encoding is deterministic — encode again and compare.
+	// INV-E14: Encoding is deterministic - encode again and compare.
 	var out2 [InputDim]float32
 	a.Encode(ctx, drawnBucket, &out2)
 	if out != out2 {

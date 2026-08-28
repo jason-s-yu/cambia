@@ -14,9 +14,9 @@ type HouseRules struct {
 	SnapRace              bool  // snap model: false = race-OFF (sequential discarder-first, the frozen default); true = race-ON, the true N-way race (simultaneous imperfect-info commit, one uniform-random winner among willing snappers, losers penalized) per cambia-564
 	NumJokers             uint8 // 0, 1, or 2 jokers in the deck
 	LockCallerHand        bool  // if true, the Cambia caller cannot replace cards from hand
-	NumPlayers            uint8 // number of active players (2–8); 0 treated as 2
+	NumPlayers            uint8 // number of active players (2-8); 0 treated as 2
 	InitialViewCount      uint8 // how many cards each player peeks at game start (default 2)
-	NumDecks              uint8 // number of standard decks shuffled together (1–4; 0 treated as 1)
+	NumDecks              uint8 // number of standard decks shuffled together (1-4; 0 treated as 1)
 }
 
 // DefaultHouseRules returns the standard Cambia house rules.

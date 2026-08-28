@@ -1,6 +1,6 @@
 package engine
 
-// Suit constants — packed into upper 4 bits of Card.
+// Suit constants - packed into upper 4 bits of Card.
 const (
 	SuitHearts    uint8 = 0
 	SuitDiamonds  uint8 = 1
@@ -10,7 +10,7 @@ const (
 	SuitBlackJoker uint8 = 5
 )
 
-// Rank constants — packed into lower 4 bits of Card.
+// Rank constants - packed into lower 4 bits of Card.
 const (
 	RankAce   uint8 = 0
 	RankTwo   uint8 = 1
@@ -48,7 +48,7 @@ func (c Card) Rank() uint8 { return uint8(c) & 0x0F }
 // Value returns the point value of the card.
 //   - Joker (rank 13) → 0
 //   - Ace (rank 0) → 1
-//   - Two–Nine (ranks 1–8) → rank+1
+//   - Two-Nine (ranks 1-8) → rank+1
 //   - Ten (rank 9) → 10
 //   - Jack (rank 10) → 11
 //   - Queen (rank 11) → 12
@@ -60,7 +60,7 @@ func (c Card) Value() int8 {
 		return 0
 	case r == RankAce:
 		return 1
-	case r <= RankNine: // ranks 1–8: Two–Nine
+	case r <= RankNine: // ranks 1-8: Two-Nine
 		return int8(r + 1)
 	case r == RankTen:
 		return 10
@@ -75,11 +75,11 @@ func (c Card) Value() int8 {
 		}
 		return 13
 	}
-	// EmptyCard or malformed — return 0
+	// EmptyCard or malformed - return 0
 	return 0
 }
 
-// HasAbility returns true for ranks Seven through King (6–12).
+// HasAbility returns true for ranks Seven through King (6-12).
 func (c Card) HasAbility() bool {
 	r := c.Rank()
 	return r >= RankSeven && r <= RankKing
@@ -90,10 +90,10 @@ type AbilityType uint8
 
 const (
 	AbilityNone      AbilityType = iota // 0
-	AbilityPeekOwn                      // 1 — Seven, Eight
-	AbilityPeekOther                    // 2 — Nine, Ten
-	AbilityBlindSwap                    // 3 — Jack, Queen
-	AbilityKingLook                     // 4 — King
+	AbilityPeekOwn                      // 1 - Seven, Eight
+	AbilityPeekOther                    // 2 - Nine, Ten
+	AbilityBlindSwap                    // 3 - Jack, Queen
+	AbilityKingLook                     // 4 - King
 )
 
 // Ability returns the ability associated with discarding this card.
@@ -328,7 +328,7 @@ func ActionIsSnapOpponentMove(idx uint16) (ownIdx, slotIdx uint8, ok bool) {
 }
 
 // ---------------------------------------------------------------------------
-// LastActionInfo — public observation of the last game action.
+// LastActionInfo - public observation of the last game action.
 // ---------------------------------------------------------------------------
 
 // LastActionInfo encodes a fully observable summary of the most recent action.
@@ -364,17 +364,17 @@ const (
 //   2   CallCambia
 //   3   DiscardNoAbility
 //   4   DiscardWithAbility
-//   5–10    Replace(slot), 6 entries
-//   11–16   PeekOwn(slot), 6 entries
-//   17–58   PeekOther(slot*7 + oppIdx), 6 slots × 7 opponents = 42 entries
-//   59–310  BlindSwap(own*42 + oppSlot*7 + oppIdx), 6 own × 6 opp-slots × 7 opp-idx = 252 entries
-//   311–562 KingLook(own*42 + oppSlot*7 + oppIdx), 252 entries
+//   5-10    Replace(slot), 6 entries
+//   11-16   PeekOwn(slot), 6 entries
+//   17-58   PeekOther(slot*7 + oppIdx), 6 slots × 7 opponents = 42 entries
+//   59-310  BlindSwap(own*42 + oppSlot*7 + oppIdx), 6 own × 6 opp-slots × 7 opp-idx = 252 entries
+//   311-562 KingLook(own*42 + oppSlot*7 + oppIdx), 252 entries
 //   563     KingSwapNo
 //   564     KingSwapYes
 //   565     PassSnap
-//   566–571 SnapOwn(slot), 6 entries
-//   572–613 SnapOpponent(slot*7 + oppIdx), 6 slots × 7 opp-idx = 42 entries
-//   614–619 SnapOpponentMove(ownCardIdx), 6 entries
+//   566-571 SnapOwn(slot), 6 entries
+//   572-613 SnapOpponent(slot*7 + oppIdx), 6 slots × 7 opp-idx = 42 entries
+//   614-619 SnapOpponentMove(ownCardIdx), 6 entries
 //   Total: 620
 
 const (

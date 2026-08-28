@@ -2,7 +2,7 @@
 
 package engine
 
-// integration_test.go — Full-game integration tests for the Go engine.
+// integration_test.go - Full-game integration tests for the Go engine.
 //
 // These tests use only the public API: NewGame, ApplyAction, LegalActions,
 // IsTerminal, Save/Restore (undo), ActingPlayer, DecisionCtx.
@@ -215,7 +215,7 @@ func TestIntegrationCambiaTriggersEndGame(t *testing.T) {
 			return // test passes after first valid Cambia game
 		}
 	}
-	t.Errorf("no Cambia call occurred in %d attempts — check cambia_allowed_round or Cambia action availability", maxAttempts)
+	t.Errorf("no Cambia call occurred in %d attempts - check cambia_allowed_round or Cambia action availability", maxAttempts)
 }
 
 // ---------------------------------------------------------------------------

@@ -106,7 +106,7 @@ func (g *GameState) legalPostDraw(mask *[3]uint64) {
 
 	// Replace(i): legal for each i < acting player's hand length.
 	// When LockCallerHand is true and Cambia has been called, the caller
-	// cannot replace cards — they may only discard.
+	// cannot replace cards - they may only discard.
 	if !(g.Rules.LockCallerHand && g.IsCambiaCalled() && int8(acting) == g.CambiaCaller) {
 		handLen := g.Players[acting].HandLen
 		for i := uint8(0); i < handLen; i++ {
@@ -129,7 +129,7 @@ func (g *GameState) canUseAbility(acting uint8, card Card) bool {
 		return oppHandLen > 0
 	case AbilityBlindSwap, AbilityKingLook:
 		// When LockCallerHand is true and the opponent is the Cambia caller,
-		// swap abilities cannot target them — fizzle at ability-select stage.
+		// swap abilities cannot target them - fizzle at ability-select stage.
 		if g.Rules.LockCallerHand && g.IsCambiaCalled() && int8(opp) == g.CambiaCaller {
 			return false
 		}
@@ -162,7 +162,7 @@ func (g *GameState) legalAbilitySelect(mask *[3]uint64) {
 	case PendingBlindSwap:
 		// BlindSwap(own_i, opp_j) for all valid combinations.
 		// When LockCallerHand is true and opponent is the Cambia caller,
-		// targeting their hand is forbidden — ability produces no actions.
+		// targeting their hand is forbidden - ability produces no actions.
 		if !(g.Rules.LockCallerHand && g.IsCambiaCalled() && int8(opp) == g.CambiaCaller) {
 			for i := uint8(0); i < ownHandLen; i++ {
 				for j := uint8(0); j < oppHandLen; j++ {
@@ -174,7 +174,7 @@ func (g *GameState) legalAbilitySelect(mask *[3]uint64) {
 	case PendingKingLook:
 		// KingLook(own_i, opp_j) for all valid combinations.
 		// When LockCallerHand is true and opponent is the Cambia caller,
-		// targeting their hand is forbidden — ability produces no actions.
+		// targeting their hand is forbidden - ability produces no actions.
 		if !(g.Rules.LockCallerHand && g.IsCambiaCalled() && int8(opp) == g.CambiaCaller) {
 			for i := uint8(0); i < ownHandLen; i++ {
 				for j := uint8(0); j < oppHandLen; j++ {

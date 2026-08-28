@@ -53,8 +53,8 @@ interface AuthState {
 // mount around the same time) GET /user/me probes instead of one. Reusing
 // the in-flight promise collapses concurrent callers onto a single request.
 // The guard clears once the request settles, so a later login/register/
-// guest-login/claim flow -- which calls checkAuth() again to refresh state
-// -- still issues a fresh check rather than being stuck deduped forever.
+// guest-login/claim flow - which calls checkAuth() again to refresh state
+// - still issues a fresh check rather than being stuck deduped forever.
 let checkAuthInFlight: Promise<void> | null = null;
 
 export const useAuthStore = create<AuthState>()(
@@ -145,7 +145,7 @@ export const useAuthStore = create<AuthState>()(
 			try {
 				await logoutUser();
 			} catch {
-				// Best-effort — clear local state regardless
+				// Best-effort - clear local state regardless
 			}
 			set({ isAuthenticated: false, user: null, error: null, isLoading: false });
 		},

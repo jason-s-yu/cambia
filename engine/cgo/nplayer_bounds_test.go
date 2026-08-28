@@ -5,7 +5,7 @@ import "testing"
 // cambia-542 F3: prior to HouseRules.Validate(), NumPlayers had no upper
 // bound anywhere. cambia_game_new_with_rules only clamped the lower bound
 // (np < 2 -> 2); numPlayers=9 sailed through, and Deal()'s round-robin loop
-// then indexed g.Players[8] into a fixed [8]PlayerState array -- an
+// then indexed g.Players[8] into a fixed [8]PlayerState array - an
 // unrecoverable panic inside libcambia.so, not a Go error the Python side
 // could catch. These tests assert the FFI boundary now rejects it (-1)
 // instead; they must never reach the panic path itself.

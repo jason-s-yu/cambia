@@ -68,13 +68,13 @@ func (g *GameState) discardWithAbility() error {
 		}
 	}
 
-	// No ability or ability fizzles — snap phase for the discarded card.
+	// No ability or ability fizzles - snap phase for the discarded card.
 	g.initiateSnapPhase(drawn)
 	return nil
 }
 
 // peekOwn resolves a PendingPeekOwn ability: the acting player observes one of
-// their own cards. This is observation-only — no cards are moved.
+// their own cards. This is observation-only - no cards are moved.
 func (g *GameState) peekOwn(targetIdx uint8) error {
 	if g.Pending.Type != PendingPeekOwn {
 		return fmt.Errorf("pending type is not PendingPeekOwn (got %d)", g.Pending.Type)
@@ -100,7 +100,7 @@ func (g *GameState) peekOwn(targetIdx uint8) error {
 }
 
 // peekOther resolves a PendingPeekOther ability: the acting player observes one of
-// the opponent's cards. This is observation-only — no cards are moved.
+// the opponent's cards. This is observation-only - no cards are moved.
 func (g *GameState) peekOther(targetIdx uint8) error {
 	if g.Pending.Type != PendingPeekOther {
 		return fmt.Errorf("pending type is not PendingPeekOther (got %d)", g.Pending.Type)
@@ -239,7 +239,7 @@ func (g *GameState) kingSwapDecision(performSwap bool) error {
 }
 
 // ===========================================================================
-// N-Player ability handlers — accept explicit target player
+// N-Player ability handlers - accept explicit target player
 // ===========================================================================
 
 // peekOtherNPlayer resolves PendingPeekOther targeting a specific player.

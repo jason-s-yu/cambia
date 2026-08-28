@@ -175,7 +175,7 @@ func TestActingPlayer(t *testing.T) {
 	g := NewGame(42, DefaultHouseRules())
 	g.Deal()
 
-	// No snap, no pending — should return CurrentPlayer.
+	// No snap, no pending - should return CurrentPlayer.
 	if g.Snap.Active || g.Pending.Type != PendingNone {
 		t.Skip("unexpected initial snap/pending state")
 	}
