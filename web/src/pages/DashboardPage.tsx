@@ -382,11 +382,15 @@ const DashboardPage: React.FC = () => {
                   </span>
                 </div>
               )}
-              {/* Nothing rated: the headline already says Unrated, so the rows would
-                  be four more copies of it. One line explains the state instead
-                  (cambia-876, DL-2 review F6). Gated on hasRatedPool too, so the
-                  hint never sits under a headline that is printing a real rating
-                  (cambia-929). */}
+              {/* Nothing to show at all: the headline already says Unrated, so the rows
+                  would be four more copies of it. One line explains the state instead
+                  (cambia-876, DL-2 review F6). The gate is neverPlayed && !hasRatedPool,
+                  deliberately not !hasRatedPool alone: a player with real casual-game
+                  history (record.games > 0) but no rated pool still has a real Record
+                  row worth showing, so the hint is reserved for an account with nothing
+                  recorded at all (cambia-949 CP6). hasRatedPool alone covers the
+                  opposite mismatch: a rated pool seeded without a matching game_results
+                  row must not sit under a hint claiming no rating exists (cambia-929). */}
               {neverPlayed && !hasRatedPool ? (
                 <Note style={{ fontSize: 'var(--ds-text-xs)' }}>Play a ranked game to start a rating.</Note>
               ) : (
