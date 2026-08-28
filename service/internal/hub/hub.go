@@ -21,6 +21,11 @@ import (
 // GameServer does not override CountdownDuration on the hub.
 const defaultCountdownDuration = 3 * time.Second
 
+// defaultPostGameResultsDuration is how long a hub stays in PhasePostGame showing results before
+// it returns the lobby to PhaseOpen, used when the GameServer does not override
+// PostGameDuration on the hub. It matches the between-rounds interval in HandleRoundEnd.
+const defaultPostGameResultsDuration = 10 * time.Second
+
 // GameFactory builds and registers a CambiaGame for the given players, wiring emitter as
 // the event sink. The returned game is registered but not begun (the hub calls BeginPreGame
 // after routing is in place). Returns nil if the game could not be created (e.g. <2 players).
@@ -89,6 +94,10 @@ type Hub struct {
 	// CountdownDuration is the delay from countdown start to game creation.
 	CountdownDuration time.Duration
 
+	// PostGameDuration is how long PhasePostGame holds the results screen before the hub
+	// returns itself to PhaseOpen (see returnToLobby).
+	PostGameDuration time.Duration
+
 	// seq is the monotonic per-hub sequence stamped on every server->client envelope. Invariant:
 	// one logical broadcast consumes exactly one seq, stamped identically on every recipient's copy
 	// (Emit does this inherently; broadcastLobbyUpdate does it via emitToWithSeq). dispatch() rejects
@@ -129,6 +138,7 @@ func NewHub(lob *lobby.Lobby) *Hub {
 		Phase:             PhaseOpen,
 		Lobby:             lob,
 		CountdownDuration: defaultCountdownDuration,
+		PostGameDuration:  defaultPostGameResultsDuration,
 		conns:             make(map[uuid.UUID]*Connection),
 		CumulativeScores:  make(map[uuid.UUID]int),
 		RoundHistory:      make([]map[uuid.UUID]int, 0),
@@ -212,6 +222,12 @@ func (h *Hub) dispatch(msg ClientMsg) {
 		if h.Phase == PhaseInGame {
 			h.Phase = PhasePostGame
 			h.Emit("phase_change", map[string]interface{}{"phase": "post_game"})
+			h.schedulePostGameReset()
+		}
+		return
+	case "_return_to_lobby":
+		if h.Phase == PhasePostGame {
+			h.returnToLobby()
 		}
 		return
 	}
@@ -585,6 +601,54 @@ func (h *Hub) abortToOpen(reason string) {
 	log.Printf("hub %s: aborting game start: %s", h.ID, reason)
 	h.Game = nil
 	h.Phase = PhaseOpen
+	h.Emit("phase_change", map[string]interface{}{"phase": "open"})
+	h.broadcastLobbyUpdate()
+}
+
+// schedulePostGameReset fires a _return_to_lobby message back into the Run() loop after the
+// results interval, so the reset itself runs serialized in the hub goroutine like every other
+// phase transition (same pattern as scheduleGameStart). A shutdown drops the pending reset.
+// Armed only on the PhaseInGame -> PhasePostGame edge, so one game end arms one timer.
+func (h *Hub) schedulePostGameReset() {
+	d := h.PostGameDuration
+	if d <= 0 {
+		d = defaultPostGameResultsDuration
+	}
+	go func() {
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			select {
+			case h.incoming <- ClientMsg{Type: "_return_to_lobby"}:
+			case <-h.shutdown:
+			}
+		case <-h.shutdown:
+		}
+	}()
+}
+
+// returnToLobby ends the post-game results phase: it drops the finished game, clears the lobby's
+// in-game flags and ready states, and puts the hub back in PhaseOpen so the existing
+// ready -> countdown -> beginGame path can create the next game (cambia-793; PhasePostGame was
+// terminal and h.Game was never cleared, so createAndStartGame's guard blocked every later start).
+// Casual single games only: PhaseMatchEnd keeps its own (still unwired) circuit lifecycle, and no
+// circuit or cumulative state is touched here. Must run in the Run() goroutine.
+func (h *Hub) returnToLobby() {
+	h.Game = nil
+	h.Phase = PhaseOpen
+
+	// The lobby is also mutated by the game's OnGameEnd callback on a foreign goroutine, so its
+	// own mutex guards this reset (same discipline as createAndStartGame).
+	h.Lobby.Mu.Lock()
+	h.Lobby.InGame = false
+	h.Lobby.GameID = uuid.Nil
+	h.Lobby.GameInstanceCreated = false
+	for uid := range h.Lobby.ReadyStates {
+		h.Lobby.ReadyStates[uid] = false
+	}
+	h.Lobby.Mu.Unlock()
+
 	h.Emit("phase_change", map[string]interface{}{"phase": "open"})
 	h.broadcastLobbyUpdate()
 }

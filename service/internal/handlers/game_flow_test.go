@@ -376,6 +376,120 @@ func TestCasualGameEndDrivesHubToPostGame(t *testing.T) {
 	}
 }
 
+// TestLobbyStartsSecondGameAfterPostGame is the cambia-793 regression over the real WS handlers:
+// after a casual game ends and the results interval elapses, the hub must return to the open phase
+// with its finished game cleared, and a second ready round must create a genuinely new game.
+// Pre-fix, PhasePostGame was terminal and h.Game stayed set, so createAndStartGame's guard blocked
+// every later start and a lobby could only ever play one game.
+func TestLobbyStartsSecondGameAfterPostGame(t *testing.T) {
+	auth.Init()
+
+	gs := NewGameServer()
+	gs.CountdownDuration = 50 * time.Millisecond
+	gs.PostGameDuration = 100 * time.Millisecond // keep the results interval short
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/lobby/create", CreateLobbyHandler(gs))
+	mux.Handle("/ws/", HubWSHandler(logger, gs))
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	hostID := uuid.New()
+	hostToken, _ := auth.CreateJWT(hostID.String())
+	p2ID := uuid.New()
+	p2Token, _ := auth.CreateJWT(p2ID.String())
+
+	lobUUID := createPublicLobby(t, gs, hostToken)
+	lobbyID := lobUUID.String()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	host := dialWSClient(t, ctx, ts.URL, lobbyID, hostToken)
+	defer host.close()
+	p2 := dialWSClient(t, ctx, ts.URL, lobbyID, p2Token)
+	defer p2.close()
+	host.settle()
+	p2.settle()
+
+	// Game one.
+	host.sendReliable("ready")
+	host.settle()
+	p2.settle()
+	p2.sendReliable("ready")
+
+	if host.waitForType("game_started", 5*time.Second) == nil {
+		t.Fatalf("host never received game_started for game one")
+	}
+	host.settle()
+	p2.settle()
+
+	firstGame := gs.GameStore.GetGameByLobbyID(lobUUID)
+	if firstGame == nil {
+		t.Fatalf("no CambiaGame registered for lobby %s", lobbyID)
+	}
+
+	// End game one through the engine's own callback, as endGame() does once terminal.
+	firstGame.OnGameEnd(lobUUID, hostID, map[uuid.UUID]int{hostID: 31, p2ID: 38})
+
+	if host.waitForPhaseChange("post_game", 5*time.Second) == nil {
+		t.Fatalf("host never received a post_game phase_change after game one ended")
+	}
+
+	// The results interval elapses and the hub returns itself to the open lobby.
+	if host.waitForPhaseChange("open", 5*time.Second) == nil {
+		t.Fatalf("host never received an open phase_change after the results interval")
+	}
+	if p2.waitForPhaseChange("open", 5*time.Second) == nil {
+		t.Fatalf("player 2 never received an open phase_change after the results interval")
+	}
+	host.settle()
+	p2.settle()
+
+	h, hasHub := gs.HubStore.GetHub(lobUUID)
+	if !hasHub {
+		t.Fatalf("hub for lobby %s no longer exists after game one", lobbyID)
+	}
+	if h.Phase != hub.PhaseOpen {
+		t.Fatalf("hub.Phase = %v, want PhaseOpen", h.Phase)
+	}
+	if h.Game != nil {
+		t.Fatalf("hub still routes the finished game %s; a second game can never be created", h.Game.ID)
+	}
+
+	// Game two: the same ready path must start a genuinely new game.
+	host.sendReliable("ready")
+	host.settle()
+	p2.settle()
+	p2.sendReliable("ready")
+
+	if host.waitForType("game_started", 5*time.Second) == nil {
+		t.Fatalf("host never received game_started for game two")
+	}
+	host.settle()
+
+	if n := host.countType("game_started"); n != 2 {
+		t.Fatalf("expected 2 game_started frames (one per game), got %d", n)
+	}
+	secondGame := gs.GameStore.GetGameByLobbyID(lobUUID)
+	if secondGame == nil {
+		t.Fatalf("no CambiaGame registered for lobby %s after the second start", lobbyID)
+	}
+	if secondGame.ID == firstGame.ID {
+		t.Fatalf("second start reused the finished game %s", firstGame.ID)
+	}
+	if len(secondGame.Players) != 2 {
+		t.Fatalf("second game has %d players, want 2", len(secondGame.Players))
+	}
+	if p2.waitForType("private_initial_cards", 5*time.Second) == nil {
+		t.Fatalf("player 2 never received private_initial_cards for game two")
+	}
+}
+
 // TestHubRepeatedStartIsIdempotent verifies that extra start_game requests once a game is
 // starting are rejected and never create a second game: exactly one game_started is emitted.
 func TestHubRepeatedStartIsIdempotent(t *testing.T) {
