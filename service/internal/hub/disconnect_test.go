@@ -38,6 +38,18 @@ type endedGame struct {
 func newInGameHubStopped(t *testing.T, playerCount int, forfeit bool, turnTimerSec int, turnDuration, grace time.Duration) (*Hub, []uuid.UUID, *game.CambiaGame, chan endedGame) {
 	t.Helper()
 
+	h, ids, g, ended := newPreGameHubStopped(t, playerCount, forfeit, turnTimerSec, turnDuration, grace, 0)
+	g.StartGame()
+	return h, ids, g, ended
+}
+
+// newPreGameHubStopped builds the same table but stops at the initial card reveal, before
+// StartGame flips Started true. preGame overrides the reveal's length when non-zero, which is what
+// lets a test decide whether a reconnect window opened during the reveal expires before or after
+// the game proper begins (cambia-955 F1).
+func newPreGameHubStopped(t *testing.T, playerCount int, forfeit bool, turnTimerSec int, turnDuration, grace, preGame time.Duration) (*Hub, []uuid.UUID, *game.CambiaGame, chan endedGame) {
+	t.Helper()
+
 	ids := make([]uuid.UUID, playerCount)
 	for i := range ids {
 		ids[i] = uuid.New()
@@ -81,12 +93,14 @@ func newInGameHubStopped(t *testing.T, playerCount int, forfeit bool, turnTimerS
 			User:      &models.User{ID: id, Username: "P" + strconv.Itoa(i)},
 		})
 	}
+	if preGame > 0 {
+		g.PreGameDuration = preGame
+	}
 	g.BeginPreGame()
 	if turnDuration > 0 {
 		g.TurnDuration = turnDuration
 	}
 	g.DisconnectGrace = grace
-	g.StartGame()
 
 	h.Game = g
 	h.Phase = PhaseInGame
@@ -109,6 +123,24 @@ func newInGameHub(t *testing.T, playerCount int, forfeit bool, turnTimerSec int,
 	t.Helper()
 
 	h, ids, g, ended := newInGameHubStopped(t, playerCount, forfeit, turnTimerSec, turnDuration, grace)
+	runAndConnect(t, h, ids)
+	return h, ids, g, ended
+}
+
+// newPreGameHub is newInGameHub stopped at the initial card reveal: the Run loop is up and every
+// player is connected, but StartGame has not run yet.
+func newPreGameHub(t *testing.T, playerCount int, grace, preGame time.Duration) (*Hub, []uuid.UUID, *game.CambiaGame, chan endedGame) {
+	t.Helper()
+
+	h, ids, g, ended := newPreGameHubStopped(t, playerCount, true, 0, 0, grace, preGame)
+	runAndConnect(t, h, ids)
+	return h, ids, g, ended
+}
+
+// runAndConnect starts the hub's Run loop and joins every player, which is the state any drop
+// test has to begin from.
+func runAndConnect(t *testing.T, h *Hub, ids []uuid.UUID) {
+	t.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -120,8 +152,6 @@ func newInGameHub(t *testing.T, playerCount int, forfeit bool, turnTimerSec int,
 		h.Join(conn)
 		require.NotNil(t, waitEnvelope(t, conn, "lobby_state", 2*time.Second), "player %d must be served", i)
 	}
-
-	return h, ids, g, ended
 }
 
 // connectedIn reports the game's view of whether a player holds a live connection.

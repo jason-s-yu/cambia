@@ -580,6 +580,12 @@ player or fewer connected. A player who was away but had not yet forfeited is sc
 the table finishes without them, and one who comes back to a game that is still running takes
 their seat back: the forfeit only sticks once the game itself is over.
 
+The window opens from the deal onwards, not from the first turn: a drop during the initial card
+reveal holds the seat and forfeits it on expiry exactly as a mid-game drop does, whether the
+window closes before or after the reveal ends. Leaving the reveal exempt would have scored a
+player who abandoned there as if they had played the game out, since scoring reads the forfeit
+set rather than the connection flag.
+
 ## Reconnecting to a finished game
 
 A hub holds its finished game for the post-game results interval, so a client that reconnects in

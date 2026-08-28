@@ -610,7 +610,12 @@ func (g *CambiaGame) HandleDisconnect(playerID uuid.UUID) {
 	shouldAdvanceTurn := false
 	shouldForfeit := false
 
-	if g.Started && !g.GameOver {
+	// PreGameActive counts as being in the game (cambia-955 F1): Started only flips true when
+	// StartGame runs at the end of the initial card reveal, but the hub is in PhaseInGame from
+	// the deal onwards and routes drops here throughout. Gating on Started alone left that whole
+	// window exempt from the forfeit rule, and with scoring keyed on the forfeit set rather than
+	// Player.Connected, somebody who abandoned during the peek was then scored as if present.
+	if (g.Started || g.PreGameActive) && !g.GameOver {
 		// Check if game ends due to forfeit rule.
 		if g.HouseRules.ForfeitOnDisconnect {
 			// The grace window (cambia-955): the seat is held, the table keeps playing, and the
@@ -623,8 +628,10 @@ func (g *CambiaGame) HandleDisconnect(playerID uuid.UUID) {
 				log.Printf("Game %s: Player %s disconnected, forfeiting due to house rules.", g.ID, playerID)
 				shouldForfeit = true
 			}
-		} else {
-			// If no forfeit, check if the current player disconnected.
+		} else if g.Started {
+			// If no forfeit, check if the current player disconnected. Only meaningful once turns
+			// exist: during the pregame reveal nobody is on turn yet, so there is nothing to
+			// advance past.
 			currentPlayerUUID := g.currentPlayerID()
 			if playerID == currentPlayerUUID {
 				log.Printf("Game %s: Current player %s disconnected. Advancing turn.", g.ID, playerID)
@@ -676,7 +683,10 @@ func (g *CambiaGame) armDisconnectGrace(playerID uuid.UUID) {
 		}
 		delete(g.disconnectGraceTimers, playerID)
 		delete(g.graceDeadlines, playerID)
-		if g.GameOver || !g.Started {
+		// A window armed during the initial card reveal has to be able to land whether or not
+		// StartGame has run by the time it expires, so the pregame phase is accepted here too
+		// (cambia-955 F1). A grace shorter than the reveal expires with Started still false.
+		if g.GameOver || (!g.Started && !g.PreGameActive) {
 			return
 		}
 		log.Printf("Game %s: Player %s did not return within %s. Forfeiting.", g.ID, playerID, grace)
@@ -784,8 +794,10 @@ func (g *CambiaGame) HandleReconnect(playerID uuid.UUID, conn *websocket.Conn) {
 			// it, not to somebody who was away for part of it, and this is also the pre-cambia-955
 			// behaviour, where scoring simply asked who was connected at the final whistle. Once
 			// the game is over there is nothing to return to: endGame has already scored it.
+			// The initial card reveal is "still running" for this purpose too, so a forfeit that
+			// landed during the peek is lifted the same way (cambia-955 F1).
 			resumed := false
-			if g.Started && !g.GameOver && g.forfeited[playerID] {
+			if (g.Started || g.PreGameActive) && !g.GameOver && g.forfeited[playerID] {
 				delete(g.forfeited, playerID)
 				resumed = true
 				log.Printf("Game %s: Player %s returned to a game still in progress; their forfeit is lifted.", g.ID, playerID)

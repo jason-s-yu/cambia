@@ -287,3 +287,88 @@ func newInGameHubGraceStopped(t *testing.T, playerCount int, grace time.Duration
 	t.Helper()
 	return newInGameHubStopped(t, playerCount, true, 0, 0, grace)
 }
+
+// TestDropDuringThePregamePeekStillForfeits closes the hole cambia-955 F1 found: HandleDisconnect
+// gated its whole forfeit block on Started, which StartGame only sets once the initial card reveal
+// is over, so a drop during the reveal armed nothing and forfeited nobody. Scoring now reads the
+// forfeit set rather than Player.Connected, so that abandoner would have been scored as if they
+// had played the game out. The window here is shorter than the reveal, so the forfeit also has to
+// land with Started still false.
+func TestDropDuringThePregamePeekStillForfeits(t *testing.T) {
+	h, ids, g, ended := newPreGameHub(t, 2, 400*time.Millisecond, 5*time.Second)
+
+	state := g.GetCurrentObfuscatedGameState(ids[0])
+	require.True(t, state.PreGameActive, "the table must still be in the initial reveal")
+	require.False(t, state.Started, "StartGame must not have run yet")
+
+	h.Leave(ids[1])
+	require.True(t, waitDisconnected(t, g, ids[0], ids[1], 2*time.Second), "the drop must reach the game")
+
+	select {
+	case res := <-ended:
+		assert.Equal(t, ids[0], res.winner, "the player still connected must win the forfeit")
+		assert.Contains(t, res.scores, ids[0], "the remaining player must be scored")
+		assert.NotContains(t, res.scores, ids[1], "a player who abandoned during the reveal must not be scored")
+	case <-time.After(3 * time.Second):
+		t.Fatal("a drop during the initial reveal never forfeited")
+	}
+	assert.True(t, g.IsForfeited(ids[1]), "the expired window must forfeit the seat")
+}
+
+// TestAPregameWindowSurvivesTheStartOfTheGame is the other side of the same bail: a window opened
+// during the reveal that outlasts it must still forfeit once the game proper is running. Three
+// players, so the only-one-left check does not end the game and the forfeit itself is the subject.
+func TestAPregameWindowSurvivesTheStartOfTheGame(t *testing.T) {
+	h, ids, g, ended := newPreGameHub(t, 3, 1500*time.Millisecond, 300*time.Millisecond)
+
+	h.Leave(ids[2])
+	require.True(t, waitDisconnected(t, g, ids[0], ids[2], 2*time.Second), "the drop must reach the game")
+	require.False(t, g.IsForfeited(ids[2]), "nobody forfeits while their window is open")
+
+	// The reveal ends first: the window has to carry across the Started transition.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !g.GetCurrentObfuscatedGameState(ids[0]).Started {
+		time.Sleep(10 * time.Millisecond)
+	}
+	require.True(t, g.GetCurrentObfuscatedGameState(ids[0]).Started, "the game must have started")
+
+	require.True(t, waitForfeited(t, g, ids[2], 3*time.Second), "the window must still forfeit after the reveal ends")
+	select {
+	case res := <-ended:
+		t.Fatalf("two players are still here; the game must not have ended (winner %s, scores %v)", res.winner, res.scores)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestReturnDuringThePregamePeekKeepsTheSeat is the reload case at its worst moment: the player
+// drops during the reveal and comes back inside the window, so nothing forfeits and the game
+// starts with both of them.
+func TestReturnDuringThePregamePeekKeepsTheSeat(t *testing.T) {
+	h, ids, g, ended := newPreGameHub(t, 2, 3*time.Second, 1500*time.Millisecond)
+
+	survivor := h.getConn(ids[0])
+	require.NotNil(t, survivor)
+
+	h.Leave(ids[1])
+	require.True(t, waitDisconnected(t, g, ids[0], ids[1], 2*time.Second), "the drop must reach the game")
+	require.NotNil(t, waitEnvelope(t, survivor, "player_reconnecting", 2*time.Second),
+		"the table was never told the seat is being held")
+
+	rejoin := newFakeConn(ids[1], "P1")
+	h.Join(rejoin)
+	require.NotNil(t, waitEnvelope(t, rejoin, "private_sync_state", 2*time.Second),
+		"the returning player must be sent the table again")
+	assert.False(t, g.IsForfeited(ids[1]), "a return inside the window must not forfeit")
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && !g.GetCurrentObfuscatedGameState(ids[0]).Started {
+		time.Sleep(10 * time.Millisecond)
+	}
+	assert.True(t, g.GetCurrentObfuscatedGameState(ids[0]).Started, "the reveal must still end in a live game")
+	assert.False(t, g.IsForfeited(ids[1]), "the forfeit that was pending on the window must never land")
+	select {
+	case res := <-ended:
+		t.Fatalf("a return during the reveal ended the game (winner %s, scores %v)", res.winner, res.scores)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
