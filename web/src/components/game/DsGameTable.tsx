@@ -156,11 +156,39 @@ function useTableNotice(gs: ObfGameState, selfId: string | undefined, names: Map
   return notice;
 }
 
-const NOTICE_TONES: Record<TableNotice['tone'], { color: string; border: string }> = {
+const NOTICE_TONES: Record<TableNotice['tone'] | 'warning', { color: string; border: string }> = {
   success: { color: 'var(--status-success)', border: 'var(--status-success-border)' },
   danger: { color: 'var(--status-danger)', border: 'var(--status-danger-border)' },
-  info: { color: 'var(--status-info)', border: 'var(--status-info-border)' }
+  info: { color: 'var(--status-info)', border: 'var(--status-info-border)' },
+  warning: { color: 'var(--status-warning)', border: 'var(--status-warning-border)' }
 };
+
+/**
+ * Status pill placed on the felt. Badge's tinted fill is built for a panel: on green the
+ * light-theme foreground drops below 3:1, so a pill on the felt sits on an opaque
+ * surface-1 chip with the status color on top, like the notice line.
+ */
+const FeltChip: React.FC<{ tone: 'warning' | 'danger' | 'info' | 'success'; children: React.ReactNode }> = ({ tone, children }) => (
+  <span
+    style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 6,
+      padding: '2px 10px',
+      background: 'var(--surface-1)',
+      border: '1px solid ' + NOTICE_TONES[tone].border,
+      borderRadius: 'var(--radius-pill)',
+      color: NOTICE_TONES[tone].color,
+      fontSize: 'var(--ds-text-xs)',
+      fontWeight: 'var(--weight-bold)',
+      lineHeight: 1.5,
+      whiteSpace: 'nowrap'
+    }}
+  >
+    <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'currentColor', flex: 'none' }}></span>
+    {children}
+  </span>
+);
 
 const FELT_LABEL: React.CSSProperties = {
   marginTop: 8,
@@ -509,8 +537,8 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                 Cambia called{cambiaCaller && <span style={{ textTransform: 'none', letterSpacing: 0, fontWeight: 'var(--weight-medium)' }}>by {nameOf(cambiaCaller.playerId)}</span>}
               </span>
             )}
-            {offline && <Badge tone={gaveUp ? 'danger' : 'warning'} dot>{gaveUp ? 'Disconnected' : 'Reconnecting'}</Badge>}
-            {roundOver && <Badge tone='warning'>{phase === 'round_end' ? 'Round over' : 'Game over'}</Badge>}
+            {offline && <FeltChip tone={gaveUp ? 'danger' : 'warning'}>{gaveUp ? 'Disconnected' : 'Reconnecting'}</FeltChip>}
+            {roundOver && <FeltChip tone='warning'>{phase === 'round_end' ? 'Round over' : 'Game over'}</FeltChip>}
           </div>
 
           {/* Opponent seats and hand backs. */}
