@@ -416,7 +416,9 @@ const DashboardPage: React.FC = () => {
         </Panel>
       </div>
 
-      <Modal open={createOpen} title='New lobby' onClose={handleCloseCreate} footer={(
+      {/* Opens on Create: the dialog exists to make a lobby, and its fields all
+          carry defaults (cambia-914 DL-8 R9, said explicitly in cambia-935 F6). */}
+      <Modal open={createOpen} title='New lobby' onClose={handleCloseCreate} initialFocus='confirm' footer={(
         <>
           <Button variant='secondary' onClick={handleCloseCreate} disabled={creating}>Cancel</Button>
           <Button variant='primary' onClick={handleCreateLobby} disabled={creating}>{creating ? 'Creating' : 'Create'}</Button>

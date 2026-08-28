@@ -59,6 +59,9 @@ const Button: React.FC<ButtonProps> = ({
       className={`${base} ${stateClass} ${SIZE_CLASS[size]} ${className}`}
       disabled={isDisabled}
       aria-busy={isLoading || undefined}
+      // Same marker the ds button carries: a dialog keeps initial focus off a
+      // destructive action (lib/modalFocus, cambia-935 F6).
+      data-destructive={variant === 'danger' ? '' : undefined}
       {...props}
     >
       {isLoading && (
