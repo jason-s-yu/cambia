@@ -1,27 +1,49 @@
 /* Import Tailwind CSS v4 base styles, components, and utilities */
 @import "tailwindcss";
 
-/* Cambia Design System tokens (cambia-437/438) -- see styles/design-tokens.css
-   for the collision-avoidance rationale. Additive only: existing utility
-   classes below (dark: variant, default Tailwind scale) are unaffected. */
+/* Cambia design tokens (cambia-845). Dark is the default and lives on
+   :root; [data-theme="light"] is the explicit light override. */
 @import "./styles/design-tokens.css";
 
 /* Bind the Tailwind `dark:` variant to the single theme mechanism: the
-   `data-theme="dark"` attribute on <html>, written by hooks/useTheme. The
-   design-system tokens key light mode off `[data-theme="light"]`; this keeps
-   every existing class-based `dark:` utility in step with that attribute. */
-@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+   `data-theme` attribute on <html>, written by hooks/useTheme. Dark is also
+   the default when the attribute is absent (tokens on :root are the dark
+   set), so the variant matches anything that is not explicitly light. */
+@custom-variant dark (&:where(html:not([data-theme="light"]), html:not([data-theme="light"]) *));
 
-/* Optional: Define custom base styles or theme overrides via @theme (Tailwind v4 method) */
-/* @theme { */
-/* --color-bg-light: white; */
-/* --color-bg-dark: black; */
-/* } */
+html {
+  font-family: var(--font-sans);
+}
 
-/* Optional: Add plugins via @plugin (Tailwind v4 method) */
-/* @plugin require('@tailwindcss/forms'); */
-
-/* Your own global base styles can go here */
 body {
-  @apply bg-white dark:bg-gray-900 text-black dark:text-white transition-colors duration-200;
+  margin: 0;
+  background: var(--surface-0);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  line-height: var(--ds-leading-normal);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background-color var(--dur-med) var(--ds-ease-out), color var(--dur-med) var(--ds-ease-out);
+}
+
+/* Numeric readouts that change in place (scores, timers, counts, ratings,
+   deltas) must not reflow as digits swap. Applied globally to the elements
+   that carry them, and available as the .tabular-nums class for anything
+   the selectors below miss. */
+.tabular-nums,
+input[type='number'],
+table,
+time {
+  font-variant-numeric: tabular-nums;
+}
+
+::selection {
+  background: var(--accent-gold-soft);
+  color: var(--text-primary);
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus-ring-color);
+  outline-offset: 2px;
 }

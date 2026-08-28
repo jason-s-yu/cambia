@@ -1,50 +1,278 @@
 /*
- * Cambia Design System token bridge (cambia-437 / cambia-438).
+ * Cambia design tokens (cambia-845, DL-1).
  *
- * Wires ../../design-system-import/tokens/*.css into the Vite + Tailwind v4
- * build. Source of truth for every value below is design-system-import/;
- * this file must be kept in sync by hand if that reference snapshot changes
- * (CSS @import cannot cherry-pick declarations out of a stylesheet).
+ * Single source of truth for the app's visual language: a modern flat
+ * card-room style. Deep green-tinted neutral grounds in dark, warm paper
+ * neutrals in light, one gold accent family, 1px borders, restrained
+ * shadows. See web/DESIGN.md for the spec and the do/don't rules.
  *
- * Tailwind v4 emits its own default theme scale as bare CSS custom
- * properties (--text-sm, --radius-lg, --ease-out, --font-mono, ...). A
- * subset of the design system's token names collide with those exact keys.
- * Declaring the design values under the same bare names at :root would
- * silently retarget every existing Tailwind utility of that name across the
- * app (43 files currently use the dark: variant + Tailwind's default type
- * scale, radii, easing and font-mono stack) -- outside this task's scope
- * (see cambia-438 step 4: do not rewire existing screens yet).
+ * Theme mechanism: dark is the default and lives on :root, so an unset
+ * data-theme attribute renders dark with no flash. The light theme is an
+ * explicit override under [data-theme="light"] that redefines the same
+ * semantic names. hooks/useTheme writes the attribute; src/index.css binds
+ * Tailwind's `dark:` variant to [data-theme="dark"].
  *
- * Resolution: tokens with colliding names are re-declared here under a
- * `--ds-` prefix and bridged into Tailwind's @theme under `-ds-` suffixed
- * keys (e.g. rounded-ds-lg, text-ds-sm, ease-ds-out, font-ds-mono). The ds/
- * component adaptations (src/components/ds/) reference the --ds- names
- * directly. Tokens with non-colliding names (color ramps, spacing, shadows,
- * font-display/font-ui, weight-*, tracking-caps, ease-snap, radius-pill,
- * radius-playing-card) are imported/declared verbatim under their original
- * bare names -- safe today, and directly reusable if the design system
- * later becomes the app's sole theme.
+ * Layers, in order:
+ *   1. Primitive ramps  -- raw hues, never referenced by components.
+ *   2. Semantic tokens  -- the component contract (--surface-*, --text-*,
+ *                          --border-*, --accent-*, --status-*).
+ *   3. Scale tokens     -- type, spacing, radius, elevation, motion.
+ *   4. Legacy aliases   -- old token names kept alive so pages still on the
+ *                          previous language render in the new palette until
+ *                          the DL-2..5 sweeps retire them. Do not use in new
+ *                          code; DESIGN.md carries the removal checklist.
  *
- * design-system-import/tokens/base.css is NOT wired here: it sets global
- * `body`/`a`/`::selection` rules that would immediately reskin the whole
- * app. That belongs to the later "rewire existing screens" phase.
+ * Naming note: tokens whose bare name would collide with a Tailwind v4
+ * default theme key (--text-sm, --radius-lg, --ease-out, --font-mono, ...)
+ * carry a --ds- prefix so both scales coexist. That constraint is unchanged
+ * from cambia-438.
  */
 
-/* ---- fonts.css: Google Fonts substitution, network @import (see
-   design-system-import/readme.md Caveats). No brand font binaries exist in
-   the source repo. This is a runtime browser fetch, not a build-time
-   dependency -- `vite build` does not resolve external URLs in CSS, so it
-   does not make the build itself network-dependent. Replace with local
-   @font-face rules if licensed font files are supplied. ---- */
-@import '../../design-system-import/tokens/fonts.css';
-
-/* ---- colors.css: fully collision-free (bark/parchment/ink/ember/moss/
-   dusk/berry/honey ramps + semantic aliases use bare names Tailwind's
-   default theme never defines), imported verbatim. ---- */
-@import '../../design-system-import/tokens/colors.css';
+/* ======================= 1. PRIMITIVE RAMPS ======================= */
 
 :root {
-  /* ---- spacing.css: non-colliding tokens carried over by value ---- */
+  /* felt: green-tinted neutral grounds. Dark-theme surfaces. */
+  --felt-950: #070d0b;
+  --felt-900: #0b1210;
+  --felt-850: #101a16;
+  --felt-800: #16231e;
+  --felt-750: #1c2c26;
+  --felt-700: #23372f;
+  --felt-600: #2e463c;
+
+  /* paper: warm neutral grounds. Light-theme surfaces. */
+  --paper-0: #ffffff;
+  --paper-50: #fbf9f5;
+  --paper-100: #f1eee6;
+  --paper-200: #e9e5db;
+  --paper-300: #d8d2c2;
+  --paper-400: #b4ac9b;
+
+  /* ink: text and hairlines on paper. */
+  --ink-900: #16211d;
+  --ink-700: #3f4d47;
+  --ink-500: #6b7972;
+
+  /* green: card-room felt chroma. Table surface, success, ready states. */
+  --green-800: #0f3d2a;
+  --green-700: #14563a;
+  --green-600: #1a6d49;
+  --green-500: #22885b;
+  --green-400: #35a271;
+  --green-300: #62c096;
+
+  /* gold + cream: the single accent family. CTAs, highlights, tiers. */
+  --gold-700: #8a6a1f;
+  --gold-600: #ab8526;
+  --gold-500: #c9a227;
+  --gold-400: #dcb84a;
+  --gold-300: #ebd07f;
+  --cream-100: #f6efdc;
+  --cream-50: #fbf7ec;
+
+  /* red: danger, the Cambia call, red suits. */
+  --red-700: #8e2420;
+  --red-600: #a92c26;
+  --red-500: #c4362f;
+  --red-400: #dd5a52;
+
+  /* amber: warning. Held apart from gold so status never reads as a CTA. */
+  --amber-600: #a45f0c;
+  --amber-500: #c47512;
+  --amber-400: #e09a30;
+
+  /* blue: info, neutral emphasis. */
+  --blue-600: #2a5f8f;
+  --blue-500: #3477ab;
+  --blue-400: #6aa5cf;
+}
+
+/* ================ 2. SEMANTIC TOKENS -- DARK (default) ================ */
+
+:root {
+  color-scheme: dark;
+
+  /* Surfaces */
+  --surface-0: var(--felt-900);
+  --surface-1: var(--felt-850);
+  --surface-2: var(--felt-800);
+  --surface-3: var(--felt-750);
+  --surface-inset: var(--felt-950);
+  --surface-overlay: rgba(4, 8, 7, 0.72);
+  --surface-felt: var(--green-700);
+  --surface-felt-deep: var(--green-800);
+
+  /* Text tiers */
+  --text-primary: #edf2ef;
+  --text-secondary: #a9b8b1;
+  --text-tertiary: #74857d;
+  --text-disabled: #4d5b55;
+  --text-inverse: var(--felt-900);
+  --text-on-gold: var(--felt-950);
+  --text-on-danger: #fdf1ef;
+  --text-on-green: #f0f7f3;
+
+  /* Borders */
+  --border-subtle: rgba(237, 242, 239, 0.07);
+  --border-default: rgba(237, 242, 239, 0.14);
+  --border-strong: rgba(237, 242, 239, 0.26);
+  --border-accent: var(--gold-500);
+
+  /* Interactive states */
+  --interactive-hover: rgba(237, 242, 239, 0.06);
+  --interactive-active: rgba(237, 242, 239, 0.11);
+  --interactive-selected: rgba(201, 162, 39, 0.14);
+  --focus-ring-color: var(--gold-400);
+
+  /* Accents */
+  --accent-gold: var(--gold-500);
+  --accent-gold-hover: var(--gold-400);
+  --accent-gold-active: var(--gold-600);
+  --accent-gold-soft: rgba(201, 162, 39, 0.16);
+  --accent-green: var(--green-600);
+  --accent-green-hover: var(--green-500);
+  --accent-danger: var(--red-500);
+  --accent-danger-hover: var(--red-400);
+
+  /* Status */
+  --status-success: var(--green-400);
+  --status-success-bg: rgba(53, 162, 113, 0.14);
+  --status-success-border: rgba(53, 162, 113, 0.38);
+  --status-danger: var(--red-400);
+  --status-danger-bg: rgba(221, 90, 82, 0.14);
+  --status-danger-border: rgba(221, 90, 82, 0.38);
+  --status-warning: var(--amber-400);
+  --status-warning-bg: rgba(224, 154, 48, 0.14);
+  --status-warning-border: rgba(224, 154, 48, 0.38);
+  --status-info: var(--blue-400);
+  --status-info-bg: rgba(106, 165, 207, 0.14);
+  --status-info-border: rgba(106, 165, 207, 0.38);
+
+  /* Playing cards */
+  --card-face: #f4f1e8;
+  --card-face-edge: #cdc7b7;
+  --card-back: var(--green-700);
+  --card-back-line: rgba(201, 162, 39, 0.42);
+  --suit-red: var(--red-500);
+  --suit-black: var(--ink-900);
+
+  /* Rank tiers */
+  --tier-bronze: #b0763f;
+  --tier-silver: #a6b0b2;
+  --tier-gold: var(--gold-500);
+  --tier-platinum: #7fc9bb;
+  --tier-diamond: #6fa8dc;
+  --tier-master: #a98ade;
+  --tier-grandmaster: #e0645a;
+}
+
+/* ===================== 2b. SEMANTIC TOKENS -- LIGHT ==================== */
+
+[data-theme='light'] {
+  color-scheme: light;
+
+  --surface-0: var(--paper-100);
+  --surface-1: var(--paper-50);
+  --surface-2: var(--paper-0);
+  --surface-3: var(--paper-0);
+  --surface-inset: var(--paper-200);
+  --surface-overlay: rgba(22, 33, 29, 0.42);
+  --surface-felt: var(--green-600);
+  --surface-felt-deep: var(--green-700);
+
+  --text-primary: var(--ink-900);
+  --text-secondary: var(--ink-700);
+  --text-tertiary: var(--ink-500);
+  --text-disabled: #9aa5a0;
+  --text-inverse: var(--paper-50);
+  --text-on-gold: #241c05;
+  --text-on-danger: #fdf1ef;
+  --text-on-green: #f0f7f3;
+
+  --border-subtle: rgba(22, 33, 29, 0.09);
+  --border-default: rgba(22, 33, 29, 0.17);
+  --border-strong: rgba(22, 33, 29, 0.32);
+  --border-accent: var(--gold-600);
+
+  --interactive-hover: rgba(22, 33, 29, 0.05);
+  --interactive-active: rgba(22, 33, 29, 0.1);
+  --interactive-selected: rgba(171, 133, 38, 0.14);
+  --focus-ring-color: var(--gold-600);
+
+  --accent-gold: var(--gold-600);
+  --accent-gold-hover: var(--gold-700);
+  --accent-gold-active: #6f5518;
+  --accent-gold-soft: rgba(171, 133, 38, 0.14);
+  --accent-green: var(--green-700);
+  --accent-green-hover: var(--green-800);
+  --accent-danger: var(--red-600);
+  --accent-danger-hover: var(--red-700);
+
+  --status-success: var(--green-600);
+  --status-success-bg: rgba(26, 109, 73, 0.12);
+  --status-success-border: rgba(26, 109, 73, 0.32);
+  --status-danger: var(--red-600);
+  --status-danger-bg: rgba(169, 44, 38, 0.1);
+  --status-danger-border: rgba(169, 44, 38, 0.3);
+  --status-warning: var(--amber-600);
+  --status-warning-bg: rgba(164, 95, 12, 0.12);
+  --status-warning-border: rgba(164, 95, 12, 0.3);
+  --status-info: var(--blue-600);
+  --status-info-bg: rgba(42, 95, 143, 0.1);
+  --status-info-border: rgba(42, 95, 143, 0.3);
+
+  --card-face: var(--paper-0);
+  --card-face-edge: var(--paper-300);
+  --card-back: var(--green-600);
+  --card-back-line: rgba(201, 162, 39, 0.55);
+  --suit-red: var(--red-600);
+  --suit-black: var(--ink-900);
+
+  --tier-bronze: #8a5a2d;
+  --tier-silver: #6f7a7c;
+  --tier-gold: var(--gold-700);
+  --tier-platinum: #2f8d7c;
+  --tier-diamond: #2f6ea8;
+  --tier-master: #6b4fae;
+  --tier-grandmaster: #b13a31;
+}
+
+/* ========================= 3. SCALE TOKENS ========================= */
+
+:root {
+  /* ---- Typography ----
+     One family for the whole app: 'Archivo Variable', self-hosted through
+     @fontsource-variable/archivo (imported in src/main.tsx). --font-sans and
+     --text-2xs/--tracking-caps are declared in the @theme block at the foot
+     of this file, which doubles as their :root declaration; repeating them
+     here would make them self-referential. No serif anywhere.
+     Mono is the platform monospace stack, used only for code-like content
+     (logs, ids, seeds), never for numeric readouts. */
+  --ds-font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+  --ds-text-xs: 12px;
+  --ds-text-sm: 13px;
+  --text-md: 14px;
+  --ds-text-lg: 16px;
+  --ds-text-xl: 20px;
+  --ds-text-2xl: 25px;
+  --ds-text-3xl: 32px;
+  --ds-text-4xl: 42px;
+  --ds-text-5xl: 56px;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-bold: 600;
+  --weight-black: 700;
+
+  --ds-leading-tight: 1.15;
+  --ds-leading-snug: 1.35;
+  --ds-leading-normal: 1.55;
+
+  --ds-tracking-tight: -0.01em;
+  --ds-tracking-wide: 0.14em;
+
+  /* ---- Spacing (4px base) ---- */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -56,11 +284,43 @@
   --space-12: 48px;
   --space-16: 64px;
 
+  /* ---- Radius ---- */
+  --ds-radius-sm: 4px;
+  --ds-radius-md: 6px;
+  --ds-radius-lg: 10px;
+  --ds-radius-xl: 14px;
   --radius-pill: 999px;
-  --radius-playing-card: 9px;
+  --radius-playing-card: 8px;
 
-  --line-thick: 2px;
-  --line-thin: 1.5px;
+  /* ---- Border weights. Flat style: hairlines only. ---- */
+  --line-thin: 1px;
+  --line-thick: 1px;
+
+  /* ---- Elevation. Flat surfaces separate by border and ground, not by
+     shadow. Only detached layers (menus, dialogs, dragged cards) cast one. */
+  --shadow-none: none;
+  --shadow-piece: none;
+  --shadow-card: none;
+  --shadow-raised: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-overlay: 0 16px 40px rgba(0, 0, 0, 0.45);
+  --shadow-playing-card: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --inset-table: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+
+  /* Composed focus ring, applied as a box-shadow. */
+  --focus-ring: 0 0 0 2px var(--surface-0), 0 0 0 4px var(--focus-ring-color);
+
+  /* ---- Motion ---- */
+  --dur-fast: 120ms;
+  --dur-med: 200ms;
+  --dur-slow: 320ms;
+  --ds-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-snap: cubic-bezier(0.3, 0.8, 0.4, 1);
+
+  /* ---- Component geometry ---- */
+  --topbar-h: 56px;
+  --control-h-sm: 28px;
+  --control-h-md: 36px;
+  --control-h-lg: 44px;
 
   --card-w-sm: 44px;
   --card-h-sm: 62px;
@@ -68,168 +328,125 @@
   --card-h-md: 90px;
   --card-w-lg: 92px;
   --card-h-lg: 129px;
-
-  --topbar-h: 58px;
-  --control-h-sm: 30px;
-  --control-h-md: 40px;
-  --control-h-lg: 48px;
-
-  /* spacing.css --radius-sm/md/lg/xl collide with Tailwind's own --radius-*
-     scale; re-declared under --ds- so both scales coexist intact. */
-  --ds-radius-sm: 8px;
-  --ds-radius-md: 10px;
-  --ds-radius-lg: 14px;
-  --ds-radius-xl: 20px;
-
-  /* --font-mono collides with Tailwind's default monospace stack.
-     --font-display / --font-ui / --text-2xs / --tracking-caps are also
-     collision-free but are declared once below, inside @theme, instead of
-     here -- @theme's output doubles as their :root declaration, and giving
-     them two same-named declarations (one plain, one `var(--x): var(--x)`
-     in @theme) would be a circular self-reference. */
-  --ds-font-mono: 'Space Mono', 'SFMono-Regular', Menlo, monospace;
-
-  /* --text-md is not a Tailwind default key, safe as-is */
-  --text-md: 15px;
-  /* --text-xs/sm/lg/xl/2xl/3xl/4xl/5xl collide with Tailwind's font-size scale */
-  --ds-text-xs: 12px;
-  --ds-text-sm: 13px;
-  --ds-text-lg: 17px;
-  --ds-text-xl: 21px;
-  --ds-text-2xl: 27px;
-  --ds-text-3xl: 36px;
-  --ds-text-4xl: 48px;
-  --ds-text-5xl: 66px;
-
-  /* --weight-* (not --font-weight-*) never collides with Tailwind */
-  --weight-regular: 400;
-  --weight-medium: 500;
-  --weight-bold: 700;
-  --weight-black: 800;
-
-  /* --leading-tight/snug/normal collide with Tailwind's line-height scale */
-  --ds-leading-tight: 1.08;
-  --ds-leading-snug: 1.3;
-  --ds-leading-normal: 1.5;
-
-  /* --tracking-caps is safe (declared in @theme below); --tracking-tight/wide collide */
-  --ds-tracking-tight: -0.005em;
-  --ds-tracking-wide: 0.16em;
-
-  /* ---- effects.css: shadow/motion tokens ---- */
-  --shadow-piece: 0 2px 0 var(--outline-ink);
-  --shadow-card: 0 3px 0 rgba(20, 15, 8, 0.55);
-  --shadow-raised: 0 4px 0 rgba(20, 15, 8, 0.55), 0 10px 24px rgba(20, 15, 8, 0.25);
-  --shadow-overlay: 0 6px 0 rgba(20, 15, 8, 0.5), 0 24px 60px rgba(20, 15, 8, 0.45);
-  --shadow-playing-card: 0 2px 0 rgba(20, 15, 8, 0.5), 0 4px 10px rgba(20, 15, 8, 0.3);
-
-  --inset-table: inset 0 3px 0 rgba(20, 15, 8, 0.35), inset 0 0 56px rgba(20, 15, 8, 0.28);
-
-  /* --ease-snap is safe; --ease-out collides with Tailwind's easing scale */
-  --ease-snap: cubic-bezier(0.34, 1.45, 0.64, 1);
-  --ds-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
-  --dur-fast: 120ms;
-  --dur-med: 220ms;
-  --dur-slow: 420ms;
-
-  --focus-ring: 0 0 0 2px var(--surface-page), 0 0 0 4px var(--honey-500);
 }
 
-/* Spinner's keyframe, hoisted out of component-level DOM injection (the
-   source design-system-import/components/core/Spinner.jsx injects a <style>
-   tag into document.head at module scope, which is unsafe under React
-   StrictMode's double-invoke and has no SSR story). The ds/ adaptation
-   references this class name instead. */
+[data-theme='light'] {
+  /* Shadows carry less weight on a light ground. */
+  --shadow-raised: 0 1px 2px rgba(22, 33, 29, 0.12);
+  --shadow-overlay: 0 16px 40px rgba(22, 33, 29, 0.22);
+  --shadow-playing-card: 0 1px 3px rgba(22, 33, 29, 0.18);
+  --inset-table: inset 0 0 0 1px rgba(0, 0, 0, 0.18);
+}
+
+/* ======================== 4. LEGACY ALIASES ========================
+   Deprecated. Kept only so surfaces not yet swept by DL-2..5 render in the
+   new palette instead of falling back to unset custom properties. Every name
+   below is on the removal checklist in web/DESIGN.md. New code uses the
+   semantic tokens in section 2. */
+
+:root {
+  /* old accent ramps -> new families */
+  --ember-600: var(--gold-600);
+  --ember-500: var(--gold-500);
+  --ember-400: var(--gold-400);
+  --ember-300: var(--gold-300);
+
+  --honey-600: var(--gold-600);
+  --honey-500: var(--gold-500);
+  --honey-400: var(--gold-400);
+  --honey-300: var(--gold-300);
+
+  --berry-600: var(--red-600);
+  --berry-500: var(--red-500);
+  --berry-400: var(--red-400);
+
+  --moss-700: var(--green-800);
+  --moss-600: var(--green-600);
+  --moss-500: var(--green-500);
+  --moss-400: var(--green-400);
+
+  --dusk-600: var(--blue-600);
+  --dusk-500: var(--blue-500);
+  --dusk-400: var(--blue-400);
+
+  /* old ground ramps */
+  --bark-950: var(--felt-950);
+  --bark-900: var(--felt-900);
+  --bark-850: var(--felt-850);
+  --bark-800: var(--felt-800);
+  --bark-700: var(--felt-750);
+  --bark-600: var(--felt-700);
+  --bark-500: var(--felt-600);
+
+  --parchment-50: var(--paper-50);
+  --parchment-100: var(--paper-100);
+  --parchment-200: var(--paper-200);
+  --parchment-300: var(--paper-300);
+  --parchment-400: var(--paper-400);
+
+  /* old semantic names */
+  --surface-page: var(--surface-0);
+  --surface-card: var(--surface-1);
+  --surface-raised: var(--surface-2);
+  --surface-table: var(--surface-felt);
+  --surface-table-deep: var(--surface-felt-deep);
+  --outline-ink: var(--border-strong);
+  --text-on-ember: var(--text-on-gold);
+  --text-on-honey: var(--text-on-gold);
+
+  /* old font aliases: both display and UI roles now resolve to the one sans */
+  --font-display: var(--font-sans);
+  --font-ui: var(--font-sans);
+}
+
+/* Loading spinner keyframe, declared once here rather than injected into
+   document.head by a component (unsafe under StrictMode double-invoke). */
 @keyframes ds-spin {
   to {
     transform: rotate(360deg);
   }
 }
 
-/* Tailwind v4 utility bridge: exposes the tokens above as ds-* utilities
-   (bg-bark-900, text-text-primary, rounded-ds-lg, ease-ds-out, ...) without
-   touching Tailwind's own default theme keys. */
+/* Tailwind v4 utility bridge: exposes the semantic tokens as utilities
+   (bg-surface-1, text-text-secondary, border-border-default, rounded-ds-md,
+   font-sans, ...) without retargeting Tailwind's own default theme keys.
+   Colliding names carry a -ds- infix. */
 @theme {
-  /* base ramps */
-  --color-bark-950: var(--bark-950);
-  --color-bark-900: var(--bark-900);
-  --color-bark-850: var(--bark-850);
-  --color-bark-800: var(--bark-800);
-  --color-bark-700: var(--bark-700);
-  --color-bark-600: var(--bark-600);
-  --color-bark-500: var(--bark-500);
-
-  --color-parchment-50: var(--parchment-50);
-  --color-parchment-100: var(--parchment-100);
-  --color-parchment-200: var(--parchment-200);
-  --color-parchment-300: var(--parchment-300);
-  --color-parchment-400: var(--parchment-400);
-
-  --color-ink-900: var(--ink-900);
-  --color-ink-700: var(--ink-700);
-  --color-ink-500: var(--ink-500);
-
-  --color-ember-600: var(--ember-600);
-  --color-ember-500: var(--ember-500);
-  --color-ember-400: var(--ember-400);
-  --color-ember-300: var(--ember-300);
-
-  --color-moss-700: var(--moss-700);
-  --color-moss-600: var(--moss-600);
-  --color-moss-500: var(--moss-500);
-  --color-moss-400: var(--moss-400);
-
-  --color-dusk-600: var(--dusk-600);
-  --color-dusk-500: var(--dusk-500);
-  --color-dusk-400: var(--dusk-400);
-
-  --color-berry-600: var(--berry-600);
-  --color-berry-500: var(--berry-500);
-  --color-berry-400: var(--berry-400);
-
-  --color-honey-600: var(--honey-600);
-  --color-honey-500: var(--honey-500);
-  --color-honey-400: var(--honey-400);
-  --color-honey-300: var(--honey-300);
-
-  /* semantic aliases (theme-aware via [data-theme="light"]) */
-  --color-surface-page: var(--surface-page);
-  --color-surface-card: var(--surface-card);
-  --color-surface-raised: var(--surface-raised);
+  --color-surface-0: var(--surface-0);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
   --color-surface-inset: var(--surface-inset);
   --color-surface-overlay: var(--surface-overlay);
-  --color-surface-table: var(--surface-table);
-  --color-surface-table-deep: var(--surface-table-deep);
+  --color-surface-felt: var(--surface-felt);
+  --color-surface-felt-deep: var(--surface-felt-deep);
 
   --color-text-primary: var(--text-primary);
   --color-text-secondary: var(--text-secondary);
   --color-text-tertiary: var(--text-tertiary);
+  --color-text-disabled: var(--text-disabled);
   --color-text-inverse: var(--text-inverse);
-  --color-text-on-ember: var(--text-on-ember);
-  --color-text-on-honey: var(--text-on-honey);
+  --color-text-on-gold: var(--text-on-gold);
 
   --color-border-subtle: var(--border-subtle);
   --color-border-default: var(--border-default);
   --color-border-strong: var(--border-strong);
-  --color-outline-ink: var(--outline-ink);
+  --color-border-accent: var(--border-accent);
 
-  --color-accent-primary: var(--accent-primary);
-  --color-accent-primary-hover: var(--accent-primary-hover);
-  --color-accent-cambia: var(--accent-cambia);
-  --color-accent-cambia-hover: var(--accent-cambia-hover);
   --color-accent-gold: var(--accent-gold);
-
-  --color-card-face: var(--card-face);
-  --color-card-face-edge: var(--card-face-edge);
-  --color-card-back: var(--card-back);
-  --color-card-back-line: var(--card-back-line);
-  --color-suit-red: var(--suit-red);
-  --color-suit-black: var(--suit-black);
+  --color-accent-gold-hover: var(--accent-gold-hover);
+  --color-accent-green: var(--accent-green);
+  --color-accent-danger: var(--accent-danger);
 
   --color-status-success: var(--status-success);
   --color-status-danger: var(--status-danger);
   --color-status-warning: var(--status-warning);
   --color-status-info: var(--status-info);
+
+  --color-card-face: var(--card-face);
+  --color-card-back: var(--card-back);
+  --color-suit-red: var(--suit-red);
+  --color-suit-black: var(--suit-black);
 
   --color-tier-bronze: var(--tier-bronze);
   --color-tier-silver: var(--tier-silver);
@@ -239,17 +456,16 @@
   --color-tier-master: var(--tier-master);
   --color-tier-grandmaster: var(--tier-grandmaster);
 
-  /* fonts (literal values: --font-display/--font-ui share their bare name
-     with the Tailwind utility key, so @theme is their sole declaration) */
-  --font-display: 'Young Serif', Georgia, serif;
-  --font-ui: 'Alegreya Sans', 'Gill Sans', 'Helvetica Neue', sans-serif;
+  /* Literal values: --font-sans, --text-2xs and --tracking-caps share their
+     bare name with the Tailwind utility key, so @theme is their sole
+     declaration and its output is what components read via var(). */
+  --font-sans: 'Archivo Variable', 'Archivo', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   --font-ds-mono: var(--ds-font-mono);
 
-  /* type scale, weights, tracking, leading (ds-prefixed where colliding) */
   --text-2xs: 11px;
-  --text-ds-md: var(--text-md);
   --text-ds-xs: var(--ds-text-xs);
   --text-ds-sm: var(--ds-text-sm);
+  --text-ds-md: var(--text-md);
   --text-ds-lg: var(--ds-text-lg);
   --text-ds-xl: var(--ds-text-xl);
   --text-ds-2xl: var(--ds-text-2xl);
@@ -262,7 +478,7 @@
   --font-weight-ds-bold: var(--weight-bold);
   --font-weight-ds-black: var(--weight-black);
 
-  --tracking-caps: 0.09em;
+  --tracking-caps: 0.08em;
   --tracking-ds-tight: var(--ds-tracking-tight);
   --tracking-ds-wide: var(--ds-tracking-wide);
 
@@ -270,7 +486,6 @@
   --leading-ds-snug: var(--ds-leading-snug);
   --leading-ds-normal: var(--ds-leading-normal);
 
-  /* spacing / radii */
   --spacing-ds-1: var(--space-1);
   --spacing-ds-2: var(--space-2);
   --spacing-ds-3: var(--space-3);
@@ -289,14 +504,10 @@
   --radius-ds-pill: var(--radius-pill);
   --radius-ds-card: var(--radius-playing-card);
 
-  /* shadows */
-  --shadow-ds-piece: var(--shadow-piece);
-  --shadow-ds-card: var(--shadow-card);
   --shadow-ds-raised: var(--shadow-raised);
   --shadow-ds-overlay: var(--shadow-overlay);
   --shadow-ds-playing-card: var(--shadow-playing-card);
 
-  /* motion */
   --ease-ds-out: var(--ds-ease-out);
   --ease-ds-snap: var(--ease-snap);
 }
