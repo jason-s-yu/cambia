@@ -281,25 +281,6 @@ export const useGameStore = create<GameState & GameActions>()(
 							}
 							break;
 
-						case 'player_replace': // Treat as discard for state update simplicity
-							if (state.gameState) {
-								state.gameState.discardSize++;
-								state.gameState.discardTop = payload.card; // The replaced card goes to discard
-								const player = state.gameState.players.find(p => p.playerId === payload.user?.id);
-								if (player) {
-									player.drawnCard = null;
-									// If we have revealedHand, update it (tricky without full card info)
-									if (player.revealedHand && payload.card?.idx !== undefined) {
-										// We don't know what the drawn card was here easily,
-										// rely on next sync or private events for perfect hand state.
-										// For now, just clear drawnCard.
-									}
-								}
-								state.displayedDrawnCard = null; // Clear magnified card
-								state.pendingAction = null; // Action completed (unless special triggered)
-							}
-							break;
-
 						case 'player_special_choice':
 							if (state.gameState) {
 								const player = state.gameState.players.find(p => p.playerId === selfPlayerId); // Find 'self'
