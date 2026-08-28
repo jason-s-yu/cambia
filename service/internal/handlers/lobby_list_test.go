@@ -317,7 +317,7 @@ func TestListLobbiesOmitsInternalLobbyFields(t *testing.T) {
 		}
 	}
 	// Everything the web client reads off an entry (web/src/types LobbyState) stays.
-	for _, want := range []string{"id", "hostUserID", "type", "gameMode", "inGame", "houseRules", "circuit", "lobbySettings", "visibility", "mode", "name"} {
+	for _, want := range []string{"id", "hostUserID", "type", "gameMode", "inGame", "houseRules", "circuit", "lobbySettings", "mode", "name"} {
 		if _, present := entry.Lobby[want]; !present {
 			t.Fatalf("client-visible field %q disappeared from the lobby list payload", want)
 		}

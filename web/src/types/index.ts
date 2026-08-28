@@ -88,7 +88,6 @@ export interface LobbyState {
   your_is_host?: boolean; // From WS
   // Matchmaking fields (from WS or REST)
   queueId?: string;
-  visibility?: 'private' | 'public';
   mode?: 'casual' | 'ranked';
   isRanked?: boolean;
   matchState?: MatchState;
