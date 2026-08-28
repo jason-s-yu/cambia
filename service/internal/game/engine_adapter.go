@@ -468,6 +468,24 @@ func (g *CambiaGame) applyEngineAction(actionIdx uint16, actorID uuid.UUID) erro
 	// Sync Player model hands (keeps service-level code working).
 	g.syncPlayerHandsFromEngine()
 
+	// A stockpile draw that started with an empty stockpile always reshuffled the discard pile
+	// back into the stockpile first (engine drawStockpile -> attemptReshuffle, engine/actions.go:
+	// StockLen==0 triggers the reshuffle unconditionally before the draw). Broadcast it so clients
+	// correct their locally-tracked discard/stockpile counts immediately instead of drifting until
+	// the next full sync_state (cambia-763 F3). Engine state (StockLen/DiscardLen) is authoritative
+	// here regardless of the CardUUIDTracker mirror, so the counts are correct even though the
+	// tracker's per-card UUID slots for the reshuffled cards are not (separate, pre-existing gap;
+	// harmless for this event since reshuffled stockpile cards are never individually addressed).
+	if actionIdx == engine.ActionDrawStockpile && preStockLen == 0 {
+		g.fireEvent(GameEvent{
+			Type: EventGameReshuffleStockpile,
+			Payload: map[string]interface{}{
+				"stockpileSize": int(g.Engine.StockLen),
+				"discardSize":   int(g.Engine.DiscardLen),
+			},
+		})
+	}
+
 	// Emit WebSocket events.
 	g.emitEventsForAction(actionIdx, actorID, engineIdx, preStockLen, preDiscardLen)
 
