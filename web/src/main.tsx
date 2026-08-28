@@ -16,7 +16,12 @@ const mount = getAppRoot();
 if (mount) {
   ReactDOM.createRoot(mount).render(
     <React.StrictMode>
-      <BrowserRouter>
+      {/* Opts into the v7 behaviors early per React Router's own warning (cambia-958 D7):
+          v7_startTransition wraps navigation state updates in React.startTransition;
+          v7_relativeSplatPath changes relative link resolution under a nested splat route,
+          which this app has none of (its one splat, path="*" in App.tsx, is a top-level
+          catch-all with no children), so neither flag changes route behavior here. */}
+      <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <App />
       </BrowserRouter>
     </React.StrictMode>

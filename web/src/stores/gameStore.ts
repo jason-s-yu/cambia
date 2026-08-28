@@ -222,7 +222,14 @@ export const useGameStore = create<GameState & GameActions>()(
 				// out self and must not be used for self-detection.
 				const selfPlayerId = useAuthStore.getState().user?.id ?? null;
 
-				if (!state.gameState && type !== 'private_sync_state') {
+				// game_started is exempt alongside private_sync_state: the hub emits it before
+				// BeginPreGame's first private_sync_state on every round, including the first of a
+				// session, when state.gameState is still null (hub.go createAndStartGame comment:
+				// "game_started precedes BeginPreGame"). Its case below only resets fields and never
+				// reads state.gameState first, so letting it through here is safe regardless of
+				// whether a prior sync has landed; dropping it here logged this warning on every
+				// game start instead of only a genuinely out-of-order message (cambia-958 D6).
+				if (!state.gameState && type !== 'private_sync_state' && type !== 'game_started') {
 					console.warn(`[GameStore] Received message type ${type} before initial state sync. Ignoring.`);
 					return;
 				}
