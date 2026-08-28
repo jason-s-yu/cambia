@@ -11,6 +11,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "check-tokens": "node scripts/check-theme-tokens.mjs",
+    "test:resend": "node --test scripts/test-resend-decision.mjs",
     "measure-dev-transfer": "node scripts/measure-dev-transfer.mjs"
   },
   "dependencies": {

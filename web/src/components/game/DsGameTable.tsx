@@ -31,7 +31,8 @@ import {
   selectIsProcessingAction,
   selectDisplayedDrawnCard,
   selectServerClockOffsetMs,
-  selectAbilityReveal
+  selectAbilityReveal,
+  selectDroppedActionNonce
 } from '@/stores/gameStore';
 import { useAuthStore } from '@/stores/authStore';
 import { useCurrentLobbyStore, type LobbyPhase } from '@/stores/lobbyStore';
@@ -99,7 +100,7 @@ const REVEAL_HOLD_MS = 6000;
 
 interface TableNotice {
   id: number;
-  tone: 'success' | 'danger' | 'info';
+  tone: 'success' | 'danger' | 'info' | 'warning';
   text: string;
 }
 
@@ -121,6 +122,17 @@ interface PileSnapshot {
 function useTableNotice(gs: ObfGameState, selfId: string | undefined, names: Map<string, string>): TableNotice | null {
   const [notice, setNotice] = useState<TableNotice | null>(null);
   const prev = useRef<PileSnapshot | null>(null);
+
+  // The one notice that is not a state delta: an action the hub discarded on its staleness
+  // gate that useSocket could not safely resend, because the board moved under it (cambia-891).
+  // The socket only counts them; the copy lives here with the rest of the table's voice.
+  const droppedNonce = useGameStore(selectDroppedActionNonce);
+  const seenDrop = useRef(droppedNonce);
+  useEffect(() => {
+    if (droppedNonce === seenDrop.current) return;
+    seenDrop.current = droppedNonce;
+    setNotice({ id: Date.now(), tone: 'warning', text: 'That did not go through.' });
+  }, [droppedNonce]);
 
   useEffect(() => {
     const snap: PileSnapshot = {
@@ -161,7 +173,7 @@ function useTableNotice(gs: ObfGameState, selfId: string | undefined, names: Map
   return notice;
 }
 
-const NOTICE_TONES: Record<TableNotice['tone'] | 'warning', { color: string; border: string }> = {
+const NOTICE_TONES: Record<TableNotice['tone'], { color: string; border: string }> = {
   success: { color: 'var(--status-success)', border: 'var(--status-success-border)' },
   danger: { color: 'var(--status-danger)', border: 'var(--status-danger-border)' },
   info: { color: 'var(--status-info)', border: 'var(--status-info-border)' },
@@ -617,7 +629,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
             )}
           </div>
 
-          {/* Notice line: snap, penalty, reshuffle. Space is reserved so the piles do not jump. */}
+          {/* Notice line: snap, penalty, reshuffle, dropped action. Space is reserved so the piles do not jump. */}
           <div style={{ display: 'flex', justifyContent: 'center', minHeight: 30 }} aria-live='polite'>
             {notice && (
               <span

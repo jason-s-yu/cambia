@@ -6,6 +6,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { useCurrentLobbyStore } from '@/stores/lobbyStore';
 import { useGameStore } from '@/stores/gameStore';
 import { WS_URL } from '@/lib/runtimeEnv';
+import { cardRefsOf, decideResend, tableContext, type OutboundRecord } from '@/lib/resendDecision';
 const MAX_RETRIES = 5;
 const INITIAL_RETRY_DELAY = 1000;
 
@@ -13,6 +14,23 @@ const INITIAL_RETRY_DELAY = 1000;
  * Server envelopes: { seq: number, type: string, payload?: any }
  * Client messages: { last_seq: number, type: string, body?: any }
  */
+
+/**
+ * Anything the app sends. Action frames carry their card references at the top level (the hub
+ * falls back to the whole frame when no `body` is present, see hub/connection.go), and those
+ * references are part of the resend decision, so they are named here rather than hidden behind
+ * an opaque body.
+ */
+interface OutboundMessage {
+	type: string;
+	body?: unknown;
+	special?: string;
+	/** Slot-addressed frames carry idx (and, for a two-sided ability, the owner); the resend
+	 *  decision needs both, since the server resolves those frames by index alone. */
+	card?: { id?: string; idx?: number; user?: { id?: string } };
+	card1?: { id?: string; idx?: number; user?: { id?: string } };
+	card2?: { id?: string; idx?: number; user?: { id?: string } };
+}
 
 /** Lobby-phase message types routed to lobbyStore */
 const LOBBY_TYPES = new Set([
@@ -32,10 +50,46 @@ export function useSocket(lobbyId: string | null | undefined) {
 	const isConnecting = useRef<boolean>(false);
 	const shouldBeConnected = useRef<boolean>(false);
 	const lastSeqRef = useRef<number>(0);
+	/** The last frame sent, held until the hub either acts on it or answers it with a repair. */
+	const lastSentRef = useRef<{ message: OutboundMessage; record: OutboundRecord } | null>(null);
 
 	const userId = useAuthStore((state) => state.user?.id);
 
 	const lobbyActions = useCurrentLobbyStore();
+
+	/** The board and lobby state a resend decision compares against. */
+	const context = useCallback(() => {
+		const game = useGameStore.getState();
+		return tableContext(
+			game.gameState,
+			game.pendingAction,
+			useCurrentLobbyStore.getState().phase,
+			useAuthStore.getState().user?.id
+		);
+	}, []);
+
+	/** Puts a frame on the wire with the current seq and records it for the repair path. */
+	const send = useCallback((message: OutboundMessage, attempt: number): boolean => {
+		if (ws.current?.readyState !== WebSocket.OPEN) return false;
+		const sentSeq = lastSeqRef.current;
+		try {
+			ws.current.send(JSON.stringify({ ...message, last_seq: sentSeq }));
+		} catch (error) {
+			console.error('[useSocket] Failed to send message:', error);
+			return false;
+		}
+		lastSentRef.current = {
+			message,
+			record: {
+				type: message.type,
+				cardRefs: cardRefsOf(message),
+				sentSeq,
+				attempt,
+				ctx: context()
+			}
+		};
+		return true;
+	}, [context]);
 
 	const connectWebSocket = useCallback((targetLobbyId: string) => {
 		if (!targetLobbyId || !userId) {
@@ -85,6 +139,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 		shouldBeConnected.current = true;
 		managedLobbyId.current = targetLobbyId;
 		lastSeqRef.current = 0;
+		lastSentRef.current = null;
 
 		if (useCurrentLobbyStore.getState().currentLobbyId === targetLobbyId) {
 			lobbyActions.setLoading(true);
@@ -131,9 +186,27 @@ export function useSocket(lobbyId: string | null | undefined) {
 
 				// Route by message type
 				if (type === 'sync_state') {
-					// Desync recovery — force both stores
+					// Desync recovery. The repair carries the hub's lobby snapshot and the seq to
+					// catch up to; the game snapshot rides its own private_sync_state, and one FIFO
+					// writer per connection means every frame this client was behind on has already
+					// been applied, so the state read below is current.
 					useCurrentLobbyStore.getState().forceSync(payload);
 					useGameStore.getState().forceSync(payload);
+
+					// The frame the hub discarded. Without a resend the player's action is simply
+					// gone (cambia-891); with a stale one it can mean something else entirely, so
+					// decideResend re-checks the intent against the repaired board.
+					const sent = lastSentRef.current;
+					if (sent) {
+						const syncSeq = typeof payload?.seq === 'number' ? payload.seq : lastSeqRef.current;
+						const verdict = decideResend(sent.record, context(), syncSeq);
+						if (verdict === 'resend') {
+							if (!send(sent.message, sent.record.attempt + 1)) lastSentRef.current = null;
+						} else {
+							lastSentRef.current = null;
+							if (verdict === 'notify') useGameStore.getState().noteDroppedAction();
+						}
+					}
 				} else if (type === 'error') {
 					// Errors go to both stores
 					useCurrentLobbyStore.getState().processLobbyWebSocketMessage(type, payload);
@@ -234,7 +307,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 			}
 		};
 
-	}, [userId, lobbyActions]);
+	}, [userId, lobbyActions, context, send]);
 
 	// Connect/disconnect based on lobbyId prop
 	useEffect(() => {
@@ -279,25 +352,18 @@ export function useSocket(lobbyId: string | null | undefined) {
 	}, [lobbyId, connectWebSocket, lobbyActions]);
 
 	/** Send a message over the WS. Injects last_seq automatically. */
-	const sendMessage = useCallback((message: { type: string; body?: unknown }) => {
+	const sendMessage = useCallback((message: OutboundMessage) => {
 		if (!managedLobbyId.current || ws.current?.readyState !== WebSocket.OPEN) {
 			console.warn('[useSocket] sendMessage prevented: not connected.');
 			return;
 		}
-		try {
-			const wire = {
-				...message,
-				last_seq: lastSeqRef.current,
-			};
-			ws.current.send(JSON.stringify(wire));
-		} catch (error) {
-			console.error('[useSocket] Failed to send message:', error);
-		}
-	}, []);
+		send(message, 0);
+	}, [send]);
 
 	/** Explicitly close the connection. */
 	const closeSocket = useCallback(() => {
 		shouldBeConnected.current = false;
+		lastSentRef.current = null;
 
 		if (reconnectTimeoutId.current) {
 			clearTimeout(reconnectTimeoutId.current);

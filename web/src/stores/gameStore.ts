@@ -52,6 +52,10 @@ interface GameState {
 	// keeps its face; abilityReveal is the latest reveal, for the table's transient display.
 	seenFaces: Record<string, RevealedCard>;
 	abilityReveal: AbilityReveal | null;
+	// Bumped once per outbound action the hub discarded on its staleness gate that the client
+	// could not safely resend (cambia-891). The table watches the number and shows a notice; it
+	// carries no text so the surface owns the copy.
+	droppedActionNonce: number;
 }
 
 interface GameActions {
@@ -62,6 +66,7 @@ interface GameActions {
 	clearError: () => void;
 	processGameWebSocketMessage: (type: string, payload: any) => void;
 	forceSync: (payload: any) => void;
+	noteDroppedAction: () => void;
 	clearGameState: () => void; // For leaving game
 	setDisplayedDrawnCard: (card: ObfCard | null) => void;
 	clearDisplayedDrawnCard: () => void;
@@ -84,7 +89,8 @@ const initialState: GameState = {
 	finalScores: null,
 	winnerId: null,
 	seenFaces: {},
-	abilityReveal: null
+	abilityReveal: null,
+	droppedActionNonce: 0
 };
 
 export const useGameStore = create<GameState & GameActions>()(
@@ -173,16 +179,28 @@ export const useGameStore = create<GameState & GameActions>()(
 					if (typeof payload.state.serverNow === 'number') {
 						state.serverClockOffsetMs = payload.state.serverNow - Date.now();
 					}
+					// Only a payload that actually replaced the board may clear what the board
+					// was showing. The hub's sync_state is a lobby snapshot plus a seq (see
+					// hub.go sendSyncState -> buildLobbySnapshot); the game side resyncs through
+					// private_sync_state. Clearing unconditionally wiped the drawn card and the
+					// pending ability of a player whose only sin was sending a frame during a
+					// broadcast, leaving a turn that could not be finished (cambia-891).
+					state.pendingAction = null;
+					state.displayedDrawnCard = null;
+					state.abilityReveal = null;
 				}
 				if (typeof payload?.seq === 'number') {
 					state.seq = payload.seq;
 				}
-				state.pendingAction = null;
-				state.displayedDrawnCard = null;
-				state.abilityReveal = null;
 				state.isLoading = false;
 				state.isConnected = true;
 				state.error = null;
+			});
+		},
+
+		noteDroppedAction: () => {
+			set((state) => {
+				state.droppedActionNonce += 1;
 			});
 		},
 
@@ -623,6 +641,7 @@ export const selectPendingAction = (state: GameState) => state.pendingAction;
 export const selectIsProcessingAction = (state: GameState) => state.isProcessingAction;
 export const selectServerClockOffsetMs = (state: GameState) => state.serverClockOffsetMs;
 export const selectAbilityReveal = (state: GameState) => state.abilityReveal;
+export const selectDroppedActionNonce = (state: GameState) => state.droppedActionNonce;
 export const selectFinalScores = (state: GameState) => state.finalScores;
 export const selectCurrentPlayerId = (state: GameState) => state.gameState?.currentPlayerId;
 export const selectSelfPlayerState = (state: GameState) => {
