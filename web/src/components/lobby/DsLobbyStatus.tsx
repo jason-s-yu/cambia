@@ -25,7 +25,7 @@ interface ToneSpec {
 const TONES: Record<LobbyStatusTone, ToneSpec> = {
   info: { bg: 'var(--status-info-bg)', border: 'var(--status-info-border)', color: 'var(--status-info)' },
   success: { bg: 'var(--status-success-bg)', border: 'var(--status-success-border)', color: 'var(--status-success)' },
-  gold: { bg: 'var(--accent-gold-soft)', border: 'var(--border-accent)', color: 'var(--accent-gold)' }
+  gold: { bg: 'var(--accent-gold-soft)', border: 'var(--border-accent)', color: 'var(--accent-gold-text)' }
 };
 
 const DsLobbyStatus: React.FC<DsLobbyStatusProps> = ({ tone, text, value, style }) => {

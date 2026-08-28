@@ -6,7 +6,7 @@
 // message matches what the legacy components sent: `ready`/`unready`
 // (ReadyButton), `start_game` (HostControls), `chat` (ChatWindow),
 // `update_rules` (settings, via DsMatchSettings). No protocol change.
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useCurrentLobbyStore, type LobbyPhase } from '@/stores/lobbyStore';
 import { useAuthStore } from '@/stores/authStore';
 import Panel from '@/components/ds/chrome/Panel';
@@ -77,6 +77,7 @@ const DsLobbyView: React.FC<DsLobbyViewProps> = ({ lobbyId, phase, sendMessage, 
   const remaining = useCountdownRemaining();
   const [draft, setDraft] = useState('');
   const [copied, setCopied] = useState(false);
+  const chatListRef = useRef<HTMLDivElement>(null);
 
   const players = useMemo(() => lobbyDetails?.lobby_status?.users ?? [], [lobbyDetails]);
   const isHost = lobbyDetails?.your_is_host ?? false;
@@ -87,6 +88,13 @@ const DsLobbyView: React.FC<DsLobbyViewProps> = ({ lobbyId, phase, sendMessage, 
   const waiting = players.filter((p) => !p.is_ready).map((p) => p.username);
   const shortId = lobbyId.substring(0, 8);
   const lobbyType = lobbyDetails?.type ?? 'private';
+
+  // The chat list is height-bounded, so each new line pins the scroll to the newest
+  // message; otherwise anything past the fold would land unseen.
+  useEffect(() => {
+    const el = chatListRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [chatMessages.length]);
 
   const toggleReady = () => sendMessage({ type: isReady ? 'unready' : 'ready' });
   const startGame = () => sendMessage({ type: 'start_game' });
@@ -120,7 +128,7 @@ const DsLobbyView: React.FC<DsLobbyViewProps> = ({ lobbyId, phase, sendMessage, 
   })();
 
   return (
-    <div className='grid w-full max-w-[1280px] mx-auto items-start gap-5 p-4 md:p-6 grid-cols-1 lg:grid-cols-[minmax(280px,340px)_minmax(0,1fr)_minmax(240px,300px)]'>
+    <div className='grid w-full max-w-[1280px] mx-auto items-start gap-5 p-4 md:p-6 grid-cols-1 lg:grid-cols-[minmax(300px,380px)_minmax(0,1fr)_minmax(240px,280px)]'>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)', minWidth: 0 }}>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -148,17 +156,17 @@ const DsLobbyView: React.FC<DsLobbyViewProps> = ({ lobbyId, phase, sendMessage, 
         <Panel title='Players' action={<Badge tone='neutral'>{players.length} seated</Badge>}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
             {players.map((p) => (
-              <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
-                {/* The seat keeps its natural width so a long name never wraps inside the pill;
-                    the badge group drops to its own right-aligned line when the row is short. */}
+              <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                {/* Two cells, one shape per row: the seat takes the free width and truncates a
+                    long name inside the pill; the badge group keeps its natural width. */}
                 <PlayerSeat
                   username={p.username}
                   isYou={p.id === selfId}
                   state={p.is_ready ? 'ready' : undefined}
-                  style={{ flex: '1 1 auto' }}
+                  style={{ flex: '1 1 0', minWidth: 0 }}
                 />
                 {(p.is_host || !p.is_ready) && (
-                  <div style={{ display: 'flex', gap: 'var(--space-2)', marginLeft: 'auto' }}>
+                  <div style={{ display: 'flex', gap: 'var(--space-2)', flex: 'none' }}>
                     {p.is_host && <Badge tone='gold'>Host</Badge>}
                     {!p.is_ready && <Badge tone='neutral'>Not ready</Badge>}
                   </div>
@@ -194,13 +202,13 @@ const DsLobbyView: React.FC<DsLobbyViewProps> = ({ lobbyId, phase, sendMessage, 
       )}
 
       <Panel title='Lobby chat' style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minHeight: 240, maxHeight: 360, overflowY: 'auto' }}>
+        <div ref={chatListRef} style={{ display: 'flex', flexDirection: 'column', gap: 6, minHeight: 240, maxHeight: 360, overflowY: 'auto' }}>
           {chatMessages.length === 0 && <div style={MUTED}>No messages yet.</div>}
           {chatMessages.map((c, i) => {
             const mine = c.user_id === selfId;
             return (
               <div key={`${c.user_id}-${c.ts}-${i}`} style={{ fontSize: 'var(--ds-text-sm)', lineHeight: 'var(--ds-leading-snug)', overflowWrap: 'anywhere' }}>
-                <span style={{ fontWeight: 'var(--weight-bold)', color: mine ? 'var(--accent-gold)' : 'var(--text-primary)' }}>{c.username}</span>
+                <span style={{ fontWeight: 'var(--weight-bold)', color: mine ? 'var(--accent-gold-text)' : 'var(--text-primary)' }}>{c.username}</span>
                 <span style={{ color: 'var(--text-secondary)' }}> {c.msg}</span>
               </div>
             );
