@@ -1,10 +1,13 @@
 // src/pages/ProfilePage.tsx
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Navigate } from 'react-router-dom';
 import { useAuthStore } from '@/stores/authStore';
+import { useHistoryStore } from '@/stores/historyStore';
 import Input from '@/components/common/Input';
 import Button from '@/components/common/Button';
 import ErrorMessage from '@/components/common/ErrorMessage';
+import DsRatingSummary from '@/components/profile/DsRatingSummary';
+import DsGameHistory from '@/components/profile/DsGameHistory';
 
 const ProfilePage: React.FC = () => {
 	const user = useAuthStore((state) => state.user);
@@ -12,6 +15,28 @@ const ProfilePage: React.FC = () => {
 	const error = useAuthStore((state) => state.error);
 	const clearError = useAuthStore((state) => state.clearError);
 	const claimAccount = useAuthStore((state) => state.claimAccount);
+
+	const userId = user?.id;
+	const fetchGames = useHistoryStore((state) => state.fetchGames);
+	const fetchMoreGames = useHistoryStore((state) => state.fetchMoreGames);
+	const fetchRatings = useHistoryStore((state) => state.fetchRatings);
+	const resetHistory = useHistoryStore((state) => state.reset);
+	const games = useHistoryStore((state) => state.games);
+	const gamesTotal = useHistoryStore((state) => state.total);
+	const gamesLoading = useHistoryStore((state) => state.gamesLoading);
+	const gamesLoaded = useHistoryStore((state) => state.gamesLoaded);
+	const gamesError = useHistoryStore((state) => state.gamesError);
+	const ratings = useHistoryStore((state) => state.ratings);
+	const ratingsError = useHistoryStore((state) => state.ratingsError);
+
+	// Keyed on the user id so a claim (guest -> account) or an account switch refetches
+	// against the new session rather than leaving the previous account's rows on screen.
+	useEffect(() => {
+		if (!userId) return;
+		resetHistory();
+		fetchGames();
+		fetchRatings();
+	}, [userId, resetHistory, fetchGames, fetchRatings]);
 
 	const [claimUsername, setClaimUsername] = useState('');
 	const [claimEmail, setClaimEmail] = useState('');
@@ -46,16 +71,8 @@ const ProfilePage: React.FC = () => {
 		return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
 	};
 
-	const glickoRating = user.elo != null
-		? `${Math.round(user.elo)} ± ${Math.round(user.rd ?? 0)}`
-		: '—';
-
-	const openSkillRating = user.open_skill_mu != null
-		? `${user.open_skill_mu.toFixed(2)} ± ${(user.open_skill_sigma ?? 0).toFixed(2)}`
-		: '—';
-
 	return (
-		<div className="max-w-lg mx-auto space-y-6">
+		<div className="max-w-3xl mx-auto space-y-6">
 			<h2 className="text-2xl font-semibold text-gray-800 dark:text-gray-100">Profile</h2>
 
 			<div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 space-y-4">
@@ -79,18 +96,6 @@ const ProfilePage: React.FC = () => {
 				<hr className="border-gray-200 dark:border-gray-700" />
 
 				<div>
-					<p className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">Glicko-2 Rating</p>
-					<p className="text-gray-800 dark:text-gray-100">{glickoRating}</p>
-				</div>
-
-				<div>
-					<p className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">OpenSkill Rating</p>
-					<p className="text-gray-800 dark:text-gray-100">{openSkillRating}</p>
-				</div>
-
-				<hr className="border-gray-200 dark:border-gray-700" />
-
-				<div>
 					<p className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">Member Since</p>
 					<p className="text-gray-800 dark:text-gray-100">{formatDate(user.created_at)}</p>
 				</div>
@@ -100,6 +105,17 @@ const ProfilePage: React.FC = () => {
 					<p className="text-gray-800 dark:text-gray-100">{formatDate(user.last_login)}</p>
 				</div>
 			</div>
+
+			<DsRatingSummary summary={ratings} error={ratingsError} />
+
+			<DsGameHistory
+				games={games}
+				total={gamesTotal}
+				isLoading={gamesLoading}
+				loaded={gamesLoaded}
+				error={gamesError}
+				onLoadMore={fetchMoreGames}
+			/>
 
 			{user.is_ephemeral && (
 				<div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 space-y-4">
