@@ -17,7 +17,7 @@ interface Tone {
   border: string;
 }
 
-const GOLD: Tone = { bg: 'var(--accent-gold-soft)', color: 'var(--accent-gold)', border: 'var(--border-accent)' };
+const GOLD: Tone = { bg: 'var(--accent-gold-soft)', color: 'var(--accent-gold-text)', border: 'var(--border-accent)' };
 
 const TONES: Record<NonNullable<BadgeProps['tone']>, Tone> = {
   neutral: { bg: 'var(--surface-2)', color: 'var(--text-secondary)', border: 'var(--border-default)' },

@@ -84,6 +84,7 @@ One family. Gold is the CTA and the highlight; green is the table and the affirm
 |`--accent-gold-hover`|`#dcb84a`|`#8a6a1f`|Hover fill.|
 |`--accent-gold-active`|`#ab8526`|`#6f5518`|Pressed fill.|
 |`--accent-gold-soft`|`rgba(201,162,39,.16)`|`rgba(171,133,38,.14)`|Gold-tinted fill behind a badge or selection.|
+|`--accent-gold-text`|`#c9a227`|`#6f5518`|Gold as text: on `--accent-gold-soft`, on a neutral surface (status strip, gold badge, own name in chat). `--accent-gold` is a fill; as light-theme text it sits under 3:1.|
 |`--accent-green`|`#1a6d49`|`#14563a`|Affirmative fill, ready state.|
 |`--accent-danger`|`#c4362f`|`#a92c26`|Cambia call, destructive action.|
 

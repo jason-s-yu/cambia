@@ -70,8 +70,8 @@ const PlayerSeat: React.FC<PlayerSeatProps> = ({ username = 'Player', state, isY
       >
         {(username[0] || '?').toUpperCase()}
       </span>
-      <span style={{ lineHeight: 1.2 }}>
-        <span style={{ display: 'block', fontWeight: 'var(--weight-medium)', fontSize: compact ? 'var(--ds-text-sm)' : 'var(--text-md)' }}>
+      <span style={{ lineHeight: 1.2, minWidth: 0 }}>
+        <span style={{ display: 'block', fontWeight: 'var(--weight-medium)', fontSize: compact ? 'var(--ds-text-sm)' : 'var(--text-md)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
           {username}
           {isYou ? ' (you)' : ''}
         </span>

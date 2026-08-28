@@ -129,6 +129,10 @@
   --accent-gold-hover: var(--gold-400);
   --accent-gold-active: var(--gold-600);
   --accent-gold-soft: rgba(201, 162, 39, 0.16);
+  /* Gold as text on a soft tint or a neutral surface (cambia-847). The fill
+     gold reads at 5.7:1 on a dark tint but only 2.8:1 on the light one, so
+     light text takes the pressed shade instead. */
+  --accent-gold-text: var(--gold-500);
   --accent-green: var(--green-600);
   --accent-green-hover: var(--green-500);
   --accent-danger: var(--red-500);
@@ -203,6 +207,7 @@
   --accent-gold-hover: var(--gold-700);
   --accent-gold-active: #6f5518;
   --accent-gold-soft: rgba(171, 133, 38, 0.14);
+  --accent-gold-text: #6f5518;
   --accent-green: var(--green-700);
   --accent-green-hover: var(--green-800);
   --accent-danger: var(--red-600);
@@ -435,6 +440,7 @@
 
   --color-accent-gold: var(--accent-gold);
   --color-accent-gold-hover: var(--accent-gold-hover);
+  --color-accent-gold-text: var(--accent-gold-text);
   --color-accent-green: var(--accent-green);
   --color-accent-danger: var(--accent-danger);
 

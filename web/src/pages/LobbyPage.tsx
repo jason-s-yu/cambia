@@ -13,11 +13,10 @@ import { leaveLobby as apiLeaveLobby } from '@/services/lobbyService';
 import { useSocket } from '@/hooks/useSocket';
 import { useGameStore, selectGameState } from '@/stores/gameStore';
 import DsLobbyView from '@/components/lobby/DsLobbyView';
+import DsLobbyConnectState from '@/components/lobby/DsLobbyConnectState';
 import DsResultsView from '@/components/lobby/DsResultsView';
 import DsGameTable from '@/components/game/DsGameTable';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
-import ErrorMessage from '@/components/common/ErrorMessage';
-import Button from '@/components/common/Button';
 
 const LobbyPage: React.FC = () => {
   const { lobbyId: urlLobbyId } = useParams<{ lobbyId: string }>();
@@ -98,40 +97,30 @@ const LobbyPage: React.FC = () => {
 
   const isLoading = isStoreLoading || (storeLobbyId === urlLobbyId && isValidLobbyId && !isConnected && !storeError);
 
-  // --- Pre-connection / error states (Tailwind chrome) ---
-  if (!isValidLobbyId) return <div className='flex items-center justify-center h-screen'><LoadingSpinner /></div>;
+  // --- Pre-connection / error states (DS chrome, cambia-847) ---
+  if (!isValidLobbyId) return <DsLobbyConnectState />;
   if (isLoading) return (
-    <div className='flex flex-col items-center justify-center h-full pt-10'>
-      <LoadingSpinner />
-      <p className='mt-2 text-gray-600 dark:text-gray-400'>
-        {isStoreLoading ? 'Processing...' : `Connecting to lobby ${lobbyShortId}...`}
-      </p>
-    </div>
+    <DsLobbyConnectState message={isStoreLoading ? 'Joining lobby' : `Connecting to lobby ${lobbyShortId}`} />
   );
   if (storeError) return (
-    <div className='text-center pt-10'>
-      <ErrorMessage message={storeError} onClear={clearStoreError} />
-      <Button onClick={handleLeaveLobby} className='mt-4'>Back to Dashboard</Button>
-    </div>
+    <DsLobbyConnectState
+      error={storeError}
+      onClearError={clearStoreError}
+      action={{ label: 'Back to home', onClick: handleLeaveLobby }}
+    />
   );
   if (isConnected && !lobbyDetails) return (
-    <div className='flex flex-col items-center justify-center h-full pt-10'>
-      <LoadingSpinner />
-      <p className='mt-2 text-gray-600 dark:text-gray-400'>Waiting for lobby data...</p>
-      <Button onClick={handleLeaveLobby} className='mt-4' variant='secondary'>Leave Lobby</Button>
-    </div>
+    <DsLobbyConnectState
+      message='Waiting for lobby state'
+      action={{ label: 'Leave lobby', onClick: handleLeaveLobby, variant: 'ghost' }}
+    />
   );
-  if (!isConnected && !isLoading && !lobbyDetails) return (
-    <div className='flex flex-col items-center justify-center h-full pt-10'>
-      <p className='text-yellow-600 dark:text-yellow-400 mb-4'>Attempting to connect to lobby...</p>
-      <LoadingSpinner size='sm' />
-    </div>
-  );
+  if (!isConnected && !isLoading && !lobbyDetails) return <DsLobbyConnectState message='Reconnecting to lobby' />;
   if (!lobbyDetails) return (
-    <div className='flex flex-col items-center justify-center h-full pt-10'>
-      <ErrorMessage message='Lobby data is missing. Please try rejoining.' />
-      <Button onClick={handleLeaveLobby} className='mt-4'>Back to Dashboard</Button>
-    </div>
+    <DsLobbyConnectState
+      error='Lobby state is missing. Rejoin from the home screen.'
+      action={{ label: 'Back to home', onClick: handleLeaveLobby }}
+    />
   );
 
   // --- Phase: results (post_game / match_end) ---
