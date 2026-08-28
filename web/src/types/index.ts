@@ -41,7 +41,7 @@ export interface HouseRules {
   cambiaAllowedRound?: number; // 0-255
   numJokers?: number; // 0-2
   numDecks?: number; // 1-4
-  initialViewCount?: number; // 0-2
+  initialViewCount?: number; // 0-6, and never above cardsPerPlayer
 }
 
 /** Nested rules structure within CircuitSettings */

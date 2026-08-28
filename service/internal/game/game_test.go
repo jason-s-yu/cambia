@@ -573,7 +573,9 @@ func TestSnapFailPenalty(t *testing.T) {
 	for i := 0; i < penaltyCount; i++ {
 		assert.Equal(t, EventPrivateSnapPenalty, privateEventsB[i].Type)
 		require.NotNil(t, privateEventsB[i].Card, "Private penalty event card missing")
-		assert.NotEmpty(t, privateEventsB[i].Card.Rank, "Private penalty event should reveal card details")
+		require.NotNil(t, privateEventsB[i].Card.Idx, "Private penalty event should name the hand slot")
+		// Penalty cards are drawn unseen (cambia-820); see TestSnapPenaltyRevealsNoCardFace.
+		assert.Empty(t, privateEventsB[i].Card.Rank, "Private penalty event must not reveal the card face")
 	}
 	_ = playerA
 }

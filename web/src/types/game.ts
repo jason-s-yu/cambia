@@ -128,11 +128,24 @@ export interface GamePlayerTurnEvent {
 	};
 }
 
-/** Structure for private initial card reveal events */
+/** A card as it appears inside a GameEvent payload (service EventCard). */
+export interface EventCard {
+	id: string;
+	rank?: string;
+	suit?: string;
+	value?: number;
+	idx?: number;
+	user?: { id: string };
+}
+
+/**
+ * Structure for private initial card reveal events. One entry per peeked hand slot: the length is
+ * the initialViewCount house rule, which runs from 0 up to cardsPerPlayer, so the reveal ships as a
+ * list rather than the fixed card1/card2 pair it used to carry (cambia-817).
+ */
 export interface PrivateInitialCardsEvent {
 	type: 'private_initial_cards';
-	card1?: ObfCard | null;
-	card2?: ObfCard | null;
+	cards?: EventCard[];
 }
 
 /** Structure for full state sync events */
@@ -222,13 +235,18 @@ export interface PlayerSnapPenaltyEvent {
 	type: 'player_snap_penalty';
 	user: { id: string };
 	card: { id: string }; // Obfuscated card ID drawn
-	payload: { count: number; total: number };
+	// stockpileSize/discardSize are the server's counts after this card was drawn, including any
+	// reshuffle the draw forced (cambia-821). Both piles are public, so they ride the public event.
+	payload: { count: number; total: number; stockpileSize: number; discardSize: number };
 }
 
-/** Structure for private penalty draw events */
+/**
+ * Structure for private penalty draw events. Card carries the id and the hand slot only: a penalty
+ * card is drawn unseen, so its face never crosses the wire (cambia-820).
+ */
 export interface PrivateSnapPenaltyEvent {
 	type: 'private_snap_penalty';
-	card: ObfCard; // Revealed penalty card details
+	card: { id: string; idx: number };
 	payload: { count: number; total: number };
 }
 

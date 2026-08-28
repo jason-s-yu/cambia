@@ -38,11 +38,13 @@ const (
 	numDecksMin = 1
 	numDecksMax = engine.MaxDeckSize / engine.StandardDeckSize
 
-	// The pregame reveal ships on private_initial_cards, whose wire shape carries exactly two
-	// card slots (card1/card2 on GameEvent), so a third peeked card has nowhere to go. The
-	// engine itself accepts up to CardsPerPlayer; raising this ceiling is a protocol change.
+	// Deal() writes InitialPeek[i] for every i < InitialViewCount and PlayerState.InitialPeek is
+	// [engine.MaxHandSize]uint8, so this is the absolute ceiling. The playable ceiling is lower
+	// still: a peek cannot cover more cards than the hand holds, which the cross-field check in
+	// Update enforces against CardsPerPlayer. The pregame reveal ships the whole peek as a list
+	// on private_initial_cards, so any count in range has somewhere to go (cambia-817).
 	initialViewCountMin = 0
-	initialViewCountMax = 2
+	initialViewCountMax = engine.MaxHandSize
 
 	// PenaltyDrawCount converts to a uint8 in mapHouseRulesToEngine and snap.go stops adding
 	// penalty cards once a hand reaches MaxHandSize, so a larger value cannot take effect.
@@ -98,8 +100,15 @@ func DefaultHouseRules() HouseRules {
 }
 
 // Update applies changes from a map to the HouseRules struct.
-// It validates input types and ranges where applicable.
+// It validates input types and ranges where applicable. Nothing is committed until every check
+// has passed, so a rejected update leaves the receiver exactly as it was.
 func (rules *HouseRules) Update(newRules map[string]interface{}) error {
+	// Assignments land on a copy and are committed at the bottom. The per-key helpers already
+	// refuse an out-of-range value before writing it, but the cross-field check below cannot know
+	// a value is bad until every key in the map has been applied, so it needs somewhere to roll
+	// back to (cambia-817).
+	next := *rules
+
 	var err error // Declare error variable
 
 	// Helper function to handle type assertion and assignment for booleans. The assertion
@@ -152,49 +161,58 @@ func (rules *HouseRules) Update(newRules map[string]interface{}) error {
 	}
 
 	// Apply updates using helpers.
-	if err = assignBool(&rules.AllowDrawFromDiscardPile, "allowDrawFromDiscardPile"); err != nil {
+	if err = assignBool(&next.AllowDrawFromDiscardPile, "allowDrawFromDiscardPile"); err != nil {
 		return err
 	}
-	if err = assignBool(&rules.AllowReplaceAbilities, "allowReplaceAbilities"); err != nil {
+	if err = assignBool(&next.AllowReplaceAbilities, "allowReplaceAbilities"); err != nil {
 		return err
 	}
-	if err = assignBool(&rules.AllowOpponentSnapping, "allowOpponentSnapping"); err != nil {
+	if err = assignBool(&next.AllowOpponentSnapping, "allowOpponentSnapping"); err != nil {
 		return err
 	}
-	if err = assignBool(&rules.SnapRace, "snapRace"); err != nil {
+	if err = assignBool(&next.SnapRace, "snapRace"); err != nil {
 		return err
 	}
-	if err = assignBool(&rules.LockCallerHand, "lockCallerHand"); err != nil {
+	if err = assignBool(&next.LockCallerHand, "lockCallerHand"); err != nil {
 		return err
 	}
-	if err = assignBool(&rules.ForfeitOnDisconnect, "forfeitOnDisconnect"); err != nil {
+	if err = assignBool(&next.ForfeitOnDisconnect, "forfeitOnDisconnect"); err != nil {
 		return err
 	}
-	if err = assignInt(&rules.PenaltyDrawCount, "penaltyDrawCount", penaltyDrawCountMin, penaltyDrawCountMax); err != nil {
+	if err = assignInt(&next.PenaltyDrawCount, "penaltyDrawCount", penaltyDrawCountMin, penaltyDrawCountMax); err != nil {
 		return err
 	}
-	if err = assignInt(&rules.TurnTimerSec, "turnTimerSec", turnTimerSecMin, turnTimerSecMax); err != nil {
+	if err = assignInt(&next.TurnTimerSec, "turnTimerSec", turnTimerSecMin, turnTimerSecMax); err != nil {
 		return err
 	}
-	if err = assignInt(&rules.MaxGameTurns, "maxGameTurns", maxGameTurnsMin, maxGameTurnsMax); err != nil {
+	if err = assignInt(&next.MaxGameTurns, "maxGameTurns", maxGameTurnsMin, maxGameTurnsMax); err != nil {
 		return err
 	}
-	if err = assignInt(&rules.CardsPerPlayer, "cardsPerPlayer", cardsPerPlayerMin, cardsPerPlayerMax); err != nil {
+	if err = assignInt(&next.CardsPerPlayer, "cardsPerPlayer", cardsPerPlayerMin, cardsPerPlayerMax); err != nil {
 		return err
 	}
-	if err = assignInt(&rules.CambiaAllowedRound, "cambiaAllowedRound", cambiaAllowedRoundMin, cambiaAllowedRoundMax); err != nil {
+	if err = assignInt(&next.CambiaAllowedRound, "cambiaAllowedRound", cambiaAllowedRoundMin, cambiaAllowedRoundMax); err != nil {
 		return err
 	}
-	if err = assignInt(&rules.NumJokers, "numJokers", numJokersMin, numJokersMax); err != nil {
+	if err = assignInt(&next.NumJokers, "numJokers", numJokersMin, numJokersMax); err != nil {
 		return err
 	}
-	if err = assignInt(&rules.NumDecks, "numDecks", numDecksMin, numDecksMax); err != nil {
+	if err = assignInt(&next.NumDecks, "numDecks", numDecksMin, numDecksMax); err != nil {
 		return err
 	}
-	if err = assignInt(&rules.InitialViewCount, "initialViewCount", initialViewCountMin, initialViewCountMax); err != nil {
+	if err = assignInt(&next.InitialViewCount, "initialViewCount", initialViewCountMin, initialViewCountMax); err != nil {
 		return err
 	}
 
+	// Cross-field ceiling: the pregame peek cannot cover more cards than the hand holds. Deal()
+	// clamps InitialViewCount to CardsPerPlayer rather than failing, so an over-large value would
+	// otherwise be accepted at the lobby edge and silently play as something else. Checked after
+	// both assignments because either key may arrive in the same update (cambia-817).
+	if next.InitialViewCount > next.CardsPerPlayer {
+		return fmt.Errorf("invalid value for initialViewCount: must be between %d and %d (cardsPerPlayer)", initialViewCountMin, next.CardsPerPlayer)
+	}
+
+	*rules = next
 	return nil
 }
 

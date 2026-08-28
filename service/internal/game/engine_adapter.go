@@ -1146,22 +1146,34 @@ func (g *CambiaGame) handleSnapFailure(playerID uuid.UUID, engineIdx uint8, atte
 		g.CardTracker.Players[engineIdx].HandUUIDs[handLen] = penaltyUUID
 		g.CardTracker.StockLen = g.Engine.StockLen
 
-		// Broadcast public penalty event.
+		// Broadcast public penalty event. It reports both pile sizes as they stand after this card
+		// was drawn, so a client sets the counts it displays from the server's own numbers instead
+		// of reconstructing them by subtraction (cambia-821). Both piles are public knowledge:
+		// sync_state broadcasts stockpileSize and discardSize to every player already. The counts
+		// go on the public event only, which the penalized player receives alongside the private
+		// one, rather than being repeated on both.
 		g.fireEvent(GameEvent{
 			Type: EventPlayerSnapPenalty,
 			User: &EventUser{ID: playerID},
 			Card: &EventCard{ID: penaltyUUID},
 			Payload: map[string]interface{}{
-				"count": i + 1,
-				"total": penaltyCount,
+				"count":         i + 1,
+				"total":         penaltyCount,
+				"stockpileSize": int(g.Engine.StockLen),
+				"discardSize":   int(g.Engine.DiscardLen),
 			},
 		})
 
-		// Private penalty event with card details.
+		// Private penalty event. It names the new card and where it landed, never its face: a
+		// penalty card is drawn unseen, so its rank stays hidden from the penalized player exactly
+		// as it is from everyone else. doc/game_actions.md has said so since this event was
+		// specified ("Note that no card details are to be revealed, just the new cards"), and the
+		// client, the engine's agent state and the CFR reference all already model it that way.
+		// Only this emitter disagreed, leaking a face nothing consumed (cambia-820).
 		privateIdx := int(handLen)
 		g.fireEventToPlayer(playerID, GameEvent{
 			Type: EventPrivateSnapPenalty,
-			Card: &EventCard{ID: penaltyUUID, Idx: &privateIdx, Rank: penaltyCard.Rank, Suit: penaltyCard.Suit, Value: penaltyCard.Value},
+			Card: &EventCard{ID: penaltyUUID, Idx: &privateIdx},
 			Payload: map[string]interface{}{
 				"count": i + 1,
 				"total": penaltyCount,
@@ -1173,9 +1185,10 @@ func (g *CambiaGame) handleSnapFailure(playerID uuid.UUID, engineIdx uint8, atte
 	g.syncPlayerHandsFromEngine()
 
 	// Tell clients about the reshuffle once the penalty has settled, so the counts carried here are
-	// the post-reshuffle-and-draw ones. The penalty events themselves carry no pile sizes, so
-	// without this a client's stockpile and discard counts would stay wrong until the next full
-	// sync_state.
+	// the post-reshuffle-and-draw ones. Since cambia-821 the penalty events carry the same counts,
+	// so this is no longer the only thing keeping a client's piles in step; it stays because the
+	// reshuffle itself is a public fact a client may act on, and because a penalty paid entirely
+	// short after a reshuffle emits no penalty event to carry the new counts.
 	if reshuffled {
 		g.fireEvent(GameEvent{
 			Type: EventGameReshuffleStockpile,

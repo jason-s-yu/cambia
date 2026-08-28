@@ -40,7 +40,7 @@ const (
 	EventPlayerCambia           GameEventType = "player_cambia"                  // Public: Player called Cambia.
 	EventGamePlayerTurn         GameEventType = "game_player_turn"               // Public: Notification of the current player's turn.
 	EventPrivateSyncState       GameEventType = "private_sync_state"             // Private: Full game state sync for a player.
-	EventPrivateInitialCards    GameEventType = "private_initial_cards"          // Private: Initial two cards revealed during pre-game.
+	EventPrivateInitialCards    GameEventType = "private_initial_cards"          // Private: Pregame peek cards revealed to their owner.
 	EventGameEnd                GameEventType = "game_end"                       // Public: Game has ended, includes results.
 )
 
@@ -67,6 +67,11 @@ type GameEvent struct {
 	Card1   *EventCard    `json:"card1,omitempty"`   // First card in a two-card action (e.g., swap).
 	Card2   *EventCard    `json:"card2,omitempty"`   // Second card in a two-card action.
 	Special string        `json:"special,omitempty"` // Identifier for the specific special action (e.g., "peek_self").
+	// Cards carries a variable-length card list for events whose card count is a house rule
+	// rather than a fixed property of the action. private_initial_cards is the only such event:
+	// the pregame peek reveals initialViewCount slots, which ranges up to cardsPerPlayer, so the
+	// fixed Card1/Card2 pair could not express a three-card peek (cambia-817).
+	Cards []*EventCard `json:"cards,omitempty"`
 
 	Payload map[string]interface{} `json:"payload,omitempty"` // Additional arbitrary data.
 
@@ -274,7 +279,7 @@ func (g *CambiaGame) BeginPreGame() {
 		handLen := g.Engine.Players[engineIdx].HandLen
 		if handLen == 0 {
 			log.Printf("Warning: Player %s has 0 cards during pregame reveal in game %s.", p.ID, g.ID)
-			g.firePrivateInitialCards(p.ID, nil, nil)
+			g.firePrivateInitialCards(p.ID, nil)
 			continue
 		}
 
@@ -282,14 +287,11 @@ func (g *CambiaGame) BeginPreGame() {
 		if peekCount > handLen {
 			peekCount = handLen
 		}
-		var card1, card2 *EventCard
-		if peekCount > 0 {
-			card1 = makeInitialCard(peekIdxs[0])
+		cards := make([]*EventCard, 0, peekCount)
+		for i := uint8(0); i < peekCount; i++ {
+			cards = append(cards, makeInitialCard(peekIdxs[i]))
 		}
-		if peekCount > 1 {
-			card2 = makeInitialCard(peekIdxs[1])
-		}
-		g.firePrivateInitialCards(p.ID, card1, card2)
+		g.firePrivateInitialCards(p.ID, cards)
 	}
 
 	// Schedule the transition to the main game phase.
@@ -339,15 +341,17 @@ func (g *CambiaGame) Start() {
 	g.BeginPreGame()
 }
 
-// firePrivateInitialCards sends the initial card reveal event to a specific player.
-func (g *CambiaGame) firePrivateInitialCards(playerID uuid.UUID, card1, card2 *EventCard) {
+// firePrivateInitialCards sends the pregame peek reveal to a specific player. cards holds one
+// entry per peeked slot, in the engine's InitialPeek order, and is empty when the initialViewCount
+// house rule peeks nothing. The whole list ships under Cards: the peek size is a house rule that
+// the engine allows up to cardsPerPlayer, so the event cannot assume two (cambia-817).
+func (g *CambiaGame) firePrivateInitialCards(playerID uuid.UUID, cards []*EventCard) {
 	if g.Emitter == nil {
 		return
 	}
 	ev := GameEvent{
 		Type:  EventPrivateInitialCards,
-		Card1: card1,
-		Card2: card2,
+		Cards: cards,
 	}
 	g.Emitter.EmitTo(playerID, string(EventPrivateInitialCards), ev)
 }

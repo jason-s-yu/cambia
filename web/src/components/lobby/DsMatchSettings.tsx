@@ -50,6 +50,18 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
     setHouseRules((prev) => ({ ...prev, [key]: value }));
     setSaveStatus('idle');
   };
+  // initialViewCount is bounded by cardsPerPlayer server-side (internal/game/rules.go, cambia-817):
+  // the pregame peek cannot cover more cards than the hand holds, and an over-large value rejects
+  // the whole update_rules message. Lowering the deal size therefore pulls the peek down with it
+  // instead of leaving the panel holding a combination the server refuses.
+  const setCardsPerPlayer = (value: number) => {
+    setHouseRules((prev) => ({
+      ...prev,
+      cardsPerPlayer: value,
+      initialViewCount: Math.min(prev.initialViewCount ?? 2, value)
+    }));
+    setSaveStatus('idle');
+  };
   const setCircuitRule = <K extends keyof CircuitSettings['rules']>(key: K, value: CircuitSettings['rules'][K]) => {
     setCircuit((prev) => ({ ...prev, rules: { ...prev.rules, [key]: value } }));
     setSaveStatus('idle');
@@ -125,7 +137,7 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
           type='number'
           disabled={ro}
           value={num(houseRules?.cardsPerPlayer)}
-          onChange={(e) => setRule('cardsPerPlayer', clamped(e.target.value, 1, 6, 4))}
+          onChange={(e) => setCardsPerPlayer(clamped(e.target.value, 1, 6, 4))}
         />
         <Input
           label='Initial peek'
@@ -133,7 +145,7 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
           type='number'
           disabled={ro}
           value={num(houseRules?.initialViewCount)}
-          onChange={(e) => setRule('initialViewCount', clamped(e.target.value, 0, 2, 2))}
+          onChange={(e) => setRule('initialViewCount', clamped(e.target.value, 0, houseRules?.cardsPerPlayer ?? 4, 2))}
         />
         <Input
           label='Jokers per deck'
