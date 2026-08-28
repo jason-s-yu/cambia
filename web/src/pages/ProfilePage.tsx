@@ -87,10 +87,10 @@ const ProfilePage: React.FC = () => {
 		return <Navigate to="/login" replace />;
 	}
 
-	const formatDate = (iso?: string) => {
-		if (!iso) return 'Unknown';
-		return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
-	};
+	// GET /user/me serialises only id, username, is_ephemeral and is_admin today
+	// (service/internal/handlers/user.go MeHandler), so the date and email fields
+	// render only when the payload carries them instead of claiming 'Unknown'.
+	const formatDate = (iso: string) => new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
 
 	return (
 		<div
@@ -145,8 +145,8 @@ const ProfilePage: React.FC = () => {
 				<div className="grid gap-4 sm:grid-cols-2">
 					<Field label='Username'>{user.username}</Field>
 					{user.email && <Field label='Email'>{user.email}</Field>}
-					<Field label='Member since'>{formatDate(user.created_at)}</Field>
-					<Field label='Last login'>{formatDate(user.last_login)}</Field>
+					{user.created_at && <Field label='Member since'>{formatDate(user.created_at)}</Field>}
+					{user.last_login && <Field label='Last login'>{formatDate(user.last_login)}</Field>}
 				</div>
 			</Panel>
 
@@ -205,7 +205,10 @@ const ProfilePage: React.FC = () => {
 						)}
 						<Input
 							label='Username'
+							id='claim-username'
+							name='username'
 							type='text'
+							autoComplete='username'
 							value={claimUsername}
 							onChange={(e) => setClaimUsername(e.target.value)}
 							placeholder={user.username}
@@ -213,7 +216,11 @@ const ProfilePage: React.FC = () => {
 						/>
 						<Input
 							label='Email'
+							id='claim-email'
+							name='email'
 							type='email'
+							autoComplete='email'
+							required
 							value={claimEmail}
 							onChange={(e) => setClaimEmail(e.target.value)}
 							placeholder='you@example.com'
@@ -221,7 +228,11 @@ const ProfilePage: React.FC = () => {
 						/>
 						<Input
 							label='Password'
+							id='claim-password'
+							name='password'
 							type='password'
+							autoComplete='new-password'
+							required
 							value={claimPassword}
 							onChange={(e) => setClaimPassword(e.target.value)}
 							placeholder='Create a password'
