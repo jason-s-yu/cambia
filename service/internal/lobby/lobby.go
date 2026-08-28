@@ -57,16 +57,7 @@ type LobbySettings struct {
 // NewLobbyWithDefaults creates an ephemeral lobby with default house rules.
 func NewLobbyWithDefaults(hostID uuid.UUID) *Lobby {
 	lobbyID, _ := uuid.NewRandom()
-	defaultHouseRules := game.HouseRules{
-		AllowDrawFromDiscardPile: false,
-		AllowReplaceAbilities:    false,
-		AllowOpponentSnapping:    true,
-		SnapRace:                 false,
-		ForfeitOnDisconnect:      true,
-		PenaltyDrawCount:         2,
-		AutoKickTurnCount:        3,
-		TurnTimerSec:             15,
-	}
+	defaultHouseRules := game.DefaultHouseRules()
 	defaultCircuit := game.Circuit{
 		Enabled: false,
 		Rules: game.CircuitRules{

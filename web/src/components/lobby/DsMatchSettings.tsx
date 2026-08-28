@@ -75,6 +75,16 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
   const ro = !isHost;
   const num = (v: number | undefined) => (v === undefined || v === null ? '' : String(v));
 
+  // Numeric house rules are range-checked server-side (internal/game/rules.go) and an
+  // out-of-range value rejects the whole update_rules message, so the panel clamps to the same
+  // bounds rather than letting a typo discard every other edited setting. An empty or
+  // unparseable field falls back to the rule's own default.
+  const clamped = (raw: string, min: number, max: number, fallback: number) => {
+    const parsed = parseInt(raw, 10);
+    if (Number.isNaN(parsed)) return fallback;
+    return Math.min(max, Math.max(min, parsed));
+  };
+
   return (
     <Panel
       title={isHost ? 'Match settings · host' : 'Match settings'}
@@ -87,7 +97,7 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
           type='number'
           disabled={ro}
           value={num(houseRules?.turnTimerSec)}
-          onChange={(e) => setRule('turnTimerSec', parseInt(e.target.value, 10) || 0)}
+          onChange={(e) => setRule('turnTimerSec', clamped(e.target.value, 0, 86400, 0))}
         />
         <Input
           label='Penalty draw count'
@@ -95,7 +105,59 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
           type='number'
           disabled={ro}
           value={num(houseRules?.penaltyDrawCount)}
-          onChange={(e) => setRule('penaltyDrawCount', parseInt(e.target.value, 10) || 0)}
+          onChange={(e) => setRule('penaltyDrawCount', clamped(e.target.value, 0, 6, 2))}
+        />
+        <Input
+          label='Max game turns'
+          mono
+          type='number'
+          disabled={ro}
+          value={num(houseRules?.maxGameTurns)}
+          onChange={(e) => setRule('maxGameTurns', clamped(e.target.value, 0, 65535, 46))}
+        />
+      </div>
+
+      <div style={{ ...CAPS_LABEL, margin: '2px 0 10px' }}>Deal</div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 14, marginBottom: 16 }}>
+        <Input
+          label='Cards per player'
+          mono
+          type='number'
+          disabled={ro}
+          value={num(houseRules?.cardsPerPlayer)}
+          onChange={(e) => setRule('cardsPerPlayer', clamped(e.target.value, 1, 6, 4))}
+        />
+        <Input
+          label='Initial peek'
+          mono
+          type='number'
+          disabled={ro}
+          value={num(houseRules?.initialViewCount)}
+          onChange={(e) => setRule('initialViewCount', clamped(e.target.value, 0, 2, 2))}
+        />
+        <Input
+          label='Jokers per deck'
+          mono
+          type='number'
+          disabled={ro}
+          value={num(houseRules?.numJokers)}
+          onChange={(e) => setRule('numJokers', clamped(e.target.value, 0, 2, 2))}
+        />
+        <Input
+          label='Decks'
+          mono
+          type='number'
+          disabled={ro}
+          value={num(houseRules?.numDecks)}
+          onChange={(e) => setRule('numDecks', clamped(e.target.value, 1, 4, 1))}
+        />
+        <Input
+          label='Cambia from round'
+          mono
+          type='number'
+          disabled={ro}
+          value={num(houseRules?.cambiaAllowedRound)}
+          onChange={(e) => setRule('cambiaAllowedRound', clamped(e.target.value, 0, 255, 0))}
         />
       </div>
 
@@ -128,6 +190,13 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
           onChange={(v) => setRule('snapRace', v)}
           label='Snap race'
           description='snapRace — only the first snap wins'
+        />
+        <Checkbox
+          disabled={ro}
+          checked={houseRules?.lockCallerHand ?? true}
+          onChange={(v) => setRule('lockCallerHand', v)}
+          label='Lock caller hand'
+          description='lockCallerHand — the Cambia caller is safe from snaps and swaps'
         />
         <Checkbox
           disabled={ro}

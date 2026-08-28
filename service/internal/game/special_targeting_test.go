@@ -74,7 +74,7 @@ func placeholderTarget(ownerID uuid.UUID, idx int) map[string]interface{} {
 // TestPeekOtherSucceedsWithRealOpponentUUID verifies 9/T peek_other resolves end-to-end when the
 // target is a real opponent-card UUID.
 func TestPeekOtherSucceedsWithRealOpponentUUID(t *testing.T) {
-	g, _, mb := setupTestGame(t, 2, &HouseRules{TurnTimerSec: 0, PenaltyDrawCount: 2})
+	g, _, mb := setupTestGame(t, 2, testHouseRules(0, 2))
 	actor := currentTurnPlayer(g)
 	oppID, oppIdx := oppOf(g, actor.ID)
 	oppSlot0 := g.CardTracker.Players[oppIdx].HandUUIDs[0]
@@ -94,7 +94,7 @@ func TestPeekOtherSucceedsWithRealOpponentUUID(t *testing.T) {
 // TestSwapBlindSucceedsWithRealOpponentUUID verifies J/Q swap_blind resolves end-to-end with a real
 // opponent-card UUID.
 func TestSwapBlindSucceedsWithRealOpponentUUID(t *testing.T) {
-	g, _, mb := setupTestGame(t, 2, &HouseRules{TurnTimerSec: 0, PenaltyDrawCount: 2})
+	g, _, mb := setupTestGame(t, 2, testHouseRules(0, 2))
 	actor := currentTurnPlayer(g)
 	engineIdx := g.PlayerToEngine[actor.ID]
 	oppID, oppIdx := oppOf(g, actor.ID)
@@ -121,7 +121,7 @@ func TestSwapBlindSucceedsWithRealOpponentUUID(t *testing.T) {
 // TestKingSwapPeekSucceedsWithRealOpponentUUID verifies the K look-then-swap flow resolves
 // end-to-end with a real opponent-card UUID across both steps.
 func TestKingSwapPeekSucceedsWithRealOpponentUUID(t *testing.T) {
-	g, _, mb := setupTestGame(t, 2, &HouseRules{TurnTimerSec: 0, PenaltyDrawCount: 2})
+	g, _, mb := setupTestGame(t, 2, testHouseRules(0, 2))
 	actor := currentTurnPlayer(g)
 	engineIdx := g.PlayerToEngine[actor.ID]
 	oppID, oppIdx := oppOf(g, actor.ID)
@@ -167,7 +167,7 @@ func assertRejectAndWait(t *testing.T, g *CambiaGame, mb *mockBroadcaster, actor
 // TestPeekOtherInvalidTargetRejectsAndRetries verifies a garbage peek_other target rejects without
 // wedging and the same player can retry successfully.
 func TestPeekOtherInvalidTargetRejectsAndRetries(t *testing.T) {
-	g, _, mb := setupTestGame(t, 2, &HouseRules{TurnTimerSec: 0, PenaltyDrawCount: 2})
+	g, _, mb := setupTestGame(t, 2, testHouseRules(0, 2))
 	actor := currentTurnPlayer(g)
 	oppID, oppIdx := oppOf(g, actor.ID)
 	oppSlot0 := g.CardTracker.Players[oppIdx].HandUUIDs[0]
@@ -190,7 +190,7 @@ func TestPeekOtherInvalidTargetRejectsAndRetries(t *testing.T) {
 // TestSwapBlindInvalidTargetRejectsAndRetries verifies a garbage swap_blind target rejects without
 // wedging and the same player can retry successfully.
 func TestSwapBlindInvalidTargetRejectsAndRetries(t *testing.T) {
-	g, _, mb := setupTestGame(t, 2, &HouseRules{TurnTimerSec: 0, PenaltyDrawCount: 2})
+	g, _, mb := setupTestGame(t, 2, testHouseRules(0, 2))
 	actor := currentTurnPlayer(g)
 	engineIdx := g.PlayerToEngine[actor.ID]
 	oppID, oppIdx := oppOf(g, actor.ID)
@@ -220,7 +220,7 @@ func TestSwapBlindInvalidTargetRejectsAndRetries(t *testing.T) {
 // TestKingInvalidTargetRejectsAndRetries verifies a garbage King-look target rejects without
 // wedging (the original permanent-wedge case) and the same player can retry through both steps.
 func TestKingInvalidTargetRejectsAndRetries(t *testing.T) {
-	g, _, mb := setupTestGame(t, 2, &HouseRules{TurnTimerSec: 0, PenaltyDrawCount: 2})
+	g, _, mb := setupTestGame(t, 2, testHouseRules(0, 2))
 	actor := currentTurnPlayer(g)
 	engineIdx := g.PlayerToEngine[actor.ID]
 	oppID, oppIdx := oppOf(g, actor.ID)
@@ -258,7 +258,7 @@ func TestKingInvalidTargetRejectsAndRetries(t *testing.T) {
 // TestObfStateExposesOpponentIDsHiddenForAllViewers verifies every viewer sees opponent hand slots
 // as id references with Known:false and no leaked face fields.
 func TestObfStateExposesOpponentIDsHiddenForAllViewers(t *testing.T) {
-	g, players, _ := setupTestGame(t, 2, &HouseRules{TurnTimerSec: 0, PenaltyDrawCount: 2})
+	g, players, _ := setupTestGame(t, 2, testHouseRules(0, 2))
 
 	for _, viewer := range players {
 		obf := g.GetCurrentObfuscatedGameState(viewer.ID)

@@ -33,7 +33,8 @@ func TestGameStartEmitsSyncStateToEachPlayer(t *testing.T) {
 	g := NewCambiaGame()
 	mb := newMockBroadcaster()
 	g.Emitter = mb
-	g.HouseRules = HouseRules{TurnTimerSec: 5, PenaltyDrawCount: 2, ForfeitOnDisconnect: false}
+	g.HouseRules = *testHouseRules(5, 2)
+	g.HouseRules.ForfeitOnDisconnect = false
 
 	ids := make([]uuid.UUID, 2)
 	for i := range ids {

@@ -27,16 +27,26 @@ export interface LobbyStatus {
   users: LobbyUser[]; // Ensures users have usernames
 }
 
-/** Structure for House Rules - based on lobby_actions.md and internal/game/rules.go */
+/**
+ * Structure for House Rules - based on lobby_actions.md and internal/game/rules.go.
+ * The numeric rules are range-checked by the server; the ranges in the comments are the ones
+ * update_rules accepts, and a value outside them rejects the whole settings save.
+ */
 export interface HouseRules {
   allowDrawFromDiscardPile: boolean;
   allowReplaceAbilities: boolean;
   allowOpponentSnapping?: boolean;
   snapRace: boolean;
+  lockCallerHand?: boolean;
   forfeitOnDisconnect: boolean;
-  penaltyDrawCount: number;
-  autoKickTurnCount: number;
-  turnTimerSec: number;
+  penaltyDrawCount: number; // 0-6
+  turnTimerSec: number; // 0-86400, 0 disables the turn timer
+  maxGameTurns?: number; // 0-65535, 0 means unlimited
+  cardsPerPlayer?: number; // 1-6
+  cambiaAllowedRound?: number; // 0-255
+  numJokers?: number; // 0-2
+  numDecks?: number; // 1-4
+  initialViewCount?: number; // 0-2
 }
 
 /** Nested rules structure within CircuitSettings */

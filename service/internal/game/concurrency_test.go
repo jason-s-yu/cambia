@@ -46,7 +46,8 @@ func runConcurrentRound(t *testing.T) {
 	g.Emitter = noopEmitter{}
 	// ForfeitOnDisconnect off keeps scoring simple; TurnTimerSec>0 arms a turn timer that we
 	// then shrink below its 1s floor via TurnDuration before StartGame reads it.
-	g.HouseRules = HouseRules{TurnTimerSec: 1, PenaltyDrawCount: 2, ForfeitOnDisconnect: false}
+	g.HouseRules = *testHouseRules(1, 2)
+	g.HouseRules.ForfeitOnDisconnect = false
 
 	ids := make([]uuid.UUID, 2)
 	for i := range ids {

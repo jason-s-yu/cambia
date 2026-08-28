@@ -107,11 +107,24 @@ func engineCardToDetails(c engine.Card, id uuid.UUID) *models.Card {
 	}
 }
 
-// mapHouseRulesToEngine maps service HouseRules to engine.HouseRules.
+// mapHouseRulesToEngine maps service HouseRules to engine.HouseRules. Every field except
+// NumPlayers comes straight from the lobby's house rules, whose ranges HouseRules.Update
+// already bounds to what the engine can represent (internal/game/rules.go).
+//
+// The two zero-value fallbacks below cover a CambiaGame whose HouseRules were assigned
+// wholesale from a struct built without DefaultHouseRules (an older persisted payload, or a
+// caller that only set the field it cared about): 0 penalty cards and 0 dealt cards are not
+// configurations any lobby can produce, so they are read as "unset" rather than obeyed.
+// Every other count is taken literally, since 0 is a meaningful setting for it (no jokers,
+// no pregame peek, unlimited turns) and NumDecks==0 already means one deck in NewGame.
 func (g *CambiaGame) mapHouseRulesToEngine() engine.HouseRules {
 	penaltyCount := uint8(g.HouseRules.PenaltyDrawCount)
 	if penaltyCount == 0 {
 		penaltyCount = 2
+	}
+	cardsPerPlayer := uint8(g.HouseRules.CardsPerPlayer)
+	if cardsPerPlayer == 0 {
+		cardsPerPlayer = 4
 	}
 	// In circuit mode, use tournament-enforced rules.
 	if g.Circuit.Enabled {
@@ -121,31 +134,22 @@ func (g *CambiaGame) mapHouseRulesToEngine() engine.HouseRules {
 		return hr
 	}
 	return engine.HouseRules{
-		MaxGameTurns:          46,
-		CardsPerPlayer:        4,
-		CambiaAllowedRound:    0,
+		MaxGameTurns:          uint16(g.HouseRules.MaxGameTurns),
+		CardsPerPlayer:        cardsPerPlayer,
+		CambiaAllowedRound:    uint8(g.HouseRules.CambiaAllowedRound),
 		PenaltyDrawCount:      penaltyCount,
 		AllowDrawFromDiscard:  g.HouseRules.AllowDrawFromDiscardPile,
 		AllowReplaceAbilities: g.HouseRules.AllowReplaceAbilities,
 		AllowOpponentSnapping: g.HouseRules.AllowOpponentSnapping,
 		SnapRace:              g.HouseRules.SnapRace,
-		// Service HouseRules has no per-lobby joker toggle, so pin to the RULES.md deck spec
-		// (54 = 52 + 2 Jokers, §1). Left unset this defaults to 0 and NewGame builds a 52-card
-		// deck, which is the cambia-508 bug: live games under-dealt the stockpile by 2.
-		NumJokers: 2,
-		// RULES.md §3C: the Cambia caller's hand is locked from snaps/swaps by default. Service
-		// HouseRules has no per-lobby override for this, so pin to true (tournament mode
-		// explicitly overrides to false via TournamentHouseRules below). Left unset this
-		// defaults to false and callers stayed exposed to snaps/swaps after calling Cambia.
-		LockCallerHand: true,
+		NumJokers:             uint8(g.HouseRules.NumJokers),
+		LockCallerHand:        g.HouseRules.LockCallerHand,
 		// Deal() sizes hands off Rules.numPlayers(), which treats 0 as 2 (engine/rules.go). Left
-		// unset, any non-circuit lobby with 3+ players would only get 2 hands dealt.
-		NumPlayers: uint8(len(g.Players)),
-		// Each player peeks two cards at game start (RULES.md §2). Left unset this defaults to 0,
-		// which makes Deal() leave InitialPeek at [0,0,...] so the pregame reveal shows slot 0
-		// twice and never slot 1 (the seen-set would then cover only one card). Pin it to 2 to
-		// match DefaultHouseRules and reveal indices 0 and 1.
-		InitialViewCount: 2,
+		// unset, any non-circuit lobby with 3+ players would only get 2 hands dealt. Not a house
+		// rule: the player count comes from the lobby roster, never from the settings panel.
+		NumPlayers:       uint8(len(g.Players)),
+		InitialViewCount: uint8(g.HouseRules.InitialViewCount),
+		NumDecks:         uint8(g.HouseRules.NumDecks),
 	}
 }
 

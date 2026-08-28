@@ -2,12 +2,14 @@
 package game
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
 	engine "github.com/jason-s-yu/cambia/engine"
 	"github.com/jason-s-yu/cambia/service/internal/models"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // addTestPlayers appends n bare players to g via AddPlayer, mirroring lobby join order.
@@ -50,8 +52,7 @@ func TestMapHouseRulesToEngine_NonCircuit_MatchesServiceRules(t *testing.T) {
 		LockCallerHand:        true,
 		NumPlayers:            3,
 		InitialViewCount:      2,
-		// NumDecks intentionally left at zero: NewGame treats NumDecks==0 as 1 (engine/game.go),
-		// matching DefaultHouseRules, so leaving it unmapped here is not an omission.
+		NumDecks:              1,
 	}
 	assert.Equal(t, want, got)
 }
@@ -78,6 +79,7 @@ func TestMapHouseRulesToEngine_NonCircuit_PenaltyDrawDefault(t *testing.T) {
 		LockCallerHand:        true,
 		NumPlayers:            2,
 		InitialViewCount:      2,
+		NumDecks:              1,
 	}
 	assert.Equal(t, want, got)
 }
@@ -161,4 +163,155 @@ func TestBeginPreGame_DealsFullJokerDeckAndAllHands(t *testing.T) {
 	}
 
 	assert.True(t, g.Engine.Rules.LockCallerHand, "non-circuit games should lock the Cambia caller's hand by default")
+}
+
+// TestMapHouseRulesToEngine_DefaultsMatchLegacyHardcodes pins the fields cambia-782 unpinned.
+// Before that change mapHouseRulesToEngine wrote MaxGameTurns/CardsPerPlayer/CambiaAllowedRound/
+// NumJokers/LockCallerHand/InitialViewCount as literals; they now come from the lobby's house
+// rules, so a game whose rules were never touched must still produce exactly those values.
+func TestMapHouseRulesToEngine_DefaultsMatchLegacyHardcodes(t *testing.T) {
+	g := NewCambiaGame()
+	addTestPlayers(g, 2)
+
+	got := g.mapHouseRulesToEngine()
+
+	assert.Equal(t, uint16(46), got.MaxGameTurns)
+	assert.Equal(t, uint8(4), got.CardsPerPlayer)
+	assert.Equal(t, uint8(0), got.CambiaAllowedRound)
+	assert.Equal(t, uint8(2), got.NumJokers)
+	assert.True(t, got.LockCallerHand)
+	assert.Equal(t, uint8(2), got.InitialViewCount)
+	// NumDecks was previously left unmapped and NewGame read 0 as 1; it is now written
+	// explicitly, so the engine config carries the same single deck without the sentinel.
+	assert.Equal(t, uint8(1), got.NumDecks)
+}
+
+// TestMapHouseRulesToEngine_ExposedRules_UpdateRules walks every house rule cambia-782 exposed
+// through the same call path as the "update_rules" WS message and checks the value lands in the
+// engine config. Extends the cambia-781 pattern to the numeric knobs.
+func TestMapHouseRulesToEngine_ExposedRules_UpdateRules(t *testing.T) {
+	cases := []struct {
+		key    string
+		value  interface{}
+		assert func(*testing.T, engine.HouseRules)
+	}{
+		{"maxGameTurns", float64(0), func(t *testing.T, hr engine.HouseRules) {
+			assert.Equal(t, uint16(0), hr.MaxGameTurns, "0 means unlimited turns")
+		}},
+		{"maxGameTurns", float64(120), func(t *testing.T, hr engine.HouseRules) {
+			assert.Equal(t, uint16(120), hr.MaxGameTurns)
+		}},
+		{"cardsPerPlayer", float64(6), func(t *testing.T, hr engine.HouseRules) {
+			assert.Equal(t, uint8(6), hr.CardsPerPlayer)
+		}},
+		{"cambiaAllowedRound", float64(3), func(t *testing.T, hr engine.HouseRules) {
+			assert.Equal(t, uint8(3), hr.CambiaAllowedRound)
+		}},
+		{"numJokers", float64(0), func(t *testing.T, hr engine.HouseRules) {
+			assert.Equal(t, uint8(0), hr.NumJokers, "a jokerless deck must survive the mapping")
+		}},
+		{"numDecks", float64(4), func(t *testing.T, hr engine.HouseRules) {
+			assert.Equal(t, uint8(4), hr.NumDecks)
+		}},
+		{"lockCallerHand", false, func(t *testing.T, hr engine.HouseRules) {
+			assert.False(t, hr.LockCallerHand)
+		}},
+		{"initialViewCount", float64(0), func(t *testing.T, hr engine.HouseRules) {
+			assert.Equal(t, uint8(0), hr.InitialViewCount, "a blind start must survive the mapping")
+		}},
+		{"initialViewCount", float64(1), func(t *testing.T, hr engine.HouseRules) {
+			assert.Equal(t, uint8(1), hr.InitialViewCount)
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("%s=%v", tc.key, tc.value), func(t *testing.T) {
+			g := NewCambiaGame()
+			addTestPlayers(g, 2)
+
+			require.NoError(t, g.HouseRules.Update(map[string]interface{}{tc.key: tc.value}))
+
+			tc.assert(t, g.mapHouseRulesToEngine())
+		})
+	}
+}
+
+// TestMapHouseRulesToEngine_ZeroValueCardsPerPlayer covers a CambiaGame whose HouseRules were
+// assigned from a struct built without DefaultHouseRules: 0 cards per player is not a config any
+// lobby can produce, so the mapper reads it as unset and deals the standard 4 rather than nothing.
+func TestMapHouseRulesToEngine_ZeroValueCardsPerPlayer(t *testing.T) {
+	g := NewCambiaGame()
+	g.HouseRules = HouseRules{}
+	addTestPlayers(g, 2)
+
+	got := g.mapHouseRulesToEngine()
+
+	assert.Equal(t, uint8(4), got.CardsPerPlayer)
+	assert.Equal(t, uint8(2), got.PenaltyDrawCount)
+}
+
+// TestBeginPreGame_HonorsExposedDealRules drives the exposed deal knobs through the real
+// BeginPreGame -> Deal() path and checks observable state, the way cambia-508's regression test
+// does for the defaults: a mapping that compiles but never reaches Deal() would still pass the
+// mapper-level tests above.
+func TestBeginPreGame_HonorsExposedDealRules(t *testing.T) {
+	t.Run("cards per player, jokers and decks size the deal", func(t *testing.T) {
+		hr := testHouseRules(0, 2)
+		hr.CardsPerPlayer = 6
+		hr.NumJokers = 0
+		hr.NumDecks = 2
+		g, players, _ := setupTestGame(t, 3, hr)
+
+		for i, p := range players {
+			engineIdx := g.PlayerToEngine[p.ID]
+			assert.Equal(t, uint8(6), g.Engine.Players[engineIdx].HandLen, "player %d hand size", i)
+		}
+		// 2 decks * 52 jokerless cards, minus 3*6 dealt, minus the discard flip.
+		assert.Equal(t, uint8(2*52-18-1), g.Engine.StockLen)
+	})
+
+	t.Run("the largest legal deal fits the engine and the UUID tracker", func(t *testing.T) {
+		hr := testHouseRules(0, 2)
+		hr.NumDecks = 4
+		hr.NumJokers = 2
+		hr.CardsPerPlayer = 6
+		g, players, _ := setupTestGame(t, engine.MaxPlayers, hr)
+
+		// 4 * 54 is exactly engine.MaxDeckSize, the ceiling numDecks is validated against.
+		assert.Equal(t, uint8(engine.MaxDeckSize-8*6-1), g.Engine.StockLen)
+		assert.Len(t, g.CardTracker.Registry, engine.MaxDeckSize, "every dealt card needs a UUID")
+		for i, p := range players {
+			engineIdx := g.PlayerToEngine[p.ID]
+			assert.Equal(t, uint8(6), g.Engine.Players[engineIdx].HandLen, "player %d hand size", i)
+		}
+	})
+
+	t.Run("initial view count drives the pregame reveal", func(t *testing.T) {
+		hr := testHouseRules(0, 2)
+		hr.InitialViewCount = 1
+		g, players, _ := setupTestGame(t, 2, hr)
+
+		for i, p := range players {
+			engineIdx := g.PlayerToEngine[p.ID]
+			assert.Equal(t, uint8(1), g.Engine.Players[engineIdx].InitialPeekCount, "player %d peek count", i)
+
+			hand := selfRevealedHand(g.GetCurrentObfuscatedGameState(p.ID), p.ID)
+			require.NotEmpty(t, hand)
+			assert.True(t, hand[0].Known, "the single peeked card stays visible to its owner")
+			assert.False(t, hand[1].Known, "slot 1 must not be revealed when only one card is peeked")
+		}
+	})
+
+	t.Run("zero initial view count reveals nothing", func(t *testing.T) {
+		hr := testHouseRules(0, 2)
+		hr.InitialViewCount = 0
+		g, players, _ := setupTestGame(t, 2, hr)
+
+		for _, p := range players {
+			hand := selfRevealedHand(g.GetCurrentObfuscatedGameState(p.ID), p.ID)
+			for slot, c := range hand {
+				assert.False(t, c.Known, "slot %d must stay hidden with no pregame peek", slot)
+			}
+		}
+	})
 }
