@@ -110,6 +110,12 @@ type Hub struct {
 	connsMu sync.RWMutex              // guards conns (cross-goroutine emits from game timers)
 	conns   map[uuid.UUID]*Connection // userID → connection
 
+	// alive reports whether Run() is still serving this hub. Set when Run starts, cleared
+	// when it returns (last connection left, Shutdown, or ctx cancel). A dissolved hub stays
+	// registered in the HubStore, so callers outside the Run goroutine need this to tell a
+	// hub that can still answer a reconnect from one that can no longer be resumed.
+	alive atomic.Bool
+
 	// Match state (ranked/circuit)
 	QueueID     string
 	IsRanked    bool
@@ -153,6 +159,8 @@ func NewHub(lob *lobby.Lobby) *Hub {
 // Run is the hub's main goroutine. It serializes all state access.
 // Call this in its own goroutine.
 func (h *Hub) Run(ctx context.Context) {
+	h.alive.Store(true)
+	defer h.alive.Store(false)
 	defer h.cleanup()
 	for {
 		select {
@@ -898,6 +906,14 @@ func (h *Hub) Leave(userID uuid.UUID) {
 // Shutdown signals the hub to stop.
 func (h *Hub) Shutdown() {
 	close(h.shutdown)
+}
+
+// Alive reports whether the Run() loop is still serving this hub. Safe to call from any
+// goroutine. False for a hub whose Run() has returned (it dissolves when its last connection
+// leaves) and for one that was never started, i.e. a hub that would accept a WebSocket without
+// ever answering it.
+func (h *Hub) Alive() bool {
+	return h.alive.Load()
 }
 
 // NotifyGameEnded queues the post-game phase transition (PhaseInGame -> PhasePostGame) onto the

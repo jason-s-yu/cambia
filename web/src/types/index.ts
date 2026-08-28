@@ -99,6 +99,27 @@ export interface LobbyListEntry {
 }
 
 
+/**
+ * The lobby (and in-progress game, if any) the signed-in user can return to after a refresh
+ * or a lost tab. Mirrors the service ActiveSession in
+ * service/internal/handlers/active_session.go (GET /lobby/active).
+ */
+export interface ActiveSession {
+  lobbyId: string;
+  lobbyType: string;
+  gameMode: string;
+  /** Host-supplied lobby name. Absent when the lobby was created without one. */
+  name?: string;
+  /** Derived from lobby state, not the hub's own finer-grained phase. */
+  phase: 'open' | 'searching' | 'in_game';
+  /** Set only while a live game is registered for that lobby. */
+  gameId?: string;
+  /** True when the user holds a seat in the running game, false for a lobby-only member. */
+  seated: boolean;
+  /** Seated players while in game, otherwise joined lobby members. */
+  playerCount: number;
+}
+
 /** Represents a chat message */
 export interface ChatMessage {
   user_id: string;  // ID of the sender

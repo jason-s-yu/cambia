@@ -9,13 +9,14 @@ import QueueCard from '@/components/ds/data/QueueCard';
 import TierBadge from '@/components/ds/data/TierBadge';
 import StatRow from '@/components/ds/data/StatRow';
 import Panel from '@/components/ds/chrome/Panel';
+import DsResumeBanner from '@/components/dashboard/DsResumeBanner';
 import { useAuthStore } from '@/stores/authStore';
 import { useCurrentLobbyStore, useLobbyListStore } from '@/stores/lobbyStore';
 import { useQueueStore } from '@/stores/queueStore';
 import { useFriendsStore } from '@/stores/friendsStore';
-import { joinLobby as apiJoinPublicLobby } from '@/services/lobbyService';
+import { joinLobby as apiJoinPublicLobby, getActiveSession } from '@/services/lobbyService';
 import type { QueueInfo } from '@/services/matchmakingService';
-import type { ApiErrorResponse, LobbyState } from '@/types';
+import type { ActiveSession, ApiErrorResponse, LobbyState } from '@/types';
 import { gameModeLabel } from '@/utils/gameMode';
 
 /** Queues considered "flagship" for the primary/highlighted card treatment. */
@@ -73,6 +74,9 @@ const DashboardPage: React.FC = () => {
 
   const [joinLobbyError, setJoinLobbyError] = useState<string | null>(null);
 
+  const [activeSession, setActiveSession] = useState<ActiveSession | null>(null);
+  const [resumeDismissed, setResumeDismissed] = useState(false);
+
   const [createOpen, setCreateOpen] = useState(false);
   const [createLobbyType, setCreateLobbyType] = useState<'private' | 'public'>('public');
   const [createGameMode, setCreateGameMode] = useState('head_to_head');
@@ -85,6 +89,23 @@ const DashboardPage: React.FC = () => {
     fetchLobbies();
     fetchFriends();
   }, [fetchQueues, fetchLobbies, fetchFriends]);
+
+  // Resume affordance (cambia-783): ask the server whether this user is still counted into a
+  // live lobby or game. Nothing to resume, or an unreachable endpoint, leaves the banner off:
+  // this is a convenience surface and must never take over the home screen with an error.
+  useEffect(() => {
+    let cancelled = false;
+    getActiveSession()
+      .then((session) => {
+        if (!cancelled) setActiveSession(session);
+      })
+      .catch(() => {
+        if (!cancelled) setActiveSession(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Elapsed timer for an active matchmaking search (ported from PlayPage.tsx).
   useEffect(() => {
@@ -162,6 +183,10 @@ const DashboardPage: React.FC = () => {
     }
   }, [navigate]);
 
+  const handleResumeSession = useCallback(() => {
+    if (activeSession) navigate(`/lobby/${activeSession.lobbyId}`);
+  }, [activeSession, navigate]);
+
   const publicLobbies = Object.entries(lobbies).filter(([, entry]) => entry.lobby?.type === 'public');
 
   const ratingValue = authUser?.elo !== undefined ? `${Math.round(authUser.elo)}` : '1520';
@@ -170,6 +195,16 @@ const DashboardPage: React.FC = () => {
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 20, padding: 22, maxWidth: 1240, margin: '0 auto', width: '100%' }}>
+      {activeSession && !resumeDismissed && (
+        <div style={{ gridColumn: '1 / -1' }}>
+          <DsResumeBanner
+            session={activeSession}
+            onResume={handleResumeSession}
+            onDismiss={() => setResumeDismissed(true)}
+          />
+        </div>
+      )}
+
       <div style={{ display: 'flex', flexDirection: 'column', gap: 20, minWidth: 0 }}>
         <div>
           <h1 style={{ margin: 0, fontFamily: 'var(--font-display)', fontSize: 'var(--ds-text-3xl)', fontWeight: 'var(--weight-regular)', lineHeight: 'var(--ds-leading-tight)' }}>Lowest score wins.</h1>
