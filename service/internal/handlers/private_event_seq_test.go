@@ -243,16 +243,15 @@ func TestFailedSnapPrivatePenaltyDoesNotDropThePeersDraw(t *testing.T) {
 
 // TestAbilityRevealDoesNotStrandThePeer covers the other private-event family named in
 // cambia-878: private_special_action_success, the ability reveal a 7/8, 9/T or King sends to the
-// acting player alone. It plays real turns until an ability that reveals fires, then asserts
-//
-//	1) the seq that private frame carried is one the peer also observed. This is the contract
-//	   itself (a seq the hub consumes must be observable by every client, since dispatch() gates
-//	   every inbound message against it) and the assertion that fails pre-fix.
-//	2) the peer's next draw is applied without a sync_state bounce, end to end.
+// acting player alone. It plays real turns until an ability that reveals fires, then asserts two
+// things: first, that the seq the private frame carried is one the peer also observed, which is
+// the contract itself (dispatch() gates every inbound message against h.seq, so a seq the hub
+// consumes has to be observable by every client) and the assertion that fails pre-fix; second,
+// that the peer's next draw is applied without a sync_state bounce, end to end.
 //
 // The reveal is followed by a public player_special_action, so on this path the peer is dragged
-// back level a frame later and only (1) catches the defect; the failed-snap test above is where
-// the dropped action is directly reproducible. Both are the same bug.
+// back level a frame later and only the seq assertion catches the defect; the failed-snap test
+// above is where the dropped action is directly reproducible. Both are the same bug.
 func TestAbilityRevealDoesNotStrandThePeer(t *testing.T) {
 	g, hostID, p2ID, host, p2 := startTwoPlayerGame(t)
 

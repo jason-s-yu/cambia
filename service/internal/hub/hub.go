@@ -113,10 +113,15 @@ type Hub struct {
 	OnIdle func(lobbyID uuid.UUID)
 
 	// seq is the monotonic per-hub sequence stamped on every server->client envelope. Invariant:
-	// one logical broadcast consumes exactly one seq, stamped identically on every recipient's copy
-	// (Emit does this inherently; broadcastLobbyUpdate does it via emitToWithSeq). dispatch() rejects
-	// inbound msgs whose LastSeq < seq, so a per-recipient seq bump on a broadcast would leave every
-	// recipient but the last one spuriously "behind" and drop their next action (cambia-502).
+	// only a broadcast consumes a seq, exactly one, stamped identically on every recipient's copy
+	// (Emit does this inherently; broadcastLobbyUpdate does it via emitToWithSeq). dispatch()
+	// rejects inbound msgs whose LastSeq < seq, so a seq is only usable as a staleness gate if
+	// every connected client observes it. A per-recipient bump on a broadcast leaves every
+	// recipient but the last one spuriously "behind" and drops their next action (cambia-502);
+	// a bump on a frame sent to a single connection (EmitTo, sendSyncState, errEnvelope, pong)
+	// leaves every OTHER client behind a number no frame will ever carry to them, so their next
+	// action is dropped and only a retry after the repair gets through (cambia-878). Private
+	// frames therefore stamp the current seq without consuming one.
 	// Mutated only via nextSeq() (atomic, for cross-goroutine game-timer emits); read unlocked in
 	// dispatch(), which runs in the single Run() goroutine.
 	seq uint64
@@ -597,8 +602,10 @@ func (h *Hub) handleGameMsg(msg ClientMsg) {
 		h.Game.ProcessSpecialAction(msg.UserID, raw.Special, raw.Card1, raw.Card2)
 
 	case "ping":
+		// A pong answers one connection, so it stamps the current seq without consuming one:
+		// a keepalive that moved the sequence would stale every other client (cambia-878).
 		if conn := h.getConn(msg.UserID); conn != nil {
-			conn.SendEnvelope(Envelope{Seq: h.nextSeq(), Type: "pong"})
+			conn.SendEnvelope(Envelope{Seq: atomic.LoadUint64(&h.seq), Type: "pong"})
 		}
 
 	default:
@@ -948,15 +955,30 @@ func (h *Hub) Emit(eventType string, payload any) {
 	}
 }
 
-// EmitTo sends an envelope only to the connection matching userID, consuming one seq.
+// EmitTo sends an envelope to the connection matching userID alone, stamped with the current seq
+// and consuming none.
+//
+// This is the whole private-event surface: the game engine's per-player frames all arrive here
+// through the Emitter (private_draw_stockpile, private_snap_penalty,
+// private_special_action_success/_fail, private_initial_cards, private_sync_state), as does the
+// lobby snapshot a joining connection gets. Consuming a seq for a frame only one connection
+// receives leaves every other client behind h.seq holding a number no frame will ever carry to
+// them, and dispatch() answers their next action with a sync_state repair and drops it: a failed
+// snap cost the other player their next draw, an ability reveal cost them theirs, and only a
+// retry after the repair got through (cambia-878). A private frame conveys no shared ordering, so
+// it stamps h.seq as it stands, exactly as sendSyncState and errEnvelope do.
+//
+// A logical broadcast that has to be built per recipient still consumes exactly one seq for all
+// of them: those call emitToWithSeq directly with a single nextSeq() (broadcastLobbyUpdate).
 func (h *Hub) EmitTo(userID uuid.UUID, eventType string, payload any) {
-	h.emitToWithSeq(userID, h.nextSeq(), eventType, payload)
+	h.emitToWithSeq(userID, atomic.LoadUint64(&h.seq), eventType, payload)
 }
 
 // emitToWithSeq sends an envelope stamped with the caller-supplied seq to userID's connection.
 // Broadcasts that fan a single logical event out per-recipient (buildLobbySnapshot is tailored per
 // user, so they cannot share one Emit) call this with one nextSeq() value across every recipient,
-// keeping the one-seq-per-broadcast invariant documented on Hub.seq (cambia-502).
+// keeping the one-seq-per-broadcast invariant documented on Hub.seq (cambia-502). Genuinely
+// private frames call it with the current seq and consume none (cambia-878); EmitTo is that path.
 func (h *Hub) emitToWithSeq(userID uuid.UUID, seq uint64, eventType string, payload any) {
 	conn := h.getConn(userID)
 	if conn == nil {
