@@ -1,6 +1,11 @@
 import React, { useState } from 'react';
 
-export interface InputProps {
+/**
+ * Native input attributes pass straight through to the <input> (id, name,
+ * autoComplete, required, inputMode, aria-*), so forms keep their
+ * autofill and validation semantics. The wrapper owns `style`.
+ */
+export interface InputProps extends Omit<React.InputHTMLAttributes<HTMLInputElement>, 'onChange' | 'style' | 'type' | 'value' | 'defaultValue'> {
   /** Uppercase eyebrow label above the field. */
   label?: string;
   value?: string;
@@ -17,7 +22,7 @@ export interface InputProps {
 }
 
 /** Text input on an inset well; gold focus ring, danger-token error state. */
-const Input: React.FC<InputProps> = ({ label, value, defaultValue, placeholder, type = 'text', mono = false, error, disabled = false, onChange, style }) => {
+const Input: React.FC<InputProps> = ({ label, value, defaultValue, placeholder, type = 'text', mono = false, error, disabled = false, onChange, style, ...rest }) => {
   const [focus, setFocus] = useState(false);
   return (
     <label style={{ display: 'block', ...style }}>
@@ -37,6 +42,7 @@ const Input: React.FC<InputProps> = ({ label, value, defaultValue, placeholder, 
         </span>
       )}
       <input
+        {...rest}
         type={type}
         value={value}
         defaultValue={defaultValue}

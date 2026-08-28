@@ -13,50 +13,60 @@ import type { PoolRating, RatingSummary } from '@/services/historyService';
 import { ratingPoolLabel, tierFromRating } from '@/utils/ratingPool';
 
 const winRate = (wins: number, games: number): string =>
-	games > 0 ? `${Math.round((wins / games) * 100)}%` : '—';
+	games > 0 ? `${Math.round((wins / games) * 100)}%` : '-';
+
+/** Eyebrow over a tabular value, one cell of the pool card's stat strip. */
+const Stat: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
+	<span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+		<span style={{ fontSize: 'var(--text-2xs)', letterSpacing: 'var(--tracking-caps)', textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>{label}</span>
+		<span style={{ fontSize: 'var(--ds-text-sm)', fontWeight: 'var(--weight-medium)', color: 'var(--text-primary)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{children}</span>
+	</span>
+);
 
 const PoolCard: React.FC<{ pool: PoolRating }> = ({ pool }) => {
 	const unplayed = pool.games === 0;
 	return (
 		<div
 			style={{
-				border: '1.5px solid var(--border-subtle)',
+				background: 'var(--surface-2)',
+				border: '1px solid var(--border-default)',
 				borderRadius: 'var(--ds-radius-md)',
 				padding: '12px 14px',
 				display: 'flex',
 				flexDirection: 'column',
 				gap: 8,
-				opacity: unplayed ? 0.68 : 1
+				minWidth: 0
 			}}
 		>
-			<div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
-				<span style={{ fontWeight: 'var(--weight-bold)' }}>{ratingPoolLabel(pool.pool)}</span>
+			<div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', minHeight: 24 }}>
+				<span style={{ fontWeight: 'var(--weight-bold)', fontSize: 'var(--ds-text-sm)' }}>{ratingPoolLabel(pool.pool)}</span>
 				{unplayed
 					? <Badge tone='neutral'>unranked</Badge>
 					: <TierBadge tier={tierFromRating(pool.rating)} size='sm' />}
 			</div>
-			<div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
-				<span style={{ fontFamily: 'var(--ds-font-mono)', fontSize: 'var(--ds-text-2xl)', fontWeight: 'var(--weight-bold)' }}>
+			<div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap', fontVariantNumeric: 'tabular-nums' }}>
+				<span
+					style={{
+						fontSize: 'var(--ds-text-3xl)',
+						fontWeight: 'var(--weight-black)',
+						lineHeight: 'var(--ds-leading-tight)',
+						letterSpacing: 'var(--ds-tracking-tight)',
+						color: unplayed ? 'var(--text-tertiary)' : 'var(--text-primary)'
+					}}
+				>
 					{Math.round(pool.rating)}
 				</span>
-				<span style={{ fontSize: 'var(--ds-text-xs)', color: 'var(--text-tertiary)', fontFamily: 'var(--ds-font-mono)' }}>
+				<span style={{ fontSize: 'var(--ds-text-xs)', color: 'var(--text-tertiary)' }}>
 					± {Math.round(pool.rd)}
 				</span>
 			</div>
-			<div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 'var(--ds-text-xs)', color: 'var(--text-secondary)' }}>
-				<span>
-					<span style={{ color: 'var(--text-tertiary)' }}>Games </span>
-					<span style={{ fontFamily: 'var(--ds-font-mono)' }}>{pool.games}</span>
-				</span>
-				<span>
-					<span style={{ color: 'var(--text-tertiary)' }}>Won </span>
-					<span style={{ fontFamily: 'var(--ds-font-mono)' }}>{pool.wins}</span>
-					{pool.games > 0 && <span style={{ color: 'var(--text-tertiary)' }}> ({winRate(pool.wins, pool.games)})</span>}
-				</span>
-				<span>
-					<span style={{ color: 'var(--text-tertiary)' }}>Peak </span>
-					<span style={{ fontFamily: 'var(--ds-font-mono)' }}>{Math.round(pool.peak)}</span>
-				</span>
+			<div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8, marginTop: 2 }}>
+				<Stat label='Games'>{pool.games}</Stat>
+				<Stat label='Won'>
+					{pool.wins}
+					{pool.games > 0 && <span style={{ color: 'var(--text-tertiary)', fontWeight: 'var(--weight-regular)' }}> ({winRate(pool.wins, pool.games)})</span>}
+				</Stat>
+				<Stat label='Peak'>{Math.round(pool.peak)}</Stat>
 			</div>
 		</div>
 	);
@@ -81,7 +91,7 @@ const DsRatingSummary: React.FC<DsRatingSummaryProps> = ({ summary, error }) => 
 					? <div style={{ padding: '16px 0', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 'var(--ds-text-sm)' }}>{error}</div>
 					: (
 						<div style={{ display: 'flex', justifyContent: 'center', padding: '20px 0' }}>
-							<Spinner label='Loading ratings…' />
+							<Spinner label='Loading ratings' />
 						</div>
 					)}
 			</Panel>
@@ -97,12 +107,12 @@ const DsRatingSummary: React.FC<DsRatingSummaryProps> = ({ summary, error }) => 
 			action={
 				neverPlayed
 					? <Badge tone='neutral'>no games yet</Badge>
-					: <Badge tone='info' mono>{record.wins}W · {record.games - record.wins}L</Badge>
+					: <Badge tone='info'>{record.wins}W · {record.games - record.wins}L</Badge>
 			}
 		>
 			{neverPlayed && (
 				<p style={{ margin: '0 0 12px', fontSize: 'var(--ds-text-sm)', color: 'var(--text-secondary)' }}>
-					Play a ranked game to start a rating. Everyone begins at 1500 with a wide deviation, which narrows as you play.
+					Ranked games set your rating. Everyone starts at 1500 with a wide deviation that narrows as you play.
 				</p>
 			)}
 			<div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 10 }}>
