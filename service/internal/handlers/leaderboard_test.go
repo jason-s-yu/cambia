@@ -48,7 +48,7 @@ func TestLeaderboardInvalidPool(t *testing.T) {
 // the "you" row (present with true global rank even outside the top N), and the
 // unrated (no rated games recorded) -> "you": null case.
 func TestLeaderboardRankingAndYou(t *testing.T) {
-	setupFriendTest(t) // dbAvailable gate + auth.Init() + database.ConnectDB(), shared with friend tests.
+	setupFriendTest(t) // dbAvailable gate + auth.Init() + single package-wide ensureTestDB(t), shared with friend tests.
 
 	ctx := context.Background()
 

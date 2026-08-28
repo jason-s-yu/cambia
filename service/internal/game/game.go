@@ -173,6 +173,17 @@ type CambiaGame struct {
 	Emitter   Emitter       // Set by the hub after game creation; nil-safe (events dropped if unset).
 	OnGameEnd OnGameEndFunc // Callback executed when the game finishes.
 
+	// PersistWG, when set (test-only; production games leave it nil, copied from
+	// GameServer.PersistWG at creation - see CreateGameInstance), is Add(1)'d once per
+	// background DB-write goroutine persistFinalGameState launches and Done()'d when that
+	// goroutine returns. It lets a caller that already knows the game has ended (via a
+	// happens-before edge through g.mu or an observed game_results broadcast, both of which
+	// endGame produces only after persistFinalGameState's Add already ran) Wait() for every
+	// write to finish before proceeding, instead of leaving them to outlive it (cambia-908: an
+	// unwaited goroutine from one test's game end raced a later test's database.ConnectDB
+	// reassigning the shared pool, under -race).
+	PersistWG *sync.WaitGroup
+
 	// Special Action State — kept for backward compatibility with ProcessSpecialAction routing.
 	SpecialAction SpecialActionState // Holds state for pending multi-step special actions.
 
@@ -1019,7 +1030,14 @@ func (g *CambiaGame) persistFinalGameState(finalScores map[uuid.UUID]int, winner
 
 	if database.DB != nil {
 		gameID := g.ID
+		wg := g.PersistWG
+		if wg != nil {
+			wg.Add(2)
+		}
 		go func() {
+			if wg != nil {
+				defer wg.Done()
+			}
 			if err := database.StoreFinalGameStateInDB(context.Background(), gameID, snapshot); err != nil {
 				log.Printf("Game %s: failed to persist final game state: %v", gameID, err)
 			}
@@ -1031,6 +1049,9 @@ func (g *CambiaGame) persistFinalGameState(finalScores map[uuid.UUID]int, winner
 		players := g.Players
 		rated := g.Rated
 		go func() {
+			if wg != nil {
+				defer wg.Done()
+			}
 			if err := database.RecordGameAndResults(context.Background(), gameID, players, finalScores, winners, rated); err != nil {
 				log.Printf("Game %s: failed to record game results/ratings: %v", gameID, err)
 			}
