@@ -34,6 +34,9 @@ export interface HouseRules {
   snapRace: boolean;
   lockCallerHand?: boolean;
   forfeitOnDisconnect: boolean;
+  /** Seconds a dropped player keeps their seat before the forfeit lands. 0-3600; 0 forfeits on
+   *  the drop itself. Only read when forfeitOnDisconnect is on (cambia-955). */
+  disconnectGraceSec?: number;
   penaltyDrawCount: number; // 0-6
   turnTimerSec: number; // 0-86400, 0 disables the turn timer
   maxGameTurns?: number; // 0-65535, 0 means unlimited

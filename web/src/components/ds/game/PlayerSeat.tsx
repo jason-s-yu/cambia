@@ -1,6 +1,6 @@
 import React from 'react';
 
-export type PlayerSeatState = 'turn' | 'ready' | 'cambia' | 'disconnected';
+export type PlayerSeatState = 'turn' | 'ready' | 'cambia' | 'disconnected' | 'forfeited';
 
 export interface PlayerSeatProps {
   username?: string;
@@ -39,7 +39,8 @@ const STATES: Record<PlayerSeatState, StateSpec> = {
   turn: { label: 'Their turn', youLabel: 'Your turn', color: 'var(--accent-gold-text)' },
   ready: { label: 'Ready', youLabel: 'Ready', color: 'var(--status-success)' },
   cambia: { label: 'Called Cambia', youLabel: 'Called Cambia', color: 'var(--status-danger)' },
-  disconnected: { label: 'Reconnecting', youLabel: 'Reconnecting', color: 'var(--text-tertiary)' }
+  disconnected: { label: 'Reconnecting', youLabel: 'Reconnecting', color: 'var(--text-tertiary)' },
+  forfeited: { label: 'Forfeited', youLabel: 'Forfeited', color: 'var(--text-tertiary)' }
 };
 
 /** Player chip: initial avatar + name + state line. Gold border = their turn; danger border = called Cambia. */
@@ -65,7 +66,7 @@ const PlayerSeat: React.FC<PlayerSeatProps> = ({ username = 'Player', state, isY
         border: '1px solid ' + (isTurn ? 'var(--accent-gold)' : state === 'cambia' ? 'var(--accent-danger)' : 'var(--border-default)'),
         borderRadius: 'var(--radius-pill)',
         color: 'var(--text-primary)',
-        opacity: state === 'disconnected' ? 0.6 : 1,
+        opacity: state === 'disconnected' || state === 'forfeited' ? 0.6 : 1,
         transition: 'background var(--dur-med) var(--ds-ease-out), border-color var(--dur-med) var(--ds-ease-out)',
         ...style
       }}

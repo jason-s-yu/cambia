@@ -35,7 +35,8 @@ import {
   selectServerClockOffsetMs,
   selectAbilityReveal,
   selectDroppedActionNonce,
-  selectLastSnap
+  selectLastSnap,
+  selectLastPresence
 } from '@/stores/gameStore';
 import { useAuthStore } from '@/stores/authStore';
 import { useCurrentLobbyStore, type LobbyPhase } from '@/stores/lobbyStore';
@@ -83,6 +84,9 @@ function abilityName(rank: string | undefined): string | null {
 }
 
 function seatStateFor(p: ObfPlayerState, currentPlayerId: string | null): PlayerSeatState | undefined {
+  // Forfeited outranks away: once the reconnect window has closed the seat is not coming back,
+  // and labelling it "Reconnecting" for the rest of the game would be a lie (cambia-955).
+  if (p.forfeited) return 'forfeited';
   if (!p.connected) return 'disconnected';
   if (p.hasCalledCambia) return 'cambia';
   if (p.playerId === currentPlayerId) return 'turn';
@@ -156,6 +160,27 @@ function useTableNotice(gs: ObfGameState, selfId: string | undefined, names: Map
             : `Snap. ${snapper} matched ${owner}'s card.`;
     setNotice({ id: Date.now(), tone: onYou && !byYou ? 'warning' : 'success', text });
   }, [lastSnap, selfId, names]);
+
+  // A seat that dropped, came back, or ran its window out (cambia-955). The seat chip already
+  // carries the state; this is the moment it changed, which is what a player looking at their own
+  // cards would otherwise miss. The grace length comes off the event so the notice quotes the
+  // rule in force rather than a hardcoded minute.
+  const lastPresence = useGameStore(selectLastPresence);
+  const seenPresence = useRef(lastPresence?.nonce ?? 0);
+  useEffect(() => {
+    if (!lastPresence || lastPresence.nonce === seenPresence.current) return;
+    seenPresence.current = lastPresence.nonce;
+    if (lastPresence.playerId === selfId) return; // your own drop is the offline strip, not a notice
+    const who = names.get(lastPresence.playerId) ?? 'Opponent';
+    if (lastPresence.kind === 'reconnecting') {
+      const secs = lastPresence.deadline ? Math.max(1, Math.round((lastPresence.deadline - Date.now()) / 1000)) : null;
+      setNotice({ id: Date.now(), tone: 'warning', text: secs ? `${who} dropped. ${secs}s to reconnect.` : `${who} dropped.` });
+    } else if (lastPresence.kind === 'reconnected') {
+      setNotice({ id: Date.now(), tone: 'success', text: `${who} is back.` });
+    } else {
+      setNotice({ id: Date.now(), tone: 'danger', text: `${who} forfeited.` });
+    }
+  }, [lastPresence, selfId, names]);
 
   useEffect(() => {
     const snap: PileSnapshot = {

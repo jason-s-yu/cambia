@@ -62,6 +62,10 @@ interface GameState {
 	// rather than inferring the actor from the seat that shrank (cambia-913). Ids only; the
 	// surface owns the copy.
 	lastSnap: { nonce: number; snapperId: string | null; ownerId: string | null } | null;
+	// The most recent seat-presence change: a socket dropped and its seat is being held
+	// ('reconnecting'), the player came back ('reconnected'), or the window closed and they
+	// forfeited ('forfeited') - cambia-955. Ids and a deadline only; the surface owns the copy.
+	lastPresence: { nonce: number; kind: 'reconnecting' | 'reconnected' | 'forfeited'; playerId: string; deadline: number | null } | null;
 }
 
 interface GameActions {
@@ -97,7 +101,8 @@ const initialState: GameState = {
 	seenFaces: {},
 	abilityReveal: null,
 	droppedActionNonce: 0,
-	lastSnap: null
+	lastSnap: null,
+	lastPresence: null
 };
 
 export const useGameStore = create<GameState & GameActions>()(
@@ -551,6 +556,37 @@ export const useGameStore = create<GameState & GameActions>()(
 							state.winnerId = payload.payload?.winner ?? null;
 							break;
 
+						// --- Seat presence (cambia-955) ---
+						// A dropped socket now holds its seat for the reconnect grace instead of
+						// forfeiting on the spot, so the table has three states to tell apart, not
+						// two. The seat fields also arrive on the next private_sync_state; these
+						// events are what let the surface react at the moment it happens (and carry
+						// the deadline a countdown needs).
+						case 'player_reconnecting':
+						case 'player_reconnected':
+						case 'player_forfeited': {
+							const playerId = payload.user?.id;
+							if (!playerId) break;
+							const kind = type === 'player_reconnecting' ? 'reconnecting'
+								: type === 'player_reconnected' ? 'reconnected' : 'forfeited';
+							const deadline = typeof payload.payload?.deadline === 'number' ? payload.payload.deadline : null;
+							if (state.gameState) {
+								const player = state.gameState.players.find(p => p.playerId === playerId);
+								if (player) {
+									player.connected = kind === 'reconnected';
+									player.forfeited = kind === 'forfeited';
+									player.reconnectDeadline = kind === 'reconnecting' ? deadline : null;
+								}
+							}
+							state.lastPresence = {
+								nonce: (state.lastPresence?.nonce ?? 0) + 1,
+								kind,
+								playerId,
+								deadline
+							};
+							break;
+						}
+
 						case 'error': // Server-sent error message
 							state.error = `Game Error: ${payload.message ?? payload.error ?? 'Unknown error'}`;
 							state.isProcessingAction = false; // Allow new actions after error
@@ -573,6 +609,7 @@ export const useGameStore = create<GameState & GameActions>()(
 							state.winnerId = null;
 							state.seenFaces = {};
 							state.abilityReveal = null;
+							state.lastPresence = null;
 							state.isLoading = true;
 							state.isProcessingAction = false;
 							break;
@@ -619,11 +656,25 @@ export const useGameStore = create<GameState & GameActions>()(
 							break;
 
 						// game_results duplicates game_end's winner/scores (both derived from the same
-						// adjustedScores computed once in CambiaGame.endGame, game.go); finalScores/winnerId
-						// are already set by game_end, so this store no-ops on it. Its lobby_status
-						// snapshot is lobbyStore's domain and is dual-routed there by useSocket.ts
-						// (cambia-763 F2).
+						// adjustedScores computed once in CambiaGame.endGame, game.go), and its
+						// lobby_status snapshot is lobbyStore's domain, dual-routed there by
+						// useSocket.ts (cambia-763 F2). It used to be a no-op here because game_end
+						// had always arrived first. It cannot be any more: a client that reloads into
+						// a finished game never saw game_end, and the hub answers its reconnect with
+						// this frame alone (cambia-955), so the scores it carries are the only ones
+						// the results screen will ever get. Applied unconditionally, since both
+						// frames carry the same numbers.
 						case 'game_results':
+							if (payload.scores && typeof payload.scores === 'object') {
+								state.finalScores = payload.scores;
+							}
+							if (typeof payload.winner === 'string') {
+								state.winnerId = payload.winner;
+							}
+							if (state.gameState) {
+								state.gameState.gameOver = true;
+								state.gameState.currentPlayerId = null;
+							}
 							break;
 
 						default:
@@ -651,6 +702,7 @@ export const selectServerClockOffsetMs = (state: GameState) => state.serverClock
 export const selectAbilityReveal = (state: GameState) => state.abilityReveal;
 export const selectDroppedActionNonce = (state: GameState) => state.droppedActionNonce;
 export const selectLastSnap = (state: GameState) => state.lastSnap;
+export const selectLastPresence = (state: GameState) => state.lastPresence;
 export const selectFinalScores = (state: GameState) => state.finalScores;
 export const selectCurrentPlayerId = (state: GameState) => state.gameState?.currentPlayerId;
 export const selectSelfPlayerState = (state: GameState) => {

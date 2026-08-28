@@ -55,6 +55,13 @@ const (
 	// and the ceiling is a day, well past any playable turn length.
 	turnTimerSecMin = 0
 	turnTimerSecMax = 86400
+
+	// DisconnectGraceSec has no engine counterpart either: it is how long a dropped socket holds
+	// its seat before ForfeitOnDisconnect takes it. 0 forfeits on the drop itself. The ceiling is
+	// an hour rather than a day because the hub never reaps a lobby whose game is still running
+	// (hub.handleIdleReap), so the grace is also how long an abandoned table can pin its lobby.
+	disconnectGraceSecMin = 0
+	disconnectGraceSecMax = 3600
 )
 
 // HouseRules defines optional game rules that can modify standard play. Every field maps to
@@ -67,6 +74,7 @@ type HouseRules struct {
 	SnapRace                 bool `json:"snapRace"`                 // Only the first player to successfully snap gets the benefit; others are penalized.
 	LockCallerHand           bool `json:"lockCallerHand"`           // Protect the Cambia caller's hand from snaps, swaps and replacements (RULES.md 3C and 7).
 	ForfeitOnDisconnect      bool `json:"forfeitOnDisconnect"`      // If a player disconnects, their game is forfeited. If false, they can rejoin.
+	DisconnectGraceSec       int  `json:"disconnectGraceSec"`       // Seconds a dropped player keeps their seat before the forfeit lands (0 forfeits immediately). Ignored when ForfeitOnDisconnect is off.
 	PenaltyDrawCount         int  `json:"penaltyDrawCount"`         // Number of cards to draw as penalty for an invalid snap.
 	TurnTimerSec             int  `json:"turnTimerSec"`             // Duration (in seconds) for each player's turn (0 disables timer).
 	MaxGameTurns             int  `json:"maxGameTurns"`             // Turn cap after which the game ends (0 = unlimited).
@@ -88,6 +96,7 @@ func DefaultHouseRules() HouseRules {
 		SnapRace:                 false,
 		LockCallerHand:           true,
 		ForfeitOnDisconnect:      true,
+		DisconnectGraceSec:       60,
 		PenaltyDrawCount:         2,
 		TurnTimerSec:             15,
 		MaxGameTurns:             46,
@@ -177,6 +186,9 @@ func (rules *HouseRules) Update(newRules map[string]interface{}) error {
 		return err
 	}
 	if err = assignBool(&next.ForfeitOnDisconnect, "forfeitOnDisconnect"); err != nil {
+		return err
+	}
+	if err = assignInt(&next.DisconnectGraceSec, "disconnectGraceSec", disconnectGraceSecMin, disconnectGraceSecMax); err != nil {
 		return err
 	}
 	if err = assignInt(&next.PenaltyDrawCount, "penaltyDrawCount", penaltyDrawCountMin, penaltyDrawCountMax); err != nil {

@@ -58,6 +58,22 @@ func newForfeitTestServer(t *testing.T) (*GameServer, *httptest.Server) {
 	return gs, ts
 }
 
+// setDisconnectGrace overrides a lobby's reconnect grace before its game is built. The default
+// is 60 seconds (cambia-955), so a test that wants the forfeit to land on the drop itself - the
+// behaviour these end-to-end tests were written against - sets it to 0 rather than waiting the
+// window out. The grace window itself is covered by the hub tests and by
+// TestE2EReconnectInsideTheGraceWindowKeepsTheSeat below.
+func setDisconnectGrace(t *testing.T, gs *GameServer, lobbyID uuid.UUID, seconds int) {
+	t.Helper()
+	lob, ok := gs.LobbyStore.GetLobby(lobbyID)
+	if !ok {
+		t.Fatalf("lobby %s not found", lobbyID)
+	}
+	lob.Mu.Lock()
+	lob.HouseRules.DisconnectGraceSec = seconds
+	lob.Mu.Unlock()
+}
+
 // awaitGameEndPersistence blocks, bounded by a 5s timeout, until every background DB-write
 // goroutine launched by a game created by gs completes: persistFinalGameState's two (final
 // state, then game_results + ratings) and persistInitialGameState's one.
@@ -116,6 +132,7 @@ func TestE2EMidGameDropForfeitsAndOmitsScores(t *testing.T) {
 
 	lobUUID := createPublicLobby(t, gs, hostToken)
 	lobbyID := lobUUID.String()
+	setDisconnectGrace(t, gs, lobUUID, 0) // the forfeit under test is the immediate one
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

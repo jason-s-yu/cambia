@@ -18,16 +18,22 @@ type QueueConfig struct {
 	// are spaced by 10 to leave room for a queue inserted between two existing ones without
 	// renumbering the rest.
 	Order int
+	// DisconnectGraceSec is how long a dropped player keeps their seat before forfeiting in this
+	// queue's games. A queued lobby does not get its rules from a host, so the queue carries the
+	// value itself and it overrides the lobby's house rule when the game is built
+	// (handlers.NewCambiaGameFromLobby). 60 is the ranked figure in MATCHMAKING.md 8 and
+	// RULES.md T5; 0 would forfeit on the drop itself (cambia-955).
+	DisconnectGraceSec int
 }
 
 // QueueConfigs is the authoritative list of supported queues.
 var QueueConfigs = map[string]QueueConfig{
-	"h2h_quickplay":  {QueueID: "h2h_quickplay", Players: 2, Rounds: 1, RatingPool: "h2h_qp", Ranked: true, HiddenRating: true, Order: 10},
-	"h2h_blitz":      {QueueID: "h2h_blitz", Players: 2, Rounds: 4, RatingPool: "h2h_ranked", Ranked: true, Order: 20},
-	"h2h_rapid":      {QueueID: "h2h_rapid", Players: 2, Rounds: 8, RatingPool: "h2h_ranked", Ranked: true, Order: 30},
-	"h2h_classical":  {QueueID: "h2h_classical", Players: 2, Rounds: 16, RatingPool: "h2h_ranked", Ranked: true, Order: 40},
-	"ffa4_standard":  {QueueID: "ffa4_standard", Players: 4, Rounds: 8, RatingPool: "ffa4", Ranked: true, Order: 50},
-	"ffa4_classical": {QueueID: "ffa4_classical", Players: 4, Rounds: 12, RatingPool: "ffa4", Ranked: true, Order: 60},
+	"h2h_quickplay":  {QueueID: "h2h_quickplay", Players: 2, Rounds: 1, RatingPool: "h2h_qp", Ranked: true, HiddenRating: true, Order: 10, DisconnectGraceSec: 60},
+	"h2h_blitz":      {QueueID: "h2h_blitz", Players: 2, Rounds: 4, RatingPool: "h2h_ranked", Ranked: true, Order: 20, DisconnectGraceSec: 60},
+	"h2h_rapid":      {QueueID: "h2h_rapid", Players: 2, Rounds: 8, RatingPool: "h2h_ranked", Ranked: true, Order: 30, DisconnectGraceSec: 60},
+	"h2h_classical":  {QueueID: "h2h_classical", Players: 2, Rounds: 16, RatingPool: "h2h_ranked", Ranked: true, Order: 40, DisconnectGraceSec: 60},
+	"ffa4_standard":  {QueueID: "ffa4_standard", Players: 4, Rounds: 8, RatingPool: "ffa4", Ranked: true, Order: 50, DisconnectGraceSec: 60},
+	"ffa4_classical": {QueueID: "ffa4_classical", Players: 4, Rounds: 12, RatingPool: "ffa4", Ranked: true, Order: 60, DisconnectGraceSec: 60},
 }
 
 // GetQueueConfig looks up a queue configuration by ID.

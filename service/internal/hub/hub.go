@@ -168,6 +168,15 @@ type Hub struct {
 	connsMu sync.RWMutex              // guards conns (cross-goroutine emits from game timers)
 	conns   map[uuid.UUID]*Connection // userID → connection
 
+	// terminalMu guards terminalType/terminalPayload, the last results frame this hub broadcast
+	// (game_results, or match_end for a ranked circuit). Emit records it from whichever goroutine
+	// ended the game, and notePlayerReconnected replays it to a connection that arrives after the
+	// fact, so a player who reloads into a finished game gets the scores instead of an empty
+	// "Game over" (cambia-955). Cleared when the next game starts.
+	terminalMu      sync.RWMutex
+	terminalType    string
+	terminalPayload json.RawMessage
+
 	// alive reports whether Run() is still serving this hub. Set when Run starts, cleared
 	// when it returns (Shutdown or ctx cancel). Callers outside the Run goroutine need this
 	// to tell a hub that can still answer a reconnect from one that can no longer be resumed.
@@ -377,11 +386,60 @@ func (h *Hub) notePlayerDisconnected(userID uuid.UUID) {
 // read - every event a game sends goes out through the hub Emitter - and passing the raw
 // WebSocket would give HandleReconnect's not-a-player path the power to close a connection the
 // hub is still serving.
+// Since cambia-955 it also answers the other reconnect a hub has to serve: one into a game that
+// is already over. The hub holds its finished game for the results interval (cambia-793), so a
+// player who reloads in that window is handed the final table and the results frame again. The
+// lobby snapshot they get on join carries the phase but no scores, and nothing else re-sends
+// them, which is why that reload landed on a "Game over" screen with no winner and no scores.
 func (h *Hub) notePlayerReconnected(userID uuid.UUID) {
-	if h.Phase != PhaseInGame || h.Game == nil || !h.Game.HasPlayer(userID) {
+	if h.Game == nil || !h.Game.HasPlayer(userID) {
 		return
 	}
+	// Phase is not a gate here the way it is on the disconnect side: the reconnect is safe in
+	// every phase that still holds a game. In PhaseInGame it cancels a pending forfeit and
+	// restores the seat; in PhasePostGame/PhaseMatchEnd the game is finished, so HandleReconnect
+	// only re-sends its terminal snapshot (its turn-timer and grace branches are all guarded by
+	// Started/GameOver).
 	h.Game.HandleReconnect(userID, nil)
+	// The phase can still read in_game for the moment between the game ending and the queued
+	// _game_ended landing (NotifyGameEnded routes it through this same loop), so the game's own
+	// verdict is what decides, with the post-game phases covering a hub whose game was cleared.
+	if h.Game.IsGameOver() || h.Phase == PhasePostGame || h.Phase == PhaseMatchEnd {
+		h.resendTerminal(userID)
+	}
+}
+
+// rememberTerminal stores the last results broadcast so a late joiner can be given it.
+func (h *Hub) rememberTerminal(eventType string, payload json.RawMessage) {
+	h.terminalMu.Lock()
+	h.terminalType = eventType
+	h.terminalPayload = payload
+	h.terminalMu.Unlock()
+}
+
+// forgetTerminal drops the stored results. A new game's results are the only ones worth
+// re-sending, so the previous round's are cleared the moment one starts.
+func (h *Hub) forgetTerminal() {
+	h.terminalMu.Lock()
+	h.terminalType = ""
+	h.terminalPayload = nil
+	h.terminalMu.Unlock()
+}
+
+// resendTerminal replays the stored results frame to one connection. Private, so it stamps the
+// current seq and consumes none (see the Hub.seq invariant).
+func (h *Hub) resendTerminal(userID uuid.UUID) {
+	h.terminalMu.RLock()
+	eventType, payload := h.terminalType, h.terminalPayload
+	h.terminalMu.RUnlock()
+	if eventType == "" || payload == nil {
+		return
+	}
+	conn := h.getConn(userID)
+	if conn == nil {
+		return
+	}
+	conn.SendEnvelope(Envelope{Seq: atomic.LoadUint64(&h.seq), Type: eventType, Payload: payload})
 }
 
 // armIdleReap opens a fresh idle window. Called from Run() only, so idleTimer and idleGen need no
@@ -1138,6 +1196,16 @@ func (h *Hub) Emit(eventType string, payload any) {
 		log.Printf("hub %s: Emit marshal error: %v", h.ID, err)
 		return
 	}
+	// A results broadcast is the one frame a client can miss and never recover from any later
+	// state: the lobby snapshot carries the phase but no scores, and nothing re-sends it. Keep it
+	// so a reconnect can be answered with it (cambia-955); game_started drops it again.
+	switch eventType {
+	case "game_results", "match_end":
+		h.rememberTerminal(eventType, raw)
+	case "game_started":
+		h.forgetTerminal()
+	}
+
 	env := Envelope{Seq: h.nextSeq(), Type: eventType, Payload: raw}
 	data, err := json.Marshal(env)
 	if err != nil {

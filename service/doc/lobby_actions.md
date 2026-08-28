@@ -64,6 +64,7 @@ These messages are typically broadcast to all users in the lobby unless specifie
   "snapRace": bool,
   "lockCallerHand": bool,
   "forfeitOnDisconnect": bool,
+  "disconnectGraceSec": int,
   "penaltyDrawCount": int,
   "turnTimerSec": int,
   "maxGameTurns": int,
@@ -79,7 +80,7 @@ Numeric rules are range-checked server-side and an out-of-range value rejects th
 `update_rules` message, leaving the lobby's rules unchanged. The accepted ranges follow the
 engine's own limits: `penaltyDrawCount` 0-6, `turnTimerSec` 0-86400, `maxGameTurns` 0-65535
 (0 = unlimited), `cardsPerPlayer` 1-6, `cambiaAllowedRound` 0-255, `numJokers` 0-2,
-`numDecks` 1-4, `initialViewCount` 0-6. `initialViewCount` additionally may not exceed
+`numDecks` 1-4, `initialViewCount` 0-6, `disconnectGraceSec` 0-3600. `initialViewCount` additionally may not exceed
 `cardsPerPlayer`: the pregame peek cannot cover more cards than the hand holds, and the pair is
 checked after the whole update is applied, so both keys may move in one message.
 
@@ -107,3 +108,13 @@ checked after the whole update is applied, so both keys may move in one message.
   "autoStart": bool
 }
 ```
+
+**Reconnect grace (`disconnectGraceSec`)**
+
+`disconnectGraceSec` is how long a dropped socket keeps its seat before `forfeitOnDisconnect`
+takes it (default 60, range 0-3600, 0 forfeits on the drop itself). It is read only when
+`forfeitOnDisconnect` is on, and it is what makes a page reload survivable: the seat is held, the
+table keeps playing, and a reconnect inside the window restores the player through the usual
+`private_sync_state` (see `game_actions.md`, "Disconnect grace"). Matchmaking queues do not take
+this from the lobby: each queue carries its own value (`internal/matchmaking/validation.go`),
+applied when the game is built, since a queued lobby has no host setting rules.

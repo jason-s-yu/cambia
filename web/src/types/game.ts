@@ -21,6 +21,11 @@ export interface ObfPlayerState {
 	hasCalledCambia: boolean;
 	connected: boolean;
 	isCurrentTurn: boolean;
+	/** True once the player's reconnect window has closed and they forfeited (cambia-955).
+	 *  Distinct from `connected`: inside the window a player is away but still in the game. */
+	forfeited?: boolean;
+	/** Epoch-ms time this player's reconnect window closes, present only while one is open. */
+	reconnectDeadline?: number | null;
 	// Revealed only for the player requesting the state
 	revealedHand?: ObfCard[];
 	drawnCard?: ObfCard | null; // Card currently held after drawing
@@ -272,6 +277,26 @@ export interface GameEndEvent {
 	};
 }
 
+/** A player's socket dropped and their seat is being held for the reconnect grace (cambia-955).
+ *  Public. deadline is epoch-ms; serverNow lets the client correct for clock skew. */
+export interface PlayerReconnectingEvent {
+	type: 'player_reconnecting';
+	user: { id: string };
+	payload: { graceSeconds: number; deadline: number; serverNow: number };
+}
+
+/** The player came back inside their window, so the pending forfeit is cancelled. Public. */
+export interface PlayerReconnectedEvent {
+	type: 'player_reconnected';
+	user: { id: string };
+}
+
+/** The window closed with nobody there: the player forfeited. Public. */
+export interface PlayerForfeitedEvent {
+	type: 'player_forfeited';
+	user: { id: string };
+}
+
 /** Structure for generic error events (private) */
 export interface GameErrorEvent {
 	type: 'error';
@@ -321,6 +346,9 @@ export type ServerGameEvent =
 	| PlayerSnapPenaltyEvent
 	| PrivateSnapPenaltyEvent
 	| PlayerCambiaEvent
+	| PlayerReconnectingEvent
+	| PlayerReconnectedEvent
+	| PlayerForfeitedEvent
 	| GameEndEvent
 	| GameStartedEvent
 	| GameResultsEvent

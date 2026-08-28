@@ -26,6 +26,15 @@ type ObfPlayerState struct {
 	HasCalledCambia bool      `json:"hasCalledCambia"`
 	Connected       bool      `json:"connected"`
 	IsCurrentTurn   bool      `json:"isCurrentTurn"`
+	// Forfeited is set once the player's reconnect window has closed (or immediately on the drop
+	// where the grace is 0). Connected alone cannot carry this: inside the window a player is
+	// disconnected but still in the game, and the two states read differently at the table
+	// (cambia-955).
+	Forfeited bool `json:"forfeited"`
+	// ReconnectDeadline is the epoch-ms time this player's reconnect window closes, present only
+	// while one is open. It lets a client that joins or resyncs mid-window render the same
+	// countdown as the clients that saw the player_reconnecting event.
+	ReconnectDeadline *int64 `json:"reconnectDeadline,omitempty"`
 	// RevealedHand is populated only for the player requesting the state ('self').
 	RevealedHand []ObfCard `json:"revealedHand,omitempty"`
 	// DrawnCard is populated only for the player requesting the state ('self').
@@ -157,6 +166,11 @@ func (g *CambiaGame) getCurrentObfuscatedGameState(forUser uuid.UUID) ObfGameSta
 			PlayerID:  pl.ID,
 			Username:  pl.User.Username,
 			Connected: pl.Connected,
+			Forfeited: g.forfeited[pl.ID],
+		}
+		if deadline, open := g.graceDeadlines[pl.ID]; open {
+			deadlineMs := deadline.UnixMilli()
+			ps.ReconnectDeadline = &deadlineMs
 		}
 
 		if hasMapping {

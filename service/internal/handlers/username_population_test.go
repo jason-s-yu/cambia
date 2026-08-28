@@ -51,6 +51,9 @@ func TestE2EGameCarriesRealUsernames(t *testing.T) {
 
 	lobUUID := createPublicLobby(t, gs, hostToken)
 	lobbyID := lobUUID.String()
+	// This test ends its game by dropping a socket, so the forfeit has to land on the drop
+	// rather than after the default reconnect grace (cambia-955).
+	setDisconnectGrace(t, gs, lobUUID, 0)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

@@ -114,7 +114,17 @@ func (gs *GameServer) NewCambiaGameFromLobby(ctx context.Context, lob *lobby.Lob
 	rated := lob.Mode == "ranked"
 	houseRules := lob.HouseRules
 	circuit := lob.Circuit
+	queueID := lob.QueueID
 	lob.Mu.Unlock()
+
+	// A queue owns the reconnect grace for the games it produces: a matchmade lobby has no host
+	// setting rules, so its house rules are whatever defaults it was built with, and the queue's
+	// own figure is the one MATCHMAKING.md 8 specifies (cambia-955).
+	if queueID != "" {
+		if cfg, known := matchmaking.GetQueueConfig(queueID); known {
+			houseRules.DisconnectGraceSec = cfg.DisconnectGraceSec
+		}
+	}
 
 	return gs.CreateGameInstance(ctx, lobbyID, hostID, gameMode, lobbyType, rated, houseRules, circuit, playerIDs, usernames, emitter)
 }
