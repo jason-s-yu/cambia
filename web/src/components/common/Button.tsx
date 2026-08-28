@@ -20,6 +20,15 @@ const VARIANT_CLASS: Record<NonNullable<ButtonProps['variant']>, string> = {
   ghost: 'bg-transparent text-text-secondary border-transparent hover:bg-[var(--interactive-hover)] hover:text-text-primary active:bg-[var(--interactive-active)]'
 };
 
+// Disabled is its own fill, not a faded accent: opacity-50 washed the gold
+// primary down to a 1.65:1 label in light (measured on the login form's
+// in-flight submit), and LoginForm, RegisterForm and CreateRunModal all render
+// their in-flight submit through it. Same neutral fill as ds/core/Button, and
+// ghost keeps its transparent shell so a disabled ghost control does not grow a
+// chip (cambia-892, DL-7 F2).
+const DISABLED_CLASS = 'bg-surface-2 text-text-disabled border-border-default';
+const DISABLED_GHOST_CLASS = 'bg-transparent text-text-disabled border-transparent';
+
 const SIZE_CLASS: Record<NonNullable<ButtonProps['size']>, string> = {
   sm: 'h-[var(--control-h-sm)] px-3 text-ds-sm',
   md: 'h-[var(--control-h-md)] px-4 text-ds-md',
@@ -35,12 +44,18 @@ const Button: React.FC<ButtonProps> = ({
   disabled,
   ...props
 }) => {
-  const base = 'inline-flex items-center justify-center gap-2 border rounded-ds-md font-sans font-ds-bold tracking-ds-tight whitespace-nowrap cursor-pointer transition-colors duration-[var(--dur-fast)] disabled:opacity-50 disabled:cursor-not-allowed';
+  const base = 'inline-flex items-center justify-center gap-2 border rounded-ds-md font-sans font-ds-bold tracking-ds-tight whitespace-nowrap cursor-pointer transition-colors duration-[var(--dur-fast)] disabled:cursor-not-allowed';
+  // The variant classes carry :hover fills that still match on a disabled
+  // button, so the disabled state replaces them rather than layering over them.
+  const isDisabled = disabled || isLoading;
+  const stateClass = isDisabled
+    ? (variant === 'ghost' ? DISABLED_GHOST_CLASS : DISABLED_CLASS)
+    : VARIANT_CLASS[variant];
 
   return (
     <button
-      className={`${base} ${VARIANT_CLASS[variant]} ${SIZE_CLASS[size]} ${className}`}
-      disabled={disabled || isLoading}
+      className={`${base} ${stateClass} ${SIZE_CLASS[size]} ${className}`}
+      disabled={isDisabled}
       aria-busy={isLoading || undefined}
       {...props}
     >
