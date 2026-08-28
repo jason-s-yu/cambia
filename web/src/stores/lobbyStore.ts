@@ -460,8 +460,25 @@ export const useCurrentLobbyStore = create<CurrentLobbyState>((set, get) => ({
 					}
 
 					case 'game_results': {
-						// Casual single-game results (existing flow)
-						return { phase: 'post_game' as LobbyPhase };
+						// Casual single-game results (existing flow). Dual-routed here by useSocket.ts
+						// (cambia-763 F2): game_results starts with "game_" so isGameType previously
+						// claimed it before lobbyStore ever saw it, leaving this case dead. Its
+						// lobby_status snapshot is the only carrier of the post-game reset (ReadyStates
+						// cleared, InGame false — see api_server.go attachOnGameEnd): nothing else
+						// re-broadcasts it, and "Back to lobby" (LobbyPage handleReturnToLobby) flips
+						// phase locally with no resync, so without this the next lobby view would keep
+						// serving stale pre-game ready state. Fields sit at the top level of the
+						// envelope payload (plain hub.Emit map, not a GameEvent wrapper), matching
+						// lobby_state/lobby_update above rather than the nested payload.payload
+						// convention used by GameEvent-sourced messages.
+						const updates: Partial<CurrentLobbyState> = { phase: 'post_game' as LobbyPhase };
+						if (newLobbyDetails && message.lobby_status) {
+							updates.lobbyDetails = {
+								...newLobbyDetails,
+								lobby_status: { users: mapLobbyUsers(message.lobby_status?.users) }
+							};
+						}
+						return updates;
 					}
 
 					default:

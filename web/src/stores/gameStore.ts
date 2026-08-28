@@ -481,10 +481,10 @@ export const useGameStore = create<GameState & GameActions>()(
 							break;
 
 						// game_results duplicates game_end's winner/scores (both derived from the same
-						// adjustedScores computed once in CambiaGame.endGame, game.go) and additionally
-						// carries a lobby_status snapshot that belongs to lobbyStore, not this store -
-						// client-side routing (useSocket.ts isGameType) sends it here exclusively since it
-						// starts with "game_". finalScores/winnerId are already set by game_end; no-op.
+						// adjustedScores computed once in CambiaGame.endGame, game.go); finalScores/winnerId
+						// are already set by game_end, so this store no-ops on it. Its lobby_status
+						// snapshot is lobbyStore's domain and is dual-routed there by useSocket.ts
+						// (cambia-763 F2).
 						case 'game_results':
 							break;
 
