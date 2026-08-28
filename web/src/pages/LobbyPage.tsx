@@ -135,8 +135,19 @@ const LobbyPage: React.FC = () => {
   );
 
   // --- Phase: results (post_game / match_end) ---
+  // The finished table stays in gameStore until the next game_started, so the results
+  // render as an overlay above it (cambia-848); DsResultsView falls back to a bare card
+  // when no table is available (a reload straight into post_game).
   if (phase === 'post_game' || phase === 'match_end') {
-    return <DsResultsView phase={phase} onReturnToLobby={handleReturnToLobby} onLeave={handleLeaveLobby} />;
+    return (
+      <DsResultsView
+        phase={phase}
+        onReturnToLobby={handleReturnToLobby}
+        onLeave={handleLeaveLobby}
+        gameState={gameState}
+        sendMessage={sendMessage}
+      />
+    );
   }
 
   // --- Phase: live game (in_game / round_end) ---
@@ -145,7 +156,7 @@ const LobbyPage: React.FC = () => {
       return (
         <div className='flex flex-col items-center justify-center h-full pt-10'>
           <LoadingSpinner />
-          <p className='mt-2 text-gray-600 dark:text-gray-400'>Loading game...</p>
+          <p className='mt-2' style={{ color: 'var(--text-secondary)', fontVariantNumeric: 'tabular-nums' }}>Setting the table.</p>
         </div>
       );
     }

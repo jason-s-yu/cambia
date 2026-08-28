@@ -8,9 +8,15 @@ export interface PlayingCardProps {
   suit?: PlayingCardSuit;
   faceDown?: boolean;
   size?: 'sm' | 'md' | 'lg';
-  /** Lifted with a gold focus ring (targeting / chosen). */
+  /** Lifted with a gold focus ring: the chosen card, or the card being shown. */
   selected?: boolean;
+  /** Gold 1px edge without the lift: a legal target or an actionable pile. */
+  highlight?: boolean;
+  /** Faded: not a legal target right now. */
+  dimmed?: boolean;
   onClick?: () => void;
+  /** Accessible name for the button role when clickable. */
+  label?: string;
   style?: React.CSSProperties;
 }
 
@@ -31,48 +37,62 @@ const DIMS: Record<NonNullable<PlayingCardProps['size']>, Dims> = {
   lg: { w: 'var(--card-w-lg)', h: 'var(--card-h-lg)', idx: 20, pip: 44, star: 38 }
 };
 
-/** Playing card: flat cream face with ink/red pips, or a green back with a gold hairline frame. */
-const PlayingCard: React.FC<PlayingCardProps> = ({ rank, suit, faceDown = false, size = 'md', selected = false, onClick, style }) => {
+/**
+ * Playing card: flat cream face with ink/red pips, or a green back with a gold
+ * hairline frame. 1px border, one hairline lift. `selected` raises the card and
+ * rings it in gold; `highlight` only recolors the edge, for a target that has
+ * not been chosen yet. A clickable card is a button for the keyboard.
+ */
+const PlayingCard: React.FC<PlayingCardProps> = ({ rank, suit, faceDown = false, size = 'md', selected = false, highlight = false, dimmed = false, onClick, label, style }) => {
   const d = DIMS[size] || DIMS.md;
   const joker = rank === 'JOKER';
   const glyph = joker ? '★' : suit ? GLYPHS[suit] || '' : '';
-  const color = joker ? 'var(--gold-600)' : suit && RED[suit] ? 'var(--suit-red)' : 'var(--suit-black)';
+  const color = joker ? 'var(--accent-gold)' : suit && RED[suit] ? 'var(--suit-red)' : 'var(--suit-black)';
+  const edge = faceDown ? 'var(--border-strong)' : 'var(--card-face-edge)';
   const base: React.CSSProperties = {
     width: d.w,
     height: d.h,
     flex: 'none',
     position: 'relative',
+    boxSizing: 'border-box',
     borderRadius: 'var(--radius-playing-card)',
+    border: '1px solid ' + (selected || highlight ? 'var(--border-accent)' : edge),
     boxShadow: selected ? 'var(--focus-ring), var(--shadow-playing-card)' : 'var(--shadow-playing-card)',
     transform: selected ? 'translateY(-6px)' : 'none',
-    transition: 'transform var(--dur-med) var(--ease-snap), box-shadow var(--dur-fast) var(--ds-ease-out)',
+    opacity: dimmed ? 0.55 : 1,
+    transition:
+      'transform var(--dur-med) var(--ease-snap), box-shadow var(--dur-fast) var(--ds-ease-out), border-color var(--dur-fast) var(--ds-ease-out), opacity var(--dur-med) var(--ds-ease-out)',
     cursor: onClick ? 'pointer' : 'default',
     userSelect: 'none',
     ...style
   };
+  const interactive = onClick
+    ? {
+        role: 'button' as const,
+        tabIndex: 0,
+        'aria-label': label,
+        onClick,
+        onKeyDown: (e: React.KeyboardEvent) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onClick();
+          }
+        }
+      }
+    : { 'aria-label': label };
   if (faceDown) {
     return (
-      <div
-        onClick={onClick}
-        style={{
-          ...base,
-          background: 'var(--card-back)',
-          border: '1px solid var(--border-strong)',
-          boxSizing: 'border-box'
-        }}
-      >
+      <div {...interactive} style={{ ...base, background: 'var(--card-back)' }}>
         <div style={{ position: 'absolute', inset: 4, borderRadius: 4, border: '1px solid var(--card-back-line)', pointerEvents: 'none' }}></div>
       </div>
     );
   }
   return (
     <div
-      onClick={onClick}
+      {...interactive}
       style={{
         ...base,
         background: 'var(--card-face)',
-        border: '1px solid var(--card-face-edge)',
-        boxSizing: 'border-box',
         color,
         fontFamily: 'var(--font-sans)',
         fontVariantNumeric: 'tabular-nums'

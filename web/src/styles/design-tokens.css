@@ -102,6 +102,14 @@
   --surface-felt: var(--green-700);
   --surface-felt-deep: var(--green-800);
 
+  /* On-felt (cambia-848). The felt is the one saturated ground and stays green
+     in both themes, so text and hairlines placed directly on it cannot use the
+     neutral text and border tiers, which flip with the theme. Both are
+     light-on-green; only their alpha shifts per theme so the check-tokens
+     dark/light diff still holds. --text-on-green is the primary tier. */
+  --text-on-felt-muted: rgba(240, 247, 243, 0.68);
+  --border-on-felt: rgba(240, 247, 243, 0.22);
+
   /* Text tiers */
   --text-primary: #edf2ef;
   --text-secondary: #a9b8b1;
@@ -179,6 +187,9 @@
   --surface-overlay: rgba(22, 33, 29, 0.42);
   --surface-felt: var(--green-600);
   --surface-felt-deep: var(--green-700);
+
+  --text-on-felt-muted: rgba(240, 247, 243, 0.78);
+  --border-on-felt: rgba(240, 247, 243, 0.3);
 
   --text-primary: var(--ink-900);
   --text-secondary: var(--ink-700);
@@ -427,11 +438,14 @@
   --color-text-disabled: var(--text-disabled);
   --color-text-inverse: var(--text-inverse);
   --color-text-on-gold: var(--text-on-gold);
+  --color-text-on-green: var(--text-on-green);
+  --color-text-on-felt-muted: var(--text-on-felt-muted);
 
   --color-border-subtle: var(--border-subtle);
   --color-border-default: var(--border-default);
   --color-border-strong: var(--border-strong);
   --color-border-accent: var(--border-accent);
+  --color-border-on-felt: var(--border-on-felt);
 
   --color-accent-gold: var(--accent-gold);
   --color-accent-gold-hover: var(--accent-gold-hover);

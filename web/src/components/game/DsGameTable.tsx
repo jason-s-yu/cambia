@@ -1,12 +1,14 @@
 // src/components/game/DsGameTable.tsx
-// DS-styled live table (cambia-484). Re-skins the legacy GameBoard/ActionControls
-// onto the design-system GameScreen primitives (PlayerSeat, PlayingCard,
-// ScorePill, TimerBar). Interaction + every outgoing WS action is copied from
-// GameBoard so the wire protocol is unchanged: clicking the stockpile, discard
-// pile, own cards and opponent cards drives draw / discard / replace / snap /
-// special / Cambia via the same action constructors. This is a re-skin, not a
-// protocol change.
-import React, { useCallback, useMemo, useState } from 'react';
+// The live table (cambia-484, restyled for the flat card-room language in
+// cambia-848). Composes the design-system game primitives (PlayerSeat,
+// PlayingCard, ScorePill, TimerBar) on the felt tokens. Interaction and every
+// outgoing WS action are the same as the legacy GameBoard: clicking the
+// stockpile, discard pile, own cards and opponent cards drives draw / discard /
+// replace / snap / special / Cambia via the same action constructors. Snap,
+// penalty and reshuffle feedback is derived from state deltas the store already
+// applies (player_snap_success, player_snap_penalty, game_reshuffle_stockpile),
+// so no store or protocol change rides with this file.
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ObfCard, ObfGameState, ObfPlayerState, ClientGameAction } from '@/types/game';
 import {
   drawStockpileAction,
@@ -18,6 +20,7 @@ import {
   peekOtherAction,
   blindSwapAction,
   kingPeekAction,
+  kingSwapConfirmAction,
   callCambiaAction,
   skipSpecialAction
 } from '@/types/game';
@@ -47,25 +50,24 @@ interface DsGameTableProps {
   onLeave: () => void;
 }
 
-const HINTS = {
-  waiting: 'Waiting for other players…',
-  yourTurn: 'Your turn. Draw from the stockpile or discard pile.',
-  selectReplace: 'Click a hand card to swap it in, or discard the drawn card.',
-  selectSnap: 'Click the discard pile to snap the selected card.',
-  peekSelf: 'Peek: click one of your own cards.',
-  peekOther: 'Peek: click an opponent card.',
-  swapBlind: 'Blind swap: pick one of your cards, then an opponent card.',
-  swapPeek: 'King: pick one of your cards, then an opponent card to look and swap.',
-  cambiaCalled: 'Cambia called - everyone gets one last turn.'
-};
-
-const CAP_LABEL: React.CSSProperties = {
-  marginTop: 7,
-  fontSize: 10,
-  fontWeight: 'var(--weight-black)',
-  letterSpacing: '0.09em',
-  color: 'rgba(243,236,218,0.75)'
-};
+/** Ability name by the discarded rank, for seat notes and prompts. */
+function abilityName(rank: string | undefined): string | null {
+  switch (rank) {
+    case '7':
+    case '8':
+      return 'Peek own card';
+    case '9':
+    case 'T':
+      return 'Peek a card';
+    case 'J':
+    case 'Q':
+      return 'Blind swap';
+    case 'K':
+      return 'Look and swap';
+    default:
+      return null;
+  }
+}
 
 function seatStateFor(p: ObfPlayerState, currentPlayerId: string | null): PlayerSeatState | undefined {
   if (!p.connected) return 'disconnected';
@@ -74,10 +76,121 @@ function seatStateFor(p: ObfPlayerState, currentPlayerId: string | null): Player
   return undefined;
 }
 
+/** The pair sent with the King look, kept so the follow-up swap names the same cards. */
+interface KingPair {
+  myId: string;
+  myIdx: number;
+  oppId: string;
+  oppIdx: number;
+  oppOwner: string;
+}
+
+interface TableNotice {
+  id: number;
+  tone: 'success' | 'danger' | 'info';
+  text: string;
+}
+
+interface PileSnapshot {
+  gameId: string;
+  stock: number;
+  discardTopId: string | null;
+  hands: Record<string, number>;
+}
+
+/**
+ * Transient table notice derived from state deltas. A hand that grows is a snap
+ * penalty (nothing else adds a card to a hand mid-game; the drawn card is held
+ * apart from the hand), a hand that shrinks as the discard top changes is a
+ * successful snap, and a stockpile that grows is a reshuffle. Each notice
+ * clears itself after a few seconds. Penalty cards are drawn unseen, so this
+ * never names a face (cambia-820).
+ */
+function useTableNotice(gs: ObfGameState, selfId: string | undefined, names: Map<string, string>): TableNotice | null {
+  const [notice, setNotice] = useState<TableNotice | null>(null);
+  const prev = useRef<PileSnapshot | null>(null);
+
+  useEffect(() => {
+    const snap: PileSnapshot = {
+      gameId: gs.gameId,
+      stock: gs.stockpileSize,
+      discardTopId: gs.discardTop?.id ?? null,
+      hands: Object.fromEntries(gs.players.map((p) => [p.playerId, p.handSize]))
+    };
+    const before = prev.current;
+    prev.current = snap;
+    if (!before || before.gameId !== snap.gameId || !gs.started || gs.gameOver) return;
+
+    let next: Omit<TableNotice, 'id'> | null = null;
+    for (const p of gs.players) {
+      const was = before.hands[p.playerId];
+      if (was === undefined) continue;
+      const you = p.playerId === selfId;
+      if (p.handSize > was) {
+        const who = names.get(p.playerId) ?? 'Opponent';
+        next = { tone: 'danger', text: you ? 'Snap missed. A penalty card joins your hand.' : `Snap missed. ${who} draws a penalty card.` };
+      } else if (p.handSize < was && snap.discardTopId !== before.discardTopId) {
+        const who = names.get(p.playerId) ?? 'Opponent';
+        next = { tone: 'success', text: you ? 'Snap. Your card matched the discard.' : `Snap. ${who} matched the discard.` };
+      }
+    }
+    if (snap.stock > before.stock) {
+      next = { tone: 'info', text: 'Discard pile reshuffled into the stock.' };
+    }
+    if (next) setNotice({ id: Date.now(), ...next });
+  }, [gs, selfId, names]);
+
+  useEffect(() => {
+    if (!notice) return;
+    const t = window.setTimeout(() => setNotice(null), 4500);
+    return () => window.clearTimeout(t);
+  }, [notice]);
+
+  return notice;
+}
+
+const NOTICE_TONES: Record<TableNotice['tone'], { color: string; border: string }> = {
+  success: { color: 'var(--status-success)', border: 'var(--status-success-border)' },
+  danger: { color: 'var(--status-danger)', border: 'var(--status-danger-border)' },
+  info: { color: 'var(--status-info)', border: 'var(--status-info-border)' }
+};
+
+const FELT_LABEL: React.CSSProperties = {
+  marginTop: 8,
+  fontSize: 'var(--text-2xs)',
+  fontWeight: 'var(--weight-bold)',
+  letterSpacing: 'var(--tracking-caps)',
+  textTransform: 'uppercase',
+  color: 'var(--text-on-felt-muted)',
+  fontVariantNumeric: 'tabular-nums',
+  whiteSpace: 'nowrap'
+};
+
+/** Outlined empty pile slot: same footprint as a md card, hairline on the felt. */
+const EmptySlot: React.FC<{ onClick?: () => void; highlight?: boolean; label?: string }> = ({ onClick, highlight, label }) => (
+  <div
+    role={onClick ? 'button' : undefined}
+    tabIndex={onClick ? 0 : undefined}
+    aria-label={label}
+    onClick={onClick}
+    onKeyDown={onClick ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } } : undefined}
+    style={{
+      width: 'var(--card-w-md)',
+      height: 'var(--card-h-md)',
+      boxSizing: 'border-box',
+      borderRadius: 'var(--radius-playing-card)',
+      border: '1px dashed ' + (highlight ? 'var(--border-accent)' : 'var(--border-on-felt)'),
+      cursor: onClick ? 'pointer' : 'default'
+    }}
+  />
+);
+
 const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage, onLeave }) => {
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
+  const [kingPair, setKingPair] = useState<KingPair | null>(null);
 
   const selfId = useAuthStore((s) => s.user?.id);
+  const authName = useAuthStore((s) => s.user?.username);
   const pendingAction = useGameStore(selectPendingAction);
   const isMyTurn = useGameStore(selectIsSelfTurn);
   const isProcessing = useGameStore(selectIsProcessingAction);
@@ -89,9 +202,27 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   const selfState = gameState.players.find((p) => p.playerId === selfId);
   const opponents = gameState.players.filter((p) => p.playerId !== selfId);
   const specialAction = gameState.specialAction;
+  const specialRank = pendingAction === 'special_action' && specialAction ? specialAction.cardRank : null;
   const turnTimerSec = gameState.houseRules?.turnTimerSec ?? 0;
+  const currentPlayer = gameState.players.find((p) => p.playerId === gameState.currentPlayerId);
+  const turnNo = typeof gameState.turnId === 'number' && gameState.turnId > 0 ? gameState.turnId : null;
+  const preGame = !!gameState.preGameActive && !gameState.started;
 
-  // --- Interaction handlers (semantics copied verbatim from GameBoard) ---
+  // Display names: the game snapshot's username, then the lobby roster, then the signed-in
+  // user's own name, then a seat number. The snapshot's username can arrive empty.
+  const names = useMemo(() => {
+    const m = new Map<string, string>();
+    gameState.players.forEach((p, i) => {
+      const fromLobby = (lobbyPlayers ?? []).find((u) => u.id === p.playerId)?.username;
+      const own = p.playerId === selfId ? authName : undefined;
+      m.set(p.playerId, p.username || fromLobby || own || `Player ${i + 1}`);
+    });
+    return m;
+  }, [gameState.players, lobbyPlayers, selfId, authName]);
+  const nameOf = useCallback((id: string | null | undefined) => (id ? names.get(id) : undefined) ?? 'Player', [names]);
+  const notice = useTableNotice(gameState, selfId, names);
+
+  // --- Interaction handlers (semantics unchanged from GameBoard) ---
 
   const handlePlayerCardClick = useCallback((card: ObfCard, idx: number) => {
     if (isProcessing) return;
@@ -153,9 +284,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   const handleOpponentCardClick = useCallback((playerId: string, card: ObfCard, idx: number) => {
     if (isProcessing) return;
     // Target opponent cards by their real server-assigned UUID (card.id), sourced from the
-    // opponent's revealedHand slot. The server now publishes opponent hand slots as hidden id
-    // references, so the client no longer fabricates an unparseable `${playerId}-card-${idx}`
-    // placeholder that the server would reject (cambia-509).
+    // opponent's revealedHand slot (hidden id references, cambia-509).
     if (pendingAction === 'special_action' && specialAction) {
       const rank = specialAction.cardRank;
       if (rank === '9' || rank === 'T') {
@@ -175,6 +304,9 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
         const myCard = selfState?.revealedHand?.[selectedIdx];
         if (myCard && selfId) {
           sendMessage(kingPeekAction(myCard.id, selectedIdx, selfId, card.id, idx, playerId));
+          // The King is two steps on the wire: swap_peek reveals both cards, then
+          // swap_peek_swap or skip settles them. Remember the pair for the second step.
+          setKingPair({ myId: myCard.id, myIdx: selectedIdx, oppId: card.id, oppIdx: idx, oppOwner: playerId });
           setSelectedIdx(null);
         }
         return;
@@ -192,216 +324,346 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     }
   }, [isProcessing, pendingAction, specialAction, selectedIdx, selfState, selfId, gameState, sendMessage]);
 
-  // --- Derived flags (copied from GameBoard) ---
-
-  const hint = useMemo(() => {
-    if (gameState.cambiaCalled) return HINTS.cambiaCalled;
-    if (!isMyTurn) return HINTS.waiting;
-    if (pendingAction === 'special_action' && specialAction) {
-      const rank = specialAction.cardRank;
-      if (rank === '7' || rank === '8') return HINTS.peekSelf;
-      if (rank === '9' || rank === 'T') return HINTS.peekOther;
-      if (rank === 'J' || rank === 'Q') return HINTS.swapBlind;
-      if (rank === 'K') return HINTS.swapPeek;
+  const snapSelected = useCallback(() => {
+    if (isProcessing || selectedIdx === null || pendingAction !== null) return;
+    const selectedCard = selfState?.revealedHand?.[selectedIdx];
+    if (selectedCard) {
+      sendMessage(snapAction(selectedCard.id));
+      setSelectedIdx(null);
     }
-    if (pendingAction === 'discard_replace') return HINTS.selectReplace;
-    if (selectedIdx !== null) return HINTS.selectSnap;
-    return HINTS.yourTurn;
-  }, [isMyTurn, pendingAction, selectedIdx, specialAction, gameState.cambiaCalled]);
+  }, [isProcessing, selectedIdx, pendingAction, selfState, sendMessage]);
 
-  const canCallCambia = isMyTurn && pendingAction === null && !isProcessing && !gameState.cambiaCalled && gameState.started && !gameState.gameOver;
-  const canSkipSpecial = isMyTurn && pendingAction === 'special_action' && !isProcessing;
-  const opponentTargetable = pendingAction === 'special_action' || (selectedIdx !== null && pendingAction === null);
+  // The King's second step is over once the ability resolves or the turn moves on.
+  useEffect(() => {
+    if (pendingAction !== 'special_action' || specialAction?.cardRank !== 'K') setKingPair(null);
+  }, [pendingAction, specialAction]);
+
+  const confirmKingSwap = useCallback((swap: boolean) => {
+    if (!kingPair || !selfId || isProcessing) return;
+    sendMessage(swap
+      ? kingSwapConfirmAction(kingPair.myId, kingPair.myIdx, selfId, kingPair.oppId, kingPair.oppIdx, kingPair.oppOwner)
+      : skipSpecialAction());
+    setKingPair(null);
+  }, [kingPair, selfId, isProcessing, sendMessage]);
+
+  // --- Derived flags ---
+
+  const roundOver = phase === 'round_end' || gameState.gameOver;
+  const canTakeDiscard = isMyTurn && pendingAction === null && !isProcessing && !!gameState.houseRules.allowDrawFromDiscardPile && !!gameState.discardTop;
   const deckInteractive = isMyTurn && pendingAction === null && !isProcessing && gameState.stockpileSize > 0;
   const discardInteractive =
-    (isMyTurn && pendingAction === null && !!gameState.houseRules.allowDrawFromDiscardPile && !!gameState.discardTop) ||
-    pendingAction === 'discard_replace' ||
+    canTakeDiscard ||
+    (pendingAction === 'discard_replace' && !!selfState?.drawnCard) ||
     (selectedIdx !== null && pendingAction === null);
-  const canTakeDiscard = isMyTurn && pendingAction === null && !isProcessing && !!gameState.houseRules.allowDrawFromDiscardPile && !!gameState.discardTop;
+  const canSnap = selectedIdx !== null && pendingAction === null && !isProcessing;
+  const canCallCambia = isMyTurn && pendingAction === null && !isProcessing && !gameState.cambiaCalled && gameState.started && !gameState.gameOver;
+  const kingConfirm = !!kingPair && specialRank === 'K' && isMyTurn && !isProcessing;
+  const canSkipSpecial = isMyTurn && pendingAction === 'special_action' && !isProcessing && !kingConfirm;
+  const allowOpponentSnapping = gameState.houseRules.allowOpponentSnapping ?? true;
+
+  // Legal-target highlighting. The click handlers above already no-op outside these
+  // cases; this only decides what the felt shows as a target.
+  const opponentTargetable = (() => {
+    if (isProcessing || kingConfirm) return false;
+    if (specialRank) {
+      if (specialRank === '9' || specialRank === 'T') return true;
+      if (specialRank === 'J' || specialRank === 'Q' || specialRank === 'K') return selectedIdx !== null;
+      return false;
+    }
+    return selectedIdx !== null && pendingAction === null && allowOpponentSnapping;
+  })();
+  const ownTargetable = (() => {
+    if (isProcessing || kingConfirm) return false;
+    if (pendingAction === 'discard_replace') return true;
+    if (specialRank === '7' || specialRank === '8') return true;
+    if (specialRank === 'J' || specialRank === 'Q' || specialRank === 'K') return selectedIdx === null;
+    return false;
+  })();
+
+  const hint = useMemo(() => {
+    if (roundOver) return phase === 'round_end' ? 'Round over. Waiting for the next round.' : 'Game over.';
+    if (preGame) return 'Memorize your peeked cards. Play starts when the timer runs out.';
+    if (!isMyTurn) {
+      if (specialAction?.active && currentPlayer && specialAction.playerId === currentPlayer.playerId) {
+        return `${nameOf(currentPlayer.playerId)} is choosing a target for ${abilityName(specialAction.cardRank)?.toLowerCase() ?? 'an ability'}.`;
+      }
+      return currentPlayer ? `Waiting for ${nameOf(currentPlayer.playerId)}.` : 'Waiting for the next turn.';
+    }
+    if (specialRank === '7' || specialRank === '8') return 'Peek: choose one of your cards to look at.';
+    if (specialRank === '9' || specialRank === 'T') return 'Peek: choose an opponent card to look at.';
+    if (specialRank === 'J' || specialRank === 'Q') return selectedIdx === null ? 'Blind swap: choose one of your cards.' : 'Blind swap: now choose the opponent card.';
+    if (kingConfirm) return 'King: swap the two cards, or keep them where they are.';
+    if (specialRank === 'K') return selectedIdx === null ? 'King: choose one of your cards.' : 'King: now choose the opponent card to look at.';
+    if (pendingAction === 'discard_replace') return 'Swap the drawn card into a slot, or discard it.';
+    if (selectedIdx !== null) return 'Snap the selected card onto the discard, or pick another card.';
+    if (gameState.cambiaCalled) return canTakeDiscard ? 'Last turn. Draw from the stock or take the discard.' : 'Last turn. Draw from the stock.';
+    return canTakeDiscard ? 'Your turn. Draw from the stock or take the discard.' : 'Your turn. Draw from the stock.';
+  }, [roundOver, phase, preGame, isMyTurn, specialAction, currentPlayer, nameOf, specialRank, kingConfirm, selectedIdx, pendingAction, gameState.cambiaCalled, canTakeDiscard]);
 
   const discardFace = toDsCardFace(gameState.discardTop);
   const drawnCard = selfState?.drawnCard ?? displayedDrawnCard;
   const drawnFace = toDsCardFace(drawnCard);
-  const roundOver = phase === 'round_end' || gameState.gameOver;
 
-  // Standings: prefer circuit cumulative scores, else the live seat order.
+  // Standings: circuit cumulative totals when present, else live hand counts.
   const cumulative = matchState?.cumulativeScores;
+  const hasTotals = !!cumulative && Object.keys(cumulative).length > 0;
   const standings = useMemo(() => {
-    const names = new Map<string, string>();
-    (lobbyPlayers ?? []).forEach((u) => names.set(u.id, u.username));
-    gameState.players.forEach((p) => { if (!names.has(p.playerId)) names.set(p.playerId, p.username); });
     if (cumulative && Object.keys(cumulative).length > 0) {
       return Object.keys(cumulative)
-        .map((id) => ({ id, name: names.get(id) ?? id.substring(0, 6), score: cumulative[id] }))
+        .map((id) => ({ id, name: names.get(id) ?? (lobbyPlayers ?? []).find((u) => u.id === id)?.username ?? id.substring(0, 6), score: cumulative[id] }))
         .sort((a, b) => a.score - b.score);
     }
-    return gameState.players.map((p) => ({ id: p.playerId, name: p.username, score: p.handSize }));
-  }, [cumulative, lobbyPlayers, gameState.players]);
-  const scoreLabel = cumulative && Object.keys(cumulative).length > 0 ? 'TOTAL' : 'CARDS';
+    return gameState.players.map((p) => ({ id: p.playerId, name: names.get(p.playerId) ?? 'Player', score: p.handSize }));
+  }, [cumulative, lobbyPlayers, gameState.players, names]);
+
+  const cambiaCaller = gameState.cambiaCalled
+    ? gameState.players.find((p) => p.playerId === gameState.cambiaCallerId)
+    : undefined;
 
   const renderHand = () => {
-    const hand = selfState?.revealedHand;
-    if (hand && hand.length > 0) {
-      return hand.map((card, i) => {
-        const face = toDsCardFace(card);
-        return (
-          <PlayingCard
-            key={card.id || i}
-            faceDown={!face}
-            rank={face?.rank}
-            suit={face?.suit}
-            size='md'
-            selected={selectedIdx === i}
-            onClick={() => handlePlayerCardClick(card, i)}
-          />
-        );
-      });
-    }
-    const count = selfState?.handSize ?? 0;
-    return Array.from({ length: count }).map((_, i) => <PlayingCard key={i} faceDown size='md' />);
+    const hand = selfState?.revealedHand ?? [];
+    const known = hand.map((card, i) => {
+      const face = toDsCardFace(card);
+      return (
+        <PlayingCard
+          key={card.id || i}
+          faceDown={!face}
+          rank={face?.rank}
+          suit={face?.suit}
+          size='md'
+          selected={selectedIdx === i}
+          highlight={ownTargetable && selectedIdx !== i}
+          label={face ? `Your card ${i + 1}: ${face.rank}${face.suit ? ' of ' + face.suit : ''}` : `Your card ${i + 1}, face down`}
+          onClick={() => handlePlayerCardClick(card, i)}
+        />
+      );
+    });
+    // handSize is authoritative between syncs: a penalty card drawn unseen (cambia-820) can
+    // grow the hand before its slot reference is applied, so pad with backs that carry no id
+    // and take no click until the next sync fills them in.
+    const extra = Math.max(0, (selfState?.handSize ?? 0) - hand.length);
+    const padding = Array.from({ length: extra }).map((_, j) => (
+      <PlayingCard key={`pad-${j}`} faceDown size='md' label={`Your card ${hand.length + j + 1}, face down`} />
+    ));
+    return [...known, ...padding];
   };
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 300px', gap: 18, padding: 18, width: '100%', maxWidth: 1320, margin: '0 auto', alignItems: 'stretch', flex: 1, minHeight: 0 }}>
-      <div
-        style={{
-          position: 'relative',
-          display: 'flex',
-          flexDirection: 'column',
-          justifyContent: 'space-between',
-          background: 'var(--surface-table)',
-          border: '3px solid var(--outline-ink)',
-          borderRadius: 'var(--ds-radius-xl)',
-          boxShadow: 'var(--inset-table)',
-          padding: '16px 20px',
-          minHeight: 620
-        }}
-      >
-        {gameState.cambiaCalled && (
-          <div
-            style={{
-              position: 'absolute',
-              top: 12,
-              left: '50%',
-              transform: 'translateX(-50%)',
-              zIndex: 5,
-              padding: '8px 18px',
-              background: 'var(--berry-500)',
-              color: 'var(--text-on-ember)',
-              border: '2px solid var(--outline-ink)',
-              borderRadius: 'var(--radius-pill)',
-              boxShadow: 'var(--shadow-piece)',
-              fontWeight: 'var(--weight-black)',
-              whiteSpace: 'nowrap'
-            }}
-          >Cambia called - everyone gets one last turn.</div>
-        )}
-
-        <div style={{ display: 'flex', justifyContent: 'space-around', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap', paddingTop: gameState.cambiaCalled ? 34 : 4 }}>
-          {opponents.map((opp) => (
-            <div key={opp.playerId} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
-              <PlayerSeat username={opp.username} compact handSize={opp.handSize} state={seatStateFor(opp, gameState.currentPlayerId)} />
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, auto)', gap: 5 }}>
-                {Array.from({ length: opp.handSize }).map((_, i) => {
-                  // handSize drives the slot count (authoritative even between syncs); the real card
-                  // UUID for targeting comes from the matching revealedHand slot. A slot is only
-                  // clickable once its real id is known - never a fabricated placeholder (cambia-509).
-                  const card = opp.revealedHand?.[i];
-                  const targetable = opponentTargetable && !!card;
-                  return (
-                    <PlayingCard
-                      key={card?.id ?? i}
-                      faceDown
-                      size='sm'
-                      selected={targetable}
-                      onClick={targetable ? () => handleOpponentCardClick(opp.playerId, card!, i) : undefined}
-                    />
-                  );
-                })}
-              </div>
-            </div>
-          ))}
-          {opponents.length === 0 && (
-            <div style={{ color: 'var(--text-tertiary)', fontSize: 'var(--ds-text-sm)' }}>Waiting for opponents…</div>
-          )}
-        </div>
-
-        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'flex-end', gap: 34, margin: '10px 0' }}>
-          <div style={{ textAlign: 'center' }}>
-            <PlayingCard faceDown size='md' onClick={deckInteractive ? handleDeckClick : undefined} selected={deckInteractive} />
-            <div style={CAP_LABEL}>STOCKPILE · <span style={{ fontFamily: 'var(--ds-font-mono)' }}>{gameState.stockpileSize}</span></div>
-          </div>
-          <div style={{ textAlign: 'center' }}>
-            {discardFace ? (
-              <PlayingCard rank={discardFace.rank} suit={discardFace.suit} size='md' selected={discardInteractive} onClick={discardInteractive ? handleDiscardClick : undefined} />
-            ) : (
-              <PlayingCard faceDown size='md' selected={discardInteractive} onClick={discardInteractive ? handleDiscardClick : undefined} />
+    <div className='grid w-full max-w-[1320px] gap-4 p-4 mx-auto lg:grid-cols-[minmax(0,1fr)_300px]' style={{ flex: 1, minHeight: 0, alignItems: 'stretch' }}>
+      {/* Rail + felt. The rail is a solid ring of the deep felt; both edges carry a 1px line. */}
+      <div style={{ background: 'var(--surface-felt-deep)', border: '1px solid var(--border-default)', borderRadius: 'var(--ds-radius-xl)', padding: 10, display: 'flex', minWidth: 0 }}>
+        <div
+          style={{
+            flex: 1,
+            minWidth: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'space-between',
+            gap: 12,
+            background: 'var(--surface-felt)',
+            border: '1px solid var(--border-on-felt)',
+            borderRadius: 'var(--ds-radius-lg)',
+            padding: '14px 16px 16px',
+            minHeight: 520,
+            color: 'var(--text-on-green)'
+          }}
+        >
+          {/* Top strip: turn readout, Cambia call. */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', minHeight: 24 }}>
+            <span style={{ ...FELT_LABEL, marginTop: 0 }}>
+              {[matchState ? `Round ${matchState.currentRound}/${matchState.totalRounds}` : null, turnNo !== null ? `Turn ${turnNo}` : null].filter(Boolean).join(' · ')}
+            </span>
+            {gameState.cambiaCalled && (
+              <span
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '3px 12px',
+                  background: 'var(--accent-danger)',
+                  color: 'var(--text-on-danger)',
+                  border: '1px solid var(--accent-danger)',
+                  borderRadius: 'var(--radius-pill)',
+                  fontSize: 'var(--ds-text-xs)',
+                  fontWeight: 'var(--weight-bold)',
+                  letterSpacing: 'var(--tracking-caps)',
+                  textTransform: 'uppercase',
+                  whiteSpace: 'nowrap'
+                }}
+              >
+                Cambia called{cambiaCaller && <span style={{ textTransform: 'none', letterSpacing: 0, fontWeight: 'var(--weight-medium)' }}>by {nameOf(cambiaCaller.playerId)}</span>}
+              </span>
             )}
-            <div style={CAP_LABEL}>DISCARD · <span style={{ fontFamily: 'var(--ds-font-mono)' }}>{gameState.discardSize}</span></div>
+            {roundOver && <Badge tone='warning'>{phase === 'round_end' ? 'Round over' : 'Game over'}</Badge>}
           </div>
-          {drawnCard && (
+
+          {/* Opponent seats and hand backs. */}
+          <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'flex-start', gap: 28, flexWrap: 'wrap' }}>
+            {opponents.map((opp) => {
+              const acting = !!specialAction?.active && specialAction.playerId === opp.playerId;
+              const note = acting ? abilityName(specialAction?.cardRank) ?? undefined : undefined;
+              return (
+                <div key={opp.playerId} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
+                  <PlayerSeat username={nameOf(opp.playerId)} compact handSize={opp.handSize} note={note} state={seatStateFor(opp, gameState.currentPlayerId)} />
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, auto)', gap: 5 }}>
+                    {Array.from({ length: opp.handSize }).map((_, i) => {
+                      // handSize drives the slot count (authoritative between syncs); the real card
+                      // UUID for targeting comes from the matching revealedHand slot. A slot is only
+                      // clickable once its real id is known (cambia-509).
+                      const card = opp.revealedHand?.[i];
+                      const targetable = opponentTargetable && !!card;
+                      return (
+                        <PlayingCard
+                          key={card?.id ?? i}
+                          faceDown
+                          size='sm'
+                          highlight={targetable}
+                          dimmed={!!specialRank && !targetable}
+                          label={`${nameOf(opp.playerId)} card ${i + 1}`}
+                          onClick={targetable ? () => handleOpponentCardClick(opp.playerId, card!, i) : undefined}
+                        />
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+            {opponents.length === 0 && (
+              <div style={{ color: 'var(--text-on-felt-muted)', fontSize: 'var(--ds-text-sm)' }}>No opponents seated.</div>
+            )}
+          </div>
+
+          {/* Notice line: snap, penalty, reshuffle. Space is reserved so the piles do not jump. */}
+          <div style={{ display: 'flex', justifyContent: 'center', minHeight: 30 }} aria-live='polite'>
+            {notice && (
+              <span
+                key={notice.id}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  padding: '4px 12px',
+                  background: 'var(--surface-1)',
+                  border: '1px solid ' + NOTICE_TONES[notice.tone].border,
+                  borderRadius: 'var(--radius-pill)',
+                  color: NOTICE_TONES[notice.tone].color,
+                  fontSize: 'var(--ds-text-sm)',
+                  fontWeight: 'var(--weight-medium)',
+                  fontVariantNumeric: 'tabular-nums'
+                }}
+              >
+                {notice.text}
+              </span>
+            )}
+          </div>
+
+          {/* Piles. */}
+          <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'flex-start', gap: 28, flexWrap: 'wrap' }}>
             <div style={{ textAlign: 'center' }}>
-              <PlayingCard faceDown={!drawnFace} rank={drawnFace?.rank} suit={drawnFace?.suit} size='md' selected />
-              <div style={{ ...CAP_LABEL, color: 'var(--honey-300)' }}>DRAWN</div>
+              {gameState.stockpileSize > 0 ? (
+                <PlayingCard faceDown size='md' highlight={deckInteractive} label='Stockpile' onClick={deckInteractive ? handleDeckClick : undefined} />
+              ) : (
+                <EmptySlot label='Stockpile, empty' />
+              )}
+              <div style={FELT_LABEL}>Stock · {gameState.stockpileSize}</div>
             </div>
-          )}
-        </div>
-
-        <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'center', gap: 26, flexWrap: 'wrap' }}>
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, auto)', gap: 6 }}>
-              {renderHand()}
+            <div style={{ textAlign: 'center' }}>
+              {discardFace ? (
+                <PlayingCard
+                  rank={discardFace.rank}
+                  suit={discardFace.suit}
+                  size='md'
+                  highlight={discardInteractive}
+                  label={`Discard pile, top card ${discardFace.rank}`}
+                  onClick={discardInteractive ? handleDiscardClick : undefined}
+                />
+              ) : (
+                <EmptySlot label='Discard pile, empty' highlight={discardInteractive} onClick={discardInteractive ? handleDiscardClick : undefined} />
+              )}
+              <div style={FELT_LABEL}>Discard · {gameState.discardSize}</div>
             </div>
-            <PlayerSeat username={selfState?.username ?? 'You'} isYou compact state={seatStateFor(selfState ?? ({ playerId: selfId ?? '', connected: true, hasCalledCambia: false } as ObfPlayerState), gameState.currentPlayerId)} />
+            {drawnCard && (
+              <div style={{ textAlign: 'center' }}>
+                <PlayingCard faceDown={!drawnFace} rank={drawnFace?.rank} suit={drawnFace?.suit} size='md' selected label='Drawn card' />
+                <div style={{ ...FELT_LABEL, color: 'var(--text-on-green)' }}>Drawn</div>
+              </div>
+            )}
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: 240, paddingBottom: 4 }}>
-            <p style={{ margin: 0, minHeight: 20, textAlign: 'center', fontSize: 'var(--ds-text-sm)', color: 'var(--text-secondary)' }}>{hint}</p>
-            {deckInteractive && <Button onClick={handleDeckClick}>Draw from stockpile</Button>}
-            {canTakeDiscard && <Button variant='secondary' onClick={handleDiscardClick}>Take discard</Button>}
-            {pendingAction === 'discard_replace' && selfState?.drawnCard && (
-              <Button variant='secondary' onClick={() => { sendMessage(discardAction(selfState.drawnCard!.id)); setSelectedIdx(null); }}>Discard drawn card</Button>
-            )}
-            {canSkipSpecial && <Button variant='secondary' onClick={() => sendMessage(skipSpecialAction())}>Skip ability</Button>}
-            {canCallCambia && <Button variant='cambia' onClick={() => sendMessage(callCambiaAction())}>Call Cambia</Button>}
-            {turnTimerSec > 0 && (
-              <TimerBar
-                label='TURN'
-                totalSec={turnTimerSec}
-                remainingSec={turnTimerSec}
-                deadlineMs={gameState.turnDeadline ?? null}
-                clockOffsetMs={serverClockOffsetMs}
+
+          {/* Own hand and the action column. */}
+          <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'center', gap: 24, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, auto)', gap: 6, paddingTop: 6 }}>
+                {renderHand()}
+              </div>
+              <PlayerSeat
+                username={nameOf(selfId)}
+                isYou
+                compact
+                handSize={selfState?.handSize}
+                state={seatStateFor(selfState ?? ({ playerId: selfId ?? '', connected: true, hasCalledCambia: false } as ObfPlayerState), gameState.currentPlayerId)}
               />
-            )}
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: '1 1 220px', maxWidth: 280, paddingBottom: 2 }}>
+              <p style={{ margin: 0, minHeight: 20, textAlign: 'center', fontSize: 'var(--ds-text-sm)', lineHeight: 'var(--ds-leading-snug)', color: 'var(--text-on-green)' }}>{hint}</p>
+              {deckInteractive && <Button onClick={handleDeckClick}>Draw from stock</Button>}
+              {canTakeDiscard && <Button variant='secondary' onClick={handleDiscardClick}>Take discard</Button>}
+              {pendingAction === 'discard_replace' && selfState?.drawnCard && (
+                <Button variant='secondary' onClick={() => { sendMessage(discardAction(selfState.drawnCard!.id)); setSelectedIdx(null); }}>Discard drawn card</Button>
+              )}
+              {canSnap && <Button onClick={snapSelected}>Snap selected card</Button>}
+              {canSnap && <Button variant='ghost' onClick={() => setSelectedIdx(null)}>Cancel</Button>}
+              {kingConfirm && <Button onClick={() => confirmKingSwap(true)}>Swap cards</Button>}
+              {kingConfirm && <Button variant='secondary' onClick={() => confirmKingSwap(false)}>Keep cards</Button>}
+              {canSkipSpecial && <Button variant='secondary' onClick={() => sendMessage(skipSpecialAction())}>Skip ability</Button>}
+              {canCallCambia && <Button variant='cambia' onClick={() => sendMessage(callCambiaAction())}>Call Cambia</Button>}
+              {turnTimerSec > 0 && !roundOver && !preGame && (
+                <TimerBar
+                  label='Turn'
+                  totalSec={turnTimerSec}
+                  remainingSec={turnTimerSec}
+                  deadlineMs={gameState.turnDeadline ?? null}
+                  clockOffsetMs={serverClockOffsetMs}
+                  style={{ marginTop: 4, color: 'var(--text-on-green)' }}
+                />
+              )}
+            </div>
           </div>
         </div>
       </div>
 
+      {/* Side column: standings and table facts. */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16, minHeight: 0 }}>
-        <Panel title={matchState ? `Circuit · round ${matchState.currentRound}/${matchState.totalRounds}` : 'Standings'}>
+        <Panel title={hasTotals ? 'Standings' : 'Players'} action={matchState ? <Badge tone='info'>Round {matchState.currentRound}/{matchState.totalRounds}</Badge> : undefined}>
           <div style={{ display: 'flex', flexDirection: 'column' }}>
             {standings.map((row, i) => (
-              <div key={row.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 2px', borderTop: i ? '1px solid var(--border-subtle)' : 'none' }}>
-                <span style={{ fontFamily: 'var(--ds-font-mono)', fontSize: 'var(--ds-text-xs)', color: 'var(--text-tertiary)', width: 16 }}>{i + 1}</span>
-                <span style={{ fontWeight: 'var(--weight-bold)', flex: 1, color: row.id === selfId ? 'var(--honey-400)' : 'var(--text-primary)' }}>
+              <div key={row.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 2px', borderTop: i ? '1px solid var(--border-subtle)' : 'none' }}>
+                <span style={{ fontSize: 'var(--ds-text-xs)', color: 'var(--text-tertiary)', width: 16, fontVariantNumeric: 'tabular-nums' }}>{i + 1}</span>
+                <span style={{ fontWeight: 'var(--weight-medium)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: row.id === selfId ? 'var(--accent-gold)' : 'var(--text-primary)' }}>
                   {row.name}{row.id === selfId ? ' (you)' : ''}
                 </span>
-                <span style={{ fontFamily: 'var(--ds-font-mono)', fontWeight: 'var(--weight-bold)' }}>{row.score}</span>
+                <span style={{ fontWeight: 'var(--weight-bold)', fontVariantNumeric: 'tabular-nums' }}>{row.score}</span>
               </div>
             ))}
           </div>
-          <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
-            <ScorePill label={scoreLabel} value={standings.length} />
-            {roundOver && <Badge tone='warning'>round over</Badge>}
+          <div style={{ marginTop: 10, fontSize: 'var(--text-2xs)', color: 'var(--text-tertiary)', letterSpacing: 'var(--tracking-caps)', textTransform: 'uppercase' }}>
+            {hasTotals ? 'Total score, lower wins' : 'Cards in hand'}
           </div>
         </Panel>
         <Panel title='Table' style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, flex: 1 }}>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              <ScorePill label='STOCK' value={gameState.stockpileSize} />
-              <ScorePill label='DISCARD' value={gameState.discardSize} />
+              <ScorePill label='Stock' value={gameState.stockpileSize} />
+              <ScorePill label='Discard' value={gameState.discardSize} />
+              {turnNo !== null && <ScorePill label='Turn' value={turnNo} />}
+            </div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {turnTimerSec > 0 ? <Badge>{turnTimerSec}s turns</Badge> : <Badge>No turn timer</Badge>}
+              <Badge>{gameState.houseRules.penaltyDrawCount} card penalty</Badge>
+              {gameState.houseRules.allowDrawFromDiscardPile && <Badge>Discard draws</Badge>}
+              {gameState.houseRules.snapRace && <Badge>Snap race</Badge>}
             </div>
             <div style={{ fontSize: 'var(--ds-text-sm)', color: 'var(--text-secondary)' }}>
-              {isMyTurn ? 'Your turn.' : gameState.gameOver ? 'Game over.' : 'Waiting on other players.'}
+              {roundOver ? (phase === 'round_end' ? 'Round over.' : 'Game over.') : preGame ? 'Pre-game peek.' : isMyTurn ? 'Your turn.' : currentPlayer ? `${nameOf(currentPlayer.playerId)} to act.` : 'Waiting for the next turn.'}
             </div>
           </div>
           <Button size='sm' variant='ghost' onClick={onLeave} style={{ marginTop: 12 }}>Leave table</Button>
