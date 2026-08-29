@@ -48,6 +48,14 @@ from src.constants import (
 )
 from src.cfr.exceptions import GameStateError, AgentStateError, ObservationUpdateError
 
+# The training driver's observation builder and per-observer mask. Evaluation
+# feeds belief models through these same two functions so an evaluated agent
+# sees exactly the observation stream training produced (cambia-1038).
+from src.cfr.worker import (
+    _create_observation as _worker_create_observation,
+    _filter_observation as _worker_filter_observation,
+)
+
 logging.basicConfig(
     level=logging.ERROR, format="%(asctime)s - %(levelname)s - %(message)s"
 )
@@ -81,15 +89,52 @@ def _drawn_card_bucket_from_game_state(game_state) -> int:
         return -1
 
 
-def _build_public_observation(
+def _build_transition_observation(
     game_state,
     action: Optional[GameAction],
     acting_player: int,
 ) -> Optional[AgentObservation]:
     """Builds the post-action observation shared by every belief wrapper.
 
-    Public-only: no drawn or peeked cards, so the result is identical for every
-    observer and independent of which agent asks for it.
+    This is the training driver's own builder (``worker._create_observation``,
+    called with the post-action state exactly as the traversal calls it), so the
+    result carries the ACTOR's private drawn and peeked cards. It is therefore an
+    unfiltered observation: every consumer must run it through
+    ``worker._filter_observation(obs, observer_id)`` before handing it to a
+    belief model, which is what masks the private fields for the non-actor seats
+    (cambia-1038). Sharing one unfiltered object across observers is the training
+    contract (``worker.py`` builds once, filters per agent) and is safe because
+    ``_filter_observation`` returns a fresh shallow copy per observer and
+    ``AgentState.update`` never mutates the observation.
+
+    ``snap_results`` is deep-copied so the shared observation does not alias the
+    engine's live log across the game.
+    """
+    try:
+        return _worker_create_observation(
+            None,
+            action,
+            game_state,
+            acting_player,
+            copy.deepcopy(game_state.snap_results_log),
+        )
+    except Exception as e_obs:  # JUSTIFIED: evaluation resilience
+        logger.error("Failed to build transition observation: %s", e_obs, exc_info=True)
+        return None
+
+
+def _build_public_observation(
+    game_state,
+    action: Optional[GameAction],
+    acting_player: int,
+) -> Optional[AgentObservation]:
+    """Builds a public-only post-action observation.
+
+    No drawn or peeked cards, so the result is identical for every observer and
+    independent of which agent asks for it. Used for the pre-first-action initial
+    observation (where no private information exists) and by wrappers that
+    deliberately train on a public-only belief feed. The per-transition eval feed
+    uses ``_build_transition_observation`` instead.
     """
     try:
         return AgentObservation(
@@ -337,13 +382,15 @@ class CFRAgentWrapper(BaseAgent):
     def _filter_observation(
         self, obs: AgentObservation, observer_id: int
     ) -> AgentObservation:
-        """Filters observation for the agent's own perspective (minimal filtering needed here)."""
-        # Since _create_observation doesn't include sensitive info, filtering is simpler
-        filtered_obs = copy.copy(obs)
-        # Ensure fields intended to be private for updates are None
-        filtered_obs.drawn_card = None
-        filtered_obs.peeked_cards = None
-        return filtered_obs
+        """Masks the observation for this seat using the TRAINING filter.
+
+        cambia-1038: this used to null ``drawn_card``/``peeked_cards``
+        unconditionally, including for the acting seat, so an evaluated agent
+        never learned what it drew or peeked. ``worker._filter_observation`` is
+        the single definition of that contract: the actor keeps its own drawn and
+        peeked cards, every other seat sees neither.
+        """
+        return _worker_filter_observation(obs, observer_id)
 
 
 # --- Neural Agent Wrapper Base ---
@@ -406,15 +453,19 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
         self.agent_state.initialize(initial_obs, initial_hand, initial_peeks)
 
     def update_state(self, observation: AgentObservation):
-        """Update internal AgentState after an action."""
+        """Update internal AgentState after an action.
+
+        Masks the observation with the TRAINING filter
+        (``worker._filter_observation``): this seat keeps its own drawn and
+        peeked cards, every other seat's private cards stay hidden. Before
+        cambia-1038 both fields were nulled unconditionally, which starved the
+        acting agent of exactly the private-card information the belief state
+        exists to track and which training fed it.
+        """
         if not self.agent_state:
             return
-        filtered = copy.copy(observation)
-        filtered.drawn_card = None
-        filtered.peeked_cards = None
+        filtered = _worker_filter_observation(observation, self.player_id)
         try:
-            from src.cfr.exceptions import AgentStateError, ObservationUpdateError
-
             self.agent_state.update(filtered)
         except Exception as e:  # JUSTIFIED: evaluation resilience
             logger.error(
@@ -1863,7 +1914,16 @@ class PPOAgentWrapper(BaseAgent):
         self._agent_state.initialize(initial_obs, initial_hand, initial_peeks)
 
     def update_state(self, observation: AgentObservation):
-        """Update internal state based on observation."""
+        """Update internal state based on observation.
+
+        Deliberately NOT the training filter used by the CFR wrappers
+        (cambia-1038). PPO's own training feed is ``ppo_env._update_states``,
+        which nulls ``drawn_card`` and ``peeked_cards`` for every seat including
+        the actor; the PPO policy was fit against beliefs built that way. Keeping
+        the strip here is what preserves PPO's train/eval parity, and it makes
+        this wrapper safe to hand the shared unfiltered observation the eval feed
+        now builds.
+        """
         if not self._agent_state:
             return
         filtered = copy.copy(observation)
@@ -2826,8 +2886,15 @@ def _feed_agent_beliefs(
     Two belief kinds are fed:
       - token-stream wrappers (PRT-CFR) take the transition directly, through the
         training driver's own observation builders;
-      - ``AgentState`` wrappers take one public observation, built once per
-        transition and shared (it carries no per-observer private information).
+      - ``AgentState`` wrappers take one UNFILTERED observation, built once per
+        transition by the same training-driver builder and shared; each wrapper's
+        ``update_state`` masks it for its own seat. Building once and filtering
+        per observer is the training traversal's own shape (``worker.py``:
+        ``_create_observation`` then ``_filter_observation`` per agent), and it is
+        what lets the acting agent keep its own drawn and peeked cards while the
+        other seats see neither (cambia-1038). Wrappers whose own training feed
+        was public-only (``PPOAgentWrapper``) keep stripping both fields in their
+        ``update_state``, so the shared object stays correct for them too.
     """
     for agent in agents:
         if isinstance(agent, PRTCFRAgentWrapper):
@@ -2841,7 +2908,7 @@ def _feed_agent_beliefs(
     if not belief_agents:
         return
 
-    observation = _build_public_observation(game_state, action, acting_player)
+    observation = _build_transition_observation(game_state, action, acting_player)
     if observation is None:
         return
     for agent in belief_agents:

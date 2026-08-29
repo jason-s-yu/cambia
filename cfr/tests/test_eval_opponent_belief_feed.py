@@ -23,6 +23,7 @@ import pytest
 
 from src.agent_state import AgentObservation, AgentState
 from src.agents.baseline_agents import RandomNoCambiaAgent
+from src.cfr.worker import _create_observation, _filter_observation
 from src.config import load_config
 from src.constants import NUM_PLAYERS
 from src.evaluate_agents import (
@@ -59,11 +60,33 @@ class _ProbeBeliefAgent(NeuralAgentWrapper):
         super().update_state(observation)
 
 
+def _observer_frame(
+    game_state: CambiaGameState, action, acting_player: int, observer: int = 0
+) -> AgentObservation:
+    """Transcript frame as ``observer``'s belief should see it: the training
+    driver's own builder plus its per-observer mask, so the actor keeps its
+    private drawn/peeked cards and the other seat does not (cambia-1038).
+
+    Recorded here in the test loop rather than taken from ``_feed_agent_beliefs``,
+    so the reconstruction still checks the feed's delivery (which transitions
+    reach the belief, in what order) rather than restating it.
+    """
+    return _filter_observation(
+        _create_observation(
+            None,
+            action,
+            game_state,
+            acting_player,
+            copy.deepcopy(game_state.snap_results_log),
+        ),
+        observer,
+    )
+
+
 def _public_obs(
     game_state: CambiaGameState, action, acting_player: int
 ) -> AgentObservation:
-    """Independent transcript frame, built in the test rather than by the code
-    under test, so the reconstruction is not a restatement of the feed."""
+    """Public-only frame, used for the pre-first-action initial observation."""
     return AgentObservation(
         acting_player=acting_player,
         action=action,
@@ -189,7 +212,7 @@ def test_belief_matches_from_scratch_reconstruction(config):
         action = agents[acting].choose_action(game_state, legal)
         game_state.apply_action(action)
         acted += 1
-        transcript.append((acting, _public_obs(game_state, action, acting)))
+        transcript.append((acting, _observer_frame(game_state, action, acting)))
         _feed_agent_beliefs(agents, game_state, action, acting)
 
     assert any(actor == 1 for actor, _ in transcript), "opponent never acted"
