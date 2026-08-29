@@ -75,10 +75,15 @@
   --red-600: #a92c26;
   --red-500: #c4362f;
   --red-400: #dd5a52;
-  --red-300: #e88a83;
+  /* #e88a83, the step this replaces, was the 400 tinted toward white: C*=39.9
+     in CIELAB, less chroma than the warning amber it sits next to (C*=64.6), so
+     a crashed pill read calmer than a starting one. This step holds red hue
+     (h*=33.1) at C*=64.4 instead (cambia-1046). */
+  --red-300: #ff6f61;
 
-  /* amber: warning. Held apart from gold so status never reads as a CTA. */
-  --amber-700: #8a4f0a;
+  /* amber: warning in dark. Held apart from gold so status never reads as a
+     CTA. Light warning is not on this ramp: an amber dark enough for AA on
+     paper lands on the gold text hue (see the light --status-warning note). */
   --amber-600: #a45f0c;
   --amber-500: #c47512;
   --amber-400: #e09a30;
@@ -182,13 +187,20 @@
      PlayerSeat state lines sat at 3.97:1 and 3.43:1. The steps here measure
      5.62 and 5.16 on the tint, 5.76 and 5.09 on the seat (cambia-971).
      --red-300 is new: the ramp stopped at 400, which was the danger fill.
-     Warning and info are unchanged; they already cleared AA on both grounds. */
+     Warning and info are unchanged; they already cleared AA on both grounds.
+
+     Danger was then retuned for severity order (cambia-1046). The AA fix left
+     it a soft salmon at C*=39.9, below the untouched warning amber's C*=64.6,
+     so a crashed pill read calmer than a starting one next to it. The red now
+     carries C*=64.4 at h*=33.1, level with the amber in chroma and 41 degrees
+     off it in hue, and measures 5.37 and 4.88 on its tint over --surface-1 and
+     --surface-2, 4.67 on the seat and 7.19 in a score pill. */
   --status-success: var(--green-300);
   --status-success-bg: rgba(98, 192, 150, 0.14);
   --status-success-border: rgba(98, 192, 150, 0.38);
   --status-danger: var(--red-300);
-  --status-danger-bg: rgba(232, 138, 131, 0.14);
-  --status-danger-border: rgba(232, 138, 131, 0.38);
+  --status-danger-bg: rgba(255, 111, 97, 0.14);
+  --status-danger-border: rgba(255, 111, 97, 0.38);
   --status-warning: var(--amber-400);
   --status-warning-bg: rgba(224, 154, 48, 0.14);
   --status-warning-border: rgba(224, 154, 48, 0.38);
@@ -300,14 +312,20 @@
   --status-danger: var(--red-600);
   --status-danger-bg: rgba(169, 44, 38, 0.1);
   --status-danger-border: rgba(169, 44, 38, 0.3);
-  /* One ramp step darker than the other light tones, which is where the amber
-     family runs out: --amber-600 measured 4.05:1 on its own badge tint over
-     --surface-1 and 3.96:1 on --surface-inset, the pill ground, against 4.5.
-     Amber is the one status hue whose 600 step is that light, so --amber-700 is
-     new rather than a reuse. 5.24 and 5.21 now (cambia-971). */
-  --status-warning: var(--amber-700);
-  --status-warning-bg: rgba(138, 79, 10, 0.12);
-  --status-warning-border: rgba(138, 79, 10, 0.3);
+  /* Warning leaves the amber ramp on paper, and both moves are forced.
+     Darkness first: --amber-600 measured 4.05:1 on its own badge tint over
+     --surface-1 and 3.96:1 on --surface-inset, the pill ground, against 4.5, so
+     the tone dropped to #8a4f0a (cambia-971). Hue second: that bronze sat at
+     h*=66.3 against --accent-gold-text's h*=83.7, and QueueCard draws the two
+     side by side, gold Ranked on the primary queue and warning Ranked on the
+     rest, where they read as one color. This literal holds the same lightness
+     and chroma (L*=39.5, C*=50.8 against 39.6 and 50.0) and turns the hue 13.6
+     degrees toward red, to h*=52.7: 31 degrees off the gold and 18 off the
+     danger red at h*=34.3. 5.24:1 on its tint over --surface-1, 5.49:1 over
+     --surface-2, the same pair of numbers the bronze measured (cambia-1046). */
+  --status-warning: #96461a;
+  --status-warning-bg: rgba(150, 70, 26, 0.12);
+  --status-warning-border: rgba(150, 70, 26, 0.3);
   --status-info: var(--blue-600);
   --status-info-bg: rgba(42, 95, 143, 0.1);
   --status-info-border: rgba(42, 95, 143, 0.3);
