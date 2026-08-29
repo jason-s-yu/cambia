@@ -524,6 +524,33 @@ class DESCAConfig(_CambiaBaseModel):
 # --- PRT-CFR Configuration ---
 
 
+def resolve_prtcfr_reservoir_capacity(
+    static_capacity: int,
+    k_games_per_iter: int,
+    scale_with_k: bool,
+    reference_k: int,
+) -> int:
+    """Resolve a PRT-CFR reservoir capacity, optionally scaled with k (cambia-736).
+
+    Off (``scale_with_k=False``, the default): returns ``static_capacity``
+    unchanged, reproducing every pre-cambia-736 config byte-for-byte.
+
+    On: scales ``static_capacity`` linearly by ``k_games_per_iter /
+    reference_k`` so sample retention (capacity relative to samples generated
+    per run) stays comparable when a cell raises or lowers the per-iteration
+    sample count away from the baseline the static capacity was sized against.
+    """
+    if not scale_with_k:
+        return int(static_capacity)
+    if reference_k <= 0:
+        raise ValueError(
+            "prt_cfr.reservoir_capacity_reference_k must be positive, got "
+            f"{reference_k}"
+        )
+    scaled = round(static_capacity * (k_games_per_iter / reference_k))
+    return max(1, scaled)
+
+
 class PRTCFRConfig(_CambiaBaseModel):
     """Configuration for PRT-CFR (Perfect-Recall Trajectory CFR) training.
 
@@ -628,6 +655,41 @@ class PRTCFRConfig(_CambiaBaseModel):
     reservoir_capacity: int = 20_000_000  # per-player disk reservoir rows (AC5)
     reservoir_dir: Optional[str] = None  # override; default <run_dir>/reservoir
     snapshot_dir: Optional[str] = None  # override; default <run_dir>/snapshots
+
+    # --- Reservoir capacity scaling with k_games_per_iter (cambia-736). ---
+    # Motivation (X2R C0, frozen evidence): k_games_per_iter=212 against the
+    # unscaled buffer_capacity=2_000_000 default made the reservoir cap at
+    # iteration ~180 with ~18% sample retention, vs ~48% for the k=80 baseline
+    # the capacity default was sized against -- an informationally degenerate
+    # arm. Rule going forward: a cell that raises samples/iteration must scale
+    # reservoir capacity with k so retention stays comparable. Opt-in: default
+    # False leaves resolve_buffer_capacity()/resolve_reservoir_capacity()
+    # returning the static field unchanged, so every existing YAML (explicit
+    # buffer_capacity/reservoir_capacity, no new field) reproduces byte-for-byte.
+    # Applies uniformly to both reservoir backends PRTCFRConfig feeds: the
+    # tiny trainer's in-RAM buffer_capacity (ReservoirBuffer) and the
+    # production trainer's disk-backed reservoir_capacity (DiskReservoir,
+    # ragged int16 pool) -- both are sized against the same k_games_per_iter
+    # knob on this config, so one flag/reference governs whichever backend the
+    # active trainer resolves.
+    reservoir_capacity_scale_with_k: bool = Field(
+        False,
+        description=(
+            "Scale buffer_capacity/reservoir_capacity linearly with "
+            "k_games_per_iter (relative to reservoir_capacity_reference_k) "
+            "instead of using the static field value unchanged. Off by "
+            "default for backward compatibility."
+        ),
+    )
+    reservoir_capacity_reference_k: int = Field(
+        80,
+        description=(
+            "k_games_per_iter that buffer_capacity/reservoir_capacity were "
+            "sized against (the X2 fresh-run baseline). Only read when "
+            "reservoir_capacity_scale_with_k is true; resolved capacity = "
+            "round(static_capacity * k_games_per_iter / reservoir_capacity_reference_k)."
+        ),
+    )
     num_players: int = 2
 
     @field_validator("num_players")
@@ -716,6 +778,34 @@ class PRTCFRConfig(_CambiaBaseModel):
     # silently producing a fresh-run-with-net-prior snapshot lineage. Full-mode
     # warm start and --resume are never affected by this flag.
     warm_start_net_only_ok: bool = False
+
+    def resolve_buffer_capacity(self) -> int:
+        """Effective PRTCFRTinyTrainer ReservoirBuffer capacity (in-RAM).
+
+        Returns ``buffer_capacity`` unchanged unless
+        ``reservoir_capacity_scale_with_k`` is set (cambia-736), in which case
+        it scales linearly with ``k_games_per_iter`` relative to
+        ``reservoir_capacity_reference_k``.
+        """
+        return resolve_prtcfr_reservoir_capacity(
+            self.buffer_capacity,
+            self.k_games_per_iter,
+            self.reservoir_capacity_scale_with_k,
+            self.reservoir_capacity_reference_k,
+        )
+
+    def resolve_reservoir_capacity(self) -> int:
+        """Effective PRTCFRProductionTrainer DiskReservoir capacity (disk-backed).
+
+        Same scaling rule as ``resolve_buffer_capacity``, applied to
+        ``reservoir_capacity`` instead of ``buffer_capacity``.
+        """
+        return resolve_prtcfr_reservoir_capacity(
+            self.reservoir_capacity,
+            self.k_games_per_iter,
+            self.reservoir_capacity_scale_with_k,
+            self.reservoir_capacity_reference_k,
+        )
 
 
 # --- Baseline Agent Configuration ---

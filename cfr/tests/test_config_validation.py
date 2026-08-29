@@ -521,9 +521,7 @@ class TestPRTCFREnumFieldsConstrained:
     @pytest.mark.parametrize("mode", ["min", "max"])
     def test_valid_stability_metric_mode_accepted(self, mode):
         _, PRTCFRConfig = _get_real_config_classes()
-        assert (
-            PRTCFRConfig(stability_metric_mode=mode).stability_metric_mode == mode
-        )
+        assert PRTCFRConfig(stability_metric_mode=mode).stability_metric_mode == mode
 
     def test_defaults_still_valid(self):
         """The field defaults (used by every existing run/test that doesn't
@@ -562,3 +560,182 @@ class TestShippedPRTCFRConfigsStillValidate:
         cfr_root = Path(__file__).resolve().parent.parent
         raw = real_mod.resolve_config_yaml(str(cfr_root / rel_path))
         real_mod.Config.model_validate(raw)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# cambia-736: reservoir capacity scaling with k_games_per_iter
+#
+# Motivation (frozen evidence): the X2R C0 run (k_games_per_iter=212 against
+# the unscaled buffer_capacity=2_000_000 default) capped the reservoir at
+# iteration ~180 with ~18% sample retention, vs ~48% for the k=80 baseline
+# the capacity default was sized against. reservoir_capacity_scale_with_k
+# (opt-in, default False) and reservoir_capacity_reference_k let a cell that
+# raises k_games_per_iter scale reservoir capacity to match.
+# ---------------------------------------------------------------------------
+
+
+class TestReservoirCapacityScalingDefaultOff:
+    """Default (scale_with_k=False) must reproduce pre-cambia-736 behavior
+    byte-for-byte: resolve_*_capacity() returns the static field unchanged."""
+
+    def test_defaults_disable_scaling(self):
+        _, PRTCFRConfig = _get_real_config_classes()
+        cfg = PRTCFRConfig()
+        assert cfg.reservoir_capacity_scale_with_k is False
+        assert cfg.reservoir_capacity_reference_k == 80
+
+    def test_explicit_buffer_capacity_no_new_field_is_byte_identical(self):
+        """An existing YAML with an explicit buffer_capacity and no new field
+        must resolve to exactly that value (the old getattr(config,
+        'buffer_capacity', ...) behavior), regardless of k_games_per_iter."""
+        _, PRTCFRConfig = _get_real_config_classes()
+        cfg = PRTCFRConfig(buffer_capacity=1_234_567, k_games_per_iter=212)
+        assert cfg.resolve_buffer_capacity() == 1_234_567
+
+    def test_explicit_reservoir_capacity_no_new_field_is_byte_identical(self):
+        _, PRTCFRConfig = _get_real_config_classes()
+        cfg = PRTCFRConfig(reservoir_capacity=5_000_000, k_games_per_iter=8192)
+        assert cfg.resolve_reservoir_capacity() == 5_000_000
+
+    def test_shipped_x2r_c0_config_unscaled_by_default(self):
+        """The actual X2R C0 config (k_games_per_iter=212, no scaling field)
+        must still resolve to the static default -- the ticket adds an
+        opt-in fix, it does not retroactively change C0's frozen behavior."""
+        real_mod = _get_real_config_module()
+        cfr_root = Path(__file__).resolve().parent.parent
+        raw = real_mod.resolve_config_yaml(str(cfr_root / "config/x2r/c0.yaml"))
+        validated = real_mod.Config.model_validate(raw)
+        assert validated.prt_cfr.k_games_per_iter == 212
+        assert validated.prt_cfr.reservoir_capacity_scale_with_k is False
+        assert validated.prt_cfr.resolve_buffer_capacity() == 2_000_000
+
+
+class TestReservoirCapacityScalingEnabled:
+    @pytest.mark.parametrize(
+        "k_games_per_iter, expected",
+        [
+            (80, 2_000_000),  # k == reference_k: no-op
+            (212, 5_300_000),  # X2R C0's k: 2_000_000 * 212 / 80
+            (40, 1_000_000),  # half the reference k
+        ],
+    )
+    def test_buffer_capacity_scales_linearly_with_k(self, k_games_per_iter, expected):
+        _, PRTCFRConfig = _get_real_config_classes()
+        cfg = PRTCFRConfig(
+            reservoir_capacity_scale_with_k=True,
+            reservoir_capacity_reference_k=80,
+            k_games_per_iter=k_games_per_iter,
+        )
+        assert cfg.resolve_buffer_capacity() == expected
+
+    @pytest.mark.parametrize(
+        "k_games_per_iter, expected",
+        [
+            (8192, 20_000_000),  # k == reference_k: no-op
+            (16384, 40_000_000),  # 2x the reference k
+        ],
+    )
+    def test_reservoir_capacity_scales_linearly_with_k(self, k_games_per_iter, expected):
+        _, PRTCFRConfig = _get_real_config_classes()
+        cfg = PRTCFRConfig(
+            reservoir_capacity_scale_with_k=True,
+            reservoir_capacity_reference_k=8192,
+            k_games_per_iter=k_games_per_iter,
+        )
+        assert cfg.resolve_reservoir_capacity() == expected
+
+    def test_nonpositive_reference_k_raises_when_scaling_enabled(self):
+        _, PRTCFRConfig = _get_real_config_classes()
+        cfg = PRTCFRConfig(
+            reservoir_capacity_scale_with_k=True,
+            reservoir_capacity_reference_k=0,
+        )
+        with pytest.raises(ValueError, match="reservoir_capacity_reference_k"):
+            cfg.resolve_buffer_capacity()
+
+    def test_x2r_c0_config_with_scaling_opted_in_matches_ticket_math(self):
+        """Overriding the shipped C0 config with the new opt-in field
+        reproduces the ticket's own worked example (80 * 2.65 = 212 samples
+        knob) as a capacity scale: 2_000_000 * 212 / 80 = 5_300_000."""
+        real_mod = _get_real_config_module()
+        cfr_root = Path(__file__).resolve().parent.parent
+        raw = real_mod.resolve_config_yaml(str(cfr_root / "config/x2r/c0.yaml"))
+        raw.setdefault("prt_cfr", {})["reservoir_capacity_scale_with_k"] = True
+        validated = real_mod.Config.model_validate(raw)
+        assert validated.prt_cfr.resolve_buffer_capacity() == 5_300_000
+
+
+class TestReservoirCapacityScalingSchemaAndLogging:
+    def test_fields_documented_in_json_schema(self):
+        real_mod = _get_real_config_module()
+        schema = real_mod.Config.model_json_schema()
+        props = schema["$defs"]["PRTCFRConfig"]["properties"]
+        for field in (
+            "reservoir_capacity_scale_with_k",
+            "reservoir_capacity_reference_k",
+        ):
+            assert field in props
+            assert props[field].get("description"), f"{field} missing a description"
+
+    def test_resolver_function_importable_and_matches_method(self):
+        """resolve_prtcfr_reservoir_capacity is the shared primitive both
+        resolve_buffer_capacity()/resolve_reservoir_capacity() and the
+        trainers (via getattr-based duck typing) call."""
+        real_mod = _get_real_config_module()
+        _, PRTCFRConfig = _get_real_config_classes()
+        cfg = PRTCFRConfig(
+            reservoir_capacity_scale_with_k=True,
+            reservoir_capacity_reference_k=80,
+            k_games_per_iter=212,
+            buffer_capacity=2_000_000,
+        )
+        direct = real_mod.resolve_prtcfr_reservoir_capacity(
+            static_capacity=cfg.buffer_capacity,
+            k_games_per_iter=cfg.k_games_per_iter,
+            scale_with_k=cfg.reservoir_capacity_scale_with_k,
+            reference_k=cfg.reservoir_capacity_reference_k,
+        )
+        assert direct == cfg.resolve_buffer_capacity() == 5_300_000
+
+    def test_tiny_trainer_logs_resolved_capacity_at_startup(self, tmp_path, caplog):
+        from src.cfr.prtcfr_trainer import PRTCFRTinyTrainer
+        from tools.tiny_solver import build_tree
+
+        # PRTCFRTinyTrainer reads config via getattr() duck typing and never
+        # imports src.config, so it collects fine under the conftest stub.
+        # The stub's PRTCFRConfig replica does not carry the new
+        # reservoir_capacity_scale_with_k/reference_k fields, though, so the
+        # config instance itself must be the real PRTCFRConfig for those
+        # kwargs to stick (rather than being silently ignored by extra="ignore").
+        _, PRTCFRConfig = _get_real_config_classes()
+        real_mod = _get_real_config_module()
+        base = real_mod.load_config("config/tiny_2card_plateau.yaml")
+        root, _isets, _n, aborted = build_tree(
+            base,
+            n_deals=1,
+            seed0=0,
+            max_nodes_per_deal=200_000,
+            enumerate_draws=True,
+            perfect_recall=True,
+            tokenize=True,
+            seq_cap=256,
+        )
+        assert aborted == 0
+        cfg = PRTCFRConfig(
+            m_rollouts=1,
+            k_games_per_iter=160,
+            iterations=1,
+            train_steps_per_iter=1,
+            batch_size=32,
+            device="cpu",
+            reservoir_capacity_scale_with_k=True,
+            reservoir_capacity_reference_k=80,
+            buffer_capacity=2_000_000,
+        )
+        with caplog.at_level(logging.INFO, logger="src.cfr.prtcfr_trainer"):
+            trainer = PRTCFRTinyTrainer(root, cfg, str(tmp_path / "snaps"))
+        assert trainer.buffer_capacity == 4_000_000
+        assert any(
+            "reservoir capacity resolved" in r.message and "4000000" in r.message
+            for r in caplog.records
+        )
