@@ -1,17 +1,8 @@
 package engine
 
 import (
-	"sort"
 	"testing"
 )
-
-// sortedActions returns a sorted copy of the action slice for deterministic comparison.
-func sortedActions(actions []uint16) []uint16 {
-	cp := make([]uint16, len(actions))
-	copy(cp, actions)
-	sort.Slice(cp, func(i, j int) bool { return cp[i] < cp[j] })
-	return cp
-}
 
 // containsAction returns true if action is in the slice.
 func containsAction(actions []uint16, action uint16) bool {

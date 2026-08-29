@@ -513,9 +513,11 @@ func TestCircuitFullTournament(t *testing.T) {
 		t.Errorf("expected player 4 in last place, got %d", standings[3].PlayerID)
 	}
 
-	// Player 1: 12 * (5 - 5) = 0 cumulative (5 score + -5 subsidy each round)
+	// Player 1: 12 rounds, each netting raw score 5 plus the -5 first-place
+	// aggression subsidy (FFA-4 schedule, no Cambia caller declared) = 0 cumulative.
+	const p1FirstPlaceSubsidy = -5
 	p1 := standings[0]
-	wantCumulative := 12 * (5 - 5)
+	wantCumulative := 12 * (baseScores[1] + p1FirstPlaceSubsidy)
 	if p1.CumulativeScore != wantCumulative {
 		t.Errorf("player 1 cumulative: want %d, got %d", wantCumulative, p1.CumulativeScore)
 	}

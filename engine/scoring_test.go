@@ -12,15 +12,11 @@ func makeTerminalGame(p0Hand []Card, p1Hand []Card, cambiaCaller int8) GameState
 
 	// Set player 0 hand.
 	gs.Players[0].HandLen = uint8(len(p0Hand))
-	for i, c := range p0Hand {
-		gs.Players[0].Hand[i] = c
-	}
+	copy(gs.Players[0].Hand[:], p0Hand)
 
 	// Set player 1 hand.
 	gs.Players[1].HandLen = uint8(len(p1Hand))
-	for i, c := range p1Hand {
-		gs.Players[1].Hand[i] = c
-	}
+	copy(gs.Players[1].Hand[:], p1Hand)
 
 	gs.CambiaCaller = cambiaCaller
 	gs.Flags |= FlagGameOver
