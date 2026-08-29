@@ -10,17 +10,11 @@ import HostBadge from '@/components/training/HostBadge';
 import SyncStatus from '@/components/training/SyncStatus';
 import CreateRunModal from '@/components/training/CreateRunModal';
 import ResourceMonitor from '@/components/training/ResourceMonitor';
+import Badge from '@/components/ds/core/Badge';
+import { statusTone } from '@/utils/statusTone';
 import type { Run, ProcessStatus } from '@/types/training';
 
 const STATUS_OPTIONS = ['', 'running', 'stopped', 'completed', 'failed', 'created'];
-
-const STATUS_BADGE: Record<string, string> = {
-	running: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200',
-	completed: 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200',
-	stopped: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
-	failed: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
-	created: 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300',
-};
 
 const PROCESS_STATUSES: ProcessStatus[] = [
 	'created', 'starting', 'running', 'stopping', 'stopped', 'crashed',
@@ -40,12 +34,7 @@ function toProcessStatus(status: string): ProcessStatus | null {
 }
 
 function statusBadge(status: string) {
-	const cls = STATUS_BADGE[status] ?? STATUS_BADGE.created;
-	return (
-		<span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${cls}`}>
-			{status}
-		</span>
-	);
+	return <Badge tone={statusTone(status)} dot>{status}</Badge>;
 }
 
 const TrainingPage: React.FC = () => {
