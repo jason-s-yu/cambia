@@ -36,9 +36,14 @@ export interface ModalFocusables<T> {
  * Resolves where focus lands when a dialog opens.
  *
  * The default is the first control in the action row that is not destructive,
- * then the first body control, then the panel. A named target that is not
+ * then the first body control, then the panel. A named control that is not
  * present falls back to that same chain rather than dropping focus on the body
  * of the page.
+ *
+ * 'panel' is the one target outside that rule: it does not name a control, it
+ * declines all of them, so with no panel to hold focus the answer is nothing.
+ * Running it through the chain armed the confirm action the caller had just
+ * asked not to arm (cambia-971).
  *
  * `isDestructive` reports whether a control performs a destructive action; the
  * DOM caller answers it from the `data-destructive` marker the danger button
@@ -50,10 +55,10 @@ export function pickInitialFocus<T>(
   isDestructive: (el: T) => boolean = () => false
 ): T | null {
   const { footer, body, panel } = els;
+  if (target === 'panel') return panel;
   let named: T | undefined;
   if (target === 'confirm') named = footer[footer.length - 1];
   else if (target === 'dismiss') named = footer[0];
   else if (target === 'body') named = body[0];
-  else if (target === 'panel') named = panel ?? undefined;
   return named ?? footer.find((el) => !isDestructive(el)) ?? body[0] ?? panel;
 }
