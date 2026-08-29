@@ -122,10 +122,12 @@ func (g *CambiaGame) getCurrentObfuscatedGameState(forUser uuid.UUID) ObfGameSta
 		GameOver:      g.Engine.IsTerminal() || g.GameOver,
 		TurnID:        int(g.Engine.TurnNumber),
 		StockpileSize: int(g.Engine.StockLen),
-		DiscardSize:   int(g.Engine.DiscardLen),
-		CambiaCalled:  g.Engine.IsCambiaCalled(),
-		HouseRules:    g.HouseRules,
-		ServerNow:     time.Now().UnixMilli(),
+		// Both piles are reported as the table sees them: discardSize counts the ability card that
+		// has been announced onto the pile but not yet applied to the engine (cambia-1033).
+		DiscardSize:  g.discardSize(),
+		CambiaCalled: g.Engine.IsCambiaCalled(),
+		HouseRules:   g.HouseRules,
+		ServerNow:    time.Now().UnixMilli(),
 	}
 
 	// Turn deadline: only advertised while a turn timer is actually armed (TurnDeadline is the
@@ -180,19 +182,18 @@ func (g *CambiaGame) getCurrentObfuscatedGameState(forUser uuid.UUID) ObfGameSta
 		}
 	}
 
-	// Discard top card (always public knowledge).
-	if g.Engine.DiscardLen > 0 {
-		topIdx := g.Engine.DiscardLen - 1
-		topCard := g.Engine.DiscardPile[topIdx]
-		topUUID := g.CardTracker.DiscardUUIDs[topIdx]
-		if topUUID != uuid.Nil {
-			obf.DiscardTop = &ObfCard{
-				ID:    topUUID,
-				Known: true,
-				Rank:  engineRankToString(topCard.Rank()),
-				Suit:  engineSuitToString(topCard.Suit()),
-				Value: int(topCard.Value()),
-			}
+	// Discard top card (always public knowledge). Read through the same effective view the snap path
+	// judges against: while an ability discard is buffered, the top is the card every client was
+	// shown, not the one it covers. A snapshot naming the covered card contradicted the pile the
+	// clients had already rendered, and a client that resynced mid-window (reconnect, tab refresh)
+	// adopted it (cambia-1033).
+	if topCard, topUUID, ok := g.effectiveDiscardTop(); ok && topUUID != uuid.Nil {
+		obf.DiscardTop = &ObfCard{
+			ID:    topUUID,
+			Known: true,
+			Rank:  engineRankToString(topCard.Rank()),
+			Suit:  engineSuitToString(topCard.Suit()),
+			Value: int(topCard.Value()),
 		}
 	}
 
@@ -245,9 +246,14 @@ func (g *CambiaGame) getCurrentObfuscatedGameState(forUser uuid.UUID) ObfGameSta
 					ps.RevealedHand[j] = oc
 				}
 
-				// Drawn card (pending discard in engine).
+				// Drawn card (pending discard in engine). An ability card whose discard is still
+				// buffered stays pending in the engine, but the table has already been told it was
+				// discarded and this snapshot reports it as the pile's top: naming it here as well
+				// showed the same card twice, and the client reads a drawn card as "discard or
+				// replace", which put the discarder back on that prompt instead of the ability one it
+				// actually owes (web/src/stores/gameStore.ts, private_sync_state; cambia-1033).
 				if g.Engine.Pending.Type == engine.PendingDiscard &&
-					g.Engine.Pending.PlayerID == engineIdx {
+					g.Engine.Pending.PlayerID == engineIdx && !g.pendingDiscardAbilityChoice {
 					drawnCard := engine.Card(g.Engine.Pending.Data[0])
 					drawnUUID := g.CardTracker.Players[engineIdx].DrawnCardUUID
 					if drawnUUID != uuid.Nil {

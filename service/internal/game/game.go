@@ -161,9 +161,19 @@ type CambiaGame struct {
 	PlayerToEngine map[uuid.UUID]uint8          // Service player UUID -> engine index.
 	EngineToPlayer [engine.MaxPlayers]uuid.UUID // Engine index -> service player UUID.
 
-	// Buffered discard flow (ability-choice state).
+	// Buffered discard flow (ability-choice state). See buffered_discard.go for the window these
+	// four fields describe: the card is announced to every client immediately and only reaches the
+	// engine once the ability is resolved or skipped.
 	pendingDiscardAbilityChoice bool
 	pendingDiscardCardID        uuid.UUID
+	// pendingDiscardWindowSnaps counts the cards snapped onto the discard pile while the announced
+	// discard was still buffered, so the buffered card can be sunk back underneath them when it
+	// applies (cambia-1033).
+	pendingDiscardWindowSnaps int
+	// applyingAnnouncedDiscard is set only while that buffered action is being applied. It marks the
+	// one discard whose card the table already knows about, which is what keeps the apply from
+	// announcing it a second time and what triggers the rotation above.
+	applyingAnnouncedDiscard bool
 
 	// Turn Management
 	TurnID       int           // Increments each turn, useful for state synchronization and checks.
