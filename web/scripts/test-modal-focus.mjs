@@ -54,7 +54,12 @@ test('body opens on the first field, panel on nothing', () => {
     assert.equal(pickInitialFocus('panel', standard, isDestructive), 'panel');
 });
 
-test('a named target that is not there falls back to the default chain', () => {
+test('panel with no panel arms nothing rather than falling through to a control', () => {
+    assert.equal(pickInitialFocus('panel', { footer: ['Cancel', 'Create'], body: ['Name'], panel: null }, isDestructive), null);
+    assert.equal(pickInitialFocus('panel', { footer: [], body: [], panel: null }, isDestructive), null);
+});
+
+test('a named control that is not there falls back to the default chain', () => {
     const noFooter = { footer: [], body: ['Name'], panel: 'panel' };
     assert.equal(pickInitialFocus('confirm', noFooter, isDestructive), 'Name');
     assert.equal(pickInitialFocus('dismiss', noFooter, isDestructive), 'Name');

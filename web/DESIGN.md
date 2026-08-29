@@ -114,7 +114,9 @@ The lift stops at those three fills. Light gold that carries no text stays on th
 
 Every text tier paired with a ground by name above holds AA (4.5:1) in both themes, measured with the WCAG 2.1 relative-luminance formula and, for translucent tiers, on the composited color. The exception is the two disabled pairs, which hold 3:1: WCAG exempts inactive controls, but a disabled label is still read ("Signing in", "Creating"), so the house floor keeps it legible without letting it compete with live text.
 
-`npm run check-tokens` measures the pairs and fails under the floor, and CI runs it after the web build, so a token change that breaks one is visible before merge. The pairs it holds: `--text-on-gold` on each of `--accent-gold`, `--accent-gold-hover`, `--accent-gold-active`; `--text-on-danger` on `--accent-danger` and `--accent-danger-hover`; `--text-on-green` on `--accent-green`; `--text-primary`, `--text-secondary` and `--accent-gold-text` on `--surface-1`; `--text-tertiary` on `--surface-1`, `--surface-2` and `--surface-inset`; `--text-on-green` and `--text-on-felt-muted` on `--surface-felt`; `--text-disabled` on `--surface-disabled` and `--surface-2`; `--accent-gold-text` on `--accent-gold-soft` over `--surface-1` and over `--surface-2`, and `--text-primary` on `--accent-gold-soft` over `--surface-1` (the `::selection` fill); `--text-primary`, `--text-secondary` and `--accent-gold-text` on `--surface-selected` and on `--interactive-selected` over `--surface-1`. `--accent-green-hover` is out: nothing draws text on it.
+`npm run check-tokens` measures the pairs and fails under the floor, and CI runs it after the web build, so a token change that breaks one is visible before merge. The pairs it holds: `--text-on-gold` on each of `--accent-gold`, `--accent-gold-hover`, `--accent-gold-active`; `--text-on-danger` on `--accent-danger` and `--accent-danger-hover`; `--text-on-green` on `--accent-green`; `--text-primary`, `--text-secondary` and `--accent-gold-text` on `--surface-1`; `--text-tertiary` on `--surface-1`, `--surface-2` and `--surface-inset`; `--text-on-green` and `--text-on-felt-muted` on `--surface-felt`; `--text-disabled` on `--surface-disabled` and `--surface-2`; `--accent-gold-text` on `--accent-gold-soft` over `--surface-1` and over `--surface-2`, and `--text-primary` on `--accent-gold-soft` over `--surface-1` (the `::selection` fill); `--text-primary`, `--text-secondary` and `--accent-gold-text` on `--surface-selected` and on `--interactive-selected` over `--surface-1`; each status foreground on its own `-bg` tint over `--surface-1` and over `--surface-2`, `--status-success` and `--status-danger` on `--surface-selected` and on `--surface-inset`, and `--text-secondary` on `--surface-2` for the one status pill with a neutral fill. `--accent-green-hover` is out: nothing draws text on it.
+
+The status grounds are enumerated the same way the tertiary tier's are. A tone's own tint pulls the ground toward the tone, so the tint pair over a surface bounds the same tone drawn flat on it, which covers the opaque `--surface-1` chip on the felt. The flat grounds outside that bound are `--surface-selected`, the lightest in dark, and `--surface-inset`, the darkest in light and the score pill's fill; the resting `--surface-2` seat sits inside that span. The floor is 4.5 and not the 3:1 large-text one: the pill label is bold, but bold counts as large only at 18.66px.
 
 A tinted fill is a ground like any other: the pair names the opaque surface the tint is painted on (`over`), the gate flattens the tint onto it, then flattens the text onto the result. A translucent ground with no `over` named stays a hard failure, so a pair cannot claim a measurement it has no ground for.
 
@@ -128,10 +130,14 @@ Each status carries three tokens: the foreground, a tinted `-bg`, and a `-border
 
 |Token family|Dark foreground|Light foreground|Use|
 |-|-|-|-|
-|`--status-success-*`|`#35a271`|`#1a6d49`|Running, succeeded, connected, positive delta.|
-|`--status-danger-*`|`#dd5a52`|`#a92c26`|Failed, crashed, error text, negative delta.|
-|`--status-warning-*`|`#e09a30`|`#a45f0c`|Starting, stopping, degraded.|
+|`--status-success-*`|`#62c096`|`#1a6d49`|Running, succeeded, connected, positive delta.|
+|`--status-danger-*`|`#e88a83`|`#a92c26`|Failed, crashed, error text, negative delta.|
+|`--status-warning-*`|`#e09a30`|`#8a4f0a`|Starting, stopping, degraded.|
 |`--status-info-*`|`#6aa5cf`|`#2a5f8f`|Created, queued, neutral notice.|
+
+The `-bg` tint and the `-border` hairline carry the rgb of the foreground above them, so a badge is one hue at three strengths.
+
+A status tone is read as text at 11-13px inside its own tint, and the tint lifts the ground it is measured against, which is where three of these fell under AA: dark success measured 4.14:1 on the badge tint over `--surface-2`, dark danger 4.13:1 and 3.76:1 over `--surface-1` and `--surface-2`, and light warning 4.05:1 and 4.25:1. The same two dark tones sat at 3.97:1 and 3.43:1 as the `PlayerSeat` state line on `--surface-selected`, the lightest ground in dark. Success and danger moved one ramp step lighter and warning one step darker, to 5.62, 5.16 and 5.24 at their worst ground, 5.76 and 5.09 on the seat. `--red-300` and `--amber-700` are new ramp steps: red stopped at the 400 that was the danger fill, and amber is the one status hue whose 600 step is light enough to fail on paper.
 
 ### Cards and tiers
 

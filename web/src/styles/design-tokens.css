@@ -75,8 +75,10 @@
   --red-600: #a92c26;
   --red-500: #c4362f;
   --red-400: #dd5a52;
+  --red-300: #e88a83;
 
   /* amber: warning. Held apart from gold so status never reads as a CTA. */
+  --amber-700: #8a4f0a;
   --amber-600: #a45f0c;
   --amber-500: #c47512;
   --amber-400: #e09a30;
@@ -169,13 +171,24 @@
      DL-8 review F1). */
   --accent-danger-hover: var(--red-600);
 
-  /* Status */
-  --status-success: var(--green-400);
-  --status-success-bg: rgba(53, 162, 113, 0.14);
-  --status-success-border: rgba(53, 162, 113, 0.38);
-  --status-danger: var(--red-400);
-  --status-danger-bg: rgba(221, 90, 82, 0.14);
-  --status-danger-border: rgba(221, 90, 82, 0.38);
+  /* Status. Each tone's tint and hairline carry the rgb of its own foreground,
+     so a badge is one hue at three strengths.
+
+     Success and danger are one ramp step lighter than the fill colors they
+     started on. The tone is read as text at 11-13px inside its own tint, and
+     the tint lifts the ground it is measured against: --green-400 came out at
+     4.14:1 on the badge tint over --surface-2 and --red-400 at 3.76:1, both
+     under AA, and on --surface-selected, the lightest ground in dark, the
+     PlayerSeat state lines sat at 3.97:1 and 3.43:1. The steps here measure
+     5.62 and 5.16 on the tint, 5.76 and 5.09 on the seat (cambia-971).
+     --red-300 is new: the ramp stopped at 400, which was the danger fill.
+     Warning and info are unchanged; they already cleared AA on both grounds. */
+  --status-success: var(--green-300);
+  --status-success-bg: rgba(98, 192, 150, 0.14);
+  --status-success-border: rgba(98, 192, 150, 0.38);
+  --status-danger: var(--red-300);
+  --status-danger-bg: rgba(232, 138, 131, 0.14);
+  --status-danger-border: rgba(232, 138, 131, 0.38);
   --status-warning: var(--amber-400);
   --status-warning-bg: rgba(224, 154, 48, 0.14);
   --status-warning-border: rgba(224, 154, 48, 0.38);
@@ -286,9 +299,14 @@
   --status-danger: var(--red-600);
   --status-danger-bg: rgba(169, 44, 38, 0.1);
   --status-danger-border: rgba(169, 44, 38, 0.3);
-  --status-warning: var(--amber-600);
-  --status-warning-bg: rgba(164, 95, 12, 0.12);
-  --status-warning-border: rgba(164, 95, 12, 0.3);
+  /* One ramp step darker than the other light tones, which is where the amber
+     family runs out: --amber-600 measured 4.05:1 on its own badge tint over
+     --surface-1 and 3.96:1 on --surface-inset, the pill ground, against 4.5.
+     Amber is the one status hue whose 600 step is that light, so --amber-700 is
+     new rather than a reuse. 5.24 and 5.21 now (cambia-971). */
+  --status-warning: var(--amber-700);
+  --status-warning-bg: rgba(138, 79, 10, 0.12);
+  --status-warning-border: rgba(138, 79, 10, 0.3);
   --status-info: var(--blue-600);
   --status-info-bg: rgba(42, 95, 143, 0.1);
   --status-info-border: rgba(42, 95, 143, 0.3);

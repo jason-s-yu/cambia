@@ -62,6 +62,9 @@ jobs:
 
       - run: npm ci
       - run: npm run lint
+      # The unit tests (node --test) read src/ directly, so they run before the
+      # build and fail on their own line rather than inside it (cambia-971).
+      - run: npm test
       - run: npm run build
       # Reads dist/, so it has to follow the build (cambia-914, DL-8 review F2).
       - run: npm run check-tokens
