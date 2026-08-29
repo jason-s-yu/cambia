@@ -716,6 +716,18 @@ func (h *Hub) handleLobbyMsg(msg ClientMsg) {
 			return
 		}
 		h.Lobby.Mu.Lock()
+		// A ranked or matchmade lobby has its rules fixed by the queue it entered, not by its
+		// host: the queue config is what the matchmaker used to pair the players and what the
+		// game inherits at creation (NewCambiaGameFromLobby), so a mid-search or post-match rule
+		// edit would leave the two sides of the match disagreeing about what they agreed to play
+		// (cambia-966). Type and Mode are only ever assigned at creation (CreateLobbyHandler), so
+		// this is a stable read for as long as the lobby exists.
+		locked := h.Lobby.Type == "matchmaking" || h.Lobby.Mode == "ranked"
+		if locked {
+			h.Lobby.Mu.Unlock()
+			conn.SendEnvelope(h.errEnvelope("house rules are locked for a ranked matchmaking lobby"))
+			return
+		}
 		err := h.Lobby.UpdateUnsafe(payload.Rules)
 		h.Lobby.Mu.Unlock()
 		if err != nil {

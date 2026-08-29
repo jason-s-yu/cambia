@@ -191,6 +191,18 @@ export const useCurrentLobbyStore = create<CurrentLobbyState>((set, get) => ({
 			return;
 		}
 
+		// A match_found notice can name a lobby other than the one search was running from: the
+		// party that did not host the match (cambia-933) keeps searching from lobby A while the
+		// match is played in lobby B, so matchState.lobbyId is B the moment the notice arrives,
+		// still pointed at A as currentLobbyId. DashboardPage then navigates to B, LobbyPage's
+		// URL-sync effect calls this with B, and A !== B unconditionally wiped matchState right
+		// here before LobbyPage ever read it - the queue/round info the WS just delivered was
+		// gone on arrival for that party every time (cambia-966). Carrying it forward exactly
+		// when the switch lands on the lobby it already names keeps a genuine lobby change (one
+		// with no bearing on the current match) resetting it as before.
+		const matchState = get().matchState;
+		const carriedMatchState = matchState && matchState.lobbyId === lobbyId ? matchState : null;
+
 		set({
 			currentLobbyId: lobbyId,
 			lobbyDetails: null,
@@ -201,7 +213,7 @@ export const useCurrentLobbyStore = create<CurrentLobbyState>((set, get) => ({
 			phase: 'open' as LobbyPhase,
 			countdownStartTime: null,
 			countdownDuration: null,
-			matchState: null
+			matchState: carriedMatchState
 		});
 	},
 

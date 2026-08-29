@@ -158,8 +158,15 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
       !jsonEqual(lobbySettings, effective);
   }, [houseRules, circuit, lobbySettings, currentSettings]);
 
+  // A ranked or matchmade lobby has its rules fixed by the queue it entered: the service
+  // rejects update_rules for one regardless (hub.go), so this only keeps the host from editing
+  // a control that would 400 on Save (cambia-966). mode can be briefly stale right after the
+  // WS connects (buildLobbySnapshot does not send it outside a multi-round match_state), so
+  // type carries the check on its own - every ranked queue today is also a matchmaking lobby.
+  const locked = currentSettings.type === 'matchmaking' || currentSettings.mode === 'ranked';
+
   const save = () => {
-    if (!isHost) return;
+    if (!isHost || locked) return;
     sendMessage({
       type: 'update_rules',
       body: { rules: { houseRules, circuit, settings: lobbySettings } }
@@ -168,7 +175,7 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
     setTimeout(() => setSaveStatus('idle'), 2000);
   };
 
-  const ro = !isHost;
+  const ro = !isHost || locked;
   const num = (v: number | undefined) => (v === undefined || v === null ? '' : String(v));
 
   // Numeric house rules are range-checked server-side (internal/game/rules.go) and an
@@ -275,12 +282,14 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
             label='Auto-start when all ready'
           />
         )}
-        {isHost ? (
+        {isHost && !locked ? (
           <Button variant='primary' size='sm' disabled={!hasChanges} onClick={save}>
             {saveStatus === 'saved' ? 'Saved' : 'Save rules'}
           </Button>
         ) : (
-          <span style={{ fontSize: 'var(--ds-text-sm)', color: 'var(--text-tertiary)' }}>Host sets the rules</span>
+          <span style={{ fontSize: 'var(--ds-text-sm)', color: 'var(--text-tertiary)' }}>
+            {isHost ? 'Rules are locked for ranked play' : 'Host sets the rules'}
+          </span>
         )}
       </div>
     </Panel>
