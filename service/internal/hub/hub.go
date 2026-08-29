@@ -781,7 +781,7 @@ func (h *Hub) handleGameMsg(msg ClientMsg) {
 
 	switch msg.Type {
 	case "action_draw_stockpile", "action_draw_discardpile",
-		"action_discard", "action_replace", "action_cambia", "action_snap":
+		"action_discard", "action_replace", "action_cambia", "action_snap", "action_snap_move":
 		gameAction := models.GameAction{
 			ActionType: msg.Type,
 			Payload:    make(map[string]interface{}),

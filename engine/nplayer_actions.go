@@ -232,13 +232,9 @@ func (g *GameState) nplayerSnapOpponentMove(ownIdx uint8) error {
 		return fmt.Errorf("nplayerSnapOpponentMove: opponent hand is full (%d)", oppHandLen)
 	}
 
-	card := g.removeCardFromHand(snapperIdx, ownIdx)
-
-	for i := oppHandLen; i > slotIdx; i-- {
-		g.Players[opponent].Hand[i] = g.Players[opponent].Hand[i-1]
+	if !g.SnapMoveCard(snapperIdx, ownIdx, opponent, slotIdx) {
+		return fmt.Errorf("nplayerSnapOpponentMove: cannot move card %d from player %d into player %d slot %d", ownIdx, snapperIdx, opponent, slotIdx)
 	}
-	g.Players[opponent].Hand[slotIdx] = card
-	g.Players[opponent].HandLen++
 
 	g.Pending = PendingAction{}
 

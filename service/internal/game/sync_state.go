@@ -52,6 +52,21 @@ type ObfSpecialActionState struct {
 	CardRank string    `json:"cardRank"`
 }
 
+// ObfSnapMoveState is one outstanding snap fill (RULES.md 5, cambia-936): the snapper owes a card
+// into VictimID's hand at Slot. Everything here was already public the moment the snap resolved
+// (player_snap_success names the victim and the slot), and which card pays it is not decided yet,
+// so the projection leaks nothing. It is serialized so a client that resyncs mid-obligation - a
+// reconnect, a tab refresh, a repair after a dropped frame - restores the prompt instead of sitting
+// on a table that refuses its every action until the deadline fires.
+type ObfSnapMoveState struct {
+	SnapperID uuid.UUID `json:"snapperId"`
+	VictimID  uuid.UUID `json:"victimId"`
+	Slot      int       `json:"slot"`
+	// Deadline is the epoch-ms time the server fills for the snapper, omitted when the table plays
+	// without a turn timer and nothing is armed.
+	Deadline *int64 `json:"deadline,omitempty"`
+}
+
 // ObfGameState represents the overall game state, obfuscated for a specific observer.
 type ObfGameState struct {
 	GameID          uuid.UUID        `json:"gameId"`
@@ -73,6 +88,10 @@ type ObfGameState struct {
 	// (cambia-763 F1: previously never serialized, so reconnecting mid-action left the client
 	// unable to restore its pendingAction state).
 	SpecialAction *ObfSpecialActionState `json:"specialAction,omitempty"`
+	// SnapMoves lists every outstanding snap fill, one per snapper who owes one. A list rather than
+	// a single entry because two players can each owe one off the same discard when snapRace is off
+	// (cambia-936).
+	SnapMoves []ObfSnapMoveState `json:"snapMoves,omitempty"`
 	// TurnDeadline is the absolute server-clock epoch-ms time the current turn's timer expires.
 	// Omitted (null) when no turn timer is configured/active, in which case the client falls back
 	// to an informational (non-counting-down) render.
@@ -137,6 +156,27 @@ func (g *CambiaGame) getCurrentObfuscatedGameState(forUser uuid.UUID) ObfGameSta
 			Active:   true,
 			PlayerID: g.SpecialAction.PlayerID,
 			CardRank: g.SpecialAction.CardRank,
+		}
+	}
+
+	// Outstanding snap fills (cambia-936). Walked in seating order rather than map order so the
+	// list is stable between snapshots.
+	if len(g.snapFills) > 0 {
+		for _, pl := range g.Players {
+			fill, owed := g.snapFills[pl.ID]
+			if !owed {
+				continue
+			}
+			entry := ObfSnapMoveState{
+				SnapperID: fill.SnapperID,
+				VictimID:  fill.VictimID,
+				Slot:      int(fill.Slot),
+			}
+			if !fill.Deadline.IsZero() {
+				deadlineMs := fill.Deadline.UnixMilli()
+				entry.Deadline = &deadlineMs
+			}
+			obf.SnapMoves = append(obf.SnapMoves, entry)
 		}
 	}
 

@@ -107,6 +107,22 @@ test('snap notifies when the snapped card is no longer in play', () => {
 
 // --- Draw / discard / replace ------------------------------------------------------------
 
+// --- The snap fill (RULES.md 5, cambia-936) ------------------------------------------------
+
+test('the snap fill resends while the card is still owed', () => {
+    // The fill is owed out of turn and settles on the server's own deadline, so the question is
+    // not whose turn it is: it is whether the obligation still stands.
+    const rec = record('action_snap_move', { cardRefs: [{ id: 'my-0', idx: 0 }], ctx: ctx({ owesSnapMove: true }) });
+    assert.equal(decideResend(rec, ctx({ owesSnapMove: true, currentPlayerId: OPP, turnId: 4 }), 11), 'resend');
+});
+
+test('the snap fill notifies once the server has settled it', () => {
+    // The deadline pays the card for a snapper who never answers (snap_fill.go autoSnapFill), so
+    // a frame resent after that would give away a second card.
+    const rec = record('action_snap_move', { cardRefs: [{ id: 'my-0', idx: 0 }], ctx: ctx({ owesSnapMove: true }) });
+    assert.equal(decideResend(rec, ctx({ owesSnapMove: false }), 11), 'notify');
+});
+
 test('draw resends only on the same turn with nothing drawn yet', () => {
     const rec = record('action_draw_stockpile');
     assert.equal(decideResend(rec, ctx(), 11), 'resend');
@@ -254,6 +270,11 @@ test('tableContext reads the snapshot the way the table does', () => {
     assert.equal(c.slots[`${OPP}:opp-0`], 7);
     assert.equal(c.drawnCardId, 'drawn-1');
     assert.equal(c.specialRank, 'K');
+    assert.equal(c.owesSnapMove, false);
+    // An outstanding fill of our own is what makes an action_snap_move frame still meaningful; one
+    // owed by someone else is not ours to pay (cambia-936).
+    assert.equal(tableContext({ ...gs, snapMoves: [{ snapperId: SELF, victimId: OPP, slot: 1 }] }, null, 'in_game', SELF).owesSnapMove, true);
+    assert.equal(tableContext({ ...gs, snapMoves: [{ snapperId: OPP, victimId: SELF, slot: 1 }] }, null, 'in_game', SELF).owesSnapMove, false);
     assert.deepEqual(c.cardIds.sort(), ['discard-7', 'drawn-1', 'my-0', 'my-1', 'opp-0']);
 
     // An opponent's pending special is not ours to resend against.
@@ -394,6 +415,13 @@ test('an accepted chat is acked instead of being sent twice', () => {
     outbox = ackOutbound(outbox, 'chat', { userID: SELF, msg: 'hi' }, SELF);
     assert.deepEqual(outbox, []);
     assert.deepEqual(resolveOutbox(outbox, ctx({ phase: 'open' }), 11, 1000).resend, []);
+});
+
+test('the fill event acks the fill frame, whoever chose the card', () => {
+    // The deadline settles it with the same public event (snap_fill.go applySnapFill), so an
+    // outstanding frame is answered either way and must leave the outbox (cambia-936).
+    assert.equal(ackedType('player_snap_move', { user: { id: SELF }, payload: { auto: true } }, SELF), 'action_snap_move');
+    assert.equal(ackedType('player_snap_move', { user: { id: OPP } }, SELF), null);
 });
 
 test('an event from someone else acks nothing', () => {

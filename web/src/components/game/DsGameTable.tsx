@@ -18,6 +18,7 @@ import {
   discardAction,
   replaceAction,
   snapAction,
+  snapMoveAction,
   peekSelfAction,
   peekOtherAction,
   blindSwapAction,
@@ -36,6 +37,8 @@ import {
   selectAbilityReveal,
   selectDroppedActionNonce,
   selectLastSnap,
+  selectPendingSnapMove,
+  selectLastSnapMove,
   selectLastPresence
 } from '@/stores/gameStore';
 import { useAuthStore } from '@/stores/authStore';
@@ -161,6 +164,25 @@ function useTableNotice(gs: ObfGameState, selfId: string | undefined, names: Map
     setNotice({ id: Date.now(), tone: onYou && !byYou ? 'warning' : 'success', text });
   }, [lastSnap, selfId, names]);
 
+  // The card a snapper owed and has now paid (RULES.md 5, cambia-936). Announced from the event
+  // because the hand deltas alone cannot say it: the victim's hand grows, which every other time
+  // in a game means a penalty draw.
+  const lastSnapMove = useGameStore(selectLastSnapMove);
+  const seenSnapMove = useRef(lastSnapMove?.nonce ?? 0);
+  useEffect(() => {
+    if (!lastSnapMove || lastSnapMove.nonce === seenSnapMove.current) return;
+    seenSnapMove.current = lastSnapMove.nonce;
+    const byYou = lastSnapMove.snapperId === selfId;
+    const toYou = lastSnapMove.victimId === selfId;
+    const snapper = names.get(lastSnapMove.snapperId ?? '') ?? 'Opponent';
+    const victim = names.get(lastSnapMove.victimId ?? '') ?? 'Opponent';
+    const text = byYou
+      ? (lastSnapMove.auto ? `Time up. A card went to ${victim} for the slot you snapped.` : `You gave ${victim} a card for the slot you snapped.`)
+      : toYou ? `${snapper} filled your empty slot with one of their cards.`
+        : `${snapper} filled ${victim}'s empty slot.`;
+    setNotice({ id: Date.now(), tone: byYou ? 'info' : 'success', text });
+  }, [lastSnapMove, selfId, names]);
+
   // A seat that dropped, came back, or ran its window out (cambia-955). The seat chip already
   // carries the state; this is the moment it changed, which is what a player looking at their own
   // cards would otherwise miss. The grace length comes off the event so the notice quotes the
@@ -182,6 +204,10 @@ function useTableNotice(gs: ObfGameState, selfId: string | undefined, names: Map
     }
   }, [lastPresence, selfId, names]);
 
+  // Consumed by the delta pass below, separately from the notice effect above: the two answer
+  // different questions about the same event and neither may swallow it for the other.
+  const seenFill = useRef(lastSnapMove?.nonce ?? 0);
+
   useEffect(() => {
     const snap: PileSnapshot = {
       gameId: gs.gameId,
@@ -193,11 +219,21 @@ function useTableNotice(gs: ObfGameState, selfId: string | undefined, names: Map
     prev.current = snap;
     if (!before || before.gameId !== snap.gameId || !gs.started || gs.gameOver) return;
 
+    // The one hand that grows for a reason other than a penalty draw: the victim of a snap fill,
+    // being paid the card the snapper owed them (cambia-936). Consumed here so the next pass reads
+    // its growth as a penalty again.
+    let filledVictim: string | null = null;
+    if (lastSnapMove && lastSnapMove.nonce !== seenFill.current) {
+      seenFill.current = lastSnapMove.nonce;
+      filledVictim = lastSnapMove.victimId;
+    }
+
     let next: Omit<TableNotice, 'id'> | null = null;
     for (const p of gs.players) {
       const was = before.hands[p.playerId];
       if (was === undefined) continue;
       const you = p.playerId === selfId;
+      if (p.playerId === filledVictim) continue;
       if (p.handSize > was) {
         const who = names.get(p.playerId) ?? 'Opponent';
         // The count comes from the house rule, not from the hand delta: the service fires one
@@ -214,7 +250,7 @@ function useTableNotice(gs: ObfGameState, selfId: string | undefined, names: Map
       next = { tone: 'info', text: 'Discard pile reshuffled into the stock.' };
     }
     if (next) setNotice({ id: Date.now(), ...next });
-  }, [gs, selfId, names]);
+  }, [gs, selfId, names, lastSnapMove]);
 
   useEffect(() => {
     if (!notice) return;
@@ -308,12 +344,17 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   const pendingAction = useGameStore(selectPendingAction);
   const isMyTurn = useGameStore(selectIsSelfTurn);
   const isProcessing = useGameStore(selectIsProcessingAction);
+  // The card this player owes an opponent after snapping one of theirs (RULES.md 5, cambia-936).
+  // Until it is paid the server refuses everything else this client sends, so it locks the felt
+  // the way an in-flight action does and the own hand becomes the only live target.
+  const pendingSnapMove = useGameStore(selectPendingSnapMove);
   // Every interaction gate reads `busy`: an action in flight or a dropped socket both lock
   // the felt. The hook retries a dropped socket by itself, so the notice says so unless it
   // reported that it stopped (cambia-848 F1).
   const offline = !connected;
   const gaveUp = offline && !!connectionError && /stopped|after \d+ retries/i.test(connectionError);
-  const busy = isProcessing || offline;
+  const owesSnapMove = !!pendingSnapMove;
+  const busy = isProcessing || offline || owesSnapMove;
   const displayedDrawnCard = useGameStore(selectDisplayedDrawnCard);
   const serverClockOffsetMs = useGameStore(selectServerClockOffsetMs);
   const abilityReveal = useGameStore(selectAbilityReveal);
@@ -359,6 +400,15 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   // --- Interaction handlers (semantics unchanged from GameBoard) ---
 
   const handlePlayerCardClick = useCallback((card: ObfCard, idx: number) => {
+    // Paying the snap fill outranks every other read of an own-card click: it is the only action
+    // the server will take from this client until the card is given (cambia-936).
+    if (pendingSnapMove) {
+      if (isProcessing || offline) return;
+      sendMessage(snapMoveAction(card.id, idx));
+      setSelectedIdx(null);
+      setSnapTarget(null);
+      return;
+    }
     if (busy) return;
     if (pendingAction === 'discard_replace') {
       sendMessage(replaceAction(card.id, idx));
@@ -385,7 +435,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
       setSnapTarget(null);
       setSelectedIdx((prev) => (prev === idx ? null : idx));
     }
-  }, [busy, pendingAction, specialAction, selectedIdx, sendMessage]);
+  }, [busy, isProcessing, offline, pendingSnapMove, pendingAction, specialAction, selectedIdx, sendMessage]);
 
   const handleDeckClick = useCallback(() => {
     if (!isMyTurn || pendingAction !== null || busy) return;
@@ -549,6 +599,9 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   const opponentSnappable =
     !busy && !roundOver && !preGame && pendingAction === null && allowOpponentSnapping && !!gameState.discardTop;
   const ownTargetable = (() => {
+    // Owing a fill, the own hand is the only live target on the felt: one of these cards has to go
+    // into the slot this player emptied (cambia-936).
+    if (owesSnapMove) return !isProcessing && !offline;
     if (busy || kingConfirm) return false;
     if (pendingAction === 'discard_replace') return true;
     if (specialRank === '7' || specialRank === '8') return true;
@@ -559,7 +612,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   // click lands and aria-pressed is only set where the card is a pick, not a commit
   // (cambia-959). Mirrors handlePlayerCardClick exactly: outside these two the handler
   // returns without touching state, and an inert card is not a button.
-  const ownCommits = !busy && (pendingAction === 'discard_replace' || specialRank === '7' || specialRank === '8');
+  const ownCommits = (owesSnapMove && !isProcessing && !offline) || (!busy && (pendingAction === 'discard_replace' || specialRank === '7' || specialRank === '8'));
   const ownSelects = !busy && (pendingAction === null || ((specialRank === 'J' || specialRank === 'Q' || specialRank === 'K') && selectedIdx === null));
 
   const hint = useMemo(() => {
@@ -570,6 +623,9 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     // during the peek window and the copy must not point at one (cambia-876,
     // DL-4 review F5).
     if (preGame) return 'Memorize your peeked cards. Play starts in a moment.';
+    // The fill is owed before anything else this player can do, and out of turn, so it outranks
+    // both the snap lines and the whose-turn line (cambia-936).
+    if (pendingSnapMove) return `You snapped ${nameOf(pendingSnapMove.victimId)}. Choose one of your cards to fill the slot you emptied.`;
     // A snap selection is actionable out of turn (snapping is), so it outranks
     // the whose-turn line, which otherwise sat above the Snap button that the
     // selection had just enabled (cambia-876, DL-4 review F6).
@@ -589,7 +645,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     if (pendingAction === 'discard_replace') return 'Swap the drawn card into a slot, or discard it.';
     if (gameState.cambiaCalled) return canTakeDiscard ? 'Last turn. Draw from the stock or take the discard.' : 'Last turn. Draw from the stock.';
     return canTakeDiscard ? 'Your turn. Draw from the stock or take the discard.' : 'Your turn. Draw from the stock.';
-  }, [gaveUp, offline, roundOver, phase, preGame, isMyTurn, specialAction, currentPlayer, nameOf, specialRank, kingConfirm, selectedIdx, snapTarget, pendingAction, gameState.cambiaCalled, canTakeDiscard]);
+  }, [gaveUp, offline, roundOver, phase, preGame, isMyTurn, specialAction, currentPlayer, nameOf, specialRank, kingConfirm, selectedIdx, snapTarget, pendingAction, pendingSnapMove, gameState.cambiaCalled, canTakeDiscard]);
 
   const discardFace = toDsCardFace(gameState.discardTop);
   const drawnCard = selfState?.drawnCard ?? displayedDrawnCard;
@@ -838,7 +894,10 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
               <p style={{ margin: 0, minHeight: 20, textAlign: 'center', fontSize: 'var(--ds-text-sm)', lineHeight: 'var(--ds-leading-snug)', color: 'var(--text-on-green)' }}>{hint}</p>
               {deckInteractive && <Button testId='action-draw-stock' onClick={handleDeckClick}>Draw from stock</Button>}
               {canTakeDiscard && <Button variant='secondary' testId='action-take-discard' onClick={handleDiscardClick}>Take discard</Button>}
-              {pendingAction === 'discard_replace' && selfState?.drawnCard && (
+              {/* A player can draw, snap an opponent, and owe the fill while still holding the
+                  drawn card. The server refuses the discard until the card is paid, so the button
+                  goes with it rather than firing a frame that cannot land (cambia-936). */}
+              {!owesSnapMove && pendingAction === 'discard_replace' && selfState?.drawnCard && (
                 <Button variant='secondary' testId='action-discard-drawn' onClick={() => { sendMessage(discardAction(selfState.drawnCard!.id)); setSelectedIdx(null); }}>Discard drawn card</Button>
               )}
               {canSnap && <Button testId='action-snap' onClick={snapSelected}>Snap selected card</Button>}
@@ -849,7 +908,21 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
               {kingConfirm && <Button variant='secondary' testId='action-king-keep' onClick={() => confirmKingSwap(false)}>Keep cards</Button>}
               {canSkipSpecial && <Button variant='secondary' testId='action-skip-ability' onClick={() => sendMessage(skipSpecialAction())}>Skip ability</Button>}
               {canCallCambia && <Button variant='cambia' testId='action-cambia' onClick={() => sendMessage(callCambiaAction())}>Call Cambia</Button>}
-              {turnTimerSec > 0 && !roundOver && !preGame && (
+              {/* While a fill is owed the clock that matters is the one that gives a card away for
+                  this player, not the turn's (cambia-936). Same duration by construction: the
+                  server arms the fill deadline off the turn timer. */}
+              {owesSnapMove && turnTimerSec > 0 && !roundOver && (
+                <TimerBar
+                  label='Card owed'
+                  totalSec={turnTimerSec}
+                  remainingSec={turnTimerSec}
+                  deadlineMs={pendingSnapMove?.deadline ?? null}
+                  clockOffsetMs={serverClockOffsetMs}
+                  onFelt
+                  style={{ marginTop: 4 }}
+                />
+              )}
+              {!owesSnapMove && turnTimerSec > 0 && !roundOver && !preGame && (
                 <TimerBar
                   label='Turn'
                   totalSec={turnTimerSec}

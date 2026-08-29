@@ -43,6 +43,7 @@ export const GAME_ACTION_TYPES = new Set([
 	'action_discard',
 	'action_replace',
 	'action_snap',
+	'action_snap_move',
 	'action_cambia',
 	'action_special'
 ]);
@@ -74,6 +75,8 @@ export interface GameSnapshotLike {
 		drawnCard?: { id: string } | null;
 	}[];
 	specialAction?: { active: boolean; playerId: string; cardRank: string } | null;
+	/** Snap fills still owed, one per snapper (cambia-936). */
+	snapMoves?: { snapperId: string }[] | null;
 }
 
 /** Everything the decision compares, captured at send time and again after the repair. */
@@ -89,6 +92,8 @@ export interface TableContext {
 	pendingAction: string | null;
 	/** Rank of the special action this player owes, else null. */
 	specialRank: string | null;
+	/** Whether this player still owes a snapped opponent a card (RULES.md 5, cambia-936). */
+	owesSnapMove: boolean;
 	/** The card this player is holding after a draw, else null. */
 	drawnCardId: string | null;
 	cambiaCalled: boolean;
@@ -186,6 +191,7 @@ export function tableContext(
 		discardTopId: gs?.discardTop?.id ?? null,
 		pendingAction,
 		specialRank: special?.active && special.playerId === selfId ? special.cardRank : null,
+		owesSnapMove: (gs?.snapMoves ?? []).some((m) => m.snapperId === selfId),
 		drawnCardId: self?.drawnCard?.id ?? null,
 		cambiaCalled: !!gs?.cambiaCalled,
 		cardIds,
@@ -290,6 +296,13 @@ export function decideResend(rec: OutboundRecord, now: TableContext, syncSeq: nu
 			if (now.pendingAction !== 'special_action') return 'notify';
 			if (!now.specialRank || now.specialRank !== rec.ctx.specialRank) return 'notify';
 			return 'resend';
+
+		case 'action_snap_move':
+			// The fill is owed out of turn, so the turn is not the question: the only thing that
+			// makes this frame still meaningful is the obligation still standing. The server settles
+			// it on its own deadline, and the card refs checked above are what rule out paying with
+			// a card that has since moved.
+			return now.owesSnapMove ? 'resend' : 'notify';
 
 		case 'action_cambia':
 			// Cambia is called at turn start, before drawing, and only once per game.
@@ -404,6 +417,10 @@ export function ackedType(type: string, payload: unknown, selfId: string | null)
 		case 'player_snap_success':
 		case 'player_snap_fail':
 			return mine ? 'action_snap' : null;
+		case 'player_snap_move':
+			// Fired for the card the snapper paid, whether they chose it or the deadline did; either
+			// way their frame is answered and must leave the outbox (cambia-936).
+			return mine ? 'action_snap_move' : null;
 		case 'player_special_action':
 			return mine ? 'action_special' : null;
 		case 'private_special_action_success':

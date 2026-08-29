@@ -5,6 +5,7 @@ import type { ObfGameState, ObfCard, EventCard } from '@/types/game';
 import { immer } from 'zustand/middleware/immer';
 import { useAuthStore } from './authStore';
 import { applySnapSuccess } from '@/lib/snapSuccess';
+import { applySnapMove } from '@/lib/snapFill';
 
 /** A face shown to this client by an ability (7/8 own card, 9/T opponent card, King both). */
 export interface RevealedCard {
@@ -62,6 +63,18 @@ interface GameState {
 	// rather than inferring the actor from the seat that shrank (cambia-913). Ids only; the
 	// surface owns the copy.
 	lastSnap: { nonce: number; snapperId: string | null; ownerId: string | null } | null;
+	// The fill this client owes after snapping an opponent's card (RULES.md 5, cambia-936): the
+	// victim whose slot it fills, that slot, and the epoch-ms deadline the server settles it at
+	// (null on a table with no turn timer). Held apart from pendingAction because the obligation
+	// outlives the events that clear that field: it is owed out of turn, so a turn change or a
+	// discard by anyone else would wipe the prompt while the server still refuses everything else
+	// this client sends.
+	pendingSnapMove: { victimId: string; slot: number; deadline: number | null } | null;
+	// The most recent fill that landed: who gave the card, who received it, and whether the server
+	// chose it when the deadline passed. The table needs it for two things: the notice, and to know
+	// that this particular hand growing by one is a card being paid, not a snap penalty being drawn
+	// (which is what every other mid-game hand growth is).
+	lastSnapMove: { nonce: number; snapperId: string | null; victimId: string | null; auto: boolean } | null;
 	// The most recent seat-presence change: a socket dropped and its seat is being held
 	// ('reconnecting'), the player came back ('reconnected'), or the window closed and they
 	// forfeited ('forfeited') - cambia-955. Ids and a deadline only; the surface owns the copy.
@@ -102,8 +115,17 @@ const initialState: GameState = {
 	abilityReveal: null,
 	droppedActionNonce: 0,
 	lastSnap: null,
+	pendingSnapMove: null,
+	lastSnapMove: null,
 	lastPresence: null
 };
+
+/** The fill `selfId` still owes, read out of a state snapshot's snapMoves (cambia-936). */
+function ownSnapMove(gs: ObfGameState | null | undefined, selfId: string | null) {
+	if (!gs || !selfId || gs.gameOver) return null;
+	const mine = (gs.snapMoves ?? []).find((m) => m.snapperId === selfId);
+	return mine ? { victimId: mine.victimId, slot: mine.slot, deadline: mine.deadline ?? null } : null;
+}
 
 export const useGameStore = create<GameState & GameActions>()(
 	immer((set) => ({
@@ -122,6 +144,7 @@ export const useGameStore = create<GameState & GameActions>()(
 					state.isProcessingAction = false;
 					state.seenFaces = {};
 					state.abilityReveal = null;
+					state.pendingSnapMove = null;
 				}
 				state.gameId = id;
 			});
@@ -200,6 +223,10 @@ export const useGameStore = create<GameState & GameActions>()(
 					state.pendingAction = null;
 					state.displayedDrawnCard = null;
 					state.abilityReveal = null;
+					// A snap fill is not cleared, it is re-read: the obligation lives on the server
+					// and a repair that replaced the board carries whatever is still owed
+					// (cambia-936).
+					state.pendingSnapMove = ownSnapMove(payload.state, useAuthStore.getState().user?.id ?? null);
 				}
 				if (typeof payload?.seq === 'number') {
 					state.seq = payload.seq;
@@ -248,6 +275,10 @@ export const useGameStore = create<GameState & GameActions>()(
 							state.error = null;
 							state.pendingAction = null; // Clear pending actions on full sync
 							state.abilityReveal = null;
+							// The snap fill is server state, so the snapshot is its authority both
+							// ways: it restores a prompt this client lost and drops one the server
+							// has already settled (cambia-936).
+							state.pendingSnapMove = ownSnapMove(payload.state, selfPlayerId);
 							// Recompute clock skew from this snapshot's serverNow (cambia-488).
 							if (typeof payload.state?.serverNow === 'number') {
 								state.serverClockOffsetMs = payload.state.serverNow - Date.now();
@@ -490,6 +521,32 @@ export const useGameStore = create<GameState & GameActions>()(
 								};
 							}
 							break;
+						case 'player_snap_move_required':
+							// The snapper owes the victim a card back (RULES.md 5, cambia-936). Only
+							// the snapper can pay it, so only their client prompts; every other seat
+							// learns it from the move itself.
+							if (payload.user?.id === selfPlayerId) {
+								state.pendingSnapMove = {
+									victimId: payload.card?.user?.id ?? '',
+									slot: typeof payload.card?.idx === 'number' ? payload.card.idx : 0,
+									deadline: typeof payload.payload?.deadline === 'number' ? payload.payload.deadline : null
+								};
+							}
+							break;
+						case 'player_snap_move':
+							// The card changes hands face down: applySnapMove moves the id and both
+							// hand sizes, and no face is shown to anyone (see lib/snapFill.ts).
+							if (state.gameState) {
+								const parties = applySnapMove(state.gameState, payload);
+								state.lastSnapMove = {
+									nonce: (state.lastSnapMove?.nonce ?? 0) + 1,
+									snapperId: parties.snapperId,
+									victimId: parties.victimId,
+									auto: payload.payload?.auto === true
+								};
+								if (payload.user?.id === selfPlayerId) state.pendingSnapMove = null;
+							}
+							break;
 						case 'player_snap_fail':
 							// No immediate state change needed from public fail event
 							break;
@@ -548,6 +605,9 @@ export const useGameStore = create<GameState & GameActions>()(
 								state.pendingAction = null;
 								state.displayedDrawnCard = null;
 							}
+							// The server drops every unpaid fill when the game ends (endGame ->
+							// cancelSnapFills), so the prompt goes with it (cambia-936).
+							state.pendingSnapMove = null;
 							// Final scores/winner live under the nested GameEvent payload (the service
 							// wraps { type, payload: {...} } and the hub re-wraps that as the envelope
 							// payload), matching the payload.payload convention used elsewhere in this
@@ -610,6 +670,7 @@ export const useGameStore = create<GameState & GameActions>()(
 							state.seenFaces = {};
 							state.abilityReveal = null;
 							state.lastPresence = null;
+							state.pendingSnapMove = null;
 							state.isLoading = true;
 							state.isProcessingAction = false;
 							break;
@@ -702,6 +763,8 @@ export const selectServerClockOffsetMs = (state: GameState) => state.serverClock
 export const selectAbilityReveal = (state: GameState) => state.abilityReveal;
 export const selectDroppedActionNonce = (state: GameState) => state.droppedActionNonce;
 export const selectLastSnap = (state: GameState) => state.lastSnap;
+export const selectPendingSnapMove = (state: GameState) => state.pendingSnapMove;
+export const selectLastSnapMove = (state: GameState) => state.lastSnapMove;
 export const selectLastPresence = (state: GameState) => state.lastPresence;
 export const selectFinalScores = (state: GameState) => state.finalScores;
 export const selectCurrentPlayerId = (state: GameState) => state.gameState?.currentPlayerId;
