@@ -4,21 +4,6 @@ import (
 	"testing"
 )
 
-// setupReplaceAbilityGame creates a game with AllowReplaceAbilities=true and
-// places an ability card at the top of the stockpile, ready to be drawn.
-func setupReplaceAbilityGame(t *testing.T, abilityCard Card) *GameState {
-	t.Helper()
-	rules := DefaultHouseRules()
-	rules.AllowReplaceAbilities = true
-	gs := NewGame(42, rules)
-	gs.Deal()
-	gs.CurrentPlayer = 0
-	// Place the ability card at the top of stockpile (to be drawn next).
-	gs.Stockpile[gs.StockLen] = abilityCard
-	gs.StockLen++
-	return &gs
-}
-
 // TestAllowReplaceAbilitiesField verifies the field exists and defaults to false.
 func TestAllowReplaceAbilitiesField(t *testing.T) {
 	rules := DefaultHouseRules()

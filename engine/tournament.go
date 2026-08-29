@@ -105,10 +105,6 @@ func ceilLog2(n int) int {
 	return int(math.Ceil(math.Log2(float64(n))))
 }
 
-func isPowerOfTwo(n int) bool {
-	return n > 0 && (n&(n-1)) == 0
-}
-
 // buildSingleElimBracket initialises the first-round matchups with byes.
 func (t *TournamentState) buildSingleElimBracket() {
 	players := t.Config.PlayerIDs
@@ -626,7 +622,7 @@ func (t *TournamentState) advanceDoubleElimLosers() {
 	}
 	if len(survivors) <= 1 {
 		// Check if grand final needed.
-		t.checkDoubleElimComplete(survivors)
+		t.checkDoubleElimComplete()
 		return
 	}
 	t.losersRound++
@@ -643,7 +639,7 @@ func (t *TournamentState) advanceDoubleElimLosers() {
 	}
 }
 
-func (t *TournamentState) checkDoubleElimComplete(losersSurvivors []int) {
+func (t *TournamentState) checkDoubleElimComplete() {
 	// Check if winners bracket is done too.
 	if t.CurrentRound >= len(t.Bracket) || len(t.Bracket[t.CurrentRound].Matchups) == 0 {
 		t.Completed = true
