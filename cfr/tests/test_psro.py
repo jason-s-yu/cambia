@@ -92,7 +92,7 @@ class TestPSROPopulation:
     def test_sample_with_replacement(self):
         """sample_opponents samples with replacement when pop < num_opponents."""
         oracle = PSROOracle(heuristic_types=["random"])
-        # Only 1 member, request 5 — must use replacement
+        # Only 1 member, request 5: must use replacement
         opponents = oracle.sample_opponents(num_opponents=5)
         assert len(opponents) == 5
 
@@ -326,7 +326,7 @@ class TestGhostRatingRegression:
             )
         pop = oracle._checkpoints  # 4 members
 
-        # Orderings only involving players 0, 1, 2 — player 3 never appears
+        # Orderings only involving players 0, 1, 2: player 3 never appears
         orderings = [
             [0, 1, 2],
             [1, 0, 2],
@@ -334,7 +334,7 @@ class TestGhostRatingRegression:
             [0, 2, 1],
         ]
         ratings = oracle._plackett_luce_ratings(pop, orderings)
-        # Player 3 had stale rating 9.9 — after fix, it must be 0.0 (before normalization)
+        # Player 3 had stale rating 9.9: after fix, it must be 0.0 (before normalization)
         # After normalization the value may differ, but the key check: no inf/nan
         assert not np.isnan(ratings).any(), "NaN in ratings"
         assert not np.isinf(ratings).any(), "Inf in ratings"

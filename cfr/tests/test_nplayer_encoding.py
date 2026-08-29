@@ -550,7 +550,7 @@ class TestAgentStateNPlayerMasks:
 
 
 # ---------------------------------------------------------------------------
-# 8. GoEngine N-player construction (FFI — skip if libcambia unavailable)
+# 8. GoEngine N-player construction (FFI - skip if libcambia unavailable)
 # ---------------------------------------------------------------------------
 
 
@@ -602,7 +602,7 @@ class TestGoEngineNPlayer:
 
 
 # ---------------------------------------------------------------------------
-# 9. GoAgentState N-player encode (FFI — skip if libcambia unavailable)
+# 9. GoAgentState N-player encode (FFI - skip if libcambia unavailable)
 # ---------------------------------------------------------------------------
 
 

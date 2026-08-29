@@ -80,7 +80,7 @@ def _make_game(rules_kwargs=None) -> CambiaGameState:
         Card(rank=ACE, suit=DIAMONDS),
     ]
 
-    # Build stockpile (ability card on top — last in list)
+    # Build stockpile (ability card on top - last in list)
     stockpile = [Card(rank=THREE, suit=CLUBS), Card(rank=ACE, suit=SPADES)]
 
     players = [
@@ -170,7 +170,7 @@ class TestAllowReplaceAbilitiesInterface:
 
 
 # ---------------------------------------------------------------------------
-# Regression tests — default False, no ability should fire
+# Regression tests: default False, no ability should fire
 # ---------------------------------------------------------------------------
 
 
@@ -226,7 +226,7 @@ class TestReplaceAbilitiesDefaultOff:
 
 
 # ---------------------------------------------------------------------------
-# Behavioral tests — AllowReplaceAbilities=True
+# Behavioral tests: AllowReplaceAbilities=True
 # ---------------------------------------------------------------------------
 
 

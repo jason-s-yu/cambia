@@ -294,7 +294,7 @@ class AgentState:
                     self.slot_buckets[evicted] = 0
                     self.own_active_mask.append(slot)
                 else:
-                    # New slot is less salient — revert tag to UNK (don't track it)
+                    # New slot is less salient: revert tag to UNK (don't track it)
                     self.slot_tags[slot] = EpistemicTag.UNK
                     self.slot_buckets[slot] = 0
             else:
@@ -486,7 +486,7 @@ class AgentState:
             # Already PRIV_OPP or PUB: no change
 
         def _forget_slot(slot: int):
-            """Card at `slot` moved/swapped — both players lose epistemic knowledge."""
+            """Card at `slot` moved/swapped: both players lose epistemic knowledge."""
             self._eppbs_set_tag(slot, EpistemicTag.UNK)
 
         def _bucket_from_peeked(p_idx: int, h_idx: int) -> int:
@@ -1446,7 +1446,7 @@ class AgentState:
         archetype = self.memory_archetype
 
         if archetype == "perfect":
-            # No decay — retain all observations.
+            # No decay: retain all observations.
             return
 
         elif archetype == "decaying":
@@ -1676,7 +1676,7 @@ class AgentState:
     def clone(self) -> "AgentState":
         """Creates a copy of the agent state. Uses manual copy instead of deepcopy
         for performance (called millions of times during traversals)."""
-        # own_hand: Dict[int, KnownCardInfo] — copy KnownCardInfo objects (mutable dataclass)
+        # own_hand: Dict[int, KnownCardInfo] - copy KnownCardInfo objects (mutable dataclass)
         own_hand_copy = {
             k: KnownCardInfo(
                 bucket=v.bucket, last_seen_turn=v.last_seen_turn, card=v.card

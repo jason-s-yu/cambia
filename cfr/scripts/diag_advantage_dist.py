@@ -267,7 +267,7 @@ def play_random_turns(game_state, agent_states, n_turns, rng):
 def collect_samples(net, n_samples, target_turn_range, device, rng_seed_base):
     """Collect network output samples at specific game phases.
 
-    target_turn_range: (min_turn, max_turn) — we play random actions until
+    target_turn_range: (min_turn, max_turn) - we play random actions until
     game turn is in range, then sample from the current player's perspective.
     """
     results = []

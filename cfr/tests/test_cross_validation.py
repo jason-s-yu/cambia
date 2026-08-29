@@ -312,7 +312,7 @@ class TestGoEncodingParity:
     Compare 222-dim legacy encodings between Go (GoAgentState.encode) and
     Python (encode_infoset) at matched game states.
 
-    If encoding parity fails, that is a genuine bug — the test reports
+    If encoding parity fails, that is a genuine bug: the test reports
     full diagnostics at the first divergence point.
     """
 
@@ -477,7 +477,7 @@ class TestEPPBSCrossEngine:
     Compare 200-dim EP-PBS encodings between Go (GoAgentState.encode_eppbs)
     and Python (encode_infoset_eppbs) at matched game states.
 
-    If parity fails, that is a genuine bug — the test reports diagnostics.
+    If parity fails, that is a genuine bug: the test reports diagnostics.
     """
 
     @pytest.mark.parametrize("seed", [42, 137, 12345])
@@ -647,7 +647,7 @@ class TestEPPBSCrossEngine:
 
 
 # ---------------------------------------------------------------------------
-# Test 5: Memory decay parity (Go vs Python) — GAP TRACKING
+# Test 5: Memory decay parity (Go vs Python) - GAP TRACKING
 # ---------------------------------------------------------------------------
 #
 # Memory archetypes (decaying / human_like) require PRNG-driven forgetting in
@@ -655,7 +655,7 @@ class TestEPPBSCrossEngine:
 # These fields exist on the Go struct (confirmed in engine/agent/memory_test.go)
 # but are NOT currently exposed via the FFI bridge:
 #   - cambia_agent_new takes only (game_h, player_id, memory_level,
-#     time_decay_turns) — no archetype / lambda / capacity parameters.
+#     time_decay_turns): no archetype / lambda / capacity parameters.
 #   - cambia_agents_update_both also applies no PRNG decay.
 #
 # Until FFI exports for memory archetype configuration are added, cross-engine
@@ -680,7 +680,7 @@ class TestMemoryDecayParity:
     to configure memory archetypes from Python.
 
     For Decaying archetype: lambda=100.0 gives p≈1, so all PrivOwn slots
-    deterministically clear on the first decay call — no PRNG alignment needed.
+    deterministically clear on the first decay call: no PRNG alignment needed.
     For HumanLike archetype: eviction is deterministic (saliency-based).
     """
 
@@ -711,7 +711,7 @@ class TestMemoryDecayParity:
             pa.memory_archetype = "decaying"
             pa.memory_decay_lambda = LAMBDA
 
-        # Apply one decay step — with lambda=100 all PrivOwn slots clear to TagUnk
+        # Apply one decay step: with lambda=100 all PrivOwn slots clear to TagUnk
         decay_seed = seed + 1000
         for ga in go_agents:
             ga.apply_decay(rng_seed=decay_seed)
@@ -859,7 +859,7 @@ class TestMemoryDecayParity:
             pa.memory_archetype = "human_like"
             pa.memory_capacity = CAPACITY
 
-        # Apply HumanLike eviction — no PRNG needed
+        # Apply HumanLike eviction: no PRNG needed
         for ga in go_agents:
             ga.apply_decay(rng_seed=0)
         for pa in py_agents:

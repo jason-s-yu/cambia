@@ -233,7 +233,7 @@ class TestESCHERAgentWrapper:
         try:
             _make_escher_checkpoint(ckpt_path)
             agent = ESCHERAgentWrapper(0, config, ckpt_path, device="cpu")
-            # Do NOT call initialize_state — agent_state remains None
+            # Do NOT call initialize_state: agent_state remains None
 
             game_state = CambiaGameState(house_rules=config.cambia_rules)
             legal_actions = game_state.get_legal_actions()
@@ -515,7 +515,7 @@ class TestESCHERAgentStateReset:
         """Agent state must be freshly initialized for each new game.
 
         After initialize_state() with a second game, the wrapper must hold a
-        brand-new AgentState that reflects the new game — not the old one.
+        brand-new AgentState that reflects the new game: not the old one.
         Checks:
           1. agent_state is not None after second init.
           2. agent_state is a different object from the first game's state.

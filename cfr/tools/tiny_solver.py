@@ -82,7 +82,7 @@ def _quiet_src_loggers():
     """Mute src.* loggers for the duration of a tree expansion, then restore.
 
     Reentrant via a depth counter: only the outermost enter captures levels
-    and mutes; only the outermost exit restores. Safe (and cheap) to nest —
+    and mutes; only the outermost exit restores. Safe (and cheap) to nest:
     Builder.build_decision_or_terminal enters this once per top-level call
     (once per deal in build_tree), not once per recursively-expanded node.
     """

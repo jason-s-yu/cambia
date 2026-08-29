@@ -348,7 +348,7 @@ Buffer capacity 500K fills at iter ~{500000/(50*samp_per_ep):.0f}.
 - Go FFI calls are per-process (no shared state, no mutex contention).
 - XPU training: Intel Arc A310 LP is entry-level. Transfer overhead may negate gains
   for small batch sizes.
-- Range entropy barely moves with random nets (~6.148 throughout). Expected — random
+- Range entropy barely moves with random nets (~6.148 throughout). Expected: random
   policy nets produce ~uniform action distributions across hand types, so Bayes update
   is a no-op. Should improve as nets learn.
 - Solver export_leaves occasionally fails with game_config=None (Go defaults).

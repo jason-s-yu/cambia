@@ -21,7 +21,7 @@ from src.constants import (
 )
 
 # ---------------------------------------------------------------------------
-# 2P constant regression — must NOT change
+# 2P constant regression: must NOT change
 # ---------------------------------------------------------------------------
 
 

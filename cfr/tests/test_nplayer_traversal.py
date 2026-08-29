@@ -1,7 +1,7 @@
 """
 tests/test_nplayer_traversal.py
 
-Tests for _deep_traverse_os_go_nplayer() — N-player outcome sampling traversal
+Tests for _deep_traverse_os_go_nplayer(): N-player outcome sampling traversal
 using the Go engine backend.
 
 Requires libcambia.so to be built and available (skipped otherwise).

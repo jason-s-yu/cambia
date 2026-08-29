@@ -1,7 +1,7 @@
 """Round-robin tournament between all baseline agents.
 
 Produces a full pairwise win-rate matrix with confidence intervals.
-No neural networks — pure heuristic agents only.
+No neural networks: pure heuristic agents only.
 """
 
 import itertools
@@ -29,7 +29,7 @@ BASELINES = [
     "human_player",
 ]
 
-# Agent types that need checkpoints — skip these
+# Agent types that need checkpoints: skip these
 CHECKPOINT_AGENTS = {"cfr", "deep_cfr", "escher", "sd_cfr", "nplayer"}
 
 

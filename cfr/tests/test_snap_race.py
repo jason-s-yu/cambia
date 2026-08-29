@@ -99,7 +99,7 @@ def test_snap_race_true_accessible():
 
 
 # ---------------------------------------------------------------------------
-# Regression: default (snapRace=False) — sequential snapper behavior preserved
+# Regression: default (snapRace=False) - sequential snapper behavior preserved
 # ---------------------------------------------------------------------------
 
 
@@ -114,7 +114,7 @@ def test_no_snap_race_first_snapper_passes_second_gets_turn():
 
     state = build_snap_state(p0_hand, p1_hand, snap_card, snap_race=False)
 
-    # P0 is at index 0 in snap_potential_snappers — they pass
+    # P0 is at index 0 in snap_potential_snappers: they pass
     state.apply_action(ActionPassSnap())
 
     assert state.snap_phase_active, "Snap phase should still be active after P0 pass"
@@ -122,7 +122,7 @@ def test_no_snap_race_first_snapper_passes_second_gets_turn():
 
 
 def test_no_snap_race_first_snapper_succeeds_second_still_gets_turn():
-    """With snapRace=False, P0 successfully snapping does NOT end phase — P1 still acts."""
+    """With snapRace=False, P0 successfully snapping does NOT end phase: P1 still acts."""
     snap_card = Card("5", "S")
     p0_match = Card("5", "H")
     p1_match = Card("5", "D")
@@ -155,13 +155,13 @@ def test_no_snap_race_both_snappers_exhaust_ends_phase():
     state.apply_action(ActionPassSnap())
     assert state.snap_phase_active
 
-    # P1 passes — all snappers exhausted, phase ends
+    # P1 passes: all snappers exhausted, phase ends
     state.apply_action(ActionPassSnap())
     assert not state.snap_phase_active, "Snap phase should end after all snappers acted"
 
 
 # ---------------------------------------------------------------------------
-# Behavioral: snapRace=True — simultaneous imperfect-info commit + N-way race
+# Behavioral: snapRace=True - simultaneous imperfect-info commit + N-way race
 # ---------------------------------------------------------------------------
 
 
@@ -196,7 +196,7 @@ def test_snap_race_pass_does_not_end_phase_early():
 
     state = build_snap_state(p0_hand, p1_hand, snap_card, snap_race=True)
 
-    # P0 passes — no success, so snap phase continues
+    # P0 passes: no success, so snap phase continues
     state.apply_action(ActionPassSnap())
 
     assert (
@@ -219,7 +219,7 @@ def test_snap_race_second_snapper_success_also_ends_phase():
     state.apply_action(ActionPassSnap())
     assert state.snap_phase_active
 
-    # P1 snaps own card — phase should end
+    # P1 snaps own card: phase should end
     state.apply_action(ActionSnapOwn(own_card_hand_index=0))
     assert (
         not state.snap_phase_active
@@ -341,7 +341,7 @@ def test_snap_race_opponent_snap_deactivates_snap_phase():
     p1_match = Card("5", "D")
     filler = Card("7", "C")
 
-    # P0 snaps opponent — P0 needs a card to move (filler), P1 has matching card
+    # P0 snaps opponent: P0 needs a card to move (filler), P1 has matching card
     p0_hand = [filler]
     p1_hand = [p1_match, Card("9", "C")]
 

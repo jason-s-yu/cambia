@@ -55,7 +55,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # MEAN_IMP_BASELINES imported from src.evaluate_agents (canonical source)
-# Full evaluation set — includes context-only baselines not in mean_imp
+# Full evaluation set: includes context-only baselines not in mean_imp
 ALL_BASELINES = ["random", "greedy"] + list(MEAN_IMP_BASELINES)
 
 STATE_FILENAME = "eval_watcher_state.json"
@@ -154,7 +154,7 @@ def evaluate_checkpoint(
     eval_dir = run_dir_path / "evaluations" / f"iter_{iter_num}"
     eval_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load checkpoint for loss info — guard for agent-specific key differences
+    # Load checkpoint for loss info: guard for agent-specific key differences
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     is_rebel = "rebel_value_net_state_dict" in checkpoint or agent_type == "rebel"
     if is_rebel:

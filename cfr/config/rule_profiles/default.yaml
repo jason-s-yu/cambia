@@ -1,4 +1,4 @@
-# Default training rules — matches CambiaRulesConfig defaults
+# Default training rules (matches CambiaRulesConfig defaults)
 allowDrawFromDiscardPile: false
 allowReplaceAbilities: false
 snapRace: false

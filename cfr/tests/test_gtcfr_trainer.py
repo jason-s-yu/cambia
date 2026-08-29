@@ -1,7 +1,7 @@
 """
 tests/test_gtcfr_trainer.py
 
-Tests for gtcfr_trainer.py — training loop orchestrator.
+Tests for gtcfr_trainer.py: training loop orchestrator.
 
 Tests run without Go FFI by mocking self-play episode generation.
 Network and buffer operations use synthetic data.
@@ -214,7 +214,7 @@ class TestCheckpointSaveLoad:
             assert trainer2.current_epoch == 3
 
     def test_load_nonexistent_checkpoint(self):
-        """Loading a missing checkpoint should not raise — starts fresh."""
+        """Loading a missing checkpoint should not raise: starts fresh."""
         config = make_fast_config()
         trainer = GTCFRTrainer(config=config)
         trainer.load_checkpoint("/nonexistent/path/checkpoint.pt")

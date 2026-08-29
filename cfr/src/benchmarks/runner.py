@@ -190,7 +190,7 @@ class BenchmarkSuite:
         Returns:
             List of BenchmarkResult from all benchmarks
         """
-        # Create timestamped output directory — use canonical format and share
+        # Create timestamped output directory: use canonical format and share
         # the same run_id across all results in this suite run.
         run_id = _now_stamp()
         if output_dir:

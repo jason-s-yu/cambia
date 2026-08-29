@@ -493,8 +493,8 @@ def encode_infoset_eppbs_dealiased(
                 EMPTY slots (slot_in_hand >= hand_size): all zeros (NOT UNK)
       [88-195]: slot identities (108 dims = 12 slots × 9-dim one-hot)
                 EMPTY slots: all zeros
-      [196]:    own_hand_size / 6.0 (NEW — was padding)
-      [197]:    opp_hand_size / 6.0 (NEW — was padding)
+      [196]:    own_hand_size / 6.0 (NEW - was padding)
+      [197]:    opp_hand_size / 6.0 (NEW - was padding)
       [198-199]: padding (2 dims)
 
     De-aliasing fix: empty slots (beyond hand_size) are all-zeros in both tag
@@ -504,7 +504,7 @@ def encode_infoset_eppbs_dealiased(
     out = np.zeros(EP_PBS_INPUT_DIM, dtype=np.float32)
     offset = 0
 
-    # Public features (40 dims) — identical to encode_infoset_eppbs
+    # Public features (40 dims): identical to encode_infoset_eppbs
     # [0-9]: discard top bucket (10-dim one-hot)
     if 0 <= discard_top_bucket <= 9:
         out[offset + discard_top_bucket] = 1.0
@@ -550,7 +550,7 @@ def encode_infoset_eppbs_dealiased(
             tag = slot_tags[i] if i < len(slot_tags) else EpistemicTag.UNK
             if 0 <= tag <= 3:
                 out[offset + tag] = 1.0
-        # else: empty slot — leave all-zeros (de-aliasing fix)
+        # else: empty slot - leave all-zeros (de-aliasing fix)
         offset += EP_PBS_TAG_DIM
     # offset = 88
 
@@ -567,7 +567,7 @@ def encode_infoset_eppbs_dealiased(
                 bucket = slot_buckets[i] if i < len(slot_buckets) else 0
                 if 0 <= bucket <= 8:
                     out[offset + bucket] = 1.0
-        # else: empty slot — leave all-zeros (de-aliasing fix)
+        # else: empty slot - leave all-zeros (de-aliasing fix)
         offset += EP_PBS_BUCKET_DIM
     # offset = 196
 
@@ -645,7 +645,7 @@ def encode_infoset_eppbs_interleaved(
     out = np.zeros(output_dim, dtype=np.float32)
     offset = 0
 
-    # Public features (40 dims) — identical to encode_infoset_eppbs
+    # Public features (40 dims): identical to encode_infoset_eppbs
     # [0-9]: discard top bucket (10-dim one-hot)
     if 0 <= discard_top_bucket <= 9:
         out[offset + discard_top_bucket] = 1.0
@@ -697,7 +697,7 @@ def encode_infoset_eppbs_interleaved(
         slot_base = 42 + i * (EP_PBS_TAG_DIM + EP_PBS_BUCKET_DIM)
 
         if slot_in_hand >= hand_size:
-            # Empty slot — leave all zeros
+            # Empty slot: leave all zeros
             continue
 
         tag = slot_tags[i] if i < len(slot_tags) else EpistemicTag.UNK
@@ -705,7 +705,7 @@ def encode_infoset_eppbs_interleaved(
         if 0 <= tag <= 3:
             out[slot_base + tag] = 1.0
 
-        # Write identity bucket one-hot (9 dims) — same condition as existing function
+        # Write identity bucket one-hot (9 dims): same condition as existing function
         if tag in (EpistemicTag.PRIV_OWN, EpistemicTag.PUB):
             bucket = slot_buckets[i] if i < len(slot_buckets) else 0
             if 0 <= bucket <= 8:

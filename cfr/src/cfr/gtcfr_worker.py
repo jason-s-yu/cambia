@@ -8,8 +8,8 @@ and records (PBS_encoding, value_target, policy_target, action_mask) tuples.
 
 Training data shapes:
     features:      (PBS_INPUT_DIM,) = (956,)  float32
-    value_target:  (VALUE_DIM,)    = (936,)  float32  — from search root CFVs
-    policy_target: (NUM_ACTIONS,)  = (146,)  float32  — average strategy from search
+    value_target:  (VALUE_DIM,)    = (936,)  float32  - from search root CFVs
+    policy_target: (NUM_ACTIONS,)  = (146,)  float32  - average strategy from search
     action_mask:   (NUM_ACTIONS,)  = (146,)  bool
 """
 
@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 VALUE_DIM: int = 2 * NUM_HAND_TYPES
 
 # Decision context integer → PBS phase index
-# (copied from rebel_worker.py — coexistence policy)
+# (copied from rebel_worker.py - coexistence policy)
 _CTX_TO_PHASE: Dict[int, int] = {
     0: PHASE_DRAW,
     1: PHASE_DISCARD,

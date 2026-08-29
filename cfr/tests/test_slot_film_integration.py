@@ -6,7 +6,7 @@ End-to-end smoke test for the SlotFiLM training pipeline.
 This test verifies that DeepCFRTrainer with network_type='slot_film' and
 encoding_mode='ep_pbs' can:
   1. Initialize without errors
-  2. Run 2 training iterations (traversal is mocked — no libcambia.so needed)
+  2. Run 2 training iterations (traversal is mocked - no libcambia.so needed)
   3. Save a checkpoint
   4. Load the checkpoint and run a forward pass
 

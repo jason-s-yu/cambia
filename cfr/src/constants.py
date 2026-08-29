@@ -239,7 +239,7 @@ class ActionDiscard(NamedTuple):
 
     use_ability: bool  # Does the player intend to use the card's ability?
     tag: str = (
-        "discard"  # type discriminator — prevents hash collision with ActionReplace(0)
+        "discard"  # type discriminator: prevents hash collision with ActionReplace(0)
     )
 
 
@@ -286,7 +286,7 @@ class ActionAbilityKingSwapDecision(NamedTuple):
 
     perform_swap: bool  # True to swap the looked-at cards, False otherwise
     tag: str = (
-        "king_swap"  # type discriminator — prevents hash collision with ActionDiscard
+        "king_swap"  # type discriminator: prevents hash collision with ActionDiscard
     )
 
 

@@ -4,7 +4,7 @@ The stale-memory bug (agents not resetting between games) invalidated all prior
 evaluations against imperfect agents. This script re-runs seat-balanced evals
 for key checkpoints and outputs corrected metrics.
 
-Greedy and random evals are NOT re-run — they were unaffected (no memory state).
+Greedy and random evals are NOT re-run: they were unaffected (no memory state).
 """
 
 import json
@@ -24,7 +24,7 @@ LEGACY_CONFIG = "runs/prod-full-333/config.yaml"
 CHECKPOINT_DIR = Path("runs/prod-full-333/checkpoints")
 GAMES_PER_BASELINE = 5000  # 2500 per seat
 
-# mean_imp baselines — the core metric set
+# mean_imp baselines: the core metric set
 MEAN_IMP_BASELINES = [
     "random_no_cambia",
     "random_late_cambia",
@@ -33,7 +33,7 @@ MEAN_IMP_BASELINES = [
     "aggressive_snap",
 ]
 
-# Full evaluation set — includes context-only baselines not in mean_imp
+# Full evaluation set: includes context-only baselines not in mean_imp
 ALL_BASELINES = ["random", "greedy"] + MEAN_IMP_BASELINES
 
 # Key checkpoints: every 100 iters + final

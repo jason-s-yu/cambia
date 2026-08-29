@@ -519,7 +519,7 @@ class TestAgentBehaviors:
             game = make_game()
             agent._ensure_initialized(game)
 
-            # All own cards unknown — no snap should happen
+            # All own cards unknown: no snap should happen
             agent.own_memory = {0: None, 1: None, 2: None, 3: None}
             agent.own_rank_memory = {0: None, 1: None, 2: None, 3: None}
 

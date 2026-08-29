@@ -128,7 +128,7 @@ class TestDeepCFRAgentWrapper:
         from src.constants import ActionDrawStockpile
 
         agent = DeepCFRAgentWrapper(player_id=0, config=config, checkpoint_path=ckpt_path)
-        # Don't call initialize_state — agent_state is None
+        # Don't call initialize_state: agent_state is None
         legal = {ActionDrawStockpile()}
         action = agent.choose_action(None, legal)  # type: ignore
         assert action in legal

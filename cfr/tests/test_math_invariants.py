@@ -117,7 +117,7 @@ def test_os_regret_formula_matches_worker():
 
 
 # ---------------------------------------------------------------------------
-# Distribution validity — random inputs
+# Distribution validity: random inputs
 # ---------------------------------------------------------------------------
 
 

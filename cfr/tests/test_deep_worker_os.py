@@ -648,7 +648,7 @@ def test_worker_network_roundtrip(minimal_config, use_residual):
         k: torch.tensor(v) if isinstance(v, np.ndarray) else v
         for k, v in weights_numpy.items()
     }
-    # This is the line that failed in the EP-PBS run — must not raise
+    # This is the line that failed in the EP-PBS run: must not raise
     worker_net.load_state_dict(weights_tensors)
 
     # 5. Verify the architectures match
@@ -696,6 +696,6 @@ def test_worker_network_mismatch_raises(use_residual):
     )
     weights_tensors = {k: torch.tensor(v) for k, v in weights_numpy.items()}
 
-    # Must fail — this is what the EP-PBS bug looked like
+    # Must fail: this is what the EP-PBS bug looked like
     with pytest.raises(RuntimeError, match="(Missing key|Unexpected key)"):
         target_net.load_state_dict(weights_tensors)

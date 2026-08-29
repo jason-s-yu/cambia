@@ -28,7 +28,7 @@ NOTE ON RNG ALIGNMENT:
   To ensure Go and Python deal the same cards from the same seed, this oracle
   implements xorshift64 and uses it for the Fisher-Yates deck shuffle and
   starting-player selection.  All gameplay action choices use Python's stdlib
-  random (seeded deterministically from the outer RNG) — this only affects
+  random (seeded deterministically from the outer RNG): this only affects
   which of the legal actions is chosen each step, not the card layout.
 """
 
@@ -102,7 +102,7 @@ from src.game.player_state import PlayerState  # noqa: E402
 from src.card import create_standard_deck  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# xorshift64 — mirrors Go engine's RNG exactly
+# xorshift64: mirrors Go engine's RNG exactly
 # ---------------------------------------------------------------------------
 
 # Python integers are arbitrary precision; we mask to 64-bit unsigned arithmetic.
@@ -293,7 +293,7 @@ def _play_game(seed: int, rng: random.Random) -> List[Dict[str, Any]]:
         # --- Record decision point BEFORE applying the action ---
         legal_set = state.get_legal_actions()
         if not legal_set:
-            # No legal actions in non-terminal state — engine stalemate, stop
+            # No legal actions in non-terminal state: engine stalemate, stop
             break
 
         acting_player = state.get_acting_player()

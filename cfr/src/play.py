@@ -1,4 +1,4 @@
-"""src/play.py — Interactive human-vs-AI play for Cambia."""
+"""src/play.py: Interactive human-vs-AI play for Cambia."""
 
 from __future__ import annotations
 
@@ -360,7 +360,7 @@ def update_knowledge(
                 if card:
                     k.know(viewer, slot, card)
             # If opponent replaced, we don't know their new card
-            # but we saw the discarded card (goes to discard pile — visible)
+            # but we saw the discarded card (goes to discard pile - visible)
 
         case ActionAbilityPeekOwnSelect(target_hand_index=slot):
             if acting_player == viewer:
@@ -394,7 +394,7 @@ def update_knowledge(
             # A card was removed from acting_player's hand at snap_slot.
             # All cards above that index shift down by 1.
             _shift_knowledge_after_removal(k, acting_player, snap_slot)
-            # The snapped card went to discard — visible to all, no knowledge needed
+            # The snapped card went to discard: visible to all, no knowledge needed
             console.print(
                 f"  [bold]Snap![/] {seats[acting_player].name} snapped slot {snap_slot}"
             )
@@ -443,7 +443,7 @@ def update_knowledge(
                 # Actually the knowledge we had pre-swap now refers to swapped cards
                 # We need to swap our knowledge entries
                 opp = 1 - viewer
-                # Find the king look slots from pending data — but we can't easily
+                # Find the king look slots from pending data, but we can't easily
                 # get them here. For simplicity, clear king-related knowledge
                 # and let the player re-peek. In practice the game state already
                 # reflects the swap, so our peek knowledge from KingLookSelect

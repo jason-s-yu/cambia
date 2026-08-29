@@ -7,9 +7,9 @@ if an agent fails to reinitialize between games, memory from game N bleeds into 
 causing immediate Cambia calls (turn < 5) and heavily skewed win rates.
 
 Three test categories:
-  1. Cross-Game Eval Integration  — game-level stats remain valid over a full eval run
-  2. Agent Strength Ordering      — canary assertions on known dominance relationships
-  3. Multi-Step Memory Verification — unit-level memory correctness across games
+  1. Cross-Game Eval Integration  : game-level stats remain valid over a full eval run
+  2. Agent Strength Ordering      : canary assertions on known dominance relationships
+  3. Multi-Step Memory Verification : unit-level memory correctness across games
 """
 
 import pytest
@@ -45,7 +45,7 @@ class TestCrossGameEvalIntegration:
 
         Stale memory causes immediate Cambia calls (turns < 5 per game).
         With max_turns=46 and no stale-memory bug, avg should be well above 15.
-        Failure means agents are terminating games immediately — a hallmark of the
+        Failure means agents are terminating games immediately: a hallmark of the
         stale-memory bug where initial peek memory from a prior game is mistakenly
         reused, convincing the agent it already has a winning hand.
         """
@@ -58,7 +58,7 @@ class TestCrossGameEvalIntegration:
         )
         avg_turns = results.stats.get("avg_game_turns", 0)
         assert avg_turns > 15, (
-            f"avg_game_turns={avg_turns:.1f} is too low — agents may be carrying stale "
+            f"avg_game_turns={avg_turns:.1f} is too low: agents may be carrying stale "
             f"memory across games, triggering immediate Cambia calls. "
             f"Expected >15 turns; stale-memory bug produces <5."
         )
@@ -68,7 +68,7 @@ class TestCrossGameEvalIntegration:
         """Decisive outcomes must be non-zero over 200 games.
 
         Both agents should win at least some games. If one agent never wins
-        (0 wins over all non-tie games), that agent is effectively broken —
+        (0 wins over all non-tie games), that agent is effectively broken:
         most likely due to stale memory causing irrational decisions on every game.
 
         Note: most games end in MaxTurnTies (~72%) because both agents play
@@ -85,11 +85,11 @@ class TestCrossGameEvalIntegration:
         p0 = results.get("P0 Wins", 0)
         p1 = results.get("P1 Wins", 0)
         scored = p0 + p1 + results.get("Ties", 0) + results.get("MaxTurnTies", 0)
-        assert scored > 0, "No games scored — evaluation loop produced no results."
+        assert scored > 0, "No games scored: evaluation loop produced no results."
 
         p0_rate = p0 / scored
         assert p0_rate > 0.05, (
-            f"P0 win rate {p0_rate:.2%} is below 5% — imperfect_greedy should win "
+            f"P0 win rate {p0_rate:.2%} is below 5%: imperfect_greedy should win "
             f"at least some games vs random_no_cambia. Near-zero wins suggests the "
             f"agent is calling Cambia immediately (stale-memory bug)."
         )
@@ -302,7 +302,7 @@ class TestMultiStepMemory:
                     game_state.apply_action(action)
                 steps += 1
 
-        # Replace may not occur in conservative games — not a failure
+        # Replace may not occur in conservative games: not a failure
         pytest.skip("No Replace action observed in 50 game attempts")
 
     def test_memory_correct_across_5_games(self):
@@ -338,7 +338,7 @@ class TestMultiStepMemory:
                     break
                 act = agents[p].choose_action(game_state, la)
                 if p == 0 and not init_checked:
-                    # Memory has just been initialized — check peek slots before applying
+                    # Memory has just been initialized: check peek slots before applying
                     my_hand = game_state.get_player_hand(0)
                     for slot in range(min(peek_count, len(my_hand))):
                         actual_card = my_hand[slot]
@@ -392,10 +392,10 @@ class TestMultiStepMemory:
         }
 
         # --- Game 2: initialize on a fresh game state ---
-        # game1 still referenced here — prevents id reuse.
+        # game1 still referenced here: prevents id reuse.
         game2 = CambiaGameState(house_rules=config.cambia_rules)
         assert id(game2) != id(game1), (
-            "game2 got the same id as game1 — id-based reinit check would be skipped. "
+            "game2 got the same id as game1: id-based reinit check would be skipped. "
             "Keep game1 alive until after game2 is fully initialized."
         )
 
@@ -411,7 +411,7 @@ class TestMultiStepMemory:
                 break
             act2 = agents[p2].choose_action(game2, la2)
             if p2 == 0 and not init_checked:
-                # Memory has just been re-initialized for game2 — check peek slots
+                # Memory has just been re-initialized for game2: check peek slots
                 my_hand2 = game2.get_player_hand(0)
                 peek_count = config.cambia_rules.initial_view_count
                 for slot in range(min(peek_count, len(my_hand2))):
@@ -421,17 +421,17 @@ class TestMultiStepMemory:
                         assert mem_val == actual_card.value, (
                             f"Game 2 slot {slot}: memory={mem_val}, actual={actual_card.value}. "
                             f"Game 1 memory at this slot was {game1_peek_values.get(slot)}. "
-                            f"Cross-game contamination detected — memory was not re-initialized "
+                            f"Cross-game contamination detected: memory was not re-initialized "
                             f"for game 2 (stale values from game 1 persist)."
                         )
                 init_checked = True
-                break  # Checked — don't need to continue
+                break  # Checked, don't need to continue
             game2.apply_action(act2)
             steps2 += 1
 
         # Ensure we found a turn where agent acted
         assert init_checked, (
-            "Agent (P0) never got to act in game 2's first 100 steps — "
+            "Agent (P0) never got to act in game 2's first 100 steps: "
             "could not verify memory re-initialization."
         )
 

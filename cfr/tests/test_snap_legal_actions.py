@@ -74,7 +74,7 @@ def build_snap_state(
 
 
 # ---------------------------------------------------------------------------
-# Test 1: Player has matching cards — snap own and snap opponent should be legal
+# Test 1: Player has matching cards - snap own and snap opponent should be legal
 # ---------------------------------------------------------------------------
 
 
@@ -111,7 +111,7 @@ def test_player_has_matching_own_cards():
 
 
 # ---------------------------------------------------------------------------
-# Test 2: Player has no matching cards — only pass snap should be legal
+# Test 2: Player has no matching cards - only pass snap should be legal
 # ---------------------------------------------------------------------------
 
 

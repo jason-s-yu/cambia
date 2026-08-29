@@ -148,7 +148,7 @@ class TestAtomicNpzSave:
 
 
 # ---------------------------------------------------------------------------
-# weights_only=True at load sites — source-level inspection (no module import)
+# weights_only=True at load sites: source-level inspection (no module import)
 # ---------------------------------------------------------------------------
 
 _SRC_ROOT = Path(__file__).resolve().parent.parent / "src"
@@ -197,7 +197,7 @@ class TestWeightsOnlyAtLoadSites:
 
 
 # ---------------------------------------------------------------------------
-# Mutual exclusion guard — source-level inspection + minimal dataclass exec
+# Mutual exclusion guard: source-level inspection + minimal dataclass exec
 # ---------------------------------------------------------------------------
 
 

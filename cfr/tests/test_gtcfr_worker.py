@@ -1,7 +1,7 @@
 """
 tests/test_gtcfr_worker.py
 
-Tests for gtcfr_worker.py — self-play episode runner using GT-CFR search.
+Tests for gtcfr_worker.py: self-play episode runner using GT-CFR search.
 
 Tests run without the Go FFI library by mocking GoEngine, GoAgentState, and
 GTCFRSearch. All shapes and dtypes are verified with synthetic data.

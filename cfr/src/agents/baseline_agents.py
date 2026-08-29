@@ -654,7 +654,7 @@ class ImperfectMemoryMixin:
             )
 
         if isinstance(sample, ActionAbilityKingSwapDecision):
-            # We've peeked via KingLook — use game state pending data if available
+            # We've peeked via KingLook: use game state pending data if available
             look_data = game_state.pending_action_data
             card1 = look_data.get("card1")  # own card
             card2 = look_data.get("card2")  # opp card
@@ -717,7 +717,7 @@ class ImperfectGreedyAgent(ImperfectMemoryMixin, BaseAgent):
 
     Tracks own cards from initial peek + subsequent peeks/swaps.
     For unseen own cards: estimates value as UNKNOWN_CARD_EXPECTED_VALUE (~6.5).
-    Cannot see opponent hand — uses expected value for opponent decisions.
+    Cannot see opponent hand: uses expected value for opponent decisions.
     Snap: only snaps own cards it has seen and knows match discard.
     """
 
@@ -765,13 +765,13 @@ class ImperfectGreedyAgent(ImperfectMemoryMixin, BaseAgent):
             for action in snap_own_actions:
                 if self._own_card_matches_discard(action.own_card_hand_index, game_state):
                     return action
-            # Pass snap — don't snap opponent or unknown own cards
+            # Pass snap: don't snap opponent or unknown own cards
             pass_action = ActionPassSnap()
             if pass_action in legal_actions:
                 return pass_action
             return next(iter(legal_actions))
 
-        # 4. Call Cambia — need to know most of hand first
+        # 4. Call Cambia: need to know most of hand first
         if ActionCallCambia() in legal_actions:
             num_known = sum(1 for v in self.own_memory.values() if v is not None)
             estimated_value = self._estimate_own_hand_value()
@@ -871,7 +871,7 @@ class MemoryHeuristicAgent(ImperfectMemoryMixin, BaseAgent):
             )
         self._ensure_initialized(game_state)
 
-        # 1. Ability phases — prioritize info gathering
+        # 1. Ability phases: prioritize info gathering
         ability_action = self._handle_ability_phase_imperfect(game_state, legal_actions)
         if ability_action is not None:
             return ability_action
@@ -894,7 +894,7 @@ class MemoryHeuristicAgent(ImperfectMemoryMixin, BaseAgent):
                 return pass_action
             return next(iter(legal_actions))
 
-        # 4. Call Cambia — need to know most of hand first
+        # 4. Call Cambia: need to know most of hand first
         if ActionCallCambia() in legal_actions:
             num_known = sum(1 for v in self.own_memory.values() if v is not None)
             estimated_value = self._estimate_own_hand_value()
@@ -1270,7 +1270,7 @@ class HumanPlayerAgent(ImperfectMemoryMixin, BaseAgent):
             self._initialized = True
 
     def _sync_observations(self, game_state: CambiaGameState):
-        """Observe what changed since last turn — track new discards."""
+        """Observe what changed since last turn: track new discards."""
         pile = game_state.discard_pile
         new_len = len(pile)
         if new_len > self._last_discard_len:
@@ -1340,7 +1340,7 @@ class HumanPlayerAgent(ImperfectMemoryMixin, BaseAgent):
 
         estimated = self._estimate_hand_value()
 
-        # Direct threshold comparison — unknown penalty already makes estimate
+        # Direct threshold comparison: unknown penalty already makes estimate
         # conservative (5.0 per unknown vs 6.2 average), so no adjustment needed.
         if num_known >= 3 and estimated <= self.CAMBIA_THRESHOLD:
             return True
@@ -1543,7 +1543,7 @@ class HumanPlayerAgent(ImperfectMemoryMixin, BaseAgent):
                 )
             return action
 
-        # J/Q: Blind swap — swap our highest known with opponent unknown
+        # J/Q: Blind swap - swap our highest known with opponent unknown
         if isinstance(sample, ActionAbilityBlindSwapSelect):
             own_high = self._find_highest_known_own_slot()
             opp_unknown = next(

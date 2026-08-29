@@ -117,7 +117,7 @@ class TestEPPBSEncoding:
 
     @pytest.mark.skip(reason="Requires rebuilt libcambia with EP-PBS exports")
     def test_cross_engine_parity(self):
-        """Cross-engine parity test — enable after libcambia rebuilt."""
+        """Cross-engine parity test: enable after libcambia rebuilt."""
         pass
 
 
@@ -227,7 +227,7 @@ class TestEPPBSAgentStateTracking:
         agent_state._eppbs_set_tag(0, EpistemicTag.PRIV_OWN, 8)  # HIGH_KING, sal=8.5
         agent_state._eppbs_set_tag(1, EpistemicTag.PRIV_OWN, 1)  # NEG_KING, sal=5.5
         agent_state._eppbs_set_tag(2, EpistemicTag.PRIV_OWN, 6)  # PEEK_OTHER, sal=5.0
-        # Now add very low saliency: MID_NUM(4, sal=1.0) — lower than minimum (5.0)
+        # Now add very low saliency: MID_NUM(4, sal=1.0) - lower than minimum (5.0)
         agent_state._eppbs_set_tag(3, EpistemicTag.PRIV_OWN, 4)  # MID_NUM, sal=1.0
         # Slot 3 should NOT be in mask (lower saliency than slot 2's 5.0)
         assert 3 not in agent_state.own_active_mask

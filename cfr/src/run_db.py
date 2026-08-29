@@ -4,7 +4,7 @@ src/run_db.py
 SQLite run database for the Cambia CFR pipeline.
 
 Tracks training runs, checkpoints, eval results, and head-to-head comparisons.
-Uses standard library sqlite3 only — no extra dependencies.
+Uses standard library sqlite3 only: no extra dependencies.
 
 Usage:
     db = get_db()                          # default path: cfr/runs/cambia_runs.db
@@ -299,7 +299,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
                 row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
             }
         except sqlite3.Error:
-            # Table absent (e.g. older schema variant) — DDL above creates it with
+            # Table absent (e.g. older schema variant): DDL above creates it with
             # the columns already present, so nothing to migrate.
             continue
         if not existing:

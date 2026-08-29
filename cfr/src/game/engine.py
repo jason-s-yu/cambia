@@ -637,7 +637,7 @@ class CambiaGameState(QueryMixin, SnapLogicMixin, AbilityMixin):
                     )
 
             # _check_game_end is called by _advance_turn when the turn advances.
-            # No separate call needed here — game-end conditions only change on turn advancement.
+            # No separate call needed here: game-end conditions only change on turn advancement.
 
             # --- Sanity Check ---
             # If no action was processed, but game isn't over and requires action, log potential stall

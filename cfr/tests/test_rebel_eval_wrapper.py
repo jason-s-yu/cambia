@@ -125,7 +125,7 @@ def test_rebel_wrapper_defaults_from_checkpoint():
     with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
         path = f.name
 
-    # Checkpoint with no dcfr_config — should use class defaults
+    # Checkpoint with no dcfr_config: should use class defaults
     value_net = PBSValueNetwork(
         input_dim=PBS_INPUT_DIM,
         hidden_dim=1024,
@@ -205,7 +205,7 @@ def test_rebel_choose_action_without_state():
     wrapper = ReBeLAgentWrapper(
         player_id=0, config=config, checkpoint_path=path, device="cpu"
     )
-    # agent_state is None — should fall back to random without error
+    # agent_state is None: should fall back to random without error
     legal_actions = {ActionDrawStockpile(), ActionCallCambia()}
     action = wrapper.choose_action(game_state=None, legal_actions=legal_actions)
     assert action in legal_actions
@@ -278,7 +278,7 @@ def test_initialize_state_called_via_isinstance():
     wrapper = ReBeLAgentWrapper(
         player_id=0, config=config, checkpoint_path=path, device="cpu"
     )
-    # ReBeLAgentWrapper is a NeuralAgentWrapper, not DeepCFRAgentWrapper —
+    # ReBeLAgentWrapper is a NeuralAgentWrapper, not DeepCFRAgentWrapper:
     # the fixed isinstance check must include NeuralAgentWrapper.
     assert isinstance(
         wrapper, NeuralAgentWrapper

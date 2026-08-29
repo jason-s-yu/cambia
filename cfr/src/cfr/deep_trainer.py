@@ -1,7 +1,7 @@
 """
 src/cfr/deep_trainer.py
 
-Deep CFR Trainer — replaces the tabular CFRTrainer for neural network-based training.
+Deep CFR Trainer: replaces the tabular CFRTrainer for neural network-based training.
 
 Training loop:
 1. Every K traversals, distribute advantage network weights to workers
@@ -477,7 +477,7 @@ def _run_traversals_batch(
     _escher_sampled_mags: List[float] = []
     _escher_cf_mags: List[float] = []
 
-    # Create file handler ONCE for the batch — avoids glob.glob() per traversal.
+    # Create file handler ONCE for the batch: avoids glob.glob() per traversal.
     file_handler = _create_worker_file_handler(
         config,
         0,
@@ -579,7 +579,7 @@ def _run_traversals_threaded(
     traversals_done = 0
     total_nodes = 0
 
-    # Create one file handler per thread slot ONCE — avoids glob.glob() per traversal.
+    # Create one file handler per thread slot ONCE: avoids glob.glob() per traversal.
     worker_handlers: Dict[int, SerialRotatingFileHandler] = {}
     for slot in range(num_threads):
         worker_handlers[slot] = _create_worker_file_handler(
@@ -658,7 +658,7 @@ def qre_strategy(
     CRITICAL IMPLEMENTATION NOTES (from researcher review _1c):
     - Mask illegal actions with -inf via masked_fill
     - Use per-row max via max(dim=-1, keepdim=True) for numerical stability
-    - Do NOT use advantages[legal_mask].max() — this flattens across batch dim,
+    - Do NOT use advantages[legal_mask].max(): this flattens across batch dim,
       computing a global max that causes cross-row underflow → NaN
 
     Args:
@@ -751,7 +751,7 @@ class DeepCFRTrainer:
         else:
             self.strategy_net = None
 
-        # B5: torch.compile — gated by config (effective on CUDA and XPU)
+        # B5: torch.compile - gated by config (effective on CUDA and XPU)
         if (
             self.dcfr_config.use_compile
             and hasattr(torch, "compile")
@@ -808,7 +808,7 @@ class DeepCFRTrainer:
             self.value_optimizer = None
             self.value_buffer = None
 
-        # B4: AMP scaler — gated by config (effective on CUDA and XPU)
+        # B4: AMP scaler - gated by config (effective on CUDA and XPU)
         self.use_amp = self.dcfr_config.use_amp and self.device.type != "cpu"
         self.scaler = torch.amp.GradScaler(self.device.type, enabled=self.use_amp)
 
@@ -883,7 +883,7 @@ class DeepCFRTrainer:
             self.dcfr_config.use_psro,
         )
 
-        # Run DB state (never raises — DB is optional)
+        # Run DB state (never raises - DB is optional)
         self._db_run_id: Optional[int] = None
         self._db_conn = None
         if _RUN_DB_AVAILABLE:
@@ -1470,7 +1470,7 @@ class DeepCFRTrainer:
                 network_weights = self._get_network_weights_for_workers()
                 phase_times["weights_copy"] = time.time() - _t0
 
-                # Collect traversal results — either from pipeline future or synchronously
+                # Collect traversal results: either from pipeline future or synchronously
                 _trav_timing: Dict[str, float] = {}
                 _trav_start = time.time()
                 if pending_future is not None:
@@ -1577,7 +1577,7 @@ class DeepCFRTrainer:
                     self.dcfr_config.engine_backend == "go"
                     and self.dcfr_config.num_traversal_threads > 1
                 ):
-                    # Threaded path for Go FFI backend — threads share the
+                    # Threaded path for Go FFI backend: threads share the
                     # advantage network read-only; each thread gets its own
                     # GoEngine instance (handle pool is mutex-protected).
                     (
@@ -1661,7 +1661,7 @@ class DeepCFRTrainer:
                 # Submit next traversals BEFORE training so both adv_train and
                 # strat_train overlap with the worker's traversal.  The worker
                 # uses pre-adv-training weights (one step staler for the
-                # advantage net), which is an acceptable approximation — Deep
+                # advantage net), which is an acceptable approximation: Deep
                 # CFR already tolerates stale strategy weights with the prior
                 # placement.  Saves ~4s/step by overlapping adv_train with
                 # the worker traversal.
@@ -2300,7 +2300,7 @@ class DeepCFRTrainer:
                     checkpoint["strategy_optimizer_state_dict"]
                 )
 
-            # ESCHER value network — cross-mode safe
+            # ESCHER value network: cross-mode safe
             value_net_sd = checkpoint.get("value_net_state_dict")
             if self._is_escher:
                 if value_net_sd is not None:
@@ -2315,7 +2315,7 @@ class DeepCFRTrainer:
                     logger.info(
                         "OS checkpoint loaded into ESCHER trainer: value_net initializes fresh."
                     )
-            # else: ESCHER checkpoint -> OS trainer — value fields are ignored (value_net is None)
+            # else: ESCHER checkpoint -> OS trainer - value fields are ignored (value_net is None)
 
             # Load reservoir buffers from their saved .npz files
             adv_buffer_path = checkpoint.get("advantage_buffer_path")

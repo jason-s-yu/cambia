@@ -9,8 +9,8 @@ records (PBS_encoding, value_target, policy_target, action_mask) tuples.
 
 Training data shapes:
     features:      (PBS_INPUT_DIM,) = (956,)  float32
-    value_target:  (VALUE_DIM,)    = (936,)  float32  — tiled from solver's 2-dim root values
-    policy_target: (NUM_ACTIONS,)  = (146,)  float32  — averaged strategy from subgame CFR
+    value_target:  (VALUE_DIM,)    = (936,)  float32  - tiled from solver's 2-dim root values
+    policy_target: (NUM_ACTIONS,)  = (146,)  float32  - averaged strategy from subgame CFR
     action_mask:   (NUM_ACTIONS,)  = (146,)  bool
 """
 
@@ -108,7 +108,7 @@ def _get_leaf_values(
         range_p1: Current range distribution for player 1 (NUM_HAND_TYPES,).
 
     Returns:
-        float32 array of shape (n_leaves, 2, NUM_HAND_TYPES) — per-hand-type
+        float32 array of shape (n_leaves, 2, NUM_HAND_TYPES): per-hand-type
         counterfactual values at each leaf for each player.
         result[i, 0, h] = value network output for player 0, hand type h, at leaf i.
         result[i, 1, h] = value network output for player 1, hand type h, at leaf i.
@@ -146,7 +146,7 @@ def _compute_policy_matrix(
         range_p1: Current range for player 1 (NUM_HAND_TYPES,).
 
     Returns:
-        np.ndarray of shape (NUM_HAND_TYPES, NUM_ACTIONS) — policy_matrix[h, a] is
+        np.ndarray of shape (NUM_HAND_TYPES, NUM_ACTIONS): policy_matrix[h, a] is
         the probability that a player with hand type h takes action a.
     """
     mask_u8 = game.legal_actions_mask()  # (146,) uint8
@@ -256,7 +256,7 @@ def rebel_self_play_episode(
                             leaf_values = _get_leaf_values(
                                 value_net, leaf_engines, range_p0, range_p1
                             )  # (n_leaves, 2, NUM_HAND_TYPES)
-                            # Free leaf game handles eagerly — they consumed
+                            # Free leaf game handles eagerly: they consumed
                             # game pool slots and are no longer needed.
                             del leaf_engines
                             solver.free_leaves()

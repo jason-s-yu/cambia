@@ -199,7 +199,7 @@ def test_update_range_preserves_distribution() -> None:
     rng = np.random.default_rng(42)
     range_vec = uniform_range()
     num_actions = 10
-    # Uniform policy — all actions equally likely
+    # Uniform policy: all actions equally likely
     policy_matrix = np.full(
         (NUM_HAND_TYPES, num_actions), 1.0 / num_actions, dtype=np.float32
     )

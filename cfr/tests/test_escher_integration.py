@@ -261,7 +261,7 @@ class TestCrossModeSafety:
         )
         escher_trainer.save_checkpoint(checkpoint_path)
 
-        # Load into OS trainer — should not raise
+        # Load into OS trainer: should not raise
         os_trainer, _ = _build_trainer(str(tmp_path), traversal_method="outcome")
         os_trainer.load_checkpoint(checkpoint_path)  # should not raise
 
@@ -295,7 +295,7 @@ class TestEscherTrainingLoop:
         rules.cambia_allowed_round = 1
         cfg.cambia_rules = rules
 
-        # Provide real SimpleNamespace for system (not MagicMock — avoids
+        # Provide real SimpleNamespace for system (not MagicMock - avoids
         # TypeError: '>=' not supported between int and MagicMock)
         system = SimpleNamespace()
         system.recursion_limit = 200
@@ -307,7 +307,7 @@ class TestEscherTrainingLoop:
         agent_params.time_decay_turns = 3
         cfg.agent_params = agent_params
 
-        # Provide real deep_cfr config (not MagicMock — avoids comparison errors)
+        # Provide real deep_cfr config (not MagicMock - avoids comparison errors)
         deep_cfr = SimpleNamespace()
         deep_cfr.traversal_method = "escher"
         deep_cfr.sampling_method = "outcome"

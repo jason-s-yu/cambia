@@ -103,7 +103,7 @@ class TestSlotFiLMNetwork:
         assert net.film_beta.weight.grad is not None, "film_beta.weight has no gradient"
         assert (
             net.film_beta.weight.grad.abs().max().item() > 0.0
-        ), "film_beta.weight gradient is zero — additive path is broken"
+        ), "film_beta.weight gradient is zero: additive path is broken"
 
     def test_empty_slot_film_beta_weight_grad_zero(self):
         """Empty slots (all-zeros input including tag) produce zero weight gradient on film_beta.

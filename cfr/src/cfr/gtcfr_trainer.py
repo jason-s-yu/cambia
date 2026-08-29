@@ -1,7 +1,7 @@
 """
 src/cfr/gtcfr_trainer.py
 
-GT-CFR Trainer — training loop orchestrator for Phase 2.
+GT-CFR Trainer: training loop orchestrator for Phase 2.
 
 Architecture:
 - CVPN (dual-head): predicts counterfactual values (936) + policy logits (146)
@@ -59,7 +59,7 @@ POLICY_DIM: int = NUM_ACTIONS  # 146
 
 def _gtcfr_batch_worker(args: Tuple) -> List:
     """
-    ProcessPoolExecutor worker — runs N GT-CFR self-play episodes and returns all samples.
+    ProcessPoolExecutor worker: runs N GT-CFR self-play episodes and returns all samples.
 
     Must be at module level (not a closure or method) so ProcessPoolExecutor can
     pickle it for spawn-based worker processes.
@@ -411,7 +411,7 @@ class GTCFRTrainer:
         """Load compatible weights from a Phase 1 ReBeL checkpoint into CVPN."""
         if not os.path.exists(rebel_checkpoint_path):
             logger.warning(
-                "ReBeL checkpoint not found at %s — skipping warm start.",
+                "ReBeL checkpoint not found at %s: skipping warm start.",
                 rebel_checkpoint_path,
             )
             return

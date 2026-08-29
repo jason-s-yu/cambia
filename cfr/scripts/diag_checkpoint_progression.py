@@ -300,7 +300,7 @@ def build_scenarios(encode_fn, input_dim):
     )
     scenarios.append(("Terrible(44) T1", f, m, "P(Cambia)", lambda s, a: s[IDX_CAMBIA]))
 
-    # S3: Good hand, late game — should strongly Cambia
+    # S3: Good hand, late game - should strongly Cambia
     f, m = _st(
         [P, P, P, P],
         [B.ACE.value, B.LOW_NUM.value, B.LOW_NUM.value, B.LOW_NUM.value],
@@ -313,7 +313,7 @@ def build_scenarios(encode_fn, input_dim):
     )
     scenarios.append(("Good(8) late", f, m, "P(Cambia)", lambda s, a: s[IDX_CAMBIA]))
 
-    # S4: All unknown mid-game — Cambia is suicidal
+    # S4: All unknown mid-game - Cambia is suicidal
     f, m = _st(
         [U, U, U, U],
         [0, 0, 0, 0],
@@ -326,7 +326,7 @@ def build_scenarios(encode_fn, input_dim):
     )
     scenarios.append(("Unknown mid", f, m, "P(Cambia)", lambda s, a: s[IDX_CAMBIA]))
 
-    # S5: Drew ACE, slot 2 has HIGH_KING — should replace slot 2
+    # S5: Drew ACE, slot 2 has HIGH_KING - should replace slot 2
     f, m = _pd(
         [P, U, P, U],
         [B.LOW_NUM.value, 0, B.HIGH_KING.value, 0],
@@ -340,7 +340,7 @@ def build_scenarios(encode_fn, input_dim):
         ("Drew A,has K", f, m, "P(Repl2)", lambda s, a: s[IDX_REPLACE_BASE + 2])
     )
 
-    # S6: Drew HIGH_KING, all low — should discard
+    # S6: Drew HIGH_KING, all low - should discard
     f, m = _pd(
         [P, P, P, P],
         [B.ACE.value, B.LOW_NUM.value, B.LOW_NUM.value, B.ACE.value],
@@ -354,7 +354,7 @@ def build_scenarios(encode_fn, input_dim):
         ("Drew K,all low", f, m, "P(Disc)", lambda s, a: s[IDX_DISCARD_NO_ABILITY])
     )
 
-    # S7: Peek own — 2 known, 2 unknown — should peek unknown (slot 2 or 3)
+    # S7: Peek own - 2 known, 2 unknown - should peek unknown (slot 2 or 3)
     f, m = _pk(
         [P, P, U, U],
         [B.LOW_NUM.value, B.ACE.value, 0, 0],
@@ -373,7 +373,7 @@ def build_scenarios(encode_fn, input_dim):
         )
     )
 
-    # S8: Snap — known ACE match at slot 0, discard=ACE
+    # S8: Snap - known ACE match at slot 0, discard=ACE
     f, m = _sn(
         [P, U, U, U],
         [B.ACE.value, 0, 0, 0],
@@ -386,7 +386,7 @@ def build_scenarios(encode_fn, input_dim):
         ("Snap ACE s0", f, m, "P(SnapOwn0)", lambda s, a: s[IDX_SNAP_OWN_BASE])
     )
 
-    # S9: Snap — HIGH_KING discard, all unknown — should pass
+    # S9: Snap - HIGH_KING discard, all unknown - should pass
     f, m = _sn(
         [U, U, U, U],
         [0, 0, 0, 0],
