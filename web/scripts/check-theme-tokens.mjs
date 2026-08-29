@@ -245,6 +245,31 @@ const PAIRS = [
     { fg: 'text-primary', bg: 'interactive-selected', over: 'surface-1', min: 4.5, use: 'own name on the leaderboard row' },
     { fg: 'text-secondary', bg: 'interactive-selected', over: 'surface-1', min: 4.5, use: 'rank and counts on the own leaderboard row' },
     { fg: 'accent-gold-text', bg: 'interactive-selected', over: 'surface-1', min: 4.5, use: 'a top-three rank on the own leaderboard row' },
+    // Status tones (cambia-971). Every one of them is read as text at 11-13px,
+    // so the floor is 4.5 and not the 3:1 large-text or non-text one; the pill
+    // is bold, but bold reaches "large" only at 18.66px.
+    //
+    // Grounds, enumerated the way the tertiary tier is: the badge tint over the
+    // two panel surfaces, then the worst flat ground per theme. A tone's own
+    // tint pulls the ground toward the tone, so the tint pair over a surface
+    // bounds the same tone drawn flat on it, which covers the opaque
+    // --surface-1 chip on the felt (DsGameTable FeltChip). The flat grounds
+    // that are not bounded that way are --surface-selected, the lightest ground
+    // in dark, and --surface-inset, the darkest in light; both are measured in
+    // both themes, and the resting --surface-2 seat sits inside that span.
+    { fg: 'status-success', bg: 'status-success-bg', over: 'surface-1', min: 4.5, use: 'success badge label on a card' },
+    { fg: 'status-success', bg: 'status-success-bg', over: 'surface-2', min: 4.5, use: 'success badge label on a raised row' },
+    { fg: 'status-danger', bg: 'status-danger-bg', over: 'surface-1', min: 4.5, use: 'danger badge label on a card' },
+    { fg: 'status-danger', bg: 'status-danger-bg', over: 'surface-2', min: 4.5, use: 'danger badge label on a raised row' },
+    { fg: 'status-warning', bg: 'status-warning-bg', over: 'surface-1', min: 4.5, use: 'warning badge label on a card' },
+    { fg: 'status-warning', bg: 'status-warning-bg', over: 'surface-2', min: 4.5, use: 'warning badge label on a raised row' },
+    { fg: 'status-info', bg: 'status-info-bg', over: 'surface-1', min: 4.5, use: 'info badge label on a card' },
+    { fg: 'status-info', bg: 'status-info-bg', over: 'surface-2', min: 4.5, use: 'info badge label on a raised row' },
+    { fg: 'status-success', bg: 'surface-selected', min: 4.5, use: 'the Ready line on the active-turn seat' },
+    { fg: 'status-danger', bg: 'surface-selected', min: 4.5, use: 'the Called Cambia line on the active-turn seat' },
+    { fg: 'status-success', bg: 'surface-inset', min: 4.5, use: 'a positive delta in a score pill' },
+    { fg: 'status-danger', bg: 'surface-inset', min: 4.5, use: 'a negative delta in a score pill' },
+    { fg: 'text-secondary', bg: 'surface-2', min: 4.5, use: 'the stopped badge, the one status pill drawn on a neutral fill' },
     { fg: 'card-targetable-ring', bg: 'surface-felt', min: 3, use: 'targetable card and pile ring (non-text indicator, WCAG 1.4.11 3:1)' }
 ];
 
