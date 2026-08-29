@@ -1086,6 +1086,14 @@ func (g *CambiaGame) handleSnapViaEngine(playerID uuid.UUID, engineIdx uint8, pa
 			g.handleSnapFailure(playerID, engineIdx, &cardID)
 			return
 		}
+		// A snapper with nothing left to give cannot pay the card the snap owes (RULES.md 5), so
+		// the attempt fails and draws the penalty instead. This is the engine's own answer to the
+		// same position (engine/snap.go snapOpponent, the HandLen == 0 branch), mirrored here
+		// because the service resolves snaps outside the engine's snap phase.
+		if g.Engine.Players[engineIdx].HandLen == 0 {
+			g.handleSnapFailure(playerID, engineIdx, &cardID)
+			return
+		}
 
 		// Successful snap from that seat's hand.
 		if g.HouseRules.SnapRace {
@@ -1115,6 +1123,10 @@ func (g *CambiaGame) handleSnapViaEngine(playerID uuid.UUID, engineIdx uint8, pa
 
 		g.syncPlayerHandsFromEngine()
 		g.emitSnapSuccessEvents(playerID, g.EngineToPlayer[oppEngineIdx], cardID, cardRank, int(i))
+		// The snap took a card out of another hand, so it owes one back into the slot it emptied
+		// (RULES.md 5). The snapper picks which; beginSnapFill prompts them and arms the deadline
+		// that settles it if they never answer (cambia-936).
+		g.beginSnapFill(playerID, engineIdx, g.EngineToPlayer[oppEngineIdx], oppEngineIdx, i)
 		return
 	}
 
@@ -1474,6 +1486,14 @@ func (g *CambiaGame) handleTimeoutEngine(playerID uuid.UUID) {
 	if !ok {
 		log.Printf("Game %s: Timed out player %s not in engine mapping.", g.ID, playerID)
 		return
+	}
+
+	// An unpaid snap fill is settled before the turn is played out: the fill has its own deadline,
+	// but a snapper whose turn came round first would otherwise have every action below refused by
+	// HandlePlayerAction's fill gate (cambia-936). Settling it here leaves the turn free to resolve
+	// normally in the same pass.
+	if fill, owed := g.snapFills[playerID]; owed {
+		g.autoSnapFill(fill)
 	}
 
 	// If special action pending, skip it.

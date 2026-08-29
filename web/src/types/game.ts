@@ -31,6 +31,14 @@ export interface ObfPlayerState {
 	drawnCard?: ObfCard | null; // Card currently held after drawing
 }
 
+/** One outstanding snap fill: `snapperId` owes a card into `victimId`'s hand at `slot`. */
+export interface SnapMoveState {
+	snapperId: string;
+	victimId: string;
+	slot: number;
+	deadline?: number | null;
+}
+
 /** Represents the overall game state, potentially obfuscated for a specific client */
 export interface ObfGameState {
 	gameId: string;
@@ -53,6 +61,12 @@ export interface ObfGameState {
 		cardRank: string;
 		// Add other fields based on spec (e.g., peeked card info for King)
 	} | null;
+	// Snap fills still owed (RULES.md 5, cambia-936): each snapper who took an opponent's card owes
+	// one of their own into the slot it left. One entry per snapper, since two players can each owe
+	// one off the same discard when snapRace is off. Carried in the snapshot so a client that
+	// resyncs mid-obligation restores its prompt instead of sitting on a table that refuses
+	// everything else it sends. deadline is epoch-ms, absent when the table has no turn timer.
+	snapMoves?: SnapMoveState[] | null;
 	// Absolute server-clock epoch-ms deadline for the current turn's timer (cambia-488).
 	// Null/absent when no turn timer is configured; the UI falls back to an informational render.
 	turnDeadline?: number | null;
@@ -79,6 +93,8 @@ export const drawDiscardPileAction = (): ClientGameAction => ({ type: 'action_dr
 export const discardAction = (cardId: string): ClientGameAction => ({ type: 'action_discard', card: { id: cardId } });
 export const replaceAction = (cardIdToReplace: string, index: number): ClientGameAction => ({ type: 'action_replace', card: { id: cardIdToReplace, idx: index } });
 export const snapAction = (cardId: string): ClientGameAction => ({ type: 'action_snap', card: { id: cardId } });
+/** The card the snapper gives up to fill the slot they snapped (RULES.md 5, cambia-936). */
+export const snapMoveAction = (cardId: string, index: number): ClientGameAction => ({ type: 'action_snap_move', card: { id: cardId, idx: index } });
 export const callCambiaAction = (): ClientGameAction => ({ type: 'action_cambia' });
 export const skipSpecialAction = (): ClientGameAction => ({ type: 'action_special', special: 'skip' });
 
@@ -232,6 +248,31 @@ export interface PlayerSnapSuccessEvent {
 	card: EventCard; // Card that was snapped (rank and suit, plus its owner and slot)
 }
 
+/**
+ * A successful opponent snap owes the victim a card back (RULES.md 5, cambia-936). `user` is the
+ * snapper who owes it, `card.user` the victim and `card.idx` the slot the snapped card left.
+ * `payload.deadline` is the epoch-ms time the server chooses for them, absent on a table with no
+ * turn timer.
+ */
+export interface PlayerSnapMoveRequiredEvent {
+	type: 'player_snap_move_required';
+	user: { id: string };
+	card: EventCard;
+	payload: { serverNow: number; deadline?: number };
+}
+
+/**
+ * The fill landed. `user` is the snapper, `card` the id that moved (face down, so no rank or suit)
+ * with `card.user`/`card.idx` naming where it went, and `payload.fromIdx` the slot it left.
+ * `payload.auto` marks a fill the deadline chose rather than the player.
+ */
+export interface PlayerSnapMoveEvent {
+	type: 'player_snap_move';
+	user: { id: string };
+	card: EventCard;
+	payload: { fromIdx: number; auto: boolean };
+}
+
 /** Structure for player snap fail events (public) */
 export interface PlayerSnapFailEvent {
 	type: 'player_snap_fail';
@@ -342,6 +383,8 @@ export type ServerGameEvent =
 	| PrivateSpecialActionSuccessEvent
 	| PrivateSpecialActionFailEvent
 	| PlayerSnapSuccessEvent
+	| PlayerSnapMoveRequiredEvent
+	| PlayerSnapMoveEvent
 	| PlayerSnapFailEvent
 	| PlayerSnapPenaltyEvent
 	| PrivateSnapPenaltyEvent

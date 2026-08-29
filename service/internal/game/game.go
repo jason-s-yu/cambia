@@ -36,6 +36,13 @@ type GameEventType string
 const (
 	EventPlayerSnapSuccess      GameEventType = "player_snap_success"
 	EventPlayerSnapFail         GameEventType = "player_snap_fail"
+	// A successful opponent snap owes the victim a card back (RULES.md 5). The first event opens
+	// that obligation - user is the snapper, card.user the victim and card.idx the slot the snapped
+	// card left - and the second reports the card that settled it (cambia-936). Both are public:
+	// the whole table watched the snap, and the moved card travels face down, so only its id rides
+	// the second event.
+	EventPlayerSnapMoveRequired GameEventType = "player_snap_move_required"
+	EventPlayerSnapMove         GameEventType = "player_snap_move"
 	EventPlayerSnapPenalty      GameEventType = "player_snap_penalty"            // Public: Player drew penalty cards.
 	EventPrivateSnapPenalty     GameEventType = "private_snap_penalty"           // Private: Details of penalty cards drawn.
 	EventGameReshuffleStockpile GameEventType = "game_reshuffle_stockpile"       // Public: Discard pile was reshuffled into stockpile.
@@ -211,6 +218,14 @@ type CambiaGame struct {
 	// Snap State
 	snapUsedForThisDiscard bool // Tracks if a snap has succeeded for the current discard (used for SnapRace rule).
 
+	// snapFills holds the fill each successful opponent snap owes, keyed by the snapper who owes
+	// it (RULES.md 5, cambia-936). Keyed rather than singular because two players can each snap a
+	// different opponent card off one discard when snapRace is off, and each owes their own card
+	// back. snapFillGen stamps every obligation so a timer armed for a settled one cannot act on
+	// its successor. See snap_fill.go.
+	snapFills   map[uuid.UUID]*snapFillState
+	snapFillGen uint64
+
 	// Timers
 	preGameTimer *time.Timer // Timer controlling the duration of the pre-game phase.
 
@@ -268,6 +283,7 @@ func NewCambiaGame() *CambiaGame {
 		graceDeadlines:        make(map[uuid.UUID]time.Time),
 		graceGen:              make(map[uuid.UUID]uint64),
 		forfeited:             make(map[uuid.UUID]bool),
+		snapFills:             make(map[uuid.UUID]*snapFillState),
 	}
 	return g
 }
@@ -926,14 +942,23 @@ func (g *CambiaGame) HandlePlayerAction(playerID uuid.UUID, action models.GameAc
 	actingPlayer := g.Engine.ActingPlayer()
 	isCurrentPlayer := (actingPlayer == engineIdx)
 
-	// Allow snap anytime.
-	if action.ActionType != "action_snap" && !isCurrentPlayer {
+	// Allow snap anytime, and the fill a snap owes with it: both are answers to another player's
+	// discard, so neither waits for the sender's turn (RULES.md 5).
+	if action.ActionType != "action_snap" && action.ActionType != "action_snap_move" && !isCurrentPlayer {
 		log.Printf("Game %s: Action %s from %s ignored (not their turn).", g.ID, action.ActionType, playerID)
 		g.fireEventToPlayer(playerID, GameEvent{Type: EventPrivateSpecialFail, Payload: map[string]interface{}{"message": "It's not your turn."}})
 		return
 	}
+	// A snapper who took an opponent's card owes them one back before doing anything else
+	// (RULES.md 5, cambia-936). Another snap is refused with the rest: it would open a second
+	// obligation against a hand that has not paid the first.
+	if action.ActionType != "action_snap_move" && g.owesSnapFill(playerID) && !g.dropUnpayableSnapFill(playerID, engineIdx) {
+		log.Printf("Game %s: Action %s from %s ignored (snap fill pending).", g.ID, action.ActionType, playerID)
+		g.fireEventToPlayer(playerID, GameEvent{Type: EventPrivateSpecialFail, Payload: map[string]interface{}{"message": "You must move one of your cards into the slot you snapped first."}})
+		return
+	}
 	// Check if blocked by pending special action requiring resolution.
-	if g.SpecialAction.Active && g.SpecialAction.PlayerID == playerID && action.ActionType != "action_special" && action.ActionType != "action_snap" {
+	if g.SpecialAction.Active && g.SpecialAction.PlayerID == playerID && action.ActionType != "action_special" && action.ActionType != "action_snap" && action.ActionType != "action_snap_move" {
 		log.Printf("Game %s: Action %s from %s ignored (special action pending).", g.ID, action.ActionType, playerID)
 		g.fireEventToPlayer(playerID, GameEvent{Type: EventPrivateSpecialFail, Payload: map[string]interface{}{"message": "You must resolve the special card action first (use action_special with 'skip' or required payload)."}})
 		return
@@ -972,6 +997,8 @@ func (g *CambiaGame) HandlePlayerAction(playerID uuid.UUID, action models.GameAc
 	switch action.ActionType {
 	case "action_snap":
 		g.handleSnapViaEngine(playerID, engineIdx, action.Payload)
+	case "action_snap_move":
+		g.handleSnapMoveViaEngine(playerID, engineIdx, action.Payload)
 	case "action_draw_stockpile":
 		g.applyEngineAction(engine.ActionDrawStockpile, playerID)
 	case "action_draw_discardpile":
@@ -1043,6 +1070,9 @@ func (g *CambiaGame) endGame() {
 		delete(g.disconnectGraceTimers, id)
 		delete(g.graceDeadlines, id)
 	}
+	// An unpaid snap fill dies with the game it was owed in: the hands are about to be scored as
+	// they stand, so moving a card between them now would rewrite a result already being read.
+	g.cancelSnapFills()
 
 	// --- Scoring and Winner Determination ---
 	// Compute scores from engine hand state.

@@ -205,6 +205,46 @@ func (g *GameState) snapOpponent(oppIdx uint8) error {
 	return nil
 }
 
+// SnapMoveCard performs the RULES.md 5 fill: the card at fromIdx in fromPlayer's hand moves into
+// toPlayer's hand at slotIdx, shifting that hand right so the card lands in the slot the snapped
+// card vacated. slotIdx may equal the destination hand's length, which appends. It reports whether
+// the move happened: false when either index is out of range or the destination hand is already at
+// MaxHandSize, in which case no hand is touched.
+//
+// It mutates hands only: no snap-phase, pending-action or turn state moves, so a caller owns
+// whatever sequencing its own model needs. Exported for the same reason as DrawPenaltyCard: the
+// service answers snaps asynchronously, outside the engine's sequential snap phase, so it cannot
+// reach snapOpponentMove and would otherwise hand-roll the shift-and-insert this rule is (the
+// service skipped the fill entirely until cambia-936). Routing both callers through here keeps the
+// mechanics of the fill defined once.
+func (g *GameState) SnapMoveCard(fromPlayer, fromIdx, toPlayer, slotIdx uint8) bool {
+	if int(fromPlayer) >= MaxPlayers || int(toPlayer) >= MaxPlayers {
+		return false
+	}
+	if fromIdx >= g.Players[fromPlayer].HandLen {
+		return false
+	}
+	toHandLen := g.Players[toPlayer].HandLen
+	if slotIdx > toHandLen || toHandLen >= MaxHandSize {
+		return false
+	}
+
+	card := g.removeCardFromHand(fromPlayer, fromIdx)
+
+	// The removal above shifts the source hand left; when both hands are the same player's the
+	// destination length has to be re-read, since it just changed.
+	toHandLen = g.Players[toPlayer].HandLen
+	if slotIdx > toHandLen {
+		slotIdx = toHandLen
+	}
+	for i := toHandLen; i > slotIdx; i-- {
+		g.Players[toPlayer].Hand[i] = g.Players[toPlayer].Hand[i-1]
+	}
+	g.Players[toPlayer].Hand[slotIdx] = card
+	g.Players[toPlayer].HandLen++
+	return true
+}
+
 // snapOpponentMove moves the snapper's card at ownIdx into the opponent's hand at slotIdx,
 // completing a successful snapOpponent action.
 func (g *GameState) snapOpponentMove(ownIdx, slotIdx uint8) error {
@@ -231,16 +271,10 @@ func (g *GameState) snapOpponentMove(ownIdx, slotIdx uint8) error {
 		return fmt.Errorf("snapOpponentMove: opponent hand is full (%d)", oppHandLen)
 	}
 
-	// Remove card from snapper's hand.
-	card := g.removeCardFromHand(snapperIdx, ownIdx)
-
-	// Insert card into opponent's hand at slotIdx, shifting cards right.
-	// Shift cards from slotIdx to oppHandLen one position right.
-	for i := oppHandLen; i > slotIdx; i-- {
-		g.Players[opponent].Hand[i] = g.Players[opponent].Hand[i-1]
+	// Remove the snapper's card and insert it into the opponent's hand at slotIdx.
+	if !g.SnapMoveCard(snapperIdx, ownIdx, opponent, slotIdx) {
+		return fmt.Errorf("snapOpponentMove: cannot move card %d from player %d into player %d slot %d", ownIdx, snapperIdx, opponent, slotIdx)
 	}
-	g.Players[opponent].Hand[slotIdx] = card
-	g.Players[opponent].HandLen++
 
 	// Clear pending.
 	g.Pending = PendingAction{}
