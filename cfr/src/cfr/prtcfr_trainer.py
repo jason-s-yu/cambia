@@ -71,6 +71,40 @@ from .prtcfr_worker import (
 logger = logging.getLogger(__name__)
 
 
+def _resolve_prtcfr_capacity(
+    static_capacity: int,
+    k_games_per_iter: int,
+    scale_with_k: bool,
+    reference_k: int,
+) -> int:
+    """Resolve a PRT-CFR reservoir capacity, optionally scaled with k
+    (cambia-736).
+
+    Off (``scale_with_k=False``, the default): returns ``static_capacity``
+    unchanged, reproducing every pre-cambia-736 config byte-for-byte. On:
+    scales ``static_capacity`` linearly by ``k_games_per_iter / reference_k``
+    so sample retention stays comparable across cells that change the
+    per-iteration sample count away from the baseline the static capacity was
+    sized against.
+
+    Duplicates config.resolve_prtcfr_reservoir_capacity (the Pydantic-model
+    accessor for the same formula) rather than importing it: this module
+    reads every config value via getattr() duck typing and has never imported
+    src.config, precisely so it tolerates the test-conftest config stub
+    (which does not carry this helper) without forcing every PRT-CFR trainer
+    test onto the real Pydantic model.
+    """
+    if not scale_with_k:
+        return int(static_capacity)
+    if reference_k <= 0:
+        raise ValueError(
+            "prt_cfr.reservoir_capacity_reference_k must be positive, got "
+            f"{reference_k}"
+        )
+    scaled = round(static_capacity * (k_games_per_iter / reference_k))
+    return max(1, scaled)
+
+
 def _peak_lr_for_iter(
     lr: float, lr_min: float, t: int, total_iters: int, schedule: str
 ) -> float:
@@ -531,7 +565,24 @@ class PRTCFRTinyTrainer:
         self.iterations = int(getattr(config, "iterations", 100))
         self.lr = float(getattr(config, "lr", 1e-3))
         self.batch_size = int(getattr(config, "batch_size", 1024))
-        self.buffer_capacity = int(getattr(config, "buffer_capacity", 2_000_000))
+        # Reservoir capacity, optionally scaled with k_games_per_iter
+        # (cambia-736) so sample retention stays comparable across cells that
+        # change the per-iteration sample count. Off by default: reproduces
+        # the static buffer_capacity unchanged.
+        self.buffer_capacity = _resolve_prtcfr_capacity(
+            static_capacity=int(getattr(config, "buffer_capacity", 2_000_000)),
+            k_games_per_iter=self.k_games,
+            scale_with_k=bool(getattr(config, "reservoir_capacity_scale_with_k", False)),
+            reference_k=int(getattr(config, "reservoir_capacity_reference_k", 80)),
+        )
+        logger.info(
+            "PRT-CFR tiny trainer reservoir capacity resolved: buffer_capacity=%d "
+            "(k_games_per_iter=%d, scale_with_k=%s, reference_k=%d)",
+            self.buffer_capacity,
+            self.k_games,
+            bool(getattr(config, "reservoir_capacity_scale_with_k", False)),
+            int(getattr(config, "reservoir_capacity_reference_k", 80)),
+        )
         self.weight_decay = float(getattr(config, "weight_decay", 0.0))
         self.grad_clip = float(getattr(config, "grad_clip", 1.0))
         self.train_steps = int(getattr(config, "train_steps_per_iter", 256))
@@ -1814,7 +1865,27 @@ class PRTCFRProductionTrainer:
         # production path always sets config.device via _resolve_device
         # before constructing this trainer, so this default is not hit there.
         self.device = getattr(config, "device", "cpu")
-        self.reservoir_capacity = int(getattr(config, "reservoir_capacity", 20_000_000))
+        # Reservoir capacity, optionally scaled with k_games_per_iter
+        # (cambia-736) so sample retention stays comparable across cells that
+        # change the per-iteration sample count. Off by default: reproduces
+        # the static reservoir_capacity unchanged. The reservoir is
+        # disk-backed (DiskReservoir, ragged int16 pool), so a scaled capacity
+        # here costs disk, not VRAM.
+        self.reservoir_capacity = _resolve_prtcfr_capacity(
+            static_capacity=int(getattr(config, "reservoir_capacity", 20_000_000)),
+            k_games_per_iter=self.k_games,
+            scale_with_k=bool(getattr(config, "reservoir_capacity_scale_with_k", False)),
+            reference_k=int(getattr(config, "reservoir_capacity_reference_k", 80)),
+        )
+        logger.info(
+            "PRT-CFR production trainer reservoir capacity resolved: "
+            "reservoir_capacity=%d (k_games_per_iter=%d, scale_with_k=%s, "
+            "reference_k=%d)",
+            self.reservoir_capacity,
+            self.k_games,
+            bool(getattr(config, "reservoir_capacity_scale_with_k", False)),
+            int(getattr(config, "reservoir_capacity_reference_k", 80)),
+        )
         # Batched incremental generation (S1W15, the X3 gen remedy).
         self.gen_batched = bool(getattr(config, "gen_batched", True))
         self.gen_chunk_games = int(getattr(config, "gen_chunk_games", 64))
