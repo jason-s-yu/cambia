@@ -117,7 +117,7 @@ class TestUnknownYamlKeyWarnings:
         load_config = _get_real_load_config()
         # Should not raise
         result = load_config(str(config_file))
-        # Returns None or Config — either is acceptable
+        # Returns None or Config: either is acceptable
         assert result is None or hasattr(result, "cambia_rules")
 
     def test_multiple_unknown_keys_all_warned(self, tmp_path, caplog):
@@ -158,7 +158,7 @@ class TestCheckpointCambiaRulesMismatch:
         import torch
         import numpy as np
 
-        # Minimal network state dict stubs — we patch load_state_dict anyway
+        # Minimal network state dict stubs: we patch load_state_dict anyway
         return {
             "advantage_net_state_dict": {},
             "strategy_net_state_dict": {},
@@ -213,7 +213,7 @@ class TestCheckpointCambiaRulesMismatch:
         checkpoint = {"metadata": {"config": {}}}
         saved_meta = checkpoint.get("metadata", {})
         saved_rules = (saved_meta.get("config", {}) or {}).get("cambia_rules", {})
-        # Empty dict is falsy — skip check
+        # Empty dict is falsy: skip check
         assert not saved_rules
 
     def test_deep_trainer_cambia_rules_mismatch_warns(self, caplog):

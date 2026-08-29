@@ -1,7 +1,7 @@
 """
 tests/test_subgame_bridge.py
 
-Integration tests for SubgameSolver — verifies the Python cffi bridge wrapping
+Integration tests for SubgameSolver: verifies the Python cffi bridge wrapping
 the Go subgame solver (cambia_subgame_* exports in libcambia.so).
 """
 
@@ -88,7 +88,7 @@ class TestExportLeaves:
         with _make_game() as g:
             solver = SubgameSolver(g, max_depth=1)
             leaves = solver.export_leaves()
-            # Close the view objects — they are non-owning, no double-free
+            # Close the view objects: they are non-owning, no double-free
             for leaf in leaves:
                 leaf.close()
             # Solver should still be able to free cleanly

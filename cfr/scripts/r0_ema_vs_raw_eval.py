@@ -160,7 +160,7 @@ def main():
     args = parser.parse_args()
 
     print(
-        f"R0: EMA vs Raw evaluation — {len(args.iters)} checkpoints × "
+        f"R0: EMA vs Raw evaluation ({len(args.iters)} checkpoints × "
         f"{len(args.baselines)} baselines × {args.games} games"
     )
     print(f"Config: {CONFIG_PATH}")
@@ -205,7 +205,7 @@ def main():
         ema_mi = mean_imp(ema_results)
         print(f"  EMA  mean_imp = {ema_mi*100:.1f}%  ({ema_time:.0f}s)")
 
-        # Raw evaluation — use existing data or re-run
+        # Raw evaluation: use existing data or re-run
         if args.skip_raw and it in existing_raw:
             raw_results = existing_raw[it]
             raw_mi = mean_imp(raw_results)

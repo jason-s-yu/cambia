@@ -107,7 +107,7 @@ def test_decaying_eventual_loss():
     rng = random.Random(42)
     agent.apply_memory_decay(rng=rng)
 
-    # With lambda=10, p ≈ 1.0 — should decay everything in one step.
+    # With lambda=10, p ≈ 1.0: should decay everything in one step.
     assert len(agent.own_active_mask) == 0, "Expected all slots decayed with lambda=10"
     for slot in [0, 1]:
         assert agent.slot_tags[slot] == EpistemicTag.UNK
@@ -168,7 +168,7 @@ def test_human_like_capacity_limit():
 def test_human_like_saliency_eviction():
     """MemoryHumanLike: lowest-saliency slot is evicted first."""
     agent = _make_agent(memory_archetype="human_like", memory_capacity=2)
-    # Slot 0: BucketAce, saliency = |1 - 4.5| = 3.5 — LOWEST
+    # Slot 0: BucketAce, saliency = |1 - 4.5| = 3.5 - LOWEST
     # Slot 1: BucketHighKing, saliency = |13 - 4.5| = 8.5
     # Slot 2: BucketZero, saliency = |0 - 4.5| = 4.5
     _add_priv_own_slot(agent, 0, CardBucket.ACE.value)
@@ -194,7 +194,7 @@ def test_human_like_no_eviction_when_at_capacity():
 
     agent.apply_memory_decay()
 
-    # Only 2 slots, capacity=3 — nothing should be evicted.
+    # Only 2 slots, capacity=3: nothing should be evicted.
     assert len(agent.own_active_mask) == 2
     assert agent.slot_tags[0] == EpistemicTag.PRIV_OWN
     assert agent.slot_tags[1] == EpistemicTag.PRIV_OWN

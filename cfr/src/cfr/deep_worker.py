@@ -1552,7 +1552,7 @@ def _deep_traverse_os_go(
         )
     else:
         # Opponent: sample from pure strategy (no exploration)
-        # This ensures unbiased counterfactual value estimation — see Lanctot et al. 2009
+        # This ensures unbiased counterfactual value estimation: see Lanctot et al. 2009
         exploration_policy = local_strategy.copy()
 
     # Normalize
@@ -1917,7 +1917,7 @@ def _deep_traverse_os_go_nplayer(
         )
     else:
         # Opponent: sample from pure strategy (no exploration)
-        # This ensures unbiased counterfactual value estimation — see Lanctot et al. 2009
+        # This ensures unbiased counterfactual value estimation: see Lanctot et al. 2009
         exploration_policy = local_strategy.copy()
 
     # Normalize
@@ -2272,7 +2272,7 @@ def _escher_traverse_go(
         worker_stats.error_count += 1
         return np.zeros(NUM_PLAYERS, dtype=np.float64)
 
-    # Compute strategy from regret network (no epsilon mixing — pure strategy sampling)
+    # Compute strategy from regret network (no epsilon mixing - pure strategy sampling)
     if regret_net is not None:
         try:
             strategy_full = _get_strategy_from_network(
@@ -3007,7 +3007,7 @@ def _deep_traverse_os(
         )
     else:
         # Opponent: sample from pure strategy (no exploration)
-        # This ensures unbiased counterfactual value estimation — see Lanctot et al. 2009
+        # This ensures unbiased counterfactual value estimation: see Lanctot et al. 2009
         exploration_policy = strategy.copy()
 
     # Normalize just in case
@@ -3325,7 +3325,7 @@ def run_deep_cfr_worker(
         worker_root_logger.propagate = False
 
         if file_handler_override is not None:
-            # Reuse pre-created handler — avoids glob.glob() on every traversal.
+            # Reuse pre-created handler: avoids glob.glob() on every traversal.
             file_handler_override.setLevel(effective_level)
             worker_root_logger.addHandler(file_handler_override)
         else:

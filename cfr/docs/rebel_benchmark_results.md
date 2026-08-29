@@ -56,7 +56,7 @@ Default competitive-minus (no discard draw, no replace abilities, no snap race, 
 | PBS build + encode | 0.02 | 0.0 | Python/numpy |
 | Range update | 0.01 | 0.0 | Python/numpy |
 
-**Go FFI total: 66.0% — Python/PyTorch total: 34.0%**
+**Go FFI total: 66.0%; Python/PyTorch total: 34.0%**
 Average: 182.9 ms/step.
 
 ### Language Switch Analysis
@@ -64,7 +64,7 @@ Average: 182.9 ms/step.
 **Would rewriting in Go/C++ help?** No.
 
 - The 66% bottleneck is already Go. C++ might gain single-digit % from compiler differences.
-- The 34% is neural net matmul (PyTorch calls into C++ libTorch/MKL). In C++ you'd use libtorch or ONNX Runtime — same BLAS kernels.
+- The 34% is neural net matmul (PyTorch calls into C++ libTorch/MKL). In C++ you'd use libtorch or ONNX Runtime (same BLAS kernels).
 - Python dispatch overhead is <0.1% of step time (PBS build + range update).
 - The cost is algorithmic (200 CFR iters x depth-4 tree x 468 hand types), not linguistic.
 
@@ -127,7 +127,7 @@ If mean_imp still climbing at 1000, extend to 2000.
 - Self-play workers run on CPU (ProcessPoolExecutor, spawn context).
   Each worker reconstructs nets from numpy state dicts.
 - Go FFI calls are per-process (no shared state, no mutex contention).
-- Range entropy barely moves with random nets (~6.148 throughout). Expected — random
+- Range entropy barely moves with random nets (~6.148 throughout). Expected: random
   policy nets produce ~uniform action distributions across hand types, so Bayes update
   is a no-op. Should improve as nets learn.
 - Solver export_leaves fails with game_config=None (Go defaults).

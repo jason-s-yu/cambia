@@ -4,8 +4,8 @@ EMA Parity Test (Phase 1.2)
 
 Validates that EMA serving weights produce equivalent play to full snapshot
 averaging by running head-to-head games between:
-  Agent A: SDCFRAgentWrapper(use_ema=True)  — O(1) EMA inference
-  Agent B: SDCFRAgentWrapper(use_ema=False) — full snapshot averaging
+  Agent A: SDCFRAgentWrapper(use_ema=True)  - O(1) EMA inference
+  Agent B: SDCFRAgentWrapper(use_ema=False) - full snapshot averaging
 
 Target: 50% +/- 1.5% win rate over 5,000 games.
 """

@@ -11,7 +11,7 @@ import numpy as np
 from types import SimpleNamespace
 
 # ---------------------------------------------------------------------------
-# Skip guard — skip all tests if libcambia.so is unavailable
+# Skip guard: skip all tests if libcambia.so is unavailable
 # ---------------------------------------------------------------------------
 
 

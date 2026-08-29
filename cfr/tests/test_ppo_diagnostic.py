@@ -28,7 +28,7 @@ from src.evaluate_agents import AGENT_REGISTRY, get_agent  # noqa: E402
 from src.ppo_env import CambiaEnv, make_env  # noqa: E402
 
 # ------------------------------------------------------------------
-# Config stubs — mirror conftest pattern but with agent_params
+# Config stubs: mirror conftest pattern but with agent_params
 # ------------------------------------------------------------------
 
 
@@ -168,7 +168,7 @@ def _run_episode(env, max_steps=500):
 
 
 # ==================================================================
-# Unit Tests — CambiaEnv observation/action spaces
+# Unit Tests: CambiaEnv observation/action spaces
 # ==================================================================
 
 
@@ -187,7 +187,7 @@ class TestEnvSpaces:
 
 
 # ==================================================================
-# Unit Tests — CambiaEnv reset
+# Unit Tests: CambiaEnv reset
 # ==================================================================
 
 
@@ -217,7 +217,7 @@ class TestEnvReset:
 
 
 # ==================================================================
-# Unit Tests — CambiaEnv step
+# Unit Tests: CambiaEnv step
 # ==================================================================
 
 
@@ -241,7 +241,7 @@ class TestEnvStep:
         # Pick an index that is NOT legal
         illegal_indices = np.where(~mask)[0]
         if len(illegal_indices) == 0:
-            pytest.skip("All actions are legal — cannot test fallback")
+            pytest.skip("All actions are legal: cannot test fallback")
         action = int(illegal_indices[0])
         obs, reward, terminated, truncated, info = reset_env.step(action)
         assert obs.shape == (EP_PBS_INPUT_DIM,)
@@ -284,7 +284,7 @@ class TestEnvStep:
 
 
 # ==================================================================
-# Unit Tests — agent_seat variants
+# Unit Tests: agent_seat variants
 # ==================================================================
 
 
@@ -307,7 +307,7 @@ class TestEnvSeatVariants:
 
 
 # ==================================================================
-# Unit Tests — different opponent types
+# Unit Tests: different opponent types
 # ==================================================================
 
 
@@ -326,7 +326,7 @@ class TestEnvOpponents:
 
 
 # ==================================================================
-# Unit Tests — action mask consistency
+# Unit Tests: action mask consistency
 # ==================================================================
 
 
@@ -371,7 +371,7 @@ class TestActionMaskConsistency:
 
 
 # ==================================================================
-# Unit Tests — make_env factory
+# Unit Tests: make_env factory
 # ==================================================================
 
 
@@ -393,7 +393,7 @@ class TestMakeEnvFactory:
 
 
 # ==================================================================
-# Integration Tests — PPOAgentWrapper and AGENT_REGISTRY
+# Integration Tests: PPOAgentWrapper and AGENT_REGISTRY
 # ==================================================================
 
 
@@ -515,7 +515,7 @@ class TestPPOAgentWrapperIntegration:
 
 
 # ==================================================================
-# Integration Tests — encoding consistency
+# Integration Tests: encoding consistency
 # ==================================================================
 
 
@@ -584,7 +584,7 @@ class TestRegressions:
 
         assert terminated, "Game should have ended"
 
-        # Now step again — should return terminated=True, reward=0.0
+        # Now step again: should return terminated=True, reward=0.0
         obs2, reward2, terminated2, truncated2, info2 = env.step(0)
         assert terminated2 is True
         assert reward2 == 0.0
@@ -646,4 +646,4 @@ class TestRegressions:
         # With different seeds, we should get at least 2 distinct step counts
         assert (
             len(set(results)) > 1
-        ), "All 10 episodes had identical step counts — likely not random"
+        ), "All 10 episodes had identical step counts: likely not random"

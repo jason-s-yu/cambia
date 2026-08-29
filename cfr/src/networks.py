@@ -239,7 +239,7 @@ class SlotFiLMAdvantageNetwork(nn.Module):
         self.num_players = num_players
         self.slots_per_player = num_slots // num_players
 
-        # Stage 1 — Slot Encoder (shared across all slots)
+        # Stage 1: Slot Encoder (shared across all slots)
         self.tag_embed = nn.Linear(tag_dim, embed_dim)
         self.id_embed = nn.Linear(id_dim, embed_dim)
 
@@ -258,13 +258,13 @@ class SlotFiLMAdvantageNetwork(nn.Module):
 
         self.slot_norm = nn.LayerNorm(slot_repr_dim)
 
-        # Stage 2 — Aggregation
+        # Stage 2: Aggregation
         self.global_proj = nn.Linear(public_dim, slot_repr_dim)
         aggregated_dim = slot_repr_dim * (num_players + 1)
         self.input_proj = nn.Linear(aggregated_dim, hidden_dim)
         self.input_norm = nn.LayerNorm(hidden_dim)
 
-        # Stage 3 — Trunk
+        # Stage 3: Trunk
         self.blocks = nn.ModuleList(
             [_ResBlock(hidden_dim, dropout) for _ in range(num_hidden_layers)]
         )

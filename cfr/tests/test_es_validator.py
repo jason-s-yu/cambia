@@ -43,7 +43,7 @@ def make_test_config(
     """
     config = SimpleNamespace()
 
-    # deep_cfr sub-config — use real Pydantic model with test overrides
+    # deep_cfr sub-config: use real Pydantic model with test overrides
     from src.config import DeepCfrConfig
 
     config.deep_cfr = DeepCfrConfig(
@@ -111,7 +111,7 @@ def make_network_config() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Test 1 — creation
+# Test 1: creation
 # ---------------------------------------------------------------------------
 
 
@@ -133,7 +133,7 @@ class TestESValidatorCreation:
 
 
 # ---------------------------------------------------------------------------
-# Test 2 — return keys
+# Test 2: return keys
 # ---------------------------------------------------------------------------
 
 
@@ -163,7 +163,7 @@ class TestComputeExploitabilityKeys:
 
 
 # ---------------------------------------------------------------------------
-# Test 3 — few traversals, valid metrics
+# Test 3: few traversals, valid metrics
 # ---------------------------------------------------------------------------
 
 
@@ -185,7 +185,7 @@ class TestComputeExploitabilityFewTraversals:
 
 
 # ---------------------------------------------------------------------------
-# Test 4 — metric value invariants
+# Test 4: metric value invariants
 # ---------------------------------------------------------------------------
 
 
@@ -206,7 +206,7 @@ class TestMetricsReasonable:
 
 
 # ---------------------------------------------------------------------------
-# Test 5 — zero traversals
+# Test 5: zero traversals
 # ---------------------------------------------------------------------------
 
 
@@ -229,7 +229,7 @@ class TestZeroTraversals:
 
 
 # ---------------------------------------------------------------------------
-# Test 6 — consistent random network
+# Test 6: consistent random network
 # ---------------------------------------------------------------------------
 
 
@@ -254,7 +254,7 @@ class TestESValidatorWithTrainedNetwork:
 
 
 # ---------------------------------------------------------------------------
-# Test 7 — entropy helper
+# Test 7: entropy helper
 # ---------------------------------------------------------------------------
 
 
@@ -289,7 +289,7 @@ class TestEntropyComputation:
 
 
 # ---------------------------------------------------------------------------
-# Test 8 — depth limit
+# Test 8: depth limit
 # ---------------------------------------------------------------------------
 
 
@@ -321,7 +321,7 @@ class TestDepthLimitRespected:
 
 
 # ---------------------------------------------------------------------------
-# Test 9 — config fields parsed
+# Test 9: config fields parsed
 # ---------------------------------------------------------------------------
 
 
@@ -390,7 +390,7 @@ class TestConfigFieldsParsed:
 
 
 # ---------------------------------------------------------------------------
-# Test 10 — trainer integration
+# Test 10: trainer integration
 # ---------------------------------------------------------------------------
 
 

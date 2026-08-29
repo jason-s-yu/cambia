@@ -135,7 +135,7 @@ def setup_logging(
         )
         handlers: List[logging.Handler] = []
 
-        # Live Handler (forwards based on its level) — skipped in headless mode
+        # Live Handler (forwards based on its level): skipped in headless mode
         if live_display_manager is not None:
             live_handler = LiveLogHandler(
                 live_display_manager, level=effective_console_log_level_value

@@ -120,7 +120,7 @@ def test_episode_sample_shapes(value_net, policy_net, fast_config):
 
 
 # ---------------------------------------------------------------------------
-# Test 3: Value semantics — finite values, policy sums to ~1
+# Test 3: Value semantics - finite values, policy sums to ~1
 # ---------------------------------------------------------------------------
 
 
@@ -201,12 +201,12 @@ def test_multiple_episodes_differ(value_net, policy_net, fast_config):
     # By step 1, games diverge due to different random card deals and action choices.
     # Check that any episode pair with >= 2 steps produces different second-step features,
     # or that episode lengths vary across the 5 runs (at least one pair differs).
-    # Verify episodes are not all trivially identical — check that either
+    # Verify episodes are not all trivially identical: check that either
     # episode lengths differ or any features differ at any step
     all_lengths = [len(ep) for ep in episodes]
     lengths_vary = len(set(all_lengths)) > 1
     if not lengths_vary:
-        # All same length — check if any features differ across episodes
+        # All same length: check if any features differ across episodes
         any_different = False
         for step_idx in range(min(all_lengths)):
             step_features = [ep[step_idx].features for ep in episodes]
@@ -217,7 +217,7 @@ def test_multiple_episodes_differ(value_net, policy_net, fast_config):
             if any_different:
                 break
         assert any_different or len(episodes) < 2, (
-            "Multiple episodes produced fully identical feature sequences — "
+            "Multiple episodes produced fully identical feature sequences: "
             "likely a seeding or game-divergence bug"
         )
 

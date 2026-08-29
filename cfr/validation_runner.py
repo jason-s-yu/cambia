@@ -171,7 +171,7 @@ def main():
             output_dir = eval_output_dir(run, iteration)
             if os.path.exists(os.path.join(output_dir, "eval_stdout.txt")):
                 evaluated.add((run, iteration))
-                logger.info("Skipping %s iter %d — already evaluated", run, iteration)
+                logger.info("Skipping %s iter %d: already evaluated", run, iteration)
 
     total_evals = len(RUNS) * len(TARGET_ITERATIONS)
     logger.info("Pending evaluations: %d / %d", total_evals - len(evaluated), total_evals)
@@ -233,7 +233,7 @@ def main():
         if stale_count >= max_stale:
             logger.warning("No new checkpoints for %d polls. Training may have stalled.",
                           max_stale)
-            # Don't exit — ES runs can take 10+ hours
+            # Don't exit: ES runs can take 10+ hours
             stale_count = 0  # Reset to avoid repeated warnings
 
         time.sleep(args.poll_interval)

@@ -4,12 +4,12 @@ scripts/plot_metrics.py
 Generate matplotlib plots from collected metrics.jsonl files.
 
 Plots produced:
-  1. win_rate_by_run.png         — One subplot per run, one line per baseline.
-  2. win_rate_by_baseline.png    — One subplot per baseline, one line per run.
-  3. win_rate_combined.png       — All runs on same axes, averaged across baselines.
-  4. t1_cambia_rate.png          — T1 Cambia rate vs iteration (averaged across baselines).
-  5. avg_game_length.png         — Average game turns vs iteration, one line per baseline.
-  6. head_to_head.png            — Cross-iteration win rate from head_to_head.jsonl.
+  1. win_rate_by_run.png         : One subplot per run, one line per baseline.
+  2. win_rate_by_baseline.png    : One subplot per baseline, one line per run.
+  3. win_rate_combined.png       : All runs on same axes, averaged across baselines.
+  4. t1_cambia_rate.png          : T1 Cambia rate vs iteration (averaged across baselines).
+  5. avg_game_length.png         : Average game turns vs iteration, one line per baseline.
+  6. head_to_head.png            : Cross-iteration win rate from head_to_head.jsonl.
 
 Usage:
     python scripts/plot_metrics.py [--runs-dir PATH] [--output-dir PATH]

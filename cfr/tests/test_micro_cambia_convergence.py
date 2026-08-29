@@ -79,7 +79,7 @@ AdvantageNetwork = MicroAdvantageNetwork
 # Micro-Cambia game implementation
 # ---------------------------------------------------------------------------
 
-# Action indices (compact — only 5 possible actions)
+# Action indices (compact - only 5 possible actions)
 A_DRAW_STOCK = 0
 A_DRAW_DISCARD = 1
 A_DISCARD = 2  # Discard drawn card (keep hand)
@@ -1028,7 +1028,7 @@ class TestBestResponse:
 
         def random_policy(features, mask):
             legal = mask.astype(np.float64)
-            # Random (not uniform) — bias toward first action
+            # Random (not uniform): bias toward first action
             legal[np.argmax(legal)] += 1.0
             return legal / legal.sum()
 

@@ -5,13 +5,13 @@ Verifies that each of the 7 critical bug fixes and performance
 optimizations from the Phase 0 audit has not regressed.
 
 Fixes tested:
-  BUG-1:  King Swap Belief Gap — AgentObservation.king_swap_indices field
-  BUG-2:  Double _check_game_end call removed — single call in _advance_turn
-  BUG-3:  Exception name correctness — AssertionError is valid Python
-  PERF-1: Deterministic RNG — game-local random.Random
-  PERF-2: Shallow copy for pending_action_data — no deepcopy in engine
-  PERF-3: Observation construction consolidated — shared _create_observation
-  PERF-4: Penalty undo/reshuffle — throwaway undo stack for reshuffles
+  BUG-1:  King Swap Belief Gap - AgentObservation.king_swap_indices field
+  BUG-2:  Double _check_game_end call removed - single call in _advance_turn
+  BUG-3:  Exception name correctness - AssertionError is valid Python
+  PERF-1: Deterministic RNG - game-local random.Random
+  PERF-2: Shallow copy for pending_action_data - no deepcopy in engine
+  PERF-3: Observation construction consolidated - shared _create_observation
+  PERF-4: Penalty undo/reshuffle - throwaway undo stack for reshuffles
 """
 
 import copy

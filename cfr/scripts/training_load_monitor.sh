@@ -3,7 +3,7 @@
 # Usage: ./training_load_monitor.sh runs/v2.0-rebel/logs/training.log
 LOG="${1:-runs/v2.0-rebel/logs/training.log}"
 OUT="${LOG%.log}_load.log"
-echo "# Training load monitor — $(date -Iseconds)" > "$OUT"
+echo "# Training load monitor: $(date -Iseconds)" > "$OUT"
 echo "# Format: iter | self_play_s | load_1m | load_5m | cpus_busy" >> "$OUT"
 tail -f "$LOG" | while read -r line; do
   if echo "$line" | grep -q '^\[rebel\] iter'; then

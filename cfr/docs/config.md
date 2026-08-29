@@ -26,7 +26,7 @@ Config is validated via Pydantic v2 `BaseModel` at load time. Unknown keys trigg
 
 ### Config Inheritance via `_base`
 
-Any config file can declare `_base: path/to/base.yaml` to inherit fields from a base config. The base path is resolved relative to the config file's directory. Override fields are deep-merged: nested dicts merge recursively, and the overriding file wins on conflicts. Inheritance is single-level only — chaining `_base` in the base file is not supported.
+Any config file can declare `_base: path/to/base.yaml` to inherit fields from a base config. The base path is resolved relative to the config file's directory. Override fields are deep-merged: nested dicts merge recursively, and the overriding file wins on conflicts. Inheritance is single-level only - chaining `_base` in the base file is not supported.
 
 Example:
 ```yaml

@@ -68,7 +68,7 @@ go_available = _go_available()
 skip_if_no_go = pytest.mark.skipif(not go_available, reason="libcambia.so not available")
 
 # ---------------------------------------------------------------------------
-# xorshift64 — mirrors Go engine's RNG exactly
+# xorshift64: mirrors Go engine's RNG exactly
 # ---------------------------------------------------------------------------
 _MASK64 = (1 << 64) - 1
 
@@ -203,7 +203,7 @@ class TestCrossEngineLegalActions:
             if go_term and py_term:
                 break
             if go_term != py_term:
-                # Terminal mismatch — check if snap divergence caused it.
+                # Terminal mismatch: check if snap divergence caused it.
                 # If we've already had snap divergences, this is expected.
                 if snap_passes > 0:
                     break  # Snap divergence caused terminal mismatch
@@ -250,7 +250,7 @@ class TestCrossEngineLegalActions:
             if go_non_snap != py_non_snap:
                 if snap_passes > 0:
                     # Divergence caused by earlier snap handling differences.
-                    # Expected — stop comparison, not a failure.
+                    # Expected: stop comparison, not a failure.
                     break
                 go_only = sorted(go_non_snap - py_non_snap)
                 py_only = sorted(py_non_snap - go_non_snap)
@@ -274,7 +274,7 @@ class TestCrossEngineLegalActions:
             # Pick lowest common non-snap legal action
             common = sorted(go_non_snap & py_non_snap)
             if len(common) == 0:
-                # No common actions — engines have diverged (snap-related)
+                # No common actions: engines have diverged (snap-related)
                 break
 
             action_idx = common[0]

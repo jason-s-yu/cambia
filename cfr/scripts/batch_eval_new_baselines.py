@@ -37,14 +37,14 @@ EVALS = [
         "iters": [1075],
         "run_name": "prod-full-333",
     },
-    # sd-cfr-500k (legacy SD-CFR) — closest to iter 500 is 550
+    # sd-cfr-500k (legacy SD-CFR): closest to iter 500 is 550
     {
         "config": "runs/sd-cfr-500k/config.yaml",
         "checkpoints": "runs/sd-cfr-500k/checkpoints",
         "iters": [550],
         "run_name": "sd-cfr-500k",
     },
-    # eppbs-2p (flat EP-PBS, 1500 iter run) — key milestones
+    # eppbs-2p (flat EP-PBS, 1500 iter run): key milestones
     {
         "config": "runs/eppbs-2p/config.yaml",
         "checkpoints": "runs/eppbs-2p/checkpoints",

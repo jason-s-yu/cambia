@@ -65,7 +65,7 @@ def _load_network(checkpoint_path: str, device: torch.device) -> AdvantageNetwor
 def _make_minimal_config() -> Config:
     """Create a minimal Config object for agent state initialization."""
     config = Config()
-    # Instantiate sub-configs — construct without kwargs to handle stub environments.
+    # Instantiate sub-configs: construct without kwargs to handle stub environments.
     rules = CambiaRulesConfig()
     rules.use_jokers = 0  # No jokers for speed in state sampling.
     config.cambia_rules = rules

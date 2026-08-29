@@ -171,7 +171,7 @@ def test_collector_meets_requested_count():
     # Must reach the requested count, never ~0.07x.
     assert len(infosets) >= requested, (
         f"collector under-collected: got {len(infosets)} of {requested} "
-        f"(BUG-3 regression — sized for wrong decisions/game)"
+        f"(BUG-3 regression - sized for wrong decisions/game)"
     )
     # And it must not wildly over-collect (collection stops at the target).
     assert len(infosets) <= requested + 50

@@ -326,7 +326,7 @@ def build_scenarios():
                 game_phase=GamePhase.EARLY.value,
                 turn_progress=0.05,
             ),
-            "Clear T1C — Cambia should dominate strongly.",
+            "Clear T1C: Cambia should dominate strongly.",
         )
     )
 
@@ -344,7 +344,7 @@ def build_scenarios():
                 stock_est=StockpileEstimate.MEDIUM.value,
                 turn_progress=0.3,
             ),
-            "All unknown — should draw (need information). Cambia suicidal.",
+            "All unknown: should draw (need information). Cambia suicidal.",
         )
     )
 
@@ -470,7 +470,7 @@ def build_scenarios():
 
     # ── ABILITY_SELECT (peek own) scenarios ──
 
-    # S11: Peek own — 2 known slots, 2 unknown. Should peek unknown.
+    # S11: Peek own - 2 known slots, 2 unknown. Should peek unknown.
     scenarios.append(
         (
             "S11: PEEK_OWN, slots 0,1 known, slots 2,3 unknown",
@@ -487,7 +487,7 @@ def build_scenarios():
         )
     )
 
-    # S12: Peek own — all unknown. Any slot equally good.
+    # S12: Peek own - all unknown. Any slot equally good.
     scenarios.append(
         (
             "S12: PEEK_OWN, all 4 slots unknown",
@@ -756,7 +756,7 @@ def main():
     primary_label = "EMA" if ema_net else "Raw-450"
 
     print("\n" + "#" * 80)
-    print(f"  DETAILED SCENARIO ANALYSIS — {primary_label} network")
+    print(f"  DETAILED SCENARIO ANALYSIS: {primary_label} network")
     print("#" * 80)
 
     for name, features, mask, expected in scenarios:

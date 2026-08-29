@@ -50,7 +50,7 @@ from src.utils import WorkerStats
 
 
 class MockValueNet(HistoryValueNetwork):
-    """Always returns zeros — no GPU overhead, predictable output."""
+    """Always returns zeros: no GPU overhead, predictable output."""
 
     def __init__(self):
         # Skip parent __init__ to avoid param allocation in many tests
@@ -65,7 +65,7 @@ class MockValueNet(HistoryValueNetwork):
 
 
 class MockRegretNet(AdvantageNetwork):
-    """Returns uniform advantages — all actions equally weighted."""
+    """Returns uniform advantages: all actions equally weighted."""
 
     def __init__(self):
         torch.nn.Module.__init__(self)
@@ -223,7 +223,7 @@ def test_escher_traversal_completes():
 
 def test_escher_no_importance_weights():
     """
-    ESCHER samples from pure strategy — no q(a) = epsilon*uniform + (1-e)*sigma.
+    ESCHER samples from pure strategy: no q(a) = epsilon*uniform + (1-e)*sigma.
     Verify: value samples use 'actual child utility', not IS-corrected utility.
     In OS, regret[a] uses 1/q(a) * u; in ESCHER, it uses V(h,a) - V(h).
     We test this indirectly: with a zero value net, regret[sampled_action] ==

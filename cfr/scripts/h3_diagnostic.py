@@ -182,10 +182,10 @@ def run_h3_diagnostic(
         print("This confirms the H3 bug: the agent was trained as best-response")
         print("to a 60%-random opponent and solves that objective well.")
     elif avg_wr > 45:
-        print("DIAGNOSIS: Agent WR 45-55% — inconclusive.")
+        print("DIAGNOSIS: Agent WR 45-55% - inconclusive.")
         print("The agent may have partially adapted to random opponents.")
     else:
-        print("DIAGNOSIS: Agent WR < 45% — H3 not the primary issue.")
+        print("DIAGNOSIS: Agent WR < 45% - H3 not the primary issue.")
 
     return results
 

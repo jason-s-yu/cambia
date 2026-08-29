@@ -55,7 +55,7 @@ def make_fast_config(**overrides) -> DeepCfrConfig:
     cfg.worker_memory_budget_pct = 0.10
     cfg.device = "cpu"
     cfg.alpha = 1.5
-    # ReBeL settings — must be set explicitly for conftest stub compatibility
+    # ReBeL settings: must be set explicitly for conftest stub compatibility
     cfg.rebel_value_buffer_capacity = 200
     cfg.rebel_policy_buffer_capacity = 200
     cfg.rebel_value_hidden_dim = 32  # tiny network for speed
@@ -270,7 +270,7 @@ def test_buffer_sizes_grow():
 
 
 # ---------------------------------------------------------------------------
-# Test 5: CLI routing — train rebel command exists
+# Test 5: CLI routing - train rebel command exists
 # ---------------------------------------------------------------------------
 
 

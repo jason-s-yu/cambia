@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 # Value target dimension: 2 * NUM_HAND_TYPES = 936
 VALUE_DIM: int = 2 * NUM_HAND_TYPES
 
-# Decision context integer → PBS phase index (copied from rebel_worker.py — coexistence policy)
+# Decision context integer → PBS phase index (copied from rebel_worker.py - coexistence policy)
 _CTX_TO_PHASE: Dict[int, int] = {
     0: PHASE_DRAW,
     1: PHASE_DISCARD,
@@ -105,8 +105,8 @@ class GTCFRNode:
 
     # PUCT state
     visit_counts: np.ndarray  # (NUM_ACTIONS,) int32
-    total_action_value: np.ndarray  # (NUM_ACTIONS,) float32 — sum of values
-    policy_prior: np.ndarray  # (NUM_ACTIONS,) float32 — from CVPN
+    total_action_value: np.ndarray  # (NUM_ACTIONS,) float32: sum of values
+    policy_prior: np.ndarray  # (NUM_ACTIONS,) float32: from CVPN
 
     # CVPN leaf evaluation (stored when first evaluated)
     leaf_values: Optional[np.ndarray]  # (2, NUM_HAND_TYPES) float32
@@ -148,8 +148,8 @@ class GTCFRNode:
 class SearchResult:
     """Result of a GT-CFR search."""
 
-    policy: np.ndarray  # (NUM_ACTIONS,) float32 — root average strategy
-    root_values: np.ndarray  # (VALUE_DIM,) = (936,) float32 — flattened (2, 468) CFVs
+    policy: np.ndarray  # (NUM_ACTIONS,) float32: root average strategy
+    root_values: np.ndarray  # (VALUE_DIM,) = (936,) float32: flattened (2, 468) CFVs
     tree_size: int  # total nodes in tree
     depth_stats: dict  # {"min": int, "max": int, "mean": float}
 
@@ -170,7 +170,7 @@ class GTCFRSearch:
       3. Return root average strategy and root CFVs
       4. Free all GoEngine handles
 
-    The tree is a PUBLIC tree — nodes represent public game states.
+    The tree is a PUBLIC tree: nodes represent public game states.
     CFR produces MIXED strategies (not deterministic like MCTS).
     Ranges (range_p0, range_p1) are passed through but not Bayesian-updated
     during tree traversal (Phase 2 approximation; Phase 3 adds full range updates).
@@ -296,7 +296,7 @@ class GTCFRSearch:
         """One CFR iteration on the growing tree.
 
         Returns:
-            np.ndarray of shape (2, NUM_HAND_TYPES) — CFVs at this node.
+            np.ndarray of shape (2, NUM_HAND_TYPES): CFVs at this node.
         """
         # Terminal: broadcast scalar utilities across hand types
         if node.is_terminal:

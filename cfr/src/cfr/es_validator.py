@@ -1,7 +1,7 @@
 """
 src/cfr/es_validator.py
 
-ES Validation — runs short-depth External Sampling traversals to measure
+ES Validation: runs short-depth External Sampling traversals to measure
 exploitability metrics during Deep CFR training.
 """
 
@@ -143,11 +143,11 @@ class ESValidator:
         4. Compute metrics from collected regrets
 
         Returns dict with:
-            mean_regret: float — mean absolute regret across all samples
-            max_regret: float — maximum absolute regret
-            strategy_entropy: float — mean entropy of strategy at visited nodes
-            traversals: int — how many traversals completed
-            depth: int — configured depth limit
+            mean_regret: float - mean absolute regret across all samples
+            max_regret: float - maximum absolute regret
+            strategy_entropy: float - mean entropy of strategy at visited nodes
+            traversals: int - how many traversals completed
+            depth: int - configured depth limit
             elapsed_seconds: float
             total_nodes: int
         """

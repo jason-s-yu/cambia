@@ -141,7 +141,7 @@ class TestLockCallerHandReplace:
     def test_caller_cannot_replace_when_locked(self):
         """When lockCallerHand=True, the Cambia caller should not have Replace actions."""
         # Non-caller (P1) draws a plain card (no ability) and is in pending state
-        # Caller is P0 — the pending state player is P1 (non-caller), so this checks
+        # Caller is P0: the pending state player is P1 (non-caller), so this checks
         # that the CALLER (P0) does not get Replace actions if they were the pending player.
         # Re-arrange: caller=P1, acting/pending=P0 (non-caller has drawn card)
         deck = create_standard_deck(include_jokers=2)
@@ -159,7 +159,7 @@ class TestLockCallerHandReplace:
             PlayerState(hand=list(p0_hand), initial_peek_indices=(0, 1)),
             PlayerState(hand=list(p1_hand), initial_peek_indices=(0, 1)),
         ]
-        # caller is P0, acting player is P0 — P0 drew a card, P0 is in post-draw pending
+        # caller is P0, acting player is P0: P0 drew a card, P0 is in post-draw pending
         state = CambiaGameState(
             players=players,
             stockpile=list(stockpile),
@@ -280,7 +280,7 @@ class TestLockCallerHandBlindSwap:
         # Caller=P0, non-caller=P1 has pending BlindSwap, but target opponent (P0) is not caller
         # Wait: opponent_id = get_opponent_index(pending_player=P1) = P0 = caller
         # So we need caller=P1, pending_player=P0 to have opponent=P1 (caller) fizzle
-        # For non-fizzle: caller=P0=acting player, pending=P0 — but caller can't act after call
+        # For non-fizzle: caller=P0=acting player, pending=P0, but caller can't act after call
         # Instead use no caller set: cambia_caller_id=None
         deck = create_standard_deck(include_jokers=2)
         p0_hand = deck[:4]

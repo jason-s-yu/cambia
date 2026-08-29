@@ -301,7 +301,7 @@ def wait_for_processes(
         try:
             rc = proc.wait()
         except KeyboardInterrupt:
-            print("\nInterrupted — terminating all processes.")
+            print("\nInterrupted: terminating all processes.")
             for p in processes:
                 p.terminate()
             sys.exit(1)
@@ -359,7 +359,7 @@ def main() -> None:
     hw_info = _collect_hardware_info()
 
     print("=" * 80)
-    print("CONCURRENCY BENCHMARK — Deep CFR Training")
+    print("CONCURRENCY BENCHMARK: Deep CFR Training")
     print("=" * 80)
     print(f"\nSystem:  {hw_info['cpu']}")
     print(f"GPU:     {hw_info['gpu']}")

@@ -119,7 +119,7 @@ def extract_deck_from_python_game(game) -> Tuple[List[int], int]:
 
 
 # ---------------------------------------------------------------------------
-# Library loading — module-level singleton
+# Library loading: module-level singleton
 # ---------------------------------------------------------------------------
 
 _ffi = cffi.FFI()
@@ -1512,7 +1512,7 @@ class SubgameSolver:
         Returns:
             Tuple of (strategy, root_cfvs) as numpy float32 arrays.
             strategy has shape (146,).
-            root_cfvs has shape (2, num_hand_types) — per-hand-type CFVs for each player.
+            root_cfvs has shape (2, num_hand_types): per-hand-type CFVs for each player.
         """
         nht = len(range_p0)
         leaf_values = np.ascontiguousarray(leaf_values.ravel(), dtype=np.float32)
@@ -1569,7 +1569,7 @@ def get_handle_pool_stats() -> dict:
     Calls the Go-side cambia_handle_pool_stats (thread-safe via poolMu).
 
     Returns:
-        dict with keys 'games', 'agents', 'snapshots' — each an int count of
+        dict with keys 'games', 'agents', 'snapshots': each an int count of
         currently allocated handles in the respective pool.
     """
     lib = _get_lib()

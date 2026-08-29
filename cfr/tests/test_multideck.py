@@ -1,4 +1,4 @@
-"""tests/test_multideck.py — Tests for NumDecks / multi-deck support."""
+"""tests/test_multideck.py: Tests for NumDecks / multi-deck support."""
 
 import pytest
 from src.card import Card, create_standard_deck

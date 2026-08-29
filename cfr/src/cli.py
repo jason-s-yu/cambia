@@ -3537,7 +3537,7 @@ def runs_prune(
     typer.echo(f"\nTotal space to reclaim: {total_size / 1024 / 1024:.1f} MB")
 
     if dry_run:
-        typer.echo("(dry run — no files deleted)")
+        typer.echo("(dry run - no files deleted)")
         db.close()
         return
 

@@ -112,7 +112,7 @@ class TestQREStrategy:
         - Correct impl: max(dim=-1, keepdim=True) → per-row max
         """
         # Row 0: modest advantages in [0, 1]
-        # Row 1: enormous advantages in [0, 1e6] — if global max is used,
+        # Row 1: enormous advantages in [0, 1e6] - if global max is used,
         #         row 0 underflows to NaN
         adv = torch.zeros(2, 5)
         adv[0, 0] = 1.0
@@ -123,7 +123,7 @@ class TestQREStrategy:
 
         sigma = self.qre_strategy(adv, mask, lam=1.0)
 
-        assert not torch.isnan(sigma).any(), "per-row max failed — global max caused NaN"
+        assert not torch.isnan(sigma).any(), "per-row max failed: global max caused NaN"
         # Row 0 should assign highest prob to action 0
         assert sigma[0, 0] > sigma[0, 1], "row 0: action 0 should dominate"
         # Both rows should sum to 1
@@ -382,7 +382,7 @@ class TestNPlayerDispatch:
 
 class TestQREOverflowRegression:
     def test_qre_tiny_lambda_no_overflow(self):
-        """Tiny lambda should not cause exp() overflow — no NaN/Inf in output."""
+        """Tiny lambda should not cause exp() overflow: no NaN/Inf in output."""
         from src.cfr.deep_trainer import qre_strategy
 
         adv = torch.tensor([[10.0, 5.0, 0.0]])

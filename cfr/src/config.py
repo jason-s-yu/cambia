@@ -164,9 +164,7 @@ class _CambiaBaseModel(BaseModel):
             )
             for key in values:
                 if key not in known:
-                    log.warning(
-                        "Unknown %s key '%s' — %s", section_name, key, disposition
-                    )
+                    log.warning("Unknown %s key '%s': %s", section_name, key, disposition)
         return values
 
 

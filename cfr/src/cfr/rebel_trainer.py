@@ -1,7 +1,7 @@
 """
 src/cfr/rebel_trainer.py
 
-ReBeL Trainer — training loop orchestrator for ReBeL (Recursive Belief-based Learning).
+ReBeL Trainer: training loop orchestrator for ReBeL (Recursive Belief-based Learning).
 
 Architecture:
 - PBSValueNetwork: predicts counterfactual values given PBS encoding (956 -> 936)
@@ -46,7 +46,7 @@ from .exceptions import (
 
 logger = logging.getLogger(__name__)
 
-# PBS dimensions — imported from canonical sources
+# PBS dimensions: imported from canonical sources
 from ..pbs import PBS_INPUT_DIM, NUM_HAND_TYPES
 from ..encoding import NUM_ACTIONS
 
@@ -61,7 +61,7 @@ POLICY_OUTPUT_DIM: int = NUM_ACTIONS
 
 def _rebel_batch_worker(args: Tuple) -> List:
     """
-    ProcessPoolExecutor worker — runs N self-play episodes and returns all samples.
+    ProcessPoolExecutor worker: runs N self-play episodes and returns all samples.
 
     Must be at module level (not a closure or method) so ProcessPoolExecutor can
     pickle it for spawn-based worker processes.
@@ -245,7 +245,7 @@ class ReBeLTrainer:
         """
         Train PBSValueNetwork on value_buffer samples.
 
-        Loss: (t^alpha) * MSE(V(pbs), value_target) — iteration-weighted, no masking.
+        Loss: (t^alpha) * MSE(V(pbs), value_target) - iteration-weighted, no masking.
         Returns average loss over all training steps.
         """
         if len(self.value_buffer) == 0:
@@ -300,7 +300,7 @@ class ReBeLTrainer:
         """
         Train PBSPolicyNetwork on policy_buffer samples.
 
-        Loss: (t^alpha) * MSE(pi(pbs), policy_target) — iteration-weighted, with masking.
+        Loss: (t^alpha) * MSE(pi(pbs), policy_target) - iteration-weighted, with masking.
         Returns average loss over all training steps.
         """
         if len(self.policy_buffer) == 0:

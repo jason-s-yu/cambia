@@ -179,7 +179,7 @@ def test_rebel_self_play_episode_produces_valid_samples(
     all_values = np.concatenate([s.value_target for s in samples])
     assert (
         float(np.var(all_values)) > 0.0
-    ), "All value targets are identical — degenerate output"
+    ), "All value targets are identical: degenerate output"
 
     # Diagnostic log was emitted
     log_messages = [r.message for r in caplog.records]
@@ -296,7 +296,7 @@ def test_rebel_wrapper_range_reset_on_initialize_state(rebel_checkpoint):
 
 
 # ---------------------------------------------------------------------------
-# Test 4: One training iteration — loss decreases from random initialization
+# Test 4: One training iteration - loss decreases from random initialization
 # ---------------------------------------------------------------------------
 
 
@@ -306,7 +306,7 @@ def test_rebel_train_one_iteration(small_value_net, small_policy_net, fast_confi
     """Run 1 episode → insert into buffers → train; verify loss is finite and decreases.
 
     Uses a manual training loop (no ProcessPoolExecutor) for deterministic control.
-    Measures loss before and after training on the same batch — with multiple gradient
+    Measures loss before and after training on the same batch: with multiple gradient
     steps, loss on the training data should decrease (or at least not blow up).
     """
     import torch.optim as optim
@@ -539,4 +539,4 @@ def test_discard_bucket_varies(small_value_net, small_policy_net, fast_config):
     # If all samples have identical discard bucket features, the bug is present
     assert not np.all(
         discard_features == discard_features[0]
-    ), "All samples have identical discard bucket features — discard bucket may not be populated"
+    ), "All samples have identical discard bucket features: discard bucket may not be populated"

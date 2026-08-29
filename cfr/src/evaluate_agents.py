@@ -2124,7 +2124,7 @@ class NPlayerAgentWrapper(NeuralAgentWrapper):
         torch = self._torch
         with torch.inference_mode():
             feat_t = torch.from_numpy(features).unsqueeze(0).to(self.device)
-            # Build a mask of shape (1, N_PLAYER_NUM_ACTIONS) — pad legacy mask if needed
+            # Build a mask of shape (1, N_PLAYER_NUM_ACTIONS): pad legacy mask if needed
             mask_np = action_mask
             if mask_np.shape[0] < self._N_PLAYER_NUM_ACTIONS:
                 padded = np.zeros(self._N_PLAYER_NUM_ACTIONS, dtype=np.float32)
@@ -3337,7 +3337,7 @@ def run_evaluation(
         results["logging_overhead_ms"] = int(jsonl_overhead_ms)
         results["logging_overhead_pct"] = int(pct_overhead)
 
-    # Aggregate enhanced stats — stored as a plain dict attribute (.stats).
+    # Aggregate enhanced stats: stored as a plain dict attribute (.stats).
     # NOT stored in the Counter itself to preserve backward-compat sum invariants.
     enhanced_stats: Dict = {}
     if score_margins:
@@ -3653,7 +3653,7 @@ def run_head_to_head(
                 else:
                     checkpoint_b_wins += 1
             else:
-                # Max turns reached without terminal — count as tie
+                # Max turns reached without terminal: count as tie
                 ties_count += 1
 
         except Exception as e_game:
