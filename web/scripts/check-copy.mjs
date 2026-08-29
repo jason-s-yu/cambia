@@ -5,6 +5,10 @@
 //
 // A missing target or a zero-file scan is also a hard failure (cambia-945
 // L1): a misconfigured TARGETS entry must not silently report a clean pass.
+// The count is per target and not over the whole list (cambia-971): a single
+// entry that scans nothing, because it was renamed to a directory that holds
+// only skipped entries, left the other entries covering for it and the run
+// still passed while a whole tree went unread.
 //
 // Run standalone:  npm run check-copy
 // Also runs as the last step of `npm run build` (see package.json).
@@ -41,9 +45,17 @@ function collectFiles(path) {
     return out;
 }
 
-const files = TARGETS.flatMap(collectFiles);
+const files = [];
+for (const target of TARGETS) {
+    const found = collectFiles(target);
+    if (found.length === 0) {
+        console.error(`check-copy: target scanned 0 files: ${relative(ROOT, target)}`);
+        process.exit(1);
+    }
+    files.push(...found);
+}
 if (files.length === 0) {
-    console.error('check-copy: scanned 0 files across all targets; no files were scanned, so the target list is wrong');
+    console.error('check-copy: scanned 0 files across all targets; the target list is empty');
     process.exit(1);
 }
 const hits = [];
