@@ -106,12 +106,8 @@ func (g *CambiaGame) doPeekSelfEngine(playerID uuid.UUID, engineIdx uint8, card1
 	}
 
 	// Apply buffered discard with ability.
-	if g.pendingDiscardAbilityChoice {
-		g.pendingDiscardAbilityChoice = false
-		g.pendingDiscardCardID = uuid.Nil
-		if err := g.applyEngineActionRaw(engine.ActionDiscardWithAbility, playerID, engineIdx); err != nil {
-			return
-		}
+	if err := g.applyBufferedDiscard(engine.ActionDiscardWithAbility, playerID); err != nil {
+		return
 	}
 
 	// Apply PeekOwn.
@@ -138,12 +134,8 @@ func (g *CambiaGame) doPeekOtherEngine(playerID uuid.UUID, engineIdx uint8, card
 	}
 
 	// Apply buffered discard with ability.
-	if g.pendingDiscardAbilityChoice {
-		g.pendingDiscardAbilityChoice = false
-		g.pendingDiscardCardID = uuid.Nil
-		if err := g.applyEngineActionRaw(engine.ActionDiscardWithAbility, playerID, engineIdx); err != nil {
-			return
-		}
+	if err := g.applyBufferedDiscard(engine.ActionDiscardWithAbility, playerID); err != nil {
+		return
 	}
 
 	// Apply PeekOther against the resolved seat.
@@ -174,12 +166,8 @@ func (g *CambiaGame) doSwapBlindEngine(playerID uuid.UUID, engineIdx uint8, card
 	}
 
 	// Apply buffered discard with ability.
-	if g.pendingDiscardAbilityChoice {
-		g.pendingDiscardAbilityChoice = false
-		g.pendingDiscardCardID = uuid.Nil
-		if err := g.applyEngineActionRaw(engine.ActionDiscardWithAbility, playerID, engineIdx); err != nil {
-			return
-		}
+	if err := g.applyBufferedDiscard(engine.ActionDiscardWithAbility, playerID); err != nil {
+		return
 	}
 
 	// Apply BlindSwap against the resolved seat.
@@ -280,13 +268,9 @@ func (g *CambiaGame) doKingLookEngine(playerID uuid.UUID, engineIdx uint8, card1
 	g.SpecialAction.Card2Owner = g.EngineToPlayer[oppEngineIdx]
 
 	// Apply buffered discard with ability.
-	if g.pendingDiscardAbilityChoice {
-		g.pendingDiscardAbilityChoice = false
-		g.pendingDiscardCardID = uuid.Nil
-		if err := g.applyEngineActionRaw(engine.ActionDiscardWithAbility, playerID, engineIdx); err != nil {
-			g.SpecialAction = SpecialActionState{}
-			return
-		}
+	if err := g.applyBufferedDiscard(engine.ActionDiscardWithAbility, playerID); err != nil {
+		g.SpecialAction = SpecialActionState{}
+		return
 	}
 
 	// Apply KingLook against the resolved seat.
@@ -325,6 +309,13 @@ func (g *CambiaGame) applyEngineActionRaw(actionIdx uint16, actorID uuid.UUID, a
 	}
 
 	g.updateCardTracker(actionIdx, actorEngineIdx, engineSeatNone, preStockLen, preDiscardLen)
+
+	// The engine pushed this discard on top of everything snapped while it was buffered; the clients
+	// put it underneath them. Rotate it back down to the order they were shown (cambia-1033).
+	if g.applyingAnnouncedDiscard {
+		g.sinkAnnouncedDiscardBeneathWindowSnaps()
+	}
+
 	g.syncPlayerHandsFromEngine()
 	return nil
 }
@@ -336,12 +327,11 @@ func (g *CambiaGame) processSkipSpecialAction(userID uuid.UUID) {
 	log.Printf("Game %s: Player %s chose to skip special action for rank %s.", g.ID, userID, rank)
 	g.logAction(userID, "action_special_skip", map[string]interface{}{"rank": rank})
 
-	// If there's a buffered discard waiting, apply it as no-ability.
+	// If there's a buffered discard waiting, apply it as no-ability. The card was announced when it
+	// was played, so this settles the buffer without a second player_discard (buffered_discard.go).
 	if g.pendingDiscardAbilityChoice {
-		g.pendingDiscardAbilityChoice = false
-		g.pendingDiscardCardID = uuid.Nil
 		g.SpecialAction = SpecialActionState{}
-		g.applyEngineAction(engine.ActionDiscardNoAbility, userID)
+		g.applyBufferedDiscard(engine.ActionDiscardNoAbility, userID)
 		return
 	}
 

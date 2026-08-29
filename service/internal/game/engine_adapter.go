@@ -437,13 +437,19 @@ func (g *CambiaGame) stockpileSize() int {
 	return int(g.Engine.StockLen)
 }
 
-// discardSize returns current discard pile size from engine.
+// discardSize returns the discard pile's size as the table sees it: the engine's own pile, plus the
+// announced-but-unapplied card while an ability discard is buffered (see effectiveDiscardTop and
+// buffered_discard.go). Reporting the engine's count inside that window left every client's pile a
+// card short of the one it had already rendered (cambia-1033).
 func (g *CambiaGame) discardSize() int {
+	if g.pendingDiscardAbilityChoice && g.Engine.Pending.Type == engine.PendingDiscard {
+		return int(g.Engine.DiscardLen) + 1
+	}
 	return int(g.Engine.DiscardLen)
 }
 
-// effectiveDiscardTop returns the card the table sees on top of the discard pile, and whether
-// there is one.
+// effectiveDiscardTop returns the card the table sees on top of the discard pile, its id, and
+// whether there is one.
 //
 // A drawn card that carries an ability is announced as discarded the moment it is played, but its
 // engine action is buffered until the discarder resolves or skips the ability: the engine models
@@ -454,14 +460,21 @@ func (g *CambiaGame) discardSize() int {
 // one covered, while every client has already moved the played card onto the pile (the
 // player_discard event, mirrored by the web client's gameStore). Anything judged against the
 // engine's top inside that window therefore reads a card no player can see (cambia-956).
-func (g *CambiaGame) effectiveDiscardTop() (engine.Card, bool) {
-	if g.pendingDiscardAbilityChoice && g.Engine.Pending.Type == engine.PendingDiscard {
-		return engine.Card(g.Engine.Pending.Data[0]), true
+//
+// Once a snap lands inside the window the announced card is covered in turn, and the engine's own
+// top is the card the table sees again: a successful snap is applied to the engine pile
+// immediately, and it matched the announced card's rank to get there, so the rank a later snap is
+// judged against is the same either way and only the identity differs (cambia-1033).
+func (g *CambiaGame) effectiveDiscardTop() (engine.Card, uuid.UUID, bool) {
+	if g.pendingDiscardAbilityChoice && g.Engine.Pending.Type == engine.PendingDiscard &&
+		g.pendingDiscardWindowSnaps == 0 {
+		return engine.Card(g.Engine.Pending.Data[0]), g.pendingDiscardCardID, true
 	}
 	if g.Engine.DiscardLen == 0 {
-		return engine.EmptyCard, false
+		return engine.EmptyCard, uuid.Nil, false
 	}
-	return g.Engine.DiscardPile[g.Engine.DiscardLen-1], true
+	topIdx := g.Engine.DiscardLen - 1
+	return g.Engine.DiscardPile[topIdx], g.CardTracker.DiscardUUIDs[topIdx], true
 }
 
 // discardTopCard returns the top discard card and its UUID, or nil if empty.
@@ -571,6 +584,12 @@ func (g *CambiaGame) applyEngineActionSeat(actionIdx uint16, actorID uuid.UUID, 
 
 	// Update UUID tracker.
 	g.updateCardTracker(actionIdx, engineIdx, oppEngineIdx, preStockLen, preDiscardLen)
+
+	// A discard the table was already shown lands under whatever was snapped on top of it while it
+	// waited on the ability choice, before any event reads the pile (cambia-1033).
+	if g.applyingAnnouncedDiscard {
+		g.sinkAnnouncedDiscardBeneathWindowSnaps()
+	}
 
 	// Sync Player model hands (keeps service-level code working).
 	g.syncPlayerHandsFromEngine()
@@ -703,10 +722,12 @@ func (g *CambiaGame) emitEventsForAction(actionIdx uint16, actorID uuid.UUID, ac
 		})
 
 	case actionIdx == engine.ActionDiscardNoAbility || actionIdx == engine.ActionDiscardWithAbility:
-		// Discard events are handled in handleDiscardViaEngine before applying.
-		// The discard event was already fired in buffered flow for ability cards.
-		// For non-ability cards, emit here.
-		if actionIdx == engine.ActionDiscardNoAbility {
+		// A card played for its ability is announced by handleDiscardViaEngine the moment it is
+		// played, long before the buffered action reaches the engine, so the skip and timeout paths
+		// that settle that buffer as a no-ability discard must not announce it again: a client reads
+		// the second player_discard as a second card, counting the pile up by one and rendering the
+		// ability card back on top of anything snapped over it since (cambia-1033).
+		if actionIdx == engine.ActionDiscardNoAbility && !g.applyingAnnouncedDiscard {
 			discardLen := g.Engine.DiscardLen
 			if discardLen > 0 {
 				discardedUUID := g.CardTracker.DiscardUUIDs[discardLen-1]
@@ -915,9 +936,12 @@ func (g *CambiaGame) handleDiscardViaEngine(playerID uuid.UUID, engineIdx uint8,
 	hasAbility := drawnCard.HasAbility() && drawnFrom == engine.DrawnFromStockpile
 
 	if hasAbility {
-		// Buffer the discard - fire special choice event, wait for ability decision.
+		// Buffer the discard - fire special choice event, wait for ability decision. Nothing has been
+		// snapped on top of this card yet; the count runs until applyBufferedDiscard closes the
+		// window (buffered_discard.go).
 		g.pendingDiscardAbilityChoice = true
 		g.pendingDiscardCardID = cardID
+		g.pendingDiscardWindowSnaps = 0
 
 		rankStr := engineRankToString(drawnCard.Rank())
 		specialType := rankToSpecial(rankStr)
@@ -1045,7 +1069,7 @@ func (g *CambiaGame) handleSnapViaEngine(playerID uuid.UUID, engineIdx uint8, pa
 	// it covered: reading the engine's pile directly rejected clean rank matches with the
 	// invalid-snap penalty for the length of the ability window, and accepted snaps of the covered
 	// card's rank in the same window (cambia-956).
-	discardTop, hasDiscardTop := g.effectiveDiscardTop()
+	discardTop, _, hasDiscardTop := g.effectiveDiscardTop()
 	if !hasDiscardTop {
 		g.handleSnapFailure(playerID, engineIdx, nil)
 		return
@@ -1089,6 +1113,7 @@ func (g *CambiaGame) handleSnapViaEngine(playerID uuid.UUID, engineIdx uint8, pa
 				g.CardTracker.DiscardUUIDs[discardPos] = cardID
 				g.CardTracker.DiscardLen = g.Engine.DiscardLen
 				g.snapUsedForThisDiscard = true
+				g.recordWindowSnap()
 
 				g.syncPlayerHandsFromEngine()
 				g.emitSnapSuccessEvents(playerID, playerID, cardID, cardRank, int(i))
@@ -1147,6 +1172,7 @@ func (g *CambiaGame) handleSnapViaEngine(playerID uuid.UUID, engineIdx uint8, pa
 		g.CardTracker.DiscardUUIDs[discardPos] = cardID
 		g.CardTracker.DiscardLen = g.Engine.DiscardLen
 		g.snapUsedForThisDiscard = true
+		g.recordWindowSnap()
 
 		g.syncPlayerHandsFromEngine()
 		g.emitSnapSuccessEvents(playerID, g.EngineToPlayer[oppEngineIdx], cardID, cardRank, int(i))
@@ -1271,6 +1297,10 @@ func (g *CambiaGame) handleSnapFailure(playerID uuid.UUID, engineIdx uint8, atte
 		// sync_state broadcasts stockpileSize and discardSize to every player already. The counts
 		// go on the public event only, which the penalized player receives alongside the private
 		// one, rather than being repeated on both.
+		// The discard count is the one the table sees (discardSize), not the engine's: a snap that
+		// fails while an ability discard is still buffered would otherwise hand every client a count
+		// one short of the pile it has already rendered, and clients set their count from this
+		// payload outright (cambia-1033).
 		g.fireEvent(GameEvent{
 			Type: EventPlayerSnapPenalty,
 			User: &EventUser{ID: playerID},
@@ -1279,7 +1309,7 @@ func (g *CambiaGame) handleSnapFailure(playerID uuid.UUID, engineIdx uint8, atte
 				"count":         i + 1,
 				"total":         penaltyCount,
 				"stockpileSize": int(g.Engine.StockLen),
-				"discardSize":   int(g.Engine.DiscardLen),
+				"discardSize":   g.discardSize(),
 			},
 		})
 
@@ -1313,7 +1343,7 @@ func (g *CambiaGame) handleSnapFailure(playerID uuid.UUID, engineIdx uint8, atte
 			Type: EventGameReshuffleStockpile,
 			Payload: map[string]interface{}{
 				"stockpileSize": int(g.Engine.StockLen),
-				"discardSize":   int(g.Engine.DiscardLen),
+				"discardSize":   g.discardSize(),
 			},
 		})
 	}
@@ -1529,12 +1559,11 @@ func (g *CambiaGame) handleTimeoutEngine(playerID uuid.UUID) {
 		return
 	}
 
-	// If pending ability choice, resolve as no-ability.
+	// If pending ability choice, resolve as no-ability. The card is already on the table's pile, so
+	// this settles the buffer without announcing it a second time (buffered_discard.go).
 	if g.pendingDiscardAbilityChoice && g.SpecialAction.Active && g.SpecialAction.PlayerID == playerID {
-		g.pendingDiscardAbilityChoice = false
-		g.pendingDiscardCardID = uuid.Nil
 		g.SpecialAction = SpecialActionState{}
-		g.applyEngineAction(engine.ActionDiscardNoAbility, playerID)
+		g.applyBufferedDiscard(engine.ActionDiscardNoAbility, playerID)
 		return
 	}
 
