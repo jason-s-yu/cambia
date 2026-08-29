@@ -420,6 +420,12 @@ _ALLOWED_CUDA_SUBSTRINGS = {
     "cfr/prtcfr_trainer.py": [
         "(cuda or xpu)",
         "pre-xpu CUDA-only",
+        # _device_supports_fp64 (a83fe49a): cpu/cuda always execute fp64
+        # kernels; other backends (xpu without the SYCL fp64 aspect) are
+        # probed dynamically, so the branch is a deliberate capability
+        # fast path, not a cuda-only gate.
+        "cpu/cuda always support fp64",
+        'in ("cpu", "cuda")',
         # cambia-607 f1 fused-Adam optimizer: torch's fused Adam kernel is
         # cuda-only by design; every other device (cpu, xpu) takes the foreach
         # path, so the branch is a deliberate cuda fast path, not a cuda-only
