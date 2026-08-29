@@ -1064,6 +1064,17 @@ func (g *CambiaGame) handleSnapViaEngine(playerID uuid.UUID, engineIdx uint8, pa
 	}
 	g.logAction(playerID, "action_snap_attempt", map[string]interface{}{"cardId": cardID})
 
+	// LockCallerHand freezes the caller's whole hand, not just other players' access to it
+	// (RULES.md 3C: "Your hand is locked and cannot be altered by any player, including yourself
+	// (snaps, swaps, etc.)"). This is checked before either hand search below: the engine's own
+	// snap phase never gives the caller a Snap.Snappers slot at all once they have called
+	// (engine/snap.go initiateSnapPhase), so the caller draws no penalty for attempting to snap
+	// while locked, any more than they would for an action the engine never made legal.
+	if g.handLocked(engineIdx) {
+		g.refuseSnapAttempt(playerID, cardID, "snapper's hand is locked by LockCallerHand")
+		return
+	}
+
 	// Check discard pile. The top is read through effectiveDiscardTop so a snap that lands while an
 	// ability discard is still buffered is judged against the card the table was shown, not the one
 	// it covered: reading the engine's pile directly rejected clean rank matches with the
@@ -1133,6 +1144,25 @@ func (g *CambiaGame) handleSnapViaEngine(playerID uuid.UUID, engineIdx uint8, pa
 	// wrapped to seat 255 and panicked the process (cambia-946).
 	oppEngineIdx, i, foundOpp := g.seatHoldingCard(cardID)
 	if foundOpp && oppEngineIdx != engineIdx {
+		// AllowOpponentSnapping gates the whole category of action, not just this card's rank: a
+		// crafted frame naming an opponent's card with the rule off is refused outright, mirroring
+		// engine/snap.go snapOpponent and nplayer_actions.go nplayerSnapOpponent, which return a
+		// plain error before touching any hand when the rule is off, rather than the drawPenalty
+		// path a legal-but-mismatched snap takes. Before cambia-1043 only the client checked this
+		// flag (DsGameTable.tsx houseRules.allowOpponentSnapping), so a hand-crafted action_snap
+		// frame could snap an opponent's card with the rule off.
+		if !g.HouseRules.AllowOpponentSnapping {
+			g.refuseSnapAttempt(playerID, cardID, "opponent snapping is disabled by house rules")
+			return
+		}
+		// LockCallerHand protects the caller's hand from everyone else too (RULES.md 3C). The
+		// engine's initiateSnapPhase never offers the caller's cards as a snap target once they
+		// have called, so this is refused the same way as the AllowOpponentSnapping case above:
+		// no penalty, because the target was never legal to name.
+		if g.handLocked(oppEngineIdx) {
+			g.refuseSnapAttempt(playerID, cardID, "target's hand is locked by LockCallerHand")
+			return
+		}
 		cardRank := g.Engine.Players[oppEngineIdx].Hand[i].Rank()
 		if cardRank != discardTopRank {
 			g.handleSnapFailure(playerID, engineIdx, &cardID)
@@ -1209,16 +1239,27 @@ func (g *CambiaGame) emitSnapSuccessEvents(playerID uuid.UUID, ownerID uuid.UUID
 	g.logAction(playerID, string(EventPlayerSnapSuccess), map[string]interface{}{"cardId": cardID, "rank": rankStr, "ownerId": ownerID})
 }
 
-// handleSnapFailure processes a failed snap and applies penalties.
-func (g *CambiaGame) handleSnapFailure(playerID uuid.UUID, engineIdx uint8, attemptedCardID *uuid.UUID) {
-	log.Printf("Game %s: Player %s snap failed. Penalizing.", g.ID, playerID)
+// handLocked reports whether engineIdx's hand is frozen by the LockCallerHand house rule.
+// RULES.md 3C: once Cambia is called, "your hand is locked and cannot be altered by any player,
+// including yourself (snaps, swaps, etc.)"; the LockCallerHand field comment (rules.go) names
+// exactly that scope - snaps, swaps and replacements - for this flag. Swaps and replacements
+// reach that protection for free because they route through engine.ApplyAction, which already
+// gates on Rules.LockCallerHand (engine/legal.go); snap does not (see handleSnapViaEngine), which
+// is why this helper exists and every snap-path caller must consult it explicitly.
+func (g *CambiaGame) handLocked(engineIdx uint8) bool {
+	return g.HouseRules.LockCallerHand && g.isCambiaCalled() && g.Engine.CambiaCaller >= 0 && uint8(g.Engine.CambiaCaller) == engineIdx
+}
+
+// fireSnapFailEvent logs and broadcasts the public failure notice a rejected snap fires, whether
+// or not it draws a penalty. Shared by handleSnapFailure (RULES.md 5: wrong card, or nothing left
+// to pay with) and refuseSnapAttempt (a target the house rules never made legal to name).
+func (g *CambiaGame) fireSnapFailEvent(playerID uuid.UUID, attemptedCardID *uuid.UUID) {
 	if attemptedCardID != nil {
 		g.logAction(playerID, string(EventPlayerSnapFail), map[string]interface{}{"attemptedCardId": *attemptedCardID})
 	} else {
 		g.logAction(playerID, string(EventPlayerSnapFail), nil)
 	}
 
-	// Broadcast public failure event.
 	failEvent := GameEvent{
 		Type: EventPlayerSnapFail,
 		User: &EventUser{ID: playerID},
@@ -1235,6 +1276,27 @@ func (g *CambiaGame) handleSnapFailure(playerID uuid.UUID, engineIdx uint8, atte
 		}
 	}
 	g.fireEvent(failEvent)
+}
+
+// refuseSnapAttempt rejects a snap attempt the house rules forbid outright: an opponent target
+// with AllowOpponentSnapping off, or any target once LockCallerHand has frozen the acting or
+// targeted hand. Unlike handleSnapFailure this draws no penalty - the request was never a legal
+// action to attempt in the first place, not a legal one that turned out wrong, mirroring the
+// engine's own answer to the same request: snapOpponent/nplayerSnapOpponent return a plain error
+// before touching any hand when AllowOpponentSnapping is off, and initiateSnapPhase never offers
+// the caller as a snapper or as a target once LockCallerHand applies, so neither ever reaches the
+// engine's drawPenalty path either. Reuses the public player_snap_fail event (the client already
+// renders it as a no-op, cambia-1043) rather than private_special_action_fail, which the client
+// reads as an unresolved special-ability choice and would leave pendingAction stuck.
+func (g *CambiaGame) refuseSnapAttempt(playerID uuid.UUID, attemptedCardID uuid.UUID, reason string) {
+	log.Printf("Game %s: Player %s snap refused (%s).", g.ID, playerID, reason)
+	g.fireSnapFailEvent(playerID, &attemptedCardID)
+}
+
+// handleSnapFailure processes a failed snap and applies penalties.
+func (g *CambiaGame) handleSnapFailure(playerID uuid.UUID, engineIdx uint8, attemptedCardID *uuid.UUID) {
+	log.Printf("Game %s: Player %s snap failed. Penalizing.", g.ID, playerID)
+	g.fireSnapFailEvent(playerID, attemptedCardID)
 
 	// Apply penalty draws. This path cannot go through engine.ApplyAction: the engine draws snap
 	// penalties inside its snap actions (engine/snap.go snapOwn/snapOpponent -> drawPenalty), but
