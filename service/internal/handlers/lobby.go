@@ -146,9 +146,22 @@ func CreateLobbyHandler(gs *GameServer) http.HandlerFunc {
 			// gates on host, Searching and QueueID alone, so a standing lobby can queue its
 			// party without being typed "matchmaking". The id is kept, and validated here so a
 			// bogus one fails at create time rather than at search time.
-			if _, known := matchmaking.GetQueueConfig(lob.QueueID); !known {
+			cfg, known := matchmaking.GetQueueConfig(lob.QueueID)
+			if !known {
 				http.Error(w, "Unknown matchmaking queue: "+lob.QueueID, http.StatusBadRequest)
 				return
+			}
+			// Mirror the matchmaking-type branch above: a lobby's Mode is what
+			// NewCambiaGameFromLobby reads to decide whether the game it produces is rated, and
+			// what the ranked-lock on update_rules (hub.go) checks. Without this a party that
+			// queued a standing public/private lobby into a ranked queue by carrying its id here
+			// played a rated queue's match as an unrated, rule-editable casual game: the id was
+			// kept and validated, but the one thing carrying a queue id is supposed to mean never
+			// derived from it (cambia-966).
+			if cfg.Ranked {
+				lob.Mode = "ranked"
+			} else {
+				lob.Mode = "casual"
 			}
 		}
 
@@ -519,6 +532,16 @@ func SearchLobbyHandler(gs *GameServer) http.HandlerFunc {
 			return
 		}
 
+		// A party's own size has to obey the queue family's rules (solo queue only for H2H,
+		// parties up to 2 for FFA-4) before it ever reaches the matchmaker: Enqueue only rejects
+		// a party bigger than the queue's whole target size, which a full-size H2H party of two
+		// friends still passes, pairing them with each other every time and skipping matchmaking
+		// entirely. ValidateParty carried this rule already but had no caller (cambia-966).
+		if err := matchmaking.ValidateParty(queueID, playerCount, nil); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
 		entry := &matchmaking.QueuedLobby{
 			LobbyID:     lobbyID,
 			PlayerCount: playerCount,
@@ -534,10 +557,15 @@ func SearchLobbyHandler(gs *GameServer) http.HandlerFunc {
 
 		lob.Mu.Lock()
 		lob.Searching = true
-		lob.Mu.Unlock()
-
 		// The hub's phase and match parameters belong to its Run goroutine, so the change is
-		// handed to it rather than written from this one (cambia-933).
+		// handed to it rather than written from this one (cambia-933). The notice is sent inside
+		// the same critical section as the Searching flag write: SetSearchState only pushes onto
+		// a buffered channel and never blocks, so holding lob.Mu here is cheap, and it is what
+		// keeps a concurrent cancel on this lobby from landing its hub notice out of the order
+		// the two requests actually ran in (cambia-966). Sending it unlocked let a goroutine that
+		// lost the race to acquire the lock still win the race to the hub's channel, so a
+		// cancel-then-search from two overlapping requests could reach the hub as
+		// search-then-cancel, leaving it phased as Searching while lob.Searching read false.
 		if h, hasHub := gs.HubStore.GetHub(lobbyID); hasHub {
 			h.SetSearchState(hub.SearchState{
 				Searching:   true,
@@ -546,6 +574,7 @@ func SearchLobbyHandler(gs *GameServer) http.HandlerFunc {
 				TotalRounds: queueCfg.Rounds,
 			})
 		}
+		lob.Mu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"status": "searching", "queue_id": queueID})
@@ -589,13 +618,16 @@ func CancelSearchHandler(gs *GameServer) http.HandlerFunc {
 			return
 		}
 		lob.Searching = false
-		lob.Mu.Unlock()
-
-		gs.Matchmaker.Dequeue(lobbyID)
-
+		// See the matching comment in SearchLobbyHandler: the hub notice is sent inside the same
+		// critical section as the Searching flag write so the two requests' hub notices land in
+		// the order the requests actually acquired lob.Mu, not whichever goroutine happens to
+		// reach the hub's channel first (cambia-966).
 		if h, hasHub := gs.HubStore.GetHub(lobbyID); hasHub {
 			h.SetSearchState(hub.SearchState{Searching: false})
 		}
+		lob.Mu.Unlock()
+
+		gs.Matchmaker.Dequeue(lobbyID)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"status": "cancelled"})
