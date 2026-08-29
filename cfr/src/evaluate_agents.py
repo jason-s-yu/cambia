@@ -81,6 +81,38 @@ def _drawn_card_bucket_from_game_state(game_state) -> int:
         return -1
 
 
+def _build_public_observation(
+    game_state,
+    action: Optional[GameAction],
+    acting_player: int,
+) -> Optional[AgentObservation]:
+    """Builds the post-action observation shared by every belief wrapper.
+
+    Public-only: no drawn or peeked cards, so the result is identical for every
+    observer and independent of which agent asks for it.
+    """
+    try:
+        return AgentObservation(
+            acting_player=acting_player,
+            action=action,
+            discard_top_card=game_state.get_discard_top(),
+            player_hand_sizes=[
+                game_state.get_player_card_count(i) for i in range(NUM_PLAYERS)
+            ],
+            stockpile_size=game_state.get_stockpile_size(),
+            drawn_card=None,
+            peeked_cards=None,
+            snap_results=copy.deepcopy(game_state.snap_results_log),
+            did_cambia_get_called=game_state.cambia_caller_id is not None,
+            who_called_cambia=game_state.cambia_caller_id,
+            is_game_over=game_state.is_terminal(),
+            current_turn=game_state.get_turn_number(),
+        )
+    except Exception as e_obs:  # JUSTIFIED: evaluation resilience
+        logger.error("Failed to build public observation: %s", e_obs, exc_info=True)
+        return None
+
+
 # --- CFR Agent Wrapper ---
 
 
@@ -300,40 +332,7 @@ class CFRAgentWrapper(BaseAgent):
         acting_player: int,
     ) -> Optional[AgentObservation]:
         """Creates observation needed *by this agent* after an action."""
-        try:
-            # Simplified for evaluation: Assume agent state uses public info + own known cards
-            obs = AgentObservation(
-                acting_player=acting_player,
-                action=action,
-                discard_top_card=game_state.get_discard_top(),
-                player_hand_sizes=[
-                    game_state.get_player_card_count(i) for i in range(NUM_PLAYERS)
-                ],
-                stockpile_size=game_state.get_stockpile_size(),
-                drawn_card=None,  # Don't pass private draw info during evaluation obs
-                peeked_cards=None,  # Don't pass private peek info during evaluation obs
-                snap_results=copy.deepcopy(game_state.snap_results_log),  # Public
-                did_cambia_get_called=game_state.cambia_caller_id is not None,
-                who_called_cambia=game_state.cambia_caller_id,
-                is_game_over=game_state.is_terminal(),
-                current_turn=game_state.get_turn_number(),
-            )
-            return obs
-        except GameStateError as e_obs:
-            logger.error(
-                "CFRAgent P%d: Game state error creating observation: %s",
-                self.player_id,
-                e_obs,
-            )
-            return None
-        except Exception as e_obs:  # JUSTIFIED: evaluation resilience
-            logger.error(
-                "CFRAgent P%d: Error creating observation: %s",
-                self.player_id,
-                e_obs,
-                exc_info=True,
-            )
-            return None
+        return _build_public_observation(game_state, action, acting_player)
 
     def _filter_observation(
         self, obs: AgentObservation, observer_id: int
@@ -524,28 +523,7 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
         acting_player: int,
     ) -> Optional[AgentObservation]:
         """Creates a public observation from game state after an action."""
-        try:
-            return AgentObservation(
-                acting_player=acting_player,
-                action=action,
-                discard_top_card=game_state.get_discard_top(),
-                player_hand_sizes=[
-                    game_state.get_player_card_count(i) for i in range(NUM_PLAYERS)
-                ],
-                stockpile_size=game_state.get_stockpile_size(),
-                drawn_card=None,
-                peeked_cards=None,
-                snap_results=copy.deepcopy(game_state.snap_results_log),
-                did_cambia_get_called=game_state.cambia_caller_id is not None,
-                who_called_cambia=game_state.cambia_caller_id,
-                is_game_over=game_state.is_terminal(),
-                current_turn=game_state.get_turn_number(),
-            )
-        except Exception as e:  # JUSTIFIED: evaluation resilience
-            logger.error(
-                "%s P%d observation error: %s", self.__class__.__name__, self.player_id, e
-            )
-            return None
+        return _build_public_observation(game_state, action, acting_player)
 
     @classmethod
     def _load_cambia_rules_mismatch_check(cls, checkpoint, config, player_id):
@@ -2822,6 +2800,54 @@ def get_agent(agent_type: str, player_id: int, config, **kwargs) -> BaseAgent:
         return agent_class(player_id, config)
 
 
+# --- Belief Feed ---
+
+# Wrapper types that carry an AgentState belief model across a game and
+# therefore must see every applied transition.
+_BELIEF_WRAPPER_TYPES = (CFRAgentWrapper, NeuralAgentWrapper, PPOAgentWrapper)
+
+
+def _feed_agent_beliefs(
+    agents: List[BaseAgent],
+    game_state,
+    action: Optional[GameAction],
+    acting_player: int,
+) -> None:
+    """Deliver one applied transition to every stateful agent's belief model.
+
+    Contract: every applied action reaches every stateful agent, in application
+    order, regardless of who acted. The acting agent may be stateless (a
+    baseline), which does not exempt the transition from the feed: an
+    ``AgentState`` that misses opponent actions holds beliefs the training
+    traversal never produced (stale own-card entries after an opponent swap,
+    skipped event decay, an action-history window with the opponent's moves
+    missing).
+
+    Two belief kinds are fed:
+      - token-stream wrappers (PRT-CFR) take the transition directly, through the
+        training driver's own observation builders;
+      - ``AgentState`` wrappers take one public observation, built once per
+        transition and shared (it carries no per-observer private information).
+    """
+    for agent in agents:
+        if isinstance(agent, PRTCFRAgentWrapper):
+            agent.observe_transition(game_state, action, acting_player)
+
+    belief_agents = [
+        a
+        for a in agents
+        if isinstance(a, _BELIEF_WRAPPER_TYPES) and not isinstance(a, PRTCFRAgentWrapper)
+    ]
+    if not belief_agents:
+        return
+
+    observation = _build_public_observation(game_state, action, acting_player)
+    if observation is None:
+        return
+    for agent in belief_agents:
+        agent.update_state(observation)
+
+
 # --- Evaluation Loop ---
 
 
@@ -3156,38 +3182,11 @@ def run_evaluation(
                             game_error = True
                             break
 
-                        # PRT-CFR token-stream feed (measurement-layer rule):
-                        # every applied transition, both players, independent of
-                        # the public-observation sharing below. That sharing is
-                        # gated on the ACTING agent having _create_observation, so
-                        # a baseline actor's move would be dropped -- corrupting
-                        # PRT-CFR's full-recall token prefix. observe_transition
-                        # builds each frame from the post-action engine state via
-                        # the training driver's own observation builders.
-                        for agent in agents:
-                            if isinstance(agent, PRTCFRAgentWrapper):
-                                agent.observe_transition(
-                                    game_state, chosen_action, acting_player_id
-                                )
-
-                        # Create observation AFTER action (for stateful agents)
-                        has_stateful = any(
-                            isinstance(a, (CFRAgentWrapper, NeuralAgentWrapper))
-                            for a in agents
+                        # Belief feed: every applied transition reaches every
+                        # stateful agent, in order, whoever acted.
+                        _feed_agent_beliefs(
+                            agents, game_state, chosen_action, acting_player_id
                         )
-                        observation = None
-                        if has_stateful and hasattr(current_agent, "_create_observation"):
-                            observation = current_agent._create_observation(
-                                game_state, chosen_action, acting_player_id
-                            )
-
-                        # Update agent states (only stateful agents need it)
-                        if observation:
-                            for agent in agents:
-                                if isinstance(
-                                    agent, (CFRAgentWrapper, NeuralAgentWrapper)
-                                ):
-                                    agent.update_state(observation)
 
                     except GameStateError as e_turn:
                         logger.error(
@@ -3631,13 +3630,9 @@ def run_head_to_head(
                     _, undo_info = game_state.apply_action(chosen_action)
                     if not callable(undo_info):
                         break
-                    # Update agent states
-                    obs = current_agent._create_observation(
-                        game_state, chosen_action, acting_player_id
+                    _feed_agent_beliefs(
+                        agents, game_state, chosen_action, acting_player_id
                     )
-                    if obs:
-                        for agent in agents:
-                            agent.update_state(obs)
                 except Exception as e_turn:
                     logger.error("Head-to-head game %d turn error: %s", game_num, e_turn)
                     break
@@ -3794,14 +3789,9 @@ def run_head_to_head_typed(
                     _, undo_info = game_state.apply_action(chosen_action)
                     if not callable(undo_info):
                         break
-                    if hasattr(current_agent, "_create_observation"):
-                        obs = current_agent._create_observation(
-                            game_state, chosen_action, acting_player_id
-                        )
-                        if obs:
-                            for agent in agents:
-                                if hasattr(agent, "update_state"):
-                                    agent.update_state(obs)
+                    _feed_agent_beliefs(
+                        agents, game_state, chosen_action, acting_player_id
+                    )
                 except Exception as e_turn:
                     logger.error(
                         "Head-to-head-typed game %d turn error: %s", game_num, e_turn
