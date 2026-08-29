@@ -281,8 +281,9 @@
      --interactive-selected tint) stays on --gold-600, because the requirement
      there runs the other way: a hairline and a ring are measured against the
      surface behind them (3:1, WCAG 1.4.11), and lifting them lightens gold
-     toward the paper. --gold-600 measures 3.27:1 on --surface-1 and 3.43:1 on
-     --surface-2, the lifted #b89026 only 2.83 and 2.98 (cambia-935, F3). */
+     toward the paper. --gold-600 clears that floor at 3.27:1 on --surface-1
+     and 3.43:1 on --surface-2; the lifted #b89026 falls under it at 2.83 and
+     2.98 (cambia-935, F3; measured values only). */
   --accent-gold: #b89026;
   --accent-gold-hover: #cba32e;
   --accent-gold-active: #a98325;

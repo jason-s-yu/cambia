@@ -108,7 +108,7 @@ One family. Gold is the CTA and the highlight; green is the table and the affirm
 
 The light gold trio runs one step brighter than the `--gold-*` ramp and moves the same direction as dark: lighter on hover, darker on press. The earlier light ramp darkened on both, and `--text-on-gold` fell to 3.35:1 on the hover fill and 2.40:1 pressed.
 
-The lift stops at those three fills. Light gold that carries no text stays on the ramp's `--gold-600` `#ab8526`: `--border-accent`, `--focus-ring-color`, `--accent-gold-soft` and the `--interactive-selected` tint. A hairline and a ring are measured against the surface behind them (3:1, WCAG 1.4.11) rather than against a label on top of them, so the two requirements pull opposite ways: `--gold-600` measures 3.27:1 on `--surface-1` and 3.43:1 on `--surface-2`, the lifted `#b89026` only 2.83 and 2.98. Follow the trio with them and the ring loses its edge on paper.
+The lift stops at those three fills. Light gold that carries no text stays on the ramp's `--gold-600` `#ab8526`: `--border-accent`, `--focus-ring-color`, `--accent-gold-soft` and the `--interactive-selected` tint. A hairline and a ring are measured against the surface behind them (3:1, WCAG 1.4.11) rather than against a label on top of them, so the two requirements pull opposite ways: `--gold-600` clears the 3:1 floor at 3.27:1 on `--surface-1` and 3.43:1 on `--surface-2`; the lifted `#b89026` falls under it at 2.83 and 2.98.
 
 ### Contrast
 
