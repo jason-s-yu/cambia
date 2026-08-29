@@ -6,6 +6,11 @@ import (
 	"github.com/jason-s-yu/cambia/service/internal/models"
 )
 
+// DefaultOpenSkillMu is the baseline OpenSkill mu (25.0) a user with no prior circuit/FFA-4
+// rating carries, matching the open_skill_mu column default (migrations/1_add_openskill.sql)
+// and engine.NewOpenSkillRating().
+const DefaultOpenSkillMu = 25.0
+
 // FinalizeCircuitRatings updates OpenSkill ratings for all players after a circuit tournament.
 // scores maps player UUID to their final cumulative score (lower = better).
 // Returns updated users with new OpenSkillMu/OpenSkillSigma.

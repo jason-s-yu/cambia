@@ -125,3 +125,84 @@ func TestNilPartyLiveMatchesEverything(t *testing.T) {
 		t.Fatalf("expected one match with no liveness predicate, got %d", len(results))
 	}
 }
+
+// queuedRanked builds a ranked H2H solo entry carrying AvgRating/MaxRD, the fields cambia-1041
+// found with no writer anywhere: every QueuedLobby read AvgRating=0, MaxRD=0 regardless of the
+// party's real rating, which made glicko2Quality's spread term zero for every pairing and the
+// ranked quality gate pass everyone.
+func queuedRanked(lobbyID uuid.UUID, queuedAt time.Time, avgRating, maxRD float64) *QueuedLobby {
+	e := queuedSolo(lobbyID, queuedAt)
+	e.AvgRating = avgRating
+	e.MaxRD = maxRD
+	return e
+}
+
+// TestGlicko2QualityWideSpreadIsLow pins the quality-gate math directly: a 1200-point rating gap
+// between two well-established players (low RD, so the c-term dominates less) must fall well
+// below the 0.80 threshold an under-30-second wait requires (minQuality).
+func TestGlicko2QualityWideSpreadIsLow(t *testing.T) {
+	a := &QueuedLobby{AvgRating: 1000, MaxRD: 60}
+	b := &QueuedLobby{AvgRating: 2200, MaxRD: 60}
+	if q := glicko2Quality(a, b); q >= 0.80 {
+		t.Fatalf("expected quality below 0.80 for a 1200-point spread, got %v", q)
+	}
+}
+
+// TestGlicko2QualityCloseSpreadIsHigh is the positive pin: a 30-point gap between the same two
+// well-established players clears the 0.80 immediate-match threshold easily.
+func TestGlicko2QualityCloseSpreadIsHigh(t *testing.T) {
+	a := &QueuedLobby{AvgRating: 1500, MaxRD: 60}
+	b := &QueuedLobby{AvgRating: 1530, MaxRD: 60}
+	if q := glicko2Quality(a, b); q < 0.80 {
+		t.Fatalf("expected quality at or above 0.80 for a 30-point spread, got %v", q)
+	}
+}
+
+// TestRankedH2HQualityGateRefusesWideSpread is the cambia-1041 end-to-end regression: with
+// AvgRating/MaxRD actually populated, a wide-spread ranked H2H pairing must not be formed on the
+// first tick (wait < 30s, minQuality 0.80). Before the fix both entries read AvgRating=0 and
+// this pairing matched immediately regardless of spread.
+func TestRankedH2HQualityGateRefusesWideSpread(t *testing.T) {
+	m := NewMatchmaker()
+	var results []MatchResult
+	m.OnMatchFormed = func(r MatchResult) { results = append(results, r) }
+
+	now := time.Now()
+	if err := m.Enqueue(queuedRanked(uuid.New(), now, 1000, 60)); err != nil {
+		t.Fatalf("enqueue low: %v", err)
+	}
+	if err := m.Enqueue(queuedRanked(uuid.New(), now, 2200, 60)); err != nil {
+		t.Fatalf("enqueue high: %v", err)
+	}
+
+	m.processQueues()
+
+	if len(results) != 0 {
+		t.Fatalf("expected the wide rating spread to be refused, got %d matches: %+v", len(results), results)
+	}
+	if got := m.QueueStats()["h2h_quickplay"].PlayerCount; got != 2 {
+		t.Fatalf("expected both parties to remain queued, got playerCount %d", got)
+	}
+}
+
+// TestRankedH2HQualityGateAcceptsCloseSpread is the positive pin: a close-rating ranked H2H pair
+// matches on the first tick.
+func TestRankedH2HQualityGateAcceptsCloseSpread(t *testing.T) {
+	m := NewMatchmaker()
+	var results []MatchResult
+	m.OnMatchFormed = func(r MatchResult) { results = append(results, r) }
+
+	now := time.Now()
+	if err := m.Enqueue(queuedRanked(uuid.New(), now, 1500, 60)); err != nil {
+		t.Fatalf("enqueue a: %v", err)
+	}
+	if err := m.Enqueue(queuedRanked(uuid.New(), now, 1530, 60)); err != nil {
+		t.Fatalf("enqueue b: %v", err)
+	}
+
+	m.processQueues()
+
+	if len(results) != 1 {
+		t.Fatalf("expected the close rating spread to match immediately, got %d matches", len(results))
+	}
+}

@@ -13,9 +13,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jason-s-yu/cambia/service/internal/database"
 	"github.com/jason-s-yu/cambia/service/internal/hub"
 	"github.com/jason-s-yu/cambia/service/internal/lobby"
 	"github.com/jason-s-yu/cambia/service/internal/matchmaking"
+	"github.com/jason-s-yu/cambia/service/internal/rating"
 )
 
 // Define valid enum-like values for lobby type and game mode.
@@ -519,6 +521,15 @@ func SearchLobbyHandler(gs *GameServer) http.HandlerFunc {
 		}
 		queueID := lob.QueueID
 		playerCount := lob.JoinedCount()
+		// Snapshot the joined member ids while the lock is held so the rating lookup below (a DB
+		// round trip) can run unlocked, the same trade the rest of this handler already makes for
+		// playerCount.
+		partyUserIDs := make([]uuid.UUID, 0, playerCount)
+		for uid, joined := range lob.Users {
+			if joined {
+				partyUserIDs = append(partyUserIDs, uid)
+			}
+		}
 		lob.Mu.Unlock()
 
 		if queueID == "" {
@@ -532,21 +543,36 @@ func SearchLobbyHandler(gs *GameServer) http.HandlerFunc {
 			return
 		}
 
+		// Live ratings for every party member, pool-aware (rating.ModeForPlayerCount picks the
+		// pool from the queue's target player count, the same gate applyRatingUpdate uses at game
+		// end). A player with no rating row - or no DB reachable at all - reads back pool defaults
+		// (database.LoadPartyRatings), never a zero value: AvgRating/MaxRD used to be left at their
+		// zero defaults entirely (no writer ever touched them), which made glicko2Quality's spread
+		// term zero for every pairing and the ranked quality gate pass everyone (cambia-1041).
+		partyRatings := database.LoadPartyRatings(r.Context(), partyUserIDs, rating.ModeForPlayerCount(queueCfg.Players))
+
 		// A party's own size has to obey the queue family's rules (solo queue only for H2H,
 		// parties up to 2 for FFA-4) before it ever reaches the matchmaker: Enqueue only rejects
 		// a party bigger than the queue's whole target size, which a full-size H2H party of two
 		// friends still passes, pairing them with each other every time and skipping matchmaking
-		// entirely. ValidateParty carried this rule already but had no caller (cambia-966).
-		if err := matchmaking.ValidateParty(queueID, playerCount, nil); err != nil {
+		// entirely. ValidateParty carried this rule already but had no caller (cambia-966). Its
+		// FFA-4 spread check reads OpenSkill mu (ratingSpread's 15-unit limit is a mu-scale limit,
+		// not an Elo one); before cambia-1041 it was always called with ratings=nil, so the check
+		// never fired.
+		if err := matchmaking.ValidateParty(queueID, playerCount, database.PartyOpenSkillMu(partyRatings)); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+
+		avgRating, maxRD := database.AggregatePartyGlicko(partyRatings)
 
 		entry := &matchmaking.QueuedLobby{
 			LobbyID:     lobbyID,
 			PlayerCount: playerCount,
 			QueueID:     queueID,
 			TargetCount: queueCfg.Players,
+			AvgRating:   avgRating,
+			MaxRD:       maxRD,
 			IsRanked:    queueCfg.Ranked,
 			QueuedAt:    time.Now(),
 		}

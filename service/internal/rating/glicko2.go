@@ -40,6 +40,23 @@ const (
 	Mode7p8p RatingMode = "7p8p"
 )
 
+// ModeForPlayerCount selects the rating pool a roster of this size contributes to, mirroring
+// the gate database.applyRatingUpdate applies at game end (2 => 1v1, 4 => 4p, 7 or 8 => 7p8p).
+// An unsupported count returns "", meaning no pool applies; callers must check for it rather
+// than let PoolFields silently fall back to 1v1 for a count that was never meant to rate.
+func ModeForPlayerCount(playerCount int) RatingMode {
+	switch playerCount {
+	case 2:
+		return Mode1v1
+	case 4:
+		return Mode4p
+	case 7, 8:
+		return Mode7p8p
+	default:
+		return ""
+	}
+}
+
 // PoolFields returns the stored Elo, Phi (RD), and Sigma (volatility) for the
 // given user in the given rating pool. Unrecognized modes fall back to 1v1.
 func PoolFields(u models.User, mode RatingMode) (elo int, phi, sigma float64) {
