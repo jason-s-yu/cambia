@@ -16,7 +16,7 @@ Components read semantic names only. They never branch on theme, and never read 
 
 Token layers, in `design-tokens.css` order:
 
-1. Primitive ramps (`--felt-*`, `--paper-*`, `--ink-*`, `--green-*`, `--gold-*`, `--cream-*`, `--red-*`, `--amber-*`, `--blue-*`). Raw hues. Not for component use.
+1. Primitive ramps (`--felt-*`, `--paper-*`, `--ink-*`, `--green-*`, `--gold-*`, `--cream-*`, `--red-*`, `--orange-*`, `--blue-*`). Raw hues. Not for component use.
 2. Semantic tokens. The component contract, listed below.
 3. Scale tokens: type, spacing, radius, elevation, motion, control geometry.
 4. Legacy aliases. Deprecated, see "Removal checklist".
@@ -126,20 +126,24 @@ Text on a selected ground steps up a tier. The gold selection tint lands lighter
 
 ### Status
 
-Each status carries three tokens: the foreground, a tinted `-bg`, and a `-border`. Status color reports state; it is never a call to action. Warning is amber in dark and a red-orange on paper, both held apart from gold so a warning never reads as a button.
+Each status carries three tokens: the foreground, a tinted `-bg`, and a `-border`. Status color reports state; it is never a call to action. Warning is orange in both themes, held off gold so a warning never reads as a button, and held under the danger red in chroma so it never outranks a failure.
 
 |Token family|Dark foreground|Light foreground|Use|
 |-|-|-|-|
 |`--status-success-*`|`#62c096`|`#1a6d49`|Running, succeeded, connected, positive delta.|
 |`--status-danger-*`|`#ff6f61`|`#a92c26`|Failed, crashed, error text, negative delta.|
-|`--status-warning-*`|`#e09a30`|`#96461a`|Starting, stopping, degraded.|
+|`--status-warning-*`|`#f68c57`|`#96461a`|Starting, stopping, degraded.|
 |`--status-info-*`|`#6aa5cf`|`#2a5f8f`|Created, queued, neutral notice.|
 
 The `-bg` tint and the `-border` hairline carry the rgb of the foreground above them, so a badge is one hue at three strengths.
 
 A status tone is read as text at 11-13px inside its own tint, and the tint lifts the ground it is measured against, which is where three of these fell under AA: dark success measured 4.14:1 on the badge tint over `--surface-2`, dark danger 4.13:1 and 3.76:1 over `--surface-1` and `--surface-2`, and light warning 4.05:1 and 4.25:1. The same two dark tones sat at 3.97:1 and 3.43:1 as the `PlayerSeat` state line on `--surface-selected`, the lightest ground in dark. Success and danger moved one ramp step lighter and warning one step darker, to 5.62, 5.16 and 5.24 at their worst ground, 5.76 and 5.09 on the seat. `--red-300` and `--amber-700` are new ramp steps: red stopped at the 400 that was the danger fill, and amber is the one status hue whose 600 step is light enough to fail on paper.
 
-That pass moved level and left hue alone, and both tones then read wrong (cambia-1046). Lightness, chroma and hue below are CIELAB. In dark it left danger a light salmon of chroma 39.9, less colorful than the untouched warning amber at 64.6, so a crashed pill read calmer than the starting pill beside it. `--red-300` is now `#ff6f61`, chroma 64.4 at hue 33.1: level with the amber in chroma, 41 degrees off it in hue, and measured at 5.37:1 and 4.88:1 on its own tint over `--surface-1` and `--surface-2`, 4.67:1 on the seat and 7.19:1 in the score pill. Dark warning keeps `--amber-400`. On paper the deep amber landed at hue 66.3 against `--accent-gold-text` at 83.7, and `QueueCard` draws the two side by side, a gold Ranked on the primary queue and a warning Ranked on the rest. Light warning is now the literal `#96461a`: lightness 39.5 and chroma 50.8 against the bronze's 39.6 and 50.0, with the hue turned 13.6 degrees toward red, to 52.7, which puts it 31 degrees off the gold and 18 off the light danger red at hue 34.3, and it measures the same 5.24:1 and 5.49:1 that the bronze did. `--amber-700` had no other consumer and is gone with it.
+That pass moved level and left hue alone, and both tones then read wrong (cambia-1046). Lightness, chroma and hue below are CIELAB.
+
+Danger, dark: the AA fix left it a light salmon of chroma 39.9, less colorful than the amber warning of the day at 64.6, so a crashed pill read calmer than the starting pill beside it. `--red-300` is now `#ff6f61`, chroma 64.4 at hue 33.1, measured at 5.37:1 and 4.88:1 on its own tint over `--surface-1` and `--surface-2`, 4.67:1 on the seat and 7.19:1 in the score pill.
+
+Warning, both themes: the amber ramp ran at hue 66 to 74, against `--accent-gold-text` at 83.7 light and 87.4 dark, and `QueueCard` draws the two side by side, a gold Ranked on the primary queue and a warning Ranked on the rest, so they read as one color, 17.4 degrees apart on paper and 13.1 in dark. Both tones move to a two-step orange ramp at hue 52. `--orange-700` `#96461a` holds the light bronze's lightness and chroma (39.5 and 50.8 against 39.6 and 50.0) and measures the same 5.24:1 and 5.49:1 the bronze did. `--orange-300` `#f68c57` holds the dark amber's lightness (68.8 against 68.9) at chroma 57.7, under the danger red's 64.4 so danger outranks it on colorfulness, and measures 5.95:1 and 5.38:1 against the amber's 5.93:1 and 5.36:1. The two orange steps sit 31.0 and 35.7 degrees off their theme's gold and 18.4 and 18.6 off its danger red. The amber ramp had no other consumer and is removed.
 
 ### Cards and tiers
 
