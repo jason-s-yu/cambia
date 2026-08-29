@@ -203,6 +203,20 @@ func (g *CambiaGame) applySnapFill(fill *snapFillState, ownSlot uint8, auto bool
 		log.Printf("Game %s: snap fill slot %d out of range for player %s.", g.ID, ownSlot, fill.SnapperID)
 		return
 	}
+	// The victim's hand can lock between the snap that opened this obligation and the fill that
+	// pays it: the snap itself lands mid-turn, but nothing stops the victim from calling Cambia on
+	// their own later turn while the fill is still outstanding (the snapper who owes it, not the
+	// victim, is the one HandlePlayerAction blocks from acting in the meantime). RULES.md is silent
+	// on a fill landing after the hand it targets has locked, so this takes the conservative
+	// reading: LockCallerHand forbids altering that hand at all (RULES.md 3C), so the fill lapses
+	// the same way it does when the hand is already full, rather than writing into a locked hand.
+	// The snapper keeps the card they would have given up and their obligation is cleared either
+	// way (cambia-1043).
+	if g.handLocked(victimIdx) {
+		log.Printf("Game %s: player %s's hand is now locked by LockCallerHand; dropping the snap fill owed by %s.", g.ID, fill.VictimID, fill.SnapperID)
+		g.clearSnapFill(fill)
+		return
+	}
 	victimHandLen := g.Engine.Players[victimIdx].HandLen
 	if victimHandLen >= engine.MaxHandSize {
 		// The victim filled back up on their own (penalty draws) while the fill was outstanding.
