@@ -734,3 +734,314 @@ def test_cli_help_exits_zero():
     with pytest.raises(SystemExit) as exc_info:
         x2.main(["--help"])
     assert exc_info.value.code == 0
+
+
+# ---------------------------------------------------------------------------
+# Amendments A3-3 (execution note) / A4 / A5: the stop-inert regime
+#
+# C0, C1, and confirm-seed cells are submitted with the stop rule made
+# structurally inert (cfr/config/x2r/c0.yaml et al.: stability_stop_mode:
+# divergence, stability_min_iters: 1001 past the 1000-iter horizon). Under this
+# regime the rule-3 bar-reach antecedent (A5-1) scans the WHOLE [1, 700]
+# window, and rule 2's floor-move input (A4-2) is the EXACT iteration-700
+# checkpoint compared against C-rep's matched-iteration reference (A4-1), never
+# the window minimum and never the fixed 0.08895 baseline. The float values
+# below are the exact float64 closed-record readings (hub notes on cambia-690/
+# cambia-742/cambia-739): v0.4-x2r-crep-xpu iter 700 = 0.06276914910567255;
+# v0.4-x2r-c0-xpu iter 700 = 0.34575726595790635 (window minimum 0.0894180004934208
+# at iter 200 -- the reversal A4-2 must not read); v0.4-x2r-c1-xpu iter 700 =
+# 0.06976493461268152; v0.4-x2r-s2-xpu iter 700 = 0.059910965083118134 with a
+# global minimum 0.05969901291572505 at iteration 970, OUTSIDE the window.
+# ---------------------------------------------------------------------------
+
+STOPINERT_PARAMS = {"stop_mode": "divergence", "min_iters": 1001}
+
+
+def stopinert_tail(values, lo=210, step=10):
+    """A short stop-inert-regime tail series [lo, lo+step, ...] -> values."""
+    its = list(range(lo, lo + step * len(values), step))
+    return list(zip(its, values))
+
+
+def test_detect_regime_divergence_with_inert_min_iters():
+    assert x2._detect_regime(STOPINERT_PARAMS) == "stopinert"
+    assert x2._detect_regime({"stop_mode": "plateau"}) == "plateau"
+    assert x2._detect_regime({}) == "plateau"
+    # divergence mode alone, with a reachable min_iters, is NOT stop-inert.
+    assert x2._detect_regime({"stop_mode": "divergence", "min_iters": 10}) == "plateau"
+    # min_iters past the boundary alone (still plateau mode) is NOT stop-inert.
+    assert x2._detect_regime({"stop_mode": "plateau", "min_iters": 1001}) == "plateau"
+
+
+def test_build_cell_readout_autodetects_stopinert_from_params():
+    series = [(1, 1.4)] + stopinert_tail([0.10, 0.09, 0.08, 0.07], lo=670)
+    cell = x2.build_cell_readout("C1", series, stop_params=STOPINERT_PARAMS)
+    assert cell.regime == "stopinert"
+    assert cell.recorded_min_iters == 1001
+
+
+def test_regime_override_forces_plateau_ignoring_params():
+    series = [(1, 1.4)] + stopinert_tail([0.10, 0.09, 0.08, 0.07], lo=670)
+    cell = x2.build_cell_readout(
+        "C1", series, stop_params=STOPINERT_PARAMS, regime_override="plateau"
+    )
+    assert cell.regime == "plateau"
+
+
+def test_regime_override_forces_stopinert_ignoring_params():
+    cell = x2.build_cell_readout("C1", FRESH_SERIES, regime_override="stopinert")
+    assert cell.regime == "stopinert"
+
+
+def test_stopinert_min_iters_drift_is_not_flagged():
+    # The stop-inert method's own authorized deviation (min_iters raised past
+    # the read-out boundary) must never itself read as discrepancy-causing
+    # drift; it is the same signal that classified the cell as stop-inert.
+    series = [(1, 1.0)] + stopinert_tail([0.5, 0.3, 0.2, 0.1], lo=100)
+    cell = x2.build_cell_readout("C1", series, stop_params=STOPINERT_PARAMS)
+    assert cell.param_drift is None
+    assert cell.discrepancy is None
+
+
+def test_stopinert_other_param_drift_still_flagged():
+    params = dict(STOPINERT_PARAMS)
+    params["patience"] = 20  # unauthorized deviation
+    series = [(1, 1.0)] + stopinert_tail([0.5, 0.3, 0.2, 0.1], lo=100)
+    cell = x2.build_cell_readout("C1", series, stop_params=params)
+    assert cell.regime == "stopinert"
+    assert cell.param_drift is not None
+    assert "patience" in cell.param_drift
+
+
+def test_stopinert_readout_window_is_full_1_to_700_not_post_stop():
+    # A shared ~330 flat the plateau replay would fire inside, but the
+    # stop-inert window reads the WHOLE [1, 700] span, not a post-(spurious
+    # replay-stop) slice.
+    series = (
+        [(1, 1.4), (100, 0.5)]
+        + stopinert_tail([0.102, 0.10, 0.098], lo=210)  # inside the shared flat
+        + [(670, 0.06806887962195773), (700, 0.06976493461268152)]
+    )
+    cell = x2.build_cell_readout("C1", series, stop_params=STOPINERT_PARAMS)
+    assert cell.iter700_nashconv == pytest.approx(0.06976493461268152, abs=1e-15)
+    assert cell.readout_min_nashconv == pytest.approx(0.06806887962195773, abs=1e-15)
+    assert cell.readout_min_iter == 670
+    assert cell.bar_cross_iter is None  # never <= 0.057 in [1, 700]
+
+
+def test_stopinert_window_excludes_post_700_minimum():
+    # The real S2 shape: the global minimum (0.05970 @ 970) sits outside the
+    # [1, 700] window; the rule-3 antecedent must not see it.
+    series = (
+        [(1, 1.7)]
+        + stopinert_tail([0.10, 0.08], lo=600)
+        + [
+            (700, 0.059910965083118134),
+            (970, 0.05969901291572505),
+            (1000, 0.06131825859194878),
+        ]
+    )
+    cell = x2.build_cell_readout("S2", series, stop_params=STOPINERT_PARAMS)
+    assert cell.iter700_nashconv == pytest.approx(0.059910965083118134, abs=1e-15)
+    assert cell.readout_min_nashconv == pytest.approx(0.059910965083118134, abs=1e-15)
+    assert cell.readout_min_iter == 700
+    assert cell.bar_cross_iter is None  # 0.05991 > bar_respec 0.057
+    assert cell.crossed_bar() is False
+
+
+def test_moved_the_floor_stopinert_arithmetic_matches_a4_2():
+    crep_series = (
+        [(1, 1.4)] + stopinert_tail([0.08, 0.07], lo=600) + [(700, 0.06276914910567255)]
+    )
+    crep = x2.build_cell_readout("C-rep", crep_series)  # plateau regime (default)
+    threshold_rel = 0.15191  # frozen B from the closed record (A3-1)
+    target = 0.06276914910567255 * (1 - threshold_rel)
+    assert target == pytest.approx(0.05323, abs=1e-4)
+
+    c1_series = (
+        [(1, 1.4)] + stopinert_tail([0.08, 0.07], lo=600) + [(700, 0.06976493461268152)]
+    )
+    c1 = x2.build_cell_readout("C1", c1_series, stop_params=STOPINERT_PARAMS)
+    result = x2.moved_the_floor_stopinert(c1, crep, threshold_rel)
+    assert result["cell_iter700_nashconv"] == pytest.approx(
+        0.06976493461268152, abs=1e-15
+    )
+    assert result["reference_iter700_nashconv"] == pytest.approx(
+        0.06276914910567255, abs=1e-15
+    )
+    assert result["moved_floor"] is False  # 0.06976 > 0.05323 target
+
+
+def test_moved_the_floor_stopinert_none_when_iter700_missing():
+    crep = x2.build_cell_readout("C-rep", [(1, 1.4), (690, 0.062)])  # no iter 700
+    c1 = x2.build_cell_readout(
+        "C1", [(1, 1.4), (700, 0.06)], stop_params=STOPINERT_PARAMS
+    )
+    assert x2.moved_the_floor_stopinert(c1, crep, 0.15191) is None
+
+
+def _floored_crep_at_iter700(iter700_value):
+    cont = flat_continuation(0.06, lo=210, hi=690) + [(700, iter700_value)]
+    return x2.build_cell_readout("C-rep", stopping_series(0.088, cont))
+
+
+def _stopinert_fork_cell(name, iter700_value, dip_value=None, dip_iter=200):
+    """A stop-inert fork cell reading ``iter700_value`` at iteration 700,
+    optionally dipping to ``dip_value`` earlier (mirrors C0's real shape: an
+    early minimum well below the iteration-700 reversal)."""
+    pts = [(1, 1.4)]
+    if dip_value is not None:
+        pts.append((dip_iter, dip_value))
+    pts.append((690, iter700_value))
+    pts.append((700, iter700_value))
+    return x2.build_cell_readout(name, pts, stop_params=STOPINERT_PARAMS)
+
+
+def test_a5_rule5_fail_neither_moves_floor_at_iter700():
+    # Matches the real closed-record C0/C1 read-out (cambia-739 known values).
+    crep = _floored_crep_at_iter700(0.06276914910567255)
+    c0 = _stopinert_fork_cell(
+        "C0", 0.34575726595790635, dip_value=0.0894180004934208, dip_iter=200
+    )
+    c1 = _stopinert_fork_cell("C1", 0.06976493461268152)
+    verdict = x2.compute_verdict(crep=crep, c0=c0, c1=c1)
+    assert verdict["overall_verdict"] == "FAIL"
+    assert verdict["rule_4_5"]["rule"] == 5
+    assert verdict["rule_4_5"]["c2_auto_queued"] is False
+    c0_info = verdict["rule_2_floor_move"]["cells"]["C0"]
+    c1_info = verdict["rule_2_floor_move"]["cells"]["C1"]
+    assert c0_info["regime"] == "stopinert"
+    assert c1_info["regime"] == "stopinert"
+    assert c0_info["moved_floor"] is False
+    assert c1_info["moved_floor"] is False
+    # A4-2 reads the iteration-700 checkpoint, NOT C0's early minimum dip.
+    assert c0_info["cell_iter700_nashconv"] == pytest.approx(
+        0.34575726595790635, abs=1e-12
+    )
+    assert c0_info["readout_min_nashconv"] == pytest.approx(0.0894180004934208, abs=1e-12)
+    ref = verdict["rule_2_floor_move"]["a4_matched_iteration_reference"]
+    assert ref["reference_cell"] == "C-rep"
+    assert ref["reference_nashconv"] == pytest.approx(0.06276914910567255, abs=1e-12)
+    assert any("A5-4" in n for n in verdict["notes"])
+
+
+def test_a5_rule4_indeterminate_exactly_one_moved_no_c2():
+    # A larger (hypothetical) crep reference than the real 0.06277 is used here
+    # so the floor-move target (0.135) sits ABOVE bar_respec (0.057): with the
+    # real reference the target (~0.053) sits below the bar, so any cell that
+    # moves the floor also crosses it (A5-1 fires first). This test exercises
+    # the A5-2 branch (moved-without-bar-reach) on its own terms.
+    crep = _floored_crep_at_iter700(0.15)  # threshold = max(B,0.10) = 0.10
+    target = 0.15 * 0.90  # 0.135, above bar_respec 0.057
+    c0 = _stopinert_fork_cell("C0", target - 0.02)  # 0.115: moved, no bar cross
+    c1 = _stopinert_fork_cell("C1", target + 0.01)  # 0.145: not moved
+    verdict = x2.compute_verdict(crep=crep, c0=c0, c1=c1)
+    assert verdict["overall_verdict"] == "INDETERMINATE"
+    assert verdict["rule_4_5"]["rule"] == 4
+    assert verdict["rule_4_5"]["c0_moved_floor"] is True
+    assert verdict["rule_4_5"]["c1_moved_floor"] is False
+    assert verdict["rule_4_5"]["c2_auto_queued"] is False
+    assert any("A5-2" in n for n in verdict["notes"])
+
+
+def test_a5_rule4_both_moved_autoqueues_c2():
+    crep = _floored_crep_at_iter700(0.15)
+    target = 0.15 * 0.90
+    c0 = _stopinert_fork_cell("C0", target - 0.02)  # 0.115
+    c1 = _stopinert_fork_cell("C1", target - 0.03)  # 0.105
+    verdict = x2.compute_verdict(crep=crep, c0=c0, c1=c1)
+    assert verdict["overall_verdict"] == "INDETERMINATE"
+    assert verdict["rule_4_5"]["rule"] == 4
+    assert verdict["rule_4_5"]["c0_moved_floor"] is True
+    assert verdict["rule_4_5"]["c1_moved_floor"] is True
+    assert verdict["rule_4_5"]["c2_auto_queued"] is True
+
+
+def test_a5_bar_reach_in_window_routes_to_rule3_not_rule5():
+    # A5-1: a bar reach ANYWHERE in [1, 700] (here, mid-window, not at the
+    # iteration-700 checkpoint) routes to rule 3's PASS pathway and excludes
+    # rule 5, even though neither cell's iteration-700 reading alone would
+    # move the floor under A4-2.
+    crep = _floored_crep_at_iter700(0.06276914910567255)
+    c0 = x2.build_cell_readout(
+        "C0",
+        [(1, 1.4), (500, 0.05), (690, 0.06), (700, 0.06)],
+        stop_params=STOPINERT_PARAMS,
+    )
+    c1 = _stopinert_fork_cell("C1", 0.069)
+    verdict = x2.compute_verdict(crep=crep, c0=c0, c1=c1)
+    assert verdict["stage"] == "e"
+    assert verdict["rule_4_5"] is None  # rule 5 never reached
+    assert verdict["rule_3_pass"]["passing_cell"] == "C0"
+    assert verdict["rule_3_pass"]["passing_cell_regime"] == "stopinert"
+    assert any("A5-1" in n for n in verdict["notes"])
+
+
+def test_c0c1_fork_pending_when_stopinert_cell_missing_iter700_checkpoint():
+    crep = _floored_crep_at_iter700(0.06276914910567255)
+    c0 = x2.build_cell_readout(
+        "C0",
+        [(1, 0.5)] + [(it, 0.5) for it in range(10, 711, 10) if it != 700],
+        stop_params=STOPINERT_PARAMS,
+    )  # reaches past 700 but skips the exact iteration-700 checkpoint
+    c1 = _stopinert_fork_cell("C1", 0.069)
+    verdict = x2.compute_verdict(crep=crep, c0=c0, c1=c1)
+    assert verdict["overall_verdict"] == "PENDING"
+    assert any("iteration 700" in p or "checkpoint" in p for p in verdict["pending"])
+
+
+def test_discrepancy_free_end_to_end_on_stopinert_run_dirs(tmp_path):
+    # Regression for the reported bug: real-shaped C0/C1 run dirs (divergence
+    # stop mode, min_iters 1001) must never render DISCREPANCY purely from the
+    # stop-inert regime's own authorized min_iters deviation.
+    crep_cell = _floored_crep_at_iter700(0.06276914910567255)
+    crep_dir = _write_run_dir(
+        tmp_path,
+        "crep",
+        crep_cell.series,
+        stopped=True,
+        best_iteration=940,
+        log_stop_iter=crep_cell.replay_stop_iter,
+    )
+    c0_dir = _write_run_dir(
+        tmp_path,
+        "c0",
+        _stopinert_fork_cell(
+            "C0", 0.34575726595790635, dip_value=0.0894180004934208, dip_iter=200
+        ).series,
+        stopped=False,
+        best_iteration=200,
+        params=STOPINERT_PARAMS,
+    )
+    c1_dir = _write_run_dir(
+        tmp_path,
+        "c1",
+        _stopinert_fork_cell("C1", 0.06976493461268152).series,
+        stopped=False,
+        best_iteration=670,
+        params=STOPINERT_PARAMS,
+    )
+    verdict = x2.compute_verdict(
+        crep_dir=str(crep_dir), c0_dir=str(c0_dir), c1_dir=str(c1_dir)
+    )
+    assert verdict["overall_verdict"] != "DISCREPANCY"
+    assert not verdict["discrepancies"]
+    assert verdict["overall_verdict"] == "FAIL"
+    assert verdict["rule_4_5"]["rule"] == 5
+
+
+def test_cli_regime_flag_forces_plateau_on_stopinert_run_dir(tmp_path):
+    # A regression guard on the escape hatch: forcing 'plateau' overrides
+    # auto-detection even when the recorded params clearly signal stop-inert.
+    run_dir = _write_run_dir(
+        tmp_path,
+        "c1",
+        _stopinert_fork_cell("C1", 0.06976493461268152).series,
+        stopped=False,
+        best_iteration=670,
+        params=STOPINERT_PARAMS,
+    )
+    cell = x2.load_cell(str(run_dir), "C1", regime_override=None)
+    assert cell.regime == "stopinert"
+    forced = x2.load_cell(str(run_dir), "C1", regime_override="plateau")
+    assert forced.regime == "plateau"

@@ -3,7 +3,9 @@
 X2 re-specified gate verdict (v0.4 Phase 2): renders the X2 gate status or
 verdict from the FROZEN pre-registration
 (.docs/v0.4/phase2-throughput-pilot/x2-respec-preregistration.md, cambia-516/517)
-and its amendment A3 (C-rep continuation past the ~330 flat, hub note cambia-632).
+and its amendments A3 (C-rep continuation past the ~330 flat, hub note cambia-632),
+A4 (matched-iteration reference for rule 2 under A3, hub note cambia-671), and A5
+(precedence for the frozen-text gaps at the C0/C1 read-out, hub note cambia-730).
 
 Encoding the frozen rules exactly is the point of this tool: a deviation poisons a
 gate verdict. Every threshold and formula below is transcribed from the
@@ -23,13 +25,48 @@ status the data at hand authorizes:
       the bar"; the 700 window is the verdict input even if the run drifts past it,
       A3-5).
   (d) C0/C1 cells present (the A3-4 fork): rule 2 moved-the-floor per cell,
-      measured at each cell's A3 continuation read-out floor (the post-stop
-      minimum NashConv up to iteration 700), NOT the shared ~330 flat the
-      plateau stop sits inside; then rule 4 (INDETERMINATE, C2 auto-queued only
-      if BOTH C0 and C1 moved) or rule 5 (FAIL if neither moved).
+      branched by regime (see STOP-INERT REGIME below): a plateau-regime cell
+      reads its A3 continuation read-out floor (the post-stop minimum NashConv
+      up to iteration 700) against the fresh-run baseline 0.08895 (rule 2
+      base text), NOT the shared ~330 flat the plateau stop sits inside; a
+      stop-inert-regime cell reads its EXACT iteration-700 checkpoint against
+      C-rep's matched-iteration continuation value (A4-1/A4-2). Then rule 4
+      (INDETERMINATE, C2 auto-queued only if BOTH C0 and C1 moved, or the A5-2
+      user escalation without C2 if exactly one moved) or rule 5 (FAIL if
+      neither moved, subject to A5-1's precedence below).
   (e) Confirm seeds present: rule 3 PASS requires the passing cell <= bar_respec
-      at its A3-3 read-out with a descent monotone under the stop rule, plus two
-      additional seeds plateauing <= 1.25 * bar_respec, each under the A3 regime.
+      within the read-out window with a descent monotone under the stop rule,
+      plus two additional seeds plateauing <= 1.25 * bar_respec, each under the
+      A3 regime.
+
+STOP-INERT REGIME (amendment A3-3's execution note + amendments A4/A5): C0, C1,
+C2 and confirm-seed cells are submitted with the plateau/divergence stop rule
+made structurally inert (cfr/config/x2r/c0.yaml et al.: stability_stop_mode:
+divergence + stability_min_iters past the read-out boundary, so the rule cannot
+fire before iteration 700 regardless of the trajectory), so the cell runs the
+full 1000-iteration horizon uninterrupted. This is auto-detected per cell from
+the run's own recorded controller params (stop_mode != "plateau" and min_iters
+> the A3 read-out boundary) or forced via --regime; C-rep is never subject to
+this flag; it always keeps its own frozen-plateau-stop-then-latched-continuation
+handling, which rule 1/A3-1 and the A4-1 matched-iteration reference depend on.
+Under the stop-inert regime:
+  - the read-out window for the rule-3 bar-reach antecedent (A5-1) is the WHOLE
+    [1, 700] span, not a post-(replay-stop) slice: there is no real stop to be
+    "post" of;
+  - rule 2's floor-move input (A4-2) is the EXACT iteration-700 checkpoint (a
+    cell may dip below it earlier in the window and reverse -- C0's closed
+    record does exactly this, minimum 0.08942 at iteration 200 vs. 0.34576 at
+    iteration 700 -- so the read-out is the checkpoint, never the window
+    minimum), compared against C-rep's iteration-700 continuation value (A4-1),
+    not the fixed fresh-run baseline;
+  - the stop-inert method's own authorized deviation (min_iters raised past the
+    read-out boundary) is never itself flagged as param drift; any OTHER
+    unauthorized deviation still is.
+A5 precedence: a bar reach anywhere in [1, 700] routes that cell to rule 3's
+PASS pathway and excludes rule 5 (A5-1); exactly one of C0/C1 moving the floor
+with no bar reach routes to rule 4's user escalation without auto-queuing C2
+(A5-2); neither moving with no bar reach routes to rule 5 (mechanism-defect
+presumption, rebuttable per A5-4).
 
 The plateau stop rule is NOT reimplemented here. The frozen-stop iteration is
 derived by replaying a BestSnapshotController (src/cfr/prtcfr_stability.py)
@@ -41,7 +78,8 @@ disagreement between the frozen replay and the record is reported loudly and
 refuses to resolve into a verdict, EXCEPT that A3-3's authorized divergence stop
 mode (recorded stopped=False on a clean descent) is not treated as a discrepancy
 against the plateau replay. A run whose controller recorded non-frozen stop-rule
-params is flagged as drift.
+params is flagged as drift, except the stop-inert regime's own min_iters
+deviation (see STOP-INERT REGIME above).
 
 Data source is the run directory, per cell. The (iteration, NashConv) series and
 the stop latch come from ``<run_dir>/resume_state.json`` (controller.history and
@@ -55,6 +93,12 @@ Usage:
       --c0-dir runs/v0.4-x2r-c0-xpu --c1-dir runs/v0.4-x2r-c1-xpu \
       --confirm-seed-dir runs/seed2 --confirm-seed-dir runs/seed3 \
       --out runs/v0.4-x2r-crep-xpu/x2_verdict.json
+
+--regime {auto,plateau,stopinert} (default auto) forces the stop-rule regime
+for C0/C1/C2/confirm-seed cells (never C-rep); auto-detection from the run's
+own recorded controller params is almost always correct (see STOP-INERT REGIME
+above) and the flag exists for a run directory whose recorded params do not
+carry that signal.
 
 Exit codes: 0 PASS, 1 FAIL, 2 INDETERMINATE, 3 PENDING (insufficient data),
 4 DISCREPANCY (replay vs recorded stop disagree; no verdict rendered).
@@ -195,6 +239,45 @@ _EVAL_BAR, _EVAL_BAR_CONSISTENT = _check_bar_consistency()
 
 
 # ---------------------------------------------------------------------------
+# Stop-inert regime detection (amendment A3-3's execution note + A4/A5)
+# ---------------------------------------------------------------------------
+
+_REGIMES = ("plateau", "stopinert")
+
+
+def _detect_regime(run_params: Dict[str, Any]) -> str:
+    """Auto-detect a cell's stop-rule regime from its OWN recorded controller
+    params: "stopinert" iff stop_mode is not "plateau" and the recorded
+    min_iters exceeds the A3 read-out boundary (700), i.e. the (divergence)
+    stop rule is structurally unreachable anywhere inside the window this tool
+    ever reads. This is exactly the method cfr/config/x2r/c0.yaml, c1.yaml,
+    confirm_s2.yaml and s0.yaml use ("stability_min_iters: 1001 (> the
+    1000-iter horizon) makes the trigger unreachable"). Anything else
+    (including plain plateau mode, or divergence with a reachable min_iters) is
+    "plateau" regime -- the original A3-1/A3-3 handling, unchanged.
+    """
+    stop_mode = str(run_params.get("stop_mode", "plateau"))
+    min_iters = run_params.get("min_iters")
+    if (
+        stop_mode != "plateau"
+        and min_iters is not None
+        and min_iters > A3_READOUT_MAX_ITER
+    ):
+        return "stopinert"
+    return "plateau"
+
+
+def _value_at_iteration(
+    series: List[Tuple[int, float]], iteration: int
+) -> Optional[float]:
+    """The recorded NashConv at EXACTLY ``iteration``, else None."""
+    for it, nc in series:
+        if it == iteration:
+            return nc
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Frozen-stop replay (reuses BestSnapshotController; never reimplements the rule)
 # ---------------------------------------------------------------------------
 
@@ -302,6 +385,10 @@ class CellReadout:
     series: List[Tuple[int, float]] = field(default_factory=list)
     stop_params: Dict[str, Any] = field(default_factory=lambda: dict(FROZEN_STOP_PARAMS))
 
+    # stop-rule regime (A3-3 execution note + A4/A5): "plateau" (unchanged
+    # original handling) or "stopinert" (amended read-out per A4-2/A5-1).
+    regime: str = "plateau"
+
     # replayed frozen plateau stop
     replay_stopped: bool = False
     replay_stop_iter: Optional[int] = None
@@ -317,12 +404,16 @@ class CellReadout:
     # stop_mode the run itself used (A3-3 permits divergence); "plateau" by
     # default so a synthetic cell is treated as plateau-governed.
     recorded_stop_mode: str = "plateau"
-    # non-frozen stop-rule params the run recorded, if any (drift signal).
+    # recorded min_iters (regime-detection evidence + report transparency).
+    recorded_min_iters: Optional[int] = None
+    # non-frozen stop-rule params the run recorded, if any (drift signal); the
+    # stop-inert regime's own min_iters deviation is exempt (see _param_drift).
     param_drift: Optional[str] = None
     # cross-checks that could not run (e.g. training.log absent); informational.
     crosscheck_note: Optional[str] = None
 
-    # A3 read-out window
+    # A3 read-out window (plateau regime: post-stop through iteration 700;
+    # stop-inert regime: the whole [1, 700] span -- see STOP-INERT REGIME).
     max_iter: Optional[int] = None
     reaches_readout_end: bool = False
     bar_cross_iter: Optional[int] = None
@@ -334,6 +425,9 @@ class CellReadout:
     descent_monotone: Optional[bool] = None
     monotone_evidence: Dict[str, Any] = field(default_factory=dict)
 
+    # A4-2 read-out input: the EXACT iteration-700 checkpoint, if recorded.
+    iter700_nashconv: Optional[float] = None
+
     load_error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -344,6 +438,7 @@ class CellReadout:
             "first_iter": self.series[0][0] if self.series else None,
             "last_iter": self.series[-1][0] if self.series else None,
             "last_nashconv": self.series[-1][1] if self.series else None,
+            "regime": self.regime,
             "replay_stopped": self.replay_stopped,
             "replay_stop_iter": self.replay_stop_iter,
             "replay_stop_nashconv": self.replay_stop_nashconv,
@@ -351,6 +446,7 @@ class CellReadout:
             "recorded_stopped": self.recorded_stopped,
             "recorded_stop_iter": self.recorded_stop_iter,
             "recorded_stop_mode": self.recorded_stop_mode,
+            "recorded_min_iters": self.recorded_min_iters,
             "discrepancy": self.discrepancy,
             "param_drift": self.param_drift,
             "crosscheck_note": self.crosscheck_note,
@@ -364,6 +460,7 @@ class CellReadout:
             "readout_min_nashconv": self.readout_min_nashconv,
             "descent_monotone": self.descent_monotone,
             "monotone_evidence": self.monotone_evidence,
+            "iter700_nashconv": self.iter700_nashconv,
             "load_error": self.load_error,
         }
 
@@ -390,6 +487,7 @@ def build_cell_readout(
     recorded_stop_iter: Optional[int] = None,
     recorded_best_iter: Optional[int] = None,
     run_dir: Optional[str] = None,
+    regime_override: Optional[str] = None,
 ) -> CellReadout:
     """Compute a CellReadout from a raw (iteration, NashConv) series.
 
@@ -400,6 +498,9 @@ def build_cell_readout(
     adopted for the replay (the replay always uses the frozen params); they are
     inspected for drift and their stop_mode is read to decide whether the
     recorded stop is comparable to the frozen plateau replay.
+
+    ``regime_override`` forces "plateau" or "stopinert" regardless of the
+    recorded params; None (the default) auto-detects via ``_detect_regime``.
     """
     frozen = dict(FROZEN_STOP_PARAMS)
     run_params = dict(stop_params) if stop_params else {}
@@ -407,7 +508,11 @@ def build_cell_readout(
 
     cell = CellReadout(name=name, run_dir=run_dir, series=series, stop_params=frozen)
     cell.recorded_stop_mode = str(run_params.get("stop_mode", "plateau"))
-    cell.param_drift = _param_drift(run_params)
+    cell.recorded_min_iters = run_params.get("min_iters")
+    cell.regime = (
+        regime_override if regime_override in _REGIMES else _detect_regime(run_params)
+    )
+    cell.param_drift = _param_drift(run_params, cell.regime)
     if not series:
         cell.load_error = "empty series"
         return cell
@@ -426,13 +531,19 @@ def build_cell_readout(
 
     cell.max_iter = series[-1][0]
     cell.reaches_readout_end = cell.max_iter >= A3_READOUT_MAX_ITER
+    cell.iter700_nashconv = _value_at_iteration(series, A3_READOUT_MAX_ITER)
 
-    # Read-out region: the continuation after the plateau stop, up to iteration
-    # 700. "After the stop" places the crossing physically past the ~330 flat;
-    # every pre-stop checkpoint is far above the bar, so restricting to
-    # iteration > stop_iter never excludes a real crossing. When the run has not
-    # yet stopped there is no read-out.
-    if cell.replay_stopped and cell.replay_stop_iter is not None:
+    # Read-out region. Stop-inert regime (A3-3 execution note): the stop rule
+    # never fires, so the whole [1, 700] span is the window (A5-1's rule-3
+    # antecedent scans it in full). Plateau regime (unchanged): the
+    # continuation after the plateau stop, up to iteration 700 -- "after the
+    # stop" places the crossing physically past the ~330 flat; every pre-stop
+    # checkpoint is far above the bar, so restricting to iteration > stop_iter
+    # never excludes a real crossing. When the run has not yet stopped there is
+    # no read-out.
+    if cell.regime == "stopinert":
+        readout = [(it, nc) for it, nc in series if it <= A3_READOUT_MAX_ITER]
+    elif cell.replay_stopped and cell.replay_stop_iter is not None:
         readout = [
             (it, nc)
             for it, nc in series
@@ -459,19 +570,26 @@ def build_cell_readout(
     return cell
 
 
-def _param_drift(run_params: Dict[str, Any]) -> Optional[str]:
+def _param_drift(run_params: Dict[str, Any], regime: str = "plateau") -> Optional[str]:
     """Describe any frozen stop-rule param the run recorded with a non-frozen
     value, else None.
 
     The replay always uses the frozen params, so a drifted run is still scored on
     the frozen rule; this only reports that the run itself did not follow the
     frozen stop rule (so its own recorded stop is untrustworthy). ``stop_mode`` is
-    exempt: A3-3 authorizes a divergence stop mode (or a latched controller) for
-    the read-out regime of confirm seeds and resubmitted C0/C1.
+    always exempt: A3-3 authorizes a divergence stop mode (or a latched
+    controller) for the read-out regime of confirm seeds and resubmitted C0/C1.
+    ``min_iters`` is additionally exempt when ``regime == "stopinert"``: raising
+    it past the A3 read-out boundary is precisely the stop-inert method's own
+    authorized deviation (cfr/config/x2r/c0.yaml et al.), not a run defect, and
+    is in fact the same signal ``_detect_regime`` used to classify the cell as
+    stop-inert in the first place. Any OTHER param drift is still flagged for
+    every regime.
     """
+    exempt = {"stop_mode"} | ({"min_iters"} if regime == "stopinert" else set())
     drifts = []
     for key, frozen_val in FROZEN_STOP_PARAMS.items():
-        if key == "stop_mode" or key not in run_params:
+        if key in exempt or key not in run_params:
             continue
         run_val = run_params[key]
         if isinstance(frozen_val, float) or isinstance(run_val, float):
@@ -555,14 +673,18 @@ def _parse_training_log_stop(log_path: Path) -> Tuple[Optional[int], Optional[bo
     return (terminal_iter if terminal_iter is not None else stop_iter, saw_stop)
 
 
-def load_cell(run_dir: str, name: str) -> CellReadout:
+def load_cell(
+    run_dir: str, name: str, regime_override: Optional[str] = None
+) -> CellReadout:
     """Load a CellReadout from a run directory.
 
     Series and stop latch come from ``resume_state.json`` (controller.history and
     controller.stopped); the stop iteration is cross-checked against
     ``logs/training.log``. Missing or malformed inputs are recorded as a
     ``load_error`` rather than raised, so a stage-aware verdict can still report
-    which cell's data is absent.
+    which cell's data is absent. ``regime_override`` forces the stop-inert
+    regime detection (see ``_detect_regime``); None auto-detects from the run's
+    own recorded controller params.
     """
     path = Path(run_dir)
     cell = CellReadout(name=name, run_dir=str(path))
@@ -611,6 +733,7 @@ def load_cell(run_dir: str, name: str) -> CellReadout:
         recorded_stop_iter=log_stop_iter,
         recorded_best_iter=controller.get("best_iteration"),
         run_dir=str(path),
+        regime_override=regime_override,
     )
     # When logs/training.log is absent the stop-iteration cross-check cannot run
     # (resume_state records only the stopped flag and best_iteration, not the
@@ -674,6 +797,76 @@ def moved_the_floor(cell: CellReadout, threshold_rel: float) -> Optional[bool]:
     return improvement > threshold_rel
 
 
+def moved_the_floor_stopinert(
+    cell: CellReadout, crep: Optional[CellReadout], threshold_rel: float
+) -> Optional[Dict[str, Any]]:
+    """A4-2: a stop-inert cell moves the floor iff its EXACT iteration-700
+    NashConv improves on C-rep's matched-iteration (iteration 700) continuation
+    value (A4-1) by more than ``threshold_rel`` (max(B, 0.10), per A4-2/A3-1)
+    relative.
+
+    Unlike ``moved_the_floor`` (plateau regime), this reads the checkpoint
+    value AT iteration 700 exactly, never the window minimum: a stop-inert cell
+    can dip below its iteration-700 reading earlier in the window and reverse
+    (C0's closed record: minimum 0.08942 at iteration 200, 0.34576 at iteration
+    700), and A4-2's read-out input is the iteration-700 checkpoint.
+
+    Returns None when either iteration-700 value is unavailable (the cell or
+    C-rep has no checkpoint recorded at exactly iteration 700).
+    """
+    cell_val = cell.iter700_nashconv
+    ref_val = crep.iter700_nashconv if crep is not None else None
+    if cell_val is None or ref_val is None:
+        return None
+    improvement = (ref_val - cell_val) / ref_val
+    return {
+        "cell_iter700_nashconv": cell_val,
+        "reference_iter700_nashconv": ref_val,
+        "floor_move_target_nashconv": ref_val * (1.0 - threshold_rel),
+        "moved_floor": improvement > threshold_rel,
+    }
+
+
+def _rule2_cell_info(
+    cell: CellReadout, crep: Optional[CellReadout], threshold_rel: float
+) -> Dict[str, Any]:
+    """Rule 2's per-cell floor-move disposition, branched by regime.
+
+    Plateau regime (unchanged): the floor is the A3 continuation read-out
+    minimum (or the plateau-stop value absent a continuation), read against the
+    fixed fresh-run baseline 0.08895.
+
+    Stop-inert regime (A4-2): the floor is the exact iteration-700 checkpoint,
+    read against C-rep's matched-iteration continuation value (A4-1). The
+    window minimum is still surfaced (informational only, no decision weight)
+    so the disposition is auditable against the fuller trajectory.
+    """
+    if cell.regime == "stopinert":
+        info: Dict[str, Any] = {
+            "regime": "stopinert",
+            "reference_cell": crep.name if crep is not None else None,
+            "threshold_rel": threshold_rel,
+            "readout_min_iter": cell.readout_min_iter,
+            "readout_min_nashconv": cell.readout_min_nashconv,
+            "cell_iter700_nashconv": cell.iter700_nashconv,
+            "reference_iter700_nashconv": None,
+            "floor_move_target_nashconv": None,
+            "moved_floor": None,
+        }
+        result = moved_the_floor_stopinert(cell, crep, threshold_rel)
+        if result is not None:
+            info.update(result)
+        return info
+    return {
+        "regime": "plateau",
+        "plateau_stop_iter": cell.replay_stop_iter,
+        "plateau_stop_nashconv": cell.replay_stop_nashconv,
+        "readout_floor_iter": cell.readout_min_iter,
+        "readout_floor_nashconv": _floor_move_nashconv(cell),
+        "moved_floor": moved_the_floor(cell, threshold_rel),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Verdict assembly
 # ---------------------------------------------------------------------------
@@ -691,24 +884,34 @@ def compute_verdict(
     c1: Optional[CellReadout] = None,
     c2: Optional[CellReadout] = None,
     confirm_seeds: Optional[List[CellReadout]] = None,
+    regime: str = "auto",
 ) -> Dict[str, Any]:
     """Render the X2 status/verdict.
 
     Cells may be passed as run-directory paths (loaded here) or as pre-built
     CellReadout objects (the test path). Directory arguments take precedence when
     both are given for the same cell.
+
+    ``regime`` is "auto" (default; per-cell auto-detection via
+    ``_detect_regime``), "plateau", or "stopinert". A non-"auto" value forces
+    that regime uniformly on the C0/C1/C2/confirm-seed cells loaded from a
+    directory; it never applies to C-rep, whose own frozen-plateau-stop
+    handling is foundational to rule 1/A3-1 and the A4-1 reference. It has no
+    effect on cells passed as pre-built CellReadout objects.
     """
+    regime_override = None if regime == "auto" else regime
     if crep_dir is not None:
         crep = load_cell(crep_dir, "C-rep")
     if c0_dir is not None:
-        c0 = load_cell(c0_dir, "C0")
+        c0 = load_cell(c0_dir, "C0", regime_override=regime_override)
     if c1_dir is not None:
-        c1 = load_cell(c1_dir, "C1")
+        c1 = load_cell(c1_dir, "C1", regime_override=regime_override)
     if c2_dir is not None:
-        c2 = load_cell(c2_dir, "C2")
+        c2 = load_cell(c2_dir, "C2", regime_override=regime_override)
     if confirm_seed_dirs:
         confirm_seeds = [
-            load_cell(d, "seed-%d" % (i + 2)) for i, d in enumerate(confirm_seed_dirs)
+            load_cell(d, "seed-%d" % (i + 2), regime_override=regime_override)
+            for i, d in enumerate(confirm_seed_dirs)
         ]
     confirm_seeds = confirm_seeds or []
 
@@ -854,7 +1057,7 @@ def compute_verdict(
         return verdict
 
     # A3-4 fork: C-rep floored -> capacity/coverage cells C0/C1 (rules 2/4/5) --
-    return _finish_c0c1_path(verdict, c0, c1, c2, threshold_rel)
+    return _finish_c0c1_path(verdict, c0, c1, c2, threshold_rel, crep=crep)
 
 
 def _finish_pass_path(
@@ -872,6 +1075,7 @@ def _finish_pass_path(
     n_needed = 2
     verdict["rule_3_pass"] = {
         "passing_cell": passing_cell.name,
+        "passing_cell_regime": passing_cell.regime,
         "bar_cross_iter": passing_cell.bar_cross_iter,
         "bar_cross_nashconv": passing_cell.bar_cross_nashconv,
         "descent_monotone": monotone,
@@ -881,6 +1085,12 @@ def _finish_pass_path(
         "confirm_seeds_passed": [s.name for s in passed_seeds],
         "confirm_seeds_pending": [s.name for s in pending_seeds],
     }
+    if passing_cell.regime == "stopinert":
+        verdict["notes"].append(
+            "A5-1: %s reached bar_respec within the stop-inert [1, %d] window; "
+            "rule 3's PASS pathway governs and rule 5 is excluded on this "
+            "record." % (passing_cell.name, A3_READOUT_MAX_ITER)
+        )
 
     if not monotone:
         verdict["overall_verdict"] = "PENDING"
@@ -926,13 +1136,17 @@ def _finish_c0c1_path(
     c1: Optional[CellReadout],
     c2: Optional[CellReadout],
     threshold_rel: float,
+    crep: Optional[CellReadout] = None,
 ) -> Dict[str, Any]:
     """Rules 2/4/5 over the A3-4 capacity/coverage fork (C-rep floored)."""
     verdict["stage"] = "d"
 
     # Both C0 and C1 must have reached their <= 700 read-out end (A3-4 floor
     # read-out) with no bar crossing before rules 2/4/5 can be applied. A missing
-    # or still-running cell keeps the verdict PENDING, never a premature FAIL.
+    # or still-running cell keeps the verdict PENDING, never a premature FAIL. A
+    # stop-inert cell additionally needs its own iteration-700 checkpoint (A4-2)
+    # and C-rep's matched-iteration reference (A4-1) before its disposition can
+    # be computed.
     missing = []
     for cell, label in [(c0, "C0"), (c1, "C1")]:
         if cell is None or cell.load_error or not cell.series:
@@ -940,10 +1154,26 @@ def _finish_c0c1_path(
                 "%s: %s"
                 % (label, (cell.load_error if cell is not None else "not provided"))
             )
-        elif not cell.reaches_readout_end:
+            continue
+        if not cell.reaches_readout_end:
             missing.append(
                 "%s: read-out has not reached iteration %d (last iter=%s)"
                 % (label, A3_READOUT_MAX_ITER, cell.max_iter)
+            )
+            continue
+        if cell.regime == "stopinert" and cell.iter700_nashconv is None:
+            missing.append(
+                "%s: stop-inert regime but no checkpoint recorded at exactly "
+                "iteration %d (A4-2 needs the exact checkpoint)"
+                % (label, A3_READOUT_MAX_ITER)
+            )
+        elif cell.regime == "stopinert" and (
+            crep is None or crep.iter700_nashconv is None
+        ):
+            missing.append(
+                "%s: stop-inert regime (A4-2) needs C-rep's matched "
+                "iteration-%d continuation value, which is unavailable"
+                % (label, A3_READOUT_MAX_ITER)
             )
     if missing:
         verdict["overall_verdict"] = "PENDING"
@@ -954,24 +1184,19 @@ def _finish_c0c1_path(
         )
         return verdict
 
-    moved_c0 = moved_the_floor(c0, threshold_rel)
-    moved_c1 = moved_the_floor(c1, threshold_rel)
-    verdict["rule_2_floor_move"]["cells"] = {
-        "C0": {
-            "plateau_stop_iter": c0.replay_stop_iter,
-            "plateau_stop_nashconv": c0.replay_stop_nashconv,
-            "readout_floor_iter": c0.readout_min_iter,
-            "readout_floor_nashconv": _floor_move_nashconv(c0),
-            "moved_floor": moved_c0,
-        },
-        "C1": {
-            "plateau_stop_iter": c1.replay_stop_iter,
-            "plateau_stop_nashconv": c1.replay_stop_nashconv,
-            "readout_floor_iter": c1.readout_min_iter,
-            "readout_floor_nashconv": _floor_move_nashconv(c1),
-            "moved_floor": moved_c1,
-        },
-    }
+    info_c0 = _rule2_cell_info(c0, crep, threshold_rel)
+    info_c1 = _rule2_cell_info(c1, crep, threshold_rel)
+    verdict["rule_2_floor_move"]["cells"] = {"C0": info_c0, "C1": info_c1}
+    if crep is not None and crep.iter700_nashconv is not None:
+        verdict["rule_2_floor_move"]["a4_matched_iteration_reference"] = {
+            "reference_cell": crep.name,
+            "reference_iteration": A3_READOUT_MAX_ITER,
+            "reference_nashconv": crep.iter700_nashconv,
+        }
+    any_stopinert = info_c0["regime"] == "stopinert" or info_c1["regime"] == "stopinert"
+
+    moved_c0 = info_c0["moved_floor"]
+    moved_c1 = info_c1["moved_floor"]
 
     both_moved = bool(moved_c0) and bool(moved_c1)
     either_moved = bool(moved_c0) or bool(moved_c1)
@@ -990,10 +1215,24 @@ def _finish_c0c1_path(
         verdict["overall_verdict"] = "FAIL"
         verdict["notes"].append(
             "Rule 5: neither C0 nor C1 moved the floor (> max(B, 0.10) = %.4f "
-            "relative over baseline %.5f), and no cell reached bar_respec. X2 FAIL "
-            "(mechanism-defect presumption); Phase 1 reopens as a defect hunt."
-            % (threshold_rel, BASELINE_NASHCONV)
+            "relative over %s), and no cell reached bar_respec anywhere in "
+            "[1, %d]. X2 FAIL (mechanism-defect presumption); Phase 1 reopens as "
+            "a defect hunt."
+            % (
+                threshold_rel,
+                (
+                    "C-rep's matched-iteration-700 continuation (A4-2)"
+                    if any_stopinert
+                    else "baseline %.5f" % BASELINE_NASHCONV
+                ),
+                A3_READOUT_MAX_ITER,
+            )
         )
+        if any_stopinert:
+            verdict["notes"].append(
+                "Per A5-4 the mechanism-defect presumption is rebuttable; any "
+                "reopen is scoped to sample efficiency / horizon, not soundness."
+            )
         return verdict
 
     # Rule 4: at least one of C0/C1 moved but no cell reached the bar.
@@ -1012,11 +1251,19 @@ def _finish_c0c1_path(
         )
     else:
         moved_name = "C0" if moved_c0 else "C1"
-        verdict["notes"].append(
+        note = (
             "Rule 4: %s moved the floor but no cell reached bar_respec; the other "
             "capacity/coverage cell did not move it, so C2 is NOT auto-queued "
             "(auto-queue requires both)." % moved_name
         )
+        if any_stopinert:
+            note += (
+                " Per A5-2, exactly one cell moving the floor with no bar reach "
+                "routes to rule 4's user escalation without C2: the question is a "
+                "capacity/sample-budget decision for the user, not a soundness "
+                "ruling."
+            )
+        verdict["notes"].append(note)
     return verdict
 
 
@@ -1071,13 +1318,16 @@ def human_summary(verdict: Dict[str, Any]) -> str:
             lines.append("cell %-7s LOAD ERROR: %s" % (name, cell["load_error"]))
             continue
         lines.append(
-            "cell %-7s n=%d iters[%s..%s] last_nc=%s stop@%s(nc=%s) crossed_bar@%s"
+            "cell %-7s regime=%-9s n=%d iters[%s..%s] last_nc=%s iter700_nc=%s "
+            "stop@%s(nc=%s) crossed_bar@%s"
             % (
                 name,
+                cell["regime"],
                 cell["n_points"],
                 cell["first_iter"],
                 cell["last_iter"],
                 _fmt(cell["last_nashconv"]),
+                _fmt(cell["iter700_nashconv"]),
                 cell["replay_stop_iter"],
                 _fmt(cell["replay_stop_nashconv"]),
                 cell["bar_cross_iter"],
@@ -1110,16 +1360,44 @@ def human_summary(verdict: Dict[str, Any]) -> str:
                 r2["floor_move_target_nashconv"],
             )
         )
-        for cname, cinfo in (r2.get("cells") or {}).items():
+        a4ref = r2.get("a4_matched_iteration_reference")
+        if a4ref:
             lines.append(
-                "  %s A3 read-out floor nc=%s (plateau-stop nc=%s) moved_floor=%s"
+                "  A4-1 matched-iteration reference: %s @ iter %d = %s"
                 % (
-                    cname,
-                    _fmt(cinfo["readout_floor_nashconv"]),
-                    _fmt(cinfo["plateau_stop_nashconv"]),
-                    cinfo["moved_floor"],
+                    a4ref["reference_cell"],
+                    a4ref["reference_iteration"],
+                    _fmt(a4ref["reference_nashconv"]),
                 )
             )
+        for cname, cinfo in (r2.get("cells") or {}).items():
+            if cinfo.get("regime") == "stopinert":
+                lines.append(
+                    "  %s [stopinert/A4-2] iter700 nc=%s vs %s iter700 nc=%s "
+                    "(target<=%s; window-min nc=%s@%s, informational) "
+                    "moved_floor=%s"
+                    % (
+                        cname,
+                        _fmt(cinfo["cell_iter700_nashconv"]),
+                        cinfo.get("reference_cell"),
+                        _fmt(cinfo["reference_iter700_nashconv"]),
+                        _fmt(cinfo["floor_move_target_nashconv"]),
+                        _fmt(cinfo["readout_min_nashconv"]),
+                        cinfo["readout_min_iter"],
+                        cinfo["moved_floor"],
+                    )
+                )
+            else:
+                lines.append(
+                    "  %s [plateau] A3 read-out floor nc=%s (plateau-stop nc=%s) "
+                    "moved_floor=%s"
+                    % (
+                        cname,
+                        _fmt(cinfo["readout_floor_nashconv"]),
+                        _fmt(cinfo["plateau_stop_nashconv"]),
+                        cinfo["moved_floor"],
+                    )
+                )
 
     if verdict["a3_readout"]:
         lines.append("")
@@ -1208,17 +1486,43 @@ def results_append_block(verdict: Dict[str, Any]) -> str:
             "must be < %.6f to move the floor)."
             % (r2["threshold_rel"], r2["floor_move_target_nashconv"])
         )
-        for cname, cinfo in (r2.get("cells") or {}).items():
+        a4ref = r2.get("a4_matched_iteration_reference")
+        if a4ref:
             lines.append(
-                "    %s: A3 read-out floor NashConv %s (plateau-stop NashConv %s), "
-                "moved floor = %s."
+                "  A4-1 matched-iteration reference: %s @ iter %d = %s."
                 % (
-                    cname,
-                    _fmt(cinfo["readout_floor_nashconv"]),
-                    _fmt(cinfo["plateau_stop_nashconv"]),
-                    cinfo["moved_floor"],
+                    a4ref["reference_cell"],
+                    a4ref["reference_iteration"],
+                    _fmt(a4ref["reference_nashconv"]),
                 )
             )
+        for cname, cinfo in (r2.get("cells") or {}).items():
+            if cinfo.get("regime") == "stopinert":
+                lines.append(
+                    "    %s [stopinert/A4-2]: iteration-%d NashConv %s vs %s "
+                    "iteration-%d NashConv %s (target <= %s), moved floor = %s."
+                    % (
+                        cname,
+                        A3_READOUT_MAX_ITER,
+                        _fmt(cinfo["cell_iter700_nashconv"]),
+                        cinfo.get("reference_cell"),
+                        A3_READOUT_MAX_ITER,
+                        _fmt(cinfo["reference_iter700_nashconv"]),
+                        _fmt(cinfo["floor_move_target_nashconv"]),
+                        cinfo["moved_floor"],
+                    )
+                )
+            else:
+                lines.append(
+                    "    %s [plateau]: A3 read-out floor NashConv %s "
+                    "(plateau-stop NashConv %s), moved floor = %s."
+                    % (
+                        cname,
+                        _fmt(cinfo["readout_floor_nashconv"]),
+                        _fmt(cinfo["plateau_stop_nashconv"]),
+                        cinfo["moved_floor"],
+                    )
+                )
     for cname, info in verdict["a3_readout"].items():
         lines.append(
             "  A3 read-out %s: %s (bar-cross iter %s nc %s; read-out min iter %s "
@@ -1297,6 +1601,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--out", default=None, help="JSON verdict output path.")
     ap.add_argument(
+        "--regime",
+        choices=["auto", "plateau", "stopinert"],
+        default="auto",
+        help=(
+            "Stop-rule regime for the C0/C1/C2/confirm-seed cells; never applies "
+            "to C-rep. 'auto' (default) detects amendment A3-3's stop-inert "
+            "regime from the run's own recorded controller params (stop_mode != "
+            "plateau and min_iters past the A3 read-out boundary, matching "
+            "cfr/config/x2r/c0.yaml et al.); 'plateau' or 'stopinert' forces that "
+            "regime uniformly, overriding auto-detection."
+        ),
+    )
+    ap.add_argument(
         "--no-results-block",
         action="store_true",
         help="Suppress the pre-registration Results append block on stdout.",
@@ -1312,6 +1629,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         c1_dir=args.c1_dir,
         c2_dir=args.c2_dir,
         confirm_seed_dirs=args.confirm_seed_dirs,
+        regime=args.regime,
     )
     print(human_summary(verdict))
     if not args.no_results_block:
