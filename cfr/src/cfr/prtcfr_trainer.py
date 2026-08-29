@@ -201,6 +201,11 @@ class PRTCFRTrainState:
     iteration: int
     samples_added: int
     buffer_size: int
+    # Final training loss of this iteration's net fit. Under lr_schedule=
+    # "global_cosine" this tracks the per-iteration peak LR at Spearman +0.99
+    # (confirmed even in a diverged run) -- it is an LR-schedule proxy, not a
+    # convergence or progress signal. Use eval-based metrics (NashConv,
+    # mean_imp, tier_a_lbr) to judge convergence.
     fit_loss: float
     snapshot_path: str
 
@@ -1668,6 +1673,11 @@ class PRTCFRProductionTrainState:
     iteration: int
     samples_added: Dict[int, int]
     buffer_sizes: Dict[int, int]
+    # Final training loss of this iteration's net fit. Under lr_schedule=
+    # "global_cosine" this tracks peak_lr (below) at Spearman +0.99, confirmed
+    # even in a diverged run (v0.4 X2R C0) -- it is an LR-schedule proxy, not
+    # a convergence or progress signal. Judge convergence from eval-based
+    # metrics (NashConv, mean_imp, tier_a_lbr) instead.
     fit_loss: float
     peak_lr: float
     critic_held_out_mse: float
@@ -2446,6 +2456,14 @@ class PRTCFRProductionTrainer:
         )
 
     def _write_metrics_row(self, st: PRTCFRProductionTrainState) -> None:
+        """Append one metrics.jsonl row for iteration ``st.iteration``.
+
+        ``fit_loss`` here is an LR-schedule proxy under lr_schedule=
+        "global_cosine" (Spearman +0.99 with peak_lr, confirmed even in a
+        diverged run), not a convergence signal; readers of this file should
+        judge convergence from eval-based rows (NashConv, mean_imp,
+        tier_a_lbr) instead.
+        """
         row = {
             "iteration": st.iteration,
             "samples_added": {str(p): int(n) for p, n in st.samples_added.items()},
