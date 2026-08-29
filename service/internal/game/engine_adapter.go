@@ -442,6 +442,28 @@ func (g *CambiaGame) discardSize() int {
 	return int(g.Engine.DiscardLen)
 }
 
+// effectiveDiscardTop returns the card the table sees on top of the discard pile, and whether
+// there is one.
+//
+// A drawn card that carries an ability is announced as discarded the moment it is played, but its
+// engine action is buffered until the discarder resolves or skips the ability: the engine models
+// "use the ability" as part of the discard action itself (ActionDiscardWithAbility vs
+// ActionDiscardNoAbility, engine/abilities.go and engine/actions.go) and offers no way to decline
+// an ability it has already begun, so handleDiscardViaEngine cannot pick the action until the
+// player chooses. Throughout that window the engine's own pile top is still the card the played
+// one covered, while every client has already moved the played card onto the pile (the
+// player_discard event, mirrored by the web client's gameStore). Anything judged against the
+// engine's top inside that window therefore reads a card no player can see (cambia-956).
+func (g *CambiaGame) effectiveDiscardTop() (engine.Card, bool) {
+	if g.pendingDiscardAbilityChoice && g.Engine.Pending.Type == engine.PendingDiscard {
+		return engine.Card(g.Engine.Pending.Data[0]), true
+	}
+	if g.Engine.DiscardLen == 0 {
+		return engine.EmptyCard, false
+	}
+	return g.Engine.DiscardPile[g.Engine.DiscardLen-1], true
+}
+
 // discardTopCard returns the top discard card and its UUID, or nil if empty.
 func (g *CambiaGame) discardTopCard() (*models.Card, uuid.UUID) {
 	if g.Engine.DiscardLen == 0 {
@@ -1018,8 +1040,13 @@ func (g *CambiaGame) handleSnapViaEngine(playerID uuid.UUID, engineIdx uint8, pa
 	}
 	g.logAction(playerID, "action_snap_attempt", map[string]interface{}{"cardId": cardID})
 
-	// Check discard pile.
-	if g.Engine.DiscardLen == 0 {
+	// Check discard pile. The top is read through effectiveDiscardTop so a snap that lands while an
+	// ability discard is still buffered is judged against the card the table was shown, not the one
+	// it covered: reading the engine's pile directly rejected clean rank matches with the
+	// invalid-snap penalty for the length of the ability window, and accepted snaps of the covered
+	// card's rank in the same window (cambia-956).
+	discardTop, hasDiscardTop := g.effectiveDiscardTop()
+	if !hasDiscardTop {
 		g.handleSnapFailure(playerID, engineIdx, nil)
 		return
 	}
@@ -1030,7 +1057,7 @@ func (g *CambiaGame) handleSnapViaEngine(playerID uuid.UUID, engineIdx uint8, pa
 		return
 	}
 
-	discardTopRank := g.Engine.DiscardPile[g.Engine.DiscardLen-1].Rank()
+	discardTopRank := discardTop.Rank()
 
 	// Find card in own hand first.
 	for i := uint8(0); i < g.Engine.Players[engineIdx].HandLen; i++ {
