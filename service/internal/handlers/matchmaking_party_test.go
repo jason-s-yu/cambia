@@ -2,15 +2,18 @@
 package handlers
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/jason-s-yu/cambia/service/internal/auth"
+	"github.com/jason-s-yu/cambia/service/internal/matchmaking"
 )
 
 // postCancelSearch runs CancelSearchHandler for DELETE /lobby/{id}/search as token's user.
@@ -119,5 +122,57 @@ func TestSearchThenCancelLeavesConsistentState(t *testing.T) {
 	lob.Mu.Unlock()
 	if searching {
 		t.Fatalf("lob.Searching must be false after a cancel that ran after the search")
+	}
+}
+
+// TestSearchPopulatesPartyRatingForQualityGate is the cambia-1041 regression: QueuedLobby.AvgRating
+// and MaxRD had no writer anywhere, so every entry SearchLobbyHandler enqueued carried the zero
+// value regardless of the party's real rating, and glicko2Quality's spread term was zero for
+// every pairing. Both test users are freshly minted JWTs with no users row, so this also covers
+// the no-rating-row default path (rating.DefaultMu/DefaultPhi): the match must still form (no
+// blocked-on-DB failure) and must carry the pool defaults, not zero.
+//
+// PartyLive is left unwired (WireMatchmaker is not called) so the match forms with no WebSocket
+// connection open, mirroring TestNilPartyLiveMatchesEverything in the matchmaking package.
+func TestSearchPopulatesPartyRatingForQualityGate(t *testing.T) {
+	auth.Init()
+	gs := NewGameServer()
+
+	resultCh := make(chan matchmaking.MatchResult, 1)
+	gs.Matchmaker.OnMatchFormed = func(r matchmaking.MatchResult) { resultCh <- r }
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	go gs.Matchmaker.Run(ctx)
+
+	tokenA, _ := auth.CreateJWT(uuid.New().String())
+	tokenB, _ := auth.CreateJWT(uuid.New().String())
+
+	lobA := createdLobby(t, postCreateLobby(t, gs, tokenA, `{"type":"matchmaking","queueID":"h2h_quickplay"}`))
+	lobB := createdLobby(t, postCreateLobby(t, gs, tokenB, `{"type":"matchmaking","queueID":"h2h_quickplay"}`))
+
+	if w := postSearch(t, gs, tokenA, lobA.ID); w.Code != http.StatusOK {
+		t.Fatalf("search for lobby A failed: %d %s", w.Code, w.Body.String())
+	}
+	if w := postSearch(t, gs, tokenB, lobB.ID); w.Code != http.StatusOK {
+		t.Fatalf("search for lobby B failed: %d %s", w.Code, w.Body.String())
+	}
+
+	// The matchmaker ticks every 5 seconds; allow two ticks plus slack.
+	select {
+	case result := <-resultCh:
+		if len(result.Parties) != 2 {
+			t.Fatalf("expected 2 parties in the match, got %d", len(result.Parties))
+		}
+		for _, p := range result.Parties {
+			if p.AvgRating != 1500 {
+				t.Errorf("party %s: AvgRating = %v, want the pool default 1500 (no rating row)", p.LobbyID, p.AvgRating)
+			}
+			if p.MaxRD != 350 {
+				t.Errorf("party %s: MaxRD = %v, want the pool default 350 (no rating row)", p.LobbyID, p.MaxRD)
+			}
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatalf("no match formed within 15s")
 	}
 }
