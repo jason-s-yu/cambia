@@ -13,6 +13,7 @@ favor of colons, semicolons, commas, parentheses, simple dashes, or deletion.
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -67,7 +68,32 @@ def _should_skip_dir(name: str) -> bool:
     return name.startswith(".") or name in SKIP_DIR_NAMES or name.endswith(".egg-info")
 
 
+def _git_tracked_files(root: Path) -> list[Path] | None:
+    """Tracked files under root per git, or None when git is unavailable.
+
+    The scan covers TRACKED files only: untracked runtime artifacts (logs/,
+    pulled run mirrors, scratch output) are not style-governed and made the
+    plain filesystem walk fail on checkouts that hold them (cambia-1019).
+    """
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "-z", "--", "."],
+            cwd=root,
+            capture_output=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return [root / name for name in out.stdout.decode("utf-8").split("\0") if name]
+
+
 def _iter_candidate_files(root: Path):
+    tracked = _git_tracked_files(root)
+    if tracked is not None:
+        for path in tracked:
+            if path.is_file():
+                yield path
+        return
     stack = [root]
     while stack:
         current = stack.pop()
