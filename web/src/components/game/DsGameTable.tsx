@@ -43,6 +43,7 @@ import {
 } from '@/stores/gameStore';
 import { useAuthStore } from '@/stores/authStore';
 import { useCurrentLobbyStore, type LobbyPhase } from '@/stores/lobbyStore';
+import { lockedPlayerId, isHandLocked, canSnapCard } from '@/lib/handLock';
 import Button from '@/components/ds/core/Button';
 import Badge from '@/components/ds/core/Badge';
 import Panel from '@/components/ds/chrome/Panel';
@@ -108,6 +109,13 @@ interface KingPair {
 
 /** How long a peeked opponent face stays up once the ability itself has resolved. */
 const REVEAL_HOLD_MS = 6000;
+
+/**
+ * Spoken suffix for a card in the hand LockCallerHand has frozen (cambia-1069). A locked card is
+ * not a button any more, and an element that simply stops taking clicks says nothing to a screen
+ * reader, so the name has to carry the reason it went inert.
+ */
+const LOCKED_LABEL = ', locked after calling Cambia';
 
 interface TableNotice {
   id: number;
@@ -370,6 +378,12 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
 
   const selfState = gameState.players.find((p) => p.playerId === selfId);
   const opponents = gameState.players.filter((p) => p.playerId !== selfId);
+  // LockCallerHand: the seat whose hand is frozen for the rest of the round, and whether that is
+  // this player (cambia-1069). Nothing the server would refuse is offered on the felt: no snap
+  // into the locked hand, no snap out of it by its owner, no swap ability naming it. See
+  // src/lib/handLock.ts for the rule and the two server layers it mirrors.
+  const lockedPlayer = lockedPlayerId(gameState);
+  const selfHandLocked = !!selfId && lockedPlayer === selfId;
   const specialAction = gameState.specialAction;
   const specialRank = pendingAction === 'special_action' && specialAction ? specialAction.cardRank : null;
   const turnTimerSec = gameState.houseRules?.turnTimerSec ?? 0;
@@ -411,6 +425,11 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
       return;
     }
     if (busy) return;
+    // A locked hand holds no snap picks: the server refuses a snap from the caller's own hand
+    // before it reads the card at all (engine_adapter.go handLocked, cambia-1043). Checked below
+    // the fill branch, which is the one own-card click a lock cannot collide with: a fill blocks
+    // every other action from its snapper until it is paid, so no one calls Cambia while owing one.
+    if (selfHandLocked) return;
     if (pendingAction === 'discard_replace') {
       sendMessage(replaceAction(card.id, idx));
       setSelectedIdx(null);
@@ -436,7 +455,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
       setSnapTarget(null);
       setSelectedIdx((prev) => (prev === idx ? null : idx));
     }
-  }, [busy, isProcessing, offline, pendingSnapMove, pendingAction, specialAction, selectedIdx, sendMessage]);
+  }, [busy, isProcessing, offline, pendingSnapMove, selfHandLocked, pendingAction, specialAction, selectedIdx, sendMessage]);
 
   const handleDeckClick = useCallback(() => {
     if (!isMyTurn || pendingAction !== null || busy) return;
@@ -478,6 +497,10 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     // opponent's revealedHand slot (hidden id references, cambia-509).
     if (pendingAction === 'special_action' && specialAction) {
       const rank = specialAction.cardRank;
+      // A swap ability cannot name a locked hand: the engine drops every BlindSwap/KingLook that
+      // targets the Cambia caller out of the legal action set (engine/legal.go). A peek still can,
+      // and does here: looking alters nothing, so the rule leaves 9/T alone.
+      if ((rank === 'J' || rank === 'Q' || rank === 'K') && isHandLocked(gameState, playerId)) return;
       if (rank === '9' || rank === 'T') {
         sendMessage(peekOtherAction(card.id, idx, playerId));
         setSelectedIdx(null);
@@ -503,7 +526,9 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
         return;
       }
     }
-    if (pendingAction === null && (gameState.houseRules.allowOpponentSnapping ?? true)) {
+    // canSnapCard carries both halves of the server's snap gate: a locked hand is neither a target
+    // nor a snapper (engine_adapter.go handLocked, cambia-1043).
+    if (pendingAction === null && (gameState.houseRules.allowOpponentSnapping ?? true) && canSnapCard(gameState, selfId, playerId)) {
       // Pick this card for the snap; the commit is the discard or the Snap button, the same two
       // steps an own-hand snap takes.
       setSelectedIdx(null);
@@ -527,14 +552,22 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   }, [busy, selectedIdx, snapTarget, pendingAction, selfState, sendMessage]);
 
   // A picked opponent card can leave the table under us: its owner may snap it first, an ability
-  // may move it, the game may end. Drop the pick rather than let the commit fire at a card that
-  // is no longer where it was clicked.
+  // may move it, the game may end, or a Cambia call may lock the hand it sits in or this player's
+  // own (cambia-1069). Drop the pick rather than let the commit fire at a card that is no longer
+  // where it was clicked, or that the server would now refuse.
   useEffect(() => {
     if (!snapTarget) return;
     const owner = gameState.players.find((p) => p.playerId === snapTarget.playerId);
     const held = owner?.revealedHand?.some((c) => c.id === snapTarget.cardId);
-    if (!held || pendingAction !== null || gameState.gameOver) setSnapTarget(null);
-  }, [snapTarget, gameState.players, gameState.gameOver, pendingAction]);
+    const locked = selfHandLocked || lockedPlayer === snapTarget.playerId;
+    if (!held || locked || pendingAction !== null || gameState.gameOver) setSnapTarget(null);
+  }, [snapTarget, gameState.players, gameState.gameOver, pendingAction, selfHandLocked, lockedPlayer]);
+
+  // Cambia can be called with an own-hand card already picked out for a snap, and that pick stops
+  // being sendable the moment the hand locks.
+  useEffect(() => {
+    if (selfHandLocked) setSelectedIdx(null);
+  }, [selfHandLocked]);
 
   // The King's second step is over once the ability resolves or the turn moves on.
   useEffect(() => {
@@ -584,6 +617,8 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     return m;
   }, [revealShown, abilityReveal]);
 
+  // The two ability steps that move a card between hands, and so the two a locked hand refuses.
+  const swapTargeting = specialRank === 'J' || specialRank === 'Q' || specialRank === 'K';
   // Legal-target highlighting for an ability step. The click handlers above already no-op
   // outside these cases; this only decides what the felt shows as a target. Opponent snapping
   // used to ride this flag, which is where its select-your-own-card-first precondition came
@@ -591,14 +626,16 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   const opponentTargetable = (() => {
     if (busy || kingConfirm || !specialRank) return false;
     if (specialRank === '9' || specialRank === 'T') return true;
-    if (specialRank === 'J' || specialRank === 'Q' || specialRank === 'K') return selectedIdx !== null;
+    if (swapTargeting) return selectedIdx !== null;
     return false;
   })();
   // Snapping an opponent is legal out of turn and takes no selection first, so their cards stay
   // clickable for the whole hand. They are not ringed for it: a ring that never goes out is not
   // a highlight, and an opponent snap is a claim to know the card, not a prompt.
+  // A locked hand cannot snap anything, so the caller's own lock takes every opponent card off the
+  // felt at once; the per-seat half of the gate is applied where the seats render.
   const opponentSnappable =
-    !busy && !roundOver && !preGame && pendingAction === null && allowOpponentSnapping && !!gameState.discardTop;
+    !busy && !roundOver && !preGame && pendingAction === null && allowOpponentSnapping && !selfHandLocked && !!gameState.discardTop;
   const ownTargetable = (() => {
     // Owing a fill, the own hand is the only live target on the felt: one of these cards has to go
     // into the slot this player emptied (cambia-936).
@@ -614,7 +651,9 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   // (cambia-959). Mirrors handlePlayerCardClick exactly: outside these two the handler
   // returns without touching state, and an inert card is not a button.
   const ownCommits = (owesSnapMove && !isProcessing && !offline) || (!busy && (pendingAction === 'discard_replace' || specialRank === '7' || specialRank === '8'));
-  const ownSelects = !busy && (pendingAction === null || ((specialRank === 'J' || specialRank === 'Q' || specialRank === 'K') && selectedIdx === null));
+  // The own-hand pick is a snap pick, which is what a locked hand loses; the commits above stay as
+  // they are, since a caller takes no further turn to replace or peek on.
+  const ownSelects = !busy && !selfHandLocked && (pendingAction === null || (swapTargeting && selectedIdx === null));
 
   const hint = useMemo(() => {
     if (gaveUp) return 'Connection lost. Leave the table and rejoin from the dashboard.';
@@ -636,7 +675,10 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
       if (specialAction?.active && currentPlayer && specialAction.playerId === currentPlayer.playerId) {
         return `${nameOf(currentPlayer.playerId)} is choosing a target for ${abilityName(specialAction.cardRank)?.toLowerCase() ?? 'an ability'}.`;
       }
-      return currentPlayer ? `Waiting for ${nameOf(currentPlayer.playerId)}.` : 'Waiting for the next turn.';
+      const waiting = currentPlayer ? `Waiting for ${nameOf(currentPlayer.playerId)}.` : 'Waiting for the next turn.';
+      // Say why the felt went dead for the caller: their cards stopped being snap picks and no
+      // one can snap or swap into their hand for the rest of the round (cambia-1069).
+      return selfHandLocked ? `Your hand is locked until the round ends. ${waiting}` : waiting;
     }
     if (specialRank === '7' || specialRank === '8') return 'Peek: choose one of your cards to look at.';
     if (specialRank === '9' || specialRank === 'T') return 'Peek: choose an opponent card to look at.';
@@ -646,7 +688,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     if (pendingAction === 'discard_replace') return 'Swap the drawn card into a slot, or discard it.';
     if (gameState.cambiaCalled) return canTakeDiscard ? 'Last turn. Draw from the stock or take the discard.' : 'Last turn. Draw from the stock.';
     return canTakeDiscard ? 'Your turn. Draw from the stock or take the discard.' : 'Your turn. Draw from the stock.';
-  }, [gaveUp, offline, roundOver, phase, preGame, isMyTurn, specialAction, currentPlayer, nameOf, specialRank, kingConfirm, selectedIdx, snapTarget, pendingAction, pendingSnapMove, gameState.cambiaCalled, canTakeDiscard]);
+  }, [gaveUp, offline, roundOver, phase, preGame, isMyTurn, specialAction, currentPlayer, nameOf, specialRank, kingConfirm, selectedIdx, snapTarget, pendingAction, pendingSnapMove, selfHandLocked, gameState.cambiaCalled, canTakeDiscard]);
 
   const discardFace = toDsCardFace(gameState.discardTop);
   const drawnCard = selfState?.drawnCard ?? displayedDrawnCard;
@@ -683,6 +725,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
       // aria-pressed tracks what the eye sees: the King's own card stays picked
       // through the confirm step, which is why `selected` covers it too.
       const picked = selectedIdx === i || (kingConfirm && kingPair?.myIdx === i);
+      const named = spoken ? `Your card ${i + 1}: ${spoken}` : `Your card ${i + 1}, face down`;
       return (
         <PlayingCard
           key={card.id || i}
@@ -692,7 +735,8 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
           size='md'
           selected={picked}
           highlight={ownTargetable && selectedIdx !== i}
-          label={spoken ? `Your card ${i + 1}: ${spoken}` : `Your card ${i + 1}, face down`}
+          dimmed={selfHandLocked}
+          label={selfHandLocked ? named + LOCKED_LABEL : named}
           pressed={ownSelects ? picked : undefined}
           testId={`card-${seat}-${i}`}
           style={ownHandPlacement(i, slots)}
@@ -705,7 +749,15 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     // and take no click until the next sync fills them in.
     const extra = Math.max(0, (selfState?.handSize ?? 0) - hand.length);
     const padding = Array.from({ length: extra }).map((_, j) => (
-      <PlayingCard key={`pad-${j}`} faceDown size='md' label={`Your card ${hand.length + j + 1}, face down`} testId={`card-${seat}-${hand.length + j}`} style={ownHandPlacement(hand.length + j, slots)} />
+      <PlayingCard
+        key={`pad-${j}`}
+        faceDown
+        size='md'
+        dimmed={selfHandLocked}
+        label={`Your card ${hand.length + j + 1}, face down` + (selfHandLocked ? LOCKED_LABEL : '')}
+        testId={`card-${seat}-${hand.length + j}`}
+        style={ownHandPlacement(hand.length + j, slots)}
+      />
     ));
     return [...known, ...padding];
   };
@@ -781,12 +833,17 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                       // UUID for targeting comes from the matching revealedHand slot. A slot is only
                       // clickable once its real id is known (cambia-509).
                       const card = opp.revealedHand?.[i];
-                      const targetable = opponentTargetable && !!card;
-                      const snappable = opponentSnappable && !!card;
+                      // A locked hand is out of reach for a snap and for either swap ability, but
+                      // stays a legal 9/T peek target, so the lock only closes those two
+                      // (cambia-1069, see src/lib/handLock.ts).
+                      const locked = lockedPlayer === opp.playerId;
+                      const targetable = opponentTargetable && !!card && !(locked && swapTargeting);
+                      const snappable = opponentSnappable && !!card && !locked;
                       const picked = !!card && snapTarget?.cardId === card.id;
                       const shown = card ? toDsCardFace(revealById.get(card.id)) : null;
                       const spoken = cardFaceName(shown);
                       const who = nameOf(opp.playerId);
+                      const named = spoken ? `${who} card ${i + 1}: ${spoken}` : `${who} card ${i + 1}, face down`;
                       return (
                         <PlayingCard
                           key={card?.id ?? i}
@@ -796,8 +853,8 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                           size='sm'
                           selected={!!shown || picked}
                           highlight={targetable}
-                          dimmed={!!specialRank && !targetable && !shown}
-                          label={spoken ? `${who} card ${i + 1}: ${spoken}` : `${who} card ${i + 1}, face down`}
+                          dimmed={!targetable && !shown && (locked || !!specialRank)}
+                          label={locked ? named + LOCKED_LABEL : named}
                           // An ability click commits on the card it lands on; a snap pick is the
                           // one opponent click that toggles, so it is the one that is pressed.
                           pressed={snappable && !targetable ? picked : undefined}
