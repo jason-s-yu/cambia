@@ -46,6 +46,12 @@ def _walk_decisions(node, acc):
 
 def _build(perfect_recall):
     cfg = load_config(CONFIG_1CARD)
+    # PYTHON backend: this module compares perfect-recall keying against the
+    # PRODUCTION IMPERFECT-RECALL belief key (Decision.iset, from
+    # AgentState.get_infoset_key + DecisionContext). The FFI exports no infoset
+    # key, so build_tree_go refuses perfect_recall=False and leaves iset None --
+    # the comparison only exists on this backend. The Go backend's own
+    # perfect-recall coverage is tests/test_tiny_solver_go_backend.py.
     root, isets, nnodes, aborted = build_tree(
         cfg,
         n_deals=5,
@@ -53,6 +59,7 @@ def _build(perfect_recall):
         max_nodes_per_deal=2_000_000,
         enumerate_draws=True,
         perfect_recall=perfect_recall,
+        backend="python",
     )
     assert aborted == 0, "tree truncated; raise max_nodes_per_deal"
     decisions = []

@@ -246,9 +246,30 @@ def _find_snapshot():
 
 @pytest.fixture(scope="module")
 def exact_tree():
+    """The recorded 230,206-node {A,6} tree, pinned to the PYTHON backend.
+
+    build_tiny_tree defaults to the Go engine since cambia-1429, but this fixture
+    certifies published numbers -- U = 1.6727709190672155, the uniform-policy
+    NashConv anchor the X2 bar 0.057 is derived from -- and those numbers belong to
+    THIS tree. The Go engine cannot rebuild it: the {A,6} enumerated tree exhausts
+    the 8-card deck, and past that point the Python tree's chance structure is
+    fixed by the random.Random(seed0 + d) reshuffle stream, consumed in DFS order
+    and never rewound by undo. Holding the Python engine fixed and only changing
+    the reshuffle's ORDER moves both counts (sorted: 234,185 / 69,873;
+    reverse-sorted: 229,835 / 68,522), so the recorded pair is a property of that
+    one RNG stream rather than of the game or of either engine.
+
+    The Go build of the same config gives 208,844 / 64,383 with 4,594
+    unenumerable draw points; tests/test_tiny_solver_go_backend.py
+    ::test_a6_tree_divergence_is_diagnosed carries that measurement and the
+    mechanism, and test_exact_certifier_runs_on_the_go_tree covers the certifier
+    against a Go-built tree.
+    """
     from src.cfr import prtcfr_eval
 
-    root, isets, n, ab = prtcfr_eval.build_tiny_tree(exact_weights=True)
+    root, isets, n, ab = prtcfr_eval.build_tiny_tree(
+        exact_weights=True, backend="python"
+    )
     assert not ab and n == 230206 and len(isets) == 69636
     assert root.wfrac is not None and root.wfrac[0] == Fraction(1, 5)
     return root
