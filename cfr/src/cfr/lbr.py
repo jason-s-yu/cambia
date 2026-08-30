@@ -87,7 +87,7 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tu
 
 import numpy as np
 
-from src.agents.action_codec import actions_from_mask, index_to_action
+from src.agents.action_codec import actions_from_indices, index_to_action
 from src.agents.game_view import GameView
 from src.constants import GameAction
 from src.ffi.bridge import (
@@ -311,7 +311,7 @@ class GoSearchState:
         return [int(i) for i in np.flatnonzero(mask)]
 
     def legal_actions(self) -> List[GameAction]:
-        return actions_from_mask(self.legal_indices())
+        return actions_from_indices(self.legal_indices())
 
     # --- Mutation + rewind ---
 
@@ -626,7 +626,7 @@ def collect_infosets(
                 legal_indices = state.legal_indices()
                 if not legal_indices:
                     break
-                legal_actions = actions_from_mask(legal_indices)
+                legal_actions = actions_from_indices(legal_indices)
 
                 if ap == _PLAYER_ID:
                     take = len(sampled) < num_infosets and rng.random() < sample_prob
@@ -722,7 +722,7 @@ def _agent_policy_rollout(
         legal_indices = state.legal_indices()
         if not legal_indices:
             break
-        legal_actions = actions_from_mask(legal_indices)
+        legal_actions = actions_from_indices(legal_indices)
         try:
             if ap == _PLAYER_ID:
                 act = agent_wrapper.choose_action(state.view(), legal_actions)

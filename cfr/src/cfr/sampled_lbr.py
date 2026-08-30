@@ -31,7 +31,7 @@ from src.cfr.lbr import (
     replay_infoset,
     terminal_utility,
 )
-from src.agents.action_codec import actions_from_mask
+from src.agents.action_codec import actions_from_indices
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ def _rollout(state: GoSearchState, policies: list, max_turns: int) -> float:
         legal_indices = state.legal_indices()
         if not legal_indices:
             break
-        legal_actions = actions_from_mask(legal_indices)
+        legal_actions = actions_from_indices(legal_indices)
         try:
             act = policies[ap].choose_action(state.view(), legal_actions)
             pos = legal_actions.index(act)

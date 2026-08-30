@@ -41,7 +41,7 @@ import random
 
 import pytest
 
-from src.agents.action_codec import actions_from_mask
+from src.agents.action_codec import actions_from_indices
 from src.cfr.ismcts_br import ismcts_br
 from src.cfr.sampled_lbr import sampled_lbr
 from src.config import load_config
@@ -381,7 +381,7 @@ def test_incremental_key_matches_rebuilt(cfg, deal_pool):
                 legal_indices = state.legal_indices()
                 if not legal_indices:
                     break
-                legal = actions_from_mask(legal_indices)
+                legal = actions_from_indices(legal_indices)
                 if acting == responder:
                     # At each responder decision: incremental == rebuilt.
                     rebuilt = _InfoKey.from_streams(priv_init, priv_draw, pub_path)

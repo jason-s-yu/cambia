@@ -216,7 +216,23 @@ def actions_from_mask(mask) -> List[GameAction]:
     identically run to run.
     """
     arr = np.asarray(mask)
+    if arr.shape != (NUM_ACTIONS,):
+        raise ValueError(
+            f"actions_from_mask expects a ({NUM_ACTIONS},) mask, got shape {arr.shape}; "
+            "decode a list of legal indices with actions_from_indices instead"
+        )
     return [_TWO_PLAYER_TABLE[int(i)] for i in np.flatnonzero(arr)]
+
+
+def actions_from_indices(indices) -> List[GameAction]:
+    """Decode an iterable of 2-player action INDICES (already legal) to actions.
+
+    ``actions_from_mask`` takes the (146,) bitmask itself; this one takes the
+    set-bit index list a caller like ``GoSearchState.legal_indices()`` already
+    holds. Handing an index list to the mask decoder decodes the wrong actions
+    silently, which is why that function now refuses non-mask shapes.
+    """
+    return [index_to_action(int(i)) for i in indices]
 
 
 def nplayer_index_to_action(index: int) -> NPlayerAction:

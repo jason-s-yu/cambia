@@ -105,7 +105,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from src.agents.action_codec import actions_from_mask
+from src.agents.action_codec import actions_from_indices
 from src.agents.game_view import GameView
 from src.cfr.lbr import (
     DealSpec,
@@ -407,7 +407,7 @@ def _rollout(
             if acting == responder:
                 pos = rng.randrange(len(legal_indices))
             else:
-                legal_actions = actions_from_mask(legal_indices)
+                legal_actions = actions_from_indices(legal_indices)
                 act = opponent.choose_action(state.view(), legal_actions)
                 pos = legal_actions.index(act)
         except Exception:  # JUSTIFIED: eval resilience
@@ -490,7 +490,7 @@ def _simulate(
         if not legal_indices:
             value = _terminal_util(state, responder)
             break
-        legal_actions = actions_from_mask(legal_indices)
+        legal_actions = actions_from_indices(legal_indices)
         turns += 1
 
         if acting == responder:
@@ -576,7 +576,7 @@ def _play_greedy_br_game(
         legal_indices = state.legal_indices()
         if not legal_indices:
             break
-        legal_actions = actions_from_mask(legal_indices)
+        legal_actions = actions_from_indices(legal_indices)
         if acting == responder:
             nkey = (key, len(legal_indices))
             a_pos = _greedy_action_index(tree.get(nkey), len(legal_indices), rng)
@@ -633,7 +633,7 @@ def _play_target_game(
         legal_indices = state.legal_indices()
         if not legal_indices:
             break
-        legal_actions = actions_from_mask(legal_indices)
+        legal_actions = actions_from_indices(legal_indices)
         try:
             if acting == responder:
                 action = target.choose_action(state.view(), legal_actions)

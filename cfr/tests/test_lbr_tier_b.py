@@ -227,14 +227,14 @@ def test_legal_actions_are_in_ascending_engine_index_order():
     """The ordering handed to a policy is the engine's ascending index order,
     which is stable across processes (the Python engine's legal-action set was
     not: GameAction carries a str tag and set order is hash-salted)."""
-    from src.agents.action_codec import actions_from_mask
+    from src.agents.action_codec import actions_from_indices
 
     config = _Config()
     state = GoSearchState.new(config.cambia_rules, 31337)
     try:
         indices = state.legal_indices()
         assert indices == sorted(indices), "legal_indices is not ascending"
-        assert state.legal_actions() == actions_from_mask(indices)
+        assert state.legal_actions() == actions_from_indices(indices)
     finally:
         state.close()
 
