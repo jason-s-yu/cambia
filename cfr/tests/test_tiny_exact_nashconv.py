@@ -267,9 +267,7 @@ def exact_tree():
     """
     from src.cfr import prtcfr_eval
 
-    root, isets, n, ab = prtcfr_eval.build_tiny_tree(
-        exact_weights=True, backend="python"
-    )
+    root, isets, n, ab = prtcfr_eval.build_tiny_tree(exact_weights=True, backend="python")
     assert not ab and n == 230206 and len(isets) == 69636
     assert root.wfrac is not None and root.wfrac[0] == Fraction(1, 5)
     return root

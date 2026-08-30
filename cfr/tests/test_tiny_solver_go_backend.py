@@ -530,9 +530,7 @@ def test_exact_certifier_runs_on_the_go_tree():
         backend="go",
     )
     assert root.wfrac is not None and root.wfrac[0] == Fraction(1, 5)
-    policy = {
-        pkey: np.ones(nA, dtype=np.float64) / nA for (pkey, nA) in isets.items()
-    }
+    policy = {pkey: np.ones(nA, dtype=np.float64) / nA for (pkey, nA) in isets.items()}
     nc_f, _ = exploitability(root, policy)
     nc_e, _ = tiny_exact.exploitability_exact(root, policy)
     assert isinstance(nc_e, Fraction)
