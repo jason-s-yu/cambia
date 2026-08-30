@@ -71,28 +71,42 @@ export function presetMatchesRules(preset: PresetOption, houseRules: unknown, se
 }
 
 /**
- * Whether a preset could be the one a lobby is playing, by value. The game mode has to agree:
- * the queue presets are rule-identical, so without this gate the first 2-player preset in the
- * list answers for a 4-player lobby. A preset that fixes no game mode (the default) fits any
+ * Whether a preset is playable at a lobby's table size. A preset that fixes a game mode names a
+ * player count with it (ffa4_standard is four seats), so it is not a ruleset a head-to-head lobby
+ * can be on, whatever its rules say. A preset that fixes no game mode (the default) fits any
  * lobby.
  */
+export function presetFitsGameMode(preset: PresetOption, gameMode?: string | null): boolean {
+  return !preset.gameMode || preset.gameMode === gameMode;
+}
+
+/**
+ * Whether a preset could be the one a lobby is playing, by value. The game mode has to agree:
+ * the queue presets are rule-identical, so without this gate the first 2-player preset in the
+ * list answers for a 4-player lobby.
+ */
 export function presetFitsLobby(preset: PresetOption, subject: LobbyRuleSubject): boolean {
-  if (preset.gameMode && preset.gameMode !== subject.gameMode) return false;
+  if (!presetFitsGameMode(preset, subject.gameMode)) return false;
   return presetMatchesRules(preset, subject.houseRules, subject.settings);
 }
 
 /**
  * The preset a saved lobby is on, or null for a sheet that is nobody's preset.
  *
- * The recorded id wins outright wherever it names a preset in the list. It is the only thing
+ * The recorded id wins wherever it names a preset the lobby could be on. It is the only thing
  * that can tell two rule-identical presets apart, and the service clears it the moment an edit
  * departs from the preset, so an id that is still there is still true. Value matching runs only
  * when there is no id to honour: a lobby created before the service recorded them, or one whose
  * id names a queue that has since left the config.
+ *
+ * The one thing a recorded id does not outrank is the table size (cambia-1099 Q1, mislabelled
+ * ruleset). An id naming a 4-player preset on a 2-player lobby is a record that cannot be true of
+ * any lobby, so the sheet reads it as no record at all rather than heading a head-to-head lobby
+ * FFA-4 Standard; the rules answer instead, and Custom is the honest answer where they do not.
  */
 export function resolvePresetId(presets: PresetOption[], subject: LobbyRuleSubject): string | null {
-  const recorded = subject.presetId;
-  if (recorded && presets.some((p) => p.id === recorded)) return recorded;
+  const recorded = subject.presetId ? presets.find((p) => p.id === subject.presetId) : undefined;
+  if (recorded && presetFitsGameMode(recorded, subject.gameMode)) return recorded.id;
   return presets.find((p) => presetFitsLobby(p, subject))?.id ?? null;
 }
 
@@ -143,6 +157,11 @@ export interface RulesetRowInput {
  * the host's select. There is no buffer here to have departed from the preset, and the recorded
  * id outranks the rules by construction: the queue presets are rule-identical, so a value check
  * could only ever disagree with the id by naming the wrong preset.
+ *
+ * The host is offered the presets the lobby can actually be on, which is the ones fitting its
+ * game mode (cambia-1099 Q1). Applying a preset fills the rules and nothing else, so offering
+ * ffa4_standard to a head-to-head lobby offered a name it would then be labelled with over a Head
+ * to head badge, at four seats it does not have.
  */
 export function rulesetRow(input: RulesetRowInput): RulesetRow {
   const { presets, canEdit, saved, selectedId, houseRules, settings } = input;
@@ -156,13 +175,18 @@ export function rulesetRow(input: RulesetRowInput): RulesetRow {
     return { kind: 'name', name: preset ? preset.name : CUSTOM_PRESET_LABEL };
   }
 
-  const active = presets.find((p) => p.id === selectedId);
+  // A row offering only Custom is a row with nothing on offer, so it goes the way an unread
+  // preset list does rather than sitting there as a one-entry select.
+  const offered = presets.filter((p) => presetFitsGameMode(p, saved.gameMode));
+  if (offered.length === 0) return { kind: 'none' };
+
+  const active = offered.find((p) => p.id === selectedId);
   const onPreset = !!active && presetMatchesRules(active, houseRules, settings);
   return {
     kind: 'select',
     value: onPreset && active ? active.id : CUSTOM_PRESET_VALUE,
     options: [
-      ...presets.map((p) => ({ value: p.id, label: p.name })),
+      ...offered.map((p) => ({ value: p.id, label: p.name })),
       ...(onPreset ? [] : [{ value: CUSTOM_PRESET_VALUE, label: CUSTOM_PRESET_LABEL }])
     ],
     description: onPreset && active ? active.description : ''
