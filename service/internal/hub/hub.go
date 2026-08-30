@@ -719,9 +719,11 @@ func (h *Hub) handleLobbyMsg(msg ClientMsg) {
 		// game inherits at creation (NewCambiaGameFromLobby), so a mid-search or post-match rule
 		// edit would leave the two sides of the match disagreeing about what they agreed to play
 		// (cambia-966). Type and Mode are only ever assigned at creation (CreateLobbyHandler), so
-		// this is a stable read for as long as the lobby exists.
+		// this is a stable read for as long as the lobby exists. RulesLockedUnsafe carries the
+		// rule, and buildLobbySnapshot ships its answer as rules_locked, so the refusal here and
+		// the sheet the client renders cannot disagree (cambia-1099 K2).
 		h.Lobby.Mu.Lock()
-		locked := h.Lobby.Type == "matchmaking" || h.Lobby.Mode == "ranked"
+		locked := h.Lobby.RulesLockedUnsafe()
 		h.Lobby.Mu.Unlock()
 		if locked {
 			conn.SendEnvelope(h.errEnvelope("the rules for this match are locked by its queue and cannot be changed"))
@@ -1386,7 +1388,13 @@ func (h *Hub) buildLobbySnapshot(forUserID uuid.UUID) map[string]interface{} {
 		// Rapid as H2H Quick (cambia-1123). Always present, empty string included: an absent key
 		// and a recorded empty id read the same to a client, and only one of them means "the
 		// service has no answer".
-		"preset_id":    lob.PresetID,
+		"preset_id": lob.PresetID,
+		// rules_locked is the service's own answer to "may these rules still change", computed
+		// where update_rules refuses (Lobby.RulesLockedUnsafe) rather than left to the client to
+		// re-derive. It cannot be re-derived from this payload anyway: a public or private lobby
+		// that queued its party into a ranked queue is locked by its mode, and mode is not sent,
+		// so the sheet offered its host controls that fail on Save (cambia-1099 K2).
+		"rules_locked": lob.RulesLockedUnsafe(),
 		"circuit":      lob.Circuit,
 		"settings":     lob.LobbySettings,
 		"lobby_status": lobbyStatus,

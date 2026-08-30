@@ -86,6 +86,15 @@ is how a lobby created from H2H Rapid came back reading H2H Quick.
 * Empty means the sheet is nobody's preset. A client may fall back to matching values then, but
   the match has to include the game mode, or a 4-player preset names a 2-player lobby's rules.
 
+`lobby_state.rules_locked` sits beside `preset_id` and answers the other half: whether that
+ruleset can still move. It is the same expression `update_rules` refuses on
+(`Lobby.RulesLockedUnsafe`: a `matchmaking` lobby, or any lobby whose mode is `ranked`), computed
+server-side so the refusal and the sheet a client renders cannot drift apart. Sent because no
+client can derive it from this payload: a public or private lobby that queued its party into a
+ranked queue is locked by its mode alone (cambia-966), and the snapshot carries no mode, so the
+rule sheet used to hand that lobby's host controls every Save would refuse (cambia-1099). Always
+present, on `sync_state` as on `lobby_state`, since both are built from the one snapshot.
+
 ## Server → Client Events
 
 These messages are typically broadcast to all users in the lobby unless specified otherwise.
@@ -93,7 +102,7 @@ These messages are typically broadcast to all users in the lobby unless specifie
 | Event Description             | `type` String             | Payload Example / Key Fields                                                                                                                                                                | Emitter Location           | Notes                                                                                             |
 | :---------------------------- | :------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | :------------------------- | :------------------------------------------------------------------------------------------------ |
 | User Joined / Left            | `lobby_update`            | `{ "user_join": "{uuid}", "is_host": bool, "lobby_status": { ... } }` OR `{ "user_left": "{uuid}", "lobby_status": { ... } }`                                                                | `internal/game/lobby.go`   | Sent when a user connects or disconnects. Includes updated `lobby_status`.                        |
-| Full Lobby State (Private)    | `lobby_state`             | `{ "lobby_id", "host_id", "your_id", "your_is_host", "system_host", "lobby_type", "game_mode", "in_game", "game_id", "house_rules": {...}, "preset_id": "h2h_rapid", "circuit": {...}, "settings": {...}, "lobby_status": { ... } }` | `internal/game/lobby.go`   | Sent privately to a user upon joining/connecting, and rebroadcast to everyone when the roster or the host role changes. `system_host` marks a lobby the queue runs (see "Host role"). `preset_id` names the ruleset `house_rules` came from, always present and empty for a sheet that is nobody's preset (see "Ruleset identity"). |
+| Full Lobby State (Private)    | `lobby_state`             | `{ "lobby_id", "host_id", "your_id", "your_is_host", "system_host", "lobby_type", "game_mode", "in_game", "game_id", "house_rules": {...}, "preset_id": "h2h_rapid", "rules_locked": false, "circuit": {...}, "settings": {...}, "lobby_status": { ... } }` | `internal/game/lobby.go`   | Sent privately to a user upon joining/connecting, and rebroadcast to everyone when the roster or the host role changes. `system_host` marks a lobby the queue runs (see "Host role"). `preset_id` names the ruleset `house_rules` came from, always present and empty for a sheet that is nobody's preset, and `rules_locked` says whether it can still change (see "Ruleset identity"). |
 | User Ready State Change       | `ready_update`            | `{ "user_id": "{uuid}", "is_ready": bool }`                                                                                                                                                  | `internal/game/lobby.go`   | Sent when a user's ready state changes.                                                           |
 | User Invited                  | `lobby_invite`            | `{ "invitedID": "{uuid}" }`                                                                                                                                                                  | `internal/game/lobby.go`   | Sent when a user is invited via the `invite` command.                                             |
 | Countdown Started             | `lobby_countdown_start`   | `{ "seconds": int }`                                                                                                                                                                        | `internal/game/lobby.go`   | Sent when the auto-start countdown begins.                                                        |
