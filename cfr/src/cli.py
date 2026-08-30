@@ -2515,6 +2515,129 @@ def _checkpoint_iteration_from_name(name: str) -> int:
     return int(m.group(1)) if m else 0
 
 
+def _persist_lbr_result(
+    run_dir: str,
+    iteration: int,
+    checkpoint_path: str,
+    tier: str,
+    result: dict,
+    seed: int,
+    num_infosets_requested: int,
+    br_rollouts_per_infoset: int,
+) -> None:
+    """Dual-write an LBR exploitability estimate to metrics.jsonl and SQLite.
+
+    Mirrors ``evaluate_agents.persist_eval_results`` (same run upsert, same
+    checkpoint registration, same eval_results table) so an LBR number lives
+    next to the win-rate rows for the same checkpoint instead of only ever
+    existing in a terminal line (cambia-1427 AC3, the gap TA2 named).
+
+    The row is keyed by the synthetic baseline name ``lbr_tier_a`` /
+    ``lbr_tier_b``. Those names are deliberately NOT in
+    ``evaluate_agents.MEAN_IMP_BASELINES``, which is the explicit allowlist every
+    mean_imp aggregation filters on (``run_db.recompute_best_metric``,
+    ``run_db.write_eval_summary_jsonl``), so an exploitability row cannot be
+    averaged into a win-rate metric.
+
+    Column reuse: ``win_rate`` carries the exploitability and ``ci_low`` /
+    ``ci_high`` its +/-1.96*std_err interval, because eval_results has no
+    exploitability column and adding one is outside this ticket. ``games_played``
+    carries the number of infosets actually sampled, and ``crn_seed`` carries the
+    LBR seed -- the field that makes the row reproducible.
+    """
+    import json as _json
+    from datetime import datetime, timezone
+    from pathlib import Path as _Path
+
+    run_dir_path = _Path(run_dir).resolve()
+    run_name = run_dir_path.name
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    exploitability = float(result.get("exploitability", 0.0))
+    std_err = float(result.get("std_err", 0.0))
+    n_sampled = int(result.get("num_infosets_sampled", 0))
+    margin = 1.96 * std_err
+
+    row = {
+        "run": run_name,
+        "iter": iteration,
+        "baseline": f"lbr_tier_{tier.lower()}",
+        "win_rate": round(exploitability, 6),
+        "ci_low": round(max(0.0, exploitability - margin), 6),
+        "ci_high": round(exploitability + margin, 6),
+        "games_played": n_sampled,
+        "p0_wins": None,
+        "p1_wins": None,
+        "ties": None,
+        "adv_loss": None,
+        "strat_loss": None,
+        "timestamp": timestamp,
+        "avg_game_turns": None,
+        "t1_cambia_rate": None,
+        "avg_score_margin": None,
+        "seat_scheme": "fixed",
+        "selection_mode": f"lbr_tier_{tier.lower()}",
+        "crn_seed": str(seed),
+        "seat_balanced": 0,
+        # Estimator provenance, carried in the JSONL row (which is schemaless)
+        # even though eval_results has no column for it.
+        "lbr": {
+            "tier": tier.upper(),
+            "seed": seed,
+            "exploitability": exploitability,
+            "std_err": std_err,
+            "num_infosets_requested": num_infosets_requested,
+            "num_infosets_sampled": n_sampled,
+            "br_rollouts_per_infoset": br_rollouts_per_infoset,
+            "rollout_opponent": result.get("rollout_opponent"),
+            "engine": "go",
+        },
+    }
+
+    run_dir_path.mkdir(parents=True, exist_ok=True)
+    with open(run_dir_path / "metrics.jsonl", "a", encoding="utf-8") as f:
+        f.write(_json.dumps(row) + "\n")
+
+    try:
+        import src.run_db as run_db
+        import yaml as _yaml
+
+        db = run_db.get_db()
+        config_path = run_dir_path / "config.yaml"
+        yaml_text = None
+        config_dict = {}
+        if config_path.exists():
+            try:
+                yaml_text = config_path.read_text(encoding="utf-8")
+                config_dict = _yaml.safe_load(yaml_text) or {}
+            except Exception:
+                pass
+        algorithm = run_db.infer_algorithm(config_dict)
+        run_id = run_db.upsert_run(
+            db,
+            name=run_name,
+            algorithm=algorithm,
+            config_yaml=yaml_text,
+            config_dict=config_dict,
+            # Attaching a measurement must not touch lifecycle status.
+            status=None,
+        )
+        ckpt_id = run_db.register_checkpoint(db, run_id, iteration, str(checkpoint_path))
+        run_db.insert_eval_result(db, run_id, ckpt_id, row)
+        db.close()
+        print(
+            f"[lbr] persisted tier={tier.upper()} seed={seed} to "
+            f"{run_dir_path}/metrics.jsonl and run_db "
+            f"(run={run_name}, iter={iteration}, baseline={row['baseline']})"
+        )
+    except Exception as exc:  # JUSTIFIED: persistence must not fail a measurement
+        print(
+            f"[lbr] WARNING: SQLite dual-write failed for {run_name} iter "
+            f"{iteration} ({type(exc).__name__}: {exc}); the metrics.jsonl row "
+            "was still written."
+        )
+
+
 def _find_run_dir_checkpoints(ckpt_dir: Path, prefix: str, algorithm: str) -> List[Path]:
     """Glob run_dir/checkpoints/ for files matching an algorithm's naming convention.
 
@@ -2636,6 +2759,15 @@ def evaluate(
         help=(
             "LBR tier: 'A' (random rollouts, loose lower bound) or 'B' "
             "(agent-policy rollouts vs a strong opponent, tighter bound)."
+        ),
+    ),
+    lbr_seed: int = typer.Option(
+        42,
+        "--lbr-seed",
+        help=(
+            "Seed for the LBR estimate. The whole measurement is a "
+            "deterministic function of this seed, and it is recorded with the "
+            "persisted row so a number can be reproduced or re-rolled."
         ),
     ),
     max_workers: Optional[int] = typer.Option(
@@ -2909,12 +3041,14 @@ def evaluate(
                     lbr_config,
                     num_infosets=lbr_infosets,
                     br_rollouts_per_infoset=lbr_rollouts,
+                    seed=lbr_seed,
                 )
                 opp = result.get("rollout_opponent", "?")
                 print(
                     f"[lbr] tier=B exploitability={result['exploitability']:.3f} "
                     f"({result['num_infosets_sampled']} infosets, "
-                    f"stderr={result['std_err']:.3f}, opp={opp})"
+                    f"stderr={result['std_err']:.3f}, opp={opp}, "
+                    f"seed={result.get('seed', lbr_seed)})"
                 )
             else:
                 from .cfr.sampled_lbr import sampled_lbr as run_lbr
@@ -2924,11 +3058,30 @@ def evaluate(
                     lbr_config,
                     num_infosets=lbr_infosets,
                     br_rollouts_per_infoset=lbr_rollouts,
+                    seed=lbr_seed,
                 )
                 print(
                     f"[lbr] tier=A exploitability={result['exploitability']:.3f} "
                     f"({result['num_infosets_sampled']} infosets, "
-                    f"stderr={result['std_err']:.3f})"
+                    f"stderr={result['std_err']:.3f}, "
+                    f"seed={result.get('seed', lbr_seed)})"
+                )
+
+            if run_dir is not None:
+                _persist_lbr_result(
+                    run_dir=str(run_dir),
+                    iteration=_checkpoint_iteration_from_name(str(checkpoint)),
+                    checkpoint_path=str(checkpoint),
+                    tier=tier,
+                    result=result,
+                    seed=lbr_seed,
+                    num_infosets_requested=lbr_infosets,
+                    br_rollouts_per_infoset=lbr_rollouts,
+                )
+            else:
+                print(
+                    "[lbr] not persisted: no run directory context (pass a run "
+                    "dir rather than a bare checkpoint file to record the row)."
                 )
 
 

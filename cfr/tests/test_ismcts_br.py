@@ -1,21 +1,37 @@
 """Tests for ISMCTS-BR (cfr/src/cfr/ismcts_br.py): the information-set Monte-Carlo
 tree-search best-response exploitability estimator.
 
-Three properties, per the P3W4 spec:
+Four properties, per the P3W4 spec plus the cambia-1427 port:
 
-  1. Calibration. On the tiny {A,6} game, coupled to the SAME K-deal Monte-Carlo
-     chance root that tools/tiny_solver.py solves exactly, the ISMCTS-BR estimate
-     converges to the solver's exact perfect-recall best-response gap
-     (br0 - onp0 vs the uniform policy) within a measured tolerance as the search
-     budget grows. Coupling to the identical deal seeds removes deal-sampling noise
-     between estimator and reference, so the only residual is the estimator's
-     search/greedy-extraction error, which shrinks with budget.
+  1. Calibration. On the tiny {A,6} game, coupled to the SAME K deals that
+     tools/tiny_solver.py solves exactly, the ISMCTS-BR estimate converges to the
+     solver's exact perfect-recall best-response gap (br0 - onp0 vs the uniform
+     policy) within a measured tolerance as the search budget grows. Coupling to
+     the identical deals removes deal-sampling noise between estimator and
+     reference, so the only residual is the estimator's search/greedy-extraction
+     error, which shrinks with budget.
 
   2. Tighter bound than LBR. On a known-exploitable stub policy the ISMCTS-BR
      estimate is >= the one-ply sampled-LBR estimate for the same policy: the
      multi-ply search recovers exploitation a one-ply lookahead misses.
 
   3. Determinism. Identical output under a fixed seed.
+
+  4. Info-key exactness. The O(1)-extend incremental key stays content-identical
+     to the O(L) rebuild and induces the same tree-node sharing.
+
+Deal coupling after the Go port (cambia-1427 D3)
+------------------------------------------------
+The estimator now runs on the Go engine while tiny_solver still builds its exact
+tree on the Python reference engine, and the two engines do NOT share a PRNG: a
+seed means different cards to each. Seed coupling would therefore silently
+reintroduce the deal-sampling mismatch the calibration exists to remove. The
+fixture instead transplants the solver's actual deals -- it extracts each Python
+deal's deck order and hands the pool to the estimator via ``deal_decks``, which
+is engine-independent. This test imports the Python engine to build the
+reference; the estimator modules themselves no longer do. When cambia-1429 lands
+a Go-native tiny_solver, both sides can couple on Go seeds and the transplant
+goes away.
 
 Budgets are kept small so this file runs in well under a few minutes on CPU (the
 tiny_solver reference build is the largest single cost).
@@ -25,10 +41,11 @@ import random
 
 import pytest
 
-from src.config import load_config
+from src.agents.action_codec import actions_from_mask
 from src.cfr.ismcts_br import ismcts_br
 from src.cfr.sampled_lbr import sampled_lbr
-from src.constants import ActionDrawStockpile, ActionDiscard
+from src.config import load_config
+from src.constants import ActionDiscard, ActionDrawStockpile
 from tools.tiny_solver import build_tree, _br_value, _policy_value
 
 TINY_CONFIG = "config/tiny_2card_plateau.yaml"
@@ -36,15 +53,9 @@ TINY_CONFIG = "config/tiny_2card_plateau.yaml"
 # --- Calibration budget + tolerance (measured; do not tighten without re-measuring). ---
 # Reference: tools/tiny_solver exact perfect-recall BR gap (br0 - onp0) vs the
 # uniform policy on a CALIB_K-deal subgame. The estimator is coupled to the same
-# CALIB_K deal seeds (deal_seeds=range(K)), so it integrates over the identical
-# chance root -- no deal-sampling mismatch, only estimator error.
-#
-# Measured across 10 seeds at (CALIB_HI_ITERS search sims, CALIB_HI_GAMES eval
-# games): the coupled estimate lands 0.00-0.05 BELOW the exact gap (a systematic
-# downward bias from greedy extraction + uniform fallback on unseen infosets);
-# worst |error| = 0.050. At CALIB_LOW_ITERS the |error| is ~0.4. CALIB_TOL = 0.08
-# clears the worst observed case with margin while staying tight relative to the
-# ~0.76 exact gap (~10%).
+# CALIB_K deals (deal_decks transplanted from the solver's own deals), so it
+# integrates over the identical chance root -- no deal-sampling mismatch, only
+# estimator error.
 CALIB_K = 8
 CALIB_LOW_ITERS = 300
 CALIB_LOW_GAMES = 1000
@@ -55,16 +66,23 @@ CALIB_SEED = 7
 
 
 class _UniformWrapper:
-    """Uniform-random target over the repr-sorted legal set (its own RNG so the
-    game-value baseline is seed-deterministic). Matches the solver's uniform
-    (empty) policy, the calibration reference.
+    """Uniform-random target with its own RNG, so the game-value baseline is
+    seed-deterministic. Matches the solver's uniform (empty) policy, the
+    calibration reference.
+
+    Written against the cambia-1427 policy boundary: a GameView plus a list of
+    GameAction NamedTuples already in the engine's ascending index order (the old
+    repr-sort existed only because the Python engine handed over an unordered
+    set).
     """
+
+    accepts_game_view = True
 
     def __init__(self, seed):
         self._rng = random.Random(seed)
 
-    def choose_action(self, state, legal):
-        actions = sorted(legal, key=repr)
+    def choose_action(self, view, legal):
+        actions = list(legal)
         return actions[self._rng.randrange(len(actions))]
 
 
@@ -75,8 +93,10 @@ class _PassiveStub:
     LBR.
     """
 
-    def choose_action(self, state, legal):
-        actions = sorted(legal, key=repr)
+    accepts_game_view = True
+
+    def choose_action(self, view, legal):
+        actions = list(legal)
         draws = [a for a in actions if isinstance(a, ActionDrawStockpile)]
         if draws:
             return draws[0]
@@ -89,6 +109,45 @@ class _PassiveStub:
 @pytest.fixture(scope="module")
 def cfg():
     return load_config(TINY_CONFIG)
+
+
+# Deals for the uncoupled tests. The tiny config restricts the deck via
+# deck_ranks, which the Go FFI rules struct cannot express, so a Go deal from
+# these rules would silently be a full 54-card game. Every tiny-game case
+# therefore deals from a transplanted deck pool; POOL_N is wide enough to stand
+# in for "the deal distribution" without being the 8-deal calibration root.
+POOL_N = 64
+
+
+@pytest.fixture(scope="module")
+def deal_pool(cfg):
+    """A wider transplanted deck pool, standing in for the deal distribution."""
+    return _transplant_decks(cfg, range(1000, 1000 + POOL_N))
+
+
+def _transplant_decks(cfg, seeds):
+    from src.ffi.bridge import extract_deck_from_python_game
+    from src.game.engine import CambiaGameState
+
+    decks = []
+    for s in seeds:
+        game = CambiaGameState(house_rules=cfg.cambia_rules, _rng=random.Random(s))
+        deck, starting_player = extract_deck_from_python_game(game)
+        decks.append((deck, starting_player))
+    return decks
+
+
+@pytest.fixture(scope="module")
+def calib_decks(cfg):
+    """The solver's CALIB_K deals, as (deck order, starting player) pairs.
+
+    build_tree deals with ``CambiaGameState(house_rules=cfg.cambia_rules,
+    _rng=random.Random(seed0 + d))`` at seed0=0, so this reproduces exactly those
+    K games and extracts each one's deck. Handing the decks to the estimator
+    couples it to the reference's chance root without either side having to share
+    a PRNG.
+    """
+    return _transplant_decks(cfg, range(CALIB_K))
 
 
 @pytest.fixture(scope="module")
@@ -115,19 +174,42 @@ def exact_br_gap(cfg):
     return br0 - onp0
 
 
-def test_calibration_converges_to_exact_br(cfg, exact_br_gap):
+def test_deck_transplant_reproduces_the_reference_deal(cfg, calib_decks):
+    """The coupling itself: a transplanted deck must deal the same hands on the Go
+    engine as the Python deal it came from. If this drifts, the calibration below
+    is comparing two different chance roots and its tolerance is meaningless.
+    """
+    from src.game.engine import CambiaGameState
+    from src.cfr.lbr import GoSearchState
+
+    for d, (deck, starting_player) in enumerate(calib_decks):
+        py = CambiaGameState(house_rules=cfg.cambia_rules, _rng=random.Random(d))
+        go = GoSearchState.from_deck(cfg.cambia_rules, deck, starting_player)
+        try:
+            for seat in (0, 1):
+                py_ranks = [c.rank for c in py.get_player_hand(seat)]
+                go_ranks = [c.rank for c in go.view().get_player_hand(seat)]
+                assert py_ranks == go_ranks, (
+                    f"deal {d} seat {seat}: Go hand {go_ranks} != Python hand "
+                    f"{py_ranks}; the deck transplant has drifted"
+                )
+            assert go.acting_player() == py.get_acting_player()
+        finally:
+            go.close()
+
+
+def test_calibration_converges_to_exact_br(cfg, exact_br_gap, calib_decks):
     """Coupled to the solver's CALIB_K deals, ISMCTS-BR converges to the exact BR
     gap within CALIB_TOL as the budget grows, and the error strictly shrinks from
     the low to the high budget.
     """
-    deal_seeds = list(range(CALIB_K))
     low = ismcts_br(
         _UniformWrapper(1234),
         cfg,
         ismcts_iterations=CALIB_LOW_ITERS,
         eval_games=CALIB_LOW_GAMES,
         seed=CALIB_SEED,
-        deal_seeds=deal_seeds,
+        deal_decks=calib_decks,
     )
     high = ismcts_br(
         _UniformWrapper(1234),
@@ -135,7 +217,7 @@ def test_calibration_converges_to_exact_br(cfg, exact_br_gap):
         ismcts_iterations=CALIB_HI_ITERS,
         eval_games=CALIB_HI_GAMES,
         seed=CALIB_SEED,
-        deal_seeds=deal_seeds,
+        deal_decks=calib_decks,
     )
     low_err = abs(low["exploitability"] - exact_br_gap)
     high_err = abs(high["exploitability"] - exact_br_gap)
@@ -155,14 +237,26 @@ def test_calibration_converges_to_exact_br(cfg, exact_br_gap):
     )
 
 
-def test_tighter_bound_than_lbr(cfg):
+def test_tighter_bound_than_lbr(cfg, deal_pool):
     """On a known-exploitable stub, ISMCTS-BR (multi-ply) >= sampled LBR (one-ply)
     for the same policy: a tighter lower bound on true exploitability.
     """
     lbr = sampled_lbr(
-        _PassiveStub(), cfg, num_infosets=800, br_rollouts_per_infoset=20, seed=13
+        _PassiveStub(),
+        cfg,
+        num_infosets=800,
+        br_rollouts_per_infoset=20,
+        seed=13,
+        deal_decks=deal_pool,
     )
-    ism = ismcts_br(_PassiveStub(), cfg, ismcts_iterations=4000, eval_games=3000, seed=13)
+    ism = ismcts_br(
+        _PassiveStub(),
+        cfg,
+        ismcts_iterations=4000,
+        eval_games=3000,
+        seed=13,
+        deal_decks=deal_pool,
+    )
     assert ism["exploitability"] >= lbr["exploitability"], (
         f"ISMCTS-BR ({ism['exploitability']:.4f}) must be a tighter (>=) bound than "
         f"one-ply LBR ({lbr['exploitability']:.4f}) on the exploitable stub"
@@ -171,13 +265,23 @@ def test_tighter_bound_than_lbr(cfg):
     assert lbr["exploitability"] > 0.1
 
 
-def test_deterministic_under_seed(cfg):
+def test_deterministic_under_seed(cfg, deal_pool):
     """Identical output for identical (seed, arguments)."""
     a = ismcts_br(
-        _UniformWrapper(0), cfg, ismcts_iterations=1500, eval_games=1500, seed=55
+        _UniformWrapper(0),
+        cfg,
+        ismcts_iterations=1500,
+        eval_games=1500,
+        seed=55,
+        deal_decks=deal_pool,
     )
     b = ismcts_br(
-        _UniformWrapper(0), cfg, ismcts_iterations=1500, eval_games=1500, seed=55
+        _UniformWrapper(0),
+        cfg,
+        ismcts_iterations=1500,
+        eval_games=1500,
+        seed=55,
+        deal_decks=deal_pool,
     )
     assert a["exploitability"] == b["exploitability"]
     assert a["br_value"] == b["br_value"]
@@ -185,9 +289,16 @@ def test_deterministic_under_seed(cfg):
     assert a["num_infosets_sampled"] == b["num_infosets_sampled"]
 
 
-def test_result_shape_and_nonnegative(cfg):
+def test_result_shape_and_nonnegative(cfg, deal_pool):
     """Return-dict shape (mirrors src.cfr.lbr.tier_b_lbr) and basic invariants."""
-    r = ismcts_br(_UniformWrapper(0), cfg, ismcts_iterations=400, eval_games=400, seed=1)
+    r = ismcts_br(
+        _UniformWrapper(0),
+        cfg,
+        ismcts_iterations=400,
+        eval_games=400,
+        seed=1,
+        deal_decks=deal_pool,
+    )
     for key in (
         "exploitability",
         "br_value",
@@ -198,16 +309,40 @@ def test_result_shape_and_nonnegative(cfg):
         "ismcts_iterations",
         "eval_games",
         "ucb_c",
+        "seed",
     ):
         assert key in r, f"missing key {key}"
     assert r["estimator"] == "ismcts_br"
+    assert r["seed"] == 1
     assert r["exploitability"] >= 0.0
     assert r["std_err"] >= 0.0
     assert r["num_infosets_sampled"] > 0
     assert isinstance(r["exploitability"], float)
 
 
-def test_incremental_key_matches_rebuilt(cfg):
+def test_no_handle_leak_across_a_search(cfg, deal_pool):
+    """Every determinization holds a game handle plus two agent handles out of a
+    finite pool; a full search-and-eval run must return all of them."""
+    from src.ffi.bridge import get_handle_pool_stats
+
+    before = get_handle_pool_stats()
+    assert set(before) >= {"games", "agents", "snapshots"}, before
+    ismcts_br(
+        _UniformWrapper(0),
+        cfg,
+        ismcts_iterations=300,
+        eval_games=200,
+        seed=2,
+        deal_decks=deal_pool,
+    )
+    after = get_handle_pool_stats()
+    for key in ("games", "agents", "snapshots"):
+        assert (
+            after[key] == before[key]
+        ), f"handle leak in {key}: {before[key]} -> {after[key]}"
+
+
+def test_incremental_key_matches_rebuilt(cfg, deal_pool):
     """The info key carried incrementally down a playout equals the key rebuilt
     from scratch from the full streams, and induces exactly the same equivalence
     classes (tree-node sharing) as the pre-refactor
@@ -216,9 +351,9 @@ def test_incremental_key_matches_rebuilt(cfg):
     """
     from src.cfr.ismcts_br import (
         _InfoKey,
-        _step_tokens,
-        _responder_priv_init,
         _new_deal,
+        _responder_priv_init,
+        _step_tokens,
     )
 
     responder = 0
@@ -231,37 +366,45 @@ def test_incremental_key_matches_rebuilt(cfg):
     # playouts; the two keying schemes must agree class-for-class.
     pairs = []
     for _ in range(80):
-        state = _new_deal(house_rules, deal_rng, None)
-        priv_init = _responder_priv_init(state, responder)
-        key = _InfoKey.root(priv_init)
-        priv_draw = []
-        pub_path = []
-        turns = 0
-        while not state.is_terminal() and turns < 200:
-            turns += 1
-            acting = state.get_acting_player()
-            if acting == -1:
-                break
-            legal = sorted(state.get_legal_actions(), key=repr)
-            if not legal:
-                break
-            if acting == responder:
-                # At each responder decision: incremental key == rebuild-from-scratch.
-                rebuilt = _InfoKey.from_streams(priv_init, priv_draw, pub_path)
-                assert key == rebuilt, "incremental key != rebuilt-from-scratch key"
-                assert hash(key) == hash(rebuilt), "equal keys must hash equal"
-                old_tuple = ("PR", priv_init, tuple(priv_draw), tuple(pub_path))
-                pairs.append((old_tuple, key))
-                action = legal[move_rng.randrange(len(legal))]
-            else:
-                action = opp.choose_action(state, legal)
-            state.apply_action(action)
-            pub_entry, draw_token = _step_tokens(state, action, acting, responder)
-            key = key.extend_pub(pub_entry)
-            pub_path.append(pub_entry)
-            if draw_token is not None:
-                key = key.extend_draw(draw_token)
-                priv_draw.append(draw_token)
+        state = _new_deal(house_rules, deal_rng, None, deal_pool)
+        try:
+            priv_init = _responder_priv_init(state.view(), responder)
+            key = _InfoKey.root(priv_init)
+            priv_draw = []
+            pub_path = []
+            turns = 0
+            while not state.is_terminal() and turns < 200:
+                turns += 1
+                acting = state.acting_player()
+                if acting == -1:
+                    break
+                legal_indices = state.legal_indices()
+                if not legal_indices:
+                    break
+                legal = actions_from_mask(legal_indices)
+                if acting == responder:
+                    # At each responder decision: incremental == rebuilt.
+                    rebuilt = _InfoKey.from_streams(priv_init, priv_draw, pub_path)
+                    assert key == rebuilt, "incremental key != rebuilt-from-scratch key"
+                    assert hash(key) == hash(rebuilt), "equal keys must hash equal"
+                    old_tuple = ("PR", priv_init, tuple(priv_draw), tuple(pub_path))
+                    pairs.append((old_tuple, key))
+                    pos = move_rng.randrange(len(legal))
+                else:
+                    action = opp.choose_action(state.view(), legal)
+                    pos = legal.index(action)
+                if not state.apply_index(legal_indices[pos]):
+                    break
+                pub_entry, draw_token = _step_tokens(
+                    state.view(), legal[pos], legal_indices[pos], acting, responder
+                )
+                key = key.extend_pub(pub_entry)
+                pub_path.append(pub_entry)
+                if draw_token is not None:
+                    key = key.extend_draw(draw_token)
+                    priv_draw.append(draw_token)
+        finally:
+            state.close()
 
     assert len(pairs) > 20, f"too few responder decisions sampled ({len(pairs)})"
     # Node sharing is exact: two decisions share a tree node under the incremental
