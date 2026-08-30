@@ -17,6 +17,7 @@ import Input from '@/components/ds/core/Input';
 import PlayerSeat from '@/components/ds/game/PlayerSeat';
 import DsMatchSettings from './DsMatchSettings';
 import DsLobbyStatus, { type LobbyStatusTone } from './DsLobbyStatus';
+import { humanizeId } from '@/utils/gameMode';
 
 interface DsLobbyViewProps {
   lobbyId: string;
@@ -112,6 +113,11 @@ const DsLobbyView: React.FC<DsLobbyViewProps> = ({ lobbyId, phase, sendMessage, 
   const waiting = players.filter((p) => !p.is_ready).map((p) => p.username);
   const shortId = lobbyId.substring(0, 8);
   const lobbyType = lobbyDetails?.type ?? 'private';
+  // A lobby type the map does not carry is title-cased rather than printed raw: the wire value is
+  // an id, and the badge used to put a bare `matchmaking_ranked`-shaped string on screen the way
+  // the pool ids of cambia-1086 did (cambia-1099 K1). Empty renders no badge rather than an empty
+  // one, since there is nothing to name.
+  const typeLabel = TYPE_LABELS[lobbyType] ?? humanizeId(lobbyType);
 
   // The chat list is height-bounded, so each new line pins the scroll to the newest
   // message; otherwise anything past the fold would land unseen.
@@ -175,7 +181,7 @@ const DsLobbyView: React.FC<DsLobbyViewProps> = ({ lobbyId, phase, sendMessage, 
             >
               Lobby
             </h1>
-            <Badge tone='neutral'>{TYPE_LABELS[lobbyType] ?? lobbyType}</Badge>
+            {typeLabel && <Badge tone='neutral'>{typeLabel}</Badge>}
           </div>
           <div style={{ marginTop: 'var(--space-2)', display: 'flex', alignItems: 'center', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
             {/* Not 'Invite code': nothing takes a code. Joining goes through the

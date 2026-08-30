@@ -123,8 +123,10 @@ const GPUCard: React.FC<{ gpu: GPUStat; history: ResourceSnapshot[] }> = ({ gpu,
 
 			{procs.length > 0 && (
 				<div className="mt-2 text-xs text-gray-500 dark:text-gray-400 space-y-0.5">
-					{procs.map((p) => (
-						<div key={p.pid} className="flex justify-between font-mono">
+					{/* Composite for the same reason: a driver that does not answer for a pid
+					    leaves parseIntField handing every such row 0 (resources.go). */}
+					{procs.map((p, i) => (
+						<div key={`${p.pid}-${i}`} className="flex justify-between font-mono">
 							<span className="truncate mr-2">{p.name}</span>
 							<span>{p.mem_mb.toFixed(0)} MB</span>
 						</div>
@@ -209,8 +211,14 @@ const ResourceMonitor: React.FC = () => {
 									</p>
 								) : (
 									<div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-										{snapshot.gpus.map((gpu) => (
-											<GPUCard key={gpu.index} gpu={gpu} history={history} />
+										{/* Keyed by position as well as index: the index is the device's
+										    identity and the sampler now keeps it unique (cambia-1099
+										    K4), but a payload that repeated one turned into a React
+										    key collision and a card that never rendered. Position is
+										    stable across ticks, since nvidia-smi lists devices in a
+										    fixed order. */}
+										{snapshot.gpus.map((gpu, i) => (
+											<GPUCard key={`${gpu.index}-${i}`} gpu={gpu} history={history} />
 										))}
 									</div>
 								)}

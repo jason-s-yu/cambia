@@ -176,6 +176,21 @@ func (l *Lobby) SystemHosted() bool {
 	return l.SystemHostedUnsafe()
 }
 
+// RulesLockedUnsafe reports whether this lobby's ruleset belongs to a queue rather than to its
+// host: the queue config is what the matchmaker paired the players on and what
+// NewCambiaGameFromLobby builds the game from, so update_rules is refused for one (hub.go).
+// Assumes the lock is held.
+//
+// Type alone does not answer it. A standing public or private lobby that queues its party into a
+// ranked queue carries the queue id without being typed "matchmaking", and CreateLobbyHandler
+// derives Mode "ranked" from the queue config for exactly that case (cambia-966). The rule lives
+// here so the refusal and the rules_locked flag lobby_state ships cannot drift apart: the client
+// used to re-derive it from a type it could see and a mode the snapshot never sent, which left a
+// ranked party lobby's host editing controls that fail on Save (cambia-1099 K2).
+func (l *Lobby) RulesLockedUnsafe() bool {
+	return l.Type == "matchmaking" || l.Mode == "ranked"
+}
+
 // JoinUser marks a user as joined (Users[userID] = true) and initialises their ready state.
 // Acquires lock.
 func (l *Lobby) JoinUser(userID uuid.UUID) {

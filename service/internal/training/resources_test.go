@@ -278,6 +278,44 @@ func TestParseGPUCSV(t *testing.T) {
 	}
 }
 
+// TestParseGPUCSVKeepsIndexesUnique covers the wire contract every consumer of this list keys on:
+// one entry per device index. The dashboard renders a card per GPU keyed by that index, so a
+// second entry claiming an index already in the list is a React key collision and a card that
+// never renders (cambia-1099 K4).
+func TestParseGPUCSVKeepsIndexesUnique(t *testing.T) {
+	// A driver that reports the same device twice: the repeat is dropped, the first reading kept.
+	out := "0, GPU A, 97887, 95784, 856, 78, 58\n" +
+		"0, GPU A, 97887, 95784, 856, 78, 58\n" +
+		"1, GPU B, 97887, 1024, 96863, 3, 40\n"
+	gpus := parseGPUCSV(out)
+	if len(gpus) != 2 {
+		t.Fatalf("expected the repeated index to be dropped, got %d entries: %+v", len(gpus), gpus)
+	}
+	if gpus[0].Index != 0 || gpus[1].Index != 1 {
+		t.Errorf("expected indexes 0 and 1, got %d and %d", gpus[0].Index, gpus[1].Index)
+	}
+
+	// An index the driver did not answer for takes its position in the list rather than the 0
+	// every other unparseable field falls back to: two of those used to collide on device 0.
+	out = "[N/A], GPU A, 97887, 95784, 856, 78, 58\n" +
+		"[N/A], GPU B, 97887, 1024, 96863, 3, 40\n"
+	gpus = parseGPUCSV(out)
+	if len(gpus) != 2 {
+		t.Fatalf("expected both GPUs kept, got %d entries: %+v", len(gpus), gpus)
+	}
+	if gpus[0].Index == gpus[1].Index {
+		t.Errorf("two GPUs share index %d: %+v", gpus[0].Index, gpus)
+	}
+
+	seen := map[int]bool{}
+	for _, g := range gpus {
+		if seen[g.Index] {
+			t.Errorf("index %d reported twice", g.Index)
+		}
+		seen[g.Index] = true
+	}
+}
+
 func TestReadHostParsers(t *testing.T) {
 	// These read real host /proc and statfs; they should return sane values on
 	// any Linux CI host without launching GPU work.

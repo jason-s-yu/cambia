@@ -540,6 +540,13 @@ func defaultGPUStats(ctx context.Context) ([]GPUStat, bool) {
 // parseGPUCSV parses the 7-field per-GPU CSV. Malformed lines are skipped; an
 // unparseable numeric field falls back to 0 without dropping the GPU (handles
 // "[N/A]" values some drivers emit).
+//
+// Index is the exception to that fallback, and a repeated one drops its row: the index is this
+// list's identity, not a reading, and every consumer keys on it - the dashboard renders one card
+// per GPU keyed by index, so two entries claiming 0 collapse into a React key collision and one
+// unrenderable card (cambia-1099 K4). A row whose index does not parse takes its position in the
+// list instead of the 0 parseIntField would hand it, which is the only way two rows here ever
+// claimed the same device.
 func parseGPUCSV(out string) []GPUStat {
 	var gpus []GPUStat
 	for _, line := range strings.Split(out, "\n") {
@@ -554,8 +561,15 @@ func parseGPUCSV(out string) []GPUStat {
 		for i := range fields {
 			fields[i] = strings.TrimSpace(fields[i])
 		}
+		idx, ok := parseIndexField(fields[0])
+		if !ok {
+			idx = len(gpus)
+		}
+		if indexTaken(gpus, idx) {
+			continue
+		}
 		gpus = append(gpus, GPUStat{
-			Index:      parseIntField(fields[0]),
+			Index:      idx,
 			Name:       fields[1],
 			MemTotalMB: parseFloatField(fields[2]),
 			MemUsedMB:  parseFloatField(fields[3]),
@@ -604,6 +618,26 @@ func parseFloatField(s string) float64 {
 		return 0
 	}
 	return v
+}
+
+// indexTaken reports whether a GPU with this index is already in the list.
+func indexTaken(gpus []GPUStat, idx int) bool {
+	for i := range gpus {
+		if gpus[i].Index == idx {
+			return true
+		}
+	}
+	return false
+}
+
+// parseIndexField parses a device index, reporting whether it parsed at all. Unlike the numeric
+// readings, an index has no sensible fallback value: 0 is a real device.
+func parseIndexField(s string) (int, bool) {
+	v, err := strconv.Atoi(s)
+	if err != nil || v < 0 {
+		return 0, false
+	}
+	return v, true
 }
 
 // parseIntField parses a trimmed CSV integer field, returning 0 on failure.

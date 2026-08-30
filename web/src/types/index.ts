@@ -112,6 +112,13 @@ export interface LobbyState {
    *  because every ranked queue plays the one ruleset MATCHMAKING.md 5.2 fixes and the six queue
    *  presets are therefore byte-identical (cambia-1123). See lib/lobbyPreset.ts. */
   presetId?: string;
+  /** Whether the ruleset can still change, as the service decides it: true for a matchmaking
+   *  lobby and for any lobby whose mode is ranked, which is the same expression `update_rules`
+   *  refuses on (`Lobby.RulesLockedUnsafe`). From WS `lobby_state`/`sync_state` as `rules_locked`.
+   *  Not re-derivable here: a public or private lobby that queued its party into a ranked queue
+   *  is locked by a `mode` the snapshot does not carry, so the sheet offered its host controls
+   *  every Save refused (cambia-1099 K2). Absent only from a REST-built lobby object. */
+  rulesLocked?: boolean;
   circuit: CircuitSettings;     // Present in both REST and WS
   lobbySettings: LobbySettings; // From REST payload
   settings?: LobbySettings;     // From WS lobby_state message (nested under root)

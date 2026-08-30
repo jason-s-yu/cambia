@@ -159,10 +159,24 @@ func (g *GameState) canUseAbility(acting uint8, card Card) bool {
 	}
 }
 
+// maskOpponent names the seat the 146-action space treats as "the opponent". That space encodes
+// one, so a table with more seats is the N-player space's business (NPlayerLegalActions); this
+// only has to stay in bounds if the 2-player mask is asked for at such a table.
+//
+// OpponentOf is 1-acting, which is that answer at two seats and an underflow to 255 from seat 2,
+// indexing off the end of Players exactly as the replace path did before cambia-1125. The next
+// seat round the table is the same seat at two players, so no bit of the 2-player mask moves.
+func (g *GameState) maskOpponent(acting uint8) uint8 {
+	if n := g.Rules.numPlayers(); n > 2 {
+		return (acting + 1) % n
+	}
+	return g.OpponentOf(acting)
+}
+
 // legalAbilitySelect populates legal actions for CtxAbilitySelect.
 func (g *GameState) legalAbilitySelect(mask *[3]uint64) {
 	acting := g.Pending.PlayerID
-	opp := g.OpponentOf(acting)
+	opp := g.maskOpponent(acting)
 	ownHandLen := g.Players[acting].HandLen
 	oppHandLen := g.Players[opp].HandLen
 
@@ -213,7 +227,7 @@ func (g *GameState) legalAbilitySelect(mask *[3]uint64) {
 // legalSnapDecision populates legal actions for CtxSnapDecision.
 func (g *GameState) legalSnapDecision(mask *[3]uint64) {
 	acting := g.Snap.Snappers[g.Snap.CurrentSnapperIdx]
-	opp := g.OpponentOf(acting)
+	opp := g.maskOpponent(acting)
 	ownHandLen := g.Players[acting].HandLen
 	oppHandLen := g.Players[opp].HandLen
 

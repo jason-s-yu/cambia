@@ -187,10 +187,12 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
 
   // A ranked or matchmade lobby has its rules fixed by the queue it entered: the service
   // rejects update_rules for one regardless (hub.go), so this only keeps the host from editing
-  // a control that would 400 on Save (cambia-966). mode can be briefly stale right after the
-  // WS connects (buildLobbySnapshot does not send it outside a multi-round match_state), so
-  // type carries the check on its own - every ranked queue today is also a matchmaking lobby.
-  const locked = currentSettings.type === 'matchmaking' || currentSettings.mode === 'ranked';
+  // a control that would fail on Save (cambia-966). The service says so itself, in
+  // lobby_state.rules_locked, because this side cannot work it out: a standing public or private
+  // lobby that queued its party into a ranked queue is locked by its mode, and no mode reaches
+  // the client (cambia-1099 K2). The type/mode reading stays as the fallback for a lobby object
+  // built from the REST create response, which carries neither flag nor a lock to report.
+  const locked = currentSettings.rulesLocked ?? (currentSettings.type === 'matchmaking' || currentSettings.mode === 'ranked');
   const canEdit = isHost && !locked;
 
   // Ruleset presets (cambia-1088): one named ruleset fills the whole sheet. Fetched for every
