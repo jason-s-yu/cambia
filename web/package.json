@@ -23,6 +23,7 @@
     "test:pregame-peek": "node --test scripts/test-pregame-peek.mjs",
     "test:preset": "node --test scripts/test-lobby-preset.mjs",
     "test:rule-buffer": "node --test scripts/test-lobby-rule-buffer.mjs",
+    "test:round-counter": "node --test scripts/test-round-counter.mjs",
     "test:special-prompt": "node --test scripts/test-special-prompt.mjs",
     "test:game-store-events": "node --test scripts/test-game-store-events.mjs",
     "test:tab-session": "node --test scripts/test-tab-session.mjs",
@@ -31,7 +32,7 @@
     "test:rules-lock": "node --test scripts/test-lobby-rules-lock.mjs",
     "test:gpu-key": "node --test scripts/test-resource-gpu-key.mjs",
     "test:render": "vitest run",
-    "test": "node --test scripts/test-resend-decision.mjs scripts/test-snap-success.mjs scripts/test-snap-fill.mjs scripts/test-modal-focus.mjs scripts/test-card-names.mjs scripts/test-hand-layout.mjs scripts/test-circuit-copy.mjs scripts/test-hand-lock.mjs scripts/test-pregame-peek.mjs scripts/test-lobby-preset.mjs scripts/test-lobby-rule-buffer.mjs scripts/test-special-prompt.mjs scripts/test-game-store-events.mjs scripts/test-tab-session.mjs scripts/test-dev-switcher.mjs scripts/test-lobby-type-label.mjs scripts/test-lobby-rules-lock.mjs scripts/test-resource-gpu-key.mjs scripts/test-training-runs-key.mjs && npm run test:render",
+    "test": "node --test scripts/test-resend-decision.mjs scripts/test-snap-success.mjs scripts/test-snap-fill.mjs scripts/test-modal-focus.mjs scripts/test-card-names.mjs scripts/test-hand-layout.mjs scripts/test-circuit-copy.mjs scripts/test-hand-lock.mjs scripts/test-pregame-peek.mjs scripts/test-lobby-preset.mjs scripts/test-lobby-rule-buffer.mjs scripts/test-round-counter.mjs scripts/test-special-prompt.mjs scripts/test-game-store-events.mjs scripts/test-tab-session.mjs scripts/test-dev-switcher.mjs scripts/test-lobby-type-label.mjs scripts/test-lobby-rules-lock.mjs scripts/test-resource-gpu-key.mjs scripts/test-training-runs-key.mjs && npm run test:render",
     "measure-dev-transfer": "node scripts/measure-dev-transfer.mjs"
   },
   "dependencies": {

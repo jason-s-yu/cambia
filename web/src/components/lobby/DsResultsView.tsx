@@ -24,6 +24,7 @@ import Button from '@/components/ds/core/Button';
 import Badge from '@/components/ds/core/Badge';
 import { EYEBROW } from '@/components/ds/eyebrow';
 import ScorePill from '@/components/ds/game/ScorePill';
+import { roundCounterLabel } from '@/lib/roundCounter';
 import DsGameTable from '@/components/game/DsGameTable';
 
 interface DsResultsViewProps {
@@ -38,6 +39,15 @@ interface DsResultsViewProps {
 const DsResultsView: React.FC<DsResultsViewProps> = ({ phase, onReturnToLobby, onLeave, gameState, sendMessage }) => {
   const matchState = useCurrentLobbyStore((s) => s.matchState);
   const lobbyPlayers = useCurrentLobbyStore((s) => s.lobbyDetails?.lobby_status?.users);
+  const circuitEnabled = useCurrentLobbyStore((s) => s.lobbyDetails?.circuit?.enabled);
+  // Shown only where a circuit is playing the rounds it counts (lib/roundCounter.ts). The card
+  // used to badge Round 0/8 over the standings of the one game a matchmade lobby plays
+  // (cambia-1126 item 2).
+  const roundCounter = roundCounterLabel({
+    circuitEnabled,
+    totalRounds: matchState?.totalRounds,
+    currentRound: matchState?.currentRound
+  });
   const selfId = useAuthStore((s) => s.user?.id);
   const authName = useAuthStore((s) => s.user?.username);
   const finalScores = useGameStore(selectFinalScores);
@@ -129,7 +139,7 @@ const DsResultsView: React.FC<DsResultsViewProps> = ({ phase, onReturnToLobby, o
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <span style={EYEBROW}>{isMatchEnd ? 'Circuit' : 'Casual game'}</span>
           {isMatchEnd && matchState?.isRanked && <Badge tone='gold'>Ranked</Badge>}
-          {matchState && <Badge tone='info'>Round {matchState.currentRound}/{matchState.totalRounds}</Badge>}
+          {roundCounter && <Badge tone='info'>{roundCounter}</Badge>}
         </div>
         <h1 id='results-title' style={{ margin: 0, fontSize: 'var(--ds-text-2xl)', fontWeight: 'var(--weight-bold)', letterSpacing: 'var(--ds-tracking-tight)', lineHeight: 'var(--ds-leading-tight)' }}>{title}</h1>
         {winner && (

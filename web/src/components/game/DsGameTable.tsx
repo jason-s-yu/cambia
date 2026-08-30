@@ -45,6 +45,7 @@ import { canSkipSpecialAction } from '@/lib/specialPrompt';
 import { useAuthStore } from '@/stores/authStore';
 import { useCurrentLobbyStore, type LobbyPhase } from '@/stores/lobbyStore';
 import { lockedPlayerId, isHandLocked, canSnapCard } from '@/lib/handLock';
+import { roundCounterLabel } from '@/lib/roundCounter';
 import Button from '@/components/ds/core/Button';
 import Badge from '@/components/ds/core/Badge';
 import Panel from '@/components/ds/chrome/Panel';
@@ -362,12 +363,16 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   const serverClockOffsetMs = useGameStore(selectServerClockOffsetMs);
   const abilityReveal = useGameStore(selectAbilityReveal);
   const matchState = useCurrentLobbyStore((s) => s.matchState);
-  // A round counter only says something in a match that runs more than one round. A single-round
-  // queue (h2h_quickplay) now carries match state into the game, and it read "Round 0/1" the
-  // whole way through (cambia-933).
-  const roundCounter = matchState && matchState.totalRounds > 1
-    ? `Round ${matchState.currentRound}/${matchState.totalRounds}`
-    : null;
+  const circuitEnabled = useCurrentLobbyStore((s) => s.lobbyDetails?.circuit?.enabled);
+  // A round counter only says something where a circuit is playing the rounds it counts. Match
+  // state carries a queue's round count with no circuit behind it, so the felt read ROUND 0/8 for
+  // the whole of a matchmade h2h_rapid game (cambia-1126 item 2); the rule and its sources are in
+  // lib/roundCounter.ts, shared with the results card.
+  const roundCounter = roundCounterLabel({
+    circuitEnabled,
+    totalRounds: matchState?.totalRounds,
+    currentRound: matchState?.currentRound
+  });
   const lobbyPlayers = useCurrentLobbyStore((s) => s.lobbyDetails?.lobby_status?.users);
 
   const selfState = gameState.players.find((p) => p.playerId === selfId);

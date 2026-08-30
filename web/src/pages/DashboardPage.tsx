@@ -20,18 +20,18 @@ import { joinLobby as apiJoinPublicLobby, getActiveSession, getLobbyPresets, typ
 import type { QueueInfo } from '@/services/matchmakingService';
 import type { ActiveSession, ApiErrorResponse, LobbyPreset } from '@/types';
 import { DEFAULT_PRESET_ID } from '@/types';
+import { presetFitsGameMode } from '@/lib/lobbyPreset';
 import { gameModeLabel } from '@/utils/gameMode';
 import { queuePoolLabel, ratingPoolLabel, tierFromRating } from '@/utils/ratingPool';
 
-/**
- * Queues considered "flagship" for the primary/highlighted card treatment. This is a display
- * flag only - it does not move a card earlier in the grid. Card order comes straight from
- * GET /matchmaking/queues (queues.map below, no client-side sort) and is deterministic
- * server-side as of cambia-957 (QueueConfig.Order); do not add a sort here that reads this set,
- * or the two flagship cards would stop appearing where the server placed them relative to the
- * other four.
- */
-const PRIMARY_QUEUE_IDS = new Set(['h2h_rapid', 'ffa4_standard']);
+// No queue card takes QueueCard's gold `primary` treatment (cambia-1126 item 4). It used to go to
+// a hardcoded pair, h2h_rapid and ffa4_standard, chosen here and nowhere else: the service names
+// no flagship queue, QueueConfig carries no such field, and the set did not even move a card in
+// the grid (order is QueueConfig.Order, cambia-957). So the gold border, gold Ranked badge and
+// gold Play read as a recommendation with nothing behind it, on two of six queues whose rules are
+// byte-identical (MATCHMAKING.md 5.2) and which differ only by a round count no lobby currently
+// plays. The primitive keeps the prop for the day GET /matchmaking/queues names a featured queue;
+// until it does, the cards read alike.
 
 /**
  * Rough estimated match length in minutes from queue shape, since the
@@ -121,12 +121,15 @@ const DashboardPage: React.FC = () => {
   const [creating, setCreating] = useState(false);
   const previousLobbyIdRef = useRef<string | null>(null);
 
-  // The ruleset the dialog is currently on, and the game mode it fixes. A preset built from a
-  // queue carries that queue's player count, so it decides the mode and the mode control goes
-  // read-only; the default preset fixes none and leaves the choice to the host.
-  const selectedPreset = presets.find((p) => p.id === createPresetId);
-  const presetGameMode = selectedPreset?.gameMode ?? '';
-  const effectiveGameMode = presetGameMode || createGameMode;
+  // The rulesets the chosen game mode can play, which is the filter the in-lobby rule sheet
+  // already applies to its own Ruleset select (lib/lobbyPreset.ts rulesetRow, cambia-1099 Q1). A
+  // preset built from a queue carries that queue's player count, so FFA-4 Standard is not a
+  // ruleset a head-to-head lobby can be created on; the default preset fixes no count and fits
+  // either. The dialog used to list all six and let the pick silently overrule the game mode the
+  // host had chosen, leaving that control disabled with no way back (cambia-1126 item 7). The
+  // mode leads here, as it does in the lobby.
+  const offeredPresets = presets.filter((p) => presetFitsGameMode(p, createGameMode));
+  const selectedPreset = offeredPresets.find((p) => p.id === createPresetId);
 
   useEffect(() => {
     fetchQueues();
@@ -228,7 +231,7 @@ const DashboardPage: React.FC = () => {
       // presetId goes only when the service offered one, so a dialog that could not load the
       // list still creates a lobby on the service's own defaults rather than 400ing on an id
       // this client made up.
-      const settings: CreateLobbyRequest = { type: createLobbyType, gameMode: effectiveGameMode };
+      const settings: CreateLobbyRequest = { type: createLobbyType, gameMode: createGameMode };
       if (selectedPreset) settings.presetId = selectedPreset.id;
       const lobbyId = await createAndJoinLobby(settings);
       if (!lobbyId) {
@@ -238,7 +241,15 @@ const DashboardPage: React.FC = () => {
     } finally {
       setCreating(false);
     }
-  }, [createAndJoinLobby, createLobbyType, effectiveGameMode, selectedPreset]);
+  }, [createAndJoinLobby, createLobbyType, createGameMode, selectedPreset]);
+
+  // Changing the mode re-cuts the ruleset list, so a pick the new mode cannot play goes back to
+  // the default preset rather than sitting selected in a list that no longer offers it.
+  const chooseGameMode = useCallback((mode: string) => {
+    setCreateGameMode(mode);
+    const picked = presets.find((p) => p.id === createPresetId);
+    if (picked && !presetFitsGameMode(picked, mode)) setCreatePresetId(DEFAULT_PRESET_ID);
+  }, [presets, createPresetId]);
 
   const handlePlayQueue = useCallback((queue: QueueInfo) => {
     joinQueue(queue);
@@ -355,7 +366,6 @@ const DashboardPage: React.FC = () => {
                   rounds={queue.rounds}
                   minutes={estimateMinutes(queue)}
                   pool={queuePoolLabel(queue.ratingPool)}
-                  primary={PRIMARY_QUEUE_IDS.has(queue.queueId)}
                   ranked={queue.ranked}
                   onPlay={() => handlePlayQueue(queue)}
                 />
@@ -501,30 +511,29 @@ const DashboardPage: React.FC = () => {
           />
           <Select
             label='Game mode'
-            value={effectiveGameMode}
-            disabled={creating || !!presetGameMode}
-            onChange={(e) => setCreateGameMode(e.target.value)}
+            value={createGameMode}
+            disabled={creating}
+            onChange={(e) => chooseGameMode(e.target.value)}
             options={[
               { value: 'head_to_head', label: gameModeLabel('head_to_head') },
               { value: 'group_of_4', label: gameModeLabel('group_of_4') }
             ]}
           />
-          {/* Ruleset third, under the two fields it can override, so the host reads the shape
-              of the lobby before the rules it plays by (cambia-1088). Hidden entirely when the
-              preset list did not load: an empty dropdown is worse than none. */}
-          {presets.length > 0 && (
+          {/* Ruleset third, under the two fields that decide what it may be, so the host reads
+              the shape of the lobby before the rules it plays by (cambia-1088). Hidden entirely
+              when the preset list did not load: an empty dropdown is worse than none. */}
+          {offeredPresets.length > 0 && (
             <div>
               <Select
                 label='Ruleset'
                 value={createPresetId}
                 disabled={creating}
                 onChange={(e) => setCreatePresetId(e.target.value)}
-                options={presets.map((p) => ({ value: p.id, label: p.name }))}
+                options={offeredPresets.map((p) => ({ value: p.id, label: p.name }))}
               />
               {selectedPreset && (
                 <p style={{ margin: '6px 0 0', fontSize: 'var(--ds-text-sm)', lineHeight: 'var(--ds-leading-snug)', color: 'var(--text-tertiary)' }}>
                   {selectedPreset.description}
-                  {presetGameMode ? ` Game mode is fixed at ${gameModeLabel(presetGameMode)}.` : ''}
                 </p>
               )}
             </div>
