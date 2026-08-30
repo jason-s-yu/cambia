@@ -1147,8 +1147,15 @@ func (g *CambiaGame) autoResolveArmedAbility(playerID uuid.UUID) {
 	g.logAction(playerID, "action_special_timeout_resolve", map[string]interface{}{
 		"rank": g.SpecialAction.CardRank, "pending": g.Engine.Pending.Type,
 	})
+	prompt := g.SpecialAction
 	g.SpecialAction = SpecialActionState{}
 	if err := g.applyEngineActionSeat(actionIdx, playerID, targetSeat); err != nil {
+		// The engine refused a target read out of its own state under this lock, so something is
+		// out of step. Put the prompt back and re-arm the clock rather than leaving a cleared
+		// prompt over an ability the engine still holds, which is the wedge shape this whole path
+		// exists to avoid.
+		g.SpecialAction = prompt
+		g.scheduleNextTurnTimer()
 		return
 	}
 	// A King's look leaves the swap decision pending; take the no-swap side of it.
