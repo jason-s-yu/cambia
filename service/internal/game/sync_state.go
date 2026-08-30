@@ -4,8 +4,8 @@ package game
 import (
 	"time"
 
-	engine "github.com/jason-s-yu/cambia/engine"
 	"github.com/google/uuid"
+	engine "github.com/jason-s-yu/cambia/engine"
 )
 
 // ObfCard represents a card's state for client synchronization, potentially hiding details.

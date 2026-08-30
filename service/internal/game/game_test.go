@@ -737,13 +737,13 @@ func TestCambiaLock(t *testing.T) {
 
 	// Attempt blind swap involving second player (who called Cambia).
 	swapCard1Data := map[string]interface{}{
-		"id":  cardA_UUID.String(),
-		"idx": float64(0),
+		"id":   cardA_UUID.String(),
+		"idx":  float64(0),
 		"user": map[string]interface{}{"id": first.ID.String()},
 	}
 	swapCard2Data := map[string]interface{}{
-		"id":  cardB_UUID.String(),
-		"idx": float64(0),
+		"id":   cardB_UUID.String(),
+		"idx":  float64(0),
 		"user": map[string]interface{}{"id": second.ID.String()},
 	}
 	g.ProcessSpecialAction(first.ID, "swap_blind", swapCard1Data, swapCard2Data)

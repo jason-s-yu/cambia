@@ -34,8 +34,8 @@ type GameEventType string
 
 // Constants defining the various GameEvent types used for WebSocket communication.
 const (
-	EventPlayerSnapSuccess      GameEventType = "player_snap_success"
-	EventPlayerSnapFail         GameEventType = "player_snap_fail"
+	EventPlayerSnapSuccess GameEventType = "player_snap_success"
+	EventPlayerSnapFail    GameEventType = "player_snap_fail"
 	// A successful opponent snap owes the victim a card back (RULES.md 5). The first event opens
 	// that obligation - user is the snapper, card.user the victim and card.idx the slot the snapped
 	// card left - and the second reports the card that settled it (cambia-936). Both are public:

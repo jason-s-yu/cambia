@@ -13,11 +13,11 @@ import (
 // CardUUIDTracker mirrors engine card positions with UUIDs for client communication.
 // Updated in lockstep with every engine action.
 type CardUUIDTracker struct {
-	Players    [engine.MaxPlayers]PlayerUUIDState
-	StockUUIDs [engine.MaxDeckSize]uuid.UUID
-	StockLen   uint8
+	Players      [engine.MaxPlayers]PlayerUUIDState
+	StockUUIDs   [engine.MaxDeckSize]uuid.UUID
+	StockLen     uint8
 	DiscardUUIDs [engine.MaxDeckSize]uuid.UUID
-	DiscardLen  uint8
+	DiscardLen   uint8
 
 	// Registry maps UUID -> full card details for event payloads.
 	Registry map[uuid.UUID]*models.Card
@@ -63,34 +63,56 @@ type PlayerUUIDState struct {
 // engineRankToString converts an engine rank uint8 to service rank string.
 func engineRankToString(rank uint8) string {
 	switch rank {
-	case engine.RankAce:   return "A"
-	case engine.RankTwo:   return "2"
-	case engine.RankThree: return "3"
-	case engine.RankFour:  return "4"
-	case engine.RankFive:  return "5"
-	case engine.RankSix:   return "6"
-	case engine.RankSeven: return "7"
-	case engine.RankEight: return "8"
-	case engine.RankNine:  return "9"
-	case engine.RankTen:   return "T"
-	case engine.RankJack:  return "J"
-	case engine.RankQueen: return "Q"
-	case engine.RankKing:  return "K"
-	case engine.RankJoker: return "O"
-	default:               return "?"
+	case engine.RankAce:
+		return "A"
+	case engine.RankTwo:
+		return "2"
+	case engine.RankThree:
+		return "3"
+	case engine.RankFour:
+		return "4"
+	case engine.RankFive:
+		return "5"
+	case engine.RankSix:
+		return "6"
+	case engine.RankSeven:
+		return "7"
+	case engine.RankEight:
+		return "8"
+	case engine.RankNine:
+		return "9"
+	case engine.RankTen:
+		return "T"
+	case engine.RankJack:
+		return "J"
+	case engine.RankQueen:
+		return "Q"
+	case engine.RankKing:
+		return "K"
+	case engine.RankJoker:
+		return "O"
+	default:
+		return "?"
 	}
 }
 
 // engineSuitToString converts an engine suit uint8 to service suit string.
 func engineSuitToString(suit uint8) string {
 	switch suit {
-	case engine.SuitHearts:      return "H"
-	case engine.SuitDiamonds:    return "D"
-	case engine.SuitClubs:       return "C"
-	case engine.SuitSpades:      return "S"
-	case engine.SuitRedJoker:    return "R"
-	case engine.SuitBlackJoker:  return "B"
-	default:                     return "?"
+	case engine.SuitHearts:
+		return "H"
+	case engine.SuitDiamonds:
+		return "D"
+	case engine.SuitClubs:
+		return "C"
+	case engine.SuitSpades:
+		return "S"
+	case engine.SuitRedJoker:
+		return "R"
+	case engine.SuitBlackJoker:
+		return "B"
+	default:
+		return "?"
 	}
 }
 
@@ -685,8 +707,8 @@ func (g *CambiaGame) emitEventsForAction(actionIdx uint16, actorID uuid.UUID, ac
 		drawnCard := g.CardTracker.Registry[drawnUUID]
 		if drawnCard != nil {
 			g.fireEventToPlayer(actorID, GameEvent{
-				Type: EventPrivateDrawStockpile,
-				Card: &EventCard{ID: drawnUUID, Rank: drawnCard.Rank, Suit: drawnCard.Suit, Value: drawnCard.Value},
+				Type:    EventPrivateDrawStockpile,
+				Card:    &EventCard{ID: drawnUUID, Rank: drawnCard.Rank, Suit: drawnCard.Suit, Value: drawnCard.Value},
 				Payload: map[string]interface{}{"source": "stockpile"},
 			})
 		}
@@ -709,8 +731,8 @@ func (g *CambiaGame) emitEventsForAction(actionIdx uint16, actorID uuid.UUID, ac
 				},
 			})
 			g.fireEventToPlayer(actorID, GameEvent{
-				Type: EventPrivateDrawStockpile,
-				Card: &EventCard{ID: drawnUUID, Rank: drawnCard.Rank, Suit: drawnCard.Suit, Value: drawnCard.Value},
+				Type:    EventPrivateDrawStockpile,
+				Card:    &EventCard{ID: drawnUUID, Rank: drawnCard.Rank, Suit: drawnCard.Suit, Value: drawnCard.Value},
 				Payload: map[string]interface{}{"source": "discardpile"},
 			})
 		}
@@ -1827,4 +1849,3 @@ func (g *CambiaGame) handleTimeoutEngine(playerID uuid.UUID) {
 	g.logAction(playerID, "player_timeout_discard", nil)
 	g.applyEngineAction(engine.ActionDiscardNoAbility, playerID)
 }
-
