@@ -52,14 +52,19 @@ const QueueCard: React.FC<QueueCardProps> = ({
         {ranked ? <Badge tone={primary ? 'gold' : 'warning'}>Ranked</Badge> : <Badge>Casual</Badge>}
       </div>
       {/* The facts row is what a player compares queues on, so it reads at the
-          body size rather than the scale's floor (cambia-1097). */}
-      <div style={{ display: 'flex', flexWrap: 'wrap', minWidth: 0, gap: '4px 14px', fontSize: 'var(--ds-text-sm)', fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
-        <span>{players}p</span>
-        <span>
-          {rounds} {rounds === 1 ? 'round' : 'rounds'}
-        </span>
-        <span>~{minutes} min</span>
-        {pool && <span style={{ color: 'var(--text-tertiary)' }}>{pool}</span>}
+          body size rather than the scale's floor (cambia-1097). The pool label
+          sits on its own line below it, never inside the wrap row: a short pool
+          name would otherwise ride the facts line on one card and drop below it
+          on the next, and the cards would come out different heights. */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0, fontSize: 'var(--ds-text-sm)', color: 'var(--text-secondary)' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 14px', fontVariantNumeric: 'tabular-nums' }}>
+          <span>{players}p</span>
+          <span>
+            {rounds} {rounds === 1 ? 'round' : 'rounds'}
+          </span>
+          <span>~{minutes} min</span>
+        </div>
+        {pool && <div style={{ color: 'var(--text-tertiary)' }}>{pool}</div>}
       </div>
       <Button variant={primary ? 'primary' : 'secondary'} fullWidth onClick={onPlay}>
         Play
