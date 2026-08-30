@@ -249,6 +249,7 @@ Handled by `internal/handlers/lobby.go`. These manage *ephemeral* in-memory lobb
         "houseRules": { ... }, // Full HouseRules object
         "circuit": { ... }, // Full Circuit object
         "lobbySettings": { ... }, // Full LobbySettings object
+        "presetId": "h2h_rapid", // string, omitted when the lobby is on no preset
         "mode": "casual",
         "searching": false
     }
@@ -258,8 +259,23 @@ Handled by `internal/handlers/lobby.go`. These manage *ephemeral* in-memory lobb
     `uuid.UUID` (a fixed-size byte array), and Go's `encoding/json` only treats a pointer, slice,
     map, or string as "empty" for that tag, never a fixed-size array - the tag would have been a
     no-op, so a lobby with no game yet always reports the nil UUID rather than omitting the key.
-    `queueID` is the one field that genuinely omits: it is a plain string, empty until a queue is
-    selected.
+    `queueID` and `presetId` are the two fields that genuinely omit: both are plain strings,
+    empty until a queue or a preset is selected.
+
+    **`presetId`** is which ruleset the lobby carries, recorded by the service rather than
+    derived from `houseRules` (cambia-1123). It has to be recorded: MATCHMAKING.md 5.2 fixes one
+    ruleset for every ranked queue, so all six queue presets hold byte-identical `houseRules` and
+    a client matching values against `GET /lobby/presets` would name whichever preset that list
+    happens to return first. Set when a `presetId` is accepted on create and when `update_rules`
+    carries one, and cleared by the first later edit that moves a house rule or lobby setting
+    without naming a preset. Circuit settings are not part of a preset, so changing them leaves
+    it alone.
+
+    A queue-backed lobby (`type: "matchmaking"`, or any lobby with a `queueID`) is created
+    carrying its queue's preset: `houseRules`, `lobbySettings` and `presetId` are the queue's
+    from the moment of creation, and the games it produces are built from the lobby. Before
+    cambia-1123 the queue's rules were only read at game creation, so a matchmade lobby reported
+    the defaults it was constructed with while its game ran the queue's ruleset.
 * **Response (Error):** `400 Bad Request` (invalid type/mode/payload), `401 Unauthorized`, `403 Forbidden`, `500 Internal Server Error`.
 
 #### `GET /lobby/presets`

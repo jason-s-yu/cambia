@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jason-s-yu/cambia/service/internal/hub"
+	"github.com/jason-s-yu/cambia/service/internal/lobby"
 	"github.com/jason-s-yu/cambia/service/internal/matchmaking"
 )
 
@@ -83,8 +84,20 @@ func (gs *GameServer) HandleMatchFormed(result matchmaking.MatchResult) {
 	// system before the roster below is built is what makes every seat report IsHost false.
 	// The pre-match party lobby keeps its leader up to this point, which is what DELETE
 	// /lobby/{id}/search and the cancel_search frame are gated on.
+	//
+	// It takes the queue's ruleset in the same breath. CreateLobbyHandler already stamps a
+	// queue-backed lobby with it, but the lobby the match lands in is the one whose rule sheet
+	// every seated player reads, and the match's queue - not whatever the lobby was opened for -
+	// is what the matchmaker paired them under. Stamping it here as well makes the sheet and the
+	// game the match produces the same answer by construction rather than by two paths agreeing
+	// (cambia-1123).
 	hostLob.Mu.Lock()
 	hostLob.AdoptSystemHostUnsafe()
+	if preset, known := lobby.GetPreset(result.QueueID); known {
+		hostLob.HouseRules = preset.HouseRules
+		hostLob.LobbySettings = preset.Settings
+		hostLob.PresetID = preset.ID
+	}
 	hostLob.Mu.Unlock()
 
 	players := make([]hub.MatchedPlayer, 0, len(lobbyIDs))

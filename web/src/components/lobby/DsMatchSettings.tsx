@@ -8,6 +8,7 @@
 // No WS protocol change.
 import React, { useEffect, useMemo, useState } from 'react';
 import type { LobbyState, HouseRules, CircuitSettings, LobbySettings, LobbyPreset } from '@/types';
+import { CUSTOM_PRESET_VALUE, presetMatchesRules, resolvePresetId } from '@/lib/lobbyPreset';
 import Panel from '@/components/ds/chrome/Panel';
 import { EYEBROW } from '@/components/ds/eyebrow';
 import Input from '@/components/ds/core/Input';
@@ -29,22 +30,6 @@ interface DsMatchSettingsProps {
 
 function jsonEqual(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
-}
-
-/** Value of the Ruleset select once the sheet no longer matches any preset. Not a preset id. */
-const CUSTOM_PRESET_VALUE = '__custom__';
-
-/**
- * Whether a rule sheet is still exactly the preset it was filled from (cambia-1088). Compared
- * field by field over the preset's own keys rather than by serializing both sides: the buffer
- * takes its key order from whichever message delivered it, and a key-order difference is not a
- * rule difference. Circuit settings are not part of a preset and so are not compared - a preset
- * cannot express a round count, so it has nothing to say about circuit scoring.
- */
-function presetMatches(preset: LobbyPreset, rules: HouseRules, settings: LobbySettings): boolean {
-  const keys = Object.keys(preset.houseRules) as (keyof HouseRules)[];
-  return keys.every((k) => rules?.[k] === preset.houseRules[k]) &&
-    settings?.autoStart === preset.settings.autoStart;
 }
 
 /**
@@ -183,41 +168,6 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saved'>('idle');
   const [circuitInfoOpen, setCircuitInfoOpen] = useState(false);
 
-  useEffect(() => {
-    setHouseRules(currentSettings.houseRules);
-    setCircuit(currentSettings.circuit);
-    setLobbySettings(currentSettings.lobbySettings ?? currentSettings.settings ?? { autoStart: false });
-    setSaveStatus('idle');
-  }, [currentSettings]);
-
-  const setRule = <K extends keyof HouseRules>(key: K, value: HouseRules[K]) => {
-    setHouseRules((prev) => ({ ...prev, [key]: value }));
-    setSaveStatus('idle');
-  };
-  // initialViewCount is bounded by cardsPerPlayer server-side (internal/game/rules.go, cambia-817):
-  // the pregame peek cannot cover more cards than the hand holds, and an over-large value rejects
-  // the whole update_rules message. Lowering the deal size therefore pulls the peek down with it
-  // instead of leaving the panel holding a combination the server refuses.
-  const setCardsPerPlayer = (value: number) => {
-    setHouseRules((prev) => ({
-      ...prev,
-      cardsPerPlayer: value,
-      initialViewCount: Math.min(prev.initialViewCount ?? 2, value)
-    }));
-    setSaveStatus('idle');
-  };
-  const setCircuitRule = <K extends keyof CircuitSettings['rules']>(key: K, value: CircuitSettings['rules'][K]) => {
-    setCircuit((prev) => ({ ...prev, rules: { ...prev.rules, [key]: value } }));
-    setSaveStatus('idle');
-  };
-
-  const hasChanges = useMemo(() => {
-    const effective = currentSettings.lobbySettings ?? currentSettings.settings ?? { autoStart: false };
-    return !jsonEqual(houseRules, currentSettings.houseRules) ||
-      !jsonEqual(circuit, currentSettings.circuit) ||
-      !jsonEqual(lobbySettings, effective);
-  }, [houseRules, circuit, lobbySettings, currentSettings]);
-
   // A ranked or matchmade lobby has its rules fixed by the queue it entered: the service
   // rejects update_rules for one regardless (hub.go), so this only keeps the host from editing
   // a control that would 400 on Save (cambia-966). mode can be briefly stale right after the
@@ -248,23 +198,65 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
     };
   }, [canEdit]);
 
-  // Which preset the lobby's saved rules correspond to, re-derived whenever they arrive. First
-  // hit wins: the six queue presets are rule-identical to each other, differing only in player
-  // count and round count, neither of which is a rule on this sheet. The id is then held rather
-  // than re-derived per keystroke, so editing a field reports a departure from the preset the
-  // host chose instead of silently jumping to another one that happens to match.
+  // Which preset the lobby's saved rules are: the id the service recorded, and only then a value
+  // match (lib/lobbyPreset.ts). Recognising one by value alone named the wrong preset every time
+  // for a queue ruleset, since all six queue presets hold the same rules (cambia-1123).
+  const savedPresetId = useMemo(
+    () => resolvePresetId(presets, {
+      presetId: currentSettings.presetId,
+      gameMode: currentSettings.gameMode,
+      houseRules: currentSettings.houseRules,
+      settings: currentSettings.lobbySettings ?? currentSettings.settings ?? { autoStart: false }
+    }),
+    [presets, currentSettings]
+  );
+
+  // The buffer is reset from the saved lobby whenever it arrives, the ruleset naming it included:
+  // the sheet below is what the host edits, and leaving the select pointed at a preset the sheet
+  // no longer holds would name a ruleset nobody is playing.
   useEffect(() => {
-    if (presets.length === 0) return;
-    const effective = currentSettings.lobbySettings ?? currentSettings.settings ?? { autoStart: false };
-    setPresetId((prev) => {
-      const held = prev ? presets.find((p) => p.id === prev) : undefined;
-      if (held && presetMatches(held, currentSettings.houseRules, effective)) return prev;
-      return presets.find((p) => presetMatches(p, currentSettings.houseRules, effective))?.id ?? null;
-    });
-  }, [presets, currentSettings]);
+    setHouseRules(currentSettings.houseRules);
+    setCircuit(currentSettings.circuit);
+    setLobbySettings(currentSettings.lobbySettings ?? currentSettings.settings ?? { autoStart: false });
+    setPresetId(savedPresetId);
+    setSaveStatus('idle');
+  }, [currentSettings, savedPresetId]);
+
+  const setRule = <K extends keyof HouseRules>(key: K, value: HouseRules[K]) => {
+    setHouseRules((prev) => ({ ...prev, [key]: value }));
+    setSaveStatus('idle');
+  };
+  // initialViewCount is bounded by cardsPerPlayer server-side (internal/game/rules.go, cambia-817):
+  // the pregame peek cannot cover more cards than the hand holds, and an over-large value rejects
+  // the whole update_rules message. Lowering the deal size therefore pulls the peek down with it
+  // instead of leaving the panel holding a combination the server refuses.
+  const setCardsPerPlayer = (value: number) => {
+    setHouseRules((prev) => ({
+      ...prev,
+      cardsPerPlayer: value,
+      initialViewCount: Math.min(prev.initialViewCount ?? 2, value)
+    }));
+    setSaveStatus('idle');
+  };
+  const setCircuitRule = <K extends keyof CircuitSettings['rules']>(key: K, value: CircuitSettings['rules'][K]) => {
+    setCircuit((prev) => ({ ...prev, rules: { ...prev.rules, [key]: value } }));
+    setSaveStatus('idle');
+  };
 
   const activePreset = presets.find((p) => p.id === presetId);
-  const onPreset = !!activePreset && presetMatches(activePreset, houseRules, lobbySettings);
+  const onPreset = !!activePreset && presetMatchesRules(activePreset, houseRules, lobbySettings);
+
+  // Switching between two rule-identical presets moves no rule, so the sheet-versus-saved
+  // comparison cannot see it. It is still a change worth saving: the lobby would otherwise keep
+  // naming the ruleset the host just replaced (cambia-1123).
+  const hasChanges = useMemo(() => {
+    const effective = currentSettings.lobbySettings ?? currentSettings.settings ?? { autoStart: false };
+    return !jsonEqual(houseRules, currentSettings.houseRules) ||
+      !jsonEqual(circuit, currentSettings.circuit) ||
+      !jsonEqual(lobbySettings, effective) ||
+      (onPreset && presetId !== savedPresetId);
+  }, [houseRules, circuit, lobbySettings, currentSettings, onPreset, presetId, savedPresetId]);
+
   const presetValue = activePreset && onPreset ? activePreset.id : CUSTOM_PRESET_VALUE;
   const presetOptions = [
     ...presets.map((p) => ({ value: p.id, label: p.name })),
@@ -284,12 +276,17 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
     setSaveStatus('idle');
   };
 
+  // Save carries the preset id alongside the expanded sheet whenever the buffer is still on one.
+  // The service records it and echoes it back as lobby_state.preset_id, which is what lets the
+  // sheet name the ruleset the host chose rather than the first one holding those rules; without
+  // it, an update_rules that moves a rule clears the recorded id and the lobby goes back to being
+  // recognised by value (cambia-1123). The expanded sheet still travels, and lands on top of the
+  // preset server-side, so a departed sheet saves exactly as it did before.
   const save = () => {
     if (!isHost || locked) return;
-    sendMessage({
-      type: 'update_rules',
-      body: { rules: { houseRules, circuit, settings: lobbySettings } }
-    });
+    const rules: Record<string, unknown> = { houseRules, circuit, settings: lobbySettings };
+    if (onPreset && activePreset) rules.presetId = activePreset.id;
+    sendMessage({ type: 'update_rules', body: { rules } });
     setSaveStatus('saved');
     setTimeout(() => setSaveStatus('idle'), 2000);
   };

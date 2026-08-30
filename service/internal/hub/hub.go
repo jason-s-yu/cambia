@@ -1357,13 +1357,21 @@ func (h *Hub) buildLobbySnapshot(forUserID uuid.UUID) map[string]interface{} {
 	lob.Mu.Lock()
 	lobbyStatus := lob.GetLobbyStatusPayloadUnsafe()
 	snapshot := map[string]interface{}{
-		"lobby_id":     lob.ID.String(),
-		"host_id":      lob.HostUserID.String(),
-		"lobby_type":   lob.Type,
-		"game_mode":    lob.GameMode,
-		"in_game":      lob.InGame,
-		"game_id":      lob.GameID.String(),
-		"house_rules":  lob.HouseRules,
+		"lobby_id":    lob.ID.String(),
+		"host_id":     lob.HostUserID.String(),
+		"lobby_type":  lob.Type,
+		"game_mode":   lob.GameMode,
+		"in_game":     lob.InGame,
+		"game_id":     lob.GameID.String(),
+		"house_rules": lob.HouseRules,
+		// preset_id names the ruleset house_rules came from, or is empty for a sheet that is
+		// nobody's preset. Sent because the rules cannot answer it: every ranked queue plays the
+		// one ruleset MATCHMAKING.md 5.2 fixes, so a client matching house_rules against the
+		// preset list picks whichever preset is listed first and shows a lobby created from H2H
+		// Rapid as H2H Quick (cambia-1123). Always present, empty string included: an absent key
+		// and a recorded empty id read the same to a client, and only one of them means "the
+		// service has no answer".
+		"preset_id":    lob.PresetID,
 		"circuit":      lob.Circuit,
 		"settings":     lob.LobbySettings,
 		"lobby_status": lobbyStatus,

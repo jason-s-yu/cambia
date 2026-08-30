@@ -123,6 +123,7 @@ func (gs *GameServer) NewCambiaGameFromLobby(ctx context.Context, lob *lobby.Lob
 	houseRules := lob.HouseRules
 	circuit := lob.Circuit
 	queueID := lob.QueueID
+	presetID := lob.PresetID
 	lob.Mu.Unlock()
 
 	// A queue owns the rules of the games it produces. A matchmade lobby has no host setting
@@ -132,8 +133,16 @@ func (gs *GameServer) NewCambiaGameFromLobby(ctx context.Context, lob *lobby.Lob
 	// preset the client is shown for a queue the ruleset that queue actually plays (cambia-1088);
 	// before this, every queue played game.DefaultHouseRules and the T1C fix in MATCHMAKING.md 5
 	// existed only in the document.
+	//
+	// The lobby now carries that ruleset itself, from creation and again at match formation
+	// (cambia-1123), so houseRules above is already the queue's. What remains here is the
+	// assertion that the two agree: a disagreement means the lobby reached a game by some path
+	// that never stamped it, and the queue still wins, because the rule sheet its players read
+	// is the thing that would be wrong and the game they play is the thing that must not be.
 	if queueID != "" {
-		if preset, known := lobby.GetPreset(queueID); known {
+		if preset, known := lobby.GetPreset(queueID); known && houseRules != preset.HouseRules {
+			log.Printf("Lobby %s: house rules disagree with queue %s (lobby preset %q); the queue's ruleset wins and the lobby's rule sheet was showing something else",
+				lobbyID, queueID, presetID)
 			houseRules = preset.HouseRules
 		}
 	}
