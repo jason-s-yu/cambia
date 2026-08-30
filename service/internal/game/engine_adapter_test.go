@@ -286,6 +286,9 @@ func TestBeginPreGame_HonorsExposedDealRules(t *testing.T) {
 		}
 	})
 
+	// The reveal is read off the private_initial_cards payload, not off sync_state: since
+	// cambia-1094 the self-view hides every own card in every phase, so a sync snapshot can no
+	// longer tell a one-card peek from a two-card one.
 	t.Run("initial view count drives the pregame reveal", func(t *testing.T) {
 		hr := testHouseRules(0, 2)
 		hr.InitialViewCount = 1
@@ -295,10 +298,17 @@ func TestBeginPreGame_HonorsExposedDealRules(t *testing.T) {
 			engineIdx := g.PlayerToEngine[p.ID]
 			assert.Equal(t, uint8(1), g.Engine.Players[engineIdx].InitialPeekCount, "player %d peek count", i)
 
+			cards := g.pregameInitialCards(p.ID)
+			require.Lenf(t, cards, 1, "player %d: the reveal should name exactly the peeked card", i)
+			require.NotNil(t, cards[0].Idx)
+			assert.Equal(t, int(g.Engine.Players[engineIdx].InitialPeek[0]), *cards[0].Idx, "the reveal should name the engine's peeked slot")
+			assert.NotEmpty(t, cards[0].Rank, "the reveal carries the face")
+
 			hand := selfRevealedHand(g.GetCurrentObfuscatedGameState(p.ID), p.ID)
 			require.NotEmpty(t, hand)
-			assert.True(t, hand[0].Known, "the single peeked card stays visible to its owner")
-			assert.False(t, hand[1].Known, "slot 1 must not be revealed when only one card is peeked")
+			for slot, c := range hand {
+				assert.Falsef(t, c.Known, "slot %d: no own card is face-up in sync_state", slot)
+			}
 		}
 	})
 
@@ -308,6 +318,7 @@ func TestBeginPreGame_HonorsExposedDealRules(t *testing.T) {
 		g, players, _ := setupTestGame(t, 2, hr)
 
 		for _, p := range players {
+			assert.Empty(t, g.pregameInitialCards(p.ID), "no peek means no reveal")
 			hand := selfRevealedHand(g.GetCurrentObfuscatedGameState(p.ID), p.ID)
 			for slot, c := range hand {
 				assert.False(t, c.Known, "slot %d must stay hidden with no pregame peek", slot)

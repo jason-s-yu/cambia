@@ -529,6 +529,60 @@ Every time someone's turn is over, the server should automatically increment the
 }
 ```
 
+## Hand visibility
+
+No card in any hand is ever persistently face-up on the wire, the requesting player's own hand
+included. `private_sync_state` sends every hand slot, own and opponent, as an id plus its index
+with `known: false` and no `rank`/`suit`/`value`, in every phase: during the initial reveal, in
+live play, and in the repair snapshot a reconnecting player is sent.
+
+```json: server -> one client (own seat inside private_sync_state)
+{
+  "playerId": "{uuid}",
+  "handSize": 4,
+  "revealedHand": [
+    { "id": "{uuid}", "known": false, "idx": 0 },
+    { "id": "{uuid}", "known": false, "idx": 1 },
+    { "id": "{uuid}", "known": false, "idx": 2 },
+    { "id": "{uuid}", "known": false, "idx": 3 }
+  ],
+  "drawnCard": { "id": "{uuid}", "known": true, "rank": "K", "suit": "S", "value": 13 }
+}
+```
+
+The ids and indices are there for targeting, not for rendering: `action_special` names an own card
+by id (`peek_self`, `swap_blind`, `swap_peek`), and the slot count is what a client draws card
+backs from.
+
+This mirrors the physical game: you are shown two cards before the deal, they go face-down with
+everything else, and you play the round on memory. A snapshot that repeated a face you had already
+been shown would make every reveal permanent and remove the memory element entirely.
+
+Each reveal a player is entitled to therefore travels in its own event, once, and the client shows
+it for that window and then turns the card back down:
+
+| Reveal                        | Carrier                            | Window                              |
+|-------------------------------|------------------------------------|-------------------------------------|
+| Pregame peek                  | `private_initial_cards`            | the pre-game phase                  |
+| Card drawn from a pile        | `private_draw_stockpile`           | until it is discarded or replaced   |
+| 7/8 peek own, 9/10 peek other | `private_special_action_success`   | a short client-side hold            |
+| King look (own and target)    | `private_special_action_success`   | the confirm step, then a hold       |
+
+`drawnCard` in `private_sync_state` is the single exception, and only while it is pending: a card
+drawn and not yet placed is in the player's hand rather than their fan, and the client needs its
+face to choose between discarding and replacing it. Once it is placed, its slot is a face-down id
+like every other.
+
+A player who reconnects while the pre-game phase is still running is re-sent
+`private_initial_cards` after their `private_sync_state`. That event is the only carrier of those
+faces, so without the re-fire a reload during the reveal would cost the returning player the peek
+for the whole round.
+
+The server still records what each seat has legitimately been shown
+(`CardUUIDTracker.SeenByPlayer`, keyed by card id so knowledge travels with a card across swaps).
+That record is server-side reasoning about knowledge, not a rendering gate: nothing in it reaches
+a client.
+
 ## Disconnect grace
 
 A dropped socket does not forfeit on the spot. The seat is held for the lobby's

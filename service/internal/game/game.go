@@ -359,46 +359,15 @@ func (g *CambiaGame) BeginPreGame() {
 	// private_initial_cards / game_player_turn events land on already-populated client state.
 	g.broadcastSyncStateToAll()
 
-	// Privately reveal each player's pregame peek. Deal() decides how many slots that is from
-	// the initialViewCount house rule (clamped to the hand size) and records them in
-	// InitialPeek/InitialPeekCount, so the count is read from the engine rather than assumed:
-	// a lobby that peeks one card, or none at all, must not have slot 0 revealed anyway.
+	// Privately reveal each player's pregame peek. This event is the ONLY carrier of those faces:
+	// sync_state hides every own card unconditionally (cambia-1094), so a client that misses this
+	// frame plays the round blind rather than picking the peek up from the next snapshot.
 	for _, p := range g.Players {
 		engineIdx := g.PlayerToEngine[p.ID]
-		peekIdxs := g.Engine.Players[engineIdx].InitialPeek
-
-		makeInitialCard := func(slotIdx uint8) *EventCard {
-			cardUUID := g.CardTracker.Players[engineIdx].HandUUIDs[slotIdx]
-			card := g.Engine.Players[engineIdx].Hand[slotIdx]
-			// Record the pregame peek: this card is now legitimately seen by its owner.
-			g.markCardSeen(engineIdx, cardUUID)
-			idx := int(slotIdx)
-			return &EventCard{
-				ID:    cardUUID,
-				Rank:  engineRankToString(card.Rank()),
-				Suit:  engineSuitToString(card.Suit()),
-				Value: int(card.Value()),
-				Idx:   &idx,
-				User:  &EventUser{ID: p.ID},
-			}
-		}
-
-		handLen := g.Engine.Players[engineIdx].HandLen
-		if handLen == 0 {
+		if g.Engine.Players[engineIdx].HandLen == 0 {
 			log.Printf("Warning: Player %s has 0 cards during pregame reveal in game %s.", p.ID, g.ID)
-			g.firePrivateInitialCards(p.ID, nil)
-			continue
 		}
-
-		peekCount := g.Engine.Players[engineIdx].InitialPeekCount
-		if peekCount > handLen {
-			peekCount = handLen
-		}
-		cards := make([]*EventCard, 0, peekCount)
-		for i := uint8(0); i < peekCount; i++ {
-			cards = append(cards, makeInitialCard(peekIdxs[i]))
-		}
-		g.firePrivateInitialCards(p.ID, cards)
+		g.firePrivateInitialCards(p.ID, g.pregameInitialCards(p.ID))
 	}
 
 	// Schedule the transition to the main game phase. PreGameDuration is configurable (see
@@ -451,6 +420,52 @@ func (g *CambiaGame) StartGame() {
 // Deprecated: Use BeginPreGame() which handles the pre-game reveal and timer.
 func (g *CambiaGame) Start() {
 	g.BeginPreGame()
+}
+
+// pregameInitialCards builds playerID's pregame peek reveal: one EventCard per slot the engine
+// peeked, in InitialPeek order. Deal() decides how many slots that is from the initialViewCount
+// house rule (clamped to the hand size) and records them in InitialPeek/InitialPeekCount, so the
+// count is read from the engine rather than assumed: a lobby that peeks one card, or none at all,
+// must not have slot 0 revealed anyway. Returns nil for a player with no engine seat or an empty
+// hand. Assumes lock is held by caller.
+//
+// Called once from BeginPreGame and again from HandleReconnect for a player who returns inside
+// the pregame window. Rebuilding rather than caching keeps the reveal honest about the hand as it
+// stands; nothing moves cards during the reveal, so the two calls name the same slots.
+func (g *CambiaGame) pregameInitialCards(playerID uuid.UUID) []*EventCard {
+	engineIdx, ok := g.PlayerToEngine[playerID]
+	if !ok {
+		return nil
+	}
+	handLen := g.Engine.Players[engineIdx].HandLen
+	if handLen == 0 {
+		return nil
+	}
+	peekCount := g.Engine.Players[engineIdx].InitialPeekCount
+	if peekCount > handLen {
+		peekCount = handLen
+	}
+	peekIdxs := g.Engine.Players[engineIdx].InitialPeek
+
+	cards := make([]*EventCard, 0, peekCount)
+	for i := uint8(0); i < peekCount; i++ {
+		slotIdx := peekIdxs[i]
+		cardUUID := g.CardTracker.Players[engineIdx].HandUUIDs[slotIdx]
+		card := g.Engine.Players[engineIdx].Hand[slotIdx]
+		// Record the pregame peek: this card is now legitimately seen by its owner. Idempotent, so
+		// a reconnect re-fire changes nothing.
+		g.markCardSeen(engineIdx, cardUUID)
+		idx := int(slotIdx)
+		cards = append(cards, &EventCard{
+			ID:    cardUUID,
+			Rank:  engineRankToString(card.Rank()),
+			Suit:  engineSuitToString(card.Suit()),
+			Value: int(card.Value()),
+			Idx:   &idx,
+			User:  &EventUser{ID: playerID},
+		})
+	}
+	return cards
 }
 
 // firePrivateInitialCards sends the pregame peek reveal to a specific player. cards holds one
@@ -843,6 +858,14 @@ func (g *CambiaGame) HandleReconnect(playerID uuid.UUID, conn *websocket.Conn) {
 
 			// Send sync state immediately to the reconnected player.
 			g.sendSyncState(playerID)
+
+			// A player who returns while the initial reveal is still running gets it again. The
+			// snapshot just sent carries no own faces at all (cambia-1094), and private_initial_cards
+			// is the only frame that ever carries them, so without this a reload during the peek
+			// costs the player the whole reveal for the rest of the round.
+			if g.PreGameActive && !g.GameOver {
+				g.firePrivateInitialCards(playerID, g.pregameInitialCards(playerID))
+			}
 
 			// Broadcast updated state to others.
 			g.broadcastSyncStateToAll()

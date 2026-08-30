@@ -99,7 +99,12 @@ func TestSnapPenaltyCardStaysUnseen(t *testing.T) {
 	require.NotNil(t, self, "the snapper should appear in its own sync state")
 	require.Len(t, self.RevealedHand, handBefore+f.game.HouseRules.PenaltyDrawCount)
 
-	assert.True(t, self.RevealedHand[seenSlot].Known, "control: the card the snapper played is one they had seen")
+	// The control is the seen-set, not the wire: since cambia-1094 sync_state renders every own
+	// card face-down whether or not its owner has seen it, so "face-down on the wire" is no longer
+	// evidence about a single card. The played card is one the snapper has seen and it is face-down
+	// too; what pins the penalty cards as unseen is their absence from SeenByPlayer.
+	assert.True(t, f.game.hasSeenCard(f.snapperIdx, f.snapCardID), "control: the card the snapper played is one they had seen")
+	assert.False(t, self.RevealedHand[seenSlot].Known, "no own card is ever face-up in sync_state (cambia-1094)")
 
 	for slot := handBefore; slot < len(self.RevealedHand); slot++ {
 		card := self.RevealedHand[slot]
