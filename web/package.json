@@ -21,7 +21,8 @@
     "test:circuit-copy": "node --test scripts/test-circuit-copy.mjs",
     "test:lock": "node --test scripts/test-hand-lock.mjs",
     "test:pregame-peek": "node --test scripts/test-pregame-peek.mjs",
-    "test": "node --test scripts/test-resend-decision.mjs scripts/test-snap-success.mjs scripts/test-snap-fill.mjs scripts/test-modal-focus.mjs scripts/test-card-names.mjs scripts/test-hand-layout.mjs scripts/test-circuit-copy.mjs scripts/test-hand-lock.mjs scripts/test-pregame-peek.mjs",
+    "test:preset": "node --test scripts/test-lobby-preset.mjs",
+    "test": "node --test scripts/test-resend-decision.mjs scripts/test-snap-success.mjs scripts/test-snap-fill.mjs scripts/test-modal-focus.mjs scripts/test-card-names.mjs scripts/test-hand-layout.mjs scripts/test-circuit-copy.mjs scripts/test-hand-lock.mjs scripts/test-pregame-peek.mjs scripts/test-lobby-preset.mjs",
     "measure-dev-transfer": "node scripts/measure-dev-transfer.mjs"
   },
   "dependencies": {

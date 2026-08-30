@@ -154,6 +154,7 @@ export const useCurrentLobbyStore = create<CurrentLobbyState>((set, get) => ({
 					inGame: payload.in_game ?? false,
 					game_id: payload.game_id ?? null,
 					houseRules: payload.house_rules ?? state.lobbyDetails?.houseRules ?? {},
+					presetId: payload.preset_id ?? state.lobbyDetails?.presetId ?? '',
 					circuit: payload.circuit ?? state.lobbyDetails?.circuit ?? {},
 					lobbySettings: payload.settings ?? state.lobbyDetails?.lobbySettings ?? { autoStart: false },
 					settings: payload.settings ?? state.lobbyDetails?.settings ?? { autoStart: false },
@@ -243,6 +244,11 @@ export const useCurrentLobbyStore = create<CurrentLobbyState>((set, get) => ({
 							inGame: message.in_game ?? false,
 							game_id: message.game_id ?? null,
 							houseRules: message.house_rules ?? state.lobbyDetails?.houseRules ?? {},
+							// Which ruleset those rules are, named by the service rather than
+							// recognised by value: the six queue presets hold identical rules,
+							// so matching values names whichever one is listed first
+							// (cambia-1123). Always sent, empty for a custom sheet.
+							presetId: message.preset_id ?? '',
 							circuit: message.circuit ?? state.lobbyDetails?.circuit ?? {},
 							lobbySettings: message.settings ?? state.lobbyDetails?.lobbySettings ?? { autoStart: false },
 							settings: message.settings ?? state.lobbyDetails?.settings ?? { autoStart: false },
