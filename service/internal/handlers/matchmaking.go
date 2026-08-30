@@ -25,6 +25,10 @@ const matchNoticeSendTimeout = 2 * time.Second
 // go there. Before cambia-933 only the host hub was notified, and the second party was left
 // sitting in its own lobby with no way to reach the match.
 //
+// The lobby that holds the match gets a system host at the same time (cambia-1087): from here on
+// no player can edit its rules, force its start, or requeue it, because a quick play match runs
+// on its queue's settings and one party's leader is not the arbiter of everybody else's game.
+//
 // A party whose members all closed their tabs is not seated: consolidating it would move the
 // live players into a ready check the absent side can never answer, and nothing times that check
 // out (cambia-933 F1). When that leaves the match short, no notice goes out at all and the
@@ -72,8 +76,15 @@ func (gs *GameServer) HandleMatchFormed(result matchmaking.MatchResult) {
 		return
 	}
 
+	// The match lobby is run by its queue from here on, not by the player who happened to open
+	// it: every queue is ranked, the rules are the queue's, and the start is the ready check's,
+	// so leaving one party's leader holding host powers over everybody else's match is a
+	// privilege nothing in a matchmade game justifies (cambia-1087). Handing the role to the
+	// system before the roster below is built is what makes every seat report IsHost false.
+	// The pre-match party lobby keeps its leader up to this point, which is what DELETE
+	// /lobby/{id}/search and the cancel_search frame are gated on.
 	hostLob.Mu.Lock()
-	hostUserID := hostLob.HostUserID
+	hostLob.AdoptSystemHostUnsafe()
 	hostLob.Mu.Unlock()
 
 	players := make([]hub.MatchedPlayer, 0, len(lobbyIDs))
@@ -96,7 +107,9 @@ func (gs *GameServer) HandleMatchFormed(result matchmaking.MatchResult) {
 			players = append(players, hub.MatchedPlayer{
 				UserID:   uid,
 				Username: username,
-				IsHost:   uid == hostUserID,
+				// Nobody hosts a matchmade match: the lobby's host role went to the system
+				// above, so no seat in this roster carries host powers (cambia-1087).
+				IsHost: false,
 			})
 
 			// Membership of the match lobby is what the WebSocket upgrade, the lobby roster and

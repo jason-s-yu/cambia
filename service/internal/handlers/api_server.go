@@ -108,7 +108,15 @@ func NewGameServer() *GameServer {
 func (gs *GameServer) NewCambiaGameFromLobby(ctx context.Context, lob *lobby.Lobby, playerIDs []uuid.UUID, usernames map[uuid.UUID]string, emitter game.Emitter) *game.CambiaGame {
 	lob.Mu.Lock()
 	lobbyID := lob.ID
+	// The lobbies row this game hangs off has host_user_id NOT NULL with an FK to users, and a
+	// matchmade lobby's host is a sentinel with no users row behind it, so a system-hosted lobby
+	// records its creator here instead (cambia-1087). Without the substitution the whole
+	// UpsertInitialGameState transaction fails the FK and no games row is written for a
+	// matchmade match at all, taking its rating with it.
 	hostID := lob.HostUserID
+	if lob.SystemHostedUnsafe() {
+		hostID = lob.CreatorUserID
+	}
 	lobbyType := lob.Type
 	gameMode := lob.GameMode
 	rated := lob.Mode == "ranked"

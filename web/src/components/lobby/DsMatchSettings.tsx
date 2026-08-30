@@ -313,13 +313,21 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
             label='Auto-start when all ready'
           />
         )}
-        {isHost && !locked ? (
+        {/* A locked sheet reads the same for everyone, host or not: the queue fixed these rules
+            when it paired the players, and a matchmade lobby has no player host to point at
+            anyway (cambia-1087). Pointing at Create lobby is the answer to what the copy leaves
+            people wanting, which is a table they can set their own rules on. */}
+        {locked ? (
+          <span style={{ fontSize: 'var(--ds-text-sm)', color: 'var(--text-tertiary)' }}>
+            The queue sets these rules. Use Create lobby for your own.
+          </span>
+        ) : isHost ? (
           <Button variant='primary' size='sm' disabled={!hasChanges} onClick={save}>
             {saveStatus === 'saved' ? 'Saved' : 'Save rules'}
           </Button>
         ) : (
           <span style={{ fontSize: 'var(--ds-text-sm)', color: 'var(--text-tertiary)' }}>
-            {isHost ? 'Rules are locked for ranked play' : 'Host sets the rules'}
+            Host sets the rules
           </span>
         )}
       </div>

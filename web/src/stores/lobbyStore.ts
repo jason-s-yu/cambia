@@ -160,6 +160,7 @@ export const useCurrentLobbyStore = create<CurrentLobbyState>((set, get) => ({
 					lobby_status: { users: usersState },
 					your_id: payload.your_id,
 					your_is_host: payload.your_is_host ?? (payload.your_id === payload.host_id),
+					system_host: payload.system_host ?? state.lobbyDetails?.system_host ?? false,
 					lobby_id: payload.lobby_id ?? state.currentLobbyId,
 				};
 			}
@@ -248,6 +249,10 @@ export const useCurrentLobbyStore = create<CurrentLobbyState>((set, get) => ({
 							lobby_status: { users: usersState },
 							your_id: message.your_id,
 							your_is_host: message.your_is_host ?? (message.your_id === message.host_id),
+							// A matchmade lobby has no player host at all (cambia-1087). Kept
+							// separate from your_is_host, which cannot tell a lobby somebody
+							// else hosts from one nobody does.
+							system_host: message.system_host ?? false,
 							lobby_id: message.lobby_id
 						};
 						const phaseUpdate = message.phase ? { phase: message.phase as LobbyPhase } : {};

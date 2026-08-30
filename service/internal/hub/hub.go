@@ -87,6 +87,11 @@ func (p LobbyPhase) String() string {
 }
 
 // MatchedPlayer represents a player matched by the matchmaker.
+//
+// IsHost is false for every seat of a matchmade match and has been since cambia-1087: the lobby
+// holding the match is system-hosted, so the field survives only for the clients that read it
+// off match_found. It is not a permission - handleLobbyMsg re-reads the lobby's own HostUserID
+// on every host-gated frame.
 type MatchedPlayer struct {
 	UserID   uuid.UUID
 	Username string
@@ -704,6 +709,24 @@ func (h *Hub) handleLobbyMsg(msg ClientMsg) {
 		})
 
 	case "update_rules":
+		// The rules lock is checked before the host gate, not after: a matchmade lobby has no
+		// player host at all (cambia-1087), so ordering the checks the other way answered every
+		// sender with "only the host can update rules" - true, and a description of a role
+		// nobody in that lobby can hold, rather than the actual reason the rules will not move.
+		//
+		// A ranked or matchmade lobby has its rules fixed by the queue it entered, not by its
+		// host: the queue config is what the matchmaker used to pair the players and what the
+		// game inherits at creation (NewCambiaGameFromLobby), so a mid-search or post-match rule
+		// edit would leave the two sides of the match disagreeing about what they agreed to play
+		// (cambia-966). Type and Mode are only ever assigned at creation (CreateLobbyHandler), so
+		// this is a stable read for as long as the lobby exists.
+		h.Lobby.Mu.Lock()
+		locked := h.Lobby.Type == "matchmaking" || h.Lobby.Mode == "ranked"
+		h.Lobby.Mu.Unlock()
+		if locked {
+			conn.SendEnvelope(h.errEnvelope("the rules for this match are locked by its queue and cannot be changed"))
+			return
+		}
 		if !h.isHost(msg.UserID) {
 			conn.SendEnvelope(h.errEnvelope("only the host can update rules"))
 			return
@@ -716,18 +739,6 @@ func (h *Hub) handleLobbyMsg(msg ClientMsg) {
 			return
 		}
 		h.Lobby.Mu.Lock()
-		// A ranked or matchmade lobby has its rules fixed by the queue it entered, not by its
-		// host: the queue config is what the matchmaker used to pair the players and what the
-		// game inherits at creation (NewCambiaGameFromLobby), so a mid-search or post-match rule
-		// edit would leave the two sides of the match disagreeing about what they agreed to play
-		// (cambia-966). Type and Mode are only ever assigned at creation (CreateLobbyHandler), so
-		// this is a stable read for as long as the lobby exists.
-		locked := h.Lobby.Type == "matchmaking" || h.Lobby.Mode == "ranked"
-		if locked {
-			h.Lobby.Mu.Unlock()
-			conn.SendEnvelope(h.errEnvelope("house rules are locked for a ranked matchmaking lobby"))
-			return
-		}
 		err := h.Lobby.UpdateUnsafe(payload.Rules)
 		h.Lobby.Mu.Unlock()
 		if err != nil {
@@ -736,6 +747,16 @@ func (h *Hub) handleLobbyMsg(msg ClientMsg) {
 		}
 
 	case "start_game":
+		// A matchmade lobby starts itself. Its host role belongs to the system (cambia-1087),
+		// so there is no player to force the start and none is needed: auto-start is on for
+		// every lobby the create handler builds and a queue-backed one cannot turn it off, so
+		// the last ready seat begins the countdown through the "ready" case above. Answered
+		// with what will start the game rather than with the host gate's wording, which would
+		// point at a role nobody holds.
+		if h.Lobby != nil && h.Lobby.SystemHosted() {
+			conn.SendEnvelope(h.errEnvelope("this match starts on its own once every player is ready"))
+			return
+		}
 		if !h.isHost(msg.UserID) {
 			conn.SendEnvelope(h.errEnvelope("only the host can start the game"))
 			return
@@ -816,6 +837,11 @@ func (h *Hub) handleSearchingMsg(msg ClientMsg) {
 	}
 	switch msg.Type {
 	case "cancel_search":
+		// Still the party leader's call, and deliberately so: the system host lands at match
+		// formation (handlers.HandleMatchFormed), which also moves the hub out of
+		// PhaseSearching, so a lobby that can reach this case always still has its human leader
+		// (cambia-1087). Pulling a party out of the queue is the one host power a quick play
+		// party keeps, because the party is theirs until a match exists.
 		if !h.isHost(msg.UserID) {
 			conn.SendEnvelope(h.errEnvelope("only the host can cancel search"))
 			return
@@ -867,6 +893,14 @@ func (h *Hub) handleMatchFound(notice MatchNotice) {
 		"is_ranked":    h.IsRanked,
 		"players":      notice.Players,
 	})
+
+	// The hosting lobby just lost its player host to the system (cambia-1087), and match_found
+	// does not carry lobby state. Without this the party leader who queued keeps a Host badge
+	// and a Start game button from the lobby_state they were sent on connect, both of which the
+	// service now refuses, until some unrelated event happens to rebroadcast the roster.
+	if hosting {
+		h.broadcastLobbyUpdate()
+	}
 }
 
 // Matched returns a send-only channel that the matchmaker uses to deliver a formed match.
@@ -1336,6 +1370,12 @@ func (h *Hub) buildLobbySnapshot(forUserID uuid.UUID) map[string]interface{} {
 		"phase":        h.Phase.String(),
 		"your_id":      forUserID.String(),
 		"your_is_host": forUserID == lob.HostUserID,
+		// system_host says the nil host_id is deliberate rather than missing: a matchmade
+		// lobby's host role belongs to the queue, so every seat reads your_is_host false and
+		// lobby_status marks no seat is_host (cambia-1087). A client that only checked
+		// your_is_host could not tell "somebody else hosts" from "nobody does", and the two
+		// call for different copy.
+		"system_host": lob.SystemHostedUnsafe(),
 	}
 	lob.Mu.Unlock()
 

@@ -55,6 +55,27 @@ func matchmakingQueueID(lob *lobby.Lobby, userID uuid.UUID) (string, error) {
 	return "", errors.New("Matchmaking lobby requires queueID")
 }
 
+// ruleOverrideKeys are the POST /lobby/create body keys that carry a rule set. Listed in a fixed
+// order so the 400 a caller gets names the same key every time for the same body, rather than
+// whichever one Go's randomised map iteration reached first.
+//
+// "lobbySettings" is in the list even though lobby.UpdateUnsafe reads the auto-start block from
+// "settings": rest_api.md documents the request body with "lobbySettings", so a caller who sends
+// it means to set a rule and is owed the same refusal as one who spells it the way the handler
+// reads.
+var ruleOverrideKeys = []string{"houseRules", "circuit", "settings", "lobbySettings"}
+
+// firstRuleOverrideKey returns the first rule-carrying key present in a create body, and whether
+// there was one.
+func firstRuleOverrideKey(reqBody map[string]interface{}) (string, bool) {
+	for _, key := range ruleOverrideKeys {
+		if _, present := reqBody[key]; present {
+			return key, true
+		}
+	}
+	return "", false
+}
+
 // CreateLobbyHandler handles requests to create a new ephemeral lobby.
 // It authenticates the user, creates a lobby with default or provided settings,
 // configures it for automatic cleanup via OnEmpty, adds it to the store,
@@ -96,7 +117,10 @@ func CreateLobbyHandler(gs *GameServer) http.HandlerFunc {
 			if name, ok := reqBody["name"].(string); ok {
 				lob.Name = name
 			}
-			lob.Update(reqBody) // Apply overrides for rules/settings.
+			// The rules/settings overrides are deliberately NOT applied here. Whether this
+			// lobby may carry client-supplied rules at all depends on whether it resolves to a
+			// matchmaking queue, and that is only known once the branch below has read the
+			// queue config, so lob.Update runs after it (cambia-1089).
 		}
 
 		// Validate the lobby type before anything derived from it.
@@ -104,6 +128,10 @@ func CreateLobbyHandler(gs *GameServer) http.HandlerFunc {
 			http.Error(w, "Invalid lobby type specified", http.StatusBadRequest)
 			return
 		}
+
+		// queueBacked records that a configured queue answers for this lobby, whichever branch
+		// below resolved it. A queue owns the rules of every match it forms.
+		queueBacked := false
 
 		// A matchmaking lobby is defined by its queue, not by a client-supplied game mode: the
 		// queue config carries the player count, the round count and whether the queue is
@@ -143,6 +171,7 @@ func CreateLobbyHandler(gs *GameServer) http.HandlerFunc {
 			} else {
 				lob.Mode = "casual"
 			}
+			queueBacked = true
 		} else if lob.QueueID != "" {
 			// A public or private lobby may legitimately carry a queue id: SearchLobbyHandler
 			// gates on host, Searching and QueueID alone, so a standing lobby can queue its
@@ -164,6 +193,35 @@ func CreateLobbyHandler(gs *GameServer) http.HandlerFunc {
 				lob.Mode = "ranked"
 			} else {
 				lob.Mode = "casual"
+			}
+			queueBacked = true
+		}
+
+		// Apply the client's rules and settings, or refuse them outright when a queue answers
+		// for this lobby.
+		//
+		// The rules lock that cambia-966 put on update_rules only ever covered the WebSocket, so
+		// the create call was the way around it: POST /lobby/create
+		// {"type":"matchmaking","queueID":"h2h_quickplay","houseRules":{"cardsPerPlayer":2}}
+		// seated a rated match of a public queue on rules its players never agreed to, because
+		// lob.Update ran before the branch above had worked out that a queue was involved
+		// (cambia-1089). The queue config is the whole rule set for the matches it forms; a
+		// caller who wants their own rules opens a private or public lobby with no queue id.
+		//
+		// Refused rather than silently dropped: the only client that sends these keys alongside
+		// a queue id is one that expects them to take effect, and a 400 says so where a silent
+		// win-by-default leaves it believing the match runs on its numbers.
+		if reqBody != nil {
+			if queueBacked {
+				if key, present := firstRuleOverrideKey(reqBody); present {
+					http.Error(w, "A matchmaking queue sets its own rules: remove "+key+" or create a lobby without a queueID", http.StatusBadRequest)
+					return
+				}
+			} else {
+				// Error still discarded, as before this change: an out-of-range house rule
+				// leaves the lobby on its defaults rather than failing the create. Widening
+				// that into a 400 is a separate call from this one (cambia-1089).
+				lob.Update(reqBody)
 			}
 		}
 
