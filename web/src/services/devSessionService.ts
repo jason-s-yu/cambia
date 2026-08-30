@@ -75,5 +75,8 @@ export const loginToTab = async (email: string, password: string): Promise<TabId
 export const mintForIntent = async (intent: BootIntent): Promise<TabIdentity | null> => {
   if (intent.kind === 'dev-account') return mintDevAccount(intent.name);
   if (intent.kind === 'guest') return mintTabGuest();
-  return { token: intent.token, label: 'pinned' };
+  // Unreached in practice: consumeBootIdentity resolves a `token` intent
+  // itself and never calls this mint (lib/tabSession.ts). Kept correct so a
+  // future caller does not silently drop the handed-over label.
+  return { token: intent.token, label: intent.label ?? 'pinned' };
 };

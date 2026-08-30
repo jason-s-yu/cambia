@@ -54,9 +54,18 @@ const AppLayout: React.FC = () => {
 		return () => mq.removeEventListener('change', resolve);
 	}, [theme]);
 
+	// A pinned tab's logout only drops its own token and re-probes the shared
+	// cookie (authStore.logout, cambia-1149): that re-probe can land signed in
+	// as whoever the cookie belongs to. Routing to /login unconditionally threw
+	// that answer away, so a reload came back on the dashboard as the cookie's
+	// guest instead of the login screen the tab had just navigated to. The
+	// store's post-logout state is what /login is actually gated on: navigate
+	// there only when it says signed out.
 	const handleLogout = async () => {
 		await logout();
-		navigate('/login');
+		if (!useAuthStore.getState().isAuthenticated) {
+			navigate('/login');
+		}
 	};
 
 	// Headline rating: the 1v1 (head-to-head) pool, matching the dashboard hero

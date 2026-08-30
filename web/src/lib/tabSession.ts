@@ -63,8 +63,13 @@ export type BootIntent =
   | { kind: 'dev-account'; name: string }
   /** `?as=guest`: mint a fresh guest for this tab alone. */
   | { kind: 'guest' }
-  /** `#tab=<jwt>`: pin a token handed over by another tab. */
-  | { kind: 'token'; token: string };
+  /**
+   * `#tab=<jwt>`: pin a token handed over by another tab.
+   * `label` rides a second fragment field (`&label=<name>`) written by the
+   * tab that made the handoff; null when the fragment carried none, which
+   * falls back to the token's short subject rather than losing the name.
+   */
+  | { kind: 'token'; token: string; label: string | null };
 
 /** A pinned identity: the token that proves it and the name to show for it. */
 export interface TabIdentity {
@@ -282,12 +287,15 @@ export function readBootIntent(href: string): BootRequest {
 
   const hash = url.hash.startsWith('#') ? url.hash.slice(1) : url.hash;
   if (hash.startsWith('tab=')) {
-    const token = decodeURIComponent(hash.slice('tab='.length));
+    const fields = hash.split('&');
+    const token = decodeURIComponent(fields[0].slice('tab='.length));
     const cleanedHref = url.pathname + url.search;
     if (!token) {
       return { intent: null, cleanedHref, error: 'Ignored an empty #tab= handoff.' };
     }
-    return { intent: { kind: 'token', token }, cleanedHref, error: null };
+    const labelField = fields.slice(1).find((field) => field.startsWith('label='));
+    const label = labelField ? decodeURIComponent(labelField.slice('label='.length)) : null;
+    return { intent: { kind: 'token', token, label }, cleanedHref, error: null };
   }
 
   return { intent: null, cleanedHref: null, error: null };
@@ -329,7 +337,7 @@ export async function consumeBootIdentity(mint: TabMinter): Promise<BootIntent |
 
   try {
     const identity = intent.kind === 'token'
-      ? { token: intent.token, label: shortSubject(intent.token) || 'pinned' }
+      ? { token: intent.token, label: intent.label || shortSubject(intent.token) || 'pinned' }
       : await mint(intent);
     if (identity) {
       pinTab(identity.token, identity.label);
@@ -354,7 +362,12 @@ export function describeMintFailure(intent: BootIntent, error: unknown): string 
   return `Could not pin the ${who}. Staying on the shared session.`;
 }
 
-/** The URL that opens a new tab already pinned to `token`. */
-export function handoffHref(origin: string, pathname: string, token: string): string {
-  return `${origin}${pathname}#tab=${encodeURIComponent(token)}`;
+/**
+ * The URL that opens a new tab already pinned to `token`, carrying `label` as
+ * a second fragment field so the new tab's pill and stored label read the
+ * account name instead of falling back to the token's short subject.
+ */
+export function handoffHref(origin: string, pathname: string, token: string, label?: string | null): string {
+  const base = `${origin}${pathname}#tab=${encodeURIComponent(token)}`;
+  return label ? `${base}&label=${encodeURIComponent(label)}` : base;
 }

@@ -132,15 +132,13 @@ const DevSessionSwitcher: React.FC = () => {
     pillRef.current?.focus();
   }, []);
 
-  // Escape closes and hands focus back to the pill; Tab cycles inside the
-  // panel. A switcher that swallowed focus would be worse than no switcher:
-  // it sits over a game table that is played from the keyboard.
+  // Tab cycles inside the panel. A switcher that swallowed focus would be
+  // worse than no switcher: it sits over a game table that is played from the
+  // keyboard. Escape is handled at the document level below, not here: this
+  // handler only fires when focus is already inside the panel, and a
+  // programmatic focus move (a mint, an unpin) can leave it elsewhere while
+  // the panel is still open.
   const onPanelKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === 'Escape') {
-      event.stopPropagation();
-      close();
-      return;
-    }
     if (event.key !== 'Tab') return;
     const panel = panelRef.current;
     if (!panel) return;
@@ -157,6 +155,21 @@ const DevSessionSwitcher: React.FC = () => {
     const first = panelRef.current?.querySelector<HTMLElement>(FOCUSABLE);
     first?.focus();
   }, [open]);
+
+  // Escape closes the panel and hands focus back to the pill, no matter where
+  // focus is: bound to the document rather than the panel, on capture like
+  // Modal's own Escape handler (ds/core/Modal.tsx), so a focus move away from
+  // the panel does not leave it stuck open. Removed the moment the panel closes.
+  useEffect(() => {
+    if (!open) return;
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.stopPropagation();
+      close();
+    };
+    document.addEventListener('keydown', onEscape, true);
+    return () => document.removeEventListener('keydown', onEscape, true);
+  }, [open, close]);
 
   /**
    * Pins the token an action produced, then re-reads who this tab now is.
@@ -199,7 +212,7 @@ const DevSessionSwitcher: React.FC = () => {
   const openNewTab = () => {
     const token = getTabToken();
     if (!token) return;
-    window.open(handoffHref(window.location.origin, window.location.pathname, token), '_blank');
+    window.open(handoffHref(window.location.origin, window.location.pathname, token, label), '_blank');
   };
 
   const unpin = async () => {
@@ -350,9 +363,6 @@ const DevSessionSwitcher: React.FC = () => {
         aria-label={`Dev session: ${identity.pill}`}
         style={PILL}
         onClick={() => setOpen((was) => !was)}
-        onKeyDown={(event) => {
-          if (event.key === 'Escape' && open) close();
-        }}
         data-testid='dev-session-pill'
       >
         <span
