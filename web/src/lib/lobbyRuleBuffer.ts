@@ -29,6 +29,11 @@ export interface RuleSeed<H, C, S> {
   settings: S;
 }
 
+/** A rule sheet plus the ruleset it names, which is what Save sends and what it is measured against. */
+export interface RuleBaseline<H, C, S> extends RuleSeed<H, C, S> {
+  presetId: string | null;
+}
+
 export interface RuleBuffer<H, C, S> extends RuleSeed<H, C, S> {
   /** The preset the buffer is on, or null for a sheet that is nobody's preset. */
   presetId: string | null;
@@ -40,6 +45,17 @@ export interface RuleBuffer<H, C, S> extends RuleSeed<H, C, S> {
   touched: boolean;
   /** The saved lobby the buffer was seeded from, which is what a 'saved' action is measured against. */
   seed: RuleSeed<H, C, S>;
+  /**
+   * The sheet as Save last sent it, held until the service echoes it back, and null the rest of
+   * the time (cambia-1126 item 3).
+   *
+   * Save is offered whenever the buffer differs from what the lobby holds, and update_rules takes
+   * a round trip to move what the lobby holds. Measured against the saved lobby alone, the button
+   * therefore stayed live on the sheet that had just been sent, so Save read Saved and was still
+   * a control: every further click resent the same rules. Measured against this, a sent sheet is
+   * nothing left to save, and Save comes back exactly when the host moves a rule off it.
+   */
+  submitted: RuleBaseline<H, C, S> | null;
 }
 
 export type RuleAction<H, C, S> =
@@ -50,6 +66,8 @@ export type RuleAction<H, C, S> =
   | { type: 'settings'; settings: S }
   /** A preset picked from the Ruleset select: it fills the rules and names itself. */
   | { type: 'preset'; presetId: string; houseRules: H; settings: S }
+  /** Save has gone out. `presetId` is the ruleset id that travelled with it, null for a custom sheet. */
+  | { type: 'submitted'; presetId: string | null }
   | { type: 'saveStatus'; status: SaveStatus };
 
 function jsonEqual(a: unknown, b: unknown): boolean {
@@ -77,8 +95,46 @@ export function seedRuleBuffer<H, C, S>(lobby: RuleSeed<H, C, S>, presetId: stri
     presetId,
     saveStatus: 'idle',
     touched: false,
-    seed: lobby
+    seed: lobby,
+    submitted: null
   };
+}
+
+/**
+ * What Save is measured against: the sheet last sent while its echo is still outstanding, and the
+ * saved lobby the rest of the time.
+ *
+ * The lobby is passed in rather than read off `seed`, because the two can differ by a ruleset id:
+ * a lobby whose rules did not move does not reseed the buffer, and the id resolved against a
+ * late-arriving preset list is carried onto it separately.
+ */
+function saveBaseline<H, C, S>(
+  buffer: RuleBuffer<H, C, S>,
+  lobby: RuleSeed<H, C, S>,
+  presetId: string | null
+): RuleBaseline<H, C, S> {
+  return buffer.submitted ?? { ...lobby, presetId };
+}
+
+/**
+ * Whether Save has anything to send, which is what decides the button.
+ *
+ * `onPreset` is whether the buffer still holds the rules of the preset it names, decided by the
+ * caller against the preset list (lib/lobbyPreset.ts). Switching between two rule-identical
+ * presets moves no rule, so no value comparison can see it; it is still a change worth saving,
+ * since the lobby would otherwise keep naming the ruleset the host just replaced (cambia-1123).
+ */
+export function ruleBufferHasChanges<H, C, S>(
+  buffer: RuleBuffer<H, C, S>,
+  lobby: RuleSeed<H, C, S>,
+  presetId: string | null,
+  onPreset: boolean
+): boolean {
+  const baseline = saveBaseline(buffer, lobby, presetId);
+  return !jsonEqual(buffer.houseRules, baseline.houseRules) ||
+    !jsonEqual(buffer.circuit, baseline.circuit) ||
+    !jsonEqual(buffer.settings, baseline.settings) ||
+    (onPreset && buffer.presetId !== baseline.presetId);
 }
 
 export function ruleBufferReducer<H, C, S>(state: RuleBuffer<H, C, S>, action: RuleAction<H, C, S>): RuleBuffer<H, C, S> {
@@ -93,12 +149,14 @@ export function ruleBufferReducer<H, C, S>(state: RuleBuffer<H, C, S>, action: R
       // one is named by its rules, which is Custom until they are a preset's again.
       if (state.touched || state.presetId === action.presetId) return state;
       return { ...state, presetId: action.presetId };
+    // Every edit drops `submitted`: the host has moved the sheet off what was sent, so Save is
+    // measured against the lobby again and is on offer again with it.
     case 'houseRules':
-      return { ...state, houseRules: action.houseRules, saveStatus: 'idle', touched: true };
+      return { ...state, houseRules: action.houseRules, saveStatus: 'idle', touched: true, submitted: null };
     case 'circuit':
-      return { ...state, circuit: action.circuit, saveStatus: 'idle', touched: true };
+      return { ...state, circuit: action.circuit, saveStatus: 'idle', touched: true, submitted: null };
     case 'settings':
-      return { ...state, settings: action.settings, saveStatus: 'idle', touched: true };
+      return { ...state, settings: action.settings, saveStatus: 'idle', touched: true, submitted: null };
     case 'preset':
       // Circuit scoring is untouched on purpose: a preset cannot express a round count, so it
       // says nothing about circuit scoring and applying one does not turn it off.
@@ -108,7 +166,21 @@ export function ruleBufferReducer<H, C, S>(state: RuleBuffer<H, C, S>, action: R
         settings: action.settings,
         presetId: action.presetId,
         saveStatus: 'idle',
-        touched: true
+        touched: true,
+        submitted: null
+      };
+    case 'submitted':
+      // The sheet as it went out. Not the lobby: nothing has confirmed these rules yet, and a
+      // 'saved' carrying them is what reseeds the buffer for real.
+      return {
+        ...state,
+        saveStatus: 'saved',
+        submitted: {
+          houseRules: state.houseRules,
+          circuit: state.circuit,
+          settings: state.settings,
+          presetId: action.presetId
+        }
       };
     case 'saveStatus':
       return state.saveStatus === action.status ? state : { ...state, saveStatus: action.status };

@@ -15,7 +15,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { ruleBufferReducer, seedRuleBuffer } from '../src/lib/lobbyRuleBuffer.ts';
+import { ruleBufferHasChanges, ruleBufferReducer, seedRuleBuffer } from '../src/lib/lobbyRuleBuffer.ts';
 
 const LOBBY = {
     houseRules: { turnTimerSec: 15, cardsPerPlayer: 4, snapRace: false },
@@ -28,6 +28,9 @@ const resent = () => structuredClone(LOBBY);
 
 const edit = (state, houseRules) => ruleBufferReducer(state, { type: 'houseRules', houseRules });
 const savedLobby = (state, lobby, presetId) => ruleBufferReducer(state, { type: 'saved', lobby, presetId });
+
+/** Whether the Save button is on offer, which is what ruleBufferHasChanges decides. */
+const dirty = (state, lobby, presetId, onPreset = false) => ruleBufferHasChanges(state, lobby, presetId, onPreset);
 
 /** Runs an action and asserts the reducer wrote nothing into the state it was handed. */
 function reduce(state, action) {
@@ -131,4 +134,72 @@ test('every edit clears the saved flag, and Save sets it', () => {
     assert.equal(edit(saved, { ...LOBBY.houseRules, turnTimerSec: 30 }).saveStatus, 'idle');
     assert.equal(ruleBufferReducer(saved, { type: 'saveStatus', status: 'saved' }), saved,
         'a status that has not moved must not re-render the sheet');
+});
+
+// Save is offered against what the lobby holds, and update_rules takes a round trip to move that
+// (cambia-1126 item 3). The sheet that went out therefore stands in for the lobby until its echo
+// lands, or the button stays live on rules it has already sent.
+
+test('a sent sheet is nothing left to save', () => {
+    const typed = edit(seedRuleBuffer(resent(), null), { ...LOBBY.houseRules, turnTimerSec: 30 });
+    assert.equal(dirty(typed, resent(), null), true, 'an edited sheet is savable');
+
+    const sent = reduce(typed, { type: 'submitted', presetId: null });
+    assert.equal(sent.saveStatus, 'saved');
+    assert.equal(dirty(sent, resent(), null), false, 'the sheet just sent must not offer Save again');
+});
+
+test('the label returning to Save rules does not put the button back', () => {
+    // The 2s timer only stops the button reading Saved. Nothing about the sheet moved, so there
+    // is still nothing to send.
+    const sent = reduce(edit(seedRuleBuffer(resent(), null), { ...LOBBY.houseRules, turnTimerSec: 30 }),
+        { type: 'submitted', presetId: null });
+    const idle = reduce(sent, { type: 'saveStatus', status: 'idle' });
+
+    assert.equal(idle.saveStatus, 'idle');
+    assert.equal(dirty(idle, resent(), null), false);
+});
+
+test('an edit after Save puts the button back', () => {
+    const sent = reduce(edit(seedRuleBuffer(resent(), null), { ...LOBBY.houseRules, turnTimerSec: 30 }),
+        { type: 'submitted', presetId: null });
+    const again = edit(sent, { ...LOBBY.houseRules, turnTimerSec: 45 });
+
+    assert.equal(again.submitted, null, 'the sheet has moved off what was sent');
+    assert.equal(dirty(again, resent(), null), true);
+});
+
+test('a lobby event that moves no rule leaves the sent sheet standing', () => {
+    // A player joining rebuilds LobbyState and reaches the sheet as a 'saved' action. It says
+    // nothing about the update_rules still in flight, so it must not re-offer Save.
+    const sent = reduce(edit(seedRuleBuffer(resent(), null), { ...LOBBY.houseRules, turnTimerSec: 30 }),
+        { type: 'submitted', presetId: null });
+    const joined = savedLobby(sent, resent(), null);
+
+    assert.equal(dirty(joined, resent(), null), false);
+});
+
+test('the lobby echoing the save clears what was sent', () => {
+    const moved = { ...resent(), houseRules: { ...LOBBY.houseRules, turnTimerSec: 30 } };
+    const sent = reduce(edit(seedRuleBuffer(resent(), null), moved.houseRules), { type: 'submitted', presetId: null });
+    const echoed = savedLobby(sent, moved, 'default');
+
+    assert.equal(echoed.submitted, null, 'the lobby now holds these rules; nothing is outstanding');
+    assert.equal(echoed.touched, false);
+    assert.equal(dirty(echoed, moved, 'default'), false);
+});
+
+test('a ruleset-only save is measured against the ruleset it sent', () => {
+    // The queue presets are rule-identical, so this save moves no value at all and only the id
+    // sent with it can tell the sheet it has already gone out.
+    const picked = reduce(seedRuleBuffer(resent(), 'h2h_quick'), {
+        type: 'preset',
+        presetId: 'h2h_rapid',
+        houseRules: resent().houseRules,
+        settings: resent().settings
+    });
+    assert.equal(dirty(picked, resent(), 'h2h_quick', true), true, 'the sheet names a new ruleset');
+
+    const sent = reduce(picked, { type: 'submitted', presetId: 'h2h_rapid' });
+    assert.equal(dirty(sent, resent(), 'h2h_quick', true), false, 'that ruleset has been sent');
 });

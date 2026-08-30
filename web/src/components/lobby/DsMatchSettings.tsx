@@ -9,7 +9,7 @@
 import React, { useEffect, useMemo, useReducer, useState } from 'react';
 import type { LobbyState, HouseRules, CircuitSettings, LobbySettings, LobbyPreset } from '@/types';
 import { presetMatchesRules, resolvePresetId, rulesetRow } from '@/lib/lobbyPreset';
-import { ruleBufferReducer, seedRuleBuffer } from '@/lib/lobbyRuleBuffer';
+import { ruleBufferHasChanges, ruleBufferReducer, seedRuleBuffer } from '@/lib/lobbyRuleBuffer';
 import Panel from '@/components/ds/chrome/Panel';
 import { EYEBROW } from '@/components/ds/eyebrow';
 import Input from '@/components/ds/core/Input';
@@ -27,10 +27,6 @@ interface DsMatchSettingsProps {
   currentSettings: LobbyState;
   isHost: boolean;
   sendMessage: (message: { type: string; body?: unknown }) => void;
-}
-
-function jsonEqual(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 /**
@@ -263,15 +259,14 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
   const activePreset = presets.find((p) => p.id === presetId);
   const onPreset = !!activePreset && presetMatchesRules(activePreset, houseRules, lobbySettings);
 
-  // Switching between two rule-identical presets moves no rule, so the sheet-versus-saved
-  // comparison cannot see it. It is still a change worth saving: the lobby would otherwise keep
-  // naming the ruleset the host just replaced (cambia-1123).
-  const hasChanges = useMemo(() => {
-    return !jsonEqual(houseRules, savedLobby.houseRules) ||
-      !jsonEqual(circuit, savedLobby.circuit) ||
-      !jsonEqual(lobbySettings, savedLobby.settings) ||
-      (onPreset && presetId !== savedPresetId);
-  }, [houseRules, circuit, lobbySettings, savedLobby, onPreset, presetId, savedPresetId]);
+  // Whether Save has anything to send, decided in lib/lobbyRuleBuffer.ts against the saved lobby
+  // or, while the service has yet to echo an update_rules back, against the sheet already sent.
+  // Without that second case Save stayed live on the sheet it had just sent for the whole of the
+  // round trip, reading Saved and resending it on every further click (cambia-1126 item 3).
+  const hasChanges = useMemo(
+    () => ruleBufferHasChanges(buffer, savedLobby, savedPresetId, onPreset),
+    [buffer, savedLobby, savedPresetId, onPreset]
+  );
 
   // Selector for the host of an unlocked lobby, the ruleset's name for everyone else, nothing at
   // all when the preset list could not be read (lib/lobbyPreset.ts).
@@ -302,9 +297,13 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
   const save = () => {
     if (!isHost || locked) return;
     const rules: Record<string, unknown> = { houseRules, circuit, settings: lobbySettings };
-    if (onPreset && activePreset) rules.presetId = activePreset.id;
+    const sentPresetId = onPreset && activePreset ? activePreset.id : null;
+    if (sentPresetId) rules.presetId = sentPresetId;
     sendMessage({ type: 'update_rules', body: { rules } });
-    dispatch({ type: 'saveStatus', status: 'saved' });
+    // The sheet that went out becomes what Save is measured against until the lobby echoes it,
+    // which is what takes the button out of the host's hands for the round trip. The timer below
+    // only returns the label to Save rules; the button stays off until the sheet moves again.
+    dispatch({ type: 'submitted', presetId: sentPresetId });
     setTimeout(() => dispatch({ type: 'saveStatus', status: 'idle' }), 2000);
   };
 
