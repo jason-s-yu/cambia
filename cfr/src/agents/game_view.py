@@ -58,6 +58,8 @@ from ..ffi.bridge import (
 __all__ = [
     "GameView",
     "PythonGameView",
+    "as_game_view",
+    "tracked_opponent_seat",
     "PendingInfo",
     "SnapInfo",
     "HouseRulesView",
@@ -315,6 +317,56 @@ class PythonGameView:
             initial_view_count=int(rules.initial_view_count),
             num_decks=int(getattr(rules, "num_decks", 1)),
         )
+
+
+#: Attribute the Python-engine wrapper is cached under, on the wrapped state.
+_VIEW_CACHE_ATTR = "_cambia_game_view"
+
+
+def as_game_view(state):
+    """Return ``state`` as a GameView, wrapping the Python engine if needed.
+
+    Lets one agent implementation serve both engines during the transition
+    window: an agent written against GameView still accepts a raw
+    ``CambiaGameState`` from the callers that have not moved yet (LBR, IS-MCTS,
+    PSRO, the existing tests), while the evaluation loop hands it a GoEngine
+    directly and pays nothing.
+
+    The wrapper is cached ON the wrapped state, so repeated calls within one
+    game return the same object. That matters because the memory baselines
+    detect a new game by ``id()`` of what they were handed: a fresh wrapper per
+    call would read as a new game on every decision and reset their memory every
+    turn.
+    """
+    if hasattr(state, "get_pending"):
+        return state
+    cached = getattr(state, _VIEW_CACHE_ATTR, None)
+    if isinstance(cached, PythonGameView) and cached.state is state:
+        return cached
+    view = PythonGameView(state)
+    try:
+        setattr(state, _VIEW_CACHE_ATTR, view)
+    except (AttributeError, TypeError):
+        # A state that refuses attributes still gets a working view; only the
+        # id() stability above is lost, and the eval loop resets the sentinel
+        # per game anyway.
+        pass
+    return view
+
+
+def tracked_opponent_seat(seat: int, num_players: int) -> int:
+    """The single opponent seat an agent written for two players tracks.
+
+    At two seats this is the other seat. Above two it is the next seat round
+    the table, which is the same seat the engine's own ``maskOpponent`` names
+    when the 2-player action space is read at a larger table (cambia-1099 K3).
+    Agents holding one opponent memory therefore track the seat the rules
+    already point their opponent-targeting actions at, rather than an arbitrary
+    one.
+    """
+    if num_players <= 2:
+        return 1 - seat
+    return (seat + 1) % num_players
 
 
 def _as_card(value) -> Optional[Card]:

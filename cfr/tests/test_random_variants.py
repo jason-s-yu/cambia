@@ -50,9 +50,15 @@ class _TestConfig:
 
 
 def _make_game_state(turn_number: int = 0):
-    """Create a mock game state with a given turn number."""
+    """Create a mock GameView reporting a given turn number.
+
+    The agents read the game through the GameView protocol (cambia-1426), so
+    the mock answers ``turn_number()`` rather than carrying the Python engine's
+    ``_turn_number`` attribute.
+    """
     gs = MagicMock()
-    gs._turn_number = turn_number
+    gs.turn_number.return_value = turn_number
+    gs.num_players.return_value = 2
     return gs
 
 
