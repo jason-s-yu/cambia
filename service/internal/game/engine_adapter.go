@@ -1014,45 +1014,154 @@ func (g *CambiaGame) handleReplaceViaEngine(playerID uuid.UUID, engineIdx uint8,
 		return
 	}
 
-	// Check if replace ability should trigger.
-	if g.HouseRules.AllowReplaceAbilities {
-		oldCard := g.Engine.Players[engineIdx].Hand[targetIdx]
-		if oldCard.HasAbility() {
-			// Buffer replace with ability - for simplicity, apply replace then trigger special.
-			// Actually the engine handles this through ActionDiscardWithAbility flow for replace.
-			// For now, apply replace (which puts old card to discard) and then trigger special.
-			if err := g.applyEngineAction(engine.EncodeReplace(targetIdx), playerID); err != nil {
-				return
-			}
-			// The replaced card (old one) is now on discard. Check if it triggers ability.
-			discardLen := g.Engine.DiscardLen
-			if discardLen > 0 {
-				discardedUUID := g.CardTracker.DiscardUUIDs[discardLen-1]
-				if discardedCard := g.CardTracker.Registry[discardedUUID]; discardedCard != nil {
-					specialType := rankToSpecial(discardedCard.Rank)
-					if specialType != "" {
-						g.SpecialAction = SpecialActionState{
-							Active:   true,
-							PlayerID: playerID,
-							CardRank: discardedCard.Rank,
-						}
-						g.fireEvent(GameEvent{
-							Type:    EventPlayerSpecialChoice,
-							User:    &EventUser{ID: playerID},
-							Card:    &EventCard{ID: discardedUUID, Rank: discardedCard.Rank},
-							Special: specialType,
-						})
-						g.scheduleNextTurnTimer()
-						return
-					}
-				}
-			}
-			return
-		}
+	// Apply the replace, then read back what the engine did with the card it put on the discard
+	// pile. Whether that card's ability fires is the engine's decision and not one the service can
+	// predict from the rank: replace() arms an ability only when the house rule is on, the drawn
+	// card came off the STOCKPILE (RULES.md 3B: a discard-pile draw carries no ability) and the
+	// ability has a legal target (engine/actions.go, canUseAbility). Prompting off the rank alone
+	// announced abilities the engine had never armed, leaving the previous player holding a prompt
+	// that refused their every action on their next turn (cambia-1125).
+	if err := g.applyEngineAction(engine.EncodeReplace(targetIdx), playerID); err != nil {
+		return
+	}
+	g.promptEngineArmedAbility(playerID, engineIdx)
+}
+
+// pendingAbilityCard names the card whose ability the engine is currently holding pending: its
+// rank read off the engine's own discard top, its id off the UUID mirror of the same slot. Reading
+// the rank from the engine rather than the mirror's registry keeps it in step with Pending.Type by
+// construction - replace() arms the pending type from exactly this card.
+// Assumes the lock is held by the caller.
+func (g *CambiaGame) pendingAbilityCard() (uuid.UUID, string, bool) {
+	switch g.Engine.Pending.Type {
+	case engine.PendingPeekOwn, engine.PendingPeekOther, engine.PendingBlindSwap, engine.PendingKingLook:
+	default:
+		return uuid.Nil, "", false
+	}
+	discardLen := g.Engine.DiscardLen
+	if discardLen == 0 {
+		return uuid.Nil, "", false
+	}
+	return g.CardTracker.DiscardUUIDs[discardLen-1], engineRankToString(g.Engine.DiscardPile[discardLen-1].Rank()), true
+}
+
+// promptEngineArmedAbility prompts for an ability the engine armed on its own, which today is only
+// the one replace() arms under AllowReplaceAbilities. It is a no-op when the engine armed nothing,
+// which is how the service stays in step with replace()'s own conditions rather than re-deriving
+// them (cambia-1125).
+//
+// The prompt is marked Mandatory: there is no action in the engine's space that declines an ability
+// already armed, so the player's only way out of the pending state is to resolve it. See
+// SpecialActionState.Mandatory.
+// Assumes the lock is held by the caller.
+func (g *CambiaGame) promptEngineArmedAbility(playerID uuid.UUID, engineIdx uint8) {
+	if g.Engine.Pending.PlayerID != engineIdx {
+		return
+	}
+	cardUUID, rank, ok := g.pendingAbilityCard()
+	if !ok {
+		return
+	}
+	specialType := rankToSpecial(rank)
+	if specialType == "" {
+		return
 	}
 
-	// Normal replace: no ability.
-	g.applyEngineAction(engine.EncodeReplace(targetIdx), playerID)
+	g.SpecialAction = SpecialActionState{
+		Active:    true,
+		PlayerID:  playerID,
+		CardRank:  rank,
+		Mandatory: true,
+	}
+	g.fireEvent(GameEvent{
+		Type:    EventPlayerSpecialChoice,
+		User:    &EventUser{ID: playerID},
+		Card:    &EventCard{ID: cardUUID, Rank: rank},
+		Special: specialType,
+		Payload: map[string]interface{}{"mandatory": true},
+	})
+	g.logAction(playerID, string(EventPlayerSpecialChoice), map[string]interface{}{
+		"cardId": cardUUID, "rank": rank, "special": specialType, "mandatory": true,
+	})
+	g.scheduleNextTurnTimer()
+}
+
+// firstOpponentWithCards returns the lowest-numbered seat other than actorSeat that still holds a
+// card, which is the target an auto-resolved opponent-facing ability plays against.
+// Assumes the lock is held by the caller.
+func (g *CambiaGame) firstOpponentWithCards(actorSeat uint8) (uint8, bool) {
+	for seat := uint8(0); seat < g.seatCount(); seat++ {
+		if seat != actorSeat && g.Engine.Players[seat].HandLen > 0 {
+			return seat, true
+		}
+	}
+	return engineSeatNone, false
+}
+
+// autoResolveArmedAbility plays out an engine-armed ability whose owner let their turn timer run
+// out. Neither of the other two outcomes is available: the ability cannot be declined
+// (SpecialActionState.Mandatory), and leaving it pending stops the table, because the engine
+// refuses every action while it holds one - including the fallback draw the rest of this timeout
+// path would take, which leaves the turn timer unrescheduled on a dead clock (cambia-1125).
+//
+// The target is the first legal one, and the King settles on no swap, which is the same defensive
+// line the rest of the timeout path takes: the obligation is discharged without moving a card the
+// player did not ask to move. A blind swap has no such line - the engine models no no-op blind
+// swap - and the player chose to play that Jack or Queen out of their own hand.
+// Assumes the lock is held by the caller.
+func (g *CambiaGame) autoResolveArmedAbility(playerID uuid.UUID) {
+	engineIdx, ok := g.PlayerToEngine[playerID]
+	if !ok {
+		engineIdx = g.Engine.ActingPlayer()
+	}
+	oppSeat, haveOpp := g.firstOpponentWithCards(engineIdx)
+	ownHandLen := g.Engine.Players[engineIdx].HandLen
+
+	var actionIdx uint16
+	targetSeat := uint8(engineSeatNone)
+	var resolvable bool
+	switch g.Engine.Pending.Type {
+	case engine.PendingPeekOwn:
+		actionIdx, resolvable = engine.EncodePeekOwn(0), ownHandLen > 0
+	case engine.PendingPeekOther:
+		actionIdx, targetSeat, resolvable = engine.EncodePeekOther(0), oppSeat, haveOpp
+	case engine.PendingBlindSwap:
+		actionIdx, targetSeat, resolvable = engine.EncodeBlindSwap(0, 0), oppSeat, haveOpp && ownHandLen > 0
+	case engine.PendingKingLook:
+		actionIdx, targetSeat, resolvable = engine.EncodeKingLook(0, 0), oppSeat, haveOpp && ownHandLen > 0
+	default:
+		// Nothing armed after all: fall back to the ordinary skip so the prompt does not outlive
+		// the state that justified it.
+		g.processSkipSpecialAction(playerID)
+		return
+	}
+	if !resolvable {
+		// A snap taken during the ability window emptied the only hand the ability could target,
+		// so the engine has no legal action left for it. Leave the prompt and re-arm the clock
+		// rather than clearing state the engine still holds; a hand refilling is the only way out.
+		log.Printf("Game %s: cannot auto-resolve pending ability %d for player %s: no legal target.", g.ID, g.Engine.Pending.Type, playerID)
+		g.scheduleNextTurnTimer()
+		return
+	}
+
+	g.logAction(playerID, "action_special_timeout_resolve", map[string]interface{}{
+		"rank": g.SpecialAction.CardRank, "pending": g.Engine.Pending.Type,
+	})
+	prompt := g.SpecialAction
+	g.SpecialAction = SpecialActionState{}
+	if err := g.applyEngineActionSeat(actionIdx, playerID, targetSeat); err != nil {
+		// The engine refused a target read out of its own state under this lock, so something is
+		// out of step. Put the prompt back and re-arm the clock rather than leaving a cleared
+		// prompt over an ability the engine still holds, which is the wedge shape this whole path
+		// exists to avoid.
+		g.SpecialAction = prompt
+		g.scheduleNextTurnTimer()
+		return
+	}
+	// A King's look leaves the swap decision pending; take the no-swap side of it.
+	if g.Engine.Pending.Type == engine.PendingKingDecision && g.Engine.Pending.PlayerID == engineIdx {
+		g.applyEngineAction(engine.ActionKingSwapNo, playerID)
+	}
 }
 
 // handleSnapViaEngine processes a snap action.
@@ -1620,8 +1729,13 @@ func (g *CambiaGame) handleTimeoutEngine(playerID uuid.UUID) {
 		g.autoSnapFill(fill)
 	}
 
-	// If special action pending, skip it.
+	// If special action pending, skip it - unless the engine armed it, in which case skipping is
+	// not on offer and the ability has to be played out for the turn to end at all (cambia-1125).
 	if g.SpecialAction.Active && g.SpecialAction.PlayerID == playerID {
+		if g.SpecialAction.Mandatory && !(g.SpecialAction.CardRank == "K" && g.SpecialAction.FirstStepDone) {
+			g.autoResolveArmedAbility(playerID)
+			return
+		}
 		g.processSkipSpecialAction(playerID)
 		return
 	}

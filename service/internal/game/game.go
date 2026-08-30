@@ -105,9 +105,17 @@ type GameEvent struct {
 
 // SpecialActionState holds temporary information about a pending multi-step special action (e.g., King).
 type SpecialActionState struct {
-	Active        bool         // Is a special action currently pending?
-	PlayerID      uuid.UUID    // Which player must act?
-	CardRank      string       // Rank of the card that triggered the action ("K", "Q", etc.).
+	Active   bool      // Is a special action currently pending?
+	PlayerID uuid.UUID // Which player must act?
+	CardRank string    // Rank of the card that triggered the action ("K", "Q", etc.).
+	// Mandatory marks an ability the engine armed by itself, which today means the one
+	// engine replace() arms when AllowReplaceAbilities is on. It cannot be declined: the engine
+	// folds that decision into the discard action (DiscardNoAbility vs DiscardWithAbility) and its
+	// legal set for an armed ability offers targets and nothing else (engine/legal.go
+	// legalAbilitySelect), so once it is armed the pending state can only be resolved. Clearing
+	// this prompt without resolving it leaves the engine holding the ability forever, refusing
+	// every later action at the table (cambia-1125).
+	Mandatory     bool
 	FirstStepDone bool         // For King: Has the initial peek step completed?
 	Card1         *models.Card // For King: First peeked card.
 	Card1Owner    uuid.UUID    // For King: Owner of the first peeked card.

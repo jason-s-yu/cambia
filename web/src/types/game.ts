@@ -68,6 +68,10 @@ export interface ObfGameState {
 		active: boolean;
 		playerId: string;
 		cardRank: string;
+		// Set when the ability cannot be declined: the one a replace triggers under
+		// allowReplaceAbilities is armed by the engine, which has no action that declines an armed
+		// ability, so the table must not offer a skip for it (cambia-1125).
+		mandatory?: boolean;
 		// Add other fields based on spec (e.g., peeked card info for King)
 	} | null;
 	// Snap fills still owed (RULES.md 5, cambia-936): each snapper who took an opponent's card owes

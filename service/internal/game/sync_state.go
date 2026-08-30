@@ -50,6 +50,9 @@ type ObfSpecialActionState struct {
 	Active   bool      `json:"active"`
 	PlayerID uuid.UUID `json:"playerId"`
 	CardRank string    `json:"cardRank"`
+	// Mandatory says the ability cannot be declined, so a client restoring this prompt after a
+	// reconnect knows not to offer a skip that the server would only refuse (cambia-1125).
+	Mandatory bool `json:"mandatory,omitempty"`
 }
 
 // ObfSnapMoveState is one outstanding snap fill (RULES.md 5, cambia-936): the snapper owes a card
@@ -155,9 +158,10 @@ func (g *CambiaGame) getCurrentObfuscatedGameState(forUser uuid.UUID) ObfGameSta
 	// Pending special action (cambia-763 F1). Public-safe projection only; see ObfSpecialActionState.
 	if g.SpecialAction.Active {
 		obf.SpecialAction = &ObfSpecialActionState{
-			Active:   true,
-			PlayerID: g.SpecialAction.PlayerID,
-			CardRank: g.SpecialAction.CardRank,
+			Active:    true,
+			PlayerID:  g.SpecialAction.PlayerID,
+			CardRank:  g.SpecialAction.CardRank,
+			Mandatory: g.SpecialAction.Mandatory && !(g.SpecialAction.CardRank == "K" && g.SpecialAction.FirstStepDone),
 		}
 	}
 

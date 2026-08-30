@@ -41,6 +41,7 @@ import {
   selectLastSnapMove,
   selectLastPresence
 } from '@/stores/gameStore';
+import { canSkipSpecialAction } from '@/lib/specialPrompt';
 import { useAuthStore } from '@/stores/authStore';
 import { useCurrentLobbyStore, type LobbyPhase } from '@/stores/lobbyStore';
 import { lockedPlayerId, isHandLocked, canSnapCard } from '@/lib/handLock';
@@ -587,7 +588,11 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   const canSnap = (selectedIdx !== null || !!snapTarget) && pendingAction === null && !busy;
   const canCallCambia = isMyTurn && pendingAction === null && !busy && !gameState.cambiaCalled && gameState.started && !gameState.gameOver;
   const kingConfirm = !!kingPair && specialRank === 'K' && isMyTurn && !busy;
-  const canSkipSpecial = isMyTurn && pendingAction === 'special_action' && !busy && !kingConfirm;
+  // An ability the engine armed off a replace has no skip: the engine models no way to decline one
+  // it has already armed, so the server refuses the skip and the only way on is to name a target
+  // (cambia-1125). The King's second step keeps its decline - that one is a real engine action.
+  const canSkipSpecial = isMyTurn && pendingAction === 'special_action' && !busy && !kingConfirm
+    && canSkipSpecialAction(specialAction);
   const allowOpponentSnapping = gameState.houseRules.allowOpponentSnapping ?? true;
 
   // Transient reveals (cambia-848 F3, widened by cambia-1094). No face is durable any more: an

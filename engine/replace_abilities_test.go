@@ -454,3 +454,100 @@ func TestReplaceAbilityHandCountFizzleUnchanged(t *testing.T) {
 		})
 	}
 }
+
+// TestReplaceAbilityAtSeatTwoOrHigher covers a replace made from a seat past 1 at an N-player
+// table, which is live play: the ranked FFA-4 queue turns AllowReplaceAbilities on
+// (MATCHMAKING.md 5.2) and replace() is shared by both action spaces (ApplyNPlayerAction routes
+// NPlayerActionIsReplace straight into it). Its ability gate used to read the single opponent
+// OpponentOf(acting) gives, which is 1-acting and underflows to 255 from seat 2, indexing off the
+// end of the player array (cambia-1125). The gate now asks the same question
+// discardWithAbilityNPlayer asks: does ANY opponent still hold a card the ability could reach.
+func TestReplaceAbilityAtSeatTwoOrHigher(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rank uint8
+		want PendingType
+	}{
+		{"peek_own", RankSeven, PendingPeekOwn},
+		{"peek_other", RankTen, PendingPeekOther},
+		{"blind_swap", RankJack, PendingBlindSwap},
+		{"king_look", RankKing, PendingKingLook},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rules := nplayerRules(4)
+			rules.AllowReplaceAbilities = true
+			gs := NewGame(42, rules)
+			gs.Deal()
+			gs.CurrentPlayer = 2
+
+			gs.Players[2].Hand[0] = NewCard(SuitClubs, tc.rank)
+			gs.Stockpile[gs.StockLen] = NewCard(SuitDiamonds, RankAce)
+			gs.StockLen++
+
+			if err := gs.ApplyNPlayerAction(NPlayerActionDrawStockpile); err != nil {
+				t.Fatalf("DrawStockpile: %v", err)
+			}
+			if err := gs.ApplyNPlayerAction(NPlayerEncodeReplace(0)); err != nil {
+				t.Fatalf("Replace: %v", err)
+			}
+			if gs.Pending.Type != tc.want {
+				t.Errorf("rank %s from seat 2: Pending.Type=%d, want %d", rankName(tc.rank), gs.Pending.Type, tc.want)
+			}
+			if gs.Pending.PlayerID != 2 {
+				t.Errorf("rank %s: ability armed for seat %d, want 2", rankName(tc.rank), gs.Pending.PlayerID)
+			}
+		})
+	}
+}
+
+// TestReplaceAbilityFizzlesWhenEverySeatIsEmpty verifies the widened gate still fizzles: an
+// opponent-facing ability needs SOME opponent holding a card, not just seat 1.
+func TestReplaceAbilityFizzlesWhenEverySeatIsEmpty(t *testing.T) {
+	rules := nplayerRules(4)
+	rules.AllowReplaceAbilities = true
+	gs := NewGame(42, rules)
+	gs.Deal()
+	gs.CurrentPlayer = 2
+	for _, seat := range []uint8{0, 1, 3} {
+		gs.Players[seat].HandLen = 0
+	}
+
+	gs.Players[2].Hand[0] = NewCard(SuitClubs, RankTen)
+	gs.Stockpile[gs.StockLen] = NewCard(SuitDiamonds, RankAce)
+	gs.StockLen++
+
+	if err := gs.ApplyNPlayerAction(NPlayerActionDrawStockpile); err != nil {
+		t.Fatalf("DrawStockpile: %v", err)
+	}
+	if err := gs.ApplyNPlayerAction(NPlayerEncodeReplace(0)); err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	if gs.Pending.Type == PendingPeekOther {
+		t.Error("peek-other should fizzle when no opponent holds a card")
+	}
+}
+
+// TestReplaceAbilitySeesEveryOpponentNotJustSeatOne verifies the gate does not fizzle merely
+// because the one seat OpponentOf would have named is empty.
+func TestReplaceAbilitySeesEveryOpponentNotJustSeatOne(t *testing.T) {
+	rules := nplayerRules(4)
+	rules.AllowReplaceAbilities = true
+	gs := NewGame(42, rules)
+	gs.Deal()
+	gs.CurrentPlayer = 0
+	gs.Players[1].HandLen = 0 // the only seat the old gate looked at
+
+	gs.Players[0].Hand[0] = NewCard(SuitClubs, RankTen)
+	gs.Stockpile[gs.StockLen] = NewCard(SuitDiamonds, RankAce)
+	gs.StockLen++
+
+	if err := gs.ApplyNPlayerAction(NPlayerActionDrawStockpile); err != nil {
+		t.Fatalf("DrawStockpile: %v", err)
+	}
+	if err := gs.ApplyNPlayerAction(NPlayerEncodeReplace(0)); err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	if gs.Pending.Type != PendingPeekOther {
+		t.Errorf("peek-other should arm against seats 2 and 3: Pending.Type=%d", gs.Pending.Type)
+	}
+}

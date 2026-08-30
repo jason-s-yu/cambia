@@ -324,6 +324,18 @@ func (g *CambiaGame) applyEngineActionRaw(actionIdx uint16, actorID uuid.UUID, a
 // Assumes lock is held by caller.
 func (g *CambiaGame) processSkipSpecialAction(userID uuid.UUID) {
 	rank := g.SpecialAction.CardRank
+
+	// An ability the engine armed cannot be declined, so the skip is refused and the prompt stands
+	// (SpecialActionState.Mandatory). Clearing it here and advancing the service's turn is what
+	// wedged a table: the engine kept the pending ability, refused every action sent afterwards,
+	// and refused the fallback draw its own turn timeout falls through to, which left the timer
+	// unrescheduled on a dead clock (cambia-1125). The King's second step is exempt - the engine
+	// models declining that swap as ActionKingSwapNo, handled below.
+	if g.SpecialAction.Mandatory && !(rank == "K" && g.SpecialAction.FirstStepDone) {
+		g.RejectSpecialAction(userID, "That ability was played from your hand and has to be used; choose a target.")
+		return
+	}
+
 	log.Printf("Game %s: Player %s chose to skip special action for rank %s.", g.ID, userID, rank)
 	g.logAction(userID, "action_special_skip", map[string]interface{}{"rank": rank})
 

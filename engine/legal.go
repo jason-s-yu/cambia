@@ -117,23 +117,43 @@ func (g *GameState) legalPostDraw(mask *[3]uint64) {
 
 // canUseAbility returns true if the ability of the given card can be used.
 // Mirrors Python's ability fizzle conditions.
+//
+// An opponent-facing ability needs SOME opponent it can still reach, which is the same question
+// discardWithAbilityNPlayer asks of the N-player ability arm. It used to ask about the single seat
+// OpponentOf(acting) names, which is 1-acting: correct at two seats, and from seat 2 an underflow
+// to 255 that indexed off the end of the player array. replace() calls this on every replace when
+// AllowReplaceAbilities is on, and it is shared by both action spaces, so at a ranked FFA table a
+// replace from seat 2 or 3 panicked the game (cambia-1125). At two seats the two readings are the
+// same question, so nothing about the 2-player action space or its legal masks changes.
 func (g *GameState) canUseAbility(acting uint8, card Card) bool {
-	opp := g.OpponentOf(acting)
 	ownHandLen := g.Players[acting].HandLen
-	oppHandLen := g.Players[opp].HandLen
+
+	// reachableOpponent reports whether any seat other than acting still holds a card, optionally
+	// skipping the Cambia caller when LockCallerHand puts their hand out of reach. Walked in place
+	// rather than through Opponents(), which allocates: this sits on the legal-mask path.
+	reachableOpponent := func(skipLockedCaller bool) bool {
+		n := g.Rules.numPlayers()
+		for opp := uint8(0); opp < n; opp++ {
+			if opp == acting || g.Players[opp].HandLen == 0 {
+				continue
+			}
+			if skipLockedCaller && g.Rules.LockCallerHand && g.IsCambiaCalled() && int8(opp) == g.CambiaCaller {
+				continue
+			}
+			return true
+		}
+		return false
+	}
 
 	switch card.Ability() {
 	case AbilityPeekOwn:
 		return ownHandLen > 0
 	case AbilityPeekOther:
-		return oppHandLen > 0
+		return reachableOpponent(false)
 	case AbilityBlindSwap, AbilityKingLook:
-		// When LockCallerHand is true and the opponent is the Cambia caller,
-		// swap abilities cannot target them - fizzle at ability-select stage.
-		if g.Rules.LockCallerHand && g.IsCambiaCalled() && int8(opp) == g.CambiaCaller {
-			return false
-		}
-		return ownHandLen > 0 && oppHandLen > 0
+		// When LockCallerHand is true and the only opponent left is the Cambia caller, swap
+		// abilities cannot target anyone - fizzle at ability-select stage.
+		return ownHandLen > 0 && reachableOpponent(true)
 	default:
 		return false
 	}
