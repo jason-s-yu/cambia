@@ -17,7 +17,8 @@
     "test:snap-fill": "node --test scripts/test-snap-fill.mjs",
     "test:modal-focus": "node --test scripts/test-modal-focus.mjs",
     "test:names": "node --test scripts/test-card-names.mjs",
-    "test": "node --test scripts/test-resend-decision.mjs scripts/test-snap-success.mjs scripts/test-snap-fill.mjs scripts/test-modal-focus.mjs scripts/test-card-names.mjs",
+    "test:circuit-copy": "node --test scripts/test-circuit-copy.mjs",
+    "test": "node --test scripts/test-resend-decision.mjs scripts/test-snap-success.mjs scripts/test-snap-fill.mjs scripts/test-modal-focus.mjs scripts/test-card-names.mjs scripts/test-circuit-copy.mjs",
     "measure-dev-transfer": "node scripts/measure-dev-transfer.mjs"
   },
   "dependencies": {

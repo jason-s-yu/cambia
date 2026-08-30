@@ -15,6 +15,8 @@ import Checkbox from '@/components/ds/core/Checkbox';
 import Switch from '@/components/ds/core/Switch';
 import Badge from '@/components/ds/core/Badge';
 import Button from '@/components/ds/core/Button';
+import IconButton from '@/components/ds/core/IconButton';
+import DsCircuitInfoModal from './DsCircuitInfoModal';
 import { gameModeLabel } from '@/utils/gameMode';
 
 interface DsMatchSettingsProps {
@@ -65,13 +67,27 @@ const FLAG_LABEL: React.CSSProperties = {
   lineHeight: 1.35
 };
 
-/** One titled group of the rule sheet: eyebrow, optional hint, fields. */
-const RuleGroup: React.FC<{ title: string; hint?: string; action?: React.ReactNode; first?: boolean; children?: React.ReactNode }> = ({ title, hint, action, first = false, children }) => (
+/** The (i) glyph: a hairline ring, a dot and a stem, drawn in the button's own color. */
+const InfoIcon: React.FC = () => (
+  <svg width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='currentColor' strokeWidth='2' strokeLinecap='round' strokeLinejoin='round' aria-hidden='true'>
+    <circle cx='12' cy='12' r='9' />
+    <path d='M12 11v5' />
+    <path d='M12 7.75h.01' />
+  </svg>
+);
+
+/**
+ * One titled group of the rule sheet: eyebrow, optional hint, fields.
+ * `info` sits with the title rather than in `action`, since it explains the
+ * group and does not set it; alignSelf centers it against the baseline row.
+ */
+const RuleGroup: React.FC<{ title: string; hint?: string; info?: React.ReactNode; action?: React.ReactNode; first?: boolean; children?: React.ReactNode }> = ({ title, hint, info, action, first = false, children }) => (
   <div style={first ? undefined : DIVIDER}>
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--space-3)', marginBottom: 'var(--space-3)', flexWrap: 'wrap' }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
         <span style={EYEBROW}>{title}</span>
         {hint && <span style={HINT}>{hint}</span>}
+        {info}
       </div>
       {action}
     </div>
@@ -122,6 +138,7 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
   const [circuit, setCircuit] = useState<CircuitSettings>(currentSettings.circuit);
   const [lobbySettings, setLobbySettings] = useState<LobbySettings>(initialLobbySettings);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saved'>('idle');
+  const [circuitInfoOpen, setCircuitInfoOpen] = useState(false);
 
   useEffect(() => {
     setHouseRules(currentSettings.houseRules);
@@ -248,6 +265,17 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
       <RuleGroup
         title='Circuit scoring'
         hint='Rounds accumulate toward a target'
+        info={
+          <IconButton
+            size='sm'
+            variant='ghost'
+            title='About circuit scoring'
+            onClick={() => setCircuitInfoOpen(true)}
+            style={{ alignSelf: 'center', color: 'var(--text-secondary)' }}
+          >
+            <InfoIcon />
+          </IconButton>
+        }
         action={
           ro ? (
             <OnOff on={!!circuit?.enabled} />
@@ -267,6 +295,9 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
             {numField('False Cambia penalty', circuit?.rules?.falseCambiaPenalty, (raw) => setCircuitRule('falseCambiaPenalty', parseInt(raw, 10) || 1))}
           </div>
         )}
+        {/* Mounted here and not beside the Panel so the explainer travels with the row that
+            opens it. Modal portals to the body and renders nothing while closed. */}
+        <DsCircuitInfoModal open={circuitInfoOpen} onClose={() => setCircuitInfoOpen(false)} />
       </RuleGroup>
 
       <div style={{ ...DIVIDER, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--space-3)', flexWrap: 'wrap' }}>
