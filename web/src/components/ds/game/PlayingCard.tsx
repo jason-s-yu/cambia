@@ -98,10 +98,21 @@ const PlayingCard: React.FC<PlayingCardProps> = ({ rank, suit, faceDown = false,
   const edge = faceDown ? 'var(--card-back-edge)' : 'var(--card-face-edge)';
   const base: React.CSSProperties = {
     // Button reset: the card owns its box, so the UA padding, font and fill go.
+    // The font reset is spelled out in longhands rather than `font: inherit`, and
+    // fontVariantNumeric is set here rather than on the face alone, because a card
+    // flips between the two `face` objects below on the same element: the `font`
+    // shorthand covers font-variant-numeric, so the longhand disappearing on the
+    // flip to a back left React removing it while the shorthand was still set, which
+    // it reports as a style conflict on every reveal and every deal (cambia-1124).
     appearance: 'none',
     margin: 0,
     padding: 0,
-    font: 'inherit',
+    fontFamily: 'inherit',
+    fontSize: 'inherit',
+    fontStyle: 'inherit',
+    fontWeight: 'inherit',
+    lineHeight: 'inherit',
+    fontVariantNumeric: 'tabular-nums',
     textAlign: 'left',
     display: 'block',
     width: d.w,
@@ -153,12 +164,15 @@ const PlayingCard: React.FC<PlayingCardProps> = ({ rank, suit, faceDown = false,
     </>
   );
 
-  // Two longhands, not the `background` shorthand: the shorthand resets
-  // background-image, so pairing it with the crosshatch would leave the back
-  // dependent on the order the two keys happen to be emitted in.
+  // Two longhands on both branches, never the `background` shorthand: the shorthand
+  // resets background-image, so pairing it with the crosshatch would leave the back
+  // dependent on the order the two keys happen to be emitted in. The two branches
+  // also carry the same keys as each other, so flipping a card sets every property
+  // rather than dropping one, which is what keeps the flip clear of the shorthand
+  // collision React reports on a removed longhand (cambia-1124).
   const face: React.CSSProperties = faceDown
-    ? { backgroundColor: 'var(--card-back-fill)', backgroundImage: crosshatch(d.weave) }
-    : { background: 'var(--card-face)', color, fontVariantNumeric: 'tabular-nums' };
+    ? { backgroundColor: 'var(--card-back-fill)', backgroundImage: crosshatch(d.weave), color: 'inherit' }
+    : { backgroundColor: 'var(--card-face)', backgroundImage: 'none', color };
 
   if (onClick) {
     return (

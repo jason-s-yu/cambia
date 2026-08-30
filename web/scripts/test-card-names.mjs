@@ -11,9 +11,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { toDsCardFace, cardFaceName } from '../src/components/game/dsCardMap.ts';
+import { toDsCardFace, cardFaceName, cardSlotName, LOCKED_SUFFIX } from '../src/components/game/dsCardMap.ts';
 
 const name = (rank, suit) => cardFaceName(toDsCardFace({ id: 'c', known: true, rank, suit }));
+
+/** The face a slot is drawing during a reveal: what revealById hands renderHand. */
+const shown = (rank, suit) => toDsCardFace({ id: 'c', known: true, rank, suit });
 
 test('number ranks read as the number and the long suit', () => {
     assert.equal(name('9', 'C'), '9 of clubs');
@@ -41,6 +44,41 @@ test('an unknown card has no face to name, so the caller says face down', () => 
     assert.equal(cardFaceName(toDsCardFace(null)), null);
     assert.equal(cardFaceName(toDsCardFace(undefined)), null);
     assert.equal(cardFaceName(toDsCardFace({ id: 'c', known: false })), null);
+});
+
+// --- Slot names -------------------------------------------------------------------------
+//
+// The name a hand slot carries has to follow the face the slot is drawing. During the transient
+// reveal of an own card (a replace, a 7/8 peek, a King look) the slot goes face-up for the hold,
+// and a name still reading 'face down' would tell a screen reader the opposite of what is on the
+// felt (cambia-1094, cambia-1124).
+
+test('a revealed face names the card, on either side of the table', () => {
+    assert.equal(cardSlotName('Your', 0, shown('9', 'H')), 'Your card 1: 9 of hearts');
+    assert.equal(cardSlotName('Your', 2, shown('K', 'S')), 'Your card 3: king of spades');
+    assert.equal(cardSlotName('Guest-AA0883AF', 1, shown('T', 'D')), 'Guest-AA0883AF card 2: 10 of diamonds');
+});
+
+test('the slot goes back to face down when the reveal ends', () => {
+    assert.equal(cardSlotName('Your', 0, null), 'Your card 1, face down');
+    assert.equal(cardSlotName('Your', 0, toDsCardFace({ id: 'c', known: false })), 'Your card 1, face down');
+    assert.equal(cardSlotName('Guest-AA0883AF', 3, null), 'Guest-AA0883AF card 4, face down');
+});
+
+test('slots are named by their 1-based engine slot index', () => {
+    // Placement puts slots 0 and 1 on the row nearest their owner, but the spoken index stays the
+    // engine slot, so the names run 1, 2, 3, 4 in DOM order (cambia-1095).
+    const hand = [null, null, null, null];
+    assert.deepEqual(
+        hand.map((face, i) => cardSlotName('Your', i, face)),
+        ['Your card 1, face down', 'Your card 2, face down', 'Your card 3, face down', 'Your card 4, face down']
+    );
+});
+
+test('a locked hand keeps the reason it went inert, revealed or not', () => {
+    assert.equal(cardSlotName('Your', 0, shown('A', 'S'), true), 'Your card 1: ace of spades' + LOCKED_SUFFIX);
+    assert.equal(cardSlotName('Your', 0, null, true), 'Your card 1, face down' + LOCKED_SUFFIX);
+    assert.equal(LOCKED_SUFFIX, ', locked after calling Cambia');
 });
 
 console.log('card name checks loaded');

@@ -68,7 +68,9 @@ test('the table places its own cards with the helper and keeps the slot keyed ho
     assert.ok(src.match(/style=\{ownHandPlacement\(/g).length >= 2, 'own hand cards are not all placed');
     // The testId and the spoken name stay keyed by the engine slot index, not by draw order.
     assert.ok(src.includes('testId={`card-${seat}-${i}`}'), 'own card testId is no longer the engine slot index');
-    assert.ok(src.includes('`Your card ${i + 1}'), 'own card name is no longer the engine slot index');
+    // cardSlotName speaks the slot 1-based; what matters here is that it is handed the engine
+    // slot index (see test-card-names.mjs for the naming itself).
+    assert.ok(src.includes("cardSlotName('Your', i,"), 'own card name is no longer the engine slot index');
     // Opponents keep plain row-major order: their near row is the top one on screen.
     const opponentGrid = src.slice(src.indexOf('{opponents.map('), src.indexOf('{opponents.length === 0'));
     assert.ok(opponentGrid.length > 0, 'opponent hand block not found');

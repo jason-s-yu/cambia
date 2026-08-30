@@ -52,7 +52,7 @@ import PlayingCard from '@/components/ds/game/PlayingCard';
 import PlayerSeat, { type PlayerSeatState } from '@/components/ds/game/PlayerSeat';
 import ScorePill from '@/components/ds/game/ScorePill';
 import TimerBar from '@/components/ds/game/TimerBar';
-import { toDsCardFace, cardFaceName } from './dsCardMap';
+import { toDsCardFace, cardFaceName, cardSlotName } from './dsCardMap';
 import { ownHandPlacement } from './handLayout';
 
 interface DsGameTableProps {
@@ -109,13 +109,6 @@ interface KingPair {
 
 /** How long a peeked opponent face stays up once the ability itself has resolved. */
 const REVEAL_HOLD_MS = 6000;
-
-/**
- * Spoken suffix for a card in the hand LockCallerHand has frozen (cambia-1069). A locked card is
- * not a button any more, and an element that simply stops taking clicks says nothing to a screen
- * reader, so the name has to carry the reason it went inert.
- */
-const LOCKED_LABEL = ', locked after calling Cambia';
 
 interface TableNotice {
   id: number;
@@ -727,11 +720,9 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
       // the pregame peek the store keeps on the slot for the length of that window. Everything
       // else is a back, including cards this player has already been shown (cambia-1094).
       const face = toDsCardFace(revealById.get(card.id) ?? card);
-      const spoken = cardFaceName(face);
       // aria-pressed tracks what the eye sees: the King's own card stays picked
       // through the confirm step, which is why `selected` covers it too.
       const picked = selectedIdx === i || (kingConfirm && kingPair?.myIdx === i);
-      const named = spoken ? `Your card ${i + 1}: ${spoken}` : `Your card ${i + 1}, face down`;
       return (
         <PlayingCard
           key={card.id || i}
@@ -742,7 +733,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
           selected={picked}
           highlight={ownTargetable && selectedIdx !== i}
           dimmed={selfHandLocked}
-          label={selfHandLocked ? named + LOCKED_LABEL : named}
+          label={cardSlotName('Your', i, face, selfHandLocked)}
           pressed={ownSelects ? picked : undefined}
           testId={`card-${seat}-${i}`}
           style={ownHandPlacement(i, slots)}
@@ -760,7 +751,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
         faceDown
         size='md'
         dimmed={selfHandLocked}
-        label={`Your card ${hand.length + j + 1}, face down` + (selfHandLocked ? LOCKED_LABEL : '')}
+        label={cardSlotName('Your', hand.length + j, null, selfHandLocked)}
         testId={`card-${seat}-${hand.length + j}`}
         style={ownHandPlacement(hand.length + j, slots)}
       />
@@ -847,9 +838,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                       const snappable = opponentSnappable && !!card && !locked;
                       const picked = !!card && snapTarget?.cardId === card.id;
                       const shown = card ? toDsCardFace(revealById.get(card.id)) : null;
-                      const spoken = cardFaceName(shown);
                       const who = nameOf(opp.playerId);
-                      const named = spoken ? `${who} card ${i + 1}: ${spoken}` : `${who} card ${i + 1}, face down`;
                       return (
                         <PlayingCard
                           key={card?.id ?? i}
@@ -860,7 +849,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                           selected={!!shown || picked}
                           highlight={targetable}
                           dimmed={!targetable && !shown && (locked || !!specialRank)}
-                          label={locked ? named + LOCKED_LABEL : named}
+                          label={cardSlotName(who, i, shown, locked)}
                           // An ability click commits on the card it lands on; a snap pick is the
                           // one opponent click that toggles, so it is the one that is pressed.
                           pressed={snappable && !targetable ? picked : undefined}
