@@ -1,5 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import api from '@/lib/axios';
+import { isPinned, pinTab } from '@/lib/tabSession';
+import { loginToTab, mintTabGuest } from '@/services/devSessionService';
 import type { User } from '@/types'; // Import common types
 
 // Define interfaces for API request bodies inline or import if defined elsewhere
@@ -22,6 +24,17 @@ interface RegisterDetails {
  */
 export const loginUser = async (credentials: LoginCredentials): Promise<boolean> => {
 	try {
+		// A tab already pinned to its own identity signs in as that tab, not as
+		// the browser: the request carries the tab-session header, the service
+		// answers with a token and no Set-Cookie, and the new token replaces the
+		// pin (cambia-1149). Without this the form would set the shared cookie
+		// (signing every other tab in as this account) while the tab kept its old
+		// token, so the login would look like it had done nothing.
+		if (isPinned()) {
+			const identity = await loginToTab(credentials.email, credentials.password ?? '');
+			pinTab(identity.token, credentials.email.split('@')[0] || identity.label);
+			return true;
+		}
 		const response = await api.post<{ token: string }>('/user/login', credentials);
 		// Backend sets HttpOnly cookie, presence of token in response body confirms success.
 		return !!response.data.token;
@@ -66,6 +79,13 @@ export const logoutUser = async (): Promise<void> => {
  */
 export const guestLogin = async (): Promise<{ id: string }> => {
 	try {
+		// Same rule as loginUser: a pinned tab takes its guest as a token, so the
+		// cookie the other tabs share is left alone (cambia-1149).
+		if (isPinned()) {
+			const guest = await mintTabGuest();
+			pinTab(guest.token, guest.label);
+			return { id: guest.id };
+		}
 		const response = await api.post<{ id: string }>('/user/guest');
 		return response.data;
 	} catch (error: any) {

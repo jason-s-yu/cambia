@@ -1,5 +1,7 @@
 // src/hooks/useResourceSocket.ts
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { wsProtocols } from '@/lib/tabSession';
+import { useTabSessionEpoch } from '@/hooks/useTabSession';
 import type { ResourceSnapshot } from '@/types/training';
 
 const MAX_RECONNECT_DELAY = 30_000;
@@ -29,6 +31,7 @@ export function useResourceSocket(): UseResourceSocketResult {
 	const reconnectTimeout = useRef<number | null>(null);
 	const retryCount = useRef(0);
 	const shouldConnect = useRef(false);
+	const sessionEpoch = useTabSessionEpoch();
 
 	const connect = useCallback(() => {
 		const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -37,7 +40,8 @@ export function useResourceSocket(): UseResourceSocketResult {
 
 		let socket: WebSocket;
 		try {
-			socket = new WebSocket(url);
+			// Offers "cambia", plus this tab's token when it has one (cambia-1149).
+			socket = new WebSocket(url, wsProtocols());
 		} catch {
 			return;
 		}
@@ -93,6 +97,9 @@ export function useResourceSocket(): UseResourceSocketResult {
 		};
 	}, []);
 
+	// sessionEpoch is a dependency, not a value this body reads: a pin or unpin
+	// re-runs the effect, whose cleanup closes the old socket and whose body
+	// dials again with the new protocol list (cambia-1149).
 	useEffect(() => {
 		shouldConnect.current = true;
 		connect();
@@ -109,7 +116,7 @@ export function useResourceSocket(): UseResourceSocketResult {
 				ws.current = null;
 			}
 		};
-	}, [connect]);
+	}, [connect, sessionEpoch]);
 
 	return { connected, snapshot, history };
 }

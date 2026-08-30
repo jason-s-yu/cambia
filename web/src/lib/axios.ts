@@ -2,6 +2,7 @@
 import axios, { AxiosError, type InternalAxiosRequestConfig } from 'axios';
 import { useAuthStore } from '@/stores/authStore';
 import { API_URL } from '@/lib/runtimeEnv';
+import { authHeader, isPinned, unpinTab } from '@/lib/tabSession';
 import type { ApiErrorResponse } from '@/types';
 
 // authFlightGuard tracks whether an auth bootstrap flow (the initial
@@ -43,14 +44,17 @@ const api = axios.create({
 });
 
 // --- Request Interceptor ---
-// Can be used to add tokens to headers if not using cookies
+// Carries this tab's own identity when it has one (cambia-1149). A pinned tab
+// holds its JWT in sessionStorage and sends it as a Bearer header; the server
+// resolves an explicit token ahead of the cookie, so the two tabs of one
+// browser can be two different players. An unpinned tab adds no header and
+// the request is answered from the shared cookie exactly as before.
 api.interceptors.request.use(
 	(config: InternalAxiosRequestConfig): InternalAxiosRequestConfig => {
-		// Modify config here if needed, e.g., add Authorization header
-		// const token = useAuthStore.getState().token; // Example if token were in store
-		// if (token) {
-		//   config.headers.Authorization = `Bearer ${token}`;
-		// }
+		const header = authHeader();
+		if (header.Authorization) {
+			config.headers.set('Authorization', header.Authorization);
+		}
 		return config;
 	},
 	(error: AxiosError) => {
@@ -73,6 +77,21 @@ api.interceptors.response.use(
 			const requestedUrl = error.config?.url ?? '';
 			if (requestedUrl.endsWith('/user/logout')) {
 				// Avoid triggering logout if the error came from a logout attempt itself.
+			} else if (isPinned()) {
+				// This tab's own token was rejected (expired, or minted by a service
+				// that has since restarted). Drop the pin and fall back to the shared
+				// cookie identity rather than logging the whole browser out: a
+				// POST /user/logout here would end the session every other tab is
+				// using (cambia-1149). unpinTab is idempotent, so a burst of rejected
+				// requests unpins once.
+				console.warn(`Tab token rejected (${response.status}) on ${requestedUrl}. Falling back to the shared session.`);
+				unpinTab();
+				// Unconditionally, bootstrap or not: unpinning retires the probe that
+				// is in flight (it asked as the token this tab no longer holds), so
+				// something has to ask again as the cookie identity or the app never
+				// leaves its loading state. checkAuth starts a fresh check rather than
+				// reusing that one, since the tab-session epoch has moved.
+				useAuthStore.getState().checkAuth();
 			} else if (authFlightGuard.active) {
 				// A 401/403 while the initial checkAuth or a login/register attempt is
 				// in flight is an expected "not authenticated yet" outcome that the

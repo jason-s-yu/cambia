@@ -4,6 +4,7 @@ import { create } from 'zustand';
 import type { User } from '@/types';
 import { loginUser, registerUser, fetchMe, logoutUser, guestLogin, claimAccount as claimAccountApi } from '@/services/authService';
 import { authFlightGuard } from '@/lib/axios';
+import { getTabSessionEpoch, isPinned, unpinTab } from '@/lib/tabSession';
 
 interface LoginCredentials {
 	email: string;
@@ -56,6 +57,13 @@ interface AuthState {
 // guest-login/claim flow - which calls checkAuth() again to refresh state
 // - still issues a fresh check rather than being stuck deduped forever.
 let checkAuthInFlight: Promise<void> | null = null;
+// The tab-session epoch the in-flight check was issued under. A pin or unpin
+// bumps it, which retires that probe rather than letting a later caller reuse
+// an answer about the identity this tab has just stopped being (cambia-1149).
+let checkAuthEpoch = 0;
+// Issue number of the current check, so a probe that has been superseded can
+// tell it is no longer the one holding the slot above.
+let checkAuthSeq = 0;
 
 export const useAuthStore = create<AuthState>()(
 	// Optionally persist part of the auth state (e.g., isAuthenticated, user)
@@ -142,6 +150,16 @@ export const useAuthStore = create<AuthState>()(
 		},
 
 		logout: async () => {
+			// A pinned tab logs out of its own identity only (cambia-1149).
+			// POST /user/logout expires the shared cookie, which is what every
+			// other tab on this origin is using, so the pinned tab drops its token
+			// and re-probes instead: it lands back on whoever the cookie is.
+			if (isPinned()) {
+				unpinTab();
+				set({ isAuthenticated: false, user: null, error: null, isLoading: false });
+				await get().checkAuth();
+				return;
+			}
 			try {
 				await logoutUser();
 			} catch {
@@ -153,14 +171,23 @@ export const useAuthStore = create<AuthState>()(
 		checkAuth: () => {
 			// Single-flight: a concurrent caller reuses the in-flight request instead
 			// of firing a duplicate GET /user/me (see checkAuthInFlight comment above).
-			if (checkAuthInFlight) {
+			// Except across a pin or unpin: that probe asked who this tab was under
+			// the previous identity, so reusing it would answer the switcher with
+			// the player it just replaced (cambia-1149).
+			const epoch = getTabSessionEpoch();
+			if (checkAuthInFlight && checkAuthEpoch === epoch) {
 				return checkAuthInFlight;
 			}
+			const seq = ++checkAuthSeq;
 			const flight = (async () => {
 				set({ isLoading: true, error: null });
 				authFlightGuard.begin();
 				try {
 					const currentUser = await fetchMe();
+					// The tab changed identity while this probe was on the wire: a
+					// newer check owns the state, and writing this answer would put
+					// the old player back. isLoading stays raised for that newer one.
+					if (getTabSessionEpoch() !== epoch) return;
 					if (currentUser) {
 						set({ isAuthenticated: true, user: currentUser, isLoading: false });
 					} else {
@@ -171,15 +198,20 @@ export const useAuthStore = create<AuthState>()(
 					// Catch unexpected errors during fetchMe (e.g., network issue)
 					// Auth errors (401/403) are typically handled by returning null from fetchMe
 					console.log('Auth check failed:', error);
-					set({ isAuthenticated: false, user: null, isLoading: false });
+					if (getTabSessionEpoch() === epoch) {
+						set({ isAuthenticated: false, user: null, isLoading: false });
+					}
 				} finally {
 					// The first settled check unblocks the app shell, pass or fail.
 					set({ initialised: true });
 					authFlightGuard.end();
-					checkAuthInFlight = null;
+					// Only if this probe is still the current one: one superseded by a
+					// pin must not clear the slot the newer probe holds.
+					if (checkAuthSeq === seq) checkAuthInFlight = null;
 				}
 			})();
 			checkAuthInFlight = flight;
+			checkAuthEpoch = epoch;
 			return flight;
 		},
 

@@ -1,6 +1,8 @@
 // src/hooks/useTrainingSocket.ts
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useTrainingStore } from '@/stores/trainingStore';
+import { wsProtocols } from '@/lib/tabSession';
+import { useTabSessionEpoch } from '@/hooks/useTabSession';
 
 const MAX_RECONNECT_DELAY = 30_000;
 const INITIAL_DELAY = 1000;
@@ -14,6 +16,8 @@ export function useTrainingSocket(runName: string | undefined) {
 	const activeRunName = useRef<string | undefined>(undefined);
 
 	const clearLogBuffer = useTrainingStore((s) => s.clearLogBuffer);
+	/** Pin or unpin: the effect below tears the socket down and dials again as the new identity. */
+	const sessionEpoch = useTabSessionEpoch();
 
 	const connect = useCallback((name: string) => {
 		if (!name) return;
@@ -25,7 +29,10 @@ export function useTrainingSocket(runName: string | undefined) {
 
 		let socket: WebSocket;
 		try {
-			socket = new WebSocket(url);
+			// Offers "cambia", plus this tab's token when it has one (cambia-1149).
+			// The server selects "cambia" on every endpoint, so a client that
+			// offers protocols always gets one back.
+			socket = new WebSocket(url, wsProtocols());
 		} catch {
 			return;
 		}
@@ -120,7 +127,7 @@ export function useTrainingSocket(runName: string | undefined) {
 				ws.current = null;
 			}
 		};
-	}, [runName, connect, clearLogBuffer]);
+	}, [runName, connect, clearLogBuffer, sessionEpoch]);
 
 	return { connected };
 }
