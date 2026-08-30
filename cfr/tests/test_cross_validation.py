@@ -30,6 +30,11 @@ skipgo = pytest.mark.skipif(not HAS_GO, reason="libcambia.so not available")
 # Import cross-engine helpers from the mature test suite
 # ---------------------------------------------------------------------------
 try:
+    from tests.parity_seeds import PARITY_SEEDS
+except ImportError:  # pragma: no cover - path fallback
+    from parity_seeds import PARITY_SEEDS  # type: ignore
+
+try:
     from tests.test_cross_engine_samples import (
         _setup_python_game_matching_go,
         XorShift64,
@@ -220,7 +225,7 @@ class TestEncodingDimensionConstants:
 class TestGoStateParity:
     """At matched game states, Go and Python agree on acting_player and decision_ctx."""
 
-    @pytest.mark.parametrize("seed", [42, 137, 12345])
+    @pytest.mark.parametrize("seed", PARITY_SEEDS)
     def test_state_tracking_parity(self, seed):
         """Drive both engines in lockstep, comparing acting_player at every step."""
         from src.encoding import action_to_index
@@ -316,7 +321,7 @@ class TestGoEncodingParity:
     full diagnostics at the first divergence point.
     """
 
-    @pytest.mark.parametrize("seed", [42, 137, 12345])
+    @pytest.mark.parametrize("seed", PARITY_SEEDS)
     def test_go_python_encoding_parity(self, seed):
         from src.encoding import action_to_index
         from src.agent_state import AgentObservation
@@ -480,7 +485,7 @@ class TestEPPBSCrossEngine:
     If parity fails, that is a genuine bug: the test reports diagnostics.
     """
 
-    @pytest.mark.parametrize("seed", [42, 137, 12345])
+    @pytest.mark.parametrize("seed", PARITY_SEEDS)
     def test_eppbs_encoding_parity(self, seed):
         from src.encoding import action_to_index, encode_infoset_eppbs
         from src.constants import CardBucket, GamePhase, StockpileEstimate
@@ -684,7 +689,7 @@ class TestMemoryDecayParity:
     For HumanLike archetype: eviction is deterministic (saliency-based).
     """
 
-    @pytest.mark.parametrize("seed", [42, 137, 12345])
+    @pytest.mark.parametrize("seed", PARITY_SEEDS)
     def test_decaying_archetype_legacy_encoding_parity(self, seed):
         """
         With memory_archetype='decaying' and lambda=100.0, all PrivOwn slots
@@ -748,7 +753,7 @@ class TestMemoryDecayParity:
             ga.close()
         go_engine.close()
 
-    @pytest.mark.parametrize("seed", [42, 137, 12345])
+    @pytest.mark.parametrize("seed", PARITY_SEEDS)
     def test_decaying_archetype_eppbs_encoding_parity(self, seed):
         """
         With memory_archetype='decaying' and lambda=100.0, all PrivOwn slots
@@ -830,7 +835,7 @@ class TestMemoryDecayParity:
             ga.close()
         go_engine.close()
 
-    @pytest.mark.parametrize("seed", [42, 137, 12345])
+    @pytest.mark.parametrize("seed", PARITY_SEEDS)
     def test_human_like_archetype_encoding_parity(self, seed):
         """
         With memory_archetype='human_like' and capacity=1, saliency-based

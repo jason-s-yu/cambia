@@ -1,5 +1,11 @@
 name: CI
 
+# cfr/** is excluded here on purpose; lifting that is the sprint-2 CI ticket.
+# One cfr path set is already covered, in its own workflow: the Go vs Python
+# parity gate (.github/workflows/parity-gate.yml, cambia-1234) triggers on
+# engine/**, cfr/src/game/** and cfr/src/encoding.py. It has to be a separate
+# workflow because this paths-ignore skips the whole workflow on a cfr-only
+# change and GitHub has no per-job path filter.
 on:
   pull_request:
     paths-ignore:
