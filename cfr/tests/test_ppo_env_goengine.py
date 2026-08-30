@@ -437,6 +437,59 @@ def test_self_play_randomizes_the_agent_seat(env_factory, tmp_path):
 
 
 @skiplib
+def test_self_play_opponent_is_asked_on_its_own_seat(env_factory, tmp_path):
+    """The snapshot must be queried with the acting opponent seat's belief.
+
+    A seat-indexing slip here would hand the opponent the learner's own belief
+    encoding, which is both an information leak and a silent self-play bug: the
+    run would still train and still look healthy.
+    """
+    env = env_factory(
+        opponent_type="self_play",
+        selfplay_snapshot_path=str(tmp_path / "snap"),
+        num_players=4,
+    )
+    env.reset(seed=81)
+
+    seen = []
+
+    class _Recorder:
+        def predict_index(self, obs, action_mask):
+            # Checked here, not afterwards: the belief states advance with every
+            # applied action, so a comparison made once the episode has moved on
+            # would be against a different game state.
+            seat = env._engine.acting_player()
+            own = env._get_obs(seat=seat)
+            learner = env._get_obs(seat=env._agent_seat)
+            seen.append(
+                (
+                    seat,
+                    np.array_equal(obs, own),
+                    np.array_equal(obs, learner),
+                )
+            )
+            # Decline, so the env takes its random-legal fallback.
+            return None
+
+    env._opponent = _Recorder()
+    rng = np.random.default_rng(3)
+    for _ in range(400):
+        mask = np.asarray(env.action_masks())
+        legal = np.flatnonzero(mask)
+        if legal.size == 0:
+            break
+        _, _, term, _, _ = env.step(int(rng.choice(legal)))
+        if term:
+            break
+
+    assert seen, "the self-play opponent was never consulted"
+    for seat, matched_own, matched_learner in seen:
+        assert seat != env._agent_seat, "opponent asked on the learner's seat"
+        assert matched_own, f"seat {seat} was not shown its own belief encoding"
+        assert not matched_learner, f"seat {seat} was shown the learner's belief"
+
+
+@skiplib
 def test_random_legal_opponent_keeps_the_agent_on_its_seat(env_factory):
     """Without self-play the agent stays where it was configured."""
     env = env_factory(num_players=4, agent_seat=2)
