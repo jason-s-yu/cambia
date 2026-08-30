@@ -79,3 +79,65 @@ describe('DsGameTable interactions', () => {
     expect(sendMessage).toHaveBeenCalledWith({ type: 'action_draw_stockpile' });
   });
 });
+
+describe('DsGameTable forfeited own seat', () => {
+  // The seat whose reconnect window closed (cambia-955): the server drops it from scoring and
+  // plays its turns on the clock, so isMyTurn never comes back. Before cambia-1237 the hint line
+  // sat on the whose-turn copy for the rest of the round with every control gone, and the only way
+  // off the table was the ghost button at the bottom of the side panel.
+  const forfeitedSelf = () =>
+    buildGameState({
+      currentPlayerId: OPP_ID,
+      self: { forfeited: true, isCurrentTurn: false },
+      opponent: { isCurrentTurn: true }
+    });
+
+  it('names the forfeit instead of the player who is to act (cambia-1237)', () => {
+    renderDsGameTable({ gameState: forfeitedSelf() });
+
+    expect(
+      screen.getByText('You forfeited. Your score is not counted. You can keep watching, or leave the table.')
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Waiting for Rival.')).not.toBeInTheDocument();
+  });
+
+  it('keeps the forfeit line once the round is over, since that is why the score is missing', () => {
+    renderDsGameTable({ gameState: forfeitedSelf(), phase: 'round_end' });
+    expect(screen.getByText('You forfeited. Your score is not counted in this round.')).toBeInTheDocument();
+  });
+
+  it('offers an exit in the action area, not only in the side panel', async () => {
+    const user = userEvent.setup();
+    const { onLeave } = renderDsGameTable({ gameState: forfeitedSelf() });
+
+    const exit = screen.getByTestId('action-leave-forfeited');
+    await user.click(exit);
+    expect(onLeave).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves the round watchable: the piles, the opponent hand and the standings still render', () => {
+    renderDsGameTable({ gameState: forfeitedSelf() });
+
+    expect(screen.getByTestId('pile-stock')).toBeInTheDocument();
+    expect(screen.getByTestId('pile-discard')).toBeInTheDocument();
+    expect(screen.getByTestId('card-1-0')).toBeInTheDocument();
+    expect(screen.getByTestId('card-0-0')).toBeInTheDocument();
+  });
+
+  it('takes the snap surface off the felt, so no live control contradicts the forfeit line', () => {
+    const { sendMessage } = renderDsGameTable({ gameState: forfeitedSelf() });
+
+    // A live seat's own cards are snap picks and an opponent's are snappable out of turn. A
+    // forfeited seat is out of the round, so neither is offered: PlayingCard renders a <button>
+    // only where it takes a click, and with no pick there is no Snap button to reach.
+    expect(screen.getByTestId('card-0-0').tagName).not.toBe('BUTTON');
+    expect(screen.getByTestId('card-1-0').tagName).not.toBe('BUTTON');
+    expect(screen.queryByTestId('action-snap')).not.toBeInTheDocument();
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('shows no forfeit exit for a live seat', () => {
+    renderDsGameTable();
+    expect(screen.queryByTestId('action-leave-forfeited')).not.toBeInTheDocument();
+  });
+});

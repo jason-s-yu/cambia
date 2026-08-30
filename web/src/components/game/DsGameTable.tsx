@@ -378,6 +378,11 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   // src/lib/handLock.ts for the rule and the two server layers it mirrors.
   const lockedPlayer = lockedPlayerId(gameState);
   const selfHandLocked = !!selfId && lockedPlayer === selfId;
+  // This player's own seat forfeited (cambia-955, surfaced by cambia-1237). The server drops the
+  // seat from scoring and plays its turns on the clock (game.go forfeitPlayer), so isMyTurn never
+  // comes back and nothing this client sends can land. Read like selfHandLocked: it takes the
+  // remaining out-of-turn surface (the snap) off the felt and gives the hint line its own branch.
+  const selfForfeited = !!selfState?.forfeited;
   const specialAction = gameState.specialAction;
   const specialRank = pendingAction === 'special_action' && specialAction ? specialAction.cardRank : null;
   const turnTimerSec = gameState.houseRules?.turnTimerSec ?? 0;
@@ -585,7 +590,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     canTakeDiscard ||
     (pendingAction === 'discard_replace' && !!selfState?.drawnCard) ||
     ((selectedIdx !== null || !!snapTarget) && pendingAction === null);
-  const canSnap = (selectedIdx !== null || !!snapTarget) && pendingAction === null && !busy;
+  const canSnap = (selectedIdx !== null || !!snapTarget) && pendingAction === null && !busy && !selfForfeited;
   const canCallCambia = isMyTurn && pendingAction === null && !busy && !gameState.cambiaCalled && gameState.started && !gameState.gameOver;
   const kingConfirm = !!kingPair && specialRank === 'K' && isMyTurn && !busy;
   // An ability the engine armed off a replace has no skip: the engine models no way to decline one
@@ -636,7 +641,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   // A locked hand cannot snap anything, so the caller's own lock takes every opponent card off the
   // felt at once; the per-seat half of the gate is applied where the seats render.
   const opponentSnappable =
-    !busy && !roundOver && !preGame && pendingAction === null && allowOpponentSnapping && !selfHandLocked && !!gameState.discardTop;
+    !busy && !roundOver && !preGame && pendingAction === null && allowOpponentSnapping && !selfHandLocked && !selfForfeited && !!gameState.discardTop;
   const ownTargetable = (() => {
     // Owing a fill, the own hand is the only live target on the felt: one of these cards has to go
     // into the slot this player emptied (cambia-936).
@@ -654,11 +659,21 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   const ownCommits = (owesSnapMove && !isProcessing && !offline) || (!busy && (pendingAction === 'discard_replace' || specialRank === '7' || specialRank === '8'));
   // The own-hand pick is a snap pick, which is what a locked hand loses; the commits above stay as
   // they are, since a caller takes no further turn to replace or peek on.
-  const ownSelects = !busy && !selfHandLocked && (pendingAction === null || (swapTargeting && selectedIdx === null));
+  const ownSelects = !busy && !selfHandLocked && !selfForfeited && (pendingAction === null || (swapTargeting && selectedIdx === null));
 
   const hint = useMemo(() => {
     if (gaveUp) return 'Connection lost. Leave the table and rejoin from the dashboard.';
     if (offline) return 'Connection lost. Reconnecting.';
+    // Above the round-over line, and above every turn line below it: a forfeited seat is why this
+    // client has no controls and why its score is missing from the standings, and neither fact
+    // expires when the round does. Without this the copy sat on "Waiting for X." for the rest of
+    // the round, since isMyTurn never comes back for the seat (cambia-1237). The top strip and
+    // the Table panel still carry the round-over chip and line.
+    if (selfForfeited) {
+      return roundOver
+        ? 'You forfeited. Your score is not counted in this round.'
+        : 'You forfeited. Your score is not counted. You can keep watching, or leave the table.';
+    }
     if (roundOver) return phase === 'round_end' ? 'Round over. Waiting for the next round.' : 'Game over.';
     // No pre-game deadline reaches the client, so the table shows no countdown
     // during the peek window and the copy must not point at one (cambia-876,
@@ -689,7 +704,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     if (pendingAction === 'discard_replace') return 'Swap the drawn card into a slot, or discard it.';
     if (gameState.cambiaCalled) return canTakeDiscard ? 'Last turn. Draw from the stock or take the discard.' : 'Last turn. Draw from the stock.';
     return canTakeDiscard ? 'Your turn. Draw from the stock or take the discard.' : 'Your turn. Draw from the stock.';
-  }, [gaveUp, offline, roundOver, phase, preGame, isMyTurn, specialAction, currentPlayer, nameOf, specialRank, kingConfirm, selectedIdx, snapTarget, pendingAction, pendingSnapMove, selfHandLocked, gameState.cambiaCalled, canTakeDiscard]);
+  }, [gaveUp, offline, roundOver, phase, preGame, isMyTurn, specialAction, currentPlayer, nameOf, specialRank, kingConfirm, selectedIdx, snapTarget, pendingAction, pendingSnapMove, selfHandLocked, selfForfeited, gameState.cambiaCalled, canTakeDiscard]);
 
   const discardFace = toDsCardFace(gameState.discardTop);
   const drawnCard = selfState?.drawnCard ?? displayedDrawnCard;
@@ -961,6 +976,11 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: '1 1 220px', maxWidth: 280, paddingBottom: 2 }}>
               <p style={{ margin: 0, minHeight: 20, textAlign: 'center', fontSize: 'var(--ds-text-sm)', lineHeight: 'var(--ds-leading-snug)', color: 'var(--text-on-green)' }}>{hint}</p>
+              {/* The forfeited seat's only control, and it sits here rather than only in the side
+                  panel: the panel's ghost Leave is below the fold at 390x844, so the seat that
+                  cannot act had no reachable way off the table (cambia-1237). Secondary, not the
+                  gold CTA: leaving is offered, and the round stays watchable behind it. */}
+              {selfForfeited && <Button variant='secondary' testId='action-leave-forfeited' onClick={onLeave}>Leave table</Button>}
               {deckInteractive && <Button testId='action-draw-stock' onClick={handleDeckClick}>Draw from stock</Button>}
               {canTakeDiscard && <Button variant='secondary' testId='action-take-discard' onClick={handleDiscardClick}>Take discard</Button>}
               {/* A player can draw, snap an opponent, and owe the fill while still holding the
