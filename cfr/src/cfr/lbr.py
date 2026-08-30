@@ -49,7 +49,7 @@ against a correctly rewound agent: under the old deep-copy path the shared
 agent wrapper carried whatever prefix it had accumulated at collection time into
 every branch rollout.
 
-Sampled infosets are recorded as ``(deal_seed, applied action-index prefix)``
+Sampled infosets are recorded as ``(deal spec, applied action-index prefix)``
 and REPLAYED on demand rather than held open, so the estimator never pins more
 than one triple's worth of the finite FFI handle pool at a time. Replay is
 exact: the Go deal is a pure function of the seed and the engine is
@@ -113,17 +113,89 @@ _EST_P0_DECISIONS_PER_GAME = 3.0
 OpponentFactory = Callable[[int, Any], Any]
 
 
+#: Rule fields the Go engine's FFI rules struct cannot express. The bridge passes
+#: 12 of CambiaRulesConfig's 13 fields to cambia_game_new_with_rules; deck_ranks
+#: is the one it drops, and dropping it silently changes the GAME (a
+#: deck_ranks=["A","6"] config deals a 4-card tiny deck on the Python engine and a
+#: full 54-card deck on the Go engine). See _reject_unsupported_rules.
+_FFI_UNSUPPORTED_RULE_FIELDS = ("deck_ranks",)
+
+
+def _reject_unsupported_rules(house_rules: Any) -> None:
+    """Refuse house rules the Go deal cannot honor.
+
+    Without this, a restricted-deck config measures a completely different game
+    on the Go path and reports the number as if it were the configured one. An
+    explicit deck (``GoSearchState.from_deck``, or the ``deal_decks`` pool the
+    estimators accept) is the supported way to run a non-standard deck, since a
+    deck order fully determines the deal and needs no rule support.
+    """
+    for field in _FFI_UNSUPPORTED_RULE_FIELDS:
+        value = getattr(house_rules, field, None)
+        if value:
+            raise ValueError(
+                f"house_rules.{field}={value!r} cannot be expressed over the "
+                "Go engine's FFI rules struct, so dealing from these rules "
+                "would silently measure a different game (a full 54-card deck). "
+                "Pass an explicit deck instead: GoSearchState.from_deck(...), "
+                "or the deal_decks= pool accepted by collect_infosets / "
+                "sampled_lbr / tier_b_lbr / ismcts_br."
+            )
+
+
+class DealSpec(NamedTuple):
+    """How to produce one deal: either a Go seed or an explicit deck order.
+
+    A spec is self-contained, so a recorded infoset can be replayed without the
+    caller holding on to whatever pool it came from.
+    """
+
+    seed: int = 0
+    deck: Optional[Tuple[int, ...]] = None
+    starting_player: int = 0
+
+    def new_state(self, house_rules: Any) -> "GoSearchState":
+        if self.deck is not None:
+            return GoSearchState.from_deck(
+                house_rules, self.deck, self.starting_player
+            )
+        return GoSearchState.new(house_rules, self.seed)
+
+
+def normalize_deal_decks(deal_decks) -> List[DealSpec]:
+    """Turn a deck pool into ``DealSpec``s.
+
+    Accepts either bare deck orders or ``(deck, starting_player)`` pairs -- the
+    pair form is what a reference implementation hands over, since which seat
+    moves first is part of the deal it solved.
+    """
+    specs: List[DealSpec] = []
+    for entry in deal_decks:
+        if (
+            isinstance(entry, tuple)
+            and len(entry) == 2
+            and not isinstance(entry[1], (list, tuple))
+        ):
+            deck, starting_player = entry
+        else:
+            deck, starting_player = entry, 0
+        specs.append(
+            DealSpec(deck=tuple(int(c) for c in deck), starting_player=int(starting_player))
+        )
+    return specs
+
+
 class SampledInfoset(NamedTuple):
     """A recorded P0 decision point, replayable on demand.
 
-    Holds the deal seed and the action-index prefix that reaches the decision
-    instead of a copy of the state: the Go deal is a pure function of the seed,
-    so replaying the prefix reconstructs the exact game, both seats' beliefs and
-    both token streams. Keeping the state open instead would pin three FFI
-    handles per sampled infoset, and the pool is finite.
+    Holds the deal spec and the action-index prefix that reaches the decision
+    instead of a copy of the state: a Go deal is a pure function of its seed (or
+    of its explicit deck), so replaying the prefix reconstructs the exact game,
+    both seats' beliefs and both token streams. Keeping the state open instead
+    would pin three FFI handles per sampled infoset, and the pool is finite.
     """
 
-    deal_seed: int
+    deal: DealSpec
     action_prefix: Tuple[int, ...]
     legal_indices: Tuple[int, ...]
     agent_action_pos: int
@@ -159,7 +231,12 @@ class GoSearchState:
 
     @classmethod
     def new(cls, house_rules: Any, seed: int) -> "GoSearchState":
-        """Fresh deal from ``seed`` under ``house_rules``."""
+        """Fresh deal from ``seed`` under ``house_rules``.
+
+        Refuses rules the Go deal cannot honor, rather than quietly dealing a
+        different game (see ``_reject_unsupported_rules``).
+        """
+        _reject_unsupported_rules(house_rules)
         engine = GoEngine(seed=int(seed), house_rules=house_rules)
         return cls._with_agents(engine)
 
@@ -444,7 +521,7 @@ def replay_infoset(
     the decision point matches collection. Caller owns the returned state and
     must close it.
     """
-    state = GoSearchState.new(house_rules, infoset.deal_seed)
+    state = infoset.deal.new_state(house_rules)
     try:
         _begin_episode(state, agent_wrapper, _PLAYER_ID)
         for action_idx in infoset.action_prefix:
@@ -452,7 +529,7 @@ def replay_infoset(
             if not state.apply_index(action_idx):
                 raise RuntimeError(
                     f"replay_infoset: engine rejected action {action_idx} while "
-                    f"replaying deal {infoset.deal_seed}; the recorded prefix "
+                    f"replaying deal {infoset.deal}; the recorded prefix "
                     "and the engine have diverged."
                 )
             _notify(
@@ -476,6 +553,7 @@ def collect_infosets(
     trajectory_opponent_factory: OpponentFactory = _make_random_opponent,
     sample_prob: float = 1.0,
     max_games: Optional[int] = None,
+    deal_decks: Optional[Sequence[Any]] = None,
 ) -> List[SampledInfoset]:
     """Collect P0 decision points by play against a trajectory opponent.
 
@@ -500,10 +578,15 @@ def collect_infosets(
         max_games: hard cap on games played (safety against unreachable targets).
             Defaults to a generous multiple of the games implied by the measured
             decisions/game, with an absolute ceiling.
+        deal_decks: optional pool of explicit deck orders (bare decks, or
+            ``(deck, starting_player)`` pairs) to draw deals from instead of
+            seeding the Go dealer. Required for any config whose deck the FFI
+            rules struct cannot express -- see ``_reject_unsupported_rules``.
 
     Returns:
         list of ``SampledInfoset``.
     """
+    deal_specs = normalize_deal_decks(deal_decks) if deal_decks else []
     rng = np.random.default_rng(seed)
     _random_module.seed(seed)
 
@@ -523,10 +606,13 @@ def collect_infosets(
     while len(sampled) < num_infosets and games_played < max_games:
         games_played += 1
 
-        deal_seed = int(rng.integers(0, 2**31))
+        if deal_specs:
+            deal = deal_specs[int(rng.integers(len(deal_specs)))]
+        else:
+            deal = DealSpec(seed=int(rng.integers(0, 2**31)))
         opp_agent = trajectory_opponent_factory(_OPPONENT_ID, config)
 
-        state = GoSearchState.new(house_rules, deal_seed)
+        state = deal.new_state(house_rules)
         try:
             _begin_episode(state, agent_wrapper, _PLAYER_ID)
             prefix: List[int] = []
@@ -554,7 +640,7 @@ def collect_infosets(
                     if take:
                         sampled.append(
                             SampledInfoset(
-                                deal_seed=deal_seed,
+                                deal=deal,
                                 action_prefix=tuple(prefix),
                                 legal_indices=tuple(legal_indices),
                                 agent_action_pos=pos,
@@ -659,6 +745,7 @@ def tier_b_lbr(
     trajectory_opponent_factory: OpponentFactory = DEFAULT_TRAJECTORY_OPPONENT,
     rollout_opponent_factory: OpponentFactory = DEFAULT_ROLLOUT_OPPONENT,
     max_games: Optional[int] = None,
+    deal_decks: Optional[Sequence[Any]] = None,
 ) -> Dict[str, Any]:
     """Compute the Tier-B sampled LBR exploitability estimate.
 
@@ -691,6 +778,7 @@ def tier_b_lbr(
         seed=seed,
         trajectory_opponent_factory=trajectory_opponent_factory,
         max_games=max_games,
+        deal_decks=deal_decks,
     )
 
     opp_label = type(rollout_opponent_factory(_OPPONENT_ID, config)).__name__

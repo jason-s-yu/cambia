@@ -18,7 +18,7 @@ with Tier B and with ISMCTS-BR. See that module's docstring for the
 
 import logging
 import random as _random_module
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -72,6 +72,7 @@ def sampled_lbr(
     br_rollouts_per_infoset: int = 100,
     seed: int = 42,
     rollout_seed: Optional[int] = None,
+    deal_decks: Optional[Sequence[Any]] = None,
 ) -> Dict[str, Any]:
     """Compute the Tier-A sampled LBR exploitability estimate.
 
@@ -102,6 +103,9 @@ def sampled_lbr(
         rollout_seed: Seed for the rollout policies' RNG. Defaults to ``seed``,
             so a run is fully determined by ``seed`` alone; pass it separately
             only to re-roll the continuation noise over a fixed infoset sample.
+        deal_decks: optional pool of explicit deck orders to deal from, required
+            for configs whose deck the Go FFI rules struct cannot express (e.g.
+            a ``deck_ranks`` tiny game). See ``src.cfr.lbr``.
 
     Returns:
         dict with keys:
@@ -126,6 +130,7 @@ def sampled_lbr(
         num_infosets=num_infosets,
         seed=seed,
         trajectory_opponent_factory=_make_random_opponent,
+        deal_decks=deal_decks,
     )
 
     def _empty(reason: str) -> Dict[str, Any]:

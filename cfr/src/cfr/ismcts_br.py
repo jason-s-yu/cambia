@@ -107,7 +107,13 @@ import numpy as np
 
 from src.agents.action_codec import actions_from_mask
 from src.agents.game_view import GameView
-from src.cfr.lbr import GoSearchState, UniformRandomPolicy, terminal_utility
+from src.cfr.lbr import (
+    DealSpec,
+    GoSearchState,
+    UniformRandomPolicy,
+    normalize_deal_decks,
+    terminal_utility,
+)
 from src.constants import ActionDrawStockpile
 
 logger = logging.getLogger(__name__)
@@ -199,13 +205,13 @@ def _new_deal(
     Caller owns the returned state and must close it.
     """
     if deal_decks:
-        deck = deal_decks[deal_rng.randrange(len(deal_decks))]
-        return GoSearchState.from_deck(house_rules, deck)
+        specs = normalize_deal_decks(deal_decks)
+        return specs[deal_rng.randrange(len(specs))].new_state(house_rules)
     if deal_seeds:
         s = deal_seeds[deal_rng.randrange(len(deal_seeds))]
     else:
         s = deal_rng.getrandbits(31)
-    return GoSearchState.new(house_rules, s)
+    return DealSpec(seed=s).new_state(house_rules)
 
 
 def _card_id(card) -> Optional[str]:
