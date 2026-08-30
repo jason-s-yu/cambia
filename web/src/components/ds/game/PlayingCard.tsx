@@ -37,24 +37,52 @@ interface Dims {
   idx: number;
   pip: number;
   star: number;
+  /** Inset of the back's hairline frame from the card edge. */
+  frame: number;
+  /** Pitch of the back's crosshatch, in px. Scaled so the weave stays the same
+   *  visual density at every card size instead of packing up at sm. */
+  weave: number;
 }
 
 const DIMS: Record<NonNullable<PlayingCardProps['size']>, Dims> = {
-  sm: { w: 'var(--card-w-sm)', h: 'var(--card-h-sm)', idx: 12, pip: 20, star: 18 },
-  md: { w: 'var(--card-w-md)', h: 'var(--card-h-md)', idx: 15, pip: 30, star: 26 },
-  lg: { w: 'var(--card-w-lg)', h: 'var(--card-h-lg)', idx: 20, pip: 44, star: 38 }
+  sm: { w: 'var(--card-w-sm)', h: 'var(--card-h-sm)', idx: 12, pip: 20, star: 18, frame: 3, weave: 6 },
+  md: { w: 'var(--card-w-md)', h: 'var(--card-h-md)', idx: 15, pip: 30, star: 26, frame: 4, weave: 7 },
+  lg: { w: 'var(--card-w-lg)', h: 'var(--card-h-lg)', idx: 20, pip: 44, star: 38, frame: 6, weave: 10 }
 };
 
 /**
- * Playing card: flat cream face with ink/red pips, or a green back with a gold
- * hairline frame. 1px border, one hairline lift.
+ * Crosshatch of the card back: 1px --card-back-pattern lines on both diagonals,
+ * hard stops so it stays a flat weave and never reads as a gradient sheen.
+ */
+const crosshatch = (pitch: number): string =>
+  `repeating-linear-gradient(45deg, var(--card-back-pattern) 0, var(--card-back-pattern) 1px, transparent 1px, transparent ${pitch}px), ` +
+  `repeating-linear-gradient(-45deg, var(--card-back-pattern) 0, var(--card-back-pattern) 1px, transparent 1px, transparent ${pitch}px)`;
+
+/**
+ * Playing card: flat cream face with ink/red pips, or a face-down back. 1px
+ * border, one hairline lift.
+ *
+ * The back is a plate, not an outline (cambia-1096). It used to be filled with
+ * --card-back, which resolves to the felt's own green, so a face-down card came
+ * out as a hollow rectangle indistinguishable from DsGameTable's EmptySlot and
+ * a four-card deal read as two cards and two empty slots. It is now three
+ * layers on a --card-back-fill ground that sits under the felt: a gold
+ * crosshatch, the --card-back-line frame inset from the edge, and a light
+ * neutral --card-back-edge silhouette. Solid and filled against the empty
+ * slot's dashed and transparent, which stays the marker for a genuinely empty
+ * pile.
  *
  * Four states, kept apart so a chosen card never looks like a merely legal one
  * (cambia-959): idle is the plain edge; `highlight` (targetable) draws a solid
  * --card-targetable-ring edge and a 2px ring in the same gold, no lift;
  * `selected` rings the card in gold and raises it; `dimmed` fades a card that is
  * not a target right now. The targetable ring is opaque because the tint it
- * replaced measured 1.03:1 on the felt (review F1).
+ * replaced measured 1.03:1 on the felt (review F1). A dimmed back fades less
+ * far than a dimmed face: opacity blends the card toward the felt behind it,
+ * and the cream face has the contrast to spend while the back does not. The
+ * back's 1.99:1 on the felt falls to 1.51:1 at 0.55 and slides under the
+ * 1.73:1 the empty slot's dashed line holds, which is the read this ticket
+ * exists to fix; 0.7 keeps it at 1.67:1 (dark; 2.47 -> 1.93 light).
  *
  * A card that takes a click is a real <button>, so Enter and Space activate it
  * natively and it takes the global :focus-visible ring. A card that takes no
@@ -67,7 +95,7 @@ const PlayingCard: React.FC<PlayingCardProps> = ({ rank, suit, faceDown = false,
   const joker = rank === 'JOKER';
   const glyph = joker ? '★' : suit ? GLYPHS[suit] || '' : '';
   const color = joker ? 'var(--accent-gold)' : suit && RED[suit] ? 'var(--suit-red)' : 'var(--suit-black)';
-  const edge = faceDown ? 'var(--border-strong)' : 'var(--card-face-edge)';
+  const edge = faceDown ? 'var(--card-back-edge)' : 'var(--card-face-edge)';
   const base: React.CSSProperties = {
     // Button reset: the card owns its box, so the UA padding, font and fill go.
     appearance: 'none',
@@ -89,7 +117,7 @@ const PlayingCard: React.FC<PlayingCardProps> = ({ rank, suit, faceDown = false,
         ? '0 0 0 2px var(--card-targetable-ring), var(--shadow-playing-card)'
         : 'var(--shadow-playing-card)',
     transform: selected ? 'translateY(-6px)' : 'none',
-    opacity: dimmed ? 0.55 : 1,
+    opacity: dimmed ? (faceDown ? 0.7 : 0.55) : 1,
     transition:
       'transform var(--dur-med) var(--ease-snap), box-shadow var(--dur-fast) var(--ds-ease-out), border-color var(--dur-fast) var(--ds-ease-out), opacity var(--dur-med) var(--ds-ease-out)',
     cursor: onClick ? 'pointer' : 'default',
@@ -98,7 +126,16 @@ const PlayingCard: React.FC<PlayingCardProps> = ({ rank, suit, faceDown = false,
   };
 
   const body = faceDown ? (
-    <span style={{ position: 'absolute', inset: 4, borderRadius: 4, border: '1px solid var(--card-back-line)', pointerEvents: 'none' }}></span>
+    <span
+      aria-hidden='true'
+      style={{
+        position: 'absolute',
+        inset: d.frame,
+        borderRadius: `calc(var(--radius-playing-card) - ${d.frame}px)`,
+        border: '1px solid var(--card-back-line)',
+        pointerEvents: 'none'
+      }}
+    ></span>
   ) : (
     <>
       <span style={{ position: 'absolute', top: 4, left: 6, textAlign: 'center', lineHeight: 1, fontWeight: 'var(--weight-black)', fontSize: d.idx }}>
@@ -116,8 +153,11 @@ const PlayingCard: React.FC<PlayingCardProps> = ({ rank, suit, faceDown = false,
     </>
   );
 
+  // Two longhands, not the `background` shorthand: the shorthand resets
+  // background-image, so pairing it with the crosshatch would leave the back
+  // dependent on the order the two keys happen to be emitted in.
   const face: React.CSSProperties = faceDown
-    ? { background: 'var(--card-back)' }
+    ? { backgroundColor: 'var(--card-back-fill)', backgroundImage: crosshatch(d.weave) }
     : { background: 'var(--card-face)', color, fontVariantNumeric: 'tabular-nums' };
 
   if (onClick) {
