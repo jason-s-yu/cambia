@@ -14,6 +14,14 @@ import (
 // allowlist. Unset means "no allowlist configured".
 const OriginEnvVar = "ALLOWED_WS_ORIGINS"
 
+// Subprotocol is the only subprotocol this service ever selects, on every
+// socket. A client may offer more than this one entry - a tab-held JWT rides
+// the handshake as auth.TokenSubprotocolPrefix + the token (cambia-1149) - and
+// RFC 6455 requires a client that offered protocols to fail the handshake if
+// the server selects none, so every Accept site passes this value even where
+// the protocol itself carries no meaning.
+const Subprotocol = "cambia"
+
 // OriginPatterns returns the value for websocket.AcceptOptions.OriginPatterns.
 // An unset ALLOWED_WS_ORIGINS keeps the "*" wildcard that dev runs depend on
 // (the Vite dev server and the client are served from different ports).

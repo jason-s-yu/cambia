@@ -162,7 +162,7 @@ func (m *ResourceMonitor) HandleSnapshot(w http.ResponseWriter, r *http.Request)
 // starts the sampler if it was idle; disconnecting stops it when it was the last
 // client.
 func (m *ResourceMonitor) HandleWS(w http.ResponseWriter, r *http.Request) {
-	c, err := websocket.Accept(w, r, wsopts.AcceptOptions())
+	c, err := websocket.Accept(w, r, wsopts.AcceptOptions(wsopts.Subprotocol))
 	if err != nil {
 		return
 	}

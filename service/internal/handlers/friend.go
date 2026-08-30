@@ -19,7 +19,7 @@ import (
 // authenticateAndGetUser performs JWT authentication and retrieves the user UUID.
 // It handles common authentication errors and returns the UUID or writes an HTTP error.
 func authenticateAndGetUser(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
-	userIDStr, sawAny, ok := auth.ResolveAuthTokenCookie(w, r)
+	userIDStr, sawAny, ok := auth.ResolveAuthToken(w, r)
 	if !ok {
 		if !sawAny {
 			http.Error(w, "Missing authentication token", http.StatusUnauthorized)
