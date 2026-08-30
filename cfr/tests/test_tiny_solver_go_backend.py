@@ -267,6 +267,13 @@ def test_control_config_nashconv_matches_across_backends():
     The AC2 check the {A,6} tree cannot support: on the config where the two trees
     ARE the same tree, the solver and the exploitability certifier must agree.
 
+    This is also what pins the two INFOSET PARTITIONS as equivalent rather than
+    merely equal in size. Tabular CFR+ and exploitability are functions of the
+    tree shape, the terminal utilities, the chance masses and the partition alone;
+    the two backends spell a pkey differently (repr(card) strings against
+    (rank, suit) pairs), so the keys cannot be compared directly, but a partition
+    that differed anywhere would move the number far more than float noise.
+
     Agreement is asserted to a tolerance, not bit for bit. Both builders sort a
     decision node's legal actions by repr(action), but a nested chance node's child
     order cannot be matched: build_tree_python forces a card to the top by popping
