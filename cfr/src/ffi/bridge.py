@@ -9,6 +9,7 @@ The shared library is loaded once at module import time.
 
 import os
 import random
+import sys
 import warnings
 from pathlib import Path
 from typing import List, NamedTuple, Optional, Tuple
@@ -1098,8 +1099,15 @@ class GoEngine:
         Return a (N_PLAYER_NUM_ACTIONS,) uint8 numpy array where 1 = legal N-player action.
 
         Uses the _NPLAYER_LEGAL_WORDS-word uint64 bitmask from Go, expanded to per-action bytes.
-        Requires an agent handle; uses cambia_game_nplayer_legal_actions for
-        the raw bitmask and returns it as a dense byte array.
+        Uses cambia_game_nplayer_legal_actions for the raw bitmask and returns
+        it as a dense byte array.
+
+        The expansion is vectorized: on a little-endian host the uint64 words
+        are already in ascending bit order byte by byte, so unpackbits over the
+        raw buffer gives the dense mask directly. This is on the N-seat env's
+        per-step path (cambia-1376), where the previous
+        N_PLAYER_NUM_ACTIONS-iteration Python loop cost more than the rest of
+        the step put together.
         """
         ret = self._lib.cambia_game_nplayer_legal_actions(
             self._game_h, self._nplayer_legal_buf
@@ -1109,6 +1117,14 @@ class GoEngine:
                 f"cambia_game_nplayer_legal_actions failed (returned {ret}) "
                 f"on handle {self._game_h}"
             )
+        if sys.byteorder == "little":
+            words = np.frombuffer(
+                _ffi.buffer(self._nplayer_legal_buf, _NPLAYER_LEGAL_WORDS * 8),
+                dtype=np.uint8,
+            )
+            return np.unpackbits(words, bitorder="little")[
+                : self.N_PLAYER_NUM_ACTIONS
+            ].copy()
         mask = np.zeros(self.N_PLAYER_NUM_ACTIONS, dtype=np.uint8)
         for i in range(self.N_PLAYER_NUM_ACTIONS):
             word = i // 64
