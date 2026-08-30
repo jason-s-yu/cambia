@@ -6,6 +6,7 @@ import { immer } from 'zustand/middleware/immer';
 import { useAuthStore } from './authStore';
 import { applySnapSuccess } from '@/lib/snapSuccess';
 import { applySnapMove } from '@/lib/snapFill';
+import { applyPregamePeek } from '@/lib/pregamePeek';
 
 /** A face shown to this client by an event: an ability look, a pregame peek, a card drawn in. */
 export interface RevealedCard {
@@ -129,28 +130,6 @@ const initialState: GameState = {
 	lastSnapMove: null,
 	lastPresence: null
 };
-
-/**
- * Puts the pregame peek back onto the self hand of a board snapshot (cambia-1094).
- *
- * The server hides every own card in every sync_state, so a snapshot that lands during the pregame
- * window - a peer dropping, a repair, the reconnect resync - would otherwise turn the peeked cards
- * down before the window is up. Called for every snapshot while preGameActive, so the peek survives
- * as many syncs as the window takes, and never past it. Slot ids and indices come from the
- * snapshot, which is authoritative for them; only the face comes from the peek.
- */
-function applyPregamePeek(gs: ObfGameState | null | undefined, peek: RevealedCard[], selfId: string | null) {
-	if (!gs || !selfId || peek.length === 0) return;
-	const self = gs.players.find((p) => p.playerId === selfId);
-	if (!self?.revealedHand) return;
-	for (const card of peek) {
-		// Id first, slot second: the id is minted once per card, the index is a position.
-		let at = self.revealedHand.findIndex((c) => c.id === card.id);
-		if (at < 0 && typeof card.idx === 'number') at = self.revealedHand.findIndex((c) => c.idx === card.idx);
-		if (at < 0) continue;
-		self.revealedHand[at] = { ...self.revealedHand[at], known: true, rank: card.rank, suit: card.suit, value: card.value };
-	}
-}
 
 /** The fill `selfId` still owes, read out of a state snapshot's snapMoves (cambia-936). */
 function ownSnapMove(gs: ObfGameState | null | undefined, selfId: string | null) {
