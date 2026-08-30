@@ -53,12 +53,110 @@ from src.sequence_encoding import encode_observation_sequence
 # src.sequence_encoding carry no engine dependency and stay eager.
 
 
-# Global action index of ActionDrawStockpile (encoding.action_to_index's
-# _IDX_DRAW_STOCKPILE). The Go engine's legal-action mask and apply path are both
-# index-native, so the Go builder tests a draw action against this index rather
-# than against the Python action NamedTuple's type. Cross-checked against
-# encoding.action_to_index in tests/test_tiny_solver_go_backend.py.
-_GO_DRAW_STOCKPILE = 0
+# Index -> GameAction inverse of encoding.action_to_index, built by enumerating
+# every action variant and inverting the map (so it cannot drift from the forward
+# map it inverts). The Go engine's legal mask and apply path are index-native,
+# but a Decision node has to carry the SAME GameAction NamedTuples the Python
+# builder put there: Decision.actions is read by the PRT-CFR trainer, the tiny
+# worker, prtcfr_net and the X2 scorer, all of which route actions through
+# encoding.action_to_index. Handing them integers would fork the node contract
+# per backend. Keeping one contract also keeps the child ORDER the same (both
+# builders sort a node's legal actions by repr), which is what makes the two
+# trees agree to the bit rather than to float64 summation noise.
+_GO_ACTION_BY_INDEX = None
+
+
+def _go_action_table():
+    """Build (and cache) the index -> GameAction table.
+
+    Enumerates every constructible action variant over the [0, MAX_HAND) slot
+    ranges and inverts action_to_index. Asserts injectivity, so a forward-map
+    change that collided two actions would fail loudly here instead of silently
+    mislabelling a node's legal set.
+    """
+    global _GO_ACTION_BY_INDEX
+    if _GO_ACTION_BY_INDEX is not None:
+        return _GO_ACTION_BY_INDEX
+
+    from src.constants import (
+        ActionAbilityBlindSwapSelect,
+        ActionAbilityKingLookSelect,
+        ActionAbilityKingSwapDecision,
+        ActionAbilityPeekOtherSelect,
+        ActionAbilityPeekOwnSelect,
+        ActionCallCambia,
+        ActionDiscard,
+        ActionDrawDiscard,
+        ActionDrawStockpile,
+        ActionPassSnap,
+        ActionReplace,
+        ActionSnapOpponent,
+        ActionSnapOpponentMove,
+        ActionSnapOwn,
+    )
+    from src.encoding import MAX_HAND, NUM_ACTIONS, action_to_index
+
+    variants = [
+        ActionDrawStockpile(),
+        ActionDrawDiscard(),
+        ActionCallCambia(),
+        ActionDiscard(use_ability=True),
+        ActionDiscard(use_ability=False),
+        ActionAbilityKingSwapDecision(perform_swap=True),
+        ActionAbilityKingSwapDecision(perform_swap=False),
+        ActionPassSnap(),
+    ]
+    for i in range(MAX_HAND):
+        variants.append(ActionReplace(target_hand_index=i))
+        variants.append(ActionAbilityPeekOwnSelect(target_hand_index=i))
+        variants.append(ActionAbilityPeekOtherSelect(target_opponent_hand_index=i))
+        variants.append(ActionSnapOwn(own_card_hand_index=i))
+        variants.append(ActionSnapOpponent(opponent_target_hand_index=i))
+        for j in range(MAX_HAND):
+            variants.append(
+                ActionAbilityBlindSwapSelect(own_hand_index=i, opponent_hand_index=j)
+            )
+            variants.append(
+                ActionAbilityKingLookSelect(own_hand_index=i, opponent_hand_index=j)
+            )
+            variants.append(
+                ActionSnapOpponentMove(
+                    own_card_to_move_hand_index=i, target_empty_slot_index=j
+                )
+            )
+
+    table = [None] * NUM_ACTIONS
+    for action in variants:
+        idx = action_to_index(action)
+        if table[idx] is not None:
+            raise AssertionError(
+                f"action_to_index is not injective: {action!r} and {table[idx]!r} "
+                f"both map to {idx}"
+            )
+        table[idx] = action
+    _GO_ACTION_BY_INDEX = tuple(table)
+    return _GO_ACTION_BY_INDEX
+
+
+def _go_actions_from_mask(mask_indices):
+    """Legal-action list for a Go mask, in build_tree_python's repr order.
+
+    Raises on an index the inverse table does not cover: that means the Go engine
+    offered an action encoding.action_to_index cannot name, which would make the
+    node's policy vector meaningless rather than merely misordered.
+    """
+    table = _go_action_table()
+    out = []
+    for i in mask_indices:
+        action = table[i]
+        if action is None:
+            raise AssertionError(
+                f"Go legal mask offers action index {i}, which encoding's action "
+                f"space does not name; the tree's legal set cannot be keyed"
+            )
+        out.append(action)
+    out.sort(key=repr)
+    return out
 
 
 def _encode_seq(hand, peek_indices, observations, observer_id, seq_cap):
@@ -803,9 +901,16 @@ class GoBuilder:
 
     # -- state plumbing --
 
-    def _apply_raw(self, eng, a0, a1, action_idx):
+    def _apply_raw(self, eng, a0, a1, action):
+        """Advance the game plus both token streams by one action.
+
+        ``action`` is a GameAction (the node contract); the FFI is index-native,
+        so it is translated here, at the boundary, and nowhere else.
+        """
+        from src.encoding import action_to_index
+
         self.bridge.apply_games_batch(
-            [eng.handle], [a0.handle], [a1.handle], [int(action_idx)]
+            [eng.handle], [a0.handle], [a1.handle], [action_to_index(action)]
         )
 
     def _materialize(self, deck, prefix):
@@ -863,7 +968,9 @@ class GoBuilder:
         if self.eng.is_terminal():
             return self._terminal()
         acting = self.eng.acting_player()
-        legal = [int(i) for i in self.eng.legal_actions_mask().nonzero()[0]]
+        legal = _go_actions_from_mask(
+            int(i) for i in self.eng.legal_actions_mask().nonzero()[0]
+        )
         if acting < 0 or not legal:
             return self._terminal()
 
@@ -888,16 +995,17 @@ class GoBuilder:
             node.seq_tokens = self._tokens(acting)
 
         for action in legal:
+            is_draw = isinstance(action, ActionDrawStockpile)
             enumerable = (
                 self.enumerate_draws
-                and action == _GO_DRAW_STOCKPILE
+                and is_draw
                 and self.eng.stock_len() > 0
                 and self.reshuffles_on_path == 0
             )
             if enumerable:
                 node.children.append(self._draw_chance(action, acting, depth))
             else:
-                if action == _GO_DRAW_STOCKPILE and self.enumerate_draws:
+                if is_draw and self.enumerate_draws:
                     self.unenumerated_draws += 1
                 node.children.append(self._apply_one(action, acting, depth))
         return node
@@ -983,9 +1091,13 @@ class GoBuilder:
             pushed_priv = None
             if self.perfect_recall:
                 self.pub_path.append(
-                    (acting, action, _go_card_key(self.eng.get_discard_top()))
+                    (
+                        acting,
+                        repr(action),
+                        _go_card_key(self.eng.get_discard_top()),
+                    )
                 )
-                if action == _GO_DRAW_STOCKPILE and drawn is not None:
+                if isinstance(action, ActionDrawStockpile) and drawn is not None:
                     self.priv_draw[acting].append(_go_card_key(drawn))
                     pushed_priv = acting
             if recycled:
@@ -1120,7 +1232,7 @@ def build_tree(
     seq_cap=256,
     quiet=True,
     exact_weights=False,
-    production_obs=False,
+    production_obs=None,
     backend="go",
     stats=None,
 ):
@@ -1132,10 +1244,15 @@ def build_tree(
 
     ``quiet`` and ``production_obs`` are python-backend knobs. On the Go backend
     there is nothing to quiet (the engine emits no per-node warnings) and the
-    token stream is the Go tokenizer's own, which IS the production observation
-    path; ``production_obs=False`` there names the pre-cambia-528/529 legacy
-    stream, which no Go build can produce, so it warns rather than silently
-    handing back live tokens under a legacy label.
+    token stream is the Go tokenizer's own -- which IS the production observation
+    path, and the only stream that backend can produce.
+
+    ``production_obs`` therefore defaults to None, "unspecified", rather than
+    False: the python backend maps None to False (its historical default) while
+    the Go backend warns only for an EXPLICIT False, the case where a caller is
+    deliberately asking for the pre-cambia-528/529 legacy stream and would
+    otherwise get live tokens under a legacy label. Warning on the default instead
+    would fire on every ordinary build and train readers to ignore it.
     """
     if backend == "python":
         return build_tree_python(
@@ -1149,11 +1266,11 @@ def build_tree(
             seq_cap=seq_cap,
             quiet=quiet,
             exact_weights=exact_weights,
-            production_obs=production_obs,
+            production_obs=bool(production_obs),
         )
     if backend != "go":
         raise ValueError(f"unknown backend {backend!r}; expected 'go' or 'python'")
-    if tokenize and not production_obs:
+    if tokenize and production_obs is False:
         warnings.warn(
             "build_tree(backend='go', tokenize=True, production_obs=False): the Go "
             "tokenizer emits the live (production) observation stream, so the "

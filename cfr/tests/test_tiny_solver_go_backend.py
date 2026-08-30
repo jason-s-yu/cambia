@@ -37,16 +37,16 @@ import numpy as np
 import pytest
 
 from src.config import load_config
-from src.encoding import action_to_index
+from src.encoding import NUM_ACTIONS, action_to_index
 from src.constants import ActionDrawStockpile
-from tools import tiny_solver
 from tools.tiny_solver import (
     TabularCFR,
     build_tree,
     exploitability,
     go_deal_decks,
+    _go_action_table,
+    _go_actions_from_mask,
     _go_card_key,
-    _GO_DRAW_STOCKPILE,
 )
 
 pytest.importorskip("cffi")
@@ -172,9 +172,41 @@ def test_go_deal_decks_reach_the_engines_dealt_hands(config=CONTROL_CONFIG):
             eng.close()
 
 
-def test_draw_stockpile_index_constant():
-    """_GO_DRAW_STOCKPILE is the encoding's own draw-stockpile index."""
-    assert _GO_DRAW_STOCKPILE == action_to_index(ActionDrawStockpile())
+def test_action_inverse_table_inverts_action_to_index():
+    """The index -> GameAction table is a true inverse over the whole space.
+
+    A Go Decision node must carry the same GameAction objects a Python one does:
+    Decision.actions is read by the PRT-CFR trainer, the tiny worker, prtcfr_net
+    and the X2 scorer, all of which route actions through action_to_index. This
+    pins the inverse rather than the forward map, since that is the direction the
+    Go builder depends on.
+    """
+    table = _go_action_table()
+    assert len(table) == NUM_ACTIONS
+    covered = 0
+    for idx, action in enumerate(table):
+        if action is None:
+            continue
+        covered += 1
+        assert action_to_index(action) == idx
+    assert covered == NUM_ACTIONS, f"{NUM_ACTIONS - covered} indices unnamed"
+    # And the draw-stockpile round trip the draw enumeration turns on.
+    draw_idx = action_to_index(ActionDrawStockpile())
+    assert isinstance(table[draw_idx], ActionDrawStockpile)
+
+
+def test_actions_from_mask_sorts_like_the_python_builder():
+    """_go_actions_from_mask returns build_tree_python's repr order.
+
+    Matching the order is what makes the two backends' trees agree to the bit
+    rather than to float64 summation noise: _cfr, _policy_value and _br_eval all
+    reduce over a node's children in list order.
+    """
+    idxs = [action_to_index(ActionDrawStockpile()), 40, 12, 7]
+    got = _go_actions_from_mask(idxs)
+    assert [repr(a) for a in got] == sorted(repr(a) for a in got)
+    assert len(got) == len(idxs)
+    assert sorted(action_to_index(a) for a in got) == sorted(idxs)
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +316,7 @@ def test_go_key_components_are_suit_exact():
             assert isinstance(card, tuple) and len(card) == 2
             suits_by_rank.setdefault(card[0], set()).add(card[1])
         for _acting, action, top in pkey[3]:
-            assert isinstance(action, int)
+            assert isinstance(action, str)
             if top is not None:
                 assert isinstance(top, tuple) and len(top) == 2
                 suits_by_rank.setdefault(top[0], set()).add(top[1])
@@ -488,18 +520,24 @@ def test_exact_certifier_runs_on_the_go_tree():
 
 
 @requires_lib
-def test_scorer_reads_integer_action_nodes():
-    """prtcfr_eval's index helpers accept the Go tree's integer actions."""
-    from src.cfr.prtcfr_eval import _legal_index, _legal_mask146, enumerate_infosets
+def test_go_nodes_carry_the_same_action_contract_as_python_nodes():
+    """Decision.actions holds GameActions the scorer's own encoders accept.
+
+    The whole reason the Go builder decodes its index-native legal mask back into
+    GameAction NamedTuples: prtcfr_eval, prtcfr_net, the trainer and the tiny
+    worker all read Decision.actions through action_to_index / encode_action_mask.
+    """
+    from src.encoding import encode_action_mask
+    from src.cfr.prtcfr_eval import enumerate_infosets
 
     root, _isets, _n, _ab = _build(CONTROL_CONFIG, "go", deals=1)
     nodes = enumerate_infosets(root)
     assert nodes
     for node in nodes[:200]:
-        idx = [_legal_index(a) for a in node.actions]
-        assert idx == [int(a) for a in node.actions]
-        mask = _legal_mask146(node.actions)
-        assert mask.dtype == np.bool_ and mask.shape == (146,)
+        assert not any(isinstance(a, (int, np.integer)) for a in node.actions)
+        idx = [action_to_index(a) for a in node.actions]
+        mask = encode_action_mask(node.actions)
+        assert mask.dtype == np.bool_ and mask.shape == (NUM_ACTIONS,)
         assert int(mask.sum()) == len(set(idx)) == len(node.actions)
         assert all(mask[i] for i in idx)
 
