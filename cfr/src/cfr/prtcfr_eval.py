@@ -206,7 +206,8 @@ def build_tiny_tree(
     config_path: str = TINY_2CARD_CONFIG,
     seq_cap: int = SEQ_CAP,
     exact_weights: bool = False,
-    production_obs: bool = False,
+    production_obs: Optional[bool] = None,
+    backend: str = "go",
 ):
     """Build the perfect-recall + tokenized {A,6} tiny tree.
 
@@ -218,7 +219,8 @@ def build_tiny_tree(
     (Chance.wfrac) for the NashConv certifier (tools/tiny_exact.py, cambia-530).
     The float ``weights`` used by the fast-path scorer are unchanged.
 
-    production_obs (cambia-612, default off): build each node's token stream
+    production_obs (cambia-612, default None = unspecified): build each node's
+    token stream
     through the PRODUCTION worker observation path (peek-result + post-draw drawn
     frames) instead of the analysis_tools BR path. The scoring entry points set
     this from the checkpoint's recorded tokenizer version (>= 2 -> True) so the
@@ -237,6 +239,7 @@ def build_tiny_tree(
         seq_cap=seq_cap,
         exact_weights=exact_weights,
         production_obs=production_obs,
+        backend=backend,
     )
     if aborted:
         raise RuntimeError(

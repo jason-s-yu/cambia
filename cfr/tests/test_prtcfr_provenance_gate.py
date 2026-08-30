@@ -212,7 +212,7 @@ def _peek_ability_cfg():
     return cfg
 
 
-def _build_scorer_tree(cfg, production_obs):
+def _build_scorer_tree(cfg, production_obs, backend="go"):
     """Build the scorer tree the way build_tiny_tree does (perfect_recall +
     tokenize) on the peek fixture. enumerate_draws=False -> no chance nodes below
     the deal root, so each decision's children map 1:1 to its (sorted) actions and
@@ -227,6 +227,7 @@ def _build_scorer_tree(cfg, production_obs):
         tokenize=True,
         seq_cap=10**9,
         production_obs=production_obs,
+        backend=backend,
     )
     assert not aborted, "peek fixture tree hit the node cap; shrink the game"
     return root
@@ -325,7 +326,12 @@ def test_scorer_legacy_obs_drops_peek_frames():
     representation gap the v>=2 production_obs flip closes. (production_obs=True is
     proven to carry peek frames by the equality test above.)"""
     cfg = _peek_ability_cfg()
-    root = _build_scorer_tree(cfg, production_obs=False)
+    # PYTHON backend: the legacy path IS the analysis_tools BR observation path,
+    # which only exists there. The Go tokenizer emits one stream, the live
+    # production one, so build_tree(backend="go", production_obs=False) warns and
+    # hands back v3 tokens -- which do carry peek frames. Scoring a
+    # legacy-provenance checkpoint means building its tree on this backend.
+    root = _build_scorer_tree(cfg, production_obs=False, backend="python")
     peek = _find_decision_node(
         root, lambda nd: se.PEEK_FRAME_BASE in (nd.seq_tokens or ())
     )

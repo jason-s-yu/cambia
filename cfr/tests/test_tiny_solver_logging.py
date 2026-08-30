@@ -135,7 +135,16 @@ class TestBuildTreeQuietParameter:
         original = logger.level
         logger.setLevel(logging.WARNING)
         try:
-            build_tree(cfg, n_deals=1, seed0=0, max_nodes_per_deal=2_000_000)
+            # PYTHON backend: quiet= mutes the reference engine's per-node
+            # src.* warnings, and the Go engine emits none, so the knob (and this
+            # assertion) only mean anything on that backend.
+            build_tree(
+                cfg,
+                n_deals=1,
+                seed0=0,
+                max_nodes_per_deal=2_000_000,
+                backend="python",
+            )
             assert (
                 logger.level == logging.WARNING
             ), "build_tree(quiet=True default) must restore logger levels after returning"
@@ -151,7 +160,14 @@ class TestBuildTreeQuietParameter:
         original = logger.level
         logger.setLevel(logging.WARNING)
         try:
-            build_tree(cfg, n_deals=1, seed0=0, max_nodes_per_deal=2_000_000, quiet=False)
+            build_tree(
+                cfg,
+                n_deals=1,
+                seed0=0,
+                max_nodes_per_deal=2_000_000,
+                quiet=False,
+                backend="python",
+            )
             # quiet=False never touches the level; it should be untouched throughout
             # and after (nothing to restore since nothing was muted).
             assert logger.level == logging.WARNING

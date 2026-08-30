@@ -1,9 +1,16 @@
 """Exact-tree solver and exploitability for tiny-Cambia (research E1).
 
-Builds an explicit game tree of a reduced-deck Cambia variant by recursively
-expanding the Python CambiaGameState, then:
+Builds an explicit game tree of a reduced-deck Cambia variant, then:
   - solves it with tabular CFR+ to near-exact equilibrium,
   - computes exact best-response exploitability of ANY policy over the same tree.
+
+Two backends build that tree (``build_tree(..., backend=...)``, cambia-1429):
+``"go"`` (the default) expands the Go engine through the FFI bridge, and
+``"python"`` recurses the Python reference CambiaGameState as this module
+originally did. Every X1/X2 number recorded before cambia-1429 came off the
+python backend, and the {A,6} tree is NOT reproducible on the go backend -- see
+build_tree_go's stats dict and tests/test_tiny_solver_go_backend.py
+::test_a6_tree_divergence_is_diagnosed for the counts and the mechanism.
 
 Chance handling. Two chance layers exist in Cambia: the initial deal and every
 stockpile draw. We model both as explicit chance nodes:
@@ -17,8 +24,12 @@ stockpile draw. We model both as explicit chance nodes:
     This makes future draws fair chance (the BR cannot read the deck order).
 
 Infosets are keyed by the production agent-state machinery (analysis_tools
-helpers + AgentState.get_infoset_key + DecisionContext), so the tabular table
-and the deep pipeline share the exact same infoset partition on this game.
+helpers + AgentState.get_infoset_key + DecisionContext) under
+``perfect_recall=False``, so the tabular table and the deep pipeline share the
+exact same infoset partition on this game; that keying needs the Python belief
+state and so is python-backend only. Under ``perfect_recall=True`` -- what every
+X1/X2 consumer uses, and all the go backend supports -- the key is the acting
+seat's genuine perfect-recall information state instead.
 
 The tree is explicit (no memoization: a node is defined by full engine+belief
 state, which is not cheaply hashable). Size is bounded by K and the reduced
@@ -32,22 +43,137 @@ import pickle
 import random
 import sys
 import time
+import warnings
 from collections import defaultdict
 from fractions import Fraction
 
 import numpy as np
 
 from src.config import load_config
-from src.game.engine import CambiaGameState
-from src.agent_state import AgentState
-from src.analysis_tools import AnalysisTools
 from src.constants import NUM_PLAYERS, ActionDrawStockpile
 from src.utils import InfosetKey
 from src.sequence_encoding import encode_observation_sequence
-from src.cfr.worker import (
-    _create_observation as _wk_create_observation,
-    _filter_observation as _wk_filter_observation,
-)
+
+# The Python reference engine and the belief/observation machinery layered on it
+# (src.game.engine, src.agent_state, src.analysis_tools, src.cfr.worker) are
+# imported LAZILY, inside the python-backend entry points only. Importing them at
+# module scope would make every consumer of this module -- prtcfr_eval.py's X2
+# scorer and tiny_exact.py's certifier included -- depend on the Python engine
+# even when the tree is built on the Go engine (cambia-1429). src.config,
+# src.constants (action NamedTuples), src.utils (InfosetKey) and
+# src.sequence_encoding carry no engine dependency and stay eager.
+
+
+# Index -> GameAction inverse of encoding.action_to_index, built by enumerating
+# every action variant and inverting the map (so it cannot drift from the forward
+# map it inverts). The Go engine's legal mask and apply path are index-native,
+# but a Decision node has to carry the SAME GameAction NamedTuples the Python
+# builder put there: Decision.actions is read by the PRT-CFR trainer, the tiny
+# worker, prtcfr_net and the X2 scorer, all of which route actions through
+# encoding.action_to_index. Handing them integers would fork the node contract
+# per backend. Keeping one contract also keeps the child ORDER the same (both
+# builders sort a node's legal actions by repr), which is what makes the two
+# trees agree to the bit rather than to float64 summation noise.
+_GO_ACTION_BY_INDEX = None
+# The same map the other way, so the hot apply path translates a GameAction to
+# its FFI index with a dict lookup instead of a call back into encoding.
+_GO_INDEX_BY_ACTION = {}
+
+
+def _go_action_table():
+    """Build (and cache) the index -> GameAction table.
+
+    Enumerates every constructible action variant over the [0, MAX_HAND) slot
+    ranges and inverts action_to_index. Asserts injectivity, so a forward-map
+    change that collided two actions would fail loudly here instead of silently
+    mislabelling a node's legal set.
+    """
+    global _GO_ACTION_BY_INDEX
+    if _GO_ACTION_BY_INDEX is not None:
+        return _GO_ACTION_BY_INDEX
+
+    from src.constants import (
+        ActionAbilityBlindSwapSelect,
+        ActionAbilityKingLookSelect,
+        ActionAbilityKingSwapDecision,
+        ActionAbilityPeekOtherSelect,
+        ActionAbilityPeekOwnSelect,
+        ActionCallCambia,
+        ActionDiscard,
+        ActionDrawDiscard,
+        ActionDrawStockpile,
+        ActionPassSnap,
+        ActionReplace,
+        ActionSnapOpponent,
+        ActionSnapOpponentMove,
+        ActionSnapOwn,
+    )
+    from src.encoding import MAX_HAND, NUM_ACTIONS, action_to_index
+
+    variants = [
+        ActionDrawStockpile(),
+        ActionDrawDiscard(),
+        ActionCallCambia(),
+        ActionDiscard(use_ability=True),
+        ActionDiscard(use_ability=False),
+        ActionAbilityKingSwapDecision(perform_swap=True),
+        ActionAbilityKingSwapDecision(perform_swap=False),
+        ActionPassSnap(),
+    ]
+    for i in range(MAX_HAND):
+        variants.append(ActionReplace(target_hand_index=i))
+        variants.append(ActionAbilityPeekOwnSelect(target_hand_index=i))
+        variants.append(ActionAbilityPeekOtherSelect(target_opponent_hand_index=i))
+        variants.append(ActionSnapOwn(own_card_hand_index=i))
+        variants.append(ActionSnapOpponent(opponent_target_hand_index=i))
+        for j in range(MAX_HAND):
+            variants.append(
+                ActionAbilityBlindSwapSelect(own_hand_index=i, opponent_hand_index=j)
+            )
+            variants.append(
+                ActionAbilityKingLookSelect(own_hand_index=i, opponent_hand_index=j)
+            )
+            variants.append(
+                ActionSnapOpponentMove(
+                    own_card_to_move_hand_index=i, target_empty_slot_index=j
+                )
+            )
+
+    table = [None] * NUM_ACTIONS
+    reverse = {}
+    for action in variants:
+        idx = action_to_index(action)
+        if table[idx] is not None:
+            raise AssertionError(
+                f"action_to_index is not injective: {action!r} and {table[idx]!r} "
+                f"both map to {idx}"
+            )
+        table[idx] = action
+        reverse[action] = idx
+    _GO_ACTION_BY_INDEX = tuple(table)
+    _GO_INDEX_BY_ACTION.update(reverse)
+    return _GO_ACTION_BY_INDEX
+
+
+def _go_actions_from_mask(mask_indices):
+    """Legal-action list for a Go mask, in build_tree_python's repr order.
+
+    Raises on an index the inverse table does not cover: that means the Go engine
+    offered an action encoding.action_to_index cannot name, which would make the
+    node's policy vector meaningless rather than merely misordered.
+    """
+    table = _go_action_table()
+    out = []
+    for i in mask_indices:
+        action = table[i]
+        if action is None:
+            raise AssertionError(
+                f"Go legal mask offers action index {i}, which encoding's action "
+                f"space does not name; the tree's legal set cannot be keyed"
+            )
+        out.append(action)
+    out.sort(key=repr)
+    return out
 
 
 def _encode_seq(hand, peek_indices, observations, observer_id, seq_cap):
@@ -162,6 +288,8 @@ class Decision:
 
 
 def _mk_agent(game, pid, opp, cfg, init_obs):
+    from src.agent_state import AgentState
+
     a = AgentState(
         player_id=pid,
         opponent_id=opp,
@@ -175,6 +303,8 @@ def _mk_agent(game, pid, opp, cfg, init_obs):
 
 
 def _advance(game, action, acting, ag):
+    from src.analysis_tools import AnalysisTools
+
     obs = AnalysisTools._create_observation_for_br(game, action, acting)
     if obs is None:
         return None
@@ -298,6 +428,8 @@ class Builder:
         legal = sorted(list(game.get_legal_actions()), key=repr)
         if acting == -1 or not legal:
             return Terminal((game.get_utility(0), game.get_utility(1)))
+
+        from src.analysis_tools import AnalysisTools
 
         ctx = AnalysisTools._get_decision_context(game)
         base = ag[acting].get_infoset_key()
@@ -429,6 +561,10 @@ class Builder:
         # observation + filter as _advance (the production information boundary).
         pushed_obs = False
         if self.tokenize:
+            from src.analysis_tools import AnalysisTools
+            from src.cfr.worker import _create_observation as _wk_create_observation
+            from src.cfr.worker import _filter_observation as _wk_filter_observation
+
             if self.production_obs:
                 snaps = list(getattr(game, "snap_results_log", []) or [])
                 obs = _wk_create_observation(None, action, game, acting, snaps)
@@ -455,7 +591,7 @@ class Builder:
         return child
 
 
-def build_tree(
+def build_tree_python(
     cfg,
     n_deals,
     seed0,
@@ -469,6 +605,11 @@ def build_tree(
     production_obs=False,
 ):
     """Synthetic root: K deals, each weight 1/K; each is a full chance-tree.
+
+    PYTHON-ENGINE BACKEND. Retained as the reference implementation behind
+    ``build_tree(..., backend="python")``; the default backend is the Go engine
+    (``build_tree_go``, cambia-1429). Every X1/X2 number recorded before
+    cambia-1429 came from this function.
 
     tokenize (default off): populate Decision.seq_tokens with each acting player's
     perfect-recall observation-action token stream (src.sequence_encoding), the
@@ -502,6 +643,9 @@ def build_tree(
             "solving of race-ON requires exposing the winner draw as an enumerable "
             "chance node first (cambia-564 follow-up)."
         )
+    from src.analysis_tools import AnalysisTools
+    from src.game.engine import CambiaGameState
+
     root = Chance()
     all_isets = {}
     total_nodes = 0
@@ -563,6 +707,652 @@ def build_tree(
         k = len(root.children)
         root.wfrac = [Fraction(1, k)] * k
     return root, all_isets, total_nodes, aborted_deals
+
+
+# ---- Go-engine tree builder (cambia-1429) ----
+#
+# Same explicit-tree contract as build_tree_python (Terminal / Chance / Decision
+# nodes, perfect-recall pkeys, per-node token streams), built on the Go engine
+# through the FFI bridge instead of src.game.engine. Three primitives carry it:
+#
+#   GoEngine.from_deck(deck, starting_player, rules) -- fixes the deal AND the
+#     draw order: cambia_game_new_with_deck consumes deck[0] first, so the deck
+#     array doubles as the draw script (see GoBuilder._draw_chance).
+#   bridge.state_save / state_restore / state_snapshot_free -- token-inclusive
+#     (game, both agents) checkpoints on the SAME handles: the enumeration's
+#     backtracking, replacing the Python engine's undo closures.
+#   bridge.apply_games_batch -- the only FFI path that advances the game AND
+#     both agents' token streams, so Decision.seq_tokens comes off the Go
+#     tokenizer (the stream production training consumes) rather than a Python
+#     re-derivation of it.
+#
+# Draw enumeration. The Go engine exposes no stockpile accessor and no way to
+# reorder the stockpile, so a card is forced to the top the only way the FFI
+# allows: swap it into the next-consumed deck slot, rebuild the game from the
+# edited deck and replay the action prefix (_materialize). Deck positions at or
+# after the next-consumed slot do not affect the current node's state, so the
+# rebuilt state is the same node.
+#
+# The deck channel dies at the first RESHUFFLE. When the stockpile empties the
+# engine recycles the discard pile (engine/actions.go attemptReshuffle) and
+# shuffles it with the game's own RNG; past that the stockpile corresponds to no
+# deck suffix and no FFI surface can order it. Those draws are taken as a single
+# engine-resolved child and counted in GoBuilder.unenumerated_draws, and every
+# enumerated draw positively asserts that the card the engine drew is the one its
+# deck slot promised -- a dead channel raises GoDeckChannelLost instead of
+# silently yielding a tree whose chance weights do not match its branches.
+
+
+def _go_card_key(card):
+    """Suit-preserving hashable identity for a Card, for use in a key component.
+
+    src.card.Card declares ``suit`` as ``field(compare=False)``, so Card objects
+    compare and HASH BY RANK ALONE: putting them straight into a perfect-recall
+    key silently merges all four suits of a rank and coarsens the infoset
+    partition by up to 4x per card position. build_tree_python sidesteps this by
+    keying on ``repr(card)``; this returns the same information as a tuple.
+    ``(rank, suit)`` also matches the Python builder's granularity on jokers,
+    which repr and this both conflate (a canonical index would separate 52 from
+    53 and give a strictly finer partition).
+    """
+    if card is None:
+        return None
+    return (card.rank, card.suit)
+
+
+def _go_deck_indices(cards):
+    """Canonical card indices for a deal-order card list.
+
+    Mirrors bridge.extract_deck_from_python_game's joker handling (the first
+    joker seen in deal order takes index 52, the second 53);
+    python_card_to_go_index alone collapses both onto 52.
+    """
+    from src.ffi.bridge import python_card_to_go_index
+
+    out = []
+    jokers = 0
+    for c in cards:
+        idx = python_card_to_go_index(c)
+        if idx == 52:
+            idx = 52 + min(jokers, 1)
+            jokers += 1
+        out.append(idx)
+    return out
+
+
+def go_deal_decks(cfg, n_deals, seed0):
+    """The K deals build_tree_python draws, as (deck_indices, starting_player).
+
+    Reproduces CambiaGameState._setup_game's RNG consumption without importing
+    the engine: one random.Random(seed0 + d) per deal, shuffle() over
+    create_standard_deck(...), then randint(0, num_players - 1) for the starting
+    seat, with no RNG use in between. The Python deal and every Python draw pop
+    from the END of that list while cambia_game_new_with_deck consumes deck[0]
+    first, so the Go deck is the reversed list -- which lines the round-robin
+    deal, the discard flip and the draw order up card for card. Asserted against
+    the engine's own deal in tests/test_tiny_solver_go_backend.py.
+    """
+    from src.card import create_standard_deck
+
+    rules = cfg.cambia_rules
+    n_players = int(getattr(rules, "num_players", NUM_PLAYERS) or NUM_PLAYERS)
+    out = []
+    for d in range(n_deals):
+        rng = random.Random(seed0 + d)
+        deck = create_standard_deck(
+            include_jokers=rules.use_jokers,
+            num_decks=getattr(rules, "num_decks", 1),
+            deck_ranks=getattr(rules, "deck_ranks", None),
+        )
+        rng.shuffle(deck)
+        order = list(reversed(deck))
+        starting_player = rng.randint(0, n_players - 1)
+        out.append((_go_deck_indices(order), starting_player))
+    return out
+
+
+class GoDeckChannelLost(RuntimeError):
+    """An enumerated draw did not yield the card its deck slot promised.
+
+    Raised, never swallowed: it means the deck-order channel GoBuilder._draw_chance
+    enumerates through no longer controls the stockpile (a reshuffle the fence
+    failed to notice), so continuing would build a tree whose chance structure
+    does not match its own weights.
+    """
+
+
+class GoBuilder:
+    """One deal's chance-tree, expanded on the Go engine.
+
+    Counterpart of Builder: same node types, same node-counter semantics (``n``
+    counts decision-or-terminal expansions, not chance nodes), same perfect-recall
+    key construction. The key components are Go-native and injective against the
+    Python ones they replace -- card identities are the interned Card objects
+    behind canonical indices (repr-equivalent), and an action is its global
+    [0, NUM_ACTIONS) index, which encoding.action_to_index maps one-to-one from
+    the GameAction NamedTuples Builder keyed on.
+    """
+
+    def __init__(
+        self,
+        cfg,
+        deck,
+        starting_player,
+        max_nodes,
+        enumerate_draws=True,
+        perfect_recall=True,
+        tokenize=False,
+        seq_cap=256,
+        exact_weights=False,
+    ):
+        from src.ffi import bridge
+
+        self.cfg = cfg
+        self.rules = cfg.cambia_rules
+        self.bridge = bridge
+        self.base_deck = [int(x) for x in deck]
+        self.deck = list(self.base_deck)
+        self.starting_player = int(starting_player)
+        self.max_nodes = max_nodes
+        self.enumerate_draws = enumerate_draws
+        self.perfect_recall = perfect_recall
+        self.tokenize = tokenize
+        self.seq_cap = seq_cap
+        self.exact_weights = exact_weights
+        self.n = 0
+        self.aborted = False
+        self.iset_actions = {}
+        self.prefix = []
+        self.priv_init = {}
+        self.priv_draw = {0: [], 1: []}
+        self.pub_path = []
+        # Reshuffles seen on the CURRENT root-to-node path (pushed on descend,
+        # popped on ascend). Non-zero fences off draw enumeration: past a
+        # reshuffle the deck array no longer describes the stockpile.
+        self.reshuffles_on_path = 0
+        # Build-wide diagnostics, aggregated by build_tree_go into its stats dict.
+        self.unenumerated_draws = 0
+        self.reshuffle_draws = 0
+        self.rebuilds = 0
+        self.unchecked_draws = 0
+        # Actions the legal mask offered that the engine then refused. Should be 0:
+        # a non-zero count means the mask and the apply path disagree, and the
+        # builder stubbed a whole subtree out as a zero-utility Terminal.
+        self.rejected_actions = 0
+        self.eng = None
+        self.a0 = None
+        self.a1 = None
+
+    # -- handle lifecycle --
+
+    def open(self):
+        from src.ffi.bridge import GoAgentState, GoEngine
+
+        _go_action_table()  # prime the index maps before the first apply
+
+        self.eng = GoEngine.from_deck(self.deck, self.starting_player, self.rules)
+        self.a0 = GoAgentState(self.eng, 0)
+        self.a1 = GoAgentState(self.eng, 1)
+        hr = self.eng.get_house_rules()
+        if hr.num_players != 2:
+            self.close()
+            raise NotImplementedError(
+                f"GoBuilder is 2-player only (got num_players={hr.num_players}): "
+                "the token-inclusive checkpoint it backtracks on "
+                "(cambia_state_save) is a two-agent surface."
+            )
+        peek = min(int(hr.initial_view_count), int(hr.cards_per_player))
+        for pid in (0, 1):
+            hand = self.eng.get_player_hand(pid)
+            self.priv_init[pid] = tuple(
+                (i, _go_card_key(hand[i])) for i in range(peek) if i < len(hand)
+            )
+        return self
+
+    def close(self):
+        for h in (self.a1, self.a0, self.eng):
+            if h is not None:
+                h.close()
+        self.a1 = self.a0 = self.eng = None
+
+    def __enter__(self):
+        return self.open()
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+    # -- state plumbing --
+
+    def _apply_raw(self, eng, a0, a1, action):
+        """Advance the game plus both token streams by one action.
+
+        ``action`` is a GameAction (the node contract); the FFI is index-native,
+        so it is translated here, at the boundary, and nowhere else.
+        """
+        self.bridge.apply_games_batch(
+            [eng.handle], [a0.handle], [a1.handle], [_GO_INDEX_BY_ACTION[action]]
+        )
+
+    def _materialize(self, deck, prefix):
+        """Put the persistent (game, a0, a1) handles at (deck, prefix)'s state.
+
+        Builds a throwaway game from ``deck``, replays ``prefix`` into it, then
+        value-copies the result onto the persistent handles through
+        state_save/state_restore. Going via a snapshot rather than swapping in the
+        fresh handles is what keeps every OUTER frame's checkpoint restorable:
+        cambia_state_restore copies into whichever handles it is handed, so the
+        persistent handle ids never move under a recursion holding checkpoints
+        against them.
+        """
+        from src.ffi.bridge import GoAgentState, GoEngine
+
+        tmp = GoEngine.from_deck(deck, self.starting_player, self.rules)
+        t0 = GoAgentState(tmp, 0)
+        t1 = GoAgentState(tmp, 1)
+        try:
+            for a in prefix:
+                self._apply_raw(tmp, t0, t1, a)
+            snap = self.bridge.state_save(tmp.handle, t0.handle, t1.handle)
+            try:
+                self.bridge.state_restore(
+                    self.eng.handle, snap, self.a0.handle, self.a1.handle
+                )
+            finally:
+                self.bridge.state_snapshot_free(snap)
+        finally:
+            t1.close()
+            t0.close()
+            tmp.close()
+        self.rebuilds += 1
+
+    def _tokens(self, acting):
+        agent = self.a0 if acting == 0 else self.a1
+        return self.bridge.frame_aligned_window(
+            agent.tokens(), seq_cap=self.seq_cap, add_bos_eos=True
+        )
+
+    def _terminal(self):
+        u = self.eng.get_utility()
+        return Terminal((float(u[0]), float(u[1])))
+
+    # -- expansion --
+
+    def build(self):
+        return self._build(0)
+
+    def _build(self, depth):
+        self.n += 1
+        if self.n > self.max_nodes:
+            self.aborted = True
+            return Terminal((0.0, 0.0))
+        if self.eng.is_terminal():
+            return self._terminal()
+        acting = self.eng.acting_player()
+        legal = _go_actions_from_mask(
+            int(i) for i in self.eng.legal_actions_mask().nonzero()[0]
+        )
+        if acting < 0 or not legal:
+            return self._terminal()
+
+        nA = len(legal)
+        # Perfect-recall key: the acting seat's initial private knowledge, its own
+        # draws, and the full public action/reveal sequence -- the same three
+        # components Builder keys on, in Go-native currency. Determines nA by
+        # construction, the property the X1 keystone rests on.
+        pkey = (
+            "PR",
+            self.priv_init[acting],
+            tuple(self.priv_draw[acting]),
+            tuple(self.pub_path),
+        )
+        self.iset_actions[(pkey, nA)] = nA
+        # iset (the production imperfect-recall belief key) is None on this
+        # backend: it comes from AgentState.get_infoset_key, which has no FFI
+        # export. Nothing on the perfect-recall path reads it; build_tree_go
+        # refuses perfect_recall=False rather than hand back a half-keyed node.
+        node = Decision(acting, None, pkey, legal)
+        if self.tokenize:
+            node.seq_tokens = self._tokens(acting)
+
+        can_enumerate = (
+            self.enumerate_draws
+            and self.reshuffles_on_path == 0
+            and self.eng.stock_len() > 0
+        )
+        for action in legal:
+            is_draw = isinstance(action, ActionDrawStockpile)
+            enumerable = can_enumerate and is_draw
+            if enumerable:
+                node.children.append(self._draw_chance(action, acting, depth))
+            else:
+                if is_draw and self.enumerate_draws:
+                    self.unenumerated_draws += 1
+                node.children.append(self._apply_one(action, acting, depth))
+        return node
+
+    def _draw_chance(self, action, acting, depth):
+        """Chance node over the distinct cards the stockpile can yield.
+
+        Weights are multiplicity over stockpile size, matching
+        Builder._draw_chance. The stockpile IS the deck suffix from the
+        next-consumed slot ``m`` onward: cambia_game_new_with_deck loads deck[i]
+        at Stockpile[len-1-i] and the deal plus every draw consume from the top,
+        so ``m = len(deck) - stock_len``.
+        """
+        ch = Chance()
+        if self.exact_weights:
+            ch.wfrac = []
+        stock = self.eng.stock_len()
+        m = len(self.deck) - stock
+        tail = self.deck[m:]
+        total = len(tail)
+        # Distinct cards in Builder._draw_chance's insertion order, so the two
+        # backends lay a chance node's children out identically and the reductions
+        # in _cfr / _policy_value / _br_eval sum the same terms in the same order.
+        # The Python engine's stockpile list holds the next-drawn card LAST and it
+        # iterates the list front to back, which is the deck suffix reversed.
+        counts = {}
+        for c in reversed(tail):
+            counts[c] = counts.get(c, 0) + 1
+        saved = list(self.deck)
+        for card, cnt in counts.items():
+            if self.deck[m] != card:
+                j = self.deck.index(card, m)
+                self.deck[m], self.deck[j] = self.deck[j], self.deck[m]
+                self._materialize(self.deck, self.prefix)
+            child = self._apply_one(action, acting, depth, expect_draw=card)
+            ch.children.append(child)
+            ch.weights.append(cnt / total)
+            if self.exact_weights:
+                # Exact draw-chance mass: multiplicity over stockpile size, both
+                # integers read off the deck, so this is the true rational rather
+                # than the rounded float above.
+                ch.wfrac.append(Fraction(cnt, total))
+            if self.deck != saved:
+                self.deck[:] = saved
+                self._materialize(self.deck, self.prefix)
+            if self.aborted:
+                break
+        return ch
+
+    def _apply_one(self, action, acting, depth, expect_draw=None):
+        snap = self.bridge.state_save(self.eng.handle, self.a0.handle, self.a1.handle)
+        try:
+            stock_before = self.eng.stock_len()
+            m_before = len(self.deck) - stock_before
+            try:
+                self._apply_raw(self.eng, self.a0, self.a1, action)
+            except RuntimeError:
+                # The engine refused an action its own legal mask offered.
+                # Builder._apply_one returns a zero-utility Terminal stub in the
+                # same situation (a non-callable undo), so the shape is mirrored --
+                # but the stub silently replaces a whole subtree, so it is counted
+                # and build_tree_go warns on any non-zero total.
+                self.rejected_actions += 1
+                self.bridge.state_restore(
+                    self.eng.handle, snap, self.a0.handle, self.a1.handle
+                )
+                return Terminal((0.0, 0.0))
+
+            # The stockpile only ever grows by a reshuffle: engine/actions.go
+            # attemptReshuffle recycles the discard pile when a draw finds it
+            # empty. That is where the deck-order channel dies, so the flag fences
+            # off draw enumeration for the rest of this path.
+            recycled = self.eng.stock_len() > stock_before
+
+            pend = self.eng.get_pending()
+            drawn = pend.drawn_card if pend.seat == acting else None
+            if expect_draw is not None:
+                expected_card = self.bridge.card_from_index(int(expect_draw))
+                if drawn is None:
+                    # No pending record to read the drawn card back from (the draw
+                    # auto-resolved). Counted, not asserted.
+                    self.unchecked_draws += 1
+                elif _go_card_key(drawn) != _go_card_key(expected_card):
+                    # Compared through _go_card_key, not ==: Card equality drops
+                    # the suit, so a suit-wrong draw would pass an == check.
+                    raise GoDeckChannelLost(
+                        f"enumerated draw expected {expected_card!r} from deck slot "
+                        f"{m_before} but the engine drew {drawn!r}: the deck-order "
+                        f"channel no longer controls the stockpile (reshuffle). "
+                        f"deck={self.deck} prefix={self.prefix}"
+                    )
+
+            pushed_priv = None
+            if self.perfect_recall:
+                self.pub_path.append(
+                    (
+                        acting,
+                        repr(action),
+                        _go_card_key(self.eng.get_discard_top()),
+                    )
+                )
+                if isinstance(action, ActionDrawStockpile) and drawn is not None:
+                    self.priv_draw[acting].append(_go_card_key(drawn))
+                    pushed_priv = acting
+            if recycled:
+                self.reshuffles_on_path += 1
+                self.reshuffle_draws += 1
+            self.prefix.append(action)
+
+            child = self._build(depth + 1)
+
+            self.prefix.pop()
+            if recycled:
+                self.reshuffles_on_path -= 1
+            if self.perfect_recall:
+                if pushed_priv is not None:
+                    self.priv_draw[pushed_priv].pop()
+                self.pub_path.pop()
+            self.bridge.state_restore(
+                self.eng.handle, snap, self.a0.handle, self.a1.handle
+            )
+            return child
+        finally:
+            self.bridge.state_snapshot_free(snap)
+
+
+def build_tree_go(
+    cfg,
+    n_deals,
+    seed0,
+    max_nodes_per_deal,
+    enumerate_draws=True,
+    perfect_recall=True,
+    tokenize=False,
+    seq_cap=256,
+    exact_weights=False,
+    stats=None,
+):
+    """Synthetic root over K Go-engine deals; the build_tree_python counterpart.
+
+    perfect_recall must be True: the imperfect-recall belief key comes from
+    AgentState.get_infoset_key, which the FFI does not export, so keying by it
+    would need the Python engine back. Every X1/X2 consumer keys perfect-recall.
+
+    ``stats`` (optional dict) receives the build's diagnostics --
+    ``unenumerated_draws`` (draw points the deck channel could not enumerate,
+    i.e. downstream of a reshuffle), ``reshuffle_draws`` (transitions where the
+    engine recycled the discard pile), ``rebuilds`` (deck-surgery replays),
+    ``unchecked_draws`` and ``rejected_actions``. A non-zero ``unenumerated_draws`` means the tree carries
+    chance points collapsed onto one engine-sampled outcome; read that count
+    before trusting any exactness claim about the tree.
+    """
+    if getattr(cfg.cambia_rules, "snapRace", False):
+        raise ValueError(
+            "build_tree_go does not support snapRace=true (race-ON): the N-way "
+            "snap winner is an engine-internal RNG draw an exact tree builder "
+            "cannot enumerate, so the tree would treat a stochastic transition as "
+            "sampled-deterministic and corrupt NashConv (the same fence "
+            "build_tree_python carries, cambia-564)."
+        )
+    if not perfect_recall:
+        raise NotImplementedError(
+            "build_tree_go supports perfect_recall=True only: the production "
+            "imperfect-recall key is AgentState.get_infoset_key + DecisionContext "
+            "and the FFI exports neither, so an imperfect-recall Go tree would "
+            "reintroduce the Python engine this backend exists to retire. Use "
+            "build_tree(..., backend='python') for belief-keyed trees."
+        )
+    root = Chance()
+    all_isets = {}
+    total_nodes = 0
+    aborted_deals = 0
+    agg = {
+        "unenumerated_draws": 0,
+        "reshuffle_draws": 0,
+        "rebuilds": 0,
+        "unchecked_draws": 0,
+        "rejected_actions": 0,
+    }
+    for deck, starting_player in go_deal_decks(cfg, n_deals, seed0):
+        b = GoBuilder(
+            cfg,
+            deck,
+            starting_player,
+            max_nodes_per_deal,
+            enumerate_draws=enumerate_draws,
+            perfect_recall=perfect_recall,
+            tokenize=tokenize,
+            seq_cap=seq_cap,
+            exact_weights=exact_weights,
+        )
+        try:
+            b.open()
+            sub = b.build()
+        finally:
+            b.close()
+        root.children.append(sub)
+        root.weights.append(1.0)  # normalized below
+        total_nodes += b.n
+        if b.aborted:
+            aborted_deals += 1
+        for k, v in b.iset_actions.items():
+            all_isets[k] = v
+        agg["unenumerated_draws"] += b.unenumerated_draws
+        agg["reshuffle_draws"] += b.reshuffle_draws
+        agg["rebuilds"] += b.rebuilds
+        agg["unchecked_draws"] += b.unchecked_draws
+        agg["rejected_actions"] += b.rejected_actions
+    s = sum(root.weights)
+    root.weights = [w / s for w in root.weights]
+    if exact_weights:
+        k = len(root.children)
+        root.wfrac = [Fraction(1, k)] * k
+    if agg["rejected_actions"]:
+        warnings.warn(
+            f"build_tree_go: the engine refused {agg['rejected_actions']} actions "
+            "its own legal mask offered, and each one stubbed a subtree out as a "
+            "zero-utility Terminal. The mask and the apply path disagree; the tree "
+            "is wrong wherever that happened.",
+            stacklevel=2,
+        )
+    if agg["unchecked_draws"]:
+        warnings.warn(
+            f"build_tree_go: {agg['unchecked_draws']} enumerated draws left no "
+            "pending record to read the drawn card back from, so neither the deck "
+            "channel nor the acting seat's private-draw key component could be "
+            "validated at those nodes (build_tree_python's priv_draw guard has the "
+            "same blind spot). The tree is only as trustworthy as that count is "
+            "small; it is 0 on config/tiny_norecall.yaml and "
+            "config/tiny_2card_plateau.yaml.",
+            stacklevel=2,
+        )
+    if agg["unenumerated_draws"]:
+        warnings.warn(
+            f"build_tree_go: {agg['unenumerated_draws']} draw points could not be "
+            f"enumerated ({agg['reshuffle_draws']} transitions recycled the discard "
+            "pile). Downstream of a reshuffle the stockpile corresponds to no deck "
+            "suffix and the FFI exposes no way to order it, so those chance points "
+            "collapse onto the one outcome the engine's own RNG produced. NashConv "
+            "on this tree is exact FOR this tree, not for the game.",
+            stacklevel=2,
+        )
+    if stats is not None:
+        stats.update(agg)
+    return root, all_isets, total_nodes, aborted_deals
+
+
+def _go_tokenizer_version():
+    from src.ffi.bridge import get_tokenizer_version
+
+    try:
+        return get_tokenizer_version()
+    except Exception:  # noqa: BLE001 - diagnostics string only
+        return "?"
+
+
+def build_tree(
+    cfg,
+    n_deals,
+    seed0,
+    max_nodes_per_deal,
+    enumerate_draws=True,
+    perfect_recall=False,
+    tokenize=False,
+    seq_cap=256,
+    quiet=True,
+    exact_weights=False,
+    production_obs=None,
+    backend="go",
+    stats=None,
+):
+    """Build the explicit tiny-Cambia tree on the selected engine backend.
+
+    backend="go" (default, cambia-1429): build_tree_go, the Go engine through the
+    FFI bridge. No Python-engine import happens anywhere on this path.
+    backend="python": build_tree_python, the original src.game.engine expansion.
+
+    ``quiet`` and ``production_obs`` are python-backend knobs. On the Go backend
+    there is nothing to quiet (the engine emits no per-node warnings) and the
+    token stream is the Go tokenizer's own -- which IS the production observation
+    path, and the only stream that backend can produce.
+
+    ``production_obs`` therefore defaults to None, "unspecified", rather than
+    False: the python backend maps None to False (its historical default) while
+    the Go backend warns only for an EXPLICIT False, the case where a caller is
+    deliberately asking for the pre-cambia-528/529 legacy stream and would
+    otherwise get live tokens under a legacy label. Warning on the default instead
+    would fire on every ordinary build and train readers to ignore it.
+    """
+    if backend == "python":
+        return build_tree_python(
+            cfg,
+            n_deals,
+            seed0,
+            max_nodes_per_deal,
+            enumerate_draws=enumerate_draws,
+            perfect_recall=perfect_recall,
+            tokenize=tokenize,
+            seq_cap=seq_cap,
+            quiet=quiet,
+            exact_weights=exact_weights,
+            production_obs=bool(production_obs),
+        )
+    if backend != "go":
+        raise ValueError(f"unknown backend {backend!r}; expected 'go' or 'python'")
+    if tokenize and production_obs is False:
+        warnings.warn(
+            "build_tree(backend='go', tokenize=True, production_obs=False): the Go "
+            "tokenizer emits the live (production) observation stream, so the "
+            f"returned seq_tokens are v{_go_tokenizer_version()} tokens, NOT the "
+            "pre-cambia-528/529 legacy stream production_obs=False names. Score a "
+            "legacy-provenance checkpoint with backend='python'.",
+            stacklevel=2,
+        )
+    return build_tree_go(
+        cfg,
+        n_deals,
+        seed0,
+        max_nodes_per_deal,
+        enumerate_draws=enumerate_draws,
+        perfect_recall=perfect_recall,
+        tokenize=tokenize,
+        seq_cap=seq_cap,
+        exact_weights=exact_weights,
+        stats=stats,
+    )
 
 
 # ---- Tabular CFR+ over the explicit tree ----

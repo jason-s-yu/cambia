@@ -1294,6 +1294,7 @@ def train_tiny_prtcfr(
     seed0: int = 0,
     seq_cap: int = SEQ_CAP,
     config_overrides: Optional[dict] = None,
+    tree_backend: str = "go",
 ) -> List[PRTCFRTrainState]:
     """Build the tiny perfect-recall tree and run PRT-CFR training on it.
 
@@ -1334,6 +1335,11 @@ def train_tiny_prtcfr(
         perfect_recall=True,
         tokenize=True,
         seq_cap=prt_cfg.seq_cap,
+        # Go engine (build_tree's default since cambia-1429): node seq_tokens come
+        # off the Go tokenizer, the same stream the production worker trains on,
+        # and the tree build no longer imports src.game.engine.
+        backend=tree_backend,
+        production_obs=True,
     )
     logger.info(
         "[prtcfr] tiny tree built: nodes~%d aborted_deals=%d seq_cap=%d",
