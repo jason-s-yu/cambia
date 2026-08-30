@@ -121,7 +121,7 @@ func TestPrivateInitialCardsPeekMarksExactlyThoseSlotsSeen(t *testing.T) {
 
 		for slot := uint8(0); slot < g.Engine.Players[engineIdx].HandLen; slot++ {
 			cardUUID := g.CardTracker.Players[engineIdx].HandUUIDs[slot]
-			assert.Equalf(t, revealed[int(slot)], g.hasSeenCard(engineIdx, cardUUID),
+			assert.Equalf(t, revealed[int(slot)], g.CardTracker.SeenByPlayer[engineIdx][cardUUID],
 				"slot %d: the seen-set should hold exactly the peeked slots", slot)
 		}
 	}

@@ -161,7 +161,7 @@ func (g *CambiaGame) getCurrentObfuscatedGameState(forUser uuid.UUID) ObfGameSta
 			Active:    true,
 			PlayerID:  g.SpecialAction.PlayerID,
 			CardRank:  g.SpecialAction.CardRank,
-			Mandatory: g.SpecialAction.Mandatory && !(g.SpecialAction.CardRank == "K" && g.SpecialAction.FirstStepDone),
+			Mandatory: g.SpecialAction.MustResolve(),
 		}
 	}
 

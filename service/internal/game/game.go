@@ -123,6 +123,16 @@ type SpecialActionState struct {
 	Card2Owner    uuid.UUID    // For King: Owner of the second peeked card.
 }
 
+// MustResolve reports whether the pending ability has to be played out rather than declined: the
+// engine armed it (Mandatory) and it is not the King's second step, which the engine does model as
+// declinable (ActionKingSwapNo). It is the one predicate three callers had a copy of - the skip
+// handler's refusal, the turn timeout's auto-resolve, and the Mandatory flag sync_state projects to
+// the client - so a change to when an ability can be declined has one place to land (cambia-1125).
+// Only meaningful while Active; a cleared state answers false.
+func (s SpecialActionState) MustResolve() bool {
+	return s.Mandatory && !(s.CardRank == "K" && s.FirstStepDone)
+}
+
 // CircuitRules defines parameters for tournament-style play across multiple rounds.
 type CircuitRules struct {
 	TargetScore            int  `json:"targetScore"`            // Score limit to trigger elimination or end.
