@@ -127,7 +127,7 @@ func (g *CambiaGame) doPeekOtherEngine(playerID uuid.UUID, engineIdx uint8, card
 	// Resolve the seat the client named from the target card's owner, and bounds-check its slot,
 	// before touching engine state (reject-and-wait; see cambia-509). The seat used to be derived
 	// as `1 - engineIdx`, which wraps past seat 1 and panicked at a 4-seat table (cambia-946).
-	oppEngineIdx, oppSlot, reason, ok := g.resolveOpponentTarget(engineIdx, ownerID, cardID, idx)
+	oppEngineIdx, oppSlot, reason, ok := g.resolveOpponentTarget(engineIdx, ownerID, cardID, idx, false)
 	if !ok {
 		g.RejectSpecialAction(playerID, reason)
 		return
@@ -228,7 +228,10 @@ func (g *CambiaGame) resolveSwapPair(playerID uuid.UUID, engineIdx uint8, card1D
 		return swapTarget{}, false
 	}
 
-	oppSeat, oppSlot, reason, ok := g.resolveOpponentTarget(engineIdx, oppOwnerID, oppCardID, oppIdx)
+	// A swap moves a card out of the seat it names, so LockCallerHand refuses one that names the
+	// Cambia caller. Both callers of resolveSwapPair are swaps: J/Q blind swap, and the King look
+	// that binds the pair its decision may then swap.
+	oppSeat, oppSlot, reason, ok := g.resolveOpponentTarget(engineIdx, oppOwnerID, oppCardID, oppIdx, true)
 	if !ok {
 		g.RejectSpecialAction(playerID, reason)
 		return swapTarget{}, false

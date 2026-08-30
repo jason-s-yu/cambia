@@ -1087,15 +1087,49 @@ func (g *CambiaGame) promptEngineArmedAbility(playerID uuid.UUID, engineIdx uint
 }
 
 // firstOpponentWithCards returns the lowest-numbered seat other than actorSeat that still holds a
-// card, which is the target an auto-resolved opponent-facing ability plays against.
+// card, which is the target an auto-resolved opponent-facing ability plays against. skipLocked
+// drops the Cambia caller, whose hand LockCallerHand freezes against anything that moves a card
+// (RULES.md 3C): that is the same skip the engine's canUseAbility applies through
+// reachableOpponent(true) and both legal-mask builders apply to PendingBlindSwap and PendingKingLook
+// (engine/legal.go). A look that moves nothing keeps the caller in reach, so peek-other does not
+// pass it.
 // Assumes the lock is held by the caller.
-func (g *CambiaGame) firstOpponentWithCards(actorSeat uint8) (uint8, bool) {
+func (g *CambiaGame) firstOpponentWithCards(actorSeat uint8, skipLocked bool) (uint8, bool) {
 	for seat := uint8(0); seat < g.seatCount(); seat++ {
-		if seat != actorSeat && g.Engine.Players[seat].HandLen > 0 {
-			return seat, true
+		if seat == actorSeat || g.Engine.Players[seat].HandLen == 0 {
+			continue
 		}
+		if skipLocked && g.handLocked(seat) {
+			continue
+		}
+		return seat, true
 	}
 	return engineSeatNone, false
+}
+
+// engineActionLegal reports whether the engine's own legal mask accepts an action the adapter is
+// about to apply on a player's behalf, translated into whichever action space this table runs in.
+// The auto-resolution picks its target out of engine state rather than from a client, so this is
+// what makes that choice legal by construction instead of by restating the engine's rules a second
+// time in the adapter (cambia-1125).
+// Assumes the lock is held by the caller.
+func (g *CambiaGame) engineActionLegal(actionIdx uint16, actorSeat, targetSeat uint8) bool {
+	engineActionIdx, useNPlayer, err := g.engineActionForSeat(actionIdx, actorSeat, targetSeat)
+	if err != nil {
+		return false
+	}
+	if useNPlayer {
+		if engineActionIdx >= engine.NPlayerNumActions {
+			return false
+		}
+		mask := g.Engine.NPlayerLegalActions()
+		return mask[engineActionIdx/64]>>(engineActionIdx%64)&1 == 1
+	}
+	if engineActionIdx >= engine.NumActions {
+		return false
+	}
+	mask := g.Engine.LegalActions()
+	return mask[engineActionIdx/64]>>(engineActionIdx%64)&1 == 1
 }
 
 // autoResolveArmedAbility plays out an engine-armed ability whose owner let their turn timer run
@@ -1108,13 +1142,19 @@ func (g *CambiaGame) firstOpponentWithCards(actorSeat uint8) (uint8, bool) {
 // line the rest of the timeout path takes: the obligation is discharged without moving a card the
 // player did not ask to move. A blind swap has no such line - the engine models no no-op blind
 // swap - and the player chose to play that Jack or Queen out of their own hand.
+//
+// "Legal" is the engine's own answer, not the adapter's: the seat is picked out of engine state and
+// then put to the legal mask, so a target the mask refuses falls through to the !resolvable branch
+// rather than being applied. That is what keeps the LockCallerHand skip below in step with
+// engine/legal.go instead of restating it (cambia-1125).
 // Assumes the lock is held by the caller.
 func (g *CambiaGame) autoResolveArmedAbility(playerID uuid.UUID) {
 	engineIdx, ok := g.PlayerToEngine[playerID]
 	if !ok {
 		engineIdx = g.Engine.ActingPlayer()
 	}
-	oppSeat, haveOpp := g.firstOpponentWithCards(engineIdx)
+	oppSeat, haveOpp := g.firstOpponentWithCards(engineIdx, false)
+	swapSeat, haveSwapSeat := g.firstOpponentWithCards(engineIdx, true)
 	ownHandLen := g.Engine.Players[engineIdx].HandLen
 
 	var actionIdx uint16
@@ -1126,15 +1166,16 @@ func (g *CambiaGame) autoResolveArmedAbility(playerID uuid.UUID) {
 	case engine.PendingPeekOther:
 		actionIdx, targetSeat, resolvable = engine.EncodePeekOther(0), oppSeat, haveOpp
 	case engine.PendingBlindSwap:
-		actionIdx, targetSeat, resolvable = engine.EncodeBlindSwap(0, 0), oppSeat, haveOpp && ownHandLen > 0
+		actionIdx, targetSeat, resolvable = engine.EncodeBlindSwap(0, 0), swapSeat, haveSwapSeat && ownHandLen > 0
 	case engine.PendingKingLook:
-		actionIdx, targetSeat, resolvable = engine.EncodeKingLook(0, 0), oppSeat, haveOpp && ownHandLen > 0
+		actionIdx, targetSeat, resolvable = engine.EncodeKingLook(0, 0), swapSeat, haveSwapSeat && ownHandLen > 0
 	default:
 		// Nothing armed after all: fall back to the ordinary skip so the prompt does not outlive
 		// the state that justified it.
 		g.processSkipSpecialAction(playerID)
 		return
 	}
+	resolvable = resolvable && g.engineActionLegal(actionIdx, engineIdx, targetSeat)
 	if !resolvable {
 		// A snap taken during the ability window emptied the only hand the ability could target,
 		// so the engine has no legal action left for it. Leave the prompt and re-arm the clock
@@ -1158,10 +1199,41 @@ func (g *CambiaGame) autoResolveArmedAbility(playerID uuid.UUID) {
 		g.scheduleNextTurnTimer()
 		return
 	}
-	// A King's look leaves the swap decision pending; take the no-swap side of it.
+	// A King's look leaves the swap decision pending; take the no-swap side of it. A refused
+	// decline would otherwise leave the engine holding PendingKingDecision with the prompt already
+	// cleared and no timer armed, which is the dead-clock wedge in a second shape, so the prompt is
+	// rebuilt as the King's second step and the clock re-armed. From there both a live client's
+	// skip and the next timeout route to ActionKingSwapNo again.
 	if g.Engine.Pending.Type == engine.PendingKingDecision && g.Engine.Pending.PlayerID == engineIdx {
-		g.applyEngineAction(engine.ActionKingSwapNo, playerID)
+		if err := g.applyEngineAction(engine.ActionKingSwapNo, playerID); err != nil {
+			g.restoreKingDecisionPrompt(playerID, engineIdx, targetSeat, 0, 0)
+		}
 	}
+}
+
+// restoreKingDecisionPrompt rebuilds the prompt for a King whose look has landed but whose swap
+// decision is still open, and re-arms the turn clock. It reproduces the state doKingLookEngine
+// leaves behind on the interactive path: Mandatory with FirstStepDone set, which is the one
+// combination processSkipSpecialAction reads as a decline it may apply.
+// Assumes the lock is held by the caller.
+func (g *CambiaGame) restoreKingDecisionPrompt(playerID uuid.UUID, actorSeat, targetSeat, ownSlot, oppSlot uint8) {
+	log.Printf("Game %s: King swap decline was refused for player %s; restoring the decision prompt.", g.ID, playerID)
+	g.SpecialAction = SpecialActionState{
+		Active:        true,
+		PlayerID:      playerID,
+		CardRank:      "K",
+		Mandatory:     true,
+		FirstStepDone: true,
+	}
+	if int(actorSeat) < engine.MaxPlayers && ownSlot < g.Engine.Players[actorSeat].HandLen {
+		g.SpecialAction.Card1 = &models.Card{ID: g.CardTracker.Players[actorSeat].HandUUIDs[ownSlot]}
+		g.SpecialAction.Card1Owner = playerID
+	}
+	if targetSeat != engineSeatNone && int(targetSeat) < engine.MaxPlayers && oppSlot < g.Engine.Players[targetSeat].HandLen {
+		g.SpecialAction.Card2 = &models.Card{ID: g.CardTracker.Players[targetSeat].HandUUIDs[oppSlot]}
+		g.SpecialAction.Card2Owner = g.EngineToPlayer[targetSeat]
+	}
+	g.scheduleNextTurnTimer()
 }
 
 // handleSnapViaEngine processes a snap action.
