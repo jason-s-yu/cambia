@@ -159,9 +159,14 @@ func TestSkipAbilityAdvancesTurnThroughSnapPhase(t *testing.T) {
 
 // TestNoStaleTimeoutAfterAbilitySnapAdvance is the end-to-end reproduction of the evidence-log
 // wedge: the previous player's turn timer must not fire and auto-play them after the ability
-// resolves through a snap phase. The opponent is disconnected before resolution so no fresh timer
-// arms for them; the only timer that could fire is the previous player's. Before the fix it fired
-// ("timed out without drawing") and drew for the previous player; after the fix it is neutralized.
+// resolves through a snap phase. Before the fix it fired ("timed out without drawing") and drew for
+// the previous player; after the fix it is neutralized.
+//
+// The advance is isolated down to that one timer by hand. This test used to get the isolation for
+// free by disconnecting the opponent, since the scheduler then declined to clock them; a
+// disconnected player is clocked like everyone else as of cambia-1117 D4, and letting their timer
+// run would auto-play the round back around to the previous player inside the observation window,
+// which is the game working rather than the wedge.
 func TestNoStaleTimeoutAfterAbilitySnapAdvance(t *testing.T) {
 	g, ids, mb := buildTimedTestGame(t, 80*time.Millisecond)
 	defer stopGameTimer(g)
@@ -172,8 +177,8 @@ func TestNoStaleTimeoutAfterAbilitySnapAdvance(t *testing.T) {
 
 	giveMatchingCard(g, oppIdx, 0, engine.NewCard(engine.SuitHearts, engine.RankSeven))
 
-	// Disconnect the opponent so the advance arms no new timer; only the previous player's stale
-	// timer remains as a candidate to fire.
+	// Disconnect the opponent: a player who is not there cannot act on the turn the advance hands
+	// them, so anything that plays inside the observation window came off a timer.
 	g.mu.Lock()
 	if p := g.getPlayerByID(oppID); p != nil {
 		p.Connected = false
@@ -184,6 +189,15 @@ func TestNoStaleTimeoutAfterAbilitySnapAdvance(t *testing.T) {
 	g.ProcessSpecialAction(curID, "peek_self", cardTarget(ownSlot0, curID, 0), nil)
 
 	require.Equal(t, oppIdx, g.Engine.ActingPlayer(), "engine turn should have advanced to the opponent")
+
+	// Stop the timer the advance armed for the opponent, leaving the previous player's stale timer
+	// as the only candidate left to fire. Stopping it here cannot race the fire it prevents: the
+	// timer was armed under mu inside ProcessSpecialAction and its duration is the same 80ms the
+	// observation window below waits out.
+	g.mu.Lock()
+	require.NotNil(t, g.turnTimer, "the advance must have armed a timer for the disconnected opponent")
+	g.turnTimer.Stop()
+	g.mu.Unlock()
 
 	// Observe past the stale timer's original deadline.
 	mb.clear()

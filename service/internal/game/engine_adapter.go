@@ -1740,14 +1740,20 @@ func (g *CambiaGame) scheduleNextTurnTimerEngine() {
 		return
 	}
 
-	// A disconnected player under the forfeit rule still gets a timer: while their reconnect
-	// window is open the table has to keep playing (RULES.md T5, MATCHMAKING.md 8), and once it
-	// closes their turns still have to resolve for the remaining players to finish the game. The
-	// timeout path draws and discards without touching their hand, which is the defensive play
-	// those rules describe. Without an armed timer the turn simply never ends (cambia-955).
-	if !currentPlayer.Connected && !g.HouseRules.ForfeitOnDisconnect {
-		log.Printf("Game %s: Current player %s is disconnected and the forfeit rule is off; leaving the turn unarmed.", g.ID, currentPlayerUUID)
-		return
+	// A disconnected player is clocked like everyone else: while their reconnect window is open the
+	// table has to keep playing (RULES.md T5, MATCHMAKING.md 8), and once it closes their turns
+	// still have to resolve for the remaining players to finish the game. The timeout path draws
+	// and discards without touching their hand, which is the defensive play those rules describe.
+	// Without an armed timer the turn simply never ends (cambia-955).
+	//
+	// This used to be declined whenever ForfeitOnDisconnect was off, on the reading that a game
+	// nobody can be forfeited from can wait for its player. Nothing else ends that turn, so the
+	// wait had no end either, and every circuit round is created with the forfeit rule off
+	// (handlers.CreateGameInstance): a circuit whose actor dropped stalled with neither a clock nor
+	// a forfeit (cambia-1117 D4). TurnTimerSec 0 remains the one configuration that leaves a turn
+	// unclocked, and it returns at the TurnDuration check above.
+	if !currentPlayer.Connected {
+		log.Printf("Game %s: Current player %s is disconnected; arming their turn timer so the turn still resolves.", g.ID, currentPlayerUUID)
 	}
 
 	curTurnID := g.TurnID
