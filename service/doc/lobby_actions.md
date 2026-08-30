@@ -18,7 +18,7 @@ This document describes the JSON payloads used for WebSocket communication on th
 | Invite User              | `invite`         | `{ "userID": "{uuid}" }`                                                                               | `internal/handlers/lobby_ws.go`  | Invites another user to a private lobby.                   |
 | Leave Lobby              | *(not a WS message)* | *(None)* | `internal/handlers/lobby.go` | `POST /lobby/{id}/leave`. Leaving releases membership, which nothing a lost socket can also trigger may do, so it is an HTTP call rather than a frame (cambia-807). Refused with 409 while the lobby's game is in progress. |
 | Send Chat Message        | `chat`           | `{ "msg": "Your message here" }`                                                                       | `internal/handlers/lobby_ws.go`  | Sends a chat message to the lobby.                         |
-| Update Rules (Host Only) | `update_rules`   | `{ "rules": { "presetId": "h2h_rapid", ... partial HouseRules object ... } }` (See `internal/game/rules.go` for fields)       | `internal/handlers/lobby_ws.go`  | Host updates lobby's house rules or circuit settings. Refused outright for a ranked or matchmaking lobby: see "Host role". An optional `presetId` inside `rules` names a whole ruleset from `GET /lobby/presets` and is expanded server-side before the field-by-field keys, so a `houseRules` object in the same message lands on top of it; an unknown id rejects the whole message (cambia-1088). The id is recorded on the lobby and echoed back as `lobby_state.preset_id`; sending one with the expanded sheet is how a client keeps the lobby's ruleset named (see "Ruleset identity"). |
+| Update Rules (Host Only) | `update_rules`   | `{ "rules": { "presetId": "h2h_rapid", ... partial HouseRules object ... } }` (See `internal/game/rules.go` for fields)       | `internal/handlers/lobby_ws.go`  | Host updates lobby's house rules or circuit settings. Refused outright for a ranked or matchmaking lobby: see "Host role". An optional `presetId` inside `rules` names a whole ruleset from `GET /lobby/presets` and is expanded server-side before the field-by-field keys, so a `houseRules` object in the same message lands on top of it; an unknown id rejects the whole message (cambia-1088). The id is recorded on the lobby and echoed back as `lobby_state.preset_id`; sending one with the expanded sheet is how a client keeps the lobby's ruleset named (see "Ruleset identity"). A preset that fixes a player count fixes `game_mode` with it, and one that seats fewer players than the lobby already has is refused, changing nothing. The auto-start block is read from `settings`, with `lobbySettings` accepted as an alias (see `rest_api.md`). An accepted edit broadcasts `lobby_state` to every connected seat; a refused one broadcasts nothing. |
 | Force Start (Host Only)  | `start_game`     | *(None)* | `internal/handlers/lobby_ws.go`  | Host attempts to start the game manually (if all ready). Refused for a system-hosted lobby, which starts on its ready check. |
 | Cancel Search (Host Only) | `cancel_search` | *(None)* | `internal/hub/hub.go` | Party leader takes the lobby back out of its queue. Valid only in the `searching` phase, which is the phase a party still has a leader in. |
 
@@ -75,6 +75,11 @@ is how a lobby created from H2H Rapid came back reading H2H Quick.
 * Cleared by the first later `update_rules` that moves a house rule or the auto-start setting
   without naming a preset. Circuit settings are not part of a preset, so changing them alone
   leaves the id where it is.
+* A preset carries a lobby shape as well as a ruleset: one that fixes a player count fixes
+  `game_mode` too, in `update_rules` as on create, so a lobby never records a 4-player ruleset
+  while still calling itself `head_to_head`. A preset that seats fewer players than the lobby
+  already has is refused and nothing is written, not even the `houseRules` alongside it: the seats
+  are taken, and the service does not empty them to fit a ruleset (cambia-1099).
 * A queue-backed lobby carries its queue's preset from creation, and takes it again at match
   formation. Its `house_rules` are the queue's from that moment, which is what makes the
   read-only rule sheet a matchmade lobby shows the ruleset its game is actually built from.
@@ -93,7 +98,7 @@ These messages are typically broadcast to all users in the lobby unless specifie
 | User Invited                  | `lobby_invite`            | `{ "invitedID": "{uuid}" }`                                                                                                                                                                  | `internal/game/lobby.go`   | Sent when a user is invited via the `invite` command.                                             |
 | Countdown Started             | `lobby_countdown_start`   | `{ "seconds": int }`                                                                                                                                                                        | `internal/game/lobby.go`   | Sent when the auto-start countdown begins.                                                        |
 | Countdown Canceled            | `lobby_countdown_cancel`  | *(None)* | `internal/game/lobby.go`   | Sent if the countdown is stopped (e.g., user leaves or becomes unready).                          |
-| Rules Updated                 | `lobby_rules_updated`     | `{ "house_rules": { ... full HouseRules object ... }, "circuit": { ... full Circuit object ... } }`                                                                                         | `internal/game/lobby.go`   | Sent when the host successfully updates rules via `update_rules`.                                 |
+| Rules Updated                 | `lobby_state`             | The `lobby_state` payload above, carrying the new `house_rules`, `circuit`, `settings`, `preset_id` and `game_mode`                                                                          | `internal/hub/hub.go`      | An accepted `update_rules` rebroadcasts the full snapshot to every connected seat. Everyone at the table plays by these rules, so everyone is told: before cambia-1099 only the host who sent the edit knew, and every other seat rendered the old rule sheet until it reloaded. There is no separate rules event: one snapshot shape means a client renders the sheet the same way however it moved. |
 | Chat Message Received         | `chat`                    | `{ "user_id": "{uuid}", "msg": "The message", "ts": int }`                                                                                                                                  | `internal/game/lobby.go`   | Echoes a chat message sent by a user.                                                             |
 | Game Started                  | `game_start`              | `{ "game_id": "{uuid}" }`                                                                                                                                                                   | `internal/handlers/lobby_ws.go` (via callback) | Sent when the game instance is created and starts. Clients should connect to `/game/ws/{game_id}`. |
 | Error Occurred (Private)      | `error`                   | `{ "message": "Error description text" }`                                                                                                                                                   | `internal/game/lobby.go`   | Sent privately to the user who caused an error (e.g., invalid action, not host).                 |
@@ -113,7 +118,7 @@ These messages are typically broadcast to all users in the lobby unless specifie
   // Potentially other status fields could be added here
 }
 
-**`HouseRules` Object Structure (within `lobby_state`, `lobby_rules_updated`, used by `update_rules`):**
+**`HouseRules` Object Structure (within `lobby_state`, used by `update_rules`):**
 (See `internal/game/rules.go` for field definitions)
 
 ```json
@@ -144,7 +149,7 @@ engine's own limits: `penaltyDrawCount` 0-6, `turnTimerSec` 0-86400, `maxGameTur
 `cardsPerPlayer`: the pregame peek cannot cover more cards than the hand holds, and the pair is
 checked after the whole update is applied, so both keys may move in one message.
 
-**`Circuit` Object Structure (within `lobby_state`, `lobby_rules_updated`, used by `update_rules`):**
+**`Circuit` Object Structure (within `lobby_state`, used by `update_rules`):**
 (See `internal/game/game.go` for field definitions)
 
 ```json

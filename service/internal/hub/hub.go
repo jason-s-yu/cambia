@@ -744,7 +744,16 @@ func (h *Hub) handleLobbyMsg(msg ClientMsg) {
 		if err != nil {
 			log.Printf("hub %s: UpdateUnsafe error: %v", h.ID, err)
 			conn.SendEnvelope(h.errEnvelope("failed to apply rule updates"))
+			return
 		}
+
+		// Everyone at the table plays by these rules, so everyone is told. Nothing broadcast after
+		// an accepted edit, so every seat but the host's went on rendering the old sheet - house
+		// rules, auto-start, preset name, and the game mode a preset now fixes - until a reload or
+		// some unrelated roster change refreshed it, while chat on the same socket arrived live
+		// (cambia-1099 Q10). The same per-user lobby_state join, leave and match formation send, so
+		// there is one shape a client renders a rule sheet from however it moved.
+		h.broadcastLobbyUpdate()
 
 	case "start_game":
 		// A matchmade lobby starts itself. Its host role belongs to the system (cambia-1087),
