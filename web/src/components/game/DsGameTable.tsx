@@ -52,6 +52,7 @@ import PlayerSeat, { type PlayerSeatState } from '@/components/ds/game/PlayerSea
 import ScorePill from '@/components/ds/game/ScorePill';
 import TimerBar from '@/components/ds/game/TimerBar';
 import { toDsCardFace, cardFaceName } from './dsCardMap';
+import { ownHandPlacement } from './handLayout';
 
 interface DsGameTableProps {
   gameState: ObfGameState;
@@ -670,6 +671,12 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   const renderHand = () => {
     const hand = selfState?.revealedHand ?? [];
     const seat = seatIndexOf(selfId);
+    // Slots 0 and 1 are the row nearest their owner (RULES.md section 2): they are the pair the
+    // engine peeks at the deal, so on our own side of the table they belong on the BOTTOM row and
+    // the later slots stack above them (cambia-1095). Placement is explicit per card, so DOM order
+    // stays slot order: the tab sequence and the 'Your card N' names still run 1, 2, 3, 4 and the
+    // card-<seat>-<i> hooks stay keyed by the engine slot index.
+    const slots = Math.max(hand.length, selfState?.handSize ?? 0);
     const known = hand.map((card, i) => {
       const face = toDsCardFace(card);
       const spoken = cardFaceName(face);
@@ -688,6 +695,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
           label={spoken ? `Your card ${i + 1}: ${spoken}` : `Your card ${i + 1}, face down`}
           pressed={ownSelects ? picked : undefined}
           testId={`card-${seat}-${i}`}
+          style={ownHandPlacement(i, slots)}
           onClick={ownCommits || ownSelects ? () => handlePlayerCardClick(card, i) : undefined}
         />
       );
@@ -697,7 +705,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     // and take no click until the next sync fills them in.
     const extra = Math.max(0, (selfState?.handSize ?? 0) - hand.length);
     const padding = Array.from({ length: extra }).map((_, j) => (
-      <PlayingCard key={`pad-${j}`} faceDown size='md' label={`Your card ${hand.length + j + 1}, face down`} testId={`card-${seat}-${hand.length + j}`} />
+      <PlayingCard key={`pad-${j}`} faceDown size='md' label={`Your card ${hand.length + j + 1}, face down`} testId={`card-${seat}-${hand.length + j}`} style={ownHandPlacement(hand.length + j, slots)} />
     ));
     return [...known, ...padding];
   };
@@ -764,6 +772,9 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
               return (
                 <div key={opp.playerId} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
                   <PlayerSeat username={nameOf(opp.playerId)} compact handSize={opp.handSize} note={note} state={seatStateFor(opp, gameState.currentPlayerId)} />
+                  {/* Every opponent seat, at any player count, is drawn across the table above its
+                      hand, so the row nearest that opponent is the TOP row on screen and plain
+                      row-major order already puts slots 0 and 1 there (cambia-1095). */}
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, auto)', gap: 5 }}>
                     {Array.from({ length: opp.handSize }).map((_, i) => {
                       // handSize drives the slot count (authoritative between syncs); the real card
@@ -879,6 +890,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
           {/* Own hand and the action column. */}
           <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'center', gap: 24, flexWrap: 'wrap' }}>
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
+              {/* Two columns; each card names its own row so slots 0 and 1 draw nearest us (cambia-1095). */}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, auto)', gap: 6, paddingTop: 6 }}>
                 {renderHand()}
               </div>
