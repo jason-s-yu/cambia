@@ -224,6 +224,25 @@
   --card-face-edge: #cdc7b7;
   --card-back: var(--green-700);
   --card-back-line: rgba(201, 162, 39, 0.42);
+  /* Face-down back (cambia-1096). --card-back resolves to --green-700, the same
+     literal as --surface-felt: a back filled with it measured 1.00:1 against
+     the table, so a face-down card was a hollow rectangle and a dealt hand read
+     as empty slots. The three tokens below are what the back is actually
+     painted with. --card-back-fill is a green ink under the felt (1.99:1 dark,
+     2.47:1 light against --surface-felt), which clears the 1.73:1 / 1.84:1 that
+     the empty slot's own dashed --border-on-felt line carries, so the filled
+     plate is at least as present as the outline it has to be told apart from.
+     --card-back-pattern is the crosshatch over it, deliberately low-alpha
+     ornament in the ramp gold and never --accent-gold, which stays the
+     targeting signal. --card-back-edge is the silhouette: it belongs to the
+     on-felt family, light-on-green in both themes like --border-on-felt and
+     --card-targetable-ring, since the plate is dark under both. It runs above
+     the neutral border tiers because it composites onto that dark plate, not
+     onto the felt: --border-strong there measures 1.23:1 and leaves no
+     silhouette, while these hold 2.16:1 dark and 1.97:1 light. */
+  --card-back-fill: #071f16;
+  --card-back-pattern: rgba(201, 162, 39, 0.3);
+  --card-back-edge: rgba(240, 247, 243, 0.46);
   /* Edge and ring of a card or pile that is a legal target. It is drawn on the
      felt, so it belongs to the on-felt family and runs light-on-green in both
      themes rather than following the neutral border tiers. The soft gold tint
@@ -345,6 +364,11 @@
   --card-face-edge: var(--paper-300);
   --card-back: var(--green-600);
   --card-back-line: rgba(201, 162, 39, 0.55);
+  /* The table stays green in light, so the back keeps its hue and lifts only
+     enough to stay green-reading under the lighter felt. */
+  --card-back-fill: #09291d;
+  --card-back-pattern: rgba(201, 162, 39, 0.34);
+  --card-back-edge: rgba(240, 247, 243, 0.52);
   /* One step brighter than dark: the light felt is lighter, so the ring
      separates by going up, not down. --gold-600, the light border accent, sits
      at 1.84:1 here, below the idle edge. */
