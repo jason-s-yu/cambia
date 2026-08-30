@@ -47,8 +47,27 @@ function presetMatches(preset: LobbyPreset, rules: HouseRules, settings: LobbySe
     settings?.autoStart === preset.settings.autoStart;
 }
 
+/**
+ * Group heading (cambia-1097). Was the shared EYEBROW, the same style the field
+ * labels under it use, so Pace, Deal and Play sat at the weight of the rows they
+ * titled and the sheet had to be read to be navigated. Sentence case, above body
+ * size, in primary text: one rank under the panel's own heading and two above
+ * the eyebrow labels. Size and not weight alone, because the read-only sheet
+ * draws its rule names at the body size in --weight-medium, close enough that a
+ * bolded heading at the same size would not have separated from them.
+ */
+const GROUP_TITLE: React.CSSProperties = {
+  fontSize: 'var(--ds-text-lg)',
+  fontWeight: 'var(--weight-bold)',
+  letterSpacing: 'var(--ds-tracking-tight)',
+  lineHeight: 'var(--ds-leading-tight)',
+  color: 'var(--text-primary)'
+};
+
+/** Explanatory line under a group heading. Body copy, so not the smallest tier. */
 const HINT: React.CSSProperties = {
-  fontSize: 'var(--ds-text-xs)',
+  fontSize: 'var(--ds-text-sm)',
+  lineHeight: 'var(--ds-leading-snug)',
   color: 'var(--text-tertiary)'
 };
 
@@ -72,10 +91,12 @@ const RULE_GRID: React.CSSProperties = {
   gap: 'var(--space-3) var(--space-5)'
 };
 
+// Wider than the space-4 it opened at: the divider plus the air around it is
+// what makes a group read as a block rather than as one more row (cambia-1097).
 const DIVIDER: React.CSSProperties = {
-  borderTop: '1px solid var(--border-subtle)',
-  marginTop: 'var(--space-4)',
-  paddingTop: 'var(--space-4)'
+  borderTop: '1px solid var(--border-default)',
+  marginTop: 'var(--space-6)',
+  paddingTop: 'var(--space-5)'
 };
 
 const FLAG_LABEL: React.CSSProperties = {
@@ -95,20 +116,24 @@ const InfoIcon: React.FC = () => (
 );
 
 /**
- * One titled group of the rule sheet: eyebrow, optional hint, fields.
+ * One titled group of the rule sheet: heading, optional hint, fields.
  * `info` sits with the title rather than in `action`, since it explains the
- * group and does not set it; alignSelf centers it against the baseline row.
+ * group and does not set it.
+ *
+ * The hint took its own line in cambia-1097. Trailing the heading, it pushed the
+ * group's only landmark into the middle of a sentence and put two type sizes on
+ * one row; under it, the heading is the leftmost thing in the block.
  */
 const RuleGroup: React.FC<{ title: string; hint?: string; info?: React.ReactNode; action?: React.ReactNode; first?: boolean; children?: React.ReactNode }> = ({ title, hint, info, action, first = false, children }) => (
   <div style={first ? undefined : DIVIDER}>
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--space-3)', marginBottom: 'var(--space-3)', flexWrap: 'wrap' }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
-        <span style={EYEBROW}>{title}</span>
-        {hint && <span style={HINT}>{hint}</span>}
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--space-3)', marginBottom: hint ? 2 : 'var(--space-3)', flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', minWidth: 0 }}>
+        <span style={GROUP_TITLE}>{title}</span>
         {info}
       </div>
       {action}
     </div>
+    {hint && <p style={{ ...HINT, margin: '0 0 var(--space-3)' }}>{hint}</p>}
     {children}
   </div>
 );
@@ -141,7 +166,7 @@ const RuleFlag: React.FC<{ label: string; description: string; on: boolean }> = 
   <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
     <span style={{ flex: 1, minWidth: 0 }}>
       <span style={FLAG_LABEL}>{label}</span>
-      <span style={{ display: 'block', fontSize: 'var(--ds-text-xs)', color: 'var(--text-secondary)', marginTop: 2 }}>{description}</span>
+      <span style={{ display: 'block', fontSize: 'var(--ds-text-sm)', lineHeight: 'var(--ds-leading-snug)', color: 'var(--text-secondary)', marginTop: 2 }}>{description}</span>
     </span>
     <span style={{ flex: 'none' }}>
       <OnOff on={on} />
@@ -352,16 +377,20 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
         </div>
       </RuleGroup>
 
+      {/* Not 'Rounds accumulate toward a target' (cambia-1117 D1): nothing reads
+          CircuitRules.TargetScore, and engine/circuit.go ends a circuit on its round
+          count. The explainer behind the (i) already says so; the hint used to
+          contradict it. */}
       <RuleGroup
         title='Circuit scoring'
-        hint='Rounds accumulate toward a target'
+        hint='Rounds accumulate; lowest total wins'
         info={
           <IconButton
             size='sm'
             variant='ghost'
             title='About circuit scoring'
             onClick={() => setCircuitInfoOpen(true)}
-            style={{ alignSelf: 'center', color: 'var(--text-secondary)' }}
+            style={{ color: 'var(--text-secondary)' }}
           >
             <InfoIcon />
           </IconButton>

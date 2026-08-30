@@ -1,10 +1,14 @@
 // src/components/ds/eyebrow.ts
-// The one eyebrow style: 11px uppercase, bold, cap-tracked, tertiary text.
-// Panels, field labels, table headers and the felt pile labels all drew their
-// own copy of it and drifted; wordSpacing is why it is shared. At 11px with
+// The one eyebrow style: --text-2xs uppercase, bold, cap-tracked, tertiary
+// text. Field labels, table headers and the felt pile labels all drew their own
+// copy of it and drifted; wordSpacing is why it is shared. At this size with
 // 0.08em letter-spacing the inter-word gap collapses into the letter gaps and a
-// two-word eyebrow reads as one run (RULESHEET, LOBBYCHAT), so the space needs
-// widening back out (cambia-876, DL-3 review F11).
+// two-word eyebrow reads as one run (SNAPPENALTY, JOKERSPERDECK), so the space
+// needs widening back out (cambia-876, DL-3 review F11).
+//
+// It is the bottom rank of the ladder, not a heading: panel titles and rule
+// group titles left it in cambia-1097, since a sheet whose sections and whose
+// fields were both set in it had no scannable structure at all.
 import type React from 'react';
 
 export const EYEBROW: React.CSSProperties = {

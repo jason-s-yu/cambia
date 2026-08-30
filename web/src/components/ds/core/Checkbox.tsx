@@ -48,7 +48,9 @@ const Checkbox: React.FC<CheckboxProps> = ({ label, description, checked, defaul
       </span>
       <span style={{ flex: 1, minWidth: 0 }}>
         {label && <span style={{ display: 'block', fontWeight: 'var(--weight-medium)', fontSize: 'var(--text-md)', lineHeight: 1.35 }}>{label}</span>}
-        {description && <span style={{ display: 'block', fontSize: 'var(--ds-text-xs)', color: 'var(--text-secondary)', marginTop: 2 }}>{description}</span>}
+        {/* Body copy, so a step above the scale's floor: the house-rule
+            explanations are the sentences a host actually reads (cambia-1097). */}
+        {description && <span style={{ display: 'block', fontSize: 'var(--ds-text-sm)', lineHeight: 'var(--ds-leading-snug)', color: 'var(--text-secondary)', marginTop: 2 }}>{description}</span>}
       </span>
     </div>
   );

@@ -338,7 +338,7 @@ const DashboardPage: React.FC = () => {
                     <div style={{ fontSize: 'var(--ds-text-lg)', fontWeight: 'var(--weight-bold)', letterSpacing: 'var(--ds-tracking-tight)', lineHeight: 'var(--ds-leading-tight)' }}>{queue.name}</div>
                     <Badge tone='info' dot>Searching</Badge>
                   </div>
-                  <div style={{ fontSize: 'var(--ds-text-xs)', fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
+                  <div style={{ fontSize: 'var(--ds-text-sm)', fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
                     {Math.floor(searchElapsed / 60)}:{String(searchElapsed % 60).padStart(2, '0')} elapsed
                   </div>
                   <Button variant='cambia' fullWidth onClick={handleCancelSearch}>
@@ -381,7 +381,7 @@ const DashboardPage: React.FC = () => {
                 <div key={lobbyId} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 2px', borderTop: i ? '1px solid var(--border-subtle)' : 'none' }}>
                   <span style={{ fontWeight: 'var(--weight-bold)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayName}</span>
                   <Badge>{gameModeLabel(lobby?.gameMode)}</Badge>
-                  <span style={{ fontSize: 'var(--ds-text-xs)', fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)', minWidth: 30, textAlign: 'right', whiteSpace: 'nowrap' }}>
+                  <span style={{ fontSize: 'var(--ds-text-sm)', fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)', minWidth: 34, textAlign: 'right', whiteSpace: 'nowrap' }}>
                     {entry.playerCount}/{entry.maxPlayers}
                   </span>
                   <Button size='sm' variant='secondary' disabled={full} onClick={() => handleJoinPublicLobby(lobbyId)}>
@@ -431,7 +431,7 @@ const DashboardPage: React.FC = () => {
                   opposite mismatch: a rated pool seeded without a matching game_results
                   row must not sit under a hint claiming no rating exists (cambia-929). */}
               {neverPlayed && !hasRatedPool ? (
-                <Note style={{ fontSize: 'var(--ds-text-xs)' }}>Play a ranked game to start a rating.</Note>
+                <Note>Play a ranked game to start a rating.</Note>
               ) : (
                 <>
                   {/* The 1v1 row is dropped only when the headline rendered its number. */}
@@ -468,8 +468,8 @@ const DashboardPage: React.FC = () => {
                 <div key={f.userId} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 2px', borderTop: i ? '1px solid var(--border-subtle)' : 'none' }}>
                   <span style={{ width: 8, height: 8, borderRadius: '50%', flex: 'none', background: dotColor }}></span>
                   <span style={{ lineHeight: 'var(--ds-leading-snug)', flex: 1, minWidth: 0 }}>
-                    <span style={{ display: 'block', fontWeight: 'var(--weight-bold)', fontSize: 'var(--ds-text-sm)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.username}</span>
-                    <span style={{ display: 'block', fontSize: 'var(--text-2xs)', color: 'var(--text-tertiary)' }}>{f.status}</span>
+                    <span style={{ display: 'block', fontWeight: 'var(--weight-bold)', fontSize: 'var(--text-md)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.username}</span>
+                    <span style={{ display: 'block', fontSize: 'var(--ds-text-xs)', color: 'var(--text-tertiary)' }}>{f.status}</span>
                   </span>
                   {/* No invite control here: the button had no handler on any branch,
                       and the real invite is the lobby link (cambia-876). */}
@@ -523,7 +523,7 @@ const DashboardPage: React.FC = () => {
                 options={presets.map((p) => ({ value: p.id, label: p.name }))}
               />
               {selectedPreset && (
-                <p style={{ margin: '6px 0 0', fontSize: 'var(--ds-text-xs)', color: 'var(--text-tertiary)' }}>
+                <p style={{ margin: '6px 0 0', fontSize: 'var(--ds-text-sm)', lineHeight: 'var(--ds-leading-snug)', color: 'var(--text-tertiary)' }}>
                   {selectedPreset.description}
                   {presetGameMode ? ` Game mode is fixed at ${gameModeLabel(presetGameMode)}.` : ''}
                 </p>

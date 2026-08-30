@@ -123,23 +123,38 @@
      in both themes, so text and hairlines placed directly on it cannot use the
      neutral text and border tiers, which flip with the theme. Both are
      light-on-green; only their alpha shifts per theme so the check-tokens
-     dark/light diff still holds. --text-on-green is the primary tier. */
-  --text-on-felt-muted: rgba(240, 247, 243, 0.68);
+     dark/light diff still holds. --text-on-green is the primary tier.
+
+     .68 measured 4.64:1 on the dark felt, on the AA line for the pile labels it
+     draws; .80 puts it at 5.75:1, the same headroom the neutral tiers gained in
+     cambia-1097, and still a rank under --text-on-green's 7.66:1. */
+  --text-on-felt-muted: rgba(240, 247, 243, 0.8);
   --border-on-felt: rgba(240, 247, 243, 0.22);
 
-  /* Text tiers */
+  /* Text tiers.
+
+     The three tiers below were lifted together in cambia-1097: the dark grounds
+     are green-tinted neutrals, and against them the old steps read as one grey
+     wash rather than as three ranks. Each keeps its place in the ladder and each
+     gains headroom over the AA floor it was already scraping. */
   --text-primary: #edf2ef;
-  --text-secondary: #a9b8b1;
-  /* Raised from #74857d, which held AA on the card but fell to 4.17:1 on
-     --surface-2, the lightest neutral ground an eyebrow or a metadata line
-     sits on in dark. 4.77:1 there, 5.22:1 on the card (cambia-935, F4). The
-     selected grounds below sit lighter still; metadata on those steps up to
+  /* Raised from #a9b8b1 (8.62:1 on the card, 6.17:1 on --surface-selected).
+     10.83:1 on the card, 9.90:1 on --surface-2, 7.76:1 on the selected ground,
+     still well clear of --text-primary's 15.70:1 (cambia-1097). */
+  --text-secondary: #c0cdc7;
+  /* Raised from #7e8f87, itself raised from #74857d, which held AA on the card
+     but fell to 4.17:1 on --surface-2, the lightest neutral ground an eyebrow or
+     a metadata line sits on in dark (cambia-935, F4). This step measures 7.39:1
+     on the card, 6.75:1 on --surface-2 and 5.29:1 on --surface-selected. The
+     R1 rule stands regardless: metadata on the two selected grounds steps up to
      --text-secondary rather than pulling this tier toward it (cambia-935, R1). */
-  --text-tertiary: #7e8f87;
-  /* Raised from #4d5b55, which sat at 2.28:1 on the disabled fill. A disabled
-     label is still read ("Signing in", "Creating"), so it holds the 3:1 house
-     floor while staying a tier below --text-tertiary (cambia-914, DL-8 R8). */
-  --text-disabled: #63726b;
+  --text-tertiary: #9aaba3;
+  /* Raised from #63726b (3.21:1 on the disabled fill), itself raised from
+     #4d5b55 at 2.28:1. A disabled label is still read ("Signing in",
+     "Creating"), so it holds the 3:1 house floor with room to spare at 3.60:1
+     while staying a clear tier below --text-tertiary's 6.75:1 on the same
+     ground (cambia-914, DL-8 R8; re-measured cambia-1097). */
+  --text-disabled: #6b7a73;
   --text-inverse: var(--felt-900);
   --text-on-gold: var(--felt-950);
   --text-on-danger: #fdf1ef;
@@ -222,13 +237,12 @@
   /* Playing cards */
   --card-face: #f4f1e8;
   --card-face-edge: #cdc7b7;
-  --card-back: var(--green-700);
   --card-back-line: rgba(201, 162, 39, 0.42);
-  /* Face-down back (cambia-1096). --card-back resolves to --green-700, the same
-     literal as --surface-felt: a back filled with it measured 1.00:1 against
-     the table, so a face-down card was a hollow rectangle and a dealt hand read
-     as empty slots. The three tokens below are what the back is actually
-     painted with. --card-back-fill is a green ink under the felt (1.99:1 dark,
+  /* Face-down back (cambia-1096). --card-back used to resolve to --green-700,
+     the same literal as --surface-felt: a back filled with it measured 1.00:1
+     against the table, so a face-down card was a hollow rectangle and a dealt
+     hand read as empty slots. The three tokens below are what the back is
+     actually painted with. --card-back-fill is a green ink under the felt (1.99:1 dark,
      2.47:1 light against --surface-felt), which clears the 1.73:1 / 1.84:1 that
      the empty slot's own dashed --border-on-felt line carries, so the filled
      plate is at least as present as the outline it has to be told apart from.
@@ -243,6 +257,12 @@
   --card-back-fill: #071f16;
   --card-back-pattern: rgba(201, 162, 39, 0.3);
   --card-back-edge: rgba(240, 247, 243, 0.46);
+  /* The name the back carried before cambia-1096 split it into the three tokens
+     above, kept for DESIGN.md's card section and for the --color-card-back
+     Tailwind bridge. Nothing reads either one today, and while it held
+     --green-700 a consumer that picked it up would have repainted the hollow
+     rectangle. Aliased onto the plate instead (cambia-1097). */
+  --card-back: var(--card-back-fill);
   /* Edge and ring of a card or pile that is a legal target. It is drawn on the
      felt, so it belongs to the on-felt family and runs light-on-green in both
      themes rather than following the neutral border tiers. The soft gold tint
@@ -278,21 +298,25 @@
   --surface-felt: var(--green-600);
   --surface-felt-deep: var(--green-700);
 
-  /* .78 measured 4.25:1 on the lighter light-theme felt, under AA for the 11px
-     pile labels; .86 puts it at ~4.9:1 (cambia-876, DL-4 review F8). */
-  --text-on-felt-muted: rgba(240, 247, 243, 0.86);
+  /* .78 measured 4.25:1 on the lighter light-theme felt, under AA for the pile
+     labels; .86 put it at 4.76:1 (cambia-876, DL-4 review F8). .94 measures
+     5.34:1, matching the headroom the dark side took in cambia-1097. */
+  --text-on-felt-muted: rgba(240, 247, 243, 0.94);
   --border-on-felt: rgba(240, 247, 243, 0.3);
 
   --text-primary: var(--ink-900);
   --text-secondary: var(--ink-700);
   /* Darkened from --ink-500 #6b7972, which sat at 4.34:1 on the card and
-     3.63:1 on --surface-inset, the input ground its placeholder is drawn on.
-     4.58:1 there, 5.48:1 on the card. A literal, since the ramp's next step
-     down is --ink-700, the secondary tier (cambia-935, F4). */
-  --text-tertiary: #5b6962;
-  /* Darkened from #9aa5a0 (2.02:1 on the disabled fill) to hold the same 3:1
-     house floor as the dark tier (cambia-914, DL-8 R8). */
-  --text-disabled: #76827b;
+     3.63:1 on --surface-inset, the input ground its placeholder is drawn on,
+     then from #5b6962 (5.48:1 and 4.58:1). 6.36:1 on the card and 5.32:1 on the
+     inset, the same lift the dark tier took, and the gap to --text-secondary's
+     8.45:1 still reads as a rank (cambia-935, F4; cambia-1097). A literal,
+     since the ramp's next step down is --ink-700, the secondary tier. */
+  --text-tertiary: #525f59;
+  /* Darkened from #9aa5a0 (2.02:1 on the disabled fill), then from #76827b
+     (3.18:1), to hold the same 3:1 house floor as the dark tier with the same
+     margin: 3.55:1 (cambia-914, DL-8 R8; cambia-1097). */
+  --text-disabled: #6e7a74;
   --text-inverse: var(--paper-50);
   --text-on-gold: #241c05;
   --text-on-danger: #fdf1ef;
@@ -362,13 +386,13 @@
 
   --card-face: var(--paper-0);
   --card-face-edge: var(--paper-300);
-  --card-back: var(--green-600);
   --card-back-line: rgba(201, 162, 39, 0.55);
   /* The table stays green in light, so the back keeps its hue and lifts only
      enough to stay green-reading under the lighter felt. */
   --card-back-fill: #09291d;
   --card-back-pattern: rgba(201, 162, 39, 0.34);
   --card-back-edge: rgba(240, 247, 243, 0.52);
+  --card-back: var(--card-back-fill);
   /* One step brighter than dark: the light felt is lighter, so the ring
      separates by going up, not down. --gold-600, the light border accent, sits
      at 1.84:1 here, below the idle edge. */
@@ -398,15 +422,24 @@
      (logs, ids, seeds), never for numeric readouts. */
   --ds-font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
 
-  --ds-text-xs: 12px;
-  --ds-text-sm: 13px;
-  --text-md: 14px;
-  --ds-text-lg: 16px;
-  --ds-text-xl: 20px;
-  --ds-text-2xl: 25px;
-  --ds-text-3xl: 32px;
-  --ds-text-4xl: 42px;
-  --ds-text-5xl: 56px;
+  /* Every step moved up one in cambia-1097. The old ramp started at 11px and
+     put body copy on --text-md 14px, which left the four small tiers (11, 12,
+     13, 14) inside a 3px span: a hint, a label and a sentence all rendered at
+     nearly the same size, so a dense panel read as one block of small grey
+     text. The small end still climbs 1px at a time, but from 12, and --text-md
+     (the body size, set on <body> in index.css) is 15px. The large end opens
+     up rather than tracking that shift, so a section heading clears body copy
+     by a step you can see: --ds-text-lg is 18px against the old 16px, which is
+     what panel and rule-group headings are set in. */
+  --ds-text-xs: 13px;
+  --ds-text-sm: 14px;
+  --text-md: 15px;
+  --ds-text-lg: 18px;
+  --ds-text-xl: 22px;
+  --ds-text-2xl: 28px;
+  --ds-text-3xl: 34px;
+  --ds-text-4xl: 44px;
+  --ds-text-5xl: 58px;
 
   --weight-regular: 400;
   --weight-medium: 500;
@@ -616,7 +649,9 @@
   --font-sans: 'Archivo Variable', 'Archivo', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   --font-ds-mono: var(--ds-font-mono);
 
-  --text-2xs: 11px;
+  /* The eyebrow size, and the floor of the scale: nothing renders smaller.
+     11px in the old ramp (cambia-1097). */
+  --text-2xs: 12px;
   --text-ds-xs: var(--ds-text-xs);
   --text-ds-sm: var(--ds-text-sm);
   --text-ds-md: var(--text-md);
