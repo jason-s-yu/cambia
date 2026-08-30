@@ -2,7 +2,9 @@
 // LockCallerHand at the apply paths, where the legal mask is not a guard: the service adapter hands
 // an action straight to ApplyAction or ApplyNPlayerAction (service/internal/game/engine_adapter.go
 // applyToEngine), so a hand-rolled or stale client's swap onto the Cambia caller's frozen hand is
-// refused here or not at all (cambia-1118).
+// refused here or not at all. The other side of the same rule is that the freeze follows the house
+// rule rather than the call: with lockCallerHand off, the configuration ranked play uses
+// (MATCHMAKING.md 5.2), the caller keeps playing the snap window like everyone else (cambia-1118).
 package engine
 
 import "testing"
@@ -103,6 +105,91 @@ func TestTwoPlayerSwapAbilitiesRefuseLockedCaller(t *testing.T) {
 			}
 			if got := handsOf(g); got != before {
 				t.Error("the refused action moved a card")
+			}
+		})
+	}
+}
+
+// snapWindowFor plants rank across the named seats' first slot, empties the rest of every hand, and
+// opens the snap window for that rank. It returns the seats the window admitted.
+func snapWindowFor(t *testing.T, g *GameState, rank uint8, holders ...uint8) []uint8 {
+	t.Helper()
+	n := g.Rules.numPlayers()
+	holds := make(map[uint8]bool, len(holders))
+	for _, h := range holders {
+		holds[h] = true
+	}
+	for seat := uint8(0); seat < n; seat++ {
+		g.Players[seat].HandLen = 1
+		g.Players[seat].Hand[0] = NewCard(SuitClubs, RankTwo)
+		if holds[seat] {
+			g.Players[seat].Hand[0] = NewCard(SuitClubs, rank)
+		}
+	}
+	g.CurrentPlayer = 0
+	g.initiateSnapPhase(NewCard(SuitHearts, rank))
+	if !g.Snap.Active {
+		return nil
+	}
+	return append([]uint8(nil), g.Snap.Snappers[:g.Snap.NumSnappers]...)
+}
+
+// TestLockedCallerSitsOutSnapWindow: RULES.md 3C bars the locked caller from snapping in either
+// direction, since snapping their own card empties a slot in the frozen hand and snapping an
+// opponent's obliges them to pay a card out of it.
+func TestLockedCallerSitsOutSnapWindow(t *testing.T) {
+	g := lockedCallerTable(t, 3, true)
+	got := snapWindowFor(t, g, RankFive, 0, 1, 2)
+	for _, seat := range got {
+		if seat == 1 {
+			t.Fatalf("the locked caller is in the snap window %v", got)
+		}
+	}
+	if len(got) != 2 {
+		t.Errorf("snap window %v, want the two unlocked seats", got)
+	}
+}
+
+// TestCallerSnapsWhenLockOff is the rule the unconditional exclusion broke: with lockCallerHand off
+// nothing freezes the caller's hand, so they play the snap window like any other seat.
+func TestCallerSnapsWhenLockOff(t *testing.T) {
+	g := lockedCallerTable(t, 3, false)
+	got := snapWindowFor(t, g, RankFive, 0, 1, 2)
+	found := false
+	for _, seat := range got {
+		if seat == 1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("snap window %v leaves out the caller with lockCallerHand off", got)
+	}
+}
+
+// TestCallerIsSnappableWhenLockOff covers the other direction of the same exclusion: the caller's
+// cards are a legal target for everyone else's snap once the lock is off. Only the caller holds the
+// discarded rank, so seats 0 and 2 can only be in the window through the caller's hand, and with
+// the lock on nobody is: the caller cannot snap their own card and no one else may take it.
+func TestCallerIsSnappableWhenLockOff(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		lock bool
+		want []uint8
+	}{
+		{"locked", true, nil},
+		{"unlocked", false, []uint8{0, 1, 2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := lockedCallerTable(t, 3, tc.lock)
+			g.Rules.AllowOpponentSnapping = true
+			got := snapWindowFor(t, g, RankFive, 1)
+			if len(got) != len(tc.want) {
+				t.Fatalf("snap window %v, want %v", got, tc.want)
+			}
+			for i, seat := range tc.want {
+				if got[i] != seat {
+					t.Fatalf("snap window %v, want %v", got, tc.want)
+				}
 			}
 		})
 	}

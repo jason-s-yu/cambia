@@ -10,7 +10,12 @@ func (g *GameState) initiateSnapPhase(discardedCard Card) {
 
 	// The acting player just discarded - they are the "discarder".
 	// Build the snapper list: discarder first, then all others in turn order.
-	// Skip anyone who called Cambia.
+	// Skip a Cambia caller whose hand the lock has frozen: RULES.md 3C bars them from both
+	// directions of a snap, since snapping their own card empties a slot in the locked hand and
+	// snapping an opponent's obliges them to pay a card out of it. The exclusion follows the house
+	// rule rather than the call, because with lockCallerHand off the caller keeps playing the snap
+	// window like anyone else - which is the configuration ranked play uses (MATCHMAKING.md 5.2),
+	// where an unconditional exclusion silently dropped a whole player's snaps (cambia-1118).
 	// NOTE: Per RULES.md the non-discarder should go first, but Python's
 	// _initiate_snap_phase computes discarder_player incorrectly (off by one),
 	// resulting in the actual discarder going first. We mirror that behavior
@@ -26,7 +31,7 @@ func (g *GameState) initiateSnapPhase(discardedCard Card) {
 	// Collect players in discarder-first order.
 	for step := uint8(0); step < n; step++ {
 		p := (discarder + step) % n
-		if int8(p) == g.CambiaCaller {
+		if g.handLocked(p) {
 			continue
 		}
 		// Check if this player can snap own card.
@@ -42,7 +47,7 @@ func (g *GameState) initiateSnapPhase(discardedCard Card) {
 		canSnapOpp := false
 		if g.Rules.AllowOpponentSnapping && hand.HandLen > 0 {
 			for opp := uint8(0); opp < n; opp++ {
-				if opp == p || int8(opp) == g.CambiaCaller {
+				if opp == p || g.handLocked(opp) {
 					continue
 				}
 				oppHand := &g.Players[opp]
