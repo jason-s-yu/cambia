@@ -218,9 +218,9 @@ func TestMidGameDropKeepsLobbyMembership(t *testing.T) {
 // TestMidGameDropWithoutForfeitKeepsTheGameRunning is the rule-off half: the drop is recorded,
 // nothing forfeits, and the turn timer is still the backstop it always was.
 //
-// The player dropped is the one not on turn, so the game is left waiting on a live player: the
-// engine's scheduler declines to arm a timer for a disconnected acting player, so dropping the
-// player on turn would prove nothing about the timer still running.
+// The player dropped is the one not on turn, so the game is left waiting on a live player and the
+// drop must not disturb the on-turn clock. The on-turn drop case (the scheduler clocks a
+// disconnected actor since cambia-1233) is covered by internal/game/circuit_disconnect_test.go.
 func TestMidGameDropWithoutForfeitKeepsTheGameRunning(t *testing.T) {
 	h, ids, g, ended := newInGameHub(t, 2, false, 1, 300*time.Millisecond, 0)
 
