@@ -147,7 +147,7 @@ Warning, both themes: the amber ramp ran at hue 66 to 74, against `--accent-gold
 
 ### Cards and tiers
 
-`--card-face`, `--card-face-edge`, `--card-back`, `--card-back-line`, `--suit-red`, `--suit-black` cover the playing card. The back is flat green with a 1px gold inner frame, not a woven lattice.
+`--card-face`, `--card-face-edge`, `--card-back-fill`, `--card-back-pattern`, `--card-back-line`, `--card-back-edge`, `--suit-red`, `--suit-black` cover the playing card. The back is a plate (cambia-1096): a `--card-back-fill` green ink darker than the felt, a hairline gold crosshatch in `--card-back-pattern`, the `--card-back-line` frame inset per size, and a light `--card-back-edge` silhouette, so a face-down card reads as a card and never as the dashed hollow outline an empty slot keeps. `--card-back` is a compatibility alias of `--card-back-fill`.
 
 `--tier-bronze` through `--tier-grandmaster` are set per theme: the dark values are lifted for a dark ground, the light values darkened for contrast on paper.
 

@@ -351,7 +351,6 @@ const DashboardPage: React.FC = () => {
               <div key={queue.queueId} style={disabled ? { opacity: 0.45, pointerEvents: 'none' } : undefined}>
                 <QueueCard
                   name={queue.name}
-                  tagline={`${queue.players} players, ${queue.rounds} ${queue.rounds === 1 ? 'round' : 'rounds'}`}
                   players={queue.players}
                   rounds={queue.rounds}
                   minutes={estimateMinutes(queue)}
