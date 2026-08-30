@@ -10,6 +10,9 @@ npm run build     # tsc -b && vite build -> dist/
 npm run lint      # ESLint
 ```
 
+The dev server is also reachable over TLS at
+`https://app.cambia.pangu.home.jasonyu.io` -- see "Staging hosts on pangu".
+
 ## Production URL configuration
 
 `VITE_API_URL`/`VITE_WS_URL` in `.env` are an override, not the primary
@@ -39,6 +42,47 @@ nothing for `vite build`'s stricter `define` validation to reject.
 The dev server (`npm run dev`, `npm run dev:remote`) is unaffected either
 way -- it always derives origin unconditionally through the same-origin dev
 proxy (see below), regardless of `.env`.
+
+## Staging hosts on pangu
+
+Caddy on pangu terminates TLS on :443 with per-host Let's Encrypt certs and
+reverse-proxies to the local dev processes:
+
+| Host | Proxies to | Serves |
+|-|-|-|
+| `https://app.cambia.pangu.home.jasonyu.io` | `172.17.0.1:5180` | `npm run dev` (this client) |
+| `https://api.cambia.pangu.home.jasonyu.io` | `172.17.0.1:8088` | Go service, direct |
+| `https://preview.cambia.pangu.home.jasonyu.io` | `172.17.0.1:3000` | compose nginx preview, optional |
+
+Work against the **app** host. It carries the same-origin topology
+`http://localhost:5180` already has: the browser only ever sees one origin,
+and `/user`, `/lobby`, `/ws`, `/training`, and the rest reach the Go service
+through the dev proxy. Pointing the client at the api host instead would make every call
+cross-origin, and the service sends no CORS headers, so it would fail. The api
+host is for hitting REST or a WebSocket by hand (curl, a WS client), not for
+the client to talk to.
+
+`app.cambia.pangu.home.jasonyu.io` is listed in `server.allowedHosts` in
+`vite.config.js` (`DEV_ALLOWED_HOSTS`); without it Vite's DNS-rebinding guard
+answers 403 to both page loads and the HMR WebSocket upgrade. Vite always
+allows `localhost` and bare IPv4 literals on its own, so that list does not
+affect local or LAN-IP access. Add another staging name to the same array.
+
+HMR needs no extra configuration. `server.hmr` is left unset in the default
+lane, so the HMR client derives its protocol and port from the URL the page
+was loaded from: `wss://app.cambia.pangu.home.jasonyu.io` on :443 behind the
+TLS front, `ws://localhost:5180` locally. Do not add a static
+`hmr: { protocol: 'wss', clientPort: 443 }` block here: those values are
+injected as literals for every client alike, so the TLS front would work and
+localhost would break.
+
+`COOKIE_SECURE` (service side) stays unset by default. Setting it to `true`
+adds `Secure` + `SameSite=Lax` to `auth_token`, which the app host wants and
+loopback tolerates -- browsers treat `http://localhost` and `http://127.0.0.1`
+as trustworthy origins and will store and replay a `Secure` cookie there. A
+LAN IP or tailnet name over plain http is not a trustworthy origin, so the
+cookie is dropped silently and login appears to do nothing. Turn it on only
+when the https host is the only lane in use.
 
 ## Remote development
 
