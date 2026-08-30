@@ -39,8 +39,9 @@ Search phase (build a value tree keyed by the responder's information):
 
   Each simulation:
     1. Sample a determinization: a full game state drawn from the deal distribution
-       (a fresh engine deal; ``deal_seeds`` restricts the pool for calibration so
-       the search integrates over exactly the solver's K-deal chance root).
+       (a fresh engine deal; ``deal_seeds`` / ``deal_decks`` restrict the pool for
+       calibration so the search integrates over exactly the reference's K-deal
+       chance root).
     2. Descend from the game start. At a responder node select an action by UCB1
        over the responder's own actions; at an opponent node sample from the fixed
        target/opponent policy; stockpile draws resolve from the determinization's
@@ -62,12 +63,14 @@ Evaluation phase (read the best-response value off the tree):
   to estimate BR_value; the target self-play line estimates game_value;
   exploitability is their difference.
 
-Engine reuse
-------------
-This reuses the SAME game model, deep-copy, and rollout surface as the LBR/battery
-paths (``src.game.engine.CambiaGameState``; opponents from
-``src.agents.baseline_agents``): no second game model is introduced. The
-information-key construction mirrors ``tools/tiny_solver.py``'s builder
+Engine (cambia-1427)
+--------------------
+This runs on the Go engine and reuses the SAME search substrate, rewind and policy
+boundary as the LBR paths (``src.cfr.lbr.GoSearchState``): no second game model is
+introduced. Each determinization is one ``GoSearchState`` used for one playout and
+then closed, so the finite FFI handle pool is never pinned by the search.
+
+The information-key construction mirrors ``tools/tiny_solver.py``'s builder
 (priv_init + priv_draw + pub_path) but keys card identity by RANK, not the full
 suit-bearing repr (see ``_card_id``): suits are payoff- and dynamics-irrelevant in
 Cambia, so a rank-keyed best response has the exact same value as the solver's
@@ -78,33 +81,43 @@ the same key omits ability-peek contents, so the estimator there is a constraine
 (still multi-ply, still >= one-ply LBR) best response. The tiny-game calibration is
 the correctness anchor.
 
+The public entry keys the action by its 146-space INDEX rather than its ``repr``:
+the index is the engine's own canonical identifier for an action and is a
+bijection onto the NamedTuple (``src.agents.action_codec``), so the key content is
+equivalent while being cheaper to build and free of repr formatting drift.
+
 Determinism
 -----------
 All randomness derives from ``seed`` (a ``random.Random`` master stream: per-deal
 seeds, the UCB rollout stream, and the default opponent's stream). Two calls with
-the same seed and arguments return identical numbers.
+the same seed and arguments return identical numbers. Legal actions are taken in
+the engine's ascending index order, which is process-stable (the Python reference
+engine's ``get_legal_actions()`` set was not).
 """
 
 from __future__ import annotations
 
 import contextlib
-import copy
 import logging
 import math
 import random
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from src.game.engine import CambiaGameState
+from src.agents.action_codec import actions_from_mask
+from src.agents.game_view import GameView
+from src.cfr.lbr import GoSearchState, UniformRandomPolicy, terminal_utility
 from src.constants import ActionDrawStockpile
 
 logger = logging.getLogger(__name__)
 
-# Engine loggers that emit expected per-decision chatter under uniform play (e.g.
-# invalid-snap penalty warnings): muted for the duration of a search/eval run so
-# the estimator does not flood output, then restored.
-_QUIET_ENGINE_LOGGERS = ("src.game", "src.game.engine", "src.agent_state")
+# Loggers that emit expected per-decision chatter during a search: muted for the
+# duration of a search/eval run so the estimator does not flood output, then
+# restored. src.cfr.lbr is deliberately NOT muted -- its warnings (a strong
+# opponent falling back to uniform, a failed policy hook) change what a number
+# means and must stay visible.
+_QUIET_ENGINE_LOGGERS = ("src.ffi.bridge",)
 
 # Exploitability is measured from the responder seat; P0 by the LBR convention.
 _RESPONDER_ID = 0
@@ -117,7 +130,7 @@ _RESPONDER_ID = 0
 # tiny-game exact BR stays within CALIB_TOL at this value (tests/test_ismcts_br.py).
 _DEFAULT_UCB_C = 2.0 * math.sqrt(2)  # ~= 2.8284, matched to the width-2 utility range
 
-# Factory signature: (player_id, config) -> agent exposing choose_action.
+# Factory signature: (player_id, config) -> policy exposing choose_action.
 OpponentFactory = Callable[[int, Any], Any]
 
 # A tree node: [visit_count, per_action_visits, per_action_value_sum].
@@ -143,8 +156,8 @@ def _resolve_decision_cap(config: Any) -> int:
 
 @contextlib.contextmanager
 def _quiet_engine_logs():
-    """Mute the engine's expected per-decision chatter for the duration of a run,
-    then restore prior levels. Mirrors ``tools.tiny_solver._quiet_src_loggers``.
+    """Mute expected per-decision chatter for the duration of a run, then restore
+    prior levels. Mirrors ``tools.tiny_solver._quiet_src_loggers``.
     """
     saved = {n: logging.getLogger(n).level for n in _QUIET_ENGINE_LOGGERS}
     for n in _QUIET_ENGINE_LOGGERS:
@@ -156,49 +169,46 @@ def _quiet_engine_logs():
             logging.getLogger(n).setLevel(lvl)
 
 
-class _UniformAgent:
-    """Uniform-random policy over the repr-sorted legal set, driven by an injected
-    ``random.Random`` so the whole estimator is seed-deterministic regardless of
-    set-iteration order (``baseline_agents.RandomAgent`` draws from the GLOBAL
-    ``random`` module and an unsorted set, which is not reproducible under hash
-    randomization). This is the default opponent and matches the solver's uniform
-    (empty) policy exactly.
-    """
-
-    def __init__(self, player_id: int, rng: random.Random):
-        self.player_id = player_id
-        self._rng = rng
-
-    def choose_action(self, game_state: CambiaGameState, legal_actions):
-        actions = sorted(legal_actions, key=repr)
-        return actions[self._rng.randrange(len(actions))]
-
-
 def _default_opponent_factory(seed_stream: random.Random) -> OpponentFactory:
+    """Uniform-random opponent, matching the solver's uniform (empty) policy."""
+
     def factory(player_id: int, config: Any):
         # Each opponent gets its own deterministic sub-stream so a fresh opponent
         # per game/simulation stays reproducible.
-        sub = random.Random(seed_stream.getrandbits(63))
-        return _UniformAgent(player_id, sub)
+        return UniformRandomPolicy(
+            player_id, random.Random(seed_stream.getrandbits(63))
+        )
 
     return factory
 
 
-def _new_deal(house_rules, deal_rng: random.Random, deal_seeds: Optional[List[int]]):
+def _new_deal(
+    house_rules,
+    deal_rng: random.Random,
+    deal_seeds: Optional[Sequence[int]],
+    deal_decks: Optional[Sequence[Sequence[int]]] = None,
+) -> GoSearchState:
     """Sample a determinization: a fresh engine deal.
 
-    ``deal_seeds`` (calibration) restricts the pool to the solver's K deals so the
-    search integrates over the exact same chance root; otherwise deals are drawn
-    fresh from the full distribution (production).
+    ``deal_decks`` pins the exact deal order (the strongest form of coupling: a
+    deck list is engine-independent, so a reference implementation on any engine
+    can hand over the identical chance root). ``deal_seeds`` restricts the pool
+    to a fixed set of Go deal seeds. Neither given, deals are drawn fresh from
+    the full distribution (production).
+
+    Caller owns the returned state and must close it.
     """
+    if deal_decks:
+        deck = deal_decks[deal_rng.randrange(len(deal_decks))]
+        return GoSearchState.from_deck(house_rules, deck)
     if deal_seeds:
         s = deal_seeds[deal_rng.randrange(len(deal_seeds))]
     else:
         s = deal_rng.getrandbits(31)
-    return CambiaGameState(house_rules=house_rules, _rng=random.Random(s))
+    return GoSearchState.new(house_rules, s)
 
 
-def _card_id(card) -> str:
+def _card_id(card) -> Optional[str]:
     """Payoff-relevant card identity for the responder's information key: the RANK,
     not the full (suit-bearing) repr.
 
@@ -210,18 +220,24 @@ def _card_id(card) -> str:
     perfect-recall br0), while collapsing the information-set space by the suit
     multiplicity so the search is dense enough to converge at a tractable budget.
     """
+    if card is None:
+        return None
     r = getattr(card, "rank", None)
     return r if r is not None else repr(card)
 
 
-def _responder_priv_init(state: CambiaGameState, responder: int) -> Tuple:
+def _responder_priv_init(view: GameView, responder: int) -> Tuple:
     """The responder's initial private knowledge: (slot, rank) for every slot it
     peeked at deal time. Rank-keyed analogue of ``tools.tiny_solver``
     Builder.priv_init.
+
+    The Go engine assigns the initial peek to the FIRST ``initial_view_count``
+    slots (``engine/game.go``: ``InitialPeek[i] = i`` for i < count), so the peek
+    set is a function of the house rules rather than a per-deal draw.
     """
-    hand = state.players[responder].hand
-    peeks = state.players[responder].initial_peek_indices
-    return tuple((i, _card_id(hand[i])) for i in sorted(peeks) if i < len(hand))
+    hand = view.get_player_hand(responder)
+    count = int(view.get_house_rules().initial_view_count)
+    return tuple((i, _card_id(hand[i])) for i in range(min(count, len(hand))))
 
 
 class _InfoKey:
@@ -308,72 +324,63 @@ class _InfoKey:
 
 
 def _step_tokens(
-    state: CambiaGameState, action, acting: int, responder: int
+    view: GameView, action, action_idx: int, acting: int, responder: int
 ) -> Tuple[Tuple, Optional[str]]:
-    """Info-key tokens produced by ``action`` (already applied to ``state``): the
-    common-knowledge (actor, action-repr, post-action discard-top) public entry for
-    every action, and the responder's freshly drawn stockpile card (hidden from the
-    opponent) or None. Same public/private split as ``tools/tiny_solver``.
+    """Info-key tokens produced by ``action`` (already applied): the
+    common-knowledge (actor, action-index, post-action discard-top) public entry
+    for every action, and the responder's freshly drawn stockpile card (hidden
+    from the opponent) or None. Same public/private split as
+    ``tools/tiny_solver``.
     """
     try:
-        top = state.get_discard_top()
+        top = view.get_discard_top()
     except Exception:  # JUSTIFIED: eval resilience on odd terminal states
         top = None
-    top_id = _card_id(top) if top is not None else None
-    pub_entry = (acting, repr(action), top_id)
+    pub_entry = (acting, action_idx, _card_id(top))
+
     draw_token: Optional[str] = None
     if acting == responder and isinstance(action, ActionDrawStockpile):
         try:
-            if state.pending_action_player == responder:
-                drawn = state.pending_action_data.get("drawn_card")
-                if drawn is not None:
-                    draw_token = _card_id(drawn)
+            pending = view.get_pending()
+            if pending.seat == responder:
+                draw_token = _card_id(pending.drawn_card)
         except Exception:  # JUSTIFIED: pending state absent -> no draw token
             pass
     return pub_entry, draw_token
 
 
 def _apply_and_track(
-    state: CambiaGameState,
+    state: GoSearchState,
     action,
+    action_idx: int,
     acting: int,
     responder: int,
     key: "_InfoKey",
-) -> "_InfoKey":
-    """Apply ``action`` and return the responder's info key extended in O(1) with
-    this action's public entry (and, on a responder stockpile draw, the drawn card).
+) -> Tuple["_InfoKey", bool]:
+    """Apply ``action_idx`` and return the responder's info key extended in O(1)
+    with this action's public entry (and, on a responder stockpile draw, the
+    drawn card), plus whether the engine accepted the action.
     """
-    state.apply_action(action)
-    pub_entry, draw_token = _step_tokens(state, action, acting, responder)
+    if not state.apply_index(action_idx):
+        return key, False
+    pub_entry, draw_token = _step_tokens(
+        state.view(), action, action_idx, acting, responder
+    )
     key = key.extend_pub(pub_entry)
     if draw_token is not None:
         key = key.extend_draw(draw_token)
-    return key
+    return key, True
 
 
-def _terminal_util(state: CambiaGameState, responder: int) -> float:
+def _terminal_util(state: GoSearchState, responder: int) -> float:
     """Responder terminal utility, or a hand-score estimate on turn-cap timeout
     (matching the LBR tie/timeout convention so the estimators are comparable).
     """
-    if state.is_terminal():
-        try:
-            return float(state._utilities[responder])
-        except Exception:  # JUSTIFIED: eval resilience
-            return 0.0
-    try:
-        my = sum(c.value for c in state.players[responder].hand)
-        opp = sum(c.value for c in state.players[1 - responder].hand)
-        if my < opp:
-            return 1.0
-        if my > opp:
-            return -1.0
-        return 0.0
-    except Exception:  # JUSTIFIED: eval resilience
-        return 0.0
+    return terminal_utility(state, responder, 1 - responder)
 
 
 def _rollout(
-    state: CambiaGameState,
+    state: GoSearchState,
     responder: int,
     opponent,
     rng: random.Random,
@@ -386,19 +393,22 @@ def _rollout(
     turns = 0
     while not state.is_terminal() and turns < max_turns:
         turns += 1
-        acting = state.get_acting_player()
+        acting = state.acting_player()
         if acting == -1:
             break
-        legal = sorted(state.get_legal_actions(), key=repr)
-        if not legal:
+        legal_indices = state.legal_indices()
+        if not legal_indices:
             break
         try:
             if acting == responder:
-                action = legal[rng.randrange(len(legal))]
+                pos = rng.randrange(len(legal_indices))
             else:
-                action = opponent.choose_action(state, legal)
-            state.apply_action(action)
+                legal_actions = actions_from_mask(legal_indices)
+                act = opponent.choose_action(state.view(), legal_actions)
+                pos = legal_actions.index(act)
         except Exception:  # JUSTIFIED: eval resilience
+            break
+        if not state.apply_index(legal_indices[pos]):
             break
     return _terminal_util(state, responder)
 
@@ -445,7 +455,7 @@ def _greedy_action_index(
 
 
 def _simulate(
-    root_state: CambiaGameState,
+    state: GoSearchState,
     tree: Dict[Tuple, _Node],
     responder: int,
     opponent,
@@ -453,9 +463,12 @@ def _simulate(
     ucb_c: float,
     max_turns: int,
 ) -> None:
-    """One ISMCTS iteration over a single determinization (``root_state``)."""
-    state = copy.deepcopy(root_state)
-    priv_init = _responder_priv_init(state, responder)
+    """One ISMCTS iteration over a single determinization.
+
+    Consumes ``state`` (the caller's fresh determinization) in place; the caller
+    closes it.
+    """
+    priv_init = _responder_priv_init(state.view(), responder)
     key = _InfoKey.root(priv_init)
     path: List[Tuple[Tuple, int]] = []
     turns = 0
@@ -465,55 +478,80 @@ def _simulate(
         if state.is_terminal() or turns >= max_turns:
             value = _terminal_util(state, responder)
             break
-        acting = state.get_acting_player()
+        acting = state.acting_player()
         if acting == -1:
             value = _terminal_util(state, responder)
             break
-        legal = sorted(state.get_legal_actions(), key=repr)
-        if not legal:
+        legal_indices = state.legal_indices()
+        if not legal_indices:
             value = _terminal_util(state, responder)
             break
+        legal_actions = actions_from_mask(legal_indices)
         turns += 1
 
         if acting == responder:
-            nkey = (key, len(legal))
+            nkey = (key, len(legal_indices))
             node = tree.get(nkey)
             if node is None:
-                node = [0, [0] * len(legal), [0.0] * len(legal)]
+                # Unseen information set: create it, take a random action, and
+                # roll the rest out (the expansion step).
+                node = [0, [0] * len(legal_indices), [0.0] * len(legal_indices)]
                 tree[nkey] = node
-                a_idx = rng.randrange(len(legal))
-                path.append((nkey, a_idx))
-                key = _apply_and_track(state, legal[a_idx], acting, responder, key)
+                a_pos = rng.randrange(len(legal_indices))
+                expand = True
+            else:
+                untried = [i for i in range(len(legal_indices)) if node[1][i] == 0]
+                if untried:
+                    a_pos = untried[rng.randrange(len(untried))]
+                    expand = True
+                else:
+                    a_pos = _ucb_select(node, ucb_c)
+                    expand = False
+
+            path.append((nkey, a_pos))
+            key, ok = _apply_and_track(
+                state,
+                legal_actions[a_pos],
+                legal_indices[a_pos],
+                acting,
+                responder,
+                key,
+            )
+            if not ok:
+                value = _terminal_util(state, responder)
+                break
+            if expand:
                 value = _rollout(state, responder, opponent, rng, max_turns - turns)
                 break
-            untried = [i for i in range(len(legal)) if node[1][i] == 0]
-            if untried:
-                a_idx = untried[rng.randrange(len(untried))]
-                path.append((nkey, a_idx))
-                key = _apply_and_track(state, legal[a_idx], acting, responder, key)
-                value = _rollout(state, responder, opponent, rng, max_turns - turns)
-                break
-            a_idx = _ucb_select(node, ucb_c)
-            path.append((nkey, a_idx))
-            key = _apply_and_track(state, legal[a_idx], acting, responder, key)
             continue
 
         # Opponent (or any non-responder) node: fixed policy.
         try:
-            action = opponent.choose_action(state, legal)
+            action = opponent.choose_action(state.view(), legal_actions)
+            a_pos = legal_actions.index(action)
         except Exception:  # JUSTIFIED: eval resilience
-            action = legal[rng.randrange(len(legal))]
-        key = _apply_and_track(state, action, acting, responder, key)
+            a_pos = rng.randrange(len(legal_indices))
+        key, ok = _apply_and_track(
+            state,
+            legal_actions[a_pos],
+            legal_indices[a_pos],
+            acting,
+            responder,
+            key,
+        )
+        if not ok:
+            value = _terminal_util(state, responder)
+            break
 
-    for nkey, a_idx in path:
+    for nkey, a_pos in path:
         node = tree[nkey]
         node[0] += 1
-        node[1][a_idx] += 1
-        node[2][a_idx] += value
+        node[1][a_pos] += 1
+        node[2][a_pos] += value
 
 
 def _play_greedy_br_game(
-    root_state: CambiaGameState,
+    state: GoSearchState,
     tree: Dict[Tuple, _Node],
     responder: int,
     opponent,
@@ -523,33 +561,42 @@ def _play_greedy_br_game(
     """Play one game with the responder following the tree's greedy (extracted BR)
     policy and the opponent fixed; return the responder's utility.
     """
-    state = copy.deepcopy(root_state)
-    priv_init = _responder_priv_init(state, responder)
+    priv_init = _responder_priv_init(state.view(), responder)
     key = _InfoKey.root(priv_init)
     turns = 0
     while not state.is_terminal() and turns < max_turns:
         turns += 1
-        acting = state.get_acting_player()
+        acting = state.acting_player()
         if acting == -1:
             break
-        legal = sorted(state.get_legal_actions(), key=repr)
-        if not legal:
+        legal_indices = state.legal_indices()
+        if not legal_indices:
             break
+        legal_actions = actions_from_mask(legal_indices)
         if acting == responder:
-            nkey = (key, len(legal))
-            a_idx = _greedy_action_index(tree.get(nkey), len(legal), rng)
-            action = legal[a_idx]
+            nkey = (key, len(legal_indices))
+            a_pos = _greedy_action_index(tree.get(nkey), len(legal_indices), rng)
         else:
             try:
-                action = opponent.choose_action(state, legal)
+                action = opponent.choose_action(state.view(), legal_actions)
+                a_pos = legal_actions.index(action)
             except Exception:  # JUSTIFIED: eval resilience
-                action = legal[rng.randrange(len(legal))]
-        key = _apply_and_track(state, action, acting, responder, key)
+                a_pos = rng.randrange(len(legal_indices))
+        key, ok = _apply_and_track(
+            state,
+            legal_actions[a_pos],
+            legal_indices[a_pos],
+            acting,
+            responder,
+            key,
+        )
+        if not ok:
+            break
     return _terminal_util(state, responder)
 
 
-def _notify(agent, method: str, *args) -> None:
-    fn = getattr(agent, method, None)
+def _notify(policy, method: str, *args) -> None:
+    fn = getattr(policy, method, None)
     if fn is None:
         return
     try:
@@ -559,7 +606,7 @@ def _notify(agent, method: str, *args) -> None:
 
 
 def _play_target_game(
-    root_state: CambiaGameState,
+    state: GoSearchState,
     responder: int,
     target,
     opponent,
@@ -567,35 +614,35 @@ def _play_target_game(
     max_turns: int,
 ) -> float:
     """Self-play baseline: the responder plays the ``target`` policy, the opponent
-    is fixed; return the responder's utility. Optional PRT-CFR agent hooks
-    (initialize_state / observe_transition) are fed best-effort when present.
+    is fixed; return the responder's utility. The optional Go-native agent hooks
+    (bind_go_state / initialize_state / observe_transition) are fed best-effort
+    when present, matching the trajectory contract in ``src.cfr.lbr``.
     """
-    state = copy.deepcopy(root_state)
-    _notify(target, "initialize_state", state)
+    _notify(target, "bind_go_state", state.view(), state.agent_state(responder))
+    _notify(target, "initialize_state", state.view())
     turns = 0
     while not state.is_terminal() and turns < max_turns:
         turns += 1
-        acting = state.get_acting_player()
+        acting = state.acting_player()
         if acting == -1:
             break
-        legal = sorted(state.get_legal_actions(), key=repr)
-        if not legal:
+        legal_indices = state.legal_indices()
+        if not legal_indices:
             break
-        if acting == responder:
-            try:
-                action = target.choose_action(state, legal)
-            except Exception:  # JUSTIFIED: eval resilience
-                action = legal[rng.randrange(len(legal))]
-        else:
-            try:
-                action = opponent.choose_action(state, legal)
-            except Exception:  # JUSTIFIED: eval resilience
-                action = legal[rng.randrange(len(legal))]
+        legal_actions = actions_from_mask(legal_indices)
         try:
-            state.apply_action(action)
+            if acting == responder:
+                action = target.choose_action(state.view(), legal_actions)
+            else:
+                action = opponent.choose_action(state.view(), legal_actions)
+            a_pos = legal_actions.index(action)
         except Exception:  # JUSTIFIED: eval resilience
+            a_pos = rng.randrange(len(legal_indices))
+        if not state.apply_index(legal_indices[a_pos]):
             break
-        _notify(target, "observe_transition", state, action, acting)
+        _notify(
+            target, "observe_transition", state.view(), legal_actions[a_pos], acting
+        )
     return _terminal_util(state, responder)
 
 
@@ -608,6 +655,7 @@ def ismcts_br(
     seed: int = 42,
     opponent_factory: Optional[OpponentFactory] = None,
     deal_seeds: Optional[List[int]] = None,
+    deal_decks: Optional[Sequence[Sequence[int]]] = None,
     responder_id: int = _RESPONDER_ID,
     ucb_c: float = _DEFAULT_UCB_C,
     max_turns: Optional[int] = None,
@@ -617,8 +665,8 @@ def ismcts_br(
 
     Args:
         agent_wrapper: the target policy under evaluation (plays the responder seat
-            for the game-value baseline; exposes ``choose_action(state, legal)`` and
-            optionally ``initialize_state`` / ``observe_transition``).
+            for the game-value baseline; exposes ``choose_action(view, legal)`` and
+            optionally the ``src.cfr.lbr`` episode hooks).
         config: exposes ``cambia_rules`` (house rules govern the games).
         num_infosets: search-budget scale. ``ismcts_iterations`` and ``eval_games``
             default to this; mirrors the LBR ``num_infosets`` knob so callers that
@@ -632,8 +680,12 @@ def ismcts_br(
             Default: uniform-random (matches the solver's empty policy and the
             tiny-game calibration). Pass a strong opponent for a Tier-B-style
             continuation, or the target itself for a self-play (NashConv) reading.
-        deal_seeds: restrict determinizations to this deal-seed pool (calibration:
-            the solver's ``range(K)`` at ``seed0=0``); None samples fresh deals.
+        deal_seeds: restrict determinizations to this Go deal-seed pool; None
+            samples fresh deals.
+        deal_decks: restrict determinizations to this pool of explicit deck orders
+            (see ``GoEngine.from_deck``). Takes precedence over ``deal_seeds``, and
+            is the engine-independent way to couple this estimator to a reference
+            implementation's exact chance root.
         responder_id: seat measured (0 by convention).
         ucb_c: UCB1 exploration constant.
         max_turns: per-playout DECISION safety cap; the engine terminates games on
@@ -647,7 +699,7 @@ def ismcts_br(
           num_infosets_sampled: int (distinct responder information sets searched)
           std_err: float (standard error of the exploitability estimate)
           estimator: "ismcts_br"
-          ismcts_iterations, eval_games, ucb_c: echoed search knobs
+          ismcts_iterations, eval_games, ucb_c, seed: echoed search knobs
     """
     responder = responder_id
     house_rules = config.cambia_rules
@@ -673,11 +725,16 @@ def ismcts_br(
     tree: Dict[Tuple, _Node] = {}
     with _quiet_engine_logs():
         for _ in range(iters):
-            deal = _new_deal(house_rules, search_deal_rng, deal_seeds)
-            # A fresh opponent per simulation keeps stateful opponents (and the
-            # token prefix of a PRT-CFR opponent) from leaking across playouts.
-            opponent = opponent_factory(1 - responder, config)
-            _simulate(deal, tree, responder, opponent, search_rng, ucb_c, max_turns)
+            state = _new_deal(house_rules, search_deal_rng, deal_seeds, deal_decks)
+            try:
+                # A fresh opponent per simulation keeps stateful opponents (and the
+                # token prefix of a PRT-CFR opponent) from leaking across playouts.
+                opponent = opponent_factory(1 - responder, config)
+                _simulate(
+                    state, tree, responder, opponent, search_rng, ucb_c, max_turns
+                )
+            finally:
+                state.close()
 
     if not tree:
         logger.warning("ismcts_br: empty search tree (no responder decisions).")
@@ -691,6 +748,7 @@ def ismcts_br(
             "ismcts_iterations": iters,
             "eval_games": games,
             "ucb_c": ucb_c,
+            "seed": seed,
         }
 
     # ---- Eval phase: BR value (extracted greedy policy) and game value (target). ----
@@ -698,19 +756,27 @@ def ismcts_br(
     gv_outcomes: List[float] = []
     with _quiet_engine_logs():
         for _ in range(games):
-            deal = _new_deal(house_rules, br_deal_rng, deal_seeds)
-            opponent = opponent_factory(1 - responder, config)
-            br_outcomes.append(
-                _play_greedy_br_game(deal, tree, responder, opponent, br_rng, max_turns)
-            )
-        for _ in range(games):
-            deal = _new_deal(house_rules, gv_deal_rng, deal_seeds)
-            opponent = opponent_factory(1 - responder, config)
-            gv_outcomes.append(
-                _play_target_game(
-                    deal, responder, agent_wrapper, opponent, gv_rng, max_turns
+            state = _new_deal(house_rules, br_deal_rng, deal_seeds, deal_decks)
+            try:
+                opponent = opponent_factory(1 - responder, config)
+                br_outcomes.append(
+                    _play_greedy_br_game(
+                        state, tree, responder, opponent, br_rng, max_turns
+                    )
                 )
-            )
+            finally:
+                state.close()
+        for _ in range(games):
+            state = _new_deal(house_rules, gv_deal_rng, deal_seeds, deal_decks)
+            try:
+                opponent = opponent_factory(1 - responder, config)
+                gv_outcomes.append(
+                    _play_target_game(
+                        state, responder, agent_wrapper, opponent, gv_rng, max_turns
+                    )
+                )
+            finally:
+                state.close()
 
     br_arr = np.asarray(br_outcomes, dtype=np.float64)
     gv_arr = np.asarray(gv_outcomes, dtype=np.float64)
@@ -736,4 +802,5 @@ def ismcts_br(
         "ismcts_iterations": iters,
         "eval_games": games,
         "ucb_c": ucb_c,
+        "seed": seed,
     }
