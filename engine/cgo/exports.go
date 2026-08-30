@@ -1835,4 +1835,461 @@ func cambia_token_stream_cap() C.int32_t {
 	return C.int32_t(agent.MaxTokenStream)
 }
 
+// ---------------------------------------------------------------------------
+// Evaluation surface: read-only game inspection (cambia-1425)
+// ---------------------------------------------------------------------------
+//
+// These exports carry the state an eval-time agent used to read straight off
+// the Python reference engine as attributes: get_player_hand, discard_pile /
+// get_discard_top, pending_action_data, snap_phase_active /
+// snap_discarded_card, and house_rules. Together with the pre-existing
+// turn/stock/legal-action exports and the AgentState belief getters they make
+// GoEngine + GoAgentState a sufficient surface for an agent, with no Python
+// CambiaGameState anywhere in the loop.
+//
+// Every accessor here is read-only and allocation-free: it copies into a
+// caller-owned buffer, never mutates GameState, and holds no Go heap memory
+// across the boundary. None of them takes poolMu, matching the other
+// single-handle read exports (cambia_game_turn_number and friends).
+//
+// Cards cross the boundary as canonical card indices, the same encoding
+// cambia_game_new_with_deck consumes (suit*13 + rank; suits C=0, D=1, H=2,
+// S=3; ranks A=0..K=12; 52 = red joker, 53 = black joker). One card currency
+// in both directions. cardIndexNone (0xFF) marks the absence of a card: an
+// empty hand slot, or a field that does not apply to the current state.
+
+const (
+	// cardIndexNone is the "no card here" marker in every eval-surface buffer.
+	// It doubles as the "field does not apply" marker for the non-card slots of
+	// the pending and snap records, so a reader has a single sentinel to test.
+	cardIndexNone uint8 = 0xFF
+
+	// Fixed byte widths of the packed eval-surface records. Mirrored on the
+	// Python side by bridge.py's PENDING_FIELDS / SNAP_FIELDS /
+	// HOUSE_RULE_FIELDS; the field-by-field layouts are documented on each
+	// export below.
+	evalPendingFields   = 10
+	evalSnapFields      = 6
+	evalHouseRuleFields = 14
+)
+
+// cardToIndex is the inverse of indexToCard: it converts a Go Card to the
+// canonical card index Python uses. EmptyCard and any malformed card map to
+// cardIndexNone.
+func cardToIndex(c engine.Card) uint8 {
+	if c == engine.EmptyCard {
+		return cardIndexNone
+	}
+	r := c.Rank()
+	s := c.Suit()
+	if r == engine.RankJoker {
+		if s == engine.SuitBlackJoker {
+			return 53
+		}
+		return 52
+	}
+	if r > engine.RankKing {
+		return cardIndexNone
+	}
+	switch s {
+	case engine.SuitClubs:
+		return r
+	case engine.SuitDiamonds:
+		return 13 + r
+	case engine.SuitHearts:
+		return 26 + r
+	case engine.SuitSpades:
+		return 39 + r
+	}
+	return cardIndexNone
+}
+
+// boolByte maps a rule flag to its wire byte.
+func boolByte(b bool) C.uint8_t {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// cambia_game_get_hand fills out_buf with engine.MaxHandSize canonical card
+// indices for the given seat's hand, slot 0 first. Slots at or past HandLen
+// receive cardIndexNone (0xFF). Returns the seat's hand length, or -1 on
+// error (bad handle, seat out of range, or buf_len < engine.MaxHandSize).
+//
+// This is the seat's true hand: the Go equivalent of the Python reference
+// engine's CambiaGameState.get_player_hand, which the perfect-info baselines
+// and any best-response search read directly. What a seat *believes* about
+// its own or another seat's slots is a different surface, carried by
+// AgentState (cambia_agent_get_own_hand / cambia_agent_get_opp_belief);
+// imperfect-information agents read that one instead and consult this
+// accessor only at the moments the rules reveal a card to them.
+//
+//export cambia_game_get_hand
+func cambia_game_get_hand(game_h C.int32_t, seat C.uint8_t, out_buf *C.uint8_t, buf_len C.int32_t) C.int32_t {
+	if game_h < 0 || game_h >= maxGames || !gameInUse[game_h] {
+		return -1
+	}
+	if int(buf_len) < engine.MaxHandSize {
+		return -1
+	}
+	g := &gamePool[game_h]
+	if uint8(seat) >= g.NumActivePlayers() {
+		return -1
+	}
+	ps := &g.Players[uint8(seat)]
+	out := (*[engine.MaxHandSize]C.uint8_t)(unsafe.Pointer(out_buf))
+	for s := 0; s < engine.MaxHandSize; s++ {
+		if s < int(ps.HandLen) {
+			out[s] = C.uint8_t(cardToIndex(ps.Hand[s]))
+		} else {
+			out[s] = C.uint8_t(cardIndexNone)
+		}
+	}
+	return C.int32_t(ps.HandLen)
+}
+
+// cambia_game_discard_len returns the number of cards in the discard pile, or
+// -1 on a bad handle. Callers that only track pile growth (the discard-memory
+// baselines diff this between turns) can poll it without copying the pile.
+//
+//export cambia_game_discard_len
+func cambia_game_discard_len(game_h C.int32_t) C.int32_t {
+	if game_h < 0 || game_h >= maxGames || !gameInUse[game_h] {
+		return -1
+	}
+	return C.int32_t(gamePool[game_h].DiscardLen)
+}
+
+// cambia_game_get_discard_pile fills out_buf with the whole discard pile as
+// canonical card indices, bottom card first, so the last written byte is the
+// top of the pile. Returns the number of bytes written (the pile length), or
+// -1 on a bad handle or a buffer shorter than the pile. Size the buffer with
+// cambia_game_discard_len, or at engine.MaxDeckSize for a fixed allocation.
+//
+//export cambia_game_get_discard_pile
+func cambia_game_get_discard_pile(game_h C.int32_t, out_buf *C.uint8_t, buf_len C.int32_t) C.int32_t {
+	if game_h < 0 || game_h >= maxGames || !gameInUse[game_h] {
+		return -1
+	}
+	g := &gamePool[game_h]
+	n := int(g.DiscardLen)
+	if int(buf_len) < n {
+		return -1
+	}
+	if n == 0 {
+		return 0
+	}
+	out := (*[engine.MaxDeckSize]C.uint8_t)(unsafe.Pointer(out_buf))
+	for i := 0; i < n; i++ {
+		out[i] = C.uint8_t(cardToIndex(g.DiscardPile[i]))
+	}
+	return C.int32_t(n)
+}
+
+// cambia_game_discard_top_card returns the canonical card index of the top
+// discard, or -1 if the pile is empty or the handle is bad. Distinct from
+// cambia_game_discard_top, which returns the lossy CardBucket: snap matching
+// and card-counting need the rank and suit, which the bucket drops.
+//
+//export cambia_game_discard_top_card
+func cambia_game_discard_top_card(game_h C.int32_t) C.int32_t {
+	if game_h < 0 || game_h >= maxGames || !gameInUse[game_h] {
+		return -1
+	}
+	top := gamePool[game_h].DiscardTop()
+	idx := cardToIndex(top)
+	if idx == cardIndexNone {
+		return -1
+	}
+	return C.int32_t(idx)
+}
+
+// cambia_game_get_pending fills out_buf with the evalPendingFields-byte
+// pending-action record, the Go counterpart of the Python engine's
+// pending_action / pending_action_player / pending_action_data trio. Returns
+// evalPendingFields on success, or -1 on a bad handle or short buffer.
+//
+// Layout (every field is cardIndexNone when it does not apply):
+//
+//	[0] pending type      engine.PendingType (0 = PendingNone)
+//	[1] acting seat       the seat that owes the pending decision
+//	[2] drawn card        canonical index; PendingDiscard only
+//	[3] drawn from        engine.DrawnFromStockpile / DrawnFromDiscard;
+//	                      PendingDiscard only
+//	[4] own slot          own hand slot under decision; PendingKingDecision
+//	[5] target slot       target seat's hand slot; PendingKingDecision and
+//	                      PendingSnapMove (the vacated slot to refill)
+//	[6] target seat       PendingKingDecision and PendingSnapMove
+//	[7] own card          canonical index of the King-looked own card;
+//	                      PendingKingDecision only
+//	[8] target card       canonical index of the King-looked target card;
+//	                      PendingKingDecision at 2 seats only, since the
+//	                      N-player King path reuses that Data byte for the
+//	                      target seat and never records the card
+//	[9] reserved          always 0
+//
+// The peek and blind-swap pendings (PendingPeekOwn, PendingPeekOther,
+// PendingBlindSwap, PendingKingLook) carry no data of their own: the engine
+// records only the type and the acting seat, so fields [2..8] stay at the
+// sentinel for them.
+//
+//export cambia_game_get_pending
+func cambia_game_get_pending(game_h C.int32_t, out_buf *C.uint8_t, buf_len C.int32_t) C.int32_t {
+	if game_h < 0 || game_h >= maxGames || !gameInUse[game_h] {
+		return -1
+	}
+	if int(buf_len) < evalPendingFields {
+		return -1
+	}
+	g := &gamePool[game_h]
+	out := (*[evalPendingFields]C.uint8_t)(unsafe.Pointer(out_buf))
+	for i := 0; i < evalPendingFields; i++ {
+		out[i] = C.uint8_t(cardIndexNone)
+	}
+	out[0] = C.uint8_t(uint8(g.Pending.Type))
+	out[9] = 0
+	if g.Pending.Type == engine.PendingNone {
+		return C.int32_t(evalPendingFields)
+	}
+	out[1] = C.uint8_t(g.Pending.PlayerID)
+	switch g.Pending.Type {
+	case engine.PendingDiscard:
+		out[2] = C.uint8_t(cardToIndex(engine.Card(g.Pending.Data[0])))
+		out[3] = C.uint8_t(g.Pending.Data[1])
+	case engine.PendingKingDecision:
+		out[4] = C.uint8_t(g.Pending.Data[0])
+		out[5] = C.uint8_t(g.Pending.Data[1])
+		out[7] = C.uint8_t(cardToIndex(engine.Card(g.Pending.Data[2])))
+		if g.NumActivePlayers() == 2 {
+			out[6] = C.uint8_t(g.OpponentOf(g.Pending.PlayerID))
+			out[8] = C.uint8_t(cardToIndex(engine.Card(g.Pending.Data[3])))
+		} else {
+			out[6] = C.uint8_t(g.Pending.Data[3])
+		}
+	case engine.PendingSnapMove:
+		out[5] = C.uint8_t(g.Pending.Data[1])
+		out[6] = C.uint8_t(g.Pending.Data[0])
+	}
+	return C.int32_t(evalPendingFields)
+}
+
+// cambia_game_get_snap_state fills out_buf with the evalSnapFields-byte snap
+// window record. Returns evalSnapFields on success, or -1 on a bad handle or
+// short buffer.
+//
+// Layout:
+//
+//	[0] active            1 while a snap window is open, else 0
+//	[1] snapped rank      engine rank of the card that opened the window
+//	                      (A=0..K=12, joker=13); cardIndexNone when inactive
+//	[2] snapped card      canonical index of the card on top of the discard
+//	                      pile; cardIndexNone when inactive or the pile is
+//	                      empty. Its rank always equals field [1]. Under a
+//	                      multi-snapper window a successful snap pushes its own
+//	                      matching card on top, so the suit here is the most
+//	                      recently discarded card of the snap rank, not
+//	                      necessarily the card that opened the window. Rank is
+//	                      what snap legality turns on; treat the suit as
+//	                      advisory (it separates a red King from a black one).
+//	[3] snapper count     number of eligible snappers in this window, 0 when
+//	                      inactive
+//	[4] snapper cursor    index into the snapper list of whoever acts next
+//	[5] snapper seat      seat at the cursor, cardIndexNone when the window is
+//	                      inactive or the cursor has run past the list
+//
+//export cambia_game_get_snap_state
+func cambia_game_get_snap_state(game_h C.int32_t, out_buf *C.uint8_t, buf_len C.int32_t) C.int32_t {
+	if game_h < 0 || game_h >= maxGames || !gameInUse[game_h] {
+		return -1
+	}
+	if int(buf_len) < evalSnapFields {
+		return -1
+	}
+	g := &gamePool[game_h]
+	out := (*[evalSnapFields]C.uint8_t)(unsafe.Pointer(out_buf))
+	if !g.Snap.Active {
+		out[0] = 0
+		out[1] = C.uint8_t(cardIndexNone)
+		out[2] = C.uint8_t(cardIndexNone)
+		out[3] = 0
+		out[4] = 0
+		out[5] = C.uint8_t(cardIndexNone)
+		return C.int32_t(evalSnapFields)
+	}
+	out[0] = 1
+	out[1] = C.uint8_t(g.Snap.DiscardedRank)
+	out[2] = C.uint8_t(cardToIndex(g.DiscardTop()))
+	out[3] = C.uint8_t(g.Snap.NumSnappers)
+	out[4] = C.uint8_t(g.Snap.CurrentSnapperIdx)
+	if g.Snap.CurrentSnapperIdx < g.Snap.NumSnappers {
+		out[5] = C.uint8_t(g.Snap.Snappers[g.Snap.CurrentSnapperIdx])
+	} else {
+		out[5] = C.uint8_t(cardIndexNone)
+	}
+	return C.int32_t(evalSnapFields)
+}
+
+// cambia_game_get_house_rules fills out_buf with the evalHouseRuleFields-byte
+// rules record. Returns evalHouseRuleFields on success, or -1 on a bad handle
+// or short buffer.
+//
+// Fields follow cambia_game_new_with_rules' parameter order, so the record
+// reads back what that constructor was handed:
+//
+//	[0]  max game turns low byte    (0 = unlimited)
+//	[1]  max game turns high byte
+//	[2]  cards per player
+//	[3]  cambia allowed round
+//	[4]  penalty draw count
+//	[5]  allow draw from discard    0/1
+//	[6]  allow replace abilities    0/1
+//	[7]  allow opponent snapping    0/1
+//	[8]  snap race                  0/1
+//	[9]  number of jokers
+//	[10] lock caller hand           0/1
+//	[11] number of players          effective count, so a rules struct built
+//	                                with the 0 sentinel reads back as 2,
+//	                                agreeing with cambia_game_num_players
+//	[12] initial view count
+//	[13] number of decks
+//
+//export cambia_game_get_house_rules
+func cambia_game_get_house_rules(game_h C.int32_t, out_buf *C.uint8_t, buf_len C.int32_t) C.int32_t {
+	if game_h < 0 || game_h >= maxGames || !gameInUse[game_h] {
+		return -1
+	}
+	if int(buf_len) < evalHouseRuleFields {
+		return -1
+	}
+	g := &gamePool[game_h]
+	r := &g.Rules
+	out := (*[evalHouseRuleFields]C.uint8_t)(unsafe.Pointer(out_buf))
+	out[0] = C.uint8_t(uint8(r.MaxGameTurns & 0xFF))
+	out[1] = C.uint8_t(uint8(r.MaxGameTurns >> 8))
+	out[2] = C.uint8_t(r.CardsPerPlayer)
+	out[3] = C.uint8_t(r.CambiaAllowedRound)
+	out[4] = C.uint8_t(r.PenaltyDrawCount)
+	out[5] = boolByte(r.AllowDrawFromDiscard)
+	out[6] = boolByte(r.AllowReplaceAbilities)
+	out[7] = boolByte(r.AllowOpponentSnapping)
+	out[8] = boolByte(r.SnapRace)
+	out[9] = C.uint8_t(r.NumJokers)
+	out[10] = boolByte(r.LockCallerHand)
+	out[11] = C.uint8_t(g.NumActivePlayers())
+	out[12] = C.uint8_t(r.InitialViewCount)
+	out[13] = C.uint8_t(r.NumDecks)
+	return C.int32_t(evalHouseRuleFields)
+}
+
+// ---------------------------------------------------------------------------
+// Test-only wrappers for the eval surface
+// ---------------------------------------------------------------------------
+//
+// Same rationale as clone_test_helpers.go: Go forbids `import "C"` in a
+// _test.go file, so eval_accessors_test.go cannot name the C types these
+// exports take and calls through these plain-Go shims instead. They are
+// unexported and carry no //export directive, so they add no symbol to
+// libcambia.so's C ABI.
+
+func testGameGetHand(gameH int32, seat uint8) (handLen int32, slots [engine.MaxHandSize]uint8) {
+	var buf [engine.MaxHandSize]C.uint8_t
+	handLen = int32(cambia_game_get_hand(C.int32_t(gameH), C.uint8_t(seat), &buf[0], engine.MaxHandSize))
+	for i := range buf {
+		slots[i] = uint8(buf[i])
+	}
+	return handLen, slots
+}
+
+func testGameGetHandShortBuf(gameH int32, seat uint8) int32 {
+	var buf [engine.MaxHandSize]C.uint8_t
+	return int32(cambia_game_get_hand(C.int32_t(gameH), C.uint8_t(seat), &buf[0], engine.MaxHandSize-1))
+}
+
+func testGameDiscardLen(gameH int32) int32 {
+	return int32(cambia_game_discard_len(C.int32_t(gameH)))
+}
+
+func testGameGetDiscardPile(gameH int32) (n int32, pile []uint8) {
+	var buf [engine.MaxDeckSize]C.uint8_t
+	n = int32(cambia_game_get_discard_pile(C.int32_t(gameH), &buf[0], engine.MaxDeckSize))
+	if n < 0 {
+		return n, nil
+	}
+	pile = make([]uint8, n)
+	for i := int32(0); i < n; i++ {
+		pile[i] = uint8(buf[i])
+	}
+	return n, pile
+}
+
+func testGameGetDiscardPileShortBuf(gameH int32, bufLen int32) int32 {
+	var buf [engine.MaxDeckSize]C.uint8_t
+	return int32(cambia_game_get_discard_pile(C.int32_t(gameH), &buf[0], C.int32_t(bufLen)))
+}
+
+func testGameDiscardTopCard(gameH int32) int32 {
+	return int32(cambia_game_discard_top_card(C.int32_t(gameH)))
+}
+
+func testGameGetPending(gameH int32) (rc int32, rec [evalPendingFields]uint8) {
+	var buf [evalPendingFields]C.uint8_t
+	rc = int32(cambia_game_get_pending(C.int32_t(gameH), &buf[0], evalPendingFields))
+	for i := range buf {
+		rec[i] = uint8(buf[i])
+	}
+	return rc, rec
+}
+
+func testGameGetSnapState(gameH int32) (rc int32, rec [evalSnapFields]uint8) {
+	var buf [evalSnapFields]C.uint8_t
+	rc = int32(cambia_game_get_snap_state(C.int32_t(gameH), &buf[0], evalSnapFields))
+	for i := range buf {
+		rec[i] = uint8(buf[i])
+	}
+	return rc, rec
+}
+
+func testGameGetHouseRules(gameH int32) (rc int32, rec [evalHouseRuleFields]uint8) {
+	var buf [evalHouseRuleFields]C.uint8_t
+	rc = int32(cambia_game_get_house_rules(C.int32_t(gameH), &buf[0], evalHouseRuleFields))
+	for i := range buf {
+		rec[i] = uint8(buf[i])
+	}
+	return rc, rec
+}
+
+// testGameNewWithDeck drives cambia_game_new_with_deck from Go tests so a
+// scripted game can be dealt from a known deck order.
+func testGameNewWithDeck(deck []uint8, numPlayers, cardsPerPlayer, startingPlayer, numJokers, initialViewCount uint8) int32 {
+	cdeck := make([]C.uint8_t, len(deck))
+	for i, v := range deck {
+		cdeck[i] = C.uint8_t(v)
+	}
+	return int32(cambia_game_new_with_deck(
+		&cdeck[0], C.int32_t(len(cdeck)),
+		C.uint8_t(numPlayers), C.uint8_t(cardsPerPlayer), C.uint8_t(startingPlayer),
+		C.uint16_t(0), C.uint8_t(0), C.uint8_t(2),
+		C.uint8_t(1), C.uint8_t(0), C.uint8_t(1),
+		C.uint8_t(0), C.uint8_t(numJokers), C.uint8_t(1),
+		C.uint8_t(initialViewCount), C.uint8_t(1),
+	))
+}
+
+// testGameApplyAction drives cambia_game_apply_action from Go tests.
+func testGameApplyAction(gameH int32, action uint16) int32 {
+	return int32(cambia_game_apply_action(C.int32_t(gameH), C.uint16_t(action)))
+}
+
+// testGameNumPlayers drives cambia_game_num_players from Go tests.
+func testGameNumPlayers(gameH int32) uint8 {
+	return uint8(cambia_game_num_players(C.int32_t(gameH)))
+}
+
+// testCardIndexRoundTrip converts an index to a Card and back, for the
+// cardToIndex/indexToCard inverse check.
+func testCardIndexRoundTrip(idx uint8) uint8 {
+	return cardToIndex(indexToCard(idx))
+}
+
 func main() {}
