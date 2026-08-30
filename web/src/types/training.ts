@@ -1,4 +1,7 @@
 export interface Run {
+	/** run_db row id, or 0 for a run the trainer has not registered yet (it
+	 * exists only as process.json). Two unregistered runs share 0, so never key
+	 * or look a run up by id: `name` is the identity. */
 	id: number;
 	name: string;
 	algorithm: string;

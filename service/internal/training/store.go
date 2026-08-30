@@ -37,6 +37,10 @@ var meanImpBaselines = []string{
 
 // Run is a summary of a training run.
 type Run struct {
+	// ID is the run_db row id, or 0 for a run that exists only as
+	// runs/<name>/process.json (created through the dashboard, not yet
+	// registered by the trainer). run_db ids start at 1, so 0 is never a real
+	// id, and two unregistered runs share it: Name is the identity, not ID.
 	ID              int      `json:"id"`
 	Name            string   `json:"name"`
 	Algorithm       string   `json:"algorithm"`

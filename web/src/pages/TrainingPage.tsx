@@ -131,7 +131,7 @@ const TrainingPage: React.FC = () => {
 							) : (
 								filtered.map((run) => (
 									<tr
-										key={run.id}
+										key={run.name}
 										onClick={() => navigate(`/training/${run.name}`)}
 										className="border-b border-gray-100 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-750 cursor-pointer transition-colors text-gray-800 dark:text-gray-200"
 									>

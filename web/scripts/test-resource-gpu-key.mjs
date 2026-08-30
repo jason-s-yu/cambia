@@ -2,10 +2,13 @@
 //
 // Run:  npm run test:gpu-key        (node --test)
 //
-// The defect this pins: the GPU cards were keyed by gpu.index alone, so a /ws/training/resources
-// payload listing one index twice logged "Encountered two children with the same key, 0" on every
-// tick and left one card unrendered. The sampler keeps the index unique now (resources.go), and
-// the key holds regardless, because the payload comes off a driver this side does not control.
+// What this pins: the GPU cards were keyed by gpu.index alone, so a /ws/training/resources
+// payload listing one index twice would collide on key 0 and leave one card unrendered. The
+// sampler keeps the index unique now (resources.go), and the key holds regardless, because the
+// payload comes off a driver this side does not control. Note: the "two children with the same
+// key, 0" console error seen on /training was NOT this list; the sampler returned one GPU on the
+// dev host. Its source was the runs table keyed by run.id with two process-only runs at id 0
+// (test-training-runs-key.mjs). This guard stays as the defensive half.
 //
 // Structure rather than behaviour: there is no React renderer in this suite. The keying rule is
 // re-stated below as a plain function and driven with the payload that broke it, so the rule is
