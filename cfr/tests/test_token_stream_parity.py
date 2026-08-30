@@ -86,6 +86,7 @@ try:
         go_available,
         skip_if_no_go,
     )
+    from tests.parity_seeds import PARITY_SEEDS
 except ImportError:  # pragma: no cover - path fallback
     from test_cross_engine_samples import (  # type: ignore
         _setup_python_game_matching_go,
@@ -93,6 +94,7 @@ except ImportError:  # pragma: no cover - path fallback
         go_available,
         skip_if_no_go,
     )
+    from parity_seeds import PARITY_SEEDS  # type: ignore
 
 if go_available:
     from src.ffi.bridge import (
@@ -115,7 +117,9 @@ if go_available:
 
 _CAMBIA_IDX = 2
 _SNAP_MIN = 97
-_FULL_SEEDS = list(range(40))
+# Seed breadth comes from the single declared constant (cambia-1234), not a
+# literal here, so `make parity-gate` and this suite sweep the same seeds.
+_FULL_SEEDS = list(PARITY_SEEDS)
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +324,39 @@ def _py_body(init_hand, init_peek, obs_stream, observer) -> List[int]:
     )
 
 
+# --- Hand contents and pile lengths (cambia-1234) -------------------------
+# Go exports no discard-pile length, only the top card's bucket. It does not
+# need one: every card is always in exactly one of {stockpile, a hand, the
+# discard pile, the pending drawn card}, so Go's discard length is the
+# remainder, and comparing that remainder against Python's len(discard_pile)
+# catches a card going missing on either side.
+_DECK_TOTAL = _TEST_RULES.num_decks * (52 + _TEST_RULES.use_jokers)
+_EMPTY_SLOT = 0xFF
+
+
+def _go_hand_buckets(eng: "GoEngine") -> List[int]:
+    """Every player's hand as card-bucket indices, packed
+    (num_players x MAX_HAND_SIZE), with 0xFF for an empty slot."""
+    return eng._get_all_cards_unsafe().tolist()
+
+
+def _py_hand_buckets(pygame, num_players: int = NUM_PLAYERS) -> List[int]:
+    """Python's hands in the identical packed layout, for a direct compare."""
+    out: List[int] = []
+    for p in range(num_players):
+        row = [get_card_bucket(c).value for c in pygame.players[p].hand]
+        row += [_EMPTY_SLOT] * (GoEngine.MAX_HAND_SIZE - len(row))
+        out.extend(row)
+    return out
+
+
+def _go_discard_len(eng: "GoEngine", go_hands: List[int]) -> int:
+    """Go's discard-pile length, derived by card conservation (see above)."""
+    in_hands = sum(1 for v in go_hands if v != _EMPTY_SLOT)
+    pending = 1 if int(eng.get_drawn_card_bucket()) >= 0 else 0
+    return _DECK_TOTAL - int(eng.stock_len()) - in_hands - pending
+
+
 class _GameResult:
     def __init__(self):
         self.compared = 0
@@ -328,6 +365,9 @@ class _GameResult:
         self.saw_snap_frame = False
         self.post_draw_verified = 0
         self.peek_verified = 0
+        # True once both engines reached a terminal state and their utility
+        # vectors were asserted equal (cambia-1234).
+        self.utilities_compared = False
         self.init_hands: Dict[int, List[Card]] = {}
         self.init_peeks: Dict[int, Tuple[int, ...]] = {}
         self.obs_streams: Dict[int, List[Any]] = {}
@@ -469,6 +509,23 @@ def _play_lockstep(seed: int, call_cambia_after: int = -1) -> _GameResult:
                 f"Go={go_bucket} Py={py_bucket} action={action_idx}"
             )
 
+            # Hand contents, slot for slot (cambia-1234). Subsumes hand length:
+            # a lost, gained, or misplaced card shows up as a slot difference.
+            go_hands = _go_hand_buckets(eng)
+            py_hands_now = _py_hand_buckets(pygame)
+            assert go_hands == py_hands_now, (
+                f"seed {seed} step {step}: hands mismatch "
+                f"Go={go_hands} Py={py_hands_now} action={action_idx}"
+            )
+
+            # Discard-pile length, via card conservation on the Go side.
+            go_discard_len = _go_discard_len(eng, go_hands)
+            py_discard_len = len(pygame.discard_pile)
+            assert go_discard_len == py_discard_len, (
+                f"seed {seed} step {step}: discard-pile length mismatch "
+                f"Go={go_discard_len} Py={py_discard_len} action={action_idx}"
+            )
+
             for observer in range(NUM_PLAYERS):
                 go_body = agents[observer].tokens().tolist()
                 py_body = _py_body(
@@ -528,6 +585,18 @@ def _play_lockstep(seed: int, call_cambia_after: int = -1) -> _GameResult:
                         )
                         res.peek_verified += 1
             res.compared += 1
+
+        # Terminal utilities (cambia-1234). Only meaningful once BOTH engines
+        # have ended; a game that ran out of steps or lost its shared legal set
+        # leaves this unset and the caller reports the shortfall.
+        if eng.is_terminal() and pygame.is_terminal():
+            go_util = eng.get_utility().tolist()
+            py_util = [float(pygame.get_utility(p)) for p in range(NUM_PLAYERS)]
+            assert np.allclose(go_util, py_util, atol=1e-6), (
+                f"seed {seed} step terminal: terminal-utility mismatch "
+                f"Go={go_util} Py={py_util}"
+            )
+            res.utilities_compared = True
     finally:
         res.init_hands = init_hands
         res.init_peeks = init_peeks

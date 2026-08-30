@@ -44,6 +44,11 @@ from src.game.player_state import PlayerState
 from src.card import Card
 from src.config import CambiaRulesConfig
 
+try:
+    from tests.parity_seeds import PARITY_SEEDS
+except ImportError:  # pragma: no cover - path fallback
+    from parity_seeds import PARITY_SEEDS  # type: ignore
+
 # ---------------------------------------------------------------------------
 # Skip guard
 # ---------------------------------------------------------------------------
@@ -323,27 +328,16 @@ class TestCrossEngineLegalActions:
             compared_steps > 0
         ), f"seed {seed}: no steps compared (immediate divergence)"
 
-    def test_seed_0(self):
-        self._play_and_compare(seed=0)
-
-    def test_seed_42(self):
-        self._play_and_compare(seed=42)
-
-    def test_seed_100(self):
-        self._play_and_compare(seed=100)
-
-    def test_seed_999(self):
-        self._play_and_compare(seed=999)
-
-    def test_seed_12345(self):
-        self._play_and_compare(seed=12345)
+    @pytest.mark.parametrize("seed", PARITY_SEEDS)
+    def test_seed(self, seed):
+        self._play_and_compare(seed=seed)
 
 
 @skip_if_no_go
 class TestCrossEngineInitialState:
     """Validate initial state parity before any actions are taken."""
 
-    @pytest.mark.parametrize("seed", [0, 1, 42, 100, 137, 999, 12345])
+    @pytest.mark.parametrize("seed", PARITY_SEEDS)
     def test_initial_legal_actions(self, seed):
         """Initial legal actions (non-snap) should match between engines."""
         from src.ffi.bridge import GoEngine
@@ -374,7 +368,7 @@ class TestCrossEngineInitialState:
 
         go_engine.close()
 
-    @pytest.mark.parametrize("seed", [0, 1, 42, 100, 137, 999, 12345])
+    @pytest.mark.parametrize("seed", PARITY_SEEDS)
     def test_initial_acting_player(self, seed):
         """Initial acting player should match between engines."""
         from src.ffi.bridge import GoEngine
@@ -390,7 +384,7 @@ class TestCrossEngineInitialState:
 
         go_engine.close()
 
-    @pytest.mark.parametrize("seed", [0, 1, 42, 100, 137, 999, 12345])
+    @pytest.mark.parametrize("seed", PARITY_SEEDS)
     def test_initial_stock_len(self, seed):
         """Initial stockpile length should match between engines."""
         from src.ffi.bridge import GoEngine

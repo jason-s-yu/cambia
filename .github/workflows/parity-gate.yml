@@ -1,0 +1,77 @@
+name: Parity gate
+
+# Go vs Python cross-engine lockstep parity (cambia-1234).
+#
+# Migration acceptance for retiring the Python reference engine (cambia-1424):
+# while both engines exist, they must agree. Go (engine/) is the RULES.md
+# reference. This is deliberately a separate workflow rather than a job in
+# ci.yml: ci.yml carries a workflow-level `paths-ignore: cfr/**` that skips the
+# whole workflow on a cfr-only change, and GitHub has no per-job path filter,
+# so a job added there could never fire on cfr/src/game/** or
+# cfr/src/encoding.py. Lifting that ignore belongs to the sprint-2 CI ticket;
+# scoping this gate with its own `paths` needs no change to it, and keeps the
+# go-tests/web jobs from being dragged along on a Python-engine edit.
+#
+# Retires with cambia-1430, alongside the Python engine.
+
+on:
+  pull_request:
+    paths:
+      - 'engine/**'
+      - 'cfr/src/game/**'
+      - 'cfr/src/encoding.py'
+      - 'cfr/tests/**'
+      - 'Makefile'
+      - '.github/workflows/parity-gate.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'engine/**'
+      - 'cfr/src/game/**'
+      - 'cfr/src/encoding.py'
+      - 'cfr/tests/**'
+      - 'Makefile'
+      - '.github/workflows/parity-gate.yml'
+
+jobs:
+  parity-gate:
+    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: false
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.environment }}-go-${{ hashFiles('go.work.sum', 'engine/go.sum', 'service/go.sum') }}
+          restore-keys: |
+            ${{ runner.environment }}-go-
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: cfr/pyproject.toml
+
+      # The CPU torch extra: tests/test_cross_validation.py imports torch at
+      # module load for the encoding-dimension checks. Nothing here runs on a
+      # GPU, so the cpu index keeps the wheel small.
+      - name: Install cfr (cpu extra)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ./cfr[cpu] \
+            --extra-index-url https://download.pytorch.org/whl/cpu
+
+      # Builds libcambia.so, pins the interpreter at this checkout, then runs
+      # the lockstep suite over the declared seed constant
+      # (cfr/tests/parity_seeds.py, default 40) at 2 and 4 seats. A divergence
+      # fails naming the seed, the step, and the comparison that broke.
+      - name: Parity gate
+        run: make parity-gate

@@ -33,12 +33,14 @@ try:
         go_available,
         skip_if_no_go,
     )
+    from tests.parity_seeds import PARITY_SEEDS
 except ImportError:  # pragma: no cover - path fallback
     from test_cross_engine_samples import (  # type: ignore
         _setup_python_game_matching_go,
         go_available,
         skip_if_no_go,
     )
+    from parity_seeds import PARITY_SEEDS  # type: ignore
 
 from src.cfr.worker import _create_observation, _filter_observation
 
@@ -132,7 +134,7 @@ def test_race_on_cross_engine_state_and_token_parity(prefer_opp):
     race_marker_lo = se.RACE_FRAME_BASE
     race_marker_hi = se.RACE_FRAME_BASE + se.NUM_RACE_FRAME_IDS
 
-    for seed in range(60):
+    for seed in PARITY_SEEDS:
         rules = _race_rules()
         pygame = _setup_python_game_matching_go(seed)
         pygame.house_rules = rules
