@@ -970,8 +970,10 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                 username={nameOf(selfId)}
                 isYou
                 compact
+                testId='seat-self'
                 handSize={selfState?.handSize}
                 state={offline ? 'disconnected' : seatStateFor(selfState ?? ({ playerId: selfId ?? '', connected: true, hasCalledCambia: false } as ObfPlayerState), gameState.currentPlayerId)}
+                gaveUp={gaveUp}
               />
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: '1 1 220px', maxWidth: 280, paddingBottom: 2 }}>

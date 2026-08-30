@@ -6,6 +6,13 @@ export interface PlayerSeatProps {
   username?: string;
   state?: PlayerSeatState;
   isYou?: boolean;
+  /**
+   * True once the caller has spent its reconnect budget and stopped retrying (useSocket's
+   * give-up state, cambia-1236). Swaps the disconnected label from "Reconnecting" to
+   * "Disconnected" so the seat agrees with the felt's own connection chip (cambia-1473).
+   * No effect outside `state === 'disconnected'`.
+   */
+  gaveUp?: boolean;
   /** Displayed rating (tabular figures). */
   rating?: number | string;
   /** Card count in hand (tabular figures). */
@@ -14,6 +21,7 @@ export interface PlayerSeatProps {
   note?: string;
   compact?: boolean;
   style?: React.CSSProperties;
+  testId?: string;
 }
 
 // Semantic accents only: the avatar disc is a stable per-name pick from the
@@ -44,16 +52,17 @@ const STATES: Record<PlayerSeatState, StateSpec> = {
 };
 
 /** Player chip: initial avatar + name + state line. Gold border = their turn; danger border = called Cambia. */
-const PlayerSeat: React.FC<PlayerSeatProps> = ({ username = 'Player', state, isYou = false, rating, handSize, note, compact = false, style }) => {
+const PlayerSeat: React.FC<PlayerSeatProps> = ({ username = 'Player', state, isYou = false, gaveUp = false, rating, handSize, note, compact = false, style, testId }) => {
   const s = state ? STATES[state] : undefined;
   const isTurn = state === 'turn';
   // The active-turn fill is the lightest ground in the dark theme, and
   // --text-tertiary fell to 3.74:1 on it. The emphasized seat steps its
   // metadata up a tier instead of lifting the tier everywhere (cambia-935, R1).
   const meta = isTurn ? 'var(--text-secondary)' : 'var(--text-tertiary)';
-  const stateLabel = note ?? (s ? (isYou ? s.youLabel : s.label) : undefined);
+  const stateLabel = note ?? (state === 'disconnected' && gaveUp ? 'Disconnected' : s ? (isYou ? s.youLabel : s.label) : undefined);
   return (
     <div
+      data-testid={testId}
       style={{
         display: 'inline-flex',
         alignItems: 'center',
