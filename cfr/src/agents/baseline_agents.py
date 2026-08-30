@@ -4,9 +4,9 @@ import random
 import logging
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Set, Optional, List, Dict, Tuple
+from typing import Sequence, Set, Optional, List, Dict, Tuple
 
-from ..game.engine import CambiaGameState
+from .game_view import GameView, as_game_view, tracked_opponent_seat
 from ..constants import (
     ActionDrawStockpile,
     ActionDrawDiscard,
@@ -50,12 +50,25 @@ class BaseAgent(ABC):
 
     def __init__(self, player_id: int, config: Config):
         self.player_id = player_id
-        self.opponent_id = 1 - player_id  # Assuming 2 players
+        # Provisional: rebound to the real table on the first view (see
+        # _bind_opponent). Two seats is the overwhelmingly common case and
+        # several callers read opponent_id before ever passing a view.
+        self.opponent_id = 1 - player_id
         self.config = config
+
+    def _bind_opponent(self, view: GameView) -> None:
+        """Name the single opponent seat this agent tracks, for this table.
+
+        These agents hold one opponent's memory, so above two seats they track
+        one seat rather than the whole table: the next seat round, which is the
+        seat the rules already aim the acting player's opponent-targeting
+        actions at (see game_view.tracked_opponent_seat).
+        """
+        self.opponent_id = tracked_opponent_seat(self.player_id, view.num_players())
 
     @abstractmethod
     def choose_action(
-        self, game_state: CambiaGameState, legal_actions: Set[GameAction]
+        self, game_state: GameView, legal_actions: Sequence[GameAction]
     ) -> GameAction:
         """Selects an action based on the current game state and legal actions."""
         pass
@@ -82,7 +95,7 @@ class RandomAgent(BaseAgent):
         self._rng = random if seed is None else random.Random(seed)
 
     def choose_action(
-        self, game_state: CambiaGameState, legal_actions: Set[GameAction]
+        self, game_state: GameView, legal_actions: Sequence[GameAction]
     ) -> GameAction:
         """Chooses a random action."""
         if not legal_actions:
@@ -133,7 +146,7 @@ class GreedyAgent(BaseAgent):
         return value
 
     def choose_action(
-        self, game_state: CambiaGameState, legal_actions: Set[GameAction]
+        self, game_state: GameView, legal_actions: Sequence[GameAction]
     ) -> GameAction:
         """Chooses an action based on greedy heuristics."""
         if not legal_actions:
@@ -141,8 +154,10 @@ class GreedyAgent(BaseAgent):
                 f"GreedyAgent P{self.player_id} cannot choose from empty legal actions."
             )
 
-        my_hand = game_state.get_player_hand(self.player_id)
-        opp_hand = game_state.get_player_hand(
+        view = as_game_view(game_state)
+        self._bind_opponent(view)
+        my_hand = view.get_player_hand(self.player_id)
+        opp_hand = view.get_player_hand(
             self.opponent_id
         )  # Needs opponent's hand for some decisions
 
@@ -163,7 +178,7 @@ class GreedyAgent(BaseAgent):
         # 2. Handle Snapping: Always snap if possible (prefer own)
         # List comprehensions here (not set comprehensions): legal_actions is
         # already in the canonical deterministic order from
-        # CambiaGameState.get_legal_actions(); rebuilding as a set() would
+        # the engine's own legal-action order; rebuilding as a set() would
         # re-expose PYTHONHASHSEED-salted iteration order on these NamedTuple
         # actions' str `tag` field (cambia-444).
         snap_own_actions = [a for a in legal_actions if isinstance(a, ActionSnapOwn)]
@@ -181,9 +196,10 @@ class GreedyAgent(BaseAgent):
         if snap_opp_actions:
             # Greedy needs perfect info to know *which* opponent card to snap.
             # Find the first valid snap opponent action based on true opponent hand.
-            snap_card = game_state.snap_discarded_card
-            if snap_card:
-                target_rank = snap_card.rank
+            # The rank that opened the snap window, which is what a snap has to
+            # match; the top of the discard pile is the same card here.
+            target_rank = view.get_snap_state().rank
+            if target_rank:
                 for action in sorted(
                     list(snap_opp_actions), key=lambda a: a.opponent_target_hand_index
                 ):
@@ -207,7 +223,7 @@ class GreedyAgent(BaseAgent):
 
         # 3. Handle Post-Draw Choice (Discard/Replace)
         if any(isinstance(a, (ActionDiscard, ActionReplace)) for a in legal_actions):
-            drawn_card = game_state.pending_action_data.get("drawn_card")
+            drawn_card = view.get_pending().drawn_card
             if not drawn_card or not isinstance(drawn_card, Card):
                 logger.error(
                     "GreedyAgent P%d in PostDraw state but drawn_card invalid: %s",
@@ -353,9 +369,9 @@ class GreedyAgent(BaseAgent):
             next(iter(legal_actions), None), ActionAbilityKingSwapDecision
         ):  # King Swap
             # Rule: Swap only if it reduces own hand value
-            look_data = game_state.pending_action_data
-            card1 = look_data.get("card1")  # Own card peeked
-            card2 = look_data.get("card2")  # Opp card peeked
+            pending = view.get_pending()
+            card1 = pending.own_card  # Own card peeked
+            card2 = pending.target_card  # Opp card peeked
             if isinstance(card1, Card) and isinstance(card2, Card):
                 if (
                     card2.value < card1.value
@@ -439,12 +455,14 @@ class ImperfectMemoryMixin:
     Unknown cards are estimated at UNKNOWN_CARD_EXPECTED_VALUE.
     """
 
-    def _needs_reinit(self, game_state: CambiaGameState) -> bool:
+    def _needs_reinit(self, game_state: GameView) -> bool:
         """Check if memory needs re-initialization for a new game."""
         return id(game_state) != getattr(self, "_last_game_id", None)
 
-    def _init_memory(self, game_state: CambiaGameState):
+    def _init_memory(self, game_state: GameView):
         """Initialize memory from initial peek (bottom 2 cards, indices 0 and 1)."""
+        view = as_game_view(game_state)
+        self._bind_opponent(view)
         self._last_game_id = id(game_state)
         # own_memory[slot_index] = card_value or None if unknown
         self.own_memory: Dict[int, Optional[int]] = {}
@@ -454,7 +472,7 @@ class ImperfectMemoryMixin:
         self.opponent_rank_memory: Dict[int, Optional[str]] = {}
         self._current_turn: int = 0
 
-        my_hand = game_state.get_player_hand(self.player_id)
+        my_hand = view.get_player_hand(self.player_id)
         num_cards = len(my_hand)
         # Initialize all slots as unknown
         for i in range(num_cards):
@@ -462,13 +480,13 @@ class ImperfectMemoryMixin:
             self.own_rank_memory[i] = None
 
         # Peek initial_view_count cards from the bottom (lowest indices per deal order)
-        peek_count = game_state.house_rules.initial_view_count
+        peek_count = view.get_house_rules().initial_view_count
         for i in range(min(peek_count, num_cards)):
             if isinstance(my_hand[i], Card):
                 self.own_memory[i] = my_hand[i].value
                 self.own_rank_memory[i] = my_hand[i].rank
 
-        opp_hand = game_state.get_player_hand(self.opponent_id)
+        opp_hand = view.get_player_hand(self.opponent_id)
         for i in range(len(opp_hand)):
             self.opponent_memory[i] = None
             self.opponent_rank_memory[i] = None
@@ -491,16 +509,16 @@ class ImperfectMemoryMixin:
         """Return the known value of opponent's card at slot, or None if unknown."""
         return self.opponent_memory.get(slot_index)
 
-    def _update_memory_peek_own(self, slot_index: int, game_state: CambiaGameState):
+    def _update_memory_peek_own(self, slot_index: int, game_state: GameView):
         """Update memory when we peek our own card at slot_index."""
-        my_hand = game_state.get_player_hand(self.player_id)
+        my_hand = as_game_view(game_state).get_player_hand(self.player_id)
         if 0 <= slot_index < len(my_hand) and isinstance(my_hand[slot_index], Card):
             self.own_memory[slot_index] = my_hand[slot_index].value
             self.own_rank_memory[slot_index] = my_hand[slot_index].rank
 
-    def _update_memory_peek_opp(self, slot_index: int, game_state: CambiaGameState):
+    def _update_memory_peek_opp(self, slot_index: int, game_state: GameView):
         """Update memory when we peek opponent's card at slot_index."""
-        opp_hand = game_state.get_player_hand(self.opponent_id)
+        opp_hand = as_game_view(game_state).get_player_hand(self.opponent_id)
         if 0 <= slot_index < len(opp_hand) and isinstance(opp_hand[slot_index], Card):
             self.opponent_memory[slot_index] = opp_hand[slot_index].value
             self.opponent_rank_memory[slot_index] = opp_hand[slot_index].rank
@@ -537,40 +555,37 @@ class ImperfectMemoryMixin:
                 return slot
         return None
 
-    def _own_card_matches_discard(
-        self, slot_index: int, game_state: CambiaGameState
-    ) -> bool:
+    def _own_card_matches_discard(self, slot_index: int, game_state: GameView) -> bool:
         """Return True if we know own card at slot matches the discard top by rank."""
         known_rank = self.own_rank_memory.get(slot_index)
         if known_rank is None:
             return False
-        discard_top = game_state.get_discard_top()
+        discard_top = as_game_view(game_state).get_discard_top()
         if discard_top is None:
             return False
         return known_rank == discard_top.rank
 
-    def _opp_card_matches_discard(
-        self, slot_index: int, game_state: CambiaGameState
-    ) -> bool:
+    def _opp_card_matches_discard(self, slot_index: int, game_state: GameView) -> bool:
         """Return True if we know opponent's card at slot matches the discard top by rank."""
         known_rank = self.opponent_rank_memory.get(slot_index)
         if known_rank is None:
             return False
-        discard_top = game_state.get_discard_top()
+        discard_top = as_game_view(game_state).get_discard_top()
         if discard_top is None:
             return False
         return known_rank == discard_top.rank
 
     def _handle_ability_phase_imperfect(
         self,
-        game_state: CambiaGameState,
-        legal_actions: Set[GameAction],
+        game_state: GameView,
+        legal_actions: Sequence[GameAction],
     ) -> Optional[GameAction]:
         """
         Handle ability phases for imperfect info agents.
         Prioritize peeking unknown cards to gain information.
         Returns chosen action or None if not in an ability phase.
         """
+        view = as_game_view(game_state)
         sample = next(iter(legal_actions), None)
 
         if isinstance(sample, ActionAbilityPeekOwnSelect):
@@ -655,9 +670,9 @@ class ImperfectMemoryMixin:
 
         if isinstance(sample, ActionAbilityKingSwapDecision):
             # We've peeked via KingLook: use game state pending data if available
-            look_data = game_state.pending_action_data
-            card1 = look_data.get("card1")  # own card
-            card2 = look_data.get("card2")  # opp card
+            pending = view.get_pending()
+            card1 = pending.own_card  # own card
+            card2 = pending.target_card  # opp card
             if isinstance(card1, Card) and isinstance(card2, Card):
                 if card2.value < card1.value:
                     return ActionAbilityKingSwapDecision(perform_swap=True)
@@ -667,8 +682,8 @@ class ImperfectMemoryMixin:
 
     def _handle_snap_move_imperfect(
         self,
-        game_state: CambiaGameState,
-        legal_actions: Set[GameAction],
+        game_state: GameView,
+        legal_actions: Sequence[GameAction],
     ) -> Optional[GameAction]:
         """
         Handle SnapOpponentMove phase: give lowest-known own card.
@@ -731,14 +746,15 @@ class ImperfectGreedyAgent(ImperfectMemoryMixin, BaseAgent):
             self.cambia_threshold,
         )
 
-    def _ensure_initialized(self, game_state: CambiaGameState):
+    def _ensure_initialized(self, game_state: GameView):
         if not self._initialized or self._needs_reinit(game_state):
             self._init_memory(game_state)
             self._initialized = True
 
     def choose_action(
-        self, game_state: CambiaGameState, legal_actions: Set[GameAction]
+        self, game_state: GameView, legal_actions: Sequence[GameAction]
     ) -> GameAction:
+        view = as_game_view(game_state)
         if not legal_actions:
             raise ValueError(
                 f"ImperfectGreedyAgent P{self.player_id} cannot choose from empty legal actions."
@@ -756,7 +772,7 @@ class ImperfectGreedyAgent(ImperfectMemoryMixin, BaseAgent):
             return snap_move_action
 
         # 3. Snap phase: only snap own cards we know match
-        if game_state.snap_phase_active:
+        if view.get_snap_state().active:
             # List comprehension (not set): preserves legal_actions' canonical
             # order so the first-match returned below is process-deterministic
             # (cambia-444; a set() rebuild here re-exposes PYTHONHASHSEED salt
@@ -780,12 +796,12 @@ class ImperfectGreedyAgent(ImperfectMemoryMixin, BaseAgent):
             if num_known >= 3 and estimated_value <= self.cambia_threshold + 4:
                 return ActionCallCambia()
             # Late-game fallback at turn 20+
-            if game_state._turn_number >= 20:
+            if view.turn_number() >= 20:
                 return ActionCallCambia()
 
         # 5. Post-draw: discard or replace
         if any(isinstance(a, (ActionDiscard, ActionReplace)) for a in legal_actions):
-            drawn_card = game_state.pending_action_data.get("drawn_card")
+            drawn_card = view.get_pending().drawn_card
             if not drawn_card or not isinstance(drawn_card, Card):
                 return (
                     ActionDiscard(use_ability=False)
@@ -857,14 +873,15 @@ class MemoryHeuristicAgent(ImperfectMemoryMixin, BaseAgent):
             self.cambia_threshold,
         )
 
-    def _ensure_initialized(self, game_state: CambiaGameState):
+    def _ensure_initialized(self, game_state: GameView):
         if not self._initialized or self._needs_reinit(game_state):
             self._init_memory(game_state)
             self._initialized = True
 
     def choose_action(
-        self, game_state: CambiaGameState, legal_actions: Set[GameAction]
+        self, game_state: GameView, legal_actions: Sequence[GameAction]
     ) -> GameAction:
+        view = as_game_view(game_state)
         if not legal_actions:
             raise ValueError(
                 f"MemoryHeuristicAgent P{self.player_id} cannot choose from empty legal actions."
@@ -882,7 +899,7 @@ class MemoryHeuristicAgent(ImperfectMemoryMixin, BaseAgent):
             return snap_move_action
 
         # 3. Snap phase: only snap own cards we know match
-        if game_state.snap_phase_active:
+        if view.get_snap_state().active:
             # List comprehension (not set): see cambia-444 note in
             # ImperfectGreedyAgent.choose_action above.
             snap_own_actions = [a for a in legal_actions if isinstance(a, ActionSnapOwn)]
@@ -900,12 +917,12 @@ class MemoryHeuristicAgent(ImperfectMemoryMixin, BaseAgent):
             estimated_value = self._estimate_own_hand_value()
             if num_known >= 3 and estimated_value <= self.cambia_threshold + 4:
                 return ActionCallCambia()
-            if game_state._turn_number >= 20:
+            if view.turn_number() >= 20:
                 return ActionCallCambia()
 
         # 5. Post-draw: discard or replace
         if any(isinstance(a, (ActionDiscard, ActionReplace)) for a in legal_actions):
-            drawn_card = game_state.pending_action_data.get("drawn_card")
+            drawn_card = view.get_pending().drawn_card
             if not drawn_card or not isinstance(drawn_card, Card):
                 return (
                     ActionDiscard(use_ability=False)
@@ -956,7 +973,7 @@ class RandomNoCambiaAgent(RandomAgent):
     random Cambia calls, providing a cleaner random baseline."""
 
     def choose_action(
-        self, game_state: CambiaGameState, legal_actions: Set[GameAction]
+        self, game_state: GameView, legal_actions: Sequence[GameAction]
     ) -> GameAction:
         # List comprehension (not set): preserves legal_actions' canonical
         # order so RandomAgent.choose_action's random.choice() draws against a
@@ -982,9 +999,9 @@ class RandomLateCambiaAgent(RandomAgent):
         self.n_turns = n_turns
 
     def choose_action(
-        self, game_state: CambiaGameState, legal_actions: Set[GameAction]
+        self, game_state: GameView, legal_actions: Sequence[GameAction]
     ) -> GameAction:
-        if game_state._turn_number < self.n_turns:
+        if as_game_view(game_state).turn_number() < self.n_turns:
             # List comprehension (not set): see cambia-444 note in
             # RandomNoCambiaAgent.choose_action above.
             filtered = [a for a in legal_actions if not isinstance(a, ActionCallCambia)]
@@ -1013,20 +1030,21 @@ class AggressiveSnapAgent(ImperfectMemoryMixin, BaseAgent):
         self._initialized = False
         logger.info("AggressiveSnapAgent P%d initialized", self.player_id)
 
-    def _ensure_initialized(self, game_state: CambiaGameState):
+    def _ensure_initialized(self, game_state: GameView):
         if not self._initialized or self._needs_reinit(game_state):
             self._init_memory(game_state)
             self._initialized = True
 
     def _handle_ability_phase_aggressive(
         self,
-        game_state: CambiaGameState,
-        legal_actions: Set[GameAction],
+        game_state: GameView,
+        legal_actions: Sequence[GameAction],
     ) -> Optional[GameAction]:
         """
         Aggressive ability handling: peek opponent cards first (for snap setup),
         then peek own unknowns. King: swap if beneficial.
         """
+        view = as_game_view(game_state)
         sample = next(iter(legal_actions), None)
 
         if isinstance(sample, ActionAbilityPeekOwnSelect):
@@ -1107,9 +1125,9 @@ class AggressiveSnapAgent(ImperfectMemoryMixin, BaseAgent):
             )
 
         if isinstance(sample, ActionAbilityKingSwapDecision):
-            look_data = game_state.pending_action_data
-            card1 = look_data.get("card1")  # own card
-            card2 = look_data.get("card2")  # opp card
+            pending = view.get_pending()
+            card1 = pending.own_card  # own card
+            card2 = pending.target_card  # opp card
             if isinstance(card1, Card) and isinstance(card2, Card):
                 if card2.value < card1.value:
                     return ActionAbilityKingSwapDecision(perform_swap=True)
@@ -1118,8 +1136,9 @@ class AggressiveSnapAgent(ImperfectMemoryMixin, BaseAgent):
         return None
 
     def choose_action(
-        self, game_state: CambiaGameState, legal_actions: Set[GameAction]
+        self, game_state: GameView, legal_actions: Sequence[GameAction]
     ) -> GameAction:
+        view = as_game_view(game_state)
         if not legal_actions:
             raise ValueError(
                 f"AggressiveSnapAgent P{self.player_id} cannot choose from empty legal actions."
@@ -1137,7 +1156,7 @@ class AggressiveSnapAgent(ImperfectMemoryMixin, BaseAgent):
             return snap_move_action
 
         # 3. Snap phase: snap own known matches AND opponent known matches
-        if game_state.snap_phase_active:
+        if view.get_snap_state().active:
             # Try own snaps first
             # List comprehensions (not sets): see cambia-444 note in
             # ImperfectGreedyAgent.choose_action.
@@ -1169,13 +1188,13 @@ class AggressiveSnapAgent(ImperfectMemoryMixin, BaseAgent):
             if (
                 hand_size <= self.CAMBIA_HAND_SIZE_THRESHOLD
                 or (num_known >= 3 and estimated_value <= self.CAMBIA_VALUE_THRESHOLD + 4)
-                or game_state._turn_number >= 20
+                or view.turn_number() >= 20
             ):
                 return ActionCallCambia()
 
         # 5. Post-draw: replace high cards, otherwise discard with ability (to peek opponent)
         if any(isinstance(a, (ActionDiscard, ActionReplace)) for a in legal_actions):
-            drawn_card = game_state.pending_action_data.get("drawn_card")
+            drawn_card = view.get_pending().drawn_card
             if not drawn_card or not isinstance(drawn_card, Card):
                 return (
                     ActionDiscard(use_ability=False)
@@ -1259,23 +1278,27 @@ class HumanPlayerAgent(ImperfectMemoryMixin, BaseAgent):
         # State diffing
         self._last_discard_len: int = 0
 
-    def _ensure_initialized(self, game_state: CambiaGameState):
+    def _ensure_initialized(self, game_state: GameView):
+        view = as_game_view(game_state)
         if not self._initialized or self._needs_reinit(game_state):
             self._init_memory(game_state)
-            self._last_discard_len = len(game_state.discard_pile)
+            self._last_discard_len = view.discard_len()
             self._recent_discards.clear()
             self._important_discard_counts.clear()
             self._own_rank_discard_counts.clear()
             self._opponent_may_know_slots.clear()
             self._initialized = True
 
-    def _sync_observations(self, game_state: CambiaGameState):
+    def _sync_observations(self, game_state: GameView):
         """Observe what changed since last turn: track new discards."""
-        pile = game_state.discard_pile
+        view = as_game_view(game_state)
+        pile = view.get_discard_pile()
         new_len = len(pile)
         if new_len > self._last_discard_len:
             for i in range(self._last_discard_len, new_len):
                 card = pile[i]
+                if not isinstance(card, Card):
+                    continue
                 self._recent_discards.append(card)
                 # Always remember important ranks
                 if card.rank in self.IMPORTANT_RANKS:
@@ -1323,19 +1346,20 @@ class HumanPlayerAgent(ImperfectMemoryMixin, BaseAgent):
         """Count how many own cards we know."""
         return sum(1 for v in self.own_memory.values() if v is not None)
 
-    def _should_call_cambia(self, game_state: CambiaGameState) -> bool:
+    def _should_call_cambia(self, game_state: GameView) -> bool:
         """Decide whether to call Cambia based on hand knowledge.
 
         A human player needs to know most of their hand before going out.
         Estimated hand value includes UNKNOWN_PENALTY for each unknown card,
         so comparing directly against threshold is properly conservative.
         """
+        view = as_game_view(game_state)
         num_known = self._count_known()
         num_total = len(self.own_memory)
 
         # Need to know at least 3 of 4 cards before considering Cambia
         # (a human wouldn't go out knowing only half their hand)
-        if num_known < 3 and game_state._turn_number < 15:
+        if num_known < 3 and view.turn_number() < 15:
             return False
 
         estimated = self._estimate_hand_value()
@@ -1346,14 +1370,15 @@ class HumanPlayerAgent(ImperfectMemoryMixin, BaseAgent):
             return True
 
         # Late-game fallback: accept slightly higher hand at turn 20+
-        if game_state._turn_number >= 20 and estimated <= self.CAMBIA_THRESHOLD + 4:
+        if view.turn_number() >= 20 and estimated <= self.CAMBIA_THRESHOLD + 4:
             return True
 
         return False
 
     def choose_action(
-        self, game_state: CambiaGameState, legal_actions: Set[GameAction]
+        self, game_state: GameView, legal_actions: Sequence[GameAction]
     ) -> GameAction:
+        view = as_game_view(game_state)
         if not legal_actions:
             raise ValueError(
                 f"HumanPlayerAgent P{self.player_id} cannot choose from empty legal actions."
@@ -1372,7 +1397,7 @@ class HumanPlayerAgent(ImperfectMemoryMixin, BaseAgent):
             return snap_move_action
 
         # 3. Snap phase: snap own known matches, snap opponent known matches
-        if game_state.snap_phase_active:
+        if view.get_snap_state().active:
             # Own snaps: only snap cards we know match
             # List comprehensions (not sets): see cambia-444 note in
             # ImperfectGreedyAgent.choose_action.
@@ -1408,12 +1433,13 @@ class HumanPlayerAgent(ImperfectMemoryMixin, BaseAgent):
         return list(legal_actions)[0]
 
     def _handle_draw(
-        self, game_state: CambiaGameState, legal_actions: Set[GameAction]
+        self, game_state: GameView, legal_actions: Sequence[GameAction]
     ) -> GameAction:
         """Choose between drawing from stockpile or discard pile."""
+        view = as_game_view(game_state)
         # Draw from discard if the top card is very low and we have a high card to replace
         if ActionDrawDiscard() in legal_actions:
-            top = game_state.get_discard_top()
+            top = view.get_discard_top()
             if top and top.value <= self.DRAW_FROM_DISCARD_MAX_VALUE:
                 # Check if we have a card worth replacing with this
                 high_slot = self._find_highest_known_own_slot()
@@ -1429,10 +1455,11 @@ class HumanPlayerAgent(ImperfectMemoryMixin, BaseAgent):
         return ActionDrawStockpile()
 
     def _handle_post_draw(
-        self, game_state: CambiaGameState, legal_actions: Set[GameAction]
+        self, game_state: GameView, legal_actions: Sequence[GameAction]
     ) -> GameAction:
         """Decide whether to replace a hand card or discard (with/without ability)."""
-        drawn_card = game_state.pending_action_data.get("drawn_card")
+        view = as_game_view(game_state)
+        drawn_card = view.get_pending().drawn_card
         if not drawn_card or not isinstance(drawn_card, Card):
             return (
                 ActionDiscard(use_ability=False)
@@ -1498,10 +1525,11 @@ class HumanPlayerAgent(ImperfectMemoryMixin, BaseAgent):
 
     def _handle_ability_phase_human(
         self,
-        game_state: CambiaGameState,
-        legal_actions: Set[GameAction],
+        game_state: GameView,
+        legal_actions: Sequence[GameAction],
     ) -> Optional[GameAction]:
         """Handle ability phases with memory updates and opponent tracking."""
+        view = as_game_view(game_state)
         sample = next(iter(legal_actions), None)
 
         # 7/8: Peek own unknown card
@@ -1590,9 +1618,9 @@ class HumanPlayerAgent(ImperfectMemoryMixin, BaseAgent):
 
         # King swap decision
         if isinstance(sample, ActionAbilityKingSwapDecision):
-            look_data = game_state.pending_action_data
-            card1 = look_data.get("card1")  # own card
-            card2 = look_data.get("card2")  # opp card
+            pending = view.get_pending()
+            card1 = pending.own_card  # own card
+            card2 = pending.target_card  # opp card
             if isinstance(card1, Card) and isinstance(card2, Card):
                 if card2.value < card1.value:
                     return ActionAbilityKingSwapDecision(perform_swap=True)

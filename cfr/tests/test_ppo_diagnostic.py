@@ -464,11 +464,13 @@ def tiny_ppo_model_path():
 
 class TestPPOAgentWrapperIntegration:
     def test_ppo_agent_wrapper_full_game(self, tiny_ppo_model_path, test_config):
-        """Load trained model and play a complete game via eval harness."""
-        from src.game.engine import CambiaGameState
-        from src.agent_state import AgentState, AgentObservation
-        from src.constants import NUM_PLAYERS
-        import copy
+        """Load a trained model and play a complete game through the eval loop.
+
+        Driven by _GoEvalGame (cambia-1426): the wrapper's belief is a
+        GoAgentState the engine advances, so the test no longer hand-builds and
+        strips AgentObservations to feed it.
+        """
+        from src.evaluate_agents import _GoEvalGame
 
         agent = get_agent(
             "ppo",
@@ -476,55 +478,25 @@ class TestPPOAgentWrapperIntegration:
             config=test_config,
             model_path=tiny_ppo_model_path,
         )
-
-        gs = CambiaGameState(house_rules=test_config.cambia_rules)
-        agent.initialize_state(gs)
-
-        # Set up a simple opponent (random)
         opponent = get_agent("random", player_id=1, config=test_config)
+        agents = [agent, opponent]
 
-        def _make_obs(game_state, acting_player, action):
-            return AgentObservation(
-                acting_player=acting_player,
-                action=action,
-                discard_top_card=game_state.get_discard_top(),
-                player_hand_sizes=[
-                    game_state.get_player_card_count(i) for i in range(NUM_PLAYERS)
-                ],
-                stockpile_size=game_state.get_stockpile_size(),
-                drawn_card=None,
-                peeked_cards=None,
-                snap_results=list(game_state.snap_results_log),
-                did_cambia_get_called=(game_state.cambia_caller_id is not None),
-                who_called_cambia=game_state.cambia_caller_id,
-                is_game_over=game_state.is_terminal(),
-                current_turn=game_state.get_turn_number(),
-            )
+        session = _GoEvalGame(test_config.cambia_rules, 41, 2, agents)
+        try:
+            for _step in range(500):
+                if session.is_terminal():
+                    break
+                acting = session.acting_player()
+                legal = session.legal_actions()
+                if not legal:
+                    break
+                session.apply(agents[acting].choose_action(session.engine, legal))
 
-        for step in range(500):
-            if gs.is_terminal():
-                break
-            acting = gs.get_acting_player()
-            legal = gs.get_legal_actions()
-
-            if acting == 0:
-                action = agent.choose_action(gs, legal)
-            else:
-                action = opponent.choose_action(gs, legal)
-
-            gs.apply_action(action)
-            obs = _make_obs(gs, acting, action)
-
-            # Strip private info
-            filtered = copy.copy(obs)
-            filtered.drawn_card = None
-            filtered.peeked_cards = None
-
-            agent.update_state(filtered)
-
-        assert gs.is_terminal(), "Game should terminate within 500 steps"
-        utility = gs.get_utility(0)
-        assert utility in {-1, 0, 1}
+            assert session.is_terminal(), "Game should terminate within 500 steps"
+            utility = float(session.engine.get_utility()[0])
+            assert utility in {-1.0, 0.0, 1.0}
+        finally:
+            session.close()
 
 
 # ==================================================================

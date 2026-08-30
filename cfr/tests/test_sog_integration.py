@@ -96,26 +96,26 @@ def test_sog_inference_in_agent_registry():
 def test_sog_inference_choose_action_with_state():
     """SoGInferenceAgentWrapper.choose_action returns a valid action."""
     from src.evaluate_agents import SoGInferenceAgentWrapper
-    from src.game.engine import CambiaGameState
+    from src.ffi.bridge import GoEngine
+    from src.agents import action_codec
 
     config = _make_config()
     wrapper = SoGInferenceAgentWrapper(
         player_id=0, config=config, checkpoint_path="", device="cpu"
     )
 
-    game_state = CambiaGameState(house_rules=config.cambia_rules)
-    wrapper.initialize_state(game_state)
-
-    legal = game_state.get_legal_actions()
-    action = wrapper.choose_action(game_state, legal)
-    assert action in legal
+    with GoEngine(seed=31, house_rules=config.cambia_rules) as game_state:
+        wrapper.initialize_state(game_state)
+        legal = action_codec.actions_from_mask(game_state.legal_actions_mask())
+        action = wrapper.choose_action(game_state, legal)
+        assert action in legal
+        wrapper.release_belief()
 
 
 def test_sog_inference_full_game_vs_random():
     """SoGInferenceAgentWrapper completes a game vs random without error."""
-    from src.evaluate_agents import SoGInferenceAgentWrapper, NeuralAgentWrapper
+    from src.evaluate_agents import SoGInferenceAgentWrapper, _GoEvalGame
     from src.agents.baseline_agents import RandomAgent
-    from src.game.engine import CambiaGameState
 
     config = _make_config()
     agents = [
@@ -125,24 +125,19 @@ def test_sog_inference_full_game_vs_random():
         RandomAgent(player_id=1, config=config),
     ]
 
-    game_state = CambiaGameState(house_rules=config.cambia_rules)
-    for agent in agents:
-        if isinstance(agent, NeuralAgentWrapper):
-            agent.initialize_state(game_state)
-
-    turns = 0
-    while not game_state.is_terminal() and turns < 300:
-        turns += 1
-        pid = game_state.get_acting_player()
-        if pid == -1:
-            break
-        legal = game_state.get_legal_actions()
-        if not legal:
-            break
-        action = agents[pid].choose_action(game_state, legal)
-        game_state.apply_action(action)
-
-    assert game_state.is_terminal() or turns >= 300
+    session = _GoEvalGame(config.cambia_rules, 32, 2, agents)
+    try:
+        turns = 0
+        while not session.is_terminal() and turns < 300:
+            turns += 1
+            pid = session.acting_player()
+            legal = session.legal_actions()
+            if not legal:
+                break
+            session.apply(agents[pid].choose_action(session.engine, legal))
+        assert session.is_terminal() or turns >= 300
+    finally:
+        session.close()
 
 
 # ---------------------------------------------------------------------------
@@ -176,9 +171,8 @@ def test_sog_search_budget_toggle():
 @skipgo
 def test_sog_agent_full_game_vs_random():
     """SoGAgentWrapper (with GoEngine) completes a game vs random without error."""
-    from src.evaluate_agents import SoGAgentWrapper, NeuralAgentWrapper
+    from src.evaluate_agents import SoGAgentWrapper, _GoEvalGame
     from src.agents.baseline_agents import RandomAgent
-    from src.game.engine import CambiaGameState
 
     config = _make_config(eval_budget=3)
     agents = [
@@ -193,24 +187,19 @@ def test_sog_agent_full_game_vs_random():
         RandomAgent(player_id=1, config=config),
     ]
 
-    game_state = CambiaGameState(house_rules=config.cambia_rules)
-    for agent in agents:
-        if isinstance(agent, NeuralAgentWrapper):
-            agent.initialize_state(game_state)
-
-    turns = 0
-    while not game_state.is_terminal() and turns < 300:
-        turns += 1
-        pid = game_state.get_acting_player()
-        if pid == -1:
-            break
-        legal = game_state.get_legal_actions()
-        if not legal:
-            break
-        action = agents[pid].choose_action(game_state, legal)
-        game_state.apply_action(action)
-
-    assert game_state.is_terminal() or turns >= 300
+    session = _GoEvalGame(config.cambia_rules, 33, 2, agents)
+    try:
+        turns = 0
+        while not session.is_terminal() and turns < 300:
+            turns += 1
+            pid = session.acting_player()
+            legal = session.legal_actions()
+            if not legal:
+                break
+            session.apply(agents[pid].choose_action(session.engine, legal))
+        assert session.is_terminal() or turns >= 300
+    finally:
+        session.close()
     # Cleanup
     for agent in agents:
         if hasattr(agent, "_cleanup_search"):

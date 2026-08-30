@@ -107,16 +107,19 @@ class TestDeepCFRAgentWrapper:
         config = _make_config()
 
         from src.evaluate_agents import DeepCFRAgentWrapper
-        from src.game.engine import CambiaGameState
+        from src.agents import action_codec
+        from src.ffi.bridge import GoEngine
 
         agent = DeepCFRAgentWrapper(player_id=0, config=config, checkpoint_path=ckpt_path)
-        game = CambiaGameState(house_rules=config.cambia_rules)
-        agent.initialize_state(game)
-
-        legal = game.get_legal_actions()
-        if legal:
+        # The Go engine is what the eval loop plays on (cambia-1426); the
+        # wrapper's belief is a GoAgentState bound to this game.
+        with GoEngine(seed=7, house_rules=config.cambia_rules) as game:
+            agent.initialize_state(game)
+            legal = action_codec.actions_from_mask(game.legal_actions_mask())
+            assert legal
             action = agent.choose_action(game, legal)
             assert action in legal
+            agent.release_belief()
 
     def test_choose_action_without_state_init_falls_back(self, tmp_path):
         """choose_action on uninitialized agent falls back to random without crashing."""

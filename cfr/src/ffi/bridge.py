@@ -1207,6 +1207,11 @@ class GoAgentState:
     ) -> None:
         self._lib = _get_lib()
         self._closed = False
+        # Set before the handle is claimed: cambia_agent_new can raise (a bad
+        # engine argument, an exhausted pool), and __del__ runs on the
+        # half-built object, where reading an unset _agent_h raised a second,
+        # confusing AttributeError out of the first failure.
+        self._agent_h = -1
 
         # Pre-allocated reusable encode buffers (T1-2 cffi buffer reuse).
         # encode (222), encode_eppbs (224), encode_eppbs_interleaved_v2 (257),

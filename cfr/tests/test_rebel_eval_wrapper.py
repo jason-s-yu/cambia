@@ -214,7 +214,8 @@ def test_rebel_choose_action_without_state():
 def test_rebel_choose_action_with_state():
     """choose_action runs PBSPolicyNetwork inference with initialized agent state."""
     from src.evaluate_agents import ReBeLAgentWrapper
-    from src.game.engine import CambiaGameState
+    from src.ffi.bridge import GoEngine
+    from src.agents import action_codec
 
     config = _make_config()
     with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
@@ -225,21 +226,22 @@ def test_rebel_choose_action_with_state():
         player_id=0, config=config, checkpoint_path=path, device="cpu"
     )
 
-    game_state = CambiaGameState(house_rules=config.cambia_rules)
-    wrapper.initialize_state(game_state)
-    assert wrapper.agent_state is not None
+    with GoEngine(seed=5, house_rules=config.cambia_rules) as game_state:
+        wrapper.initialize_state(game_state)
+        assert wrapper.agent_state is not None
 
-    legal_actions = game_state.get_legal_actions()
-    assert legal_actions
+        legal_actions = action_codec.actions_from_mask(game_state.legal_actions_mask())
+        assert legal_actions
 
-    action = wrapper.choose_action(game_state, legal_actions)
-    assert action in legal_actions
+        action = wrapper.choose_action(game_state, legal_actions)
+        assert action in legal_actions
+        wrapper.release_belief()
 
 
 def test_rebel_build_pbs_shape():
     """_build_pbs returns a PBS with correct shapes."""
     from src.evaluate_agents import ReBeLAgentWrapper
-    from src.game.engine import CambiaGameState
+    from src.ffi.bridge import GoEngine
     from src.pbs import NUM_HAND_TYPES, NUM_PUBLIC_FEATURES
 
     config = _make_config()
@@ -250,15 +252,17 @@ def test_rebel_build_pbs_shape():
     wrapper = ReBeLAgentWrapper(
         player_id=0, config=config, checkpoint_path=path, device="cpu"
     )
-    game_state = CambiaGameState(house_rules=config.cambia_rules)
-
-    pbs = wrapper._build_pbs(game_state)
+    with GoEngine(seed=6, house_rules=config.cambia_rules) as game_state:
+        pbs = wrapper._build_pbs(game_state)
     assert pbs.range_p0.shape == (NUM_HAND_TYPES,)
     assert pbs.range_p1.shape == (NUM_HAND_TYPES,)
     assert pbs.public_features.shape == (NUM_PUBLIC_FEATURES,)
     # Uniform ranges sum to 1
     assert abs(pbs.range_p0.sum() - 1.0) < 1e-5
     assert abs(pbs.range_p1.sum() - 1.0) < 1e-5
+    # Teeth: the public block is really derived from the state, not the
+    # all-zeros fallback the builder uses when it cannot read one.
+    assert pbs.public_features.any()
 
 
 # ---------------------------------------------------------------------------
@@ -285,11 +289,12 @@ def test_initialize_state_called_via_isinstance():
     ), "ReBeLAgentWrapper must be an instance of NeuralAgentWrapper"
     assert wrapper.agent_state is None  # not yet initialized
 
-    from src.game.engine import CambiaGameState
+    from src.ffi.bridge import GoEngine
 
-    game_state = CambiaGameState(house_rules=config.cambia_rules)
-    wrapper.initialize_state(game_state)
-    assert wrapper.agent_state is not None
+    with GoEngine(seed=7, house_rules=config.cambia_rules) as game_state:
+        wrapper.initialize_state(game_state)
+        assert wrapper.agent_state is not None
+        wrapper.release_belief()
 
 
 def test_checkpoint_rebel_config_key_loads():

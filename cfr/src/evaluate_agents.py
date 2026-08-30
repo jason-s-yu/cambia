@@ -15,7 +15,10 @@ import math
 from tqdm import tqdm
 
 from src.config import load_config, Config
-from src.game.engine import CambiaGameState
+from src.agents import action_codec
+from src.agents.game_view import GameView, tracked_opponent_seat
+from src.agents.go_belief_view import GoBeliefView
+from src.ffi.bridge import GoAgentState, GoEngine, apply_games_batch
 from src.agents.baseline_agents import (
     BaseAgent,
     RandomAgent,
@@ -28,7 +31,6 @@ from src.agents.baseline_agents import (
     HumanPlayerAgent,
 )
 from src.agent_state import AgentState, AgentObservation
-from src.cfr.trainer import CFRTrainer
 from src.utils import (
     InfosetKey,
     normalize_probabilities,
@@ -48,13 +50,14 @@ from src.constants import (
 )
 from src.cfr.exceptions import GameStateError, AgentStateError, ObservationUpdateError
 
-# The training driver's observation builder and per-observer mask. Evaluation
-# feeds belief models through these same two functions so an evaluated agent
-# sees exactly the observation stream training produced (cambia-1038).
-from src.cfr.worker import (
-    _create_observation as _worker_create_observation,
-    _filter_observation as _worker_filter_observation,
-)
+# NOTE: src.cfr.worker's observation builders are deliberately NOT imported
+# here. They take a Python CambiaGameState, and importing that module would pull
+# src.game back into this module's import graph, which is the thing this file no
+# longer depends on (cambia-1426). Belief is now advanced by the engine itself:
+# an agent's GoAgentState is updated in the same FFI crossing that applies the
+# action, so there is no Python-side observation to build, filter or share. The
+# tabular CFRAgentWrapper still speaks that language and imports it lazily,
+# inside the one method that needs it.
 
 logging.basicConfig(
     level=logging.ERROR, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -62,87 +65,85 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _drawn_card_bucket_from_game_state(game_state) -> int:
-    """The acting player's own drawn-card bucket, or -1 if none is pending.
+# --- Go-engine decision helpers ---
+#
+# The three Python-engine observation builders that used to live here are gone
+# (cambia-1426). Nothing on the eval path builds an AgentObservation any more:
+# belief state advances inside the engine, in the same FFI crossing that applies
+# the action, and each wrapper reads its own belief off its GoAgentState.
 
-    Mirrors the Go FFI ``cambia_game_get_drawn_card_bucket`` the v2 trainer
-    feeds ``encode_infoset_eppbs_interleaved_v2``: a bucket only exists while a
-    discard decision is pending (POST_DRAW); otherwise -1. The drawn card is the
-    acting player's own private information, legitimately known at decision time.
-    Used by the v2 eval wrappers so their encoding matches the training
-    distribution byte-for-byte on dims [0:11] (the drawn-card one-hot).
+#: engine/types.go CtxTerminal. Has no DecisionContext counterpart.
+_CTX_TERMINAL = 5
+
+
+def _seat_count(view) -> int:
+    """Seats at this table, from a GameView or the Python reference engine.
+
+    GameView answers ``num_players()``; CambiaGameState carries ``num_players``
+    as a plain attribute. Accepting both keeps the belief-attach path callable
+    from the Python-engine test fixtures that have not moved over.
+    """
+    n = getattr(view, "num_players", 2)
+    if callable(n):
+        n = n()
+    return max(2, int(n))
+
+
+def _decision_context(view: GameView) -> DecisionContext:
+    """The acting seat's decision context, read off the engine.
+
+    The engine's own DecisionCtx is the authority (engine/types.go: 0=StartTurn,
+    1=PostDraw, 2=SnapDecision, 3=AbilitySelect, 4=SnapMove, 5=Terminal), and
+    its first five values are numerically identical to DecisionContext's, so the
+    mapping is the identity rather than a re-derivation from the pending record.
+    A terminal state has no decision to make; it reports START_TURN so a caller
+    racing the terminal check gets a valid context instead of raising.
+    """
+    ctx = int(view.decision_ctx())
+    if ctx == _CTX_TERMINAL:
+        return DecisionContext.START_TURN
+    return DecisionContext(ctx)
+
+
+def _drawn_card_bucket(view: GameView) -> int:
+    """The acting seat's own drawn-card bucket, or -1 if none is pending.
+
+    Straight off ``cambia_game_get_drawn_card_bucket``, the same source the v2
+    trainer feeds ``encode_infoset_eppbs_interleaved_v2``: a bucket only exists
+    while a discard decision is pending (POST_DRAW), else -1. The drawn card is
+    the acting seat's own private information, legitimately known at decision
+    time.
     """
     try:
-        from src.abstraction import get_card_bucket
-        from src.constants import CardBucket
-
-        if getattr(game_state, "snap_phase_active", False):
-            return -1
-        if not isinstance(getattr(game_state, "pending_action", None), ActionDiscard):
-            return -1
-        drawn = (getattr(game_state, "pending_action_data", None) or {}).get("drawn_card")
-        if drawn is None:
-            return -1
-        bucket = get_card_bucket(drawn)
-        return int(bucket.value) if bucket != CardBucket.UNKNOWN else -1
+        return int(view.get_drawn_card_bucket())
     except Exception:  # JUSTIFIED: evaluation resilience -- fall back to "no draw"
         return -1
 
 
-def _build_transition_observation(
+# --- Python-engine observation builder (tabular CFR only) ---
+
+
+def _build_python_public_observation(
     game_state,
     action: Optional[GameAction],
     acting_player: int,
 ) -> Optional[AgentObservation]:
-    """Builds the post-action observation shared by every belief wrapper.
+    """Public-only post-action observation from a Python CambiaGameState.
 
-    This is the training driver's own builder (``worker._create_observation``,
-    called with the post-action state exactly as the traversal calls it), so the
-    result carries the ACTOR's private drawn and peeked cards. It is therefore an
-    unfiltered observation: every consumer must run it through
-    ``worker._filter_observation(obs, observer_id)`` before handing it to a
-    belief model, which is what masks the private fields for the non-actor seats
-    (cambia-1038). Sharing one unfiltered object across observers is the training
-    contract (``worker.py`` builds once, filters per agent) and is safe because
-    ``_filter_observation`` returns a fresh shallow copy per observer and
-    ``AgentState.update`` never mutates the observation.
-
-    ``snap_results`` is deep-copied so the shared observation does not alias the
-    engine's live log across the game.
+    The last Python-engine observation builder left on this path, kept for the
+    tabular CFRAgentWrapper alone (see its docstring for why that wrapper cannot
+    run on the Go engine). Public-only, so the result is identical for every
+    observer. NUM_PLAYERS is read off the state rather than the module constant
+    so it does not misreport hand sizes at a larger table.
     """
     try:
-        return _worker_create_observation(
-            None,
-            action,
-            game_state,
-            acting_player,
-            copy.deepcopy(game_state.snap_results_log),
-        )
-    except Exception as e_obs:  # JUSTIFIED: evaluation resilience
-        logger.error("Failed to build transition observation: %s", e_obs, exc_info=True)
-        return None
-
-
-def _build_public_observation(
-    game_state,
-    action: Optional[GameAction],
-    acting_player: int,
-) -> Optional[AgentObservation]:
-    """Builds a public-only post-action observation.
-
-    No drawn or peeked cards, so the result is identical for every observer and
-    independent of which agent asks for it. Used for the pre-first-action initial
-    observation (where no private information exists) and by wrappers that
-    deliberately train on a public-only belief feed. The per-transition eval feed
-    uses ``_build_transition_observation`` instead.
-    """
-    try:
+        num_players = int(getattr(game_state, "num_players", NUM_PLAYERS))
         return AgentObservation(
             acting_player=acting_player,
             action=action,
             discard_top_card=game_state.get_discard_top(),
             player_hand_sizes=[
-                game_state.get_player_card_count(i) for i in range(NUM_PLAYERS)
+                game_state.get_player_card_count(i) for i in range(num_players)
             ],
             stockpile_size=game_state.get_stockpile_size(),
             drawn_card=None,
@@ -162,7 +163,18 @@ def _build_public_observation(
 
 
 class CFRAgentWrapper(BaseAgent):
-    """Wraps a computed average strategy for use in evaluation."""
+    """Wraps a computed average strategy for use in evaluation.
+
+    PYTHON ENGINE ONLY. This is the one wrapper the Go evaluation loop cannot
+    drive (cambia-1426). Its tabular infoset key needs GamePhase, which is a
+    function of who called Cambia, and the engine exports no cambia-caller
+    accessor: every other component of the key (own-hand buckets, opponent
+    belief, hand lengths, discard-top bucket, stockpile estimate) is already
+    reachable through GoEngine and GoAgentState. Rebuilding the key without
+    the caller would silently look up the WRONG strategy entries rather than
+    fail, so _GoEvalGame refuses this agent type outright instead. Reaching it
+    needs one engine export; see the ticket.
+    """
 
     def __init__(
         self,
@@ -178,7 +190,7 @@ class CFRAgentWrapper(BaseAgent):
         self.average_strategy = average_strategy
         self.agent_state: Optional[AgentState] = None  # Internal state
 
-    def initialize_state(self, initial_game_state: CambiaGameState):
+    def initialize_state(self, initial_game_state):
         """Initialize the internal AgentState."""
         # FIX: Call internal observation creation method
         initial_obs = self._create_observation(initial_game_state, None, -1)
@@ -235,9 +247,7 @@ class CFRAgentWrapper(BaseAgent):
                 "CFRAgent P%d cannot update state, not initialized.", self.player_id
             )
 
-    def choose_action(
-        self, game_state: CambiaGameState, legal_actions: Set[GameAction]
-    ) -> GameAction:
+    def choose_action(self, game_state, legal_actions: Set[GameAction]) -> GameAction:
         """Chooses an action based on the learned average strategy."""
         if not self.agent_state:
             raise RuntimeError(
@@ -372,12 +382,12 @@ class CFRAgentWrapper(BaseAgent):
     # --- Observation helpers moved into CFRAgentWrapper ---
     def _create_observation(
         self,
-        game_state: CambiaGameState,
+        game_state,
         action: Optional[GameAction],
         acting_player: int,
     ) -> Optional[AgentObservation]:
         """Creates observation needed *by this agent* after an action."""
-        return _build_public_observation(game_state, action, acting_player)
+        return _build_python_public_observation(game_state, action, acting_player)
 
     def _filter_observation(
         self, obs: AgentObservation, observer_id: int
@@ -390,7 +400,9 @@ class CFRAgentWrapper(BaseAgent):
         the single definition of that contract: the actor keeps its own drawn and
         peeked cards, every other seat sees neither.
         """
-        return _worker_filter_observation(obs, observer_id)
+        from src.cfr.worker import _filter_observation as _worker_filter
+
+        return _worker_filter(obs, observer_id)
 
 
 # --- Neural Agent Wrapper Base ---
@@ -403,8 +415,9 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
     """
     Abstract base class for neural-network-backed agent wrappers.
 
-    Shared state management (AgentState init/update) and inference helpers
-    used by DeepCFRAgentWrapper, ESCHERAgentWrapper, and ReBeLAgentWrapper.
+    Owns this seat's belief as a GoAgentState (built at the game's initial
+    state, advanced by the engine) plus the shared inference helpers used by
+    DeepCFRAgentWrapper, ESCHERAgentWrapper, ReBeLAgentWrapper and friends.
     """
 
     def __init__(
@@ -415,166 +428,191 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
 
         self._torch = torch
         self.device = torch.device(device)
-        self.agent_state: Optional[AgentState] = None
+        #: This seat's belief, owned by the Go engine. Built by attach_belief and
+        #: advanced by the engine in the same FFI crossing that applies an
+        #: action, so there is no Python-side update step (cambia-1426).
+        self.agent_state: Optional[GoAgentState] = None
         self._use_argmax = use_argmax
+        self._num_players = 2
+
+    # --- Belief lifecycle ---
+
+    def attach_belief(self, engine, num_players: int = 2) -> GoAgentState:
+        """Bind a fresh GoAgentState for this seat to ``engine``.
+
+        Built at the game's INITIAL state, which is what seeds the seat's
+        initial-peek knowledge (and, for the token wrappers, the private peek
+        prefix of the token stream). Above two seats the N-player factory is
+        used, so the belief tracks a knowledge mask over every seat rather than
+        one opponent.
+
+        Releases any previous belief first: these handles come from a finite
+        pool, and an eval run builds one per game.
+        """
+        self.release_belief()
+        self._num_players = max(2, int(num_players))
+        params = self.config.agent_params
+        memory_level = int(getattr(params, "memory_level", 0))
+        time_decay_turns = int(getattr(params, "time_decay_turns", 0))
+        if self._num_players > 2:
+            self.agent_state = GoAgentState.new_nplayer(
+                engine,
+                self.player_id,
+                num_players=self._num_players,
+                memory_level=memory_level,
+                time_decay_turns=time_decay_turns,
+            )
+        else:
+            self.agent_state = GoAgentState(
+                engine,
+                self.player_id,
+                memory_level=memory_level,
+                time_decay_turns=time_decay_turns,
+            )
+        return self.agent_state
+
+    def belief_handle(self) -> int:
+        """This seat's agent handle for apply_games_batch, or -1 if unattached."""
+        return -1 if self.agent_state is None else int(self.agent_state.handle)
+
+    def _belief_view(self):
+        """This seat's belief as the Python AgentState attribute surface.
+
+        ``src/action_abstraction.py`` reads own_hand / opponent_belief /
+        _current_game_turn off an AgentState and falls back to a collapsed
+        abstraction when they are missing, so a GoAgentState has to be projected
+        rather than passed straight in. Rebuilt per decision: the belief moves
+        every applied action, and a stale projection would abstract against the
+        previous turn's hand.
+        """
+        st = self.agent_state
+        if st is None:
+            raise AgentStateError(
+                f"{self.__class__.__name__} P{self.player_id}: belief not attached."
+            )
+        return GoBeliefView(st)
+
+    def release_belief(self) -> None:
+        """Free this seat's belief handle. Idempotent."""
+        if self.agent_state is not None:
+            try:
+                self.agent_state.close()
+            except Exception as e:  # JUSTIFIED: evaluation resilience
+                logger.error(
+                    "%s P%d belief release error: %s",
+                    self.__class__.__name__,
+                    self.player_id,
+                    e,
+                )
+            self.agent_state = None
 
     @abc.abstractmethod
     def choose_action(self, game_state, legal_actions: Set[GameAction]) -> GameAction:
         pass
 
     def initialize_state(self, initial_game_state):
-        """Initialize internal AgentState."""
-        initial_hand = initial_game_state.players[self.player_id].hand
-        initial_peeks = initial_game_state.players[self.player_id].initial_peek_indices
-        self.agent_state = AgentState(
-            player_id=self.player_id,
-            opponent_id=self.opponent_id,
-            memory_level=self.config.agent_params.memory_level,
-            time_decay_turns=self.config.agent_params.time_decay_turns,
-            initial_hand_size=len(initial_hand),
-            config=self.config,
-        )
-        initial_obs = AgentObservation(
-            acting_player=-1,
-            action=None,
-            discard_top_card=initial_game_state.get_discard_top(),
-            player_hand_sizes=[
-                initial_game_state.get_player_card_count(i) for i in range(NUM_PLAYERS)
-            ],
-            stockpile_size=initial_game_state.get_stockpile_size(),
-            drawn_card=None,
-            peeked_cards=None,
-            snap_results=copy.deepcopy(initial_game_state.snap_results_log),
-            did_cambia_get_called=initial_game_state.cambia_caller_id is not None,
-            who_called_cambia=initial_game_state.cambia_caller_id,
-            is_game_over=initial_game_state.is_terminal(),
-            current_turn=initial_game_state.get_turn_number(),
-        )
-        self.agent_state.initialize(initial_obs, initial_hand, initial_peeks)
+        """Reset this seat's belief for a new game.
 
-    def update_state(self, observation: AgentObservation):
-        """Update internal AgentState after an action.
-
-        Masks the observation with the TRAINING filter
-        (``worker._filter_observation``): this seat keeps its own drawn and
-        peeked cards, every other seat's private cards stay hidden. Before
-        cambia-1038 both fields were nulled unconditionally, which starved the
-        acting agent of exactly the private-card information the belief state
-        exists to track and which training fed it.
+        ``initial_game_state`` is the GoEngine about to be played. Kept under
+        the old name and shape so the callers that reset agents per game
+        (run_evaluation, the head-to-head drivers) are unchanged.
         """
-        if not self.agent_state:
-            return
-        filtered = _worker_filter_observation(observation, self.player_id)
-        try:
-            self.agent_state.update(filtered)
-        except Exception as e:  # JUSTIFIED: evaluation resilience
-            logger.error(
-                "%s P%d state update error: %s",
-                self.__class__.__name__,
-                self.player_id,
-                e,
-            )
+        self.attach_belief(initial_game_state, _seat_count(initial_game_state))
+
+    def update_state(self, observation) -> None:
+        """No-op: belief is advanced by the engine, not by a Python observation.
+
+        The eval loop applies each action through the FFI path that updates the
+        acting game AND every attached agent's belief in one crossing, which is
+        the same path the training driver uses, so an evaluated agent's belief
+        follows the training update rule by construction rather than by a
+        re-derived observation stream (this is what cambia-1038's filter
+        contract was approximating in Python). Retained so callers that still
+        push observations do not crash.
+        """
+        return
 
     def _get_decision_context(self, game_state) -> DecisionContext:
-        """Determine the current decision context from game state."""
-        if game_state.snap_phase_active:
-            return DecisionContext.SNAP_DECISION
-        if game_state.pending_action:
-            pending = game_state.pending_action
-            if isinstance(pending, ActionDiscard):
-                return DecisionContext.POST_DRAW
-            if isinstance(
-                pending,
-                (
-                    ActionAbilityPeekOwnSelect,
-                    ActionAbilityPeekOtherSelect,
-                    ActionAbilityBlindSwapSelect,
-                    ActionAbilityKingLookSelect,
-                    ActionAbilityKingSwapDecision,
-                ),
-            ):
-                return DecisionContext.ABILITY_SELECT
-            if isinstance(pending, ActionSnapOpponentMove):
-                return DecisionContext.SNAP_MOVE
-        return DecisionContext.START_TURN
+        """Determine the current decision context from the engine."""
+        return _decision_context(game_state)
 
-    def _encode_eppbs(self, decision_context: DecisionContext) -> np.ndarray:
-        """Encode agent state using EP-PBS encoding for evaluation.
+    def _encode_eppbs(
+        self, decision_context: DecisionContext, drawn_bucket: int = -1
+    ) -> np.ndarray:
+        """Encode this seat's belief with the EP-PBS layout its network expects.
 
-        Dispatches to the correct layout encoder based on encoding_layout and network_type,
-        mirroring the logic in deep_worker.py:_encode_ep_pbs().
+        Dispatches on encoding_layout and network_type exactly as
+        deep_worker._encode_ep_pbs does, but through the Go encoders: the
+        network is fed by the same code that produced its training inputs
+        instead of a Python re-implementation of them, so there is no encoder
+        drift to keep in sync.
         """
-        from src.encoding import (
-            encode_infoset_eppbs,
-            encode_infoset_eppbs_interleaved,
-            encode_infoset_eppbs_dealiased,
-        )
-
         _INTERLEAVED_NETWORK_TYPES = frozenset({"slot_film", "slot_multiply"})
 
         st = self.agent_state
-        # Determine cambia_state: 0=self called, 1=opponent called, 2=none
-        if st.cambia_caller is None:
-            cambia_state = 2
-        elif st.cambia_caller == self.player_id:
-            cambia_state = 0
-        else:
-            cambia_state = 1
+        if st is None:
+            raise AgentStateError(
+                f"{self.__class__.__name__} P{self.player_id}: belief not attached; "
+                "initialize_state must run before encoding."
+            )
 
-        kwargs = dict(
-            slot_tags=[t.value if hasattr(t, "value") else int(t) for t in st.slot_tags],
-            slot_buckets=[int(b) for b in st.slot_buckets],
-            discard_top_bucket=(
-                st.known_discard_top_bucket.value
-                if hasattr(st.known_discard_top_bucket, "value")
-                else int(st.known_discard_top_bucket)
-            ),
-            stock_estimate=(
-                st.stockpile_estimate.value
-                if hasattr(st.stockpile_estimate, "value")
-                else int(st.stockpile_estimate)
-            ),
-            game_phase=(
-                st.game_phase.value
-                if hasattr(st.game_phase, "value")
-                else int(st.game_phase)
-            ),
-            decision_context=(
-                decision_context.value
-                if hasattr(decision_context, "value")
-                else int(decision_context)
-            ),
-            cambia_state=cambia_state,
+        ctx = (
+            decision_context.value
+            if hasattr(decision_context, "value")
+            else int(decision_context)
         )
-
         layout = getattr(self, "_encoding_layout", "auto")
         network_type = getattr(self, "_network_type", "mlp")
 
         if layout == "flat_dealiased":
-            kwargs["own_hand_size"] = len(st.own_hand)
-            kwargs["opp_hand_size"] = st.opponent_card_count
-            encoding = encode_infoset_eppbs_dealiased(**kwargs)
+            encoding = st.encode_eppbs_dealiased(ctx, int(drawn_bucket))
         elif layout == "interleaved" or network_type in _INTERLEAVED_NETWORK_TYPES:
-            kwargs["own_hand_size"] = len(st.own_hand)
-            kwargs["opp_hand_size"] = st.opponent_card_count
-            encoding = encode_infoset_eppbs_interleaved(**kwargs)
+            encoding = st.encode_eppbs_interleaved(ctx, int(drawn_bucket))
         else:
-            encoding = encode_infoset_eppbs(**kwargs)
+            encoding = st.encode_eppbs(ctx, int(drawn_bucket))
 
-        # Truncate to network input_dim for backward compat (200→224 migration)
+        # Truncate to network input_dim for backward compat (200->224 migration)
         expected_dim = getattr(self, "_net_input_dim", len(encoding))
         if len(encoding) > expected_dim:
             encoding = encoding[:expected_dim]
         return encoding
 
-    def _create_observation(
-        self,
-        game_state,
-        action: Optional[GameAction],
-        acting_player: int,
-    ) -> Optional[AgentObservation]:
-        """Creates a public observation from game state after an action."""
-        return _build_public_observation(game_state, action, acting_player)
+    def _encode_legacy(
+        self, decision_context: DecisionContext, drawn_bucket: int = -1
+    ) -> np.ndarray:
+        """The 222-dim legacy infoset encoding, via the Go encoder.
+
+        Replaces ``src.encoding.encode_infoset(agent_state, ctx)``, which took a
+        Python AgentState. Same encoder the trainer used; drawn_bucket defaults
+        to -1, which is what the legacy layout carried (no drawn-card one-hot).
+        """
+        st = self.agent_state
+        if st is None:
+            raise AgentStateError(
+                f"{self.__class__.__name__} P{self.player_id}: belief not attached."
+            )
+        ctx = (
+            decision_context.value
+            if hasattr(decision_context, "value")
+            else int(decision_context)
+        )
+        return st.encode(ctx, int(drawn_bucket))
+
+    def _encode_nplayer(
+        self, decision_context: DecisionContext, drawn_bucket: int = -1
+    ) -> np.ndarray:
+        """The N-player infoset encoding, via the Go encoder."""
+        st = self.agent_state
+        if st is None:
+            raise AgentStateError(
+                f"{self.__class__.__name__} P{self.player_id}: belief not attached."
+            )
+        ctx = (
+            decision_context.value
+            if hasattr(decision_context, "value")
+            else int(decision_context)
+        )
+        return st.encode_nplayer(ctx, int(drawn_bucket))
 
     @classmethod
     def _load_cambia_rules_mismatch_check(cls, checkpoint, config, player_id):
@@ -680,7 +718,7 @@ class DeepCFRAgentWrapper(NeuralAgentWrapper):
         )
 
     def choose_action(
-        self, game_state: CambiaGameState, legal_actions: Set[GameAction]
+        self, game_state: GameView, legal_actions: Set[GameAction]
     ) -> GameAction:
         """Choose an action using the AdvantageNetwork via regret-matching strategy."""
         from src.encoding import (
@@ -701,7 +739,7 @@ class DeepCFRAgentWrapper(NeuralAgentWrapper):
             if self._encoding_mode == "ep_pbs":
                 features = self._encode_eppbs(decision_context)
             else:
-                features = encode_infoset(self.agent_state, decision_context)
+                features = self._encode_legacy(decision_context)
             action_mask = encode_action_mask(legal_list)
         except Exception as e:  # JUSTIFIED: evaluation resilience
             logger.error("DeepCFRAgent P%d encoding error: %s", self.player_id, e)
@@ -849,7 +887,7 @@ class ESCHERAgentWrapper(NeuralAgentWrapper):
             if self._encoding_mode == "ep_pbs":
                 features = self._encode_eppbs(decision_context)
             else:
-                features = encode_infoset(self.agent_state, decision_context)
+                features = self._encode_legacy(decision_context)
             action_mask = encode_action_mask(legal_list)
         except Exception as e:  # JUSTIFIED: evaluation resilience
             logger.error("ESCHERAgent P%d encoding error: %s", self.player_id, e)
@@ -985,28 +1023,20 @@ class ReBeLAgentWrapper(NeuralAgentWrapper):
             # Determine phase from game state
             if game_state.is_terminal():
                 phase = PHASE_TERMINAL
-            elif game_state.snap_phase_active:
-                phase = PHASE_SNAP
-            elif game_state.pending_action is not None:
-                if isinstance(game_state.pending_action, ActionDiscard):
+            else:
+                # The engine's own decision context is the phase, so this no
+                # longer re-derives one by inspecting a Python pending action.
+                ctx = _decision_context(game_state)
+                if ctx == DecisionContext.SNAP_DECISION:
+                    phase = PHASE_SNAP
+                elif ctx == DecisionContext.POST_DRAW:
                     phase = PHASE_DISCARD
-                elif isinstance(
-                    game_state.pending_action,
-                    (
-                        ActionAbilityPeekOwnSelect,
-                        ActionAbilityPeekOtherSelect,
-                        ActionAbilityBlindSwapSelect,
-                        ActionAbilityKingLookSelect,
-                        ActionAbilityKingSwapDecision,
-                    ),
-                ):
+                elif ctx == DecisionContext.ABILITY_SELECT:
                     phase = PHASE_ABILITY
                 else:
                     phase = PHASE_DRAW
-            else:
-                phase = PHASE_DRAW
 
-            stockpile_remaining = game_state.get_stockpile_size()
+            stockpile_remaining = game_state.stock_len()
             stockpile_total = (
                 46  # Standard initial stockpile (54 - 8 dealt - 1 discard + jokers)
             )
@@ -1028,7 +1058,7 @@ class ReBeLAgentWrapper(NeuralAgentWrapper):
                 discard_top_bucket = None
 
             public_features = make_public_features(
-                turn=game_state.get_turn_number(),
+                turn=game_state.turn_number(),
                 max_turns=getattr(self.config.cambia_rules, "max_game_turns", 100),
                 phase=phase,
                 discard_top_bucket=discard_top_bucket,
@@ -1172,28 +1202,20 @@ class GTCFRAgentWrapper(NeuralAgentWrapper):
         try:
             if game_state.is_terminal():
                 phase = PHASE_TERMINAL
-            elif game_state.snap_phase_active:
-                phase = PHASE_SNAP
-            elif game_state.pending_action is not None:
-                if isinstance(game_state.pending_action, ActionDiscard):
+            else:
+                # The engine's own decision context is the phase, so this no
+                # longer re-derives one by inspecting a Python pending action.
+                ctx = _decision_context(game_state)
+                if ctx == DecisionContext.SNAP_DECISION:
+                    phase = PHASE_SNAP
+                elif ctx == DecisionContext.POST_DRAW:
                     phase = PHASE_DISCARD
-                elif isinstance(
-                    game_state.pending_action,
-                    (
-                        ActionAbilityPeekOwnSelect,
-                        ActionAbilityPeekOtherSelect,
-                        ActionAbilityBlindSwapSelect,
-                        ActionAbilityKingLookSelect,
-                        ActionAbilityKingSwapDecision,
-                    ),
-                ):
+                elif ctx == DecisionContext.ABILITY_SELECT:
                     phase = PHASE_ABILITY
                 else:
                     phase = PHASE_DRAW
-            else:
-                phase = PHASE_DRAW
 
-            stockpile_remaining = game_state.get_stockpile_size()
+            stockpile_remaining = game_state.stock_len()
             stockpile_total = 46
 
             discard_top_bucket = None
@@ -1212,7 +1234,7 @@ class GTCFRAgentWrapper(NeuralAgentWrapper):
                 discard_top_bucket = None
 
             public_features = make_public_features(
-                turn=game_state.get_turn_number(),
+                turn=game_state.turn_number(),
                 max_turns=getattr(self.config.cambia_rules, "max_game_turns", 100),
                 phase=phase,
                 discard_top_bucket=discard_top_bucket,
@@ -1791,7 +1813,7 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
             if self._encoding_mode == "ep_pbs":
                 features = self._encode_eppbs(decision_context)
             else:
-                features = encode_infoset(self.agent_state, decision_context)
+                features = self._encode_legacy(decision_context)
             action_mask = encode_action_mask(legal_list)
         except Exception as e:
             logger.error("SDCFRAgent P%d encoding error: %s", self.player_id, e)
@@ -1871,7 +1893,12 @@ class PPOAgentWrapper(BaseAgent):
                 "Install with: pip install -e '.[rl]'"
             )
         self._model = MaskablePPO.load(model_path, device=device)
-        self._agent_state: Optional[AgentState] = None
+        #: This seat's belief, owned by the Go engine (cambia-1426).
+        self._agent_state: Optional[GoAgentState] = None
+        self._num_players = 2
+        #: Per-instance RNG for the illegal-index fallback, so a fallback does
+        #: not draw from the unseeded module-global stream (cambia-651 RC-B2).
+        self._fallback_rng = random.Random(0xB1A5 ^ (player_id * 0x9E3779B1))
         # The model's observation space dictates which encoding layout to feed.
         # 257-dim models were trained on EP-PBS v2 (encoding_version=2); 224-dim
         # models on the v1 base layout. Feeding the wrong width crashes
@@ -1883,161 +1910,98 @@ class PPOAgentWrapper(BaseAgent):
         self._encoding_version = 2 if obs_dim >= 257 else 1
         self._obs_dim = obs_dim
 
-    def initialize_state(self, initial_game_state):
-        """Initialize internal AgentState."""
-        initial_hand = initial_game_state.players[self.player_id].hand
-        initial_peeks = initial_game_state.players[self.player_id].initial_peek_indices
-        self._agent_state = AgentState(
-            player_id=self.player_id,
-            opponent_id=self.opponent_id,
-            memory_level=self.config.agent_params.memory_level,
-            time_decay_turns=self.config.agent_params.time_decay_turns,
-            initial_hand_size=len(initial_hand),
-            config=self.config,
-        )
-        initial_obs = AgentObservation(
-            acting_player=-1,
-            action=None,
-            discard_top_card=initial_game_state.get_discard_top(),
-            player_hand_sizes=[
-                initial_game_state.get_player_card_count(i) for i in range(NUM_PLAYERS)
-            ],
-            stockpile_size=initial_game_state.get_stockpile_size(),
-            drawn_card=None,
-            peeked_cards=None,
-            snap_results=list(initial_game_state.snap_results_log),
-            did_cambia_get_called=initial_game_state.cambia_caller_id is not None,
-            who_called_cambia=initial_game_state.cambia_caller_id,
-            is_game_over=initial_game_state.is_terminal(),
-            current_turn=initial_game_state.get_turn_number(),
-        )
-        self._agent_state.initialize(initial_obs, initial_hand, initial_peeks)
+    def attach_belief(self, engine, num_players: int = 2) -> GoAgentState:
+        """Bind a fresh GoAgentState for this seat to ``engine``.
 
-    def update_state(self, observation: AgentObservation):
-        """Update internal state based on observation.
-
-        Deliberately NOT the training filter used by the CFR wrappers
-        (cambia-1038). PPO's own training feed is ``ppo_env._update_states``,
-        which nulls ``drawn_card`` and ``peeked_cards`` for every seat including
-        the actor; the PPO policy was fit against beliefs built that way. Keeping
-        the strip here is what preserves PPO's train/eval parity, and it makes
-        this wrapper safe to hand the shared unfiltered observation the eval feed
-        now builds.
+        Same lifecycle as NeuralAgentWrapper.attach_belief; PPOAgentWrapper does
+        not inherit from it (no torch net of its own to manage), so the three
+        belief methods are spelled out here.
         """
-        if not self._agent_state:
-            return
-        filtered = copy.copy(observation)
-        filtered.drawn_card = None
-        filtered.peeked_cards = None
-        try:
-            self._agent_state.update(filtered)
-        except Exception as e:
-            logger.error("PPOAgent P%d state update error: %s", self.player_id, e)
+        self.release_belief()
+        self._num_players = max(2, int(num_players))
+        params = self.config.agent_params
+        memory_level = int(getattr(params, "memory_level", 0))
+        time_decay_turns = int(getattr(params, "time_decay_turns", 0))
+        if self._num_players > 2:
+            self._agent_state = GoAgentState.new_nplayer(
+                engine,
+                self.player_id,
+                num_players=self._num_players,
+                memory_level=memory_level,
+                time_decay_turns=time_decay_turns,
+            )
+        else:
+            self._agent_state = GoAgentState(
+                engine,
+                self.player_id,
+                memory_level=memory_level,
+                time_decay_turns=time_decay_turns,
+            )
+        return self._agent_state
+
+    def belief_handle(self) -> int:
+        """This seat's agent handle for apply_games_batch, or -1 if unattached."""
+        return -1 if self._agent_state is None else int(self._agent_state.handle)
+
+    def release_belief(self) -> None:
+        """Free this seat's belief handle. Idempotent."""
+        if self._agent_state is not None:
+            try:
+                self._agent_state.close()
+            except Exception as e:  # JUSTIFIED: evaluation resilience
+                logger.error("PPOAgent P%d belief release error: %s", self.player_id, e)
+            self._agent_state = None
+
+    def initialize_state(self, initial_game_state):
+        """Reset this seat's belief for a new game (the GoEngine about to play)."""
+        self.attach_belief(initial_game_state, _seat_count(initial_game_state))
+
+    def update_state(self, observation) -> None:
+        """No-op: belief is advanced by the engine.
+
+        PPO's training feed (``ppo_env._update_states``) nulled drawn_card and
+        peeked_cards for every seat including the actor, and this wrapper used to
+        re-strip them here to hold that train/eval parity. That parity argument
+        is now settled a level down: eval advances belief through the same FFI
+        update the trainer drives, so there is no observation to strip.
+        """
+        return
 
     def _encode_obs(self, ctx, drawn_card_bucket: int = -1) -> np.ndarray:
-        """Encode the PPO player's infoset, dispatching on the model's obs width.
+        """Encode this seat's infoset, dispatching on the model's obs width.
 
         v2 (257-dim) models trained through ``ppo_env._get_obs`` on the canonical
-        ``encode_infoset_eppbs_interleaved_v2`` (posterior + action-history block
-        populated from AgentState). v1 (224-dim) models trained on the v1
-        interleaved layout. Per-agent parity: each model is encoded at eval the
-        same way it was trained, so the detected ``_encoding_version`` selects
-        the path. Feeding the wrong width crashes ``MaskablePPO.predict``.
+        interleaved v2 layout; v1 (224-dim) models on the v1 interleaved layout.
+        Per-agent parity: each model is encoded at eval the same way it was
+        trained, so the detected ``_encoding_version`` selects the path. Feeding
+        the wrong width crashes ``MaskablePPO.predict``.
+
+        v2 is called WITHOUT a drawn-card bucket (-1), matching PPO training,
+        which never passed one: a real bucket here would set a dims[0:11] one-hot
+        the trained policy never saw, reintroducing RC-B on the PPO anchor.
+        (DESCA differs: its trainer does pass the bucket, so DESCA eval does
+        too.) ``drawn_card_bucket`` is accepted and ignored to keep the call
+        shape shared with the other wrappers.
         """
-        from src.encoding import (
-            encode_infoset_eppbs_interleaved,
-            encode_infoset_eppbs_interleaved_v2,
-        )
-
         st = self._agent_state
+        if st is None:
+            raise AgentStateError(f"PPOAgent P{self.player_id}: belief not attached.")
+        ctx_val = ctx.value if hasattr(ctx, "value") else int(ctx)
         if getattr(self, "_encoding_version", 1) == 2:
-            # Match PPO training (ppo_env._get_obs), which calls the v2 encoder
-            # WITHOUT a drawn-card bucket (defaults to -1). Passing a real bucket
-            # here would set a dims[0:11] one-hot the trained policy never saw,
-            # reintroducing RC-B on the PPO anchor. (DESCA differs: its trainer
-            # does pass the bucket, so DESCA eval passes it too.)
-            return encode_infoset_eppbs_interleaved_v2(st, ctx).astype(np.float32)
-
-        if st.cambia_caller is None:
-            cambia_state = 2
-        elif st.cambia_caller == self.player_id:
-            cambia_state = 0
-        else:
-            cambia_state = 1
-
-        return encode_infoset_eppbs_interleaved(
-            slot_tags=[t.value if hasattr(t, "value") else int(t) for t in st.slot_tags],
-            slot_buckets=[int(b) for b in st.slot_buckets],
-            discard_top_bucket=(
-                st.known_discard_top_bucket.value
-                if hasattr(st.known_discard_top_bucket, "value")
-                else int(st.known_discard_top_bucket)
-            ),
-            stock_estimate=(
-                st.stockpile_estimate.value
-                if hasattr(st.stockpile_estimate, "value")
-                else int(st.stockpile_estimate)
-            ),
-            game_phase=(
-                st.game_phase.value
-                if hasattr(st.game_phase, "value")
-                else int(st.game_phase)
-            ),
-            decision_context=ctx.value if hasattr(ctx, "value") else int(ctx),
-            cambia_state=cambia_state,
-            own_hand_size=len(st.own_hand),
-            opp_hand_size=st.opponent_card_count,
-        ).astype(np.float32)
+            return st.encode_eppbs_interleaved_v2(ctx_val, -1).astype(np.float32)
+        return st.encode_eppbs_interleaved(ctx_val, -1).astype(np.float32)
 
     def choose_action(self, game_state, legal_actions) -> GameAction:
-        """Choose action using the trained PPO model."""
+        """Choose an action using the trained PPO model."""
         from src.encoding import encode_action_mask, index_to_action
-        from src.constants import (
-            DecisionContext,
-            ActionDiscard,
-            ActionAbilityPeekOwnSelect,
-            ActionAbilityPeekOtherSelect,
-            ActionAbilityBlindSwapSelect,
-            ActionAbilityKingLookSelect,
-            ActionAbilityKingSwapDecision,
-            ActionSnapOpponentMove,
-        )
 
         if not self._agent_state:
-            import random as _random
+            return self._fallback_rng.choice(list(legal_actions))
 
-            return _random.choice(list(legal_actions))
-
-        # Decision context
-        if game_state.snap_phase_active:
-            ctx = DecisionContext.SNAP_DECISION
-        elif game_state.pending_action:
-            p = game_state.pending_action
-            if isinstance(p, ActionDiscard):
-                ctx = DecisionContext.POST_DRAW
-            elif isinstance(
-                p,
-                (
-                    ActionAbilityPeekOwnSelect,
-                    ActionAbilityPeekOtherSelect,
-                    ActionAbilityBlindSwapSelect,
-                    ActionAbilityKingLookSelect,
-                    ActionAbilityKingSwapDecision,
-                ),
-            ):
-                ctx = DecisionContext.ABILITY_SELECT
-            elif isinstance(p, ActionSnapOpponentMove):
-                ctx = DecisionContext.SNAP_MOVE
-            else:
-                ctx = DecisionContext.START_TURN
-        else:
-            ctx = DecisionContext.START_TURN
-
-        drawn_card_bucket = _drawn_card_bucket_from_game_state(game_state)
-        obs = self._encode_obs(ctx, drawn_card_bucket)
-
-        mask = encode_action_mask(list(legal_actions))
-        import numpy as np
+        legal_list = list(legal_actions)
+        ctx = _decision_context(game_state)
+        obs = self._encode_obs(ctx)
+        mask = encode_action_mask(legal_list)
 
         action_idx, _ = self._model.predict(
             np.array(obs, dtype=np.float32),
@@ -2045,11 +2009,9 @@ class PPOAgentWrapper(BaseAgent):
             deterministic=True,
         )
         try:
-            return index_to_action(int(action_idx), list(legal_actions))
+            return index_to_action(int(action_idx), legal_list)
         except (ValueError, IndexError):
-            import random as _random
-
-            return _random.choice(list(legal_actions))
+            return self._fallback_rng.choice(legal_list)
 
 
 # --- N-Player Agent Wrapper ---
@@ -2147,13 +2109,11 @@ class NPlayerAgentWrapper(NeuralAgentWrapper):
         try:
             # Attempt N-player encoding; fall back to legacy if not available
             try:
-                from src.encoding import encode_infoset_nplayer
-
-                features = encode_infoset_nplayer(self.agent_state, decision_context)
-            except (ImportError, AttributeError):
-                from src.encoding import encode_infoset
-
-                features = encode_infoset(self.agent_state, decision_context)
+                features = self._encode_nplayer(decision_context)
+            except RuntimeError:
+                # No N-player belief attached (a two-seat table): the legacy
+                # 222-dim encoding is the documented fallback here.
+                features = self._encode_legacy(decision_context)
             action_mask = encode_action_mask(legal_list)
         except Exception as e:  # JUSTIFIED: evaluation resilience
             logger.error("NPlayerAgent P%d encoding error: %s", self.player_id, e)
@@ -2225,7 +2185,7 @@ class MixedOpponentAgent(BaseAgent):
         self.weight_a = weight_a
 
     def choose_action(
-        self, game_state: CambiaGameState, legal_actions: Set[GameAction]
+        self, game_state: GameView, legal_actions: Set[GameAction]
     ) -> GameAction:
         if random.random() < self.weight_a:
             return self.agent_a.choose_action(game_state, legal_actions)
@@ -2311,61 +2271,36 @@ class DESCAAgentWrapper(NeuralAgentWrapper):
             # history-parity / drawn-card dims. Eval-only, default off.
             return self._encode_v2_legacy_rcb(decision_context)
 
-        from src.encoding import encode_infoset_eppbs_interleaved_v2
-
-        return encode_infoset_eppbs_interleaved_v2(
-            self.agent_state, decision_context, int(drawn_card_bucket)
+        st = self.agent_state
+        if st is None:
+            raise AgentStateError(f"DESCAAgent P{self.player_id}: belief not attached.")
+        ctx = (
+            decision_context.value
+            if hasattr(decision_context, "value")
+            else int(decision_context)
         )
+        return st.encode_eppbs_interleaved_v2(ctx, int(drawn_card_bucket))
 
     def _encode_v2_legacy_rcb(self, decision_context) -> np.ndarray:
-        """RC-B reproduction (V1 arm B): faithful copy of the pre-fix encode path.
+        """RC-B reproduction (V1 arm B). PYTHON ENGINE ONLY, no longer reachable.
 
         Gated by CAMBIA_DESCA_LEGACY_ENC=1 for the V1 encoder-attribution split.
-        Calls the low-level interleaved encoder without the posterior /
-        action-history / drawn-card derivation, leaving the same dims zeroed as the
-        historical DESCA eval. Not used in training.
+        It hand-rolled the interleaved encode off Python AgentState fields
+        (slot_tags, slot_buckets, known_discard_top_bucket, stockpile_estimate,
+        game_phase, cambia_caller) to leave the posterior, action-history and
+        drawn-card dims zeroed. The Go belief exposes buckets, not those derived
+        abstractions, so the arm cannot be reproduced byte-for-byte on this
+        engine -- and an approximation would answer the attribution question
+        wrongly rather than not at all (cambia-1426).
         """
-        from src.encoding import encode_infoset_eppbs_interleaved
-
-        st = self.agent_state
-        if st.cambia_caller is None:
-            cambia_state = 2
-        elif st.cambia_caller == self.player_id:
-            cambia_state = 0
-        else:
-            cambia_state = 1
-
-        return encode_infoset_eppbs_interleaved(
-            slot_tags=[t.value if hasattr(t, "value") else int(t) for t in st.slot_tags],
-            slot_buckets=[int(b) for b in st.slot_buckets],
-            discard_top_bucket=(
-                st.known_discard_top_bucket.value
-                if hasattr(st.known_discard_top_bucket, "value")
-                else int(st.known_discard_top_bucket)
-            ),
-            stock_estimate=(
-                st.stockpile_estimate.value
-                if hasattr(st.stockpile_estimate, "value")
-                else int(st.stockpile_estimate)
-            ),
-            game_phase=(
-                st.game_phase.value
-                if hasattr(st.game_phase, "value")
-                else int(st.game_phase)
-            ),
-            decision_context=(
-                decision_context.value
-                if hasattr(decision_context, "value")
-                else int(decision_context)
-            ),
-            cambia_state=cambia_state,
-            own_hand_size=len(st.own_hand),
-            opp_hand_size=st.opponent_card_count,
-            encoding_version=2,
+        raise AgentStateError(
+            "CAMBIA_DESCA_LEGACY_ENC=1 selects the V1 arm-B encode, which is "
+            "implemented against the Python AgentState and has no Go equivalent. "
+            "Unset it to evaluate DESCA on the Go engine."
         )
 
     def choose_action(
-        self, game_state: CambiaGameState, legal_actions: Set[GameAction]
+        self, game_state: GameView, legal_actions: Set[GameAction]
     ) -> GameAction:
         """Choose an action via DESCA avg-strategy network over the abstract action space."""
         from src.action_abstraction import abstract_actions, unabstract
@@ -2379,7 +2314,7 @@ class DESCAAgentWrapper(NeuralAgentWrapper):
 
         try:
             features = self._encode_v2(decision_context, drawn_card_bucket)
-            abstract_mask = abstract_actions(legal_list, self.agent_state)
+            abstract_mask = abstract_actions(legal_list, self._belief_view())
         except Exception as e:  # JUSTIFIED: evaluation resilience
             logger.error("DESCAAgent P%d encoding error: %s", self.player_id, e)
             return random.choice(legal_list)
@@ -2412,7 +2347,7 @@ class DESCAAgentWrapper(NeuralAgentWrapper):
         seed = hash((id(game_state), chosen_abstract_idx)) & 0xFFFF_FFFF
         try:
             return unabstract(
-                chosen_abstract_idx, legal_list, self.agent_state, seed=seed
+                chosen_abstract_idx, legal_list, self._belief_view(), seed=seed
             )
         except (ValueError, Exception) as e:
             logger.error("DESCAAgent P%d unabstract error: %s", self.player_id, e)
@@ -2434,19 +2369,22 @@ class PRTCFRAgentWrapper(NeuralAgentWrapper):
       - samples ONE snapshot per EPISODE (proportional to ``w_t = t``) in
         ``initialize_state`` and plays the whole game with it -- the SD-CFR
         trajectory-sampling procedure, NOT per-decision averaging;
-      - consumes the ENGINE token stream: ``observe_transition`` (driven by
-        ``run_evaluation`` once per applied action, both players) builds each
-        frame from the post-action Python engine state via the SAME
-        ``worker._create_observation`` / ``worker._filter_observation`` the
-        training driver uses, so the eval token prefix is byte-identical to the
-        training token prefix (RC-B parity). The wrapper never re-derives
-        observations from a belief abstraction (measurement-layer rule) and does
-        not use ``AgentState`` at all.
+      - consumes the ENGINE token stream directly: the engine appends this
+        seat's frame for every applied action, and ``tokens()`` /
+        ``tokens_since()`` read it back. That is the same stream, produced by
+        the same Go code, that the production sampler's ``GoEngineGameDriver``
+        feeds training, so the eval token prefix is byte-identical to the
+        training prefix by construction rather than by a Python re-derivation
+        of it (RC-B parity). No belief abstraction and no ``AgentState``.
 
-    ``choose_action`` encodes the accumulated per-player token prefix via the
-    single-sourced ``encode_observation_sequence`` and queries the episode's
-    sampled snapshot for a masked regret-matched policy over the 146 global
-    actions -- the identical policy path as the training-time sigma^t.
+    ``choose_action`` windows the accumulated prefix with the shared
+    ``frame_aligned_window`` and queries the episode's sampled snapshot for a
+    masked regret-matched policy over the 146 global actions -- the identical
+    policy path as the training-time sigma^t.
+
+    Two seats only: the engine appends to the token stream through the
+    two-agent batch-apply path, so a larger table needs an N-player token
+    export. ``initialize_state`` says so rather than scoring on a frozen stream.
     """
 
     def __init__(
@@ -2497,17 +2435,15 @@ class PRTCFRAgentWrapper(NeuralAgentWrapper):
             (crn_seed_base or 0) ^ 0xC2B2AE3D ^ (player_id * 0x27D4EB2F)
         ) & 0xFFFF_FFFF
         self._action_rng = np.random.default_rng(action_seed)
-        # Per-episode token-stream state (populated in initialize_state).
-        self._init_hand: list = []
-        self._init_peeks: tuple = ()
-        self._obs_stream: List = []
+        # Per-episode token-stream state (populated in initialize_state). The
+        # stream itself lives in the engine; only the cursor position is here.
         self._overflow_warned = False
         # Per-episode incremental GRU cursor (cambia-249): feeds only newly
         # appended observation frames through the GRU at each decision instead
         # of re-encoding the whole accumulated prefix. Rebuilt in
         # initialize_state once the episode's snapshot is sampled.
         self._cursor = None
-        self._cursor_obs_idx = 0
+        self._cursor_token_idx = 0
         logger.info(
             "PRTCFRAgent P%d loaded %d deployable snapshot(s) (iters=%s, weighting=%s)",
             self.player_id,
@@ -2521,131 +2457,94 @@ class PRTCFRAgentWrapper(NeuralAgentWrapper):
         )
 
     def initialize_state(self, initial_game_state):
-        """Reset the token stream for a new game and sample this episode's snapshot.
+        """Bind this seat's engine token stream and sample the episode's snapshot.
 
-        Overrides the AgentState-building base: PRT-CFR conditions on the raw
-        token stream, not a belief abstraction, so no ``AgentState`` is built.
+        ``initial_game_state`` is the GoEngine for the game about to be played.
+        Attaching the GoAgentState here, at the initial state, is what seeds the
+        stream's private initial-peek prefix; the engine appends every later
+        frame itself as actions are applied, so this wrapper no longer keeps a
+        Python observation list or rebuilds frames.
         """
         from src.cfr.prtcfr_mixture import PRTCFRIncrementalCursor
 
-        self.agent_state = None
-        self._init_hand = list(initial_game_state.players[self.player_id].hand)
-        self._init_peeks = tuple(
-            initial_game_state.players[self.player_id].initial_peek_indices
-        )
-        self._obs_stream = []
+        num_players = _seat_count(initial_game_state)
+        if num_players > 2:
+            raise NotImplementedError(
+                "PRT-CFR evaluation needs the per-agent token stream, and the "
+                "engine appends to it only through the two-agent batch-apply "
+                f"path; this table has {int(num_players)} seats. Evaluate PRT-CFR "
+                "at two seats, or add an N-player token-stream export."
+            )
+        self.attach_belief(initial_game_state, 2)
         self._mixture.sample_episode(self._episode_rng)
         # active_net() lazily loads this episode's sampled snapshot on first
         # use (cambia-249); the cursor is fresh per episode since a new game
         # may sample a different net.
         self._cursor = PRTCFRIncrementalCursor(self._mixture.active_net(), self._seq_cap)
-        self._cursor_obs_idx = 0
+        self._cursor_token_idx = 0
+        self._overflow_warned = False
 
-    def update_state(self, observation):
-        """No-op: the token stream is fed by ``observe_transition`` (every applied
-        action, both players), not by the eval loop's public-observation sharing
-        (which is gated on the acting agent having ``_create_observation`` and
-        would drop baseline-actor frames -- corrupting the full-recall prefix)."""
+    def update_state(self, observation) -> None:
+        """No-op: the token stream is appended by the engine, per applied action."""
         return
 
-    def observe_transition(self, game_state, action, acting_player: int) -> None:
-        """Append the training-faithful, observer-filtered frame for one applied
-        transition to this player's token stream.
-
-        ``game_state`` is the POST-action state (matches the training driver's
-        ``next_state`` semantics). Uses the SAME builders the production sampler
-        uses (``worker._create_observation`` -> full obs with the actor's private
-        drawn/peeked cards; ``worker._filter_observation`` -> this observer's
-        view), so ``encode_observation_sequence`` over the accumulated stream
-        reproduces the exact training token prefix.
-        """
-        from src.cfr.worker import _create_observation, _filter_observation
-
-        snap_results = list(getattr(game_state, "snap_results_log", []) or [])
-        full_obs = _create_observation(
-            None, action, game_state, acting_player, snap_results
-        )
-        if full_obs is None:
-            # L5 (cambia-248): previously logged and swallowed here (a bare
-            # `return`), which silently froze this player's token prefix --
-            # every subsequent choose_action call this game would query a
-            # stream missing this frame, desynced from the true trajectory.
-            # Raise so both callers' existing per-turn/per-game exception
-            # handling (evaluate_agents.py's eval loop, lbr.py's
-            # collect_infosets) count it and abort this game's measurement
-            # instead of continuing on corrupted state.
-            msg = (
-                f"PRTCFRAgent P{self.player_id}: observation build failed for "
-                f"actor {acting_player} action {action!r}"
+    def _token_body(self) -> np.ndarray:
+        """This seat's raw token body, straight off the engine."""
+        st = self.agent_state
+        if st is None:
+            raise AgentStateError(
+                f"PRTCFRAgent P{self.player_id}: token stream not attached."
             )
-            logger.error(msg)
-            raise ObservationUpdateError(msg)
-        self._obs_stream.append(_filter_observation(full_obs, self.player_id))
+        return st.tokens()
 
     def _encode_tokens(self) -> List[int]:
-        """Full-recall token prefix for this player over the accumulated stream.
+        """Full-recall token prefix for this seat over the engine's stream.
 
-        Strict (full-recall, no silent truncation) to match the training driver's
-        ``tokens()`` contract; on overflow (a game longer than the production cap)
-        fall back to keep-most-recent, matching ``NetProductionSigma``'s own
-        overflow tolerance rather than crashing the eval.
+        Identical to the production sampler's ``GoEngineGameDriver.tokens()``:
+        the Go side never truncates, so the strict cap is enforced here before
+        ``frame_aligned_window`` (which has no strict mode) could silently window
+        a body sitting at the raw cap. On overflow, fall back to
+        keep-most-recent rather than crash the eval, matching
+        ``NetProductionSigma``'s own overflow tolerance.
         """
-        from src.sequence_encoding import encode_observation_sequence
+        from src.ffi import bridge
 
-        try:
-            return encode_observation_sequence(
-                self._init_hand,
-                self._init_peeks,
-                self._obs_stream,
-                self.player_id,
-                seq_cap=self._seq_cap,
-                strict=True,
-            )
-        except self._SequenceOverflowError as e:
+        body = self._token_body()
+        budget = self._seq_cap - 2  # BOS + EOS, matching frame_aligned_window
+        if len(body) > budget:
             if not self._overflow_warned:
                 logger.warning(
-                    "PRTCFRAgent P%d: token stream over seq_cap=%d (%s); "
-                    "falling back to keep-most-recent for this game.",
+                    "PRTCFRAgent P%d: engine token body %d over strict budget %d "
+                    "(seq_cap=%d); falling back to keep-most-recent for this game.",
                     self.player_id,
+                    len(body),
+                    budget,
                     self._seq_cap,
-                    e,
                 )
                 self._overflow_warned = True
-            return encode_observation_sequence(
-                self._init_hand,
-                self._init_peeks,
-                self._obs_stream,
-                self.player_id,
-                seq_cap=self._seq_cap,
-                strict=False,
-            )
+        return bridge.frame_aligned_window(body, seq_cap=self._seq_cap, add_bos_eos=True)
 
     def _advance_cursor(self) -> None:
-        """Feed the incremental cursor only the BODY tokens appended since the
-        last call: the private init-peek prefix once (first call), then
-        ``observation_frames`` for each observation newly appended to
-        ``self._obs_stream`` (cambia-249 -- avoids re-tokenizing/re-encoding
-        the whole accumulated prefix on every decision)."""
-        from src.sequence_encoding import initial_peek_frames, observation_frames
+        """Feed the incremental cursor only the tokens appended since last call.
 
+        ``tokens_since`` is the engine's own answer to that question, so the
+        cursor is fed the exact delta instead of re-tokenizing a Python
+        observation list (cambia-249's win, now for free).
+        """
+        st = self.agent_state
         cursor = self._cursor
-        delta: List[int] = []
-        if not cursor.registered:
-            delta.extend(initial_peek_frames(self._init_hand, self._init_peeks))
-        for obs in self._obs_stream[self._cursor_obs_idx :]:
-            delta.extend(observation_frames(obs, self.player_id))
-        cursor.advance(delta)
-        self._cursor_obs_idx = len(self._obs_stream)
+        delta = st.tokens_since(self._cursor_token_idx)
+        cursor.advance([int(t) for t in delta])
+        self._cursor_token_idx = st.token_len()
 
     def _strategy_for_mask(self, mask: np.ndarray) -> np.ndarray:
         """Masked regret-matched strategy for the current token prefix.
 
         Uses the per-episode incremental GRU cursor (O(1) amortized per
         decision) unless it has overflowed the seq_cap budget, in which case
-        this falls back to the original full stateless re-encode (matching
-        ``NetProductionSigma``'s own keep-most-recent overflow tolerance) --
-        the pre-cambia-249 behavior, used for the rest of this game once
-        triggered.
+        this falls back to the full stateless re-encode (matching
+        ``NetProductionSigma``'s own keep-most-recent overflow tolerance),
+        used for the rest of this game once triggered.
         """
         cursor = self._cursor
         if cursor is not None and not cursor.overflowed:
@@ -2853,66 +2752,299 @@ def get_agent(agent_type: str, player_id: int, config, **kwargs) -> BaseAgent:
             seed = (
                 None
                 if crn_seed_base is None
-                else (crn_seed_base ^ 0xB5297A4D ^ (player_id * 0x68E31DA4))
-                & 0xFFFF_FFFF
+                else (crn_seed_base ^ 0xB5297A4D ^ (player_id * 0x68E31DA4)) & 0xFFFF_FFFF
             )
             return agent_class(player_id, config, seed=seed)
         return agent_class(player_id, config)
 
 
-# --- Belief Feed ---
+# --- Go engine game session ---
 
-# Wrapper types that carry an AgentState belief model across a game and
-# therefore must see every applied transition.
-_BELIEF_WRAPPER_TYPES = (CFRAgentWrapper, NeuralAgentWrapper, PPOAgentWrapper)
+#: Wrapper types that carry belief across a game and therefore need a
+#: GoAgentState attached to each game. Their belief is advanced by the engine.
+_BELIEF_WRAPPER_TYPES = (NeuralAgentWrapper, PPOAgentWrapper)
+
+#: Wrapper types this loop cannot drive. CFRAgentWrapper's tabular infoset key
+#: needs GamePhase, a function of who called Cambia, and the engine exports no
+#: cambia-caller accessor (see its docstring).
+_PYTHON_ONLY_WRAPPER_TYPES = (CFRAgentWrapper,)
 
 
-def _feed_agent_beliefs(
-    agents: List[BaseAgent],
-    game_state,
-    action: Optional[GameAction],
-    acting_player: int,
-) -> None:
-    """Deliver one applied transition to every stateful agent's belief model.
+class UnsupportedAgentError(RuntimeError):
+    """An agent type this evaluation loop cannot drive on the Go engine."""
 
-    Contract: every applied action reaches every stateful agent, in application
-    order, regardless of who acted. The acting agent may be stateless (a
-    baseline), which does not exempt the transition from the feed: an
-    ``AgentState`` that misses opponent actions holds beliefs the training
-    traversal never produced (stale own-card entries after an opponent swap,
-    skipped event decay, an action-history window with the opponent's moves
-    missing).
 
-    Two belief kinds are fed:
-      - token-stream wrappers (PRT-CFR) take the transition directly, through the
-        training driver's own observation builders;
-      - ``AgentState`` wrappers take one UNFILTERED observation, built once per
-        transition by the same training-driver builder and shared; each wrapper's
-        ``update_state`` masks it for its own seat. Building once and filtering
-        per observer is the training traversal's own shape (``worker.py``:
-        ``_create_observation`` then ``_filter_observation`` per agent), and it is
-        what lets the acting agent keep its own drawn and peeked cards while the
-        other seats see neither (cambia-1038). Wrappers whose own training feed
-        was public-only (``PPOAgentWrapper``) keep stripping both fields in their
-        ``update_state``, so the shared object stays correct for them too.
+class _GoEvalGame:
+    """One evaluation game on the Go engine.
+
+    Owns the game handle and each belief-carrying agent's GoAgentState, hands
+    the acting agent a decoded legal-action list, and applies its choice.
+
+    Action space by seat count:
+
+      - TWO seats run the 2-player space (146 actions) and apply through
+        ``apply_games_batch``, the only FFI path that advances the game AND both
+        agents' belief and token streams in a single crossing. It is the path
+        the production sampler uses, which is what makes an evaluated agent's
+        belief follow the training update rule exactly.
+      - ABOVE two seats the game runs in the N-player space (620 actions). The
+        2-player space is not an option there: cambia-1099 K3 fixed its legal
+        MASK to name the opponent as the next seat round the table, but the
+        apply path still resolves "the opponent" as ``1 - acting``, which
+        underflows from seat 2 and panics the Go runtime out of reach of any
+        Python except clause. Belief is advanced per seat with
+        ``update_nplayer`` instead, and the token stream is unavailable (no
+        N-player token export), which is why the token wrappers refuse.
+
+    In the N-player space each opponent-targeting action carries a relative
+    opponent index. These agents hold one opponent's memory, so the legal set is
+    projected onto the single opponent the acting agent tracks
+    (game_view.tracked_opponent_seat) before it is handed over, and the choice
+    is re-encoded against that same opponent. That projection is a documented
+    narrowing of N-player play, not full N-player search.
     """
-    for agent in agents:
-        if isinstance(agent, PRTCFRAgentWrapper):
-            agent.observe_transition(game_state, action, acting_player)
 
-    belief_agents = [
-        a
-        for a in agents
-        if isinstance(a, _BELIEF_WRAPPER_TYPES) and not isinstance(a, PRTCFRAgentWrapper)
-    ]
-    if not belief_agents:
-        return
+    __slots__ = (
+        "engine",
+        "agents",
+        "num_players",
+        "_nplayer",
+        "_belief_agents",
+        "_batch_handles",
+        "_action_index",
+        "_closed",
+    )
 
-    observation = _build_transition_observation(game_state, action, acting_player)
-    if observation is None:
-        return
-    for agent in belief_agents:
-        agent.update_state(observation)
+    def __init__(self, house_rules, seed: Optional[int], num_players: int, agents: List):
+        self.num_players = max(2, int(num_players))
+        self._nplayer = self.num_players > 2
+        self.agents = list(agents)
+        self._closed = False
+        self._action_index: Dict[GameAction, int] = {}
+
+        for agent in self.agents:
+            if isinstance(agent, _PYTHON_ONLY_WRAPPER_TYPES):
+                raise UnsupportedAgentError(
+                    f"{type(agent).__name__} is implemented against the Python "
+                    "reference engine and cannot be evaluated on the Go engine "
+                    "(see its docstring for the missing engine accessor)."
+                )
+
+        self.engine = GoEngine(
+            seed=seed, house_rules=house_rules, num_players=self.num_players
+        )
+
+        # Reset belief BEFORE any action is applied: a GoAgentState built at the
+        # initial state is what carries the seat's initial-peek knowledge.
+        # initialize_state, not attach_belief: it is the per-game reset hook the
+        # wrappers override, and several do real work in it (PRT-CFR samples the
+        # episode's snapshot and rebuilds its GRU cursor there; the PBS wrappers
+        # reset their ranges). Calling attach_belief directly would skip that and
+        # play every game with the first game's episode state.
+        self._belief_agents: List = []
+        for agent in self.agents:
+            if isinstance(agent, _BELIEF_WRAPPER_TYPES):
+                agent.initialize_state(self.engine)
+                self._belief_agents.append(agent)
+            elif hasattr(agent, "_last_game_id"):
+                # Baselines detect a new game by the id() of what they are
+                # handed. Handles come from a pool and an address can be reused,
+                # so the sentinel is invalidated explicitly rather than trusted
+                # to differ (a stale hit keeps the previous game's memory and
+                # collapses games to an immediate Cambia call).
+                agent._last_game_id = None
+
+        # Handle vector for apply_games_batch: seat 0 in a0, seat 1 in a1, -1
+        # for a seat whose agent carries no belief.
+        if self._nplayer:
+            self._batch_handles = None
+        else:
+            self._batch_handles = [
+                (
+                    self.agents[seat].belief_handle()
+                    if isinstance(self.agents[seat], _BELIEF_WRAPPER_TYPES)
+                    else -1
+                )
+                for seat in range(2)
+            ]
+
+    # --- Reads ---
+
+    def is_terminal(self) -> bool:
+        return self.engine.is_terminal()
+
+    def acting_player(self) -> int:
+        return self.engine.acting_player()
+
+    def turn_number(self) -> int:
+        return self.engine.turn_number()
+
+    def legal_actions(self) -> List[GameAction]:
+        """The acting seat's legal actions, ascending by action index.
+
+        Also records the index each action was decoded from, so applying the
+        agent's choice does not have to re-derive it (and, at N seats, does not
+        have to re-derive which opponent it targeted).
+        """
+        if not self._nplayer:
+            mask = self.engine.legal_actions_mask()
+            actions = action_codec.actions_from_mask(mask)
+            self._action_index = {
+                a: i for a, i in zip(actions, np.flatnonzero(np.asarray(mask)))
+            }
+            return actions
+
+        seat = self.engine.acting_player()
+        pending = self.engine.get_pending()
+
+        # Which opponent this decision is about. When the engine has already
+        # fixed the target (a snap-move, a King decision), that seat is the
+        # answer and overrides the agent's tracked opponent; otherwise the agent
+        # targets the one opponent it holds memory for.
+        if pending.target_seat is not None and pending.target_seat != seat:
+            target = int(pending.target_seat)
+        else:
+            target = tracked_opponent_seat(seat, self.num_players)
+        rel = action_codec.relative_opponent_index(seat, target, self.num_players)
+
+        preferred: List[GameAction] = []
+        preferred_index: Dict[GameAction, int] = {}
+        fallback: List[GameAction] = []
+        fallback_index: Dict[GameAction, int] = {}
+
+        mask = self.engine.nplayer_legal_actions_mask()
+        for idx in np.flatnonzero(np.asarray(mask)):
+            entry = action_codec.nplayer_index_to_action(int(idx))
+            action = entry.action
+            if isinstance(action, ActionSnapOpponentMove):
+                # The N-player space keeps only the own-card index; the target
+                # slot lives on the pending record.
+                action = ActionSnapOpponentMove(
+                    own_card_to_move_hand_index=action.own_card_to_move_hand_index,
+                    target_empty_slot_index=int(pending.target_slot or 0),
+                )
+            if entry.opp_idx is None or entry.opp_idx == rel:
+                if action not in preferred_index:
+                    preferred.append(action)
+                    preferred_index[action] = int(idx)
+            # Ascending index order means the first entry kept for a given
+            # action is the lowest relative opponent, so the fallback is
+            # deterministic.
+            if action not in fallback_index:
+                fallback.append(action)
+                fallback_index[action] = int(idx)
+
+        if preferred:
+            self._action_index = preferred_index
+            return preferred
+
+        # The tracked opponent is not a legal target here (an empty hand, or the
+        # engine reaching a different seat). Fall back to the full legal set
+        # rather than reporting no legal actions: the agent's one-opponent
+        # memory simply carries no information about the target it gets.
+        self._action_index = fallback_index
+        return fallback
+
+    def winner(self) -> Optional[int]:
+        """The winning seat, or None for a tie.
+
+        Read off the engine's utility vector, which already encodes the whole
+        scoring rule including the two-seat Cambia-caller tiebreak: the winner
+        is the sole argmax, and equal top utilities are a tie.
+        """
+        if not self.engine.is_terminal():
+            return None
+        utils = (
+            self.engine.get_nplayer_utility()
+            if self._nplayer
+            else self.engine.get_utility()
+        )
+        utils = np.asarray(utils, dtype=np.float64)[: self.num_players]
+        best = float(utils.max())
+        leaders = np.flatnonzero(utils >= best - 1e-9)
+        return int(leaders[0]) if len(leaders) == 1 else None
+
+    def hand_scores(self) -> List[int]:
+        """Each seat's final hand value, for the score-margin statistic."""
+        return [
+            sum(card.value for card in self.engine.get_player_hand(seat))
+            for seat in range(self.num_players)
+        ]
+
+    # --- Write ---
+
+    def apply(self, action: GameAction) -> None:
+        """Apply one action, advancing the game and every attached belief.
+
+        An action the agent built without checking legality (the baselines have
+        such fallbacks) is not in the decoded index; it is encoded directly and
+        left to the engine to reject, so an illegal choice surfaces as an engine
+        error exactly as it did on the Python engine.
+        """
+        idx = self._action_index.get(action)
+
+        if self._nplayer:
+            if idx is None:
+                seat = self.engine.acting_player()
+                pending = self.engine.get_pending()
+                if pending.target_seat is not None and pending.target_seat != seat:
+                    target = int(pending.target_seat)
+                else:
+                    target = tracked_opponent_seat(seat, self.num_players)
+                rel = action_codec.relative_opponent_index(seat, target, self.num_players)
+                idx = action_codec.nplayer_index_for(action, rel)
+            self.engine.apply_nplayer_action(int(idx))
+            for agent in self._belief_agents:
+                agent.agent_state.update_nplayer(self.engine)
+            return
+
+        if idx is None:
+            from src.encoding import action_to_index
+
+            idx = action_to_index(action)
+        if self._belief_agents:
+            apply_games_batch(
+                [self.engine.handle],
+                [self._batch_handles[0]],
+                [self._batch_handles[1]],
+                [int(idx)],
+            )
+        else:
+            self.engine.apply_action(int(idx))
+
+    # --- Lifecycle ---
+
+    def close(self) -> None:
+        """Free the game handle and every belief handle. Idempotent."""
+        if self._closed:
+            return
+        self._closed = True
+        for agent in self._belief_agents:
+            agent.release_belief()
+        try:
+            self.engine.close()
+        except Exception as e:  # JUSTIFIED: evaluation resilience
+            logger.error("Engine close error: %s", e)
+
+    def __enter__(self) -> "_GoEvalGame":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+
+def _crn_deck_seed(
+    crn_seed_base: int, crn_identity: str, opponent_type: str, pair_index: int
+) -> int:
+    """Deterministic deck seed for one common-random-numbers seat rotation.
+
+    Unchanged hash formula (cambia-651 RC-A), so a recorded deck seed for a
+    stable run-dir path still resolves to the same integer. The DEAL that
+    integer produces differs between the two engines -- they seed different
+    RNGs -- so a cross-engine comparison is distributional, not per-game.
+    """
+    seed_key = f"{crn_seed_base}|{crn_identity}|{opponent_type}|{pair_index}"
+    return int(hashlib.sha256(seed_key.encode("utf-8")).hexdigest()[:8], 16)
 
 
 # --- Evaluation Loop ---
@@ -2931,6 +3063,7 @@ def run_evaluation(
     seat_scheme: str = "alternated",
     crn_seed_base: Optional[int] = None,
     crn_identity: Optional[str] = None,
+    num_players: int = 2,
 ) -> Counter:
     """Runs head-to-head evaluation between two agents. Returns results Counter.
 
@@ -2957,6 +3090,12 @@ def run_evaluation(
             Callers running from a non-stable path should pass an explicit
             constant here instead; the hash formula itself is unchanged, so
             recorded deck seeds for stable run-dir paths are unaffected.
+        num_players: Seats at the table. Above two, agent1 occupies one seat and
+            agent2 fills every other seat, the agent's seat rotating round the
+            table under the alternated scheme (so a 4-seat pass covers all four
+            positions) and pinned to seat 0 under the fixed one. Win attribution
+            stays agent-relative either way: "P0 Wins" is a win by the agent
+            under test, "P1 Wins" a win by any opponent seat.
     """
     seat_scheme = (seat_scheme or "alternated").lower()
     if seat_scheme not in ("alternated", "fixed"):
@@ -2965,6 +3104,7 @@ def run_evaluation(
         )
         seat_scheme = "alternated"
     alternate_seats = seat_scheme == "alternated"
+    num_players = max(2, int(num_players))
     logger.info("--- Starting Agent Evaluation ---")
     logger.info("Config: %s", config_path)
     logger.info("Agent 1 (P0): %s", agent1_type.upper())
@@ -3008,8 +3148,13 @@ def run_evaluation(
     average_strategy = None
     if agent1_type.lower() == "cfr" or agent2_type.lower() == "cfr":
         logger.info("Loading CFR agent data from %s...", strategy_path)
-        # Use the CFRTrainer temporarily just for loading/computing strategy
+        # Use the CFRTrainer temporarily just for loading/computing strategy.
+        # Imported here, not at module scope: the tabular trainer is built on the
+        # Python reference engine, and importing it up front would put src.game
+        # back in this module's import graph for every eval run, tabular or not.
         try:
+            from src.cfr.trainer import CFRTrainer
+
             # Minimal init, avoids needing full trainer setup dependencies if possible
             temp_trainer = CFRTrainer(config=config)
             temp_trainer.load_data(strategy_path)  # Use load_data method
@@ -3050,30 +3195,31 @@ def run_evaluation(
         agent2_kwargs["crn_seed_base"] = crn_seed_base
 
         # Build each side at the seat(s) it will occupy. A wrapper's player_id is
-        # baked in at construction and threaded into its AgentState, so swapping
-        # seats requires a distinct instance per seat. Construct once up front
-        # (loading any checkpoint at most twice total) rather than per game, then
-        # reset per-game belief via initialize_state inside the loop.
+        # baked in at construction and threaded into its belief, so occupying a
+        # different seat requires a distinct instance. Construct once up front
+        # rather than per game, then reset per-game belief in the loop.
         #
-        # Seat layout: in odd games the agent under test (agent1) sits at seat 0;
-        # in even games it sits at seat 1. Under the fixed scheme only the seat-0
-        # agent1 / seat-1 agent2 pair is ever used, so the mirror seats are built
-        # lazily to avoid redundant checkpoint loads.
+        # Seat layout: under the alternated scheme the agent under test rotates
+        # one seat per game and so needs an instance at every seat; under the
+        # fixed scheme it only ever sits at seat 0, so the mirror instances are
+        # not built and no redundant checkpoint load happens. agent2 fills every
+        # seat the agent under test is not occupying, which above two seats means
+        # several of its instances are live in the same game.
+        agent1_seats = list(range(num_players)) if alternate_seats else [0]
+        agent2_seats = (
+            list(range(num_players)) if alternate_seats else list(range(1, num_players))
+        )
         agent1_by_seat: Dict[int, BaseAgent] = {
-            0: get_agent(agent1_type, player_id=0, config=config, **agent1_kwargs)
+            seat: get_agent(agent1_type, player_id=seat, config=config, **agent1_kwargs)
+            for seat in agent1_seats
         }
         agent2_by_seat: Dict[int, BaseAgent] = {
-            1: get_agent(agent2_type, player_id=1, config=config, **agent2_kwargs)
+            seat: get_agent(agent2_type, player_id=seat, config=config, **agent2_kwargs)
+            for seat in agent2_seats
         }
-        if alternate_seats:
-            agent1_by_seat[1] = get_agent(
-                agent1_type, player_id=1, config=config, **agent1_kwargs
-            )
-            agent2_by_seat[0] = get_agent(
-                agent2_type, player_id=0, config=config, **agent2_kwargs
-            )
         logger.info(
-            "Agents instantiated (seat_scheme=%s, crn=%s).",
+            "Agents instantiated (seats=%d, seat_scheme=%s, crn=%s).",
+            num_players,
             seat_scheme,
             "on" if crn_seed_base is not None else "off",
         )
@@ -3114,63 +3260,48 @@ def run_evaluation(
             game_actions: List[Dict] = []
             game_winner = "error"
             game_error = False
+            turn = 0
+            session = None
 
             try:
-                # Seat assignment: agent under test (agent1) sits at seat 0 on odd
-                # games, seat 1 on even games when alternating; always seat 0 under
-                # the fixed scheme. Win attribution below maps physical seats back
-                # to agent-relative wins, so the Counter stays agent-indexed.
-                a_is_p0 = (game_num % 2 == 1) if alternate_seats else True
-                if a_is_p0:
-                    agents = [agent1_by_seat[0], agent2_by_seat[1]]
-                else:
-                    agents = [agent2_by_seat[0], agent1_by_seat[1]]
-                # Seat index occupied by the agent under test this game.
-                agent_seat = 0 if a_is_p0 else 1
+                # Seat assignment: the agent under test rotates one seat per game
+                # under the alternated scheme (at two seats that is the original
+                # odd/even swap), and sits at seat 0 under the fixed scheme. Win
+                # attribution below maps physical seats back to agent-relative
+                # wins, so the Counter stays agent-indexed.
+                agent_seat = ((game_num - 1) % num_players) if alternate_seats else 0
+                agents = [agent2_by_seat[s] for s in range(num_players)]
+                agents[agent_seat] = agent1_by_seat[agent_seat]
 
-                # Common-random-numbers seat pairing: each seat-swap pair shares one
-                # deck seed so the agent under test faces the identical deal from
-                # both seats, canceling deck-luck variance. Pair index groups games
-                # (1,2), (3,4), ... under one seed; the seat differs within a pair.
+                # Common-random-numbers seat pairing: one deck seed per full
+                # rotation of the agent under test, so it faces the identical
+                # deal from every seat and deck luck cancels. NOTE the deal
+                # itself differs from the Python engine's for the same seed --
+                # different RNGs -- so a cross-engine comparison is
+                # distributional, never per-game.
                 deck_seed: Optional[int] = None
                 if crn_seed_base is not None:
                     pair_index = (
-                        (game_num - 1) // 2 if alternate_seats else (game_num - 1)
+                        (game_num - 1) // num_players
+                        if alternate_seats
+                        else (game_num - 1)
                     )
-                    seed_key = (
-                        f"{crn_seed_base}|{crn_identity}|{agent2_type}|{pair_index}"
-                    )
-                    deck_seed = int(
-                        hashlib.sha256(seed_key.encode("utf-8")).hexdigest()[:8], 16
+                    deck_seed = _crn_deck_seed(
+                        crn_seed_base, crn_identity, agent2_type, pair_index
                     )
 
-                game_state = CambiaGameState(
-                    house_rules=config.cambia_rules, seed=deck_seed
-                )
-                # Reset per-game agent state. Neural/CFR wrappers reinitialize
-                # belief explicitly; baseline agents detect a new game lazily by
-                # the game_state object id (_needs_reinit). That id check is unsafe
-                # when an agent instance is reused across non-consecutive games
-                # (as under seat alternation, where each instance plays every other
-                # game): Python can recycle a freed game_state's address, so the new
-                # game collides with a stale _last_game_id and the agent keeps the
-                # prior game's memory, immediately calling Cambia (games collapse to
-                # ~4 turns and win rates regress to coin-flips). Invalidating the id
-                # sentinel here forces a fresh reinit every game for every agent.
-                for agent in agents:
-                    if isinstance(agent, (CFRAgentWrapper, NeuralAgentWrapper)):
-                        agent.initialize_state(game_state)
-                    elif hasattr(agent, "_last_game_id"):
-                        agent._last_game_id = None
+                # One session per game: it owns the engine handle and each
+                # belief agent's GoAgentState, built at the initial state so the
+                # seat's initial-peek knowledge is seeded. Baseline agents have
+                # their new-game sentinel invalidated by the session.
+                session = _GoEvalGame(config.cambia_rules, deck_seed, num_players, agents)
 
-                turn = 0
                 # Safety valve in action-units. The engine itself enforces the
-                # max_game_turns cap on its turn-number scale via _check_game_end
-                # (becoming terminal and scoring normally), so this local cap is a
-                # runaway guard, not the primary termination scale. Sized well above
-                # the engine cap in action terms: a single turn may span several
-                # actions (draw, ability sub-selects, snap responses), so multiply
-                # the turn-number cap by a per-turn action factor.
+                # max_game_turns cap on its turn-number scale (becoming terminal
+                # and scoring normally), so this local cap is a runaway guard,
+                # not the primary termination scale. Sized well above the engine
+                # cap in action terms: a single turn may span several actions
+                # (draw, ability sub-selects, snap responses).
                 engine_turn_cap = (
                     config.cambia_rules.max_game_turns
                     if config.cambia_rules.max_game_turns > 0
@@ -3178,15 +3309,15 @@ def run_evaluation(
                 )
                 max_turns = engine_turn_cap * 16
 
-                while not game_state.is_terminal() and turn < max_turns:
+                while not session.is_terminal() and turn < max_turns:
                     turn += 1
-                    acting_player_id = game_state.get_acting_player()
-                    if acting_player_id == -1:
+                    acting_player_id = session.acting_player()
+                    if acting_player_id < 0 or acting_player_id >= num_players:
                         logger.error(
-                            "Game %d Turn %d: Invalid acting player (-1). State: %s",
+                            "Game %d Turn %d: invalid acting player (%d).",
                             game_num,
                             turn,
-                            game_state,
+                            acting_player_id,
                         )
                         results["Errors"] += 1
                         game_error = True
@@ -3194,28 +3325,26 @@ def run_evaluation(
 
                     current_agent = agents[acting_player_id]
                     try:
-                        legal_actions = game_state.get_legal_actions()
+                        legal_actions = session.legal_actions()
                         if not legal_actions:
-                            # Check again if terminal, might have become terminal after last action
-                            if game_state.is_terminal():
+                            # May have become terminal on the last action.
+                            if session.is_terminal():
                                 break
                             logger.error(
-                                "Game %d Turn %d: No legal actions but non-terminal? State: %s",
+                                "Game %d Turn %d: no legal actions but non-terminal.",
                                 game_num,
                                 turn,
-                                game_state,
                             )
                             results["Errors"] += 1
                             game_error = True
                             break
 
-                        # Choose action
                         chosen_action = current_agent.choose_action(
-                            game_state, legal_actions
+                            session.engine, legal_actions
                         )
 
                         # Track first-turn Cambia calls by the agent under test
-                        # (which may sit at either seat under alternation).
+                        # (which may sit at any seat under rotation).
                         if (
                             turn == 1
                             and acting_player_id == agent_seat
@@ -3223,7 +3352,6 @@ def run_evaluation(
                         ):
                             t1_cambia_count += 1
 
-                        # Collect action record if logging
                         if output_file is not None:
                             game_actions.append(
                                 {
@@ -3234,26 +3362,10 @@ def run_evaluation(
                                 }
                             )
 
-                        # Apply action
-                        state_delta, undo_info = game_state.apply_action(chosen_action)
-                        if not callable(
-                            undo_info
-                        ):  # Should not happen if apply_action succeeds
-                            logger.error(
-                                "Game %d Turn %d: Action %s applied but returned invalid undo info.",
-                                game_num,
-                                turn,
-                                chosen_action,
-                            )
-                            results["Errors"] += 1
-                            game_error = True
-                            break
-
-                        # Belief feed: every applied transition reaches every
-                        # stateful agent, in order, whoever acted.
-                        _feed_agent_beliefs(
-                            agents, game_state, chosen_action, acting_player_id
-                        )
+                        # One crossing applies the action AND advances every
+                        # attached belief and token stream, so there is no
+                        # separate belief-feed step to keep in order.
+                        session.apply(chosen_action)
 
                     except GameStateError as e_turn:
                         logger.error(
@@ -3265,7 +3377,7 @@ def run_evaluation(
                         )
                         results["Errors"] += 1
                         game_error = True
-                        break  # End game on error
+                        break
                     except (AgentStateError, ObservationUpdateError) as e_turn:
                         logger.error(
                             "Agent state error during game %d turn %d for P%d: %s",
@@ -3276,58 +3388,55 @@ def run_evaluation(
                         )
                         results["Errors"] += 1
                         game_error = True
-                        break  # End game on error
+                        break
                     except Exception as e_turn:  # JUSTIFIED: evaluation resilience
                         logger.exception(
-                            "Error during game %d turn %d for P%d: %s. State: %s",
+                            "Error during game %d turn %d for P%d: %s",
                             game_num,
                             turn,
                             acting_player_id,
                             e_turn,
-                            game_state,
                         )
                         results["Errors"] += 1
                         game_error = True
-                        break  # End game on error
+                        break
 
                 # Game End
-                if game_state.is_terminal():
-                    winner = game_state._winner
-                    # Counter is agent-relative: "P0 Wins" = agent under test (agent1),
-                    # "P1 Wins" = opponent (agent2), regardless of physical seat. The
-                    # JSONL game_winner label below stays seat-relative ("p0"/"p1")
-                    # to match the seat-indexed per-action trace.
+                if session.is_terminal():
+                    winner = session.winner()
+                    # Counter is agent-relative: "P0 Wins" = agent under test
+                    # (agent1), "P1 Wins" = opponent (agent2), regardless of
+                    # physical seat. The JSONL game_winner label below stays
+                    # seat-relative to match the seat-indexed per-action trace.
                     if winner == agent_seat:
                         results["P0 Wins"] += 1
                         agent_under_test_seats_used.add(agent_seat)
-                    elif winner is not None and winner != agent_seat:
+                    elif winner is not None:
                         results["P1 Wins"] += 1
                         agent_under_test_seats_used.add(agent_seat)
                     else:
                         results["Ties"] += 1
 
-                    if winner == 0:
-                        game_winner = "p0"
-                    elif winner == 1:
-                        game_winner = "p1"
-                    else:
+                    if winner is None:
                         game_winner = "tie"
-                    # Capture score margin: sum of card values per player hand
+                    else:
+                        game_winner = f"p{winner}"
+
+                    # Score margin: the gap between the best and worst final
+                    # hand, which is the two-seat |p0 - p1| at two seats.
                     try:
-                        hand_scores = [
-                            sum(card.value for card in game_state.players[i].hand)
-                            for i in range(len(game_state.players))
-                        ]
-                        if len(hand_scores) == 2:
-                            margin = abs(hand_scores[0] - hand_scores[1])
-                            score_margins.append(float(margin))
+                        hand_scores = session.hand_scores()
+                        if len(hand_scores) >= 2:
+                            score_margins.append(
+                                float(max(hand_scores) - min(hand_scores))
+                            )
                     except Exception:
-                        pass  # Skip margin if hand unavailable
+                        pass  # Skip margin if hands unavailable
                     game_turns_list.append(turn)
                 elif turn >= max_turns:
                     logger.debug(
-                        "Game %d hit the action-count safety valve (%d actions) without "
-                        "engine termination. Scoring as MaxTurnTie.",
+                        "Game %d hit the action-count safety valve (%d actions) "
+                        "without engine termination. Scoring as MaxTurnTie.",
                         game_num,
                         max_turns,
                     )
@@ -3335,6 +3444,12 @@ def run_evaluation(
                     game_winner = "max_turns"
                     game_turns_list.append(turn)
 
+            except UnsupportedAgentError:
+                # Not a per-game failure: this matchup can never run here, so
+                # surface it instead of logging num_games identical errors.
+                if session is not None:
+                    session.close()
+                raise
             except GameStateError as e_game_loop:
                 logger.error(
                     "Game state error during game simulation %d: %s",
@@ -3359,6 +3474,11 @@ def run_evaluation(
                 )
                 results["Errors"] += 1
                 game_error = True
+            finally:
+                # Handles come from a finite pool; a game that raised must still
+                # give its engine and belief handles back.
+                if session is not None:
+                    session.close()
 
             game_end = time.perf_counter()
             game_duration_ms = (game_end - game_start) * 1000.0
@@ -3424,8 +3544,9 @@ def run_evaluation(
     # test genuinely played both seats (seat_balanced), and the CRN seed root.
     enhanced_stats["seat_scheme"] = seat_scheme
     enhanced_stats["seat_balanced"] = bool(
-        alternate_seats and len(agent_under_test_seats_used) >= 2
+        alternate_seats and len(agent_under_test_seats_used) >= num_players
     )
+    enhanced_stats["num_players"] = num_players
     enhanced_stats["selection_mode"] = "argmax" if use_argmax else "stochastic"
     enhanced_stats["crn_seed"] = crn_seed_base
     # Attach as attribute so CLI and tests can access enhanced stats without
@@ -3494,6 +3615,7 @@ def _run_single_baseline(args: tuple) -> tuple:
         use_argmax,
         seat_scheme,
         crn_seed_base,
+        num_players,
     ) = args
     results = run_evaluation(
         config_path=config_path,
@@ -3507,6 +3629,7 @@ def _run_single_baseline(args: tuple) -> tuple:
         use_argmax=use_argmax,
         seat_scheme=seat_scheme,
         crn_seed_base=crn_seed_base,
+        num_players=num_players,
     )
     return baseline, results, getattr(results, "stats", {})
 
@@ -3523,6 +3646,7 @@ def run_evaluation_multi_baseline(
     max_workers: Optional[int] = None,
     seat_scheme: str = "alternated",
     crn_seed_base: Optional[int] = None,
+    num_players: int = 2,
 ) -> Dict[str, Counter]:
     """
     Evaluate a checkpoint against multiple baseline agents.
@@ -3539,6 +3663,8 @@ def run_evaluation_multi_baseline(
         max_workers: Number of parallel baseline workers. None = auto (min of baseline
             count and cpu_count/2, capped at 7). Set to 1 for sequential execution.
         seat_scheme: "alternated" (default) or "fixed". Passed through to run_evaluation.
+        num_players: Seats at the table, passed through to run_evaluation. Above
+            two, each baseline fills every seat the agent under test is not in.
         crn_seed_base: Common-random-numbers seed root for deck pairing. When None
             (default), a deterministic root is derived from the checkpoint path so
             seat-swap pairs share decks reproducibly across runs while distinct
@@ -3577,6 +3703,7 @@ def run_evaluation_multi_baseline(
                 use_argmax,
                 seat_scheme,
                 crn_seed_base,
+                num_players,
             )
         )
 
@@ -3669,45 +3796,38 @@ def run_head_to_head(
 
         agents = [agent0, agent1]
 
+        session = None
         try:
-            game_state = CambiaGameState(house_rules=config.cambia_rules)
-            for agent in agents:
-                agent.initialize_state(game_state)
-
             max_turns = (
                 config.cambia_rules.max_game_turns
                 if config.cambia_rules.max_game_turns > 0
                 else 500
             )
             turn = 0
+            session = _GoEvalGame(config.cambia_rules, None, 2, agents)
 
-            while not game_state.is_terminal() and turn < max_turns:
+            while not session.is_terminal() and turn < max_turns:
                 turn += 1
-                acting_player_id = game_state.get_acting_player()
-                if acting_player_id == -1:
+                acting_player_id = session.acting_player()
+                if acting_player_id < 0:
                     break
                 current_agent = agents[acting_player_id]
                 try:
-                    legal_actions = game_state.get_legal_actions()
+                    legal_actions = session.legal_actions()
                     if not legal_actions:
-                        if game_state.is_terminal():
-                            break
                         break
-                    chosen_action = current_agent.choose_action(game_state, legal_actions)
-                    _, undo_info = game_state.apply_action(chosen_action)
-                    if not callable(undo_info):
-                        break
-                    _feed_agent_beliefs(
-                        agents, game_state, chosen_action, acting_player_id
+                    chosen_action = current_agent.choose_action(
+                        session.engine, legal_actions
                     )
+                    session.apply(chosen_action)
                 except Exception as e_turn:
                     logger.error("Head-to-head game %d turn error: %s", game_num, e_turn)
                     break
 
             turns_list.append(turn)
 
-            if game_state.is_terminal():
-                winner = game_state._winner
+            if session.is_terminal():
+                winner = session.winner()
                 if winner is None:
                     ties_count += 1
                 elif (a_is_p0 and winner == 0) or (not a_is_p0 and winner == 1):
@@ -3721,6 +3841,9 @@ def run_head_to_head(
         except Exception as e_game:
             logger.error("Head-to-head game %d error: %s", game_num, e_game)
             errors_count += 1
+        finally:
+            if session is not None:
+                session.close()
 
     avg_turns = sum(turns_list) / len(turns_list) if turns_list else 0.0
     if turns_list:
@@ -3789,6 +3912,7 @@ def run_head_to_head_typed(
 
     for game_num in range(1, num_games + 1):
         a_is_p0 = game_num % 2 == 1
+        session = None
 
         try:
             if a_is_p0:
@@ -3828,37 +3952,28 @@ def run_head_to_head_typed(
 
             agents = [agent0, agent1]
 
-            game_state = CambiaGameState(house_rules=config.cambia_rules)
-            for agent in agents:
-                if hasattr(agent, "initialize_state"):
-                    agent.initialize_state(game_state)
-
             max_turns = (
                 config.cambia_rules.max_game_turns
                 if getattr(config.cambia_rules, "max_game_turns", 0) > 0
                 else 500
             )
             turn = 0
+            session = _GoEvalGame(config.cambia_rules, None, 2, agents)
 
-            while not game_state.is_terminal() and turn < max_turns:
+            while not session.is_terminal() and turn < max_turns:
                 turn += 1
-                acting_player_id = game_state.get_acting_player()
-                if acting_player_id == -1:
+                acting_player_id = session.acting_player()
+                if acting_player_id < 0:
                     break
                 current_agent = agents[acting_player_id]
                 try:
-                    legal_actions = game_state.get_legal_actions()
+                    legal_actions = session.legal_actions()
                     if not legal_actions:
-                        if game_state.is_terminal():
-                            break
                         break
-                    chosen_action = current_agent.choose_action(game_state, legal_actions)
-                    _, undo_info = game_state.apply_action(chosen_action)
-                    if not callable(undo_info):
-                        break
-                    _feed_agent_beliefs(
-                        agents, game_state, chosen_action, acting_player_id
+                    chosen_action = current_agent.choose_action(
+                        session.engine, legal_actions
                     )
+                    session.apply(chosen_action)
                 except Exception as e_turn:
                     logger.error(
                         "Head-to-head-typed game %d turn error: %s", game_num, e_turn
@@ -3867,8 +3982,8 @@ def run_head_to_head_typed(
 
             turns_list.append(turn)
 
-            if game_state.is_terminal():
-                winner = game_state._winner
+            if session.is_terminal():
+                winner = session.winner()
                 if winner is None:
                     draws += 1
                 elif (a_is_p0 and winner == 0) or (not a_is_p0 and winner == 1):
@@ -3881,6 +3996,9 @@ def run_head_to_head_typed(
         except Exception as e_game:
             logger.error("Head-to-head-typed game %d error: %s", game_num, e_game)
             errors_count += 1
+        finally:
+            if session is not None:
+                session.close()
 
     avg_turns = sum(turns_list) / len(turns_list) if turns_list else 0.0
     if turns_list:
@@ -4132,14 +4250,14 @@ if __name__ == "__main__":
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
         logger.setLevel(logging.DEBUG)
-        logging.getLogger("src.game.engine").setLevel(logging.INFO)
+        logging.getLogger("src.ffi.bridge").setLevel(logging.INFO)
         logging.getLogger("src.agents.baseline_agents").setLevel(logging.DEBUG)
         logging.getLogger("src.agent_state").setLevel(
             logging.INFO
         )  # Keep agent state less verbose unless debugging it
     else:
         # Silence logs below INFO from libraries if not verbose
-        logging.getLogger("src.game.engine").setLevel(logging.WARNING)
+        logging.getLogger("src.ffi.bridge").setLevel(logging.WARNING)
         logging.getLogger("src.agents.baseline_agents").setLevel(logging.INFO)
         logging.getLogger("src.agent_state").setLevel(logging.WARNING)
 
