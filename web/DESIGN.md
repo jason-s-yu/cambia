@@ -137,7 +137,7 @@ Each status carries three tokens: the foreground, a tinted `-bg`, and a `-border
 
 The `-bg` tint and the `-border` hairline carry the rgb of the foreground above them, so a badge is one hue at three strengths.
 
-A status tone is read as text at 11-13px inside its own tint, and the tint lifts the ground it is measured against, which is where three of these fell under AA: dark success measured 4.14:1 on the badge tint over `--surface-2`, dark danger 4.13:1 and 3.76:1 over `--surface-1` and `--surface-2`, and light warning 4.05:1 and 4.25:1. The same two dark tones sat at 3.97:1 and 3.43:1 as the `PlayerSeat` state line on `--surface-selected`, the lightest ground in dark. Success and danger moved one ramp step lighter and warning one step darker, to 5.62, 5.16 and 5.24 at their worst ground, 5.76 and 5.09 on the seat. `--red-300` and `--amber-700` are new ramp steps: red stopped at the 400 that was the danger fill, and amber is the one status hue whose 600 step is light enough to fail on paper.
+A status tone is read as text at 12-13px inside its own tint, and the tint lifts the ground it is measured against, which is where three of these fell under AA: dark success measured 4.14:1 on the badge tint over `--surface-2`, dark danger 4.13:1 and 3.76:1 over `--surface-1` and `--surface-2`, and light warning 4.05:1 and 4.25:1. The same two dark tones sat at 3.97:1 and 3.43:1 as the `PlayerSeat` state line on `--surface-selected`, the lightest ground in dark. Success and danger moved one ramp step lighter and warning one step darker, to 5.62, 5.16 and 5.24 at their worst ground, 5.76 and 5.09 on the seat. `--red-300` and `--amber-700` are new ramp steps: red stopped at the 400 that was the danger fill, and amber is the one status hue whose 600 step is light enough to fail on paper.
 
 That pass moved level and left hue alone, and both tones then read wrong (cambia-1046). Lightness, chroma and hue below are CIELAB.
 
@@ -185,7 +185,7 @@ Positions are 1-based in the name because they are read aloud. Ranks are spoken,
 
 ## Typography
 
-One family for the whole app: **Archivo Variable**, self-hosted through `@fontsource-variable/archivo` and imported in `src/main.tsx`. Chosen because it is a neutral grotesque with slightly narrow proportions that stay readable at 11 to 13px in dense leaderboards and score readouts, ships a 100 to 900 weight axis so hierarchy needs no second family, and carries a real `tnum` feature for tabular figures. It is not on the AI-default shortlist.
+One family for the whole app: **Archivo Variable**, self-hosted through `@fontsource-variable/archivo` and imported in `src/main.tsx`. Chosen because it is a neutral grotesque with slightly narrow proportions that stay readable at 12 to 14px in dense leaderboards and score readouts, ships a 100 to 900 weight axis so hierarchy needs no second family, and carries a real `tnum` feature for tabular figures. It is not on the AI-default shortlist.
 
 `--font-sans` resolves to `'Archivo Variable', 'Archivo', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif`.
 
@@ -201,28 +201,34 @@ Serifs are out of the app entirely. `npm run check-tokens` fails the build check
 
 ### Scale
 
+Every step moved up one in the 2026-08-30 clarity pass (cambia-1097): the ramp used to start at 11px and put body copy on 14px, which left four tiers inside a 3px span and made a dense panel read as one block of small grey text.
+
 |Token|Size|Use|
 |-|-|-|
-|`--text-2xs`|11px|Eyebrow labels, status pills, unit suffixes.|
-|`--ds-text-xs`|12px|Badge text, dense metadata rows.|
-|`--ds-text-sm`|13px|Secondary lines, small controls, table cells.|
-|`--text-md`|14px|Body default. Controls, labels, most copy.|
-|`--ds-text-lg`|16px|Card and dialog titles, large control text.|
-|`--ds-text-xl`|20px|Section headings.|
-|`--ds-text-2xl`|25px|Page headings.|
-|`--ds-text-3xl`|32px|Hero headline.|
-|`--ds-text-4xl`|42px|Display number (final score, big rating).|
-|`--ds-text-5xl`|56px|Reserved. One per screen at most.|
+|`--text-2xs`|12px|Eyebrow labels, status pills, unit suffixes. The floor: nothing renders smaller.|
+|`--ds-text-xs`|13px|Badge text, dense metadata rows, field errors.|
+|`--ds-text-sm`|14px|Secondary lines, hints, small controls, table cells.|
+|`--text-md`|15px|Body default, set on `<body>`. Controls, labels, most copy.|
+|`--ds-text-lg`|18px|Headings inside a panel, card names, stat values, large control text.|
+|`--ds-text-xl`|22px|Panel and dialog titles.|
+|`--ds-text-2xl`|28px|Page headings.|
+|`--ds-text-3xl`|34px|Hero headline.|
+|`--ds-text-4xl`|44px|Display number (final score, big rating).|
+|`--ds-text-5xl`|58px|Reserved. One per screen at most.|
+
+The three heading tiers are one ladder and each rank is a step you can see: a panel title at `--ds-text-xl` is the outermost, the group headings inside it sit at `--ds-text-lg`, and the eyebrow labels on the fields below those are the bottom rank at `--text-2xs`.
 
 Weights: `--weight-regular` 400 (body), `--weight-medium` 500 (labels, nav, control text), `--weight-bold` 600 (headings, buttons, active nav), `--weight-black` 700 (wordmark, display numbers, card indices). Nothing above 700.
 
 Line height: `--ds-leading-tight` 1.15 for headings, `--ds-leading-snug` 1.35 for compact multi-line labels, `--ds-leading-normal` 1.55 for body.
 
-Tracking: `--ds-tracking-tight` -0.01em on headings 16px and up, `--tracking-caps` 0.08em on uppercase eyebrows, `--ds-tracking-wide` 0.14em on uppercase display text such as JOKER.
+Tracking: `--ds-tracking-tight` -0.01em on headings 18px and up, `--tracking-caps` 0.08em on uppercase eyebrows, `--ds-tracking-wide` 0.14em on uppercase display text such as JOKER.
 
 ### Eyebrows
 
-One style, exported as `EYEBROW` from `components/ds/eyebrow.ts`: 11px, `--weight-bold`, `--tracking-caps`, uppercase, `--text-tertiary`, and `word-spacing: 0.12em`. Spread it (`{ ...EYEBROW }`) and override only the color or weight a surface genuinely needs; do not restate the five declarations. The word spacing is the reason it is shared: at 11px with 0.08em tracking the inter-word gap disappears into the letter gaps and a two-word eyebrow reads as one run (RULESHEET).
+One style, exported as `EYEBROW` from `components/ds/eyebrow.ts`: `--text-2xs` 12px, `--weight-bold`, `--tracking-caps`, uppercase, `--text-tertiary`, and `word-spacing: 0.12em`. Spread it (`{ ...EYEBROW }`) and override only the color or weight a surface genuinely needs; do not restate the five declarations. The word spacing is the reason it is shared: at this size with 0.08em tracking the inter-word gap disappears into the letter gaps and a two-word eyebrow reads as one run (RULESHEET).
+
+It is a field label, not a heading. `Panel`'s title and the rule sheet's group headings were both set in it until cambia-1097, so a panel whose sections and whose fields drew the same uppercase style had no heading a scan could land on; both are sentence-case headings now, over the hairline that closes the panel's header band.
 
 ### Numerals
 
@@ -252,7 +258,7 @@ Do
 - `color: var(--status-danger)` for an error message; `background: var(--accent-danger); color: var(--text-on-danger)` for the destructive button.
 - `<span style={{ fontVariantNumeric: 'tabular-nums' }}>{score}</span>` for a live score.
 - One accent per screen region. A panel with a gold CTA does not also gold-outline its own border.
-- Reach for `--text-tertiary` and 11px uppercase for an eyebrow, then let the value below it carry the weight.
+- Reach for `--text-tertiary` and the `EYEBROW` style for a field label, then let the value below it carry the weight.
 
 Don't
 

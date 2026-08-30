@@ -27,7 +27,7 @@ export interface PanelProps {
 }
 
 /**
- * Flat card surface with an optional uppercase title row and action slot.
+ * Flat card surface with an optional heading row and action slot.
  * Separation comes from the ground/surface step plus a 1px border, not from
  * a shadow.
  */
