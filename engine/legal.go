@@ -119,18 +119,95 @@ func (g *GameState) legalPostDraw(mask *[3]uint64) {
 // Mirrors Python's ability fizzle conditions.
 //
 // An opponent-facing ability needs SOME opponent it can still reach, which is the same question
-// discardWithAbilityNPlayer asks of the N-player ability arm. It used to ask about the single seat
-// OpponentOf(acting) names, which is 1-acting: correct at two seats, and from seat 2 an underflow
-// to 255 that indexed off the end of the player array. replace() calls this on every replace when
-// AllowReplaceAbilities is on, and it is shared by both action spaces, so at a ranked FFA table a
-// replace from seat 2 or 3 panicked the game (cambia-1125). At two seats the two readings are the
-// same question, so nothing about the 2-player action space or its legal masks changes.
+// the N-player ability-select mask asks, so both go through abilityHasTargetNP. It used to ask
+// about the single seat OpponentOf(acting) names, which is 1-acting: correct at two seats, and
+// from seat 2 an underflow to 255 that indexed off the end of the player array. replace() calls
+// this on every replace when AllowReplaceAbilities is on, and it is shared by both action spaces,
+// so at a ranked FFA table a replace from seat 2 or 3 panicked the game (cambia-1125). At two
+// seats the two readings are the same question, so nothing about the 2-player action space or its
+// legal masks changes.
 func (g *GameState) canUseAbility(acting uint8, card Card) bool {
+	return g.abilityHasTargetNP(pendingForAbility(card.Ability()), acting)
+}
+
+// seatOpponent names the seat the 146-action space treats as "the opponent". That space encodes
+// exactly one, so a table with more seats is the N-player space's business (NPlayerLegalActions and
+// the *NPlayer apply handlers); this only has to stay in bounds when the 2-player surface is used
+// at such a table, which the FFI surface (cambia_game_legal_actions / cambia_game_apply_action)
+// permits.
+//
+// OpponentOf is 1-acting, which is that answer at two seats and an underflow to 255 from seat 2,
+// indexing off the end of Players exactly as the replace path did before cambia-1125. The next
+// seat round the table is the same seat at two players, so no bit of the 2-player mask moves and
+// no 2-player apply path resolves against a different seat.
+//
+// Both halves of the 2-player surface read the opponent here, mask and apply alike: if they
+// disagreed, the mask would enumerate one seat's slots and the apply path would index another's.
+func (g *GameState) seatOpponent(acting uint8) uint8 {
+	if n := g.Rules.numPlayers(); n > 2 {
+		return (acting + 1) % n
+	}
+	return g.OpponentOf(acting)
+}
+
+// pendingForAbility maps a card's ability to the pending state that ability arms, or PendingNone
+// for a card with no ability. Both discard-with-ability arms and canUseAbility key off it, so the
+// ability -> pending mapping is stated once.
+func pendingForAbility(ability AbilityType) PendingType {
+	switch ability {
+	case AbilityPeekOwn:
+		return PendingPeekOwn
+	case AbilityPeekOther:
+		return PendingPeekOther
+	case AbilityBlindSwap:
+		return PendingBlindSwap
+	case AbilityKingLook:
+		return PendingKingLook
+	default:
+		return PendingNone
+	}
+}
+
+// abilityHasTarget2P reports whether legalAbilitySelect would set at least one bit for an armed
+// ability of type pending held by acting. An ability the 2-player space can produce no action for
+// cannot be resolved by any caller that respects the mask, and the engine refuses every other
+// action while it holds a pending ability, so arming one stops the table: the arm sites resolve it
+// instead (cambia-1171).
+//
+// Kept in step with legalAbilitySelect below by construction - same seat via seatOpponent, same
+// LockCallerHand condition - and by TestAbilityHasTargetMatchesAbilitySelectMask.
+func (g *GameState) abilityHasTarget2P(pending PendingType, acting uint8) bool {
+	opp := g.seatOpponent(acting)
+	ownHandLen := g.Players[acting].HandLen
+	oppHandLen := g.Players[opp].HandLen
+
+	switch pending {
+	case PendingPeekOwn:
+		return ownHandLen > 0
+	case PendingPeekOther:
+		// Not gated on the lock: peeking reads a hand rather than moving a card out of it, and
+		// legalAbilitySelect does not gate it either.
+		return oppHandLen > 0
+	case PendingBlindSwap, PendingKingLook:
+		if g.Rules.LockCallerHand && g.IsCambiaCalled() && int8(opp) == g.CambiaCaller {
+			return false
+		}
+		return ownHandLen > 0 && oppHandLen > 0
+	case PendingKingDecision:
+		// Both swap answers are always legal.
+		return true
+	default:
+		return false
+	}
+}
+
+// abilityHasTargetNP is abilityHasTarget2P's N-player counterpart: it reports whether
+// nplayerLegalAbilitySelect would set at least one bit, which asks the same question of every
+// opponent rather than of one seat. Seats are walked in place rather than through Opponents(),
+// which allocates: this sits on the legal-mask path.
+func (g *GameState) abilityHasTargetNP(pending PendingType, acting uint8) bool {
 	ownHandLen := g.Players[acting].HandLen
 
-	// reachableOpponent reports whether any seat other than acting still holds a card, optionally
-	// skipping the Cambia caller when LockCallerHand puts their hand out of reach. Walked in place
-	// rather than through Opponents(), which allocates: this sits on the legal-mask path.
 	reachableOpponent := func(skipLockedCaller bool) bool {
 		n := g.Rules.numPlayers()
 		for opp := uint8(0); opp < n; opp++ {
@@ -145,38 +222,26 @@ func (g *GameState) canUseAbility(acting uint8, card Card) bool {
 		return false
 	}
 
-	switch card.Ability() {
-	case AbilityPeekOwn:
+	switch pending {
+	case PendingPeekOwn:
 		return ownHandLen > 0
-	case AbilityPeekOther:
+	case PendingPeekOther:
 		return reachableOpponent(false)
-	case AbilityBlindSwap, AbilityKingLook:
-		// When LockCallerHand is true and the only opponent left is the Cambia caller, swap
+	case PendingBlindSwap, PendingKingLook:
+		// When LockCallerHand is true and every opponent left is the Cambia caller, swap
 		// abilities cannot target anyone - fizzle at ability-select stage.
 		return ownHandLen > 0 && reachableOpponent(true)
+	case PendingKingDecision:
+		return true
 	default:
 		return false
 	}
 }
 
-// maskOpponent names the seat the 146-action space treats as "the opponent". That space encodes
-// one, so a table with more seats is the N-player space's business (NPlayerLegalActions); this
-// only has to stay in bounds if the 2-player mask is asked for at such a table.
-//
-// OpponentOf is 1-acting, which is that answer at two seats and an underflow to 255 from seat 2,
-// indexing off the end of Players exactly as the replace path did before cambia-1125. The next
-// seat round the table is the same seat at two players, so no bit of the 2-player mask moves.
-func (g *GameState) maskOpponent(acting uint8) uint8 {
-	if n := g.Rules.numPlayers(); n > 2 {
-		return (acting + 1) % n
-	}
-	return g.OpponentOf(acting)
-}
-
 // legalAbilitySelect populates legal actions for CtxAbilitySelect.
 func (g *GameState) legalAbilitySelect(mask *[3]uint64) {
 	acting := g.Pending.PlayerID
-	opp := g.maskOpponent(acting)
+	opp := g.seatOpponent(acting)
 	ownHandLen := g.Players[acting].HandLen
 	oppHandLen := g.Players[opp].HandLen
 
@@ -227,7 +292,7 @@ func (g *GameState) legalAbilitySelect(mask *[3]uint64) {
 // legalSnapDecision populates legal actions for CtxSnapDecision.
 func (g *GameState) legalSnapDecision(mask *[3]uint64) {
 	acting := g.Snap.Snappers[g.Snap.CurrentSnapperIdx]
-	opp := g.maskOpponent(acting)
+	opp := g.seatOpponent(acting)
 	ownHandLen := g.Players[acting].HandLen
 	oppHandLen := g.Players[opp].HandLen
 
