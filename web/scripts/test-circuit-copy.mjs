@@ -80,11 +80,13 @@ test('the subsidy schedule reads out ComputeAggressionSubsidy, in its order', ()
 });
 
 test('the disconnect window is the one a circuit game arms', () => {
-    // A circuit game takes its own branch on a drop (service/internal/game/game.go): a fixed
-    // window, no forfeit, and the sheet's own forfeit rule and reconnect grace never reached.
-    const hold = num(GAME_GO, /circuitGraceTimers\[playerID\] = time\.AfterFunc\((\d+)\s*\*\s*time\.Second/, 'the circuit disconnect window');
+    // Since cambia-1233 a circuit drop runs the rule sheet's reconnect grace
+    // (HouseRules.DisconnectGraceSec; service/internal/game/game.go) rather than a fixed window
+    // of its own, so the copy quotes the DefaultHouseRules value as the default.
+    const RULES_GO = read('service/internal/game/rules.go');
+    const hold = num(RULES_GO, /DisconnectGraceSec:\s+(\d+)/, 'the default reconnect grace');
     const disconnects = section('disconnects');
-    assert.match(disconnects, new RegExp(`held for ${hold} seconds`));
+    assert.match(disconnects, new RegExp(`default ${hold} seconds`));
     assert.match(disconnects, /does not forfeit the seat/);
 });
 
