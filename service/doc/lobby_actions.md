@@ -21,6 +21,7 @@ This document describes the JSON payloads used for WebSocket communication on th
 | Update Rules (Host Only) | `update_rules`   | `{ "rules": { "presetId": "h2h_rapid", ... partial HouseRules object ... } }` (See `internal/game/rules.go` for fields)       | `internal/handlers/lobby_ws.go`  | Host updates lobby's house rules or circuit settings. Refused outright for a ranked or matchmaking lobby: see "Host role". An optional `presetId` inside `rules` names a whole ruleset from `GET /lobby/presets` and is expanded server-side before the field-by-field keys, so a `houseRules` object in the same message lands on top of it; an unknown id rejects the whole message (cambia-1088). The id is recorded on the lobby and echoed back as `lobby_state.preset_id`; sending one with the expanded sheet is how a client keeps the lobby's ruleset named (see "Ruleset identity"). A preset that fixes a player count fixes `game_mode` with it, and one that seats fewer players than the lobby already has is refused, changing nothing. The auto-start block is read from `settings`, with `lobbySettings` accepted as an alias (see `rest_api.md`). An accepted edit broadcasts `lobby_state` to every connected seat; a refused one broadcasts nothing. |
 | Force Start (Host Only)  | `start_game`     | *(None)* | `internal/handlers/lobby_ws.go`  | Host attempts to start the game manually (if all ready). Refused for a system-hosted lobby, which starts on its ready check. |
 | Cancel Search (Host Only) | `cancel_search` | *(None)* | `internal/hub/hub.go` | Party leader takes the lobby back out of its queue. Valid only in the `searching` phase, which is the phase a party still has a leader in. |
+| Return To Lobby (Host Only) | `return_to_lobby` | *(None)* | `internal/hub/hub.go` | Closes the results screen and reopens the lobby without waiting out the results timer. Valid only in the `post_game` and `match_end` phases; ignored in every other phase. Host-gated, widened to any seated player where no player holds the role: see "Post-game exit". |
 
 ## Host role
 
@@ -58,6 +59,36 @@ on.
 The sentinel is never written to the database. `lobbies.host_user_id` is `NOT NULL` with an FK to
 `users`, so a system-hosted lobby persists its `CreatorUserID` (whoever called
 `POST /lobby/create`, stamped once and never reassigned) in that column instead.
+
+## Post-game exit
+
+A finished game leaves the hub in `post_game` (a casual single game) or `match_end` (a ranked
+circuit), showing results. `return_to_lobby` is how a table leaves that screen: it drops the
+finished game, clears the lobby's in-game flags, unreadies every seat and broadcasts
+`phase_change` with `open` plus a refreshed `lobby_state`, which is the same reset the results
+timer runs (`PostGameDuration`, 10s by default). Sending it is the client's only way out ahead of
+the timer, and in `match_end` it is the only way out at all: nothing arms a timer for that phase.
+
+* **Host-gated.** The exit closes the results for everyone at the table, so a seat that does not
+  hold the host role cannot take them away from the rest. Refused with *only the host can close
+  the results and reopen the lobby*.
+* **Fallback for a system-hosted lobby: any seated player.** A matchmade lobby has no player host
+  at all (see "Host role": `HostUserID` is the system sentinel and `your_is_host` is false in
+  every seat), so gating on the role would leave every seat of a finished match stuck on the
+  results screen. Membership is what the fallback reads, not the socket: a connection whose user
+  never joined the lobby is refused with the same message.
+* **Idempotent.** Only the first exit transitions. A repeat is ignored on the phase check, and the
+  reset the timer armed is dropped when it lands after its own results screen was closed, so it
+  cannot cut short a later game's results (the hub is in `post_game` for those too).
+* **Client-only.** The transition itself is internal to the hub, and a frame naming an internal
+  message type (`_return_to_lobby` and the other underscore-prefixed types) is refused: those run
+  phase transitions with no check on the sender, which would be a way around this gate.
+* A phase that is not `post_game` or `match_end` ignores the message, sending nothing back. There
+  is nothing to close, and a live game is not left this way (leaving is `POST /lobby/{id}/leave`).
+
+The ranked half stops there. `RoundsPlayed`, `CumulativeScores` and `RoundHistory` are left where
+the match left them, since what becomes of a finished ranked match's lobby is the unratified half
+of the round-lifecycle design (cambia-466).
 
 ## Ruleset identity
 
