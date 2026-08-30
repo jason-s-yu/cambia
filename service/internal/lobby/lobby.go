@@ -431,18 +431,30 @@ func (l *Lobby) GetLobbyStatusPayloadUnsafe() map[string]interface{} {
 }
 
 // UpdateUnsafe applies partial settings updates. Assumes lock is held.
+//
+// A "presetId" key names a whole ruleset (see presets.go, cambia-1088) and is expanded before
+// the field-by-field keys, so an explicit houseRules or settings object in the same message
+// lands on top of the preset rather than under it.
 func (l *Lobby) UpdateUnsafe(rules map[string]interface{}) error {
 	changed := false
 
+	preset, err := l.resolvePresetUnsafe(rules)
+	if err != nil {
+		return err
+	}
+
 	tempHR := l.HouseRules
+	if preset != nil {
+		tempHR = preset.HouseRules
+	}
 	if hrData, ok := rules["houseRules"].(map[string]interface{}); ok {
 		if err := tempHR.Update(hrData); err != nil {
 			return err
 		}
-		if tempHR != l.HouseRules {
-			l.HouseRules = tempHR
-			changed = true
-		}
+	}
+	if tempHR != l.HouseRules {
+		l.HouseRules = tempHR
+		changed = true
 	}
 
 	tempCircuit := l.Circuit
@@ -477,12 +489,17 @@ func (l *Lobby) UpdateUnsafe(rules map[string]interface{}) error {
 	}
 
 	tempLS := l.LobbySettings
+	if preset != nil {
+		tempLS = preset.Settings
+	}
 	if lsData, ok := rules["settings"].(map[string]interface{}); ok {
-		if autoStart, ok := lsData["autoStart"].(bool); ok && tempLS.AutoStart != autoStart {
+		if autoStart, ok := lsData["autoStart"].(bool); ok {
 			tempLS.AutoStart = autoStart
-			l.LobbySettings = tempLS
-			changed = true
 		}
+	}
+	if tempLS != l.LobbySettings {
+		l.LobbySettings = tempLS
+		changed = true
 	}
 
 	if changed {

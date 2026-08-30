@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -120,7 +119,9 @@ func CreateLobbyHandler(gs *GameServer) http.HandlerFunc {
 			// The rules/settings overrides are deliberately NOT applied here. Whether this
 			// lobby may carry client-supplied rules at all depends on whether it resolves to a
 			// matchmaking queue, and that is only known once the branch below has read the
-			// queue config, so lob.Update runs after it (cambia-1089).
+			// queue config, so lob.Update runs after it (cambia-1089). The same holds for a
+			// ruleset preset (cambia-1088): it is validated and expanded below, where
+			// queueBacked is known.
 		}
 
 		// Validate the lobby type before anything derived from it.
@@ -213,11 +214,31 @@ func CreateLobbyHandler(gs *GameServer) http.HandlerFunc {
 		// win-by-default leaves it believing the match runs on its numbers.
 		if reqBody != nil {
 			if queueBacked {
+				// A preset is a whole rule set, so it is refused on the same ground as the
+				// field-by-field keys below (cambia-1088 + cambia-1089).
+				if presetID, ok := reqBody["presetId"].(string); ok && presetID != "" {
+					http.Error(w, "Ruleset presets are not accepted for a ranked matchmaking lobby", http.StatusBadRequest)
+					return
+				}
 				if key, present := firstRuleOverrideKey(reqBody); present {
 					http.Error(w, "A matchmaking queue sets its own rules: remove "+key+" or create a lobby without a queueID", http.StatusBadRequest)
 					return
 				}
 			} else {
+				// Ruleset preset (cambia-1088): the dialog names a whole ruleset rather than
+				// sending the sheet field by field. lob.Update expands it, but this handler
+				// has always discarded that error, so the id is checked up front to get a 400
+				// out of a bad one, and the game mode the preset fixes is derived here.
+				if presetID, ok := reqBody["presetId"].(string); ok && presetID != "" {
+					preset, known := lobby.GetPreset(presetID)
+					if !known {
+						http.Error(w, "Unknown ruleset preset: "+presetID, http.StatusBadRequest)
+						return
+					}
+					if preset.GameMode != "" {
+						lob.GameMode = preset.GameMode
+					}
+				}
 				// Error still discarded, as before this change: an out-of-range house rule
 				// leaves the lobby on its defaults rather than failing the create. Widening
 				// that into a 400 is a separate call from this one (cambia-1089).
@@ -718,6 +739,28 @@ func CancelSearchHandler(gs *GameServer) http.HandlerFunc {
 	}
 }
 
+// PresetsHandler handles GET /lobby/presets: the selectable rulesets, default first, then one
+// per matchmaking queue in the queue list's order (lobby.Presets, cambia-1088).
+//
+// Its own endpoint rather than extra fields on GET /matchmaking/queues, for three reasons. The
+// default ruleset is not a queue and has no place in a list the dashboard renders as queue
+// cards; the queue list is polled for live player counts and wait times while this list is
+// static, so bundling a full house-rules object into it would ship the same fourteen fields on
+// every poll; and the lobby rule sheet needs the rulesets without needing the queue stats at
+// all.
+//
+// No authentication, on the same grounds as ListLobbiesHandler and ListQueuesHandler: nothing
+// here reads the caller's identity, and a handler that authenticates and discards the result
+// leaves an unauthenticated GET with two bodies written to one response (cambia-887 F4).
+func PresetsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(lobby.Presets())
+}
+
 // ListQueuesHandler handles GET /matchmaking/queues.
 // Returns all configured queues with live stats.
 //
@@ -748,32 +791,11 @@ func ListQueuesHandler(gs *GameServer) http.HandlerFunc {
 			AvgWaitSec   float64 `json:"avgWaitSec"`
 		}
 
-		names := map[string]string{
-			// Family-prefixed like the other five so the card label does not read as
-			// the dashboard heading (cambia-922 F1: hero/queue name collision).
-			"h2h_quickplay":  "H2H Quick",
-			"h2h_blitz":      "H2H Blitz",
-			"h2h_rapid":      "H2H Rapid",
-			"h2h_classical":  "H2H Classical",
-			"ffa4_standard":  "FFA-4 Standard",
-			"ffa4_classical": "FFA-4 Classical",
-		}
-
-		// Range over the map to collect ids, then sort before building the response: the
-		// map itself carries no order, and building queueResponse entries in iteration
-		// order (the previous bug, cambia-957) would still leave a JSON array whose
-		// element order Go never promises to repeat.
-		ids := make([]string, 0, len(matchmaking.QueueConfigs))
-		for id := range matchmaking.QueueConfigs {
-			ids = append(ids, id)
-		}
-		sort.Slice(ids, func(i, j int) bool {
-			oi, oj := matchmaking.QueueConfigs[ids[i]].Order, matchmaking.QueueConfigs[ids[j]].Order
-			if oi != oj {
-				return oi < oj
-			}
-			return ids[i] < ids[j]
-		})
+		// Ids come back sorted by QueueConfig.Order rather than in map iteration order, which
+		// Go re-randomizes on every range statement (the cambia-957 bug: the six queue cards
+		// reordered themselves between dashboard loads with nothing actually changed). The
+		// ruleset presets built from the same configs sort through the same helper.
+		ids := matchmaking.OrderedQueueIDs()
 
 		queues := make([]queueResponse, 0, len(ids))
 		for _, id := range ids {
@@ -781,7 +803,7 @@ func ListQueuesHandler(gs *GameServer) http.HandlerFunc {
 			stat := stats[id]
 			queues = append(queues, queueResponse{
 				QueueID:      id,
-				Name:         names[id],
+				Name:         cfg.DisplayName,
 				Players:      cfg.Players,
 				Rounds:       cfg.Rounds,
 				RatingPool:   cfg.RatingPool,

@@ -7,16 +7,18 @@
 // sheet as plain values (no disabled controls: guests are its readers).
 // No WS protocol change.
 import React, { useEffect, useMemo, useState } from 'react';
-import type { LobbyState, HouseRules, CircuitSettings, LobbySettings } from '@/types';
+import type { LobbyState, HouseRules, CircuitSettings, LobbySettings, LobbyPreset } from '@/types';
 import Panel from '@/components/ds/chrome/Panel';
 import { EYEBROW } from '@/components/ds/eyebrow';
 import Input from '@/components/ds/core/Input';
 import Checkbox from '@/components/ds/core/Checkbox';
+import Select from '@/components/ds/core/Select';
 import Switch from '@/components/ds/core/Switch';
 import Badge from '@/components/ds/core/Badge';
 import Button from '@/components/ds/core/Button';
 import IconButton from '@/components/ds/core/IconButton';
 import DsCircuitInfoModal from './DsCircuitInfoModal';
+import { getLobbyPresets } from '@/services/lobbyService';
 import { gameModeLabel } from '@/utils/gameMode';
 
 interface DsMatchSettingsProps {
@@ -27,6 +29,22 @@ interface DsMatchSettingsProps {
 
 function jsonEqual(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** Value of the Ruleset select once the sheet no longer matches any preset. Not a preset id. */
+const CUSTOM_PRESET_VALUE = '__custom__';
+
+/**
+ * Whether a rule sheet is still exactly the preset it was filled from (cambia-1088). Compared
+ * field by field over the preset's own keys rather than by serializing both sides: the buffer
+ * takes its key order from whichever message delivered it, and a key-order difference is not a
+ * rule difference. Circuit settings are not part of a preset and so are not compared - a preset
+ * cannot express a round count, so it has nothing to say about circuit scoring.
+ */
+function presetMatches(preset: LobbyPreset, rules: HouseRules, settings: LobbySettings): boolean {
+  const keys = Object.keys(preset.houseRules) as (keyof HouseRules)[];
+  return keys.every((k) => rules?.[k] === preset.houseRules[k]) &&
+    settings?.autoStart === preset.settings.autoStart;
 }
 
 const HINT: React.CSSProperties = {
@@ -181,6 +199,65 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
   // WS connects (buildLobbySnapshot does not send it outside a multi-round match_state), so
   // type carries the check on its own - every ranked queue today is also a matchmaking lobby.
   const locked = currentSettings.type === 'matchmaking' || currentSettings.mode === 'ranked';
+  const canEdit = isHost && !locked;
+
+  // Ruleset presets (cambia-1088): one named ruleset fills the whole sheet. Only an editing
+  // host fetches them - a locked or read-only sheet has nothing to apply one to. An unreachable
+  // endpoint leaves the list empty, which drops the control and leaves the field-by-field sheet
+  // exactly as it was.
+  const [presets, setPresets] = useState<LobbyPreset[]>([]);
+  const [presetId, setPresetId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!canEdit) return;
+    let cancelled = false;
+    getLobbyPresets()
+      .then((list) => {
+        if (!cancelled) setPresets(list);
+      })
+      .catch(() => {
+        if (!cancelled) setPresets([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [canEdit]);
+
+  // Which preset the lobby's saved rules correspond to, re-derived whenever they arrive. First
+  // hit wins: the six queue presets are rule-identical to each other, differing only in player
+  // count and round count, neither of which is a rule on this sheet. The id is then held rather
+  // than re-derived per keystroke, so editing a field reports a departure from the preset the
+  // host chose instead of silently jumping to another one that happens to match.
+  useEffect(() => {
+    if (presets.length === 0) return;
+    const effective = currentSettings.lobbySettings ?? currentSettings.settings ?? { autoStart: false };
+    setPresetId((prev) => {
+      const held = prev ? presets.find((p) => p.id === prev) : undefined;
+      if (held && presetMatches(held, currentSettings.houseRules, effective)) return prev;
+      return presets.find((p) => presetMatches(p, currentSettings.houseRules, effective))?.id ?? null;
+    });
+  }, [presets, currentSettings]);
+
+  const activePreset = presets.find((p) => p.id === presetId);
+  const onPreset = !!activePreset && presetMatches(activePreset, houseRules, lobbySettings);
+  const presetValue = activePreset && onPreset ? activePreset.id : CUSTOM_PRESET_VALUE;
+  const presetOptions = [
+    ...presets.map((p) => ({ value: p.id, label: p.name })),
+    ...(onPreset ? [] : [{ value: CUSTOM_PRESET_VALUE, label: 'Custom' }])
+  ];
+  const showPresets = canEdit && presets.length > 0;
+
+  // Applying a preset fills the buffer, leaving Save to send the same expanded sheet it always
+  // has. The service accepts a presetId on update_rules and expands it identically, so nothing
+  // about the save path had to change to carry one.
+  const applyPreset = (id: string) => {
+    const p = presets.find((x) => x.id === id);
+    if (!p) return;
+    setHouseRules(p.houseRules);
+    setLobbySettings(p.settings);
+    setPresetId(p.id);
+    setSaveStatus('idle');
+  };
 
   const save = () => {
     if (!isHost || locked) return;
@@ -226,7 +303,20 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
       action={<Badge tone='info'>{gameModeLabel(currentSettings.gameMode)}</Badge>}
       style={{ minWidth: 0 }}
     >
-      <RuleGroup title='Pace' hint='Set 0 to turn the clock or the cap off' first>
+      {showPresets && (
+        <RuleGroup title='Ruleset' hint='Fills the sheet below' first>
+          <Select
+            value={presetValue}
+            onChange={(e) => applyPreset(e.target.value)}
+            options={presetOptions}
+          />
+          <p style={{ ...HINT, margin: '6px 0 0' }}>
+            {onPreset && activePreset ? activePreset.description : 'Custom rules. Pick a preset to refill the sheet.'}
+          </p>
+        </RuleGroup>
+      )}
+
+      <RuleGroup title='Pace' hint='Set 0 to turn the clock or the cap off' first={!showPresets}>
         <div style={FIELD_GRID}>
           {numField('Turn clock (sec)', houseRules?.turnTimerSec, (raw) => setRule('turnTimerSec', clamped(raw, 0, 86400, 0)))}
           {numField('Turn cap', houseRules?.maxGameTurns, (raw) => setRule('maxGameTurns', clamped(raw, 0, 65535, 46)))}

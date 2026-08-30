@@ -16,9 +16,10 @@ import { useSocket } from '@/hooks/useSocket';
 import { useQueueStore } from '@/stores/queueStore';
 import { useFriendsStore } from '@/stores/friendsStore';
 import { useHistoryStore } from '@/stores/historyStore';
-import { joinLobby as apiJoinPublicLobby, getActiveSession } from '@/services/lobbyService';
+import { joinLobby as apiJoinPublicLobby, getActiveSession, getLobbyPresets, type CreateLobbyRequest } from '@/services/lobbyService';
 import type { QueueInfo } from '@/services/matchmakingService';
-import type { ActiveSession, ApiErrorResponse, LobbyState } from '@/types';
+import type { ActiveSession, ApiErrorResponse, LobbyPreset } from '@/types';
+import { DEFAULT_PRESET_ID } from '@/types';
 import { gameModeLabel } from '@/utils/gameMode';
 import { queuePoolLabel, ratingPoolLabel, tierFromRating } from '@/utils/ratingPool';
 
@@ -114,15 +115,41 @@ const DashboardPage: React.FC = () => {
   const [createOpen, setCreateOpen] = useState(false);
   const [createLobbyType, setCreateLobbyType] = useState<'private' | 'public'>('public');
   const [createGameMode, setCreateGameMode] = useState('head_to_head');
+  const [createPresetId, setCreatePresetId] = useState(DEFAULT_PRESET_ID);
+  const [presets, setPresets] = useState<LobbyPreset[]>([]);
   const [createError, setCreateError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const previousLobbyIdRef = useRef<string | null>(null);
+
+  // The ruleset the dialog is currently on, and the game mode it fixes. A preset built from a
+  // queue carries that queue's player count, so it decides the mode and the mode control goes
+  // read-only; the default preset fixes none and leaves the choice to the host.
+  const selectedPreset = presets.find((p) => p.id === createPresetId);
+  const presetGameMode = selectedPreset?.gameMode ?? '';
+  const effectiveGameMode = presetGameMode || createGameMode;
 
   useEffect(() => {
     fetchQueues();
     fetchLobbies();
     fetchFriends();
   }, [fetchQueues, fetchLobbies, fetchFriends]);
+
+  // Selectable rulesets for the New lobby dialog (cambia-1088). An unreachable endpoint leaves
+  // the list empty, which hides the Ruleset control and creates on the service's own defaults:
+  // the dialog exists to make a lobby, and no field in it may become a reason it cannot.
+  useEffect(() => {
+    let cancelled = false;
+    getLobbyPresets()
+      .then((list) => {
+        if (!cancelled) setPresets(list);
+      })
+      .catch(() => {
+        if (!cancelled) setPresets([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Resume affordance (cambia-783): ask the server whether this user is still counted into a
   // live lobby or game. Nothing to resume, or an unreachable endpoint, leaves the banner off:
@@ -198,7 +225,11 @@ const DashboardPage: React.FC = () => {
     setCreateError(null);
     setCreating(true);
     try {
-      const settings: Partial<LobbyState> = { type: createLobbyType, gameMode: createGameMode };
+      // presetId goes only when the service offered one, so a dialog that could not load the
+      // list still creates a lobby on the service's own defaults rather than 400ing on an id
+      // this client made up.
+      const settings: CreateLobbyRequest = { type: createLobbyType, gameMode: effectiveGameMode };
+      if (selectedPreset) settings.presetId = selectedPreset.id;
       const lobbyId = await createAndJoinLobby(settings);
       if (!lobbyId) {
         setCreateError('Could not create the lobby.');
@@ -207,7 +238,7 @@ const DashboardPage: React.FC = () => {
     } finally {
       setCreating(false);
     }
-  }, [createAndJoinLobby, createLobbyType, createGameMode]);
+  }, [createAndJoinLobby, createLobbyType, effectiveGameMode, selectedPreset]);
 
   const handlePlayQueue = useCallback((queue: QueueInfo) => {
     joinQueue(queue);
@@ -471,14 +502,34 @@ const DashboardPage: React.FC = () => {
           />
           <Select
             label='Game mode'
-            value={createGameMode}
-            disabled={creating}
+            value={effectiveGameMode}
+            disabled={creating || !!presetGameMode}
             onChange={(e) => setCreateGameMode(e.target.value)}
             options={[
               { value: 'head_to_head', label: gameModeLabel('head_to_head') },
               { value: 'group_of_4', label: gameModeLabel('group_of_4') }
             ]}
           />
+          {/* Ruleset third, under the two fields it can override, so the host reads the shape
+              of the lobby before the rules it plays by (cambia-1088). Hidden entirely when the
+              preset list did not load: an empty dropdown is worse than none. */}
+          {presets.length > 0 && (
+            <div>
+              <Select
+                label='Ruleset'
+                value={createPresetId}
+                disabled={creating}
+                onChange={(e) => setCreatePresetId(e.target.value)}
+                options={presets.map((p) => ({ value: p.id, label: p.name }))}
+              />
+              {selectedPreset && (
+                <p style={{ margin: '6px 0 0', fontSize: 'var(--ds-text-xs)', color: 'var(--text-tertiary)' }}>
+                  {selectedPreset.description}
+                  {presetGameMode ? ` Game mode is fixed at ${gameModeLabel(presetGameMode)}.` : ''}
+                </p>
+              )}
+            </div>
+          )}
         </div>
       </Modal>
     </div>

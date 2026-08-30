@@ -1,10 +1,18 @@
 package matchmaking
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+)
 
 // QueueConfig describes the rules for a named matchmaking queue.
 type QueueConfig struct {
-	QueueID      string
+	QueueID string
+	// DisplayName is the queue's label wherever a caller sees it: the dashboard queue cards
+	// (GET /matchmaking/queues) and the ruleset presets built from these configs
+	// (lobby.Presets, cambia-1088). Family-prefixed so a card label does not read as the
+	// dashboard heading (cambia-922 F1: hero/queue name collision).
+	DisplayName  string
 	Players      int    // target player count
 	Rounds       int    // rounds per match
 	RatingPool   string // e.g. "h2h_qp", "h2h_ranked", "ffa4"
@@ -28,12 +36,33 @@ type QueueConfig struct {
 
 // QueueConfigs is the authoritative list of supported queues.
 var QueueConfigs = map[string]QueueConfig{
-	"h2h_quickplay":  {QueueID: "h2h_quickplay", Players: 2, Rounds: 1, RatingPool: "h2h_qp", Ranked: true, HiddenRating: true, Order: 10, DisconnectGraceSec: 60},
-	"h2h_blitz":      {QueueID: "h2h_blitz", Players: 2, Rounds: 4, RatingPool: "h2h_ranked", Ranked: true, Order: 20, DisconnectGraceSec: 60},
-	"h2h_rapid":      {QueueID: "h2h_rapid", Players: 2, Rounds: 8, RatingPool: "h2h_ranked", Ranked: true, Order: 30, DisconnectGraceSec: 60},
-	"h2h_classical":  {QueueID: "h2h_classical", Players: 2, Rounds: 16, RatingPool: "h2h_ranked", Ranked: true, Order: 40, DisconnectGraceSec: 60},
-	"ffa4_standard":  {QueueID: "ffa4_standard", Players: 4, Rounds: 8, RatingPool: "ffa4", Ranked: true, Order: 50, DisconnectGraceSec: 60},
-	"ffa4_classical": {QueueID: "ffa4_classical", Players: 4, Rounds: 12, RatingPool: "ffa4", Ranked: true, Order: 60, DisconnectGraceSec: 60},
+	"h2h_quickplay":  {QueueID: "h2h_quickplay", DisplayName: "H2H Quick", Players: 2, Rounds: 1, RatingPool: "h2h_qp", Ranked: true, HiddenRating: true, Order: 10, DisconnectGraceSec: 60},
+	"h2h_blitz":      {QueueID: "h2h_blitz", DisplayName: "H2H Blitz", Players: 2, Rounds: 4, RatingPool: "h2h_ranked", Ranked: true, Order: 20, DisconnectGraceSec: 60},
+	"h2h_rapid":      {QueueID: "h2h_rapid", DisplayName: "H2H Rapid", Players: 2, Rounds: 8, RatingPool: "h2h_ranked", Ranked: true, Order: 30, DisconnectGraceSec: 60},
+	"h2h_classical":  {QueueID: "h2h_classical", DisplayName: "H2H Classical", Players: 2, Rounds: 16, RatingPool: "h2h_ranked", Ranked: true, Order: 40, DisconnectGraceSec: 60},
+	"ffa4_standard":  {QueueID: "ffa4_standard", DisplayName: "FFA-4 Standard", Players: 4, Rounds: 8, RatingPool: "ffa4", Ranked: true, Order: 50, DisconnectGraceSec: 60},
+	"ffa4_classical": {QueueID: "ffa4_classical", DisplayName: "FFA-4 Classical", Players: 4, Rounds: 12, RatingPool: "ffa4", Ranked: true, Order: 60, DisconnectGraceSec: 60},
+}
+
+// OrderedQueueIDs returns every configured queue id in QueueConfig.Order sequence, ties broken
+// by id. Every caller that presents queues to a client goes through here rather than ranging
+// over QueueConfigs: Go re-randomizes map iteration order on every range statement, so two
+// ranges in the same process can return different sequences (cambia-957). Both the queue list
+// (handlers.ListQueuesHandler) and the ruleset presets built from these configs
+// (lobby.Presets, cambia-1088) sort the same way because they sort here.
+func OrderedQueueIDs() []string {
+	ids := make([]string, 0, len(QueueConfigs))
+	for id := range QueueConfigs {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		oi, oj := QueueConfigs[ids[i]].Order, QueueConfigs[ids[j]].Order
+		if oi != oj {
+			return oi < oj
+		}
+		return ids[i] < ids[j]
+	})
+	return ids
 }
 
 // GetQueueConfig looks up a queue configuration by ID.

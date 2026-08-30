@@ -2,7 +2,7 @@
 // src/stores/lobbyStore.ts
 import { create } from 'zustand';
 import type { LobbyState, ChatMessage, User, LobbyUser, MatchState, LobbyListEntry } from '@/types/index';
-import { listLobbies, createLobby as apiCreateLobby } from '@/services/lobbyService';
+import { listLobbies, createLobby as apiCreateLobby, type CreateLobbyRequest } from '@/services/lobbyService';
 import { useAuthStore } from './authStore';
 import { NIL as NIL_UUID } from 'uuid';
 
@@ -48,7 +48,7 @@ interface CurrentLobbyState {
 	noteDroppedAction: () => void;
 	setPhase: (phase: LobbyPhase) => void;
 	forceSync: (state: any) => void; // Full state replacement from sync_state
-	createAndJoinLobby: (settings: Partial<LobbyState>) => Promise<string | null>;
+	createAndJoinLobby: (settings: CreateLobbyRequest) => Promise<string | null>;
 	leaveLobby: () => void;
 }
 

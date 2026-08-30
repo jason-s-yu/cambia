@@ -141,6 +141,11 @@ func main() {
 	mux.Handle("/lobby/active", middleware.LogMiddleware(logger)(http.HandlerFunc(
 		handlers.ActiveSessionHandler(srv),
 	)))
+	// Selectable rulesets for the New lobby dialog and the lobby rule sheet (cambia-1088).
+	// Exact match, same as /lobby/active above.
+	mux.Handle("/lobby/presets", middleware.LogMiddleware(logger)(http.HandlerFunc(
+		handlers.PresetsHandler,
+	)))
 
 	// lobby action router (join, leave, search)
 	mux.Handle("/lobby/", middleware.LogMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

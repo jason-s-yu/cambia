@@ -67,6 +67,31 @@ export interface LobbySettings {
   autoStart: boolean;
 }
 
+/**
+ * One selectable ruleset from GET /lobby/presets (service internal/lobby/presets.go), used by
+ * the New lobby dialog and the lobby rule sheet. The service owns the values; nothing here may
+ * hold a second copy of them, or the two surfaces would apply different rules under one name.
+ *
+ * `gameMode` is empty for the default preset, which fixes no player count - the game-mode
+ * control stays the host's in that case. `rounds` describes the queue the preset came from and
+ * is not applied to a lobby: a custom lobby has no round count until the round lifecycle lands
+ * (cambia-466). Circuit settings are deliberately not part of a preset.
+ */
+export interface LobbyPreset {
+  id: string;
+  name: string;
+  description: string;
+  gameMode: string;
+  players: number;
+  rounds: number;
+  ranked: boolean;
+  houseRules: HouseRules;
+  settings: LobbySettings;
+}
+
+/** The id of the ruleset a lobby created without a preset plays (service lobby.DefaultPresetID). */
+export const DEFAULT_PRESET_ID = 'default';
+
 
 /**
  * Represents the detailed state of a lobby, received via WS (lobby_state) or REST (/lobby/create).

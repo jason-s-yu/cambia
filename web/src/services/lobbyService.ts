@@ -1,14 +1,22 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import api from '@/lib/axios';
-import type { ActiveSession, LobbyState, LobbyListEntry } from '@/types';
+import type { ActiveSession, LobbyState, LobbyListEntry, LobbyPreset } from '@/types';
+
+/**
+ * Body of POST /lobby/create: lobby fields, plus the optional id of a ruleset preset the
+ * service expands into house rules, lobby settings and the game mode the preset fixes
+ * (cambia-1088). `presetId` is request-only, which is why it is not a LobbyState field: the
+ * created lobby comes back carrying the expanded values, not the id it was built from.
+ */
+export type CreateLobbyRequest = Partial<LobbyState> & { presetId?: string };
 
 /**
  * Creates a new lobby via the backend API.
- * @param settings Initial lobby settings (type, gameMode, houseRules, etc.). Can be a partial object.
+ * @param settings Initial lobby settings (type, gameMode, presetId, houseRules, etc.). Can be a partial object.
  * @returns A promise resolving to the full state of the newly created lobby, or null on failure before throwing.
  * @throws {Error} If the API request fails.
  */
-export const createLobby = async (settings: Partial<LobbyState>): Promise<LobbyState | null> => {
+export const createLobby = async (settings: CreateLobbyRequest): Promise<LobbyState | null> => {
 	try {
 		const response = await api.post<LobbyState>('/lobby/create', settings);
 		return response.data;
@@ -64,6 +72,22 @@ export const getActiveSession = async (): Promise<ActiveSession | null> => {
 		return response.data?.active ?? null;
 	} catch (error: any) {
 		console.error('Active Session API call failed:', error.response?.data || error.message, error);
+		throw error;
+	}
+};
+
+/**
+ * Fetches the selectable rulesets (GET /lobby/presets): the default first, then one per
+ * matchmaking queue. The service owns these values - the dialog and the lobby rule sheet both
+ * fill themselves from this list so they cannot disagree about what a preset name means.
+ * @throws {Error} If the API request fails.
+ */
+export const getLobbyPresets = async (): Promise<LobbyPreset[]> => {
+	try {
+		const response = await api.get<LobbyPreset[]>('/lobby/presets');
+		return response.data || [];
+	} catch (error: any) {
+		console.error('Lobby Presets API call failed:', error.response?.data || error.message, error);
 		throw error;
 	}
 };
