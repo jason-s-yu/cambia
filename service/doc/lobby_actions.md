@@ -18,8 +18,46 @@ This document describes the JSON payloads used for WebSocket communication on th
 | Invite User              | `invite`         | `{ "userID": "{uuid}" }`                                                                               | `internal/handlers/lobby_ws.go`  | Invites another user to a private lobby.                   |
 | Leave Lobby              | *(not a WS message)* | *(None)* | `internal/handlers/lobby.go` | `POST /lobby/{id}/leave`. Leaving releases membership, which nothing a lost socket can also trigger may do, so it is an HTTP call rather than a frame (cambia-807). Refused with 409 while the lobby's game is in progress. |
 | Send Chat Message        | `chat`           | `{ "msg": "Your message here" }`                                                                       | `internal/handlers/lobby_ws.go`  | Sends a chat message to the lobby.                         |
-| Update Rules (Host Only) | `update_rules`   | `{ "rules": { ... partial HouseRules object ... } }` (See `internal/game/rules.go` for fields)       | `internal/handlers/lobby_ws.go`  | Host updates lobby's house rules or circuit settings.    |
-| Force Start (Host Only)  | `start_game`     | *(None)* | `internal/handlers/lobby_ws.go`  | Host attempts to start the game manually (if all ready).   |
+| Update Rules (Host Only) | `update_rules`   | `{ "rules": { ... partial HouseRules object ... } }` (See `internal/game/rules.go` for fields)       | `internal/handlers/lobby_ws.go`  | Host updates lobby's house rules or circuit settings. Refused outright for a ranked or matchmaking lobby: see "Host role". |
+| Force Start (Host Only)  | `start_game`     | *(None)* | `internal/handlers/lobby_ws.go`  | Host attempts to start the game manually (if all ready). Refused for a system-hosted lobby, which starts on its ready check. |
+| Cancel Search (Host Only) | `cancel_search` | *(None)* | `internal/hub/hub.go` | Party leader takes the lobby back out of its queue. Valid only in the `searching` phase, which is the phase a party still has a leader in. |
+
+## Host role
+
+Every host-gated action compares the sender against the lobby's `HostUserID`, read live rather
+than cached on the socket, so the role moves with `RemoveUser`'s migration (cambia-835).
+
+A **matchmade lobby has no player host**. The moment the matchmaker seats a match in a lobby,
+that lobby's host role is handed to the system: `HostUserID` becomes the reserved sentinel
+`lobby.SystemHostUserID` (the nil UUID, which no authenticated user can hold), and it never
+returns to a player for the rest of the lobby's life (cambia-1087). Every quick play queue is
+ranked, so the match runs on its queue's settings and there is nothing for a host to decide;
+leaving one party's leader in charge of everybody else's rated game is the privilege this
+removes. What follows from it:
+
+* `your_is_host` is false in every seat's `lobby_state`, and no entry in `lobby_status.users`
+  carries `is_host`. `host_id` is the nil UUID, and `system_host` is true - that flag is what
+  separates "somebody else hosts this lobby" from "nobody does", which read the same off
+  `your_is_host` alone.
+* `update_rules` is refused with *the queue sets the rules for this match; they cannot be
+  changed*. That check runs before the host check, so the refusal names the lock rather than a
+  role nobody holds. It covers the auto-start setting too, which travels in the same message.
+* `start_game` is refused with *this match starts on its own once every player is ready*. The
+  ready check is what starts a matchmade game: auto-start is on for every lobby the create
+  handler builds, and a queue-backed lobby cannot turn it off (see `rest_api.md`, `POST
+  /lobby/create`), so the last ready seat begins the countdown.
+* There is no rename action, on this socket or anywhere else: a lobby's `name` is set once at
+  create time and never edited.
+
+The handover happens at **match formation, not at lobby creation**. A quick play lobby is a party
+before it is a match, and its party leader keeps the one power a party needs: pulling itself back
+out of the queue, through `cancel_search` here or `DELETE /lobby/{id}/search`. Once a match
+exists the lobby is the queue's, so both are refused with a 403 or the host-gate error from then
+on.
+
+The sentinel is never written to the database. `lobbies.host_user_id` is `NOT NULL` with an FK to
+`users`, so a system-hosted lobby persists its `CreatorUserID` (whoever called
+`POST /lobby/create`, stamped once and never reassigned) in that column instead.
 
 ## Server → Client Events
 
@@ -28,7 +66,7 @@ These messages are typically broadcast to all users in the lobby unless specifie
 | Event Description             | `type` String             | Payload Example / Key Fields                                                                                                                                                                | Emitter Location           | Notes                                                                                             |
 | :---------------------------- | :------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | :------------------------- | :------------------------------------------------------------------------------------------------ |
 | User Joined / Left            | `lobby_update`            | `{ "user_join": "{uuid}", "is_host": bool, "lobby_status": { ... } }` OR `{ "user_left": "{uuid}", "lobby_status": { ... } }`                                                                | `internal/game/lobby.go`   | Sent when a user connects or disconnects. Includes updated `lobby_status`.                        |
-| Full Lobby State (Private)    | `lobby_state`             | `{ "lobby_id", "host_id", "your_id", "your_is_host", "lobby_type", "game_mode", "in_game", "game_id", "house_rules": {...}, "circuit": {...}, "settings": {...}, "lobby_status": { ... } }` | `internal/game/lobby.go`   | Sent privately to a user upon joining/connecting.                                                 |
+| Full Lobby State (Private)    | `lobby_state`             | `{ "lobby_id", "host_id", "your_id", "your_is_host", "system_host", "lobby_type", "game_mode", "in_game", "game_id", "house_rules": {...}, "circuit": {...}, "settings": {...}, "lobby_status": { ... } }` | `internal/game/lobby.go`   | Sent privately to a user upon joining/connecting, and rebroadcast to everyone when the roster or the host role changes. `system_host` marks a lobby the queue runs (see "Host role"). |
 | User Ready State Change       | `ready_update`            | `{ "user_id": "{uuid}", "is_ready": bool }`                                                                                                                                                  | `internal/game/lobby.go`   | Sent when a user's ready state changes.                                                           |
 | User Invited                  | `lobby_invite`            | `{ "invitedID": "{uuid}" }`                                                                                                                                                                  | `internal/game/lobby.go`   | Sent when a user is invited via the `invite` command.                                             |
 | Countdown Started             | `lobby_countdown_start`   | `{ "seconds": int }`                                                                                                                                                                        | `internal/game/lobby.go`   | Sent when the auto-start countdown begins.                                                        |

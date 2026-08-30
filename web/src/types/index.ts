@@ -89,6 +89,11 @@ export interface LobbyState {
   lobby_id?: string;      // From WS, should match 'id'
   your_id?: string;       // From WS
   your_is_host?: boolean; // From WS
+  /** True when the lobby's host role belongs to the system rather than to a player: a matchmade
+   *  lobby, from the moment the matchmaker seats a match in it (cambia-1087). `host_id` is the
+   *  nil UUID then, and no seat carries `is_host`. Distinguishes "somebody else hosts" from
+   *  "nobody does", which read the same off `your_is_host` alone. */
+  system_host?: boolean;  // From WS lobby_state
   // Matchmaking fields (from WS or REST)
   /** Queue this lobby is (or will be) searching in. Sent on POST /lobby/create for a
    *  matchmaking lobby and echoed back by the service as `queueID` (omitted when empty). */

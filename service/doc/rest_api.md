@@ -191,11 +191,25 @@ Handled by `internal/handlers/lobby.go`. These manage *ephemeral* in-memory lobb
       the queue config at search time.
 
     The host is a joined member of a matchmaking lobby from creation (a party of one), so
-    `POST /lobby/{id}/search` succeeds without a WebSocket connection in between.
+    `POST /lobby/{id}/search` succeeds without a WebSocket connection in between. That host role
+    lasts until the matchmaker seats a match in the lobby, and no further: from match formation
+    on the lobby is system-hosted and no player holds host powers over it (see
+    `lobby_actions.md`, "Host role"). `hostUserID` in this response is therefore the creator, and
+    stays the creator in the persisted `lobbies` row even after the handover.
 
     A `queueID` on a `public` or `private` lobby is accepted and validated: the search endpoint
     gates on host, `searching` and `queueID` alone, so a standing lobby can queue its party
     without being typed `matchmaking`.
+
+    **A queue sets its own rules.** Whenever a create request resolves to a configured queue - by
+    `type: "matchmaking"`, by a `queueID` on any lobby type, or through the transitional
+    `gameMode` shape below - a rule-carrying key in the body is refused with a 400 rather than
+    applied. The queue config is the whole rule set for the matches it forms, and it is what the
+    matchmaker paired the players on; the WebSocket rules lock alone left `POST /lobby/create` as
+    a way around it, so a hand-written body could seat a rated match of a public queue on rules
+    of the caller's choosing (cambia-1089). The refused keys are `houseRules`, `circuit`,
+    `settings` and `lobbySettings`. A caller who wants their own rules creates a lobby with no
+    `queueID`.
 
     Transitional shape (remove after 2026-10-01): `{"type":"matchmaking","gameMode":"<queue id>"}`
     with no `queueID`, which is what web bundles cached from before cambia-933 send, is read as
@@ -206,6 +220,8 @@ Handled by `internal/handlers/lobby.go`. These manage *ephemeral* in-memory lobb
     * `Unknown matchmaking queue: <id>` - the `queueID` (on any lobby type) names no configured queue.
     * `Matchmaking queue <id> has an unsupported player count: <n>` - the queue config asks for a
       player count no game mode covers.
+    * `A matchmaking queue sets its own rules: remove <key> or create a lobby without a queueID` -
+      the body carried `houseRules`, `circuit`, `settings` or `lobbySettings` alongside a queue id.
 * **Response (Success: 200 OK):** `application/json` - Returns the full state of the created lobby.
     ```json
     {
@@ -235,7 +251,10 @@ Handled by `internal/handlers/lobby.go`. These manage *ephemeral* in-memory lobb
 
 #### `POST /lobby/{id}/search` and `DELETE /lobby/{id}/search`
 
-* **Description:** Puts the lobby's party into its `queueID` queue, or takes it back out. Host only.
+* **Description:** Puts the lobby's party into its `queueID` queue, or takes it back out. Host
+    only, and a lobby that has already held a match has no player host to satisfy that: both
+    verbs answer `403` on a system-hosted lobby, since a formed match is the queue's and not a
+    party's to requeue (`lobby_actions.md`, "Host role").
 * **Response (Success: 200 OK):** `{"status":"searching","queue_id":"<id>"}` for the POST,
     `{"status":"cancelled"}` for the DELETE.
 * **Response (Error):** `400 Bad Request` (`No queue selected for this lobby`, `Unknown queue ID`,

@@ -98,7 +98,13 @@ const DsLobbyView: React.FC<DsLobbyViewProps> = ({ lobbyId, phase, sendMessage, 
   const chatListRef = useRef<HTMLDivElement>(null);
 
   const players = useMemo(() => lobbyDetails?.lobby_status?.users ?? [], [lobbyDetails]);
-  const isHost = lobbyDetails?.your_is_host ?? false;
+  // A matchmade lobby is run by its queue: nobody holds the host role, the rules are the
+  // queue's, and the ready check starts the game (cambia-1087). The service already reports
+  // your_is_host false and marks no seat is_host for one, so this only keeps a stale snapshot
+  // from leaving a Host badge or a Start game button on screen over a service that refuses
+  // both. A party that is still searching is not system-hosted: its leader keeps the search.
+  const systemHost = lobbyDetails?.system_host ?? false;
+  const isHost = (lobbyDetails?.your_is_host ?? false) && !systemHost;
   const self = players.find((p) => p.id === selfId);
   const isReady = self?.is_ready ?? false;
   const allReady = players.length > 0 && players.every((p) => p.is_ready);
@@ -148,7 +154,7 @@ const DsLobbyView: React.FC<DsLobbyViewProps> = ({ lobbyId, phase, sendMessage, 
     if (phase === 'searching') return { tone: 'info', text: 'Searching for a match' };
     if (phase === 'ready_check') return { tone: 'gold', text: 'Match found. Ready up to begin.' };
     if (players.length < 2) return { tone: 'info', text: 'Waiting for players. Share the invite link.' };
-    if (allReady) return { tone: 'success', text: isHost || autoStart ? 'All players ready.' : 'All players ready. Waiting on the host.' };
+    if (allReady) return { tone: 'success', text: isHost || autoStart || systemHost ? 'All players ready.' : 'All players ready. Waiting on the host.' };
     return { tone: 'info', text: `Waiting on ${waiting.join(', ')}.` };
   })();
 
@@ -193,9 +199,9 @@ const DsLobbyView: React.FC<DsLobbyViewProps> = ({ lobbyId, phase, sendMessage, 
                   state={p.is_ready ? 'ready' : undefined}
                   style={{ flex: '1 1 0', minWidth: 0 }}
                 />
-                {(p.is_host || !p.is_ready) && (
+                {((p.is_host && !systemHost) || !p.is_ready) && (
                   <div style={{ display: 'flex', gap: 'var(--space-2)', flex: 'none' }}>
-                    {p.is_host && <Badge tone='gold'>Host</Badge>}
+                    {p.is_host && !systemHost && <Badge tone='gold'>Host</Badge>}
                     {!p.is_ready && <Badge tone='neutral'>Not ready</Badge>}
                   </div>
                 )}

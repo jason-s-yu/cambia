@@ -10,6 +10,15 @@ import (
 	"github.com/jason-s-yu/cambia/service/internal/game"
 )
 
+// SystemHostUserID is the reserved HostUserID of a lobby whose host role belongs to the system
+// rather than to any player: a matchmade lobby, from the moment the matchmaker seats a match in
+// it (cambia-1087). Every host-gated action compares an authenticated user id against
+// HostUserID, and no authenticated user can hold the nil UUID, so the sentinel refuses all of
+// them without a second flag to keep in sync. Read through SystemHosted rather than compared
+// inline, and never persisted: users has no row for it, so CreatorUserID is what the lobbies FK
+// is satisfied with (see NewCambiaGameFromLobby).
+var SystemHostUserID = uuid.Nil
+
 // Lobby is pure state: rules, readiness, and lifecycle. WebSocket connections
 // are managed by the hub package; lobbying is stateless here.
 type Lobby struct {
@@ -17,6 +26,16 @@ type Lobby struct {
 	HostUserID uuid.UUID `json:"hostUserID"`
 	Type       string    `json:"type"`
 	GameMode   string    `json:"gameMode"`
+
+	// CreatorUserID is whoever called POST /lobby/create, stamped once and never reassigned:
+	// unlike HostUserID it is not a role, so it survives both host migration and the handover to
+	// the system host. It exists because games.lobby_id points at a lobbies row whose
+	// host_user_id is NOT NULL with an FK to users, and a system-hosted lobby has no player in
+	// that field to persist; the creator is a real authenticated user for the lobby's whole
+	// lifetime and is the honest answer to "who opened this table" (cambia-1087). Not
+	// serialized: no client reads it, and the create response shape is documented in
+	// service/doc/rest_api.md.
+	CreatorUserID uuid.UUID `json:"-"`
 
 	// Name is an optional, host-supplied display name for the lobby. Empty when unset.
 	Name string `json:"name"`
@@ -94,21 +113,52 @@ func NewLobbyWithDefaults(hostID uuid.UUID) *Lobby {
 	}
 
 	return &Lobby{
-		ID:          lobbyID,
-		HostUserID:  hostID,
-		Type:        "private",
-		GameMode:    "head_to_head",
-		CreatedAt:   time.Now(),
-		Users:       make(map[uuid.UUID]bool),
-		ReadyStates: make(map[uuid.UUID]bool),
-		joinOrder:   make(map[uuid.UUID]uint64),
-		HouseRules:  defaultHouseRules,
-		Circuit:     defaultCircuit,
+		ID:            lobbyID,
+		HostUserID:    hostID,
+		CreatorUserID: hostID,
+		Type:          "private",
+		GameMode:      "head_to_head",
+		CreatedAt:     time.Now(),
+		Users:         make(map[uuid.UUID]bool),
+		ReadyStates:   make(map[uuid.UUID]bool),
+		joinOrder:     make(map[uuid.UUID]uint64),
+		HouseRules:    defaultHouseRules,
+		Circuit:       defaultCircuit,
 		LobbySettings: LobbySettings{
 			AutoStart: true,
 		},
 		Mode: "casual",
 	}
+}
+
+// AdoptSystemHostUnsafe hands the host role to the system, permanently: the lobby is now run by
+// the queue that seated the match in it, and no player holds host powers over it. Assumes the
+// lock is held.
+//
+// Called once, at match formation (handlers.HandleMatchFormed), not at lobby creation: a
+// matchmaking lobby is a party before it is a match, and its party leader is the one who cancels
+// the search and whose departure the lobby is emptied by. Nothing reverses it. The lobby that
+// held a match keeps the system host for the rest of its life, so an aborted start cannot hand
+// the role back to a player who could then edit a ranked match's rules (cambia-1087).
+func (l *Lobby) AdoptSystemHostUnsafe() {
+	if l.HostUserID == SystemHostUserID {
+		return
+	}
+	log.Printf("Lobby %s: host role handed to the system; no player hosts a matchmade lobby.", l.ID)
+	l.HostUserID = SystemHostUserID
+}
+
+// SystemHostedUnsafe reports whether the host role belongs to the system rather than a player.
+// Assumes the lock is held.
+func (l *Lobby) SystemHostedUnsafe() bool {
+	return l.HostUserID == SystemHostUserID
+}
+
+// SystemHosted is the locking form of SystemHostedUnsafe.
+func (l *Lobby) SystemHosted() bool {
+	l.Mu.Lock()
+	defer l.Mu.Unlock()
+	return l.SystemHostedUnsafe()
 }
 
 // JoinUser marks a user as joined (Users[userID] = true) and initialises their ready state.
@@ -161,6 +211,9 @@ func (l *Lobby) MarkJoinedUnsafe(userID uuid.UUID) {
 // A departing host hands the role on. HostUserID is what every host-gated action is checked
 // against - rules, start, search, and the private-lobby WebSocket gate - so a host that left
 // without migrating left the remaining members with a lobby nobody could change (cambia-835).
+// A system-hosted lobby has no such role to migrate and is skipped explicitly: the departing
+// user is an authenticated one and can never equal the sentinel, so the guard is a statement of
+// the invariant rather than a live branch (cambia-1087).
 func (l *Lobby) RemoveUser(userID uuid.UUID) bool {
 	l.Mu.Lock()
 	if _, present := l.Users[userID]; !present {
@@ -171,7 +224,7 @@ func (l *Lobby) RemoveUser(userID uuid.UUID) bool {
 	delete(l.ReadyStates, userID)
 	delete(l.joinOrder, userID)
 	isEmpty := l.JoinedCount() == 0
-	if !isEmpty && l.HostUserID == userID {
+	if !isEmpty && !l.SystemHostedUnsafe() && l.HostUserID == userID {
 		if next := l.nextHostUnsafe(); next != uuid.Nil {
 			l.HostUserID = next
 			log.Printf("Lobby %s: host %s left; host migrated to %s.", l.ID, userID, next)
