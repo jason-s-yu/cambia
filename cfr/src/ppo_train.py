@@ -341,6 +341,23 @@ def train_ppo(
             f"  Note: mean_imp eval disabled at {num_players} seats "
             "(the battery is 2-player only)."
         )
+    if run_eval:
+        # The battery scores through PPOAgentWrapper, which still strips
+        # drawn_card and peeked_cards from the agent's own observation (the
+        # pre-port public-only contract). This env feeds the policy
+        # GoAgentState's belief instead, which keeps what the rules reveal to
+        # the acting seat, so the eval runs the policy off its training
+        # distribution and the trajectory is not comparable to pre-port runs.
+        # cambia-1426 moves the eval side onto GoAgentState; until it lands,
+        # say so rather than letting a mean_imp trajectory look authoritative.
+        msg = (
+            "mean_imp eval scores this policy through the pre-port public-only "
+            "observation contract while training now uses GoAgentState's "
+            "belief; the trajectory is off-distribution and not comparable to "
+            "pre-port runs until cambia-1426 lands."
+        )
+        print(f"  WARNING: {msg}")
+        logger.warning(msg)
 
     save_dir = os.path.dirname(save_path) or "."
     os.makedirs(save_dir, exist_ok=True)
