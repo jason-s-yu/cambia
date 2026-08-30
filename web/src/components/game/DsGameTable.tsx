@@ -563,10 +563,13 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   const canSkipSpecial = isMyTurn && pendingAction === 'special_action' && !busy && !kingConfirm;
   const allowOpponentSnapping = gameState.houseRules.allowOpponentSnapping ?? true;
 
-  // Ability reveals (cambia-848 F3). Own faces are durable in revealedHand (the store folds
-  // them in), so the table only has to show an opponent face: for the whole King confirm,
-  // and for a short hold after a 9/T peek or a settled King. A tick re-renders once the hold
-  // ends so the face goes back down without another store event.
+  // Transient reveals (cambia-848 F3, widened by cambia-1094). No face is durable any more: an
+  // own card the player peeked at, King-looked at, or took in from a draw goes up on exactly the
+  // hold an opponent's peeked face gets, and then back down. The only faces that outlive a hold
+  // are the pregame peek, which the store keeps on revealedHand for the length of the pregame
+  // window. Held for the whole King confirm, and for a short hold after a 9/T peek, a 7/8 peek, a
+  // settled King, or a replace. A tick re-renders once the hold ends so the face goes back down
+  // without another store event.
   const [, setRevealTick] = useState(0);
   useEffect(() => {
     if (!abilityReveal) return;
@@ -671,7 +674,10 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     const hand = selfState?.revealedHand ?? [];
     const seat = seatIndexOf(selfId);
     const known = hand.map((card, i) => {
-      const face = toDsCardFace(card);
+      // A slot shows a face only while something is holding it up: a live transient reveal, or
+      // the pregame peek the store keeps on the slot for the length of that window. Everything
+      // else is a back, including cards this player has already been shown (cambia-1094).
+      const face = toDsCardFace(revealById.get(card.id) ?? card);
       const spoken = cardFaceName(face);
       // aria-pressed tracks what the eye sees: the King's own card stays picked
       // through the confirm step, which is why `selected` covers it too.

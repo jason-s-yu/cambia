@@ -23,15 +23,20 @@ type CardUUIDTracker struct {
 	Registry map[uuid.UUID]*models.Card
 
 	// SeenByPlayer[p] is the set of card UUIDs that player p has legitimately observed the
-	// identity of: the two pregame peeks, a card the player personally drew, a peek-own (7/8)
+	// identity of: the pregame peeks, a card the player personally drew, a peek-own (7/8)
 	// target, and the own card viewed during a King look. Knowledge is keyed by UUID, not slot,
 	// so it travels with the card across moves: a card swapped INTO a hand by a blind swap (J/Q)
-	// or a King swap is absent from the new holder's set and stays hidden, while a card that
-	// leaves a hand simply stops being rendered from that hand. Only own-card observations are
-	// recorded, so an opponent card the actor merely peeked (9/T) or looked at during a King is
-	// not auto-revealed if it later swaps into the actor's hand. Read by
-	// getCurrentObfuscatedGameState to gate the self-view: an own card renders face-up only when
-	// its UUID is in this set; unseen own cards render as backs, exactly like opponent cards.
+	// or a King swap is absent from the new holder's set, while a card that leaves a hand takes
+	// its entry nowhere. Only own-card observations are recorded, so an opponent card the actor
+	// merely peeked (9/T) or looked at during a King does not enter the set if it later swaps in.
+	//
+	// This is the server's record of what a seat has been shown, not a rendering gate: since
+	// cambia-1094 the self-view in getCurrentObfuscatedGameState hides EVERY own card
+	// unconditionally, because the physical game turns the pregame peek face-down at the start and
+	// plays the round on memory. Each reveal travels in its own event and the client shows it for
+	// that event's window only. Kept because the knowledge semantics are the thing snap fills and
+	// swaps are reasoned about in (snap_fill.go), and because they are what a future server-side
+	// agent or replay consumer needs.
 	SeenByPlayer [engine.MaxPlayers]map[uuid.UUID]bool
 }
 

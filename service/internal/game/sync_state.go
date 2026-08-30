@@ -220,30 +220,33 @@ func (g *CambiaGame) getCurrentObfuscatedGameState(forUser uuid.UUID) ObfGameSta
 			ps.IsCurrentTurn = (g.Engine.ActingPlayer() == engineIdx && g.Started && !obf.GameOver)
 
 			if isSelf {
-				// Self-view: expose every hand slot so the client renders a card in each position,
-				// but reveal rank/suit/value ONLY for cards the player has legitimately seen (pregame
-				// peek, own draw, peek-own ability, King look of the own card). Unseen own cards carry
-				// Known:false with no face details, so the client renders a face-down back - exactly
-				// like an opponent's card. This keeps the memory mechanic intact: a fresh game shows
-				// only the two peeked cards, not the full hand (cambia-505).
+				// Self-view: expose every hand slot as an id+index reference with the face hidden
+				// ALWAYS (Known:false, no rank/suit/value), exactly like an opponent's hand. No own
+				// card is ever persistently face-up: the physical game gives you the pregame peek and
+				// then turns every card down, and you play the rest of the round on memory
+				// (cambia-1094, replacing the cambia-505 memory aid).
+				//
+				// The reveals a player is entitled to travel in their own events, never in a
+				// snapshot: the pregame peek in private_initial_cards (re-fired on a reconnect that
+				// lands inside the pregame window, see HandleReconnect), a drawn card in
+				// private_draw_stockpile and DrawnCard below, an ability look in
+				// private_special_action_success. The client shows each of those for its window and
+				// then turns the card down. A snapshot that repeated them would make every one of
+				// those windows permanent, which is the bug.
+				//
+				// The slot ids and indices stay: ability targeting names an own card by id
+				// (peek_self, swap_blind, swap_peek) and the client needs a real UUID per slot
+				// (cambia-509).
 				handLen := g.Engine.Players[engineIdx].HandLen
 				ps.RevealedHand = make([]ObfCard, handLen)
 				for j := uint8(0); j < handLen; j++ {
-					card := g.Engine.Players[engineIdx].Hand[j]
 					cardUUID := g.CardTracker.Players[engineIdx].HandUUIDs[j]
 					idx := int(j)
-					oc := ObfCard{
+					ps.RevealedHand[j] = ObfCard{
 						ID:    cardUUID,
 						Known: false,
 						Idx:   &idx,
 					}
-					if g.hasSeenCard(engineIdx, cardUUID) {
-						oc.Known = true
-						oc.Rank = engineRankToString(card.Rank())
-						oc.Suit = engineSuitToString(card.Suit())
-						oc.Value = int(card.Value())
-					}
-					ps.RevealedHand[j] = oc
 				}
 
 				// Drawn card (pending discard in engine). An ability card whose discard is still

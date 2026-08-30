@@ -7,7 +7,7 @@ import { useAuthStore } from './authStore';
 import { applySnapSuccess } from '@/lib/snapSuccess';
 import { applySnapMove } from '@/lib/snapFill';
 
-/** A face shown to this client by an ability (7/8 own card, 9/T opponent card, King both). */
+/** A face shown to this client by an event: an ability look, a pregame peek, a card drawn in. */
 export interface RevealedCard {
 	id: string;
 	rank?: string;
@@ -17,7 +17,13 @@ export interface RevealedCard {
 	ownerId?: string;
 }
 
-/** The most recent ability reveal, kept so the table can show the faces while the ability plays out. */
+/**
+ * The most recent transient reveal, kept so the table can show the faces for the window they are
+ * shown in and no longer. Since cambia-1094 this covers own cards too: an ability look at your own
+ * card and the card you take from a draw are shown the same way an opponent's peeked card is, held
+ * for a beat and then turned back down. `special` names what caused it - the ability's own string
+ * for an ability, 'replace' for a card taken in from a draw.
+ */
 export interface AbilityReveal {
 	special: string;
 	/** Client receipt time; the table holds a peek on screen for a beat past this. */
@@ -45,15 +51,19 @@ interface GameState {
 	// reads these directly instead (cambia-510).
 	finalScores: Record<string, number> | null;
 	winnerId: string | null;
-	// Faces revealed to this client by abilities (cambia-848 F3). The service's
-	// private_special_action_success is the only carrier of a peeked face: own cards it names
-	// are marked seen server-side (CardTracker.SeenByPlayer) and come back known on the next
-	// sync, so they are folded into revealedHand here as well; opponent faces never appear in
-	// a sync, so they live only in these two fields. seenFaces accumulates every face by card
-	// id for the life of the game so a swap that moves a looked-at card into the own hand
-	// keeps its face; abilityReveal is the latest reveal, for the table's transient display.
-	seenFaces: Record<string, RevealedCard>;
+	// The latest transient reveal, for the table's temporary display (cambia-848 F3, widened by
+	// cambia-1094). No face this client is shown is durable any more: sync_state hides every own
+	// hand slot in every phase, exactly as it hides every opponent slot, because the physical game
+	// turns your pregame peek face-down at the start and leaves you to play on memory. So an
+	// ability look (own or opponent) and the card taken in from a draw are all held here for their
+	// window and then dropped, rather than being folded into revealedHand for the rest of the round.
 	abilityReveal: AbilityReveal | null;
+	// The pregame peek, held for the length of the pregame window only. private_initial_cards is
+	// the sole carrier of these faces, and any sync during the window (a peer dropping, a repair)
+	// replaces the board with one that has them face-down, so they are re-applied to each snapshot
+	// while preGameActive rather than being read back off it. Cleared by the sync that ends the
+	// pregame phase, which is what turns the peeked cards down at game start (cambia-1094).
+	pregamePeek: RevealedCard[];
 	// Bumped once per outbound action the hub discarded on its staleness gate that the client
 	// could not safely resend (cambia-891). The table watches the number and shows a notice; it
 	// carries no text so the surface owns the copy.
@@ -111,14 +121,36 @@ const initialState: GameState = {
 	serverClockOffsetMs: 0,
 	finalScores: null,
 	winnerId: null,
-	seenFaces: {},
 	abilityReveal: null,
+	pregamePeek: [],
 	droppedActionNonce: 0,
 	lastSnap: null,
 	pendingSnapMove: null,
 	lastSnapMove: null,
 	lastPresence: null
 };
+
+/**
+ * Puts the pregame peek back onto the self hand of a board snapshot (cambia-1094).
+ *
+ * The server hides every own card in every sync_state, so a snapshot that lands during the pregame
+ * window - a peer dropping, a repair, the reconnect resync - would otherwise turn the peeked cards
+ * down before the window is up. Called for every snapshot while preGameActive, so the peek survives
+ * as many syncs as the window takes, and never past it. Slot ids and indices come from the
+ * snapshot, which is authoritative for them; only the face comes from the peek.
+ */
+function applyPregamePeek(gs: ObfGameState | null | undefined, peek: RevealedCard[], selfId: string | null) {
+	if (!gs || !selfId || peek.length === 0) return;
+	const self = gs.players.find((p) => p.playerId === selfId);
+	if (!self?.revealedHand) return;
+	for (const card of peek) {
+		// Id first, slot second: the id is minted once per card, the index is a position.
+		let at = self.revealedHand.findIndex((c) => c.id === card.id);
+		if (at < 0 && typeof card.idx === 'number') at = self.revealedHand.findIndex((c) => c.idx === card.idx);
+		if (at < 0) continue;
+		self.revealedHand[at] = { ...self.revealedHand[at], known: true, rank: card.rank, suit: card.suit, value: card.value };
+	}
+}
 
 /** The fill `selfId` still owes, read out of a state snapshot's snapMoves (cambia-936). */
 function ownSnapMove(gs: ObfGameState | null | undefined, selfId: string | null) {
@@ -142,8 +174,8 @@ export const useGameStore = create<GameState & GameActions>()(
 					state.displayedDrawnCard = null;
 					state.pendingAction = null;
 					state.isProcessingAction = false;
-					state.seenFaces = {};
 					state.abilityReveal = null;
+					state.pregamePeek = [];
 					state.pendingSnapMove = null;
 				}
 				state.gameId = id;
@@ -226,7 +258,15 @@ export const useGameStore = create<GameState & GameActions>()(
 					// A snap fill is not cleared, it is re-read: the obligation lives on the server
 					// and a repair that replaced the board carries whatever is still owed
 					// (cambia-936).
-					state.pendingSnapMove = ownSnapMove(payload.state, useAuthStore.getState().user?.id ?? null);
+					const selfId = useAuthStore.getState().user?.id ?? null;
+					state.pendingSnapMove = ownSnapMove(payload.state, selfId);
+					// A repair that lands mid-peek must not end the peek early (cambia-1094). Only
+					// a positive preGameActive re-applies: this payload can be the hub's lobby
+					// snapshot, which carries no phase at all, and that is not evidence the window
+					// closed. The phase transition is settled by private_sync_state below.
+					if (payload.state.preGameActive === true) {
+						applyPregamePeek(state.gameState, state.pregamePeek, selfId);
+					}
 				}
 				if (typeof payload?.seq === 'number') {
 					state.seq = payload.seq;
@@ -283,13 +323,19 @@ export const useGameStore = create<GameState & GameActions>()(
 							if (typeof payload.state?.serverNow === 'number') {
 								state.serverClockOffsetMs = payload.state.serverNow - Date.now();
 							}
+							// The snapshot hides every own card (cambia-1094), so the pregame peek has
+							// to be put back on for as long as the window lasts, and dropped the moment
+							// it closes. The sync StartGame broadcasts is what turns the peeked cards
+							// down on screen: it is the first snapshot with preGameActive false.
+							if (payload.state?.preGameActive) {
+								applyPregamePeek(state.gameState, state.pregamePeek, selfPlayerId);
+							} else {
+								state.pregamePeek = [];
+							}
 							// Determine pending action based on new state
 							const gs = state.gameState;
 							if (gs) {
 								const userState = gs.players.find(p => p.playerId === selfPlayerId); // Find 'self'
-								for (const c of userState?.revealedHand ?? []) {
-									if (c.known && c.rank) state.seenFaces[c.id] = { id: c.id, rank: c.rank, suit: c.suit, value: c.value, idx: c.idx, ownerId: selfPlayerId ?? undefined };
-								}
 								if (userState?.drawnCard && gs.currentPlayerId === userState.playerId && !gs.gameOver && gs.started) {
 									state.pendingAction = 'discard_replace';
 								} else if (gs.specialAction?.active && gs.specialAction.playerId === selfPlayerId && !gs.gameOver && gs.started) {
@@ -307,29 +353,17 @@ export const useGameStore = create<GameState & GameActions>()(
 							// slot under `cards` (cambia-817); the count is the initialViewCount house
 							// rule, up to cardsPerPlayer, so nothing here may assume two.
 							//
-							// The service fires this right after the opening private_sync_state, which it
-							// builds before marking these cards seen: that snapshot therefore shows every
-							// own slot face-down. Apply the reveal to revealedHand here so the peek is
-							// visible for the whole pregame window instead of only from the next full sync
-							// at game start.
+							// This is the ONLY frame that ever carries an own face for these cards: the
+							// server hides every own hand slot in every sync_state (cambia-1094). So the
+							// faces are held in pregamePeek and re-applied to each snapshot that lands
+							// during the window, rather than written once and read back. The service
+							// re-fires the event to a player who reconnects mid-window, which lands here
+							// and simply replaces the held peek with the same faces.
 							const cards = Array.isArray(payload.cards) ? (payload.cards as EventCard[]) : [];
-							const self = state.gameState?.players.find(p => p.playerId === selfPlayerId);
-							if (self?.revealedHand) {
-								for (const card of cards) {
-									if (!card || typeof card.idx !== 'number') continue;
-									const slot = self.revealedHand.findIndex(c => c.idx === card.idx);
-									if (slot < 0) continue;
-									self.revealedHand[slot] = {
-										id: card.id,
-										known: true,
-										rank: card.rank,
-										suit: card.suit,
-										value: card.value,
-										idx: card.idx
-									};
-									state.seenFaces[card.id] = { id: card.id, rank: card.rank, suit: card.suit, value: card.value, idx: card.idx, ownerId: selfPlayerId ?? undefined };
-								}
-							}
+							state.pregamePeek = cards
+								.filter((c): c is EventCard => !!c && !!c.id)
+								.map((c): RevealedCard => ({ id: c.id, rank: c.rank, suit: c.suit, value: c.value, idx: c.idx, ownerId: selfPlayerId ?? undefined }));
+							applyPregamePeek(state.gameState, state.pregamePeek, selfPlayerId);
 							break;
 						}
 
@@ -389,9 +423,6 @@ export const useGameStore = create<GameState & GameActions>()(
 										player.drawnCard = payload.card;
 										state.pendingAction = 'discard_replace'; // Player must now discard/replace
 										state.displayedDrawnCard = payload.card; // Magnify revealed card for self
-										if (payload.card?.id && payload.card.rank) {
-											state.seenFaces[payload.card.id] = { id: payload.card.id, rank: payload.card.rank, suit: payload.card.suit, value: payload.card.value, ownerId: selfPlayerId ?? undefined };
-										}
 									}
 									// Update stockpile/discard size based on source
 									if (payload.payload?.source === 'stockpile') {
@@ -411,19 +442,28 @@ export const useGameStore = create<GameState & GameActions>()(
 								state.gameState.discardTop = payload.card;
 								// Clear drawn card for the discarding player. A replace carries the slot the
 								// discarded card left (card.idx, see the engine adapter's replace branch); the
-								// drawn card takes that slot, with its face for the own hand and as an id
-								// reference for an opponent's. No sync follows a replace, so without this the
-								// slot keeps showing (and targeting) the card that just hit the discard pile
-								// (cambia-848 F3). A plain discard carries no idx and leaves the hand alone.
+								// drawn card takes that slot as an id reference. No sync follows a replace, so
+								// without this the slot keeps showing (and targeting) the card that just hit
+								// the discard pile (cambia-848 F3). A plain discard carries no idx and leaves
+								// the hand alone.
+								//
+								// The slot goes down face-DOWN even for the player who drew it (cambia-1094):
+								// you saw the card as you put it in and then it is one more card you have to
+								// remember. That look is the transient reveal below, on the same hold an
+								// opponent's peeked face gets.
 								const player = state.gameState.players.find(p => p.playerId === payload.user?.id);
 								if (player) {
 									const idx = payload.card?.idx;
 									const drawn = player.drawnCard;
 									if (typeof idx === 'number' && drawn?.id && player.revealedHand && idx >= 0 && idx < player.revealedHand.length) {
-										const face = player.playerId === selfPlayerId ? (drawn.rank ? drawn : state.seenFaces[drawn.id]) : undefined;
-										player.revealedHand[idx] = face
-											? { id: drawn.id, known: true, rank: face.rank, suit: face.suit, value: face.value, idx }
-											: { id: drawn.id, known: false, idx };
+										player.revealedHand[idx] = { id: drawn.id, known: false, idx };
+										if (player.playerId === selfPlayerId && drawn.rank) {
+											state.abilityReveal = {
+												special: 'replace',
+												at: Date.now(),
+												cards: [{ id: drawn.id, rank: drawn.rank, suit: drawn.suit, value: drawn.value, idx, ownerId: selfPlayerId ?? undefined }]
+											};
+										}
 									}
 									player.drawnCard = null;
 								}
@@ -461,17 +501,15 @@ export const useGameStore = create<GameState & GameActions>()(
 									// target's, each with the id now sitting there. No sync follows a swap,
 									// so move the ids in both hands here or a later snap or ability would
 									// target the card that left, and a reveal keyed by id would land on the
-									// wrong slot. An own slot keeps a face only when this client has seen it
-									// (a King look, or an earlier peek of that card); opponent slots are id
-									// references and stay face down (cambia-848 F3).
+									// wrong slot. Every slot on both sides is an id reference and stays face
+									// down: no own card is ever persistently face-up (cambia-1094), and a
+									// King's look at the card it is about to move is shown by the transient
+									// reveal, not by the slot it lands in (cambia-848 F3).
 									for (const c of [payload.card1, payload.card2] as (EventCard | undefined)[]) {
 										if (!c?.user?.id || typeof c.idx !== 'number') continue;
 										const owner = state.gameState.players.find(p => p.playerId === c.user!.id);
 										if (!owner?.revealedHand || c.idx < 0 || c.idx >= owner.revealedHand.length) continue;
-										const face = owner.playerId === selfPlayerId ? state.seenFaces[c.id] : undefined;
-										owner.revealedHand[c.idx] = face
-											? { id: c.id, known: true, rank: face.rank, suit: face.suit, value: face.value, idx: c.idx }
-											: { id: c.id, known: false, idx: c.idx };
+										owner.revealedHand[c.idx] = { id: c.id, known: false, idx: c.idx };
 									}
 								}
 							}
@@ -480,23 +518,15 @@ export const useGameStore = create<GameState & GameActions>()(
 						// --- Private Events ---
 						case 'private_special_action_success': {
 							// The looked-at faces: card1 for a 7/8 or 9/T peek, card1 (own) and card2
-							// (opponent) for a King look. See the seenFaces note on the state shape.
+							// (opponent) for a King look. Held for the reveal window and nothing more -
+							// an own card the actor just looked at goes back down with the opponent's
+							// (cambia-1094). See the abilityReveal note on the state shape.
 							const revealed = ([payload.card1, payload.card2] as (EventCard | undefined)[])
 								.filter((c): c is EventCard => !!c && !!c.id)
 								.map((c): RevealedCard => ({ id: c.id, rank: c.rank, suit: c.suit, value: c.value, idx: c.idx, ownerId: c.user?.id }));
-							for (const c of revealed) state.seenFaces[c.id] = c;
 							state.abilityReveal = revealed.length > 0
 								? { special: typeof payload.special === 'string' ? payload.special : '', at: Date.now(), cards: revealed }
 								: null;
-							const self = state.gameState?.players.find(p => p.playerId === selfPlayerId);
-							if (self?.revealedHand) {
-								for (const c of revealed) {
-									if (c.ownerId !== selfPlayerId) continue;
-									const slot = self.revealedHand.findIndex(h => h.id === c.id);
-									if (slot < 0) continue;
-									self.revealedHand[slot] = { ...self.revealedHand[slot], known: true, rank: c.rank, suit: c.suit, value: c.value };
-								}
-							}
 							break;
 						}
 						case 'private_special_action_fail':
@@ -667,8 +697,8 @@ export const useGameStore = create<GameState & GameActions>()(
 							state.displayedDrawnCard = null;
 							state.finalScores = null;
 							state.winnerId = null;
-							state.seenFaces = {};
 							state.abilityReveal = null;
+							state.pregamePeek = [];
 							state.lastPresence = null;
 							state.pendingSnapMove = null;
 							state.isLoading = true;

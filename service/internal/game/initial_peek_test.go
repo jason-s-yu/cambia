@@ -88,10 +88,11 @@ func TestPrivateInitialCardsCarriesEveryPeekedSlot(t *testing.T) {
 	}
 }
 
-// TestPrivateInitialCardsPeekMarksExactlyThoseSlotsSeen verifies the reveal and the server's
-// seen-set agree past the old two-card wire limit: with a peek wider than two, every peeked slot
-// (and only those) must come back Known in the owner's own sync_state, so the client renders the
-// same cards the event revealed rather than a hand the two of them disagree about.
+// TestPrivateInitialCardsPeekMarksExactlyThoseSlotsSeen verifies the reveal names exactly the
+// slots the engine peeked, past the old two-card wire limit, and that the server records exactly
+// those as seen. sync_state is deliberately NOT the cross-check any more: since cambia-1094 the
+// self-view hides every own card in every phase, so the event is the sole carrier of the peek and
+// the seen-set is the server's own record of it.
 func TestPrivateInitialCardsPeekMarksExactlyThoseSlotsSeen(t *testing.T) {
 	rules := DefaultHouseRules()
 	rules.TurnTimerSec = 0
@@ -110,21 +111,20 @@ func TestPrivateInitialCardsPeekMarksExactlyThoseSlotsSeen(t *testing.T) {
 			revealed[*card.Idx] = true
 		}
 
-		obf := g.GetCurrentObfuscatedGameState(id)
-		var self *ObfPlayerState
-		for i := range obf.Players {
-			if obf.Players[i].PlayerID == id {
-				self = &obf.Players[i]
-			}
+		engineIdx := g.PlayerToEngine[id]
+		peek := g.Engine.Players[engineIdx].InitialPeek
+		wanted := make(map[int]bool, 3)
+		for i := uint8(0); i < g.Engine.Players[engineIdx].InitialPeekCount; i++ {
+			wanted[int(peek[i])] = true
 		}
-		require.NotNilf(t, self, "player %s should appear in its own sync state", id)
-		require.Len(t, self.RevealedHand, 4)
+		assert.Equalf(t, wanted, revealed, "player %s: the reveal should name the engine's peeked slots", id)
 
-		for slot, card := range self.RevealedHand {
-			assert.Equalf(t, revealed[slot], card.Known, "slot %d: sync_state visibility should match the pregame reveal", slot)
+		for slot := uint8(0); slot < g.Engine.Players[engineIdx].HandLen; slot++ {
+			cardUUID := g.CardTracker.Players[engineIdx].HandUUIDs[slot]
+			assert.Equalf(t, revealed[int(slot)], g.hasSeenCard(engineIdx, cardUUID),
+				"slot %d: the seen-set should hold exactly the peeked slots", slot)
 		}
 	}
-	_ = mb
 }
 
 // TestInitialViewCountBound verifies the lobby-edge bound on initialViewCount. The ceiling used to

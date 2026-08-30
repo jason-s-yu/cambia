@@ -26,9 +26,18 @@ export interface ObfPlayerState {
 	forfeited?: boolean;
 	/** Epoch-ms time this player's reconnect window closes, present only while one is open. */
 	reconnectDeadline?: number | null;
-	// Revealed only for the player requesting the state
+	/**
+	 * One entry per hand slot: a card id and its index. Every slot arrives `known: false` with no
+	 * face, for the requesting player's own hand as well as everyone else's, in every phase
+	 * (cambia-1094) - no own card is ever persistently face-up, so the ids are here for targeting
+	 * and slot counting, not for rendering faces. The faces a player is entitled to arrive in their
+	 * own events (private_initial_cards, private_draw_stockpile, private_special_action_success)
+	 * and gameStore turns each of those into a reveal held for its window only. The store does
+	 * write `known: true` onto these slots for the pregame peek, for the length of that window.
+	 */
 	revealedHand?: ObfCard[];
-	drawnCard?: ObfCard | null; // Card currently held after drawing
+	/** The card this player drew and is still holding. The one own face a snapshot names. */
+	drawnCard?: ObfCard | null;
 }
 
 /** One outstanding snap fill: `snapperId` owes a card into `victimId`'s hand at `slot`. */
