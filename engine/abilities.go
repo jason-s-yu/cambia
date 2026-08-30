@@ -389,7 +389,7 @@ func (g *GameState) discardWithAbilityNPlayer() error {
 	return nil
 }
 
-// ResolveUntargetableArmedAbility discharges an armed ability that no action in this table's action
+// ResolveUntargetableArmedAbility discharges an armed ability that no action in the caller's action
 // space can resolve: it clears the pending ability and runs the snap phase for the card that armed
 // it, which is what resolving any ability does and which advances the turn when no one can snap.
 // It reports whether it resolved anything, and is a no-op whenever the ability still has a legal
