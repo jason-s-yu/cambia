@@ -23,6 +23,7 @@ Minimize your score. **Red Kings** are the best; **Black Kings** are the worst.
 1. Deal **4 cards** face-down to each player arranged in a square (2x2).
 2. Place the remaining deck (Stockpile) in the center. Flip the top card to start the **Discard Pile**.
 3. **Memorize:** At the start *only*, players may peek at their **bottom two cards**. After this, you must rely on memory.
+4. **Slot numbering:** hand slots run 0-3 from the row nearest their owner, so slots 0 and 1 are that peeked bottom pair and slots 2 and 3 the far row. Engine, service and clients all use this numbering.
 
 ## 3. The Turn
 
