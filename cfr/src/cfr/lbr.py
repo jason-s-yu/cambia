@@ -319,6 +319,10 @@ def _make_random_opponent(player_id: int, config: Any):
     ))
 
 
+# Set once the strong-opponent fallback has been reported (see below).
+_STRONG_OPPONENT_WARNED = False
+
+
 def _make_strong_opponent(player_id: int, config: Any):
     """The default strong fixed opponent (ImperfectGreedyAgent), if available.
 
@@ -329,6 +333,7 @@ def _make_strong_opponent(player_id: int, config: Any):
     continuation wearing a Tier-B label, which the returned
     ``rollout_opponent`` field names so a row is never silently mislabelled.
     """
+    global _STRONG_OPPONENT_WARNED
     try:
         from src.agents.baseline_agents import ImperfectGreedyAgent
 
@@ -340,12 +345,18 @@ def _make_strong_opponent(player_id: int, config: Any):
             )
         return agent
     except Exception as exc:  # JUSTIFIED: eval resilience across the port window
-        logger.warning(
-            "lbr: strong opponent unavailable (%s); falling back to "
-            "UniformRandomPolicy. Tier-B numbers from this run are NOT "
-            "measured against a strong continuation.",
-            exc,
-        )
+        # Warn once per process, not once per constructed opponent: Tier B builds
+        # a fresh rollout opponent per branch rollout, so a per-call warning is
+        # millions of identical lines on a production-sized run.
+        if not _STRONG_OPPONENT_WARNED:
+            _STRONG_OPPONENT_WARNED = True
+            logger.warning(
+                "lbr: strong opponent unavailable (%s); falling back to "
+                "UniformRandomPolicy for the rest of this process. Tier-B "
+                "numbers from this run are NOT measured against a strong "
+                "continuation.",
+                exc,
+            )
         return _make_random_opponent(player_id, config)
 
 
