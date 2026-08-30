@@ -68,8 +68,10 @@ func HubWSHandler(logger *logrus.Logger, gs *GameServer) http.HandlerFunc {
 			return
 		}
 
-		// 5. Upgrade WebSocket with subprotocol "cambia"
-		c, err := websocket.Accept(w, r, wsopts.AcceptOptions("cambia"))
+		// 5. Upgrade WebSocket with subprotocol "cambia". A tab-pinned client also offers a
+		// cambia-token.<jwt> entry (resolved in step 3, above the upgrade); it is never
+		// selected, so the negotiated protocol is "cambia" either way.
+		c, err := websocket.Accept(w, r, wsopts.AcceptOptions(wsopts.Subprotocol))
 		if err != nil {
 			logger.Warnf("ws: accept error for lobby %s: %v", lobbyID, err)
 			return

@@ -70,6 +70,13 @@ func main() {
 	mux.HandleFunc("/user/history", handlers.GameHistoryHandler)
 	mux.HandleFunc("/user/ratings", handlers.RatingSummaryHandler)
 
+	// Dev identity endpoints (cambia-1149), registered only when
+	// CAMBIA_DEV_ACCOUNTS is set. Unset - the production default - leaves
+	// /dev/session unrouted, so it 404s like any unknown path.
+	if handlers.RegisterDevRoutes(mux) {
+		log.Printf("%s is set: POST/GET /dev/session enabled (dev identity switcher)", handlers.DevAccountsEnvVar)
+	}
+
 	// friend endpoints
 	mux.HandleFunc("/friends/add", handlers.AddFriendHandler)
 	mux.HandleFunc("/friends/accept", handlers.AcceptFriendHandler)

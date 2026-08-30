@@ -51,7 +51,7 @@ func (s *TrainingStore) HandleLogStream(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	c, err := websocket.Accept(w, r, wsopts.AcceptOptions())
+	c, err := websocket.Accept(w, r, wsopts.AcceptOptions(wsopts.Subprotocol))
 	if err != nil {
 		return
 	}

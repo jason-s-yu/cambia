@@ -4,13 +4,15 @@ This document outlines the available HTTP REST endpoints and WebSocket connectio
 
 ## Authentication
 
-Most endpoints require authentication via an `auth_token` JWT cookie sent in the `Cookie` header.
+Most endpoints require authentication by a JWT, carried by an `auth_token` cookie or sent explicitly by the caller.
 
+* **Carriers and precedence:** every authenticated path resolves the caller through `auth.ResolveAuthToken`, which reads, in order: (1) `Authorization: Bearer <jwt>` (the scheme is case-insensitive); (2) a `Sec-WebSocket-Protocol` entry prefixed `cambia-token.` (the WebSocket handshake, where a browser client cannot set headers); (3) the `auth_token` cookie(s). A caller that sends an explicit token has opted out of the cookie for that request: if that token does not verify the request fails, and the cookie is neither read nor expired. An `Authorization` header with another scheme, or an empty Bearer value, offers nothing and falls through to the cookie.
+* **Tab-scoped sessions:** the request header `X-Cambia-Session: tab` asks for a session held by one browser tab instead of the origin's shared cookie jar. `POST /user/guest` then mints a fresh guest, returns its token in the body, and sets no cookie; `POST /user/login` returns its usual body and skips the `Set-Cookie`. The client keeps the token in `sessionStorage` and replays it on the carriers above. Accepting tokens is always on; only the minting endpoints below are dev-gated.
 * **Obtaining a Token:** Use `POST /user/login`. The token is returned in the response body and set as an `HttpOnly` cookie. The default expiration time is configurable via the `TOKEN_EXPIRE_TIME` environment variable (e.g., "72h", "0" or "never" for no expiration).
 * **Ephemeral Guests:** Connecting to a WebSocket endpoint (`/lobby/ws/*` or `/game/ws/*`) *without* a valid `auth_token` cookie will automatically create a temporary guest user, set the `auth_token` cookie, and return the user's ephemeral ID.
 * **Claiming Guests:** Guests can call `POST /user/claim` (`ClaimEphemeralHandler`) to convert an ephemeral guest account into a persistent one by adding email/username/password.
 * **Token Verification:** The server uses an Ed25519 key pair (generated at runtime by default) to sign and verify JWTs.
-* **Duplicate cookies:** A request can carry more than one `auth_token` cookie (localhost cookies are shared across ports/apps on a multi-app host, and a dev-server restart that rotates the signing key can leave a stale cookie in the jar alongside a fresh one). All cookie-based auth in this service - `middleware.RequireAuth` (gating `/training/*` and `/ws/training/*`) and the REST handlers that authenticate directly off the `Cookie` header (`GET /user/me`, `POST /user/claim`, `EnsureEphemeralUser` guest bootstrap, `/friend/*`) - go through the shared `auth.ResolveAuthTokenCookie` helper. It checks every `auth_token` cookie on the request and accepts the first one that verifies, rather than only the first cookie in the header. Any invalid `auth_token` cookie seen along the way gets an expiring `Set-Cookie` in the response so the browser drops it instead of resending it on every request.
+* **Duplicate cookies:** A request can carry more than one `auth_token` cookie (localhost cookies are shared across ports/apps on a multi-app host, and a dev-server restart that rotates the signing key can leave a stale cookie in the jar alongside a fresh one). All auth in this service - `middleware.RequireAuth` (gating `/training/*` and `/ws/training/*`) and the REST handlers that authenticate directly off the request (`GET /user/me`, `POST /user/claim`, `EnsureEphemeralUser` guest bootstrap, `/friend/*`) - goes through the shared `auth.ResolveAuthToken` helper, whose cookie step is `auth.ResolveAuthTokenCookie`. It checks every `auth_token` cookie on the request and accepts the first one that verifies, rather than only the first cookie in the header. Any invalid `auth_token` cookie seen along the way gets an expiring `Set-Cookie` in the response so the browser drops it instead of resending it on every request. An invalid explicit token never triggers that expiry: one tab's stale token must not clear the jar the other tabs are using.
 
 ## HTTP REST Endpoints
 
@@ -79,6 +81,28 @@ Handled by `internal/handlers/user.go`.
     * `400 Bad Request`: Invalid payload.
     * `403 Forbidden`: Authentication failed (wrong email/password, or user not found).
     * `500 Internal Server Error`: Failed to create JWT or write response.
+* **Tab mode:** with `X-Cambia-Session: tab` the response body is unchanged and no `Set-Cookie` is written, so the caller pins the returned token to one tab and the shared cookie identity is left as it was.
+
+#### `POST /user/guest`
+
+* **Description:** Provisions an ephemeral guest session without a WebSocket. Without the tab header it returns the caller's existing identity when a valid credential is present, and otherwise creates a guest and sets the `auth_token` cookie.
+* **Authentication:** None required.
+* **Request Body:** None.
+* **Response (Success: 200 OK):** `application/json`
+    * **Headers:** `Set-Cookie: auth_token={jwt}; ...`
+    ```json
+    {
+      "id": "..." // string (UUID)
+    }
+    ```
+* **Tab mode:** with `X-Cambia-Session: tab` a *fresh* guest is always minted (never the cookie's identity: the caller asked for an identity only this tab holds), no cookie is set, and the body carries the token:
+    ```json
+    {
+      "id": "...",    // string (UUID)
+      "token": "{jwt}" // string
+    }
+    ```
+* **Response (Error):** `500 Internal Server Error`: Failed to create the guest user.
 
 #### `GET /user/me`
 
@@ -99,6 +123,52 @@ Handled by `internal/handlers/user.go`.
     * `403 Forbidden`: Invalid or missing token.
     * `404 Not Found`: User ID from token not found in database.
     * `500 Internal Server Error`: Failed to write response.
+
+---
+
+### Dev Identity Endpoints
+
+Handled by `internal/handlers/dev_session.go`. Registered only when `CAMBIA_DEV_ACCOUNTS=1` (or `true`); with the variable unset the routes do not exist and `/dev/session` returns `404 Not Found`, indistinguishable from an unknown path. They mint tab-scoped tokens for the dev identity switcher (cambia-1149) and never set a cookie.
+
+#### `POST /dev/session`
+
+* **Description:** Upserts a named dev account and returns a token for it. The account is keyed by email `<name>@dev.cambia.local`, has `is_ephemeral=false`, and is created with a random password nobody holds, so `POST /user/login` cannot reach it. Idempotent per name: repeat calls return the same user id. An absent or empty `name` mints a fresh ephemeral guest instead, in the same response shape.
+* **Authentication:** None required (the flag is the gate).
+* **Request Body:** `application/json`
+    ```json
+    {
+      "name": "alice" // string, optional, [a-z0-9_-]{1,32}
+    }
+    ```
+* **Response (Success: 200 OK):** `application/json`, no `Set-Cookie`
+    ```json
+    {
+      "token": "{jwt}",
+      "user": {
+        "id": "...",          // string (UUID)
+        "username": "alice",  // string
+        "is_ephemeral": false, // boolean
+        "is_admin": false     // boolean
+      }
+    }
+    ```
+* **Response (Error):**
+    * `400 Bad Request`: Malformed body, or a name outside `[a-z0-9_-]{1,32}`.
+    * `405 Method Not Allowed`: Any method other than GET or POST.
+    * `500 Internal Server Error`: Database or JWT failure.
+
+#### `GET /dev/session`
+
+* **Description:** Lists the dev accounts that exist, so the switcher can offer them.
+* **Response (Success: 200 OK):** `application/json`
+    ```json
+    {
+      "enabled": true,
+      "accounts": [
+        { "name": "alice", "id": "..." }
+      ]
+    }
+    ```
 
 ---
 
@@ -458,6 +528,8 @@ Handled by `internal/handlers/game.go`.
 ## WebSocket Endpoints
 
 These endpoints handle real-time communication for lobbies and active games. They require the `auth_token` cookie (or trigger guest creation) and specific subprotocols.
+
+**Token carrier and subprotocol selection.** A browser cannot set headers on `new WebSocket`, so a tab-held token rides the handshake: the client offers `['cambia', 'cambia-token.<jwt>']`, and the server resolves the second entry as an explicit token (see Authentication above). Every socket in the service - the gameplay socket at `/ws/{lobby_id}` and the training sockets at `/ws/training/*` - accepts with `wsopts.AcceptOptions(wsopts.Subprotocol)` and therefore always selects `cambia`; the `cambia-token.` entry is never selected. A client that offers subprotocols and is handed none back must fail the handshake per RFC 6455, which is why the training sockets select `cambia` too. A client that offers no subprotocol still connects, with none negotiated. `?token=` in the URL is not supported: it would put tokens in proxy and access logs.
 
 *(Note: WebSocket handlers upgrade HTTP connections initiated at these paths. See `cmd/server/main.go` for registration.)*
 

@@ -21,7 +21,7 @@ const remoteRetryBackoff = 1 * time.Second
 // validity is checked only at the runner's upgrade; a tail outliving the token
 // TTL is fine.
 func (s *TrainingStore) serveRemoteLogs(w http.ResponseWriter, r *http.Request, name string) {
-	c, err := websocket.Accept(w, r, wsopts.AcceptOptions())
+	c, err := websocket.Accept(w, r, wsopts.AcceptOptions(wsopts.Subprotocol))
 	if err != nil {
 		return
 	}

@@ -78,6 +78,41 @@ func GetUserByEmail(ctx context.Context, email string) (*models.User, error) {
 	return &u, nil
 }
 
+// ListUsersByEmailSuffix returns every user whose email ends with suffix,
+// ordered by email. Only the identity columns are read (id, email, username,
+// is_ephemeral, is_admin): the caller lists accounts, it does not need ratings
+// or a password hash.
+//
+// The comparison is right(email, length($1)) = $1 rather than a LIKE pattern so
+// the suffix is matched literally, with no wildcard characters in it to escape.
+// Used by GET /dev/session to list the dev identities (cambia-1149).
+func ListUsersByEmailSuffix(ctx context.Context, suffix string) ([]models.User, error) {
+	q := `
+	SELECT id, email, username, is_ephemeral, is_admin
+	FROM users
+	WHERE email IS NOT NULL AND right(email, length($1)) = $1
+	ORDER BY email
+	`
+	rows, err := DB.Query(ctx, q, suffix)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list users by email suffix: %w", err)
+	}
+	defer rows.Close()
+
+	var users []models.User
+	for rows.Next() {
+		var u models.User
+		if err := rows.Scan(&u.ID, &u.Email, &u.Username, &u.IsEphemeral, &u.IsAdmin); err != nil {
+			return nil, fmt.Errorf("failed to scan user row: %w", err)
+		}
+		users = append(users, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read user rows: %w", err)
+	}
+	return users, nil
+}
+
 func GetUserByID(ctx context.Context, id uuid.UUID) (*models.User, error) {
 	var u models.User
 	var email, password *string

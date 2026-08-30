@@ -32,46 +32,77 @@ func newGuestUsername(id uuid.UUID) string {
 	return "Guest-" + strings.ToUpper(hex[:8])
 }
 
-// EnsureEphemeralUser checks for an existing `auth_token` cookie.
-// If valid, it authenticates the user and returns their UUID.
-// If invalid or missing, it creates a new ephemeral guest user, sets a new `auth_token` cookie,
+// newEphemeralUser creates a guest user row and mints its JWT. It writes no
+// cookie and touches no response, so it is the single mint point shared by the
+// cookie bootstrap (EnsureEphemeralUser, which sets the cookie itself) and the
+// tab-scoped paths that must not touch the shared cookie jar at all: POST
+// /user/guest with X-Cambia-Session: tab, and POST /dev/session with no name
+// (cambia-1149).
+func newEphemeralUser(ctx context.Context) (models.User, string, error) {
+	// The id is generated here, rather than left for database.CreateUser to assign, so a
+	// unique guest username can be derived from it and persisted in the same INSERT
+	// (CreateUser only generates an id itself when the passed-in one is uuid.Nil).
+	id, err := uuid.NewRandom()
+	if err != nil {
+		return models.User{}, "", fmt.Errorf("failed to generate ephemeral user id: %w", err)
+	}
+	ephemeralUser := models.User{
+		ID:          id,
+		Email:       "", // Ephemeral users don't have email/password initially.
+		Password:    "",
+		Username:    newGuestUsername(id),
+		IsEphemeral: true,
+	}
+	if err := database.CreateUser(ctx, &ephemeralUser); err != nil {
+		return models.User{}, "", fmt.Errorf("failed to create ephemeral user: %w", err)
+	}
+	token, err := auth.CreateJWT(ephemeralUser.ID.String())
+	if err != nil {
+		// Attempt to clean up the created user if JWT creation fails? Complex.
+		return models.User{}, "", fmt.Errorf("failed to create JWT for ephemeral user: %w", err)
+	}
+	return ephemeralUser, token, nil
+}
+
+// ErrExplicitTokenInvalid reports that the caller sent a token of its own
+// (Authorization: Bearer, or a cambia-token.<jwt> handshake entry) that did not
+// verify. Callers answer 401 rather than minting a guest: the caller asked to
+// be somebody specific, and quietly handing back a different identity would
+// leave a tab holding a stale token looking signed in as a stranger
+// (cambia-1149).
+var ErrExplicitTokenInvalid = errors.New("the token on the request did not verify")
+
+// EnsureEphemeralUser checks for a token the caller sent explicitly
+// (Authorization: Bearer, or a cambia-token.<jwt> WebSocket handshake entry),
+// then for an existing `auth_token` cookie.
+// If one verifies, it authenticates the user and returns their UUID.
+// If none is present, it creates a new ephemeral guest user, sets a new `auth_token` cookie,
 // and returns the new guest user's UUID.
+// An explicit token that does not verify is an error rather than a fresh guest:
+// see auth.ResolveAuthToken for why a caller that sends one gets no fallback.
 func EnsureEphemeralUser(w http.ResponseWriter, r *http.Request) (uuid.UUID, error) {
 	// Helper function to create and set cookie for a new ephemeral user.
 	createAndSetEphemeralUser := func() (uuid.UUID, error) {
-		// The id is generated here, rather than left for database.CreateUser to assign, so a
-		// unique guest username can be derived from it and persisted in the same INSERT
-		// (CreateUser only generates an id itself when the passed-in one is uuid.Nil).
-		id, err := uuid.NewRandom()
+		ephemeralUser, newToken, err := newEphemeralUser(context.Background())
 		if err != nil {
-			return uuid.Nil, fmt.Errorf("failed to generate ephemeral user id: %w", err)
-		}
-		ephemeralUser := models.User{
-			ID:          id,
-			Email:       "", // Ephemeral users don't have email/password initially.
-			Password:    "",
-			Username:    newGuestUsername(id),
-			IsEphemeral: true,
-		}
-		if err := database.CreateUser(context.Background(), &ephemeralUser); err != nil {
-			return uuid.Nil, fmt.Errorf("failed to create ephemeral user: %w", err)
-		}
-		newToken, err := auth.CreateJWT(ephemeralUser.ID.String())
-		if err != nil {
-			// Attempt to clean up the created user if JWT creation fails? Complex.
-			return uuid.Nil, fmt.Errorf("failed to create JWT for ephemeral user: %w", err)
+			return uuid.Nil, err
 		}
 		auth.SetAuthTokenCookie(w, newToken, auth.TOKEN_EXPIRE_TIME_SEC)
 		log.Printf("Created ephemeral user %s and set auth cookie.", ephemeralUser.ID)
 		return ephemeralUser.ID, nil
 	}
 
-	// Resolve any auth_token cookie(s) on the request; accepts the first that
-	// verifies and self-heals stale/invalid duplicates (see
-	// auth.ResolveAuthTokenCookie doc comment).
-	userIDStr, sawAny, ok := auth.ResolveAuthTokenCookie(w, r)
+	// Resolve the request's credential: explicit token first, then any
+	// auth_token cookie(s), accepting the first that verifies and self-healing
+	// stale/invalid duplicates (see auth.ResolveAuthToken doc comment).
+	userIDStr, sawAny, ok := auth.ResolveAuthToken(w, r)
 	if !ok {
 		if sawAny {
+			// An explicit token that failed is a client error, not a reason to hand out a
+			// second identity: the caller asked to be somebody specific.
+			if _, explicit := auth.ExplicitToken(r); explicit {
+				return uuid.Nil, ErrExplicitTokenInvalid
+			}
 			log.Printf("No auth_token cookie on the request verified. Creating new ephemeral user.")
 		}
 		// No token found (or none valid), create a new ephemeral user.
@@ -92,11 +123,43 @@ func EnsureEphemeralUser(w http.ResponseWriter, r *http.Request) (uuid.UUID, err
 }
 
 // GuestHandler provisions an ephemeral guest session via REST (no WebSocket required).
-// GET /user/guest - if the caller already has a valid auth_token cookie, returns
-// the existing user; otherwise creates a new ephemeral user and sets the cookie.
+// GET or POST /user/guest - if the caller already holds a valid credential (an explicit
+// token or an auth_token cookie), returns the existing user; otherwise creates a
+// new ephemeral user and sets the cookie. An explicit token that does not verify
+// is a 401, not a new guest.
+//
+// With the request header X-Cambia-Session: tab the response is tab-scoped
+// instead (cambia-1149): a fresh guest is always minted, its token is returned
+// in the body as {"id":..., "token":...}, and no cookie is written. The caller
+// asked for an identity that only this browser tab holds, so reusing the shared
+// cookie identity would defeat the request, and writing a cookie would move
+// every other tab on the origin to the new guest. This mode needs no dev flag,
+// so tab guests work on any deployment.
 func GuestHandler(w http.ResponseWriter, r *http.Request) {
+	if auth.IsTabSession(r) {
+		guest, token, err := newEphemeralUser(r.Context())
+		if err != nil {
+			log.Printf("GuestHandler: failed to create tab guest: %v", err)
+			http.Error(w, "failed to create guest session", http.StatusInternalServerError)
+			return
+		}
+		log.Printf("Created tab-scoped ephemeral user %s (no cookie set).", guest.ID)
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]string{
+			"id":    guest.ID.String(),
+			"token": token,
+		}); err != nil {
+			log.Printf("GuestHandler: failed to write tab guest response: %v", err)
+		}
+		return
+	}
+
 	userID, err := EnsureEphemeralUser(w, r)
 	if err != nil {
+		if errors.Is(err, ErrExplicitTokenInvalid) {
+			http.Error(w, "invalid authentication token", http.StatusUnauthorized)
+			return
+		}
 		log.Printf("GuestHandler: failed to ensure ephemeral user: %v", err)
 		http.Error(w, "failed to create guest session", http.StatusInternalServerError)
 		return
@@ -116,7 +179,7 @@ type claimEphemeralRequest struct {
 }
 
 func ClaimEphemeralHandler(w http.ResponseWriter, r *http.Request) {
-	userIDStr, _, ok := auth.ResolveAuthTokenCookie(w, r)
+	userIDStr, _, ok := auth.ResolveAuthToken(w, r)
 	if !ok {
 		http.Error(w, "Invalid or missing authentication token", http.StatusForbidden)
 		return
@@ -253,6 +316,11 @@ type loginResponse struct {
 // LoginHandler handles user login requests.
 // It authenticates the user based on email and password, generates a JWT,
 // sets it as an HttpOnly cookie, and returns the token in the response body.
+//
+// With the request header X-Cambia-Session: tab the Set-Cookie is skipped
+// (cambia-1149): the caller pins the returned token to one browser tab, so the
+// shared cookie identity of the other tabs stays as it was. The response body
+// is identical either way.
 func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -274,7 +342,11 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Set the JWT as an HttpOnly cookie. Secure/SameSite come from COOKIE_SECURE.
-	auth.SetAuthTokenCookie(w, token, auth.TOKEN_EXPIRE_TIME_SEC)
+	// A tab-scoped login skips the cookie entirely and carries the token in the
+	// body alone.
+	if !auth.IsTabSession(r) {
+		auth.SetAuthTokenCookie(w, token, auth.TOKEN_EXPIRE_TIME_SEC)
+	}
 
 	// Return the token in the response body as well.
 	resp := loginResponse{Token: token}
@@ -287,10 +359,33 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// sanitizedUser is the public projection of a user row: identity and flags, no
+// password hash and no email. Shared by GET /user/me and POST /dev/session so
+// the two cannot drift.
+type sanitizedUser struct {
+	ID          uuid.UUID `json:"id"`
+	Username    string    `json:"username"`
+	IsEphemeral bool      `json:"is_ephemeral"`
+	IsAdmin     bool      `json:"is_admin"`
+	// Add other non-sensitive fields like Elo ratings if needed by the client.
+	// Elo1v1      int       `json:"elo_1v1"`
+}
+
+// sanitizeUser projects a user row onto the fields safe to return to a client.
+func sanitizeUser(u *models.User) sanitizedUser {
+	return sanitizedUser{
+		ID:          u.ID,
+		Username:    u.Username,
+		IsEphemeral: u.IsEphemeral,
+		IsAdmin:     u.IsAdmin,
+	}
+}
+
 // MeHandler retrieves and returns basic information about the currently authenticated user.
-// It relies on the `auth_token` cookie being present and valid.
+// It relies on a token the caller sent explicitly, or the `auth_token` cookie,
+// being present and valid.
 func MeHandler(w http.ResponseWriter, r *http.Request) {
-	userIDStr, _, ok := auth.ResolveAuthTokenCookie(w, r) // Verifies token validity.
+	userIDStr, _, ok := auth.ResolveAuthToken(w, r) // Verifies token validity.
 	if !ok {
 		http.Error(w, "Invalid or missing authentication token", http.StatusForbidden)
 		return
@@ -311,23 +406,8 @@ func MeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Prepare a sanitized response object excluding sensitive fields like password hash.
-	sanitizedUser := struct {
-		ID          uuid.UUID `json:"id"`
-		Username    string    `json:"username"`
-		IsEphemeral bool      `json:"is_ephemeral"`
-		IsAdmin     bool      `json:"is_admin"`
-		// Add other non-sensitive fields like Elo ratings if needed by the client.
-		// Elo1v1      int       `json:"elo_1v1"`
-	}{
-		ID:          user.ID,
-		Username:    user.Username,
-		IsEphemeral: user.IsEphemeral,
-		IsAdmin:     user.IsAdmin,
-		// Elo1v1:      user.Elo1v1,
-	}
-
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(sanitizedUser); err != nil {
+	if err := json.NewEncoder(w).Encode(sanitizeUser(user)); err != nil {
 		log.Printf("Failed to write /user/me response for user %s: %v", userID, err)
 		http.Error(w, "Failed to process user information", http.StatusInternalServerError)
 		return
