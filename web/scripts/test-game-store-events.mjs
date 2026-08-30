@@ -37,6 +37,27 @@ function caseLine(name) {
     return hits[0];
 }
 
+/** Source with its comments and blank lines dropped, neither of which is a statement. */
+function statementsOf(text) {
+    return text
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .split('\n')
+        .filter((line) => line.trim() && !line.trim().startsWith('//'))
+        .join('\n')
+        .trim();
+}
+
+/**
+ * Whether two case labels run one body: the first carries no statements of its own, and the
+ * second is the next label after it. Asked this way rather than as adjacent line numbers, which a
+ * comment written between the two labels would have broken (cambia-1099).
+ */
+function sharesOneBody(first, second) {
+    const from = caseLine(first);
+    const to = caseLine(second);
+    return from < to && statementsOf(LINES.slice(from + 1, to).join('\n')) === '';
+}
+
 /**
  * The body of a switch case: every line after its label, up to the next label at the same
  * indentation. A label whose body is empty falls through to the next one.
@@ -58,8 +79,8 @@ function caseBody(name) {
 test('the two draw events share one body that delegates the counts to applyDrawPileCounts', () => {
     // The public event's label falls straight through to the private one, so there is a single
     // body and a single place the counts can be written from.
-    assert.equal(caseBody('player_draw_stockpile').trim(), '', 'the public draw label falls through');
-    assert.equal(caseLine('private_draw_stockpile'), caseLine('player_draw_stockpile') + 1);
+    assert.ok(sharesOneBody('player_draw_stockpile', 'private_draw_stockpile'),
+        'the two draw labels no longer run one body: the public one has statements of its own');
 
     const body = caseBody('private_draw_stockpile');
     const calls = body.match(/applyDrawPileCounts\(/g) ?? [];

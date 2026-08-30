@@ -136,6 +136,33 @@ test('with no recorded id the rules answer, and the game mode narrows it', () =>
     assert.notEqual(twoPlayer, fourPlayer);
 });
 
+test('a recorded id from another table size does not name the lobby', () => {
+    // A head-to-head lobby recorded as ffa4_standard is a record no lobby can satisfy: applying a
+    // preset used to fill the rules and nothing else, so the id could be recorded against a lobby
+    // of the wrong size and then head the sheet FFA-4 Standard beside a Head to head badge
+    // (cambia-1099 Q1). The rules answer instead.
+    const fourPlayer = QUEUE_PRESETS.find((p) => p.gameMode === 'group_of_4');
+    const resolved = resolvePresetId(PRESETS, {
+        presetId: fourPlayer.id,
+        gameMode: 'head_to_head',
+        houseRules: RANKED_RULES,
+        settings: AUTO_START
+    });
+    assert.notEqual(resolved, fourPlayer.id);
+    assert.equal(PRESETS.find((p) => p.id === resolved).gameMode, 'head_to_head');
+});
+
+test('a recorded id from another table size on rules of its own reads Custom', () => {
+    // Nothing to fall back to: the id cannot be true and the rules are nobody's preset either.
+    const fourPlayer = QUEUE_PRESETS.find((p) => p.gameMode === 'group_of_4');
+    assert.equal(resolvePresetId(PRESETS, {
+        presetId: fourPlayer.id,
+        gameMode: 'head_to_head',
+        houseRules: { ...RANKED_RULES, turnTimerSec: 42 },
+        settings: AUTO_START
+    }), null);
+});
+
 test('an id naming no preset in the list falls back to the rules', () => {
     const resolved = resolvePresetId(PRESETS, {
         presetId: 'a_queue_that_was_retired',
@@ -265,8 +292,9 @@ test('the host of an unlocked lobby keeps the selector, Custom included', () => 
     });
     assert.equal(onPreset.kind, 'select');
     assert.equal(onPreset.value, 'h2h_rapid');
-    assert.deepEqual(onPreset.options.map((o) => o.value), PRESETS.map((p) => p.id),
-        'a sheet still on its preset is offered the presets and no Custom entry');
+    const fitsTwoPlayer = PRESETS.filter((p) => !p.gameMode || p.gameMode === 'head_to_head');
+    assert.deepEqual(onPreset.options.map((o) => o.value), fitsTwoPlayer.map((p) => p.id),
+        'a sheet still on its preset is offered the presets it could be on and no Custom entry');
     assert.equal(onPreset.description, PRESETS.find((p) => p.id === 'h2h_rapid').description);
 
     // One edited rule departs from the preset: the select falls to Custom, which has to be an
@@ -282,4 +310,55 @@ test('the host of an unlocked lobby keeps the selector, Custom included', () => 
     assert.equal(departed.value, CUSTOM_PRESET_VALUE);
     assert.equal(departed.options.at(-1).label, CUSTOM_PRESET_LABEL);
     assert.equal(departed.description, '', 'a departed sheet has no preset description to show');
+});
+
+// The table size a preset carries (cambia-1099 Q1). Applying one fills the rules and the
+// auto-start setting; it does not reseat the lobby, so a preset naming a player count the lobby
+// does not have is not a ruleset it can be on, whatever its rules say.
+
+test('the host is offered only the presets the lobby could be on', () => {
+    const offered = (gameMode) => rulesetRow({
+        presets: PRESETS,
+        canEdit: true,
+        saved: { gameMode, houseRules: RANKED_RULES, settings: AUTO_START },
+        selectedId: null,
+        houseRules: RANKED_RULES,
+        settings: AUTO_START
+    }).options.map((o) => o.value).filter((v) => v !== CUSTOM_PRESET_VALUE);
+
+    const twoPlayer = offered('head_to_head');
+    const fourPlayer = offered('group_of_4');
+    for (const preset of QUEUE_PRESETS) {
+        const listed = preset.gameMode === 'head_to_head' ? twoPlayer : fourPlayer;
+        const withheld = preset.gameMode === 'head_to_head' ? fourPlayer : twoPlayer;
+        assert.ok(listed.includes(preset.id), preset.id + ' belongs on a ' + preset.gameMode + ' lobby');
+        assert.equal(withheld.includes(preset.id), false,
+            preset.id + ' seats a different table and must not be offered');
+    }
+    // The default preset fixes no player count, so it is on offer either way.
+    assert.ok(twoPlayer.includes(DEFAULT_PRESET.id) && fourPlayer.includes(DEFAULT_PRESET.id));
+});
+
+test('a recorded id from another table size cannot mislabel a locked sheet', () => {
+    // The read-only row takes the recorded id on trust, so a record written before the select was
+    // gated is the one thing left that could head a Head to head lobby FFA-4 Standard.
+    const fourPlayer = QUEUE_PRESETS.find((p) => p.gameMode === 'group_of_4');
+    const row = rulesetRow({ ...MATCHMADE, saved: { ...MATCHMADE.saved, presetId: fourPlayer.id } });
+    assert.equal(row.kind, 'name');
+    assert.notEqual(row.name, fourPlayer.name);
+    assert.equal(PRESETS.find((p) => p.name === row.name).gameMode, 'head_to_head');
+});
+
+test('a lobby no preset fits is offered no Ruleset row at all', () => {
+    // A select whose only entry is Custom offers nothing, so it goes the way an unread preset
+    // list does rather than sitting on the sheet as a one-entry control.
+    const row = rulesetRow({
+        presets: QUEUE_PRESETS.filter((p) => p.gameMode === 'group_of_4'),
+        canEdit: true,
+        saved: MATCHMADE.saved,
+        selectedId: null,
+        houseRules: RANKED_RULES,
+        settings: AUTO_START
+    });
+    assert.deepEqual(row, { kind: 'none' });
 });
