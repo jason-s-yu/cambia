@@ -6,9 +6,10 @@
 // ({ rules: { houseRules, circuit, settings } }); non-hosts read the same
 // sheet as plain values (no disabled controls: guests are its readers).
 // No WS protocol change.
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useReducer, useState } from 'react';
 import type { LobbyState, HouseRules, CircuitSettings, LobbySettings, LobbyPreset } from '@/types';
 import { presetMatchesRules, resolvePresetId, rulesetRow } from '@/lib/lobbyPreset';
+import { ruleBufferReducer, seedRuleBuffer } from '@/lib/lobbyRuleBuffer';
 import Panel from '@/components/ds/chrome/Panel';
 import { EYEBROW } from '@/components/ds/eyebrow';
 import Input from '@/components/ds/core/Input';
@@ -161,12 +162,27 @@ const RuleFlag: React.FC<{ label: string; description: string; on: boolean }> = 
 );
 
 const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHost, sendMessage }) => {
-  const initialLobbySettings = currentSettings.lobbySettings ?? currentSettings.settings ?? { autoStart: false };
+  // The saved lobby's rules, which are what the host's buffer is seeded from and compared against.
+  // A lobby carries its auto-start setting under either name depending on which message delivered
+  // it, so the sheet reads one effective value rather than each call site picking.
+  const savedLobby = useMemo(
+    () => ({
+      houseRules: currentSettings.houseRules,
+      circuit: currentSettings.circuit,
+      settings: currentSettings.lobbySettings ?? currentSettings.settings ?? { autoStart: false }
+    }),
+    [currentSettings]
+  );
 
-  const [houseRules, setHouseRules] = useState<HouseRules>(currentSettings.houseRules);
-  const [circuit, setCircuit] = useState<CircuitSettings>(currentSettings.circuit);
-  const [lobbySettings, setLobbySettings] = useState<LobbySettings>(initialLobbySettings);
-  const [saveStatus, setSaveStatus] = useState<'idle' | 'saved'>('idle');
+  // The buffer the host edits and Save sends, and the rules for reseeding it, in lib/
+  // lobbyRuleBuffer.ts. It is a reducer rather than five useStates because the interesting part is
+  // what a late-arriving preset id may do to a sheet already being typed into (cambia-1099 Q3).
+  const [buffer, dispatch] = useReducer(
+    ruleBufferReducer<HouseRules, CircuitSettings, LobbySettings>,
+    savedLobby,
+    (lobby) => seedRuleBuffer(lobby, null)
+  );
+  const { houseRules, circuit, settings: lobbySettings, saveStatus, presetId } = buffer;
   const [circuitInfoOpen, setCircuitInfoOpen] = useState(false);
 
   // A ranked or matchmade lobby has its rules fixed by the queue it entered: the service
@@ -184,7 +200,6 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
   // endpoint leaves the list empty, which drops the row and leaves the field-by-field sheet
   // exactly as it was.
   const [presets, setPresets] = useState<LobbyPreset[]>([]);
-  const [presetId, setPresetId] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -207,43 +222,40 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
     () => ({
       presetId: currentSettings.presetId,
       gameMode: currentSettings.gameMode,
-      houseRules: currentSettings.houseRules,
-      settings: currentSettings.lobbySettings ?? currentSettings.settings ?? { autoStart: false }
+      houseRules: savedLobby.houseRules,
+      settings: savedLobby.settings
     }),
-    [currentSettings]
+    [currentSettings, savedLobby]
   );
   const savedPresetId = useMemo(() => resolvePresetId(presets, savedSubject), [presets, savedSubject]);
 
-  // The buffer is reset from the saved lobby whenever it arrives, the ruleset naming it included:
-  // the sheet below is what the host edits, and leaving the select pointed at a preset the sheet
-  // no longer holds would name a ruleset nobody is playing.
+  // The saved lobby and the ruleset naming it, handed to the buffer together. The preset id is
+  // resolved against a list fetched at mount, so it lands after the lobby does and this runs a
+  // second time with the same lobby; reseeding on that pass is what discarded a host's in-flight
+  // edits (cambia-1099 Q3), and the reducer is where that no longer happens.
   useEffect(() => {
-    setHouseRules(currentSettings.houseRules);
-    setCircuit(currentSettings.circuit);
-    setLobbySettings(currentSettings.lobbySettings ?? currentSettings.settings ?? { autoStart: false });
-    setPresetId(savedPresetId);
-    setSaveStatus('idle');
-  }, [currentSettings, savedPresetId]);
+    dispatch({ type: 'saved', lobby: savedLobby, presetId: savedPresetId });
+  }, [savedLobby, savedPresetId]);
 
   const setRule = <K extends keyof HouseRules>(key: K, value: HouseRules[K]) => {
-    setHouseRules((prev) => ({ ...prev, [key]: value }));
-    setSaveStatus('idle');
+    dispatch({ type: 'houseRules', houseRules: { ...houseRules, [key]: value } });
   };
   // initialViewCount is bounded by cardsPerPlayer server-side (internal/game/rules.go, cambia-817):
   // the pregame peek cannot cover more cards than the hand holds, and an over-large value rejects
   // the whole update_rules message. Lowering the deal size therefore pulls the peek down with it
   // instead of leaving the panel holding a combination the server refuses.
   const setCardsPerPlayer = (value: number) => {
-    setHouseRules((prev) => ({
-      ...prev,
-      cardsPerPlayer: value,
-      initialViewCount: Math.min(prev.initialViewCount ?? 2, value)
-    }));
-    setSaveStatus('idle');
+    dispatch({
+      type: 'houseRules',
+      houseRules: {
+        ...houseRules,
+        cardsPerPlayer: value,
+        initialViewCount: Math.min(houseRules?.initialViewCount ?? 2, value)
+      }
+    });
   };
   const setCircuitRule = <K extends keyof CircuitSettings['rules']>(key: K, value: CircuitSettings['rules'][K]) => {
-    setCircuit((prev) => ({ ...prev, rules: { ...prev.rules, [key]: value } }));
-    setSaveStatus('idle');
+    dispatch({ type: 'circuit', circuit: { ...circuit, rules: { ...circuit.rules, [key]: value } } });
   };
 
   const activePreset = presets.find((p) => p.id === presetId);
@@ -253,12 +265,11 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
   // comparison cannot see it. It is still a change worth saving: the lobby would otherwise keep
   // naming the ruleset the host just replaced (cambia-1123).
   const hasChanges = useMemo(() => {
-    const effective = currentSettings.lobbySettings ?? currentSettings.settings ?? { autoStart: false };
-    return !jsonEqual(houseRules, currentSettings.houseRules) ||
-      !jsonEqual(circuit, currentSettings.circuit) ||
-      !jsonEqual(lobbySettings, effective) ||
+    return !jsonEqual(houseRules, savedLobby.houseRules) ||
+      !jsonEqual(circuit, savedLobby.circuit) ||
+      !jsonEqual(lobbySettings, savedLobby.settings) ||
       (onPreset && presetId !== savedPresetId);
-  }, [houseRules, circuit, lobbySettings, currentSettings, onPreset, presetId, savedPresetId]);
+  }, [houseRules, circuit, lobbySettings, savedLobby, onPreset, presetId, savedPresetId]);
 
   // Selector for the host of an unlocked lobby, the ruleset's name for everyone else, nothing at
   // all when the preset list could not be read (lib/lobbyPreset.ts).
@@ -277,10 +288,7 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
   const applyPreset = (id: string) => {
     const p = presets.find((x) => x.id === id);
     if (!p) return;
-    setHouseRules(p.houseRules);
-    setLobbySettings(p.settings);
-    setPresetId(p.id);
-    setSaveStatus('idle');
+    dispatch({ type: 'preset', presetId: p.id, houseRules: p.houseRules, settings: p.settings });
   };
 
   // Save carries the preset id alongside the expanded sheet whenever the buffer is still on one.
@@ -294,8 +302,8 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
     const rules: Record<string, unknown> = { houseRules, circuit, settings: lobbySettings };
     if (onPreset && activePreset) rules.presetId = activePreset.id;
     sendMessage({ type: 'update_rules', body: { rules } });
-    setSaveStatus('saved');
-    setTimeout(() => setSaveStatus('idle'), 2000);
+    dispatch({ type: 'saveStatus', status: 'saved' });
+    setTimeout(() => dispatch({ type: 'saveStatus', status: 'idle' }), 2000);
   };
 
   const ro = !isHost || locked;
@@ -415,7 +423,7 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
           ) : (
             <Switch
               checked={!!circuit?.enabled}
-              onChange={(v) => { setCircuit((prev) => ({ ...prev, enabled: v })); setSaveStatus('idle'); }}
+              onChange={(v) => dispatch({ type: 'circuit', circuit: { ...circuit, enabled: v } })}
               label={circuit?.enabled ? 'On' : 'Off'}
             />
           )
@@ -442,7 +450,7 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
         ) : (
           <Switch
             checked={!!lobbySettings?.autoStart}
-            onChange={(v) => { setLobbySettings((prev) => ({ ...prev, autoStart: v })); setSaveStatus('idle'); }}
+            onChange={(v) => dispatch({ type: 'settings', settings: { ...lobbySettings, autoStart: v } })}
             label='Auto-start when all ready'
           />
         )}
