@@ -23,7 +23,6 @@ const read = (rel) => readFileSync(REPO + rel, 'utf8');
 const LOBBY_GO = read('service/internal/lobby/lobby.go');
 const CIRCUIT_GO = read('engine/circuit.go');
 const SCORING_GO = read('engine/scoring.go');
-const GAME_GO = read('service/internal/game/game.go');
 
 /** The single match of `re` in `text`, as a number. Absence is a failure, not a skip. */
 function num(text, re, what) {
