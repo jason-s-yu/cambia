@@ -152,18 +152,10 @@ func (g *CambiaGame) doSwapBlindEngine(playerID uuid.UUID, engineIdx uint8, card
 		return
 	}
 
-	// Check Cambia lock.
-	opp1 := g.getPlayerByID(pair.ownOwnerID)
-	opp2 := g.getPlayerByID(pair.oppOwnerID)
-	if opp1 != nil && opp1.HasCalledCambia || opp2 != nil && opp2.HasCalledCambia {
-		ownIdxV := int(pair.ownSlot)
-		oppIdxV := int(pair.oppSlot)
-		g.FireEventPrivateSpecialActionFail(playerID, "Cannot swap cards with a player who has called Cambia.", "swap_blind",
-			buildEventCard(&models.Card{ID: g.CardTracker.Players[engineIdx].HandUUIDs[pair.ownSlot]}, &ownIdxV, pair.ownOwnerID, false),
-			buildEventCard(&models.Card{ID: g.CardTracker.Players[pair.oppSeat].HandUUIDs[pair.oppSlot]}, &oppIdxV, pair.oppOwnerID, false))
-		g.scheduleNextTurnTimer()
-		return
-	}
+	// resolveSwapPair above already answered the Cambia lock, against the engine's own caller
+	// (resolveOpponentTarget with altersTarget set). The second check that used to sit here read
+	// models.Player.HasCalledCambia, a field nothing in production assigned, so it never fired
+	// (cambia-1118).
 
 	// Apply buffered discard with ability.
 	if err := g.applyBufferedDiscard(engine.ActionDiscardWithAbility, playerID); err != nil {
