@@ -1,9 +1,16 @@
 """Exact-tree solver and exploitability for tiny-Cambia (research E1).
 
-Builds an explicit game tree of a reduced-deck Cambia variant by recursively
-expanding the Python CambiaGameState, then:
+Builds an explicit game tree of a reduced-deck Cambia variant, then:
   - solves it with tabular CFR+ to near-exact equilibrium,
   - computes exact best-response exploitability of ANY policy over the same tree.
+
+Two backends build that tree (``build_tree(..., backend=...)``, cambia-1429):
+``"go"`` (the default) expands the Go engine through the FFI bridge, and
+``"python"`` recurses the Python reference CambiaGameState as this module
+originally did. Every X1/X2 number recorded before cambia-1429 came off the
+python backend, and the {A,6} tree is NOT reproducible on the go backend -- see
+build_tree_go's stats dict and tests/test_tiny_solver_go_backend.py
+::test_a6_tree_divergence_is_diagnosed for the counts and the mechanism.
 
 Chance handling. Two chance layers exist in Cambia: the initial deal and every
 stockpile draw. We model both as explicit chance nodes:
@@ -17,8 +24,12 @@ stockpile draw. We model both as explicit chance nodes:
     This makes future draws fair chance (the BR cannot read the deck order).
 
 Infosets are keyed by the production agent-state machinery (analysis_tools
-helpers + AgentState.get_infoset_key + DecisionContext), so the tabular table
-and the deep pipeline share the exact same infoset partition on this game.
+helpers + AgentState.get_infoset_key + DecisionContext) under
+``perfect_recall=False``, so the tabular table and the deep pipeline share the
+exact same infoset partition on this game; that keying needs the Python belief
+state and so is python-backend only. Under ``perfect_recall=True`` -- what every
+X1/X2 consumer uses, and all the go backend supports -- the key is the acting
+seat's genuine perfect-recall information state instead.
 
 The tree is explicit (no memoization: a node is defined by full engine+belief
 state, which is not cheaply hashable). Size is bounded by K and the reduced
