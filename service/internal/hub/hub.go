@@ -742,9 +742,24 @@ func (h *Hub) handleLobbyMsg(msg ClientMsg) {
 		err := h.Lobby.UpdateUnsafe(payload.Rules)
 		h.Lobby.Mu.Unlock()
 		if err != nil {
+			// The reason travels with the refusal. Every error UpdateUnsafe returns is a
+			// statement about the message that was sent - an unknown preset, a house rule out of
+			// range, a ruleset that seats fewer players than the lobby has - and a host told only
+			// "failed" has nothing to change before trying again (cambia-1099). The generic text
+			// stays as the prefix, since the payload carries one field and the client renders it
+			// as it arrives.
 			log.Printf("hub %s: UpdateUnsafe error: %v", h.ID, err)
-			conn.SendEnvelope(h.errEnvelope("failed to apply rule updates"))
+			conn.SendEnvelope(h.errEnvelope("failed to apply rule updates: " + err.Error()))
+			return
 		}
+
+		// Everyone at the table plays by these rules, so everyone is told. Nothing broadcast after
+		// an accepted edit, so every seat but the host's went on rendering the old sheet - house
+		// rules, auto-start, preset name, and the game mode a preset now fixes - until a reload or
+		// some unrelated roster change refreshed it, while chat on the same socket arrived live
+		// (cambia-1099 Q10). The same per-user lobby_state join, leave and match formation send, so
+		// there is one shape a client renders a rule sheet from however it moved.
+		h.broadcastLobbyUpdate()
 
 	case "start_game":
 		// A matchmade lobby starts itself. Its host role belongs to the system (cambia-1087),

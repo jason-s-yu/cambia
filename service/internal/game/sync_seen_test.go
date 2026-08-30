@@ -284,7 +284,7 @@ func TestReconnectSelfViewHidesEveryOwnCard(t *testing.T) {
 		ActionType: "action_replace",
 		Payload:    map[string]interface{}{"id": oldSlot2.String(), "idx": float64(2)},
 	})
-	require.True(t, g.hasSeenCard(engineIdx, drawnUUID), "the drawn card should be in the seen set")
+	require.True(t, g.CardTracker.SeenByPlayer[engineIdx][drawnUUID], "the drawn card should be in the seen set")
 
 	mb.clear()
 	g.HandleDisconnect(actor.ID)

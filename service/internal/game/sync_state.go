@@ -4,8 +4,8 @@ package game
 import (
 	"time"
 
-	engine "github.com/jason-s-yu/cambia/engine"
 	"github.com/google/uuid"
+	engine "github.com/jason-s-yu/cambia/engine"
 )
 
 // ObfCard represents a card's state for client synchronization, potentially hiding details.
@@ -161,7 +161,7 @@ func (g *CambiaGame) getCurrentObfuscatedGameState(forUser uuid.UUID) ObfGameSta
 			Active:    true,
 			PlayerID:  g.SpecialAction.PlayerID,
 			CardRank:  g.SpecialAction.CardRank,
-			Mandatory: g.SpecialAction.Mandatory && !(g.SpecialAction.CardRank == "K" && g.SpecialAction.FirstStepDone),
+			Mandatory: g.SpecialAction.MustResolve(),
 		}
 	}
 

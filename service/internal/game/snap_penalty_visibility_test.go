@@ -103,13 +103,13 @@ func TestSnapPenaltyCardStaysUnseen(t *testing.T) {
 	// card face-down whether or not its owner has seen it, so "face-down on the wire" is no longer
 	// evidence about a single card. The played card is one the snapper has seen and it is face-down
 	// too; what pins the penalty cards as unseen is their absence from SeenByPlayer.
-	assert.True(t, f.game.hasSeenCard(f.snapperIdx, f.snapCardID), "control: the card the snapper played is one they had seen")
+	assert.True(t, f.game.CardTracker.SeenByPlayer[f.snapperIdx][f.snapCardID], "control: the card the snapper played is one they had seen")
 	assert.False(t, self.RevealedHand[seenSlot].Known, "no own card is ever face-up in sync_state (cambia-1094)")
 
 	for slot := handBefore; slot < len(self.RevealedHand); slot++ {
 		card := self.RevealedHand[slot]
 		assert.Falsef(t, card.Known, "penalty card in slot %d should stay face-down for its owner", slot)
 		assert.Emptyf(t, card.Rank, "penalty card in slot %d leaked a rank into sync_state", slot)
-		assert.Falsef(t, f.game.hasSeenCard(f.snapperIdx, card.ID), "penalty card in slot %d was marked seen", slot)
+		assert.Falsef(t, f.game.CardTracker.SeenByPlayer[f.snapperIdx][card.ID], "penalty card in slot %d was marked seen", slot)
 	}
 }

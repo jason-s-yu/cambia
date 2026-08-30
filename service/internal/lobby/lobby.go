@@ -2,6 +2,7 @@
 package lobby
 
 import (
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -454,6 +455,10 @@ func (l *Lobby) GetLobbyStatusPayloadUnsafe() map[string]interface{} {
 // named records that id, and one that moves a rule the preset covers without naming a preset
 // clears it (cambia-1123). Nothing derives it from the values afterwards, which is the whole
 // point: every queue preset holds the same rules.
+//
+// A preset that fixes a player count fixes GameMode with it, and is refused outright when the
+// lobby is already fuller than that mode seats. Returns an error without writing anything in that
+// case, and in every other failing case: a half-applied ruleset is a lobby on rules nobody chose.
 func (l *Lobby) UpdateUnsafe(rules map[string]interface{}) error {
 	changed := false
 	// sheetChanged tracks the fields a preset can express - house rules and lobby settings -
@@ -466,6 +471,23 @@ func (l *Lobby) UpdateUnsafe(rules map[string]interface{}) error {
 		return err
 	}
 
+	// A preset that fixes a player count fixes the game mode too, by the same derivation
+	// CreateLobbyHandler applies at create time (presets.go gameModeForPlayers). Without this an
+	// update_rules naming a 4-player ruleset recorded its PresetID on a lobby still calling itself
+	// head_to_head, so lobby_state described two lobbies at once and the mode a game is built and
+	// persisted with disagreed with the rules its players were shown.
+	//
+	// Refused rather than truncated when the seats are already fuller than the mode holds: the
+	// people are in the lobby, so the honest answers are "not this ruleset" or "somebody leaves",
+	// and the service does not pick the second one. Validated here, ahead of every write below, so
+	// a refusal leaves the lobby exactly as it was. A matchmaking or ranked lobby never reaches
+	// this check: resolvePresetUnsafe refuses it a preset outright, its rules being the queue's.
+	if preset != nil && preset.GameMode != "" {
+		if seated := l.JoinedCount(); seated > preset.Players {
+			return fmt.Errorf("ruleset %q seats %d players and this lobby has %d", preset.ID, preset.Players, seated)
+		}
+	}
+
 	tempHR := l.HouseRules
 	if preset != nil {
 		tempHR = preset.HouseRules
@@ -475,6 +497,14 @@ func (l *Lobby) UpdateUnsafe(rules map[string]interface{}) error {
 			return err
 		}
 	}
+	// Past the last error return, so the preset's game mode lands with the rest of it or not at
+	// all. Not part of sheetChanged: the mode is the lobby's shape, not a rule the preset sheet
+	// can be departed from field by field.
+	if preset != nil && preset.GameMode != "" && l.GameMode != preset.GameMode {
+		l.GameMode = preset.GameMode
+		changed = true
+	}
+
 	if tempHR != l.HouseRules {
 		l.HouseRules = tempHR
 		changed = true
@@ -516,7 +546,16 @@ func (l *Lobby) UpdateUnsafe(rules map[string]interface{}) error {
 	if preset != nil {
 		tempLS = preset.Settings
 	}
-	if lsData, ok := rules["settings"].(map[string]interface{}); ok {
+	// "settings" is the key this reads; "lobbySettings" is accepted as an alias for it because
+	// that is the key the same block serializes back out as (Lobby.LobbySettings), and a client
+	// that echoes a lobby payload it was handed should not have its auto-start silently dropped.
+	// Both are documented in rest_api.md and both are refused for a queue-backed lobby
+	// (handlers.ruleOverrideKeys).
+	lsData, hasLS := rules["settings"].(map[string]interface{})
+	if !hasLS {
+		lsData, hasLS = rules["lobbySettings"].(map[string]interface{})
+	}
+	if hasLS {
 		if autoStart, ok := lsData["autoStart"].(bool); ok {
 			tempLS.AutoStart = autoStart
 		}

@@ -245,11 +245,16 @@ Handled by `internal/handlers/lobby.go`. These manage *ephemeral* in-memory lobb
       "gameMode": "head_to_head" | "group_of_4" | ..., // string, optional (default: "head_to_head")
       "queueID": "h2h_quickplay", // string, required for type "matchmaking", optional otherwise
       "presetId": "h2h_rapid", // string, optional; a ruleset from GET /lobby/presets
-      // Partial houseRules, circuit, or lobbySettings objects can be included
+      // Partial houseRules, circuit, or settings objects can be included
       "houseRules": { "turnTimerSec": 30 }, // optional
-      "lobbySettings": { "autoStart": false } // optional
+      "circuit": { "enabled": true }, // optional
+      "settings": { "autoStart": false } // optional; "lobbySettings" is accepted as an alias
     }
     ```
+    The auto-start block is read from **`settings`**. `lobbySettings` is accepted as an alias for
+    it, because that is the key the same block serializes back out as in the response and in
+    `lobby_state`, so a client can echo a lobby payload it was handed without its auto-start
+    silently going missing. Both spellings are refused for a queue-backed lobby.
     **`presetId`** names a whole ruleset from `GET /lobby/presets` instead of sending the sheet
     field by field. The preset's house rules and lobby settings are applied first and an explicit
     `houseRules` object in the same request lands on top of them, so a host can depart from a
@@ -340,6 +345,11 @@ Handled by `internal/handlers/lobby.go`. These manage *ephemeral* in-memory lobb
     carries one, and cleared by the first later edit that moves a house rule or lobby setting
     without naming a preset. Circuit settings are not part of a preset, so changing them leaves
     it alone.
+
+    A preset that fixes a player count fixes `gameMode` with it wherever it is accepted, on create
+    and in `update_rules` alike, so a lobby never records a 4-player ruleset while still calling
+    itself `head_to_head`. An `update_rules` naming a preset that seats fewer players than the
+    lobby already has is refused outright and changes nothing (see `lobby_actions.md`).
 
     A queue-backed lobby (`type: "matchmaking"`, or any lobby with a `queueID`) is created
     carrying its queue's preset: `houseRules`, `lobbySettings` and `presetId` are the queue's

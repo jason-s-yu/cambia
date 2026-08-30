@@ -334,7 +334,7 @@ func (g *CambiaGame) processSkipSpecialAction(userID uuid.UUID) {
 	// and refused the fallback draw its own turn timeout falls through to, which left the timer
 	// unrescheduled on a dead clock (cambia-1125). The King's second step is exempt - the engine
 	// models declining that swap as ActionKingSwapNo, handled below.
-	if g.SpecialAction.Mandatory && !(rank == "K" && g.SpecialAction.FirstStepDone) {
+	if g.SpecialAction.MustResolve() {
 		g.RejectSpecialAction(userID, "That ability was played from your hand and has to be used; choose a target.")
 		return
 	}

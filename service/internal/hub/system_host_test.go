@@ -46,6 +46,73 @@ func newSystemHostedHub(t *testing.T) (*Hub, uuid.UUID, uuid.UUID, *Connection, 
 	return h, leader, other, leaderConn, otherConn
 }
 
+// newSearchingPartyHub builds the state a quick play party is in before the matchmaker seats a
+// match: a matchmaking lobby still hosted by the leader who queued it, in the searching phase. The
+// system host lands at match formation and not before (lobby.AdoptSystemHostUnsafe), which is what
+// leaves this phase with a human host at all.
+func newSearchingPartyHub(t *testing.T) (*Hub, uuid.UUID, uuid.UUID, *Connection, *Connection) {
+	t.Helper()
+
+	leader := uuid.New()
+	other := uuid.New()
+
+	lob := lobby.NewLobbyWithDefaults(leader)
+	lob.Type = "matchmaking"
+	lob.Mode = "ranked"
+	lob.QueueID = "h2h_quickplay"
+	lob.Searching = true
+	lob.JoinUser(leader)
+	lob.JoinUser(other)
+
+	h := NewHub(lob)
+	h.Phase = PhaseSearching
+	leaderConn := newFakeConn(leader, "leader")
+	otherConn := newFakeConn(other, "other")
+	h.conns[leader] = leaderConn
+	h.conns[other] = otherConn
+
+	return h, leader, other, leaderConn, otherConn
+}
+
+// TestSearchingPartyLeaderCanCancelSearch is the power a quick play party keeps: the party is
+// theirs until a match exists, so the leader can pull it back out of the queue. Taking the host
+// role away at match formation rather than at creation (cambia-1087) is what preserves this, and
+// nothing else covered the pre-match side of that line.
+func TestSearchingPartyLeaderCanCancelSearch(t *testing.T) {
+	h, leader, _, leaderConn, _ := newSearchingPartyHub(t)
+
+	h.dispatch(ClientMsg{UserID: leader, LastSeq: h.seq, Type: "cancel_search"})
+
+	frames := drainEnvelopes(t, leaderConn)
+	assert.Nil(t, findByType(frames, "error"), "the party leader still cancels their own search")
+	assert.Equal(t, PhaseOpen, h.Phase, "cancelling returns the lobby to the open phase")
+
+	status := findByType(frames, "search_status")
+	require.NotNil(t, status, "the party must be told the search stopped")
+	assert.Equal(t, false, payloadOf(t, *status)["searching"])
+
+	h.Lobby.Mu.Lock()
+	defer h.Lobby.Mu.Unlock()
+	assert.False(t, h.Lobby.Searching, "a lobby out of the queue must not advertise a search")
+}
+
+// TestSearchingPartyMemberCannotCancelSearch is the gate around it: the party belongs to its
+// leader, so a second seat cannot drag everybody else out of the queue.
+func TestSearchingPartyMemberCannotCancelSearch(t *testing.T) {
+	h, _, other, _, otherConn := newSearchingPartyHub(t)
+
+	h.dispatch(ClientMsg{UserID: other, LastSeq: h.seq, Type: "cancel_search"})
+
+	errEnv := findByType(drainEnvelopes(t, otherConn), "error")
+	require.NotNil(t, errEnv, "a non-leader must be refused")
+	assert.Contains(t, string(errEnv.Payload), "only the host can cancel search")
+	assert.Equal(t, PhaseSearching, h.Phase, "the refused frame must leave the party in the queue")
+
+	h.Lobby.Mu.Lock()
+	defer h.Lobby.Mu.Unlock()
+	assert.True(t, h.Lobby.Searching, "the search must still be live")
+}
+
 // TestSystemHostedLobbyRefusesStartGame covers the power the party leader used to keep after the
 // match formed: forcing everybody else's ranked game to start. The refusal names what does start
 // it, since no player can take the host role back.

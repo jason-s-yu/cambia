@@ -315,8 +315,13 @@ func (g *GameState) nplayerLegalPostDraw(mask *[10]uint64) {
 
 	nplayerSetBit(mask, NPlayerActionDiscardNoAbility)
 
+	// One reachability rule, one implementation: canUseAbility already asks whether any seat
+	// other than acting is still reachable, which is the same question at any table size, and it
+	// walks the seats in place rather than through Opponents(), which allocates on this path.
+	// The N-player arm used to hold a second copy of the rule, so a fix to either one (cambia-1125
+	// corrected the 2-player copy) left the other saying something else.
 	if drawnCard.HasAbility() && drawnFrom == DrawnFromStockpile {
-		if g.nplayerCanUseAbility(acting, drawnCard) {
+		if g.canUseAbility(acting, drawnCard) {
 			nplayerSetBit(mask, NPlayerActionDiscardWithAbility)
 		}
 	}
@@ -326,40 +331,6 @@ func (g *GameState) nplayerLegalPostDraw(mask *[10]uint64) {
 		for i := uint8(0); i < handLen; i++ {
 			nplayerSetBit(mask, NPlayerEncodeReplace(i))
 		}
-	}
-}
-
-// nplayerCanUseAbility checks whether the ability card can actually be used in N-player context.
-func (g *GameState) nplayerCanUseAbility(acting uint8, card Card) bool {
-	ownHandLen := g.Players[acting].HandLen
-	opps := g.Opponents(acting)
-
-	switch card.Ability() {
-	case AbilityPeekOwn:
-		return ownHandLen > 0
-	case AbilityPeekOther:
-		for _, opp := range opps {
-			if g.Players[opp].HandLen > 0 {
-				return true
-			}
-		}
-		return false
-	case AbilityBlindSwap, AbilityKingLook:
-		if ownHandLen == 0 {
-			return false
-		}
-		// At least one non-caller opponent must have cards.
-		for _, opp := range opps {
-			if g.Rules.LockCallerHand && g.IsCambiaCalled() && int8(opp) == g.CambiaCaller {
-				continue
-			}
-			if g.Players[opp].HandLen > 0 {
-				return true
-			}
-		}
-		return false
-	default:
-		return false
 	}
 }
 
