@@ -70,7 +70,7 @@ import os
 import re
 import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -94,7 +94,7 @@ except Exception:  # noqa: BLE001
     _build_net_from_state = None  # type: ignore[assignment]
 
 from src.config import load_config
-from src.encoding import NUM_ACTIONS, action_to_index, encode_action_mask
+from src.encoding import NUM_ACTIONS, action_to_index
 from src.sequence_encoding import PAD_ID, SEQ_CAP, TOKENIZER_VERSION
 from tools.tiny_solver import build_tree, exploitability
 from tools import tiny_exact
@@ -202,11 +202,39 @@ def _resolve_scoring_obs_path(recorded_version: Optional[int]) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _legal_index(action: Any) -> int:
+    """Global [0, NUM_ACTIONS) index for one of a tree node's legal actions.
+
+    Backend-agnostic. The Go tree builder's ``Decision.actions`` are already
+    global action indices (GoEngine's legal mask and apply path are both
+    index-native, so no translation happens on that side); the Python builder's
+    are GameAction NamedTuples, which go through encoding.action_to_index. Mirrors
+    prtcfr_worker._action_index so the scorer reads whichever tree it is handed
+    without branching on the builder.
+    """
+    if isinstance(action, (int, np.integer)):
+        return int(action)
+    return action_to_index(action)
+
+
+def _legal_mask146(actions: Sequence[Any]) -> np.ndarray:
+    """(NUM_ACTIONS,) bool mask over a node's legal actions, either representation.
+
+    Same result encode_action_mask gives for GameAction NamedTuples; extended to
+    the Go backend's integer indices via _legal_index.
+    """
+    mask = np.zeros(NUM_ACTIONS, dtype=bool)
+    for action in actions:
+        mask[_legal_index(action)] = True
+    return mask
+
+
 def build_tiny_tree(
     config_path: str = TINY_2CARD_CONFIG,
     seq_cap: int = SEQ_CAP,
     exact_weights: bool = False,
     production_obs: bool = False,
+    backend: str = "go",
 ):
     """Build the perfect-recall + tokenized {A,6} tiny tree.
 
@@ -237,6 +265,7 @@ def build_tiny_tree(
         seq_cap=seq_cap,
         exact_weights=exact_weights,
         production_obs=production_obs,
+        backend=backend,
     )
     if aborted:
         raise RuntimeError(
@@ -406,7 +435,7 @@ def _net_strategy_over_legal(
 
     nA = len(legal_actions)
     tok_arr = _pad_tokens(tokens, seq_cap=seq_cap)
-    mask146 = encode_action_mask(legal_actions)  # (146,) bool
+    mask146 = _legal_mask146(legal_actions)  # (146,) bool
     dev = getattr(net, "device", None) or torch.device("cpu")
     tok_t = torch.as_tensor(tok_arr, dtype=torch.long, device=dev).unsqueeze(0)  # (1, L)
     mask_t = torch.as_tensor(mask146, dtype=torch.bool, device=dev).unsqueeze(
@@ -422,7 +451,7 @@ def _net_strategy_over_legal(
         )
     out = np.empty(nA, dtype=np.float64)
     for i, a in enumerate(legal_actions):
-        out[i] = strat146[action_to_index(a)]
+        out[i] = strat146[_legal_index(a)]
     s = out.sum()
     if s > 1e-12:
         out = out / s
@@ -506,8 +535,8 @@ def materialize_policy(
     legal_idx: List[List[int]] = []
     for i, node in enumerate(nodes):
         tok_rows[i] = _pad_tokens(tiny_node_to_tokens(node), seq_cap=seq_cap)
-        mask_rows[i] = encode_action_mask(node.actions)
-        legal_idx.append([action_to_index(a) for a in node.actions])
+        mask_rows[i] = _legal_mask146(node.actions)
+        legal_idx.append([_legal_index(a) for a in node.actions])
 
     # SD-CFR weighted accumulation in 146-space, one batched forward per net.
     acc146 = np.zeros((n, NUM_ACTIONS), dtype=np.float64)
@@ -606,8 +635,8 @@ class IncrementalPolicyAccumulator:
         self._legal_idx: List[List[int]] = []
         for i, node in enumerate(self.nodes):
             self._tok_rows[i] = _pad_tokens(tiny_node_to_tokens(node), seq_cap=seq_cap)
-            self._mask_rows[i] = encode_action_mask(node.actions)
-            self._legal_idx.append([action_to_index(a) for a in node.actions])
+            self._mask_rows[i] = _legal_mask146(node.actions)
+            self._legal_idx.append([_legal_index(a) for a in node.actions])
         self._acc146 = np.zeros((n, NUM_ACTIONS), dtype=np.float64)
         self._wsum = 0.0
         self._accumulated: set = set()
