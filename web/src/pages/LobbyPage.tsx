@@ -12,6 +12,7 @@ import { useCurrentLobbyStore } from '@/stores/lobbyStore';
 import { leaveLobby as apiLeaveLobby } from '@/services/lobbyService';
 import { useSocket } from '@/hooks/useSocket';
 import { useGameStore, selectGameState } from '@/stores/gameStore';
+import ErrorBoundary from '@/components/ErrorBoundary';
 import DsLobbyView from '@/components/lobby/DsLobbyView';
 import DsLobbyConnectState from '@/components/lobby/DsLobbyConnectState';
 import DsResultsView from '@/components/lobby/DsResultsView';
@@ -110,14 +111,19 @@ const LobbyPage: React.FC = () => {
   // the reconnect state itself and locks its controls until the hook is back (cambia-848 F1).
   if (gameLive && gameState) {
     return (
-      <DsGameTable
-        gameState={gameState}
-        phase={phase}
-        sendMessage={sendMessage}
-        onLeave={handleLeaveLobby}
-        connected={isConnected}
-        connectionError={storeError}
-      />
+      // Boundary scoped to the table itself, nested inside the app shell's own boundary
+      // (App.tsx): a render throw here is caught before it reaches the shell, so the shell,
+      // its nav and this same leave path stay reachable even when the table cannot (cambia-1235).
+      <ErrorBoundary what='table' leaveAction={{ label: 'Leave table', onClick: handleLeaveLobby }}>
+        <DsGameTable
+          gameState={gameState}
+          phase={phase}
+          sendMessage={sendMessage}
+          onLeave={handleLeaveLobby}
+          connected={isConnected}
+          connectionError={storeError}
+        />
+      </ErrorBoundary>
     );
   }
   if (isLoading) return (

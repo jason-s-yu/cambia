@@ -1,5 +1,6 @@
 // src/App.tsx
 import { Routes, Route, Navigate } from 'react-router-dom';
+import ErrorBoundary from '@/components/ErrorBoundary';
 import LoginPage from '@/pages/LoginPage';
 import RegisterPage from '@/pages/RegisterPage';
 import DashboardPage from '@/pages/DashboardPage';
@@ -36,33 +37,43 @@ function App() {
 	}
 
 	return (
-		<Routes>
-			{/* Public Routes */}
-			<Route element={<AuthLayout />}>
-				<Route path="/login" element={isAuthenticated ? <Navigate to="/dashboard" replace /> : <LoginPage />} />
-				<Route path="/register" element={isAuthenticated ? <Navigate to="/dashboard" replace /> : <RegisterPage />} />
-			</Route>
+		<ErrorBoundary
+			what='app'
+			leaveAction={{
+				label: 'Go to home',
+				onClick: () => {
+					window.location.href = '/';
+				}
+			}}
+		>
+			<Routes>
+				{/* Public Routes */}
+				<Route element={<AuthLayout />}>
+					<Route path="/login" element={isAuthenticated ? <Navigate to="/dashboard" replace /> : <LoginPage />} />
+					<Route path="/register" element={isAuthenticated ? <Navigate to="/dashboard" replace /> : <RegisterPage />} />
+				</Route>
 
-			{/* Protected Routes */}
-			<Route element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
-				<Route path="/dashboard" element={<DashboardPage />} />
-				<Route path="/lobby/:lobbyId" element={<LobbyPage />} />
-				<Route path="/profile" element={<ProfilePage />} />
-				<Route path="/leaderboard" element={<LeaderboardPage />} />
-				<Route path="/training" element={<TrainingPage />} />
-				<Route path="/training/compare" element={<ComparePage />} />
-				<Route path="/training/:runName" element={<RunDetailPage />} />
-			</Route>
+				{/* Protected Routes */}
+				<Route element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
+					<Route path="/dashboard" element={<DashboardPage />} />
+					<Route path="/lobby/:lobbyId" element={<LobbyPage />} />
+					<Route path="/profile" element={<ProfilePage />} />
+					<Route path="/leaderboard" element={<LeaderboardPage />} />
+					<Route path="/training" element={<TrainingPage />} />
+					<Route path="/training/compare" element={<ComparePage />} />
+					<Route path="/training/:runName" element={<RunDetailPage />} />
+				</Route>
 
-			{/* Legacy /play matchmaking route folded into the dashboard. */}
-			<Route path="/play" element={<Navigate to="/dashboard" replace />} />
+				{/* Legacy /play matchmaking route folded into the dashboard. */}
+				<Route path="/play" element={<Navigate to="/dashboard" replace />} />
 
-			{/* Redirect root path */}
-			<Route path="/" element={<Navigate to={isAuthenticated ? '/dashboard' : '/login'} replace />} />
+				{/* Redirect root path */}
+				<Route path="/" element={<Navigate to={isAuthenticated ? '/dashboard' : '/login'} replace />} />
 
-			{/* Fallback 404 Route */}
-			<Route path="*" element={<NotFoundPage />} />
-		</Routes>
+				{/* Fallback 404 Route */}
+				<Route path="*" element={<NotFoundPage />} />
+			</Routes>
+		</ErrorBoundary>
 	);
 }
 
