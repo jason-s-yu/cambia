@@ -1185,6 +1185,11 @@ class GoAgentState:
     ) -> None:
         self._lib = _get_lib()
         self._closed = False
+        # Set before the handle is claimed: cambia_agent_new can raise (a bad
+        # engine argument, an exhausted pool), and __del__ runs on the
+        # half-built object, where reading an unset _agent_h raised a second,
+        # confusing AttributeError out of the first failure.
+        self._agent_h = -1
 
         # Pre-allocated reusable encode buffers (T1-2 cffi buffer reuse).
         # encode (222), encode_eppbs (224), encode_eppbs_interleaved_v2 (257),
@@ -2052,8 +2057,14 @@ def observe_games_batch(game_handles, a0_handles, a1_handles, seq_cap):
     na = _OBSERVE_NUM_ACTIONS
     if n == 0:
         z = np.empty(0, dtype=np.int32)
-        return (np.empty(0, np.int8), np.empty(0, np.uint8),
-                np.empty((0, na), np.uint8), z, z, z)
+        return (
+            np.empty(0, np.int8),
+            np.empty(0, np.uint8),
+            np.empty((0, na), np.uint8),
+            z,
+            z,
+            z,
+        )
     lib = _get_lib()
     gh = _ffi.new("int32_t[]", [int(x) for x in game_handles])
     a0 = _ffi.new("int32_t[]", [int(x) for x in a0_handles])
@@ -2067,23 +2078,32 @@ def observe_games_batch(game_handles, a0_handles, a1_handles, seq_cap):
     while True:
         tok = _ffi.new("int32_t[]", tok_cap)
         ret = lib.cambia_games_observe_batch(
-            gh, a0, a1, n, tok_cap, term, actor, masks, tok, offsets, lens)
+            gh, a0, a1, n, tok_cap, term, actor, masks, tok, offsets, lens
+        )
         if ret == -2:
             tok_cap *= 2
             continue
         if ret < 0:
             raise RuntimeError(
-                "cambia_games_observe_batch failed (returned %d); invalid handle" % ret)
+                "cambia_games_observe_batch failed (returned %d); invalid handle" % ret
+            )
         break
     term_np = np.frombuffer(_ffi.buffer(term, n), dtype=np.int8).copy()
     actor_np = np.frombuffer(_ffi.buffer(actor, n), dtype=np.uint8).copy()
-    masks_np = np.frombuffer(_ffi.buffer(masks, n * na), dtype=np.uint8).reshape(n, na).copy()
+    masks_np = (
+        np.frombuffer(_ffi.buffer(masks, n * na), dtype=np.uint8).reshape(n, na).copy()
+    )
     offsets_np = np.frombuffer(_ffi.buffer(offsets, n * 4), dtype=np.int32).copy()
     lens_np = np.frombuffer(_ffi.buffer(lens, n * 4), dtype=np.int32).copy()
     total = int(offsets_np[-1]) + int(lens_np[-1])
-    tok_np = (np.frombuffer(_ffi.buffer(tok, total * 4), dtype=np.int32).copy()
-              if total > 0 else np.empty(0, dtype=np.int32))
+    tok_np = (
+        np.frombuffer(_ffi.buffer(tok, total * 4), dtype=np.int32).copy()
+        if total > 0
+        else np.empty(0, dtype=np.int32)
+    )
     return term_np, actor_np, masks_np, tok_np, offsets_np, lens_np
+
+
 def state_save(game_h: int, a0_h: int, a1_h: int) -> int:
     """Snapshot a (game, both agents' belief + token) checkpoint. Returns handle."""
     lib = _get_lib()

@@ -9,10 +9,11 @@ that validates the unification holds across a large, diverse sample of full-game
 decision points.
 
 What this test does:
-- Replays complete seeded Python games (no Go FFI required).
+- Replays complete seeded GO games (cambia-1426: the eval loop plays there, and
+  the wrappers encode through the Go encoders).
 - At every decision point (excluding snap-only drain steps), encodes the current
-  AgentState through both the wrapper's encode path and the canonical trainer
-  encoder ``encode_infoset_eppbs_interleaved_v2`` directly.
+  GoAgentState belief through both the wrapper's encode path and the canonical
+  encoder ``GoAgentState.encode_eppbs_interleaved_v2`` directly.
 - Asserts exact byte-equality (``np.array_equal``) across the full 257-dim
   vector on every comparison.
 - Runs until >= 100 distinct decision points have been compared across the seed
@@ -20,7 +21,7 @@ What this test does:
 - Covers both DESCA and PPO-v2 wrappers.
 
 Design decisions:
-- Pure Python; no Go FFI, libcambia.so, or external fixtures required.
+- Needs libcambia.so, since the belief and the encoder both live behind the FFI.
 - No ``pytest.skip`` / ``pytest.mark.xfail``; always run.
 - Exact equality (not ``np.allclose``): the wrapper delegates to the identical
   function with the identical arguments, so floating-point output must be
@@ -31,9 +32,11 @@ Design decisions:
   unification missed a wrapper or dim -- do not patch here; route back to
   encoder work.
 
-Scope: tests the wrapper encode method only. Cross-engine (Python vs Go)
-parity at the 257-dim level is owned by test_encoding_v2.py
-(test_python_v2_matches_go_v2_live_ffi_100_states).
+Scope: tests the wrapper encode method only -- that it reaches the canonical
+encoder with its own trainer's arguments and adds no re-derivation of its own.
+Cross-engine (Python vs Go) parity at the 257-dim level is owned by
+test_encoding_v2.py (test_python_v2_matches_go_v2_live_ffi_100_states), so this
+file deliberately does not re-check it.
 """
 
 from __future__ import annotations
@@ -186,6 +189,7 @@ def _make_desca_wrapper():
     w = object.__new__(DESCAAgentWrapper)
     w.player_id = 0
     w.opponent_id = 1
+    w._num_players = 2
     return w
 
 
@@ -196,13 +200,14 @@ def _make_ppo_v2_wrapper():
     w = object.__new__(PPOAgentWrapper)
     w.player_id = 0
     w.opponent_id = 1
+    w._num_players = 2
     w._encoding_version = 2
     w._obs_dim = EP_PBS_V2_INPUT_DIM
     return w
 
 
 def _wrapper_encode(wrapper, agent_state, ctx: DecisionContext, drawn: int) -> np.ndarray:
-    """Call the wrapper's v2 encode path, setting agent_state appropriately."""
+    """Call the wrapper's v2 encode path against ``agent_state``."""
     from src.evaluate_agents import DESCAAgentWrapper, PPOAgentWrapper
 
     if isinstance(wrapper, DESCAAgentWrapper):
@@ -216,18 +221,22 @@ def _wrapper_encode(wrapper, agent_state, ctx: DecisionContext, drawn: int) -> n
 
 
 # ---------------------------------------------------------------------------
-# Core parity loop: replays seeded games and compares encode outputs per state.
+# Core parity loop: replays seeded Go games and compares encode outputs per state.
 # ---------------------------------------------------------------------------
 
 
 def _run_parity_check(wrapper, min_states: int = 100):
-    """Replay seeded games, compare wrapper encode vs canonical encoder.
+    """Replay seeded Go games, compare wrapper encode vs the canonical encoder.
 
     Returns:
         (total_compared, first_divergence_message | None)
     """
+    from src.agents import action_codec
+    from src.evaluate_agents import PPOAgentWrapper, _decision_context, _drawn_card_bucket
+    from src.ffi.bridge import GoAgentState, GoEngine, apply_games_batch
+
     config = _make_config()
-    snap_indices = set(range(_SNAP_ACTION_MIN, 146 + 1))  # 146 = NUM_ACTIONS - 1
+    snap_indices = set(range(_SNAP_ACTION_MIN, 146))
     total = 0
     first_divergence: Optional[str] = None
 
@@ -235,101 +244,86 @@ def _run_parity_check(wrapper, min_states: int = 100):
         if total >= min_states:
             break
 
-        py_state = _setup_python_game_matching_go(seed)
-        py_agents = _build_py_agents(py_state, config)
+        engine = GoEngine(seed=seed, house_rules=config.cambia_rules)
+        agents = [GoAgentState(engine, pid) for pid in range(2)]
+        try:
+            for step in range(300):
+                if engine.is_terminal():
+                    break
 
-        for step in range(300):
-            if py_state.is_terminal():
-                break
-
-            # Drain snap-only phases: no encoding comparison in snap drain.
-            if py_state.snap_phase_active:
-                actor = py_state.get_acting_player()
-                py_state.apply_action(ActionPassSnap())
-                obs = _create_py_observation(py_state, ActionPassSnap(), actor)
-                for pa in py_agents:
-                    try:
-                        pa.update(obs)
-                    except Exception:
-                        pass
-                continue
-
-            actor = py_state.get_acting_player()
-            ctx = _decision_context(py_state)
-            drawn = _drawn_card_bucket(py_state)
-            agent_state = py_agents[actor]
-
-            # Reference: the canonical encoder fed exactly what THIS wrapper's
-            # trainer feeds. DESCA's trainer (desca_worker._encode_state) passes
-            # the drawn-card bucket; PPO's trainer (ppo_env._get_obs) does not
-            # (default -1). Per-agent train/eval parity means the reference must
-            # match each wrapper's own training convention, not a fixed bucket.
-            from src.evaluate_agents import PPOAgentWrapper
-
-            ref_bucket = -1 if isinstance(wrapper, PPOAgentWrapper) else drawn
-            ref = encode_infoset_eppbs_interleaved_v2(
-                agent_state, ctx, drawn_card_bucket=ref_bucket
-            )
-            # Under test: wrapper encode path.
-            got = _wrapper_encode(wrapper, agent_state, ctx, drawn)
-
-            assert ref.shape == (
-                EP_PBS_V2_INPUT_DIM,
-            ), f"Reference encoder returned shape {ref.shape}; expected (257,)"
-            assert got.shape == (
-                EP_PBS_V2_INPUT_DIM,
-            ), f"Wrapper returned shape {got.shape}; expected (257,)"
-
-            if not np.array_equal(ref, got):
-                diff_mask = ref != got
-                diff_indices = np.where(diff_mask)[0].tolist()
-                first_divergence = (
-                    f"seed={seed} step={step} actor=P{actor} "
-                    f"ctx={ctx.name} drawn_bucket={drawn}\n"
-                    f"  divergent dim count: {len(diff_indices)}\n"
-                    f"  divergent dims (first 24): {diff_indices[:24]}\n"
-                    f"  ref  at divergent dims: {ref[diff_indices[:10]].tolist()}\n"
-                    f"  got  at divergent dims: {got[diff_indices[:10]].tolist()}\n"
-                    f"  v1 base [0:224] diverged: {bool(np.any(diff_mask[:EP_PBS_INPUT_DIM]))}\n"
-                    f"  posterior [224:233] diverged: "
-                    f"{bool(np.any(diff_mask[EP_PBS_INPUT_DIM:EP_PBS_INPUT_DIM + 9]))}\n"
-                    f"  action-history [233:257] diverged: "
-                    f"{bool(np.any(diff_mask[EP_PBS_INPUT_DIM + 9:]))}\n"
-                    f"  total compared before divergence: {total}"
+                legal_idx = set(
+                    int(i) for i in np.flatnonzero(engine.legal_actions_mask())
                 )
-                break
+                if not legal_idx:
+                    break
 
-            total += 1
-            if total >= min_states:
-                break
+                actor = engine.acting_player()
+                snap_only = not (legal_idx - snap_indices)
 
-            # Advance: pick lowest-index non-snap legal action.
-            py_legal = py_state.get_legal_actions()
-            py_mask = encode_action_mask(list(py_legal)).astype(np.uint8)
-            py_actions = set(np.where(py_mask > 0)[0].tolist())
-            non_snap = sorted(py_actions - snap_indices)
-            if not non_snap:
-                break
+                if not snap_only:
+                    ctx = _decision_context(engine)
+                    drawn = _drawn_card_bucket(engine)
+                    agent_state = agents[actor]
 
-            action_idx = non_snap[0]
-            py_action = None
-            for a in py_legal:
-                try:
-                    if action_to_index(a) == action_idx:
-                        py_action = a
+                    # Reference: the canonical v2 encoder fed exactly what THIS
+                    # wrapper's trainer feeds. DESCA's trainer passes the
+                    # drawn-card bucket; PPO's (ppo_env._get_obs) does not
+                    # (default -1). Per-agent train/eval parity means the
+                    # reference must match each wrapper's own training
+                    # convention, not a fixed bucket.
+                    ref_bucket = -1 if isinstance(wrapper, PPOAgentWrapper) else drawn
+                    ctx_val = ctx.value if hasattr(ctx, "value") else int(ctx)
+                    ref = agent_state.encode_eppbs_interleaved_v2(ctx_val, ref_bucket)
+                    got = _wrapper_encode(wrapper, agent_state, ctx, drawn)
+
+                    assert ref.shape == (
+                        EP_PBS_V2_INPUT_DIM,
+                    ), f"Reference encoder returned shape {ref.shape}; expected (257,)"
+                    assert got.shape == (
+                        EP_PBS_V2_INPUT_DIM,
+                    ), f"Wrapper returned shape {got.shape}; expected (257,)"
+
+                    if not np.array_equal(ref, got):
+                        diff_mask = ref != got
+                        diff_indices = np.where(diff_mask)[0].tolist()
+                        first_divergence = (
+                            f"seed={seed} step={step} actor=P{actor} "
+                            f"ctx={ctx.name} drawn_bucket={drawn}\n"
+                            f"  divergent dim count: {len(diff_indices)}\n"
+                            f"  divergent dims (first 24): {diff_indices[:24]}\n"
+                            f"  ref  at divergent dims: {ref[diff_indices[:10]].tolist()}\n"
+                            f"  got  at divergent dims: {got[diff_indices[:10]].tolist()}\n"
+                            f"  v1 base [0:224] diverged: "
+                            f"{bool(np.any(diff_mask[:EP_PBS_INPUT_DIM]))}\n"
+                            f"  posterior [224:233] diverged: "
+                            f"{bool(np.any(diff_mask[EP_PBS_INPUT_DIM:EP_PBS_INPUT_DIM + 9]))}\n"
+                            f"  action-history [233:257] diverged: "
+                            f"{bool(np.any(diff_mask[EP_PBS_INPUT_DIM + 9:]))}\n"
+                            f"  total compared before divergence: {total}"
+                        )
                         break
-                except Exception:
-                    pass
-            if py_action is None:
-                break
 
-            py_state.apply_action(py_action)
-            obs = _create_py_observation(py_state, py_action, actor)
-            for pa in py_agents:
-                try:
-                    pa.update(obs)
-                except Exception:
-                    pass
+                    total += 1
+                    if total >= min_states:
+                        break
+
+                # Advance: lowest-index legal action, preferring non-snap so the
+                # walk keeps reaching fresh decision contexts.
+                non_snap = sorted(legal_idx - snap_indices)
+                action_idx = non_snap[0] if non_snap else sorted(legal_idx)[0]
+                # Applied through the batch path so BOTH agents' beliefs advance,
+                # which is what the eval loop does and what makes the belief under
+                # comparison the one an evaluated agent actually holds.
+                apply_games_batch(
+                    [engine.handle],
+                    [agents[0].handle],
+                    [agents[1].handle],
+                    [int(action_idx)],
+                )
+        finally:
+            for a in agents:
+                a.close()
+            engine.close()
 
         if first_divergence is not None:
             break
@@ -357,7 +351,7 @@ def test_v2_wrapper_byte_equal_to_trainer_encoder_257dim_100_states(
     This is the CI gate for finding f4-05 (Phase 0 measurement repair S1W7).
     Replays 100+ seeded full-game decision points, asserting exact byte-equality
     (np.array_equal, not approximate) between the wrapper's encode path and the
-    canonical trainer encoder encode_infoset_eppbs_interleaved_v2 on all 257 dims.
+    canonical encoder GoAgentState.encode_eppbs_interleaved_v2 on all 257 dims.
 
     Any divergence is reported with the first failing seed, step, actor, and the
     divergent dim indices. A divergence means the unification missed a dim or

@@ -76,6 +76,19 @@ logger = logging.getLogger(__name__)
 _CTX_TERMINAL = 5
 
 
+def _seat_count(view) -> int:
+    """Seats at this table, from a GameView or the Python reference engine.
+
+    GameView answers ``num_players()``; CambiaGameState carries ``num_players``
+    as a plain attribute. Accepting both keeps the belief-attach path callable
+    from the Python-engine test fixtures that have not moved over.
+    """
+    n = getattr(view, "num_players", 2)
+    if callable(n):
+        n = n()
+    return max(2, int(n))
+
+
 def _decision_context(view: GameView) -> DecisionContext:
     """The acting seat's decision context, read off the engine.
 
@@ -504,9 +517,7 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
         the old name and shape so the callers that reset agents per game
         (run_evaluation, the head-to-head drivers) are unchanged.
         """
-        self.attach_belief(
-            initial_game_state, getattr(initial_game_state, "num_players", lambda: 2)()
-        )
+        self.attach_belief(initial_game_state, _seat_count(initial_game_state))
 
     def update_state(self, observation) -> None:
         """No-op: belief is advanced by the engine, not by a Python observation.
@@ -1943,9 +1954,7 @@ class PPOAgentWrapper(BaseAgent):
 
     def initialize_state(self, initial_game_state):
         """Reset this seat's belief for a new game (the GoEngine about to play)."""
-        self.attach_belief(
-            initial_game_state, getattr(initial_game_state, "num_players", lambda: 2)()
-        )
+        self.attach_belief(initial_game_state, _seat_count(initial_game_state))
 
     def update_state(self, observation) -> None:
         """No-op: belief is advanced by the engine.
@@ -2458,8 +2467,8 @@ class PRTCFRAgentWrapper(NeuralAgentWrapper):
         """
         from src.cfr.prtcfr_mixture import PRTCFRIncrementalCursor
 
-        num_players = getattr(initial_game_state, "num_players", lambda: 2)()
-        if int(num_players) > 2:
+        num_players = _seat_count(initial_game_state)
+        if num_players > 2:
             raise NotImplementedError(
                 "PRT-CFR evaluation needs the per-agent token stream, and the "
                 "engine appends to it only through the two-agent batch-apply "
@@ -2825,12 +2834,17 @@ class _GoEvalGame:
             seed=seed, house_rules=house_rules, num_players=self.num_players
         )
 
-        # Attach belief BEFORE any action is applied: a GoAgentState built at the
+        # Reset belief BEFORE any action is applied: a GoAgentState built at the
         # initial state is what carries the seat's initial-peek knowledge.
+        # initialize_state, not attach_belief: it is the per-game reset hook the
+        # wrappers override, and several do real work in it (PRT-CFR samples the
+        # episode's snapshot and rebuilds its GRU cursor there; the PBS wrappers
+        # reset their ranges). Calling attach_belief directly would skip that and
+        # play every game with the first game's episode state.
         self._belief_agents: List = []
         for agent in self.agents:
             if isinstance(agent, _BELIEF_WRAPPER_TYPES):
-                agent.attach_belief(self.engine, self.num_players)
+                agent.initialize_state(self.engine)
                 self._belief_agents.append(agent)
             elif hasattr(agent, "_last_game_id"):
                 # Baselines detect a new game by the id() of what they are

@@ -355,13 +355,19 @@ def _write_fast_config(tmp_path, max_turns=15):
     return str(cfgpath)
 
 
-def test_observe_transition_grows_token_stream_and_captures_all_frames(tmp_path):
-    """observe_transition must append a frame for EVERY applied action (both
-    seats) so the full-recall prefix is complete -- including opponent-baseline
-    moves the eval loop's public-observation sharing would drop."""
-    from src.evaluate_agents import get_agent
+def test_engine_token_stream_grows_on_every_applied_action(tmp_path):
+    """The engine must append a frame for EVERY applied action (both seats), so
+    this seat's full-recall prefix is complete -- including the opponent
+    baseline's moves.
+
+    Was test_observe_transition_grows_token_stream_and_captures_all_frames. The
+    wrapper no longer accumulates Python observations: the stream lives in the
+    engine and grows in the same crossing that applies the action (cambia-1426),
+    so the measurement is the engine's own token_len.
+    """
+    from src.evaluate_agents import get_agent, _GoEvalGame
+    from src.agents.baseline_agents import RandomNoCambiaAgent
     from src.config import load_config
-    from src.game.engine import CambiaGameState
 
     snapdir = _make_run_dir(tmp_path, [1, 2], best_iteration=2)
     cfg = load_config(_write_fast_config(tmp_path))
@@ -372,31 +378,34 @@ def test_observe_transition_grows_token_stream_and_captures_all_frames(tmp_path)
         checkpoint_path=str(snapdir / "prtcfr_snapshot_iter_2.pt"),
         device="cpu",
     )
-    game = CambiaGameState(house_rules=cfg.cambia_rules, seed=13)
-    agent.initialize_state(game)
-    assert agent._obs_stream == []  # fresh episode
+    opponent = RandomNoCambiaAgent(1, cfg, seed=13)
+    session = _GoEvalGame(cfg.cambia_rules, 13, 2, [agent, opponent])
+    try:
+        # Fresh episode: the stream holds only this seat's private peek prefix.
+        initial_len = agent.agent_state.token_len()
+        assert initial_len > 0, "initial-peek prefix was not seeded at attach"
 
-    frames_before = 0
-    steps = 0
-    while not game.is_terminal() and steps < 200:
-        steps += 1
-        ap = game.get_acting_player()
-        if ap == -1:
-            break
-        legal = game.get_legal_actions()
-        if not legal:
-            break
-        # Both seats play uniformly at random here; only the feed is under test.
-        action = random.choice(list(legal))
-        game.apply_action(action)
-        agent.observe_transition(game, action, ap)
-        assert len(agent._obs_stream) == frames_before + 1  # one frame per action
-        frames_before += 1
+        rng = random.Random(13)
+        applied = 0
+        last_len = initial_len
+        while not session.is_terminal() and applied < 200:
+            legal = session.legal_actions()
+            if not legal:
+                break
+            session.apply(rng.choice(legal))
+            applied += 1
+            now = agent.agent_state.token_len()
+            assert now > last_len, (
+                f"token stream did not grow on applied action {applied} "
+                f"(len stayed {now}); a dropped frame breaks full recall"
+            )
+            last_len = now
 
-    assert frames_before > 0
-    # The accumulated stream tokenizes into a non-trivial full-recall prefix.
-    tokens = agent._encode_tokens()
-    assert len(tokens) > 2  # more than just BOS/EOS
+        assert applied > 0
+        tokens = agent._encode_tokens()
+        assert len(tokens) > 2  # more than just BOS/EOS
+    finally:
+        session.close()
 
 
 def test_end_to_end_eval_smoke(tmp_path):
@@ -725,9 +734,9 @@ def test_incremental_cursor_matches_full_reencode_across_seeded_games(tmp_path):
     observed max) so a REAL divergence (e.g. a token-stream construction bug)
     would still fail this gate.
     """
-    from src.evaluate_agents import get_agent
+    from src.evaluate_agents import get_agent, _GoEvalGame
+    from src.agents.baseline_agents import RandomNoCambiaAgent
     from src.config import load_config
-    from src.game.engine import CambiaGameState
     from src.encoding import encode_action_mask
 
     ATOL = 5e-6
@@ -744,37 +753,35 @@ def test_incremental_cursor_matches_full_reencode_across_seeded_games(tmp_path):
     max_abs_dev = 0.0
     n_compared = 0
     mismatches = []
+    opponent = RandomNoCambiaAgent(1, cfg, seed=5)
     for seed in range(8):
-        game = CambiaGameState(house_rules=cfg.cambia_rules, seed=seed)
-        agent.initialize_state(game)
-        rng = random.Random(1000 + seed)
-        steps = 0
-        while not game.is_terminal() and steps < 300:
-            steps += 1
-            ap = game.get_acting_player()
-            if ap == -1:
-                break
-            legal = game.get_legal_actions()
-            if not legal:
-                break
-            legal_list = list(legal)
-            if ap == agent.player_id:
-                mask = encode_action_mask(legal_list)
-                # Reference: full stateless re-encode (unchanged pre-cambia-249
-                # path). Does not mutate cursor state, safe to call either side
-                # of the incremental query below.
-                probs_full = agent._mixture.strategy(agent._encode_tokens(), mask)
-                # Under test: the incremental cursor (this is exactly what
-                # choose_action calls internally).
-                probs_incremental = agent._strategy_for_mask(mask)
-                dev = float(np.abs(probs_incremental - probs_full).max())
-                max_abs_dev = max(max_abs_dev, dev)
-                n_compared += 1
-                if dev > ATOL:
-                    mismatches.append((seed, steps, dev))
-            action = rng.choice(legal_list)
-            game.apply_action(action)
-            agent.observe_transition(game, action, ap)
+        session = _GoEvalGame(cfg.cambia_rules, seed, 2, [agent, opponent])
+        try:
+            rng = random.Random(1000 + seed)
+            steps = 0
+            while not session.is_terminal() and steps < 300:
+                steps += 1
+                ap = session.acting_player()
+                legal_list = session.legal_actions()
+                if not legal_list:
+                    break
+                if ap == agent.player_id:
+                    mask = encode_action_mask(legal_list)
+                    # Reference: full stateless re-encode (unchanged pre-cambia-249
+                    # path). Does not mutate cursor state, safe to call either side
+                    # of the incremental query below.
+                    probs_full = agent._mixture.strategy(agent._encode_tokens(), mask)
+                    # Under test: the incremental cursor (this is exactly what
+                    # choose_action calls internally).
+                    probs_incremental = agent._strategy_for_mask(mask)
+                    dev = float(np.abs(probs_incremental - probs_full).max())
+                    max_abs_dev = max(max_abs_dev, dev)
+                    n_compared += 1
+                    if dev > ATOL:
+                        mismatches.append((seed, steps, dev))
+                session.apply(rng.choice(legal_list))
+        finally:
+            session.close()
 
     assert n_compared > 20, "too few decisions compared to trust this gate"
     assert not mismatches, (
@@ -789,9 +796,9 @@ def test_incremental_cursor_falls_back_to_full_reencode_on_seq_cap_overflow(tmp_
     the cursor must mark itself overflowed and the wrapper must keep serving
     valid strategies via the full (truncating) stateless re-encode -- never
     silently continue an invalidated incremental carry."""
-    from src.evaluate_agents import get_agent
+    from src.evaluate_agents import get_agent, _GoEvalGame
+    from src.agents.baseline_agents import RandomNoCambiaAgent
     from src.config import load_config
-    from src.game.engine import CambiaGameState
     from src.encoding import encode_action_mask
 
     snapdir = _make_run_dir(tmp_path, [1, 2], best_iteration=2)
@@ -805,30 +812,39 @@ def test_incremental_cursor_falls_back_to_full_reencode_on_seq_cap_overflow(tmp_
     )
     agent._seq_cap = 12  # force overflow almost immediately
 
-    game = CambiaGameState(house_rules=cfg.cambia_rules, seed=3)
-    agent.initialize_state(game)
-    agent._cursor.seq_cap = 12
+    opponent = RandomNoCambiaAgent(1, cfg, seed=3)
     rng = random.Random(42)
     overflowed_seen = False
-    steps = 0
-    while not game.is_terminal() and steps < 150:
-        steps += 1
-        ap = game.get_acting_player()
-        if ap == -1:
+    decisions = 0
+    # The engine seeds ~6 body tokens at attach and appends a frame per action,
+    # so the cap is crossed on this seat's second or third decision. A single
+    # game against a random opponent can end before that (an early Cambia call),
+    # so play games until the overflow branch has actually been exercised.
+    for seed in range(3, 60):
+        session = _GoEvalGame(cfg.cambia_rules, seed, 2, [agent, opponent])
+        try:
+            steps = 0
+            while not session.is_terminal() and steps < 150:
+                steps += 1
+                ap = session.acting_player()
+                legal_list = session.legal_actions()
+                if not legal_list:
+                    break
+                if ap == agent.player_id:
+                    mask = encode_action_mask(legal_list)
+                    # Must not raise post-overflow.
+                    probs = agent._strategy_for_mask(mask)
+                    decisions += 1
+                    assert probs.shape == (146,)
+                    assert abs(probs[mask].sum() - 1.0) < 1e-6 or probs[mask].sum() == 0.0
+                    if agent._cursor.overflowed:
+                        overflowed_seen = True
+                session.apply(rng.choice(legal_list))
+        finally:
+            session.close()
+        if overflowed_seen:
             break
-        legal = game.get_legal_actions()
-        if not legal:
-            break
-        legal_list = list(legal)
-        if ap == agent.player_id:
-            mask = encode_action_mask(legal_list)
-            probs = agent._strategy_for_mask(mask)  # must not raise post-overflow
-            assert probs.shape == (146,)
-            assert abs(probs[mask].sum() - 1.0) < 1e-6 or probs[mask].sum() == 0.0
-            if agent._cursor.overflowed:
-                overflowed_seen = True
-        action = rng.choice(legal_list)
-        game.apply_action(action)
-        agent.observe_transition(game, action, ap)
+
+    assert decisions > 1, "too few decisions to reach the cap"
 
     assert overflowed_seen

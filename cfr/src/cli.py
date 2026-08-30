@@ -2644,6 +2644,16 @@ def evaluate(
         "-j",
         help="Parallel baseline workers (default: auto, set 1 for sequential)",
     ),
+    seats: int = typer.Option(
+        2,
+        "--seats",
+        min=2,
+        help=(
+            "Seats at the table. Above 2 each baseline fills every seat the "
+            "agent under test is not in, and the agent's seat rotates round the "
+            "table so a pass covers every position."
+        ),
+    ),
 ):
     """Evaluate a checkpoint against baseline agents and print a win-rate table."""
     from rich.console import Console
@@ -2799,6 +2809,7 @@ def evaluate(
         use_argmax=argmax,
         agent_type=agent_type,
         max_workers=max_workers,
+        num_players=seats,
     )
 
     console = Console()

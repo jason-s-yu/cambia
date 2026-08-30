@@ -71,30 +71,27 @@ def _make_config(
 
 
 def _run_simple_game(agents, max_turns: int = 200):
-    """Run one game with given agents using Python CambiaGameState."""
-    from src.game.engine import CambiaGameState
-    from src.evaluate_agents import NeuralAgentWrapper, CFRAgentWrapper
+    """Run one game with the given agents on the Go engine (cambia-1426).
+
+    Returns (turns_played, terminal). The session owns pooled handles, so it is
+    closed before returning and nothing from it escapes.
+    """
+    from src.evaluate_agents import _GoEvalGame
 
     config = agents[0].config
-    game_state = CambiaGameState(house_rules=config.cambia_rules)
-
-    for agent in agents:
-        if isinstance(agent, (NeuralAgentWrapper, CFRAgentWrapper)):
-            agent.initialize_state(game_state)
-
-    turn = 0
-    while not game_state.is_terminal() and turn < max_turns:
-        turn += 1
-        pid = game_state.get_acting_player()
-        if pid == -1:
-            break
-        legal = game_state.get_legal_actions()
-        if not legal:
-            break
-        action = agents[pid].choose_action(game_state, legal)
-        game_state.apply_action(action)
-
-    return game_state
+    session = _GoEvalGame(config.cambia_rules, 1234, 2, list(agents))
+    try:
+        turn = 0
+        while not session.is_terminal() and turn < max_turns:
+            turn += 1
+            pid = session.acting_player()
+            legal = session.legal_actions()
+            if not legal:
+                break
+            session.apply(agents[pid].choose_action(session.engine, legal))
+        return turn, session.is_terminal()
+    finally:
+        session.close()
 
 
 # ---------------------------------------------------------------------------
@@ -140,22 +137,24 @@ def test_gtcfr_eval_wrapper_choose_action_fallback():
 
 def test_gtcfr_eval_wrapper_choose_action_with_state():
     """GTCFRAgentWrapper.choose_action returns a valid GameAction with initialized state."""
-    from src.game.engine import CambiaGameState
+    from src.ffi.bridge import GoEngine
+    from src.agents import action_codec
 
     config = _make_config()
     wrapper = GTCFRAgentWrapper(
         player_id=0, config=config, checkpoint_path="", device="cpu"
     )
 
-    game_state = CambiaGameState(house_rules=config.cambia_rules)
-    wrapper.initialize_state(game_state)
-    assert wrapper.agent_state is not None
+    with GoEngine(seed=21, house_rules=config.cambia_rules) as game_state:
+        wrapper.initialize_state(game_state)
+        assert wrapper.agent_state is not None
 
-    legal_actions = game_state.get_legal_actions()
-    assert legal_actions
+        legal_actions = action_codec.actions_from_mask(game_state.legal_actions_mask())
+        assert legal_actions
 
-    action = wrapper.choose_action(game_state, legal_actions)
-    assert action in legal_actions
+        action = wrapper.choose_action(game_state, legal_actions)
+        assert action in legal_actions
+        wrapper.release_belief()
 
 
 def test_gtcfr_eval_wrapper_reset():
@@ -266,7 +265,7 @@ def test_gtcfr_vs_random():
         random_agent = RandomAgent(player_id=1, config=config)
         agents = [gtcfr_agent, random_agent]
 
-        final_state = _run_simple_game(agents, max_turns=200)
-        # Just verify the game completed without crashing
-        # (may or may not be terminal if max_turns hit)
-        assert final_state is not None, f"Game {game_num} returned None state"
+        turns, _terminal = _run_simple_game(agents, max_turns=200)
+        # Just verify the game ran without crashing (it may or may not be
+        # terminal if max_turns was hit).
+        assert turns > 0, f"Game {game_num} played no turns"
