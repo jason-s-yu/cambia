@@ -7,6 +7,7 @@ import (
 	"log"
 	"runtime/debug"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -137,7 +138,8 @@ type Hub struct {
 	CountdownDuration time.Duration
 
 	// PostGameDuration is how long PhasePostGame holds the results screen before the hub
-	// returns itself to PhaseOpen (see returnToLobby).
+	// returns itself to PhaseOpen (see returnToLobby), for a table that does not close the
+	// screen itself first (return_to_lobby, cambia-1238).
 	PostGameDuration time.Duration
 
 	// IdleTTL bounds the idle window: it is the reap deadline while EmptyIdleTTL is unset or
@@ -214,6 +216,13 @@ type Hub struct {
 	// lobby's new occupants.
 	idleTimer *time.Timer
 	idleGen   uint64
+
+	// postGameGen numbers the results screens, on the same reasoning as idleGen: a timer cannot
+	// be un-fired once it has run, and a results screen can now be closed before its own timer
+	// fires (cambia-1238). Every arm takes the next number and the queued reset carries it, so a
+	// reset that outlived the screen it was armed for is dropped rather than applied to whichever
+	// screen is up when it lands. Belongs to the Run() goroutine, like the phase it guards.
+	postGameGen uint64
 
 	// idleArmed is the window armIdleReap actually armed the current idleTimer with. handleIdleReap
 	// logs this rather than recomputing idleWindow() at fire time: EmptyIdleTTL/IdleTTL are not
@@ -587,6 +596,18 @@ drained:
 func (h *Hub) dispatch(msg ClientMsg) {
 	// Synthetic internal messages (timer callbacks) carry no client seq and must be handled
 	// before the sequence check, which would otherwise discard them as stale.
+	//
+	// They are the hub's own, and a socket may not name one. ReadPump takes the type straight
+	// off the frame and stamps the message with the connection and the authenticated user it
+	// arrived on, while a timer builds one with neither, so an underscore type carrying either
+	// was typed by a client. Each of these runs a phase transition with no check on the sender:
+	// a client naming _return_to_lobby would walk straight past the host gate the results exit
+	// is admitted through below (cambia-1238).
+	if strings.HasPrefix(msg.Type, "_") && (msg.ConnID != uuid.Nil || msg.UserID != uuid.Nil) {
+		log.Printf("hub %s: refusing internal message type %q sent by user %s", h.ID, msg.Type, msg.UserID)
+		return
+	}
+
 	switch msg.Type {
 	case "_begin_game":
 		if h.Phase == PhaseCountdown {
@@ -606,7 +627,11 @@ func (h *Hub) dispatch(msg ClientMsg) {
 		}
 		return
 	case "_return_to_lobby":
-		if h.Phase == PhasePostGame {
+		// The results timer firing. It runs only for the screen that armed it: the phase check
+		// alone passes a reset armed by an earlier game, which the host's exit left queued
+		// behind it, and a hub showing a SECOND game's results is in PhasePostGame just the same
+		// (cambia-1238).
+		if h.Phase == PhasePostGame && msg.gen == h.postGameGen {
 			h.returnToLobby()
 		}
 		return
@@ -631,9 +656,15 @@ func (h *Hub) dispatch(msg ClientMsg) {
 			h.handleLobbyMsg(msg)
 		}
 	case PhasePostGame, PhaseMatchEnd:
-		// Only allow chat in post-game; ignore game actions.
-		if msg.Type == "chat" {
+		// Chat stays open over the results; game actions are ignored, since the game they name
+		// is over. return_to_lobby is the table's own way off the results screen: without it the
+		// only exit is PostGameDuration elapsing, and PhaseMatchEnd arms no timer at all, so a
+		// finished match had no exit (cambia-1238).
+		switch msg.Type {
+		case "chat":
 			h.handleLobbyMsg(msg)
+		case "return_to_lobby":
+			h.handlePostGameExit(msg)
 		}
 	}
 }
@@ -1127,18 +1158,24 @@ func (h *Hub) abortToOpen(reason string) {
 // results interval, so the reset itself runs serialized in the hub goroutine like every other
 // phase transition (same pattern as scheduleGameStart). A shutdown drops the pending reset.
 // Armed only on the PhaseInGame -> PhasePostGame edge, so one game end arms one timer.
+//
+// The message carries the generation this arm took, and dispatch fires only on a match: the
+// screen it belongs to can be closed by its host before the timer runs (cambia-1238), and the
+// queued reset outlives that exit. Must run in the Run() goroutine.
 func (h *Hub) schedulePostGameReset() {
 	d := h.PostGameDuration
 	if d <= 0 {
 		d = defaultPostGameResultsDuration
 	}
+	h.postGameGen++
+	gen := h.postGameGen
 	go func() {
 		timer := time.NewTimer(d)
 		defer timer.Stop()
 		select {
 		case <-timer.C:
 			select {
-			case h.incoming <- ClientMsg{Type: "_return_to_lobby"}:
+			case h.incoming <- ClientMsg{Type: "_return_to_lobby", gen: gen}:
 			case <-h.shutdown:
 			}
 		case <-h.shutdown:
@@ -1146,12 +1183,57 @@ func (h *Hub) schedulePostGameReset() {
 	}()
 }
 
+// handlePostGameExit runs the client-side half of the post-game return: the table closing the
+// results screen instead of sitting out PostGameDuration. It runs the same returnToLobby the
+// timer runs, so a lobby that left the results early is in exactly the state one that waited is.
+//
+// Host-gated, read live off the lobby like every other host-gated action (isHost): the exit
+// closes the screen for the whole table, and one seat does not take everybody else's results
+// away. A matchmade lobby has no player host to gate on - its host role belongs to the queue and
+// your_is_host is false in every seat (cambia-1087) - so the role there widens to the lobby's own
+// seats. Gating those tables on the role would leave every seat of a finished match stuck on the
+// results screen, which is the bug this control exists to fix, and their seats are the players
+// who just played the match. Must run in the Run() goroutine.
+func (h *Hub) handlePostGameExit(msg ClientMsg) {
+	conn := h.getConn(msg.UserID)
+	if conn == nil {
+		return
+	}
+	if !h.mayReturnToLobby(msg.UserID) {
+		conn.SendEnvelope(h.errEnvelope("only the host can close the results and reopen the lobby"))
+		return
+	}
+	h.returnToLobby()
+}
+
+// mayReturnToLobby reports whether userID may close the results screen: the host, or any seated
+// player of a system-hosted lobby (see handlePostGameExit for why the fallback is there). The
+// membership read is what keeps the fallback a rule rather than no gate at all - a socket is not
+// a seat.
+func (h *Hub) mayReturnToLobby(userID uuid.UUID) bool {
+	if h.Lobby == nil {
+		return false
+	}
+	h.Lobby.Mu.Lock()
+	defer h.Lobby.Mu.Unlock()
+	if h.Lobby.SystemHostedUnsafe() {
+		return h.Lobby.Users[userID]
+	}
+	return h.Lobby.HostUserID == userID
+}
+
 // returnToLobby ends the post-game results phase: it drops the finished game, clears the lobby's
 // in-game flags and ready states, and puts the hub back in PhaseOpen so the existing
 // ready -> countdown -> beginGame path can create the next game (cambia-793; PhasePostGame was
 // terminal and h.Game was never cleared, so createAndStartGame's guard blocked every later start).
-// Casual single games only: PhaseMatchEnd keeps its own (still unwired) circuit lifecycle, and no
-// circuit or cumulative state is touched here. Must run in the Run() goroutine.
+//
+// Reached from the results timer and from the table's own exit (handlePostGameExit), which is why
+// it is written to be run once per results screen: the caller decides whether the screen is still
+// the one it belongs to. Runs for PhaseMatchEnd as well, so a finished match's seats are not
+// stranded (nothing arms a timer for that phase), but it touches no circuit or cumulative state:
+// RoundsPlayed, CumulativeScores and RoundHistory stay where the match left them, since what
+// becomes of a finished ranked match's lobby is the unratified half of cambia-466. Must run in
+// the Run() goroutine.
 func (h *Hub) returnToLobby() {
 	h.Game = nil
 	h.Phase = PhaseOpen

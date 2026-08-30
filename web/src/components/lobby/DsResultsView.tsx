@@ -1,8 +1,9 @@
 // src/components/lobby/DsResultsView.tsx
 // End-of-game results (cambia-484, restyled in cambia-848) for the post_game
 // (casual single game) and match_end (ranked circuit) phases. Reads standings
-// from matchState/lobbyDetails and keeps the legacy return-to-lobby behaviour
-// (LobbyPage sets the phase back to 'open'). No WS message is sent from here.
+// from matchState/lobbyDetails. "Back to lobby" calls onReturnToLobby, which
+// LobbyPage sends to the hub as a return_to_lobby frame (cambia-1238); the
+// results stay up until the server's phase_change answers it.
 // Casual (post_game) standings have no matchState (ranked-only, see
 // hub.buildLobbySnapshot), so final scores fall back to gameStore's finalScores,
 // captured off the game_end event (cambia-510).

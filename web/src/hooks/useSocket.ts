@@ -299,11 +299,10 @@ export function useSocket(lobbyId: string | null | undefined) {
 				} else if (type === 'game_results') {
 					// Dual-route (cambia-763 F2): game_results starts with "game_" so isGameType would
 					// claim it before LOBBY_TYPES is even consulted, but its lobby_status snapshot is
-					// the only place the post-game reset (ReadyStates cleared, InGame false - see
-					// api_server.go attachOnGameEnd) reaches the client. LobbyPage's "Back to lobby"
-					// button (handleReturnToLobby) flips phase locally with no resync, so without this
-					// lobbyStore would keep serving the stale pre-game ready state into the next lobby
-					// view. gameStore still needs it too (winner/scores, duplicated from game_end).
+					// how the post-game reset (ReadyStates cleared, InGame false - see api_server.go
+					// attachOnGameEnd) reaches the client at the moment the game ends, ahead of the
+					// lobby_state the hub broadcasts when the results screen closes (cambia-1238).
+					// gameStore still needs it too (winner/scores, duplicated from game_end).
 					useCurrentLobbyStore.getState().processLobbyWebSocketMessage(type, payload);
 					useGameStore.getState().processGameWebSocketMessage(type, payload);
 				} else if (LOBBY_TYPES.has(type)) {

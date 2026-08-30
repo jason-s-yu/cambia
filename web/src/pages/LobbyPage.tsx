@@ -79,8 +79,13 @@ const LobbyPage: React.FC = () => {
     navigate('/dashboard', { replace: true });
   };
 
+  // Back to lobby: the hub owns the transition, and this asks it for one (cambia-1238). The
+  // button used to flip the phase locally, which left this client rendering an open lobby the
+  // server did not agree it was in: the hub was still in post_game, where it admits chat and this
+  // message and drops everything else, so every ready frame went in the bin until the results
+  // timer fired. The results stay up until the server's phase_change lands.
   const handleReturnToLobby = () => {
-    useCurrentLobbyStore.getState().setPhase('open');
+    sendMessage({ type: 'return_to_lobby' });
   };
 
   // A table in hand: a dropped socket mid-game must not bounce the player to the dashboard.

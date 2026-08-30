@@ -14,11 +14,19 @@ type Envelope struct {
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
-// ClientMsg is the parsed client→server message routed through the hub's incoming channel.
+// ClientMsg is the parsed client→server message routed through the hub's incoming channel. The
+// hub's own timers queue synthetic messages (the underscore-prefixed types) on the same channel,
+// so those fire through one dispatch path with every client frame.
 type ClientMsg struct {
 	ConnID  uuid.UUID
 	UserID  uuid.UUID
 	LastSeq uint64          `json:"last_seq"`
 	Type    string          `json:"type"`
 	Body    json.RawMessage `json:"body,omitempty"`
+
+	// gen stamps a synthetic message with the generation of the state it was armed for, so a
+	// timer that fired after its state was superseded is dropped rather than applied to whatever
+	// took its place. Unexported: no client sets it, and ReadPump does not parse it. Only the
+	// post-game reset uses it today (Hub.postGameGen, cambia-1238).
+	gen uint64
 }
