@@ -2622,9 +2622,7 @@ def _persist_lbr_result(
             # Attaching a measurement must not touch lifecycle status.
             status=None,
         )
-        ckpt_id = run_db.register_checkpoint(
-            db, run_id, iteration, str(checkpoint_path)
-        )
+        ckpt_id = run_db.register_checkpoint(db, run_id, iteration, str(checkpoint_path))
         run_db.insert_eval_result(db, run_id, ckpt_id, row)
         db.close()
         print(

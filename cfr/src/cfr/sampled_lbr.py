@@ -180,9 +180,7 @@ def sampled_lbr(
                         ),
                     ]
                     utilities.append(_rollout(state, rollout_policies, max_turns))
-                action_mean_utils.append(
-                    float(np.mean(utilities)) if utilities else 0.0
-                )
+                action_mean_utils.append(float(np.mean(utilities)) if utilities else 0.0)
         finally:
             if snap_h is not None:
                 GoSearchState.free_snapshot(snap_h)

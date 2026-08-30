@@ -181,9 +181,7 @@ def _default_opponent_factory(seed_stream: random.Random) -> OpponentFactory:
     def factory(player_id: int, config: Any):
         # Each opponent gets its own deterministic sub-stream so a fresh opponent
         # per game/simulation stays reproducible.
-        return UniformRandomPolicy(
-            player_id, random.Random(seed_stream.getrandbits(63))
-        )
+        return UniformRandomPolicy(player_id, random.Random(seed_stream.getrandbits(63)))
 
     return factory
 
@@ -646,9 +644,7 @@ def _play_target_game(
             a_pos = rng.randrange(len(legal_indices))
         if not state.apply_index(legal_indices[a_pos]):
             break
-        _notify(
-            target, "observe_transition", state.view(), legal_actions[a_pos], acting
-        )
+        _notify(target, "observe_transition", state.view(), legal_actions[a_pos], acting)
     return _terminal_util(state, responder)
 
 
@@ -736,9 +732,7 @@ def ismcts_br(
                 # A fresh opponent per simulation keeps stateful opponents (and the
                 # token prefix of a PRT-CFR opponent) from leaking across playouts.
                 opponent = opponent_factory(1 - responder, config)
-                _simulate(
-                    state, tree, responder, opponent, search_rng, ucb_c, max_turns
-                )
+                _simulate(state, tree, responder, opponent, search_rng, ucb_c, max_turns)
             finally:
                 state.close()
 

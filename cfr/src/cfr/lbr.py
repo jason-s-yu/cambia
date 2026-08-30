@@ -156,9 +156,7 @@ class DealSpec(NamedTuple):
 
     def new_state(self, house_rules: Any) -> "GoSearchState":
         if self.deck is not None:
-            return GoSearchState.from_deck(
-                house_rules, self.deck, self.starting_player
-            )
+            return GoSearchState.from_deck(house_rules, self.deck, self.starting_player)
         return GoSearchState.new(house_rules, self.seed)
 
 
@@ -180,7 +178,9 @@ def normalize_deal_decks(deal_decks) -> List[DealSpec]:
         else:
             deck, starting_player = entry, 0
         specs.append(
-            DealSpec(deck=tuple(int(c) for c in deck), starting_player=int(starting_player))
+            DealSpec(
+                deck=tuple(int(c) for c in deck), starting_player=int(starting_player)
+            )
         )
     return specs
 
@@ -391,9 +391,9 @@ def _make_random_opponent(player_id: int, config: Any):
     ``collect_infosets`` seeds that stream before a run, so a fresh opponent per
     game stays reproducible under the estimator's ``seed``.
     """
-    return UniformRandomPolicy(player_id, _random_module.Random(
-        _random_module.getrandbits(63)
-    ))
+    return UniformRandomPolicy(
+        player_id, _random_module.Random(_random_module.getrandbits(63))
+    )
 
 
 # Set once the strong-opponent fallback has been reported (see below).
