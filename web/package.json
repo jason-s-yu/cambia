@@ -30,7 +30,8 @@
     "test:type-label": "node --test scripts/test-lobby-type-label.mjs",
     "test:rules-lock": "node --test scripts/test-lobby-rules-lock.mjs",
     "test:gpu-key": "node --test scripts/test-resource-gpu-key.mjs",
-    "test": "node --test scripts/test-resend-decision.mjs scripts/test-snap-success.mjs scripts/test-snap-fill.mjs scripts/test-modal-focus.mjs scripts/test-card-names.mjs scripts/test-hand-layout.mjs scripts/test-circuit-copy.mjs scripts/test-hand-lock.mjs scripts/test-pregame-peek.mjs scripts/test-lobby-preset.mjs scripts/test-lobby-rule-buffer.mjs scripts/test-special-prompt.mjs scripts/test-game-store-events.mjs scripts/test-tab-session.mjs scripts/test-dev-switcher.mjs scripts/test-lobby-type-label.mjs scripts/test-lobby-rules-lock.mjs scripts/test-resource-gpu-key.mjs scripts/test-training-runs-key.mjs",
+    "test:render": "vitest run",
+    "test": "node --test scripts/test-resend-decision.mjs scripts/test-snap-success.mjs scripts/test-snap-fill.mjs scripts/test-modal-focus.mjs scripts/test-card-names.mjs scripts/test-hand-layout.mjs scripts/test-circuit-copy.mjs scripts/test-hand-lock.mjs scripts/test-pregame-peek.mjs scripts/test-lobby-preset.mjs scripts/test-lobby-rule-buffer.mjs scripts/test-special-prompt.mjs scripts/test-game-store-events.mjs scripts/test-tab-session.mjs scripts/test-dev-switcher.mjs scripts/test-lobby-type-label.mjs scripts/test-lobby-rules-lock.mjs scripts/test-resource-gpu-key.mjs scripts/test-training-runs-key.mjs && npm run test:render",
     "measure-dev-transfer": "node scripts/measure-dev-transfer.mjs"
   },
   "dependencies": {
@@ -54,6 +55,10 @@
     "@tailwindcss/forms": "^0.5.10",
     "@tailwindcss/typography": "^0.5.16",
     "@tailwindcss/vite": "^4.1.4",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.6",
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",
     "@typescript-eslint/eslint-plugin": "^8.31.0",
@@ -66,11 +71,13 @@
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.20",
     "globals": "^16.0.0",
+    "jsdom": "^29.1.1",
     "prettier": "^3.5.3",
     "tailwindcss": "^4.1.4",
     "typescript": "~5.7.2",
     "typescript-eslint": "^8.31.0",
     "vite": "^6.3.1",
-    "vite-tsconfig-paths": "^5.1.4"
+    "vite-tsconfig-paths": "^5.1.4",
+    "vitest": "^4.1.11"
   }
 }
