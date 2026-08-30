@@ -8,7 +8,7 @@
 // No WS protocol change.
 import React, { useEffect, useMemo, useState } from 'react';
 import type { LobbyState, HouseRules, CircuitSettings, LobbySettings, LobbyPreset } from '@/types';
-import { CUSTOM_PRESET_VALUE, presetMatchesRules, resolvePresetId } from '@/lib/lobbyPreset';
+import { presetMatchesRules, resolvePresetId, rulesetRow } from '@/lib/lobbyPreset';
 import Panel from '@/components/ds/chrome/Panel';
 import { EYEBROW } from '@/components/ds/eyebrow';
 import Input from '@/components/ds/core/Input';
@@ -123,23 +123,24 @@ const RuleGroup: React.FC<{ title: string; hint?: string; info?: React.ReactNode
   </div>
 );
 
+/**
+ * A value the sheet states rather than a control it offers. Holds the height of the input or
+ * select it stands in for, so a read-only sheet keeps the rhythm of an editable one.
+ */
+const READ_ONLY_VALUE: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  minHeight: 'var(--control-h-md)',
+  fontSize: 'var(--ds-text-lg)',
+  fontWeight: 'var(--weight-bold)',
+  color: 'var(--text-primary)'
+};
+
 /** Read-only numeric rule: the Input's eyebrow, then the value carrying the weight. */
 const RuleValue: React.FC<{ label: string; value: string }> = ({ label, value }) => (
   <div>
     <span style={{ display: 'block', marginBottom: 6, ...EYEBROW }}>{label}</span>
-    <span
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        minHeight: 'var(--control-h-md)',
-        fontSize: 'var(--ds-text-lg)',
-        fontWeight: 'var(--weight-bold)',
-        fontVariantNumeric: 'tabular-nums',
-        color: 'var(--text-primary)'
-      }}
-    >
-      {value}
-    </span>
+    <span style={{ ...READ_ONLY_VALUE, fontVariantNumeric: 'tabular-nums' }}>{value}</span>
   </div>
 );
 
@@ -176,15 +177,16 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
   const locked = currentSettings.type === 'matchmaking' || currentSettings.mode === 'ranked';
   const canEdit = isHost && !locked;
 
-  // Ruleset presets (cambia-1088): one named ruleset fills the whole sheet. Only an editing
-  // host fetches them - a locked or read-only sheet has nothing to apply one to. An unreachable
-  // endpoint leaves the list empty, which drops the control and leaves the field-by-field sheet
+  // Ruleset presets (cambia-1088): one named ruleset fills the whole sheet. Fetched for every
+  // viewer, not just an editing host: a locked or read-only sheet has no preset to apply but it
+  // still has one to name, and without the list there is nothing to name it with (cambia-1123).
+  // GET /lobby/presets is unauthenticated and static, so a guest costs it nothing. An unreachable
+  // endpoint leaves the list empty, which drops the row and leaves the field-by-field sheet
   // exactly as it was.
   const [presets, setPresets] = useState<LobbyPreset[]>([]);
   const [presetId, setPresetId] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!canEdit) return;
     let cancelled = false;
     getLobbyPresets()
       .then((list) => {
@@ -196,20 +198,21 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
     return () => {
       cancelled = true;
     };
-  }, [canEdit]);
+  }, []);
 
   // Which preset the lobby's saved rules are: the id the service recorded, and only then a value
   // match (lib/lobbyPreset.ts). Recognising one by value alone named the wrong preset every time
   // for a queue ruleset, since all six queue presets hold the same rules (cambia-1123).
-  const savedPresetId = useMemo(
-    () => resolvePresetId(presets, {
+  const savedSubject = useMemo(
+    () => ({
       presetId: currentSettings.presetId,
       gameMode: currentSettings.gameMode,
       houseRules: currentSettings.houseRules,
       settings: currentSettings.lobbySettings ?? currentSettings.settings ?? { autoStart: false }
     }),
-    [presets, currentSettings]
+    [currentSettings]
   );
+  const savedPresetId = useMemo(() => resolvePresetId(presets, savedSubject), [presets, savedSubject]);
 
   // The buffer is reset from the saved lobby whenever it arrives, the ruleset naming it included:
   // the sheet below is what the host edits, and leaving the select pointed at a preset the sheet
@@ -257,12 +260,16 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
       (onPreset && presetId !== savedPresetId);
   }, [houseRules, circuit, lobbySettings, currentSettings, onPreset, presetId, savedPresetId]);
 
-  const presetValue = activePreset && onPreset ? activePreset.id : CUSTOM_PRESET_VALUE;
-  const presetOptions = [
-    ...presets.map((p) => ({ value: p.id, label: p.name })),
-    ...(onPreset ? [] : [{ value: CUSTOM_PRESET_VALUE, label: 'Custom' }])
-  ];
-  const showPresets = canEdit && presets.length > 0;
+  // Selector for the host of an unlocked lobby, the ruleset's name for everyone else, nothing at
+  // all when the preset list could not be read (lib/lobbyPreset.ts).
+  const ruleset = rulesetRow({
+    presets,
+    canEdit,
+    saved: savedSubject,
+    selectedId: presetId,
+    houseRules,
+    settings: lobbySettings
+  });
 
   // Applying a preset fills the buffer, leaving Save to send the same expanded sheet it always
   // has. The service accepts a presetId on update_rules and expands it identically, so nothing
@@ -325,20 +332,30 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
       action={<Badge tone='info'>{gameModeLabel(currentSettings.gameMode)}</Badge>}
       style={{ minWidth: 0 }}
     >
-      {showPresets && (
+      {ruleset.kind === 'select' && (
         <RuleGroup title='Ruleset' hint='Fills the sheet below' first>
           <Select
-            value={presetValue}
+            value={ruleset.value}
             onChange={(e) => applyPreset(e.target.value)}
-            options={presetOptions}
+            options={ruleset.options}
           />
           <p style={{ ...HINT, margin: '6px 0 0' }}>
-            {onPreset && activePreset ? activePreset.description : 'Custom rules. Pick a preset to refill the sheet.'}
+            {ruleset.description || 'Custom rules. Pick a preset to refill the sheet.'}
           </p>
         </RuleGroup>
       )}
 
-      <RuleGroup title='Pace' hint='Set 0 to turn the clock or the cap off' first={!showPresets}>
+      {/* Read-only twin of the selector above: the same ruleset name, no control (cambia-1123).
+          Drawn at the weight RuleValue gives a read-only rule's value, since that is what it is -
+          the sheet's one named value, and the only line naming what the queue paired the players
+          under. No hint: 'Fills the sheet below' describes picking one, which is not on offer. */}
+      {ruleset.kind === 'name' && (
+        <RuleGroup title='Ruleset' first>
+          <span style={READ_ONLY_VALUE}>{ruleset.name}</span>
+        </RuleGroup>
+      )}
+
+      <RuleGroup title='Pace' hint='Set 0 to turn the clock or the cap off' first={ruleset.kind === 'none'}>
         <div style={FIELD_GRID}>
           {numField('Turn clock (sec)', houseRules?.turnTimerSec, (raw) => setRule('turnTimerSec', clamped(raw, 0, 86400, 0)))}
           {numField('Turn cap', houseRules?.maxGameTurns, (raw) => setRule('maxGameTurns', clamped(raw, 0, 65535, 46)))}

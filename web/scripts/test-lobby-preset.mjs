@@ -19,7 +19,14 @@ import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { presetMatchesRules, presetFitsLobby, resolvePresetId, CUSTOM_PRESET_VALUE } from '../src/lib/lobbyPreset.ts';
+import {
+    presetMatchesRules,
+    presetFitsLobby,
+    resolvePresetId,
+    rulesetRow,
+    CUSTOM_PRESET_LABEL,
+    CUSTOM_PRESET_VALUE
+} from '../src/lib/lobbyPreset.ts';
 
 const REPO = fileURLToPath(new URL('../../', import.meta.url));
 const read = (rel) => readFileSync(REPO + rel, 'utf8');
@@ -28,13 +35,15 @@ const PRESETS_GO = read('service/internal/lobby/presets.go');
 const QUEUES_GO = read('service/internal/matchmaking/validation.go');
 
 /**
- * The queue ids the service offers as presets, in its own order. Read off the QueueConfigs table
- * so the fixture cannot drift from the queues that exist.
+ * The queues the service offers as presets, in its own order, each with the display name the
+ * preset carries (lobby/presets.go queuePreset). Read off the QueueConfigs table so the fixture
+ * cannot drift from the queues that exist.
  */
-function queueIds() {
-    const ids = [...QUEUES_GO.matchAll(/^\s*"([a-z0-9_]+)":\s*\{QueueID:/gm)].map((m) => m[1]);
-    assert.ok(ids.length >= 3, 'could not read the queue list out of validation.go');
-    return ids;
+function queues() {
+    const found = [...QUEUES_GO.matchAll(/^\s*"([a-z0-9_]+)":\s*\{QueueID: "[a-z0-9_]+", DisplayName: "([^"]+)"/gm)]
+        .map(([, id, name]) => ({ id, name }));
+    assert.ok(found.length >= 3, 'could not read the queue list out of validation.go');
+    return found;
 }
 
 /**
@@ -66,11 +75,20 @@ const DEFAULT_RULES = {
     snapRace: false
 };
 
-const DEFAULT_PRESET = { id: 'default', gameMode: '', houseRules: DEFAULT_RULES, settings: { autoStart: true } };
+const DEFAULT_PRESET = {
+    id: 'default',
+    name: 'Default',
+    description: 'The rules a new lobby starts with.',
+    gameMode: '',
+    houseRules: DEFAULT_RULES,
+    settings: { autoStart: true }
+};
 
 /** One preset per queue, all holding the same rules, which is the whole problem. */
-const QUEUE_PRESETS = queueIds().map((id) => ({
+const QUEUE_PRESETS = queues().map(({ id, name }) => ({
     id,
+    name,
+    description: 'Ranked queue rules. A custom lobby plays a single round.',
     gameMode: id.startsWith('ffa4') ? 'group_of_4' : 'head_to_head',
     houseRules: RANKED_RULES,
     settings: { autoStart: true }
@@ -167,4 +185,101 @@ test('matching survives the sheet arriving empty or missing', () => {
 
 test('the custom value is not a preset id', () => {
     assert.equal(PRESETS.some((p) => p.id === CUSTOM_PRESET_VALUE), false);
+});
+
+// The Ruleset row (cambia-1123). The row was gated on the viewer being able to change it, so a
+// matchmade lobby - locked by definition, and the one sheet whose ruleset the player never chose
+// - showed the queue's rules with nothing naming them.
+
+/** A matchmade lobby's sheet as every seat reads it: locked, so nobody can edit. */
+const MATCHMADE = {
+    presets: PRESETS,
+    canEdit: false,
+    saved: {
+        presetId: 'h2h_rapid',
+        gameMode: 'head_to_head',
+        houseRules: RANKED_RULES,
+        settings: AUTO_START
+    }
+};
+
+test('a locked sheet names the queue ruleset and offers no selector', () => {
+    const row = rulesetRow(MATCHMADE);
+    assert.equal(row.kind, 'name', 'a locked sheet must still render the Ruleset row');
+    assert.equal(row.name, PRESETS.find((p) => p.id === 'h2h_rapid').name);
+    assert.equal(row.options, undefined, 'a viewer who cannot edit is offered no choices');
+    assert.equal(row.value, undefined, 'nothing on a locked row is a control value');
+});
+
+test('the locked name is the label the host would have picked, not the id', () => {
+    const row = rulesetRow(MATCHMADE);
+    const host = rulesetRow({
+        ...MATCHMADE,
+        canEdit: true,
+        selectedId: 'h2h_rapid',
+        houseRules: RANKED_RULES,
+        settings: AUTO_START
+    });
+    assert.equal(host.kind, 'select');
+    assert.equal(row.name, host.options.find((o) => o.value === 'h2h_rapid').label);
+    assert.notEqual(row.name, 'h2h_rapid', 'the row must show the display name, never the queue id');
+});
+
+test('a locked sheet is named by the recorded id, not by the first preset holding those rules', () => {
+    const firstTwoPlayer = QUEUE_PRESETS.find((p) => p.gameMode === 'head_to_head');
+    assert.notEqual(firstTwoPlayer.id, 'h2h_rapid', 'this test can no longer tell the two apart');
+    assert.equal(rulesetRow(MATCHMADE).name, PRESETS.find((p) => p.id === 'h2h_rapid').name);
+});
+
+test('a locked sheet on nobody\'s preset reads Custom', () => {
+    const row = rulesetRow({
+        ...MATCHMADE,
+        saved: { gameMode: 'head_to_head', houseRules: { ...RANKED_RULES, turnTimerSec: 42 }, settings: AUTO_START }
+    });
+    assert.deepEqual(row, { kind: 'name', name: CUSTOM_PRESET_LABEL });
+});
+
+test('an unread preset list drops the row rather than calling the lobby Custom', () => {
+    for (const canEdit of [true, false]) {
+        assert.deepEqual(rulesetRow({ ...MATCHMADE, presets: [], canEdit }), { kind: 'none' });
+    }
+});
+
+test('a guest in an unlocked lobby reads the name the host set', () => {
+    const row = rulesetRow({
+        presets: PRESETS,
+        canEdit: false,
+        saved: { presetId: 'default', gameMode: 'head_to_head', houseRules: DEFAULT_RULES, settings: AUTO_START }
+    });
+    assert.deepEqual(row, { kind: 'name', name: DEFAULT_PRESET.name });
+});
+
+test('the host of an unlocked lobby keeps the selector, Custom included', () => {
+    const onPreset = rulesetRow({
+        presets: PRESETS,
+        canEdit: true,
+        saved: MATCHMADE.saved,
+        selectedId: 'h2h_rapid',
+        houseRules: RANKED_RULES,
+        settings: AUTO_START
+    });
+    assert.equal(onPreset.kind, 'select');
+    assert.equal(onPreset.value, 'h2h_rapid');
+    assert.deepEqual(onPreset.options.map((o) => o.value), PRESETS.map((p) => p.id),
+        'a sheet still on its preset is offered the presets and no Custom entry');
+    assert.equal(onPreset.description, PRESETS.find((p) => p.id === 'h2h_rapid').description);
+
+    // One edited rule departs from the preset: the select falls to Custom, which has to be an
+    // option before it can be the value.
+    const departed = rulesetRow({
+        presets: PRESETS,
+        canEdit: true,
+        saved: MATCHMADE.saved,
+        selectedId: 'h2h_rapid',
+        houseRules: { ...RANKED_RULES, snapRace: false },
+        settings: AUTO_START
+    });
+    assert.equal(departed.value, CUSTOM_PRESET_VALUE);
+    assert.equal(departed.options.at(-1).label, CUSTOM_PRESET_LABEL);
+    assert.equal(departed.description, '', 'a departed sheet has no preset description to show');
 });
