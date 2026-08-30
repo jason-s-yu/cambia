@@ -4250,14 +4250,14 @@ if __name__ == "__main__":
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
         logger.setLevel(logging.DEBUG)
-        logging.getLogger("src.game.engine").setLevel(logging.INFO)
+        logging.getLogger("src.ffi.bridge").setLevel(logging.INFO)
         logging.getLogger("src.agents.baseline_agents").setLevel(logging.DEBUG)
         logging.getLogger("src.agent_state").setLevel(
             logging.INFO
         )  # Keep agent state less verbose unless debugging it
     else:
         # Silence logs below INFO from libraries if not verbose
-        logging.getLogger("src.game.engine").setLevel(logging.WARNING)
+        logging.getLogger("src.ffi.bridge").setLevel(logging.WARNING)
         logging.getLogger("src.agents.baseline_agents").setLevel(logging.INFO)
         logging.getLogger("src.agent_state").setLevel(logging.WARNING)
 
