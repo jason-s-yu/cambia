@@ -89,7 +89,15 @@ func (g *CambiaGame) resolveOwnSlot(actorSeat uint8, cardID uuid.UUID, idx int) 
 // Returns a reason string for RejectSpecialAction on every failure, so an unknown owner, the actor
 // naming their own hand as the opponent, or an out-of-range slot all reject-and-wait rather than
 // mutating the engine first (cambia-509).
-func (g *CambiaGame) resolveOpponentTarget(actorSeat uint8, ownerID, cardID uuid.UUID, idx int) (seat, slot uint8, reason string, ok bool) {
+//
+// altersTarget says the ability moves a card out of the seat it names, which LockCallerHand
+// forbids against the Cambia caller (RULES.md 3C). Only the web client's hand lock used to stop a
+// swap that named a locked hand, so a hand-rolled or stale client could still send one; the engine
+// refuses it at the 2-seat legal mask but its N-player apply path carries no guard, so the swap
+// landed. A peek passes false: looking moves nothing, and the engine's masks leave the caller
+// targetable by peek-other.
+func (g *CambiaGame) resolveOpponentTarget(actorSeat uint8, ownerID, cardID uuid.UUID, idx int, altersTarget bool) (seat, slot uint8, reason string, ok bool) {
+	const lockedReason = "That player has called Cambia; their hand is locked."
 	seat = engineSeatNone
 
 	if ownerID != uuid.Nil {
@@ -109,12 +117,18 @@ func (g *CambiaGame) resolveOpponentTarget(actorSeat uint8, ownerID, cardID uuid
 		if found == actorSeat {
 			return engineSeatNone, 0, "That ability must target another player's card.", false
 		}
+		if altersTarget && g.handLocked(found) {
+			return engineSeatNone, 0, lockedReason, false
+		}
 		seat, slot = found, foundSlot
 		return seat, slot, "", true
 	}
 
 	if seat >= g.seatCount() {
 		return engineSeatNone, 0, "Target player is not seated in this game.", false
+	}
+	if altersTarget && g.handLocked(seat) {
+		return engineSeatNone, 0, lockedReason, false
 	}
 
 	handLen := g.Engine.Players[seat].HandLen
