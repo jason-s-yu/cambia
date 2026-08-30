@@ -83,3 +83,28 @@ func TestUpdateRulesBroadcastsTheAdoptedGameMode(t *testing.T) {
 	assert.Equal(t, "group_of_4", payload["game_mode"], "the preset's player count fixes the mode every seat reads")
 	assert.Equal(t, "ffa4_standard", payload["preset_id"])
 }
+
+// TestRefusedUpdateRulesNamesTheReason: a refusal the host cannot read is one they cannot act on.
+// The seat-count refusal is the one a client reaches without sending anything malformed - a
+// 4-player lobby picking a 2-player ruleset - so the message has to say which ruleset and how many
+// seats are taken, not just that something failed (cambia-1099).
+func TestRefusedUpdateRulesNamesTheReason(t *testing.T) {
+	h, host, _, hostConn, _ := newTwoMemberHub(t)
+	h.Lobby.JoinUser(uuid.New())
+	h.Lobby.GameMode = "group_of_4"
+
+	h.dispatch(presetRulesMsg(host, h.seq, "h2h_rapid"))
+
+	errEnv := findByType(drainEnvelopes(t, hostConn), "error")
+	require.NotNil(t, errEnv, "a 2-player ruleset cannot seat three players")
+	text := string(errEnv.Payload)
+	assert.Contains(t, text, "failed to apply rule updates", "the generic message stays as the prefix")
+	assert.Contains(t, text, "h2h_rapid", "the refusal must name the ruleset it refused")
+	assert.Contains(t, text, "seats 2 players", "and what that ruleset holds")
+	assert.Contains(t, text, "this lobby has 3", "and how many seats are taken")
+
+	h.Lobby.Mu.Lock()
+	defer h.Lobby.Mu.Unlock()
+	assert.Equal(t, "group_of_4", h.Lobby.GameMode, "the refused edit must not move the mode")
+	assert.Empty(t, h.Lobby.PresetID)
+}
