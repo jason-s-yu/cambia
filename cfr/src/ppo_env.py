@@ -1,22 +1,54 @@
-"""Gymnasium environment wrapping the Cambia Python engine for PPO training.
+"""Gymnasium environment wrapping the Go Cambia engine for PPO training.
 
-Two opponent regimes are supported, selected by ``opponent_type``:
+The environment steps on ``GoEngine`` and reads its observation off
+``GoAgentState`` (cfr/src/ffi/bridge.py), so the game rules, the belief update
+and the tensor encoding all come from libcambia. Nothing here imports the
+Python reference engine (cambia-1376, retirement sprint cambia-1424).
 
-- A baseline string (e.g. ``imperfect_greedy``): the PPO seat trains as a
-  best-response to a fixed opponent. This is the diagnostic regime and is NOT a
-  trustworthy equilibrium anchor: the policy learns to exploit one weak fixed
-  opponent rather than to play well in general.
-- ``"self_play"``: fair self-play. The opponent seat is driven by a
-  frozen-periodic snapshot of the learning policy, refreshed from disk every K
-  timesteps by a training-side callback (see
-  ``ppo_train.SelfPlaySnapshotCallback``). Both seats are the same policy class;
-  the agent seat is randomized per episode so the learning policy plays both P0
-  and P1. This is the E2 anchor regime: PPO improves only by beating copies of
-  itself, so its mean_imp re-derives the metric's reachable headroom rather than
-  scoring a best-response to one weak opponent.
+Seat count
+----------
+``num_players`` selects the seat count and, with it, the engine's action and
+encoding space, because the Go engine has two of them:
+
+- 2 seats use the 2-player space: 146 actions, EP-PBS interleaved observations
+  (224-dim v1 / 257-dim v2). This is the space every existing PPO checkpoint
+  was trained in, so a 2-seat run stays weight-compatible with them.
+- 3+ seats use the N-player space: ``GoEngine.N_PLAYER_NUM_ACTIONS`` actions
+  and ``GoEngine.N_PLAYER_INPUT_DIM`` observations from ``encode_nplayer``.
+
+The two spaces have different widths, so a checkpoint does not transfer across
+that boundary. The env reports whichever space its seat count selects through
+``observation_space`` / ``action_space``, which is what MaskablePPO reads.
+
+Opponent regimes
+----------------
+- ``"self_play"``: fair self-play. Every seat other than the learner is driven
+  by a frozen-periodic snapshot of the learning policy, refreshed from disk
+  every K timesteps by a training-side callback (see
+  ``ppo_train.SelfPlaySnapshotCallback``). The learner's seat is randomized per
+  episode so it plays every seat over a run. This is the E2 anchor regime: PPO
+  improves only by beating copies of itself.
+- ``"random_legal"``: opponent seats play a uniform-random legal action. Cheap
+  control, and the regime the throughput benchmark uses.
+
+The fixed-baseline regime (``imperfect_greedy`` and the rest of the eval
+registry) is NOT available on this env yet: those agents are written against
+the Python ``CambiaGameState`` and are being ported to the ``GameView``
+protocol under cambia-1426. Requesting one raises rather than quietly reviving
+the Python engine behind the env.
+
+Observation contract
+--------------------
+The pre-port env fed every seat's belief state a public-only observation, with
+``drawn_card`` and ``peeked_cards`` stripped for the actor as well (the
+contract ratified in note cambia-1074). ``GoAgentState`` has no such mode:
+``cambia_agent_update`` reads the game state directly and records what the
+rules reveal to the acting seat, which is what every other Go-backed trainer
+already gets. Moving the belief onto GoAgentState therefore changes what the
+policy observes; the divergence is measured, not incidental. See the
+concerns recorded with cambia-1376.
 """
 
-import copy
 import logging
 import os
 import threading
@@ -24,30 +56,9 @@ import threading
 import gymnasium
 import numpy as np
 
-from src.game.engine import CambiaGameState
-from src.agent_state import AgentState, AgentObservation
-from src.encoding import (
-    encode_infoset_eppbs_interleaved,
-    encode_infoset_eppbs_interleaved_v2,
-    encode_action_mask,
-    action_to_index,
-    index_to_action,
-    EP_PBS_INPUT_DIM,
-    NUM_ACTIONS,
-)
-from src.constants import (
-    DecisionContext,
-    ActionDiscard,
-    ActionAbilityPeekOwnSelect,
-    ActionAbilityPeekOtherSelect,
-    ActionAbilityBlindSwapSelect,
-    ActionAbilityKingLookSelect,
-    ActionAbilityKingSwapDecision,
-    ActionSnapOpponentMove,
-    NUM_PLAYERS,
-    EP_PBS_V2_INPUT_DIM,
-)
-from src.evaluate_agents import get_agent, NeuralAgentWrapper
+from src.constants import EP_PBS_V2_INPUT_DIM
+from src.encoding import EP_PBS_INPUT_DIM, NUM_ACTIONS
+from src.ffi.bridge import GoAgentState, GoEngine
 
 logger = logging.getLogger(__name__)
 
@@ -69,27 +80,31 @@ def _peek_encoding_version(config_path: str) -> int:
         return 1
 
 
-# Sentinel opponent_type that selects the fair self-play regime instead of a
-# fixed baseline agent from evaluate_agents.get_agent.
+# Sentinel opponent_type that selects the fair self-play regime.
 SELF_PLAY_OPPONENT = "self_play"
+
+# Sentinel opponent_type for uniform-random legal play on the opponent seats.
+RANDOM_LEGAL_OPPONENT = "random_legal"
+
+SUPPORTED_OPPONENTS = (SELF_PLAY_OPPONENT, RANDOM_LEGAL_OPPONENT)
 
 
 class SelfPlayPolicyOpponent:
     """Frozen-periodic-snapshot self-play opponent for MaskablePPO.
 
-    The opponent seat is driven by a snapshot of the learning policy persisted
-    to ``snapshot_path`` (an SB3 ``.zip``). A training-side callback overwrites
-    that file every K timesteps; this opponent watches the file's mtime and
-    reloads on change, so the opponent strength tracks the learner with a lag of
-    at most one refresh interval. Frozen-periodic (not a live mirror) is the
-    standard self-play recipe: it keeps the opponent stationary within a rollout,
-    which PPO's on-policy advantage estimates require, while still climbing as
-    the learner improves.
+    The opponent seats are driven by a snapshot of the learning policy
+    persisted to ``snapshot_path`` (an SB3 ``.zip``). A training-side callback
+    overwrites that file every K timesteps; this opponent watches the file's
+    mtime and reloads on change, so opponent strength tracks the learner with a
+    lag of at most one refresh interval. Frozen-periodic (not a live mirror) is
+    the standard self-play recipe: it keeps the opponent stationary within a
+    rollout, which PPO's on-policy advantage estimates require, while still
+    climbing as the learner improves.
 
     Until the first snapshot exists (the opening refresh interval of training),
     the opponent plays uniform-random legal actions so episodes still terminate
-    and produce reward signal. This warm-up window is small relative to a 30M
-    step run and does not bias the converged anchor: once snapshots exist, every
+    and produce reward signal. This warm-up window is small relative to a long
+    run and does not bias the converged anchor: once snapshots exist, every
     opponent move comes from a copy of the learning policy.
 
     The opponent is constructed inside each SubprocVecEnv worker process. Model
@@ -151,37 +166,62 @@ class SelfPlayPolicyOpponent:
 
 
 class CambiaEnv(gymnasium.Env):
-    """Single-agent Gymnasium environment for Cambia.
+    """Single-agent Gymnasium environment for Cambia on the Go engine.
 
-    The PPO agent controls one seat; the opponent seat is handled either by a
-    fixed baseline agent (best-response diagnostic) or by a frozen-periodic
-    snapshot of the learning policy (fair self-play, ``opponent_type ==
-    "self_play"``). The episode ends when the game reaches a terminal state.
-
-    Under self-play the agent seat is randomized each episode so the learning
-    policy plays both P0 and P1; otherwise the agent stays in ``agent_seat``.
+    The PPO agent controls one seat; every other seat is played by the
+    configured opponent regime. The episode ends when the game reaches a
+    terminal state. Under self-play the agent seat is randomized each episode
+    so the learning policy plays every seat.
     """
 
     metadata = {"render_modes": []}
 
     def __init__(
         self,
-        opponent_type: str = "imperfect_greedy",
+        opponent_type: str = SELF_PLAY_OPPONENT,
         seed: int | None = None,
         agent_seat: int = 0,
         config_path: str = "config.yaml",
         selfplay_snapshot_path: str | None = None,
         selfplay_deterministic: bool = False,
+        num_players: int = 2,
     ):
         super().__init__()
+        num_players = int(num_players)
+        if num_players < 2:
+            raise ValueError(f"num_players must be at least 2, got {num_players}")
+        self._num_players = num_players
+        # 3+ seats need the engine's N-player action and encoding space; 2 seats
+        # stay in the 2-player space every existing PPO checkpoint was fit in.
+        self._nplayer_space = num_players > 2
+
         # Peek at encoding_version from raw YAML to set obs dim.
         # _config stays None until _load_config() is called on first reset().
         self._encoding_version: int = _peek_encoding_version(config_path)
-        obs_dim = EP_PBS_V2_INPUT_DIM if self._encoding_version == 2 else EP_PBS_INPUT_DIM
+        if self._nplayer_space:
+            obs_dim = GoEngine.N_PLAYER_INPUT_DIM
+            n_actions = GoEngine.N_PLAYER_NUM_ACTIONS
+        else:
+            obs_dim = (
+                EP_PBS_V2_INPUT_DIM if self._encoding_version == 2 else EP_PBS_INPUT_DIM
+            )
+            n_actions = NUM_ACTIONS
         self.observation_space = gymnasium.spaces.Box(-5.0, 5.0, (obs_dim,), np.float32)
-        self.action_space = gymnasium.spaces.Discrete(NUM_ACTIONS)
+        self.action_space = gymnasium.spaces.Discrete(n_actions)
+
         self._opponent_type = opponent_type
         self._self_play = opponent_type == SELF_PLAY_OPPONENT
+        if opponent_type not in SUPPORTED_OPPONENTS:
+            raise NotImplementedError(
+                f"opponent_type={opponent_type!r} is not available on the Go-backed "
+                f"env. Supported: {', '.join(SUPPORTED_OPPONENTS)}. The fixed "
+                "baselines (imperfect_greedy, memory_heuristic, aggressive_snap, "
+                "the random variants) are written against the Python "
+                "CambiaGameState and are being ported to the GameView protocol "
+                "under cambia-1426; this env will accept them once that lands. "
+                "Running them today would require reviving the Python engine "
+                "behind the env, which the retirement sprint removes."
+            )
         self._selfplay_snapshot_path = selfplay_snapshot_path
         self._selfplay_deterministic = selfplay_deterministic
         if self._self_play and not selfplay_snapshot_path:
@@ -189,12 +229,12 @@ class CambiaEnv(gymnasium.Env):
                 "opponent_type='self_play' requires selfplay_snapshot_path "
                 "(the SB3 .zip the snapshot callback writes)."
             )
-        self._agent_seat = agent_seat
-        self._opponent_seat = 1 - agent_seat
+
+        self._agent_seat = int(agent_seat) % num_players
         self._config_path = config_path
         self._config = None
-        self._game_state: CambiaGameState | None = None
-        self._agent_states: list[AgentState] | None = None
+        self._engine: GoEngine | None = None
+        self._agents: list[GoAgentState] | None = None
         self._opponent = None
         self._rng = np.random.default_rng(seed)
 
@@ -203,23 +243,24 @@ class CambiaEnv(gymnasium.Env):
     # ------------------------------------------------------------------
 
     def _load_config(self):
-        if self._config is None:
-            from src.config import load_config
+        if self._config is not None:
+            return
+        from src.config import load_config
 
-            self._config = load_config(self._config_path)
-            full_version = self._config.deep_cfr.encoding_version
-            if full_version != self._encoding_version:
-                raise RuntimeError(
-                    f"encoding_version mismatch between YAML peek ({self._encoding_version}) "
-                    f"and fully-resolved config ({full_version}). The peek in "
-                    f"_peek_encoding_version only reads the child YAML and does not follow "
-                    f"_base: inheritance or rule-profile defaults. observation_space was "
-                    f"sized from the peek value and cannot change after __init__, so a "
-                    f"mismatch would make the gym obs incompatible with the actual encoder "
-                    f"output. Fix by setting deep_cfr.encoding_version explicitly in "
-                    f"{self._config_path} (not inherited)."
-                )
-            self._encoding_version = full_version
+        self._config = load_config(self._config_path)
+        full_version = self._config.deep_cfr.encoding_version
+        if not self._nplayer_space and full_version != self._encoding_version:
+            raise RuntimeError(
+                f"encoding_version mismatch between YAML peek ({self._encoding_version}) "
+                f"and fully-resolved config ({full_version}). The peek in "
+                f"_peek_encoding_version only reads the child YAML and does not follow "
+                f"_base: inheritance or rule-profile defaults. observation_space was "
+                f"sized from the peek value and cannot change after __init__, so a "
+                f"mismatch would make the gym obs incompatible with the actual encoder "
+                f"output. Fix by setting deep_cfr.encoding_version explicitly in "
+                f"{self._config_path} (not inherited)."
+            )
+        self._encoding_version = full_version
 
     # ------------------------------------------------------------------
     # gymnasium API
@@ -230,48 +271,44 @@ class CambiaEnv(gymnasium.Env):
             self._rng = np.random.default_rng(seed)
         self._load_config()
 
+        # Free the previous episode's handles before allocating new ones. The
+        # Go side hands out game and agent handles from fixed-size pools, and a
+        # training run resets thousands of times per worker, so relying on
+        # __del__ would exhaust the pool.
+        self._release()
+
         # Fair self-play: randomize which seat the learning policy occupies each
-        # episode so it experiences both P0 (acts first) and P1 over the run.
-        # The fixed-opponent regime keeps the agent in its configured seat.
+        # episode so it experiences every seat over the run.
         if self._self_play:
-            self._agent_seat = int(self._rng.integers(NUM_PLAYERS))
-            self._opponent_seat = 1 - self._agent_seat
+            self._agent_seat = int(self._rng.integers(self._num_players))
 
-        self._game_state = CambiaGameState(house_rules=self._config.cambia_rules)
+        game_seed = int(self._rng.integers(1 << 62))
+        self._engine = GoEngine(
+            seed=game_seed,
+            house_rules=self._config.cambia_rules,
+            num_players=self._num_players,
+        )
+        seats = self._engine.num_players()
+        if seats != self._num_players:
+            self._release()
+            raise RuntimeError(
+                f"engine dealt {seats} seats, env was configured for "
+                f"{self._num_players}. cambia_rules in {self._config_path} may pin "
+                f"num_players; the env's num_players must agree with it."
+            )
 
-        agent_states = []
-        for pid in range(NUM_PLAYERS):
-            st = AgentState(
-                player_id=pid,
-                opponent_id=1 - pid,
-                memory_level=self._config.agent_params.memory_level,
-                time_decay_turns=self._config.agent_params.time_decay_turns,
-                initial_hand_size=len(self._game_state.players[pid].hand),
-                config=self._config,
-            )
-            obs = AgentObservation(
-                acting_player=-1,
-                action=None,
-                discard_top_card=self._game_state.get_discard_top(),
-                player_hand_sizes=[
-                    self._game_state.get_player_card_count(i) for i in range(NUM_PLAYERS)
-                ],
-                stockpile_size=self._game_state.get_stockpile_size(),
-                drawn_card=None,
-                peeked_cards=None,
-                snap_results=list(self._game_state.snap_results_log),
-                did_cambia_get_called=self._game_state.cambia_caller_id is not None,
-                who_called_cambia=self._game_state.cambia_caller_id,
-                is_game_over=self._game_state.is_terminal(),
-                current_turn=self._game_state.get_turn_number(),
-            )
-            st.initialize(
-                obs,
-                self._game_state.players[pid].hand,
-                self._game_state.players[pid].initial_peek_indices,
-            )
-            agent_states.append(st)
-        self._agent_states = agent_states
+        mem = self._config.agent_params.memory_level
+        decay = self._config.agent_params.time_decay_turns
+        if self._nplayer_space:
+            self._agents = [
+                GoAgentState.new_nplayer(self._engine, pid, self._num_players, mem, decay)
+                for pid in range(self._num_players)
+            ]
+        else:
+            self._agents = [
+                GoAgentState(self._engine, pid, mem, decay)
+                for pid in range(self._num_players)
+            ]
 
         if self._self_play:
             self._opponent = SelfPlayPolicyOpponent(
@@ -281,206 +318,160 @@ class CambiaEnv(gymnasium.Env):
                 rng=self._rng,
             )
         else:
-            self._opponent = get_agent(
-                self._opponent_type,
-                player_id=self._opponent_seat,
-                config=self._config,
-            )
-            if hasattr(self._opponent, "initialize_state"):
-                self._opponent.initialize_state(self._game_state)
+            self._opponent = None
 
         self._advance_opponent()
         return self._get_obs(), {}
 
     def step(self, action: int):
-        gs = self._game_state
-        if gs.is_terminal():
+        engine = self._engine
+        if engine is None:
+            raise RuntimeError("step() before reset()")
+        if engine.is_terminal():
             return self._get_obs(), 0.0, True, False, {}
 
-        legal = gs.get_legal_actions()
+        mask = self._legal_mask()
+        idx = int(action)
+        if idx < 0 or idx >= mask.shape[0] or not mask[idx]:
+            idx = self._random_legal(mask)
+            logger.debug("PPO chose illegal action %s; falling back to random.", action)
 
-        # Resolve int action → GameAction; fall back to random if not legal.
-        game_action = None
-        for a in legal:
-            if action_to_index(a) == action:
-                game_action = a
-                break
-        if game_action is None:
-            game_action = list(legal)[int(self._rng.integers(len(legal)))]
-            logger.debug("PPO chose illegal action %d; falling back to random.", action)
-
-        acting_player = gs.get_acting_player()
-        gs.apply_action(game_action)
-        obs = self._make_observation(game_action, acting_player)
-        self._update_states(obs)
-
+        self._apply(idx)
+        self._update_agents()
         self._advance_opponent()
 
-        terminated = gs.is_terminal()
-        reward = float(gs.get_utility(self._agent_seat)) if terminated else 0.0
+        terminated = engine.is_terminal()
+        reward = float(self._utility()[self._agent_seat]) if terminated else 0.0
         return self._get_obs(), reward, terminated, False, {}
 
     def action_masks(self) -> np.ndarray:
-        """SB3 MaskablePPO protocol: return bool mask over all actions."""
-        return encode_action_mask(list(self._game_state.get_legal_actions()))
+        """SB3 MaskablePPO protocol: return a bool mask over all actions."""
+        return self._legal_mask().astype(bool)
 
     def render(self):
         pass
 
     def close(self):
-        pass
+        self._release()
+
+    def __del__(self):
+        try:
+            self._release()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _release(self):
+        """Free the Go game and agent handles this episode holds."""
+        for agent in self._agents or ():
+            agent.close()
+        self._agents = None
+        if self._engine is not None:
+            self._engine.close()
+            self._engine = None
+
+    def _legal_mask(self) -> np.ndarray:
+        """Return the acting seat's legal-action mask as uint8, engine-side."""
+        if self._nplayer_space:
+            return self._engine.nplayer_legal_actions_mask()
+        return self._engine.legal_actions_mask()
+
+    def _apply(self, action_idx: int) -> None:
+        if self._nplayer_space:
+            self._engine.apply_nplayer_action(action_idx)
+        else:
+            self._engine.apply_action(action_idx)
+
+    def _utility(self) -> np.ndarray:
+        if self._nplayer_space:
+            return self._engine.get_nplayer_utility()
+        return self._engine.get_utility()
+
+    def _update_agents(self) -> None:
+        """Refresh every seat's belief state from the post-action game state."""
+        if self._nplayer_space:
+            for agent in self._agents:
+                agent.update_nplayer(self._engine)
+        else:
+            # One FFI call for both seats on the 2-player path.
+            self._engine.update_both(self._agents[0], self._agents[1])
+
+    def _random_legal(self, mask: np.ndarray) -> int:
+        legal = np.flatnonzero(mask)
+        if legal.size == 0:
+            raise RuntimeError(
+                f"no legal action at a non-terminal state "
+                f"(seat {self._engine.acting_player()}, ctx {self._engine.decision_ctx()})"
+            )
+        return int(legal[int(self._rng.integers(legal.size))])
+
     def _advance_opponent(self):
-        """Run opponent turns until it's the PPO agent's turn or game ends."""
-        gs = self._game_state
-        while not gs.is_terminal() and gs.get_acting_player() != self._agent_seat:
-            acting_player = gs.get_acting_player()
-            legal = gs.get_legal_actions()
+        """Run opponent turns until it is the PPO agent's turn or the game ends."""
+        engine = self._engine
+        while not engine.is_terminal() and engine.acting_player() != self._agent_seat:
+            seat = engine.acting_player()
+            mask = self._legal_mask()
             if self._self_play:
-                action = self._select_selfplay_action(legal)
+                idx = self._select_selfplay_action(seat, mask)
             else:
-                action = self._opponent.choose_action(gs, legal)
-            gs.apply_action(action)
-            obs = self._make_observation(action, acting_player)
-            self._update_states(obs)
-            if not self._self_play and hasattr(self._opponent, "update_state"):
-                self._opponent.update_state(obs)
+                idx = self._random_legal(mask)
+            self._apply(idx)
+            self._update_agents()
 
-    def _select_selfplay_action(self, legal):
-        """Pick the opponent move from the frozen snapshot policy.
+    def _select_selfplay_action(self, seat: int, mask: np.ndarray) -> int:
+        """Pick an opponent move from the frozen snapshot policy.
 
-        Encodes the opponent seat's infoset, builds its legal-action mask, and
-        queries the snapshot. Falls back to a uniform-random legal action when
-        no snapshot exists yet (warm-up) or the predicted index is not legal
-        (mask/predict edge case), mirroring the agent-seat fallback in step().
+        Encodes the opponent seat's own belief state, so the snapshot acts on
+        that seat's information and never the learner's. Falls back to a
+        uniform-random legal action when no snapshot exists yet (warm-up) or
+        the predicted index is not legal, mirroring the agent-seat fallback in
+        step().
         """
-        legal_list = list(legal)
-        opp_obs = self._get_obs(seat=self._opponent_seat)
-        mask = encode_action_mask(legal_list)
-        idx = self._opponent.predict_index(opp_obs, mask)
-        if idx is not None:
-            for a in legal_list:
-                if action_to_index(a) == idx:
-                    return a
-        return legal_list[int(self._rng.integers(len(legal_list)))]
-
-    def _update_states(self, obs: AgentObservation):
-        """Fan-out a public observation to all agent states (strip private fields)."""
-        for st in self._agent_states:
-            filtered = copy.copy(obs)
-            filtered.drawn_card = None
-            filtered.peeked_cards = None
-            try:
-                st.update(filtered)
-            except Exception as e:
-                logger.debug("AgentState update error: %s", e)
+        obs = self._get_obs(seat=seat)
+        idx = self._opponent.predict_index(obs, mask.astype(bool))
+        if idx is not None and 0 <= idx < mask.shape[0] and mask[idx]:
+            return int(idx)
+        return self._random_legal(mask)
 
     def _get_obs(self, seat: int | None = None) -> np.ndarray:
         """Encode a seat's infoset as a float32 vector.
 
         ``seat`` defaults to the PPO agent seat (the gym observation). The
-        self-play opponent passes its own seat so it acts on its private belief
-        state, never the agent's, keeping both seats on the same encoder.
+        self-play opponent passes its own seat so both seats run through the
+        same encoder on their own belief state.
         """
         if seat is None:
             seat = self._agent_seat
-        gs = self._game_state
-        ctx = self._get_decision_context(gs)
-        st = self._agent_states[seat]
+        engine = self._engine
+        ctx = engine.decision_ctx()
+        drawn = engine.get_drawn_card_bucket()
+        agent = self._agents[seat]
 
+        if self._nplayer_space:
+            return agent.encode_nplayer(ctx, drawn)
         if self._encoding_version == 2:
-            return encode_infoset_eppbs_interleaved_v2(st, ctx).astype(np.float32)
-
-        if st.cambia_caller is None:
-            cambia_state = 2
-        elif st.cambia_caller == seat:
-            cambia_state = 0
-        else:
-            cambia_state = 1
-
-        encoding = encode_infoset_eppbs_interleaved(
-            slot_tags=[t.value if hasattr(t, "value") else int(t) for t in st.slot_tags],
-            slot_buckets=[int(b) for b in st.slot_buckets],
-            discard_top_bucket=(
-                st.known_discard_top_bucket.value
-                if hasattr(st.known_discard_top_bucket, "value")
-                else int(st.known_discard_top_bucket)
-            ),
-            stock_estimate=(
-                st.stockpile_estimate.value
-                if hasattr(st.stockpile_estimate, "value")
-                else int(st.stockpile_estimate)
-            ),
-            game_phase=(
-                st.game_phase.value
-                if hasattr(st.game_phase, "value")
-                else int(st.game_phase)
-            ),
-            decision_context=ctx.value if hasattr(ctx, "value") else int(ctx),
-            cambia_state=cambia_state,
-            own_hand_size=len(st.own_hand),
-            opp_hand_size=st.opponent_card_count,
-        )
-        return encoding.astype(np.float32)
-
-    def _get_decision_context(self, gs: CambiaGameState) -> DecisionContext:
-        if gs.snap_phase_active:
-            return DecisionContext.SNAP_DECISION
-        if gs.pending_action:
-            p = gs.pending_action
-            if isinstance(p, ActionDiscard):
-                return DecisionContext.POST_DRAW
-            if isinstance(
-                p,
-                (
-                    ActionAbilityPeekOwnSelect,
-                    ActionAbilityPeekOtherSelect,
-                    ActionAbilityBlindSwapSelect,
-                    ActionAbilityKingLookSelect,
-                    ActionAbilityKingSwapDecision,
-                ),
-            ):
-                return DecisionContext.ABILITY_SELECT
-            if isinstance(p, ActionSnapOpponentMove):
-                return DecisionContext.SNAP_MOVE
-        return DecisionContext.START_TURN
-
-    def _make_observation(self, action, acting_player: int) -> AgentObservation:
-        gs = self._game_state
-        return AgentObservation(
-            acting_player=acting_player,
-            action=action,
-            discard_top_card=gs.get_discard_top(),
-            player_hand_sizes=[gs.get_player_card_count(i) for i in range(NUM_PLAYERS)],
-            stockpile_size=gs.get_stockpile_size(),
-            drawn_card=None,
-            peeked_cards=None,
-            snap_results=list(gs.snap_results_log),
-            did_cambia_get_called=gs.cambia_caller_id is not None,
-            who_called_cambia=gs.cambia_caller_id,
-            is_game_over=gs.is_terminal(),
-            current_turn=gs.get_turn_number(),
-        )
+            return agent.encode_eppbs_interleaved_v2(ctx, drawn)
+        return agent.encode_eppbs_interleaved(ctx, drawn)
 
 
 def make_env(
-    opponent_type: str = "imperfect_greedy",
+    opponent_type: str = SELF_PLAY_OPPONENT,
     seed: int = 0,
     agent_seat: int = 0,
     config_path: str = "config.yaml",
     selfplay_snapshot_path: str | None = None,
     selfplay_deterministic: bool = False,
+    num_players: int = 2,
 ):
     """Factory for SubprocVecEnv compatibility."""
 
     def _init():
-        # Pin torch intra-op threads per SubprocVecEnv worker: env stepping and
-        # the self-play opponent's MaskablePPO inference both use torch, and an
-        # unpinned per-worker pool thrashes cores at high n_envs.
+        # Pin torch intra-op threads per SubprocVecEnv worker: the self-play
+        # opponent's MaskablePPO inference uses torch, and an unpinned
+        # per-worker pool thrashes cores at high n_envs.
         import torch
 
         torch.set_num_threads(1)
@@ -491,6 +482,7 @@ def make_env(
             config_path=config_path,
             selfplay_snapshot_path=selfplay_snapshot_path,
             selfplay_deterministic=selfplay_deterministic,
+            num_players=num_players,
         )
 
     return _init
