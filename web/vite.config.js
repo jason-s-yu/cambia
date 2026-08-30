@@ -26,6 +26,19 @@ const CLIENT_RUNTIME_DEPS = [
     'zustand',
 ];
 
+// Named hosts the default `npm run dev` lane accepts in the Host header, on
+// top of what Vite always allows on its own (any IPv4 literal, `localhost`,
+// `*.localhost`) -- so plain localhost and LAN-IP access are unaffected by
+// this list. Vite's DNS-rebinding guard rejects every other name with a 403.
+//
+// app.cambia.pangu.home.jasonyu.io is the pangu staging front: caddy holds the
+// Let's Encrypt cert on :443 and reverse-proxies to this dev server on
+// 172.17.0.1:5180 (its sibling api.cambia... goes straight to the Go service
+// on :8088, and is not fronted by Vite). Listing the one name rather than
+// setting `allowedHosts: true` keeps the guard doing its job for every other
+// name that resolves here. Add further staging names to this array.
+const DEV_ALLOWED_HOSTS = ['app.cambia.pangu.home.jasonyu.io'];
+
 // Same-origin proxy paths to the Go game server: the service sends no CORS
 // headers, so the browser must see one origin. CAMBIA_API_TARGET overrides
 // the target (the server's default :8080 and much of the 80xx range are held
@@ -185,6 +198,20 @@ export default defineConfig(({ command, mode }) => {
             port: 5180,
             strictPort: true,
             proxy: apiProxy(),
+            // Applies to the default lane; remote mode overrides it with `true`
+            // below. The same allowlist gates the HMR WebSocket upgrade, not
+            // just page/module requests, so a name missing here fails both.
+            allowedHosts: DEV_ALLOWED_HOSTS,
+            // `hmr` is deliberately left unset in the default lane. With no
+            // `hmr.protocol`/`hmr.clientPort` configured, the injected HMR
+            // client derives both from the URL it was itself loaded from:
+            // `wss` when the page is https, and the page's own port (empty for
+            // a default-port https page, which the URL parser then resolves to
+            // 443). So http://localhost:5180 connects over ws://localhost:5180
+            // and https://app.cambia.pangu.home.jasonyu.io over wss://...:443,
+            // from one config. A static `{ protocol: 'wss', clientPort: 443 }`
+            // block would serve the TLS front but break localhost, since those
+            // values are injected as literals for every client alike.
             ...(isRemote
                 ? {
                       // Tailnet clients arrive via their tailnet IP or MagicDNS
