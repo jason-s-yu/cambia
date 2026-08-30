@@ -44,3 +44,27 @@ export function cardFaceName(face: DsCardFace | null | undefined): string | null
   const rank = SPOKEN_RANK[face.rank] ?? face.rank;
   return face.suit ? `${rank} of ${face.suit}` : rank;
 }
+
+/**
+ * Spoken suffix for a card in the hand LockCallerHand has frozen (cambia-1069). A locked card is
+ * not a button any more, and an element that simply stops taking clicks says nothing to a screen
+ * reader, so the name has to carry the reason it went inert.
+ */
+export const LOCKED_SUFFIX = ', locked after calling Cambia';
+
+/**
+ * Accessible name for one hand slot: who owns it, which slot it is, and the face it is showing
+ * right now. `owner` is 'Your' on the player's own side and the opponent's username across the
+ * table; `slot` is the engine slot index, spoken 1-based (cambia-1095).
+ *
+ * The name takes the same face the slot is drawing, so a transient reveal is named while it is
+ * up and the slot goes back to 'face down' the moment the hold ends (cambia-1094, cambia-1124).
+ * Callers pass `null` for a slot showing a back. Keeping the composition here is what stops the
+ * two from drifting: a caller that named a card off its own state could leave a face-up card
+ * announced as face down.
+ */
+export function cardSlotName(owner: string, slot: number, face: DsCardFace | null | undefined, locked = false): string {
+  const spoken = cardFaceName(face);
+  const named = spoken ? `${owner} card ${slot + 1}: ${spoken}` : `${owner} card ${slot + 1}, face down`;
+  return locked ? named + LOCKED_SUFFIX : named;
+}

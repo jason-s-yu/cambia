@@ -106,6 +106,12 @@ export interface LobbyState {
   inGame: boolean;
   game_id?: string | null;      // Present if game has started
   houseRules: HouseRules;       // Present in both REST and WS
+  /** Which ruleset `houseRules` came from, as the service recorded it: `presetId` on the REST
+   *  create response, `preset_id` in WS `lobby_state`, both normalized onto this field. Empty or
+   *  absent for a sheet that is nobody's preset. Recorded rather than recognised by value,
+   *  because every ranked queue plays the one ruleset MATCHMAKING.md 5.2 fixes and the six queue
+   *  presets are therefore byte-identical (cambia-1123). See lib/lobbyPreset.ts. */
+  presetId?: string;
   circuit: CircuitSettings;     // Present in both REST and WS
   lobbySettings: LobbySettings; // From REST payload
   settings?: LobbySettings;     // From WS lobby_state message (nested under root)

@@ -18,7 +18,7 @@ This document describes the JSON payloads used for WebSocket communication on th
 | Invite User              | `invite`         | `{ "userID": "{uuid}" }`                                                                               | `internal/handlers/lobby_ws.go`  | Invites another user to a private lobby.                   |
 | Leave Lobby              | *(not a WS message)* | *(None)* | `internal/handlers/lobby.go` | `POST /lobby/{id}/leave`. Leaving releases membership, which nothing a lost socket can also trigger may do, so it is an HTTP call rather than a frame (cambia-807). Refused with 409 while the lobby's game is in progress. |
 | Send Chat Message        | `chat`           | `{ "msg": "Your message here" }`                                                                       | `internal/handlers/lobby_ws.go`  | Sends a chat message to the lobby.                         |
-| Update Rules (Host Only) | `update_rules`   | `{ "rules": { "presetId": "h2h_rapid", ... partial HouseRules object ... } }` (See `internal/game/rules.go` for fields)       | `internal/handlers/lobby_ws.go`  | Host updates lobby's house rules or circuit settings. Refused outright for a ranked or matchmaking lobby: see "Host role". An optional `presetId` inside `rules` names a whole ruleset from `GET /lobby/presets` and is expanded server-side before the field-by-field keys, so a `houseRules` object in the same message lands on top of it; an unknown id rejects the whole message (cambia-1088). |
+| Update Rules (Host Only) | `update_rules`   | `{ "rules": { "presetId": "h2h_rapid", ... partial HouseRules object ... } }` (See `internal/game/rules.go` for fields)       | `internal/handlers/lobby_ws.go`  | Host updates lobby's house rules or circuit settings. Refused outright for a ranked or matchmaking lobby: see "Host role". An optional `presetId` inside `rules` names a whole ruleset from `GET /lobby/presets` and is expanded server-side before the field-by-field keys, so a `houseRules` object in the same message lands on top of it; an unknown id rejects the whole message (cambia-1088). The id is recorded on the lobby and echoed back as `lobby_state.preset_id`; sending one with the expanded sheet is how a client keeps the lobby's ruleset named (see "Ruleset identity"). |
 | Force Start (Host Only)  | `start_game`     | *(None)* | `internal/handlers/lobby_ws.go`  | Host attempts to start the game manually (if all ready). Refused for a system-hosted lobby, which starts on its ready check. |
 | Cancel Search (Host Only) | `cancel_search` | *(None)* | `internal/hub/hub.go` | Party leader takes the lobby back out of its queue. Valid only in the `searching` phase, which is the phase a party still has a leader in. |
 
@@ -59,6 +59,28 @@ The sentinel is never written to the database. `lobbies.host_user_id` is `NOT NU
 `users`, so a system-hosted lobby persists its `CreatorUserID` (whoever called
 `POST /lobby/create`, stamped once and never reassigned) in that column instead.
 
+## Ruleset identity
+
+`lobby_state.preset_id` names the ruleset the lobby carries, and the service records it rather
+than leaving a client to work it out from `house_rules` (cambia-1123). Values cannot answer the
+question: MATCHMAKING.md 5.2 fixes one ruleset for every ranked queue, so all six queue presets
+in `GET /lobby/presets` hold byte-identical house rules and differ only in player and round
+count. A client matching rules against that list names whichever preset is returned first, which
+is how a lobby created from H2H Rapid came back reading H2H Quick.
+
+* Set when a `presetId` is accepted, on `POST /lobby/create` or in an `update_rules` message,
+  and only when the sheet that lands is still that preset: explicit `houseRules` in the same
+  message land on top of the preset, and a sheet that departs from it in the call that named it
+  is not on it.
+* Cleared by the first later `update_rules` that moves a house rule or the auto-start setting
+  without naming a preset. Circuit settings are not part of a preset, so changing them alone
+  leaves the id where it is.
+* A queue-backed lobby carries its queue's preset from creation, and takes it again at match
+  formation. Its `house_rules` are the queue's from that moment, which is what makes the
+  read-only rule sheet a matchmade lobby shows the ruleset its game is actually built from.
+* Empty means the sheet is nobody's preset. A client may fall back to matching values then, but
+  the match has to include the game mode, or a 4-player preset names a 2-player lobby's rules.
+
 ## Server → Client Events
 
 These messages are typically broadcast to all users in the lobby unless specified otherwise.
@@ -66,7 +88,7 @@ These messages are typically broadcast to all users in the lobby unless specifie
 | Event Description             | `type` String             | Payload Example / Key Fields                                                                                                                                                                | Emitter Location           | Notes                                                                                             |
 | :---------------------------- | :------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | :------------------------- | :------------------------------------------------------------------------------------------------ |
 | User Joined / Left            | `lobby_update`            | `{ "user_join": "{uuid}", "is_host": bool, "lobby_status": { ... } }` OR `{ "user_left": "{uuid}", "lobby_status": { ... } }`                                                                | `internal/game/lobby.go`   | Sent when a user connects or disconnects. Includes updated `lobby_status`.                        |
-| Full Lobby State (Private)    | `lobby_state`             | `{ "lobby_id", "host_id", "your_id", "your_is_host", "system_host", "lobby_type", "game_mode", "in_game", "game_id", "house_rules": {...}, "circuit": {...}, "settings": {...}, "lobby_status": { ... } }` | `internal/game/lobby.go`   | Sent privately to a user upon joining/connecting, and rebroadcast to everyone when the roster or the host role changes. `system_host` marks a lobby the queue runs (see "Host role"). |
+| Full Lobby State (Private)    | `lobby_state`             | `{ "lobby_id", "host_id", "your_id", "your_is_host", "system_host", "lobby_type", "game_mode", "in_game", "game_id", "house_rules": {...}, "preset_id": "h2h_rapid", "circuit": {...}, "settings": {...}, "lobby_status": { ... } }` | `internal/game/lobby.go`   | Sent privately to a user upon joining/connecting, and rebroadcast to everyone when the roster or the host role changes. `system_host` marks a lobby the queue runs (see "Host role"). `preset_id` names the ruleset `house_rules` came from, always present and empty for a sheet that is nobody's preset (see "Ruleset identity"). |
 | User Ready State Change       | `ready_update`            | `{ "user_id": "{uuid}", "is_ready": bool }`                                                                                                                                                  | `internal/game/lobby.go`   | Sent when a user's ready state changes.                                                           |
 | User Invited                  | `lobby_invite`            | `{ "invitedID": "{uuid}" }`                                                                                                                                                                  | `internal/game/lobby.go`   | Sent when a user is invited via the `invite` command.                                             |
 | Countdown Started             | `lobby_countdown_start`   | `{ "seconds": int }`                                                                                                                                                                        | `internal/game/lobby.go`   | Sent when the auto-start countdown begins.                                                        |

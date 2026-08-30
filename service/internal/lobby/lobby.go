@@ -67,6 +67,20 @@ type Lobby struct {
 	HouseRules game.HouseRules `json:"houseRules"`
 	Circuit    game.Circuit    `json:"circuit"`
 
+	// PresetID names the ruleset this lobby carries (presets.go), empty for a sheet that is
+	// nobody's preset. Recorded rather than re-derived from the rules, because MATCHMAKING.md
+	// 5.2 is one ruleset for every ranked queue: the six queue presets are byte-identical to
+	// each other and differ only in player and round count, so matching a lobby's rules against
+	// the preset list returns whichever one is listed first and a lobby created from H2H Rapid
+	// reads back as H2H Quick (cambia-1123). Written where a preset is accepted
+	// (CreateLobbyHandler, UpdateUnsafe, HandleMatchFormed) and cleared by the first rule edit
+	// that departs from it.
+	//
+	// omitempty like QueueID and unlike GameID: it is a plain string, so a lobby on no preset
+	// leaves the key out rather than naming one, and a client that reads it back can only get
+	// an id the service actually recorded.
+	PresetID string `json:"presetId,omitempty"`
+
 	LobbySettings LobbySettings `json:"lobbySettings"`
 
 	// Mode and QueueID/Searching serve matchmaking; Type alone (see above) carries
@@ -435,8 +449,17 @@ func (l *Lobby) GetLobbyStatusPayloadUnsafe() map[string]interface{} {
 // A "presetId" key names a whole ruleset (see presets.go, cambia-1088) and is expanded before
 // the field-by-field keys, so an explicit houseRules or settings object in the same message
 // lands on top of the preset rather than under it.
+//
+// PresetID follows the sheet: an update that leaves the lobby playing exactly the preset it
+// named records that id, and one that moves a rule the preset covers without naming a preset
+// clears it (cambia-1123). Nothing derives it from the values afterwards, which is the whole
+// point: every queue preset holds the same rules.
 func (l *Lobby) UpdateUnsafe(rules map[string]interface{}) error {
 	changed := false
+	// sheetChanged tracks the fields a preset can express - house rules and lobby settings -
+	// separately from changed, which also covers circuit scoring. A preset says nothing about
+	// circuit settings (presets.go), so toggling one is not a departure from it.
+	sheetChanged := false
 
 	preset, err := l.resolvePresetUnsafe(rules)
 	if err != nil {
@@ -455,6 +478,7 @@ func (l *Lobby) UpdateUnsafe(rules map[string]interface{}) error {
 	if tempHR != l.HouseRules {
 		l.HouseRules = tempHR
 		changed = true
+		sheetChanged = true
 	}
 
 	tempCircuit := l.Circuit
@@ -500,6 +524,21 @@ func (l *Lobby) UpdateUnsafe(rules map[string]interface{}) error {
 	if tempLS != l.LobbySettings {
 		l.LobbySettings = tempLS
 		changed = true
+		sheetChanged = true
+	}
+
+	// Record or release the preset the lobby carries. A named preset is only recorded when what
+	// actually landed is still that preset: explicit fields in the same message land on top of
+	// it, and a sheet that departed from the preset in the very call that named it is not on it.
+	switch {
+	case preset != nil:
+		if l.HouseRules == preset.HouseRules && l.LobbySettings == preset.Settings {
+			l.PresetID = preset.ID
+		} else {
+			l.PresetID = ""
+		}
+	case sheetChanged:
+		l.PresetID = ""
 	}
 
 	if changed {

@@ -198,6 +198,27 @@ func CreateLobbyHandler(gs *GameServer) http.HandlerFunc {
 			queueBacked = true
 		}
 
+		// A queue-backed lobby takes its queue's ruleset now, onto the lobby object itself.
+		//
+		// The rules were only ever read out of the queue at game creation
+		// (NewCambiaGameFromLobby), so the lobby kept the defaults NewLobbyWithDefaults built it
+		// with and the rule sheet its players read showed them: draw-from-discard off, replaced
+		// abilities off, snap race off, the caller's hand locked, while their game ran the exact
+		// opposite (cambia-1123). The lobby is what every reader of a lobby's rules has - the
+		// sheet, lobby_state, GET /lobby/list - so it is where the queue's answer belongs, and
+		// the game factory now reads it back from here.
+		//
+		// The whole preset crosses over, reconnect grace included: rankedQueueHouseRules carries
+		// the queue's own DisconnectGraceSec (MATCHMAKING.md 8, cambia-955), so taking the
+		// preset keeps that override rather than replacing it with the rule default.
+		if queueBacked {
+			if preset, known := lobby.GetPreset(lob.QueueID); known {
+				lob.HouseRules = preset.HouseRules
+				lob.LobbySettings = preset.Settings
+				lob.PresetID = preset.ID
+			}
+		}
+
 		// Apply the client's rules and settings, or refuse them outright when a queue answers
 		// for this lobby.
 		//
@@ -242,6 +263,10 @@ func CreateLobbyHandler(gs *GameServer) http.HandlerFunc {
 				// Error still discarded, as before this change: an out-of-range house rule
 				// leaves the lobby on its defaults rather than failing the create. Widening
 				// that into a 400 is a separate call from this one (cambia-1089).
+				//
+				// This is also what records which preset the lobby carries: UpdateUnsafe reads
+				// the same "presetId" key and stamps lob.PresetID when the sheet it leaves
+				// behind is still that preset (cambia-1123).
 				lob.Update(reqBody)
 			}
 		}

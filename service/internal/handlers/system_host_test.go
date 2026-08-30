@@ -18,7 +18,6 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/jason-s-yu/cambia/service/internal/auth"
-	"github.com/jason-s-yu/cambia/service/internal/game"
 	"github.com/jason-s-yu/cambia/service/internal/lobby"
 	"github.com/jason-s-yu/cambia/service/internal/matchmaking"
 )
@@ -77,17 +76,25 @@ func TestCreateQueueBackedLobbyRefusesClientRules(t *testing.T) {
 	}
 }
 
-// TestQueueRulesWinOnCreate is the positive half: a queue-backed lobby is built on the defaults
+// TestQueueRulesWinOnCreate is the positive half: a queue-backed lobby is built on the ruleset
 // the queue's matches are played with, and nothing a client sent moved them.
+//
+// That ruleset was game.DefaultHouseRules until cambia-1123, not because the queue played the
+// defaults - it never did, the game was built from the queue preset (cambia-1088) - but because
+// the lobby object was left on whatever NewLobbyWithDefaults gave it. Asserting the defaults here
+// was pinning the gap between what the lobby said and what its match played.
 func TestQueueRulesWinOnCreate(t *testing.T) {
 	auth.Init()
 	gs := NewGameServer()
 	token, _ := auth.CreateJWT(uuid.New().String())
 
 	lob := createdLobby(t, postCreateLobby(t, gs, token, `{"type":"matchmaking","queueID":"h2h_quickplay"}`))
-	defaults := game.DefaultHouseRules()
-	if lob.HouseRules != defaults {
-		t.Fatalf("a queue-backed lobby must carry the default rule set, got %+v", lob.HouseRules)
+	preset, _ := lobby.GetPreset("h2h_quickplay")
+	if lob.HouseRules != preset.HouseRules {
+		t.Fatalf("a queue-backed lobby must carry its queue's rule set, got %+v", lob.HouseRules)
+	}
+	if lob.PresetID != "h2h_quickplay" {
+		t.Fatalf("expected the lobby to name the queue it plays, got %q", lob.PresetID)
 	}
 	if !lob.LobbySettings.AutoStart {
 		t.Fatal("auto-start must stay on: it is what starts a match with no player host")
