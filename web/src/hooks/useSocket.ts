@@ -9,8 +9,52 @@ import { WS_URL } from '@/lib/runtimeEnv';
 import { wsProtocols } from '@/lib/tabSession';
 import { useTabSessionEpoch } from '@/hooks/useTabSession';
 import { ackOutbound, cardRefsOf, isLobbyFrame, recordOutbound, resolveOutbox, tableContext, type OutboxEntry } from '@/lib/resendDecision';
+import { NIL as NIL_UUID } from 'uuid';
 const MAX_RETRIES = 5;
 const INITIAL_RETRY_DELAY = 1000;
+
+/** The shape the hub parses the path segment as: `/ws/{lobbyId}` runs uuid.Parse on it and
+ *  answers 400 for anything else (service/internal/handlers/ws.go HubWSHandler). */
+const LOBBY_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Whether an id is worth opening a socket for. A blank, malformed or nil id dials a URL the hub
+ * refuses outright, and that refusal is not transient, so the retry path redialed it until the
+ * page went away (cambia-1126 item 1). The nil UUID is what the stores hold for "no id yet", so
+ * it names no lobby either. Checked before the socket is constructed rather than after the
+ * handshake fails, because a dial that cannot succeed should never be made.
+ */
+function isDialableLobbyId(id: string | null | undefined): id is string {
+	return typeof id === 'string' && LOBBY_ID_PATTERN.test(id) && id !== NIL_UUID;
+}
+
+/**
+ * Drops this hook's hold on a socket and closes it. The handlers come off first, so nothing the
+ * socket does afterwards reaches the hook.
+ *
+ * A handshake still in flight is aborted here, not waited out, even though close() in CONNECTING
+ * is what makes a browser log "WebSocket is closed before the connection is established" (note
+ * cambia-1174, note cambia-985 R4). Waiting for the open event would silence the log, but opening
+ * the socket is what joins the lobby: the hub calls MarkJoinedUnsafe on connect and says in as
+ * many words that a client which has just left must close before releasing membership, or its own
+ * reconnect hands the membership straight back (service/internal/handlers/ws.go step 7). A late
+ * handshake landing after POST /lobby/{id}/leave would do exactly that, so a console line is the
+ * cheaper of the two.
+ *
+ * That log line was never really about this function. It appeared on every Leave because
+ * closeSocket's own store writes re-ran the connect effect and opened a second socket to the
+ * lobby just left, which the redirect then closed mid-handshake; the same identity churn behind
+ * the retry cap (cambia-1236). With the effect no longer re-running, no second socket is opened
+ * and there is nothing mid-handshake to close.
+ */
+function releaseSocket(socket: WebSocket, reason: string): void {
+	socket.onopen = null;
+	socket.onmessage = null;
+	socket.onerror = null;
+	socket.onclose = null;
+	if (socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) return;
+	socket.close(1000, reason);
+}
 
 /**
  * Server envelopes: { seq: number, type: string, payload?: any }
@@ -54,6 +98,12 @@ export function useSocket(lobbyId: string | null | undefined) {
 	const managedLobbyId = useRef<string | null>(null);
 	const isConnecting = useRef<boolean>(false);
 	const shouldBeConnected = useRef<boolean>(false);
+	/** The lobby whose retry budget is spent. A cap is only a cap if exhausting it is remembered:
+	 *  the connect effect dials whenever the socket is not open, so a counter on its own was reset
+	 *  and spent again on every re-run (cambia-1236). Cleared by a successful open, an explicit
+	 *  close, a different lobby, or a tab identity change: the four things that make a fresh dial
+	 *  worth trying again. */
+	const gaveUpLobbyId = useRef<string | null>(null);
 	const lastSeqRef = useRef<number>(0);
 	/** Frames the hub has neither applied nor answered. A repair window can swallow more than
 	 *  one, so this is a queue rather than a slot (cambia-913 F2), and the events an accepted
@@ -65,7 +115,17 @@ export function useSocket(lobbyId: string | null | undefined) {
 	const sessionEpoch = useTabSessionEpoch();
 	const lastEpoch = useRef<number>(sessionEpoch);
 
-	const lobbyActions = useCurrentLobbyStore();
+	// Selected one action at a time, never a bare `useCurrentLobbyStore()`. The bare call returns
+	// the whole state object, whose identity changes on every write to the store, which re-created
+	// connectWebSocket and re-ran the connect effect on each one; the effect body then reset the
+	// retry counter, so the cap below was never reached and a dead server was dialed 521 times in
+	// one session (cambia-1236). These functions are defined once by create() and never replaced,
+	// so each selector returns a reference that survives every write.
+	const setConnected = useCurrentLobbyStore((s) => s.setConnected);
+	const setLoading = useCurrentLobbyStore((s) => s.setLoading);
+	const setError = useCurrentLobbyStore((s) => s.setError);
+	const clearError = useCurrentLobbyStore((s) => s.clearError);
+	const leaveLobby = useCurrentLobbyStore((s) => s.leaveLobby);
 
 	/** The board and lobby state a resend decision compares against. */
 	const context = useCallback(() => {
@@ -103,12 +163,12 @@ export function useSocket(lobbyId: string | null | undefined) {
 	}, [context]);
 
 	const connectWebSocket = useCallback((targetLobbyId: string) => {
-		if (!targetLobbyId || !userId) {
+		if (!isDialableLobbyId(targetLobbyId) || !userId) {
 			isConnecting.current = false;
 			shouldBeConnected.current = false;
 			if (useCurrentLobbyStore.getState().currentLobbyId === targetLobbyId) {
-				lobbyActions.setLoading(false);
-				lobbyActions.setError('Cannot connect: Invalid lobby ID or user not authenticated.');
+				setLoading(false);
+				setError('Cannot connect: Invalid lobby ID or user not authenticated.');
 			}
 			return;
 		}
@@ -116,9 +176,9 @@ export function useSocket(lobbyId: string | null | undefined) {
 		if (managedLobbyId.current === targetLobbyId && (isConnecting.current || ws.current?.readyState === WebSocket.OPEN)) {
 			shouldBeConnected.current = true;
 			if (ws.current?.readyState === WebSocket.OPEN) {
-				lobbyActions.setConnected(true);
-				lobbyActions.setLoading(false);
-				lobbyActions.clearError();
+				setConnected(true);
+				setLoading(false);
+				clearError();
 			}
 			return;
 		}
@@ -129,17 +189,13 @@ export function useSocket(lobbyId: string | null | undefined) {
 		}
 
 		if (ws.current && (managedLobbyId.current !== targetLobbyId || ws.current.readyState === WebSocket.CLOSING)) {
-			ws.current.onclose = null;
-			ws.current.onerror = null;
-			ws.current.onmessage = null;
-			ws.current.onopen = null;
-			ws.current.close(1000, `Switching to lobby ${targetLobbyId}`);
+			releaseSocket(ws.current, `Switching to lobby ${targetLobbyId}`);
 			ws.current = null;
 		}
 
 		if (!WS_URL) {
-			lobbyActions.setError('WebSocket URL is not configured.');
-			lobbyActions.setLoading(false);
+			setError('WebSocket URL is not configured.');
+			setLoading(false);
 			isConnecting.current = false;
 			shouldBeConnected.current = false;
 			managedLobbyId.current = null;
@@ -153,8 +209,8 @@ export function useSocket(lobbyId: string | null | undefined) {
 		outboxRef.current = [];
 
 		if (useCurrentLobbyStore.getState().currentLobbyId === targetLobbyId) {
-			lobbyActions.setLoading(true);
-			lobbyActions.clearError();
+			setLoading(true);
+			clearError();
 		}
 
 		let socket: WebSocket;
@@ -165,8 +221,8 @@ export function useSocket(lobbyId: string | null | undefined) {
 			// Sec-WebSocket-Protocol and never selected.
 			socket = new WebSocket(`${WS_URL}/ws/${targetLobbyId}`, wsProtocols());
 		} catch {
-			lobbyActions.setError('Failed to initialize connection.');
-			lobbyActions.setLoading(false);
+			setError('Failed to initialize connection.');
+			setLoading(false);
 			isConnecting.current = false;
 			shouldBeConnected.current = false;
 			managedLobbyId.current = null;
@@ -180,11 +236,12 @@ export function useSocket(lobbyId: string | null | undefined) {
 				return;
 			}
 			retryCountRef.current = 0;
+			gaveUpLobbyId.current = null;
 			isConnecting.current = false;
 			if (useCurrentLobbyStore.getState().currentLobbyId === targetLobbyId) {
-				lobbyActions.setConnected(true);
-				lobbyActions.setLoading(false);
-				lobbyActions.clearError();
+				setConnected(true);
+				setLoading(false);
+				clearError();
 			}
 		};
 
@@ -260,20 +317,23 @@ export function useSocket(lobbyId: string | null | undefined) {
 				// Handle lobby-not-found fatal error
 				if (type === 'error' && payload?.code === 'lobby_not_found') {
 					shouldBeConnected.current = false;
-					retryCountRef.current = MAX_RETRIES + 1;
+					// A lobby the hub says does not exist is not a transient failure, so this is the last
+					// dial for that id until the hook is pointed somewhere else.
+					gaveUpLobbyId.current = targetLobbyId;
+					retryCountRef.current = 0;
 					if (ws.current === socket) {
-						ws.current.close(1000, 'Lobby not found');
+						releaseSocket(socket, 'Lobby not found');
 						ws.current = null;
 					}
 					managedLobbyId.current = null;
-					lobbyActions.setError(payload.message || 'Lobby not found.');
-					lobbyActions.setLoading(false);
-					lobbyActions.setConnected(false);
-					lobbyActions.leaveLobby();
+					setError(payload.message || 'Lobby not found.');
+					setLoading(false);
+					setConnected(false);
+					leaveLobby();
 				}
 			} catch (error) {
 				console.error('[useSocket] Failed to parse message:', error);
-				lobbyActions.setError('Error processing message from server.');
+				setError('Error processing message from server.');
 			}
 		};
 
@@ -285,7 +345,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 
 			const storeLobbyId = useCurrentLobbyStore.getState().currentLobbyId;
 			if (storeLobbyId === targetLobbyId) {
-				lobbyActions.setConnected(false);
+				setConnected(false);
 				useGameStore.getState().setConnected(false);
 			}
 
@@ -297,15 +357,15 @@ export function useSocket(lobbyId: string | null | undefined) {
 				const delay = Math.pow(2, currentRetry) * INITIAL_RETRY_DELAY + Math.random() * 1000;
 
 				if (storeLobbyId === targetLobbyId) {
-					lobbyActions.setLoading(true);
-					lobbyActions.setError(`Connection lost. Retrying... (Attempt ${retryCountRef.current})`);
+					setLoading(true);
+					setError(`Connection lost. Retrying... (Attempt ${retryCountRef.current})`);
 				}
 
 				reconnectTimeoutId.current = window.setTimeout(() => {
 					if (shouldBeConnected.current && managedLobbyId.current === targetLobbyId) {
 						connectWebSocket(targetLobbyId);
 					} else {
-						if (storeLobbyId === targetLobbyId) lobbyActions.setLoading(false);
+						if (storeLobbyId === targetLobbyId) setLoading(false);
 						managedLobbyId.current = null;
 						retryCountRef.current = 0;
 					}
@@ -313,13 +373,17 @@ export function useSocket(lobbyId: string | null | undefined) {
 			} else {
 				managedLobbyId.current = null;
 				retryCountRef.current = 0;
+				// Budget spent on a drop that was worth retrying: stop dialing this lobby. Without the
+				// latch the connect effect dials again the next time it runs, which is how the cap went
+				// unenforced (cambia-1236 AC2).
+				if (wasUnexpected && !retryAllowed) gaveUpLobbyId.current = targetLobbyId;
 
 				if (storeLobbyId === targetLobbyId) {
-					lobbyActions.setLoading(false);
+					setLoading(false);
 					if (wasUnexpected) {
-						lobbyActions.setError(retryAllowed ? 'Lost connection. Stopped trying.' : `Lost connection after ${MAX_RETRIES} retries.`);
+						setError(retryAllowed ? 'Lost connection. Stopped trying.' : `Lost connection after ${MAX_RETRIES} retries.`);
 					} else if (event.code !== 1000 && event.code !== 1005 && event.reason) {
-						lobbyActions.setError(`Disconnected: ${event.reason}`);
+						setError(`Disconnected: ${event.reason}`);
 					}
 				}
 				if (!retryAllowed || !wasUnexpected) {
@@ -331,11 +395,11 @@ export function useSocket(lobbyId: string | null | undefined) {
 		socket.onerror = () => {
 			if (ws.current !== socket || !shouldBeConnected.current || managedLobbyId.current !== targetLobbyId) return;
 			if (useCurrentLobbyStore.getState().currentLobbyId === targetLobbyId) {
-				lobbyActions.setError('WebSocket connection error.');
+				setError('WebSocket connection error.');
 			}
 		};
 
-	}, [userId, lobbyActions, context, send]);
+	}, [userId, setConnected, setLoading, setError, clearError, leaveLobby, context, send]);
 
 	// Connect/disconnect based on lobbyId prop
 	useEffect(() => {
@@ -348,11 +412,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 		if (lastEpoch.current !== sessionEpoch) {
 			lastEpoch.current = sessionEpoch;
 			if (ws.current) {
-				ws.current.onclose = null;
-				ws.current.onerror = null;
-				ws.current.onmessage = null;
-				ws.current.onopen = null;
-				ws.current.close(1000, 'Tab identity changed');
+				releaseSocket(ws.current, 'Tab identity changed');
 				ws.current = null;
 			}
 			if (reconnectTimeoutId.current) {
@@ -362,15 +422,47 @@ export function useSocket(lobbyId: string | null | undefined) {
 			managedLobbyId.current = null;
 			isConnecting.current = false;
 			retryCountRef.current = 0;
+			gaveUpLobbyId.current = null;
 		}
 
-		if (lobbyId) {
-			if (managedLobbyId.current !== lobbyId || (!isConnecting.current && ws.current?.readyState !== WebSocket.OPEN)) {
+		// A lobby the hook is no longer pointed at has no claim on the retry budget.
+		if (gaveUpLobbyId.current !== null && gaveUpLobbyId.current !== lobbyId) {
+			gaveUpLobbyId.current = null;
+			retryCountRef.current = 0;
+		}
+
+		if (isDialableLobbyId(lobbyId)) {
+			// Nothing here resets retryCountRef: the counter belongs to the socket's own open event and
+			// to nothing else, or the cap cannot hold across an effect re-run (cambia-1236 AC2).
+			const backoffPending = reconnectTimeoutId.current !== null && managedLobbyId.current === lobbyId;
+			const needsDial = managedLobbyId.current !== lobbyId || (!isConnecting.current && ws.current?.readyState !== WebSocket.OPEN);
+			if (gaveUpLobbyId.current === lobbyId) {
+				// Budget spent. The onclose branch has already written the copy the table reads.
+				shouldBeConnected.current = false;
+			} else if (needsDial && !backoffPending) {
 				shouldBeConnected.current = true;
-				retryCountRef.current = 0;
 				connectWebSocket(lobbyId);
 			} else {
 				shouldBeConnected.current = true;
+			}
+		} else if (lobbyId) {
+			// Named, but not an id the hub could serve. Refusing it here is what keeps it out of the
+			// retry path entirely (cambia-1236 AC3).
+			shouldBeConnected.current = false;
+			managedLobbyId.current = null;
+			isConnecting.current = false;
+			retryCountRef.current = 0;
+			if (reconnectTimeoutId.current) {
+				clearTimeout(reconnectTimeoutId.current);
+				reconnectTimeoutId.current = null;
+			}
+			if (ws.current) {
+				releaseSocket(ws.current, 'Invalid lobby ID');
+				ws.current = null;
+			}
+			if (useCurrentLobbyStore.getState().currentLobbyId === lobbyId) {
+				setLoading(false);
+				setError('Cannot connect: Invalid lobby ID.');
 			}
 		} else {
 			shouldBeConnected.current = false;
@@ -380,19 +472,19 @@ export function useSocket(lobbyId: string | null | undefined) {
 				reconnectTimeoutId.current = null;
 			}
 
-			if (ws.current && ws.current.readyState !== WebSocket.CLOSED && ws.current.readyState !== WebSocket.CLOSING) {
-				ws.current.onclose = null;
-				ws.current.close(1000, 'Lobby ID became null');
+			if (ws.current) {
+				releaseSocket(ws.current, 'Lobby ID became null');
 				ws.current = null;
 			}
 
 			managedLobbyId.current = null;
 			isConnecting.current = false;
 			retryCountRef.current = 0;
+			gaveUpLobbyId.current = null;
 
 			if (useCurrentLobbyStore.getState().isConnected) {
-				lobbyActions.setConnected(false);
-				lobbyActions.setLoading(false);
+				setConnected(false);
+				setLoading(false);
 			}
 		}
 
@@ -402,7 +494,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 				reconnectTimeoutId.current = null;
 			}
 		};
-	}, [lobbyId, connectWebSocket, lobbyActions, sessionEpoch]);
+	}, [lobbyId, connectWebSocket, setConnected, setLoading, setError, sessionEpoch]);
 
 	/** Send a message over the WS. Injects last_seq automatically. */
 	const sendMessage = useCallback((message: OutboundMessage) => {
@@ -422,20 +514,20 @@ export function useSocket(lobbyId: string | null | undefined) {
 			clearTimeout(reconnectTimeoutId.current);
 			reconnectTimeoutId.current = null;
 		}
-		if (ws.current && ws.current.readyState !== WebSocket.CLOSED && ws.current.readyState !== WebSocket.CLOSING) {
-			ws.current.onclose = null;
-			ws.current.close(1000, 'User initiated disconnect');
+		if (ws.current) {
+			releaseSocket(ws.current, 'User initiated disconnect');
 			ws.current = null;
 		}
 		managedLobbyId.current = null;
 		isConnecting.current = false;
 		retryCountRef.current = 0;
+		gaveUpLobbyId.current = null;
 
 		if (useCurrentLobbyStore.getState().isConnected) {
-			lobbyActions.setConnected(false);
-			lobbyActions.setLoading(false);
+			setConnected(false);
+			setLoading(false);
 		}
-	}, [lobbyActions]);
+	}, [setConnected, setLoading]);
 
 	const isConnected = useCurrentLobbyStore((s) => s.isConnected);
 	const isLoading = useCurrentLobbyStore((s) => s.isLoading);
