@@ -84,6 +84,58 @@ LAN IP or tailnet name over plain http is not a trustworthy origin, so the
 cookie is dropped silently and login appears to do nothing. Turn it on only
 when the https host is the only lane in use.
 
+## Dev sessions: several players in one browser
+
+Identity is one HttpOnly `auth_token` cookie scoped to the host, so every tab
+on an origin is the same player and a second seat used to need a second
+hostname. A tab can instead pin its own identity: the JWT goes in
+`sessionStorage`, and the tab sends it explicitly on every carrier (an
+`Authorization: Bearer` header on REST, a second `cambia-token.<jwt>` entry in
+the WebSocket subprotocol list). The service resolves an explicit token first
+and falls back to the cookie, so an unpinned tab behaves exactly as it always
+has.
+
+The switcher is the pill at the bottom left, rendered only under
+`import.meta.env.DEV`. `vite build` folds that flag to false and drops the
+component with it, so its markup and copy are absent from a production bundle.
+Open it with a click or Enter, close it with Escape. It offers:
+
+- the current identity and whether it came from this tab or the shared session
+- pinning a named dev account, chosen from the list or typed as a new name
+- a fresh guest for this tab alone
+- opening a new tab already signed in as this user
+- unpinning, back to the shared session
+
+Named dev accounts need the service run with `CAMBIA_DEV_ACCOUNTS=1`; without
+it `/dev/session` does not exist, the panel says so, and guests still work.
+A dev account name is 1 to 32 characters of `a-z`, `0-9`, underscore or dash,
+and the account is idempotent per name (`alice` is always the same player).
+
+Two URL forms do the same thing without the panel, which is what a browser
+verifier uses:
+
+```
+http://localhost:5180/dashboard?as=alice   # pin the named dev account
+http://localhost:5180/dashboard?as=guest   # pin a fresh guest
+http://localhost:5180/lobby/<id>#tab=<jwt> # pin a token another tab handed over
+```
+
+Both are consumed once at boot, before the first `/user/me` probe, and taken
+straight back out of the address bar. A request that cannot be honoured (the
+flag is unset, the service is down) leaves the tab on the shared session and
+says why in the switcher.
+
+Tab semantics follow `sessionStorage`: duplicating a tab (Ctrl+click reload, or
+"Duplicate tab") copies the pin, so the copy is the same player; a tab opened
+fresh starts on the shared cookie. Closing the tab ends its pin. Logging out of
+a pinned tab drops the pin and lands back on the cookie identity: it never
+posts `/user/logout`, so the other tabs keep their session.
+
+The older stopgap still works and needs nothing: `alice.localhost:5180` and
+`bob.localhost:5180` are separate origins with separate cookie jars. It cannot
+pin two tabs on one origin, and it does nothing for the staging vhost or for a
+LAN device, which is what the switcher is for.
+
 ## Remote development
 
 Three lanes for working over a tailnet or a tethered/hotspot link, where

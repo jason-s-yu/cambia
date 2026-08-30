@@ -44,7 +44,11 @@ const DEV_ALLOWED_HOSTS = ['app.cambia.pangu.home.jasonyu.io'];
 // the target (the server's default :8080 and much of the 80xx range are held
 // by co-tenants here; dev runs use PORT=8088). Shared between the dev server
 // (always on) and the remote-mode preview server (D7 lite lane).
-const API_PROXY_PATHS = ['/user', '/lobby', '/friends', '/matchmaking', '/leaderboard', '/training', '/ws'];
+// `/dev` is the dev-account minting route (cambia-1149); it only exists on a
+// service run with CAMBIA_DEV_ACCOUNTS=1, and proxying it unconditionally is
+// how the switcher gets its 404 from the service rather than an SPA shell from
+// Vite.
+const API_PROXY_PATHS = ['/user', '/lobby', '/friends', '/matchmaking', '/leaderboard', '/training', '/dev', '/ws'];
 function apiProxy() {
     return Object.fromEntries(
         API_PROXY_PATHS.map((path) => [

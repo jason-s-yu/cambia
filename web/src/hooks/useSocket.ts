@@ -6,6 +6,8 @@ import { useAuthStore } from '@/stores/authStore';
 import { useCurrentLobbyStore } from '@/stores/lobbyStore';
 import { useGameStore } from '@/stores/gameStore';
 import { WS_URL } from '@/lib/runtimeEnv';
+import { wsProtocols } from '@/lib/tabSession';
+import { useTabSessionEpoch } from '@/hooks/useTabSession';
 import { ackOutbound, cardRefsOf, isLobbyFrame, recordOutbound, resolveOutbox, tableContext, type OutboxEntry } from '@/lib/resendDecision';
 const MAX_RETRIES = 5;
 const INITIAL_RETRY_DELAY = 1000;
@@ -59,6 +61,9 @@ export function useSocket(lobbyId: string | null | undefined) {
 	const outboxRef = useRef<OutboxEntry<OutboundMessage>[]>([]);
 
 	const userId = useAuthStore((state) => state.user?.id);
+	/** Bumped when this tab is pinned or unpinned; the connect effect redials on a change. */
+	const sessionEpoch = useTabSessionEpoch();
+	const lastEpoch = useRef<number>(sessionEpoch);
 
 	const lobbyActions = useCurrentLobbyStore();
 
@@ -154,7 +159,11 @@ export function useSocket(lobbyId: string | null | undefined) {
 
 		let socket: WebSocket;
 		try {
-			socket = new WebSocket(`${WS_URL}/ws/${targetLobbyId}`, 'cambia');
+			// Browsers cannot set headers on a handshake, so a pinned tab's token
+			// rides the subprotocol list as a second entry (cambia-1149). The
+			// server always selects "cambia"; the token entry is read off
+			// Sec-WebSocket-Protocol and never selected.
+			socket = new WebSocket(`${WS_URL}/ws/${targetLobbyId}`, wsProtocols());
 		} catch {
 			lobbyActions.setError('Failed to initialize connection.');
 			lobbyActions.setLoading(false);
@@ -330,6 +339,31 @@ export function useSocket(lobbyId: string | null | undefined) {
 
 	// Connect/disconnect based on lobbyId prop
 	useEffect(() => {
+		// A pin or unpin changes who this tab is, and the identity a connection
+		// handshaked with is fixed for its lifetime, so the open socket is dropped
+		// here and the block below dials again with the new protocol list
+		// (cambia-1149). Deliberate, so it closes 1000 and the retry path leaves
+		// it alone; managedLobbyId is cleared so the reconnect is not read as an
+		// already-connected no-op.
+		if (lastEpoch.current !== sessionEpoch) {
+			lastEpoch.current = sessionEpoch;
+			if (ws.current) {
+				ws.current.onclose = null;
+				ws.current.onerror = null;
+				ws.current.onmessage = null;
+				ws.current.onopen = null;
+				ws.current.close(1000, 'Tab identity changed');
+				ws.current = null;
+			}
+			if (reconnectTimeoutId.current) {
+				clearTimeout(reconnectTimeoutId.current);
+				reconnectTimeoutId.current = null;
+			}
+			managedLobbyId.current = null;
+			isConnecting.current = false;
+			retryCountRef.current = 0;
+		}
+
 		if (lobbyId) {
 			if (managedLobbyId.current !== lobbyId || (!isConnecting.current && ws.current?.readyState !== WebSocket.OPEN)) {
 				shouldBeConnected.current = true;
@@ -368,7 +402,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 				reconnectTimeoutId.current = null;
 			}
 		};
-	}, [lobbyId, connectWebSocket, lobbyActions]);
+	}, [lobbyId, connectWebSocket, lobbyActions, sessionEpoch]);
 
 	/** Send a message over the WS. Injects last_seq automatically. */
 	const sendMessage = useCallback((message: OutboundMessage) => {
