@@ -185,7 +185,13 @@ test('a name the server would refuse is refused here, and still consumed', () =>
 
 test('#tab= carries a token, and the fragment does not survive it', () => {
     const handoff = readBootIntent(`http://localhost:5180/lobby/abc#tab=${ALICE}`);
-    assert.deepEqual(handoff.intent, { kind: 'token', token: ALICE });
+    assert.deepEqual(handoff.intent, { kind: 'token', token: ALICE, label: null });
+    assert.equal(handoff.cleanedHref, '/lobby/abc');
+});
+
+test('#tab= with a &label= carries the name, and the whole fragment is stripped', () => {
+    const handoff = readBootIntent(`http://localhost:5180/lobby/abc#tab=${ALICE}&label=Alice%20W`);
+    assert.deepEqual(handoff.intent, { kind: 'token', token: ALICE, label: 'Alice W' });
     assert.equal(handoff.cleanedHref, '/lobby/abc');
 });
 
@@ -220,8 +226,24 @@ test('a handoff fragment needs no round trip', async () => {
     });
     assert.equal(minted, false);
     assert.equal(getTabToken(), ALICE);
+    // No &label= on this handoff: the pin falls back to the token's short
+    // subject rather than losing the name entirely.
+    assert.equal(getTabLabel(), '4f3c1d20');
     // The token must not stay in the address bar: a copied link would hand the
     // identity to whoever it was pasted to.
+    assert.equal(globalThis.location.href, 'http://localhost:5180/lobby/abc');
+});
+
+test('a handoff fragment with &label= pins that name, and strips the whole fragment', async () => {
+    installLocation(`http://localhost:5180/lobby/abc#tab=${ALICE}&label=Alice%20W`);
+    let minted = false;
+    await consumeBootIdentity(async () => {
+        minted = true;
+        return null;
+    });
+    assert.equal(minted, false);
+    assert.equal(getTabToken(), ALICE);
+    assert.equal(getTabLabel(), 'Alice W');
     assert.equal(globalThis.location.href, 'http://localhost:5180/lobby/abc');
 });
 
@@ -265,6 +287,17 @@ test('the handoff link carries the token in the fragment, never the query', () =
     const href = handoffHref('http://localhost:5180', '/lobby/abc', ALICE);
     assert.equal(href, `http://localhost:5180/lobby/abc#tab=${ALICE}`);
     assert.ok(!href.includes('?'));
+});
+
+test('the handoff link carries a label alongside the token, encoded', () => {
+    const href = handoffHref('http://localhost:5180', '/lobby/abc', ALICE, 'Alice W');
+    assert.equal(href, `http://localhost:5180/lobby/abc#tab=${ALICE}&label=Alice%20W`);
+    assert.deepEqual(readBootIntent(href).intent, { kind: 'token', token: ALICE, label: 'Alice W' });
+});
+
+test('an empty or missing label falls back to no &label= field', () => {
+    assert.equal(handoffHref('http://localhost:5180', '/lobby/abc', ALICE, null), `http://localhost:5180/lobby/abc#tab=${ALICE}`);
+    assert.equal(handoffHref('http://localhost:5180', '/lobby/abc', ALICE, ''), `http://localhost:5180/lobby/abc#tab=${ALICE}`);
 });
 
 test('a typed account name is normalised, and a bad one is named as bad', () => {

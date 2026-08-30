@@ -161,12 +161,32 @@ test('the panel holds the controls the design calls for', () => {
     }
     assert.match(component, /aria-expanded=\{open\}/);
     assert.match(component, /aria-labelledby=\{headingId\}/);
-    assert.match(component, /event\.key === 'Escape'/);
+    assert.match(component, /event\.key !== 'Escape'/);
     // Below Modal and the results overlay, both at 100.
     const zIndex = Number(component.match(/zIndex: (\d+)/)[1]);
     assert.ok(zIndex < 100, `the switcher must sit below modals, got zIndex ${zIndex}`);
     assert.match(component, /position: 'fixed'/);
     assert.match(component, /bottom: 'calc\(var\(--space-3\) \+ env\(safe-area-inset-bottom/);
+});
+
+test('Escape closes the panel from the document, not just from inside it', () => {
+    // A programmatic focus move (a mint, an unpin) can land focus outside the
+    // panel while it is still open; a handler scoped to the panel's own
+    // onKeyDown never sees the keypress from there. The document-level
+    // listener is the fix, following the same shape as Modal's own Escape
+    // handling (ds/core/Modal.tsx): bound on capture, torn down on close.
+    const component = read('src/components/dev/DevSessionSwitcher.tsx');
+    const escapeEffect = component.split('const onEscape = (event: KeyboardEvent) => {')[1];
+    assert.ok(escapeEffect, 'the switcher no longer defines a document-level Escape handler');
+    const untilCleanup = escapeEffect.split('return () =>')[0];
+    assert.match(untilCleanup, /event\.key !== 'Escape'/);
+    assert.match(untilCleanup, /close\(\)/);
+    assert.match(escapeEffect, /document\.addEventListener\('keydown', onEscape, true\)/);
+    assert.match(escapeEffect, /document\.removeEventListener\('keydown', onEscape, true\)/);
+    // Guarded on `open`, and not attached from the panel's own onKeyDown: a
+    // panel-scoped handler is exactly the bug this listener fixes.
+    const onEscapeEffect = component.split('useEffect(() => {\n    if (!open) return;\n    const onEscape')[1];
+    assert.ok(onEscapeEffect !== undefined, 'the Escape listener must be gated on the panel being open');
 });
 
 test('a pin or unpin re-reads the identity rather than reloading the page', () => {
