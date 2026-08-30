@@ -7,6 +7,7 @@ import { useAuthStore } from './authStore';
 import { applySnapSuccess } from '@/lib/snapSuccess';
 import { applySnapMove } from '@/lib/snapFill';
 import { applyPregamePeek } from '@/lib/pregamePeek';
+import { applyDrawPileCounts, pendingActionAfterFail, pendingActionForSpecial } from '@/lib/specialPrompt';
 
 /** A face shown to this client by an event: an ability look, a pregame peek, a card drawn in. */
 export interface RevealedCard {
@@ -317,11 +318,11 @@ export const useGameStore = create<GameState & GameActions>()(
 								const userState = gs.players.find(p => p.playerId === selfPlayerId); // Find 'self'
 								if (userState?.drawnCard && gs.currentPlayerId === userState.playerId && !gs.gameOver && gs.started) {
 									state.pendingAction = 'discard_replace';
-								} else if (gs.specialAction?.active && gs.specialAction.playerId === selfPlayerId && !gs.gameOver && gs.started) {
+								} else if (!gs.gameOver && gs.started) {
 									// The service's ObfGameState (service/internal/game/sync_state.go) serializes
 									// SpecialActionState into private_sync_state (cambia-763 F1), so a client that
 									// resyncs mid-action (reconnect, tab refresh) restores pendingAction here.
-									state.pendingAction = 'special_action';
+									state.pendingAction = pendingActionForSpecial(gs.specialAction, selfPlayerId);
 								}
 							}
 							break;
@@ -350,6 +351,10 @@ export const useGameStore = create<GameState & GameActions>()(
 							if (state.gameState) {
 								state.gameState.currentPlayerId = payload.user?.id;
 								state.pendingAction = null; // New turn clears pending actions
+								// The server never announces a turn over a pending ability (the King's two-step
+								// runs without one), so a special action that survives this event is stale and
+								// would keep rendering a prompt for an ability nobody owes (cambia-1125).
+								state.gameState.specialAction = null;
 								state.displayedDrawnCard = null; // Clear magnified card
 								// Update isCurrentTurn for all players
 								state.gameState.players.forEach(p => {
@@ -377,15 +382,11 @@ export const useGameStore = create<GameState & GameActions>()(
 						case 'player_draw_stockpile':
 						case 'private_draw_stockpile': // Treat both similarly for state update, but display logic differs
 							if (state.gameState) {
+								// The counts are the public event's alone; the private twin that follows it is
+								// the same draw seen a second time (cambia-1125, lib/specialPrompt.ts).
+								applyDrawPileCounts(state.gameState, type, payload.payload);
 								if (type === 'player_draw_stockpile') {
-									// Public draw - update stockpile size, show card back magnified for others
-									if (payload.payload?.source === 'stockpile') {
-										state.gameState.stockpileSize = payload.payload?.stockpileSize ?? state.gameState.stockpileSize - 1;
-									} else {
-										state.gameState.discardSize = payload.payload?.discardSize ?? state.gameState.discardSize - 1;
-										// Update discardTop if drawn from discard
-										state.gameState.discardTop = null; // Simplified: assume next sync will fix it
-									}
+									// Public draw - show card back magnified for others
 									const player = state.gameState.players.find(p => p.playerId === payload.user?.id);
 									const self = state.gameState.players.find(p => p.playerId === selfPlayerId);
 									if (player && self && player.playerId !== self.playerId) {
@@ -402,13 +403,6 @@ export const useGameStore = create<GameState & GameActions>()(
 										player.drawnCard = payload.card;
 										state.pendingAction = 'discard_replace'; // Player must now discard/replace
 										state.displayedDrawnCard = payload.card; // Magnify revealed card for self
-									}
-									// Update stockpile/discard size based on source
-									if (payload.payload?.source === 'stockpile') {
-										state.gameState.stockpileSize--; // Approximate if size not sent
-									} else {
-										state.gameState.discardSize--; // Approximate
-										state.gameState.discardTop = null; // Simplified
 									}
 								}
 							}
@@ -457,11 +451,14 @@ export const useGameStore = create<GameState & GameActions>()(
 								if (player && player.playerId === payload.user?.id) {
 									state.pendingAction = 'special_action'; // Player needs to make choice
 								}
-								// Optionally store special action details
+								// Optionally store special action details. `mandatory` marks an ability the
+								// engine armed off a replace, which cannot be declined, so the table asks for
+								// a target instead of offering a skip the server would refuse (cambia-1125).
 								state.gameState.specialAction = {
 									active: true,
 									playerId: payload.user?.id,
-									cardRank: payload.card?.rank
+									cardRank: payload.card?.rank,
+									mandatory: payload.payload?.mandatory === true
 								};
 							}
 							break;
@@ -511,7 +508,11 @@ export const useGameStore = create<GameState & GameActions>()(
 						case 'private_special_action_fail':
 							// Show error message to the user
 							// state.error = `Special action failed: ${payload.message}`; // Maybe too aggressive?
-							state.pendingAction = 'special_action'; // Allow retry or skip
+							// The server sends this for ANY refused action, not only a refused special one, so
+							// it restores the prompt only when one is genuinely pending and never invents one:
+							// a plain refusal used to leave a rankless 'special_action' on a table that had no
+							// ability to skip, which is how the dead Skip button got on screen (cambia-1125).
+							state.pendingAction = pendingActionAfterFail(state.pendingAction, state.gameState?.specialAction, selfPlayerId);
 							state.isProcessingAction = false; // Allow sending new action
 							break;
 

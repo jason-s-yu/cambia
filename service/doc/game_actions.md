@@ -232,6 +232,10 @@ If the card discarded in the previous step has a special action which can be uti
     where "special" is a field of the following enums: `peek_self` (7 or 8), `peek_other` (9 or 10), `swap_blind` (J or Q), `swap_peek` (K)
     The clients intercept this message, and the player with the matching id will be faced with the decision of invoking the special turn option, with timer. Optionally, they will also be able to skip. They respond with the payload:
 
+    An ability triggered by a **replace** (`allowReplaceAbilities`) carries `"payload": {"mandatory": true}` and **cannot be skipped**. The engine folds the decline into the discard action (`DiscardNoAbility` vs `DiscardWithAbility`) and offers an already-armed ability nothing but targets, so a `skip` against it is refused with `private_special_action_fail` and the prompt stands. Clients must not render a skip affordance for it; the turn timer resolves it by playing the first legal target (a King looks and then declines the swap). The same flag is carried in `private_sync_state` under `specialAction.mandatory` so a reconnecting client restores the prompt without the affordance.
+
+    A replace only triggers an ability when the drawn card came from the **stockpile** (RULES.md 3B) and the ability has a legal target; a replace fed by a discard-pile draw emits no `player_special_choice` at all.
+
     ```json
     {
       "type": "action_special",
