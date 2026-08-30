@@ -694,10 +694,9 @@ func TestCambiaLock(t *testing.T) {
 	g.HandlePlayerAction(second.ID, models.GameAction{ActionType: "action_cambia"})
 	require.True(t, g.Engine.IsCambiaCalled())
 
-	// Mark second player's HasCalledCambia in the Player model for Cambia lock check.
-	secondPlayerModel := g.getPlayerByID(second.ID)
-	require.NotNil(t, secondPlayerModel)
-	secondPlayerModel.HasCalledCambia = true
+	// Nothing is marked on the Player model: the engine's CambiaCaller is what the lock is read
+	// from (handLocked -> resolveOpponentTarget), and the models.Player copy this test used to set
+	// was never written in production (cambia-1118).
 
 	// Turn 3 (final): First player draws and discards a Jack to trigger blind swap.
 	require.Equal(t, first.ID, currentTurnPlayer(g).ID, "Should be first player's final turn")

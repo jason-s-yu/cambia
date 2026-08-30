@@ -1165,9 +1165,19 @@ class SnapLogicMixin:
             discarder_player,
         )
 
+        # The Cambia caller sits out the snap window only while the lock freezes their hand:
+        # RULES.md 3C bars them from snapping in either direction, but lockCallerHand decides
+        # whether that clause applies at all, and ranked play turns it off (MATCHMAKING.md 5.2).
+        # Mirrors Go engine/snap.go initiateSnapPhase (cambia-1118).
+        locked_caller = (
+            self.cambia_caller_id
+            if getattr(getattr(self, "house_rules", None), "lockCallerHand", False)
+            else None
+        )
+
         for p_idx in range(self.num_players):
-            if p_idx == self.cambia_caller_id:
-                continue  # Cambia caller cannot snap
+            if locked_caller is not None and p_idx == locked_caller:
+                continue  # the locked Cambia caller cannot snap
 
             if not (
                 0 <= p_idx < len(self.players) and hasattr(self.players[p_idx], "hand")
@@ -1188,8 +1198,8 @@ class SnapLogicMixin:
                 self.house_rules.allowOpponentSnapping and len(hand) > 0
             ):  # Must have card to move
                 opp_snap_check_idx = self.get_opponent_index(p_idx)
-                # Opponent cannot snap if they are the Cambia caller
-                if opp_snap_check_idx != self.cambia_caller_id:
+                # The locked caller's cards are not a snap target either
+                if opp_snap_check_idx != locked_caller:
                     if 0 <= opp_snap_check_idx < len(self.players) and hasattr(
                         self.players[opp_snap_check_idx], "hand"
                     ):
@@ -1233,7 +1243,7 @@ class SnapLogicMixin:
         # Check discarder last (if eligible and not Cambia caller)
         if (
             discarder_player in potential_indices
-            and discarder_player != self.cambia_caller_id
+            and discarder_player != locked_caller
             and discarder_player != start_check_idx  # Avoid adding twice in 2p game
         ):
             ordered_snappers.append(discarder_player)

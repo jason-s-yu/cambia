@@ -62,9 +62,27 @@ func (g *CambiaGame) dropUnpayableSnapFill(playerID uuid.UUID, engineIdx uint8) 
 	if !owed || int(engineIdx) >= engine.MaxPlayers || g.Engine.Players[engineIdx].HandLen > 0 {
 		return false
 	}
-	log.Printf("Game %s: player %s has no card left to pay the snap fill they owe %s; dropping it.", g.ID, playerID, fill.VictimID)
-	g.clearSnapFill(fill)
+	g.lapseSnapFill(fill, "the snapper has no card left to pay it")
 	return true
+}
+
+// lapseSnapFill drops an obligation that cannot be paid and tells the snapper's client so.
+//
+// No player_snap_move event fires for a lapse: no card moved, and that event is the table's record
+// of one that did. The snapper's client still has to be told, because the prompt it is holding
+// (player_snap_move_required) blocks every other action it can send, and only a snapshot clears it:
+// the obligation is server state, serialized per player in ObfGameState.SnapMoves, and the client
+// re-reads the whole list from every sync (web/src/stores/gameStore.ts). Without one the prompt sat
+// on screen until the next unrelated resync, refusing the player's own input against a debt the
+// server had already written off (cambia-1118).
+//
+// The snapshot goes to the snapper alone: theirs is the only client that acts on the list, and
+// every other seat's copy is corrected by the next sync it takes for any reason.
+// Assumes the lock is held by the caller.
+func (g *CambiaGame) lapseSnapFill(fill *snapFillState, reason string) {
+	log.Printf("Game %s: dropping the snap fill %s owes %s: %s.", g.ID, fill.SnapperID, fill.VictimID, reason)
+	g.clearSnapFill(fill)
+	g.sendSyncState(fill.SnapperID)
 }
 
 // snapFillDuration is how long a snapper has to choose the card they give up. It tracks the turn
@@ -186,8 +204,7 @@ func (g *CambiaGame) autoSnapFill(fill *snapFillState) {
 	handLen := g.Engine.Players[fill.SnapperIdx].HandLen
 	if handLen == 0 {
 		// Nothing left to give: the snapper emptied their hand between the snap and the deadline.
-		log.Printf("Game %s: player %s owes a snap fill with an empty hand; dropping it.", g.ID, fill.SnapperID)
-		g.clearSnapFill(fill)
+		g.lapseSnapFill(fill, "the snapper's hand emptied before the deadline")
 		return
 	}
 	g.applySnapFill(fill, handLen-1, true)
@@ -199,8 +216,17 @@ func (g *CambiaGame) autoSnapFill(fill *snapFillState) {
 func (g *CambiaGame) applySnapFill(fill *snapFillState, ownSlot uint8, auto bool) {
 	snapperIdx, victimIdx := fill.SnapperIdx, fill.VictimIdx
 
+	// A move that cannot be made leaves the obligation open on the interactive path, where the
+	// snapper still holds the prompt and can name another card; on the timeout path it has to lapse,
+	// because the timer that brought it here has already fired and nothing else would ever clear it.
+	// Both branches below are defensive: resolveOwnSlot validates the interactive slot and
+	// autoSnapFill picks the last one it just measured, and the checks above cover every refusal
+	// SnapMoveCard has left to give.
 	if ownSlot >= g.Engine.Players[snapperIdx].HandLen {
 		log.Printf("Game %s: snap fill slot %d out of range for player %s.", g.ID, ownSlot, fill.SnapperID)
+		if auto {
+			g.lapseSnapFill(fill, "the deadline named a slot the snapper no longer holds")
+		}
 		return
 	}
 	// The victim's hand can lock between the snap that opened this obligation and the fill that
@@ -213,16 +239,14 @@ func (g *CambiaGame) applySnapFill(fill *snapFillState, ownSlot uint8, auto bool
 	// The snapper keeps the card they would have given up and their obligation is cleared either
 	// way (cambia-1043).
 	if g.handLocked(victimIdx) {
-		log.Printf("Game %s: player %s's hand is now locked by LockCallerHand; dropping the snap fill owed by %s.", g.ID, fill.VictimID, fill.SnapperID)
-		g.clearSnapFill(fill)
+		g.lapseSnapFill(fill, "the victim's hand is now locked by LockCallerHand")
 		return
 	}
 	victimHandLen := g.Engine.Players[victimIdx].HandLen
 	if victimHandLen >= engine.MaxHandSize {
 		// The victim filled back up on their own (penalty draws) while the fill was outstanding.
 		// There is no slot left to fill, so the obligation lapses rather than overflowing the hand.
-		log.Printf("Game %s: player %s's hand is full; dropping the snap fill owed by %s.", g.ID, fill.VictimID, fill.SnapperID)
-		g.clearSnapFill(fill)
+		g.lapseSnapFill(fill, "the victim's hand is full")
 		return
 	}
 	// The vacated slot is a target, not a promise: the victim's hand may have shrunk since.
@@ -234,6 +258,9 @@ func (g *CambiaGame) applySnapFill(fill *snapFillState, ownSlot uint8, auto bool
 	cardUUID := g.CardTracker.Players[snapperIdx].HandUUIDs[ownSlot]
 	if !g.Engine.SnapMoveCard(snapperIdx, ownSlot, victimIdx, destSlot) {
 		log.Printf("Game %s: engine refused the snap fill from %s slot %d into %s slot %d.", g.ID, fill.SnapperID, ownSlot, fill.VictimID, destSlot)
+		if auto {
+			g.lapseSnapFill(fill, "the engine refused the fill the deadline chose")
+		}
 		return
 	}
 	g.moveTrackerCard(snapperIdx, ownSlot, victimIdx, destSlot)
