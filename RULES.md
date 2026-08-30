@@ -51,7 +51,7 @@ If you believe you have the lowest score, call "Cambia" instead of drawing.
 
 ## 4. Special Abilities
 
-Abilities only trigger when you draw from the **Stockpile** and **discard immediately**.
+Abilities only trigger when you draw from the **Stockpile** and **discard immediately**. Under the `allowReplaceAbilities` house rule, a card with an ability that you replace out of your hand after a stockpile draw also triggers it, and that ability resolves as part of the replace: whether abilities can be invoked this way is the host's setting, not a per-turn choice.
 
 * **7 or 8 (Peek Own):** Look at one of your own hidden cards.
 * **9 or 10 (Peek Other):** Look at one of an opponent's hidden cards.
@@ -79,7 +79,7 @@ After a "Cambia" call and the final round:
 Cambia allows for game hosts to customize certain key parameters of the game.
 
 * `allowDrawFromDiscardPile` (true/false): are players allowed to draw the top card from the discard pile (which is face-up and thus public information)?
-* `allowReplaceAbilities` (true/false): can players invoke card abilities when they are played from the hand? If true, players can intentionally keep expensive ability cards for information payoffs later in the game.
+* `allowReplaceAbilities` (true/false): can players invoke card abilities when they are played from the hand? If true, players can intentionally keep expensive ability cards for information payoffs later in the game. The setting is the gate: once it is on, the ability of a card replaced out of the hand after a stockpile draw resolves as part of that replace and is not declined per instance (a Jack or Queen replaced out performs its blind swap).
 * `lockCallerHand` (true/false): upon calling "Cambia," is that player's hand "locked" and protected from any action?
 * `snapRace` (true/false): is a successful snap given only to the first person who snaps the card?
 * `useJokers` (true/false): are jokers included in the deck?
