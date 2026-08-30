@@ -11,13 +11,16 @@ import os
 import random
 import warnings
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, NamedTuple, Optional, Tuple
 
 import cffi
 import numpy as np
 
+from src.card import Card
 from src.config import CambiaRulesConfig
 from src.constants import (
+    ALL_RANKS_STR,
+    JOKER_RANK_STR,
     N_PLAYER_INPUT_DIM as _GO_N_PLAYER_INPUT_DIM,
     N_PLAYER_NUM_ACTIONS as _GO_N_PLAYER_NUM_ACTIONS,
 )
@@ -116,6 +119,170 @@ def extract_deck_from_python_game(game) -> Tuple[List[int], int]:
 
     starting_player = getattr(game, "current_player_index", 0)
     return deck_indices, starting_player
+
+
+# ---------------------------------------------------------------------------
+# Evaluation surface: decoded records (cambia-1425)
+# ---------------------------------------------------------------------------
+#
+# The eval-surface exports in engine/cgo/exports.go hand back packed byte
+# records. The constants and NamedTuples below decode them; the field layouts
+# are documented on the Go side and mirrored here field for field. GoEngine's
+# accessors return these, and cfr/src/agents/game_view.py names them in the
+# GameView protocol an agent is written against.
+
+# "No card here" / "field does not apply" marker in every packed record
+# (engine/cgo/exports.go cardIndexNone).
+CARD_INDEX_NONE = 0xFF
+
+# Canonical card index space: suit*13 + rank, then 52 = red joker, 53 = black
+# joker. Same encoding python_card_to_go_index emits and
+# cambia_game_new_with_deck consumes.
+NUM_CARD_INDICES = 54
+
+# Packed record widths (engine/cgo/exports.go evalPendingFields /
+# evalSnapFields / evalHouseRuleFields).
+PENDING_FIELDS = 10
+SNAP_FIELDS = 6
+HOUSE_RULE_FIELDS = 14
+
+# engine.MaxDeckSize: the largest a discard pile can ever get (4 decks).
+MAX_DECK_SIZE = 216
+
+# engine.PendingType values.
+PENDING_NONE = 0
+PENDING_DISCARD = 1
+PENDING_PEEK_OWN = 2
+PENDING_PEEK_OTHER = 3
+PENDING_BLIND_SWAP = 4
+PENDING_KING_LOOK = 5
+PENDING_KING_DECISION = 6
+PENDING_SNAP_MOVE = 7
+
+# engine.DrawnFromStockpile / engine.DrawnFromDiscard.
+DRAWN_FROM_STOCKPILE = 0
+DRAWN_FROM_DISCARD = 1
+
+# Go rank index -> Python rank string. ALL_RANKS_STR is already in the engine's
+# rank order (A=0, 2..9, T, J, Q, K, R=13), so it doubles as the decode table.
+_RANK_BY_INDEX: Tuple[str, ...] = tuple(ALL_RANKS_STR)
+
+# Canonical suit offset -> Python suit letter; the inverse of SUIT_OFFSET.
+_SUIT_BY_OFFSET: Tuple[str, ...] = ("C", "D", "H", "S")
+
+
+def _build_card_table() -> Tuple[Card, ...]:
+    """Build the interned canonical-index -> Card table.
+
+    Card carries a per-instance uuid from a default_factory, so constructing
+    one per card per accessor call would put uuid4 generation in the eval inner
+    loop. The table is built once at import and handed out by reference. That
+    is safe because Card is a frozen dataclass whose id is excluded from both
+    comparison and repr, so nothing downstream can tell an interned card from a
+    freshly built one, or mutate the shared instance.
+
+    Indices 52 and 53 are the red and black jokers. Python's Card has no joker
+    suit (the constructor rejects one), and the Python rules give both jokers
+    value 0, so both indices decode to an equal-comparing suit-less joker.
+    """
+    cards = []
+    for idx in range(NUM_CARD_INDICES):
+        if idx >= 52:
+            cards.append(Card(rank=JOKER_RANK_STR))
+        else:
+            cards.append(
+                Card(rank=_RANK_BY_INDEX[idx % 13], suit=_SUIT_BY_OFFSET[idx // 13])
+            )
+    return tuple(cards)
+
+
+_CARD_BY_INDEX: Tuple[Card, ...] = _build_card_table()
+
+
+def card_from_index(idx: int) -> Optional[Card]:
+    """Decode a canonical card index to a Card, or None for the absent marker.
+
+    Returns None for CARD_INDEX_NONE and for any index outside [0, 54), so a
+    caller can pass a raw record byte straight through.
+    """
+    if idx < 0 or idx >= NUM_CARD_INDICES:
+        return None
+    return _CARD_BY_INDEX[idx]
+
+
+def rank_from_index(rank_idx: int) -> Optional[str]:
+    """Decode a Go rank index (A=0..K=12, joker=13) to a Python rank string."""
+    if rank_idx < 0 or rank_idx >= len(_RANK_BY_INDEX):
+        return None
+    return _RANK_BY_INDEX[rank_idx]
+
+
+class PendingInfo(NamedTuple):
+    """The pending decision the game is waiting on, if any.
+
+    Replaces the Python engine's pending_action / pending_action_player /
+    pending_action_data trio with named fields. Every field that does not apply
+    to the current pending type is None; with type == PENDING_NONE they all
+    are.
+    """
+
+    type: int
+    seat: Optional[int]
+    drawn_card: Optional[Card]
+    drawn_from: Optional[int]
+    own_slot: Optional[int]
+    target_slot: Optional[int]
+    target_seat: Optional[int]
+    own_card: Optional[Card]
+    target_card: Optional[Card]
+
+    @property
+    def is_pending(self) -> bool:
+        """True when the game owes a pending decision."""
+        return self.type != PENDING_NONE
+
+
+class SnapInfo(NamedTuple):
+    """The open snap window, if any.
+
+    ``card`` is the card on top of the discard pile while the window is open.
+    Its rank always equals ``rank``, which is what snap legality turns on. Under
+    a multi-snapper window a successful snap pushes its own matching card on
+    top, so the suit is the most recently discarded card of the snap rank, not
+    necessarily the one that opened the window; treat it as advisory (it
+    separates a red King from a black one).
+    """
+
+    active: bool
+    rank: Optional[str]
+    card: Optional[Card]
+    snapper_count: int
+    snapper_cursor: int
+    snapper_seat: Optional[int]
+
+
+class HouseRulesView(NamedTuple):
+    """The live house rules, read back off the engine.
+
+    Field names are snake_case throughout, unlike the Python-side
+    CambiaRulesConfig, whose names are half camelCase. num_players is the
+    effective seat count, so a rules struct built with the 0 sentinel reads
+    back as 2.
+    """
+
+    max_game_turns: int
+    cards_per_player: int
+    cambia_allowed_round: int
+    penalty_draw_count: int
+    allow_draw_from_discard: bool
+    allow_replace_abilities: bool
+    allow_opponent_snapping: bool
+    snap_race: bool
+    num_jokers: int
+    lock_caller_hand: bool
+    num_players: int
+    initial_view_count: int
+    num_decks: int
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +430,17 @@ _ffi.cdef("""
     int32_t cambia_token_encode_action(uint16_t action_idx);
     int32_t cambia_token_stream_cap(void);
     int32_t cambia_tokenizer_version(void);
+
+    /* Evaluation surface: read-only game inspection (cambia-1425) */
+    int32_t cambia_game_get_hand(int32_t game_h, uint8_t seat,
+                                 uint8_t *out_buf, int32_t buf_len);
+    int32_t cambia_game_discard_len(int32_t game_h);
+    int32_t cambia_game_get_discard_pile(int32_t game_h, uint8_t *out_buf,
+                                         int32_t buf_len);
+    int32_t cambia_game_discard_top_card(int32_t game_h);
+    int32_t cambia_game_get_pending(int32_t game_h, uint8_t *out_buf, int32_t buf_len);
+    int32_t cambia_game_get_snap_state(int32_t game_h, uint8_t *out_buf, int32_t buf_len);
+    int32_t cambia_game_get_house_rules(int32_t game_h, uint8_t *out_buf, int32_t buf_len);
 """)
 
 _LIB = None
@@ -666,6 +844,203 @@ class GoEngine:
                 3=SnapDecision, 4=SnapMove, 5=Terminal.
         """
         return int(self._lib.cambia_game_decision_ctx(self._game_h))
+
+    # --- Evaluation surface (cambia-1425) ---
+    #
+    # Read-only accessors covering what an eval-time agent used to read off the
+    # Python reference engine as plain attributes. Together with the belief
+    # getters on GoAgentState they make GoEngine + GoAgentState a sufficient
+    # surface for an agent. cfr/src/agents/game_view.py names them in the
+    # GameView protocol; see it for what an agent is allowed to reach for.
+    #
+    # Buffers are allocated on first use rather than in __init__ so that the
+    # throughput paths (CFR traversal, batch apply), which never touch these,
+    # pay nothing for them, and so _from_handle-built views get them too.
+
+    def _view_bufs(self) -> dict:
+        """Return this engine's lazily-allocated eval-surface scratch buffers."""
+        bufs = getattr(self, "_eval_bufs", None)
+        if bufs is None:
+            bufs = {
+                "hand": _ffi.new(f"uint8_t[{self.MAX_HAND_SIZE}]"),
+                "pile": _ffi.new(f"uint8_t[{MAX_DECK_SIZE}]"),
+                "pending": _ffi.new(f"uint8_t[{PENDING_FIELDS}]"),
+                "snap": _ffi.new(f"uint8_t[{SNAP_FIELDS}]"),
+                "rules": _ffi.new(f"uint8_t[{HOUSE_RULE_FIELDS}]"),
+            }
+            self._eval_bufs = bufs
+        return bufs
+
+    def num_players(self) -> int:
+        """Return the number of seats in this game, read off the engine."""
+        n = int(self._lib.cambia_game_num_players(self._game_h))
+        if n == 0:
+            raise RuntimeError(
+                f"cambia_game_num_players returned 0 on handle {self._game_h}"
+            )
+        return n
+
+    def get_hand_indices(self, seat: int) -> List[int]:
+        """Return a seat's hand as canonical card indices, slot 0 first.
+
+        The list is truncated to the seat's hand length, so it never contains
+        the CARD_INDEX_NONE marker. Prefer this over get_player_hand where the
+        caller works in index space and does not need Card objects.
+        """
+        if seat < 0 or seat > 0xFF:
+            # The export takes a uint8_t seat; a negative one would surface as
+            # a cffi OverflowError rather than a seat-range error.
+            raise ValueError(f"seat {seat} out of range")
+        bufs = self._view_bufs()
+        hand_len = int(
+            self._lib.cambia_game_get_hand(
+                self._game_h, seat, bufs["hand"], self.MAX_HAND_SIZE
+            )
+        )
+        if hand_len < 0:
+            raise RuntimeError(
+                f"cambia_game_get_hand failed (returned {hand_len}) for seat {seat} "
+                f"on handle {self._game_h}"
+            )
+        return [int(bufs["hand"][s]) for s in range(hand_len)]
+
+    def get_player_hand(self, seat: int) -> List[Card]:
+        """Return a seat's true hand as Card objects, slot 0 first.
+
+        The Go counterpart of the Python engine's
+        CambiaGameState.get_player_hand: ground truth, which is what the
+        perfect-information baselines and any best-response search read. What a
+        seat *believes* about its own or another seat's slots is a different
+        surface, carried by GoAgentState (get_own_hand_buckets_and_seen /
+        get_opp_belief_buckets); an imperfect-information agent reads that one
+        and consults this accessor only at the moments the rules reveal a card
+        to it.
+        """
+        return [_CARD_BY_INDEX[idx] for idx in self.get_hand_indices(seat)]
+
+    def discard_len(self) -> int:
+        """Return the number of cards in the discard pile."""
+        n = int(self._lib.cambia_game_discard_len(self._game_h))
+        if n < 0:
+            raise RuntimeError(
+                f"cambia_game_discard_len failed (returned {n}) on handle {self._game_h}"
+            )
+        return n
+
+    def get_discard_pile_indices(self) -> List[int]:
+        """Return the whole discard pile as canonical card indices.
+
+        Bottom card first, so the last entry is the top of the pile, matching
+        the Python engine's discard_pile list order.
+        """
+        bufs = self._view_bufs()
+        n = int(
+            self._lib.cambia_game_get_discard_pile(
+                self._game_h, bufs["pile"], MAX_DECK_SIZE
+            )
+        )
+        if n < 0:
+            raise RuntimeError(
+                f"cambia_game_get_discard_pile failed (returned {n}) "
+                f"on handle {self._game_h}"
+            )
+        return [int(bufs["pile"][i]) for i in range(n)]
+
+    def get_discard_pile(self) -> List[Card]:
+        """Return the whole discard pile as Card objects, bottom card first."""
+        return [_CARD_BY_INDEX[idx] for idx in self.get_discard_pile_indices()]
+
+    def get_discard_top(self) -> Optional[Card]:
+        """Return the top discard as a Card, or None if the pile is empty.
+
+        Distinct from discard_top(), which returns the lossy CardBucket: snap
+        matching and card counting need the rank and suit the bucket drops.
+        """
+        return card_from_index(int(self._lib.cambia_game_discard_top_card(self._game_h)))
+
+    def get_pending(self) -> PendingInfo:
+        """Return the pending decision record (see PendingInfo)."""
+        bufs = self._view_bufs()
+        rc = int(
+            self._lib.cambia_game_get_pending(
+                self._game_h, bufs["pending"], PENDING_FIELDS
+            )
+        )
+        if rc < 0:
+            raise RuntimeError(
+                f"cambia_game_get_pending failed (returned {rc}) "
+                f"on handle {self._game_h}"
+            )
+        rec = bufs["pending"]
+
+        def _slot(i: int) -> Optional[int]:
+            v = int(rec[i])
+            return None if v == CARD_INDEX_NONE else v
+
+        return PendingInfo(
+            type=int(rec[0]),
+            seat=_slot(1),
+            drawn_card=card_from_index(int(rec[2])),
+            drawn_from=_slot(3),
+            own_slot=_slot(4),
+            target_slot=_slot(5),
+            target_seat=_slot(6),
+            own_card=card_from_index(int(rec[7])),
+            target_card=card_from_index(int(rec[8])),
+        )
+
+    def get_snap_state(self) -> SnapInfo:
+        """Return the open snap-window record (see SnapInfo)."""
+        bufs = self._view_bufs()
+        rc = int(
+            self._lib.cambia_game_get_snap_state(self._game_h, bufs["snap"], SNAP_FIELDS)
+        )
+        if rc < 0:
+            raise RuntimeError(
+                f"cambia_game_get_snap_state failed (returned {rc}) "
+                f"on handle {self._game_h}"
+            )
+        rec = bufs["snap"]
+        active = int(rec[0]) == 1
+        seat = int(rec[5])
+        return SnapInfo(
+            active=active,
+            rank=rank_from_index(int(rec[1])) if active else None,
+            card=card_from_index(int(rec[2])),
+            snapper_count=int(rec[3]),
+            snapper_cursor=int(rec[4]),
+            snapper_seat=None if seat == CARD_INDEX_NONE else seat,
+        )
+
+    def get_house_rules(self) -> HouseRulesView:
+        """Return the live house rules (see HouseRulesView)."""
+        bufs = self._view_bufs()
+        rc = int(
+            self._lib.cambia_game_get_house_rules(
+                self._game_h, bufs["rules"], HOUSE_RULE_FIELDS
+            )
+        )
+        if rc < 0:
+            raise RuntimeError(
+                f"cambia_game_get_house_rules failed (returned {rc}) "
+                f"on handle {self._game_h}"
+            )
+        rec = bufs["rules"]
+        return HouseRulesView(
+            max_game_turns=int(rec[0]) | (int(rec[1]) << 8),
+            cards_per_player=int(rec[2]),
+            cambia_allowed_round=int(rec[3]),
+            penalty_draw_count=int(rec[4]),
+            allow_draw_from_discard=bool(rec[5]),
+            allow_replace_abilities=bool(rec[6]),
+            allow_opponent_snapping=bool(rec[7]),
+            snap_race=bool(rec[8]),
+            num_jokers=int(rec[9]),
+            lock_caller_hand=bool(rec[10]),
+            num_players=int(rec[11]),
+            initial_view_count=int(rec[12]),
+            num_decks=int(rec[13]),
+        )
 
     def _get_all_cards_unsafe(self) -> np.ndarray:
         """Return a packed uint8 array of bucket indices for every slot in
