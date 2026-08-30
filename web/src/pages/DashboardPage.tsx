@@ -20,7 +20,7 @@ import { joinLobby as apiJoinPublicLobby, getActiveSession } from '@/services/lo
 import type { QueueInfo } from '@/services/matchmakingService';
 import type { ActiveSession, ApiErrorResponse, LobbyState } from '@/types';
 import { gameModeLabel } from '@/utils/gameMode';
-import { ratingPoolLabel, tierFromRating } from '@/utils/ratingPool';
+import { queuePoolLabel, ratingPoolLabel, tierFromRating } from '@/utils/ratingPool';
 
 /**
  * Queues considered "flagship" for the primary/highlighted card treatment. This is a display
@@ -324,7 +324,7 @@ const DashboardPage: React.FC = () => {
                   players={queue.players}
                   rounds={queue.rounds}
                   minutes={estimateMinutes(queue)}
-                  pool={queue.ratingPool}
+                  pool={queuePoolLabel(queue.ratingPool)}
                   primary={PRIMARY_QUEUE_IDS.has(queue.queueId)}
                   ranked={queue.ranked}
                   onPlay={() => handlePlayQueue(queue)}

@@ -23,6 +23,26 @@ export function ratingPoolLabel(pool: string): string {
 	return POOL_LABELS[pool] ?? pool;
 }
 
+/**
+ * Matchmaking queue pool identifiers (QueueConfig.RatingPool in
+ * service/internal/matchmaking/validation.go). Distinct id space from RatingPool above:
+ * these group queues for matchmaking/rating-update purposes (h2h_qp is the hidden-rating
+ * quickplay pool, separate from the visible h2h_ranked pool), they are not the '1v1' /
+ * '4p' / '7p8p' leaderboard pool ids returned by the ratings summary endpoint.
+ */
+export type QueuePoolId = 'h2h_qp' | 'h2h_ranked' | 'ffa4';
+
+const QUEUE_POOL_LABELS: Record<string, string> = {
+	h2h_qp: 'H2H Quickplay pool',
+	h2h_ranked: 'H2H Ranked pool',
+	ffa4: 'FFA-4 pool'
+};
+
+/** Maps a matchmaking queue's rating pool id to a player-readable label. */
+export function queuePoolLabel(pool: string): string {
+	return QUEUE_POOL_LABELS[pool] ?? pool;
+}
+
 const TIER_CUTOFFS: Array<[number, Tier]> = [
 	[2000, 'grandmaster'],
 	[1850, 'master'],

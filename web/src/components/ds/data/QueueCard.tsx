@@ -9,7 +9,7 @@ export interface QueueCardProps {
   rounds?: number;
   /** Estimated match length in minutes. */
   minutes?: number;
-  /** Rating pool label, e.g. "Glicko-2" or "OpenSkill". */
+  /** Player-readable rating pool label, e.g. "H2H Ranked pool" or "FFA-4 pool". */
   pool?: string;
   /** Primary queue: gold border + gold Ranked badge + gold Play. */
   primary?: boolean;
