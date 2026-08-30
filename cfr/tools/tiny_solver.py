@@ -64,6 +64,9 @@ from src.sequence_encoding import encode_observation_sequence
 # builders sort a node's legal actions by repr), which is what makes the two
 # trees agree to the bit rather than to float64 summation noise.
 _GO_ACTION_BY_INDEX = None
+# The same map the other way, so the hot apply path translates a GameAction to
+# its FFI index with a dict lookup instead of a call back into encoding.
+_GO_INDEX_BY_ACTION = {}
 
 
 def _go_action_table():
@@ -126,6 +129,7 @@ def _go_action_table():
             )
 
     table = [None] * NUM_ACTIONS
+    reverse = {}
     for action in variants:
         idx = action_to_index(action)
         if table[idx] is not None:
@@ -134,7 +138,9 @@ def _go_action_table():
                 f"both map to {idx}"
             )
         table[idx] = action
+        reverse[action] = idx
     _GO_ACTION_BY_INDEX = tuple(table)
+    _GO_INDEX_BY_ACTION.update(reverse)
     return _GO_ACTION_BY_INDEX
 
 
@@ -858,6 +864,10 @@ class GoBuilder:
         self.reshuffle_draws = 0
         self.rebuilds = 0
         self.unchecked_draws = 0
+        # Actions the legal mask offered that the engine then refused. Should be 0:
+        # a non-zero count means the mask and the apply path disagree, and the
+        # builder stubbed a whole subtree out as a zero-utility Terminal.
+        self.rejected_actions = 0
         self.eng = None
         self.a0 = None
         self.a1 = None
@@ -866,6 +876,8 @@ class GoBuilder:
 
     def open(self):
         from src.ffi.bridge import GoAgentState, GoEngine
+
+        _go_action_table()  # prime the index maps before the first apply
 
         self.eng = GoEngine.from_deck(self.deck, self.starting_player, self.rules)
         self.a0 = GoAgentState(self.eng, 0)
@@ -907,10 +919,8 @@ class GoBuilder:
         ``action`` is a GameAction (the node contract); the FFI is index-native,
         so it is translated here, at the boundary, and nowhere else.
         """
-        from src.encoding import action_to_index
-
         self.bridge.apply_games_batch(
-            [eng.handle], [a0.handle], [a1.handle], [action_to_index(action)]
+            [eng.handle], [a0.handle], [a1.handle], [_GO_INDEX_BY_ACTION[action]]
         )
 
     def _materialize(self, deck, prefix):
@@ -994,14 +1004,14 @@ class GoBuilder:
         if self.tokenize:
             node.seq_tokens = self._tokens(acting)
 
+        can_enumerate = (
+            self.enumerate_draws
+            and self.reshuffles_on_path == 0
+            and self.eng.stock_len() > 0
+        )
         for action in legal:
             is_draw = isinstance(action, ActionDrawStockpile)
-            enumerable = (
-                self.enumerate_draws
-                and is_draw
-                and self.eng.stock_len() > 0
-                and self.reshuffles_on_path == 0
-            )
+            enumerable = can_enumerate and is_draw
             if enumerable:
                 node.children.append(self._draw_chance(action, acting, depth))
             else:
@@ -1026,8 +1036,13 @@ class GoBuilder:
         m = len(self.deck) - stock
         tail = self.deck[m:]
         total = len(tail)
+        # Distinct cards in Builder._draw_chance's insertion order, so the two
+        # backends lay a chance node's children out identically and the reductions
+        # in _cfr / _policy_value / _br_eval sum the same terms in the same order.
+        # The Python engine's stockpile list holds the next-drawn card LAST and it
+        # iterates the list front to back, which is the deck suffix reversed.
         counts = {}
-        for c in tail:
+        for c in reversed(tail):
             counts[c] = counts.get(c, 0) + 1
         saved = list(self.deck)
         for card, cnt in counts.items():
@@ -1058,17 +1073,22 @@ class GoBuilder:
             try:
                 self._apply_raw(self.eng, self.a0, self.a1, action)
             except RuntimeError:
-                # The engine rejected the action for this state. Builder._apply_one
-                # returns a zero-utility Terminal stub in the same situation (a
-                # non-callable undo); mirrored so the two trees agree on shape.
+                # The engine refused an action its own legal mask offered.
+                # Builder._apply_one returns a zero-utility Terminal stub in the
+                # same situation (a non-callable undo), so the shape is mirrored --
+                # but the stub silently replaces a whole subtree, so it is counted
+                # and build_tree_go warns on any non-zero total.
+                self.rejected_actions += 1
                 self.bridge.state_restore(
                     self.eng.handle, snap, self.a0.handle, self.a1.handle
                 )
                 return Terminal((0.0, 0.0))
 
-            stock_after = self.eng.stock_len()
-            m_after = len(self.deck) - stock_after
-            recycled = stock_after > stock_before or m_after < m_before
+            # The stockpile only ever grows by a reshuffle: engine/actions.go
+            # attemptReshuffle recycles the discard pile when a draw finds it
+            # empty. That is where the deck-order channel dies, so the flag fences
+            # off draw enumeration for the rest of this path.
+            recycled = self.eng.stock_len() > stock_before
 
             pend = self.eng.get_pending()
             drawn = pend.drawn_card if pend.seat == acting else None
@@ -1143,8 +1163,8 @@ def build_tree_go(
     ``stats`` (optional dict) receives the build's diagnostics --
     ``unenumerated_draws`` (draw points the deck channel could not enumerate,
     i.e. downstream of a reshuffle), ``reshuffle_draws`` (transitions where the
-    engine recycled the discard pile), ``rebuilds`` (deck-surgery replays) and
-    ``unchecked_draws``. A non-zero ``unenumerated_draws`` means the tree carries
+    engine recycled the discard pile), ``rebuilds`` (deck-surgery replays),
+    ``unchecked_draws`` and ``rejected_actions``. A non-zero ``unenumerated_draws`` means the tree carries
     chance points collapsed onto one engine-sampled outcome; read that count
     before trusting any exactness claim about the tree.
     """
@@ -1173,6 +1193,7 @@ def build_tree_go(
         "reshuffle_draws": 0,
         "rebuilds": 0,
         "unchecked_draws": 0,
+        "rejected_actions": 0,
     }
     for deck, starting_player in go_deal_decks(cfg, n_deals, seed0):
         b = GoBuilder(
@@ -1202,11 +1223,41 @@ def build_tree_go(
         agg["reshuffle_draws"] += b.reshuffle_draws
         agg["rebuilds"] += b.rebuilds
         agg["unchecked_draws"] += b.unchecked_draws
+        agg["rejected_actions"] += b.rejected_actions
     s = sum(root.weights)
     root.weights = [w / s for w in root.weights]
     if exact_weights:
         k = len(root.children)
         root.wfrac = [Fraction(1, k)] * k
+    if agg["rejected_actions"]:
+        warnings.warn(
+            f"build_tree_go: the engine refused {agg['rejected_actions']} actions "
+            "its own legal mask offered, and each one stubbed a subtree out as a "
+            "zero-utility Terminal. The mask and the apply path disagree; the tree "
+            "is wrong wherever that happened.",
+            stacklevel=2,
+        )
+    if agg["unchecked_draws"]:
+        warnings.warn(
+            f"build_tree_go: {agg['unchecked_draws']} enumerated draws left no "
+            "pending record to read the drawn card back from, so neither the deck "
+            "channel nor the acting seat's private-draw key component could be "
+            "validated at those nodes (build_tree_python's priv_draw guard has the "
+            "same blind spot). The tree is only as trustworthy as that count is "
+            "small; it is 0 on config/tiny_norecall.yaml and "
+            "config/tiny_2card_plateau.yaml.",
+            stacklevel=2,
+        )
+    if agg["unenumerated_draws"]:
+        warnings.warn(
+            f"build_tree_go: {agg['unenumerated_draws']} draw points could not be "
+            f"enumerated ({agg['reshuffle_draws']} transitions recycled the discard "
+            "pile). Downstream of a reshuffle the stockpile corresponds to no deck "
+            "suffix and the FFI exposes no way to order it, so those chance points "
+            "collapse onto the one outcome the engine's own RNG produced. NashConv "
+            "on this tree is exact FOR this tree, not for the game.",
+            stacklevel=2,
+        )
     if stats is not None:
         stats.update(agg)
     return root, all_isets, total_nodes, aborted_deals

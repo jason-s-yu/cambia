@@ -99,7 +99,19 @@ def _build(config, backend, deals=5, **kw):
 
 
 def _profile(root):
-    """Structural fingerprint of a tree, independent of key representation."""
+    """Aggregate fingerprint of a tree, independent of key representation.
+
+    Multisets, not shape: node kinds, per-seat decision counts, action-count and
+    chance-fan histograms, and the sorted terminal utilities. It deliberately does
+    NOT compare the two trees node-for-node in traversal order, because the child
+    ORDER of a nested chance node cannot be matched. build_tree_python's
+    _draw_chance forces a card to the top by popping it out of its own stockpile
+    LIST and appending it, so a chance node deeper in that subtree enumerates over
+    an already-permuted list; the Go builder's order comes from its deck array.
+    Both enumerate the same cards with the same weights, in a different order. The
+    invariants that matter -- counts, partition size, and NashConv -- are asserted
+    separately.
+    """
     kinds = {"T": 0, "C": 0, "D": 0}
     acting = {}
     nA = {}
@@ -239,6 +251,9 @@ def test_control_config_go_build_enumerates_every_draw():
     assert stats["unenumerated_draws"] == 0
     assert stats["reshuffle_draws"] == 0
     assert stats["unchecked_draws"] == 0
+    # And the engine never refused an action its own legal mask offered, which
+    # would have stubbed a whole subtree out as a zero-utility Terminal.
+    assert stats["rejected_actions"] == 0
 
 
 @requires_lib
@@ -248,13 +263,15 @@ def test_control_config_nashconv_matches_across_backends():
     The AC2 check the {A,6} tree cannot support: on the config where the two trees
     ARE the same tree, the solver and the exploitability certifier must agree.
 
-    Agreement is to float64 summation noise, NOT bit for bit. The two builders
-    order a node's children differently -- build_tree_python sorts legal actions by
-    repr(action) and enumerates draw children in its stockpile-list order, the Go
-    builder sorts by ascending action index and enumerates in deck order -- so the
-    reductions in _cfr / _policy_value / _br_eval accumulate the same terms in a
-    different order. The observed gap is ~1e-13 relative, ten orders of magnitude
-    below the X2 bar's decision scale.
+    Agreement is asserted to a tolerance, not bit for bit. Both builders sort a
+    decision node's legal actions by repr(action), but a nested chance node's child
+    order cannot be matched: build_tree_python forces a card to the top by popping
+    it out of its own stockpile LIST and appending it, so deeper chance nodes in
+    that subtree enumerate an already-permuted list. Same cards, same weights,
+    different order, so the reductions in _cfr / _policy_value / _br_eval sum the
+    same terms in a different order. The measured gap is at or below ~1e-13
+    relative -- ten orders of magnitude under the X2 bar's decision scale -- and at
+    60 iterations the two happen to land bit-identical.
     """
     results = {}
     for backend in ("go", "python"):
@@ -397,6 +414,9 @@ def test_a6_tree_divergence_is_diagnosed():
     assert stats["unenumerated_draws"] == 4594
     assert stats["reshuffle_draws"] == 14518
     assert stats["unchecked_draws"] == 0
+    # The gap is the enumeration channel, not engine disagreement: nothing the
+    # legal mask offered was refused by the apply path.
+    assert stats["rejected_actions"] == 0
 
 
 # ---------------------------------------------------------------------------
