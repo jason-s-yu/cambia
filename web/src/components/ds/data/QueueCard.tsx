@@ -47,11 +47,13 @@ const QueueCard: React.FC<QueueCardProps> = ({
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 'var(--ds-text-lg)', fontWeight: 'var(--weight-bold)', letterSpacing: 'var(--ds-tracking-tight)', lineHeight: 'var(--ds-leading-tight)' }}>{name}</div>
-          {tagline && <div style={{ fontSize: 'var(--ds-text-xs)', color: 'var(--text-secondary)', marginTop: 2 }}>{tagline}</div>}
+          {tagline && <div style={{ fontSize: 'var(--ds-text-sm)', color: 'var(--text-secondary)', marginTop: 2 }}>{tagline}</div>}
         </div>
         {ranked ? <Badge tone={primary ? 'gold' : 'warning'}>Ranked</Badge> : <Badge>Casual</Badge>}
       </div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', minWidth: 0, gap: '4px 14px', fontSize: 'var(--ds-text-xs)', fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
+      {/* The facts row is what a player compares queues on, so it reads at the
+          body size rather than the scale's floor (cambia-1097). */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', minWidth: 0, gap: '4px 14px', fontSize: 'var(--ds-text-sm)', fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
         <span>{players}p</span>
         <span>
           {rounds} {rounds === 1 ? 'round' : 'rounds'}

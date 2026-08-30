@@ -182,9 +182,12 @@ const Modal: React.FC<ModalProps> = ({ open = true, title, onClose, footer, init
     >
       <div style={{ flex: '0 0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px 12px' }}>
         {/* The title is the dialog's name, so it is a heading with an id, not a
-            styled div; an omitted title falls back to aria-label. */}
+            styled div; an omitted title falls back to aria-label. Sized with
+            Panel's title (cambia-1097): a dialog is a bounded surface the same
+            way a panel is, and its own sections draw at --text-md, so the two
+            surfaces would otherwise open their contents at different ranks. */}
         {title
-          ? <h2 id={titleId} style={{ margin: 0, fontSize: 'var(--ds-text-lg)', fontWeight: 'var(--weight-bold)', letterSpacing: 'var(--ds-tracking-tight)', color: 'var(--text-primary)', lineHeight: 'var(--ds-leading-tight)' }}>{title}</h2>
+          ? <h2 id={titleId} style={{ margin: 0, fontSize: 'var(--ds-text-xl)', fontWeight: 'var(--weight-bold)', letterSpacing: 'var(--ds-tracking-tight)', color: 'var(--text-primary)', lineHeight: 'var(--ds-leading-tight)' }}>{title}</h2>
           : <span></span>}
         {onClose && (
           <button

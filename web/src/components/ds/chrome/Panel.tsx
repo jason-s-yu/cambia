@@ -1,8 +1,24 @@
 import React from 'react';
-import { EYEBROW } from '../eyebrow';
+
+/**
+ * Panel title (cambia-1097). Was the shared EYEBROW: uppercase, cap-tracked and
+ * --text-2xs, the same style the field labels inside the panel use, so the card
+ * had no heading a scan could land on and a rule sheet read as one undivided
+ * run of small caps. It is a heading now: sentence case, --ds-text-xl, primary
+ * text, over a hairline that closes the header band and opens the body. It is
+ * the outermost rank on a page, so it sits a step above the --ds-text-lg
+ * headings a panel's own sections use.
+ */
+const PANEL_TITLE: React.CSSProperties = {
+  fontSize: 'var(--ds-text-xl)',
+  fontWeight: 'var(--weight-bold)',
+  letterSpacing: 'var(--ds-tracking-tight)',
+  lineHeight: 'var(--ds-leading-tight)',
+  color: 'var(--text-primary)'
+};
 
 export interface PanelProps {
-  /** Uppercase eyebrow heading. Omit for a bare card. */
+  /** Section heading. Omit for a bare card. */
   title?: string;
   /** Right-aligned header slot (e.g. a Button or legend). */
   action?: React.ReactNode;
@@ -27,8 +43,19 @@ const Panel: React.FC<PanelProps> = ({ title, action, children, style }) => {
       }}
     >
       {(title || action) && (
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 'var(--space-3)' }}>
-          <h3 style={{ margin: 0, ...EYEBROW }}>{title}</h3>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 12,
+            minHeight: 'var(--control-h-sm)',
+            marginBottom: 'var(--space-4)',
+            paddingBottom: 'var(--space-3)',
+            borderBottom: '1px solid var(--border-default)'
+          }}
+        >
+          <h3 style={{ margin: 0, ...PANEL_TITLE }}>{title}</h3>
           {action}
         </div>
       )}

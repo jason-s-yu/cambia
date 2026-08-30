@@ -70,7 +70,14 @@ const SEMANTIC = [
     'status-danger', 'status-danger-bg', 'status-danger-border',
     'status-warning', 'status-warning-bg', 'status-warning-border',
     'status-info', 'status-info-bg', 'status-info-border',
-    'card-face', 'card-face-edge', 'card-back', 'card-back-line', 'card-targetable-ring', 'suit-red',
+    // The three tokens a face-down card is actually painted with (cambia-1096)
+    // rode outside this list until cambia-1097, so the plate, its crosshatch and
+    // its silhouette were the one part of the card language nothing checked
+    // resolved or moved between themes. --card-back is the legacy name they
+    // replaced, now aliased onto the plate.
+    'card-face', 'card-face-edge', 'card-back', 'card-back-line',
+    'card-back-fill', 'card-back-pattern', 'card-back-edge',
+    'card-targetable-ring', 'suit-red',
     'tier-bronze', 'tier-silver', 'tier-gold', 'tier-platinum', 'tier-diamond', 'tier-master', 'tier-grandmaster'
 ];
 
