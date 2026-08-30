@@ -19,6 +19,10 @@
 /** One entry of GET /lobby/presets, in the shape this module reads it. */
 export interface PresetOption {
   id: string;
+  /** Display name, which the sheet shows in place of the id. Always sent (lobby/presets.go). */
+  name: string;
+  /** One line about the ruleset, shown under the host's select. */
+  description: string;
   /** Empty for the default preset, which fixes no player count. */
   gameMode?: string;
   houseRules: unknown;
@@ -90,4 +94,77 @@ export function resolvePresetId(presets: PresetOption[], subject: LobbyRuleSubje
   const recorded = subject.presetId;
   if (recorded && presets.some((p) => p.id === recorded)) return recorded;
   return presets.find((p) => presetFitsLobby(p, subject))?.id ?? null;
+}
+
+/** Label for a sheet that is nobody's preset, in the select and on a read-only row alike. */
+export const CUSTOM_PRESET_LABEL = 'Custom';
+
+/** One entry of the host's Ruleset select. */
+export interface RulesetChoice {
+  value: string;
+  label: string;
+}
+
+/**
+ * What the rule sheet's Ruleset row shows.
+ *
+ * `none` is having no preset list to answer with, which is not the same as being on no preset:
+ * an unreachable GET /lobby/presets drops the row rather than calling the lobby Custom, having
+ * read nothing that would support saying so.
+ */
+export type RulesetRow =
+  | { kind: 'none' }
+  | { kind: 'name'; name: string }
+  | { kind: 'select'; value: string; options: RulesetChoice[]; description: string };
+
+/** The sheet a Ruleset row is decided against. */
+export interface RulesetRowInput {
+  /** GET /lobby/presets, empty when it could not be read. */
+  presets: PresetOption[];
+  /** Whether the viewer may change the ruleset: the host of an unlocked lobby, and nobody else. */
+  canEdit: boolean;
+  /** The saved lobby, which is what names a sheet the viewer cannot change. */
+  saved: LobbyRuleSubject;
+  /** The host's current pick and the buffer it filled. Read only when `canEdit`. */
+  selectedId?: string | null;
+  houseRules?: unknown;
+  settings?: unknown;
+}
+
+/**
+ * Which Ruleset row the rule sheet renders (cambia-1123).
+ *
+ * A locked or non-host sheet gets the name, not a dropped row. The row used to be gated on the
+ * viewer being able to change it, which took it off every matchmade lobby: those are locked by
+ * definition, so the one sheet whose ruleset the player never chose - and most needs named - was
+ * the one that never named it.
+ *
+ * The read-only name comes from the resolved id and is not re-checked against the rules, unlike
+ * the host's select. There is no buffer here to have departed from the preset, and the recorded
+ * id outranks the rules by construction: the queue presets are rule-identical, so a value check
+ * could only ever disagree with the id by naming the wrong preset.
+ */
+export function rulesetRow(input: RulesetRowInput): RulesetRow {
+  const { presets, canEdit, saved, selectedId, houseRules, settings } = input;
+  if (presets.length === 0) return { kind: 'none' };
+
+  if (!canEdit) {
+    const preset = presets.find((p) => p.id === resolvePresetId(presets, saved));
+    // The name alone. A preset's description is written for a host picking one out of the New
+    // lobby dialog ("A custom lobby plays a single round"), which is not what a seated player
+    // reading a sheet they cannot change is asking.
+    return { kind: 'name', name: preset ? preset.name : CUSTOM_PRESET_LABEL };
+  }
+
+  const active = presets.find((p) => p.id === selectedId);
+  const onPreset = !!active && presetMatchesRules(active, houseRules, settings);
+  return {
+    kind: 'select',
+    value: onPreset && active ? active.id : CUSTOM_PRESET_VALUE,
+    options: [
+      ...presets.map((p) => ({ value: p.id, label: p.name })),
+      ...(onPreset ? [] : [{ value: CUSTOM_PRESET_VALUE, label: CUSTOM_PRESET_LABEL }])
+    ],
+    description: onPreset && active ? active.description : ''
+  };
 }
