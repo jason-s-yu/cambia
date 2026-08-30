@@ -27,7 +27,8 @@
     "test:game-store-events": "node --test scripts/test-game-store-events.mjs",
     "test:tab-session": "node --test scripts/test-tab-session.mjs",
     "test:dev-switcher": "node --test scripts/test-dev-switcher.mjs",
-    "test": "node --test scripts/test-resend-decision.mjs scripts/test-snap-success.mjs scripts/test-snap-fill.mjs scripts/test-modal-focus.mjs scripts/test-card-names.mjs scripts/test-hand-layout.mjs scripts/test-circuit-copy.mjs scripts/test-hand-lock.mjs scripts/test-pregame-peek.mjs scripts/test-lobby-preset.mjs scripts/test-lobby-rule-buffer.mjs scripts/test-special-prompt.mjs scripts/test-game-store-events.mjs scripts/test-tab-session.mjs scripts/test-dev-switcher.mjs",
+    "test:type-label": "node --test scripts/test-lobby-type-label.mjs",
+    "test": "node --test scripts/test-resend-decision.mjs scripts/test-snap-success.mjs scripts/test-snap-fill.mjs scripts/test-modal-focus.mjs scripts/test-card-names.mjs scripts/test-hand-layout.mjs scripts/test-circuit-copy.mjs scripts/test-hand-lock.mjs scripts/test-pregame-peek.mjs scripts/test-lobby-preset.mjs scripts/test-lobby-rule-buffer.mjs scripts/test-special-prompt.mjs scripts/test-game-store-events.mjs scripts/test-tab-session.mjs scripts/test-dev-switcher.mjs scripts/test-lobby-type-label.mjs",
     "measure-dev-transfer": "node scripts/measure-dev-transfer.mjs"
   },
   "dependencies": {
