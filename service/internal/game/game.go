@@ -257,9 +257,12 @@ type CambiaGame struct {
 	// Timers
 	preGameTimer *time.Timer // Timer controlling the duration of the pre-game phase.
 
-	// Circuit-mode disconnect handling (T5)
-	circuitGraceTimers  map[uuid.UUID]*time.Timer // 60s grace timers per disconnected player
-	circuitAIControlled map[uuid.UUID]bool        // Players currently under AI control
+	// circuitAIControlled marks a circuit seat whose reconnect window closed with nobody back in
+	// it (RULES.md T5). A circuit round is created with ForfeitOnDisconnect off
+	// (handlers.CreateGameInstance), so the closed window cannot forfeit the seat: it stays in the
+	// round and its turns resolve on the turn clock's defensive timeout. The agent that will play
+	// it properly is Phase 3 work; see CircuitAIPlay.
+	circuitAIControlled map[uuid.UUID]bool
 
 	// DisconnectGrace is how long a dropped player keeps their seat before ForfeitOnDisconnect
 	// takes it (RULES.md T5, MATCHMAKING.md 8). Derived in BeginPreGame from
@@ -304,7 +307,6 @@ func NewCambiaGame() *CambiaGame {
 		// Initialize HouseRules with standard defaults.
 		HouseRules:          DefaultHouseRules(),
 		Circuit:             Circuit{Enabled: false}, // Circuit mode disabled by default.
-		circuitGraceTimers:  make(map[uuid.UUID]*time.Timer),
 		circuitAIControlled: make(map[uuid.UUID]bool),
 
 		disconnectGraceTimers: make(map[uuid.UUID]*time.Timer),
@@ -663,23 +665,8 @@ func (g *CambiaGame) HandleDisconnect(playerID uuid.UUID) {
 		return
 	}
 
-	// Circuit mode: 60s grace timer instead of immediate forfeit.
-	if g.Circuit.Enabled {
-		if t, ok := g.circuitGraceTimers[playerID]; ok {
-			t.Stop()
-		}
-		g.circuitGraceTimers[playerID] = time.AfterFunc(60*time.Second, func() {
-			g.mu.Lock()
-			defer g.mu.Unlock()
-			g.circuitAIControlled[playerID] = true
-			log.Printf("Game %s: Player %s grace period expired, AI taking over", g.ID, playerID)
-		})
-		g.broadcastSyncStateToAll()
-		return
-	}
-
 	shouldAdvanceTurn := false
-	shouldForfeit := false
+	graceElapsed := false
 
 	// PreGameActive counts as being in the game (cambia-955 F1): Started only flips true when
 	// StartGame runs at the end of the initial card reveal, but the hub is in PhaseInGame from
@@ -687,8 +674,14 @@ func (g *CambiaGame) HandleDisconnect(playerID uuid.UUID) {
 	// window exempt from the forfeit rule, and with scoring keyed on the forfeit set rather than
 	// Player.Connected, somebody who abandoned during the peek was then scored as if present.
 	if (g.Started || g.PreGameActive) && !g.GameOver {
-		// Check if game ends due to forfeit rule.
-		if g.HouseRules.ForfeitOnDisconnect {
+		// The seat is held for the reconnect window whenever something waits on the player coming
+		// back: under the forfeit rule that is the forfeit itself, and in a circuit it is the
+		// takeover of a seat that stays in the round (RULES.md T5). Circuit rounds used to return
+		// ahead of this block on a 60s literal of their own, so the rule sheet's window never
+		// armed, nothing forfeited, and - since a circuit is created with the forfeit rule off
+		// (handlers.CreateGameInstance) - the turn scheduler then declined to clock the seat, which
+		// stalled any round whose actor had dropped (cambia-1117 D4).
+		if g.HouseRules.ForfeitOnDisconnect || g.Circuit.Enabled {
 			// The grace window (cambia-955): the seat is held, the table keeps playing, and the
 			// forfeit only lands if nobody comes back. A reload takes a second or two, and before
 			// this the drop forfeited inside a few hundred milliseconds, which in a two-player
@@ -696,16 +689,17 @@ func (g *CambiaGame) HandleDisconnect(playerID uuid.UUID) {
 			if g.DisconnectGrace > 0 {
 				g.armDisconnectGrace(playerID)
 			} else {
-				log.Printf("Game %s: Player %s disconnected, forfeiting due to house rules.", g.ID, playerID)
-				shouldForfeit = true
+				// No window to hold: whatever the closed window would have done lands on the drop.
+				graceElapsed = true
 			}
 		} else if g.Started {
-			// If no forfeit, check if the current player disconnected. Only meaningful once turns
-			// exist: during the pregame reveal nobody is on turn yet, so there is nothing to
-			// advance past.
+			// Nothing holds this seat: no forfeit rule to run out on the player, no circuit
+			// takeover. The turn clock is then the only thing that can end the turn they walked
+			// away from, so make sure the turn has one. Only meaningful once turns exist: during
+			// the pregame reveal nobody is on turn yet.
 			currentPlayerUUID := g.currentPlayerID()
 			if playerID == currentPlayerUUID {
-				log.Printf("Game %s: Current player %s disconnected. Advancing turn.", g.ID, playerID)
+				log.Printf("Game %s: Current player %s disconnected with nothing holding their seat; the turn clock has to end the turn.", g.ID, playerID)
 				shouldAdvanceTurn = true
 			}
 		}
@@ -715,15 +709,38 @@ func (g *CambiaGame) HandleDisconnect(playerID uuid.UUID) {
 	// Broadcast updated state to remaining players *before* ending or advancing.
 	g.broadcastSyncStateToAll()
 
-	if shouldForfeit {
+	if graceElapsed {
+		g.disconnectGraceElapsed(playerID)
+	} else if shouldAdvanceTurn && g.turnTimer == nil {
+		// Arm the abandoned turn's clock. A turn that already has one is left alone: restarting it
+		// on the drop would hand a player a fresh turn's worth of thinking time for pulling their
+		// network out, which is the same reason the reconnect window does not pause it (see
+		// armDisconnectGrace). Before the scheduler clocked disconnected players this call was
+		// unconditional and did nothing at all, since the schedule it asks for was declined.
+		g.advanceTurn()
+	}
+}
+
+// disconnectGraceElapsed applies what a closed reconnect window means for playerID: the forfeit
+// under the forfeit rule, and in a circuit (which is created with that rule off) the takeover of a
+// seat that stays in the round and keeps being played by the turn clock. Called by the grace timer
+// and, where DisconnectGraceSec is 0, by the drop itself. Assumes lock is held by caller.
+func (g *CambiaGame) disconnectGraceElapsed(playerID uuid.UUID) {
+	if g.HouseRules.ForfeitOnDisconnect {
+		log.Printf("Game %s: Player %s did not return within %s. Forfeiting.", g.ID, playerID, g.DisconnectGrace)
 		g.forfeitPlayer(playerID)
-	} else if shouldAdvanceTurn {
-		g.advanceTurn() // Advance turn if current player left.
+		return
+	}
+	if g.Circuit.Enabled {
+		g.circuitAIControlled[playerID] = true
+		log.Printf("Game %s: Player %s did not return within %s; their circuit seat now plays on the turn clock.", g.ID, playerID, g.DisconnectGrace)
+		g.broadcastSyncStateToAll()
 	}
 }
 
 // armDisconnectGrace starts (or restarts) playerID's reconnect window and tells everyone the seat
-// is being held. Assumes lock is held by caller.
+// is being held. What the window closing costs the player is disconnectGraceElapsed's call: the
+// forfeit under the forfeit rule, the circuit takeover otherwise. Assumes lock is held by caller.
 //
 // The turn timer is deliberately left running for a player inside their window: RULES.md T5 and
 // MATCHMAKING.md 8 have the table play on ("AI plays defensively", score counts normally on
@@ -760,8 +777,7 @@ func (g *CambiaGame) armDisconnectGrace(playerID uuid.UUID) {
 		if g.GameOver || (!g.Started && !g.PreGameActive) {
 			return
 		}
-		log.Printf("Game %s: Player %s did not return within %s. Forfeiting.", g.ID, playerID, grace)
-		g.forfeitPlayer(playerID)
+		g.disconnectGraceElapsed(playerID)
 	})
 
 	g.fireEvent(GameEvent{
@@ -892,12 +908,9 @@ func (g *CambiaGame) HandleReconnect(playerID uuid.UUID, conn *websocket.Conn) {
 				g.fireEvent(GameEvent{Type: EventPlayerReconnected, User: &EventUser{ID: playerID}})
 			}
 
-			// Circuit mode: cancel grace timer, restore player control.
+			// Circuit mode: cancelDisconnectGrace above already closed the window this player was
+			// in, so all that is left is handing the seat back if the takeover had already landed.
 			if g.Circuit.Enabled {
-				if t, ok := g.circuitGraceTimers[playerID]; ok {
-					t.Stop()
-					delete(g.circuitGraceTimers, playerID)
-				}
 				delete(g.circuitAIControlled, playerID)
 			}
 
@@ -1499,18 +1512,19 @@ func (g *CambiaGame) FireEventPrivateSuccess(userID uuid.UUID, special string, c
 	// Logging is typically handled within the specific do* action function.
 }
 
-// CircuitAIPlay performs a minimal defensive action for an AI-controlled disconnected player.
-// Draw from stockpile and immediately discard (no abilities, no swaps). Public entry point: acquires mu.
+// CircuitAIPlay is the seam the agent track plugs into: the point where an abandoned circuit seat
+// is played by something that reads the table rather than by the clock. It has no callers and does
+// not play a turn, and that is deliberate - the agent takeover is Phase 3 work (cambia-466), and
+// until it lands a disconnected seat is covered by the turn timer, which draws and discards
+// without touching the hand (handleTimeoutEngine). Wiring a second, weaker fallback here would put
+// two things on the same turn. Public entry point: acquires mu.
 func (g *CambiaGame) CircuitAIPlay(playerID uuid.UUID) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if !g.circuitAIControlled[playerID] {
 		return
 	}
-	// The actual implementation depends on how turns are processed.
-	// For now, just advance the turn with a no-op.
-	// In practice, this would call the engine's draw+discard actions.
-	log.Printf("Game %s: AI defensive play for disconnected player %s", g.ID, playerID)
+	log.Printf("Game %s: circuit seat %s is unattended; the turn clock is playing it until an agent owns it.", g.ID, playerID)
 }
 
 // IsCircuitAIControlled returns whether a player is currently under AI control due to disconnect.
