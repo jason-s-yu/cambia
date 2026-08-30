@@ -327,6 +327,41 @@ def test_repeated_resets_do_not_leak_go_handles(env_factory):
 
 
 @skiplib
+def test_reset_rejects_deals_that_end_before_the_agent_acts(env_factory):
+    """A deal whose opponents finish the game leaves PPO no decision to make.
+
+    reset() must retry rather than return a terminal observation, which step()
+    would answer with a zero reward instead of the seat's real utility. Forced
+    here by making opponent advancement play the game out.
+    """
+    env = env_factory(num_players=2)
+    env.reset(seed=71)
+    baseline = get_handle_pool_stats()
+
+    rng = np.random.default_rng(0)
+
+    def _play_out(self=env):
+        while not self._engine.is_terminal():
+            mask = self._legal_mask()
+            legal = np.flatnonzero(mask)
+            if legal.size == 0:
+                break
+            self._apply(int(legal[int(rng.integers(legal.size))]))
+            self._update_agents()
+
+    env._advance_opponent = _play_out
+    with pytest.raises(RuntimeError, match="ended before the agent's first turn"):
+        env.reset(seed=72)
+
+    # None of the discarded deals may strand handles in the Go pools. The env
+    # gave up its own game and agents on the way out, so the counts land at or
+    # below the one live env the baseline was read with, never above it.
+    after = get_handle_pool_stats()
+    assert after["games"] <= baseline["games"], after
+    assert after["agents"] <= baseline["agents"], after
+
+
+@skiplib
 def test_close_releases_handles(env_factory):
     """close() frees the handles and is safe to call twice."""
     from src.ppo_env import CambiaEnv

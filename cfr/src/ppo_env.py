@@ -266,15 +266,39 @@ class CambiaEnv(gymnasium.Env):
     # gymnasium API
     # ------------------------------------------------------------------
 
+    # A deal whose opponents finish the game before the learner ever acts would
+    # be an episode with no decision and no reward. It should not be reachable
+    # under the shipped rule sets, so a handful of retries is generous; the
+    # alternative is silently handing PPO a zero-reward terminal transition.
+    _MAX_DEGENERATE_DEALS = 16
+
     def reset(self, *, seed: int | None = None, options=None):
         if seed is not None:
             self._rng = np.random.default_rng(seed)
         self._load_config()
 
-        # Free the previous episode's handles before allocating new ones. The
-        # Go side hands out game and agent handles from fixed-size pools, and a
-        # training run resets thousands of times per worker, so relying on
-        # __del__ would exhaust the pool.
+        for _ in range(self._MAX_DEGENERATE_DEALS):
+            self._deal()
+            self._advance_opponent()
+            if not self._engine.is_terminal():
+                return self._get_obs(), {}
+            logger.debug("discarding a deal that ended before the agent's first turn")
+
+        self._release()
+        raise RuntimeError(
+            f"{self._MAX_DEGENERATE_DEALS} consecutive deals ended before the "
+            f"agent's first turn at {self._num_players} seats. Check "
+            f"cambia_rules in {self._config_path}: max_game_turns or "
+            "cambia_allowed_round may make games terminate immediately."
+        )
+
+    def _deal(self):
+        """Free the previous episode and set up a fresh game and belief states.
+
+        Handles come from fixed-size Go pools and a training run resets
+        thousands of times per worker, so the release is explicit here rather
+        than left to __del__.
+        """
         self._release()
 
         # Fair self-play: randomize which seat the learning policy occupies each
@@ -299,16 +323,22 @@ class CambiaEnv(gymnasium.Env):
 
         mem = self._config.agent_params.memory_level
         decay = self._config.agent_params.time_decay_turns
-        if self._nplayer_space:
-            self._agents = [
-                GoAgentState.new_nplayer(self._engine, pid, self._num_players, mem, decay)
-                for pid in range(self._num_players)
-            ]
-        else:
-            self._agents = [
-                GoAgentState(self._engine, pid, mem, decay)
-                for pid in range(self._num_players)
-            ]
+        # Built one at a time and assigned as we go: if the agent pool runs dry
+        # partway through, _release has to be able to reach the handles already
+        # taken, which a list comprehension that never returns would not allow.
+        self._agents = []
+        try:
+            for pid in range(self._num_players):
+                if self._nplayer_space:
+                    agent = GoAgentState.new_nplayer(
+                        self._engine, pid, self._num_players, mem, decay
+                    )
+                else:
+                    agent = GoAgentState(self._engine, pid, mem, decay)
+                self._agents.append(agent)
+        except Exception:
+            self._release()
+            raise
 
         if self._self_play:
             self._opponent = SelfPlayPolicyOpponent(
@@ -319,9 +349,6 @@ class CambiaEnv(gymnasium.Env):
             )
         else:
             self._opponent = None
-
-        self._advance_opponent()
-        return self._get_obs(), {}
 
     def step(self, action: int):
         engine = self._engine
