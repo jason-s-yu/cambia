@@ -63,11 +63,16 @@ test('every row is a real grid line, even for a hand of one or none', () => {
 
 test('the table places its own cards with the helper and keeps the slot keyed hooks', () => {
     const src = readFileSync(TABLE, 'utf8');
-    assert.ok(src.includes("import { ownHandPlacement } from './handLayout';"), 'DsGameTable does not import the placement helper');
+    // Matched on the module specifier and the name, not on the import line as written: the
+    // clause may gain a second name or be reformatted without any of this changing (cambia-1099).
+    assert.match(src, /import\s*\{[^}]*\bownHandPlacement\b[^}]*\}\s*from\s*['"][^'"]*\/handLayout(\.[jt]sx?)?['"]/,
+        'DsGameTable does not import the placement helper');
     // The known cards and the padding backs both take a placement.
     assert.ok(src.match(/style=\{ownHandPlacement\(/g).length >= 2, 'own hand cards are not all placed');
-    // The testId and the spoken name stay keyed by the engine slot index, not by draw order.
-    assert.ok(src.includes('testId={`card-${seat}-${i}`}'), 'own card testId is no longer the engine slot index');
+    // The testId and the spoken name stay keyed by the engine slot index, not by draw order. The
+    // attribute is matched wherever it sits in the tag, at whatever spacing.
+    assert.match(src, /testId=\{\s*`card-\$\{\s*seat\s*\}-\$\{\s*i\s*\}`\s*\}/,
+        'own card testId is no longer the engine slot index');
     // cardSlotName speaks the slot 1-based; what matters here is that it is handed the engine
     // slot index (see test-card-names.mjs for the naming itself).
     assert.ok(src.includes("cardSlotName('Your', i,"), 'own card name is no longer the engine slot index');
