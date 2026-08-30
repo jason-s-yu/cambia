@@ -12,7 +12,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { applyPregamePeek } from '../src/lib/pregamePeek.ts';
+import { applyPregamePeek, nextPregamePeek } from '../src/lib/pregamePeek.ts';
 
 const SELF = 'player-self';
 const OPP = 'player-opp';
@@ -132,4 +132,26 @@ test('re-applying across successive syncs holds the peek up for the whole window
     const afterStart = board();
     assert.equal(applyPregamePeek(afterStart, [], SELF), 0);
     for (const c of afterStart.players[0].revealedHand) assert.equal(c.known, false);
+});
+
+// gameStore.ts drives the drop above through nextPregamePeek: private_sync_state assigns
+// `state.pregamePeek = nextPregamePeek(state.pregamePeek, payload.state)` ahead of the
+// re-apply, rather than checking preGameActive itself. These drive that helper directly with
+// the same inputs the store passes it.
+
+test('nextPregamePeek holds the peek while the pregame window is open', () => {
+    const held = peek();
+    assert.deepEqual(nextPregamePeek(held, { preGameActive: true }), held);
+});
+
+test('nextPregamePeek clears the peek on the post-start sync', () => {
+    // This is the sync StartGame broadcasts: the first snapshot with preGameActive false. It is
+    // what turns the peeked cards face-down on screen.
+    assert.deepEqual(nextPregamePeek(peek(), { preGameActive: false }), []);
+});
+
+test('nextPregamePeek clears the peek for a sync that omits preGameActive, same as false', () => {
+    assert.deepEqual(nextPregamePeek(peek(), {}), []);
+    assert.deepEqual(nextPregamePeek(peek(), null), []);
+    assert.deepEqual(nextPregamePeek(peek(), undefined), []);
 });

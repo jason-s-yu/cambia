@@ -6,7 +6,7 @@ import { immer } from 'zustand/middleware/immer';
 import { useAuthStore } from './authStore';
 import { applySnapSuccess } from '@/lib/snapSuccess';
 import { applySnapMove } from '@/lib/snapFill';
-import { applyPregamePeek } from '@/lib/pregamePeek';
+import { applyPregamePeek, nextPregamePeek } from '@/lib/pregamePeek';
 import { applyDrawPileCounts, pendingActionAfterFail, pendingActionForSpecial } from '@/lib/specialPrompt';
 
 /** A face shown to this client by an event: an ability look, a pregame peek, a card drawn in. */
@@ -307,10 +307,9 @@ export const useGameStore = create<GameState & GameActions>()(
 							// to be put back on for as long as the window lasts, and dropped the moment
 							// it closes. The sync StartGame broadcasts is what turns the peeked cards
 							// down on screen: it is the first snapshot with preGameActive false.
+							state.pregamePeek = nextPregamePeek(state.pregamePeek, payload.state);
 							if (payload.state?.preGameActive) {
 								applyPregamePeek(state.gameState, state.pregamePeek, selfPlayerId);
-							} else {
-								state.pregamePeek = [];
 							}
 							// Determine pending action based on new state
 							const gs = state.gameState;

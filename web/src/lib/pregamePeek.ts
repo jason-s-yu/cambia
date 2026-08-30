@@ -39,6 +39,21 @@ export interface PeekBoardLike {
 	players: PeekHandView[];
 }
 
+/** The one field of a sync this module reads to decide whether the peek window is still open. */
+export interface PeekSyncLike {
+	preGameActive?: boolean;
+}
+
+/**
+ * Decides what the held peek should become for an incoming sync. The window is open exactly
+ * while `preGameActive` is true; anything else - false, or the field missing entirely, as on the
+ * hub's lobby snapshot - is not evidence the window is still open, so the peek is dropped. The
+ * caller still owns re-applying whatever this returns to the board.
+ */
+export function nextPregamePeek<T>(prev: T[], sync: PeekSyncLike | null | undefined): T[] {
+	return sync?.preGameActive ? prev : [];
+}
+
 /**
  * Puts the peeked faces back onto `selfId`'s hand. Mutates the board in place (it runs inside the
  * store's immer draft). Slot ids and indices come from the board, which is authoritative for them;
