@@ -227,8 +227,12 @@ def test_actions_from_mask_sorts_like_the_python_builder():
 
 
 @requires_lib
-def test_control_config_tree_is_identical_across_backends():
-    """Same node count, infoset count and structure from both engines.
+def test_control_config_tree_counts_and_profile_match_across_backends():
+    """Same node count, infoset count and aggregate profile from both engines.
+
+    Not a node-for-node identity: see _profile for why a nested chance node's
+    child ORDER cannot be matched, and test_control_config_nashconv_matches_across_backends
+    for the invariant that does pin the trees' agreement numerically.
 
     config/tiny_norecall.yaml never exhausts the stockpile, so nothing in its
     enumerated tree depends on a reshuffle. That makes it the clean cross-engine
