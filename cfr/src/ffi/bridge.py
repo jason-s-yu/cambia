@@ -9,6 +9,7 @@ The shared library is loaded once at module import time.
 
 import os
 import random
+import sys
 import warnings
 from pathlib import Path
 from typing import List, NamedTuple, Optional, Tuple
@@ -840,8 +841,14 @@ class GoEngine:
         """
         Return the current decision context as an integer.
 
-        Values: 0=StartTurn, 1=PostDraw, 2=AbilitySelect,
-                3=SnapDecision, 4=SnapMove, 5=Terminal.
+        Values: 0=StartTurn, 1=PostDraw, 2=SnapDecision,
+                3=AbilitySelect, 4=SnapMove, 5=Terminal.
+
+        This is engine/types.go's DecisionContext order, which is also
+        src/constants.py's DecisionContext order, so the integer passes
+        straight to either encoder. An earlier version of this docstring had
+        2 and 3 swapped; tests/test_cross_validation.py's _dc_int_to_enum
+        still carries that swap (cambia-1376 finding F2).
         """
         return int(self._lib.cambia_game_decision_ctx(self._game_h))
 
@@ -1092,8 +1099,15 @@ class GoEngine:
         Return a (N_PLAYER_NUM_ACTIONS,) uint8 numpy array where 1 = legal N-player action.
 
         Uses the _NPLAYER_LEGAL_WORDS-word uint64 bitmask from Go, expanded to per-action bytes.
-        Requires an agent handle; uses cambia_game_nplayer_legal_actions for
-        the raw bitmask and returns it as a dense byte array.
+        Uses cambia_game_nplayer_legal_actions for the raw bitmask and returns
+        it as a dense byte array.
+
+        The expansion is vectorized: on a little-endian host the uint64 words
+        are already in ascending bit order byte by byte, so unpackbits over the
+        raw buffer gives the dense mask directly. This is on the N-seat env's
+        per-step path (cambia-1376), where the previous
+        N_PLAYER_NUM_ACTIONS-iteration Python loop cost more than the rest of
+        the step put together.
         """
         ret = self._lib.cambia_game_nplayer_legal_actions(
             self._game_h, self._nplayer_legal_buf
@@ -1103,6 +1117,14 @@ class GoEngine:
                 f"cambia_game_nplayer_legal_actions failed (returned {ret}) "
                 f"on handle {self._game_h}"
             )
+        if sys.byteorder == "little":
+            words = np.frombuffer(
+                _ffi.buffer(self._nplayer_legal_buf, _NPLAYER_LEGAL_WORDS * 8),
+                dtype=np.uint8,
+            )
+            return np.unpackbits(words, bitorder="little")[
+                : self.N_PLAYER_NUM_ACTIONS
+            ].copy()
         mask = np.zeros(self.N_PLAYER_NUM_ACTIONS, dtype=np.uint8)
         for i in range(self.N_PLAYER_NUM_ACTIONS):
             word = i // 64
@@ -2052,8 +2074,14 @@ def observe_games_batch(game_handles, a0_handles, a1_handles, seq_cap):
     na = _OBSERVE_NUM_ACTIONS
     if n == 0:
         z = np.empty(0, dtype=np.int32)
-        return (np.empty(0, np.int8), np.empty(0, np.uint8),
-                np.empty((0, na), np.uint8), z, z, z)
+        return (
+            np.empty(0, np.int8),
+            np.empty(0, np.uint8),
+            np.empty((0, na), np.uint8),
+            z,
+            z,
+            z,
+        )
     lib = _get_lib()
     gh = _ffi.new("int32_t[]", [int(x) for x in game_handles])
     a0 = _ffi.new("int32_t[]", [int(x) for x in a0_handles])
@@ -2067,23 +2095,32 @@ def observe_games_batch(game_handles, a0_handles, a1_handles, seq_cap):
     while True:
         tok = _ffi.new("int32_t[]", tok_cap)
         ret = lib.cambia_games_observe_batch(
-            gh, a0, a1, n, tok_cap, term, actor, masks, tok, offsets, lens)
+            gh, a0, a1, n, tok_cap, term, actor, masks, tok, offsets, lens
+        )
         if ret == -2:
             tok_cap *= 2
             continue
         if ret < 0:
             raise RuntimeError(
-                "cambia_games_observe_batch failed (returned %d); invalid handle" % ret)
+                "cambia_games_observe_batch failed (returned %d); invalid handle" % ret
+            )
         break
     term_np = np.frombuffer(_ffi.buffer(term, n), dtype=np.int8).copy()
     actor_np = np.frombuffer(_ffi.buffer(actor, n), dtype=np.uint8).copy()
-    masks_np = np.frombuffer(_ffi.buffer(masks, n * na), dtype=np.uint8).reshape(n, na).copy()
+    masks_np = (
+        np.frombuffer(_ffi.buffer(masks, n * na), dtype=np.uint8).reshape(n, na).copy()
+    )
     offsets_np = np.frombuffer(_ffi.buffer(offsets, n * 4), dtype=np.int32).copy()
     lens_np = np.frombuffer(_ffi.buffer(lens, n * 4), dtype=np.int32).copy()
     total = int(offsets_np[-1]) + int(lens_np[-1])
-    tok_np = (np.frombuffer(_ffi.buffer(tok, total * 4), dtype=np.int32).copy()
-              if total > 0 else np.empty(0, dtype=np.int32))
+    tok_np = (
+        np.frombuffer(_ffi.buffer(tok, total * 4), dtype=np.int32).copy()
+        if total > 0
+        else np.empty(0, dtype=np.int32)
+    )
     return term_np, actor_np, masks_np, tok_np, offsets_np, lens_np
+
+
 def state_save(game_h: int, a0_h: int, a1_h: int) -> int:
     """Snapshot a (game, both agents' belief + token) checkpoint. Returns handle."""
     lib = _get_lib()

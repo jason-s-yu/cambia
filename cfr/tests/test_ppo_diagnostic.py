@@ -17,13 +17,7 @@ sb3_contrib = pytest.importorskip(
 )
 from sb3_contrib import MaskablePPO  # noqa: E402
 
-from src.encoding import (  # noqa: E402
-    EP_PBS_INPUT_DIM,
-    NUM_ACTIONS,
-    action_to_index,
-    encode_action_mask,
-    encode_infoset_eppbs_interleaved,
-)
+from src.encoding import EP_PBS_INPUT_DIM, NUM_ACTIONS  # noqa: E402
 from src.evaluate_agents import AGENT_REGISTRY, get_agent  # noqa: E402
 from src.ppo_env import CambiaEnv, make_env  # noqa: E402
 
@@ -132,7 +126,7 @@ def test_config():
 @pytest.fixture
 def env(test_config):
     """CambiaEnv with config injected directly (bypass YAML load)."""
-    e = CambiaEnv(opponent_type="random", seed=42, agent_seat=0)
+    e = CambiaEnv(opponent_type="random_legal", seed=42, agent_seat=0)
     e._config = test_config
     return e
 
@@ -140,7 +134,7 @@ def env(test_config):
 @pytest.fixture
 def env_seat1(test_config):
     """CambiaEnv where the PPO agent sits in seat 1."""
-    e = CambiaEnv(opponent_type="random", seed=42, agent_seat=1)
+    e = CambiaEnv(opponent_type="random_legal", seed=42, agent_seat=1)
     e._config = test_config
     return e
 
@@ -312,17 +306,32 @@ class TestEnvSeatVariants:
 
 
 class TestEnvOpponents:
-    @pytest.mark.parametrize(
-        "opp_type",
-        ["random", "random_no_cambia", "imperfect_greedy"],
-    )
-    def test_env_different_opponents(self, test_config, opp_type):
-        """Env works with different opponent types."""
+    @pytest.mark.parametrize("opp_type", ["random_legal"])
+    def test_env_supported_opponents(self, test_config, opp_type):
+        """Env plays a full episode under each Go-backed opponent regime.
+
+        self_play is exercised separately in test_ppo_env_goengine.py, which
+        has the tmp_path it needs for a snapshot stem.
+        """
         e = CambiaEnv(opponent_type=opp_type, seed=7)
         e._config = test_config
         total_reward, steps, terminated = _run_episode(e)
         assert terminated, f"Episode didn't terminate with opponent={opp_type}"
         assert total_reward in {-1.0, 0.0, 1.0}
+
+    @pytest.mark.parametrize(
+        "opp_type",
+        ["random", "random_no_cambia", "imperfect_greedy"],
+    )
+    def test_python_engine_baselines_are_refused(self, opp_type):
+        """The eval-registry baselines are not runnable on the Go-backed env.
+
+        They are written against the Python CambiaGameState and are being
+        ported to the GameView protocol under cambia-1426. Until then the env
+        refuses them by name rather than reviving the Python engine.
+        """
+        with pytest.raises(NotImplementedError, match="cambia-1426"):
+            CambiaEnv(opponent_type=opp_type, seed=7)
 
 
 # ==================================================================
@@ -331,26 +340,26 @@ class TestEnvOpponents:
 
 
 class TestActionMaskConsistency:
-    def test_action_masks_match_legal_actions(self, reset_env):
-        """Each True in mask maps to a valid GameAction via action_to_index."""
-        gs = reset_env._game_state
-        legal = list(gs.get_legal_actions())
+    def test_action_masks_match_the_engine(self, reset_env):
+        """The env mask is exactly the engine's legality for the acting seat.
+
+        The pre-port version of this test compared against the Python engine's
+        GameAction set through action_to_index. The engine mask is now the
+        authority, so the comparison is against it directly; the index space is
+        still the 146-action one, asserted below.
+        """
         mask = reset_env.action_masks()
+        engine_mask = reset_env._engine.legal_actions_mask().astype(bool)
 
-        legal_indices = {action_to_index(a) for a in legal}
-        mask_indices = set(np.where(mask)[0].tolist())
-
-        assert (
-            legal_indices == mask_indices
-        ), f"Mask indices {mask_indices} != legal indices {legal_indices}"
+        assert mask.shape == (NUM_ACTIONS,)
+        np.testing.assert_array_equal(mask, engine_mask)
 
     def test_action_masks_all_false_never_happens(self, env):
         """Mask always has >= 1 True before terminal."""
         obs, _ = env.reset()
         for _ in range(300):
             mask = env.action_masks()
-            gs = env._game_state
-            if gs.is_terminal():
+            if env._engine.is_terminal():
                 break
             assert mask.any(), "Mask is all-False on non-terminal state"
             legal_indices = np.where(mask)[0]
@@ -359,15 +368,19 @@ class TestActionMaskConsistency:
             if terminated:
                 break
 
-    def test_env_mask_covers_all_legal_actions(self, reset_env):
-        """Env mask True positions are exactly action_to_index(a) for all
-        legal actions."""
-        gs = reset_env._game_state
-        legal = list(gs.get_legal_actions())
-        mask = reset_env.action_masks()
+    def test_masked_indices_are_applicable(self, reset_env):
+        """Every index the mask marks legal is one the engine accepts.
 
-        expected_mask = encode_action_mask(legal)
-        np.testing.assert_array_equal(mask, expected_mask)
+        Guards the mask-to-apply contract: a mask that advertised an index the
+        Go apply path rejects would crash a SubprocVecEnv worker mid-rollout.
+        """
+        for idx in np.where(reset_env.action_masks())[0]:
+            snap = reset_env._engine.save()
+            try:
+                reset_env._engine.apply_action(int(idx))
+            finally:
+                reset_env._engine.restore(snap)
+                reset_env._engine.free_snapshot(snap)
 
 
 # ==================================================================
@@ -378,12 +391,12 @@ class TestActionMaskConsistency:
 class TestMakeEnvFactory:
     def test_make_env_returns_callable(self):
         """make_env() returns a callable."""
-        factory = make_env(opponent_type="random", seed=0)
+        factory = make_env(opponent_type="random_legal", seed=0)
         assert callable(factory)
 
     def test_make_env_produces_valid_env(self, test_config):
         """Calling the factory returns a CambiaEnv that can reset."""
-        factory = make_env(opponent_type="random", seed=0)
+        factory = make_env(opponent_type="random_legal", seed=0)
         e = factory()
         assert isinstance(e, CambiaEnv)
         # Inject config to bypass YAML load
@@ -426,7 +439,7 @@ def tiny_ppo_model_path():
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        env = CambiaEnv(opponent_type="random", seed=42)
+        env = CambiaEnv(opponent_type="random_legal", seed=42)
         env._config = config
 
         model = MaskablePPO(
@@ -520,48 +533,29 @@ class TestPPOAgentWrapperIntegration:
 
 
 class TestEncodingConsistency:
-    def test_obs_encoding_matches_manual(self, reset_env):
-        """Env's _get_obs() produces the same result as manually encoding
-        the agent's infoset via encode_infoset_eppbs_interleaved."""
+    def test_obs_encoding_matches_the_go_encoder(self, reset_env):
+        """_get_obs() is the agent seat's GoAgentState encode, nothing else.
+
+        The pre-port version rebuilt the vector through the Python
+        encode_infoset_eppbs_interleaved from a Python AgentState. The belief
+        state and the encoder are both Go-side now, so the reference is the
+        same FFI encode call with the seat, context and drawn bucket the env
+        should be passing.
+        """
         env = reset_env
-        st = env._agent_states[env._agent_seat]
-        gs = env._game_state
+        agent = env._agents[env._agent_seat]
+        ctx = env._engine.decision_ctx()
+        drawn = env._engine.get_drawn_card_bucket()
 
-        # Manually replicate what _get_obs does
-        ctx = env._get_decision_context(gs)
-        if st.cambia_caller is None:
-            cambia_state = 2
-        elif st.cambia_caller == env._agent_seat:
-            cambia_state = 0
-        else:
-            cambia_state = 1
+        reference = agent.encode_eppbs_interleaved(ctx, drawn)
+        np.testing.assert_array_equal(env._get_obs(), reference)
 
-        manual_enc = encode_infoset_eppbs_interleaved(
-            slot_tags=[t.value if hasattr(t, "value") else int(t) for t in st.slot_tags],
-            slot_buckets=[int(b) for b in st.slot_buckets],
-            discard_top_bucket=(
-                st.known_discard_top_bucket.value
-                if hasattr(st.known_discard_top_bucket, "value")
-                else int(st.known_discard_top_bucket)
-            ),
-            stock_estimate=(
-                st.stockpile_estimate.value
-                if hasattr(st.stockpile_estimate, "value")
-                else int(st.stockpile_estimate)
-            ),
-            game_phase=(
-                st.game_phase.value
-                if hasattr(st.game_phase, "value")
-                else int(st.game_phase)
-            ),
-            decision_context=(ctx.value if hasattr(ctx, "value") else int(ctx)),
-            cambia_state=cambia_state,
-            own_hand_size=len(st.own_hand),
-            opp_hand_size=st.opponent_card_count,
-        ).astype(np.float32)
-
-        env_obs = env._get_obs()
-        np.testing.assert_array_equal(env_obs, manual_enc)
+    def test_obs_tracks_the_agent_seat(self, reset_env):
+        """A seat argument selects that seat's belief, not the learner's."""
+        env = reset_env
+        other = 1 - env._agent_seat
+        np.testing.assert_array_equal(env._get_obs(seat=env._agent_seat), env._get_obs())
+        assert not np.array_equal(env._get_obs(seat=other), env._get_obs())
 
 
 # ==================================================================
@@ -592,7 +586,7 @@ class TestRegressions:
 
     def test_config_lazy_loading(self, test_config):
         """Config is not loaded until first reset."""
-        e = CambiaEnv(opponent_type="random", seed=0)
+        e = CambiaEnv(opponent_type="random_legal", seed=0)
         assert e._config is None
         # Inject config so reset works without YAML
         e._config = test_config

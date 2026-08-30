@@ -1,20 +1,29 @@
-"""PPO trainer for Cambia.
+"""PPO trainer for Cambia, on the Go-backed environment (cambia-1376).
 
 Two regimes, selected by ``opponent``:
 
-- A baseline string (e.g. ``imperfect_greedy``): best-response diagnostic. The
-  PPO seat learns to exploit one fixed opponent. Useful for probing reachable
-  exploitation, not a trustworthy equilibrium anchor.
-- ``"self_play"``: fair self-play (E2). The opponent seat is a frozen-periodic
-  snapshot of the learning policy, refreshed every ``selfplay_snapshot_freq``
-  timesteps. The agent seat is randomized per episode. PPO improves only by
-  beating copies of itself, so its mean_imp re-derives the metric's reachable
-  headroom. This run is the equilibrium anchor: never optimized toward, only
-  measured.
+- ``"self_play"``: fair self-play (E2). Every seat other than the learner is a
+  frozen-periodic snapshot of the learning policy, refreshed every
+  ``selfplay_snapshot_freq`` timesteps. The learner's seat is randomized per
+  episode. PPO improves only by beating copies of itself, so its measurement
+  re-derives reachable headroom. This run is the equilibrium anchor: never
+  optimized toward, only measured.
+- ``"random_legal"``: opponent seats play uniform-random legal actions. A cheap
+  control and the regime the env benchmark uses.
 
-Self-play eval-during-training persists per baseline to ``metrics.jsonl`` and
-the SQLite run_db through the shared ``persist_eval_results`` path, so the E2
-anchor lands in the same store as every other run.
+The fixed-baseline best-response regime (``imperfect_greedy`` and friends) is
+unavailable until those agents are ported to the GameView protocol under
+cambia-1426; ``ppo_env.CambiaEnv`` raises on them rather than reviving the
+Python engine behind the env.
+
+``num_players`` sets the seat count. Two seats use the engine's 2-player action
+and encoding space; three or more use its N-player space, which has different
+widths, so checkpoints do not transfer across that boundary.
+
+Eval-during-training persists per baseline to ``metrics.jsonl`` and the SQLite
+run_db through the shared ``persist_eval_results`` path. That eval still runs
+on the Python-engine battery in ``evaluate_agents``; it is 2-seat only and is
+skipped at higher seat counts, and ``eval_freq=0`` turns it off entirely.
 """
 
 import logging
@@ -113,6 +122,7 @@ def _build_callbacks(
     eval_games: int,
     eval_max_workers,
     checkpoint_freq,
+    run_eval: bool,
 ):
     """Construct the SB3 callback list. SB3 is imported here so the module stays
     importable without sb3-contrib installed (the diagnostic path also defers)."""
@@ -234,7 +244,8 @@ def _build_callbacks(
         callbacks.append(
             SelfPlaySnapshotCallback(snapshot_stem, selfplay_snapshot_freq, n_envs)
         )
-    callbacks.append(MeanImpEvalCallback())
+    if run_eval:
+        callbacks.append(MeanImpEvalCallback())
     if checkpoint_freq:
         callbacks.append(PeriodicCheckpointCallback(save_path, checkpoint_freq, n_envs))
     return callbacks
@@ -254,16 +265,18 @@ def train_ppo(
     selfplay_snapshot_freq: int = 200_000,
     eval_max_workers: int | None = None,
     checkpoint_freq: int | None = None,
+    num_players: int = 2,
 ):
     """Train a MaskablePPO agent.
 
     Args:
-        opponent: Baseline agent type, or "self_play" for fair self-play (E2).
+        opponent: "self_play" for fair self-play (E2), or "random_legal".
         timesteps: Total training timesteps.
         save_path: Checkpoint path stem (SB3 appends .zip). The run directory is
             derived from this (runs/<run>/checkpoints/<model> -> runs/<run>).
         n_envs: Parallel SubprocVecEnv workers.
-        eval_freq: Run the per-baseline mean_imp eval every N timesteps.
+        eval_freq: Run the per-baseline mean_imp eval every N timesteps. 0
+            disables the eval callback (the smoke and benchmark path).
         net_arch: MLP hidden sizes.
         seed: Base RNG seed.
         config_path: Path to config YAML.
@@ -275,6 +288,9 @@ def train_ppo(
         eval_max_workers: Parallel baseline eval workers (None = auto).
         checkpoint_freq: Save a periodic timestamped checkpoint every N
             timesteps. None disables periodic checkpoints (eval still saves one).
+        num_players: Seat count. 2 uses the engine's 2-player action/encoding
+            space; 3+ uses its N-player space. The mean_imp eval battery is
+            2-seat only and is skipped above that.
     """
     # Thread pinning: SubprocVecEnv spawns n_envs workers, each importing torch +
     # numpy; the self-play opponent also loads a MaskablePPO per worker. Without
@@ -301,9 +317,47 @@ def train_ppo(
         )
     from stable_baselines3.common.vec_env import SubprocVecEnv
     from stable_baselines3.common.callbacks import CallbackList
-    from src.ppo_env import make_env, SELF_PLAY_OPPONENT
+    from src.ppo_env import make_env, SELF_PLAY_OPPONENT, SUPPORTED_OPPONENTS
 
     self_play = opponent == SELF_PLAY_OPPONENT
+    num_players = int(num_players)
+    if num_players < 2:
+        raise ValueError(f"num_players must be at least 2, got {num_players}")
+    if opponent not in SUPPORTED_OPPONENTS:
+        # Fail here rather than inside every SubprocVecEnv worker, where the
+        # traceback arrives as an opaque connection reset.
+        raise NotImplementedError(
+            f"opponent={opponent!r} is not available on the Go-backed env. "
+            f"Supported: {', '.join(SUPPORTED_OPPONENTS)}. See ppo_env's module "
+            "docstring: the fixed baselines are being ported to the GameView "
+            "protocol under cambia-1426."
+        )
+
+    # The mean_imp battery in evaluate_agents drives 2-player games; it has no
+    # meaning at a 3+ seat table, so the callback is 2-seat only.
+    run_eval = bool(eval_freq) and num_players == 2
+    if eval_freq and num_players != 2:
+        print(
+            f"  Note: mean_imp eval disabled at {num_players} seats "
+            "(the battery is 2-player only)."
+        )
+    if run_eval:
+        # The battery scores through PPOAgentWrapper, which still strips
+        # drawn_card and peeked_cards from the agent's own observation (the
+        # pre-port public-only contract). This env feeds the policy
+        # GoAgentState's belief instead, which keeps what the rules reveal to
+        # the acting seat, so the eval runs the policy off its training
+        # distribution and the trajectory is not comparable to pre-port runs.
+        # cambia-1426 moves the eval side onto GoAgentState; until it lands,
+        # say so rather than letting a mean_imp trajectory look authoritative.
+        msg = (
+            "mean_imp eval scores this policy through the pre-port public-only "
+            "observation contract while training now uses GoAgentState's "
+            "belief; the trajectory is off-distribution and not comparable to "
+            "pre-port runs until cambia-1426 lands."
+        )
+        print(f"  WARNING: {msg}")
+        logger.warning(msg)
 
     save_dir = os.path.dirname(save_path) or "."
     os.makedirs(save_dir, exist_ok=True)
@@ -318,9 +372,13 @@ def train_ppo(
 
     print("PPO Training")
     print(
-        f"  Regime: {'FAIR SELF-PLAY (E2 anchor)' if self_play else 'best-response diagnostic'}"
+        f"  Regime: {'FAIR SELF-PLAY (E2 anchor)' if self_play else 'uniform-random opponent'}"
     )
     print(f"  Opponent: {opponent}")
+    print(
+        f"  Seats: {num_players} "
+        f"({'N-player' if num_players > 2 else '2-player'} action space)"
+    )
     print(f"  Timesteps: {timesteps:,}")
     print(f"  Parallel envs: {n_envs}")
     print(f"  Net arch: {net_arch}")
@@ -331,7 +389,10 @@ def train_ppo(
             f"  Self-play snapshot: {snapshot_path} "
             f"(refresh every {selfplay_snapshot_freq:,} steps)"
         )
-    print(f"  Eval: {eval_games} games/baseline every {eval_freq:,} steps")
+    if run_eval:
+        print(f"  Eval: {eval_games} games/baseline every {eval_freq:,} steps")
+    else:
+        print("  Eval: disabled")
 
     envs = SubprocVecEnv(
         [
@@ -340,6 +401,7 @@ def train_ppo(
                 seed=seed + i,
                 config_path=config_path,
                 selfplay_snapshot_path=snapshot_path if self_play else None,
+                num_players=num_players,
             )
             for i in range(n_envs)
         ]
@@ -378,6 +440,7 @@ def train_ppo(
         eval_games=eval_games,
         eval_max_workers=eval_max_workers,
         checkpoint_freq=checkpoint_freq,
+        run_eval=run_eval,
     )
 
     _register_run(run_dir, run_name, config_path)
