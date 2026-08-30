@@ -150,7 +150,7 @@ func (g *GameState) snapOpponent(oppIdx uint8) error {
 	}
 
 	snapperIdx := g.Snap.Snappers[g.Snap.CurrentSnapperIdx]
-	opponent := g.OpponentOf(snapperIdx)
+	opponent := g.seatOpponent(snapperIdx)
 	oppHandLen := g.Players[opponent].HandLen
 
 	g.LastAction.ActionIdx = EncodeSnapOpponent(oppIdx)
@@ -189,8 +189,8 @@ func (g *GameState) snapOpponent(oppIdx uint8) error {
 		// Set pending move: snapper must now move one of their cards to fill the vacated slot.
 		g.Pending.Type = PendingSnapMove
 		g.Pending.PlayerID = snapperIdx
-		g.Pending.Data[0] = opponent      // which opponent's hand to place card in
-		g.Pending.Data[1] = oppIdx        // the vacated slot index (cards shifted, this is now end)
+		g.Pending.Data[0] = opponent // which opponent's hand to place card in
+		g.Pending.Data[1] = oppIdx   // the vacated slot index (cards shifted, this is now end)
 
 		// Pause the snap phase (Pending takes priority, snap phase remains active but paused).
 		// The snap phase Active flag stays true; advanceSnapper is called after the move.

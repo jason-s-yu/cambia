@@ -75,17 +75,17 @@ func TestLegalActionsAtThreeSeatsStaysInBounds(t *testing.T) {
 	})
 }
 
-// TestMaskOpponentIsOpponentOfAtTwoSeats is the no-change half. maskOpponent is the only input
+// TestSeatOpponentIsOpponentOfAtTwoSeats is the no-change half. seatOpponent is the only input
 // either mask arm gained, so agreeing with OpponentOf on every seat of a 2-player table is
 // agreeing on every bit those arms set.
-func TestMaskOpponentIsOpponentOfAtTwoSeats(t *testing.T) {
+func TestSeatOpponentIsOpponentOfAtTwoSeats(t *testing.T) {
 	g := newDealtGame(t)
 	if n := g.Rules.numPlayers(); n != 2 {
 		t.Fatalf("numPlayers=%d, want the 2-player default", n)
 	}
 	for seat := uint8(0); seat < 2; seat++ {
-		if got, want := g.maskOpponent(seat), g.OpponentOf(seat); got != want {
-			t.Errorf("maskOpponent(%d)=%d, want OpponentOf(%d)=%d", seat, got, seat, want)
+		if got, want := g.seatOpponent(seat), g.OpponentOf(seat); got != want {
+			t.Errorf("seatOpponent(%d)=%d, want OpponentOf(%d)=%d", seat, got, seat, want)
 		}
 	}
 }
@@ -116,7 +116,7 @@ func TestTwoSeatMasksSurviveAPlayout(t *testing.T) {
 
 func checkSeatAgreement(t *testing.T, g *GameState, seat uint8) {
 	t.Helper()
-	if got, want := g.maskOpponent(seat), g.OpponentOf(seat); got != want {
-		t.Fatalf("maskOpponent(%d)=%d, want OpponentOf(%d)=%d", seat, got, seat, want)
+	if got, want := g.seatOpponent(seat), g.OpponentOf(seat); got != want {
+		t.Fatalf("seatOpponent(%d)=%d, want OpponentOf(%d)=%d", seat, got, seat, want)
 	}
 }

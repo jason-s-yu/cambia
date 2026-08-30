@@ -1191,10 +1191,31 @@ func (g *CambiaGame) autoResolveArmedAbility(playerID uuid.UUID) {
 	}
 	resolvable = resolvable && g.engineActionLegal(actionIdx, engineIdx, targetSeat)
 	if !resolvable {
-		// A snap taken during the ability window emptied the only hand the ability could target,
-		// so the engine has no legal action left for it. Leave the prompt and re-arm the clock
-		// rather than clearing state the engine still holds; a hand refilling is the only way out.
-		log.Printf("Game %s: cannot auto-resolve pending ability %d for player %s: no legal target.", g.ID, g.Engine.Pending.Type, playerID)
+		// A snap taken during the ability window emptied the only hand the ability could target, so
+		// the engine has no legal action left for it. Re-arming this player's clock was the old
+		// answer to that, and nothing could change the condition: the engine refuses every action
+		// while it holds a pending ability, including the fallback draw, so the same timeout fired
+		// against the same state forever. cambia-1173 bars a decline action and any other
+		// action-space change, so the escape is the engine resolving the ability itself: an empty
+		// legal-target set discharges it into the snap phase for the card that armed it, which is
+		// what resolving any ability does and which advances the turn when nobody can snap
+		// (cambia-1171). The loop this replaces was never reproduced; this is a guard.
+		pending := g.Engine.Pending.Type
+		rank := g.SpecialAction.CardRank
+		if g.Engine.ResolveUntargetableArmedAbility(g.isNPlayerTable()) {
+			log.Printf("Game %s: pending ability %d for player %s had no legal target; resolved it and advanced.", g.ID, pending, playerID)
+			g.logAction(playerID, "action_special_timeout_fizzle", map[string]interface{}{
+				"rank": rank, "pending": pending,
+			})
+			g.SpecialAction = SpecialActionState{}
+			g.FireEventPrivateSpecialActionFail(playerID, "That ability had no legal target and was discharged.", rank, nil, nil)
+			g.settleEngineResolution()
+			return
+		}
+		// The engine still has a legal target for the ability even though the action this path
+		// picked was refused, so the two are out of step rather than the ability being stranded.
+		// Leave the prompt and re-arm the clock rather than clearing state the engine still holds.
+		log.Printf("Game %s: cannot auto-resolve pending ability %d for player %s: no legal target.", g.ID, pending, playerID)
 		g.scheduleNextTurnTimer()
 		return
 	}
@@ -1222,6 +1243,30 @@ func (g *CambiaGame) autoResolveArmedAbility(playerID uuid.UUID) {
 		if err := g.applyEngineAction(engine.ActionKingSwapNo, playerID); err != nil {
 			g.restoreKingDecisionPrompt(playerID, engineIdx, targetSeat, 0, 0)
 		}
+	}
+}
+
+// settleEngineResolution mirrors the tail of applyEngineActionSeat for a state change the engine
+// made without an action index: hands resync, a game end ends the game, a snap phase the resolution
+// opened is played out, and the turn advance is announced exactly once. There is no
+// emitEventsForAction call because no action was applied - clients learn the new state from the turn
+// broadcast and the hand sync it carries.
+// Assumes the lock is held by the caller.
+func (g *CambiaGame) settleEngineResolution() {
+	g.syncPlayerHandsFromEngine()
+	if g.Engine.IsTerminal() {
+		g.endGame()
+		return
+	}
+	if g.Engine.Snap.Active {
+		g.autoProcessSnapPhase()
+		if g.Engine.IsTerminal() {
+			g.endGame()
+			return
+		}
+	}
+	if !g.Engine.Snap.Active && g.Engine.Pending.Type == engine.PendingNone {
+		g.onTurnAdvanced()
 	}
 }
 

@@ -36,36 +36,17 @@ func (g *GameState) discardWithAbility() error {
 		return nil
 	}
 
-	ability := drawn.Ability()
-	opp := g.OpponentOf(acting)
-	ownHandLen := g.Players[acting].HandLen
-	oppHandLen := g.Players[opp].HandLen
-
-	switch ability {
-	case AbilityPeekOwn:
-		if ownHandLen > 0 {
-			g.Pending.Type = PendingPeekOwn
-			g.Pending.PlayerID = acting
-			return nil
-		}
-	case AbilityPeekOther:
-		if oppHandLen > 0 {
-			g.Pending.Type = PendingPeekOther
-			g.Pending.PlayerID = acting
-			return nil
-		}
-	case AbilityBlindSwap:
-		if ownHandLen > 0 && oppHandLen > 0 {
-			g.Pending.Type = PendingBlindSwap
-			g.Pending.PlayerID = acting
-			return nil
-		}
-	case AbilityKingLook:
-		if ownHandLen > 0 && oppHandLen > 0 {
-			g.Pending.Type = PendingKingLook
-			g.Pending.PlayerID = acting
-			return nil
-		}
+	// The ability arms only if the 2-player action space has an action that can resolve it.
+	// abilityHasTarget2P answers that as legalAbilitySelect would, which adds the LockCallerHand
+	// condition the hand-count checks here used to miss: a Jack, Queen or King discarded while the
+	// lock puts the only opponent's hand out of reach armed a pending ability whose legal set was
+	// empty, and the engine refuses every other action while it holds one, so the table stopped
+	// with no action able to move it. Python already fizzles that case at trigger time
+	// (_trigger_discard_ability, cambia-650), so this closes an engine divergence as well.
+	if pending := pendingForAbility(drawn.Ability()); g.abilityHasTarget2P(pending, acting) {
+		g.Pending.Type = pending
+		g.Pending.PlayerID = acting
+		return nil
 	}
 
 	// No ability or ability fizzles - snap phase for the discarded card.
@@ -106,7 +87,7 @@ func (g *GameState) peekOther(targetIdx uint8) error {
 		return fmt.Errorf("pending type is not PendingPeekOther (got %d)", g.Pending.Type)
 	}
 	acting := g.Pending.PlayerID
-	opp := g.OpponentOf(acting)
+	opp := g.seatOpponent(acting)
 	if targetIdx >= g.Players[opp].HandLen {
 		return fmt.Errorf("peekOther target %d out of range (opponent hand size %d)", targetIdx, g.Players[opp].HandLen)
 	}
@@ -133,7 +114,7 @@ func (g *GameState) blindSwap(ownIdx, oppIdx uint8) error {
 		return fmt.Errorf("pending type is not PendingBlindSwap (got %d)", g.Pending.Type)
 	}
 	acting := g.Pending.PlayerID
-	opp := g.OpponentOf(acting)
+	opp := g.seatOpponent(acting)
 	if ownIdx >= g.Players[acting].HandLen {
 		return fmt.Errorf("blindSwap own index %d out of range (hand size %d)", ownIdx, g.Players[acting].HandLen)
 	}
@@ -165,7 +146,7 @@ func (g *GameState) kingLook(ownIdx, oppIdx uint8) error {
 		return fmt.Errorf("pending type is not PendingKingLook (got %d)", g.Pending.Type)
 	}
 	acting := g.Pending.PlayerID
-	opp := g.OpponentOf(acting)
+	opp := g.seatOpponent(acting)
 	if ownIdx >= g.Players[acting].HandLen {
 		return fmt.Errorf("kingLook own index %d out of range (hand size %d)", ownIdx, g.Players[acting].HandLen)
 	}
@@ -205,7 +186,7 @@ func (g *GameState) kingSwapDecision(performSwap bool) error {
 		return fmt.Errorf("pending type is not PendingKingDecision (got %d)", g.Pending.Type)
 	}
 	acting := g.Pending.PlayerID
-	opp := g.OpponentOf(acting)
+	opp := g.seatOpponent(acting)
 
 	ownIdx := g.Pending.Data[0]
 	oppIdx := g.Pending.Data[1]
@@ -395,52 +376,61 @@ func (g *GameState) discardWithAbilityNPlayer() error {
 		return nil
 	}
 
-	ability := drawn.Ability()
-	ownHandLen := g.Players[acting].HandLen
-
-	switch ability {
-	case AbilityPeekOwn:
-		if ownHandLen > 0 {
-			g.Pending.Type = PendingPeekOwn
-			g.Pending.PlayerID = acting
-			return nil
-		}
-	case AbilityPeekOther:
-		for _, opp := range g.Opponents(acting) {
-			if g.Players[opp].HandLen > 0 {
-				g.Pending.Type = PendingPeekOther
-				g.Pending.PlayerID = acting
-				return nil
-			}
-		}
-	case AbilityBlindSwap:
-		if ownHandLen > 0 {
-			for _, opp := range g.Opponents(acting) {
-				if g.Rules.LockCallerHand && g.IsCambiaCalled() && int8(opp) == g.CambiaCaller {
-					continue
-				}
-				if g.Players[opp].HandLen > 0 {
-					g.Pending.Type = PendingBlindSwap
-					g.Pending.PlayerID = acting
-					return nil
-				}
-			}
-		}
-	case AbilityKingLook:
-		if ownHandLen > 0 {
-			for _, opp := range g.Opponents(acting) {
-				if g.Rules.LockCallerHand && g.IsCambiaCalled() && int8(opp) == g.CambiaCaller {
-					continue
-				}
-				if g.Players[opp].HandLen > 0 {
-					g.Pending.Type = PendingKingLook
-					g.Pending.PlayerID = acting
-					return nil
-				}
-			}
-		}
+	// Same arm-or-fizzle rule as the 2-player path, asked of every opponent instead of one seat:
+	// abilityHasTargetNP mirrors nplayerLegalAbilitySelect, and walks the seats in place where this
+	// used to allocate a slice per opponent-facing ability through Opponents().
+	if pending := pendingForAbility(drawn.Ability()); g.abilityHasTargetNP(pending, acting) {
+		g.Pending.Type = pending
+		g.Pending.PlayerID = acting
+		return nil
 	}
 
 	g.initiateSnapPhase(drawn)
 	return nil
+}
+
+// ResolveUntargetableArmedAbility discharges an armed ability that no action in the caller's action
+// space can resolve: it clears the pending ability and runs the snap phase for the card that armed
+// it, which is what resolving any ability does and which advances the turn when no one can snap.
+// It reports whether it resolved anything, and is a no-op whenever the ability still has a legal
+// target or nothing is armed.
+//
+// The engine refuses every action while it holds a pending ability, so an armed ability with an
+// empty legal set stops the table: no action exists that could change the condition, and the
+// service's timeout path had nothing to do but re-arm the same player's clock forever
+// (cambia-1171). The arm sites above no longer create that state, so this is a guard for the paths
+// that can still reach it - replace() arms an ability through canUseAbility, which asks about any
+// opponent rather than the one seat the 2-player space encodes - and for callers holding a state
+// built before this fix. The loop it guards against was never reproduced.
+//
+// nPlayerSpace names the action space the caller drives, because "no legal target" is a different
+// question in each: the N-player space reaches every opponent, the 2-player space only the seat
+// seatOpponent names. The caller passes the space whose mask refused it - the service passes
+// isNPlayerTable(), the FFI 2-player surface passes false - so the answer here matches the mask
+// that stranded the ability rather than the other one.
+func (g *GameState) ResolveUntargetableArmedAbility(nPlayerSpace bool) bool {
+	switch g.Pending.Type {
+	case PendingPeekOwn, PendingPeekOther, PendingBlindSwap, PendingKingLook:
+	default:
+		// PendingKingDecision always has both answers legal, and no other pending state is an
+		// armed ability.
+		return false
+	}
+	if g.DiscardLen == 0 {
+		// The card that armed the ability is the one the snap phase runs for; without it there is
+		// nothing to resolve into.
+		return false
+	}
+	acting := g.Pending.PlayerID
+	if nPlayerSpace {
+		if g.abilityHasTargetNP(g.Pending.Type, acting) {
+			return false
+		}
+	} else if g.abilityHasTarget2P(g.Pending.Type, acting) {
+		return false
+	}
+
+	g.Pending = PendingAction{}
+	g.initiateSnapPhase(g.DiscardPile[g.DiscardLen-1])
+	return true
 }
