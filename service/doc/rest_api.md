@@ -174,11 +174,20 @@ Handled by `internal/handlers/lobby.go`. These manage *ephemeral* in-memory lobb
       "type": "private" | "public" | "matchmaking", // string, optional (default: "private")
       "gameMode": "head_to_head" | "group_of_4" | ..., // string, optional (default: "head_to_head")
       "queueID": "h2h_quickplay", // string, required for type "matchmaking", optional otherwise
+      "presetId": "h2h_rapid", // string, optional; a ruleset from GET /lobby/presets
       // Partial houseRules, circuit, or lobbySettings objects can be included
       "houseRules": { "turnTimerSec": 30 }, // optional
       "lobbySettings": { "autoStart": false } // optional
     }
     ```
+    **`presetId`** names a whole ruleset from `GET /lobby/presets` instead of sending the sheet
+    field by field. The preset's house rules and lobby settings are applied first and an explicit
+    `houseRules` object in the same request lands on top of them, so a host can depart from a
+    preset in one call. A preset that fixes a player count also fixes `gameMode`
+    (`head_to_head` for a 2-player preset, `group_of_4` for a 4-player one) and overrides any
+    `gameMode` sent alongside it; the `default` preset fixes none, so `gameMode` is the caller's.
+    A preset's `rounds` figure describes the queue it came from and is not applied to the lobby:
+    a custom lobby has no round count until the round lifecycle lands (cambia-466).
     **Matchmaking lobbies** are defined by their queue, not by a game mode: send
     `{"type":"matchmaking","queueID":"<queue id>"}` and the handler derives the rest from that
     queue's config (`internal/matchmaking/validation.go`, the same one `POST /lobby/{id}/search`
@@ -206,6 +215,10 @@ Handled by `internal/handlers/lobby.go`. These manage *ephemeral* in-memory lobb
     * `Unknown matchmaking queue: <id>` - the `queueID` (on any lobby type) names no configured queue.
     * `Matchmaking queue <id> has an unsupported player count: <n>` - the queue config asks for a
       player count no game mode covers.
+    * `Unknown ruleset preset: <id>` - the `presetId` names no preset in `GET /lobby/presets`.
+    * `Ruleset presets are not accepted for a ranked matchmaking lobby` - a `presetId` alongside
+      `type: "matchmaking"`, a `queueID`, or `mode: "ranked"`. A queue owns its lobby's rules, the
+      same rule the WebSocket `update_rules` lock enforces (cambia-966).
 * **Response (Success: 200 OK):** `application/json` - Returns the full state of the created lobby.
     ```json
     {
@@ -232,6 +245,44 @@ Handled by `internal/handlers/lobby.go`. These manage *ephemeral* in-memory lobb
     `queueID` is the one field that genuinely omits: it is a plain string, empty until a queue is
     selected.
 * **Response (Error):** `400 Bad Request` (invalid type/mode/payload), `401 Unauthorized`, `403 Forbidden`, `500 Internal Server Error`.
+
+#### `GET /lobby/presets`
+
+* **Description:** Lists the selectable rulesets a custom lobby can adopt: the default one first, then one per matchmaking queue in the same order `GET /matchmaking/queues` returns them. Defined once in `internal/lobby/presets.go`; the New lobby dialog, the lobby rule sheet, `POST /lobby/create` and the games a queue produces all read that one definition. Requires no authentication: the handler reads no identity, so the list is the same for every caller.
+* **Request Body:** None.
+* **Response (Success: 200 OK):** `application/json` - an array of presets.
+    ```json
+    [
+      {
+        "id": "default",
+        "name": "Default",
+        "description": "The rules a new lobby starts with.",
+        "gameMode": "",
+        "players": 0,
+        "rounds": 1,
+        "ranked": false,
+        "houseRules": { ... },  // Full HouseRules object
+        "settings": { "autoStart": true }
+      },
+      {
+        "id": "h2h_rapid",
+        "name": "H2H Rapid",
+        "description": "Ranked queue rules. A custom lobby plays a single round.",
+        "gameMode": "head_to_head",
+        "players": 2,
+        "rounds": 8,
+        "ranked": true,
+        "houseRules": { ... },
+        "settings": { "autoStart": true }
+      }
+    ]
+    ```
+    A queue preset's `id` is that queue's id, and its `houseRules` are the fixed ranked configuration MATCHMAKING.md 5.2 specifies (`allowDrawFromDiscardPile` and `allowReplaceAbilities` on, `lockCallerHand` off for the T1C fix, `snapRace` on, a full 54-card deck) with the queue's own reconnect grace. Those are the rules the queue's own games are built with (`NewCambiaGameFromLobby`), so the preset a client is shown for a queue is the ruleset that queue plays.
+
+    `gameMode` is empty for the default preset, which fixes no player count. `rounds` describes the queue and is not applied to a lobby: custom lobbies have no round count until the round lifecycle lands (cambia-466). Circuit settings are deliberately absent from a preset, since it cannot express a round count and would otherwise reset a host's circuit configuration to say something it never meant.
+
+    Its own endpoint rather than extra fields on `GET /matchmaking/queues`: the default ruleset is not a queue and has no place in a list the dashboard renders as queue cards, the queue list is polled for live stats while this one is static, and the lobby rule sheet needs the rulesets without the queue stats.
+* **Response (Error):** `405 Method Not Allowed` for anything but `GET`.
 
 #### `POST /lobby/{id}/search` and `DELETE /lobby/{id}/search`
 

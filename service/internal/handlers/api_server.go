@@ -117,12 +117,16 @@ func (gs *GameServer) NewCambiaGameFromLobby(ctx context.Context, lob *lobby.Lob
 	queueID := lob.QueueID
 	lob.Mu.Unlock()
 
-	// A queue owns the reconnect grace for the games it produces: a matchmade lobby has no host
-	// setting rules, so its house rules are whatever defaults it was built with, and the queue's
-	// own figure is the one MATCHMAKING.md 8 specifies (cambia-955).
+	// A queue owns the rules of the games it produces. A matchmade lobby has no host setting
+	// rules, so what it plays is its queue's preset: the fixed ranked configuration
+	// MATCHMAKING.md 5.2 specifies, carrying the reconnect grace from MATCHMAKING.md 8
+	// (cambia-955). Taking the whole ruleset rather than the grace alone is what makes the
+	// preset the client is shown for a queue the ruleset that queue actually plays (cambia-1088);
+	// before this, every queue played game.DefaultHouseRules and the T1C fix in MATCHMAKING.md 5
+	// existed only in the document.
 	if queueID != "" {
-		if cfg, known := matchmaking.GetQueueConfig(queueID); known {
-			houseRules.DisconnectGraceSec = cfg.DisconnectGraceSec
+		if preset, known := lobby.GetPreset(queueID); known {
+			houseRules = preset.HouseRules
 		}
 	}
 
