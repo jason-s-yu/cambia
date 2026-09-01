@@ -623,7 +623,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 	const reopenSocket = useCallback(() => {
 		if (!isDialableLobbyId(lobbyId)) return;
 		retryCountRef.current = 0;
-		gaveUpLobbyId.current = null;
+		gaveUp.current = null;
 		shouldBeConnected.current = true;
 		connectWebSocket(lobbyId);
 	}, [lobbyId, connectWebSocket]);
