@@ -374,6 +374,18 @@ Target match quality degrades over time to prevent indefinite waits:
 | Miss 2+ consecutive rounds | - | Tournament abandonment. Remaining rounds scored as 41. 15-min queue lockout. |
 | Full match abandonment | Remaining rounds scored as 41. Rating updated normally (massive loss). | Same as above. |
 
+The 60-second window is a rule about how long a table waits for an absent player, not an allowance
+for the browser, and it is the same 60 seconds whether the player walked away or their tab was
+backgrounded (`DisconnectGraceSec` in `DefaultHouseRules` and in every queue preset). Getting back
+inside it is the client's job: a hidden tab throttles `setTimeout` to roughly one wake-up a minute,
+so a reconnect backoff scheduled for one second can land after the seat has already been forfeited,
+and a tab restored from the back/forward cache never ran the backoff at all. The web client
+therefore reconnects on the page-lifecycle events that mean the tab can act again -
+`visibilitychange` back to visible, `pageshow`, and `resume` - rather than waiting for a timer
+(`web/src/hooks/useSocket.ts`, cambia-1521). Connections are kept alive from the server side, which
+pings every 30 seconds with a 5-second deadline (`service/internal/hub/connection.go`); the client
+sends no keepalive of its own.
+
 ## 9. Turn Order
 
 ### 9.1 Quick Play (Bo1)
