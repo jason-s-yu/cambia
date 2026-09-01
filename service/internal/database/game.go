@@ -23,6 +23,17 @@ import (
 // already recorded (duplicate end-event from a reconnect/replay/timer race), this is a no-op
 // that returns nil rather than re-inserting results or re-applying rating deltas.
 func RecordGameAndResults(ctx context.Context, gameID uuid.UUID, players []*models.Player, finalScores map[uuid.UUID]int, winners []uuid.UUID, rated bool) error {
+	// Every roster entry carries its own score or nothing is written. Indexing the map for a
+	// player it has no entry for yields a 0, which this stored in game_results and handed to the
+	// rating sort as the best score at the table; the caller that produced such a map was
+	// dropping forfeited seats from it (cambia-1541). Refusing here keeps the roster and the
+	// score map one argument in practice, so no future caller can reintroduce the same silence.
+	for _, pl := range players {
+		if _, ok := finalScores[pl.ID]; !ok {
+			return fmt.Errorf("record game %v: no final score for roster player %v", gameID, pl.ID)
+		}
+	}
+
 	var alreadyRecorded bool
 
 	err := pgx.BeginTxFunc(ctx, DB, pgx.TxOptions{}, func(tx pgx.Tx) error {
@@ -121,7 +132,18 @@ func RecordCircuitRatings(ctx context.Context, gameID uuid.UUID, playerIDs []uui
 // Rating is gated on supported roster sizes: 2 => "1v1", 4 => "4p", 7 or 8 => "7p8p", anything
 // else => no rating update. A player whose user row cannot be loaded is dropped from the update
 // rather than failing it.
+//
+// A player with no score is refused instead. Rating on an implicit map miss is what cambia-1541
+// fixed: FinalizeRatings sorts ascending and lower is better in Cambia, so the zero value a
+// missing key produces is a first-place finish. Two fresh 1500 ratings settled at 1662 and 1338
+// that way, with the seat that quit taking the gain.
 func applyRatingUpdate(ctx context.Context, gameID uuid.UUID, playerIDs []uuid.UUID, scores map[uuid.UUID]int) error {
+	for _, id := range playerIDs {
+		if _, ok := scores[id]; !ok {
+			return fmt.Errorf("rating update for game %v: no score for roster player %v", gameID, id)
+		}
+	}
+
 	// figure out rating mode
 	var ratingMode rating.RatingMode
 	switch len(playerIDs) {

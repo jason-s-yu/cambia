@@ -22,8 +22,10 @@ import (
 	"github.com/jason-s-yu/cambia/service/internal/models"
 )
 
-// endedGame captures what OnGameEnd reported, which is where a forfeit is observable: the
-// forfeited player is omitted from scoring entirely (see computeScoresFromEngine).
+// endedGame captures what OnGameEnd reported, which is where a forfeit is observable. scores is
+// the display map the results frame is built from, so a forfeited player is absent from it; the
+// seat is scored at engine.ForfeitRoundScore in the record map OnGameEnd is separately handed
+// (cambia-1541, see game.computeScoresFromEngine).
 type endedGame struct {
 	winner uuid.UUID
 	scores map[uuid.UUID]int

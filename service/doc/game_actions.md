@@ -633,10 +633,31 @@ same hand, same stockpile, same turn.
 }
 ```
 
-A forfeited player drops out of the final scoring, and the game ends there if it leaves one
-player or fewer connected. A player who was away but had not yet forfeited is scored normally if
-the table finishes without them, and one who comes back to a game that is still running takes
-their seat back: the forfeit only sticks once the game itself is over.
+A forfeited player is scored at **41 points**, the flat forfeit score MATCHMAKING.md 8 and
+RULES.md T5 put a round nobody played at (`engine.ForfeitRoundScore`, the same constant a missed
+circuit round is charged). The game ends there if the forfeit leaves one player or fewer
+connected. A player who was away but had not yet forfeited is scored normally if the table
+finishes without them, and one who comes back to a game that is still running takes their seat
+back: the forfeit only sticks once the game itself is over.
+
+The 41 is a record, not a scoreboard entry. It is what `game_results` stores, what the rating
+roster rates, and what a circuit round adds to a cumulative total; the `game_results` frame below
+keeps omitting the forfeited seat from `scores` entirely, because that frame is what the results
+screen renders and the seat is already reported as forfeited by `player_forfeited` and by the
+`forfeited` flag on `private_sync_state`. Putting a 41 next to real hands would read as a hand the
+player never held. The rules mandate is ranked-scoped, but a casual lobby scores a forfeit the
+same way for consistency: no rating is applied there, so only the persisted score differs.
+
+Every seat a finished game persists carries its own score. `database.RecordGameAndResults` and the
+rating update behind it refuse a roster entry the score map has no entry for rather than reading
+the miss as a 0, which is what used to happen: a forfeited seat was left out of the map, stored a
+0 in `game_results`, and - since lower is better in Cambia and the rating sorts ascending - rated
+as the best score at the table. Two fresh 1500 ratings came out 1662 for the player who quit and
+1338 for the player who stayed (cambia-1541).
+
+Giving the seat up on purpose costs the same as letting the reconnect window close: `leave_table`
+mid-game forfeits the seat immediately (cambia-1520) and it is scored at 41 like any other
+forfeit, so leaving early is never the cheaper exit.
 
 The window opens from the deal onwards, not from the first turn: a drop during the initial card
 reveal holds the seat and forfeits it on expiry exactly as a mid-game drop does, whether the
