@@ -68,7 +68,7 @@ func (g *GameState) ApplyNPlayerAction(actionIdx uint16) error {
 		return g.kingSwapDecision(true)
 	default:
 		if slot, ok := NPlayerDecodeReplace(actionIdx); ok {
-			return g.replace(slot)
+			return g.replace(slot, true)
 		}
 		if slot, ok := NPlayerDecodePeekOwn(actionIdx); ok {
 			return g.peekOwn(slot)

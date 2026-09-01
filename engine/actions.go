@@ -55,7 +55,7 @@ func (g *GameState) ApplyAction(actionIdx uint16) error {
 		return g.kingSwapDecision(true)
 	default:
 		if targetIdx, ok := ActionIsReplace(actionIdx); ok {
-			return g.replace(targetIdx)
+			return g.replace(targetIdx, false)
 		}
 		if targetIdx, ok := ActionIsPeekOwn(actionIdx); ok {
 			return g.peekOwn(targetIdx)
@@ -186,7 +186,16 @@ func (g *GameState) discardDrawn() error {
 }
 
 // replace swaps the drawn card into hand[targetIdx], discarding the old card.
-func (g *GameState) replace(targetIdx uint8) error {
+// nPlayerSpace names the action space that called replace: false for ApplyAction's
+// 146-action space, true for ApplyNPlayerAction's 452-action space. replace() used to
+// arm an ability through canUseAbility, which asks abilityHasTargetNP - the "does any
+// opponent still hold cards" question - regardless of which space drove the call. At
+// 3+ seats driven through the 2-player surface that can arm an ability the 2-player
+// mask cannot target: abilityHasTarget2P only asks about the single seat seatOpponent
+// names, and an empty legal set stops the table (cambia-1171 fixed the same drift for
+// discardWithAbility; ResolveUntargetableArmedAbility was the guard for this call site
+// specifically because it was still open - cambia-1489).
+func (g *GameState) replace(targetIdx uint8, nPlayerSpace bool) error {
 	if g.Pending.Type == PendingNone {
 		return fmt.Errorf("no pending drawn card to replace with")
 	}
@@ -223,8 +232,19 @@ func (g *GameState) replace(targetIdx uint8) error {
 
 	// If AllowReplaceAbilities is enabled and the old card has an ability and was
 	// drawn from the stockpile, trigger the old card's ability instead of immediately
-	// advancing to the snap phase.
-	if g.Rules.AllowReplaceAbilities && drawnFrom == DrawnFromStockpile && old.HasAbility() && g.canUseAbility(acting, old) {
+	// advancing to the snap phase - but only if the calling space's own mask could
+	// reach a target for it. Asking the wrong space's question here is exactly what
+	// stranded the ability before (see the doc comment above).
+	armsAbility := g.Rules.AllowReplaceAbilities && drawnFrom == DrawnFromStockpile && old.HasAbility()
+	if armsAbility {
+		pending := pendingForAbility(old.Ability())
+		if nPlayerSpace {
+			armsAbility = g.abilityHasTargetNP(pending, acting)
+		} else {
+			armsAbility = g.abilityHasTarget2P(pending, acting)
+		}
+	}
+	if armsAbility {
 		switch old.Ability() {
 		case AbilityPeekOwn:
 			g.Pending.Type = PendingPeekOwn

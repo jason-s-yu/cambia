@@ -863,6 +863,20 @@ func cambia_game_get_drawn_card_bucket(h C.int32_t) C.int8_t {
 	return C.int8_t(agent.CardToBucket(card))
 }
 
+// cambia_game_cambia_caller returns the seat that called Cambia, or -1 if no one has (also -1 on
+// an invalid handle). Read-only. GameState.CambiaCaller is the only input the tabular
+// CFRAgentWrapper's infoset key needs that the FFI did not already expose (own-hand buckets,
+// opponent belief, hand lengths, discard-top bucket and stockpile estimate are all reachable
+// through GoEngine and GoAgentState); this closes that gap (cambia-1488).
+//
+//export cambia_game_cambia_caller
+func cambia_game_cambia_caller(h C.int32_t) C.int8_t {
+	if h < 0 || h >= maxGames || !gameInUse[h] {
+		return -1
+	}
+	return C.int8_t(gamePool[h].CambiaCaller)
+}
+
 //export cambia_agent_action_mask
 func cambia_agent_action_mask(game_h C.int32_t, out *C.uint8_t) C.int32_t {
 	if game_h < 0 || game_h >= maxGames || !gameInUse[game_h] {
@@ -1054,6 +1068,27 @@ func cambia_game_apply_nplayer_action(h C.int32_t, action_idx C.uint16_t) C.int3
 	err := gamePool[h].ApplyNPlayerAction(uint16(action_idx))
 	if err != nil {
 		return -1
+	}
+	return 0
+}
+
+// cambia_game_resolve_untargetable_armed_ability discharges an armed ability that no action in
+// the caller's action space can resolve (engine.GameState.ResolveUntargetableArmedAbility). The
+// engine refuses every other action while it holds a pending ability, so a caller stuck behind an
+// empty legal mask needs this to make progress; n_player_space names which mask the caller was
+// driving with when it found the mask empty (0 = the 146-action surface, nonzero = the 452-action
+// surface), matching the space whose mask actually stranded it. Was unexported until cambia-1489:
+// FFI callers (eval, PPO env, best-response search) had no way to discharge a stranded ability.
+// Returns 1 if it resolved something, 0 if the ability still has a legal target or nothing is
+// armed, -1 on an invalid handle.
+//
+//export cambia_game_resolve_untargetable_armed_ability
+func cambia_game_resolve_untargetable_armed_ability(h C.int32_t, n_player_space C.uint8_t) C.int32_t {
+	if h < 0 || h >= maxGames || !gameInUse[h] {
+		return -1
+	}
+	if gamePool[h].ResolveUntargetableArmedAbility(n_player_space != 0) {
+		return 1
 	}
 	return 0
 }
@@ -2405,6 +2440,72 @@ func testGameNumPlayers(gameH int32) uint8 {
 // cardToIndex/indexToCard inverse check.
 func testCardIndexRoundTrip(idx uint8) uint8 {
 	return cardToIndex(indexToCard(idx))
+}
+
+// testGameApplyNPlayerAction drives cambia_game_apply_nplayer_action from Go tests.
+func testGameApplyNPlayerAction(gameH int32, action uint16) int32 {
+	return int32(cambia_game_apply_nplayer_action(C.int32_t(gameH), C.uint16_t(action)))
+}
+
+// testGameResolveUntargetableArmedAbility drives
+// cambia_game_resolve_untargetable_armed_ability from Go tests.
+func testGameResolveUntargetableArmedAbility(gameH int32, nPlayerSpace bool) int32 {
+	var np C.uint8_t
+	if nPlayerSpace {
+		np = 1
+	}
+	return int32(cambia_game_resolve_untargetable_armed_ability(C.int32_t(gameH), np))
+}
+
+// testGameCambiaCaller drives cambia_game_cambia_caller from Go tests.
+func testGameCambiaCaller(gameH int32) int32 {
+	return int32(cambia_game_cambia_caller(C.int32_t(gameH)))
+}
+
+// testGameActingPlayer drives cambia_game_acting_player from Go tests.
+func testGameActingPlayer(gameH int32) uint8 {
+	return uint8(cambia_game_acting_player(C.int32_t(gameH)))
+}
+
+// testGameSetPending pokes Pending.Type/PlayerID directly, for constructing a state no live arm
+// site produces any more (e.g. an ability armed with no reachable target, cambia-1489) so
+// ResolveUntargetableArmedAbility's guard contract for such states stays covered.
+func testGameSetPending(gameH int32, pendingType uint8, playerID uint8) {
+	if gameH < 0 || gameH >= maxGames || !gameInUse[gameH] {
+		return
+	}
+	gamePool[gameH].Pending.Type = engine.PendingType(pendingType)
+	gamePool[gameH].Pending.PlayerID = playerID
+}
+
+// testGameSetHandLen pokes Players[seat].HandLen directly, e.g. to empty a seat's hand so a
+// targeting predicate has nowhere to reach.
+func testGameSetHandLen(gameH int32, seat uint8, handLen uint8) {
+	if gameH < 0 || gameH >= maxGames || !gameInUse[gameH] || seat >= engine.MaxPlayers {
+		return
+	}
+	gamePool[gameH].Players[seat].HandLen = handLen
+}
+
+// testGameSetHandCard pokes one hand slot directly, so a test can pin every dealt hand away from
+// a chosen discard rank and make the resulting snap phase (or lack of one) deterministic instead
+// of depending on what a random deal happened to hold.
+func testGameSetHandCard(gameH int32, seat uint8, slot uint8, cardIdx uint8) {
+	if gameH < 0 || gameH >= maxGames || !gameInUse[gameH] || seat >= engine.MaxPlayers || slot >= engine.MaxHandSize {
+		return
+	}
+	gamePool[gameH].Players[seat].Hand[slot] = indexToCard(cardIdx)
+}
+
+// testGamePushDiscard pushes one card onto the discard pile, for setting up the card
+// ResolveUntargetableArmedAbility's snap phase resolves against.
+func testGamePushDiscard(gameH int32, cardIdx uint8) {
+	if gameH < 0 || gameH >= maxGames || !gameInUse[gameH] {
+		return
+	}
+	g := &gamePool[gameH]
+	g.DiscardPile[g.DiscardLen] = indexToCard(cardIdx)
+	g.DiscardLen++
 }
 
 func main() {}
