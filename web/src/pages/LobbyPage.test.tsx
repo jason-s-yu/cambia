@@ -51,7 +51,7 @@ function lobbyDetails(): LobbyState {
       snapRace: false,
       lockCallerHand: false,
       forfeitOnDisconnect: true,
-      disconnectGraceSec: 60,
+      disconnectGraceSec: 90,
       penaltyDrawCount: 2,
       turnTimerSec: 15,
       maxGameTurns: 0,

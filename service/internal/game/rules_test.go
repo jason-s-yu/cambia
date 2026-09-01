@@ -109,6 +109,13 @@ func TestHouseRulesUpdate_IgnoresAbsentKeys(t *testing.T) {
 	assert.Equal(t, 2, rules.InitialViewCount)
 }
 
+// TestDefaultHouseRules_DisconnectGraceSecIsNinety pins the default reconnect grace (raised
+// 60 -> 90 by cambia-1609; MATCHMAKING.md 8, RULES.md T5). This is service-owned (no engine
+// counterpart), so TestDefaultHouseRules_MatchesEngineDefaults below cannot cover it.
+func TestDefaultHouseRules_DisconnectGraceSecIsNinety(t *testing.T) {
+	assert.Equal(t, 90, DefaultHouseRules().DisconnectGraceSec)
+}
+
 // TestDefaultHouseRules_MatchesEngineDefaults ties the service defaults to the engine's own
 // DefaultHouseRules for every shared field, so the two cannot drift apart unnoticed.
 func TestDefaultHouseRules_MatchesEngineDefaults(t *testing.T) {

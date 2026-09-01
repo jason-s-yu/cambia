@@ -59,10 +59,10 @@ func newForfeitTestServer(t *testing.T) (*GameServer, *httptest.Server) {
 }
 
 // setDisconnectGrace overrides a lobby's reconnect grace before its game is built. The default
-// is 60 seconds (cambia-955), so a test that wants the forfeit to land on the drop itself - the
-// behaviour these end-to-end tests were written against - sets it to 0 rather than waiting the
-// window out. The grace window itself is covered by the hub tests and by
-// TestE2EReconnectInsideTheGraceWindowKeepsTheSeat below.
+// is 90 seconds (cambia-955, raised from 60 by cambia-1609), so a test that wants the forfeit to
+// land on the drop itself - the behaviour these end-to-end tests were written against - sets it
+// to 0 rather than waiting the window out. The grace window itself is covered by the hub tests
+// and by TestE2EReconnectInsideTheGraceWindowKeepsTheSeat below.
 func setDisconnectGrace(t *testing.T, gs *GameServer, lobbyID uuid.UUID, seconds int) {
 	t.Helper()
 	lob, ok := gs.LobbyStore.GetLobby(lobbyID)

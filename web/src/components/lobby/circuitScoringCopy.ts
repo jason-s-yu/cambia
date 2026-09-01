@@ -66,7 +66,7 @@ export const CIRCUIT_SCORING_COPY: CircuitCopySection[] = [
     id: 'disconnects',
     heading: 'Disconnects',
     body: [
-      'A drop in a circuit round does not forfeit the seat. The round plays on around it, the seat is held for the reconnect grace (default 60 seconds), and reconnecting hands the player their cards back.',
+      'A drop in a circuit round does not forfeit the seat. The round plays on around it, the seat is held for the reconnect grace (default 90 seconds), and reconnecting hands the player their cards back.',
       'Forfeit on disconnect stays a single game rule; a circuit round never forfeits the seat. The reconnect grace on the sheet is the window a circuit round holds a dropped seat for.'
     ]
   },

@@ -98,7 +98,7 @@ func DefaultHouseRules() HouseRules {
 		SnapRace:                 false,
 		LockCallerHand:           true,
 		ForfeitOnDisconnect:      true,
-		DisconnectGraceSec:       60,
+		DisconnectGraceSec:       90,
 		PenaltyDrawCount:         2,
 		TurnTimerSec:             15,
 		MaxGameTurns:             46,

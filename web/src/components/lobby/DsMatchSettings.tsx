@@ -396,7 +396,7 @@ const DsMatchSettings: React.FC<DsMatchSettingsProps> = ({ currentSettings, isHo
             share a row rather than sitting in the flag grid and the numeric grid apart. */}
         <div style={{ ...RULE_GRID, alignItems: 'start', marginTop: 'var(--space-3)' }}>
           {flag('Forfeit on disconnect', 'A dropped player forfeits instead of rejoining.', !!houseRules?.forfeitOnDisconnect, (v) => setRule('forfeitOnDisconnect', v))}
-          {numField('Reconnect grace (sec)', houseRules?.disconnectGraceSec, (raw) => setRule('disconnectGraceSec', clamped(raw, 0, 3600, 60)))}
+          {numField('Reconnect grace (sec)', houseRules?.disconnectGraceSec, (raw) => setRule('disconnectGraceSec', clamped(raw, 0, 3600, 90)))}
         </div>
       </RuleGroup>
 

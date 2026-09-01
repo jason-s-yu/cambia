@@ -505,7 +505,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 	 * Reconnect when the tab comes back (cambia-1521).
 	 *
 	 * The mechanism chosen for the backgrounded-tab forfeit is client-side: the server's reconnect
-	 * grace stays where it is (DisconnectGraceSec 60 under ForfeitOnDisconnect, service/internal/
+	 * grace stays where it is (DisconnectGraceSec 90 under ForfeitOnDisconnect, service/internal/
 	 * game/rules.go DefaultHouseRules), and the client's job is to get back inside it. The grace is
 	 * a rule about how long a table waits for an absent player, not a browser allowance, so
 	 * stretching it to cover tab throttling would make every genuine walk-off cost the table a

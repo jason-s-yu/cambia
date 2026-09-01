@@ -35,6 +35,18 @@ func TestQueueConfigsOrderIsFixed(t *testing.T) {
 	}
 }
 
+// TestQueueConfigsDisconnectGraceSecIsNinety pins the ranked reconnect grace every queue carries
+// (MATCHMAKING.md 8, RULES.md T5; raised 60 -> 90 by cambia-1609). A queued lobby gets this value
+// from the queue rather than a host setting rules, so a silent edit here would silently change
+// how long a ranked seat is held without DefaultHouseRules moving at all.
+func TestQueueConfigsDisconnectGraceSecIsNinety(t *testing.T) {
+	for id, cfg := range QueueConfigs {
+		if cfg.DisconnectGraceSec != 90 {
+			t.Errorf("QueueConfigs[%q].DisconnectGraceSec = %d, want 90", id, cfg.DisconnectGraceSec)
+		}
+	}
+}
+
 // TestQueueConfigsOrderIsUnique guards the handler's Order-then-QueueID sort: a duplicate Order
 // value still sorts deterministically (QueueID breaks the tie), but a duplicate was never part
 // of the cambia-957 design and would mean two queue cards claim the same rank.
