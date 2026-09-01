@@ -145,14 +145,16 @@ func TestSnapOpponentAtThreeSeatsResolvesAgainstARealSeat(t *testing.T) {
 }
 
 // TestUniformStepOverTwoPlayerMaskAtFourSeats is the cambia-1426 repro shape: a 4-seat game driven
-// entirely through the 2-player surface, stepping uniformly over its own legal mask. Before this
-// fix it panicked inside a few games; the run below covers many more than that.
+// entirely through the 2-player surface, stepping uniformly over its own legal mask. Before the
+// cambia-1171 fix it panicked inside a few games; the run below covers many more than that.
 //
 // An empty mask at a non-terminal state is the other failure this surface can produce, so it is
-// checked here rather than being stepped past: replace() arms an ability through canUseAbility,
-// which asks about every opponent, while the 2-player mask enumerates only the seat seatOpponent
-// names. ResolveUntargetableArmedAbility is the escape for exactly that, and any other empty mask
-// fails the test.
+// checked here rather than being stepped past. Before cambia-1489, replace() armed an ability
+// through canUseAbility, which asks about every opponent, while the 2-player mask enumerates only
+// the seat seatOpponent names, and ResolveUntargetableArmedAbility was the only recovery (178
+// stranded arms over 2000 seeds with AllowReplaceAbilities on). replace() now asks the calling
+// space's own predicate at arm time, so the guard should never have to fire on this path any
+// more; any empty mask, or any resolution the guard performs, fails the test.
 func TestUniformStepOverTwoPlayerMaskAtFourSeats(t *testing.T) {
 	for _, replaceAbilities := range []bool{false, true} {
 		name := "replace_abilities_off"
@@ -191,6 +193,9 @@ func TestUniformStepOverTwoPlayerMaskAtFourSeats(t *testing.T) {
 			// past the dealt state rather than pinning a length.
 			if steps < seeds*10 {
 				t.Errorf("only %d actions applied across %d seeds; the games are not playing out", steps, seeds)
+			}
+			if resolved != 0 {
+				t.Errorf("%d armed abilities the 2-player mask could not target were left for the guard to resolve; replace() should fizzle them at arm time instead (cambia-1489)", resolved)
 			}
 			t.Logf("%d seeds, %d actions stepped clean; %d armed abilities the 2-player mask could not target were resolved by the guard", seeds, steps, resolved)
 		})
@@ -330,15 +335,21 @@ func TestLockedCallerAbilityFizzlesAtDiscardInsteadOfArming(t *testing.T) {
 	}
 }
 
-// TestReplaceArmedAbilityWithNoTwoPlayerTargetResolves covers the arm site this ticket cannot reach
-// from abilities.go: replace() gates on canUseAbility, which asks about every opponent, so at a 4
-// seat table driven through the 2-player surface it arms an ability whose 2-player legal set is
-// empty. ResolveUntargetableArmedAbility is the escape, and it answers per action space: the same
-// state is still resolvable in the N-player space, which can reach the seat holding cards.
-func TestReplaceArmedAbilityWithNoTwoPlayerTargetResolves(t *testing.T) {
-	// setup arms PendingPeekOther for seat 0 at four seats with seat 1 - the seat the 2-player
-	// space encodes as the opponent - holding nothing, and seats 2 and 3 holding cards.
-	setup := func(t *testing.T) *GameState {
+// TestReplaceRoutesArmingThroughTheCallingSpacesPredicate covers the arm site cambia-1171 could
+// not reach from abilities.go: replace() used to gate on canUseAbility, which asks about every
+// opponent regardless of which action space called it, so at a 4 seat table driven through the
+// 2-player surface it could arm an ability whose 2-player legal set was empty and strand the
+// table behind ResolveUntargetableArmedAbility. replace() now asks abilityHasTarget2P or
+// abilityHasTargetNP to match the space that called it (cambia-1489), so the same state produces
+// different outcomes depending on which surface drove the Replace: the 2-player surface fizzles
+// straight into the snap phase, and the N-player surface - which can still reach seats 2 and 3 -
+// arms it as before.
+func TestReplaceRoutesArmingThroughTheCallingSpacesPredicate(t *testing.T) {
+	// newGame deals seat 0 a peek-other card to replace out of hand at a four seat table, with
+	// seat 1 - the seat the 2-player space encodes as the opponent - holding nothing, and seats 2
+	// and 3 holding cards. The 2-player mask cannot target the ability (its only opponent is seat
+	// 1); the N-player mask can (seats 2 and 3 are reachable).
+	newGame := func(t *testing.T) *GameState {
 		t.Helper()
 		rules := nplayerRules(4)
 		rules.AllowReplaceAbilities = true
@@ -358,47 +369,69 @@ func TestReplaceArmedAbilityWithNoTwoPlayerTargetResolves(t *testing.T) {
 		if err := g.ApplyAction(ActionDrawStockpile); err != nil {
 			t.Fatalf("DrawStockpile: %v", err)
 		}
-		if err := g.ApplyAction(EncodeReplace(0)); err != nil {
-			t.Fatalf("Replace(0): %v", err)
-		}
-		if g.Pending.Type != PendingPeekOther {
-			t.Fatalf("Pending.Type=%d, want PendingPeekOther armed by the replace", g.Pending.Type)
-		}
-		if actions := g.LegalActionsList(); len(actions) != 0 {
-			t.Fatalf("expected the 2-player mask to strand the ability, got %v", actions)
-		}
 		return &g
 	}
 
-	t.Run("two_player_space_resolves", func(t *testing.T) {
-		g := setup(t)
+	t.Run("two_player_space_fizzles_instead_of_stranding", func(t *testing.T) {
+		g := newGame(t)
 		turnBefore := g.TurnNumber
-		if !g.ResolveUntargetableArmedAbility(false) {
-			t.Fatal("guard did not resolve an ability the 2-player mask cannot target")
+		if err := g.ApplyAction(EncodeReplace(0)); err != nil {
+			t.Fatalf("Replace(0) via the 2-player surface: %v", err)
 		}
 		if g.Pending.Type != PendingNone {
-			t.Errorf("Pending.Type=%d after resolution, want PendingNone", g.Pending.Type)
+			t.Fatalf("Pending.Type=%d, want PendingNone: the 2-player mask cannot target this ability, so it should fizzle rather than arm", g.Pending.Type)
 		}
 		if g.Snap.Active {
-			t.Errorf("snap phase opened; no hand holds the discarded rank")
+			t.Errorf("snap phase opened; no hand holds the discarded rank (Ten)")
 		}
 		if g.TurnNumber != turnBefore+1 {
-			t.Errorf("TurnNumber=%d, want %d: resolution did not advance the turn", g.TurnNumber, turnBefore+1)
+			t.Errorf("TurnNumber=%d, want %d: the fizzle did not advance the turn", g.TurnNumber, turnBefore+1)
+		}
+		// Nothing left for the guard to do: the fix removed the strand at the source.
+		if g.ResolveUntargetableArmedAbility(false) {
+			t.Error("guard resolved something; nothing should have been armed")
 		}
 	})
 
-	t.Run("n_player_space_leaves_it_armed", func(t *testing.T) {
-		g := setup(t)
-		if g.ResolveUntargetableArmedAbility(true) {
-			t.Error("guard resolved an ability the N-player space can still target at seat 2")
+	t.Run("n_player_space_still_arms_it", func(t *testing.T) {
+		g := newGame(t)
+		if err := g.ApplyNPlayerAction(NPlayerEncodeReplace(0)); err != nil {
+			t.Fatalf("Replace(0) via the N-player surface: %v", err)
 		}
 		if g.Pending.Type != PendingPeekOther {
-			t.Errorf("Pending.Type=%d, want the ability left armed", g.Pending.Type)
+			t.Fatalf("Pending.Type=%d, want PendingPeekOther: the N-player mask can still reach seats 2 and 3", g.Pending.Type)
 		}
 		if mask := g.NPlayerLegalActions(); mask == [10]uint64{} {
 			t.Error("N-player mask is empty; the premise of this case does not hold")
 		}
 	})
+}
+
+// TestResolveUntargetableArmedAbilityGuardsAPreExistingStrandedState keeps
+// ResolveUntargetableArmedAbility's own contract covered independently of any arm site: it is
+// documented (abilities.go) to also guard callers holding a state built before cambia-1489's fix,
+// e.g. a snapshot restored from before the fix landed. This constructs that state directly rather
+// than through replace(), which no longer produces it.
+func TestResolveUntargetableArmedAbilityGuardsAPreExistingStrandedState(t *testing.T) {
+	rules := nplayerRules(4)
+	g := NewGame(13, rules)
+	g.Deal()
+	g.Players[1].HandLen = 0
+	g.DiscardPile[g.DiscardLen] = NewCard(SuitClubs, RankTen)
+	g.DiscardLen++
+	g.Pending.Type = PendingPeekOther
+	g.Pending.PlayerID = 0
+
+	turnBefore := g.TurnNumber
+	if !g.ResolveUntargetableArmedAbility(false) {
+		t.Fatal("guard did not resolve an ability the 2-player mask cannot target")
+	}
+	if g.Pending.Type != PendingNone {
+		t.Errorf("Pending.Type=%d after resolution, want PendingNone", g.Pending.Type)
+	}
+	if g.TurnNumber != turnBefore+1 {
+		t.Errorf("TurnNumber=%d, want %d: resolution did not advance the turn", g.TurnNumber, turnBefore+1)
+	}
 }
 
 // TestActionSpaceSizesUnchanged pins both action-space sizes. The cambia-1173 ruling bars a decline

@@ -147,6 +147,19 @@ class TestGoEngineState:
         with GoEngine(seed=403) as engine:
             assert not engine.is_terminal()
 
+    def test_go_engine_resolve_untargetable_armed_ability_noop(self):
+        """resolve_untargetable_armed_ability() is a no-op with nothing armed (cambia-1489)."""
+        with GoEngine(seed=406) as engine:
+            assert engine.resolve_untargetable_armed_ability(False) is False
+            assert engine.resolve_untargetable_armed_ability(True) is False
+
+    def test_go_engine_resolve_untargetable_armed_ability_invalid_handle_raises(self):
+        """A closed (freed) handle raises rather than segfaulting or lying."""
+        engine = GoEngine(seed=407)
+        engine.close()
+        with pytest.raises(RuntimeError):
+            engine.resolve_untargetable_armed_ability(False)
+
 
 class TestGoEngineFullGame:
     def test_go_engine_full_game(self):

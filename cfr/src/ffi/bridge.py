@@ -442,6 +442,9 @@ _ffi.cdef("""
     int32_t cambia_game_get_pending(int32_t game_h, uint8_t *out_buf, int32_t buf_len);
     int32_t cambia_game_get_snap_state(int32_t game_h, uint8_t *out_buf, int32_t buf_len);
     int32_t cambia_game_get_house_rules(int32_t game_h, uint8_t *out_buf, int32_t buf_len);
+
+    /* cambia-1489: FFI-reachable stranded-ability guard */
+    int32_t cambia_game_resolve_untargetable_armed_ability(int32_t game_h, uint8_t n_player_space);
 """)
 
 _LIB = None
@@ -1151,6 +1154,40 @@ class GoEngine:
                 f"cambia_game_apply_nplayer_action failed (returned {ret}) "
                 f"for action {action_idx} on handle {self._game_h}"
             )
+
+    def resolve_untargetable_armed_ability(self, n_player_space: bool) -> bool:
+        """
+        Discharge an armed ability that no action in the given action space can resolve.
+
+        The engine refuses every other action while it holds a pending ability,
+        so an armed ability with an empty legal set stops the game; this is the
+        FFI-reachable form of the guard (cambia-1489). Previously only an
+        internal engine caller could invoke it, so FFI users (eval, PPO env,
+        best-response search) had no way to make progress out of that state.
+
+        Args:
+            n_player_space: which action space the caller was driving with
+                when it found the mask empty. False for the 146-action
+                surface (apply_action), True for the N-player 620-action
+                surface (apply_nplayer_action). Pass the space whose mask
+                actually stranded the caller.
+
+        Returns:
+            True if an armed ability was discharged, False if the ability
+            still has a legal target or nothing is armed (a no-op).
+
+        Raises:
+            RuntimeError: If the handle is invalid.
+        """
+        ret = self._lib.cambia_game_resolve_untargetable_armed_ability(
+            self._game_h, 1 if n_player_space else 0
+        )
+        if ret < 0:
+            raise RuntimeError(
+                f"cambia_game_resolve_untargetable_armed_ability failed "
+                f"(returned {ret}) on handle {self._game_h}"
+            )
+        return bool(ret)
 
     def get_nplayer_utility(self) -> np.ndarray:
         """

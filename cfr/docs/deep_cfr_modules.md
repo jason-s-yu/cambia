@@ -762,6 +762,7 @@ class GoEngine:
     # Context helpers
     def decision_ctx(self) -> int                    # 0=StartTurn..5=Terminal
     def get_drawn_card_bucket(self) -> int           # -1 if none
+    def resolve_untargetable_armed_ability(self, n_player_space: bool) -> bool
 
     # Batch update (one FFI call for both agents)
     def update_both(self, a0: "GoAgentState", a1: "GoAgentState") -> None
@@ -783,6 +784,8 @@ The save/restore API replaces the apply/undo pattern. Before recursing into a ch
 `decision_ctx()` returns the current decision context as an integer, avoiding the cost of constructing a Python `DecisionContext` enum on every call.
 
 `update_both()` calls `cambia_agents_update_both()` in a single FFI round-trip instead of two separate `cambia_agent_update()` calls. Used in the hot traversal loop.
+
+`resolve_untargetable_armed_ability(n_player_space)` (cambia-1489) wraps `cambia_game_resolve_untargetable_armed_ability`: it discharges an armed ability that no action in the given action space can resolve, returning whether it discharged something. The engine refuses every other action while it holds a pending ability, so this is the FFI-reachable escape for that state. `n_player_space` must name the action space the caller was driving with when it found the legal mask empty (`False` for `apply_action`'s 146-action surface, `True` for `apply_nplayer_action`'s 620-action surface) -- passing the wrong one asks a different question than the one that actually stranded the caller.
 
 ### `GoAgentState`
 
@@ -861,6 +864,7 @@ ffi/bridge.py
   |     cambia_agent_encode_eppbs_interleaved, cambia_agent_encode_eppbs_dealiased
   |     cambia_agent_encode_nplayer, cambia_agent_apply_decay
   |     cambia_handle_pool_stats
+  |     cambia_game_resolve_untargetable_armed_ability
   +-- deep_worker.py: GoEngine and GoAgentState used when engine_backend="go"
   +-- evaluate_agents.py: NeuralAgentWrapper uses GoAgentState for eval encoding
 ```
