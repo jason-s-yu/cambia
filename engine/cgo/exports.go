@@ -65,6 +65,13 @@ const (
 type solverEntry struct {
 	root      *SubgameNode
 	leafCount int
+	// numPlayers is the seat count of the game cambia_subgame_build built
+	// this tree from (cambia-1554). The solver is 2-player-only (see the
+	// SubgameNode type doc in subgame_solver.go); cambia_subgame_solve and
+	// cambia_subgame_solve_ranged re-check it independently of the
+	// build-time guard, since an entry can only be observed at either call
+	// site through a handle this package itself issued.
+	numPlayers uint8
 }
 
 // stateSnapshot is a complete (game, both agents' belief + token state)
@@ -832,9 +839,36 @@ func cambia_agent_action_mask(game_h C.int32_t, out *C.uint8_t) C.int32_t {
 // Subgame solver
 // ---------------------------------------------------------------------------
 
+// cambia_subgame_build constructs a depth-limited subgame CFR tree from
+// game_h's current state. Returns the solver handle on success, or -1 on
+// failure: an invalid game handle, an exhausted solver pool, or game_h not
+// being a 2-player table (NumActivePlayers() != 2) - the same sentinel this
+// whole file already uses for "this call did not produce anything usable",
+// reported through the existing return-code error surface rather than a new
+// one. The Python wrapper (SubgameSolver.__init__, cfr/src/ffi/bridge.py)
+// checks game.num_players() itself before ever making this call, so a
+// conforming caller sees a specific, worded exception naming the actual
+// reason; this Go-side guard is the backstop for any other caller.
+//
+// The solver is 2-player only (cambia-1554; see the SubgameNode type doc in
+// subgame_solver.go): BuildSubgameTree's terminal-utility copy and both CFR
+// iteration methods hard-code seats 0 and 1. At a 3+ seat table
+// ActingPlayer() ranges 2..7, "1 - player" underflows to 255, and indexing a
+// [2]float32 with it panics inside libcambia.so - unrecoverable from Python.
+// Refusing here is a deliberate departure from cambia-1171's posture for the
+// 2-player action-space mask (engine.seatOpponent, engine/legal.go), which
+// stays in bounds at any table size by design: a single mask bit still means
+// something at 3+ seats there, but a 146-action subgame *strategy* has no
+// coherent "the opponent" once more than two seats can act, so there is
+// nothing correct to compute rather than a bound to stay inside of.
+//
 //export cambia_subgame_build
 func cambia_subgame_build(game_h C.int32_t, max_depth C.int32_t) C.int32_t {
 	if game_h < 0 || game_h >= maxGames || !gameInUse[game_h] {
+		return -1
+	}
+	numPlayers := gamePool[game_h].NumActivePlayers()
+	if numPlayers != 2 {
 		return -1
 	}
 	sh := allocSolver()
@@ -844,6 +878,7 @@ func cambia_subgame_build(game_h C.int32_t, max_depth C.int32_t) C.int32_t {
 	root, leafCount := BuildSubgameTree(gamePool[game_h], int(max_depth))
 	solverPool[sh].root = root
 	solverPool[sh].leafCount = leafCount
+	solverPool[sh].numPlayers = numPlayers
 	return C.int32_t(sh)
 }
 
@@ -878,12 +913,23 @@ func cambia_subgame_export_leaves(solver_h C.int32_t, game_handles_out *C.int32_
 	return 0
 }
 
+// cambia_subgame_solve runs CFR iterations on a previously built solver.
+// Returns 0 on success, or -1 on failure: an invalid solver handle, or the
+// solver's tree not having been built from a 2-player table. The latter
+// case only fires if a future caller ever manages to install an entry into
+// solverPool without going through cambia_subgame_build's own guard; see
+// solverEntry.numPlayers and that function's doc comment (cambia-1554) for
+// why this belt-and-suspenders check exists.
+//
 //export cambia_subgame_solve
 func cambia_subgame_solve(solver_h C.int32_t, num_iterations C.int32_t, leaf_values *C.float, strategy_out *C.float, root_values_out *C.float) C.int32_t {
 	if solver_h < 0 || solver_h >= maxSolvers || !solverInUse[solver_h] {
 		return -1
 	}
 	entry := &solverPool[solver_h]
+	if entry.numPlayers != 2 {
+		return -1
+	}
 	leafCount := entry.leafCount
 
 	// Convert leaf_values C array to Go slice (caller provides leafCount*2 floats).
@@ -1053,6 +1099,12 @@ func cambia_nplayer_num_actions() C.int32_t {
 	return C.int32_t(engine.NPlayerNumActions)
 }
 
+// cambia_subgame_solve_ranged runs range-weighted CFR iterations on a
+// previously built solver. Returns 0 on success, or -1 on failure: an
+// invalid solver handle, or the solver's tree not having been built from a
+// 2-player table. See cambia_subgame_solve's doc comment; the guard here is
+// the same belt-and-suspenders check against solverEntry.numPlayers.
+//
 //export cambia_subgame_solve_ranged
 func cambia_subgame_solve_ranged(
 	solver_h C.int32_t,
@@ -1068,6 +1120,9 @@ func cambia_subgame_solve_ranged(
 		return -1
 	}
 	entry := &solverPool[solver_h]
+	if entry.numPlayers != 2 {
+		return -1
+	}
 	leafCount := entry.leafCount
 	nht := int(num_hand_types)
 

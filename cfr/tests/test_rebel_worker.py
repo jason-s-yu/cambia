@@ -287,3 +287,31 @@ def test_value_dim_constant():
 def test_pbs_input_dim():
     """PBS_INPUT_DIM must be 956."""
     assert PBS_INPUT_DIM == 956
+
+
+# ---------------------------------------------------------------------------
+# cambia-1554: rebel_self_play_episode asserts num_players == 2 at
+# construction, rather than trusting the GoEngine(...) call above to have
+# actually produced a 2-player table (game_config's house rules can carry a
+# num_players override the "hardcoded 2-player" framing doesn't account for).
+# ---------------------------------------------------------------------------
+
+
+def test_episode_asserts_two_player_table(value_net, policy_net, fast_config, monkeypatch):
+    """If the constructed GoEngine ever reports a non-2-player table, the
+    episode must fail fast with a clear AssertionError instead of running
+    2-player-only PBS/SubgameSolver logic against it."""
+    from src.ffi.bridge import GoEngine
+
+    monkeypatch.setattr(GoEngine, "num_players", lambda self: 4)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        with pytest.raises(AssertionError, match="2-player"):
+            rebel_self_play_episode(
+                game_config=None,
+                value_net=value_net,
+                policy_net=policy_net,
+                rebel_config=fast_config,
+                exploration_epsilon=0.5,
+            )

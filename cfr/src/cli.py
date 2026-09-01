@@ -4,6 +4,7 @@ import os
 import sys
 import signal
 import multiprocessing
+import warnings
 from pathlib import Path
 from typing import List, Optional, Union, get_args, get_origin
 
@@ -444,6 +445,14 @@ def train_rebel(
     ),
 ):
     """Train a ReBeL agent (2-player)."""
+    warnings.warn(
+        "`cambia train rebel` runs the ReBeL/PBS line, which is deprecated: "
+        "mathematically unsound for N-player FFA (CLAUDE.md). Use the "
+        "PRT-CFR line instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
     from .cfr.rebel_trainer import ReBeLTrainer
     from .config import load_config
 

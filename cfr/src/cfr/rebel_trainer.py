@@ -25,6 +25,7 @@ import multiprocessing
 import os
 import threading
 import time
+import warnings
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -147,6 +148,14 @@ class ReBeLTrainer:
         shutdown_event: Optional[threading.Event] = None,
         game_config: Optional[Any] = None,
     ):
+        warnings.warn(
+            "ReBeLTrainer is part of the ReBeL/PBS line, which is deprecated: "
+            "mathematically unsound for N-player FFA (CLAUDE.md). Use the "
+            "PRT-CFR line instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
         self.config = config
         self.checkpoint_path = checkpoint_path or "rebel_checkpoint.pt"
         self.shutdown_event = shutdown_event or threading.Event()

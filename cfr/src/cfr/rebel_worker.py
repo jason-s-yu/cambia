@@ -18,6 +18,7 @@ import logging
 import multiprocessing as mp
 import queue
 import random
+import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -203,6 +204,14 @@ def rebel_self_play_episode(
     Returns:
         List of EpisodeSample, one per decision point encountered during the game.
     """
+    warnings.warn(
+        "rebel_self_play_episode is part of the ReBeL/PBS line, which is "
+        "deprecated: mathematically unsound for N-player FFA (CLAUDE.md). "
+        "Use the PRT-CFR line instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
     from ..ffi.bridge import (
         GoEngine,
         GoAgentState,
@@ -219,6 +228,16 @@ def rebel_self_play_episode(
     _discard_buckets: List[int] = []
 
     with GoEngine(seed=seed, house_rules=game_config) as game:
+        # ReBeL/PBS is 2-player only (cambia-1554): game_config's house rules
+        # can carry a num_players override, so this asserts the seat count
+        # this whole episode assumes, rather than trusting the "hardcoded
+        # 2-player" call above to actually produce one. SubgameSolver below
+        # would raise its own clear error on a mismatch, but failing here is
+        # closer to the actual cause.
+        assert (
+            game.num_players() == 2
+        ), f"rebel_self_play_episode requires a 2-player table, got {game.num_players()}"
+
         a0 = GoAgentState(game, player_id=0)
         a1 = GoAgentState(game, player_id=1)
 

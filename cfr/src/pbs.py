@@ -37,6 +37,7 @@ Index  Field                       Size  Description
 from __future__ import annotations
 
 import functools
+import warnings
 from dataclasses import dataclass
 from itertools import combinations_with_replacement
 from typing import Sequence
@@ -229,6 +230,13 @@ class PBS:
 
     def __post_init__(self) -> None:
         """Validate shapes and dtypes."""
+        warnings.warn(
+            "src.pbs.PBS is part of the ReBeL/PBS line, which is deprecated: "
+            "mathematically unsound for N-player FFA (CLAUDE.md). Use the "
+            "PRT-CFR line instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if self.range_p0.shape != (NUM_HAND_TYPES,):
             raise ValueError(
                 f"range_p0 must have shape ({NUM_HAND_TYPES},), "
