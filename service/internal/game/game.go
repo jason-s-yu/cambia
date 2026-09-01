@@ -841,6 +841,37 @@ func (g *CambiaGame) IsForfeited(playerID uuid.UUID) bool {
 	return g.forfeited[playerID]
 }
 
+// ForfeitSeat gives the seat up on purpose: the deliberate counterpart to the forfeit a closed
+// reconnect window lands (disconnectGraceElapsed). A player who leaves the table mid-game has
+// said they are not coming back, so the seat goes now rather than after the whole
+// DisconnectGraceSec window, during which the turn clock plays the empty seat out and everyone
+// else waits on somebody who has already gone (cambia-1520).
+//
+// The seat is marked down before the forfeit runs, which is what makes forfeitPlayer's "is there
+// anybody left to play this" count read correctly whichever order the leaver's socket close and
+// their leave request land in. A HandleDisconnect arriving afterwards finds the seat already
+// disconnected and returns, so the two paths cannot both arm a grace window, and any window
+// already open is closed here rather than left to fire against a seat that has gone.
+//
+// Reports whether the forfeit was recorded here: false for a finished game, a seat that has
+// already forfeited, and an id holding no seat at all. Public entry point: acquires mu.
+func (g *CambiaGame) ForfeitSeat(playerID uuid.UUID) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.GameOver || g.forfeited[playerID] {
+		return false
+	}
+	p := g.getPlayerByID(playerID)
+	if p == nil {
+		return false
+	}
+	p.Connected = false
+	p.Conn = nil
+	g.cancelDisconnectGrace(playerID)
+	g.forfeitPlayer(playerID)
+	return true
+}
+
 // ReconnectDeadline returns the wall-clock time playerID's grace window closes, and whether one
 // is open at all. Public entry point: acquires mu.
 func (g *CambiaGame) ReconnectDeadline(playerID uuid.UUID) (time.Time, bool) {

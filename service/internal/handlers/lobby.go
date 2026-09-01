@@ -387,6 +387,16 @@ func JoinLobbyHandler(gs *GameServer) http.HandlerFunc {
 	}
 }
 
+// leaveRequest is the optional body of POST /lobby/{id}/leave. forfeit=true is the client
+// saying the caller has agreed to give up a live seat; without it a mid-game leave is refused.
+type leaveRequest struct {
+	Forfeit bool `json:"forfeit"`
+}
+
+// leaveInProgressMessage is what a refused leave says. The client renders it verbatim, so it
+// reads as a sentence to a player rather than as a status line.
+const leaveInProgressMessage = "Cannot leave a lobby while its game is in progress"
+
 // LeaveLobbyHandler handles POST /lobby/{id}/leave: the deliberate counterpart to
 // /lobby/{id}/join. Membership is released here, on the surface that granted it, and not over
 // the WebSocket, for two reasons. A lost socket must never release membership, because
@@ -394,9 +404,22 @@ func JoinLobbyHandler(gs *GameServer) http.HandlerFunc {
 // leave frame and closes its socket in the same breath races its own disconnect through the
 // hub's select, so the release would land only sometimes.
 //
-// Leaving mid-game is refused: a seat in a running game is not something a lobby-level leave
-// can release, and abandoning a game is what a disconnect already means. The lobby's InGame
-// flag is the gate rather than the hub phase, which only the hub's Run goroutine may read.
+// Leaving mid-game turns on whether the caller still holds a live seat, not on whether a game
+// is running. The lobby's InGame flag opens the question - it is the gate rather than the hub
+// phase, which only the hub's Run goroutine may read - and the game itself answers it:
+//
+//   - No live seat (a member who was never dealt in, a seat that has already forfeited, a game
+//     that has finished but not yet cleared the flag): there is nothing a leave could take away,
+//     so it goes through. A forfeited seat reaching this is the exit affordance cambia-1237 put
+//     on the table; refusing it left that player watching a round they cannot act in with no way
+//     off it (cambia-1520).
+//   - A live seat, plain leave: 409. A seat in a running game is not something a lobby-level
+//     leave releases by accident, and a client that sent no body did not ask to give one up.
+//   - A live seat, {"forfeit": true}: the player is saying in as many words that the seat is
+//     theirs to give up, so it is forfeited here and now (game.ForfeitSeat) and the membership
+//     goes with it. Leaving used to be answered with the 409 alone while the client navigated
+//     away regardless, which left the seat on the table until DisconnectGraceSec ran out with
+//     the turn clock playing it (cambia-1520).
 //
 // The response is 200 for a caller who holds no membership: leaving twice, or leaving a lobby
 // somebody else already emptied, is not an error the client should surface.
@@ -430,14 +453,38 @@ func LeaveLobbyHandler(gs *GameServer) http.HandlerFunc {
 			return
 		}
 
+		// A body is optional and a malformed one is read as none: the flag is an opt-in, and
+		// nothing about a client that sent no JSON says it meant to give a seat up.
+		var body leaveRequest
+		if r.Body != nil {
+			_ = json.NewDecoder(r.Body).Decode(&body)
+		}
+
 		lob.Mu.Lock()
 		_, isMember := lob.Users[userID]
 		inGame := lob.InGame
+		gameID := lob.GameID
 		lob.Mu.Unlock()
 
 		if inGame {
-			http.Error(w, "Cannot leave a lobby while its game is in progress", http.StatusConflict)
-			return
+			// Lock discipline, same as ActiveSessionHandler: the lobby lock is released above
+			// before any game lock is taken, because endGame holds the game lock while reaching
+			// for the lobby and game stores through OnGameEnd.
+			g, hasGame := gs.GameStore.GetGame(gameID)
+			switch {
+			case gameID == uuid.Nil || !hasGame:
+				// The lobby says a game is running and there is nothing here to ask about the
+				// seat, so it has to be taken as live.
+				http.Error(w, leaveInProgressMessage, http.StatusConflict)
+				return
+			case !g.HasPlayer(userID) || g.IsForfeited(userID) || g.IsGameOver():
+				// No live seat to release; fall through to the ordinary leave.
+			case !body.Forfeit:
+				http.Error(w, leaveInProgressMessage, http.StatusConflict)
+				return
+			default:
+				g.ForfeitSeat(userID)
+			}
 		}
 		if !isMember {
 			w.Header().Set("Content-Type", "application/json")
