@@ -955,9 +955,21 @@ func (g *CambiaGame) HandleReconnect(playerID uuid.UUID, conn *websocket.Conn) {
 				delete(g.circuitAIControlled, playerID)
 			}
 
-			// If it was this player's turn, reschedule timer.
-			if g.Started && !g.GameOver && g.currentPlayerID() == playerID {
-				log.Printf("Game %s: Player %s reconnected on their turn. Rescheduling timer.", g.ID, playerID)
+			// A returning player's turn is clocked only where nothing is clocking it already,
+			// which is the rule the drop side already applies (see the turnTimer check in
+			// HandleDisconnect and armDisconnectGrace's comment). The drop never stops the turn
+			// timer, so the deadline the table has been counting down to is still the right one
+			// and there is nothing to restore: rescheduling would hand the player a whole fresh
+			// window for having dropped, and this ran on every socket join, gated on the player
+			// being the actor and not on their having been away at all. hub.notePlayerReconnected
+			// fires on every join, so repeated drop-and-return cycles refilled the clock each
+			// time and held one turn open indefinitely (cambia-1545).
+			//
+			// The syncs above therefore carry the deadline actually in force, because this leaves
+			// it alone. Where the turn genuinely has no clock the schedule still runs, and
+			// scheduleNextTurnTimerEngine publishes the deadline it arms (cambia-1556).
+			if g.Started && !g.GameOver && g.turnTimer == nil && g.currentPlayerID() == playerID {
+				log.Printf("Game %s: Player %s returned to an unclocked turn of their own; arming its clock.", g.ID, playerID)
 				g.scheduleNextTurnTimer()
 			}
 			break
