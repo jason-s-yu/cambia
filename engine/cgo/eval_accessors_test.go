@@ -375,6 +375,8 @@ func TestGameGetHouseRules(t *testing.T) {
 		2, // players
 		2, // initial view count
 		1, // decks
+		// deck rank mask: the 0 sentinel reads back as all 13 suited ranks
+		0xFF, 0x1F,
 	}
 	if rec != want {
 		t.Errorf("house rules record = %v, want %v", rec, want)

@@ -227,24 +227,54 @@ class AgentParamsConfig(_CambiaBaseModel):
 
 
 class CambiaRulesConfig(_CambiaBaseModel):
-    """Defines the specific game rules of Cambia."""
+    """Defines the specific game rules of Cambia.
+
+    The deal-shaping fields carry the same bounds engine/rules.go's
+    HouseRules.Validate enforces, so a YAML typo is refused here rather than at
+    the FFI edge (cambia-1555). Every one of them used to be an unbounded int
+    the bridge forwarded straight into libcambia.so, where the Go engine has no
+    recover(): cards_per_player=7 and num_decks=5 crashed the process, and
+    use_jokers=3 dealt a 55-card stockpile holding two Aces of Hearts on the Go
+    side against a coherent 55-card deck on the Python side.
+    """
 
     allowDrawFromDiscardPile: bool = False
     allowReplaceAbilities: bool = False
     snapRace: bool = False
     penaltyDrawCount: int = 2
-    use_jokers: int = 2
-    cards_per_player: int = 4
-    initial_view_count: int = 2
+    #: 0-2 jokers per deck copy (engine.MaxJokersPerDeck).
+    use_jokers: int = Field(default=2, ge=0, le=2)
+    #: 1-6 cards per hand (engine.MaxHandSize).
+    cards_per_player: int = Field(default=4, ge=1, le=6)
+    #: How many of the dealt cards each seat peeks at; at most
+    #: cards_per_player, checked below.
+    initial_view_count: int = Field(default=2, ge=0, le=6)
     cambia_allowed_round: int = 0
     allowOpponentSnapping: bool = False
     max_game_turns: int = 300
     lockCallerHand: bool = True
-    num_decks: int = 1
+    #: 1-4 standard decks shuffled together
+    #: (engine.MaxDecks = MaxDeckSize / StandardDeckSize). 0 keeps the engine's
+    #: documented "default to 1" sentinel.
+    num_decks: int = Field(default=1, ge=0, le=4)
     # Optional reduced-deck rank subset for tractable tabular ground truth
     # (research experiment E1). None = full 13-rank deck. When set (e.g.
     # ["A","2","3","4","K"]), the engine deals only those non-joker ranks.
+    # Crossed over the FFI as the engine's DeckRanks bitmask; the encoding, and
+    # the rejection of an empty or malformed list, live in
+    # src.ffi.bridge.deck_rank_mask (cambia-1478).
     deck_ranks: Optional[List[str]] = None
+
+    @model_validator(mode="after")
+    def _check_initial_view_count(self) -> "CambiaRulesConfig":
+        """A seat cannot peek at more cards than its hand holds."""
+        if self.initial_view_count > self.cards_per_player:
+            raise ValueError(
+                f"cambia_rules.initial_view_count ({self.initial_view_count}) "
+                f"exceeds cards_per_player ({self.cards_per_player}): a seat "
+                "cannot peek at a card it was not dealt."
+            )
+        return self
 
 
 class PersistenceConfig(_CambiaBaseModel):

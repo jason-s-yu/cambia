@@ -108,27 +108,73 @@ func testStateClone(gameH, a0H, a1H int32) (ok bool, newGame, newA0, newA1 int32
 	return true, int32(cg), int32(ca0), int32(ca1)
 }
 
-// testGameNewWithRules is a minimal test-only wrapper over
-// cambia_game_new_with_rules covering only the fields nplayer_bounds_test.go
-// needs (seed, numPlayers); every other field takes a DefaultHouseRules()-
-// shaped value. Returns the raw handle (or the FFI's -1 failure sentinel).
-func testGameNewWithRules(seed uint64, numPlayers uint8) int32 {
+// testRules mirrors cambia_game_new_with_rules' rule record so a bounds test
+// can name the single field it varies and leave the rest at the
+// DefaultHouseRules()-shaped values defaultTestRules() supplies.
+type testRules struct {
+	maxGameTurns          uint16
+	cardsPerPlayer        uint8
+	cambiaAllowedRound    uint8
+	penaltyDrawCount      uint8
+	allowDrawFromDiscard  uint8
+	allowReplaceAbilities uint8
+	allowOpponentSnapping uint8
+	snapRace              uint8
+	numJokers             uint8
+	lockCallerHand        uint8
+	numPlayers            uint8
+	initialViewCount      uint8
+	numDecks              uint8
+	deckRanks             uint16
+}
+
+func defaultTestRules() testRules {
+	return testRules{
+		maxGameTurns:          46,
+		cardsPerPlayer:        4,
+		cambiaAllowedRound:    0,
+		penaltyDrawCount:      2,
+		allowDrawFromDiscard:  1,
+		allowReplaceAbilities: 0,
+		allowOpponentSnapping: 1,
+		snapRace:              0,
+		numJokers:             2,
+		lockCallerHand:        1,
+		numPlayers:            2,
+		initialViewCount:      2,
+		numDecks:              1,
+		deckRanks:             0, // the "every suited rank" sentinel
+	}
+}
+
+// testGameNewWithRulesFull drives cambia_game_new_with_rules from Go tests.
+// Returns the raw handle, or the FFI's -1 failure sentinel.
+func testGameNewWithRulesFull(seed uint64, r testRules) int32 {
 	return int32(cambia_game_new_with_rules(
 		C.uint64_t(seed),
-		C.uint16_t(46), // maxGameTurns
-		C.uint8_t(4),   // cardsPerPlayer
-		C.uint8_t(0),   // cambiaAllowedRound
-		C.uint8_t(2),   // penaltyDrawCount
-		C.uint8_t(1),   // allowDrawFromDiscard
-		C.uint8_t(0),   // allowReplaceAbilities
-		C.uint8_t(1),   // allowOpponentSnapping
-		C.uint8_t(0),   // snapRace
-		C.uint8_t(2),   // numJokers
-		C.uint8_t(1),   // lockCallerHand
-		C.uint8_t(numPlayers),
-		C.uint8_t(2), // initialViewCount
-		C.uint8_t(1), // numDecks
+		C.uint16_t(r.maxGameTurns),
+		C.uint8_t(r.cardsPerPlayer),
+		C.uint8_t(r.cambiaAllowedRound),
+		C.uint8_t(r.penaltyDrawCount),
+		C.uint8_t(r.allowDrawFromDiscard),
+		C.uint8_t(r.allowReplaceAbilities),
+		C.uint8_t(r.allowOpponentSnapping),
+		C.uint8_t(r.snapRace),
+		C.uint8_t(r.numJokers),
+		C.uint8_t(r.lockCallerHand),
+		C.uint8_t(r.numPlayers),
+		C.uint8_t(r.initialViewCount),
+		C.uint8_t(r.numDecks),
+		C.uint16_t(r.deckRanks),
 	))
+}
+
+// testGameNewWithRules covers the fields nplayer_bounds_test.go needs (seed,
+// numPlayers); every other field keeps its defaultTestRules() value.
+func testGameNewWithRules(seed uint64, numPlayers uint8) int32 {
+	r := defaultTestRules()
+	r.numPlayers = numPlayers
+	return testGameNewWithRulesFull(seed, r)
 }
 
 func testNPlayerInputDim() int32   { return int32(cambia_nplayer_input_dim()) }

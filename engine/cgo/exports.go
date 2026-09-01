@@ -289,6 +289,16 @@ func cambia_game_new(seed C.uint64_t) C.int32_t {
 	return C.int32_t(h)
 }
 
+// cambia_game_new_with_rules deals a game from a raw rules record and returns
+// its handle, or -1 when the pool is exhausted or HouseRules.Validate rejects
+// the record. Every rule field arrives untrusted from Python, so rejection is
+// the contract: a clamped rule would deal a different game than the caller
+// configured and report the result as if it were the configured one.
+//
+// deckRanks is the suited-rank bitmask (bit 0 = Ace ... bit 12 = King; 0 =
+// every rank), the reduced-deck rule the Python config calls deck_ranks
+// (cambia-1478).
+//
 //export cambia_game_new_with_rules
 func cambia_game_new_with_rules(
 	seed C.uint64_t,
@@ -305,6 +315,7 @@ func cambia_game_new_with_rules(
 	numPlayers C.uint8_t,
 	initialViewCount C.uint8_t,
 	numDecks C.uint8_t,
+	deckRanks C.uint16_t,
 ) C.int32_t {
 	h := allocGame()
 	if h < 0 {
@@ -312,6 +323,7 @@ func cambia_game_new_with_rules(
 	}
 	rules := engine.HouseRules{
 		MaxGameTurns:          uint16(maxGameTurns),
+		DeckRanks:             uint16(deckRanks),
 		CardsPerPlayer:        uint8(cardsPerPlayer),
 		CambiaAllowedRound:    uint8(cambiaAllowedRound),
 		PenaltyDrawCount:      uint8(penaltyDrawCount),
@@ -325,11 +337,14 @@ func cambia_game_new_with_rules(
 		InitialViewCount:      uint8(initialViewCount),
 		NumDecks:              uint8(numDecks),
 	}
-	// cambia-542 F3: numPlayers arrives here as a raw, externally-supplied
-	// uint8 from Python via the FFI. Reject out-of-range values instead of
-	// silently clamping and succeeding - Deal() below indexes g.Players[p]
-	// for p in [0, NumPlayers), and that array is fixed at [MaxPlayers]; an
-	// unrejected NumPlayers=9 previously panicked inside libcambia.so.
+	// cambia-542 F3 / cambia-1555: every field here arrives as a raw,
+	// externally-supplied integer from Python via the FFI, and there is no
+	// recover() anywhere in this package, so an out-of-range value that
+	// reaches the deal takes the whole process down rather than failing as
+	// an error Python can catch. Validate is the gate: NumPlayers=9 indexed
+	// past [MaxPlayers]PlayerState, CardsPerPlayer=7 past [MaxHandSize]Card,
+	// NumDecks=5 past [MaxDeckSize]Card, and NumJokers=3 left a phantom Ace
+	// of Hearts in the stockpile.
 	if err := rules.Validate(); err != nil {
 		freeGame(h)
 		return -1
@@ -339,6 +354,16 @@ func cambia_game_new_with_rules(
 	return C.int32_t(h)
 }
 
+// cambia_game_new_with_deck deals a game from an explicit deck order and
+// returns its handle, or -1 on any rejected input: an exhausted pool, a rules
+// record HouseRules.Validate refuses, a startingPlayer outside the seat range,
+// or a deck that cannot complete the deal.
+//
+// The deck is the whole stockpile, so deckRanks (see cambia_game_new_with_rules)
+// changes nothing about what is dealt here; it is still carried into the rules
+// record, which is what the game reports about itself through
+// cambia_game_get_house_rules.
+//
 //export cambia_game_new_with_deck
 func cambia_game_new_with_deck(
 	deckPtr *C.uint8_t, deckLen C.int32_t,
@@ -349,6 +374,7 @@ func cambia_game_new_with_deck(
 	allowReplaceAbilities C.uint8_t, allowOpponentSnapping C.uint8_t,
 	snapRace C.uint8_t, numJokers C.uint8_t, lockCallerHand C.uint8_t,
 	initialViewCount C.uint8_t, numDecks C.uint8_t,
+	deckRanks C.uint16_t,
 ) C.int32_t {
 	h := allocGame()
 	if h < 0 {
@@ -356,6 +382,7 @@ func cambia_game_new_with_deck(
 	}
 	rules := engine.HouseRules{
 		MaxGameTurns:          uint16(maxGameTurns),
+		DeckRanks:             uint16(deckRanks),
 		CardsPerPlayer:        uint8(cardsPerPlayer),
 		CambiaAllowedRound:    uint8(cambiaAllowedRound),
 		PenaltyDrawCount:      uint8(penaltyDrawCount),
@@ -369,24 +396,44 @@ func cambia_game_new_with_deck(
 		InitialViewCount:      uint8(initialViewCount),
 		NumDecks:              uint8(numDecks),
 	}
-	// cambia-542 F3: reject an out-of-range NumPlayers instead of clamping
-	// and continuing - the round-robin deal loop below indexes g.Players[p]
-	// for p in [0, np), and that array is fixed at [MaxPlayers].
+	// cambia-542 F3 / cambia-1555: reject out-of-range rules instead of
+	// clamping and continuing - the round-robin deal below indexes
+	// g.Players[p] for p in [0, np) and Hand[c] for c in [0, cpp), both
+	// fixed-size arrays, and NewGame just below writes a rule-derived deck
+	// into a fixed [MaxDeckSize]Card. Validation precedes NewGame for that
+	// last reason: a NumDecks=5 record panicked inside NewGame itself.
 	if err := rules.Validate(); err != nil {
+		freeGame(h)
+		return -1
+	}
+	// The documented 0-defaults-to-2 sentinel; Validate has already confirmed
+	// the rest of the range, so this matches what NumActivePlayers will say.
+	np := uint8(numPlayers)
+	if np == 0 {
+		np = 2
+	}
+	// cambia-1555: startingPlayer is written straight into CurrentPlayer
+	// below, and every legal-action mask indexes Players by it, so a seat at
+	// or past the table panics on the first post-draw mask.
+	if uint8(startingPlayer) >= np {
+		freeGame(h)
+		return -1
+	}
+	// The deck is the whole stockpile here, so it - not the rules - has to
+	// cover the deal. Previously a short deck underflowed StockLen to 255 and
+	// an over-long one was silently truncated to MaxDeckSize, both of which
+	// play a different game than the caller handed over.
+	n := int(deckLen)
+	if deckPtr == nil || n < int(np)*int(rules.CardsPerPlayer)+1 || n > engine.MaxDeckSize {
 		freeGame(h)
 		return -1
 	}
 	// Create a base game state with the right rules (deck contents will be overwritten).
 	gamePool[h] = engine.NewGame(1, rules)
 	g := &gamePool[h]
-	np := g.NumActivePlayers() // applies the documented 0-defaults-to-2 sentinel
 
 	// Load provided deck into stockpile in reverse order so that deck[0] is
 	// the first card popped (i.e., placed at Stockpile[deckLen-1]).
-	n := int(deckLen)
-	if n > engine.MaxDeckSize {
-		n = engine.MaxDeckSize
-	}
 	deck := (*[256]C.uint8_t)(unsafe.Pointer(deckPtr))
 	for i := 0; i < n; i++ {
 		g.Stockpile[n-1-i] = indexToCard(uint8(deck[i]))
@@ -1870,7 +1917,7 @@ const (
 	// export below.
 	evalPendingFields   = 10
 	evalSnapFields      = 6
-	evalHouseRuleFields = 14
+	evalHouseRuleFields = 16
 )
 
 // cardToIndex is the inverse of indexToCard: it converts a Go Card to the
@@ -2153,6 +2200,10 @@ func cambia_game_get_snap_state(game_h C.int32_t, out_buf *C.uint8_t, buf_len C.
 //	                                agreeing with cambia_game_num_players
 //	[12] initial view count
 //	[13] number of decks
+//	[14] deck rank mask low byte   effective mask (bit 0 = Ace ... bit 12 =
+//	[15] deck rank mask high byte  King), so the 0 sentinel reads back as all
+//	                               13 suited ranks, the same way [11] reports
+//	                               the effective seat count (cambia-1478)
 //
 //export cambia_game_get_house_rules
 func cambia_game_get_house_rules(game_h C.int32_t, out_buf *C.uint8_t, buf_len C.int32_t) C.int32_t {
@@ -2179,6 +2230,9 @@ func cambia_game_get_house_rules(game_h C.int32_t, out_buf *C.uint8_t, buf_len C
 	out[11] = C.uint8_t(g.NumActivePlayers())
 	out[12] = C.uint8_t(r.InitialViewCount)
 	out[13] = C.uint8_t(r.NumDecks)
+	mask := r.DeckRankMask()
+	out[14] = C.uint8_t(uint8(mask & 0xFF))
+	out[15] = C.uint8_t(uint8(mask >> 8))
 	return C.int32_t(evalHouseRuleFields)
 }
 
@@ -2273,12 +2327,18 @@ func testGameNewWithDeck(deck []uint8, numPlayers, cardsPerPlayer, startingPlaye
 		C.uint8_t(1), C.uint8_t(0), C.uint8_t(1),
 		C.uint8_t(0), C.uint8_t(numJokers), C.uint8_t(1),
 		C.uint8_t(initialViewCount), C.uint8_t(1),
+		C.uint16_t(0), // deckRanks: the "every suited rank" sentinel
 	))
 }
 
 // testGameApplyAction drives cambia_game_apply_action from Go tests.
 func testGameApplyAction(gameH int32, action uint16) int32 {
 	return int32(cambia_game_apply_action(C.int32_t(gameH), C.uint16_t(action)))
+}
+
+// testGameStockLen drives cambia_game_stock_len from Go tests.
+func testGameStockLen(gameH int32) uint8 {
+	return uint8(cambia_game_stock_len(C.int32_t(gameH)))
 }
 
 // testGameNumPlayers drives cambia_game_num_players from Go tests.

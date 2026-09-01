@@ -112,10 +112,11 @@ def cfg():
 
 
 # Deals for the uncoupled tests. The tiny config restricts the deck via
-# deck_ranks, which the Go FFI rules struct cannot express, so a Go deal from
-# these rules would silently be a full 54-card game. Every tiny-game case
-# therefore deals from a transplanted deck pool; POOL_N is wide enough to stand
-# in for "the deal distribution" without being the 8-deal calibration root.
+# deck_ranks; the Go rules struct carries that as a rank mask since cambia-1478,
+# but these cases still deal from a transplanted deck pool so both engines walk
+# the identical deal, which is what makes a Go/Python comparison meaningful.
+# POOL_N is wide enough to stand in for "the deal distribution" without being
+# the 8-deal calibration root.
 POOL_N = 64
 
 
