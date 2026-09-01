@@ -41,6 +41,32 @@ export const joinLobby = async (lobbyId: string): Promise<void> => {
 	}
 };
 
+/** The default sentence for a refused leave, for a 409 that arrives without a body to quote. */
+const LEAVE_REFUSED_FALLBACK = 'This lobby has a game in progress.';
+
+/**
+ * A leave the server refused (409). Its own error type because the caller has to tell it from
+ * every other failure: a refusal means the membership is still held and the player is still at
+ * the table, so navigating away on it is what left the seat to forfeit on the grace timer
+ * (cambia-1520). `reason` is the server's own sentence, meant to be shown to the player.
+ */
+export class LeaveRefusedError extends Error {
+	readonly reason: string;
+
+	constructor(reason: string) {
+		super(reason);
+		this.name = 'LeaveRefusedError';
+		this.reason = reason;
+	}
+}
+
+/** Pulls the refusal sentence out of an axios error. http.Error writes a bare text body. */
+function refusalReason(error: any): string {
+	const data = error?.response?.data;
+	const text = typeof data === 'string' ? data.trim() : '';
+	return text || LEAVE_REFUSED_FALLBACK;
+}
+
 /**
  * Releases the signed-in user's membership of a lobby. This is the deliberate leave: closing
  * the tab or dropping the WebSocket keeps membership so the session stays resumable, and only
@@ -48,13 +74,21 @@ export const joinLobby = async (lobbyId: string): Promise<void> => {
  *
  * Close the lobby WebSocket before calling this: connecting joins the lobby server-side, so a
  * socket left open to auto-reconnect would hand the membership straight back.
- * @throws {Error} If the API request fails (404 when the lobby is already gone, 409 while its
- * game is in progress, which the caller may ignore and navigate away regardless).
+ *
+ * `forfeit` is the player's consent to give up a live seat, and the server only releases one
+ * when it is set. It is sent after a confirmation, never on a plain Leave, since it decides a
+ * round rather than a screen (cambia-1520).
+ * @throws {LeaveRefusedError} 409: the caller holds a live seat and did not agree to forfeit it.
+ * @throws {Error} Any other API failure (404 when the lobby is already gone, which the caller
+ * may ignore and navigate away regardless).
  */
-export const leaveLobby = async (lobbyId: string): Promise<void> => {
+export const leaveLobby = async (lobbyId: string, opts?: { forfeit?: boolean }): Promise<void> => {
 	try {
-		await api.post(`/lobby/${lobbyId}/leave`);
+		await api.post(`/lobby/${lobbyId}/leave`, { forfeit: opts?.forfeit === true });
 	} catch (error: any) {
+		if (error?.response?.status === 409) {
+			throw new LeaveRefusedError(refusalReason(error));
+		}
 		console.error('Leave Lobby API call failed:', error.response?.data || error.message, error);
 		throw error;
 	}

@@ -608,9 +608,29 @@ export function useSocket(lobbyId: string | null | undefined) {
 		}
 	}, [setConnected, setLoading]);
 
+	/**
+	 * Dials the lobby again after an explicit close. The leave sequence closes the socket before
+	 * it asks the server to release the membership, because a socket left open to reconnect hands
+	 * the membership straight back; when the server then refuses the leave the player is still at
+	 * the table, and without a way back the close has taken their connection for nothing
+	 * (cambia-1520).
+	 *
+	 * Not the connect effect's job: closeSocket clears managedLobbyId and shouldBeConnected, and
+	 * nothing in the effect's dependencies changes on a refusal, so it does not re-run. The retry
+	 * budget is reset with the dial - this is a fresh decision to be connected, not a continuation
+	 * of the run that was closed (cambia-1236's cap belongs to a socket that dropped by itself).
+	 */
+	const reopenSocket = useCallback(() => {
+		if (!isDialableLobbyId(lobbyId)) return;
+		retryCountRef.current = 0;
+		gaveUpLobbyId.current = null;
+		shouldBeConnected.current = true;
+		connectWebSocket(lobbyId);
+	}, [lobbyId, connectWebSocket]);
+
 	const isConnected = useCurrentLobbyStore((s) => s.isConnected);
 	const isLoading = useCurrentLobbyStore((s) => s.isLoading);
 	const error = useCurrentLobbyStore((s) => s.error);
 
-	return { sendMessage, closeSocket, isConnected, isLoading, error };
+	return { sendMessage, closeSocket, reopenSocket, isConnected, isLoading, error };
 }

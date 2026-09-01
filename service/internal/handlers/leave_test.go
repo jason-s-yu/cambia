@@ -9,8 +9,10 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,9 +25,25 @@ import (
 )
 
 // leaveLobbyAs calls POST /lobby/{id}/leave as the given token's user and returns the recorder.
+// It sends no body, which is the plain leave: the one a live seat refuses.
 func leaveLobbyAs(t *testing.T, gs *GameServer, lobbyID uuid.UUID, token string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest("POST", "/lobby/"+lobbyID.String()+"/leave", nil)
+	return postLeave(t, gs, lobbyID, token, nil)
+}
+
+// forfeitLobbyAs calls the same endpoint with the body that says the caller has agreed to give
+// their seat up (cambia-1520).
+func forfeitLobbyAs(t *testing.T, gs *GameServer, lobbyID uuid.UUID, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	return postLeave(t, gs, lobbyID, token, strings.NewReader(`{"forfeit":true}`))
+}
+
+func postLeave(t *testing.T, gs *GameServer, lobbyID uuid.UUID, token string, body io.Reader) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("POST", "/lobby/"+lobbyID.String()+"/leave", body)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	if token != "" {
 		req.Header.Set("Cookie", "auth_token="+token)
 	}
@@ -120,8 +138,10 @@ func TestLastLeaveTearsDownLobbyAndHub(t *testing.T) {
 	}
 }
 
-// TestLeaveRefusedDuringGame gates the leave to non-in-game phases: a seat in a running game is
-// not something a lobby-level leave can release, and the membership must survive the refusal.
+// TestLeaveRefusedDuringGame is the live-seat case: a seat the game is still waiting on is not
+// something a plain lobby-level leave can release, and the membership must survive the refusal.
+// The two ways past it - agreeing to the forfeit, and holding no live seat in the first place -
+// are the tests below.
 func TestLeaveRefusedDuringGame(t *testing.T) {
 	auth.Init()
 	gs := NewGameServer()
@@ -144,6 +164,118 @@ func TestLeaveRefusedDuringGame(t *testing.T) {
 	}
 	if _, exists := gs.LobbyStore.GetLobby(lob.ID); !exists {
 		t.Fatalf("a refused leave must not tear the lobby down")
+	}
+}
+
+// TestLeaveMidGameForfeitsTheSeatWhenAsked is the other half of the refusal above (cambia-1520).
+// The client used to swallow the 409 and navigate to the dashboard anyway, which left the seat on
+// the table for the whole DisconnectGraceSec window with the turn clock playing it out. Asking
+// for the forfeit explicitly is what releases it, and the release lands here rather than 60
+// seconds later.
+//
+// Three seats, so the forfeit does not end the game: what is under test is the seat leaving, not
+// the game ending, and a two-player table would finish before the assertions could tell them
+// apart.
+func TestLeaveMidGameForfeitsTheSeatWhenAsked(t *testing.T) {
+	auth.Init()
+	gs := NewGameServer()
+
+	hostID := uuid.New()
+	hostToken, _ := auth.CreateJWT(hostID.String())
+	playerID := uuid.New()
+	playerToken, _ := auth.CreateJWT(playerID.String())
+	thirdID := uuid.New()
+	thirdToken, _ := auth.CreateJWT(thirdID.String())
+
+	lob, _, _ := newRunningLobby(t, gs, hostToken, `{"type":"public","gameMode":"group_of_4"}`)
+	joinLobbyAs(t, gs, lob.ID, hostToken)
+	joinLobbyAs(t, gs, lob.ID, playerToken)
+	joinLobbyAs(t, gs, lob.ID, thirdToken)
+	g := startTestGame(t, gs, lob, []uuid.UUID{hostID, playerID, thirdID})
+
+	if w := forfeitLobbyAs(t, gs, lob.ID, playerToken); w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from an explicit mid-game forfeit, got %d: %s", w.Code, w.Body.String())
+	}
+	if !g.IsForfeited(playerID) {
+		t.Fatalf("an explicit mid-game leave must forfeit the seat there and then, not on a grace timer")
+	}
+	if isMember(lob, playerID) {
+		t.Fatalf("player %s still holds lobby membership after forfeiting their seat", playerID)
+	}
+	if g.IsGameOver() {
+		t.Fatalf("one seat of three leaving must not end the game")
+	}
+	if g.IsForfeited(hostID) || g.IsForfeited(thirdID) {
+		t.Fatalf("one seat leaving must not forfeit the others")
+	}
+}
+
+// TestLeaveMidGameAllowedForAForfeitedSeat is the refusal's blind spot (cambia-1520): a seat that
+// has already forfeited is not a seat the game is waiting on, so a leave takes nothing from it.
+// Refusing that caller stranded the exit affordance cambia-1237 put on the table for exactly this
+// player, who can no longer act in the round they are watching.
+func TestLeaveMidGameAllowedForAForfeitedSeat(t *testing.T) {
+	auth.Init()
+	gs := NewGameServer()
+
+	hostID := uuid.New()
+	hostToken, _ := auth.CreateJWT(hostID.String())
+	playerID := uuid.New()
+	playerToken, _ := auth.CreateJWT(playerID.String())
+	thirdID := uuid.New()
+	thirdToken, _ := auth.CreateJWT(thirdID.String())
+
+	lob, _, _ := newRunningLobby(t, gs, hostToken, `{"type":"public","gameMode":"group_of_4"}`)
+	joinLobbyAs(t, gs, lob.ID, hostToken)
+	joinLobbyAs(t, gs, lob.ID, playerToken)
+	joinLobbyAs(t, gs, lob.ID, thirdToken)
+	g := startTestGame(t, gs, lob, []uuid.UUID{hostID, playerID, thirdID})
+
+	// The seat is given up the way a closed reconnect window gives it up, before the player ever
+	// reaches for the leave control.
+	if !g.ForfeitSeat(playerID) {
+		t.Fatalf("failed to forfeit the seat under test")
+	}
+
+	if w := leaveLobbyAs(t, gs, lob.ID, playerToken); w.Code != http.StatusOK {
+		t.Fatalf("expected 200 leaving a game the caller has already forfeited, got %d: %s", w.Code, w.Body.String())
+	}
+	if isMember(lob, playerID) {
+		t.Fatalf("a forfeited seat's leave must release membership")
+	}
+	if g.IsGameOver() {
+		t.Fatalf("the forfeited seat leaving must not end the game the others are still playing")
+	}
+}
+
+// TestLeaveMidGameAllowedForAMemberWithNoSeat covers the other caller the flat refusal caught: a
+// lobby member who was not dealt into the running game holds nothing the game is waiting on, so
+// there is nothing for the leave to take away (cambia-1520).
+func TestLeaveMidGameAllowedForAMemberWithNoSeat(t *testing.T) {
+	auth.Init()
+	gs := NewGameServer()
+
+	hostID := uuid.New()
+	hostToken, _ := auth.CreateJWT(hostID.String())
+	playerID := uuid.New()
+	playerToken, _ := auth.CreateJWT(playerID.String())
+	latecomerID := uuid.New()
+	latecomerToken, _ := auth.CreateJWT(latecomerID.String())
+
+	lob, _, _ := newRunningLobby(t, gs, hostToken, `{"type":"public","gameMode":"group_of_4"}`)
+	joinLobbyAs(t, gs, lob.ID, hostToken)
+	joinLobbyAs(t, gs, lob.ID, playerToken)
+	joinLobbyAs(t, gs, lob.ID, latecomerToken)
+	g := startTestGame(t, gs, lob, []uuid.UUID{hostID, playerID})
+
+	if w := leaveLobbyAs(t, gs, lob.ID, latecomerToken); w.Code != http.StatusOK {
+		t.Fatalf("expected 200 leaving a game the caller holds no seat in, got %d: %s", w.Code, w.Body.String())
+	}
+	if isMember(lob, latecomerID) {
+		t.Fatalf("an unseated member's leave must release membership")
+	}
+	if g.IsGameOver() || g.IsForfeited(hostID) || g.IsForfeited(playerID) {
+		t.Fatalf("an unseated member leaving must not touch the game")
 	}
 }
 
