@@ -129,6 +129,8 @@ To mathematically offset the statistical risk of calling Cambia, fixed score red
 
 **Tie Rule:** The Cambia caller wins ties for bonus distribution. If neither tied player called Cambia, both receive the bonus of the higher placement.
 
+**Ties of three or more:** the rule applies per player, not per group. A caller in the tie keeps the bonus of their own placement; every other tied player, however many there are, is demoted to the single next placement's bonus (not the group's worst placement). A tie of three or more with no caller keeps every tied player at the group's own (higher) placement bonus, the same as a two-player tie.
+
 ## T4. Turn Order Equity
 
 * Round 1: Dealer chosen randomly; play proceeds clockwise.

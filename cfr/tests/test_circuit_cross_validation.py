@@ -7,6 +7,7 @@ from src.circuit import (
     CircuitConfig,
     CircuitState,
     OpenSkillRating,
+    compute_aggression_subsidy,
     update_openskill,
     ranks_from_scores,
 )
@@ -262,3 +263,72 @@ class TestHeadToHeadTiebreaker:
 
         standings = state.get_standings()
         assert [p.player_id for p in standings] == [1, 2, 3]
+
+
+class TestSubsidyScheduleParity:
+    """Cross-backend parity for the aggression subsidy schedule and tie
+    handling (cambia-1558).
+
+    There is no cgo export of ComputeAggressionSubsidy for a live FFI call
+    (circuit/subsidy logic is not on the engine's C ABI surface, and adding
+    one is out of this ticket's scope), so these pin compute_aggression_subsidy
+    and _get_subsidies_for_n against values read directly out of
+    engine/scoring.go's ComputeAggressionSubsidy and RULES.md T3, including
+    the same fixtures engine/circuit_test.go asserts.
+    """
+
+    def test_schedule_parity_2_through_6_players(self):
+        """RULES.md T3 / engine/scoring.go ComputeAggressionSubsidy schedule,
+        by player count: H2H (<=2p) -3/0, FFA-4 (3-4p) -5/-2/0/0, 5+
+        -5/-2/-1/0..0."""
+        expected_by_n = {
+            2: [-3, 0],
+            3: [-5, -2, 0],
+            4: [-5, -2, 0, 0],
+            5: [-5, -2, -1, 0, 0],
+            6: [-5, -2, -1, 0, 0, 0],
+        }
+        for n, expected in expected_by_n.items():
+            assert compute_aggression_subsidy(n, list(range(n)), -1) == expected, f"n={n}"
+
+    def test_three_way_tie_with_caller_matches_go(self):
+        """Same fixture as
+        engine/circuit_test.go::TestCircuitRecordRound_CallerTieBreakPaysFirstPlace:
+        5 players, {1,2,3} tied at 8 with player 2 the Cambia caller. The
+        caller keeps the 1st-place bonus (-5); both other tied players fall
+        to the next placement's bonus (-2), not the group's worst (0)."""
+        # compute_aggression_subsidy takes 0-indexed competition placements,
+        # tied players sharing the leading index of their score group. Sorted
+        # ascending with the caller first on the tie (engine/circuit.go's
+        # RecordRound sort, then non-caller ties by player ID): [2, 1, 3, 4,
+        # 5] with placements [0, 0, 0, 3, 4] and caller at index 0.
+        subsidies = compute_aggression_subsidy(5, [0, 0, 0, 3, 4], cambia_caller_idx=0)
+        # subsidies indexed the same as the placements list: [2, 1, 3, 4, 5]
+        assert subsidies == [-5, -2, -2, 0, 0]
+
+    def test_three_way_tie_without_caller_matches_go(self):
+        """Same 5-player 3-way tie with no Cambia caller: every tied player
+        keeps the group's own (best) placement bonus."""
+        subsidies = compute_aggression_subsidy(5, [0, 0, 0, 3, 4], cambia_caller_idx=-1)
+        assert subsidies == [-5, -5, -5, 0, 0]
+
+
+class TestPartialRosterRejection:
+    """record_round rejects a partial roster instead of rescaling the
+    subsidy schedule to whoever reported (cambia-1558)."""
+
+    def test_5_player_round_reported_by_4_is_rejected(self):
+        """A 5-player circuit round reported with only 4 players' scores
+        must be rejected, not silently scored against the 4-player schedule
+        (3rd place would pay 0 instead of the 5-player schedule's -1)."""
+        config = CircuitConfig(num_players=5, num_rounds=5, player_ids=[1, 2, 3, 4, 5])
+        state = CircuitState(config)
+
+        with pytest.raises(ValueError, match="missing score for player 5"):
+            state.record_round({1: 4, 2: 8, 3: 12, 4: 16}, cambia_caller_id=-1)
+
+        # Rejected before any mutation: no round recorded, no scores applied.
+        assert state.current_round == 0
+        assert state.rounds == []
+        for pid in (1, 2, 3, 4, 5):
+            assert state._player_map[pid].round_scores == []

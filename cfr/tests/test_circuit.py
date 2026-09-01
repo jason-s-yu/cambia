@@ -6,6 +6,8 @@ from src.circuit import (
     CircuitRunner,
     CircuitState,
     OpenSkillRating,
+    _get_subsidies_for_n,
+    compute_aggression_subsidy,
     ranks_from_scores,
     tournament_house_rules,
     update_openskill,
@@ -94,6 +96,46 @@ def test_circuit_record_round_subsidies_5p():
     assert state._player_map[5].cumulative_score == 10 + 0
 
 
+def test_get_subsidies_for_n_h2h_fixes_minus_3_0():
+    """2 players: RULES.md T3 fixes H2H at -3/0, not a slice of the FFA-4
+    table (which would give -5/-2, cambia-1558)."""
+    assert _get_subsidies_for_n(2) == [-3, 0]
+
+
+def test_circuit_record_round_subsidies_2p():
+    """2-player round {5, 9}, no caller: cumulative is 5-3=2 and 9-0=9
+    (RULES.md T3 H2H schedule), not 5-5=0 and 9-2=7 (the pre-fix FFA-4
+    slice), cambia-1558."""
+    state = CircuitState(
+        CircuitConfig(num_players=2, num_rounds=2, player_ids=[1, 2])
+    )
+    state.record_round({1: 5, 2: 9})
+
+    assert state._player_map[1].cumulative_score == 2
+    assert state._player_map[2].cumulative_score == 9
+
+
+def test_compute_aggression_subsidy_matches_get_subsidies_for_n():
+    """With no ties, compute_aggression_subsidy(n, [0..n-1], -1) is exactly
+    the schedule _get_subsidies_for_n(n) returns, for every player count the
+    engine supports (cambia-1558 AC1). Pinned against the schedule read out
+    of engine/scoring.go ComputeAggressionSubsidy / RULES.md T3, so a
+    regression in either function alone is caught."""
+    expected_by_n = {
+        2: [-3, 0],
+        3: [-5, -2, 0],
+        4: [-5, -2, 0, 0],
+        5: [-5, -2, -1, 0, 0],
+        6: [-5, -2, -1, 0, 0, 0],
+    }
+    for n, expected in expected_by_n.items():
+        assert _get_subsidies_for_n(n) == expected, f"n={n}"
+        placements = list(range(n))
+        assert (
+            compute_aggression_subsidy(n, placements, -1) == expected
+        ), f"n={n}"
+
+
 # ── Tie-break rules ───────────────────────────────────────────────────
 
 
@@ -120,6 +162,59 @@ def test_circuit_tie_both_get_higher_bonus():
 
     assert state._player_map[10].cumulative_score == 7 + (-5)
     assert state._player_map[20].cumulative_score == 7 + (-5)
+
+
+def test_circuit_three_way_tie_with_caller_demotes_to_next_placement():
+    """3-way tie with a caller: the caller is placed first and paid the
+    1st-place subsidy; the other two tied non-callers BOTH fall to the next
+    placement's bonus (-2), not the group's worst placement (0), matching
+    engine/circuit_test.go TestCircuitRecordRound_CallerTieBreakPaysFirstPlace
+    (cambia-1008, cambia-1558)."""
+    state = CircuitState(
+        CircuitConfig(num_players=5, num_rounds=5, player_ids=[1, 2, 3, 4, 5])
+    )
+    state.record_round({1: 8, 2: 8, 3: 8, 4: 15, 5: 20}, cambia_caller_id=2)
+
+    round_result = state.rounds[0]
+    assert round_result.subsidies[2] == -5
+    assert round_result.subsidies[1] == -2
+    assert round_result.subsidies[3] == -2
+    assert round_result.subsidies[4] == 0
+    assert round_result.subsidies[5] == 0
+
+
+def test_circuit_three_way_tie_without_caller_all_get_best_bonus():
+    """3-way tie with no caller: every tied player keeps the group's own
+    (best) placement bonus (cambia-1558)."""
+    state = CircuitState(
+        CircuitConfig(num_players=5, num_rounds=5, player_ids=[1, 2, 3, 4, 5])
+    )
+    state.record_round({1: 8, 2: 8, 3: 8, 4: 15, 5: 20}, cambia_caller_id=-1)
+
+    round_result = state.rounds[0]
+    assert round_result.subsidies[1] == -5
+    assert round_result.subsidies[2] == -5
+    assert round_result.subsidies[3] == -5
+    assert round_result.subsidies[4] == 0
+    assert round_result.subsidies[5] == 0
+
+
+# ── Roster validation ────────────────────────────────────────────────
+
+
+def test_circuit_record_round_rejects_missing_roster_member():
+    """record_round rejects a score map that omits a non-abandoned roster
+    member instead of rescaling the schedule to whoever reported (mirrors
+    engine/circuit.go RecordRound, cambia-1558)."""
+    state = CircuitState(
+        CircuitConfig(num_players=5, num_rounds=5, player_ids=[1, 2, 3, 4, 5])
+    )
+    with pytest.raises(ValueError, match="missing score for player 5"):
+        state.record_round({1: 5, 2: 8, 3: 10, 4: 12})
+
+    # No partial mutation on rejection.
+    assert state.current_round == 0
+    assert state._player_map[1].round_scores == []
 
 
 # ── Dealer rotation ───────────────────────────────────────────────────
