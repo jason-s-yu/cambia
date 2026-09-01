@@ -420,16 +420,28 @@ func (a *AgentState) processBlindSwap(g *engine.GameState, isSelf bool, ownIdx, 
 	if isSelf {
 		// We swapped our card at ownIdx with opponent's card at oppIdx.
 		// Our ownIdx now has the opponent's card (unknown to us).
-		// Opponent's oppIdx now has our old card (event decay since it moved).
+		// The card we gave away is the one we just held, so whatever we knew about it is
+		// now what we know about the opponent's oppIdx: the swap is blind in the card we
+		// RECEIVE, not in the card we send (RULES.md 2.3, cambia-1552). The moved belief
+		// is read before the slot is overwritten.
+		moved := a.OwnHand[ownIdx]
 		a.OwnHand[ownIdx] = KnownCardInfo{
 			Bucket:       BucketUnknown,
 			LastSeenTurn: a.CurrentTurn,
 			Card:         engine.EmptyCard,
 		}
-		a.triggerEventDecay(oppIdx)
-		// EP-PBS: both physical positions now unknown to us.
+		// EP-PBS: the position we swapped into is unknown to us now.
 		a.eppbsSetSlotUnk(ownIdx)
-		a.eppbsSetSlotUnk(OppSlotsStart + oppIdx)
+		if moved.Bucket != BucketUnknown && oppIdx < a.OppHandLen {
+			a.OppBelief[oppIdx] = BucketBelief(moved.Bucket)
+			a.OppLastSeen[oppIdx] = moved.LastSeenTurn
+			a.OppHasLastSeen[oppIdx] = true
+			a.eppbsForceOwnSlotKnown(OppSlotsStart+oppIdx, moved.Bucket)
+		} else {
+			// We never saw the card we gave away, so the opponent's slot only moved.
+			a.triggerEventDecay(oppIdx)
+			a.eppbsSetSlotUnk(OppSlotsStart + oppIdx)
+		}
 	} else {
 		// Opponent swapped: their ownIdx (their hand) <-> their oppIdx (our hand).
 		// Our card at oppIdx is now unknown (we received opponent's old card).
@@ -574,10 +586,13 @@ func (a *AgentState) processSnapOpponent(g *engine.GameState, isSelf bool, oppId
 // Mover is g.LastAction.ActingPlayer.
 func (a *AgentState) processSnapOpponentMove(g *engine.GameState, isSelf bool, ownIdx, slotIdx uint8) {
 	if isSelf {
-		// We moved our card at ownIdx to opponent's hand at slotIdx.
+		// We moved our card at ownIdx to opponent's hand at slotIdx. The card keeps its
+		// identity across the move, so what we knew about it is what we now know about the
+		// slot it landed in; reading it before removeOwnCard destroys the slot is the whole
+		// of the fix (RULES.md 5, cambia-1552).
+		moved := a.OwnHand[ownIdx]
 		a.removeOwnCard(ownIdx)
-		// Insert unknown at slotIdx in opponent's hand (or append).
-		a.insertOppUnknown(slotIdx)
+		a.insertOppFromOwn(slotIdx, moved)
 	} else {
 		// Opponent moved their card at ownIdx to our hand at slotIdx.
 		a.removeOppCard(ownIdx)
@@ -767,6 +782,32 @@ func (a *AgentState) insertOppUnknown(slotIdx uint8) {
 	a.OppLastSeen[slotIdx] = 0
 	a.OppHasLastSeen[slotIdx] = false
 	a.OppHandLen++
+}
+
+// insertOppFromOwn inserts a card the agent moved out of its OWN hand into the opponent
+// hand model at slotIdx, carrying what the agent knew about it. An unknown card is the
+// plain insertOppUnknown insert. The opponent model holds a bucket per slot and no card
+// identity, so the exact card cannot travel with it; the bucket and the turn it was last
+// seen do, which is what OppBelief and OppLastSeen represent (cambia-1552).
+func (a *AgentState) insertOppFromOwn(slotIdx uint8, moved KnownCardInfo) {
+	before := a.OppHandLen
+	a.insertOppUnknown(slotIdx)
+	if a.OppHandLen == before {
+		return // opponent hand was already full: nothing was inserted
+	}
+	// insertOppUnknown clamps an over-large index to the end of the hand.
+	if slotIdx > before {
+		slotIdx = before
+	}
+	if moved.Bucket == BucketUnknown {
+		return
+	}
+	a.OppBelief[slotIdx] = BucketBelief(moved.Bucket)
+	a.OppLastSeen[slotIdx] = moved.LastSeenTurn
+	a.OppHasLastSeen[slotIdx] = true
+	// EP-PBS: the receiving physical slot holds a card the opponent has not seen, so it
+	// is ours alone to know regardless of what the slot held before.
+	a.eppbsForceOwnSlotKnown(OppSlotsStart+slotIdx, moved.Bucket)
 }
 
 // reconcileHandLengths ensures agent hand lengths match the actual game state.
@@ -1279,11 +1320,36 @@ func (a *AgentState) nplayerProcessSnapOpponent(g *engine.GameState, actingPlaye
 }
 
 func (a *AgentState) nplayerProcessSnapOpponentMove(g *engine.GameState, actingPlayer, ownIdx uint8) {
-	// Acting player moves their card at ownIdx to a target player's hand.
-	globalSlot := nplayerSlot(actingPlayer, ownIdx)
-	// Card moves out of actingPlayer's hand - clear its knowledge.
-	a.nplayerClearKnowledge(globalSlot)
-	// Target player gains a card (unknown position), tracked via hand length.
+	// The acting player moves their card at ownIdx into the slot their snap emptied in the
+	// target seat's hand. The card keeps its identity, so everything known about it moves
+	// with it: the mover still knows the card it paid, and so does anyone else who had
+	// seen it (RULES.md 5, cambia-1552). The engine records the destination seat and slot,
+	// which the move's own action index does not carry.
+	from := nplayerSlot(actingPlayer, ownIdx)
+	known := a.NPlayerSlotKnown[from]
+	bucket := a.NPlayerSlotBuckets[from]
+	var mask [MaxKnowledgePlayers]bool
+	if from >= 0 && from < MaxTotalSlots {
+		mask = a.KnowledgeMask[from]
+	}
+	a.nplayerClearKnowledge(from)
+
+	target := g.LastAction.SwapTargetPlayer()
+	slot := g.LastAction.SwapOppIdx
+	if target == actingPlayer || target >= g.NumActivePlayers() || slot >= engine.MaxHandSize {
+		return
+	}
+	to := nplayerSlot(target, slot)
+	if to < 0 || to >= MaxTotalSlots {
+		return
+	}
+	a.KnowledgeMask[to] = mask
+	a.NPlayerSlotKnown[to] = known
+	if known {
+		a.NPlayerSlotBuckets[to] = bucket
+	} else {
+		a.NPlayerSlotBuckets[to] = 0
+	}
 }
 
 // InfosetKey encodes the belief state into a fixed-size 16-byte array.

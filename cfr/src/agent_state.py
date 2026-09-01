@@ -489,6 +489,14 @@ class AgentState:
             """Card at `slot` moved/swapped: both players lose epistemic knowledge."""
             self._eppbs_set_tag(slot, EpistemicTag.UNK)
 
+        def _known_bucket(slot: int) -> int:
+            """Raw bucket of `slot` when WE know its identity, else 0."""
+            if not 0 <= slot < len(self.slot_tags):
+                return 0
+            if self.slot_tags[slot] in (EpistemicTag.PRIV_OWN, EpistemicTag.PUB):
+                return self.slot_buckets[slot]
+            return 0
+
         def _bucket_from_peeked(p_idx: int, h_idx: int) -> int:
             """Extract raw bucket value from peeked_cards observation."""
             if not observation.peeked_cards:
@@ -534,8 +542,25 @@ class AgentState:
             elif isinstance(action, ActionAbilityBlindSwapSelect):
                 own_idx = action.own_hand_index
                 opp_idx = action.opponent_hand_index
+                # The card we send is one we may have known; it lands in a slot only we can
+                # place, so that slot is PRIV_OWN rather than forgotten (cambia-1552). The
+                # card we receive is blind, so our own slot is forgotten either way.
+                bv_sent = _known_bucket(own_idx)
                 _forget_slot(own_idx)
-                _forget_slot(6 + opp_idx)
+                if bv_sent:
+                    self._eppbs_set_tag(6 + opp_idx, EpistemicTag.PRIV_OWN, bv_sent)
+                else:
+                    _forget_slot(6 + opp_idx)
+
+            elif isinstance(action, ActionSnapOpponentMove):
+                # RULES.md 5 fill: the card we paid keeps its identity in the slot our snap
+                # emptied, and the opponent never saw it, so that slot is ours alone to know.
+                own_idx = action.own_card_to_move_hand_index
+                target_slot = action.target_empty_slot_index
+                bv_paid = _known_bucket(own_idx)
+                _forget_slot(own_idx)
+                if bv_paid and 0 <= target_slot < 6:
+                    self._eppbs_set_tag(6 + target_slot, EpistemicTag.PRIV_OWN, bv_paid)
 
         elif actor == self.opponent_id:
             if isinstance(action, ActionAbilityPeekOwnSelect):
@@ -729,6 +754,9 @@ class AgentState:
 
         # 2a. Handle card moves from SnapOpponentMove (if occurred *this turn*)
         # This needs to happen *before* final reconciliation, as it affects counts and indices.
+        # moved_fill_info is what we knew about the card we paid the fill with, read here
+        # because the reconciliation below drops the slot it lived in (cambia-1552).
+        moved_fill_info: Optional[KnownCardInfo] = None
         if isinstance(action, ActionSnapOpponentMove) and actor != -1:
             # The action contains the indices involved in the *move* step
             snapper_idx = actor  # The player who moved their card
@@ -741,6 +769,7 @@ class AgentState:
                     own_card_idx_moved in original_own_hand
                 ):  # Check against pre-snap state
                     own_indices_removed.add(own_card_idx_moved)
+                    moved_fill_info = original_own_hand[own_card_idx_moved]
                     logger.debug(
                         " -> P%d moved card from own idx %d (marked removed)",
                         self.player_id,
@@ -1018,6 +1047,11 @@ class AgentState:
                             action.own_hand_index,
                             action.opponent_hand_index,
                         )
+                        # The swap is blind in the card we RECEIVE, not the one we send: the
+                        # card we hand over keeps its identity in the opponent's slot, so
+                        # what we knew about it is what we know about that slot now
+                        # (cambia-1552). Read before the slot is overwritten.
+                        sent_info = self.own_hand.get(own_idx)
                         # Our own card becomes unknown
                         if own_idx in self.own_hand:
                             self.own_hand[own_idx] = KnownCardInfo(
@@ -1030,12 +1064,23 @@ class AgentState:
                                 self.player_id,
                                 own_idx,
                             )
-                        # Opponent's card belief decays
-                        self._trigger_event_decay(
-                            target_index=opp_idx_target,
-                            trigger_event="swap (blind, self initiated)",
-                            current_turn=self._current_game_turn,
-                        )
+                        if (
+                            sent_info is not None
+                            and isinstance(sent_info.bucket, CardBucket)
+                            and sent_info.bucket != CardBucket.UNKNOWN
+                            and opp_idx_target in self.opponent_belief
+                        ):
+                            self.opponent_belief[opp_idx_target] = sent_info.bucket
+                            self.opponent_last_seen_turn[opp_idx_target] = (
+                                sent_info.last_seen_turn
+                            )
+                        else:
+                            # We never saw the card we gave away: the opponent's slot only moved.
+                            self._trigger_event_decay(
+                                target_index=opp_idx_target,
+                                trigger_event="swap (blind, self initiated)",
+                                current_turn=self._current_game_turn,
+                            )
 
                     elif (
                         isinstance(action, ActionAbilityKingSwapDecision)
@@ -1068,7 +1113,33 @@ class AgentState:
                                 self.player_id,
                             )
 
-                    # Snap actions affecting self (SnapOwn, SnapOpponentMove) handled by reconciliation
+                    elif isinstance(action, ActionSnapOpponentMove):
+                        # RULES.md 5 fill: the card we moved into the slot our snap emptied
+                        # is the card we were just holding, so what we knew about it is what
+                        # we know about that slot now. The reconciliation above only counts
+                        # cards, so a card we had peeked came back as UNKNOWN the moment it
+                        # changed hands (cambia-1552). The opponent model holds a bucket per
+                        # slot and no card identity, so the bucket and the turn it was last
+                        # seen travel with it and the exact card does not.
+                        fill_slot_idx = action.target_empty_slot_index
+                        if (
+                            moved_fill_info is not None
+                            and isinstance(moved_fill_info.bucket, CardBucket)
+                            and moved_fill_info.bucket != CardBucket.UNKNOWN
+                            and fill_slot_idx in self.opponent_belief
+                        ):
+                            self.opponent_belief[fill_slot_idx] = moved_fill_info.bucket
+                            self.opponent_last_seen_turn[fill_slot_idx] = (
+                                moved_fill_info.last_seen_turn
+                            )
+                            logger.debug(
+                                " Agent %d moved a known card into opp idx %d (%s).",
+                                self.player_id,
+                                fill_slot_idx,
+                                moved_fill_info.bucket.name,
+                            )
+
+                    # SnapOwn affecting self is handled by reconciliation
 
                 elif actor == self.opponent_id:
                     # Observe opponent actions
