@@ -120,6 +120,32 @@ def _drawn_card_bucket(view: GameView) -> int:
         return -1
 
 
+def _require_go_belief(owner, belief, encoder: str):
+    """Return ``belief`` after asserting it satisfies the Go encoder contract.
+
+    Every eval encode path feeds a Go encoder: evaluation plays on GoEngine and
+    ``attach_belief`` builds a ``GoAgentState`` (cambia-1422 retired the Python
+    rules engine, cambia-1426 moved the battery onto libcambia). Stating that
+    contract in one place means a wrapper handed a plain Python ``AgentState``
+    fails by name here rather than raising ``AttributeError`` from inside an
+    encoder call, which is how cambia-1522 surfaced.
+    """
+    if belief is None:
+        raise AgentStateError(
+            f"{owner.__class__.__name__} P{owner.player_id}: belief not attached; "
+            "initialize_state must run before encoding."
+        )
+    if not hasattr(belief, encoder):
+        raise AgentStateError(
+            f"{owner.__class__.__name__} P{owner.player_id}: belief is a "
+            f"{type(belief).__name__}, which does not expose {encoder}(). Eval "
+            "encoding requires the Go-backed GoAgentState that attach_belief "
+            "builds; the Python AgentState encode path retired with the Python "
+            "rules engine."
+        )
+    return belief
+
+
 # --- Python-engine observation builder (tabular CFR only) ---
 
 
@@ -549,27 +575,22 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
         """
         _INTERLEAVED_NETWORK_TYPES = frozenset({"slot_film", "slot_multiply"})
 
-        st = self.agent_state
-        if st is None:
-            raise AgentStateError(
-                f"{self.__class__.__name__} P{self.player_id}: belief not attached; "
-                "initialize_state must run before encoding."
-            )
+        layout = getattr(self, "_encoding_layout", "auto")
+        network_type = getattr(self, "_network_type", "mlp")
+        if layout == "flat_dealiased":
+            encoder = "encode_eppbs_dealiased"
+        elif layout == "interleaved" or network_type in _INTERLEAVED_NETWORK_TYPES:
+            encoder = "encode_eppbs_interleaved"
+        else:
+            encoder = "encode_eppbs"
 
+        st = _require_go_belief(self, self.agent_state, encoder)
         ctx = (
             decision_context.value
             if hasattr(decision_context, "value")
             else int(decision_context)
         )
-        layout = getattr(self, "_encoding_layout", "auto")
-        network_type = getattr(self, "_network_type", "mlp")
-
-        if layout == "flat_dealiased":
-            encoding = st.encode_eppbs_dealiased(ctx, int(drawn_bucket))
-        elif layout == "interleaved" or network_type in _INTERLEAVED_NETWORK_TYPES:
-            encoding = st.encode_eppbs_interleaved(ctx, int(drawn_bucket))
-        else:
-            encoding = st.encode_eppbs(ctx, int(drawn_bucket))
+        encoding = getattr(st, encoder)(ctx, int(drawn_bucket))
 
         # Truncate to network input_dim for backward compat (200->224 migration)
         expected_dim = getattr(self, "_net_input_dim", len(encoding))
@@ -586,11 +607,7 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
         Python AgentState. Same encoder the trainer used; drawn_bucket defaults
         to -1, which is what the legacy layout carried (no drawn-card one-hot).
         """
-        st = self.agent_state
-        if st is None:
-            raise AgentStateError(
-                f"{self.__class__.__name__} P{self.player_id}: belief not attached."
-            )
+        st = _require_go_belief(self, self.agent_state, "encode")
         ctx = (
             decision_context.value
             if hasattr(decision_context, "value")
@@ -602,11 +619,7 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
         self, decision_context: DecisionContext, drawn_bucket: int = -1
     ) -> np.ndarray:
         """The N-player infoset encoding, via the Go encoder."""
-        st = self.agent_state
-        if st is None:
-            raise AgentStateError(
-                f"{self.__class__.__name__} P{self.player_id}: belief not attached."
-            )
+        st = _require_go_belief(self, self.agent_state, "encode_nplayer")
         ctx = (
             decision_context.value
             if hasattr(decision_context, "value")
@@ -1976,20 +1989,28 @@ class PPOAgentWrapper(BaseAgent):
         trained, so the detected ``_encoding_version`` selects the path. Feeding
         the wrong width crashes ``MaskablePPO.predict``.
 
-        v2 is called WITHOUT a drawn-card bucket (-1), matching PPO training,
-        which never passed one: a real bucket here would set a dims[0:11] one-hot
+        v2 is called WITHOUT a drawn-card bucket (-1). That matched PPO training
+        up to cambia-1376: ppo_env._get_obs called the v2 encoder with the bucket
+        defaulted, and a real bucket here would set the 11-dim drawn-card one-hot
         the trained policy never saw, reintroducing RC-B on the PPO anchor.
-        (DESCA differs: its trainer does pass the bucket, so DESCA eval does
-        too.) ``drawn_card_bucket`` is accepted and ignored to keep the call
-        shape shared with the other wrappers.
+        cambia-1376 moved that env onto GoEngine and now passes
+        engine.get_drawn_card_bucket(), so a PPO v2 model trained after it sees
+        the bucket while training and not while evaluating. The -1 is held rather
+        than flipped because the correct value depends on which side of
+        cambia-1376 a checkpoint was trained on, which this wrapper cannot read
+        off the checkpoint; the divergence is reported against the PPO anchor
+        (cambia-1522). (DESCA differs: its trainer passes the bucket on both
+        sides, so DESCA eval does too.) ``drawn_card_bucket`` is accepted and
+        ignored to keep the call shape shared with the other wrappers.
         """
-        st = self._agent_state
-        if st is None:
-            raise AgentStateError(f"PPOAgent P{self.player_id}: belief not attached.")
+        encoder = (
+            "encode_eppbs_interleaved_v2"
+            if getattr(self, "_encoding_version", 1) == 2
+            else "encode_eppbs_interleaved"
+        )
+        st = _require_go_belief(self, self._agent_state, encoder)
         ctx_val = ctx.value if hasattr(ctx, "value") else int(ctx)
-        if getattr(self, "_encoding_version", 1) == 2:
-            return st.encode_eppbs_interleaved_v2(ctx_val, -1).astype(np.float32)
-        return st.encode_eppbs_interleaved(ctx_val, -1).astype(np.float32)
+        return getattr(st, encoder)(ctx_val, -1).astype(np.float32)
 
     def choose_action(self, game_state, legal_actions) -> GameAction:
         """Choose an action using the trained PPO model."""
@@ -2253,15 +2274,19 @@ class DESCAAgentWrapper(NeuralAgentWrapper):
         )
 
     def _encode_v2(self, decision_context, drawn_card_bucket: int = -1) -> np.ndarray:
-        """Encode agent state to 257-dim EP-PBS v2 via the canonical encoder.
+        """Encode this seat's belief to the 257-dim EP-PBS v2 layout, via Go.
 
-        Routes through ``encode_infoset_eppbs_interleaved_v2`` -- the same
-        high-level entry point the DESCA trainer (``desca_worker._encode_state``)
-        uses. That encoder derives the card-counting posterior (dims [224:233])
-        and action-history window (dims [233:257]) from ``AgentState`` directly,
-        plus the v1 history-parity features (observation ages, dead-card
-        histogram, turn progress). The prior hand-rolled low-level call omitted
-        all of those, zeroing ~57 input dims relative to training (RC-B).
+        One encoder, the Go-backed ``GoAgentState.encode_eppbs_interleaved_v2``,
+        which fills the card-counting posterior (dims [224:233]) and the
+        action-history window (dims [233:257]) alongside the v1 block. The DESCA
+        trainer reaches the same FFI entry: ``desca_worker._encode_state`` calls
+        ``encode_infoset_eppbs_interleaved_v2``, which short-circuits to this
+        method for a Go-backed belief. Calling it here directly keeps the wrapper
+        on the same contract as every other encode path on this class rather than
+        going through the dispatcher that also admits the retired Python
+        AgentState (cambia-1522). The pre-39f28f7 hand-rolled low-level call
+        omitted the posterior and history kwargs, zeroing ~57 input dims relative
+        to training (RC-B); the Go encoder cannot express that state.
         """
         import os
 
@@ -2271,9 +2296,7 @@ class DESCAAgentWrapper(NeuralAgentWrapper):
             # history-parity / drawn-card dims. Eval-only, default off.
             return self._encode_v2_legacy_rcb(decision_context)
 
-        st = self.agent_state
-        if st is None:
-            raise AgentStateError(f"DESCAAgent P{self.player_id}: belief not attached.")
+        st = _require_go_belief(self, self.agent_state, "encode_eppbs_interleaved_v2")
         ctx = (
             decision_context.value
             if hasattr(decision_context, "value")
@@ -2310,7 +2333,7 @@ class DESCAAgentWrapper(NeuralAgentWrapper):
 
         legal_list = list(legal_actions)
         decision_context = self._get_decision_context(game_state)
-        drawn_card_bucket = _drawn_card_bucket_from_game_state(game_state)
+        drawn_card_bucket = _drawn_card_bucket(game_state)
 
         try:
             features = self._encode_v2(decision_context, drawn_card_bucket)

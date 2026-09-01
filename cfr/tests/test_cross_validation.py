@@ -18,7 +18,7 @@ import pytest
 import torch
 
 try:
-    from src.ffi.bridge import GoEngine, GoAgentState
+    from src.ffi.bridge import DecisionCtx, GoEngine, GoAgentState
 
     HAS_GO = True
 except Exception:
@@ -146,16 +146,27 @@ def _create_py_observation(py_state, action, acting_player):
 
 
 def _dc_int_to_enum(ctx_int):
-    """Convert Go decision_ctx int to Python DecisionContext enum."""
-    _MAP = {
-        0: DecisionContext.START_TURN,
-        1: DecisionContext.POST_DRAW,
-        2: DecisionContext.ABILITY_SELECT,
-        3: DecisionContext.SNAP_DECISION,
-        4: DecisionContext.SNAP_MOVE,
-        5: DecisionContext.START_TURN,  # Terminal maps to START_TURN for encoding
-    }
-    return _MAP.get(ctx_int, DecisionContext.START_TURN)
+    """Convert a Go decision_ctx int to the Python DecisionContext enum.
+
+    Resolved by name off ``DecisionCtx``, the bridge's copy of the engine's
+    numbering, rather than by a literal int map: the two enums share member
+    names but the ints belong to engine/types.go, so a name lookup survives a
+    renumbering that a literal map would silently mistranslate. This map used to
+    be written out with SNAP_DECISION and ABILITY_SELECT swapped (cambia-1484);
+    test_decision_ctx_ints_match_the_engine pins DecisionCtx against a live
+    engine so neither copy can drift again.
+
+    Terminal has no Python counterpart and encodes as START_TURN: a terminal
+    state carries no decision, and callers racing the terminal check need a
+    valid context rather than a raise.
+    """
+    try:
+        name = DecisionCtx(int(ctx_int)).name
+    except ValueError:
+        return DecisionContext.START_TURN
+    if name == DecisionCtx.TERMINAL.name:
+        return DecisionContext.START_TURN
+    return DecisionContext[name]
 
 
 def _bucket_int_to_enum(bucket_int):
@@ -898,3 +909,143 @@ class TestMemoryDecayParity:
         for ga in go_agents:
             ga.close()
         go_engine.close()
+
+
+# ---------------------------------------------------------------------------
+# Decision-context numbering pin (cambia-1484)
+#
+# engine/types.go declares the DecisionContext order and engine/legal.go's
+# LegalActions() switches on it, so each context admits exactly one band of the
+# action index space (engine/types.go action index constants). That makes the
+# numbering falsifiable from a live engine: renumber DecisionContext and the
+# observed ints stop lining up with the bands, here, rather than silently
+# re-encoding every ability and snap node under the wrong one-hot.
+#
+# _dc_int_to_enum carried SNAP_DECISION and ABILITY_SELECT swapped until
+# cambia-1484; the same swap sat in bridge.py's docstring until cambia-1376.
+# ---------------------------------------------------------------------------
+
+
+#: Engine action index band per decision context, half-open, from the
+#: engine/types.go action index constants: DrawStockpile/DrawDiscard/CallCambia
+#: at 0-2, DiscardNoAbility/DiscardWithAbility/Replace at 3-10, the ability
+#: selectors at 11-96, PassSnap/SnapOwn/SnapOpponent at 97-109, and
+#: SnapOpponentMove at 110-145.
+_CTX_ACTION_BANDS = {
+    "START_TURN": (0, 3),
+    "POST_DRAW": (3, 11),
+    "ABILITY_SELECT": (11, 97),
+    "SNAP_DECISION": (97, 110),
+    "SNAP_MOVE": (110, 146),
+}
+
+
+def _ctx_pin_action(legal_indices):
+    """Pick an action that walks the game through every decision context.
+
+    Prefers DiscardWithAbility so ability selection is reached, then a snap move,
+    then an opponent snap (which is what creates a snap move), else the lowest
+    legal index.
+    """
+    for pick in (
+        [i for i in legal_indices if i == 4],
+        [i for i in legal_indices if 110 <= i < 146],
+        [i for i in legal_indices if 104 <= i < 110],
+        legal_indices,
+    ):
+        if pick:
+            return pick[0]
+    return None
+
+
+def test_decision_ctx_names_and_values_agree_with_python_enum():
+    """DecisionCtx mirrors src.constants.DecisionContext, name and value.
+
+    Both enums carry TERMINAL. _dc_int_to_enum still folds it onto START_TURN,
+    because a terminal state has no decision to encode; that fold is a caller
+    choice, not a gap between the enums.
+    """
+    from src.ffi.bridge import DecisionCtx as _DecisionCtx
+
+    assert [m.name for m in _DecisionCtx] == [m.name for m in DecisionContext], (
+        "DecisionCtx and DecisionContext no longer share their member names, so "
+        "_dc_int_to_enum's name lookup cannot resolve."
+    )
+    for member in _DecisionCtx:
+        assert DecisionContext[member.name].value == member.value, (
+            f"{member.name}: engine numbering {member.value} vs Python "
+            f"{DecisionContext[member.name].value}"
+        )
+
+
+def test_dc_int_to_enum_maps_each_engine_context():
+    """The int map matches the engine numbering, snap and ability included."""
+    from src.ffi.bridge import DecisionCtx as _DecisionCtx
+
+    assert _dc_int_to_enum(_DecisionCtx.START_TURN) is DecisionContext.START_TURN
+    assert _dc_int_to_enum(_DecisionCtx.POST_DRAW) is DecisionContext.POST_DRAW
+    assert _dc_int_to_enum(_DecisionCtx.SNAP_DECISION) is DecisionContext.SNAP_DECISION
+    assert _dc_int_to_enum(_DecisionCtx.ABILITY_SELECT) is DecisionContext.ABILITY_SELECT
+    assert _dc_int_to_enum(_DecisionCtx.SNAP_MOVE) is DecisionContext.SNAP_MOVE
+    # Terminal has no decision to encode; it reports START_TURN.
+    assert _dc_int_to_enum(_DecisionCtx.TERMINAL) is DecisionContext.START_TURN
+    # An int outside the engine's range degrades rather than raising.
+    assert _dc_int_to_enum(99) is DecisionContext.START_TURN
+
+
+@skipgo
+def test_decision_ctx_ints_match_the_engine():
+    """Every DecisionCtx value is pinned against a live engine's legal actions.
+
+    Plays seeded games, and at each state asserts the engine's decision_ctx int
+    names a context whose action band contains every legal action. A terminal
+    state must report TERMINAL and offer none. All six contexts have to appear,
+    so a renumbering cannot pass by leaving one unobserved.
+    """
+    from src.ffi.bridge import DecisionCtx as _DecisionCtx
+
+    observed = set()
+    for seed in range(40):
+        engine = GoEngine(seed=seed, house_rules=_TEST_RULES)
+        try:
+            for step in range(300):
+                ctx_int = engine.decision_ctx()
+                try:
+                    ctx = _DecisionCtx(ctx_int)
+                except ValueError:
+                    pytest.fail(
+                        f"seed={seed} step={step}: engine reported decision_ctx "
+                        f"{ctx_int}, which DecisionCtx does not name. "
+                        f"engine/types.go gained a context; mirror it."
+                    )
+                observed.add(ctx)
+
+                legal = np.where(engine.legal_actions_mask() > 0)[0].tolist()
+                if ctx is _DecisionCtx.TERMINAL:
+                    assert not legal, (
+                        f"seed={seed} step={step}: terminal state offered legal "
+                        f"actions {legal[:8]}"
+                    )
+                    break
+
+                low, high = _CTX_ACTION_BANDS[ctx.name]
+                assert legal, f"seed={seed} step={step}: {ctx.name} offered no action"
+                assert low <= min(legal) and max(legal) < high, (
+                    f"seed={seed} step={step}: engine reported "
+                    f"{ctx.name}={ctx.value} but its legal actions "
+                    f"{legal[:8]} fall outside that context's band "
+                    f"[{low},{high}). The engine's DecisionContext numbering and "
+                    f"DecisionCtx have diverged (engine/types.go)."
+                )
+
+                action = _ctx_pin_action(legal)
+                assert action is not None
+                engine.apply_action(action)
+        finally:
+            engine.close()
+
+    missing = [m.name for m in _DecisionCtx if m not in observed]
+    assert not missing, (
+        f"These contexts never occurred, so their values went unpinned: "
+        f"{missing}. Widen the seed range or the action policy."
+    )
