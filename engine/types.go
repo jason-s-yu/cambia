@@ -343,12 +343,102 @@ type LastActionInfo struct {
 	SnapSuccess  bool
 	SnapPenalty  uint8
 	DrawnFrom    uint8 // DrawnFromStockpile or DrawnFromDiscard
+
+	// ActionMeta carries the two facts about the recorded action that ActionIdx cannot,
+	// packed into the single byte of padding this struct has to spend: GameState is
+	// size-capped (TestGameStateSize), and a second field would push it past the cap.
+	// Read it through ActionSpace() and SwapTargetPlayer(), never directly.
+	//
+	//	bit 7      the action-index namespace: set for the 620-action N-player encoding,
+	//	           clear for the 146-action 2-player one. The two spaces overlap, so an
+	//	           observer that picks a decoder on its own reads a different action than
+	//	           the one applied - PeekOther(slot 2, opponent 2) records as 19, which
+	//	           the 2-player decoder reads as PeekOther(2), and SnapOwn(3) records as
+	//	           101, which reads as BlindSwap(1, 0) (cambia-1548). Every handler that
+	//	           records a space-dependent index records the space with it; the
+	//	           seventeen shared indices (draw, discard, call Cambia, Replace, PeekOwn)
+	//	           hold the same value in both spaces, so the handlers that record only
+	//	           those leave the tag as the dispatcher stamped it and it still names a
+	//	           space their index decodes correctly in.
+	//	bits 0-2   the seat a cross-seat move named, for the N-player handlers that name
+	//	           one: blind swap, King look, the King swap decision and the
+	//	           opponent-snap pair. It is the only record of that seat once the action
+	//	           clears Pending, which is what the King swap decision does before any
+	//	           observer runs. It reads 0 for every action that names no seat, so it
+	//	           is meaningful only for the actions that do.
+	ActionMeta uint8
 }
+
+const (
+	actionMetaSeatMask   uint8 = 0x07 // seats 0-7 (MaxPlayers)
+	actionMetaNPlayerBit uint8 = 0x80
+)
+
+// ActionSpace returns the action-index namespace ActionIdx was recorded in.
+func (l LastActionInfo) ActionSpace() uint8 {
+	if l.ActionMeta&actionMetaNPlayerBit != 0 {
+		return ActionSpaceNPlayer
+	}
+	return ActionSpaceLegacy
+}
+
+// SwapTargetPlayer returns the seat the recorded action named, for the actions that name
+// one (see ActionMeta). It reads 0 for every other action.
+func (l LastActionInfo) SwapTargetPlayer() uint8 { return l.ActionMeta & actionMetaSeatMask }
 
 const (
 	DrawnFromStockpile uint8 = 0
 	DrawnFromDiscard   uint8 = 1
 )
+
+// Action-index namespaces for LastActionInfo.ActionSpace.
+const (
+	ActionSpaceLegacy  uint8 = 0 // the 146-action 2-player encoding
+	ActionSpaceNPlayer uint8 = 1 // the 620-action N-player encoding
+)
+
+// recordActionSpace stamps the namespace the next index is recorded in and clears the
+// seat the previous action named, so no stale seat outlives the action that set it.
+func (g *GameState) recordActionSpace(space uint8) {
+	if space == ActionSpaceNPlayer {
+		g.LastAction.ActionMeta = actionMetaNPlayerBit
+		return
+	}
+	g.LastAction.ActionMeta = 0
+}
+
+// recordSwapTargetPlayer records the seat a cross-seat move named, leaving the namespace
+// the recording handler stamped.
+func (g *GameState) recordSwapTargetPlayer(seat uint8) {
+	g.LastAction.ActionMeta = (g.LastAction.ActionMeta &^ actionMetaSeatMask) |
+		(seat & actionMetaSeatMask)
+}
+
+// recordSeatSpacedAction records an action index whose encoding depends on the seat
+// count, together with the space it was written in: the N-player (620) encoding above
+// two seats, the legacy (146) one at two. Handlers shared by both dispatchers call it
+// so a 2-seat game records exactly what it recorded before the namespace split.
+func (g *GameState) recordSeatSpacedAction(legacy, nplayer uint16) {
+	if g.Rules.numPlayers() > 2 {
+		g.LastAction.ActionIdx = nplayer
+		g.recordActionSpace(ActionSpaceNPlayer)
+		return
+	}
+	g.LastAction.ActionIdx = legacy
+	g.recordActionSpace(ActionSpaceLegacy)
+}
+
+// recordLegacyAction records an action index in the 146-action 2-player space.
+func (g *GameState) recordLegacyAction(idx uint16) {
+	g.LastAction.ActionIdx = idx
+	g.recordActionSpace(ActionSpaceLegacy)
+}
+
+// recordNPlayerAction records an action index in the 620-action N-player space.
+func (g *GameState) recordNPlayerAction(idx uint16) {
+	g.LastAction.ActionIdx = idx
+	g.recordActionSpace(ActionSpaceNPlayer)
+}
 
 // ---------------------------------------------------------------------------
 // N-Player action index constants (620 actions for up to 8 players)

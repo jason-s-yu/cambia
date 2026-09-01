@@ -109,7 +109,7 @@ func (g *GameState) peekOther(targetIdx uint8) error {
 	revealed := g.Players[opp].Hand[targetIdx]
 
 	// Record observation.
-	g.LastAction.ActionIdx = EncodePeekOther(targetIdx)
+	g.recordLegacyAction(EncodePeekOther(targetIdx))
 	g.LastAction.ActingPlayer = acting
 	g.LastAction.RevealedCard = revealed
 	g.LastAction.RevealedIdx = targetIdx
@@ -144,7 +144,7 @@ func (g *GameState) blindSwap(ownIdx, oppIdx uint8) error {
 		g.Players[opp].Hand[oppIdx], g.Players[acting].Hand[ownIdx]
 
 	// Record swap info.
-	g.LastAction.ActionIdx = EncodeBlindSwap(ownIdx, oppIdx)
+	g.recordLegacyAction(EncodeBlindSwap(ownIdx, oppIdx))
 	g.LastAction.ActingPlayer = acting
 	g.LastAction.SwapOwnIdx = ownIdx
 	g.LastAction.SwapOppIdx = oppIdx
@@ -179,7 +179,7 @@ func (g *GameState) kingLook(ownIdx, oppIdx uint8) error {
 
 	// Record both revealed cards in LastAction (own card in primary slot, opp card can be
 	// inferred from context, but we store opp card as the secondary via SwapOppIdx).
-	g.LastAction.ActionIdx = EncodeKingLook(ownIdx, oppIdx)
+	g.recordLegacyAction(EncodeKingLook(ownIdx, oppIdx))
 	g.LastAction.ActingPlayer = acting
 	g.LastAction.RevealedCard = ownCard // own card revealed
 	g.LastAction.RevealedIdx = ownIdx
@@ -228,10 +228,11 @@ func (g *GameState) kingSwapDecision(performSwap bool) error {
 	}
 
 	// Record in LastAction.
-	g.LastAction.ActionIdx = actionIdx
+	g.recordLegacyAction(actionIdx)
 	g.LastAction.ActingPlayer = acting
 	g.LastAction.SwapOwnIdx = ownIdx
 	g.LastAction.SwapOppIdx = oppIdx
+	g.recordSwapTargetPlayer(opp)
 
 	// Clear pending and initiate snap phase for the discarded ability card.
 	g.Pending = PendingAction{}
@@ -258,7 +259,12 @@ func (g *GameState) peekOtherNPlayer(slot uint8, targetPlayer uint8) error {
 
 	revealed := g.Players[targetPlayer].Hand[slot]
 
-	g.LastAction.ActionIdx = EncodePeekOther(slot)
+	oppRel, ok := g.relIdxOfOpponent(acting, targetPlayer)
+	if !ok {
+		return fmt.Errorf("peekOtherNPlayer: player %d is not an opponent of %d", targetPlayer, acting)
+	}
+
+	g.recordNPlayerAction(NPlayerEncodePeekOther(slot, oppRel))
 	g.LastAction.ActingPlayer = acting
 	g.LastAction.RevealedCard = revealed
 	g.LastAction.RevealedIdx = slot
@@ -290,13 +296,19 @@ func (g *GameState) blindSwapNPlayer(ownIdx, oppSlot uint8, targetPlayer uint8) 
 		return fmt.Errorf("blindSwapNPlayer: opp slot %d out of range (hand size %d)", oppSlot, g.Players[targetPlayer].HandLen)
 	}
 
+	oppRel, ok := g.relIdxOfOpponent(acting, targetPlayer)
+	if !ok {
+		return fmt.Errorf("blindSwapNPlayer: player %d is not an opponent of %d", targetPlayer, acting)
+	}
+
 	g.Players[acting].Hand[ownIdx], g.Players[targetPlayer].Hand[oppSlot] =
 		g.Players[targetPlayer].Hand[oppSlot], g.Players[acting].Hand[ownIdx]
 
-	g.LastAction.ActionIdx = EncodeBlindSwap(ownIdx, oppSlot)
+	g.recordNPlayerAction(NPlayerEncodeBlindSwap(ownIdx, oppSlot, oppRel))
 	g.LastAction.ActingPlayer = acting
 	g.LastAction.SwapOwnIdx = ownIdx
 	g.LastAction.SwapOppIdx = oppSlot
+	g.recordSwapTargetPlayer(targetPlayer)
 
 	g.Pending = PendingAction{}
 	g.initiateSnapPhase(g.DiscardPile[g.DiscardLen-1])
@@ -327,13 +339,19 @@ func (g *GameState) kingLookNPlayer(ownIdx, oppSlot uint8, targetPlayer uint8) e
 
 	ownCard := g.Players[acting].Hand[ownIdx]
 
-	g.LastAction.ActionIdx = EncodeKingLook(ownIdx, oppSlot)
+	oppRel, ok := g.relIdxOfOpponent(acting, targetPlayer)
+	if !ok {
+		return fmt.Errorf("kingLookNPlayer: player %d is not an opponent of %d", targetPlayer, acting)
+	}
+
+	g.recordNPlayerAction(NPlayerEncodeKingLook(ownIdx, oppSlot, oppRel))
 	g.LastAction.ActingPlayer = acting
 	g.LastAction.RevealedCard = ownCard
 	g.LastAction.RevealedIdx = ownIdx
 	g.LastAction.RevealedOwner = acting
 	g.LastAction.SwapOwnIdx = ownIdx
 	g.LastAction.SwapOppIdx = oppSlot
+	g.recordSwapTargetPlayer(targetPlayer)
 
 	// Transition to PendingKingDecision.
 	// Data[0]=ownIdx, Data[1]=oppSlot, Data[2]=ownCard, Data[3]=targetPlayer.
@@ -370,10 +388,13 @@ func (g *GameState) kingSwapDecisionNPlayer(performSwap bool) error {
 			g.Players[targetPlayer].Hand[oppSlot], g.Players[acting].Hand[ownIdx]
 	}
 
-	g.LastAction.ActionIdx = actionIdx
+	g.recordNPlayerAction(actionIdx)
 	g.LastAction.ActingPlayer = acting
 	g.LastAction.SwapOwnIdx = ownIdx
 	g.LastAction.SwapOppIdx = oppSlot
+	// The decision is the last chance to record the seat the look bound: Pending.Data[3]
+	// holds it only until the clear below, and every observer runs after that (cambia-1548).
+	g.recordSwapTargetPlayer(targetPlayer)
 
 	g.Pending = PendingAction{}
 	g.initiateSnapPhase(g.DiscardPile[g.DiscardLen-1])

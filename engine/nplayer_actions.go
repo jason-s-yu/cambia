@@ -15,6 +15,18 @@ func (g *GameState) ApplyNPlayerAction(actionIdx uint16) error {
 	// the resolving action; clear it before applying the next action.
 	g.Snap.RaceResolved = false
 
+	// Stamp the space this dispatcher's handlers record in, so the handlers that write
+	// one of the seventeen shared indices (draw, discard, call Cambia, Replace, PeekOwn)
+	// do not have to. At two seats this dispatcher routes the ability and snap actions to
+	// the 2-player handlers, which record legacy indices, so the stamp follows the seat
+	// count; the handlers that record an N-player index at any seat count (the opponent
+	// snap pair, a race commit) stamp themselves.
+	if g.Rules.numPlayers() > 2 {
+		g.recordActionSpace(ActionSpaceNPlayer)
+	} else {
+		g.recordActionSpace(ActionSpaceLegacy)
+	}
+
 	// Snap move resolution takes priority.
 	if g.Pending.Type == PendingSnapMove {
 		if ownIdx, ok := NPlayerDecodeSnapOpponentMove(actionIdx); ok {
@@ -121,6 +133,21 @@ func (g *GameState) oppRelIdxToAbsolute(oppRelIdx uint8) (uint8, error) {
 	return opps[oppRelIdx], nil
 }
 
+// relIdxOfOpponent returns target's index in Opponents(player), the inverse of
+// oppRelIdxToAbsolute. It reports false when target is player or is not a seat in this
+// game. Handlers that take an absolute target seat use it to record the action index the
+// caller drove them with, which the N-player encoding writes as a relative index.
+func (g *GameState) relIdxOfOpponent(player, target uint8) (uint8, bool) {
+	n := g.Rules.numPlayers()
+	if target >= n || player >= n || target == player {
+		return 0, false
+	}
+	if target < player {
+		return target, true
+	}
+	return target - 1, true
+}
+
 // callCambiaNPlayer handles CallCambia using the N-player round calculation.
 func (g *GameState) callCambiaNPlayer() error {
 	if g.Pending.Type != PendingNone {
@@ -162,8 +189,9 @@ func (g *GameState) nplayerSnapOpponent(slot, oppRelIdx uint8) error {
 	opponent := opps[oppRelIdx]
 	oppHandLen := g.Players[opponent].HandLen
 
-	g.LastAction.ActionIdx = NPlayerEncodeSnapOpponent(slot, oppRelIdx)
+	g.recordNPlayerAction(NPlayerEncodeSnapOpponent(slot, oppRelIdx))
 	g.LastAction.ActingPlayer = snapperIdx
+	g.recordSwapTargetPlayer(opponent)
 
 	if g.Players[snapperIdx].HandLen == 0 {
 		g.LastAction.SnapSuccess = false
@@ -218,8 +246,11 @@ func (g *GameState) nplayerSnapOpponentMove(ownIdx uint8) error {
 	slotIdx := g.Pending.Data[1]
 	oppHandLen := g.Players[opponent].HandLen
 
-	g.LastAction.ActionIdx = NPlayerEncodeSnapOpponentMove(ownIdx)
+	g.recordNPlayerAction(NPlayerEncodeSnapOpponentMove(ownIdx))
 	g.LastAction.ActingPlayer = snapperIdx
+	g.LastAction.SwapOwnIdx = ownIdx
+	g.LastAction.SwapOppIdx = slotIdx
+	g.recordSwapTargetPlayer(opponent)
 
 	snapperHandLen := g.Players[snapperIdx].HandLen
 	if ownIdx >= snapperHandLen {

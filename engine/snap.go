@@ -91,7 +91,7 @@ func (g *GameState) passSnap() error {
 	if !g.Snap.Active {
 		return fmt.Errorf("snap phase is not active")
 	}
-	g.LastAction.ActionIdx = ActionPassSnap
+	g.recordSeatSpacedAction(ActionPassSnap, NPlayerActionPassSnap)
 	g.LastAction.ActingPlayer = g.Snap.Snappers[g.Snap.CurrentSnapperIdx]
 	g.advanceSnapper()
 	return nil
@@ -108,7 +108,7 @@ func (g *GameState) snapOwn(idx uint8) error {
 	snapperIdx := g.Snap.Snappers[g.Snap.CurrentSnapperIdx]
 	handLen := g.Players[snapperIdx].HandLen
 
-	g.LastAction.ActionIdx = EncodeSnapOwn(idx)
+	g.recordSeatSpacedAction(EncodeSnapOwn(idx), NPlayerEncodeSnapOwn(idx))
 	g.LastAction.ActingPlayer = snapperIdx
 
 	if idx >= handLen {
@@ -158,7 +158,7 @@ func (g *GameState) snapOpponent(oppIdx uint8) error {
 	opponent := g.seatOpponent(snapperIdx)
 	oppHandLen := g.Players[opponent].HandLen
 
-	g.LastAction.ActionIdx = EncodeSnapOpponent(oppIdx)
+	g.recordLegacyAction(EncodeSnapOpponent(oppIdx))
 	g.LastAction.ActingPlayer = snapperIdx
 
 	// Snapper must have at least one card to move to the opponent's slot.
@@ -261,7 +261,7 @@ func (g *GameState) snapOpponentMove(ownIdx, slotIdx uint8) error {
 	opponent := g.Pending.Data[0]
 	oppHandLen := g.Players[opponent].HandLen
 
-	g.LastAction.ActionIdx = EncodeSnapOpponentMove(ownIdx, slotIdx)
+	g.recordLegacyAction(EncodeSnapOpponentMove(ownIdx, slotIdx))
 	g.LastAction.ActingPlayer = snapperIdx
 
 	snapperHandLen := g.Players[snapperIdx].HandLen

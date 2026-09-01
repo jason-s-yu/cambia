@@ -1004,6 +1004,22 @@ func (a *AgentState) UpdateNPlayer(g *engine.GameState) {
 	act := g.LastAction.ActionIdx
 	actingPlayer := g.LastAction.ActingPlayer
 
+	// The recorded index is read with the decoders of the space the engine recorded it in
+	// (engine.LastActionInfo.ActionSpace). The two spaces overlap, so picking a decoder
+	// without the tag reads a different action than the one applied: PeekOther(slot 2,
+	// opponent 2) records as 19, which the 2-player decoder reads as PeekOther(2), and
+	// SnapOwn(3) records as 101, which reads as BlindSwap(1, 0) and swaps knowledge
+	// between two slots that never moved (cambia-1548).
+	if g.LastAction.ActionSpace() == engine.ActionSpaceNPlayer {
+		a.updateNPlayerFromNPlayerSpace(g, act, actingPlayer)
+		return
+	}
+	a.updateNPlayerFromLegacySpace(g, act, actingPlayer)
+}
+
+// updateNPlayerFromNPlayerSpace applies an action recorded in the 620-action N-player
+// space, which is what a table above two seats records for every action.
+func (a *AgentState) updateNPlayerFromNPlayerSpace(g *engine.GameState, act uint16, actingPlayer uint8) {
 	switch {
 	case act == engine.NPlayerActionDrawStockpile || act == engine.NPlayerActionDrawDiscard:
 		// No belief change on draw alone.
@@ -1040,6 +1056,54 @@ func (a *AgentState) UpdateNPlayer(g *engine.GameState) {
 		} else if slot, oppIdx, ok := engine.NPlayerDecodeSnapOpponent(act); ok {
 			a.nplayerProcessSnapOpponent(g, actingPlayer, slot, oppIdx)
 		} else if ownIdx, ok := engine.NPlayerDecodeSnapOpponentMove(act); ok {
+			a.nplayerProcessSnapOpponentMove(g, actingPlayer, ownIdx)
+		}
+	}
+}
+
+// updateNPlayerFromLegacySpace applies an action recorded in the 146-action 2-player
+// space onto the same N-player knowledge model. ApplyNPlayerAction records that space at
+// a 2-seat table, where it resolves every ability and snap through the 2-player handlers;
+// the legacy encoding names no opponent, so the target is the acting seat's first (and,
+// at two seats, only) opponent.
+func (a *AgentState) updateNPlayerFromLegacySpace(g *engine.GameState, act uint16, actingPlayer uint8) {
+	const firstOpp uint8 = 0
+
+	switch {
+	case act == engine.ActionDrawStockpile || act == engine.ActionDrawDiscard:
+		// No belief change on draw alone.
+
+	case act == engine.ActionDiscardNoAbility || act == engine.ActionDiscardWithAbility:
+		// Discarded card is now public; discard top bucket updated above.
+
+	case act == engine.ActionCallCambia:
+		// Handled via IsCambiaCalled() above.
+
+	case act == engine.ActionKingSwapNo:
+		// No card movements.
+
+	case act == engine.ActionKingSwapYes:
+		a.nplayerProcessKingSwapYes(g, actingPlayer)
+
+	case act == engine.ActionPassSnap:
+		// No belief change.
+
+	default:
+		if slot, ok := engine.ActionIsReplace(act); ok {
+			a.nplayerProcessReplace(g, actingPlayer, slot)
+		} else if slot, ok := engine.ActionIsPeekOwn(act); ok {
+			a.nplayerProcessPeekOwn(g, actingPlayer, slot)
+		} else if slot, ok := engine.ActionIsPeekOther(act); ok {
+			a.nplayerProcessPeekOther(g, actingPlayer, slot, firstOpp)
+		} else if ownSlot, oppSlot, ok := engine.ActionIsBlindSwap(act); ok {
+			a.nplayerProcessBlindSwap(g, actingPlayer, ownSlot, oppSlot, firstOpp)
+		} else if ownSlot, oppSlot, ok := engine.ActionIsKingLook(act); ok {
+			a.nplayerProcessKingLook(g, actingPlayer, ownSlot, oppSlot, firstOpp)
+		} else if slot, ok := engine.ActionIsSnapOwn(act); ok {
+			a.nplayerProcessSnapOwn(g, actingPlayer, slot)
+		} else if slot, ok := engine.ActionIsSnapOpponent(act); ok {
+			a.nplayerProcessSnapOpponent(g, actingPlayer, slot, firstOpp)
+		} else if ownIdx, _, ok := engine.ActionIsSnapOpponentMove(act); ok {
 			a.nplayerProcessSnapOpponentMove(g, actingPlayer, ownIdx)
 		}
 	}
@@ -1173,10 +1237,15 @@ func (a *AgentState) nplayerProcessKingLook(g *engine.GameState, actingPlayer, o
 func (a *AgentState) nplayerProcessKingSwapYes(g *engine.GameState, actingPlayer uint8) {
 	ownIdx := g.LastAction.SwapOwnIdx
 	oppIdx := g.LastAction.SwapOppIdx
-	// Find which player held the opposed slot. We need target player.
-	// SwapOppIdx is relative to Opponents(actingPlayer)[0] for 2P; in N-player,
-	// we infer the target from LastAction.RevealedOwner if available.
-	targetPlayer := g.LastAction.RevealedOwner
+	// The seat the swap exchanged with comes from the engine's explicit record of it.
+	// RevealedOwner is the owner of the card the King LOOK revealed, which is the acting
+	// seat itself, so reading the target from it swapped two slots of the actor's own hand
+	// on every N-player King swap; the swap decision clears Pending before any observer
+	// runs, so SwapTargetPlayer is the only record left (cambia-1548).
+	targetPlayer := g.LastAction.SwapTargetPlayer()
+	if targetPlayer == actingPlayer || targetPlayer >= g.NumActivePlayers() {
+		return
+	}
 	slotA := nplayerSlot(actingPlayer, ownIdx)
 	slotB := nplayerSlot(targetPlayer, oppIdx)
 	a.nplayerSwapKnowledge(slotA, slotB)
