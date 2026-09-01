@@ -535,10 +535,11 @@ Every time someone's turn is over, the server should automatically increment the
 
 ## Hand visibility
 
-No card in any hand is ever persistently face-up on the wire, the requesting player's own hand
-included. `private_sync_state` sends every hand slot, own and opponent, as an id plus its index
-with `known: false` and no `rank`/`suit`/`value`, in every phase: during the initial reveal, in
-live play, and in the repair snapshot a reconnecting player is sent.
+While a round is running, no card in any hand is ever face-up on the wire, the requesting player's
+own hand included. `private_sync_state` sends every hand slot, own and opponent, as an id plus its
+index with `known: false` and no `rank`/`suit`/`value`, in every phase of a live round: during the
+initial reveal, in live play, and in the repair snapshot a reconnecting player is sent. The round
+ending is what turns them up, once, and that is the "Round-end reveal" section below.
 
 ```json: server -> one client (own seat inside private_sync_state)
 {
@@ -586,6 +587,47 @@ The server still records what each seat has legitimately been shown
 (`CardUUIDTracker.SeenByPlayer`, keyed by card id so knowledge travels with a card across swaps).
 That record is server-side reasoning about knowledge, not a rendering gate: nothing in it reaches
 a client.
+
+## Round-end reveal
+
+RULES.md 3C ends a round with all cards revealed, and the service reveals on every terminal path it
+reaches, not just a called Cambia: the turn cap, an exhausted stockpile, and a forfeit that empties
+the table all run through the same `endGame`. A seat that forfeited is left out, since it is not
+scored either.
+
+The reveal is built once, in `endGame`, and carried by every frame that reports the result:
+
+| Frame               | Who gets it                                        |
+|---------------------|----------------------------------------------------|
+| `game_end`          | every client at the table when the round ends       |
+| `game_results`      | the same clients, and any that reconnect afterwards |
+| `round_end`         | a ranked round that is not the match's last         |
+| `match_end`         | the ranked match's last round                       |
+
+`game_results` needs its own copy: the game is dropped from the store the moment it is emitted, so
+a client that reconnects into the results is answered with the hub's held copy of that frame and
+never sees `game_end`. Every frame spells the field `finalHands`, so one client shape reads them
+all, and every one carries the same list:
+
+```json: server -> all clients (finalHands, on game_end / game_results / round_end / match_end)
+"finalHands": [
+  {
+    "playerId": "{uuid}",
+    "cards": [
+      { "id": "{uuid}", "idx": 0, "rank": "K", "suit": "H", "value": -1 },
+      { "id": "{uuid}", "idx": 1, "rank": "4", "suit": "S", "value": 4 },
+      { "id": "{uuid}", "idx": 2, "rank": "O", "suit": "R", "value": 0 },
+      { "id": "{uuid}", "idx": 3, "rank": "9", "suit": "D", "value": 9 }
+    ]
+  }
+]
+```
+
+`private_sync_state` reveals the same hands the same way, off the `gameOver` flag it already
+carries: once a round is over every scored seat's `revealedHand` slots arrive `known: true` with
+their `rank`/`suit`/`value`, own hand and opponents alike. That is the one carve-out from the
+face-down rule above, so a client that resyncs or reconnects into a finished round sees the same
+table as one that watched it end.
 
 ## Disconnect grace
 
@@ -652,3 +694,6 @@ sent the finished table's `private_sync_state` and then the terminal results fra
 `game_results`, or `match_end` for a ranked circuit. Nothing else re-sends those scores: the
 lobby snapshot a joining connection gets carries the phase but no results, which is why such a
 reload used to land on a results screen with no winner and no scores.
+
+Both of those frames carry `finalHands`, and the `private_sync_state` sent ahead of them has the
+hands face-up, so the returning client gets the round-end reveal as well as the scores.

@@ -1002,7 +1002,13 @@ func (h *Hub) UsernameOf(userID uuid.UUID) string {
 // HandleRoundEnd is called when a game ends during a ranked multi-round match.
 // It records scores, applies aggression subsidies, and either transitions to
 // PhaseRoundEnd (more rounds remain) or PhaseMatchEnd (match complete).
-func (h *Hub) HandleRoundEnd(scores map[uuid.UUID]int, cambiaCallerID uuid.UUID) {
+//
+// finalHands is the round's reveal (RULES.md 3C, cambia-1542), built by the game that just ended
+// (game.CambiaGame.buildFinalReveal) and carried on whichever frame reports the round: round_end,
+// or match_end where the round that just ended was the last one, since that round gets no
+// round_end frame of its own and match_end is what a reconnect into the finished match is
+// re-sent.
+func (h *Hub) HandleRoundEnd(scores map[uuid.UUID]int, cambiaCallerID uuid.UUID, finalHands []game.FinalHand) {
 	h.RoundsPlayed++
 
 	// Store this round's scores.
@@ -1054,6 +1060,7 @@ func (h *Hub) HandleRoundEnd(scores map[uuid.UUID]int, cambiaCallerID uuid.UUID)
 			"cumulative_scores": h.CumulativeScores,
 			"round_history":     h.RoundHistory,
 			"subsidies":         buildSubsidyMap(playerIDs, subsidies),
+			"finalHands":        finalHands,
 			"final":             true,
 		})
 	} else {
@@ -1065,6 +1072,7 @@ func (h *Hub) HandleRoundEnd(scores map[uuid.UUID]int, cambiaCallerID uuid.UUID)
 			"round_scores":      roundScores,
 			"cumulative_scores": h.CumulativeScores,
 			"subsidies":         buildSubsidyMap(playerIDs, subsidies),
+			"finalHands":        finalHands,
 		})
 		// Auto-advance to next round after 10 seconds.
 		go func() {

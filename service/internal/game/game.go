@@ -27,7 +27,11 @@ import (
 // scores and the real Cambia caller (uuid.Nil if none): a circuit's cumulative totals must be
 // built from these, never from scores, since WinBonus/FalseCambiaPenalty are single-game display
 // adjustments with no rulebook standing in circuit scoring (RULES.md has no such knobs).
-type OnGameEndFunc func(lobbyID uuid.UUID, winner uuid.UUID, scores map[uuid.UUID]int, usernames map[uuid.UUID]string, rawScores map[uuid.UUID]int, cambiaCallerID uuid.UUID)
+//
+// finalHands is the round-end reveal (RULES.md 3C, cambia-1542): every scored seat's hand as the
+// round ended. It is passed here for the same reason usernames is, and because the game is dropped
+// from the store immediately after the callback returns, so a later read has nothing to read from.
+type OnGameEndFunc func(lobbyID uuid.UUID, winner uuid.UUID, scores map[uuid.UUID]int, usernames map[uuid.UUID]string, rawScores map[uuid.UUID]int, cambiaCallerID uuid.UUID, finalHands []FinalHand)
 
 // GameEventType represents the type of a game-related event broadcast via WebSockets.
 type GameEventType string
@@ -1225,6 +1229,11 @@ func (g *CambiaGame) endGame() {
 		firstWinner = winners[0]
 	}
 
+	// The round-end reveal (RULES.md 3C, cambia-1542). Built once, here, and carried by every
+	// frame that reports this result: game_end below, the game_results the hub holds and re-sends
+	// to a client that reconnects into the results, and a ranked round's round_end/match_end.
+	finalHands := g.buildFinalReveal()
+
 	// Broadcast game end event.
 	resultsPayload := map[string]interface{}{
 		"scores":          map[string]int{},
@@ -1232,6 +1241,7 @@ func (g *CambiaGame) endGame() {
 		"caller":          callerID.String(),
 		"penaltyApplied":  penaltyApplies,
 		"winBonusApplied": winBonusApplied,
+		"finalHands":      finalHands,
 	}
 	for pid, score := range adjustedScores {
 		resultsPayload["scores"].(map[string]int)[pid.String()] = score
@@ -1249,7 +1259,7 @@ func (g *CambiaGame) endGame() {
 				usernames[p.ID] = p.User.Username
 			}
 		}
-		g.OnGameEnd(g.LobbyID, firstWinner, adjustedScores, usernames, finalScores, callerID)
+		g.OnGameEnd(g.LobbyID, firstWinner, adjustedScores, usernames, finalScores, callerID, finalHands)
 	}
 
 	log.Printf("Game %s: Ended. Winner(s): %v. Final Scores (Adj): %v", g.ID, winners, adjustedScores)
@@ -1342,6 +1352,60 @@ func (g *CambiaGame) findWinnersWithCambiaLogicEngine(scores map[uuid.UUID]int, 
 // (handlers.finalizeCircuitRatings -> database.RecordCircuitRatings).
 func (g *CambiaGame) ratePerGame() bool {
 	return g.Rated && !g.Circuit.Enabled
+}
+
+// FinalHandCard is one card of a seat's hand as the round ended: the wire id every event already
+// names the card by, the slot it sat in, and the face RULES.md 3C turns up when the round is over.
+type FinalHandCard struct {
+	ID    uuid.UUID `json:"id"`
+	Idx   int       `json:"idx"`
+	Rank  string    `json:"rank"`
+	Suit  string    `json:"suit"`
+	Value int       `json:"value"`
+}
+
+// FinalHand is one seat's revealed hand at the end of a round.
+type FinalHand struct {
+	PlayerID uuid.UUID       `json:"playerId"`
+	Cards    []FinalHandCard `json:"cards"`
+}
+
+// buildFinalReveal projects every scored seat's hand into the round-end reveal RULES.md 3C calls
+// for. It reads the same engine hands persistFinalGameState serializes into
+// games.final_game_state, which nothing reads back: until cambia-1542 no frame carried a face at
+// round end at all, so a finished table sat face-down under the results and a player could not see
+// what they had lost to.
+//
+// Seats are walked by engine index, so the list order is the seating order and does not vary
+// between calls the way a map walk would.
+//
+// A forfeited seat is left out. It is not scored either (computeScoresFromEngine reads the same
+// forfeit set), so its cards take no part in the result, and the reveal reports the result. The
+// snapshot reveal in getCurrentObfuscatedGameState makes the same carve-out, so the two agree.
+//
+// Assumes the lock is held by the caller.
+func (g *CambiaGame) buildFinalReveal() []FinalHand {
+	hands := make([]FinalHand, 0, len(g.Players))
+	for i := uint8(0); i < engine.MaxPlayers; i++ {
+		playerUUID := g.EngineToPlayer[i]
+		if playerUUID == uuid.Nil || g.forfeited[playerUUID] {
+			continue
+		}
+		handLen := g.Engine.Players[i].HandLen
+		hand := FinalHand{PlayerID: playerUUID, Cards: make([]FinalHandCard, handLen)}
+		for j := uint8(0); j < handLen; j++ {
+			card := g.Engine.Players[i].Hand[j]
+			hand.Cards[j] = FinalHandCard{
+				ID:    g.CardTracker.Players[i].HandUUIDs[j],
+				Idx:   int(j),
+				Rank:  engineRankToString(card.Rank()),
+				Suit:  engineSuitToString(card.Suit()),
+				Value: int(card.Value()),
+			}
+		}
+		hands = append(hands, hand)
+	}
+	return hands
 }
 
 // persistFinalGameState saves final hands and winners to the database.

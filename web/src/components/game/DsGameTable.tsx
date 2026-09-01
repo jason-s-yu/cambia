@@ -741,9 +741,12 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     // card-<seat>-<i> hooks stay keyed by the engine slot index.
     const slots = Math.max(hand.length, selfState?.handSize ?? 0);
     const known = hand.map((card, i) => {
-      // A slot shows a face only while something is holding it up: a live transient reveal, or
-      // the pregame peek the store keeps on the slot for the length of that window. Everything
-      // else is a back, including cards this player has already been shown (cambia-1094).
+      // While the round runs, a slot shows a face only while something is holding it up: a live
+      // transient reveal, or the pregame peek the store keeps on the slot for the length of that
+      // window. Everything else is a back, including cards this player has already been shown
+      // (cambia-1094). Once the round is over the snapshot marks every scored slot known and the
+      // whole hand is face-up, which is the round-end reveal (RULES.md 3C, cambia-1542) and the
+      // one case the `?? card` fallback below carries.
       const face = toDsCardFace(revealById.get(card.id) ?? card);
       // aria-pressed tracks what the eye sees: the King's own card stays picked
       // through the confirm step, which is why `selected` covers it too.
@@ -757,8 +760,10 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
           size='md'
           selected={picked}
           highlight={ownTargetable && selectedIdx !== i}
-          dimmed={selfHandLocked}
-          label={cardSlotName('Your', i, face, selfHandLocked)}
+          // The lock dim says "out of reach", which stops meaning anything once the round is
+          // over: the caller's hand is then just a revealed hand like everyone else's.
+          dimmed={selfHandLocked && !roundOver}
+          label={cardSlotName('Your', i, face, selfHandLocked && !roundOver)}
           pressed={ownSelects ? picked : undefined}
           testId={`card-${seat}-${i}`}
           style={ownHandPlacement(i, slots)}
@@ -862,7 +867,13 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                       const targetable = opponentTargetable && !!card && !(locked && swapTargeting);
                       const snappable = opponentSnappable && !!card && !locked;
                       const picked = !!card && snapTarget?.cardId === card.id;
-                      const shown = card ? toDsCardFace(revealById.get(card.id)) : null;
+                      const peeked = card ? toDsCardFace(revealById.get(card.id)) : null;
+                      // Two different faces, drawn differently. `peeked` is a transient look and
+                      // wears the ring that says so. The round-end reveal is the whole table
+                      // turning over (RULES.md 3C, cambia-1542): the snapshot marks every scored
+                      // seat's slots known once the round is done, and those draw plainly, since
+                      // nobody is looking at anything any more.
+                      const shown = peeked ?? (roundOver && card?.known ? toDsCardFace(card) : null);
                       const who = nameOf(opp.playerId);
                       return (
                         <PlayingCard
@@ -871,7 +882,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                           rank={shown?.rank}
                           suit={shown?.suit}
                           size='sm'
-                          selected={!!shown || picked}
+                          selected={!!peeked || picked}
                           highlight={targetable}
                           dimmed={!targetable && !shown && (locked || !!specialRank)}
                           label={cardSlotName(who, i, shown, locked)}

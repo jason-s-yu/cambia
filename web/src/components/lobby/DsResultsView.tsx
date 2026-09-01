@@ -27,12 +27,14 @@
 import React, { useEffect, useMemo, useRef } from 'react';
 import { useCurrentLobbyStore, type LobbyPhase } from '@/stores/lobbyStore';
 import { useAuthStore } from '@/stores/authStore';
-import { useGameStore, selectFinalScores } from '@/stores/gameStore';
+import { useGameStore, selectFinalScores, selectFinalHands } from '@/stores/gameStore';
 import type { ClientGameAction, ObfGameState } from '@/types/game';
 import Button from '@/components/ds/core/Button';
 import Badge from '@/components/ds/core/Badge';
 import { EYEBROW } from '@/components/ds/eyebrow';
+import PlayingCard from '@/components/ds/game/PlayingCard';
 import ScorePill from '@/components/ds/game/ScorePill';
+import { toDsCardFace, cardFaceName } from '@/components/game/dsCardMap';
 import { roundCounterLabel } from '@/lib/roundCounter';
 import DsGameTable from '@/components/game/DsGameTable';
 
@@ -65,6 +67,15 @@ const DsResultsView: React.FC<DsResultsViewProps> = ({ phase, onReturnToLobby, o
   const selfId = useAuthStore((s) => s.user?.id);
   const authName = useAuthStore((s) => s.user?.username);
   const finalScores = useGameStore(selectFinalScores);
+  // The round-end reveal (RULES.md 3C, cambia-1542), off game_end or off the game_results a
+  // reload into the results is answered with. Keyed by seat so a standings row can draw the hand
+  // that produced its score; a seat that forfeited is absent and draws none.
+  const finalHands = useGameStore(selectFinalHands);
+  const handsBySeat = useMemo(() => {
+    const m = new Map<string, { id: string; rank: string; suit: string }[]>();
+    (finalHands ?? []).forEach((h) => m.set(h.playerId, h.cards));
+    return m;
+  }, [finalHands]);
 
   const isMatchEnd = phase === 'match_end';
   const title = isMatchEnd ? 'Final standings' : 'Game over';
@@ -106,6 +117,10 @@ const DsResultsView: React.FC<DsResultsViewProps> = ({ phase, onReturnToLobby, o
   }, [lobbyPlayers, gameState, selfId, authName]);
 
   const cumulative = matchState?.cumulativeScores;
+  // The hands only go beside a score they actually explain: a single round's. A circuit's
+  // standings are totals across every round played, and the reveal is one round's, so a hand
+  // under a cumulative total would be read as its cause and would not be.
+  const showsOneRound = !(cumulative && Object.keys(cumulative).length > 0);
   const standings = useMemo(() => {
     if (cumulative && Object.keys(cumulative).length > 0) {
       return Object.keys(cumulative)
@@ -175,16 +190,40 @@ const DsResultsView: React.FC<DsResultsViewProps> = ({ phase, onReturnToLobby, o
       <div style={{ borderTop: '1px solid var(--border-subtle)', padding: '12px 20px 16px' }}>
         <div style={{ ...EYEBROW, marginBottom: 6 }}>{isMatchEnd ? 'Standings' : 'Scores'}</div>
         <div style={{ display: 'flex', flexDirection: 'column' }}>
-          {standings.map((row, i) => (
-            <div key={row.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderTop: i ? '1px solid var(--border-subtle)' : 'none' }}>
-              <span style={{ fontSize: 'var(--ds-text-xs)', color: 'var(--text-tertiary)', width: 16, fontVariantNumeric: 'tabular-nums' }}>{i + 1}</span>
-              <span style={{ fontWeight: 'var(--weight-medium)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: row.id === selfId ? 'var(--accent-gold)' : 'var(--text-primary)' }}>
-                {row.name}{row.id === selfId ? ' (you)' : ''}
-              </span>
-              {winner && row.id === winner.id && <Badge tone='success'>Winner</Badge>}
-              {row.score !== null && <span style={{ fontWeight: 'var(--weight-bold)', fontVariantNumeric: 'tabular-nums', minWidth: 28, textAlign: 'right' }}>{row.score}</span>}
-            </div>
-          ))}
+          {standings.map((row, i) => {
+            const hand = showsOneRound ? handsBySeat.get(row.id) : undefined;
+            return (
+              <div key={row.id} style={{ padding: '8px 0', borderTop: i ? '1px solid var(--border-subtle)' : 'none' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ fontSize: 'var(--ds-text-xs)', color: 'var(--text-tertiary)', width: 16, fontVariantNumeric: 'tabular-nums' }}>{i + 1}</span>
+                  <span style={{ fontWeight: 'var(--weight-medium)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: row.id === selfId ? 'var(--accent-gold)' : 'var(--text-primary)' }}>
+                    {row.name}{row.id === selfId ? ' (you)' : ''}
+                  </span>
+                  {winner && row.id === winner.id && <Badge tone='success'>Winner</Badge>}
+                  {row.score !== null && <span style={{ fontWeight: 'var(--weight-bold)', fontVariantNumeric: 'tabular-nums', minWidth: 28, textAlign: 'right' }}>{row.score}</span>}
+                </div>
+                {/* The hand that made that score, turned up (RULES.md 3C, cambia-1542). Indented
+                    to sit under the name rather than the rank number. */}
+                {hand && hand.length > 0 && (
+                  <div data-testid={`final-hand-${row.id}`} style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 8, marginLeft: 26 }}>
+                    {hand.map((card) => {
+                      const face = toDsCardFace({ ...card, known: true });
+                      if (!face) return null;
+                      return (
+                        <PlayingCard
+                          key={card.id}
+                          rank={face.rank}
+                          suit={face.suit}
+                          size='sm'
+                          label={cardFaceName(face) ?? face.rank}
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
           {standings.length === 0 && (
             <div style={{ fontSize: 'var(--ds-text-sm)', color: 'var(--text-tertiary)' }}>No results yet.</div>
           )}

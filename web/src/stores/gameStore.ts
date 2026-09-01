@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // src/stores/gameStore.ts
 import { create } from 'zustand';
-import type { ObfGameState, ObfCard, EventCard } from '@/types/game';
+import type { ObfGameState, ObfCard, EventCard, FinalHand } from '@/types/game';
 import { immer } from 'zustand/middleware/immer';
 import { useAuthStore } from './authStore';
 import { applySnapSuccess } from '@/lib/snapSuccess';
@@ -53,6 +53,11 @@ interface GameState {
 	// reads these directly instead (cambia-510).
 	finalScores: Record<string, number> | null;
 	winnerId: string | null;
+	// The round-end reveal (RULES.md 3C, cambia-1542): every scored seat's hand as the round
+	// ended. Carried by game_end and by the game_results a client reconnecting into the results
+	// is answered with, so the results view has the faces whether it watched the round end or
+	// reloaded into it. A forfeited seat is absent, since it is not scored.
+	finalHands: FinalHand[] | null;
 	// The latest transient reveal, for the table's temporary display (cambia-848 F3, widened by
 	// cambia-1094). No face this client is shown is durable any more: sync_state hides every own
 	// hand slot in every phase, exactly as it hides every opponent slot, because the physical game
@@ -123,6 +128,7 @@ const initialState: GameState = {
 	serverClockOffsetMs: 0,
 	finalScores: null,
 	winnerId: null,
+	finalHands: null,
 	abilityReveal: null,
 	pregamePeek: [],
 	droppedActionNonce: 0,
@@ -131,6 +137,27 @@ const initialState: GameState = {
 	lastSnapMove: null,
 	lastPresence: null
 };
+
+/**
+ * The round-end reveal off a results frame's `finalHands` (RULES.md 3C, cambia-1542). Returns null
+ * for anything that is not a list of hands, so a frame from an older server leaves the state alone
+ * rather than blanking a reveal an earlier frame already carried. Cards without a rank are dropped:
+ * the results render faces, and a faceless entry would draw as a back beside real ones.
+ */
+function readFinalHands(raw: unknown): FinalHand[] | null {
+	if (!Array.isArray(raw)) return null;
+	const hands: FinalHand[] = [];
+	for (const entry of raw) {
+		if (!entry || typeof entry !== 'object') continue;
+		const hand = entry as Partial<FinalHand>;
+		if (typeof hand.playerId !== 'string' || !Array.isArray(hand.cards)) continue;
+		hands.push({
+			playerId: hand.playerId,
+			cards: hand.cards.filter((c) => !!c && typeof c.rank === 'string' && c.rank.length > 0)
+		});
+	}
+	return hands;
+}
 
 /** The fill `selfId` still owes, read out of a state snapshot's snapMoves (cambia-936). */
 function ownSnapMove(gs: ObfGameState | null | undefined, selfId: string | null) {
@@ -623,6 +650,9 @@ export const useGameStore = create<GameState & GameActions>()(
 							// switch (e.g. player_draw_stockpile's source/stockpileSize).
 							state.finalScores = payload.payload?.scores ?? null;
 							state.winnerId = payload.payload?.winner ?? null;
+							// The round-end reveal (RULES.md 3C, cambia-1542). Every scored seat's
+							// hand, so the results can show what each player was holding.
+							state.finalHands = readFinalHands(payload.payload?.finalHands);
 							break;
 
 						// --- Seat presence (cambia-955) ---
@@ -676,6 +706,7 @@ export const useGameStore = create<GameState & GameActions>()(
 							state.displayedDrawnCard = null;
 							state.finalScores = null;
 							state.winnerId = null;
+							state.finalHands = null;
 							state.abilityReveal = null;
 							state.pregamePeek = [];
 							state.lastPresence = null;
@@ -741,6 +772,14 @@ export const useGameStore = create<GameState & GameActions>()(
 							if (typeof payload.winner === 'string') {
 								state.winnerId = payload.winner;
 							}
+							// The reveal rides this frame too, and for a client that reloaded into
+							// the results this is the only copy of it that will ever arrive: the
+							// service drops the game from its store right after emitting it, so
+							// game_end is long gone (cambia-1542).
+							{
+								const hands = readFinalHands(payload.finalHands);
+								if (hands) state.finalHands = hands;
+							}
 							if (state.gameState) {
 								state.gameState.gameOver = true;
 								state.gameState.currentPlayerId = null;
@@ -776,6 +815,7 @@ export const selectPendingSnapMove = (state: GameState) => state.pendingSnapMove
 export const selectLastSnapMove = (state: GameState) => state.lastSnapMove;
 export const selectLastPresence = (state: GameState) => state.lastPresence;
 export const selectFinalScores = (state: GameState) => state.finalScores;
+export const selectFinalHands = (state: GameState) => state.finalHands;
 export const selectCurrentPlayerId = (state: GameState) => state.gameState?.currentPlayerId;
 export const selectSelfPlayerState = (state: GameState) => {
 	const selfId = useAuthStore.getState().user?.id;

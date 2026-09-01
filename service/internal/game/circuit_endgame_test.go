@@ -25,7 +25,7 @@ func TestEndGameSeparatesRawScoresFromCircuitAdjustments(t *testing.T) {
 
 	var capturedScores, capturedRaw map[uuid.UUID]int
 	var capturedCaller uuid.UUID
-	g.OnGameEnd = func(_ uuid.UUID, _ uuid.UUID, scores map[uuid.UUID]int, _ map[uuid.UUID]string, rawScores map[uuid.UUID]int, cambiaCallerID uuid.UUID) {
+	g.OnGameEnd = func(_ uuid.UUID, _ uuid.UUID, scores map[uuid.UUID]int, _ map[uuid.UUID]string, rawScores map[uuid.UUID]int, cambiaCallerID uuid.UUID, _ []FinalHand) {
 		capturedScores = scores
 		capturedRaw = rawScores
 		capturedCaller = cambiaCallerID

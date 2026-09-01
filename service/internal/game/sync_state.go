@@ -223,6 +223,17 @@ func (g *CambiaGame) getCurrentObfuscatedGameState(forUser uuid.UUID) ObfGameSta
 			ps.HasCalledCambia = (g.Engine.CambiaCaller == int8(engineIdx))
 			ps.IsCurrentTurn = (g.Engine.ActingPlayer() == engineIdx && g.Started && !obf.GameOver)
 
+			// The round-end reveal (RULES.md 3C, cambia-1542). Once the round is over every scored
+			// hand turns face-up, own and opponent alike, off the same obf.GameOver this snapshot
+			// already computed. Nothing below it changes before that point: while the round runs,
+			// every slot is still an id and an index with Known:false, which is the cambia-1094
+			// rule and the reason this is a carve-out from it rather than a rollback of it.
+			//
+			// A forfeited seat stays face-down. It is not scored (computeScoresFromEngine) and is
+			// left out of the game_end reveal too (buildFinalReveal), so revealing it here would put
+			// a hand on the table that the results frame does not name.
+			revealFinal := obf.GameOver && !g.forfeited[pl.ID]
+
 			if isSelf {
 				// Self-view: expose every hand slot as an id+index reference with the face hidden
 				// ALWAYS (Known:false, no rank/suit/value), exactly like an opponent's hand. No own
@@ -241,17 +252,7 @@ func (g *CambiaGame) getCurrentObfuscatedGameState(forUser uuid.UUID) ObfGameSta
 				// The slot ids and indices stay: ability targeting names an own card by id
 				// (peek_self, swap_blind, swap_peek) and the client needs a real UUID per slot
 				// (cambia-509).
-				handLen := g.Engine.Players[engineIdx].HandLen
-				ps.RevealedHand = make([]ObfCard, handLen)
-				for j := uint8(0); j < handLen; j++ {
-					cardUUID := g.CardTracker.Players[engineIdx].HandUUIDs[j]
-					idx := int(j)
-					ps.RevealedHand[j] = ObfCard{
-						ID:    cardUUID,
-						Known: false,
-						Idx:   &idx,
-					}
-				}
+				ps.RevealedHand = g.handSlots(engineIdx, revealFinal)
 
 				// Drawn card (pending discard in engine). An ability card whose discard is still
 				// buffered stays pending in the engine, but the table has already been told it was
@@ -280,17 +281,7 @@ func (g *CambiaGame) getCurrentObfuscatedGameState(forUser uuid.UUID) ObfGameSta
 				// nothing. This gives the client a real UUID to target opponent-facing abilities
 				// (9/T peek_other, J/Q swap_blind, K swap_peek) instead of fabricating an
 				// unparseable placeholder id (cambia-509).
-				handLen := g.Engine.Players[engineIdx].HandLen
-				ps.RevealedHand = make([]ObfCard, handLen)
-				for j := uint8(0); j < handLen; j++ {
-					cardUUID := g.CardTracker.Players[engineIdx].HandUUIDs[j]
-					idx := int(j)
-					ps.RevealedHand[j] = ObfCard{
-						ID:    cardUUID,
-						Known: false,
-						Idx:   &idx,
-					}
-				}
+				ps.RevealedHand = g.handSlots(engineIdx, revealFinal)
 			}
 		}
 
@@ -298,4 +289,33 @@ func (g *CambiaGame) getCurrentObfuscatedGameState(forUser uuid.UUID) ObfGameSta
 	}
 
 	return obf
+}
+
+// handSlots projects one seat's hand into snapshot slots. Both views build the same thing, so
+// they build it here: a card id and its slot index per card, face hidden.
+//
+// reveal turns the faces up, and only the round-end reveal passes it true (RULES.md 3C,
+// cambia-1542). With it false the result is the cambia-1094 projection unchanged, which is what
+// every call during a live round makes.
+//
+// Assumes the lock is held by the caller.
+func (g *CambiaGame) handSlots(engineIdx uint8, reveal bool) []ObfCard {
+	handLen := g.Engine.Players[engineIdx].HandLen
+	slots := make([]ObfCard, handLen)
+	for j := uint8(0); j < handLen; j++ {
+		idx := int(j)
+		slots[j] = ObfCard{
+			ID:    g.CardTracker.Players[engineIdx].HandUUIDs[j],
+			Known: false,
+			Idx:   &idx,
+		}
+		if reveal {
+			card := g.Engine.Players[engineIdx].Hand[j]
+			slots[j].Known = true
+			slots[j].Rank = engineRankToString(card.Rank())
+			slots[j].Suit = engineSuitToString(card.Suit())
+			slots[j].Value = int(card.Value())
+		}
+	}
+	return slots
 }

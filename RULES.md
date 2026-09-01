@@ -49,6 +49,10 @@ If you believe you have the lowest score, call "Cambia" instead of drawing.
 * Your hand is **locked** and cannot be altered by any player, including yourself (snaps, swaps, etc.)
 * All cards are revealed.
 
+The reveal is how every round ends, not only a called one: a round that ends on the turn cap, on an
+exhausted stockpile, or because forfeits emptied the table turns the same cards up. A seat that
+forfeited is the one exception, since it is not scored and takes no part in the result.
+
 ## 4. Special Abilities
 
 Abilities only trigger when you draw from the **Stockpile** and **discard immediately**. Under the `allowReplaceAbilities` house rule, a card with an ability that you replace out of your hand after a stockpile draw also triggers it, and that ability resolves as part of the replace: whether abilities can be invoked this way is the host's setting, not a per-turn choice.
