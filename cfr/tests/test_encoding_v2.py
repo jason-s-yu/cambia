@@ -677,17 +677,38 @@ def test_python_v2_matches_go_v2_live_ffi_100_states():
 
 
 # ---------------------------------------------------------------------------
-# Wrapper-vs-trainer encoder parity (S1W2): the eval wrapper must encode through
-# the SAME high-level encoder the trainer uses. Pre-fix, DESCAAgentWrapper and
-# the v2 PPO wrapper hand-rolled a low-level call that omitted the posterior +
-# action-history kwargs, zeroing dims [224:257] relative to training (RC-B).
+# Wrapper-vs-trainer encoder parity (S1W2), migrated to the Go backend by
+# cambia-1522: the eval wrapper must encode through the encoder the trainer
+# feeds, sourcing the decision context and drawn-card bucket the way its own
+# choose_action does.
 #
-# This is a pure-Python smoke check (no Go FFI): it replays a few seeded games
-# through Python AgentState.update() the way the eval harness does, then asserts
-# the wrapper encode path is byte-equal to encode_infoset_eppbs_interleaved_v2
-# on the v2-specific dims [224:257]. The hardened 100+-state Go cross-path test
-# above is the separate gate; this just guards the wrapper delegation.
+# This started as a pure-Python smoke check: it attached a Python reference
+# AgentState to the wrapper and compared dims [224:257] against
+# encode_infoset_eppbs_interleaved_v2, because the pre-fix wrappers hand-rolled
+# a low-level call that omitted the posterior + action-history kwargs and left
+# that block zero (RC-B). cambia-1422 retired the Python rules engine and
+# cambia-1426 moved the eval battery onto libcambia, so the wrappers encode
+# through GoAgentState only and the Python attach raised AttributeError.
+#
+# The check is kept rather than deleted, because the risk it guards did not
+# retire with the Python path: a wrapper can still hand its encoder the wrong
+# decision context or the wrong drawn-card bucket, and on Go it can still name
+# an encoder entry the belief does not expose. What did retire is the zeroed
+# block: the Go encoder fills all 257 dims or fails. So the comparison now runs
+# over all 257 dims (a superset of the [224:257] block in the test name), which
+# is what makes a ctx or bucket drift visible instead of cancelling out.
 # ---------------------------------------------------------------------------
+
+
+#: Whether each wrapper hands its encoder the engine's drawn-card bucket.
+#:
+#: DESCAAgentWrapper.choose_action passes it, matching desca_worker._encode_state.
+#: PPOAgentWrapper._encode_obs pins it to -1. That -1 no longer matches
+#: ppo_env._get_obs, which has passed the real bucket since cambia-1376; the
+#: divergence is reported against the PPO anchor, not settled here, so the
+#: reference follows each wrapper's declared policy and this test pins the
+#: encoder entry and the context sourcing without ruling on the bucket.
+_WRAPPER_PASSES_DRAWN_BUCKET = {"desca": True, "ppo": False}
 
 
 def _smoke_parity_seeds():
@@ -695,250 +716,244 @@ def _smoke_parity_seeds():
     return [42, 137, 313, 1729, 2718, 3141, 4096, 5551]
 
 
-def _wrapper_v2_encode(wrapper, py_state, agent_state, ctx):
-    """Drive a wrapper's bound v2 encode method against a Python agent_state.
+def _make_test_wrapper(kind, player_id):
+    """Build a wrapper exposing its v2 encode without loading a checkpoint.
 
-    Sets the AgentState on the wrapper (both the public ``agent_state`` and the
-    private ``_agent_state`` PPO uses) and calls its encode entry. Returns the
-    257-dim vector the wrapper would feed its network.
+    ``__init__`` is bypassed (it imports torch and loads a checkpoint); only the
+    attributes the belief lifecycle and the encode path read are bound, so the
+    wrapper's own attach_belief runs and builds a real GoAgentState.
+
+    ``config`` is a namespace rather than a Config: attach_belief reads only
+    ``agent_params.memory_level`` and ``agent_params.time_decay_turns``, and the
+    tests/conftest.py Config stub carries neither.
     """
-    wrapper.agent_state = agent_state
-    wrapper._agent_state = agent_state
-    return wrapper._encode_v2_for_test(py_state, ctx)
+    from types import SimpleNamespace
+
+    from src.evaluate_agents import DESCAAgentWrapper, PPOAgentWrapper
+
+    if kind == "desca":
+        w = object.__new__(DESCAAgentWrapper)
+        w.agent_state = None
+    else:
+        w = object.__new__(PPOAgentWrapper)
+        w._agent_state = None
+        w._encoding_version = 2
+        w._obs_dim = EP_PBS_V2_INPUT_DIM
+    w.player_id = int(player_id)
+    w.opponent_id = 1 - int(player_id)
+    w.config = SimpleNamespace(
+        agent_params=SimpleNamespace(memory_level=0, time_decay_turns=0)
+    )
+    w._num_players = 2
+    return w
 
 
+def _wrapper_belief(wrapper, kind):
+    """The GoAgentState the wrapper attached, under whichever name it uses."""
+    return wrapper.agent_state if kind == "desca" else wrapper._agent_state
+
+
+def _wrapper_v2_encode(wrapper, kind, engine):
+    """Drive the wrapper's v2 encode the way its own choose_action drives it."""
+    from src.evaluate_agents import _decision_context, _drawn_card_bucket
+
+    if kind == "desca":
+        # DESCAAgentWrapper.choose_action sources both from the engine.
+        return wrapper._encode_v2(
+            wrapper._get_decision_context(engine), _drawn_card_bucket(engine)
+        )
+    # PPOAgentWrapper.choose_action sources the context only.
+    return wrapper._encode_obs(_decision_context(engine))
+
+
+@_skipgo
 @pytest.mark.parametrize("wrapper_kind", ["desca", "ppo"])
 def test_v2_eval_wrapper_matches_trainer_encoder_on_dims_224_257(wrapper_kind):
-    """Eval wrapper v2 encode must match the trainer encoder on dims [224:257].
+    """Eval wrapper v2 encode must match the trainer encoder, all 257 dims.
 
-    Replays seeded Python games, encoding at every decision point through both
-    the wrapper path and ``encode_infoset_eppbs_interleaved_v2``. Asserts exact
-    byte-equality on the v2 posterior + action-history block. Pre-fix this fails
-    because the wrapper omitted those kwargs and the block stayed all-zero.
+    Plays seeded Go games, encoding at every non-snap decision point through
+    both the wrapper path and ``encode_infoset_eppbs_interleaved_v2``, the entry
+    desca_worker._encode_state calls and the one ppo_env._get_obs short-circuits
+    to for a Go-backed belief. Asserts exact equality over the full vector, so
+    the [224:257] posterior + action-history block named in this test is covered
+    along with the public block that carries the decision context and the
+    drawn-card one-hot.
     """
-    from src.constants import ActionPassSnap, CardBucket, DecisionContext, NUM_PLAYERS
-    from src.encoding import action_to_index, encode_action_mask
+    from src.constants import NUM_PLAYERS
+    from src.encoding import NUM_ACTIONS
 
     try:
-        from tests.test_cross_engine_samples import _setup_python_game_matching_go
-        from tests.test_cross_validation import (
-            _build_py_agents,
-            _create_py_observation,
-            _make_config,
+        from tests.test_cross_engine_samples import (
+            _is_snap_only,
+            _PASS_SNAP_IDX,
+            _TEST_RULES,
         )
     except ImportError:
-        from test_cross_engine_samples import _setup_python_game_matching_go  # type: ignore
-        from test_cross_validation import (  # type: ignore
-            _build_py_agents,
-            _create_py_observation,
-            _make_config,
+        from test_cross_engine_samples import (  # type: ignore
+            _is_snap_only,
+            _PASS_SNAP_IDX,
+            _TEST_RULES,
         )
 
-    wrapper = _make_test_wrapper(wrapper_kind)
-    config = _make_config()
+    pass_bucket = _WRAPPER_PASSES_DRAWN_BUCKET[wrapper_kind]
 
     _SNAP_ACTION_MIN = 97
-    NUM_ACTIONS = encode_action_mask([]).shape[0]
     snap_indices = set(range(_SNAP_ACTION_MIN, NUM_ACTIONS))
 
     total_comparisons = 0
     full_block_comparisons = 0  # comparisons where [224:257] was non-zero
+    bucket_comparisons = 0  # comparisons at a live drawn-card bucket
     first_divergence = None
 
     for seed in _smoke_parity_seeds():
         if total_comparisons >= 60:
             break
-        py_state = _setup_python_game_matching_go(seed)
-        py_agents = _build_py_agents(py_state, config)
 
-        for step in range(200):
-            if py_state.is_terminal():
-                break
+        engine = GoEngine(seed=seed, house_rules=_TEST_RULES)
+        wrappers = [_make_test_wrapper(wrapper_kind, i) for i in range(NUM_PLAYERS)]
+        try:
+            beliefs = [w.attach_belief(engine, NUM_PLAYERS) for w in wrappers]
+            for _step in range(200):
+                if engine.is_terminal():
+                    break
 
-            py_legal = py_state.get_legal_actions()
-            py_mask = encode_action_mask(list(py_legal)).astype(np.uint8)
-            py_actions = set(np.where(py_mask > 0)[0].tolist())
+                mask = engine.legal_actions_mask()
+                actions = set(np.where(mask > 0)[0].tolist())
 
-            # Drain snap-only phases uniformly (no encoding comparison there;
-            # the acting player is mid-snap and PassSnap is the only move).
-            if py_state.snap_phase_active:
-                actor = py_state.get_acting_player()
-                py_state.apply_action(ActionPassSnap())
-                obs = _create_py_observation(py_state, ActionPassSnap(), actor)
-                for pa in py_agents:
-                    try:
-                        pa.update(obs)
-                    except Exception:
-                        pass
-                continue
+                # Drain snap-only states: PassSnap is the only move, and no
+                # wrapper encodes there (choose_action is not consulted).
+                if _is_snap_only(actions):
+                    engine.apply_action(_PASS_SNAP_IDX)
+                    engine.update_both(beliefs[0], beliefs[1])
+                    continue
 
-            actor = py_state.get_acting_player()
-            ctx = _py_decision_context(py_state)
+                actor = engine.acting_player()
+                engine_bucket = int(engine.get_drawn_card_bucket())
 
-            # Reference: canonical trainer encoder, with the drawn bucket sourced
-            # the same way the wrapper sources it.
-            drawn_bucket = _py_drawn_card_bucket(py_state)
-            ref = encode_infoset_eppbs_interleaved_v2(
-                py_agents[actor], ctx, drawn_card_bucket=drawn_bucket
-            )
-            got = _wrapper_v2_encode(wrapper, py_state, py_agents[actor], ctx)
-
-            assert ref.shape == (EP_PBS_V2_INPUT_DIM,)
-            assert got.shape == (EP_PBS_V2_INPUT_DIM,)
-
-            block_ref = ref[EP_PBS_INPUT_DIM:EP_PBS_V2_INPUT_DIM]
-            block_got = got[EP_PBS_INPUT_DIM:EP_PBS_V2_INPUT_DIM]
-            if not np.array_equal(block_ref, block_got):
-                diff_idx = (
-                    np.where(np.abs(block_ref - block_got) > 0)[0] + EP_PBS_INPUT_DIM
+                # Reference: the trainer's encoder entry, with the context and
+                # bucket read straight off the engine.
+                ref = encode_infoset_eppbs_interleaved_v2(
+                    beliefs[actor],
+                    int(engine.decision_ctx()),
+                    drawn_card_bucket=(engine_bucket if pass_bucket else -1),
                 )
-                first_divergence = (
-                    f"seed={seed} step={step} actor=P{actor} ctx={int(ctx.value)} "
-                    f"kind={wrapper_kind}\n"
-                    f"  divergent dims (abs): {diff_idx.tolist()[:24]}\n"
-                    f"  ref[224:257]={block_ref.tolist()}\n"
-                    f"  got[224:257]={block_got.tolist()}"
-                )
-                break
+                got = _wrapper_v2_encode(wrappers[actor], wrapper_kind, engine)
 
-            # The posterior block [224:233] always sums to 1.0, so [224:257] is
-            # never all-zero on a live state. Track that to prove the block is
-            # actually exercised (a wrapper that zeroed it would diverge above,
-            # but this also guards a degenerate ref).
-            if np.any(block_ref != 0.0):
-                full_block_comparisons += 1
-            total_comparisons += 1
-            if total_comparisons >= 60:
-                break
+                assert ref.shape == (EP_PBS_V2_INPUT_DIM,)
+                assert got.shape == (EP_PBS_V2_INPUT_DIM,)
 
-            # Advance on the lowest-index non-snap legal action.
-            non_snap = sorted(py_actions - snap_indices)
-            if not non_snap:
-                break
-            action_idx = non_snap[0]
-            py_action = None
-            for a in py_legal:
-                try:
-                    if action_to_index(a) == action_idx:
-                        py_action = a
-                        break
-                except Exception:
-                    pass
-            if py_action is None:
-                break
-            py_state.apply_action(py_action)
-            obs = _create_py_observation(py_state, py_action, actor)
-            for pa in py_agents:
-                try:
-                    pa.update(obs)
-                except Exception:
-                    pass
+                if not np.array_equal(ref, got):
+                    diff_idx = np.where(np.abs(ref - got) > 0)[0]
+                    first_divergence = (
+                        f"seed={seed} step={_step} actor=P{actor} "
+                        f"ctx={int(engine.decision_ctx())} bucket={engine_bucket} "
+                        f"kind={wrapper_kind}\n"
+                        f"  divergent dims: {diff_idx.tolist()[:24]}\n"
+                        f"  ref at divergence: {ref[diff_idx].tolist()[:24]}\n"
+                        f"  got at divergence: {got[diff_idx].tolist()[:24]}"
+                    )
+                    break
+
+                # The posterior block [224:233] always sums to 1.0 on a live
+                # state, so [224:257] is never all-zero. Tracking it proves the
+                # block is exercised rather than compared as two zero vectors.
+                if np.any(ref[EP_PBS_INPUT_DIM:EP_PBS_V2_INPUT_DIM] != 0.0):
+                    full_block_comparisons += 1
+                if engine_bucket >= 0:
+                    bucket_comparisons += 1
+                total_comparisons += 1
+                if total_comparisons >= 60:
+                    break
+
+                # Advance on the lowest-index non-snap legal action.
+                non_snap = sorted(actions - snap_indices)
+                if not non_snap:
+                    break
+                engine.apply_action(non_snap[0])
+                engine.update_both(beliefs[0], beliefs[1])
+        finally:
+            for w in wrappers:
+                w.release_belief()
+            engine.close()
 
         if first_divergence is not None:
             break
 
-    if first_divergence is not None:
-        pytest.fail(
-            f"Wrapper-vs-trainer v2 encoder parity failure on [224:257]:\n"
-            f"{first_divergence}"
-        )
-
+    assert first_divergence is None, (
+        f"{wrapper_kind} eval wrapper diverged from the trainer encoder:\n"
+        f"{first_divergence}"
+    )
     assert total_comparisons >= 20, (
-        f"Only compared {total_comparisons} states; expected >= 20 for a "
-        f"meaningful smoke check."
+        f"Only {total_comparisons} wrapper/trainer encode comparisons ran; the "
+        f"seed set should clear 20 non-snap decision points."
     )
     assert full_block_comparisons == total_comparisons, (
-        f"{total_comparisons - full_block_comparisons} comparisons had an "
-        f"all-zero [224:257] reference block; the posterior must always sum to "
-        f"1.0 on a live state, so this indicates a broken reference encoder."
+        f"{full_block_comparisons}/{total_comparisons} comparisons had a "
+        f"non-zero [224:257] block; a zeroed block means the v2 extras were "
+        f"never exercised and the parity claim is vacuous."
+    )
+    assert bucket_comparisons >= 1, (
+        "No comparison ran at a live drawn-card bucket, so the bucket half of "
+        "the wrapper's encoder contract went unexercised."
     )
 
 
-def _make_test_wrapper(kind):
-    """Build a wrapper instance exposing ``_encode_v2_for_test`` without loading
-    a checkpoint or torch model. We bypass ``__init__`` and bind only what the
-    encode method reads.
-    """
-    from src.constants import DecisionContext  # noqa: F401 (sanity import)
-    from src.evaluate_agents import DESCAAgentWrapper, PPOAgentWrapper
-
-    if kind == "desca":
-        w = object.__new__(DESCAAgentWrapper)
-        w.player_id = 0
-        w.opponent_id = 1
-
-        def _encode(py_state, ctx, _w=w):
-            return _w._encode_v2(ctx, drawn_card_bucket=_py_drawn_card_bucket(py_state))
-
-        w._encode_v2_for_test = _encode
-        return w
-
-    # PPO: the v2 branch lives inside choose_action. We exercise the same
-    # canonical-encoder delegation the fixed wrapper uses for a 257-dim model.
-    w = object.__new__(PPOAgentWrapper)
-    w.player_id = 0
-    w.opponent_id = 1
-    w._encoding_version = 2
-    w._obs_dim = EP_PBS_V2_INPUT_DIM
-
-    def _encode_ppo(py_state, ctx, _w=w):
-        return _w._encode_obs(ctx, drawn_card_bucket=_py_drawn_card_bucket(py_state))
-
-    w._encode_v2_for_test = _encode_ppo
-    return w
+# ---------------------------------------------------------------------------
+# The encoder contract itself (cambia-1522 AC1): every eval encode path resolves
+# its belief through _require_go_belief, so a belief that does not expose the
+# named Go encoder is refused by name at the wrapper boundary instead of raising
+# AttributeError from inside the encoder call.
+# ---------------------------------------------------------------------------
 
 
-def _py_decision_context(py_state):
-    """Mirror the wrappers' decision-context derivation for a Python game."""
-    from src.constants import (
-        ActionAbilityBlindSwapSelect,
-        ActionAbilityKingLookSelect,
-        ActionAbilityKingSwapDecision,
-        ActionAbilityPeekOtherSelect,
-        ActionAbilityPeekOwnSelect,
-        ActionDiscard,
-        ActionSnapOpponentMove,
-        DecisionContext,
-    )
+def test_require_go_belief_refuses_a_belief_without_the_encoder():
+    """A non-Go belief is rejected by name, naming the missing encoder."""
+    from src.cfr.exceptions import AgentStateError
+    from src.evaluate_agents import DESCAAgentWrapper, _require_go_belief
 
-    if py_state.snap_phase_active:
-        return DecisionContext.SNAP_DECISION
-    pending = py_state.pending_action
-    if pending is not None:
-        if isinstance(pending, ActionDiscard):
-            return DecisionContext.POST_DRAW
-        if isinstance(
-            pending,
-            (
-                ActionAbilityPeekOwnSelect,
-                ActionAbilityPeekOtherSelect,
-                ActionAbilityBlindSwapSelect,
-                ActionAbilityKingLookSelect,
-                ActionAbilityKingSwapDecision,
-            ),
+    class _NoEncoder:
+        pass
+
+    owner = object.__new__(DESCAAgentWrapper)
+    owner.player_id = 0
+
+    with pytest.raises(AgentStateError) as unattached:
+        _require_go_belief(owner, None, "encode_eppbs_interleaved_v2")
+    assert "belief not attached" in str(unattached.value)
+
+    with pytest.raises(AgentStateError) as wrong_backend:
+        _require_go_belief(owner, _NoEncoder(), "encode_eppbs_interleaved_v2")
+    message = str(wrong_backend.value)
+    assert "encode_eppbs_interleaved_v2" in message
+    assert "_NoEncoder" in message
+    assert "GoAgentState" in message
+
+
+@_skipgo
+def test_require_go_belief_accepts_a_go_backed_belief():
+    """A GoAgentState passes the contract and is returned unchanged."""
+    from src.evaluate_agents import DESCAAgentWrapper, _require_go_belief
+
+    try:
+        from tests.test_cross_engine_samples import _TEST_RULES
+    except ImportError:
+        from test_cross_engine_samples import _TEST_RULES  # type: ignore
+
+    owner = object.__new__(DESCAAgentWrapper)
+    owner.player_id = 0
+
+    engine = GoEngine(seed=42, house_rules=_TEST_RULES)
+    belief = GoAgentState(engine, 0)
+    try:
+        for encoder in (
+            "encode",
+            "encode_eppbs",
+            "encode_eppbs_dealiased",
+            "encode_eppbs_interleaved",
+            "encode_eppbs_interleaved_v2",
+            "encode_nplayer",
         ):
-            return DecisionContext.ABILITY_SELECT
-        if isinstance(pending, ActionSnapOpponentMove):
-            return DecisionContext.SNAP_MOVE
-    return DecisionContext.START_TURN
-
-
-def _py_drawn_card_bucket(py_state):
-    """The acting player's own drawn-card bucket, or -1 if none is pending.
-
-    Mirrors Go ``cambia_game_get_drawn_card_bucket``: a bucket only exists while
-    a discard decision is pending (POST_DRAW). The drawn card is the acting
-    player's own private info, legitimately known to them at decision time.
-    """
-    from src.abstraction import get_card_bucket
-    from src.constants import ActionDiscard, CardBucket
-
-    if py_state.snap_phase_active:
-        return -1
-    if not isinstance(py_state.pending_action, ActionDiscard):
-        return -1
-    drawn = (py_state.pending_action_data or {}).get("drawn_card")
-    if drawn is None:
-        return -1
-    bucket = get_card_bucket(drawn)
-    return int(bucket.value) if bucket != CardBucket.UNKNOWN else -1
+            assert _require_go_belief(owner, belief, encoder) is belief
+    finally:
+        belief.close()
+        engine.close()
