@@ -6,6 +6,9 @@ export interface QueueCardProps {
   name?: string;
   tagline?: string;
   players?: number;
+  /** A round count the queue actually plays: a live circuit (currently never true for a
+   *  matchmade lobby, cambia-1518) or a genuine best-of-one. Omitted entirely rather than
+   *  shown wrong - QueueConfig.Rounds names a match length nothing plays yet. */
   rounds?: number;
   /** Estimated match length in minutes. */
   minutes?: number;
@@ -23,7 +26,7 @@ const QueueCard: React.FC<QueueCardProps> = ({
   name = 'H2H Rapid',
   tagline,
   players = 2,
-  rounds = 8,
+  rounds,
   minutes = 20,
   pool,
   primary = false,
@@ -59,9 +62,11 @@ const QueueCard: React.FC<QueueCardProps> = ({
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0, fontSize: 'var(--ds-text-sm)', color: 'var(--text-secondary)' }}>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 14px', fontVariantNumeric: 'tabular-nums' }}>
           <span>{players}p</span>
-          <span>
-            {rounds} {rounds === 1 ? 'round' : 'rounds'}
-          </span>
+          {rounds !== undefined && (
+            <span>
+              {rounds} {rounds === 1 ? 'round' : 'rounds'}
+            </span>
+          )}
           <span>~{minutes} min</span>
         </div>
         {pool && <div style={{ color: 'var(--text-tertiary)' }}>{pool}</div>}
