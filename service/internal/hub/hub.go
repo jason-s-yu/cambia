@@ -217,6 +217,15 @@ type Hub struct {
 	idleTimer *time.Timer
 	idleGen   uint64
 
+	// countdownGen numbers the countdowns, on the same reasoning as idleGen: scheduleGameStart's
+	// pending _begin_game lives in a timer goroutine and cannot be un-fired once it has run.
+	// The phase alone is not a guard, because a lobby that unreadied and readied again is back in
+	// PhaseCountdown by the time the first countdown's fire lands, and that fire started the game
+	// partway through the second countdown (cambia-1557). setPhase bumps it on every entry to and
+	// exit from PhaseCountdown, so a superseded fire is dropped by dispatch. Belongs to the Run()
+	// goroutine, like the phase it guards.
+	countdownGen uint64
+
 	// postGameGen numbers the results screens, on the same reasoning as idleGen: a timer cannot
 	// be un-fired once it has run, and a results screen can now be closed before its own timer
 	// fires (cambia-1238). Every arm takes the next number and the queued reset carries it, so a
@@ -569,6 +578,24 @@ func (h *Hub) handleIdleReap(gen uint64) {
 	h.OnIdle(h.ID)
 }
 
+// setPhase moves the hub to p, invalidating any countdown fire the phase it leaves had armed.
+//
+// Every phase change on either side of PhaseCountdown takes the next countdown generation, which
+// is what makes an aborted countdown stay aborted. scheduleGameStart's _begin_game lives in a
+// timer goroutine that has already been scheduled and cannot be un-fired, and the phase alone
+// does not identify which countdown it belongs to: a lobby that unreadied and readied again is
+// back in PhaseCountdown when the first fire lands, and dispatch admitted it, so the game started
+// partway through the second countdown (cambia-1557). Same device as idleGen and postGameGen.
+//
+// Every phase assignment goes through here so the invariant is structural rather than a list of
+// call sites to remember. Run() goroutine only.
+func (h *Hub) setPhase(p LobbyPhase) {
+	if h.Phase == PhaseCountdown || p == PhaseCountdown {
+		h.countdownGen++
+	}
+	h.Phase = p
+}
+
 // inGame reports whether a game is under way, from the hub's phase and the lobby's own flag. The
 // two are cleared at different moments - OnGameEnd clears the lobby while the hub moves to
 // PhasePostGame - so the exemption holds while either says a game is live.
@@ -644,7 +671,10 @@ func (h *Hub) dispatch(msg ClientMsg) {
 
 	switch msg.Type {
 	case "_begin_game":
-		if h.Phase == PhaseCountdown {
+		// The countdown timer firing. It runs only for the countdown that armed it: the phase
+		// check alone admits a fire from a countdown that was aborted by an unready and then
+		// re-entered, which starts the game partway through the second one (cambia-1557).
+		if h.Phase == PhaseCountdown && msg.gen == h.countdownGen {
 			h.beginGame()
 		}
 		return
@@ -655,7 +685,7 @@ func (h *Hub) dispatch(msg ClientMsg) {
 		return
 	case "_game_ended":
 		if h.Phase == PhaseInGame {
-			h.Phase = PhasePostGame
+			h.setPhase(PhasePostGame)
 			h.Emit("phase_change", map[string]interface{}{"phase": "post_game"})
 			h.schedulePostGameReset()
 		}
@@ -746,10 +776,11 @@ func (h *Hub) handleLobbyMsg(msg ClientMsg) {
 		h.Lobby.Mu.Lock()
 		h.Lobby.MarkUserUnreadyUnsafe(msg.UserID)
 		h.Lobby.Mu.Unlock()
-		// Unreadying during the countdown aborts the pending start: the scheduled _begin_game
-		// then no-ops because the phase is no longer countdown.
+		// Unreadying during the countdown aborts the pending start: leaving PhaseCountdown takes
+		// the next countdown generation, so the scheduled _begin_game is dropped by dispatch
+		// even if the lobby has readied into a fresh countdown by the time it lands.
 		if h.Phase == PhaseCountdown {
-			h.Phase = PhaseOpen
+			h.setPhase(PhaseOpen)
 			h.Emit("phase_change", map[string]interface{}{"phase": "open"})
 		}
 		h.broadcastLobbyUpdate()
@@ -945,7 +976,7 @@ func (h *Hub) handleSearchingMsg(msg ClientMsg) {
 			conn.SendEnvelope(h.errEnvelope("only the host can cancel search"))
 			return
 		}
-		h.Phase = PhaseOpen
+		h.setPhase(PhaseOpen)
 		if h.Lobby != nil {
 			h.Lobby.Mu.Lock()
 			h.Lobby.Searching = false
@@ -972,9 +1003,9 @@ func (h *Hub) handleMatchFound(notice MatchNotice) {
 	hosting := destination == h.ID
 
 	if hosting {
-		h.Phase = PhaseReadyCheck
+		h.setPhase(PhaseReadyCheck)
 	} else {
-		h.Phase = PhaseOpen
+		h.setPhase(PhaseOpen)
 	}
 	// The lobby has left the queue whichever side of the match it is on; leaving Searching set
 	// would have it advertise a search the matchmaker has already resolved.
@@ -1026,7 +1057,7 @@ func (h *Hub) SetSearchState(state SearchState) {
 // applySearchState performs the phase change SetSearchState asked for. Run() goroutine only.
 func (h *Hub) applySearchState(state SearchState) {
 	if state.Searching {
-		h.Phase = PhaseSearching
+		h.setPhase(PhaseSearching)
 		h.QueueID = state.QueueID
 		h.IsRanked = state.IsRanked
 		h.TotalRounds = state.TotalRounds
@@ -1034,7 +1065,7 @@ func (h *Hub) applySearchState(state SearchState) {
 		h.Emit("search_status", map[string]interface{}{"searching": true, "queue_id": state.QueueID})
 		return
 	}
-	h.Phase = PhaseOpen
+	h.setPhase(PhaseOpen)
 	h.Emit("phase_change", map[string]interface{}{"phase": "open"})
 	h.Emit("search_status", map[string]interface{}{"searching": false})
 }
@@ -1098,7 +1129,7 @@ func (h *Hub) HandleRoundEnd(scores map[uuid.UUID]int, cambiaCallerID uuid.UUID)
 	h.DealerSeatIdx = (h.DealerSeatIdx + 1) % len(playerIDs)
 
 	if h.RoundsPlayed >= h.TotalRounds {
-		h.Phase = PhaseMatchEnd
+		h.setPhase(PhaseMatchEnd)
 		h.Emit("phase_change", map[string]interface{}{"phase": "match_end"})
 		h.Emit("match_end", map[string]interface{}{
 			"round_scores":      roundScores,
@@ -1108,7 +1139,7 @@ func (h *Hub) HandleRoundEnd(scores map[uuid.UUID]int, cambiaCallerID uuid.UUID)
 			"final":             true,
 		})
 	} else {
-		h.Phase = PhaseRoundEnd
+		h.setPhase(PhaseRoundEnd)
 		h.Emit("phase_change", map[string]interface{}{"phase": "round_end"})
 		h.Emit("round_end", map[string]interface{}{
 			"round":             h.RoundsPlayed,
@@ -1133,7 +1164,7 @@ func (h *Hub) HandleRoundEnd(scores map[uuid.UUID]int, cambiaCallerID uuid.UUID)
 // lands, but the scoring pipeline is not driven yet.
 func (h *Hub) startNextRound() {
 	h.Game = nil // clear the previous round's finished game before creating the next
-	h.Phase = PhaseInGame
+	h.setPhase(PhaseInGame)
 	h.Emit("phase_change", map[string]interface{}{"phase": "in_game"})
 	h.Emit("round_start", map[string]interface{}{
 		"round":        h.RoundsPlayed + 1,
@@ -1147,12 +1178,14 @@ func (h *Hub) startNextRound() {
 
 // beginCountdown enters PhaseCountdown and schedules game creation. Idempotent: a hub already
 // counting down or in game is left untouched, so a duplicate ready/start_game cannot stack
-// timers. Must run in the Run() goroutine.
+// timers. That guard covers the duplicates it can see; entering the phase also takes the next
+// countdown generation, which is what disowns a timer still in flight from a countdown this one
+// replaced (cambia-1557). Must run in the Run() goroutine.
 func (h *Hub) beginCountdown() {
 	if h.Phase == PhaseCountdown || h.Phase == PhaseInGame {
 		return
 	}
-	h.Phase = PhaseCountdown
+	h.setPhase(PhaseCountdown)
 	seconds := int(h.CountdownDuration / time.Second)
 	h.Emit("phase_change", map[string]interface{}{"phase": "countdown", "seconds": seconds})
 	h.scheduleGameStart()
@@ -1161,15 +1194,23 @@ func (h *Hub) beginCountdown() {
 // scheduleGameStart fires a _begin_game message back into the Run() loop after the countdown
 // so that game creation itself runs serialized in the hub goroutine (race-free), not in the
 // timer goroutine. A shutdown mid-countdown drops the pending start.
+//
+// The message carries the countdown generation current when it was armed, and dispatch fires
+// only on a match. The phase check it used to rely on is not enough on its own: an unready drops
+// the hub to PhaseOpen without stopping this timer, and readying again puts it back in
+// PhaseCountdown, so the first countdown's fire landed inside the second one and started the game
+// early (cambia-1557). Must run in the Run() goroutine, after the setPhase that entered the
+// countdown.
 func (h *Hub) scheduleGameStart() {
 	d := h.CountdownDuration
+	gen := h.countdownGen
 	go func() {
 		timer := time.NewTimer(d)
 		defer timer.Stop()
 		select {
 		case <-timer.C:
 			select {
-			case h.incoming <- ClientMsg{Type: "_begin_game"}:
+			case h.incoming <- ClientMsg{Type: "_begin_game", gen: gen}:
 			case <-h.shutdown:
 			}
 		case <-h.shutdown:
@@ -1189,7 +1230,7 @@ func (h *Hub) beginGame() {
 		h.abortToOpen("not enough connected players to start")
 		return
 	}
-	h.Phase = PhaseInGame
+	h.setPhase(PhaseInGame)
 	h.Emit("phase_change", map[string]interface{}{"phase": "in_game"})
 	if !h.createAndStartGame(pids) {
 		h.abortToOpen("game creation failed")
@@ -1200,7 +1241,7 @@ func (h *Hub) beginGame() {
 func (h *Hub) abortToOpen(reason string) {
 	log.Printf("hub %s: aborting game start: %s", h.ID, reason)
 	h.Game = nil
-	h.Phase = PhaseOpen
+	h.setPhase(PhaseOpen)
 	h.Emit("phase_change", map[string]interface{}{"phase": "open"})
 	h.broadcastLobbyUpdate()
 }
@@ -1287,7 +1328,7 @@ func (h *Hub) mayReturnToLobby(userID uuid.UUID) bool {
 // the Run() goroutine.
 func (h *Hub) returnToLobby() {
 	h.Game = nil
-	h.Phase = PhaseOpen
+	h.setPhase(PhaseOpen)
 
 	// The lobby is also mutated by the game's OnGameEnd callback on a foreign goroutine, so its
 	// own mutex guards this reset (same discipline as createAndStartGame).

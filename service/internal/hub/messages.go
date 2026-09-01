@@ -26,7 +26,8 @@ type ClientMsg struct {
 
 	// gen stamps a synthetic message with the generation of the state it was armed for, so a
 	// timer that fired after its state was superseded is dropped rather than applied to whatever
-	// took its place. Unexported: no client sets it, and ReadPump does not parse it. Only the
-	// post-game reset uses it today (Hub.postGameGen, cambia-1238).
+	// took its place. Unexported: no client sets it, and ReadPump does not parse it. Used by the
+	// post-game reset (Hub.postGameGen, cambia-1238) and by the countdown's game start
+	// (Hub.countdownGen, cambia-1557).
 	gen uint64
 }
