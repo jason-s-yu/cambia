@@ -233,7 +233,7 @@ type Hub struct {
 
 	// Channels for Run() select loop
 	join     chan *Connection
-	leave    chan uuid.UUID
+	leave    chan leaveRequest
 	incoming chan ClientMsg
 	idleReap chan uint64
 	shutdown chan struct{}
@@ -259,7 +259,7 @@ func NewHub(lob *lobby.Lobby) *Hub {
 		matched:           make(chan MatchNotice, 1),
 		searchState:       make(chan SearchState, 4),
 		join:              make(chan *Connection, 8),
-		leave:             make(chan uuid.UUID, 8),
+		leave:             make(chan leaveRequest, 8),
 		incoming:          make(chan ClientMsg, 64),
 		idleReap:          make(chan uint64, 1),
 		shutdown:          make(chan struct{}),
@@ -319,29 +319,21 @@ func (h *Hub) runStep(ctx context.Context) (stop bool) {
 	case conn := <-h.join:
 		h.cancelIdleReap()
 		h.connsMu.Lock()
+		displaced := h.conns[conn.UserID]
 		h.conns[conn.UserID] = conn
 		h.connsMu.Unlock()
+		// One user, one socket. h.conns is keyed by user, so a second tab or a reconnect that
+		// arrives before the old socket's ReadPump notices overwrites the entry; the displaced
+		// socket used to be registered nowhere and closed by nothing, and it kept submitting
+		// actions the hub accepted while every reply went to its replacement (cambia-1543).
+		if displaced != nil && displaced != conn {
+			displaced.Close()
+		}
 		h.sendLobbyState(conn)
 		h.broadcastLobbyUpdate()
 		h.notePlayerReconnected(conn.UserID)
-	case userID := <-h.leave:
-		// Connection-level only: the user keeps their lobby membership, because this fires
-		// for a dropped socket just as it does for a deliberate leave (which releases
-		// membership over HTTP before signalling the hub). See lobby.RemoveUser.
-		h.connsMu.Lock()
-		conn, ok := h.conns[userID]
-		if ok {
-			delete(h.conns, userID)
-		}
-		h.connsMu.Unlock()
-		if ok {
-			conn.Close()
-		}
-		h.broadcastLobbyUpdate()
-		h.notePlayerDisconnected(userID)
-		if h.connCount() == 0 {
-			h.armIdleReap()
-		}
+	case req := <-h.leave:
+		h.handleLeave(req)
 	case msg := <-h.incoming:
 		h.dispatch(msg)
 	case notice := <-h.matched:
@@ -371,6 +363,48 @@ func (h *Hub) reportFatalPanic() {
 		"message": "This game hit an internal error and has ended. Other games are unaffected.",
 		"fatal":   true,
 	})
+}
+
+// handleLeave drops a departing connection. Connection-level only: the user keeps their lobby
+// membership, because this fires for a dropped socket just as it does for a deliberate leave
+// (which releases membership over HTTP before signalling the hub). See lobby.RemoveUser.
+//
+// The identity check is what the socket-addressed form buys. h.conns is keyed by user, so a
+// second tab or a reconnect displaces the entry, and the displaced socket's ReadPump can lag the
+// swap by up to a ping interval plus the write timeout. Its eventual departure used to delete and
+// close whatever was registered under that user id, which meant closing the live tab: Connection
+// .Close sends StatusGoingAway through a clean close, the client reads that as deliberate and
+// stops retrying, and the disconnect grace this call arms expires into a forfeit. Closing one tab
+// forfeited the seat the other tab was playing (cambia-1543).
+//
+// A nil req.conn is the user-addressed form, meaning whichever socket is current. The deliberate
+// HTTP leave uses it: that caller is releasing a membership, not tearing down a socket it holds.
+//
+// Run() goroutine only.
+func (h *Hub) handleLeave(req leaveRequest) {
+	h.connsMu.Lock()
+	registered, ok := h.conns[req.userID]
+	superseded := ok && req.conn != nil && registered != req.conn
+	if ok && !superseded {
+		delete(h.conns, req.userID)
+	}
+	h.connsMu.Unlock()
+
+	if superseded {
+		// The socket owns nothing on this hub any more, so nothing is broadcast, no grace
+		// window opens and no idle window is armed. The join case already closed it; closing
+		// it again is harmless and covers a displacement this hub did not perform.
+		req.conn.Close()
+		return
+	}
+	if ok {
+		registered.Close()
+	}
+	h.broadcastLobbyUpdate()
+	h.notePlayerDisconnected(req.userID)
+	if h.connCount() == 0 {
+		h.armIdleReap()
+	}
 }
 
 // notePlayerDisconnected tells a running game that one of its players lost their socket.
@@ -635,6 +669,23 @@ func (h *Hub) dispatch(msg ClientMsg) {
 			h.returnToLobby()
 		}
 		return
+	}
+
+	// Connection check: a frame from a socket that is no longer this user's registered connection
+	// is dropped. h.conns is keyed by user, so a second tab or a reconnect displaces the entry
+	// (see the join case), and the displaced socket's ReadPump can keep delivering for as long as
+	// it takes its own read to fail. It was registered nowhere, yet every action it sent was
+	// accepted and played on the seat its replacement was holding, with all output going to that
+	// replacement (cambia-1543).
+	//
+	// ConnID is stamped by ReadPump from the accepted socket and is never read off the frame, so
+	// a client cannot name another connection. It is nil only for the hub's own synthetic
+	// messages, which returned above, and for frames a test builds by hand.
+	if msg.ConnID != uuid.Nil {
+		if conn := h.getConn(msg.UserID); conn == nil || conn.ID != msg.ConnID {
+			log.Printf("hub %s: dropping %q from displaced conn %s (user %s)", h.ID, msg.Type, msg.ConnID, msg.UserID)
+			return
+		}
 	}
 
 	// Sequence check: if client is behind, send a sync snapshot and discard.
@@ -1588,12 +1639,42 @@ func (h *Hub) Join(conn *Connection) {
 	}
 }
 
-// Leave asks the hub to drop userID's connection. It does not touch lobby membership: this
-// fires for a dropped socket as well as a deliberate leave. Returns as soon as the hub has
-// stopped, so a WebSocket handler goroutine never parks on a hub that is gone.
+// leaveRequest is a departure queued onto the hub's leave channel.
+//
+// conn names the socket that is going. The hub drops the user's registration only when that
+// socket is still the registered one, so a tab that a newer tab displaced cannot evict its
+// successor on the way out (cambia-1543). A nil conn addresses the user rather than a socket and
+// means whichever connection is current.
+type leaveRequest struct {
+	userID uuid.UUID
+	conn   *Connection
+}
+
+// Leave asks the hub to drop whichever connection userID currently holds. The deliberate HTTP
+// leave is what this is for: it releases a membership and has no socket of its own to name.
+//
+// A socket teardown must use LeaveConn instead. It does not touch lobby membership either way:
+// this fires for a dropped socket as well as a deliberate leave. Returns as soon as the hub has
+// stopped, so a caller never parks on a hub that is gone.
 func (h *Hub) Leave(userID uuid.UUID) {
+	h.queueLeave(leaveRequest{userID: userID})
+}
+
+// LeaveConn asks the hub to drop one specific connection: the socket-teardown path, called by the
+// WebSocket handler when its own ReadPump returns. Naming the connection is what keeps a lagging
+// socket from evicting the live one that replaced it (cambia-1543).
+func (h *Hub) LeaveConn(conn *Connection) {
+	if conn == nil {
+		return
+	}
+	h.queueLeave(leaveRequest{userID: conn.UserID, conn: conn})
+}
+
+// queueLeave hands a departure to the Run loop, returning as soon as the hub has stopped so a
+// WebSocket handler goroutine never parks on a hub that is gone.
+func (h *Hub) queueLeave(req leaveRequest) {
 	select {
-	case h.leave <- userID:
+	case h.leave <- req:
 	case <-h.shutdown:
 	}
 }

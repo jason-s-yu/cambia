@@ -106,8 +106,13 @@ func HubWSHandler(logger *logrus.Logger, gs *GameServer) http.HandlerFunc {
 		// 11. Cleanup. Connection-level only: the user stays a lobby member, so a dropped socket
 		// or a closed tab can reconnect and still shows up in GET /lobby/active (cambia-783).
 		// Only POST /lobby/{id}/leave releases membership.
+		//
+		// Addressed to this connection, not to the user. A second tab, or a reconnect that beat
+		// this socket's own read failure, has already displaced the hub's entry for this user;
+		// a user-addressed leave here would evict and close that live socket instead, and the
+		// disconnect grace it armed would expire into a forfeit (cambia-1543).
 		logger.Infof("ws: user %s disconnected from hub %s", userID, lobbyID)
-		h.Leave(userID)
+		h.LeaveConn(conn)
 		cancel()
 	}
 }
