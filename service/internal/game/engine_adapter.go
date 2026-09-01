@@ -134,8 +134,8 @@ func engineCardToDetails(c engine.Card, id uuid.UUID) *models.Card {
 // wholesale from a struct built without DefaultHouseRules (an older persisted payload, or a
 // caller that only set the field it cared about): 0 penalty cards and 0 dealt cards are not
 // configurations any lobby can produce, so they are read as "unset" rather than obeyed.
-// Every other count is taken literally, since 0 is a meaningful setting for it (no jokers,
-// no pregame peek, unlimited turns) and NumDecks==0 already means one deck in NewGame.
+// Every other count is taken literally, since 0 is a meaningful setting for it (no jokers, no
+// pregame peek, unlimited turns). NumDecks is its own case, resolved separately below.
 func (g *CambiaGame) mapHouseRulesToEngine() engine.HouseRules {
 	penaltyCount := uint8(g.HouseRules.PenaltyDrawCount)
 	if penaltyCount == 0 {
@@ -144,6 +144,15 @@ func (g *CambiaGame) mapHouseRulesToEngine() engine.HouseRules {
 	cardsPerPlayer := uint8(g.HouseRules.CardsPerPlayer)
 	if cardsPerPlayer == 0 {
 		cardsPerPlayer = 4
+	}
+	// A NumDecks the host never touched resolves from the seated player count rather than the
+	// DefaultHouseRules literal (MATCHMAKING.md 1.1, cambia-1564): left at a flat 1, a 5-8 seat
+	// casual table dealt from a 21-card stockpile and reshuffled repeatedly. An explicit host
+	// choice, including one equal to the default, is honored as-is at every seat count. Circuit
+	// mode is untouched (cambia-1117 owns TournamentHouseRules' own NumDecks).
+	numDecks := g.HouseRules.NumDecks
+	if !g.HouseRules.numDecksExplicit {
+		numDecks = DefaultNumDecksForPlayers(len(g.Players))
 	}
 	// In circuit mode, use tournament-enforced rules.
 	if g.Circuit.Enabled {
@@ -168,7 +177,7 @@ func (g *CambiaGame) mapHouseRulesToEngine() engine.HouseRules {
 		// rule: the player count comes from the lobby roster, never from the settings panel.
 		NumPlayers:       uint8(len(g.Players)),
 		InitialViewCount: uint8(g.HouseRules.InitialViewCount),
-		NumDecks:         uint8(g.HouseRules.NumDecks),
+		NumDecks:         uint8(numDecks),
 	}
 }
 

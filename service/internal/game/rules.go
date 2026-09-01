@@ -85,6 +85,17 @@ type HouseRules struct {
 	NumJokers                int  `json:"numJokers"`                // Jokers shuffled into each deck copy (RULES.md 7 useJokers, as a count).
 	NumDecks                 int  `json:"numDecks"`                 // Standard decks shuffled together.
 	InitialViewCount         int  `json:"initialViewCount"`         // Cards each player peeks at during the pregame reveal (RULES.md 2 peeks 2).
+
+	// numDecksExplicit records whether NumDecks came from an explicit "numDecks" key in an
+	// Update call, as opposed to sitting at whatever DefaultHouseRules left it. Unexported so it
+	// never crosses the wire: no client reads or writes it, and the JSON payload keeps carrying
+	// only the resolved-or-default NumDecks value it already did. mapHouseRulesToEngine reads it
+	// to decide whether an untouched NumDecks should resolve from the seated player count at game
+	// creation (DefaultNumDecksForPlayers, MATCHMAKING.md 1.1, cambia-1564) rather than deal a
+	// single-deck game to a 5-8 seat casual table out of a 21-card stockpile. A host who sets
+	// NumDecks explicitly, including to a value equal to the default, keeps exactly that value at
+	// every seat count.
+	numDecksExplicit bool
 }
 
 // DefaultHouseRules returns the house rules a fresh lobby or game starts with. These values
@@ -107,7 +118,19 @@ func DefaultHouseRules() HouseRules {
 		NumJokers:                2,
 		NumDecks:                 1,
 		InitialViewCount:         2,
+		numDecksExplicit:         false,
 	}
+}
+
+// DefaultNumDecksForPlayers resolves the deck count a casual lobby deals from when its host has
+// not set NumDecks explicitly, per MATCHMAKING.md 1.1: one deck for 2-4 seated players, two for
+// 5-8 (the full range BeginPreGame admits, 2 through engine.MaxPlayers). Ranked queues seat 2 or
+// 4 and so always resolve to one deck either way, matching MATCHMAKING.md 1's table.
+func DefaultNumDecksForPlayers(numPlayers int) int {
+	if numPlayers >= 5 {
+		return 2
+	}
+	return 1
 }
 
 // Update applies changes from a map to the HouseRules struct.
@@ -213,6 +236,11 @@ func (rules *HouseRules) Update(newRules map[string]interface{}) error {
 	}
 	if err = assignInt(&next.NumDecks, "numDecks", numDecksMin, numDecksMax); err != nil {
 		return err
+	}
+	// Mirrors assignInt's own presence gate: a key that is absent or explicitly nil never wrote
+	// NumDecks above and must not mark it explicit here either.
+	if val, exists := newRules["numDecks"]; exists && val != nil {
+		next.numDecksExplicit = true
 	}
 	if err = assignInt(&next.InitialViewCount, "initialViewCount", initialViewCountMin, initialViewCountMax); err != nil {
 		return err
