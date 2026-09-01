@@ -197,7 +197,17 @@ type CambiaGame struct {
 	TurnID       int           // Increments each turn, useful for state synchronization and checks.
 	TurnDuration time.Duration // Configurable duration for each turn timer.
 	turnTimer    *time.Timer   // Active timer for the current turn.
-	actionIndex  int           // Sequential index for logging actions via historian.
+	// turnTimerGen stamps each arming of turnTimer. Timer.Stop cannot un-fire a callback that is
+	// already awake and waiting on g.mu, so it takes the lock once the action that stopped it has
+	// finished and runs the timeout against a turn that is no longer the one it was armed for.
+	// TurnID does not catch that on its own: it only moves in onTurnAdvanced, while the re-arms
+	// inside a single turn - the ability prompt a discard opens, the timeout fallbacks, the King's
+	// second step, a reconnect - all run on the same TurnID, so an ability prompt handed out with
+	// the clock near zero was auto-skipped and a returning player was timed out on the window they
+	// had just been given. The callback compares the generation it was armed with and returns.
+	// Same device as graceGen and snapFillState.gen (cambia-1546).
+	turnTimerGen uint64
+	actionIndex  int // Sequential index for logging actions via historian.
 
 	// PreGameDuration is how long BeginPreGame holds the initial card-reveal phase before
 	// StartGame flips Started true. Set from GameServer.PreGameDuration at creation
@@ -1489,14 +1499,6 @@ func (g *CambiaGame) logAction(actorID uuid.UUID, actionType string, payload map
 			log.Printf("Error: Game %s: Failed publishing action %d ('%s') to Redis: %v", g.ID, rec.ActionIndex, rec.ActionType, err)
 		}
 	}(record)
-}
-
-// ResetTurnTimer restarts the turn timer for the current player. Public entry point: acquires mu.
-// Internal callers that already hold mu call scheduleNextTurnTimer directly.
-func (g *CambiaGame) ResetTurnTimer() {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.scheduleNextTurnTimer() // Use the internal scheduler.
 }
 
 // FireEventPrivateSpecialActionFail helper to send a private failure event for special actions.

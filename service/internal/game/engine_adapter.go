@@ -1766,6 +1766,12 @@ func (g *CambiaGame) scheduleNextTurnTimerEngine() {
 		g.turnTimer.Stop()
 		g.turnTimer = nil
 	}
+	// Every call to this scheduler retires whatever was armed before it, including a callback
+	// Stop() could not recall because it was already awake and blocked on g.mu. The bump sits
+	// ahead of the early returns below so a call that arms nothing still retires the old stamp
+	// (cambia-1546).
+	g.turnTimerGen++
+	gen := g.turnTimerGen
 	// Clear any previously advertised deadline; only re-armed below if a timer actually starts.
 	g.TurnDeadline = time.Time{}
 	if g.TurnDuration <= 0 || g.GameOver || !g.Started {
@@ -1806,13 +1812,14 @@ func (g *CambiaGame) scheduleNextTurnTimerEngine() {
 	g.TurnDeadline = time.Now().Add(g.TurnDuration)
 
 	// The AfterFunc runs in its own goroutine, so it acquires mu before reading lifecycle
-	// state and mutating via handleTimeoutEngine. The TurnID guard drops a stale fire whose
-	// turn already advanced (Stop() does not block the in-flight callback, so a reschedule
-	// that increments TurnID makes this callback a no-op once it acquires the lock).
+	// state and mutating via handleTimeoutEngine. Stop() does not block a callback already in
+	// flight, so two guards drop a fire that no longer owns the clock: TurnID for a turn that has
+	// since advanced, and turnTimerGen for a re-arm inside this same turn, which is the case
+	// TurnID cannot see (cambia-1546).
 	g.turnTimer = time.AfterFunc(g.TurnDuration, func() {
 		g.mu.Lock()
 		defer g.mu.Unlock()
-		if g.GameOver || !g.Started || g.TurnID != curTurnID {
+		if g.GameOver || !g.Started || g.TurnID != curTurnID || g.turnTimerGen != gen {
 			return
 		}
 		log.Printf("Game %s, Turn %d: Timer fired for player %s.", g.ID, g.TurnID, capturedPlayerUUID)
