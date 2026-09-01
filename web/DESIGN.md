@@ -70,7 +70,7 @@ Text and hairlines drawn directly on the felt cannot use the neutral tiers, whic
 |`--border-subtle`|`rgba(237,242,239,.07)`|`rgba(22,33,29,.09)`|Hairline dividers inside a surface.|
 |`--border-default`|`rgba(237,242,239,.14)`|`rgba(22,33,29,.17)`|The standard 1px component border.|
 |`--border-strong`|`rgba(237,242,239,.26)`|`rgba(22,33,29,.32)`|Emphasis, container under attention.|
-|`--border-accent`|`#c9a227`|`#ab8526`|Gold-outlined surface: primary queue, selected row.|
+|`--border-accent`|`#c9a227`|`#ab8526`|Gold-outlined surface: selected row.|
 
 ### Interactive states
 
@@ -143,7 +143,7 @@ That pass moved level and left hue alone, and both tones then read wrong (cambia
 
 Danger, dark: the AA fix left it a light salmon of chroma 39.9, less colorful than the amber warning of the day at 64.6, so a crashed pill read calmer than the starting pill beside it. `--red-300` is now `#ff6f61`, chroma 64.4 at hue 33.1, measured at 5.37:1 and 4.88:1 on its own tint over `--surface-1` and `--surface-2`, 4.67:1 on the seat and 7.19:1 in the score pill.
 
-Warning, both themes: the amber ramp ran at hue 66 to 74, against `--accent-gold-text` at 83.7 light and 87.4 dark, and `QueueCard` draws the two side by side, a gold Ranked on the primary queue and a warning Ranked on the rest, so they read as one color, 17.4 degrees apart on paper and 13.1 in dark. Both tones move to a two-step orange ramp at hue 52. `--orange-700` `#96461a` holds the light bronze's lightness and chroma (39.5 and 50.8 against 39.6 and 50.0) and measures the same 5.24:1 and 5.49:1 the bronze did. `--orange-300` `#f68c57` holds the dark amber's lightness (68.8 against 68.9) at chroma 57.7, under the danger red's 64.4 so danger outranks it on colorfulness, and measures 5.95:1 and 5.38:1 against the amber's 5.93:1 and 5.36:1. The two orange steps sit 31.0 and 35.7 degrees off their theme's gold and 18.4 and 18.6 off its danger red. The amber ramp had no other consumer and is removed.
+Warning, both themes: the amber ramp ran at hue 66 to 74, against `--accent-gold-text` at 83.7 light and 87.4 dark, 17.4 degrees apart on paper and 13.1 in dark, close enough that a gold badge and a warning badge in the same view read as one color. The motivating case was `QueueCard`'s gold Ranked badge on a since-removed primary-queue treatment (cambia-1126, cambia-1519) next to a warning Ranked on every other queue; the two-step orange ramp at hue 52 keeps gold and warning legible wherever they still land near each other (a gold Host badge beside a warning status line, for instance). `--orange-700` `#96461a` holds the light bronze's lightness and chroma (39.5 and 50.8 against 39.6 and 50.0) and measures the same 5.24:1 and 5.49:1 the bronze did. `--orange-300` `#f68c57` holds the dark amber's lightness (68.8 against 68.9) at chroma 57.7, under the danger red's 64.4 so danger outranks it on colorfulness, and measures 5.95:1 and 5.38:1 against the amber's 5.93:1 and 5.36:1. The two orange steps sit 31.0 and 35.7 degrees off their theme's gold and 18.4 and 18.6 off its danger red. The amber ramp had no other consumer and is removed.
 
 ### Cards and tiers
 

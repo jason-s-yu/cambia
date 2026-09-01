@@ -24,14 +24,13 @@ import { presetFitsGameMode } from '@/lib/lobbyPreset';
 import { gameModeLabel } from '@/utils/gameMode';
 import { queuePoolLabel, ratingPoolLabel, tierFromRating } from '@/utils/ratingPool';
 
-// No queue card takes QueueCard's gold `primary` treatment (cambia-1126 item 4). It used to go to
-// a hardcoded pair, h2h_rapid and ffa4_standard, chosen here and nowhere else: the service names
-// no flagship queue, QueueConfig carries no such field, and the set did not even move a card in
-// the grid (order is QueueConfig.Order, cambia-957). So the gold border, gold Ranked badge and
-// gold Play read as a recommendation with nothing behind it, on two of six queues whose rules are
-// byte-identical (MATCHMAKING.md 5.2) and which differ only by a round count no lobby currently
-// plays. The primitive keeps the prop for the day GET /matchmaking/queues names a featured queue;
-// until it does, the cards read alike.
+// No queue card takes a gold flagship treatment (cambia-1126 item 4, prop removed cambia-1519).
+// It used to go to a hardcoded pair, h2h_rapid and ffa4_standard, chosen here and nowhere else:
+// the service names no flagship queue, QueueConfig carries no such field, and the set did not
+// even move a card in the grid (order is QueueConfig.Order, cambia-957). So the gold border, gold
+// Ranked badge and gold Play read as a recommendation with nothing behind it, on two of six
+// queues whose rules are byte-identical (MATCHMAKING.md 5.2) and which differ only by a round
+// count no lobby currently plays. All queue cards read alike until a service field names one.
 
 /**
  * Rough estimated match length in minutes from queue shape, since the

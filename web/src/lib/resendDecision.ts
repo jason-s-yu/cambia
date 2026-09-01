@@ -57,7 +57,8 @@ export const LOBBY_ACTION_TYPES = new Set([
 	'ready',
 	'unready',
 	'start_game',
-	'update_rules'
+	'update_rules',
+	'return_to_lobby'
 ]);
 
 /** The subset of the game snapshot the decision reads (structurally satisfied by ObfGameState). */
