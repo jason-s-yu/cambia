@@ -1762,6 +1762,16 @@ func (g *CambiaGame) onTurnAdvanced() {
 
 // scheduleNextTurnTimerEngine schedules a turn timer using engine state.
 func (g *CambiaGame) scheduleNextTurnTimerEngine() {
+	// Whatever this call decides, a deadline it moved is announced before it returns. This is the
+	// one place g.TurnDeadline is written, so publishing from here covers every re-arm without
+	// each of the seven mid-turn sites having to remember to (cambia-1556).
+	prevDeadline := g.TurnDeadline
+	defer func() {
+		if !g.TurnDeadline.Equal(prevDeadline) {
+			g.publishTurnDeadline()
+		}
+	}()
+
 	if g.turnTimer != nil {
 		g.turnTimer.Stop()
 		g.turnTimer = nil
@@ -1825,6 +1835,36 @@ func (g *CambiaGame) scheduleNextTurnTimerEngine() {
 		log.Printf("Game %s, Turn %d: Timer fired for player %s.", g.ID, g.TurnID, capturedPlayerUUID)
 		g.handleTimeoutEngine(capturedPlayerUUID)
 	})
+}
+
+// publishTurnDeadline announces the turn clock as it now stands.
+//
+// g.TurnDeadline used to reach the wire only from broadcastPlayerTurnEngine and the sync_state
+// snapshot, and neither runs on a mid-turn re-arm. The seven sites that stop and restart the clock
+// inside one turn moved the deadline and told nobody, so a client kept counting down to the
+// deadline it was last given: the Turn bar hit 0:00 while the server still held a full window open
+// behind it (cambia-1556). The server clock stays authoritative either way; what was wrong was the
+// picture of it.
+//
+// This rides its own event type rather than game_player_turn because no turn may be announced over
+// a pending ability (replace_ability_test.go), which is exactly when most of those re-arms happen.
+// turnDeadline is present only while a timer is armed, matching what game_player_turn puts in its
+// payload and what sync_state omits, so a client reads its absence the same way in all three.
+// Assumes the lock is held by the caller.
+func (g *CambiaGame) publishTurnDeadline() {
+	// A game that is not live has no clock to advertise, which is the rule sync_state already
+	// applies: endGame leaves TurnDeadline behind rather than clearing it.
+	if !g.Started || g.GameOver {
+		return
+	}
+	payload := map[string]interface{}{
+		"turn":      g.TurnID,
+		"serverNow": time.Now().UnixMilli(),
+	}
+	if !g.TurnDeadline.IsZero() {
+		payload["turnDeadline"] = g.TurnDeadline.UnixMilli()
+	}
+	g.fireEvent(GameEvent{Type: EventGameTurnDeadline, Payload: payload})
 }
 
 // broadcastPlayerTurnEngine notifies all players of the current player's turn using engine state.

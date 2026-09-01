@@ -162,6 +162,21 @@ export interface GamePlayerTurnEvent {
 	};
 }
 
+/** The turn clock on its own, for a re-arm that moves the deadline without starting a new turn
+ *  (an ability prompt, a King's second step, a reconnect onto an unclocked turn). It says nothing
+ *  about whose turn it is, so applying it must leave any prompt the client is holding alone:
+ *  game_player_turn is never sent over a pending ability, which is when most re-arms happen
+ *  (cambia-1556). Same payload shape and skew-correction pair as GamePlayerTurnEvent. */
+export interface GameTurnDeadlineEvent {
+	type: 'game_turn_deadline';
+	payload: {
+		turn: number;
+		// Absent when no turn timer is configured for this game.
+		turnDeadline?: number;
+		serverNow: number;
+	};
+}
+
 /** A card as it appears inside a GameEvent payload (service EventCard). */
 export interface EventCard {
 	id: string;

@@ -55,6 +55,11 @@ const (
 	EventPrivateSpecialFail     GameEventType = "private_special_action_fail"    // Private: Special action attempt failed.
 	EventPlayerCambia           GameEventType = "player_cambia"                  // Public: Player called Cambia.
 	EventGamePlayerTurn         GameEventType = "game_player_turn"               // Public: Notification of the current player's turn.
+	// EventGameTurnDeadline carries the turn clock on its own, for the re-arms that move the
+	// deadline without starting a new turn. game_player_turn may not be announced over a pending
+	// ability, which is when most of those re-arms happen, so the clock needs a channel of its own
+	// (cambia-1556). See publishTurnDeadline.
+	EventGameTurnDeadline GameEventType = "game_turn_deadline" // Public: The current turn's clock was re-armed.
 	EventPrivateSyncState       GameEventType = "private_sync_state"             // Private: Full game state sync for a player.
 	EventPrivateInitialCards    GameEventType = "private_initial_cards"          // Private: Pregame peek cards revealed to their owner.
 	EventGameEnd                GameEventType = "game_end"                       // Public: Game has ended, includes results.
@@ -931,6 +936,25 @@ func (g *CambiaGame) HandleReconnect(playerID uuid.UUID, conn *websocket.Conn) {
 				log.Printf("Game %s: Player %s returned to a game still in progress; their forfeit is lifted.", g.ID, playerID)
 			}
 
+			// A returning player's turn is clocked only where nothing is clocking it already,
+			// which is the rule the drop side already applies (see the turnTimer check in
+			// HandleDisconnect and armDisconnectGrace's comment). The drop never stops the turn
+			// timer, so the deadline the table has been counting down to is still the right one
+			// and there is nothing to restore: rescheduling would hand the player a whole fresh
+			// window for having dropped, and this ran on every socket join, gated on the player
+			// being the actor and not on their having been away at all. hub.notePlayerReconnected
+			// fires on every join, so repeated drop-and-return cycles refilled the clock each
+			// time and held one turn open indefinitely (cambia-1545).
+			//
+			// It runs ahead of the snapshots below so they carry the deadline actually in force
+			// in both cases: the one the drop preserved, or the one armed here for a turn that
+			// had no clock. Sending them first meant a re-arm left the returning client counting
+			// down to a deadline the server had already replaced (cambia-1556).
+			if g.Started && !g.GameOver && g.turnTimer == nil && g.currentPlayerID() == playerID {
+				log.Printf("Game %s: Player %s returned to an unclocked turn of their own; arming its clock.", g.ID, playerID)
+				g.scheduleNextTurnTimer()
+			}
+
 			// Send sync state immediately to the reconnected player.
 			g.sendSyncState(playerID)
 
@@ -955,23 +979,6 @@ func (g *CambiaGame) HandleReconnect(playerID uuid.UUID, conn *websocket.Conn) {
 				delete(g.circuitAIControlled, playerID)
 			}
 
-			// A returning player's turn is clocked only where nothing is clocking it already,
-			// which is the rule the drop side already applies (see the turnTimer check in
-			// HandleDisconnect and armDisconnectGrace's comment). The drop never stops the turn
-			// timer, so the deadline the table has been counting down to is still the right one
-			// and there is nothing to restore: rescheduling would hand the player a whole fresh
-			// window for having dropped, and this ran on every socket join, gated on the player
-			// being the actor and not on their having been away at all. hub.notePlayerReconnected
-			// fires on every join, so repeated drop-and-return cycles refilled the clock each
-			// time and held one turn open indefinitely (cambia-1545).
-			//
-			// The syncs above therefore carry the deadline actually in force, because this leaves
-			// it alone. Where the turn genuinely has no clock the schedule still runs, and
-			// scheduleNextTurnTimerEngine publishes the deadline it arms (cambia-1556).
-			if g.Started && !g.GameOver && g.turnTimer == nil && g.currentPlayerID() == playerID {
-				log.Printf("Game %s: Player %s returned to an unclocked turn of their own; arming its clock.", g.ID, playerID)
-				g.scheduleNextTurnTimer()
-			}
 			break
 		}
 	}

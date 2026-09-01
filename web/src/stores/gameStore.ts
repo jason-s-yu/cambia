@@ -378,6 +378,34 @@ export const useGameStore = create<GameState & GameActions>()(
 							}
 							break;
 
+						// The turn clock alone, for a re-arm that moved the deadline without
+						// starting a new turn: the ability prompt a discard opens, a King's second
+						// step, a timeout that handed the window back, a reconnect onto a turn that
+						// had no clock. Those all used to move the deadline and emit nothing, so
+						// TimerBar kept counting down to the deadline it was last given and hit
+						// 0:00 while the server still held a full window open (cambia-1556).
+						//
+						// Deliberately narrower than game_player_turn: this says nothing about
+						// whose turn it is, so it touches neither currentPlayerId nor
+						// specialAction. Clearing the prompt here would wipe the very prompt most
+						// of these re-arms exist to give the player time to answer.
+						case 'game_turn_deadline': {
+							if (state.gameState) {
+								const deadlinePayload = payload.payload;
+								if (typeof deadlinePayload?.turn === 'number') {
+									state.gameState.turnId = deadlinePayload.turn;
+								}
+								if (typeof deadlinePayload?.serverNow === 'number') {
+									state.serverClockOffsetMs = deadlinePayload.serverNow - Date.now();
+								}
+								state.gameState.turnDeadline =
+									(deadlinePayload && typeof deadlinePayload.turnDeadline === 'number')
+										? deadlinePayload.turnDeadline
+										: null;
+							}
+							break;
+						}
+
 						case 'player_draw_stockpile':
 						case 'private_draw_stockpile': // Treat both similarly for state update, but display logic differs
 							if (state.gameState) {
