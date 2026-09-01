@@ -228,10 +228,14 @@ test('a finished or replaced game says nothing', () => {
 
 test('lobby frames resend while the phase holds, and are reported once it moves', () => {
     // The staleness gate sits above the phase switch in hub.go dispatch(), so ready, chat,
-    // start_game and update_rules are dropped by exactly the same rule. A phase that moved makes
-    // the frame unresendable ('ready' in an open lobby is not 'ready' in a countdown), and the
-    // player is told rather than left watching a lobby that did not react (cambia-913 F4).
-    for (const type of ['chat', 'ready', 'unready', 'start_game', 'update_rules']) {
+    // start_game, update_rules and return_to_lobby are dropped by exactly the same rule. A phase
+    // that moved makes the frame unresendable ('ready' in an open lobby is not 'ready' in a
+    // countdown), and the player is told rather than left watching a lobby that did not react
+    // (cambia-913 F4). return_to_lobby was missing from LOBBY_ACTION_TYPES (cambia-1515): before
+    // the fix this loop's first assertion sees 'drop' instead of 'resend', since a type outside
+    // GAME_ACTION_TYPES and LOBBY_ACTION_TYPES falls through decideResend's isGameAction guard
+    // and dies silently.
+    for (const type of ['chat', 'ready', 'unready', 'start_game', 'update_rules', 'return_to_lobby']) {
         const rec = record(type, { ctx: ctx({ phase: 'open' }) });
         assert.equal(decideResend(rec, ctx({ phase: 'open' }), 11), 'resend', type);
         assert.equal(decideResend(rec, ctx({ phase: 'countdown' }), 11), 'notify', type);
