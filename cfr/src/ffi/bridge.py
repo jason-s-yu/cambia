@@ -445,6 +445,9 @@ _ffi.cdef("""
 
     /* cambia-1489: FFI-reachable stranded-ability guard */
     int32_t cambia_game_resolve_untargetable_armed_ability(int32_t game_h, uint8_t n_player_space);
+
+    /* cambia-1488: cambia-caller accessor (unblocks the tabular CFRAgentWrapper infoset key) */
+    int8_t cambia_game_cambia_caller(int32_t game_h);
 """)
 
 _LIB = None
@@ -839,6 +842,19 @@ class GoEngine:
         discard decision (i.e., a card has been drawn but not yet played).
         """
         return int(self._lib.cambia_game_get_drawn_card_bucket(self._game_h))
+
+    def cambia_caller(self) -> Optional[int]:
+        """
+        Return the seat that called Cambia, or None if no one has.
+
+        Read-only (cambia-1488). This was the one component of the tabular
+        CFRAgentWrapper's infoset key (GamePhase, a function of who called
+        Cambia) the FFI did not expose; every other component -- own-hand
+        buckets, opponent belief, hand lengths, discard-top bucket, stockpile
+        estimate -- is already reachable through GoEngine and GoAgentState.
+        """
+        result = int(self._lib.cambia_game_cambia_caller(self._game_h))
+        return result if result >= 0 else None
 
     def decision_ctx(self) -> int:
         """

@@ -809,6 +809,20 @@ func cambia_game_get_drawn_card_bucket(h C.int32_t) C.int8_t {
 	return C.int8_t(agent.CardToBucket(card))
 }
 
+// cambia_game_cambia_caller returns the seat that called Cambia, or -1 if no one has (also -1 on
+// an invalid handle). Read-only. GameState.CambiaCaller is the only input the tabular
+// CFRAgentWrapper's infoset key needs that the FFI did not already expose (own-hand buckets,
+// opponent belief, hand lengths, discard-top bucket and stockpile estimate are all reachable
+// through GoEngine and GoAgentState); this closes that gap (cambia-1488).
+//
+//export cambia_game_cambia_caller
+func cambia_game_cambia_caller(h C.int32_t) C.int8_t {
+	if h < 0 || h >= maxGames || !gameInUse[h] {
+		return -1
+	}
+	return C.int8_t(gamePool[h].CambiaCaller)
+}
+
 //export cambia_agent_action_mask
 func cambia_agent_action_mask(game_h C.int32_t, out *C.uint8_t) C.int32_t {
 	if game_h < 0 || game_h >= maxGames || !gameInUse[game_h] {
@@ -2326,6 +2340,16 @@ func testGameResolveUntargetableArmedAbility(gameH int32, nPlayerSpace bool) int
 		np = 1
 	}
 	return int32(cambia_game_resolve_untargetable_armed_ability(C.int32_t(gameH), np))
+}
+
+// testGameCambiaCaller drives cambia_game_cambia_caller from Go tests.
+func testGameCambiaCaller(gameH int32) int32 {
+	return int32(cambia_game_cambia_caller(C.int32_t(gameH)))
+}
+
+// testGameActingPlayer drives cambia_game_acting_player from Go tests.
+func testGameActingPlayer(gameH int32) uint8 {
+	return uint8(cambia_game_acting_player(C.int32_t(gameH)))
 }
 
 // testGameSetPending pokes Pending.Type/PlayerID directly, for constructing a state no live arm

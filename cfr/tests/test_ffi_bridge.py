@@ -147,6 +147,26 @@ class TestGoEngineState:
         with GoEngine(seed=403) as engine:
             assert not engine.is_terminal()
 
+    def test_go_engine_cambia_caller_none_until_called(self):
+        """cambia_caller() is None before anyone has called Cambia (cambia-1488)."""
+        with GoEngine(seed=404) as engine:
+            assert engine.cambia_caller() is None
+
+    def test_go_engine_cambia_caller_reports_the_calling_seat(self):
+        """cambia_caller() reports the seat once ActionCallCambia is applied."""
+        from src.config import CambiaRulesConfig
+
+        hr = CambiaRulesConfig()
+        hr.cambia_allowed_round = 0
+        with GoEngine(seed=405, house_rules=hr) as engine:
+            acting = engine.acting_player()
+            mask = engine.legal_actions_mask()
+            # ActionCallCambia = 2 (engine/types.go); confirm it's legal here
+            # before relying on it rather than asserting a magic index blind.
+            assert mask[2] == 1, "ActionCallCambia is not legal at cambiaAllowedRound=0"
+            engine.apply_action(2)
+            assert engine.cambia_caller() == acting
+
     def test_go_engine_resolve_untargetable_armed_ability_noop(self):
         """resolve_untargetable_armed_ability() is a no-op with nothing armed (cambia-1489)."""
         with GoEngine(seed=406) as engine:

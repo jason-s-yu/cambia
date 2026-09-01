@@ -762,6 +762,7 @@ class GoEngine:
     # Context helpers
     def decision_ctx(self) -> int                    # 0=StartTurn..5=Terminal
     def get_drawn_card_bucket(self) -> int           # -1 if none
+    def cambia_caller(self) -> Optional[int]         # seat that called Cambia, None if no one has
     def resolve_untargetable_armed_ability(self, n_player_space: bool) -> bool
 
     # Batch update (one FFI call for both agents)
@@ -786,6 +787,15 @@ The save/restore API replaces the apply/undo pattern. Before recursing into a ch
 `update_both()` calls `cambia_agents_update_both()` in a single FFI round-trip instead of two separate `cambia_agent_update()` calls. Used in the hot traversal loop.
 
 `resolve_untargetable_armed_ability(n_player_space)` (cambia-1489) wraps `cambia_game_resolve_untargetable_armed_ability`: it discharges an armed ability that no action in the given action space can resolve, returning whether it discharged something. The engine refuses every other action while it holds a pending ability, so this is the FFI-reachable escape for that state. `n_player_space` must name the action space the caller was driving with when it found the legal mask empty (`False` for `apply_action`'s 146-action surface, `True` for `apply_nplayer_action`'s 620-action surface) -- passing the wrong one asks a different question than the one that actually stranded the caller.
+
+`cambia_caller()` (cambia-1488) is a read-only wrapper over `cambia_game_cambia_caller`: the seat that called Cambia, or `None` if no one has. It is the one component of the tabular `CFRAgentWrapper`'s infoset key (`GamePhase`, a function of who called Cambia) the FFI did not previously expose; every other component of that key -- own-hand buckets, opponent belief, hand lengths, discard-top bucket, stockpile estimate -- was already reachable through `GoEngine` and `GoAgentState` (see `CFRAgentWrapper`'s docstring in `src/evaluate_agents.py`). `tests/test_cfr_agent_wrapper_go_infoset_key.py` builds the full key tuple off Go-only state using this export.
+
+### Known Boundaries of the GoEngine Evaluation Path
+
+Two things stay Python-engine-only, by ruling rather than by oversight (cambia-1488 parts 2/3):
+
+- **N-player token stream.** `PRTCFRAgentWrapper` consumes the engine's per-agent token stream, which the engine only appends to through the two-agent batch-apply path (`apply_games_batch`). A table above two seats has no export that appends tokens per seat, so `PRTCFRAgentWrapper.initialize_state` raises `NotImplementedError` naming the gap rather than silently scoring against a frozen stream. Evaluate PRT-CFR at two seats, or add an N-player token-stream export first.
+- **DESCA's `CAMBIA_DESCA_LEGACY_ENC=1` arm.** This env var selects a V1 arm-B encode reproduction (`DESCAAgentWrapper._encode_v2_legacy_rcb`) that hand-rolled the interleaved encode off Python `AgentState` fields no longer reachable byte-for-byte from Go belief (the Go belief exposes buckets, not the same derived abstractions). It raises `AgentStateError` naming the boundary; unset the env var to evaluate DESCA on the Go engine.
 
 ### `GoAgentState`
 
@@ -864,7 +874,7 @@ ffi/bridge.py
   |     cambia_agent_encode_eppbs_interleaved, cambia_agent_encode_eppbs_dealiased
   |     cambia_agent_encode_nplayer, cambia_agent_apply_decay
   |     cambia_handle_pool_stats
-  |     cambia_game_resolve_untargetable_armed_ability
+  |     cambia_game_resolve_untargetable_armed_ability, cambia_game_cambia_caller
   +-- deep_worker.py: GoEngine and GoAgentState used when engine_backend="go"
   +-- evaluate_agents.py: NeuralAgentWrapper uses GoAgentState for eval encoding
 ```
