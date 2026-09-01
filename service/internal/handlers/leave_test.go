@@ -383,6 +383,66 @@ func TestDisconnectKeepsMembershipAndReconnectWorks(t *testing.T) {
 	}
 }
 
+// TestLeaveDropsTheCallersLiveConnection pins the half of the deliberate leave that stayed
+// user-addressed when the socket teardown path stopped being (cambia-1543). The HTTP caller
+// holds no socket of its own, so its Leave has to drop whichever connection is registered now;
+// the client that just gave up its membership must not be left with a live socket on the hub.
+func TestLeaveDropsTheCallersLiveConnection(t *testing.T) {
+	auth.Init()
+	gs := NewGameServer()
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/lobby/create", CreateLobbyHandler(gs))
+	mux.Handle("/ws/", HubWSHandler(logger, gs))
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	hostID := uuid.New()
+	hostToken, _ := auth.CreateJWT(hostID.String())
+	memberID := uuid.New()
+	memberToken, _ := auth.CreateJWT(memberID.String())
+
+	lobbyUUID := createPublicLobby(t, gs, hostToken)
+	lob, exists := gs.LobbyStore.GetLobby(lobbyUUID)
+	if !exists {
+		t.Fatalf("lobby %s missing from store after create", lobbyUUID)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	host := dialWSClient(t, ctx, ts.URL, lobbyUUID.String(), hostToken)
+	defer host.close()
+	member := dialWSClient(t, ctx, ts.URL, lobbyUUID.String(), memberToken)
+	defer member.close()
+	if host.waitForType("lobby_state", 5*time.Second) == nil {
+		t.Fatalf("the host connection was never served")
+	}
+	if member.waitForType("lobby_state", 5*time.Second) == nil {
+		t.Fatalf("the member connection was never served")
+	}
+	if member.waitClosed(200 * time.Millisecond) {
+		t.Fatalf("the member's socket was closed before they left")
+	}
+
+	if w := leaveLobbyAs(t, gs, lobbyUUID, memberToken); w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from leave, got %d: %s", w.Code, w.Body.String())
+	}
+
+	if !member.waitClosed(5 * time.Second) {
+		t.Fatalf("a deliberate leave must drop the caller's live connection")
+	}
+	if host.waitClosed(200 * time.Millisecond) {
+		t.Fatalf("one member's leave must not close anybody else's socket")
+	}
+	if isMember(lob, memberID) {
+		t.Fatalf("member %s still holds lobby membership after leaving", memberID)
+	}
+}
+
 // TestLeaveUpdatesRosterForRemainingPlayers checks what the other players see: the departure
 // has to reach them, and it reaches them as the lobby snapshot the hub broadcasts.
 func TestLeaveUpdatesRosterForRemainingPlayers(t *testing.T) {

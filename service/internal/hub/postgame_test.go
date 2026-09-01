@@ -93,12 +93,14 @@ func TestSecondGameStartsAfterPostGameReset(t *testing.T) {
 	lob.JoinUser(idB)
 
 	h := NewHub(lob)
-	// The test drives _begin_game itself, so the countdown timer must never land a second copy
-	// on h.incoming (nothing drains it here; Run() is not started).
-	h.CountdownDuration = time.Hour
+	// Both timers run for real and the test dispatches what they queue. The countdown used to be
+	// set to an hour so it could never land a stray _begin_game on h.incoming (nothing drains it
+	// here; Run() is not started), which is exactly the stray fire cambia-1557 made harmless: a
+	// _begin_game now carries the generation of the countdown that armed it.
+	h.CountdownDuration = 20 * time.Millisecond
 	h.PostGameDuration = 20 * time.Millisecond
 
-	defer h.Shutdown() // releases the parked countdown timers
+	defer h.Shutdown() // releases any timer still parked
 
 	created := 0
 	h.CreateGame = func(_ *lobby.Lobby, playerIDs []uuid.UUID, _ map[uuid.UUID]string, emitter game.Emitter) *game.CambiaGame {
@@ -118,7 +120,9 @@ func TestSecondGameStartsAfterPostGameReset(t *testing.T) {
 	h.dispatch(ClientMsg{UserID: idA, LastSeq: h.seq, Type: "ready"})
 	h.dispatch(ClientMsg{UserID: idB, LastSeq: h.seq, Type: "ready"})
 	require.Equal(t, PhaseCountdown, h.Phase, "both ready should start the countdown")
-	h.dispatch(ClientMsg{Type: "_begin_game"})
+	begin := waitForIncoming(t, h, 2*time.Second)
+	require.Equal(t, "_begin_game", begin.Type, "the countdown must schedule a game start")
+	h.dispatch(begin)
 	require.Equal(t, PhaseInGame, h.Phase)
 	require.Equal(t, 1, created, "game one must be created")
 	require.NotNil(t, h.Game)
@@ -136,7 +140,9 @@ func TestSecondGameStartsAfterPostGameReset(t *testing.T) {
 	h.dispatch(ClientMsg{UserID: idA, LastSeq: h.seq, Type: "ready"})
 	h.dispatch(ClientMsg{UserID: idB, LastSeq: h.seq, Type: "ready"})
 	require.Equal(t, PhaseCountdown, h.Phase, "a re-readied lobby must count down again")
-	h.dispatch(ClientMsg{Type: "_begin_game"})
+	begin = waitForIncoming(t, h, 2*time.Second)
+	require.Equal(t, "_begin_game", begin.Type, "the second countdown must schedule its own start")
+	h.dispatch(begin)
 
 	assert.Equal(t, PhaseInGame, h.Phase, "the second game must start")
 	assert.Equal(t, 2, created, "the game factory must run a second time")

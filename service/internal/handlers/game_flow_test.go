@@ -37,6 +37,10 @@ type wsTestClient struct {
 	mu     sync.Mutex
 	frames []wsEnvelope
 	maxSeq uint64
+	// readEnded records that the read loop stopped, which for a client the test never closes
+	// itself means the server hung up. waitClosed is how a test observes the hub dropping a
+	// socket (cambia-1543).
+	readEnded bool
 }
 
 func dialWSClient(t *testing.T, ctx context.Context, serverURL, lobbyID, token string) *wsTestClient {
@@ -54,6 +58,11 @@ func dialWSClient(t *testing.T, ctx context.Context, serverURL, lobbyID, token s
 }
 
 func (c *wsTestClient) readLoop() {
+	defer func() {
+		c.mu.Lock()
+		c.readEnded = true
+		c.mu.Unlock()
+	}()
 	for {
 		_, data, err := c.conn.Read(c.ctx)
 		if err != nil {
@@ -70,6 +79,22 @@ func (c *wsTestClient) readLoop() {
 		}
 		c.mu.Unlock()
 	}
+}
+
+// waitClosed reports whether the server closed this client's socket inside the timeout. Only
+// meaningful for a client the test has not closed itself.
+func (c *wsTestClient) waitClosed(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		c.mu.Lock()
+		ended := c.readEnded
+		c.mu.Unlock()
+		if ended {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
 }
 
 // settle waits for in-flight frames to arrive so maxSeq reflects the hub's current seq
