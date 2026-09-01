@@ -7,6 +7,7 @@ GoAgentState as drop-in replacements for CambiaGameState and AgentState.
 The shared library is loaded once at module import time.
 """
 
+import enum
 import os
 import random
 import sys
@@ -32,6 +33,37 @@ from src.constants import (
 # so a future MaxPlayers bump can't silently under-allocate this buffer again the
 # way the 580/452 dims did (cambia-542 F8).
 _NPLAYER_LEGAL_WORDS = (_GO_N_PLAYER_NUM_ACTIONS + 63) // 64
+
+
+class DecisionCtx(enum.IntEnum):
+    """The engine's DecisionContext numbering, as engine/types.go declares it.
+
+    ``GoEngine.decision_ctx()`` and the ``decision_context`` argument every
+    encoder FFI entry takes are raw ints in this numbering, so anything mapping
+    one to a Python enum has to know the order. Naming it once here gives that
+    code a symbol to derive from instead of a hand-written literal map, which is
+    what drifted: a copy with SNAP_DECISION and ABILITY_SELECT swapped sat in
+    this module's docstring until cambia-1376 and in the cross-validation test
+    map until cambia-1484.
+
+    Members share both names and values with ``src.constants.DecisionContext``,
+    so a Python enum can be looked up by name off a member here. Callers that
+    encode a context still fold TERMINAL onto START_TURN: a terminal state
+    carries no decision, and the fold keeps a caller racing the terminal check
+    from raising.
+
+    tests/test_cross_validation.py pins these values against a live engine, so
+    renumbering engine/types.go fails there rather than silently re-encoding
+    every ability and snap node under the wrong one-hot.
+    """
+
+    START_TURN = 0
+    POST_DRAW = 1
+    SNAP_DECISION = 2
+    ABILITY_SELECT = 3
+    SNAP_MOVE = 4
+    TERMINAL = 5
+
 
 # ---------------------------------------------------------------------------
 # Card index mapping utilities
@@ -841,14 +873,15 @@ class GoEngine:
         """
         Return the current decision context as an integer.
 
-        Values: 0=StartTurn, 1=PostDraw, 2=SnapDecision,
-                3=AbilitySelect, 4=SnapMove, 5=Terminal.
+        Values are ``DecisionCtx`` members: 0=StartTurn, 1=PostDraw,
+        2=SnapDecision, 3=AbilitySelect, 4=SnapMove, 5=Terminal.
 
         This is engine/types.go's DecisionContext order, which is also
         src/constants.py's DecisionContext order, so the integer passes
-        straight to either encoder. An earlier version of this docstring had
-        2 and 3 swapped; tests/test_cross_validation.py's _dc_int_to_enum
-        still carries that swap (cambia-1376 finding F2).
+        straight to either encoder. Earlier copies of the order had 2 and 3
+        swapped: this docstring until cambia-1376, and
+        tests/test_cross_validation.py's _dc_int_to_enum until cambia-1484.
+        Map through ``DecisionCtx`` rather than a fresh literal map.
         """
         return int(self._lib.cambia_game_decision_ctx(self._game_h))
 
