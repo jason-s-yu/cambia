@@ -81,7 +81,7 @@ func newPreGameHubStopped(t *testing.T, playerCount int, forfeit bool, turnTimer
 	g.HouseRules = rules
 
 	ended := make(chan endedGame, 4)
-	g.OnGameEnd = func(_ uuid.UUID, winner uuid.UUID, scores map[uuid.UUID]int, _ map[uuid.UUID]string, _ map[uuid.UUID]int, _ uuid.UUID) {
+	g.OnGameEnd = func(_ uuid.UUID, winner uuid.UUID, scores map[uuid.UUID]int, _ map[uuid.UUID]string, _ map[uuid.UUID]int, _ uuid.UUID, _ []game.FinalHand) {
 		ended <- endedGame{winner: winner, scores: scores}
 	}
 

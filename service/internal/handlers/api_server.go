@@ -274,7 +274,7 @@ func (gs *GameServer) hubGameFactory() hub.GameFactory {
 
 // attachOnGameEnd wires the OnGameEnd callback that resets lobby state and emits results.
 func (gs *GameServer) attachOnGameEnd(g *game.CambiaGame, lobbyID uuid.UUID) {
-	g.OnGameEnd = func(endedLobbyID uuid.UUID, winner uuid.UUID, scores map[uuid.UUID]int, usernames map[uuid.UUID]string, rawScores map[uuid.UUID]int, cambiaCallerID uuid.UUID) {
+	g.OnGameEnd = func(endedLobbyID uuid.UUID, winner uuid.UUID, scores map[uuid.UUID]int, usernames map[uuid.UUID]string, rawScores map[uuid.UUID]int, cambiaCallerID uuid.UUID, finalHands []game.FinalHand) {
 		log.Printf("Game %s ended. OnGameEnd executing for lobby %s.", g.ID, endedLobbyID)
 
 		lobInstance, exists := gs.LobbyStore.GetLobby(endedLobbyID)
@@ -320,10 +320,16 @@ func (gs *GameServer) attachOnGameEnd(g *game.CambiaGame, lobbyID uuid.UUID) {
 			// the hub's own goroutine since OnGameEnd may run on a foreign goroutine (game timers).
 			h.NotifyGameEnded()
 
+			// finalHands rides this frame as well as game_end (RULES.md 3C, cambia-1542). It has to:
+			// the game is dropped from the store a few lines below, so a client that reconnects
+			// into the results is answered with the hub's held copy of this frame alone
+			// (Hub.rememberTerminal/resendTerminal) and never sees game_end at all. The key keeps
+			// game_end's name rather than this frame's snake_case so both carry one shape.
 			resultMsg := map[string]interface{}{
 				"type":         "game_results",
 				"winner":       winner.String(),
 				"scores":       map[string]int{},
+				"finalHands":   finalHands,
 				"lobby_status": statusPayload,
 			}
 			for pid, sc := range scores {
