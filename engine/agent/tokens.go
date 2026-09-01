@@ -539,17 +539,37 @@ func (ts *TokenStream) Observe(g *engine.GameState, observerID uint8) error {
 	// peek_own/peek_other reveal one card, recorded in LastAction (RevealedOwner/
 	// RevealedIdx/RevealedCard). King-look reveals two cards and leaves the state
 	// in PendingKingDecision with both looked cards + slots in Pending.Data (own:
-	// Data[0]/Data[2], opponent: Data[1]/Data[3]); the own card is emitted first,
-	// matching sequence_encoding.py's own-owner-first ordering.
+	// Data[0]/Data[2]); the own card is emitted first, matching sequence_encoding.py's
+	// own-owner-first ordering.
+	//
+	// Data[3]'s meaning depends on which apply path armed the pending state, the same split
+	// cambia_game_get_pending's PendingKingDecision branch keys on (cgo/exports.go): the
+	// 2-player kingLook always targets OpponentOf(actor) (1-acting, exact at two seats) and
+	// stores that seat's card in Data[3] directly. kingLookNPlayer, the path 3+ seats always
+	// takes (nplayer_actions.go), lets the actor target any other seat via oppRelIdxToAbsolute,
+	// not just seat+1, and Data[3] holds that recorded target SEAT instead - OpponentOf(actor)
+	// underflows there (cambia-1171 fixed the apply paths against exactly this; this frame was
+	// the one 3+-seat token consumer still deriving it that way). The opponent's card is not
+	// stored for that path, so it is read live off the recorded seat's hand, which the swap
+	// decision (a separate, later action) has not yet touched.
 	if actor == observerID {
 		if _, ok := engine.ActionIsPeekOwn(idx); ok {
 			putPeek(g.LastAction.RevealedOwner, g.LastAction.RevealedIdx, g.LastAction.RevealedCard)
 		} else if _, ok := engine.ActionIsPeekOther(idx); ok {
 			putPeek(g.LastAction.RevealedOwner, g.LastAction.RevealedIdx, g.LastAction.RevealedCard)
 		} else if _, _, ok := engine.ActionIsKingLook(idx); ok && g.Pending.Type == engine.PendingKingDecision {
-			opp := g.OpponentOf(actor)
+			oppSlot := g.Pending.Data[1]
+			var opp uint8
+			var oppCard engine.Card
+			if g.NumActivePlayers() == 2 {
+				opp = g.OpponentOf(actor)
+				oppCard = engine.Card(g.Pending.Data[3])
+			} else {
+				opp = g.Pending.Data[3]
+				oppCard = g.Players[opp].Hand[oppSlot]
+			}
 			putPeek(actor, g.Pending.Data[0], engine.Card(g.Pending.Data[2]))
-			putPeek(opp, g.Pending.Data[1], engine.Card(g.Pending.Data[3]))
+			putPeek(opp, oppSlot, oppCard)
 		}
 	}
 
