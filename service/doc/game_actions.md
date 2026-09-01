@@ -529,9 +529,46 @@ Every time someone's turn is over, the server should automatically increment the
   "type": "game_player_turn",
   "user": {
     "id": "{id}"
+  },
+  "payload": {
+    "turn": 12,
+    "turnDeadline": 1756400000000,
+    "serverNow": 1756399985000
   }
 }
 ```
+
+`turnDeadline` is the absolute server-clock epoch-ms time the turn's timer fires and `serverNow`
+this event's send time, so a client corrects for its own clock skew before counting down.
+`turnDeadline` is omitted on a table played without a turn timer (`turnTimerSec` 0), which the
+client renders as an informational bar rather than a countdown.
+
+### Turn clock re-armed
+
+The turn clock also restarts inside a turn, without a new turn starting: an ability prompt opened
+by a discard, a King's look before its swap decision, a timeout that could not resolve an ability
+and had to hand the window back, and a reconnect onto a turn that had no clock. Each of those moves
+the deadline, and none of them may announce a turn: `game_player_turn` is never sent over a pending
+ability, because a client reads it as the ability being over. The clock therefore travels on its
+own frame.
+
+```json: server -> all clients
+{
+  "type": "game_turn_deadline",
+  "payload": {
+    "turn": 12,
+    "turnDeadline": 1756400012000,
+    "serverNow": 1756399997000
+  }
+}
+```
+
+Same three fields, same meanings, same omission rule for `turnDeadline`, and no `user`: this says
+nothing about whose turn it is, only what the clock on it now reads. A client applies the deadline
+and leaves everything else, including any prompt it is holding, alone. It is emitted whenever the
+deadline actually moves, the ordinary turn boundary included, so a client needs one rule for the
+turn clock rather than one per carrier. The server clock stays authoritative throughout: the frame
+corrects the countdown a client draws, not when the turn ends.
 
 ## Hand visibility
 

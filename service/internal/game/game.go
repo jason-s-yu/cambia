@@ -59,6 +59,11 @@ const (
 	EventPrivateSpecialFail     GameEventType = "private_special_action_fail"    // Private: Special action attempt failed.
 	EventPlayerCambia           GameEventType = "player_cambia"                  // Public: Player called Cambia.
 	EventGamePlayerTurn         GameEventType = "game_player_turn"               // Public: Notification of the current player's turn.
+	// EventGameTurnDeadline carries the turn clock on its own, for the re-arms that move the
+	// deadline without starting a new turn. game_player_turn may not be announced over a pending
+	// ability, which is when most of those re-arms happen, so the clock needs a channel of its own
+	// (cambia-1556). See publishTurnDeadline.
+	EventGameTurnDeadline GameEventType = "game_turn_deadline" // Public: The current turn's clock was re-armed.
 	EventPrivateSyncState       GameEventType = "private_sync_state"             // Private: Full game state sync for a player.
 	EventPrivateInitialCards    GameEventType = "private_initial_cards"          // Private: Pregame peek cards revealed to their owner.
 	EventGameEnd                GameEventType = "game_end"                       // Public: Game has ended, includes results.
@@ -201,7 +206,17 @@ type CambiaGame struct {
 	TurnID       int           // Increments each turn, useful for state synchronization and checks.
 	TurnDuration time.Duration // Configurable duration for each turn timer.
 	turnTimer    *time.Timer   // Active timer for the current turn.
-	actionIndex  int           // Sequential index for logging actions via historian.
+	// turnTimerGen stamps each arming of turnTimer. Timer.Stop cannot un-fire a callback that is
+	// already awake and waiting on g.mu, so it takes the lock once the action that stopped it has
+	// finished and runs the timeout against a turn that is no longer the one it was armed for.
+	// TurnID does not catch that on its own: it only moves in onTurnAdvanced, while the re-arms
+	// inside a single turn - the ability prompt a discard opens, the timeout fallbacks, the King's
+	// second step, a reconnect - all run on the same TurnID, so an ability prompt handed out with
+	// the clock near zero was auto-skipped and a returning player was timed out on the window they
+	// had just been given. The callback compares the generation it was armed with and returns.
+	// Same device as graceGen and snapFillState.gen (cambia-1546).
+	turnTimerGen uint64
+	actionIndex  int // Sequential index for logging actions via historian.
 
 	// PreGameDuration is how long BeginPreGame holds the initial card-reveal phase before
 	// StartGame flips Started true. Set from GameServer.PreGameDuration at creation
@@ -926,6 +941,25 @@ func (g *CambiaGame) HandleReconnect(playerID uuid.UUID, conn *websocket.Conn) {
 				log.Printf("Game %s: Player %s returned to a game still in progress; their forfeit is lifted.", g.ID, playerID)
 			}
 
+			// A returning player's turn is clocked only where nothing is clocking it already,
+			// which is the rule the drop side already applies (see the turnTimer check in
+			// HandleDisconnect and armDisconnectGrace's comment). The drop never stops the turn
+			// timer, so the deadline the table has been counting down to is still the right one
+			// and there is nothing to restore: rescheduling would hand the player a whole fresh
+			// window for having dropped, and this ran on every socket join, gated on the player
+			// being the actor and not on their having been away at all. hub.notePlayerReconnected
+			// fires on every join, so repeated drop-and-return cycles refilled the clock each
+			// time and held one turn open indefinitely (cambia-1545).
+			//
+			// It runs ahead of the snapshots below so they carry the deadline actually in force
+			// in both cases: the one the drop preserved, or the one armed here for a turn that
+			// had no clock. Sending them first meant a re-arm left the returning client counting
+			// down to a deadline the server had already replaced (cambia-1556).
+			if g.Started && !g.GameOver && g.turnTimer == nil && g.currentPlayerID() == playerID {
+				log.Printf("Game %s: Player %s returned to an unclocked turn of their own; arming its clock.", g.ID, playerID)
+				g.scheduleNextTurnTimer()
+			}
+
 			// Send sync state immediately to the reconnected player.
 			g.sendSyncState(playerID)
 
@@ -950,11 +984,6 @@ func (g *CambiaGame) HandleReconnect(playerID uuid.UUID, conn *websocket.Conn) {
 				delete(g.circuitAIControlled, playerID)
 			}
 
-			// If it was this player's turn, reschedule timer.
-			if g.Started && !g.GameOver && g.currentPlayerID() == playerID {
-				log.Printf("Game %s: Player %s reconnected on their turn. Rescheduling timer.", g.ID, playerID)
-				g.scheduleNextTurnTimer()
-			}
 			break
 		}
 	}
@@ -1592,14 +1621,6 @@ func (g *CambiaGame) logAction(actorID uuid.UUID, actionType string, payload map
 			log.Printf("Error: Game %s: Failed publishing action %d ('%s') to Redis: %v", g.ID, rec.ActionIndex, rec.ActionType, err)
 		}
 	}(record)
-}
-
-// ResetTurnTimer restarts the turn timer for the current player. Public entry point: acquires mu.
-// Internal callers that already hold mu call scheduleNextTurnTimer directly.
-func (g *CambiaGame) ResetTurnTimer() {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.scheduleNextTurnTimer() // Use the internal scheduler.
 }
 
 // FireEventPrivateSpecialActionFail helper to send a private failure event for special actions.

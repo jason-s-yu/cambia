@@ -1762,10 +1762,26 @@ func (g *CambiaGame) onTurnAdvanced() {
 
 // scheduleNextTurnTimerEngine schedules a turn timer using engine state.
 func (g *CambiaGame) scheduleNextTurnTimerEngine() {
+	// Whatever this call decides, a deadline it moved is announced before it returns. This is the
+	// one place g.TurnDeadline is written, so publishing from here covers every re-arm without
+	// each of the seven mid-turn sites having to remember to (cambia-1556).
+	prevDeadline := g.TurnDeadline
+	defer func() {
+		if !g.TurnDeadline.Equal(prevDeadline) {
+			g.publishTurnDeadline()
+		}
+	}()
+
 	if g.turnTimer != nil {
 		g.turnTimer.Stop()
 		g.turnTimer = nil
 	}
+	// Every call to this scheduler retires whatever was armed before it, including a callback
+	// Stop() could not recall because it was already awake and blocked on g.mu. The bump sits
+	// ahead of the early returns below so a call that arms nothing still retires the old stamp
+	// (cambia-1546).
+	g.turnTimerGen++
+	gen := g.turnTimerGen
 	// Clear any previously advertised deadline; only re-armed below if a timer actually starts.
 	g.TurnDeadline = time.Time{}
 	if g.TurnDuration <= 0 || g.GameOver || !g.Started {
@@ -1806,18 +1822,49 @@ func (g *CambiaGame) scheduleNextTurnTimerEngine() {
 	g.TurnDeadline = time.Now().Add(g.TurnDuration)
 
 	// The AfterFunc runs in its own goroutine, so it acquires mu before reading lifecycle
-	// state and mutating via handleTimeoutEngine. The TurnID guard drops a stale fire whose
-	// turn already advanced (Stop() does not block the in-flight callback, so a reschedule
-	// that increments TurnID makes this callback a no-op once it acquires the lock).
+	// state and mutating via handleTimeoutEngine. Stop() does not block a callback already in
+	// flight, so two guards drop a fire that no longer owns the clock: TurnID for a turn that has
+	// since advanced, and turnTimerGen for a re-arm inside this same turn, which is the case
+	// TurnID cannot see (cambia-1546).
 	g.turnTimer = time.AfterFunc(g.TurnDuration, func() {
 		g.mu.Lock()
 		defer g.mu.Unlock()
-		if g.GameOver || !g.Started || g.TurnID != curTurnID {
+		if g.GameOver || !g.Started || g.TurnID != curTurnID || g.turnTimerGen != gen {
 			return
 		}
 		log.Printf("Game %s, Turn %d: Timer fired for player %s.", g.ID, g.TurnID, capturedPlayerUUID)
 		g.handleTimeoutEngine(capturedPlayerUUID)
 	})
+}
+
+// publishTurnDeadline announces the turn clock as it now stands.
+//
+// g.TurnDeadline used to reach the wire only from broadcastPlayerTurnEngine and the sync_state
+// snapshot, and neither runs on a mid-turn re-arm. The seven sites that stop and restart the clock
+// inside one turn moved the deadline and told nobody, so a client kept counting down to the
+// deadline it was last given: the Turn bar hit 0:00 while the server still held a full window open
+// behind it (cambia-1556). The server clock stays authoritative either way; what was wrong was the
+// picture of it.
+//
+// This rides its own event type rather than game_player_turn because no turn may be announced over
+// a pending ability (replace_ability_test.go), which is exactly when most of those re-arms happen.
+// turnDeadline is present only while a timer is armed, matching what game_player_turn puts in its
+// payload and what sync_state omits, so a client reads its absence the same way in all three.
+// Assumes the lock is held by the caller.
+func (g *CambiaGame) publishTurnDeadline() {
+	// A game that is not live has no clock to advertise, which is the rule sync_state already
+	// applies: endGame leaves TurnDeadline behind rather than clearing it.
+	if !g.Started || g.GameOver {
+		return
+	}
+	payload := map[string]interface{}{
+		"turn":      g.TurnID,
+		"serverNow": time.Now().UnixMilli(),
+	}
+	if !g.TurnDeadline.IsZero() {
+		payload["turnDeadline"] = g.TurnDeadline.UnixMilli()
+	}
+	g.fireEvent(GameEvent{Type: EventGameTurnDeadline, Payload: payload})
 }
 
 // broadcastPlayerTurnEngine notifies all players of the current player's turn using engine state.
