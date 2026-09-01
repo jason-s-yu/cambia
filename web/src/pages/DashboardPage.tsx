@@ -21,6 +21,7 @@ import type { QueueInfo } from '@/services/matchmakingService';
 import type { ActiveSession, ApiErrorResponse, LobbyPreset } from '@/types';
 import { DEFAULT_PRESET_ID } from '@/types';
 import { presetFitsGameMode } from '@/lib/lobbyPreset';
+import { estimateMinutes } from '@/lib/estimateMinutes';
 import { gameModeLabel } from '@/utils/gameMode';
 import { queuePoolLabel, ratingPoolLabel, tierFromRating } from '@/utils/ratingPool';
 
@@ -31,17 +32,6 @@ import { queuePoolLabel, ratingPoolLabel, tierFromRating } from '@/utils/ratingP
 // Ranked badge and gold Play read as a recommendation with nothing behind it, on two of six
 // queues whose rules are byte-identical (MATCHMAKING.md 5.2) and which differ only by a round
 // count no lobby currently plays. All queue cards read alike until a service field names one.
-
-/**
- * Rough estimated match length in minutes from queue shape, since the
- * matchmaking queues endpoint does not return one directly. Grounded on the
- * default 15s turn timer: a head-to-head round runs ~2-3 minutes, an FFA
- * round (>2 players) ~4-5.
- */
-function estimateMinutes(queue: QueueInfo): number {
-  const perRound = queue.players > 2 ? 5 : 2.5;
-  return Math.max(2, Math.round(queue.rounds * perRound));
-}
 
 /** Short fallback label for a lobby without a display name. */
 function lobbyFallbackName(lobbyId: string): string {
@@ -362,7 +352,6 @@ const DashboardPage: React.FC = () => {
                 <QueueCard
                   name={queue.name}
                   players={queue.players}
-                  rounds={queue.rounds}
                   minutes={estimateMinutes(queue)}
                   pool={queuePoolLabel(queue.ratingPool)}
                   ranked={queue.ranked}

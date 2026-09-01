@@ -4,6 +4,15 @@
 // from matchState/lobbyDetails. "Back to lobby" calls onReturnToLobby, which
 // LobbyPage sends to the hub as a return_to_lobby frame (cambia-1238); the
 // results stay up until the server's phase_change answers it.
+//
+// The hub only admits that frame from the host, widened to any seated player
+// where the host role belongs to the system (Hub.mayReturnToLobby,
+// cambia-1238) - a matchmade lobby has no player host to gate on. A seat the
+// hub would refuse never sees the button: before cambia-1516 every seat saw
+// it and a non-host click came back as an error envelope. Those seats see a
+// waiting label instead, naming the results timer where one is actually
+// armed - only post_game arms one; match_end does not (see
+// service/doc/lobby_actions.md "Post-game exit").
 // Casual (post_game) standings have no matchState (ranked-only, see
 // hub.buildLobbySnapshot), so final scores fall back to gameStore's finalScores,
 // captured off the game_end event (cambia-510).
@@ -40,6 +49,11 @@ const DsResultsView: React.FC<DsResultsViewProps> = ({ phase, onReturnToLobby, o
   const matchState = useCurrentLobbyStore((s) => s.matchState);
   const lobbyPlayers = useCurrentLobbyStore((s) => s.lobbyDetails?.lobby_status?.users);
   const circuitEnabled = useCurrentLobbyStore((s) => s.lobbyDetails?.circuit?.enabled);
+  const yourIsHost = useCurrentLobbyStore((s) => s.lobbyDetails?.your_is_host);
+  const systemHost = useCurrentLobbyStore((s) => s.lobbyDetails?.system_host);
+  // Mirrors Hub.mayReturnToLobby: the host, or (a matchmade lobby has none) any seat of a
+  // system-hosted one. Everyone here is already a seat, since the results are their own.
+  const canReturnToLobby = !!yourIsHost || !!systemHost;
   // Shown only where a circuit is playing the rounds it counts (lib/roundCounter.ts). The card
   // used to badge Round 0/8 over the standings of the one game a matchmade lobby plays
   // (cambia-1126 item 2).
@@ -200,8 +214,19 @@ const DsResultsView: React.FC<DsResultsViewProps> = ({ phase, onReturnToLobby, o
         </div>
       )}
 
-      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', padding: '14px 20px', borderTop: '1px solid var(--border-subtle)', background: 'var(--surface-2)' }}>
-        <Button variant='primary' onClick={onReturnToLobby}>Back to lobby</Button>
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', padding: '14px 20px', borderTop: '1px solid var(--border-subtle)', background: 'var(--surface-2)' }}>
+        {canReturnToLobby ? (
+          <Button variant='primary' onClick={onReturnToLobby}>Back to lobby</Button>
+        ) : (
+          // post_game arms a results timer (returnToLobby fires on its own after
+          // PostGameDuration); match_end arms none, so it names no timer that is not there
+          // (cambia-1516).
+          <span style={{ fontSize: 'var(--ds-text-sm)', color: 'var(--text-secondary)' }}>
+            {isMatchEnd
+              ? 'Waiting for the host to return to the lobby.'
+              : 'Waiting for the host. The results timer will return everyone to the lobby shortly.'}
+          </span>
+        )}
         <Button variant='ghost' onClick={onLeave}>Leave lobby</Button>
       </div>
     </section>
