@@ -4,6 +4,21 @@
 # This module implements best-response and exploitability analysis for TABULAR CFR only.
 # It is NOT compatible with the Deep CFR pipeline (neural network checkpoints).
 # For Deep CFR evaluation, use evaluate_agents.py and es_validator.py.
+#
+# cambia-1428 (Python engine retirement, R2/R3): this module still imports and
+# constructs the Python CambiaGameState (see the recursive best-response tree
+# search below -- _run_br_calculation_process, _best_response_node_logic,
+# _br_action_worker). That search deep-copies the mutable game state across
+# process boundaries and mutates it with an undo callback per branch, neither
+# of which GoEngine (index-based apply, save()/restore() snapshots, no
+# in-process undo) offers a drop-in replacement for; the InfosetKey/PolicyDict
+# tabular-CFR lookups it drives are also unrelated to GoAgentState. Porting it
+# is a standalone rewrite of the tabular CFR exploitability path (only
+# reachable through `train tabular` / main_train.py, which are outside this
+# ticket's scope), not a import swap, so it was left as a named, tracked gap
+# rather than attempted or stubbed here. The tiny/exact solver's own
+# exploitability path is already Go-backed and does not import this module
+# (see tests/test_tiny_solver_go_backend.py).
 
 import logging
 import json
@@ -38,7 +53,6 @@ from .constants import (
 )
 from .config import Config
 from .utils import InfosetKey, PolicyDict, normalize_probabilities, SimulationTrace
-from .game.helpers import serialize_card
 
 from .cfr.exceptions import (
     GracefulShutdownException,
@@ -358,7 +372,9 @@ def default_serializer(obj):
     if isinstance(obj, InfosetKey):
         return obj.astuple()  # Use the tuple representation
     if isinstance(obj, Card):
-        return serialize_card(obj)
+        # Inlined from the retired src.game.helpers.serialize_card (identical
+        # behavior): obj is already known non-None here.
+        return str(obj)
     # Handle GameAction NamedTuples and other dataclasses explicitly
     if hasattr(obj, "_asdict") and callable(obj._asdict):  # Check for NamedTuple
         action_dict = obj._asdict()

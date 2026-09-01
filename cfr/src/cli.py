@@ -3191,7 +3191,7 @@ def play(
         2,
         "--num-players",
         "-n",
-        help="Number of players (2-6)",
+        help="Number of players (2-8)",
     ),
     human_seats: str = typer.Option(
         "0",
@@ -3205,8 +3205,17 @@ def play(
     ),
 ):
     """Play a game of Cambia against AI opponents interactively."""
+    from .constants import N_PLAYER_MAX_PLAYERS
     from .evaluate_agents import get_agent, load_config, AGENT_REGISTRY
     from .play import SeatConfig, play_game
+
+    if not (2 <= num_players <= N_PLAYER_MAX_PLAYERS):
+        print(
+            f"ERROR: --num-players must be between 2 and {N_PLAYER_MAX_PLAYERS} "
+            f"(engine.MaxPlayers), got {num_players}",
+            file=sys.stderr,
+        )
+        raise typer.Exit(1)
 
     cfg = load_config(str(config))
     if not cfg:
@@ -3257,7 +3266,7 @@ def play(
         )
         raise typer.Exit(1)
 
-    play_game(seats, cfg.cambia_rules)
+    play_game(seats, cfg.cambia_rules, num_players=num_players)
 
 
 @app.command("head-to-head", help="Play two Deep CFR checkpoints against each other")

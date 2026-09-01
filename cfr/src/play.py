@@ -6,6 +6,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
+import numpy as np
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -28,7 +29,10 @@ from .constants import (
     ActionSnapOpponentMove,
     GameAction,
 )
-from .game.engine import CambiaGameState
+from .agents import action_codec
+from .agents.game_view import tracked_opponent_seat
+from .encoding import action_to_index
+from .ffi.bridge import GoEngine
 
 console = Console()
 
@@ -132,6 +136,94 @@ def card_value(card) -> int:
 
 
 # ---------------------------------------------------------------------------
+# GoEngine legal-action decode / apply
+# ---------------------------------------------------------------------------
+#
+# Mirrors _GoEvalGame in src/evaluate_agents.py: the 2-player action space is
+# used directly at two seats; at more seats the sparse N-player space is
+# projected onto the single opponent the GameView-ported agents track
+# (game_view.tracked_opponent_seat), since both the AI seats and the human
+# seat here are driven through the same BaseAgent.choose_action / manual
+# selection over one legal_actions list. That list is not reusable from
+# evaluate_agents.py (a private, engine-owning class there), so the decode is
+# duplicated rather than imported.
+
+
+def _legal_actions_for(engine: GoEngine, acting_player: int, num_players: int):
+    """The acting seat's legal actions and the index each was decoded from."""
+    if num_players == 2:
+        mask = engine.legal_actions_mask()
+        actions = action_codec.actions_from_mask(mask)
+        index = {a: int(i) for a, i in zip(actions, np.flatnonzero(mask))}
+        return actions, index
+
+    pending = engine.get_pending()
+    if pending.target_seat is not None and pending.target_seat != acting_player:
+        target = int(pending.target_seat)
+    else:
+        target = tracked_opponent_seat(acting_player, num_players)
+    rel = action_codec.relative_opponent_index(acting_player, target, num_players)
+
+    preferred: List[GameAction] = []
+    preferred_index: Dict[GameAction, int] = {}
+    fallback: List[GameAction] = []
+    fallback_index: Dict[GameAction, int] = {}
+
+    mask = engine.nplayer_legal_actions_mask()
+    for idx in np.flatnonzero(mask):
+        entry = action_codec.nplayer_index_to_action(int(idx))
+        action = entry.action
+        if isinstance(action, ActionSnapOpponentMove):
+            # The N-player space keeps only the own-card index; the target
+            # slot lives on the pending record.
+            action = ActionSnapOpponentMove(
+                own_card_to_move_hand_index=action.own_card_to_move_hand_index,
+                target_empty_slot_index=int(pending.target_slot or 0),
+            )
+        if entry.opp_idx is None or entry.opp_idx == rel:
+            if action not in preferred_index:
+                preferred.append(action)
+                preferred_index[action] = int(idx)
+        if action not in fallback_index:
+            fallback.append(action)
+            fallback_index[action] = int(idx)
+
+    if preferred:
+        return preferred, preferred_index
+    return fallback, fallback_index
+
+
+def _apply_action(
+    engine: GoEngine,
+    action: GameAction,
+    index_map: Dict[GameAction, int],
+    acting_player: int,
+    num_players: int,
+) -> None:
+    """Apply a chosen action, re-encoding it if it was not in the decoded set.
+
+    An action a seat builds without checking legality is left to the engine to
+    reject, exactly as it did on the Python engine.
+    """
+    idx = index_map.get(action)
+    if num_players == 2:
+        if idx is None:
+            idx = action_to_index(action)
+        engine.apply_action(int(idx))
+        return
+
+    if idx is None:
+        pending = engine.get_pending()
+        if pending.target_seat is not None and pending.target_seat != acting_player:
+            target = int(pending.target_seat)
+        else:
+            target = tracked_opponent_seat(acting_player, num_players)
+        rel = action_codec.relative_opponent_index(acting_player, target, num_players)
+        idx = action_codec.nplayer_index_for(action, rel)
+    engine.apply_nplayer_action(int(idx))
+
+
+# ---------------------------------------------------------------------------
 # Player knowledge tracker
 # ---------------------------------------------------------------------------
 
@@ -176,40 +268,40 @@ class SeatConfig:
 
 
 def render_game_state(
-    game: CambiaGameState,
+    game: GoEngine,
     viewer_id: int,
     seats: List[SeatConfig],
+    cambia_caller_id: Optional[int] = None,
 ) -> None:
     """Render the game state from a specific player's perspective."""
     viewer = seats[viewer_id]
     num_players = len(seats)
 
     # Header
-    turn_info = f"Turn {game._turn_number}"
-    if game.cambia_caller_id is not None:
-        caller_name = seats[game.cambia_caller_id].name
+    turn_info = f"Turn {game.turn_number()}"
+    if cambia_caller_id is not None:
+        caller_name = seats[cambia_caller_id].name
         turn_info += f"  |  Cambia called by {caller_name}"
 
     console.print()
     console.rule(f"[bold cyan]{turn_info}[/]")
 
     # Discard pile
-    if game.discard_pile:
-        top = game.discard_pile[-1]
+    top = game.get_discard_top()
+    if top is not None:
         console.print(
             f"  Discard pile top: [bold yellow]{card_str(top)}[/] (value {card_value(top)})"
         )
     else:
         console.print("  Discard pile: [dim]empty[/]")
 
-    console.print(f"  Stockpile: {len(game.stockpile)} cards remaining")
+    console.print(f"  Stockpile: {game.stock_len()} cards remaining")
     console.print()
 
     # Show each player's hand
     for pid in range(num_players):
         seat = seats[pid]
-        player_state = game.players[pid]
-        hand = player_state.hand
+        hand = game.get_player_hand(pid)
         is_viewer = pid == viewer_id
 
         hand_display = []
@@ -235,8 +327,9 @@ def render_game_state(
         console.print(f"{label}:  {hand_str}")
 
     # Show drawn card if pending
-    if game.pending_action_data and viewer_id == game.get_acting_player():
-        drawn = game.pending_action_data.get("drawn_card")
+    pending = game.get_pending()
+    if pending.is_pending and viewer_id == game.acting_player():
+        drawn = pending.drawn_card
         if drawn:
             console.print(
                 f"\n  You drew: [bold yellow]{card_str(drawn)}[/] (value {card_value(drawn)})"
@@ -274,7 +367,7 @@ def render_ai_action(name: str, action: GameAction) -> None:
     console.print(f"  [dim]{name}[/] -> {action_to_str(action)}")
 
 
-def render_game_over(game: CambiaGameState, seats: List[SeatConfig]) -> None:
+def render_game_over(game: GoEngine, seats: List[SeatConfig], num_players: int) -> None:
     """Show final results."""
     console.print()
     console.rule("[bold red]Game Over[/]")
@@ -286,7 +379,7 @@ def render_game_over(game: CambiaGameState, seats: List[SeatConfig]) -> None:
 
     scores = []
     for pid, seat in enumerate(seats):
-        hand = game.players[pid].hand
+        hand = game.get_player_hand(pid)
         hand_strs = [f"{card_str(c)}({card_value(c)})" for c in hand]
         score = sum(card_value(c) for c in hand)
         scores.append(score)
@@ -296,17 +389,19 @@ def render_game_over(game: CambiaGameState, seats: List[SeatConfig]) -> None:
 
     console.print(table)
 
-    # Determine winner
-    if hasattr(game, "_winner") and game._winner is not None:
-        winner_name = seats[game._winner].name
-        console.print(f"\n  Winner: [bold green]{winner_name}[/]!")
+    # Winner: the sole argmax of the engine's utility vector, which already
+    # encodes the whole scoring rule including the Cambia-caller tiebreak
+    # (mirrors _GoEvalGame.winner() in evaluate_agents.py). Equal top
+    # utilities are a tie.
+    utils = game.get_nplayer_utility() if num_players > 2 else game.get_utility()
+    utils = np.asarray(utils, dtype=np.float64)[:num_players]
+    best = float(utils.max())
+    leaders = np.flatnonzero(utils >= best - 1e-9)
+    if len(leaders) == 1:
+        console.print(f"\n  Winner: [bold green]{seats[int(leaders[0])].name}[/]!")
     else:
-        min_score = min(scores)
-        winners = [seats[i].name for i, s in enumerate(scores) if s == min_score]
-        if len(winners) == 1:
-            console.print(f"\n  Winner: [bold green]{winners[0]}[/]!")
-        else:
-            console.print(f"\n  Tie between: {', '.join(winners)}")
+        winners = [seats[int(i)].name for i in leaders]
+        console.print(f"\n  Tie between: {', '.join(winners)}")
 
     console.print()
 
@@ -341,22 +436,20 @@ def update_knowledge(
     seat: SeatConfig,
     action: GameAction,
     acting_player: int,
-    game: CambiaGameState,
+    game: GoEngine,
     seats: List[SeatConfig],
 ) -> None:
     """Update a human player's knowledge based on an action that just occurred."""
     k = seat.knowledge
     viewer = seat.seat_id
+    num_players = len(seats)
 
     match action:
         case ActionReplace(target_hand_index=slot):
             if acting_player == viewer:
                 # We know what card we just placed (it was the drawn card)
-                card = (
-                    game.players[viewer].hand[slot]
-                    if slot < len(game.players[viewer].hand)
-                    else None
-                )
+                viewer_hand = game.get_player_hand(viewer)
+                card = viewer_hand[slot] if slot < len(viewer_hand) else None
                 if card:
                     k.know(viewer, slot, card)
             # If opponent replaced, we don't know their new card
@@ -364,11 +457,8 @@ def update_knowledge(
 
         case ActionAbilityPeekOwnSelect(target_hand_index=slot):
             if acting_player == viewer:
-                card = (
-                    game.players[viewer].hand[slot]
-                    if slot < len(game.players[viewer].hand)
-                    else None
-                )
+                viewer_hand = game.get_player_hand(viewer)
+                card = viewer_hand[slot] if slot < len(viewer_hand) else None
                 if card:
                     k.know(viewer, slot, card)
                     console.print(
@@ -377,13 +467,14 @@ def update_knowledge(
 
         case ActionAbilityPeekOtherSelect(target_opponent_hand_index=slot):
             if acting_player == viewer:
-                # Peeked at opponent's card
-                opp = 1 - viewer  # 2-player assumption; extend for N
-                card = (
-                    game.players[opp].hand[slot]
-                    if slot < len(game.players[opp].hand)
-                    else None
-                )
+                # Peeked at opponent's card. The action carries no target seat
+                # (a 2-player-shaped index); at more seats this names the same
+                # single opponent the GameView-ported agents track, which is a
+                # pre-existing simplification carried forward from the
+                # Python-engine version of this function, not new here.
+                opp = tracked_opponent_seat(viewer, num_players)
+                opp_hand = game.get_player_hand(opp)
+                card = opp_hand[slot] if slot < len(opp_hand) else None
                 if card:
                     k.know(opp, slot, card)
                     console.print(
@@ -405,7 +496,7 @@ def update_knowledge(
             if acting_player == viewer:
                 # After blind swap, we no longer know what's in our slot
                 # (it's whatever opponent had, which we didn't see)
-                opp = 1 - viewer
+                opp = tracked_opponent_seat(viewer, num_players)
                 k.forget(viewer, own_slot)
                 k.forget(opp, opp_slot)
 
@@ -413,17 +504,11 @@ def update_knowledge(
             own_hand_index=own_slot, opponent_hand_index=opp_slot
         ):
             if acting_player == viewer:
-                opp = 1 - viewer
-                own_card = (
-                    game.players[viewer].hand[own_slot]
-                    if own_slot < len(game.players[viewer].hand)
-                    else None
-                )
-                opp_card = (
-                    game.players[opp].hand[opp_slot]
-                    if opp_slot < len(game.players[opp].hand)
-                    else None
-                )
+                opp = tracked_opponent_seat(viewer, num_players)
+                viewer_hand = game.get_player_hand(viewer)
+                opp_hand = game.get_player_hand(opp)
+                own_card = viewer_hand[own_slot] if own_slot < len(viewer_hand) else None
+                opp_card = opp_hand[opp_slot] if opp_slot < len(opp_hand) else None
                 if own_card:
                     k.know(viewer, own_slot, own_card)
                     console.print(
@@ -437,18 +522,10 @@ def update_knowledge(
 
         case ActionAbilityKingSwapDecision(perform_swap=True):
             if acting_player == viewer:
-                # After king swap, the cards have been exchanged
-                # We still know both cards, but they've switched positions
-                # The game engine already swapped them, so re-read
-                # Actually the knowledge we had pre-swap now refers to swapped cards
-                # We need to swap our knowledge entries
-                opp = 1 - viewer
-                # Find the king look slots from pending data, but we can't easily
-                # get them here. For simplicity, clear king-related knowledge
-                # and let the player re-peek. In practice the game state already
-                # reflects the swap, so our peek knowledge from KingLookSelect
-                # is now stale for the positions. Let's update by re-reading.
-                pass  # Knowledge was set in KingLookSelect; swap handled by engine
+                # Knowledge was set in KingLookSelect; the engine performs the
+                # swap and the pre-swap knowledge entries already track the
+                # cards (not the slots), so nothing further to update here.
+                pass
 
         case _:
             pass
@@ -462,79 +539,117 @@ def update_knowledge(
 def play_game(
     seat_configs: List[SeatConfig],
     house_rules,
+    num_players: Optional[int] = None,
 ) -> None:
-    """Run an interactive game."""
-    game = CambiaGameState(house_rules=house_rules)
-    num_players = len(seat_configs)
+    """Run an interactive game.
 
-    # Set up seat IDs
-    for i, seat in enumerate(seat_configs):
-        seat.seat_id = i
+    ``num_players`` defaults to ``len(seat_configs)`` and is passed straight
+    through to ``GoEngine``, which sizes its N-player utility buffer from it.
+    ``CambiaRulesConfig`` carries no seat count of its own, so this argument
+    is the sole authority on how many seats are dealt; the post-construction
+    ``engine.num_players()`` check below is a defensive cross-check, mirroring
+    the same check in ppo_env.CambiaEnv._deal and
+    evaluate_agents._GoEvalGame, against a house_rules object that did carry
+    one.
+    """
+    num_players = num_players or len(seat_configs)
+    game = GoEngine(house_rules=house_rules, num_players=num_players)
+    try:
+        seats = game.num_players()
+        if seats != num_players:
+            raise RuntimeError(
+                f"engine dealt {seats} seats, play_game was configured for "
+                f"{num_players}."
+            )
 
-    # Initialize AI agents
-    for seat in seat_configs:
-        if not seat.is_human and seat.agent is not None:
-            if hasattr(seat.agent, "initialize_state"):
-                seat.agent.initialize_state(game)
+        # Set up seat IDs
+        for i, seat in enumerate(seat_configs):
+            seat.seat_id = i
 
-    # Initialize human knowledge with initial peek
-    for seat in seat_configs:
-        if seat.is_human:
-            peek_indices = game.players[seat.seat_id].initial_peek_indices
-            for slot in peek_indices:
-                hand = game.players[seat.seat_id].hand
-                if slot < len(hand):
+        # Initialize AI agents that carry belief across the game (neural
+        # wrappers backed by GoAgentState). The GameView-ported baselines
+        # have no such hook: their per-game memory resets lazily on first
+        # choose_action (see ImperfectMemoryMixin._needs_reinit).
+        for seat in seat_configs:
+            if not seat.is_human and seat.agent is not None:
+                if hasattr(seat.agent, "initialize_state"):
+                    seat.agent.initialize_state(game)
+
+        # Initialize human knowledge with the initial peek: the first
+        # initial_view_count slots, in deal order (the same convention
+        # ImperfectMemoryMixin._init_memory uses for the Go engine).
+        peek_count = game.get_house_rules().initial_view_count
+        for seat in seat_configs:
+            if seat.is_human:
+                hand = game.get_player_hand(seat.seat_id)
+                for slot in range(min(peek_count, len(hand))):
                     seat.knowledge.know(seat.seat_id, slot, hand[slot])
 
-    max_turns = (
-        house_rules.max_game_turns
-        if hasattr(house_rules, "max_game_turns") and house_rules.max_game_turns > 0
-        else 500
-    )
-    turn = 0
+        # `turn` here counts individual actions, not engine turns: a single
+        # engine turn can span several actions (draw, ability sub-selects,
+        # snap responses), so the cap is house_rules.max_game_turns scaled up
+        # rather than used directly -- the engine enforces its own turn cap
+        # and reaches a real terminal state well within this budget; a tight
+        # cap instead risks cutting the loop before is_terminal() is true and
+        # scoring a mid-game state (mirrors the same scaling in
+        # evaluate_agents.run_evaluation's engine_turn_cap).
+        engine_turn_cap = (
+            house_rules.max_game_turns
+            if hasattr(house_rules, "max_game_turns") and house_rules.max_game_turns > 0
+            else 500
+        )
+        max_turns = engine_turn_cap * 16
+        turn = 0
+        cambia_caller_id: Optional[int] = None
 
-    # Show initial state for first human
-    for seat in seat_configs:
-        if seat.is_human:
-            console.print(
-                f"\n[bold]Welcome, {seat.name}![/] You are Player {seat.seat_id}."
-            )
-            console.print(
-                f"Your initial peek shows you slots {list(game.players[seat.seat_id].initial_peek_indices)}."
-            )
-            break
-
-    while not game.is_terminal() and turn < max_turns:
-        turn += 1
-        acting_player = game.get_acting_player()
-        if acting_player == -1:
-            console.print("[red]Error: no acting player[/]")
-            break
-
-        legal_actions = game.get_legal_actions()
-        if not legal_actions:
-            if game.is_terminal():
+        # Show initial state for first human
+        for seat in seat_configs:
+            if seat.is_human:
+                console.print(
+                    f"\n[bold]Welcome, {seat.name}![/] You are Player {seat.seat_id}."
+                )
+                console.print(
+                    f"Your initial peek shows you slots {list(range(min(peek_count, len(game.get_player_hand(seat.seat_id)))))}."
+                )
                 break
-            console.print("[red]Error: no legal actions in non-terminal state[/]")
-            break
 
-        seat = seat_configs[acting_player]
-        action_list = sorted(list(legal_actions), key=_action_sort_key)
+        while not game.is_terminal() and turn < max_turns:
+            turn += 1
+            acting_player = game.acting_player()
+            if acting_player == -1:
+                console.print("[red]Error: no acting player[/]")
+                break
 
-        if seat.is_human:
-            render_game_state(game, acting_player, seat_configs)
-            render_legal_actions(action_list)
-            chosen = prompt_action(action_list)
-        else:
-            chosen = seat.agent.choose_action(game, legal_actions)
-            render_ai_action(seat.name, chosen)
+            legal_actions, index_map = _legal_actions_for(
+                game, acting_player, num_players
+            )
+            if not legal_actions:
+                if game.is_terminal():
+                    break
+                console.print("[red]Error: no legal actions in non-terminal state[/]")
+                break
 
-        # Apply action
-        state_delta, undo_info = game.apply_action(chosen)
+            seat = seat_configs[acting_player]
+            action_list = sorted(legal_actions, key=_action_sort_key)
 
-        # Update knowledge for all human players
-        for s in seat_configs:
-            if s.is_human:
-                update_knowledge(s, chosen, acting_player, game, seat_configs)
+            if seat.is_human:
+                render_game_state(game, acting_player, seat_configs, cambia_caller_id)
+                render_legal_actions(action_list)
+                chosen = prompt_action(action_list)
+            else:
+                chosen = seat.agent.choose_action(game, action_list)
+                render_ai_action(seat.name, chosen)
 
-    render_game_over(game, seat_configs)
+            if isinstance(chosen, ActionCallCambia):
+                cambia_caller_id = acting_player
+
+            _apply_action(game, chosen, index_map, acting_player, num_players)
+
+            # Update knowledge for all human players
+            for s in seat_configs:
+                if s.is_human:
+                    update_knowledge(s, chosen, acting_player, game, seat_configs)
+
+        render_game_over(game, seat_configs, num_players)
+    finally:
+        game.close()
