@@ -1813,8 +1813,34 @@ class SubgameSolver:
         self._lib = _get_lib()
         self._closed = False
         self._leaf_handles: list = []  # track exported leaf game handles for cleanup
-        self._solver_h: int = self._lib.cambia_subgame_build(game._game_h, max_depth)
+        # Sentinel before any call that can raise, so a half-built instance's
+        # __del__ -> free() finds nothing to release instead of hitting
+        # AttributeError on a never-assigned self._solver_h.
+        self._solver_h: int = -1
+
+        # The subgame solver is 2-player only (cambia-1554): the Go tree's
+        # terminal utility and both CFR iteration methods hard-code seats 0
+        # and 1 (opp = 1 - player). At a 3+ seat table there is no single
+        # well-defined "opponent" for a 146-action subgame strategy to mean
+        # anything, and the underlying index computation underflows and
+        # panics inside libcambia.so, which would take the whole interpreter
+        # down. Check here, before the FFI call, so the failure is a normal
+        # Python exception instead of a crash.
+        n_players = game.num_players()
+        if n_players != 2:
+            raise ValueError(
+                f"SubgameSolver requires a 2-player table, got {n_players} players. "
+                "The subgame CFR tree and its opponent index (opp = 1 - player) are "
+                "2-player only; a 146-action subgame strategy has no well-defined "
+                "opponent at 3+ seats (cambia-1554)."
+            )
+
+        self._solver_h = self._lib.cambia_subgame_build(game._game_h, max_depth)
         if self._solver_h < 0:
+            # cambia_subgame_build returns -1 for an invalid handle, an
+            # exhausted solver pool, or (defense in depth) a non-2-player
+            # table - the n_players check above should already have caught
+            # the last case, so reaching here almost always means the pool.
             raise RuntimeError(
                 f"cambia_subgame_build failed (returned {self._solver_h}). "
                 "Solver pool may be exhausted."

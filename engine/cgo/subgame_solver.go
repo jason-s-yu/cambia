@@ -5,12 +5,18 @@ import (
 )
 
 // SubgameNode represents a node in the subgame tree.
+//
+// The whole tree is 2-player only (cambia-1554): Utility, CFRIteration, and
+// CFRIterationRanged all carry exactly two seats, addressed as player and
+// 1-player. cambia_subgame_build refuses to construct a tree for a table
+// whose NumActivePlayers() != 2, so no in-process caller should hand a
+// larger table's state to BuildSubgameTree directly either.
 type SubgameNode struct {
 	State       engine.GameState
 	Player      uint8         // acting player at this node
 	IsTerminal  bool
 	IsLeaf      bool          // depth limit reached (not terminal)
-	Utility     [2]float32    // filled if terminal
+	Utility     [2]float32    // filled if terminal; seats 0 and 1 only (2-player tree, see type doc)
 	LeafIndex   int           // index into leaf values array (if leaf), -1 otherwise
 	Children    []SubgameChild
 	RegretSum   []float32     // [numChildren] cumulative regrets
@@ -31,6 +37,12 @@ type leafCounter struct {
 
 // BuildSubgameTree builds a game tree from root state to maxDepth.
 // Returns the root node and total number of leaf nodes.
+//
+// 2-player only: see the SubgameNode type doc. Callers reaching this from
+// outside the package (cambia_subgame_build) must reject any root whose
+// NumActivePlayers() != 2 before calling in; this function itself does not
+// re-check, since it is also exercised directly by this package's own tests
+// against synthetic 2-player states.
 func BuildSubgameTree(root engine.GameState, maxDepth int) (*SubgameNode, int) {
 	counter := &leafCounter{}
 	node := buildNode(root, maxDepth, 0, counter)
@@ -46,6 +58,11 @@ func buildNode(state engine.GameState, maxDepth, depth int, counter *leafCounter
 
 	if state.IsTerminal() {
 		node.IsTerminal = true
+		// 2-player-only copy (cambia-1554): only seats 0 and 1 of the
+		// utility vector are read. GetUtility() returns one entry per
+		// active player, so at a 3+ seat table this silently drops every
+		// seat beyond 1 - harmless only because the FFI guard in
+		// cambia_subgame_build never lets such a state reach here.
 		u := state.GetUtility()
 		node.Utility[0] = u[0]
 		node.Utility[1] = u[1]
@@ -135,6 +152,18 @@ func regretMatch(regretSum []float32) []float32 {
 }
 
 // CFRIteration performs one CFR traversal, returning counterfactual values [2]float32.
+//
+// opp := 1 - player is a two-seat-only complement, unlike engine.seatOpponent
+// (engine/legal.go), which cambia-1171 keeps in bounds at a 3+ seat table by
+// routing through (acting+1)%n instead of the 2-player action-space's
+// 1-acting shortcut. That posture does not carry over here: the 2-player
+// action-space mask still enumerates exactly one meaningful opponent slot at
+// any table size, but a subgame CFR *strategy* over the 146-action space
+// assumes a single well-defined opponent throughout the whole tree, and at
+// 3+ seats there is no such seat - "the opponent" is ambiguous, so the
+// solver refuses the table outright (cambia_subgame_build's guard) rather
+// than trying to stay in bounds. player is always 0 or 1 by the time this
+// runs; the caller-side guard is what makes that true.
 func (node *SubgameNode) CFRIteration(
 	reachProbs [2]float32,
 	leafValues []float32,
@@ -265,6 +294,9 @@ func collectLeaves(node *SubgameNode, states []engine.GameState) {
 //   leafValues[leafIdx*2*numHandTypes + player*numHandTypes + handType]
 // ranges[p] is the probability distribution over hand types for player p.
 // Returns per-hand-type CFVs for both players: [2][]float32 each of length numHandTypes.
+//
+// Same 2-player-only opp := 1-player complement as CFRIteration; see that
+// doc comment for why this refuses rather than generalizes to N players.
 func (node *SubgameNode) CFRIterationRanged(
 	reachProbs [2]float32,
 	leafValues []float32,
