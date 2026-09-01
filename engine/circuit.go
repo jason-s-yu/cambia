@@ -18,6 +18,14 @@ func TournamentHouseRules() HouseRules {
 	return hr
 }
 
+// ForfeitRoundScore is what a seat that did not play a round out is worth: 41 points, the +2
+// sigma statistical maximum for a blind hand, which punishes the absence without corrupting the
+// lobby's rating (RULES.md T5, MATCHMAKING.md 8).
+//
+// It is the default for CircuitConfig.MissedRoundScore and the score the service records for a
+// forfeited seat, so a missed circuit round and a forfeited quick-play seat cost the same.
+const ForfeitRoundScore = 41
+
 // CircuitFormat represents a tournament circuit length preset.
 type CircuitFormat string
 
@@ -33,7 +41,7 @@ type CircuitConfig struct {
 	NumPlayers       int
 	NumRounds        int           // 0 = auto from Format. Must be multiple of NumPlayers.
 	PlayerIDs        []int
-	MissedRoundScore int           // Default 41
+	MissedRoundScore int           // Default ForfeitRoundScore
 	AbandonThreshold int           // Default 2 consecutive misses
 	DisconnectGrace  time.Duration // Default 60s (informational for service layer)
 }
@@ -107,7 +115,7 @@ func NewCircuit(config CircuitConfig) (*CircuitState, error) {
 
 	// Apply defaults
 	if config.MissedRoundScore == 0 {
-		config.MissedRoundScore = 41
+		config.MissedRoundScore = ForfeitRoundScore
 	}
 	if config.AbandonThreshold == 0 {
 		config.AbandonThreshold = 2

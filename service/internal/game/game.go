@@ -809,9 +809,10 @@ func (g *CambiaGame) cancelDisconnectGrace(playerID uuid.UUID) bool {
 	return true
 }
 
-// forfeitPlayer records the forfeit and runs the consequences: the player drops out of scoring
-// (computeScoresFromEngine reads g.forfeited, not Player.Connected) and the game ends if it has
-// nobody left to play it. Assumes lock is held by caller.
+// forfeitPlayer records the forfeit and runs the consequences: the player is scored at
+// engine.ForfeitRoundScore instead of on their hand (computeScoresFromEngine reads g.forfeited,
+// not Player.Connected), they drop off the results frame the table is shown, and the game ends if
+// it has nobody left to play it. Assumes lock is held by caller.
 func (g *CambiaGame) forfeitPlayer(playerID uuid.UUID) {
 	if g.GameOver || g.forfeited[playerID] {
 		return
@@ -1174,20 +1175,33 @@ func (g *CambiaGame) endGame() {
 	g.cancelSnapFills()
 
 	// --- Scoring and Winner Determination ---
-	// Compute scores from engine hand state.
+	// Compute scores from engine hand state. Every seat is in this map, a forfeited one included
+	// (at engine.ForfeitRoundScore).
 	finalScores := g.computeScoresFromEngine()
 	callerID := g.cambiaCallerID()
-	winners, penaltyApplies := g.findWinnersWithCambiaLogicEngine(finalScores, callerID)
-	adjustedScores := make(map[uuid.UUID]int)
+	// The winner comes from the seats that played the round out. A forfeited seat carries a flat
+	// penalty score rather than a hand, so it must not win a table where everyone still playing
+	// happens to be holding more than that.
+	playedScores := make(map[uuid.UUID]int, len(finalScores))
+	for id, score := range finalScores {
+		if !g.forfeited[id] {
+			playedScores[id] = score
+		}
+	}
+	winners, penaltyApplies := g.findWinnersWithCambiaLogicEngine(playedScores, callerID)
+	adjustedScores := make(map[uuid.UUID]int, len(finalScores))
 	for id, score := range finalScores {
 		adjustedScores[id] = score
 	}
 
-	// Apply Cambia caller penalty and circuit win bonus below. Both are single-game display
-	// adjustments only: they land in adjustedScores (the game_results payload and the value
-	// handed to OnGameEnd's scores param) but never reach circuit cumulative scoring, which reads
-	// finalScores (raw, pre-adjustment) via OnGameEnd's rawScores param instead (cambia-1009).
-	if penaltyApplies && callerID != uuid.Nil {
+	// Apply Cambia caller penalty and circuit win bonus below. Both are single-game adjustments
+	// only: they land in adjustedScores (the game_results rows and, through displayScores, the
+	// results frame) but never reach circuit cumulative scoring, which reads finalScores (raw,
+	// pre-adjustment) via OnGameEnd's rawScores param instead (cambia-1009).
+	// A forfeited caller is skipped: the forfeit score is the flat value of a round nobody played,
+	// not a hand that can be adjusted, and stacking the penalty on top would make one seat's
+	// forfeit cost more than another's.
+	if penaltyApplies && callerID != uuid.Nil && !g.forfeited[callerID] {
 		if _, ok := adjustedScores[callerID]; ok {
 			penaltyValue := 1 // Default penalty.
 			if g.Circuit.Enabled {
@@ -1210,6 +1224,19 @@ func (g *CambiaGame) endGame() {
 				log.Printf("Game %s: Applying %d win bonus to winner %s.", g.ID, winBonus, winnerID)
 				winBonusApplied = true
 			}
+		}
+	}
+	// The results frame reports the seats that played. A forfeited seat is announced by
+	// player_forfeited and rendered from the forfeited flag, so putting a 41 on the scoreboard
+	// next to real hands would read as a hand it never held. The omission is pinned by
+	// handlers.TestE2EMidGameDropForfeitsAndOmitsScores and hub.TestGraceExpiryForfeitsAndEndsTheGame
+	// (cambia-837/955) and stays a display rule; every record path - the action log, game_results,
+	// the rating roster, a circuit's cumulative totals - takes the full map, which is the half
+	// cambia-1541 fixed.
+	displayScores := make(map[uuid.UUID]int, len(adjustedScores))
+	for id, score := range adjustedScores {
+		if !g.forfeited[id] {
+			displayScores[id] = score
 		}
 	}
 	// --- End Scoring ---
@@ -1243,7 +1270,7 @@ func (g *CambiaGame) endGame() {
 		"winBonusApplied": winBonusApplied,
 		"finalHands":      finalHands,
 	}
-	for pid, score := range adjustedScores {
+	for pid, score := range displayScores {
 		resultsPayload["scores"].(map[string]int)[pid.String()] = score
 	}
 	g.fireEvent(GameEvent{
@@ -1259,13 +1286,24 @@ func (g *CambiaGame) endGame() {
 				usernames[p.ID] = p.User.Username
 			}
 		}
-		g.OnGameEnd(g.LobbyID, firstWinner, adjustedScores, usernames, finalScores, callerID, finalHands)
+		g.OnGameEnd(g.LobbyID, firstWinner, displayScores, usernames, finalScores, callerID, finalHands)
 	}
 
 	log.Printf("Game %s: Ended. Winner(s): %v. Final Scores (Adj): %v", g.ID, winners, adjustedScores)
 }
 
-// computeScoresFromEngine calculates scores from engine hand state.
+// computeScoresFromEngine calculates the final score of every seated player.
+//
+// A seat that forfeited scores engine.ForfeitRoundScore, the 41 points MATCHMAKING.md 8 and
+// RULES.md T5 put a forfeited round at. It used to be left out of the map instead, and every
+// consumer that indexed the map by player id read the miss as a 0: game_results stored a 0 and
+// the rating sort, where lower is better, read that 0 as the best score at the table, so quitting
+// a rated 2-seat game gained rating while the player who stayed lost it (cambia-1541).
+//
+// Being disconnected is not the same as having forfeited since cambia-955: a player inside their
+// reconnect window still holds their seat, and a table that finishes without them scores their
+// hand normally. With the grace at 0 the two coincide, which is the pre-cambia-955 behaviour.
+//
 // Assumes lock is held by caller.
 func (g *CambiaGame) computeScoresFromEngine() map[uuid.UUID]int {
 	scores := make(map[uuid.UUID]int)
@@ -1278,20 +1316,16 @@ func (g *CambiaGame) computeScoresFromEngine() map[uuid.UUID]int {
 		if player == nil {
 			continue
 		}
-		// Score everyone who did not forfeit. Being disconnected is not the same as having
-		// forfeited since cambia-955: a player inside their reconnect window still holds their
-		// seat, and a table that finishes without them scores their hand normally
-		// (MATCHMAKING.md 8). With the grace at 0 the two coincide, which is the pre-cambia-955
-		// behaviour.
-		if !g.forfeited[playerUUID] {
-			score := 0
-			for j := uint8(0); j < g.Engine.Players[i].HandLen; j++ {
-				score += int(g.Engine.Players[i].Hand[j].Value())
-			}
-			scores[playerUUID] = score
-		} else {
-			log.Printf("Game %s: Player %s score omitted (disconnected/forfeited).", g.ID, playerUUID)
+		if g.forfeited[playerUUID] {
+			scores[playerUUID] = engine.ForfeitRoundScore
+			log.Printf("Game %s: Player %s forfeited; scored at %d.", g.ID, playerUUID, engine.ForfeitRoundScore)
+			continue
 		}
+		score := 0
+		for j := uint8(0); j < g.Engine.Players[i].HandLen; j++ {
+			score += int(g.Engine.Players[i].Hand[j].Value())
+		}
+		scores[playerUUID] = score
 	}
 	return scores
 }
@@ -1434,7 +1468,12 @@ func (g *CambiaGame) persistFinalGameState(finalScores map[uuid.UUID]int, winner
 		}
 		score, scoreOk := finalScores[playerUUID]
 		if !scoreOk {
-			score = -999
+			// computeScoresFromEngine scores every seat, forfeits included (cambia-1541), so a
+			// miss here is a defect in the caller and not an absence to encode. The seat is left
+			// out rather than written with the -999 this used to store, which sat in the snapshot
+			// looking like a score while game_results recorded a 0 for the same seat.
+			log.Printf("Game %s: no final score for seat %s; leaving it out of the final-state snapshot.", g.ID, playerUUID)
+			continue
 		}
 		handLen := g.Engine.Players[i].HandLen
 		state := finalPlayerState{

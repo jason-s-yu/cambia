@@ -20,6 +20,12 @@ import (
 // passed in (see PoolFields) and fed back as the new stored values by the caller;
 // callers are expected to have loaded these from the DB rather than passing zero
 // values, or every match falls back to the baseline deviation/volatility.
+//
+// scoresMap must hold a score for every player passed in. A missing entry is not a
+// player who sat the game out, it is a first-place finish: the sort below is ascending
+// and lower is better in Cambia, so the zero value a map miss yields beats every real
+// hand. database.applyRatingUpdate refuses such a roster rather than rating it
+// (cambia-1541); a forfeited seat reaches here with engine.ForfeitRoundScore.
 func FinalizeRatings(players []models.User, scoresMap map[uuid.UUID]int, mode RatingMode) []models.User {
 	// 1) Build a rank-based fraction for each user
 	type userScore struct {

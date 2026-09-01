@@ -189,6 +189,13 @@ func TestE2EMidGameDropForfeitsAndOmitsScores(t *testing.T) {
 	if _, ok := payload.Scores[hostID.String()]; !ok {
 		t.Fatalf("scores missing the surviving player %s: %v", hostID, payload.Scores)
 	}
+	// The omission is a display rule and stays one (cambia-1541 kept it): this frame is what the
+	// results screen renders, and the forfeited seat is already reported by player_forfeited and
+	// by the forfeited flag on private_sync_state, so a 41 sitting next to real hands would read
+	// as a hand the player never held. The 41 is still recorded everywhere it counts - the seat
+	// scores engine.ForfeitRoundScore in game_results, in the rating roster and in a circuit's
+	// cumulative total (see internal/game/forfeit_scoring_test.go and service/doc/game_actions.md
+	// "Disconnect grace").
 	if _, ok := payload.Scores[p2ID.String()]; ok {
 		t.Fatalf("scores must omit the forfeited player %s: %v", p2ID, payload.Scores)
 	}

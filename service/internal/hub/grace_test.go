@@ -134,7 +134,11 @@ func TestGraceExpiryForfeitsAndEndsTheGame(t *testing.T) {
 	case res := <-ended:
 		assert.Equal(t, ids[0], res.winner, "the player still connected must win the forfeit")
 		assert.Contains(t, res.scores, ids[0], "the remaining player must be scored")
-		assert.NotContains(t, res.scores, ids[1], "a forfeited player must not be scored")
+		// res.scores is the results frame's display map: a forfeited seat stays off it and is
+		// rendered from the forfeited flag instead. The seat is still scored, at
+		// engine.ForfeitRoundScore, in the record map game_results and the rating roster take
+		// (cambia-1541).
+		assert.NotContains(t, res.scores, ids[1], "a forfeited player is not on the results frame")
 	case <-time.After(3 * time.Second):
 		t.Fatal("the game never ended after the grace window expired")
 	}
