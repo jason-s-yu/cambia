@@ -414,6 +414,141 @@ func TestCircuitGetStandings_AllTiebreakers(t *testing.T) {
 		standings[2].PlayerID, standings[2].CumulativeScore)
 }
 
+// TestCircuitGetStandings_HeadToHeadBeatsAggregate verifies GetStandings breaks a
+// cumulative-plus-raw tie on the mutual head-to-head record between the tied
+// players, not on total wins summed across every opponent (cambia-1560). Players
+// 1 and 2 finish level on both CumulativeScore and RawCumulative after 6 rounds;
+// player 1 holds the better record against player 2 directly (3 wins to 2), but
+// player 1's total wins across the whole field (5) trail player 2's (6), so the
+// old aggregate-sum tiebreaker would have ranked player 2 first. This exact
+// 6-round scenario is replicated in Python:
+// test_circuit_cross_validation.py::test_h2h_beats_aggregate.
+func TestCircuitGetStandings_HeadToHeadBeatsAggregate(t *testing.T) {
+	cfg := makeConfig(3, 6, []int{1, 2, 3})
+	cs, err := NewCircuit(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rounds := []map[int]int{
+		{1: 12, 2: 12, 3: 7},
+		{1: 17, 2: 13, 3: 17},
+		{1: 7, 2: 16, 3: 0},
+		{1: 20, 2: 10, 3: 12},
+		{1: 1, 2: 5, 3: 9},
+		{1: 15, 2: 16, 3: 18},
+	}
+	for _, r := range rounds {
+		if err := cs.RecordRound(r, -1); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	p1 := cs.Players[cs.playerIndex(1)]
+	p2 := cs.Players[cs.playerIndex(2)]
+	if p1.CumulativeScore != p2.CumulativeScore {
+		t.Fatalf("expected players 1 and 2 level on CumulativeScore, got %d vs %d", p1.CumulativeScore, p2.CumulativeScore)
+	}
+	if p1.RawCumulative != p2.RawCumulative {
+		t.Fatalf("expected players 1 and 2 level on RawCumulative, got %d vs %d", p1.RawCumulative, p2.RawCumulative)
+	}
+
+	// Sanity: player 1 leads the direct pairwise record (3-2) but trails on
+	// aggregate wins across the whole field (5 vs 6), confirming this scenario
+	// actually distinguishes the two tiebreaker semantics.
+	if p1.H2HRecord[2][0] != 3 || p1.H2HRecord[2][1] != 2 {
+		t.Fatalf("expected player 1 to lead player 2 head-to-head 3-2, got %v", p1.H2HRecord[2])
+	}
+	if h2hTotalWinsForTest(p1) != 5 || h2hTotalWinsForTest(p2) != 6 {
+		t.Fatalf("expected aggregate wins 5 (player 1) and 6 (player 2), got %d and %d", h2hTotalWinsForTest(p1), h2hTotalWinsForTest(p2))
+	}
+
+	standings := cs.GetStandings()
+	idx1, idx2 := -1, -1
+	for i, p := range standings {
+		if p.PlayerID == 1 {
+			idx1 = i
+		}
+		if p.PlayerID == 2 {
+			idx2 = i
+		}
+	}
+	if idx1 < 0 || idx2 < 0 {
+		t.Fatalf("expected both players 1 and 2 in standings, got %+v", standings)
+	}
+	if idx1 >= idx2 {
+		t.Errorf("expected player 1 (better head-to-head) ranked ahead of player 2, got order %d(%d), %d(%d)",
+			standings[idx1].PlayerID, standings[idx1].CumulativeScore, standings[idx2].PlayerID, standings[idx2].CumulativeScore)
+	}
+}
+
+// h2hTotalWinsForTest sums a player's H2H wins across every opponent, for
+// asserting the pre-cambia-1560 aggregate metric in tests only.
+func h2hTotalWinsForTest(p CircuitPlayerState) int {
+	total := 0
+	for _, rec := range p.H2HRecord {
+		total += rec[0]
+	}
+	return total
+}
+
+// TestCircuitGetStandings_HeadToHeadCycleFallsThrough verifies that when three
+// tied players' head-to-head mini-table comes out level (a rock-paper-scissors
+// cycle: each holds a winning record against one tied opponent and a losing
+// record against the other, so their within-group win totals still come out
+// equal), GetStandings falls through to tie-breaker 3 (BestRound) for that
+// subgroup instead of picking an arbitrary winner (cambia-1560).
+func TestCircuitGetStandings_HeadToHeadCycleFallsThrough(t *testing.T) {
+	cfg := makeConfig(3, 3, []int{1, 2, 3})
+	cs, err := NewCircuit(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Round 1: 1 beats 2 beats 3 (best_round candidates differ per player below)
+	_ = cs.RecordRound(map[int]int{1: 5, 2: 8, 3: 12}, -1)
+	// Round 2: 2 beats 3 beats 1
+	_ = cs.RecordRound(map[int]int{1: 12, 2: 5, 3: 8}, -1)
+	// Round 3: 3 beats 1 beats 2
+	_ = cs.RecordRound(map[int]int{1: 8, 2: 12, 3: 5}, -1)
+
+	p1 := cs.Players[cs.playerIndex(1)]
+	p2 := cs.Players[cs.playerIndex(2)]
+	p3 := cs.Players[cs.playerIndex(3)]
+	if p1.CumulativeScore != p2.CumulativeScore || p2.CumulativeScore != p3.CumulativeScore {
+		t.Fatalf("expected all three players level on CumulativeScore, got %d, %d, %d", p1.CumulativeScore, p2.CumulativeScore, p3.CumulativeScore)
+	}
+	if p1.RawCumulative != p2.RawCumulative || p2.RawCumulative != p3.RawCumulative {
+		t.Fatalf("expected all three players level on RawCumulative, got %d, %d, %d", p1.RawCumulative, p2.RawCumulative, p3.RawCumulative)
+	}
+	// Player 1 beats player 2 2-1, player 2 beats player 3 2-1, player 3 beats
+	// player 1 2-1: a cycle, so total within-group wins still come out level
+	// (3 each) for all three.
+	if p1.H2HRecord[2][0] != 2 || p1.H2HRecord[2][1] != 1 {
+		t.Fatalf("expected player 1 to lead player 2 head-to-head 2-1, got %v", p1.H2HRecord[2])
+	}
+	if p2.H2HRecord[3][0] != 2 || p2.H2HRecord[3][1] != 1 {
+		t.Fatalf("expected player 2 to lead player 3 head-to-head 2-1, got %v", p2.H2HRecord[3])
+	}
+	if p3.H2HRecord[1][0] != 2 || p3.H2HRecord[1][1] != 1 {
+		t.Fatalf("expected player 3 to lead player 1 head-to-head 2-1, got %v", p3.H2HRecord[1])
+	}
+	for _, p := range []CircuitPlayerState{p1, p2, p3} {
+		if h2hTotalWinsForTest(p) != 3 {
+			t.Fatalf("expected player %d to have exactly 3 head-to-head wins (cyclic mini-table), got %d", p.PlayerID, h2hTotalWinsForTest(p))
+		}
+	}
+
+	standings := cs.GetStandings()
+	// BestRound: player 1's lowest round score is 5 (round 1), player 2's is 5
+	// (round 2), player 3's is 5 (round 3) -- also level, so the group falls all
+	// the way through to the final PlayerID tiebreak.
+	ids := []int{standings[0].PlayerID, standings[1].PlayerID, standings[2].PlayerID}
+	if ids[0] != 1 || ids[1] != 2 || ids[2] != 3 {
+		t.Errorf("expected a level cyclic mini-table to fall through to PlayerID order [1 2 3], got %v", ids)
+	}
+}
+
 // TestCircuitGetStandings_BestRound tests BestRound tiebreaker.
 func TestCircuitGetStandings_BestRound(t *testing.T) {
 	cfg := makeConfig(2, 2, []int{1, 2})

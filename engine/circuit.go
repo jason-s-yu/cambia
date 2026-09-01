@@ -371,13 +371,50 @@ func (cs *CircuitState) NextFirstActor() int {
 	return cs.Config.PlayerIDs[(cs.DealerSeat+1)%len(cs.Config.PlayerIDs)]
 }
 
-// h2hTotalWins returns total H2H wins for a player across all opponents.
-func h2hTotalWins(p CircuitPlayerState) int {
-	total := 0
-	for _, rec := range p.H2HRecord {
-		total += rec[0]
+// resolveH2HTieGroup reorders a slice of players already level on cumulative and
+// raw score (T1 tie-breakers #1-#2) by tie-breaker #2, the head-to-head record:
+// the stored pairwise win/loss tally the tied players hold against each other
+// (H2HRecord), not a recount of per-round placements or a sum against the whole
+// field.
+//
+// For a group of exactly two this is a direct comparison of their mutual
+// record. For a group of three or more it is a mini-table: each player's total
+// wins counted only against the other players in this group. Ranking by that
+// per-player total is always a strict weak ordering (it sorts a number), so it
+// cannot itself cycle; a subgroup that remains level after the mini-table --
+// including a genuinely cyclic result, where each player in the subgroup beat
+// one tied opponent and lost to another, which is exactly what makes their
+// within-group win totals come out equal -- falls through to tie-breaker #3
+// (BestRound), then PlayerID, among just that subgroup.
+func resolveH2HTieGroup(group []CircuitPlayerState) {
+	groupWins := make(map[int]int, len(group))
+	for _, p := range group {
+		wins := 0
+		for _, opp := range group {
+			if opp.PlayerID == p.PlayerID {
+				continue
+			}
+			wins += p.H2HRecord[opp.PlayerID][0]
+		}
+		groupWins[p.PlayerID] = wins
 	}
-	return total
+
+	sort.SliceStable(group, func(i, j int) bool {
+		pi := group[i]
+		pj := group[j]
+		// 2. Head-to-head mini-table wins, descending.
+		wi := groupWins[pi.PlayerID]
+		wj := groupWins[pj.PlayerID]
+		if wi != wj {
+			return wi > wj
+		}
+		// 3. BestRound ascending.
+		if pi.BestRound != pj.BestRound {
+			return pi.BestRound < pj.BestRound
+		}
+		// 4. PlayerID ascending (final tiebreak).
+		return pi.PlayerID < pj.PlayerID
+	})
 }
 
 // GetStandings returns a sorted copy of player states by standings.
@@ -385,6 +422,8 @@ func (cs *CircuitState) GetStandings() []CircuitPlayerState {
 	standings := make([]CircuitPlayerState, len(cs.Players))
 	copy(standings, cs.Players)
 
+	// Group first by tie-breakers #1-#2 (CumulativeScore, RawCumulative); PlayerID
+	// is only a placeholder order within a group, corrected below by resolveH2HTieGroup.
 	sort.SliceStable(standings, func(i, j int) bool {
 		pi := standings[i]
 		pj := standings[j]
@@ -397,19 +436,24 @@ func (cs *CircuitState) GetStandings() []CircuitPlayerState {
 		if pi.RawCumulative != pj.RawCumulative {
 			return pi.RawCumulative < pj.RawCumulative
 		}
-		// 3. H2H wins descending
-		wi := h2hTotalWins(pi)
-		wj := h2hTotalWins(pj)
-		if wi != wj {
-			return wi > wj
-		}
-		// 4. BestRound ascending
-		if pi.BestRound != pj.BestRound {
-			return pi.BestRound < pj.BestRound
-		}
-		// 5. PlayerID ascending (final tiebreak)
 		return pi.PlayerID < pj.PlayerID
 	})
+
+	// Resolve tie-breaker #2 (head-to-head) within each group still level on
+	// CumulativeScore and RawCumulative.
+	start := 0
+	for start < len(standings) {
+		end := start + 1
+		for end < len(standings) &&
+			standings[end].CumulativeScore == standings[start].CumulativeScore &&
+			standings[end].RawCumulative == standings[start].RawCumulative {
+			end++
+		}
+		if end-start >= 2 {
+			resolveH2HTieGroup(standings[start:end])
+		}
+		start = end
+	}
 
 	return standings
 }

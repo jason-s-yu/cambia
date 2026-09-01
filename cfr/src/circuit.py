@@ -199,6 +199,41 @@ def _get_subsidies_for_n(n: int) -> list[int]:
     return _SUBSIDY_5P_PLUS(n)
 
 
+def _resolve_h2h_tie_group(
+    group: list[CircuitPlayerState],
+) -> list[CircuitPlayerState]:
+    """Reorder a list of players already level on cumulative and raw score
+    (T1 tie-breakers 1-2) by tie-breaker 2, the head-to-head record: the
+    stored pairwise win/loss tally the tied players hold against each other
+    (h2h_record), not a recount of per-round placements or a sum against the
+    whole field. Mirrors engine/circuit.go resolveH2HTieGroup.
+
+    For a group of exactly two this is a direct comparison of their mutual
+    record. For a group of three or more it is a mini-table: each player's
+    total wins counted only against the other players in this group. Ranking
+    by that per-player total is always a strict weak ordering (it sorts a
+    number), so it cannot itself cycle; a subgroup that remains level after
+    the mini-table -- including a genuinely cyclic result, where each player
+    in the subgroup beat one tied opponent and lost to another, which is
+    exactly what makes their within-group win totals come out equal -- falls
+    through to tie-breaker 3 (best_round), then player_id, among just that
+    subgroup.
+    """
+    group_ids = {p.player_id for p in group}
+    group_wins = {
+        p.player_id: sum(
+            p.h2h_record.get(opp_id, [0, 0])[0]
+            for opp_id in group_ids
+            if opp_id != p.player_id
+        )
+        for p in group
+    }
+    return sorted(
+        group,
+        key=lambda p: (-group_wins[p.player_id], p.best_round, p.player_id),
+    )
+
+
 class CircuitState:
     """Full mutable state of a circuit tournament."""
 
@@ -397,21 +432,40 @@ class CircuitState:
         ]
 
     def get_standings(self) -> list[CircuitPlayerState]:
-        """Return players sorted by tournament standing."""
+        """Return players sorted by tournament standing.
 
-        def h2h_total_wins(p: CircuitPlayerState) -> int:
-            return sum(v[0] for v in p.h2h_record.values())
-
-        return sorted(
+        Mirrors engine/circuit.go GetStandings (RULES.md T1): a tie on
+        CumulativeScore and RawCumulative is broken on tie-breaker 2, the
+        stored pairwise head-to-head record the tied players hold against
+        each other -- not a sum of wins against the whole field. A group of
+        three or more tied players is ranked by a mini-table of wins counted
+        only against other members of that group; a player, or subgroup,
+        still level after the mini-table falls through to tie-breaker 3
+        (best_round), then player_id.
+        """
+        # Group by tie-breakers 1-2 first (equal cumulative_score and
+        # raw_cumulative); player_id is only a placeholder order within a
+        # group, corrected below by the head-to-head mini-table.
+        standings = sorted(
             self.players,
-            key=lambda p: (
-                p.cumulative_score,
-                p.raw_cumulative,
-                -h2h_total_wins(p),
-                p.best_round,
-                p.player_id,
-            ),
+            key=lambda p: (p.cumulative_score, p.raw_cumulative, p.player_id),
         )
+
+        start = 0
+        n = len(standings)
+        while start < n:
+            end = start + 1
+            while (
+                end < n
+                and standings[end].cumulative_score == standings[start].cumulative_score
+                and standings[end].raw_cumulative == standings[start].raw_cumulative
+            ):
+                end += 1
+            if end - start >= 2:
+                standings[start:end] = _resolve_h2h_tie_group(standings[start:end])
+            start = end
+
+        return standings
 
     def is_complete(self) -> bool:
         return self.completed

@@ -199,3 +199,66 @@ class TestCrossValidation:
 
         state.record_reconnection(2)
         assert p2.consecutive_misses == 0
+
+
+class TestHeadToHeadTiebreaker:
+    """Cross-backend parity for the T1 tiebreaker-2 fix (cambia-1560).
+
+    engine/circuit_test.go::TestCircuitGetStandings_HeadToHeadBeatsAggregate
+    and ::TestCircuitGetStandings_HeadToHeadCycleFallsThrough run these exact
+    scenarios in Go; the scores here are the same round-by-round numbers.
+    """
+
+    def test_h2h_beats_aggregate(self):
+        """3 players, 6 rounds: player 1 leads player 2 head-to-head 3-2 while
+        trailing on aggregate wins across the whole field (5 vs 6). Standings
+        rank on the mutual record, so player 1 ranks ahead of player 2."""
+        rounds = [
+            {1: 12, 2: 12, 3: 7},
+            {1: 17, 2: 13, 3: 17},
+            {1: 7, 2: 16, 3: 0},
+            {1: 20, 2: 10, 3: 12},
+            {1: 1, 2: 5, 3: 9},
+            {1: 15, 2: 16, 3: 18},
+        ]
+        config = CircuitConfig(num_players=3, num_rounds=6, player_ids=[1, 2, 3])
+        state = CircuitState(config)
+        for scores in rounds:
+            state.record_round(scores, -1)
+
+        p1 = state._player_map[1]
+        p2 = state._player_map[2]
+        assert p1.cumulative_score == p2.cumulative_score
+        assert p1.raw_cumulative == p2.raw_cumulative
+        assert p1.h2h_record[2] == [3, 2]
+
+        def h2h_total(p):
+            return sum(v[0] for v in p.h2h_record.values())
+
+        assert h2h_total(p1) == 5
+        assert h2h_total(p2) == 6
+
+        standings = state.get_standings()
+        ids = [p.player_id for p in standings]
+        assert ids.index(1) < ids.index(2)
+
+    def test_h2h_cycle_falls_through_to_best_round(self):
+        """3 players, 3 rounds forming a head-to-head cycle (each leads one
+        tied opponent 2-1 and trails the other 1-2): total within-group wins
+        come out level (3 each), so standings fall through to best_round,
+        then player_id."""
+        config = CircuitConfig(num_players=3, num_rounds=3, player_ids=[1, 2, 3])
+        state = CircuitState(config)
+        state.record_round({1: 5, 2: 8, 3: 12}, -1)
+        state.record_round({1: 12, 2: 5, 3: 8}, -1)
+        state.record_round({1: 8, 2: 12, 3: 5}, -1)
+
+        p1, p2, p3 = (state._player_map[i] for i in (1, 2, 3))
+        assert p1.cumulative_score == p2.cumulative_score == p3.cumulative_score
+        assert p1.raw_cumulative == p2.raw_cumulative == p3.raw_cumulative
+        assert p1.h2h_record[2] == [2, 1]
+        assert p2.h2h_record[3] == [2, 1]
+        assert p3.h2h_record[1] == [2, 1]
+
+        standings = state.get_standings()
+        assert [p.player_id for p in standings] == [1, 2, 3]
