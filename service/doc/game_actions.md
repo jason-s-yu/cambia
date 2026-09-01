@@ -234,6 +234,8 @@ If the card discarded in the previous step has a special action which can be uti
 
     An ability triggered by a **replace** (`allowReplaceAbilities`) carries `"payload": {"mandatory": true}` and **cannot be skipped**. The engine folds the decline into the discard action (`DiscardNoAbility` vs `DiscardWithAbility`) and offers an already-armed ability nothing but targets, so a `skip` against it is refused with `private_special_action_fail` and the prompt stands. Clients must not render a skip affordance for it; the turn timer resolves it by playing the first legal target (a King looks and then declines the swap). The same flag is carried in `private_sync_state` under `specialAction.mandatory` so a reconnecting client restores the prompt without the affordance.
 
+    A King's two steps are told apart in `private_sync_state` by `specialAction.firstStepDone`: false while the look is still pending, true once it resolves and the outstanding decision is swap/keep. This lets a client that mounts fresh mid-King (a reload, a new tab, a device switch, not a live-socket resync) render the swap/keep controls straight from the snapshot instead of the look step, which the server would refuse with "reveal already done." The peeked pair itself is not part of this projection and is never re-delivered on remount: own and looked-at faces stay transient (cambia-763 F1, cambia-1094), and the swap step does not need them, since the server resolves `swap_peek_swap` from this state alone (cambia-1567).
+
     A replace only triggers an ability when the drawn card came from the **stockpile** (RULES.md 3B) and the ability has a legal target; a replace fed by a discard-pile draw emits no `player_special_choice` at all.
 
     ```json

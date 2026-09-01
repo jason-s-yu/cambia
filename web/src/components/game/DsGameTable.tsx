@@ -579,12 +579,24 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   }, [pendingAction, specialAction]);
 
   const confirmKingSwap = useCallback((swap: boolean) => {
-    if (!kingPair || !selfId || busy) return;
-    sendMessage(swap
-      ? kingSwapConfirmAction(kingPair.myId, kingPair.myIdx, selfId, kingPair.oppId, kingPair.oppIdx, kingPair.oppOwner)
-      : skipSpecialAction());
+    if (!selfId || busy) return;
+    // kingPair is unset when this client mounted straight into the second step (reload, new tab,
+    // device switch) instead of running the interactive look itself - the snapshot's
+    // specialAction.firstStepDone is what put the controls on screen in that case (cambia-1567).
+    if (!kingPair && !specialAction?.firstStepDone) return;
+    if (!swap) {
+      sendMessage(skipSpecialAction());
+      setKingPair(null);
+      return;
+    }
+    // The peeked pair is not needed to take the swap: the server resolves swap_peek_swap from
+    // SpecialActionState alone (special_actions.go doKingSwapYesEngine) and ignores this payload,
+    // so a remount with no local pair can still send a real swap. The peeked faces themselves are
+    // never re-delivered on remount (cambia-763 F1, cambia-1094).
+    const pair = kingPair ?? { myId: '', myIdx: -1, oppId: '', oppIdx: -1, oppOwner: '' };
+    sendMessage(kingSwapConfirmAction(pair.myId, pair.myIdx, selfId, pair.oppId, pair.oppIdx, pair.oppOwner));
     setKingPair(null);
-  }, [kingPair, selfId, busy, sendMessage]);
+  }, [kingPair, specialAction, selfId, busy, sendMessage]);
 
   // --- Derived flags ---
 
@@ -597,7 +609,12 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     ((selectedIdx !== null || !!snapTarget) && pendingAction === null);
   const canSnap = (selectedIdx !== null || !!snapTarget) && pendingAction === null && !busy && !selfForfeited;
   const canCallCambia = isMyTurn && pendingAction === null && !busy && !gameState.cambiaCalled && gameState.started && !gameState.gameOver;
-  const kingConfirm = !!kingPair && specialRank === 'K' && isMyTurn && !busy;
+  // True once the King's second step (swap/keep) is the live decision: either this client ran the
+  // interactive look itself (kingPair) or the snapshot says the look already resolved
+  // (specialAction.firstStepDone) - the case where this client mounted fresh into the second step
+  // and never ran the look locally, so kingPair alone would leave the swap unreachable
+  // (cambia-1567).
+  const kingConfirm = (!!kingPair || !!specialAction?.firstStepDone) && specialRank === 'K' && isMyTurn && !busy;
   // An ability the engine armed off a replace has no skip: the engine models no way to decline one
   // it has already armed, so the server refuses the skip and the only way on is to name a target
   // (cambia-1125). The King's second step keeps its decline - that one is a real engine action.
