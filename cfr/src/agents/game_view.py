@@ -53,6 +53,7 @@ from ..ffi.bridge import (
     HouseRulesView,
     PendingInfo,
     SnapInfo,
+    effective_deck_rank_mask,
 )
 
 __all__ = [
@@ -316,6 +317,7 @@ class PythonGameView:
             num_players=int(self._state.num_players),
             initial_view_count=int(rules.initial_view_count),
             num_decks=int(getattr(rules, "num_decks", 1)),
+            deck_rank_mask=effective_deck_rank_mask(getattr(rules, "deck_ranks", None)),
         )
 
 

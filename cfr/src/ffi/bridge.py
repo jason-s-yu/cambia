@@ -177,7 +177,7 @@ NUM_CARD_INDICES = 54
 # evalSnapFields / evalHouseRuleFields).
 PENDING_FIELDS = 10
 SNAP_FIELDS = 6
-HOUSE_RULE_FIELDS = 14
+HOUSE_RULE_FIELDS = 16
 
 # engine.MaxDeckSize: the largest a discard pile can ever get (4 decks).
 MAX_DECK_SIZE = 216
@@ -250,6 +250,65 @@ def rank_from_index(rank_idx: int) -> Optional[str]:
     return _RANK_BY_INDEX[rank_idx]
 
 
+# --- Deck composition (engine HouseRules.DeckRanks, cambia-1478) ---
+
+#: The DeckRanks mask selecting every suited rank; engine.AllDeckRanks. It is
+#: also what the 0 sentinel means, and what the rules read-back reports for it.
+ALL_DECK_RANKS_MASK = (1 << 13) - 1
+
+
+def deck_rank_mask(deck_ranks: Optional[List[str]]) -> int:
+    """Encode CambiaRulesConfig.deck_ranks as the engine's DeckRanks bitmask.
+
+    Bit i selects rank i in the engine's rank order, which RANK_VALUE already
+    pins (A=0 .. K=12). None means "no restriction" and encodes as the 0
+    sentinel the constructors read as the full 13-rank deck.
+
+    Every other input is refused rather than approximated. Dropping this field
+    is what cambia-1478 records: the bridge passed 12 of 13 rule fields and
+    silently left deck_ranks behind, so a ["A","6"] config dealt an 8-card game
+    on the Python engine and a 54-card one on the Go engine, and every tiny-game
+    Go measurement taken before the guard was a different game than the one
+    reported. A mask cannot express a duplicated rank (the Python deck builder
+    would deal that rank twice), so a duplicate is an error here rather than a
+    quiet cross-engine divergence.
+    """
+    if deck_ranks is None:
+        return 0
+    ranks = list(deck_ranks)
+    if not ranks:
+        raise ValueError(
+            "house_rules.deck_ranks is empty: a deck with no ranks cannot be "
+            "dealt. Leave it unset for the full 13-rank deck."
+        )
+    mask = 0
+    for rank in ranks:
+        bit = RANK_VALUE.get(rank)
+        if bit is None:
+            raise ValueError(
+                f"house_rules.deck_ranks contains {rank!r}, which is not a suited "
+                f"rank. Valid ranks are {sorted(RANK_VALUE, key=RANK_VALUE.get)}; "
+                f"jokers are governed by use_jokers, not by deck_ranks."
+            )
+        if mask & (1 << bit):
+            raise ValueError(
+                f"house_rules.deck_ranks lists {rank!r} more than once. The engine "
+                "rule is a set of ranks, so a repeat cannot be crossed over the FFI "
+                "and would deal a different deck on each engine."
+            )
+        mask |= 1 << bit
+    return mask
+
+
+def effective_deck_rank_mask(deck_ranks: Optional[List[str]]) -> int:
+    """The mask the engine deals from, with the 0 sentinel resolved.
+
+    The read-back form: cambia_game_get_house_rules reports the effective mask,
+    the same way it reports the effective seat count.
+    """
+    return deck_rank_mask(deck_ranks) or ALL_DECK_RANKS_MASK
+
+
 class PendingInfo(NamedTuple):
     """The pending decision the game is waiting on, if any.
 
@@ -316,6 +375,10 @@ class HouseRulesView(NamedTuple):
     num_players: int
     initial_view_count: int
     num_decks: int
+    #: Effective suited-rank mask (see effective_deck_rank_mask): the 0
+    #: sentinel reads back as every rank, the way num_players reads back as
+    #: the effective seat count.
+    deck_rank_mask: int
 
 
 # ---------------------------------------------------------------------------
@@ -334,7 +397,8 @@ _ffi.cdef("""
         uint8_t  penalty_draw_count, uint8_t  allow_draw_from_discard,
         uint8_t  allow_replace_abilities, uint8_t  allow_opponent_snapping,
         uint8_t  snap_race, uint8_t  num_jokers, uint8_t  lock_caller_hand,
-        uint8_t  initial_view_count, uint8_t  num_decks
+        uint8_t  initial_view_count, uint8_t  num_decks,
+        uint16_t deck_ranks
     );
     int32_t cambia_game_new_with_rules(
         uint64_t seed,
@@ -350,7 +414,8 @@ _ffi.cdef("""
         uint8_t  lockCallerHand,
         uint8_t  numPlayers,
         uint8_t  initialViewCount,
-        uint8_t  numDecks
+        uint8_t  numDecks,
+        uint16_t deckRanks
     );
     void    cambia_game_free(int32_t h);
     int32_t cambia_game_apply_action(int32_t h, uint16_t action);
@@ -597,6 +662,7 @@ class GoEngine:
                 int(np_val),
                 getattr(house_rules, "initial_view_count", 2),
                 getattr(house_rules, "num_decks", 1),
+                deck_rank_mask(getattr(house_rules, "deck_ranks", None)),
             )
         else:
             warnings.warn(
@@ -664,6 +730,10 @@ class GoEngine:
         obj._lib = lib
         obj._closed = False
         obj._owned = True
+        # Set before the constructor call below, which raises on a rejected
+        # deck or rules record: __del__ runs on the half-built object and
+        # reads this attribute.
+        obj._game_h = -1
 
         if house_rules is not None:
             np_val = int(getattr(house_rules, "num_players", 2) or 2)
@@ -697,6 +767,7 @@ class GoEngine:
                 1 if getattr(house_rules, "lockCallerHand", True) else 0,
                 int(getattr(house_rules, "initial_view_count", 2)),
                 int(getattr(house_rules, "num_decks", 1)),
+                deck_rank_mask(getattr(house_rules, "deck_ranks", None)),
             )
         else:
             # Defaults: 2 players, 4 cards each, standard competitive rules
@@ -717,6 +788,7 @@ class GoEngine:
                 1,
                 2,
                 1,
+                0,  # deckRanks: the "every suited rank" sentinel
             )
 
         if game_h < 0:
@@ -1060,10 +1132,20 @@ class GoEngine:
                 self._game_h, bufs["rules"], HOUSE_RULE_FIELDS
             )
         )
-        if rc < 0:
+        if rc != HOUSE_RULE_FIELDS:
+            # A short count instead of -1 means the loaded library writes a
+            # narrower record than this bridge reads, i.e. libcambia.so is
+            # older than the source tree. Saying so beats returning a record
+            # whose trailing fields are whatever the buffer held.
             raise RuntimeError(
-                f"cambia_game_get_house_rules failed (returned {rc}) "
-                f"on handle {self._game_h}"
+                f"cambia_game_get_house_rules returned {rc}, want "
+                f"{HOUSE_RULE_FIELDS}, on handle {self._game_h}"
+                + (
+                    ". The loaded libcambia.so is out of date with this bridge;"
+                    " rebuild it with `make libcambia`."
+                    if rc > 0
+                    else ""
+                )
             )
         rec = bufs["rules"]
         return HouseRulesView(
@@ -1080,6 +1162,7 @@ class GoEngine:
             num_players=int(rec[11]),
             initial_view_count=int(rec[12]),
             num_decks=int(rec[13]),
+            deck_rank_mask=int(rec[14]) | (int(rec[15]) << 8),
         )
 
     def _get_all_cards_unsafe(self) -> np.ndarray:

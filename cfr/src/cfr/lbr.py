@@ -113,22 +113,24 @@ _EST_P0_DECISIONS_PER_GAME = 3.0
 OpponentFactory = Callable[[int, Any], Any]
 
 
-#: Rule fields the Go engine's FFI rules struct cannot express. The bridge passes
-#: 12 of CambiaRulesConfig's 13 fields to cambia_game_new_with_rules; deck_ranks
-#: is the one it drops, and dropping it silently changes the GAME (a
-#: deck_ranks=["A","6"] config deals a 4-card tiny deck on the Python engine and a
-#: full 54-card deck on the Go engine). See _reject_unsupported_rules.
-_FFI_UNSUPPORTED_RULE_FIELDS = ("deck_ranks",)
+#: Rule fields the Go engine's FFI rules struct cannot express. Empty since
+#: cambia-1478 crossed deck_ranks over as HouseRules.DeckRanks: the bridge now
+#: passes all 13 of CambiaRulesConfig's rule fields to
+#: cambia_game_new_with_rules, so a reduced-deck config deals the same game on
+#: both engines and needs no guard. The gate stays because it is the thing that
+#: caught the last silently-dropped field: a rule the Go deal cannot honor gets
+#: named here and is refused loudly instead of quietly measuring another game.
+_FFI_UNSUPPORTED_RULE_FIELDS: Tuple[str, ...] = ()
 
 
 def _reject_unsupported_rules(house_rules: Any) -> None:
     """Refuse house rules the Go deal cannot honor.
 
-    Without this, a restricted-deck config measures a completely different game
-    on the Go path and reports the number as if it were the configured one. An
-    explicit deck (``GoSearchState.from_deck``, or the ``deal_decks`` pool the
-    estimators accept) is the supported way to run a non-standard deck, since a
-    deck order fully determines the deal and needs no rule support.
+    Without this, a config the FFI cannot carry measures a completely different
+    game on the Go path and reports the number as if it were the configured one.
+    An explicit deck (``GoSearchState.from_deck``, or the ``deal_decks`` pool the
+    estimators accept) is the fallback for anything a rule cannot express, since
+    a deck order fully determines the deal and needs no rule support.
     """
     for field in _FFI_UNSUPPORTED_RULE_FIELDS:
         value = getattr(house_rules, field, None)
@@ -136,10 +138,10 @@ def _reject_unsupported_rules(house_rules: Any) -> None:
             raise ValueError(
                 f"house_rules.{field}={value!r} cannot be expressed over the "
                 "Go engine's FFI rules struct, so dealing from these rules "
-                "would silently measure a different game (a full 54-card deck). "
-                "Pass an explicit deck instead: GoSearchState.from_deck(...), "
-                "or the deal_decks= pool accepted by collect_infosets / "
-                "sampled_lbr / tier_b_lbr / ismcts_br."
+                "would silently measure a different game. Pass an explicit deck "
+                "instead: GoSearchState.from_deck(...), or the deal_decks= pool "
+                "accepted by collect_infosets / sampled_lbr / tier_b_lbr / "
+                "ismcts_br."
             )
 
 

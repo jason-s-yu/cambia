@@ -90,26 +90,36 @@ func NewGame(seed uint64, rules HouseRules) GameState {
 	g.Rules = rules
 	g.CambiaCaller = -1
 
-	// Build NumDecks copies of the standard deck.
-	numDecks := rules.NumDecks
-	if numDecks == 0 {
-		numDecks = 1
-	}
-	jokerSuits := [2]uint8{SuitRedJoker, SuitBlackJoker}
+	// Build numDecks copies of the deck: all four suits of every rank the
+	// DeckRanks mask includes, plus that copy's jokers. With the default
+	// mask (DeckRanks == 0) every rank is included and this is the standard
+	// 52-card composition, card for card and in the same order as before, so
+	// a given seed still deals the game it always dealt.
+	numDecks := rules.numDecks()
+	rankMask := rules.DeckRankMask()
+	numJokers := rules.numJokers()
+	jokerSuits := [MaxJokersPerDeck]uint8{SuitRedJoker, SuitBlackJoker}
 	idx := 0
 	for d := uint8(0); d < numDecks; d++ {
 		for suit := uint8(0); suit < 4; suit++ {
 			for rank := uint8(0); rank <= RankKing; rank++ {
+				if rankMask&(1<<rank) == 0 {
+					continue
+				}
 				g.Stockpile[idx] = NewCard(suit, rank)
 				idx++
 			}
 		}
-		for j := uint8(0); j < rules.NumJokers && j < 2; j++ {
+		for j := uint8(0); j < numJokers; j++ {
 			g.Stockpile[idx] = NewCard(jokerSuits[j], RankJoker)
 			idx++
 		}
 	}
-	g.StockLen = uint8(int(numDecks) * (52 + int(rules.NumJokers)))
+	// Derived from the cards actually written, never from the requested
+	// counts: NumJokers=3 asked for 55 cards per deck while the loop wrote
+	// 54, and the extra slot read back as an unwritten Card(0), a phantom
+	// second Ace of Hearts (cambia-1555).
+	g.StockLen = uint8(idx)
 
 	return g
 }
@@ -124,9 +134,12 @@ func (g *GameState) Deal() {
 	}
 
 	n := g.Rules.numPlayers()
+	// Through the clamping accessor, not the raw field: Hand is a fixed
+	// [MaxHandSize]Card and CardsPerPlayer=7 indexed past it (cambia-1555).
+	cpp := g.Rules.cardsPerPlayer()
 
 	// Deal cards: alternate between players (deal 1 to p0, 1 to p1, ..., repeat).
-	for c := uint8(0); c < g.Rules.CardsPerPlayer; c++ {
+	for c := uint8(0); c < cpp; c++ {
 		for p := uint8(0); p < n; p++ {
 			g.StockLen--
 			card := g.Stockpile[g.StockLen]
@@ -138,8 +151,8 @@ func (g *GameState) Deal() {
 	// Set initial peek indices based on InitialViewCount.
 	for p := uint8(0); p < n; p++ {
 		count := g.Rules.InitialViewCount
-		if count > g.Rules.CardsPerPlayer {
-			count = g.Rules.CardsPerPlayer
+		if count > cpp {
+			count = cpp
 		}
 		for i := uint8(0); i < count; i++ {
 			g.Players[p].InitialPeek[i] = i
