@@ -7,6 +7,7 @@ from src.circuit import (
     CircuitConfig,
     CircuitState,
     OpenSkillRating,
+    compute_aggression_subsidy,
     update_openskill,
     ranks_from_scores,
 )
@@ -199,3 +200,135 @@ class TestCrossValidation:
 
         state.record_reconnection(2)
         assert p2.consecutive_misses == 0
+
+
+class TestHeadToHeadTiebreaker:
+    """Cross-backend parity for the T1 tiebreaker-2 fix (cambia-1560).
+
+    engine/circuit_test.go::TestCircuitGetStandings_HeadToHeadBeatsAggregate
+    and ::TestCircuitGetStandings_HeadToHeadCycleFallsThrough run these exact
+    scenarios in Go; the scores here are the same round-by-round numbers.
+    """
+
+    def test_h2h_beats_aggregate(self):
+        """3 players, 6 rounds: player 1 leads player 2 head-to-head 3-2 while
+        trailing on aggregate wins across the whole field (5 vs 6). Standings
+        rank on the mutual record, so player 1 ranks ahead of player 2."""
+        rounds = [
+            {1: 12, 2: 12, 3: 7},
+            {1: 17, 2: 13, 3: 17},
+            {1: 7, 2: 16, 3: 0},
+            {1: 20, 2: 10, 3: 12},
+            {1: 1, 2: 5, 3: 9},
+            {1: 15, 2: 16, 3: 18},
+        ]
+        config = CircuitConfig(num_players=3, num_rounds=6, player_ids=[1, 2, 3])
+        state = CircuitState(config)
+        for scores in rounds:
+            state.record_round(scores, -1)
+
+        p1 = state._player_map[1]
+        p2 = state._player_map[2]
+        assert p1.cumulative_score == p2.cumulative_score
+        assert p1.raw_cumulative == p2.raw_cumulative
+        assert p1.h2h_record[2] == [3, 2]
+
+        def h2h_total(p):
+            return sum(v[0] for v in p.h2h_record.values())
+
+        assert h2h_total(p1) == 5
+        assert h2h_total(p2) == 6
+
+        standings = state.get_standings()
+        ids = [p.player_id for p in standings]
+        assert ids.index(1) < ids.index(2)
+
+    def test_h2h_cycle_falls_through_to_best_round(self):
+        """3 players, 3 rounds forming a head-to-head cycle (each leads one
+        tied opponent 2-1 and trails the other 1-2): total within-group wins
+        come out level (3 each), so standings fall through to best_round,
+        then player_id."""
+        config = CircuitConfig(num_players=3, num_rounds=3, player_ids=[1, 2, 3])
+        state = CircuitState(config)
+        state.record_round({1: 5, 2: 8, 3: 12}, -1)
+        state.record_round({1: 12, 2: 5, 3: 8}, -1)
+        state.record_round({1: 8, 2: 12, 3: 5}, -1)
+
+        p1, p2, p3 = (state._player_map[i] for i in (1, 2, 3))
+        assert p1.cumulative_score == p2.cumulative_score == p3.cumulative_score
+        assert p1.raw_cumulative == p2.raw_cumulative == p3.raw_cumulative
+        assert p1.h2h_record[2] == [2, 1]
+        assert p2.h2h_record[3] == [2, 1]
+        assert p3.h2h_record[1] == [2, 1]
+
+        standings = state.get_standings()
+        assert [p.player_id for p in standings] == [1, 2, 3]
+
+
+class TestSubsidyScheduleParity:
+    """Cross-backend parity for the aggression subsidy schedule and tie
+    handling (cambia-1558).
+
+    There is no cgo export of ComputeAggressionSubsidy for a live FFI call
+    (circuit/subsidy logic is not on the engine's C ABI surface, and adding
+    one is out of this ticket's scope), so these pin compute_aggression_subsidy
+    and _get_subsidies_for_n against values read directly out of
+    engine/scoring.go's ComputeAggressionSubsidy and RULES.md T3, including
+    the same fixtures engine/circuit_test.go asserts.
+    """
+
+    def test_schedule_parity_2_through_6_players(self):
+        """RULES.md T3 / engine/scoring.go ComputeAggressionSubsidy schedule,
+        by player count: H2H (<=2p) -3/0, FFA-4 (3-4p) -5/-2/0/0, 5+
+        -5/-2/-1/0..0."""
+        expected_by_n = {
+            2: [-3, 0],
+            3: [-5, -2, 0],
+            4: [-5, -2, 0, 0],
+            5: [-5, -2, -1, 0, 0],
+            6: [-5, -2, -1, 0, 0, 0],
+        }
+        for n, expected in expected_by_n.items():
+            assert compute_aggression_subsidy(n, list(range(n)), -1) == expected, f"n={n}"
+
+    def test_three_way_tie_with_caller_matches_go(self):
+        """Same fixture as
+        engine/circuit_test.go::TestCircuitRecordRound_CallerTieBreakPaysFirstPlace:
+        5 players, {1,2,3} tied at 8 with player 2 the Cambia caller. The
+        caller keeps the 1st-place bonus (-5); both other tied players fall
+        to the next placement's bonus (-2), not the group's worst (0)."""
+        # compute_aggression_subsidy takes 0-indexed competition placements,
+        # tied players sharing the leading index of their score group. Sorted
+        # ascending with the caller first on the tie (engine/circuit.go's
+        # RecordRound sort, then non-caller ties by player ID): [2, 1, 3, 4,
+        # 5] with placements [0, 0, 0, 3, 4] and caller at index 0.
+        subsidies = compute_aggression_subsidy(5, [0, 0, 0, 3, 4], cambia_caller_idx=0)
+        # subsidies indexed the same as the placements list: [2, 1, 3, 4, 5]
+        assert subsidies == [-5, -2, -2, 0, 0]
+
+    def test_three_way_tie_without_caller_matches_go(self):
+        """Same 5-player 3-way tie with no Cambia caller: every tied player
+        keeps the group's own (best) placement bonus."""
+        subsidies = compute_aggression_subsidy(5, [0, 0, 0, 3, 4], cambia_caller_idx=-1)
+        assert subsidies == [-5, -5, -5, 0, 0]
+
+
+class TestPartialRosterRejection:
+    """record_round rejects a partial roster instead of rescaling the
+    subsidy schedule to whoever reported (cambia-1558)."""
+
+    def test_5_player_round_reported_by_4_is_rejected(self):
+        """A 5-player circuit round reported with only 4 players' scores
+        must be rejected, not silently scored against the 4-player schedule
+        (3rd place would pay 0 instead of the 5-player schedule's -1)."""
+        config = CircuitConfig(num_players=5, num_rounds=5, player_ids=[1, 2, 3, 4, 5])
+        state = CircuitState(config)
+
+        with pytest.raises(ValueError, match="missing score for player 5"):
+            state.record_round({1: 4, 2: 8, 3: 12, 4: 16}, cambia_caller_id=-1)
+
+        # Rejected before any mutation: no round recorded, no scores applied.
+        assert state.current_round == 0
+        assert state.rounds == []
+        for pid in (1, 2, 3, 4, 5):
+            assert state._player_map[pid].round_scores == []

@@ -187,16 +187,93 @@ class CircuitResult:
     rating_changes: dict[int, OpenSkillRating] = field(default_factory=dict)
 
 
-# Subsidy tables by placement position (0-indexed)
+# Subsidy tables by placement position (0-indexed). Mirrors engine/scoring.go
+# ComputeAggressionSubsidy's per-format schedule (RULES.md T3, MATCHMAKING.md
+# 5.3): H2H (<=2p) fixes -3/0 rather than slicing the FFA-4 table, because the
+# caller in H2H faces only one opponent's final turn.
+_SUBSIDY_H2H = [-3, 0]
 _SUBSIDY_4P = [-5, -2, 0, 0]
 _SUBSIDY_5P_PLUS = lambda n: [-5, -2, -1] + [0] * (n - 3)
 
 
 def _get_subsidies_for_n(n: int) -> list[int]:
     """Return subsidy list for n players (indexed by 0-based placement)."""
+    if n <= 2:
+        return list(_SUBSIDY_H2H)
     if n <= 4:
         return _SUBSIDY_4P[:n] if n < 4 else list(_SUBSIDY_4P)
     return _SUBSIDY_5P_PLUS(n)
+
+
+def compute_aggression_subsidy(
+    num_players: int, placements: list[int], cambia_caller_idx: int
+) -> list[int]:
+    """Per-player score subsidies (negative = bonus), mirroring
+    engine/scoring.go ComputeAggressionSubsidy exactly.
+
+    placements[i] is the 0-indexed competition placement for player i (tied
+    players share the leading index of their score group). cambia_caller_idx
+    is the index of the Cambia caller, or -1.
+
+    Tie rule (RULES.md T3): the Cambia caller wins ties for bonus
+    distribution and keeps their own placement's bonus. Every OTHER player
+    tied with the caller -- however many there are -- is demoted to the
+    single next placement's bonus, not the tied group's worst placement. A
+    tie with no caller keeps every tied player at the placement's own
+    (higher) bonus.
+    """
+    schedule = _get_subsidies_for_n(num_players)
+
+    def schedule_bonus(place: int) -> int:
+        return schedule[place] if place < len(schedule) else 0
+
+    subsidies = [0] * len(placements)
+    for i, place in enumerate(placements):
+        my_bonus = schedule_bonus(place)
+        tied_with = [
+            j for j in range(len(placements)) if j != i and placements[j] == place
+        ]
+        if tied_with:
+            caller_in_tie = cambia_caller_idx in tied_with
+            if caller_in_tie and i != cambia_caller_idx:
+                my_bonus = schedule_bonus(place + 1)
+        subsidies[i] = my_bonus
+    return subsidies
+
+
+def _resolve_h2h_tie_group(
+    group: list[CircuitPlayerState],
+) -> list[CircuitPlayerState]:
+    """Reorder a list of players already level on cumulative and raw score
+    (T1 tie-breakers 1-2) by tie-breaker 2, the head-to-head record: the
+    stored pairwise win/loss tally the tied players hold against each other
+    (h2h_record), not a recount of per-round placements or a sum against the
+    whole field. Mirrors engine/circuit.go resolveH2HTieGroup.
+
+    For a group of exactly two this is a direct comparison of their mutual
+    record. For a group of three or more it is a mini-table: each player's
+    total wins counted only against the other players in this group. Ranking
+    by that per-player total is always a strict weak ordering (it sorts a
+    number), so it cannot itself cycle; a subgroup that remains level after
+    the mini-table -- including a genuinely cyclic result, where each player
+    in the subgroup beat one tied opponent and lost to another, which is
+    exactly what makes their within-group win totals come out equal -- falls
+    through to tie-breaker 3 (best_round), then player_id, among just that
+    subgroup.
+    """
+    group_ids = {p.player_id for p in group}
+    group_wins = {
+        p.player_id: sum(
+            p.h2h_record.get(opp_id, [0, 0])[0]
+            for opp_id in group_ids
+            if opp_id != p.player_id
+        )
+        for p in group
+    }
+    return sorted(
+        group,
+        key=lambda p: (-group_wins[p.player_id], p.best_round, p.player_id),
+    )
 
 
 class CircuitState:
@@ -235,10 +312,21 @@ class CircuitState:
         self.completed = False
 
     def record_round(self, scores: dict[int, int], cambia_caller_id: int = -1) -> None:
-        """Record a completed round's results."""
-        participating = {pid: s for pid, s in scores.items() if pid in self._player_map}
+        """Record a completed round's results.
+
+        Every non-abandoned roster member must have a score (mirrors
+        engine/circuit.go RecordRound): a missing entry is an error, not a
+        partial round rescaled to a smaller subsidy schedule. A player who
+        misses the round routes through record_missed_round instead of being
+        silently dropped from scores.
+        """
+        active_ids = [p.player_id for p in self.players if not p.abandoned]
+        for pid in active_ids:
+            if pid not in scores:
+                raise ValueError(f"missing score for player {pid}")
+
+        participating = {pid: scores[pid] for pid in active_ids}
         n = len(participating)
-        subsidy_table = _get_subsidies_for_n(n)
 
         # Sort player IDs by score ascending; Cambia caller wins ties (placed first)
         def sort_key(pid: int) -> tuple:
@@ -263,48 +351,15 @@ class CircuitState:
                 placement_map[sorted_pids[k]] = rank
             pos = group_end
 
-        # Determine subsidy for each player by their sorted position
-        # Ties: Cambia caller gets higher bonus; if no caller in tie, BOTH get higher bonus
-        position_subsidy: dict[int, int] = {}
-        pos = 0
-        while pos < n:
-            pid = sorted_pids[pos]
-            score = participating[pid]
-            # Find all players tied at this score
-            group = [sorted_pids[pos]]
-            k = pos + 1
-            while k < n and participating[sorted_pids[k]] == score:
-                group.append(sorted_pids[k])
-                k += 1
-
-            if len(group) == 1:
-                position_subsidy[pid] = subsidy_table[pos]
-                pos += 1
-                continue
-
-            # Tied group: positions pos..pos+len(group)-1
-            # Cambia caller (if present) gets the best (lowest index) position's subsidy
-            # Others get the worst position's subsidy in the group, UNLESS no caller in group
-            caller_in_group = cambia_caller_id in group
-            best_subsidy = subsidy_table[pos]  # highest bonus (most negative = best)
-            worst_subsidy_idx = pos + len(group) - 1
-            worst_subsidy = subsidy_table[min(worst_subsidy_idx, n - 1)]
-
-            for gpid in group:
-                if caller_in_group:
-                    if gpid == cambia_caller_id:
-                        position_subsidy[gpid] = best_subsidy
-                    else:
-                        position_subsidy[gpid] = worst_subsidy
-                else:
-                    # No caller in group: all get best subsidy
-                    position_subsidy[gpid] = best_subsidy
-
-            pos += len(group)
-
-        subsidies: dict[int, int] = {}
-        for pid in participating:
-            subsidies[pid] = position_subsidy[pid]
+        # Determine subsidy for each player from their competition placement
+        # (0-indexed, tied players sharing the leading index of their score
+        # group), mirroring engine/scoring.go ComputeAggressionSubsidy exactly.
+        caller_idx = sorted_pids.index(cambia_caller_id) if cambia_caller_id in sorted_pids else -1
+        competition_placements = [placement_map[pid] - 1 for pid in sorted_pids]
+        subsidy_by_idx = compute_aggression_subsidy(n, competition_placements, caller_idx)
+        subsidies: dict[int, int] = {
+            pid: subsidy_by_idx[idx] for idx, pid in enumerate(sorted_pids)
+        }
 
         # Update player states
         for pid, raw_score in participating.items():
@@ -367,7 +422,13 @@ class CircuitState:
         pl.h2h_record[winner][1] += 1
 
     def record_missed_round(self, player_id: int) -> None:
-        """Record a player missing a round (scores 41)."""
+        """Record a player missing a round (scores 41).
+
+        This is the sanctioned path for a player absent from a round: since
+        record_round now requires a score for every non-abandoned roster
+        member, an absent player is recorded here instead of being left out
+        of the scores map passed to record_round.
+        """
         p = self._player_map[player_id]
         miss_score = self.config.missed_round_score
         p.raw_cumulative += miss_score
@@ -397,21 +458,40 @@ class CircuitState:
         ]
 
     def get_standings(self) -> list[CircuitPlayerState]:
-        """Return players sorted by tournament standing."""
+        """Return players sorted by tournament standing.
 
-        def h2h_total_wins(p: CircuitPlayerState) -> int:
-            return sum(v[0] for v in p.h2h_record.values())
-
-        return sorted(
+        Mirrors engine/circuit.go GetStandings (RULES.md T1): a tie on
+        CumulativeScore and RawCumulative is broken on tie-breaker 2, the
+        stored pairwise head-to-head record the tied players hold against
+        each other -- not a sum of wins against the whole field. A group of
+        three or more tied players is ranked by a mini-table of wins counted
+        only against other members of that group; a player, or subgroup,
+        still level after the mini-table falls through to tie-breaker 3
+        (best_round), then player_id.
+        """
+        # Group by tie-breakers 1-2 first (equal cumulative_score and
+        # raw_cumulative); player_id is only a placeholder order within a
+        # group, corrected below by the head-to-head mini-table.
+        standings = sorted(
             self.players,
-            key=lambda p: (
-                p.cumulative_score,
-                p.raw_cumulative,
-                -h2h_total_wins(p),
-                p.best_round,
-                p.player_id,
-            ),
+            key=lambda p: (p.cumulative_score, p.raw_cumulative, p.player_id),
         )
+
+        start = 0
+        n = len(standings)
+        while start < n:
+            end = start + 1
+            while (
+                end < n
+                and standings[end].cumulative_score == standings[start].cumulative_score
+                and standings[end].raw_cumulative == standings[start].raw_cumulative
+            ):
+                end += 1
+            if end - start >= 2:
+                standings[start:end] = _resolve_h2h_tie_group(standings[start:end])
+            start = end
+
+        return standings
 
     def is_complete(self) -> bool:
         return self.completed

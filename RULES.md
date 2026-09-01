@@ -97,8 +97,9 @@ A multi-round competitive format where cumulative score determines the overall c
 * The champion is the player with the lowest cumulative score.
 * Tie-Breakers:
   1. Lowest Pre-Bonus Raw Score (rewards fundamental play over bonus-farming), then
-  2. Head-to-head round placement record, then
+  2. Head-to-head record: the stored pairwise win/loss tally the tied players hold against each other, not a recount of per-round placements. Two tied players: whoever holds more wins in that pairwise record ranks first; a level pairwise record falls through to tie-breaker 3. Three or more tied players: rank them by a mini-table of wins counted only against the other players in the tie group; a player (or subgroup) still level after the mini-table -- including a cyclic result, where each player beat one tied opponent and lost to another -- falls through to tie-breaker 3 among just that subgroup. Then
   3. Lowest single-round score achieved.
+* A round that ties two or more players with no Cambia caller among them records nothing in the head-to-head tally for that tie: the pairwise record only updates when one of the tied players called Cambia (see T3's Tie Rule for how the caller's placement is decided).
 * The following house rules are enforced:
   1. `allowDrawFromDiscardPile = true`
   2. `allowReplaceAbilities = true`
@@ -127,6 +128,8 @@ To mathematically offset the statistical risk of calling Cambia, fixed score red
 **H2H subsidy is −3/0** (vs. −5/−2 in FFA-4) because the caller faces only one opponent's final turn in H2H, making the call inherently less risky.
 
 **Tie Rule:** The Cambia caller wins ties for bonus distribution. If neither tied player called Cambia, both receive the bonus of the higher placement.
+
+**Ties of three or more:** the rule applies per player, not per group. A caller in the tie keeps the bonus of their own placement; every other tied player, however many there are, is demoted to the single next placement's bonus (not the group's worst placement). A tie of three or more with no caller keeps every tied player at the group's own (higher) placement bonus, the same as a two-player tie.
 
 ## T4. Turn Order Equity
 
