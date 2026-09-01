@@ -98,12 +98,17 @@ export function useSocket(lobbyId: string | null | undefined) {
 	const managedLobbyId = useRef<string | null>(null);
 	const isConnecting = useRef<boolean>(false);
 	const shouldBeConnected = useRef<boolean>(false);
-	/** The lobby whose retry budget is spent. A cap is only a cap if exhausting it is remembered:
-	 *  the connect effect dials whenever the socket is not open, so a counter on its own was reset
-	 *  and spent again on every re-run (cambia-1236). Cleared by a successful open, an explicit
-	 *  close, a different lobby, or a tab identity change: the four things that make a fresh dial
-	 *  worth trying again. */
-	const gaveUpLobbyId = useRef<string | null>(null);
+	/** The lobby whose retry budget is spent, and what spent it. A cap is only a cap if exhausting
+	 *  it is remembered: the connect effect dials whenever the socket is not open, so a counter on
+	 *  its own was reset and spent again on every re-run (cambia-1236). Cleared by a successful
+	 *  open, an explicit close, a different lobby, or a tab identity change: the four things that
+	 *  make a fresh dial worth trying again.
+	 *
+	 *  The reason is carried because a fifth thing makes one worth trying again, and only for one
+	 *  of the two: a tab coming back to the foreground. `retries` says the network was unusable a
+	 *  moment ago, which a return is evidence against; `refused` says the hub does not have this
+	 *  lobby, which returning to the tab does not change (cambia-1521). */
+	const gaveUp = useRef<{ lobbyId: string; reason: 'retries' | 'refused' } | null>(null);
 	const lastSeqRef = useRef<number>(0);
 	/** Frames the hub has neither applied nor answered. A repair window can swallow more than
 	 *  one, so this is a queue rather than a slot (cambia-913 F2), and the events an accepted
@@ -236,7 +241,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 				return;
 			}
 			retryCountRef.current = 0;
-			gaveUpLobbyId.current = null;
+			gaveUp.current = null;
 			isConnecting.current = false;
 			if (useCurrentLobbyStore.getState().currentLobbyId === targetLobbyId) {
 				setConnected(true);
@@ -317,8 +322,9 @@ export function useSocket(lobbyId: string | null | undefined) {
 				if (type === 'error' && payload?.code === 'lobby_not_found') {
 					shouldBeConnected.current = false;
 					// A lobby the hub says does not exist is not a transient failure, so this is the last
-					// dial for that id until the hook is pointed somewhere else.
-					gaveUpLobbyId.current = targetLobbyId;
+					// dial for that id until the hook is pointed somewhere else. Coming back to the tab
+					// does not make it exist either, which is why the reason is recorded.
+					gaveUp.current = { lobbyId: targetLobbyId, reason: 'refused' };
 					retryCountRef.current = 0;
 					if (ws.current === socket) {
 						releaseSocket(socket, 'Lobby not found');
@@ -375,7 +381,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 				// Budget spent on a drop that was worth retrying: stop dialing this lobby. Without the
 				// latch the connect effect dials again the next time it runs, which is how the cap went
 				// unenforced (cambia-1236 AC2).
-				if (wasUnexpected && !retryAllowed) gaveUpLobbyId.current = targetLobbyId;
+				if (wasUnexpected && !retryAllowed) gaveUp.current = { lobbyId: targetLobbyId, reason: 'retries' };
 
 				if (storeLobbyId === targetLobbyId) {
 					setLoading(false);
@@ -421,12 +427,12 @@ export function useSocket(lobbyId: string | null | undefined) {
 			managedLobbyId.current = null;
 			isConnecting.current = false;
 			retryCountRef.current = 0;
-			gaveUpLobbyId.current = null;
+			gaveUp.current = null;
 		}
 
 		// A lobby the hook is no longer pointed at has no claim on the retry budget.
-		if (gaveUpLobbyId.current !== null && gaveUpLobbyId.current !== lobbyId) {
-			gaveUpLobbyId.current = null;
+		if (gaveUp.current !== null && gaveUp.current.lobbyId !== lobbyId) {
+			gaveUp.current = null;
 			retryCountRef.current = 0;
 		}
 
@@ -435,7 +441,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 			// to nothing else, or the cap cannot hold across an effect re-run (cambia-1236 AC2).
 			const backoffPending = reconnectTimeoutId.current !== null && managedLobbyId.current === lobbyId;
 			const needsDial = managedLobbyId.current !== lobbyId || (!isConnecting.current && ws.current?.readyState !== WebSocket.OPEN);
-			if (gaveUpLobbyId.current === lobbyId) {
+			if (gaveUp.current?.lobbyId === lobbyId) {
 				// Budget spent. The onclose branch has already written the copy the table reads.
 				shouldBeConnected.current = false;
 			} else if (needsDial && !backoffPending) {
@@ -479,7 +485,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 			managedLobbyId.current = null;
 			isConnecting.current = false;
 			retryCountRef.current = 0;
-			gaveUpLobbyId.current = null;
+			gaveUp.current = null;
 
 			if (useCurrentLobbyStore.getState().isConnected) {
 				setConnected(false);
@@ -494,6 +500,80 @@ export function useSocket(lobbyId: string | null | undefined) {
 			}
 		};
 	}, [lobbyId, connectWebSocket, setConnected, setLoading, setError, sessionEpoch]);
+
+	/**
+	 * Reconnect when the tab comes back (cambia-1521).
+	 *
+	 * The mechanism chosen for the backgrounded-tab forfeit is client-side: the server's reconnect
+	 * grace stays where it is (DisconnectGraceSec 60 under ForfeitOnDisconnect, service/internal/
+	 * game/rules.go DefaultHouseRules), and the client's job is to get back inside it. The grace is
+	 * a rule about how long a table waits for an absent player, not a browser allowance, so
+	 * stretching it to cover tab throttling would make every genuine walk-off cost the table a
+	 * longer stall (MATCHMAKING.md 8).
+	 *
+	 * What the client was missing is the return itself. Nothing above reacts to the page's
+	 * lifecycle, and every recovery path it does have runs on window.setTimeout, which a hidden tab
+	 * throttles: Chrome clamps a background page to roughly one timer wake-up a minute once it has
+	 * been hidden for five, so a backoff scheduled for 1s can land after the 60s grace has already
+	 * closed and the seat has been forfeited while the client still shows "Retrying". A tab
+	 * restored from the back/forward cache never ran the backoff at all: its socket was closed on
+	 * the way in and its timers were frozen behind it.
+	 *
+	 * No client keepalive is added with it. The connection is already pinged from the server every
+	 * 30s with a 5s deadline (service/internal/hub/connection.go WritePump), which is what notices
+	 * a socket that died while the tab slept, and an application-level ping would buy nothing while
+	 * the socket is open and cannot run at all once it is not.
+	 */
+	useEffect(() => {
+		if (!isDialableLobbyId(lobbyId)) return;
+
+		const attemptResume = () => {
+			// An open socket needs nothing, and a dial already in flight is the attempt.
+			if (isConnecting.current || ws.current?.readyState === WebSocket.OPEN) return;
+
+			if (gaveUp.current?.lobbyId === lobbyId) {
+				// A lobby the hub refused by name is refused just as hard on return.
+				if (gaveUp.current.reason !== 'retries') return;
+				// A spent retry budget is a statement about the network a moment ago, and a return to
+				// the foreground is evidence against it, so it buys one fresh budget. This is the only
+				// reset that is not the socket's own open event, and it holds the cap it was added to
+				// (cambia-1236 AC2): a store write, a re-render or an effect re-run cannot produce a
+				// page-lifecycle event, so the dial count stays bounded by the user's own tab switches
+				// rather than running free.
+				gaveUp.current = null;
+				retryCountRef.current = 0;
+			} else if (!shouldBeConnected.current) {
+				// Nothing wants this socket: an explicit closeSocket, or a clean close from the hub.
+				return;
+			}
+
+			// A backoff still waiting is this attempt, made now rather than whenever the throttle
+			// next allows it, so it costs no extra budget: the retry it belongs to was counted when
+			// it was scheduled.
+			if (reconnectTimeoutId.current !== null) {
+				clearTimeout(reconnectTimeoutId.current);
+				reconnectTimeoutId.current = null;
+			}
+			shouldBeConnected.current = true;
+			connectWebSocket(lobbyId);
+		};
+
+		// visibilitychange also fires on the way out, which is not a return.
+		const onVisibilityChange = () => {
+			if (document.visibilityState === 'visible') attemptResume();
+		};
+		// pageshow covers the back/forward cache, where the page resumes without ever having been
+		// hidden. `resume` is the Page Lifecycle counterpart to `freeze`: a tab thawed while still
+		// in the background can run again, and saving the seat does not wait on the user looking.
+		document.addEventListener('visibilitychange', onVisibilityChange);
+		window.addEventListener('pageshow', attemptResume);
+		document.addEventListener('resume', attemptResume);
+		return () => {
+			document.removeEventListener('visibilitychange', onVisibilityChange);
+			window.removeEventListener('pageshow', attemptResume);
+			document.removeEventListener('resume', attemptResume);
+		};
+	}, [lobbyId, connectWebSocket]);
 
 	/** Send a message over the WS. Injects last_seq automatically. */
 	const sendMessage = useCallback((message: OutboundMessage) => {
@@ -520,7 +600,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 		managedLobbyId.current = null;
 		isConnecting.current = false;
 		retryCountRef.current = 0;
-		gaveUpLobbyId.current = null;
+		gaveUp.current = null;
 
 		if (useCurrentLobbyStore.getState().isConnected) {
 			setConnected(false);

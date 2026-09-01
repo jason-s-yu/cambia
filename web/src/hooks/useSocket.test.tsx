@@ -113,6 +113,29 @@ function expectNoAbandonedHandshake(): void {
   }
 }
 
+/** Backgrounds or foregrounds the tab without touching the clock. jsdom answers 'visible' from the
+ *  prototype, so the override is an own property and afterEach deletes it again. */
+function setVisibility(state: 'visible' | 'hidden'): void {
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state });
+}
+
+/** The tab goes into the background: the state flips and the browser fires the event either way,
+ *  which is why the hook has to check the state rather than trust the event (cambia-1521). */
+function leaveForBackground(): void {
+  setVisibility('hidden');
+  act(() => {
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+}
+
+/** The user comes back to the tab. */
+function returnToForeground(): void {
+  setVisibility('visible');
+  act(() => {
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   FakeWebSocket.instances = [];
@@ -123,6 +146,7 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.WebSocket = RealWebSocket;
+  Reflect.deleteProperty(document, 'visibilityState');
   vi.useRealTimers();
   useAuthStore.setState(authInitial, true);
   useCurrentLobbyStore.setState(lobbyInitial, true);
@@ -238,6 +262,162 @@ describe('useSocket retry budget', () => {
     expect(FakeWebSocket.instances).toHaveLength(2 + MAX_RETRIES);
     expect(latestSocket().url).toContain(OTHER_LOBBY_ID);
     expectNoAbandonedHandshake();
+  });
+});
+
+/**
+ * The backgrounded-tab forfeit (cambia-1521). The server holds a dropped player's seat for
+ * DisconnectGraceSec (60 by default, with ForfeitOnDisconnect on) and that is unchanged; what the
+ * client owes is getting back inside it. A hidden tab cannot: its timers are throttled to roughly
+ * one wake-up a minute, so the backoff above can land after the seat is already forfeited, and a
+ * tab restored from the back/forward cache never ran it at all.
+ *
+ * The clock is deliberately never advanced in these tests. Every dial they assert is one the hook
+ * made because the page came back, not because a timer fired: that is the whole property.
+ */
+describe('useSocket backgrounded tab (cambia-1521)', () => {
+  it('dials on return rather than waiting out a backoff a hidden tab never runs', () => {
+    renderHook(() => useSocket(LOBBY_ID));
+    act(() => {
+      latestSocket().accept();
+    });
+    expect(useCurrentLobbyStore.getState().isConnected).toBe(true);
+
+    // The socket dies while the tab is away - a sleeping device, a network change, the browser
+    // discarding the page. The backoff is scheduled and then sits there.
+    leaveForBackground();
+    act(() => {
+      latestSocket().fail();
+    });
+    expect(FakeWebSocket.instances).toHaveLength(1);
+
+    returnToForeground();
+    expect(FakeWebSocket.instances).toHaveLength(2);
+
+    // Inside the grace window the seat is still the player's, so the reconnect resumes it.
+    act(() => {
+      latestSocket().accept();
+    });
+    expect(useCurrentLobbyStore.getState().isConnected).toBe(true);
+    expectNoAbandonedHandshake();
+  });
+
+  it('redials on a back/forward-cache restore, where no visibility change fires', () => {
+    renderHook(() => useSocket(LOBBY_ID));
+    act(() => {
+      latestSocket().accept();
+    });
+
+    // Entering the cache closes the socket; the page resumes holding a dead one, still "visible".
+    act(() => {
+      latestSocket().fail();
+    });
+    expect(FakeWebSocket.instances).toHaveLength(1);
+
+    act(() => {
+      window.dispatchEvent(new Event('pageshow'));
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expectNoAbandonedHandshake();
+  });
+
+  it('collapses a pending backoff without spending extra budget (cambia-1236 AC2)', () => {
+    renderHook(() => useSocket(LOBBY_ID));
+    act(() => {
+      latestSocket().fail();
+    });
+    returnToForeground();
+    expect(FakeWebSocket.instances).toHaveLength(2);
+
+    // The collapsed attempt was the retry that was already counted, so the budget still ends where
+    // it always did: MAX_RETRIES redials on top of the opening dial, and then nothing.
+    for (let i = 0; i < MAX_RETRIES - 1; i++) dropAndWaitOutBackoff();
+    expect(FakeWebSocket.instances).toHaveLength(1 + MAX_RETRIES);
+
+    dropAndWaitOutBackoff();
+    expect(FakeWebSocket.instances).toHaveLength(1 + MAX_RETRIES);
+    expect(useCurrentLobbyStore.getState().error).toBe(`Lost connection after ${MAX_RETRIES} retries.`);
+    expectNoAbandonedHandshake();
+  });
+
+  it('buys one fresh budget per return and no more', () => {
+    renderHook(() => useSocket(LOBBY_ID));
+    for (let i = 0; i <= MAX_RETRIES; i++) dropAndWaitOutBackoff();
+    expect(FakeWebSocket.instances).toHaveLength(1 + MAX_RETRIES);
+    expect(useCurrentLobbyStore.getState().error).toBe(`Lost connection after ${MAX_RETRIES} retries.`);
+
+    // A budget spent while nobody was looking says the network was unusable then, which returning
+    // is evidence against: one dial now, and the stopped-trying copy comes off the table.
+    returnToForeground();
+    expect(FakeWebSocket.instances).toHaveLength(2 + MAX_RETRIES);
+    expect(useCurrentLobbyStore.getState().error).toBeNull();
+    expect(useCurrentLobbyStore.getState().isLoading).toBe(true);
+
+    // That is one budget, not an unbounded supply. It runs out exactly like the first one.
+    for (let i = 0; i <= MAX_RETRIES; i++) dropAndWaitOutBackoff();
+    expect(FakeWebSocket.instances).toHaveLength(2 + 2 * MAX_RETRIES);
+
+    // Nothing the page does on its own buys another: not the clock, not the tab going away again.
+    act(() => {
+      vi.advanceTimersByTime(10 * PAST_ANY_BACKOFF_MS);
+    });
+    leaveForBackground();
+    expect(FakeWebSocket.instances).toHaveLength(2 + 2 * MAX_RETRIES);
+
+    // Only another return does, which is what bounds the dial count by the user's own tab switches
+    // rather than by a loop the hook can run for itself (the 521 dials of cambia-1236).
+    returnToForeground();
+    expect(FakeWebSocket.instances).toHaveLength(3 + 2 * MAX_RETRIES);
+    expectNoAbandonedHandshake();
+  });
+
+  it('leaves an open socket alone on return', () => {
+    renderHook(() => useSocket(LOBBY_ID));
+    act(() => {
+      latestSocket().accept();
+    });
+
+    leaveForBackground();
+    returnToForeground();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(useCurrentLobbyStore.getState().isConnected).toBe(true);
+  });
+
+  it('does not redial a lobby the hub refused by name', () => {
+    renderHook(() => useSocket(LOBBY_ID));
+    const socket = latestSocket();
+    act(() => {
+      socket.accept();
+    });
+
+    // lobby_not_found is the hub saying the lobby is gone. Coming back to the tab does not bring
+    // it back, so this give-up survives a return where a spent retry budget does not.
+    act(() => {
+      socket.onmessage?.({
+        data: JSON.stringify({ seq: 1, type: 'error', payload: { code: 'lobby_not_found', message: 'Lobby not found.' } })
+      } as MessageEvent);
+    });
+    expect(useCurrentLobbyStore.getState().currentLobbyId).toBeNull();
+
+    returnToForeground();
+    act(() => {
+      vi.advanceTimersByTime(10 * PAST_ANY_BACKOFF_MS);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  it('does not undo an explicit close on return', () => {
+    const { result } = renderHook(() => useSocket(LOBBY_ID));
+    act(() => {
+      latestSocket().accept();
+    });
+    act(() => {
+      result.current.closeSocket();
+    });
+
+    returnToForeground();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(useCurrentLobbyStore.getState().isConnected).toBe(false);
   });
 });
 
