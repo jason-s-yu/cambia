@@ -10,11 +10,12 @@ Two regimes, selected by ``opponent``:
   optimized toward, only measured.
 - ``"random_legal"``: opponent seats play uniform-random legal actions. A cheap
   control and the regime the env benchmark uses.
-
-The fixed-baseline best-response regime (``imperfect_greedy`` and friends) is
-unavailable until those agents are ported to the GameView protocol under
-cambia-1426; ``ppo_env.CambiaEnv`` raises on them rather than reviving the
-Python engine behind the env.
+- a ``src.agents.baseline_agents`` name (``"imperfect_greedy"`` and friends):
+  the fixed best-response diagnostic, on cambia-1426's GameView port
+  (cambia-1482). ``imperfect_greedy`` is the default opponent (``cli.py``'s
+  ``train ppo``), matching PPO-200k's original training opponent.
+  Checkpoint-backed wrappers and the tabular ``CFRAgentWrapper`` are not
+  accepted; see ``ppo_env.is_baseline_opponent``.
 
 ``num_players`` sets the seat count. Two seats use the engine's 2-player action
 and encoding space; three or more use its N-player space, which has different
@@ -317,20 +318,27 @@ def train_ppo(
         )
     from stable_baselines3.common.vec_env import SubprocVecEnv
     from stable_baselines3.common.callbacks import CallbackList
-    from src.ppo_env import make_env, SELF_PLAY_OPPONENT, SUPPORTED_OPPONENTS
+    from src.ppo_env import (
+        make_env,
+        SELF_PLAY_OPPONENT,
+        RANDOM_LEGAL_OPPONENT,
+        SUPPORTED_OPPONENTS,
+        is_baseline_opponent,
+    )
 
     self_play = opponent == SELF_PLAY_OPPONENT
     num_players = int(num_players)
     if num_players < 2:
         raise ValueError(f"num_players must be at least 2, got {num_players}")
-    if opponent not in SUPPORTED_OPPONENTS:
+    if opponent not in SUPPORTED_OPPONENTS and not is_baseline_opponent(opponent):
         # Fail here rather than inside every SubprocVecEnv worker, where the
         # traceback arrives as an opaque connection reset.
         raise NotImplementedError(
             f"opponent={opponent!r} is not available on the Go-backed env. "
-            f"Supported: {', '.join(SUPPORTED_OPPONENTS)}. See ppo_env's module "
-            "docstring: the fixed baselines are being ported to the GameView "
-            "protocol under cambia-1426."
+            f"Supported: {', '.join(SUPPORTED_OPPONENTS)}, or a "
+            "src.agents.baseline_agents name (e.g. 'imperfect_greedy'). "
+            "Checkpoint-backed wrappers and the tabular CFRAgentWrapper are "
+            "not supported here."
         )
 
     # The mean_imp battery in evaluate_agents drives 2-player games; it has no
@@ -370,10 +378,15 @@ def train_ppo(
     snapshot_stem = os.path.join(save_dir, "selfplay_opponent")
     snapshot_path = snapshot_stem + ".zip"
 
+    if self_play:
+        regime_label = "FAIR SELF-PLAY (E2 anchor)"
+    elif opponent == RANDOM_LEGAL_OPPONENT:
+        regime_label = "uniform-random opponent"
+    else:
+        regime_label = "fixed-baseline best-response diagnostic"
+
     print("PPO Training")
-    print(
-        f"  Regime: {'FAIR SELF-PLAY (E2 anchor)' if self_play else 'uniform-random opponent'}"
-    )
+    print(f"  Regime: {regime_label}")
     print(f"  Opponent: {opponent}")
     print(
         f"  Seats: {num_players} "

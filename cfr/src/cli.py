@@ -663,12 +663,23 @@ def train_ppo_cmd(
         "imperfect_greedy",
         "--opponent",
         "-o",
-        help="Fixed opponent agent type (best-response diagnostic). Ignored when --self-play is set.",
+        help=(
+            "Fixed opponent agent type (best-response diagnostic): a "
+            "src.agents.baseline_agents name (default: imperfect_greedy, the "
+            "GameView-ported baseline and PPO-200k's original training "
+            "opponent). Ignored when --self-play is set."
+        ),
     ),
     self_play: bool = typer.Option(
         False,
         "--self-play",
         help="Fair self-play: opponent is a frozen-periodic snapshot of the learning policy (E2 anchor).",
+    ),
+    num_players: int = typer.Option(
+        2,
+        "--num-players",
+        "-n",
+        help="Seat count (2-8): 2 uses the engine's 2-player space, 3+ its N-player space.",
     ),
     timesteps: int = typer.Option(
         500_000,
@@ -732,9 +743,19 @@ def train_ppo_cmd(
 ):
     """Train a PPO agent. With --self-play, the opponent is a frozen snapshot of
     the learning policy (the E2 equilibrium anchor, per-baseline persisted);
-    otherwise the agent best-responds to a fixed baseline (diagnostic)."""
+    otherwise the agent best-responds to a fixed baseline (default:
+    imperfect_greedy, diagnostic)."""
+    from .constants import N_PLAYER_MAX_PLAYERS
     from .ppo_train import train_ppo
     from .ppo_env import SELF_PLAY_OPPONENT
+
+    if not (2 <= num_players <= N_PLAYER_MAX_PLAYERS):
+        print(
+            f"ERROR: --num-players must be between 2 and {N_PLAYER_MAX_PLAYERS} "
+            f"(engine.MaxPlayers), got {num_players}",
+            file=sys.stderr,
+        )
+        raise typer.Exit(1)
 
     opponent_arg = SELF_PLAY_OPPONENT if self_play else opponent
 
@@ -752,6 +773,7 @@ def train_ppo_cmd(
         selfplay_snapshot_freq=snapshot_freq,
         eval_max_workers=eval_workers,
         checkpoint_freq=checkpoint_freq,
+        num_players=num_players,
     )
 
 

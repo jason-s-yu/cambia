@@ -95,12 +95,19 @@ def _drive(env, steps, rng, assert_space=True):
 
 
 def test_ppo_env_does_not_import_the_python_engine():
-    """ppo_env must not import src.game or the Python belief state.
+    """ppo_env must not import src.game or the Python (tabular-era) belief state.
 
     Walks the module's import statements rather than grepping the text, so the
-    docstring may still name CambiaGameState when explaining why the fixed
-    baselines are refused. sys.modules is no good here: another test in the
-    same session may have imported src.game for its own reasons.
+    docstring may still name CambiaGameState when explaining why checkpoint-
+    backed and tabular agents are refused. sys.modules is no good here:
+    another test in the same session may have imported src.game for its own
+    reasons.
+
+    src.agents (plural -- src/agents/baseline_agents.py, game_view.py,
+    action_codec.py) is NOT banned: cambia-1426 ported it onto the GameView
+    protocol, it is GoEngine-native, and cambia-1482 wires it in here as the
+    fixed-baseline opponent. src.agent_state (singular) is the older,
+    tabular-CFR-era belief state and stays banned.
     """
     import ast
 
@@ -116,7 +123,9 @@ def test_ppo_env_does_not_import_the_python_engine():
     offenders = sorted(
         name
         for name in imported
-        if name.startswith(("src.game", "src.agent_state", "src.agents"))
+        if name.startswith("src.game")
+        or name == "src.agent_state"
+        or name.startswith("src.agent_state.")
     )
     assert not offenders, f"ppo_env still imports the Python engine path: {offenders}"
 
@@ -388,15 +397,32 @@ def test_close_releases_handles(env_factory):
     "opponent",
     ["imperfect_greedy", "memory_heuristic", "aggressive_snap", "random", "greedy"],
 )
-def test_python_engine_baselines_are_refused_with_a_pointer(env_factory, opponent):
-    """The fixed baselines are not runnable here yet; the env must say so.
+@pytest.mark.parametrize("seats", [2, 4])
+def test_baseline_opponent_plays_a_full_game(env_factory, opponent, seats):
+    """cambia-1482: cambia-1426's GameView baselines drive the opponent seats.
 
-    They are written against the Python CambiaGameState and are being ported to
-    the GameView protocol under cambia-1426. Accepting them quietly would mean
-    reviving the Python engine behind the env.
+    Every seat but the learner is played by a fresh instance of the named
+    baseline, at both the 2-player and N-player action spaces.
     """
-    with pytest.raises(NotImplementedError, match="cambia-1426"):
-        env_factory(opponent_type=opponent)
+    env = env_factory(opponent_type=opponent, num_players=seats)
+    env.reset(seed=seats)
+    rewards = _drive(env, 800, np.random.default_rng(seats))
+    assert rewards, f"no episode terminated for opponent={opponent} at {seats} seats"
+
+
+@skiplib
+def test_checkpoint_backed_and_tabular_agents_are_refused_with_a_pointer(env_factory):
+    """Wrapper types outside src.agents.baseline_agents stay unsupported here.
+
+    They need a checkpoint (or, for CFRAgentWrapper, the Python engine's
+    cambia-caller accessor the Go engine does not export) that this env has no
+    mechanism to supply.
+    """
+    for opponent in ("deep_cfr", "cfr", "ppo", "sog"):
+        with pytest.raises(
+            NotImplementedError, match="not available on the Go-backed env"
+        ):
+            env_factory(opponent_type=opponent)
 
 
 @skiplib
@@ -593,14 +619,14 @@ def test_make_env_threads_num_players(tmp_path):
         env.close()
 
 
-def test_train_ppo_rejects_python_engine_baselines(tmp_path):
+def test_train_ppo_rejects_checkpoint_backed_agents(tmp_path):
     """The trainer must fail before spawning workers, where the traceback is opaque."""
     pytest.importorskip("sb3_contrib", reason="sb3-contrib required")
     from src.ppo_train import train_ppo
 
-    with pytest.raises(NotImplementedError, match="cambia-1426"):
+    with pytest.raises(NotImplementedError, match="not available on the Go-backed env"):
         train_ppo(
-            opponent="imperfect_greedy",
+            opponent="deep_cfr",
             timesteps=64,
             save_path=str(tmp_path / "runs" / "x" / "checkpoints" / "m"),
             n_envs=1,
@@ -608,6 +634,26 @@ def test_train_ppo_rejects_python_engine_baselines(tmp_path):
             net_arch=[8],
             config_path=CONFIG_PATH,
         )
+
+
+@pytest.mark.parametrize("seats", [2, 4])
+def test_train_ppo_completes_a_smoke_run_against_the_default_baseline(tmp_path, seats):
+    """cambia-1482 AC: `train ppo` (no --self-play) runs against imperfect_greedy
+    at 2 and 4 seats, end to end through SubprocVecEnv + MaskablePPO."""
+    pytest.importorskip("sb3_contrib", reason="sb3-contrib required")
+    _load_lib_or_skip()
+    from src.ppo_train import train_ppo
+
+    train_ppo(
+        opponent="imperfect_greedy",
+        timesteps=128,
+        save_path=str(tmp_path / "runs" / f"x{seats}" / "checkpoints" / "m"),
+        n_envs=1,
+        eval_freq=0,
+        net_arch=[8],
+        config_path=CONFIG_PATH,
+        num_players=seats,
+    )
 
 
 def test_train_ppo_rejects_one_seat(tmp_path):

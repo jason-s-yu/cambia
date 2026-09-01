@@ -323,14 +323,23 @@ class TestEnvOpponents:
         "opp_type",
         ["random", "random_no_cambia", "imperfect_greedy"],
     )
-    def test_python_engine_baselines_are_refused(self, opp_type):
-        """The eval-registry baselines are not runnable on the Go-backed env.
+    def test_baseline_opponent_plays_a_full_episode(self, test_config, opp_type):
+        """cambia-1482: the GameView eval-registry baselines drive the
+        opponent seat directly on the Go-backed env (cambia-1426's port)."""
+        e = CambiaEnv(opponent_type=opp_type, seed=7)
+        e._config = test_config
+        total_reward, steps, terminated = _run_episode(e)
+        assert terminated, f"Episode didn't terminate with opponent={opp_type}"
+        assert total_reward in {-1.0, 0.0, 1.0}
 
-        They are written against the Python CambiaGameState and are being
-        ported to the GameView protocol under cambia-1426. Until then the env
-        refuses them by name rather than reviving the Python engine.
-        """
-        with pytest.raises(NotImplementedError, match="cambia-1426"):
+    @pytest.mark.parametrize("opp_type", ["deep_cfr", "cfr"])
+    def test_checkpoint_backed_and_tabular_agents_are_refused(self, opp_type):
+        """Wrapper types outside src.agents.baseline_agents stay unsupported:
+        they need a checkpoint, or (CFRAgentWrapper) the Python engine's
+        cambia-caller accessor the Go engine does not export."""
+        with pytest.raises(
+            NotImplementedError, match="not available on the Go-backed env"
+        ):
             CambiaEnv(opponent_type=opp_type, seed=7)
 
 
