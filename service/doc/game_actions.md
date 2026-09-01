@@ -632,7 +632,7 @@ table as one that watched it end.
 ## Disconnect grace
 
 A dropped socket does not forfeit on the spot. The seat is held for the lobby's
-`disconnectGraceSec` house rule (default 60 seconds; 0 restores the immediate forfeit), and only
+`disconnectGraceSec` house rule (default 90 seconds; 0 restores the immediate forfeit), and only
 when that window closes does `forfeitOnDisconnect` take it. Three public events report where a
 player stands, alongside the `connected`, `forfeited` and `reconnectDeadline` fields every
 `private_sync_state` carries, so a client that joins or resyncs mid-window renders the same state
@@ -648,7 +648,7 @@ for the length of the grace by pulling their network out.
   "type": "player_reconnecting",
   "user": { "id": "{id}" },
   "payload": {
-    "graceSeconds": 60,
+    "graceSeconds": 90,
     "deadline": 1756400000000,
     "serverNow": 1756399940000
   }

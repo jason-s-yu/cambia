@@ -153,3 +153,76 @@ func TestTokenOverflowIsHardError(t *testing.T) {
 		t.Fatalf("expected ErrTokenOverflow, got %v (len=%d)", err, ts.Length)
 	}
 }
+
+// fourSeatRules returns house rules for a 4-player game, matching the pattern engine's own
+// nplayerRules test helper uses (engine/nplayer_test.go), which package agent cannot import
+// directly since it lives in a _test.go file.
+func fourSeatRules() engine.HouseRules {
+	r := engine.DefaultHouseRules()
+	r.NumPlayers = 4
+	r.MaxGameTurns = 200
+	return r
+}
+
+// TestKingLookPeekPairNamesRecordedTargetSeatAtFourSeats pins the king-look peek-pair frame's
+// opponent seat to the target Pending.Data[3] records, not OpponentOf(actor) (1-acting), which
+// underflows past seat 1 (cambia-1171 fixed the apply paths against exactly this bug; this frame
+// was the one 3+-seat token consumer still deriving the seat that way). Actor 1 targets seat 3
+// (Opponents(1) = [0, 2, 3], relative index 2): neither OpponentOf(1) (underflows to 255, then
+// clamps) nor seatOpponent's next-seat default ((1+1)%4 = 2) would name seat 3, so a regression to
+// either reads as a wrong-but-plausible seat rather than an obvious break.
+func TestKingLookPeekPairNamesRecordedTargetSeatAtFourSeats(t *testing.T) {
+	g := engine.NewGame(777, fourSeatRules())
+	g.Deal()
+
+	const actor = uint8(1)
+	const target = uint8(3)
+	g.CurrentPlayer = actor
+	g.Pending.Type = engine.PendingKingLook
+	g.Pending.PlayerID = actor
+
+	ownCard := g.Players[actor].Hand[0]
+	targetCard := g.Players[target].Hand[0]
+
+	// Opponents(1) = [0, 2, 3]; relative index 2 resolves to absolute seat 3.
+	if err := g.ApplyNPlayerAction(engine.NPlayerEncodeKingLook(0, 0, 2)); err != nil {
+		t.Fatalf("KingLook(ownSlot=0, oppSlot=0, relIdx=2) from seat %d: %v", actor, err)
+	}
+	if g.Pending.Type != engine.PendingKingDecision {
+		t.Fatalf("Pending.Type=%d after the look, want PendingKingDecision", g.Pending.Type)
+	}
+
+	var ts TokenStream
+	if err := ts.Observe(&g, actor); err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+
+	// Collect the peek frames (frameToken, actorToken, slotToken, cardToken) in emission order:
+	// own card first, then the target's.
+	var frames [][4]int32
+	for i := int32(0); i+3 < ts.Length; i++ {
+		if ts.Tokens[i] == peekFrameToken() {
+			var f [4]int32
+			copy(f[:], ts.Tokens[i:i+4])
+			frames = append(frames, f)
+			i += 3
+		}
+	}
+	if len(frames) != 2 {
+		t.Fatalf("expected 2 peek frames, found %d (tokens=%v)", len(frames), ts.Tokens[:ts.Length])
+	}
+	ownFrame, oppFrame := frames[0], frames[1]
+
+	if ownFrame[1] != actorToken(int(actor)) || ownFrame[3] != cardToken(ownCard) {
+		t.Errorf("own peek frame = %v, want actor token %d and card token %d",
+			ownFrame, actorToken(int(actor)), cardToken(ownCard))
+	}
+	if oppFrame[1] != actorToken(int(target)) {
+		t.Errorf("opponent peek frame names actor token %d, want seat %d's actor token %d (the recorded "+
+			"target, not OpponentOf(1) or seat+1)", oppFrame[1], target, actorToken(int(target)))
+	}
+	if oppFrame[3] != cardToken(targetCard) {
+		t.Errorf("opponent peek frame card token = %d, want seat %d's slot-0 card token %d",
+			oppFrame[3], target, cardToken(targetCard))
+	}
+}

@@ -216,10 +216,12 @@ checked after the whole update is applied, so both keys may move in one message.
 
 **Reconnect grace (`disconnectGraceSec`)**
 
-`disconnectGraceSec` is how long a dropped socket keeps its seat before `forfeitOnDisconnect`
-takes it (default 60, range 0-3600, 0 forfeits on the drop itself). It is read only when
-`forfeitOnDisconnect` is on, and it is what makes a page reload survivable: the seat is held, the
-table keeps playing, and a reconnect inside the window restores the player through the usual
-`private_sync_state` (see `game_actions.md`, "Disconnect grace"). Matchmaking queues do not take
-this from the lobby: each queue carries its own value (`internal/matchmaking/validation.go`),
-applied when the game is built, since a queued lobby has no host setting rules.
+`disconnectGraceSec` is how long a dropped socket keeps its seat before something acts on the drop
+(default 90, range 0-3600, 0 acts on the drop itself). Under `forfeitOnDisconnect` that something
+is the forfeit; in a circuit round, which is created with `forfeitOnDisconnect` off, it is the
+seat's takeover by the turn clock instead (cambia-1233). Either way it is what makes a page reload
+survivable: the seat is held, the table keeps playing, and a reconnect inside the window restores
+the player through the usual `private_sync_state` (see `game_actions.md`, "Disconnect grace").
+Matchmaking queues do not take this from the lobby: each queue carries its own value
+(`internal/matchmaking/validation.go`), applied when the game is built, since a queued lobby has no
+host setting rules.

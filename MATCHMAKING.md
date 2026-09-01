@@ -369,13 +369,13 @@ Target match quality degrades over time to prevent indefinite waits:
 
 | Event | H2H | FFA-4 |
 | :---- | :--- | :---- |
-| Disconnect < 60 sec | AI plays defensively. Score counts normally upon reconnection. | Same. |
-| Disconnect > 60 sec | Round forfeited. Player receives **41 points** ($+2\sigma$ blind hand maximum). | Same. |
+| Disconnect < 90 sec | AI plays defensively. Score counts normally upon reconnection. | Same. |
+| Disconnect > 90 sec | Round forfeited. Player receives **41 points** ($+2\sigma$ blind hand maximum). | Same. |
 | Miss 2+ consecutive rounds | - | Tournament abandonment. Remaining rounds scored as 41. 15-min queue lockout. |
 | Full match abandonment | Remaining rounds scored as 41. Rating updated normally (massive loss). | Same as above. |
 
-The 60-second window is a rule about how long a table waits for an absent player, not an allowance
-for the browser, and it is the same 60 seconds whether the player walked away or their tab was
+The 90-second window is a rule about how long a table waits for an absent player, not an allowance
+for the browser, and it is the same 90 seconds whether the player walked away or their tab was
 backgrounded (`DisconnectGraceSec` in `DefaultHouseRules` and in every queue preset). Getting back
 inside it is the client's job: a hidden tab throttles `setTimeout` to roughly one wake-up a minute,
 so a reconnect backoff scheduled for one second can land after the seat has already been forfeited,

@@ -267,7 +267,7 @@ describe('useSocket retry budget', () => {
 
 /**
  * The backgrounded-tab forfeit (cambia-1521). The server holds a dropped player's seat for
- * DisconnectGraceSec (60 by default, with ForfeitOnDisconnect on) and that is unchanged; what the
+ * DisconnectGraceSec (90 by default, with ForfeitOnDisconnect on) and that is unchanged; what the
  * client owes is getting back inside it. A hidden tab cannot: its timers are throttled to roughly
  * one wake-up a minute, so the backoff above can land after the seat is already forfeited, and a
  * tab restored from the back/forward cache never ran it at all.
