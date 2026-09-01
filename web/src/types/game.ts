@@ -27,17 +27,41 @@ export interface ObfPlayerState {
 	/** Epoch-ms time this player's reconnect window closes, present only while one is open. */
 	reconnectDeadline?: number | null;
 	/**
-	 * One entry per hand slot: a card id and its index. Every slot arrives `known: false` with no
-	 * face, for the requesting player's own hand as well as everyone else's, in every phase
-	 * (cambia-1094) - no own card is ever persistently face-up, so the ids are here for targeting
+	 * One entry per hand slot: a card id and its index. While the round runs every slot arrives
+	 * `known: false` with no face, for the requesting player's own hand as well as everyone else's
+	 * (cambia-1094) - no own card is ever face-up mid-round, so the ids are here for targeting
 	 * and slot counting, not for rendering faces. The faces a player is entitled to arrive in their
 	 * own events (private_initial_cards, private_draw_stockpile, private_special_action_success)
 	 * and gameStore turns each of those into a reveal held for its window only. The store does
 	 * write `known: true` onto these slots for the pregame peek, for the length of that window.
+	 *
+	 * The round ending is what turns them up: once `gameOver` is set, every scored seat's slots
+	 * arrive `known: true` with their face, which is the round-end reveal RULES.md 3C calls for
+	 * (cambia-1542). A forfeited seat stays face-down, since it is not scored.
 	 */
 	revealedHand?: ObfCard[];
 	/** The card this player drew and is still holding. The one own face a snapshot names. */
 	drawnCard?: ObfCard | null;
+}
+
+/**
+ * One seat's hand as the round ended, off the `finalHands` list every results frame carries
+ * (game_end, game_results, round_end, match_end - see service/doc/game_actions.md "Round-end
+ * reveal"). RULES.md 3C reveals all cards when a round ends, however it ended; a seat that
+ * forfeited is left out, since it is not scored.
+ */
+export interface FinalHand {
+	playerId: string;
+	cards: FinalHandCard[];
+}
+
+/** One revealed card: the id its events named it by, its slot, and its face. */
+export interface FinalHandCard {
+	id: string;
+	idx: number;
+	rank: string;
+	suit: string;
+	value: number;
 }
 
 /** One outstanding snap fill: `snapperId` owes a card into `victimId`'s hand at `slot`. */
