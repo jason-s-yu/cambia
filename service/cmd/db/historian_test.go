@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -14,9 +15,27 @@ import (
 	"github.com/jason-s-yu/cambia/service/internal/database"
 )
 
-func newTestHistorian(batchSize int) *HistorianService {
+func newTestHistorian(t *testing.T, batchSize int) *HistorianService {
+	t.Helper()
+
 	hs := NewHistorianService()
 	hs.batchSize = batchSize
+
+	// The flush these tests reach never commits, so it runs to the end of the
+	// retry schedule and dead-letters what it could not write. One attempt
+	// with no backoff keeps that fast, and a list of this test's own keeps its
+	// deliberate failures off the shared dev Redis (cambia-1881).
+	hs.retryAttempts = 1
+	hs.retryBase = 0
+	hs.deadLetterQueue = DeadLetterQueueName + "_unit_" + uuid.NewString()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		// Best effort: a machine with no dev Redis never wrote the list in the
+		// first place.
+		_ = hs.redisClient.Del(ctx, hs.deadLetterQueue).Err()
+	})
+
 	return hs
 }
 
@@ -53,7 +72,7 @@ func testRecord(i int) GameActionRecord {
 // timeout is what makes this a regression test: a deadlock hangs rather than
 // failing an assertion.
 func TestAppendToBatchDoesNotDeadlockOnFullBatch(t *testing.T) {
-	hs := newTestHistorian(2)
+	hs := newTestHistorian(t, 2)
 	withUnreachableDB(t)
 
 	done := make(chan struct{})
@@ -71,7 +90,7 @@ func TestAppendToBatchDoesNotDeadlockOnFullBatch(t *testing.T) {
 }
 
 func TestTakeBatchDrainsAndResets(t *testing.T) {
-	hs := newTestHistorian(100)
+	hs := newTestHistorian(t, 100)
 
 	for i := 0; i < 3; i++ {
 		hs.appendToBatch(testRecord(i))
@@ -93,7 +112,7 @@ func TestTakeBatchDrainsAndResets(t *testing.T) {
 }
 
 func TestTakeBatchEmptyReturnsNil(t *testing.T) {
-	if got := newTestHistorian(10).takeBatch(); got != nil {
+	if got := newTestHistorian(t, 10).takeBatch(); got != nil {
 		t.Fatalf("expected nil for an empty batch, got %v", got)
 	}
 }
@@ -101,7 +120,7 @@ func TestTakeBatchEmptyReturnsNil(t *testing.T) {
 // Stop must block until the shutdown drain has run, so a SIGTERM does not cut
 // the process off before the final batch is written.
 func TestStopWaitsForShutdownDrain(t *testing.T) {
-	hs := newTestHistorian(100)
+	hs := newTestHistorian(t, 100)
 
 	// Stand in for Run's shutdown half without connecting to Postgres or Redis.
 	close(hs.readerDone)
