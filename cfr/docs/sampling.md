@@ -14,18 +14,30 @@ The primary practical motivation here is parallelization. Multiple workers can i
 
 **Traversal:** At every decision node (traverser, opponent, chance), sample ONE action according to the current strategy profile or chance probabilities. This produces a single path from root to a terminal state per traversal.
 
-**Regret update:** Only the sampled path is visited, so regret estimates use importance sampling to remain unbiased. For action `a*` sampled at infoset `I` with probability `p(a*)`:
+**Sampling policy:** traverser nodes sample from `q(a|I) = ε · uniform + (1-ε) · σ(a|I)` with `exploration_epsilon` defaulting to 0.6; every other seat samples from `σ` itself.
+
+**Regret update:** only the sampled path is visited, so the regret estimate needs two importance corrections, not one. The local one divides by `q(a*|I)` at the node being updated. The tail one corrects for the traverser continuing to explore off `σ` below that node: the utility that comes back from the recursion is the value of the ε-mixed continuation, not of `σ`'s. The tail correction is the ratio `π^σ(I·a*, z) / q(I·a* -> z)` accumulated on the way back up (Lanctot et al. 2009). Each node multiplies in `σ(a|h) / q(a|h)` for the action it sampled and returns the running product to its parent; nodes that sample from `σ` contribute exactly 1.
 
 ```
-utility_estimate = v(I -> a*) / p(a*)
-regret(a) = (1 if a == a* else 0) * utility_estimate - σ(a|I) * utility_estimate
+tail(z)      = 1
+tail(h)      = σ(a|h)/q(a|h) · tail(h·a)          # a = the action sampled at h
+w            = tail(I·a*) / q(a*|I)
+utility_estimate = u(z) · w
+regret(a)    = (1 if a == a* else 0) · utility_estimate - σ(a|I) · utility_estimate
 ```
 
-The update is weighted by the opponent's reach probability `π_{-i}(I)`.
+**What is unbiased:** at the root of a traversal, `E[regret(a)]` is exactly the counterfactual regret `v^σ(I·a) - v^σ(I)` whenever the weight `w` stays under the clip. `tests/test_os_tail_importance.py` measures this on a three-node tree with an exactly computable counterfactual value: the corrected estimator averages to `(0.084, -0.126)` against an exact `(0.084, -0.126)`, and the same code with the tail ratio dropped averages to `(-0.050, 0.077)`, which not only misses the target but inverts which root action looks better.
 
-**IS weight clipping:** `MAX_IS_WEIGHT = 20.0` (module-level constant in `deep_worker.py`). Any importance weight `1 / p(a*)` is clipped to 20.0 before being applied. This prevents extreme variance from very low-probability sampled actions at the cost of a small bias. Worst-case bias: approximately 3x at `σ=0` with 36 legal actions; typical case is under 1.7x.
+**What is not unbiased:**
+
+- **The clip.** `MAX_IS_WEIGHT = 20.0` (module-level constant in `deep_worker.py`) is applied to the full weight `w`, not to the local `1/q(a*|I)` alone. It is a truncated importance sampling estimator: weights above the bound are pulled down to it, so trajectories `σ` strongly prefers but the ε-mixed sampler rarely draws are under-counted, biasing those actions' regret targets low. The bound buys a finite second moment, which the unclipped estimator does not have: `w` is a product of per-node ratios over the traverser's whole remaining decision horizon, and its variance grows without bound in that horizon. On a game as long as Cambia at `ε = 0.6` the clip is load-bearing, so OS regret targets should be read as biased-but-finite-variance rather than unbiased.
+- **Deeper infosets.** The estimator is written per node without the root-to-node factors `π^σ_{-i}(I) / q(root -> I)`. Those cancel at the root, where both are 1, but not below it, so a non-root advantage sample is not scaled to its counterfactual weight in the reservoir. All reservoir samples are then fit with equal weight.
+- **Depth truncation.** `traversal_depth_limit > 0` returns a utility of 0 for the truncated subtree, which is a fabricated value, not an estimate.
+- **Strategy samples.** The opponent-node target is `σ` at that infoset with no `π^σ_i(I) / q(root -> I)` weighting, so the strategy network fits the sampling-frequency-weighted average of `σ`, not the reach-weighted average strategy.
 
 **H3 bug and fix (2026-02-27):** Prior to the fix, `exploration_epsilon` (default 0.6) was applied at opponent nodes as well as traverser nodes, but IS correction was only applied at traverser nodes. This caused the agent to train a best response to a 60%-random opponent rather than to the learned strategy. The fix: `epsilon=0` at opponent nodes (`if player == updating_player`). The affected functions were `_deep_traverse_os_go`, `_deep_traverse_os_go_nplayer`, and the since-retired Python `_deep_traverse_os`. ES-MCCFR and ESCHER were not affected by this bug.
+
+**Tail correction added (cambia-715):** the H3 fix removed exploration from opponent nodes but left the traverser's own exploration uncorrected below the node being updated, so the advantage target still estimated the value of a 60% random continuation of the traverser's own play. The tail ratio above closes that gap, and the clip moved from the local factor to the full weight.
 
 **Pros:**
 - Lowest cost per traversal.

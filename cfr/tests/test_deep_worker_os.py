@@ -140,7 +140,7 @@ def test_os_traversal_single_path(minimal_config):
     simulation_nodes: List = []
 
     with go_engine_and_agents(minimal_config, seed=11) as (engine, agents):
-        utility = _deep_traverse_os_go(
+        utility, _tail_ratio = _deep_traverse_os_go(
             engine=engine,
             agent_states=agents,
             updating_player=0,
