@@ -50,7 +50,19 @@ func killJobsOnSignal(sig os.Signal, env string) bool {
 func main() {
 	listen := flag.String("listen", envOr("RUNNERD_LISTEN", "127.0.0.1:8090"),
 		"control-plane listen address (dev default 127.0.0.1:8090; prod binds the runner's LAN address)")
+	role := flag.String("role", envOr("RUNNERD_ROLE", roleBoth),
+		"coordinator | node | both: one binary, three roles (design D1)")
+	nodeConfig := flag.String("node-config", os.Getenv("RUNNERD_NASHNET_CONFIG"),
+		"path to the node's yaml, whose nashnet: section configures --role node")
 	flag.Parse()
+
+	if !validRole(*role) {
+		log.Fatalf("--role %q: want coordinator, node, or both", *role)
+	}
+	if *role == roleNode {
+		runNode(*nodeConfig)
+		return
+	}
 
 	baseDir := envOr("RUNNERD_BASE_DIR", "/srv/cambia")
 	runsDir := envOr("RUNNERD_RUNS_DIR", "/srv/cambia/runs")
