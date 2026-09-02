@@ -214,11 +214,28 @@ class AnalysisConfig(_CambiaBaseModel):
     """Parameters for analysis tools, like exploitability calculation."""
 
     exploitability_num_workers: int = 1
+    # Node ceiling for one seat's best-response search. The search walks the
+    # whole game tree, which on tiny_cambia_tabular.yaml is over 800,000 nodes
+    # per seat and left `train tabular` running for hours without reaching its
+    # end-of-run save (cambia-1785). Nodes rather than wall clock so the bound
+    # is reproducible: the same run stops in the same place on any host. 0
+    # removes the bound, for a run that wants the exact number and will wait.
+    exploitability_max_nodes: int = 2_000_000
 
     @field_validator("exploitability_num_workers", mode="before")
     @classmethod
     def _parse_workers(cls, v: Any) -> int:
         return parse_num_workers(v)
+
+    @field_validator("exploitability_max_nodes")
+    @classmethod
+    def _check_max_nodes(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(
+                f"analysis.exploitability_max_nodes must be >= 0 (0 disables the "
+                f"bound). Got: {v}."
+            )
+        return v
 
 
 class CfrTrainingConfig(_CambiaBaseModel):
