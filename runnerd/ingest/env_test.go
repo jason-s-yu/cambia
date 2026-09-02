@@ -19,14 +19,15 @@ func TestWriteEnvJSONCompleteness(t *testing.T) {
 	venvPython := filepath.Join(t.TempDir(), "venv", "bin", "python")
 
 	prov := provenance{
-		JobID:         "job-e",
-		Commit:        strings.Repeat("a", 40),
-		EngineTreeSha: "engtree123",
-		LibcambiaSha:  "libsha456",
-		UVLockSha:     "locksha789",
-		VenvCacheKey:  "locksha789-py3.11-linux_amd64",
-		PlatformTag:   "linux_amd64",
-		Device:        "cpu",
+		JobID:             "job-e",
+		Commit:            strings.Repeat("a", 40),
+		EngineTreeSha:     "engtree123",
+		LibcambiaCacheKey: "engtree123-abigen1",
+		LibcambiaSha:      "libsha456",
+		UVLockSha:         "locksha789",
+		VenvCacheKey:      "locksha789-py3.11-linux_amd64",
+		PlatformTag:       "linux_amd64",
+		Device:            "cpu",
 	}
 	if err := m.writeEnvJSON(context.Background(), runDir, venvPython, prov); err != nil {
 		t.Fatalf("writeEnvJSON: %v", err)
@@ -42,6 +43,7 @@ func TestWriteEnvJSONCompleteness(t *testing.T) {
 		"origin_host":         rec.OriginHost,
 		"commit":              rec.Commit,
 		"engine_tree_sha":     rec.EngineTreeSha,
+		"libcambia_cache_key": rec.LibcambiaCacheKey,
 		"libcambia_sha256":    rec.LibcambiaSha256,
 		"uv_lock_sha256":      rec.UVLockSha256,
 		"venv_cache_key":      rec.VenvCacheKey,
