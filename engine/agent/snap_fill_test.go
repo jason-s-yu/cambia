@@ -126,13 +126,89 @@ func TestSnapFillCarriesTheMoversKnowledge(t *testing.T) {
 		t.Errorf("EP-PBS bucket for the filled slot = %d, want %d", b, paidBucket)
 	}
 
-	// The victim was handed a card it never saw, so its own belief is unchanged by the
-	// fill: the transfer is the MOVER's knowledge, not a public reveal.
+	// The victim was handed a card it never saw, so its own belief about the face is
+	// unchanged by the fill: the transfer is the MOVER's knowledge, not a public reveal.
 	if victim.OwnHand[0].Bucket != BucketUnknown {
 		t.Errorf("victim believes it knows the card it was handed (bucket %d)", victim.OwnHand[0].Bucket)
 	}
-	if tag := victim.SlotTags[0]; tag != TagUnk {
-		t.Errorf("victim EP-PBS tag for the received slot = %d, want TagUnk (%d)", tag, TagUnk)
+	// The victim did watch the mover peek that card, though, so it knows the mover knows
+	// the card it just received: the tag travels with the card (cambia-1690).
+	if tag := victim.SlotTags[0]; tag != TagPrivOpp {
+		t.Errorf("victim EP-PBS tag for the received slot = %d, want TagPrivOpp (%d)", tag, TagPrivOpp)
+	}
+}
+
+// TestSnapFillCarriesTheKnowledgeToTheReceiver is the mirror of the case above: the seat
+// handed the fill keeps what it already knew about the card, which the receiving side used
+// to drop on the floor (cambia-1690).
+func TestSnapFillCarriesTheKnowledgeToTheReceiver(t *testing.T) {
+	g := engine.NewGame(20261690, snapFillRules(2))
+	g.Deal()
+	g.CurrentPlayer = 0
+	g.DiscardPile[0] = engine.NewCard(engine.SuitSpades, engine.RankKing)
+	g.DiscardLen = 1
+
+	// Seat 1 will snap seat 0's slot 0 and pay the fill with its own slot 1.
+	paid := engine.NewCard(engine.SuitHearts, engine.RankSeven)
+	seedHand(&g, 0, engine.NewCard(engine.SuitClubs, engine.RankFour),
+		engine.NewCard(engine.SuitDiamonds, engine.RankFive),
+		engine.NewCard(engine.SuitSpades, engine.RankSix))
+	seedHand(&g, 1, engine.NewCard(engine.SuitClubs, engine.RankTwo), paid,
+		engine.NewCard(engine.SuitDiamonds, engine.RankThree))
+
+	// Seat 0 is the receiver here, so it is seat 0 that peeks the card it will be handed.
+	receiver := NewAgentState(0, 1, 1, 3)
+	mover := NewAgentState(1, 0, 1, 3)
+	receiver.Initialize(&g)
+	mover.Initialize(&g)
+
+	paidBucket := CardToBucket(paid)
+	g.LastAction = engine.LastActionInfo{}
+	g.Pending.Type = engine.PendingPeekOther
+	g.Pending.PlayerID = 0
+	if err := g.ApplyAction(engine.EncodePeekOther(1)); err != nil {
+		t.Fatalf("peek other: %v", err)
+	}
+	receiver.Update(&g)
+	mover.Update(&g)
+	if got := receiver.OppBelief[1]; !got.IsBucket() || got.Bucket() != paidBucket {
+		t.Fatalf("peek left the receiver's belief about the paid card at %v", got)
+	}
+	peekTurn := receiver.OppLastSeen[1]
+
+	// Seat 1 snaps seat 0's slot 0, which empties it and owes seat 0 a card.
+	g.CurrentPlayer = 1
+	openSnapWindow(&g, 1, engine.NewCard(engine.SuitHearts, engine.RankFour))
+	if err := g.ApplyAction(engine.EncodeSnapOpponent(0)); err != nil {
+		t.Fatalf("snap opponent: %v", err)
+	}
+	receiver.Update(&g)
+	mover.Update(&g)
+
+	if err := g.ApplyAction(engine.EncodeSnapOpponentMove(1, 0)); err != nil {
+		t.Fatalf("snap opponent move: %v", err)
+	}
+	if g.Players[0].Hand[0] != paid {
+		t.Fatalf("engine put %v in the vacated slot, want the paid card %v", g.Players[0].Hand[0], paid)
+	}
+	receiver.Update(&g)
+	mover.Update(&g)
+
+	if receiver.OwnHand[0].Bucket != paidBucket {
+		t.Errorf("receiver belief about the card it was handed = %d, want %d",
+			receiver.OwnHand[0].Bucket, paidBucket)
+	}
+	if receiver.OwnHand[0].LastSeenTurn != peekTurn {
+		t.Errorf("receiver last-seen for the filled slot = %d, want %d",
+			receiver.OwnHand[0].LastSeenTurn, peekTurn)
+	}
+	// The receiver saw the card and never watched the mover look at it, so the slot it
+	// landed in is the receiver's alone to know: the tag travels with the card.
+	if tag := receiver.SlotTags[0]; tag != TagPrivOwn {
+		t.Errorf("receiver EP-PBS tag for the filled slot = %d, want TagPrivOwn (%d)", tag, TagPrivOwn)
+	}
+	if b := receiver.SlotBuckets[0]; b != paidBucket {
+		t.Errorf("receiver EP-PBS bucket for the filled slot = %d, want %d", b, paidBucket)
 	}
 }
 
