@@ -155,6 +155,212 @@ def test_certify_bundle_and_margin():
 
 
 # ---------------------------------------------------------------------------
+# Layer 1b: the served (reach-weighted) SD-CFR object vs the per-decision mean.
+# ---------------------------------------------------------------------------
+#
+# cambia-708: the X2 gate used to score sum_t w_t sigma_t(I) / sum_t w_t, a
+# reach-unweighted per-decision mean nothing plays. prtcfr_mixture serves a
+# MIXTURE (one snapshot sampled per episode, proportional to w_t, playing the
+# whole game), which under perfect recall is realization equivalent to the
+# own-reach-weighted mean. These tests pin that equivalence exactly, on a tree
+# built so the two objects give DIFFERENT NashConv -- a tree where they agreed
+# would pass either way and prove nothing.
+
+# Two SD-CFR iterates, linear weighting (w_t = t), t in {1, 3}.
+_REACH_SNAPSHOT_ITERS = (1, 3)
+_REACH_SNAPSHOTS = {
+    1: {"I0": [0.75, 0.25], "I1": [1.0, 0.0], "I2": [1.0, 0.0]},
+    3: {"I0": [0.25, 0.75], "I1": [0.0, 1.0], "I2": [0.0, 1.0]},
+}
+
+
+def _reach_split_shape(k0, k1, k2):
+    """P0 acts (k0), P1 acts (k1, one infoset across both P0 moves), P0 acts
+    again (k2) only under (P0 left, P1 left).
+
+    k2's own reach under an iterate is that iterate's ``sigma(k0)[left]``, so
+    the two iterates weight k2 differently in the served object and identically
+    in the per-decision mean. The P1 payoffs are set so P1's best response
+    turns on P0's behavior at k2, which is what makes the two objects differ in
+    NashConv and not merely in the strategy vector.
+    """
+    i2 = mk_decision(0, k2, [mk_terminal(2, -2), mk_terminal(-1, 1)])
+    p1_left = mk_decision(1, k1, [i2, mk_terminal(1, -1)])
+    p1_right = mk_decision(1, k1, [mk_terminal(-1, 1), mk_terminal(1, -1)])
+    return mk_decision(0, k0, [p1_left, p1_right])
+
+
+def _reach_base_tree():
+    """The plain game both objects are materialized on."""
+    return _wrap_root(_reach_split_shape("I0", "I1", "I2"))
+
+
+def _weighted_snapshot_policies():
+    return [(float(it), _pol(**_REACH_SNAPSHOTS[it])) for it in _REACH_SNAPSHOT_ITERS]
+
+
+def _commitment_tree_and_policy():
+    """The sampled mixture written out as one tree, by enumerating commitments.
+
+    Chance draws each player's iterate independently (P0 draws s0, P1 draws s1,
+    each proportional to w_t), then the whole game is played with both players
+    committed to their draw: exactly what ``prtcfr_mixture.sample_episode``
+    does per episode. A committed player's infosets are keyed by (base key, its
+    own iterate) so its fixed strategy can differ per draw; nothing keys on the
+    OPPONENT's draw, so a best responder cannot see which iterate it faces.
+    Conditioning a best response on its own draw is free (the opponent's
+    behavior does not depend on it, so the same maximizer is optimal in every
+    branch), which is why this tree's NashConv is the mixture's NashConv.
+    """
+    wsum = sum(_REACH_SNAPSHOT_ITERS)
+    kids, weights = [], []
+    for s0 in _REACH_SNAPSHOT_ITERS:
+        for s1 in _REACH_SNAPSHOT_ITERS:
+            kids.append(_reach_split_shape(("I0", s0), ("I1", s1), ("I2", s0)))
+            weights.append(Fraction(s0 * s1, wsum * wsum))
+    assert sum(weights) == 1
+    policy = {}
+    for s in _REACH_SNAPSHOT_ITERS:
+        for key in ("I0", "I1", "I2"):
+            policy[(key, s)] = np.asarray(_REACH_SNAPSHOTS[s][key], dtype=np.float64)
+    return mk_chance(kids, weights), policy
+
+
+def test_served_policy_is_the_reach_weighted_mean():
+    """The two objects differ, and only where own reach differs across iterates.
+
+    I0 and I1 are each their owner's first decision (own reach 1 under every
+    iterate), so both objects reduce to the same weighted mean there. I2 sits
+    below P0's own decision at I0, where the two iterates disagree, so its
+    served weights (w_t times own reach: 1*3/4 and 3*1/4, equal) differ from
+    its per-decision weights (1 and 3).
+    """
+    from src.cfr import prtcfr_eval
+
+    root = _reach_base_tree()
+    weighted = _weighted_snapshot_policies()
+    served = prtcfr_eval.combine_snapshot_policies(
+        root, weighted, objective=prtcfr_eval.SERVED
+    )
+    per_decision = prtcfr_eval.combine_snapshot_policies(
+        root, weighted, objective=prtcfr_eval.PER_DECISION
+    )
+    for key in ("I0", "I1"):
+        assert np.array_equal(served[key], per_decision[key])
+    assert np.array_equal(served["I0"], np.array([0.375, 0.625]))
+    assert np.array_equal(served["I1"], np.array([0.25, 0.75]))
+    # Reach weights at I2 are equal (3/4 and 3/4), so served is the plain mean;
+    # the per-decision mean keeps the 1:3 iteration weights.
+    assert np.array_equal(served["I2"], np.array([0.5, 0.5]))
+    assert np.array_equal(per_decision["I2"], np.array([0.25, 0.75]))
+    # SERVED is the default: no caller has to ask for the object that is served.
+    assert prtcfr_eval.DEFAULT_OBJECTIVE == prtcfr_eval.SERVED
+    default = prtcfr_eval.combine_snapshot_policies(root, weighted)
+    for key in ("I0", "I1", "I2"):
+        assert np.array_equal(default[key], served[key])
+
+
+def test_served_nashconv_equals_sampled_mixture_exactly():
+    """Exact-rational: NashConv(served) == NashConv(the enumerated mixture).
+
+    Realization equivalence (Kuhn, perfect recall) says the own-reach-weighted
+    mean and the per-episode snapshot sampling induce the same distribution
+    over terminal histories against any opponent, hence the same best-response
+    values and the same on-policy value. Every quantity here is dyadic, so
+    float64 carries the policies losslessly and the two exact NashConvs must be
+    the SAME Fraction, not merely close.
+    """
+    from src.cfr import prtcfr_eval
+
+    root = _reach_base_tree()
+    served = prtcfr_eval.combine_snapshot_policies(
+        root, _weighted_snapshot_policies(), objective=prtcfr_eval.SERVED
+    )
+    mix_root, mix_policy = _commitment_tree_and_policy()
+
+    nc_served, comp_served = tiny_exact.exploitability_exact(root, served)
+    nc_mix, comp_mix = tiny_exact.exploitability_exact(mix_root, mix_policy)
+    assert nc_served == nc_mix
+    assert comp_served == comp_mix  # br0, br1, onp0, onp1 all match exactly
+    assert nc_served == Fraction(27, 16)
+
+
+def test_per_decision_nashconv_differs_from_the_served_policy():
+    """The old gate object scores a different number on the same snapshots.
+
+    63/32 vs the served 27/16 = 54/32: the per-decision mean understates the
+    served exploitability by 9/32 here. Asserted as exact Fractions so the
+    difference cannot be read as float noise.
+    """
+    from src.cfr import prtcfr_eval
+
+    root = _reach_base_tree()
+    per_decision = prtcfr_eval.combine_snapshot_policies(
+        root, _weighted_snapshot_policies(), objective=prtcfr_eval.PER_DECISION
+    )
+    nc_per_decision, _ = tiny_exact.exploitability_exact(root, per_decision)
+    nc_mix, _ = tiny_exact.exploitability_exact(*_commitment_tree_and_policy())
+    assert nc_per_decision == Fraction(63, 32)
+    assert nc_per_decision != nc_mix
+    assert nc_per_decision - nc_mix == Fraction(9, 32)
+
+
+def test_single_snapshot_objects_agree():
+    """One snapshot is the degenerate case: both objects score the same.
+
+    Own reach cancels when there is one iterate, so a single-checkpoint gate
+    number is unchanged by cambia-708. Infosets that iterate never reaches fall
+    back to uniform under SERVED, which cannot move NashConv: the owner never
+    plays there, and its own best response replaces the strategy outright.
+    """
+    from src.cfr import prtcfr_eval
+
+    root = _reach_base_tree()
+    one = [(1.0, _pol(**_REACH_SNAPSHOTS[1]))]
+    served = prtcfr_eval.combine_snapshot_policies(
+        root, one, objective=prtcfr_eval.SERVED
+    )
+    per_decision = prtcfr_eval.combine_snapshot_policies(
+        root, one, objective=prtcfr_eval.PER_DECISION
+    )
+    nc_served, _ = tiny_exact.exploitability_exact(root, served)
+    nc_per_decision, _ = tiny_exact.exploitability_exact(root, per_decision)
+    assert nc_served == nc_per_decision
+
+
+def test_unknown_objective_is_refused():
+    """A typo picks no object silently."""
+    from src.cfr import prtcfr_eval
+
+    with pytest.raises(ValueError, match="objective"):
+        prtcfr_eval.combine_snapshot_policies(
+            _reach_base_tree(), _weighted_snapshot_policies(), objective="average"
+        )
+
+
+def test_own_reach_needs_perfect_recall_keying():
+    """Two histories in one infoset with different own predecessors must abort.
+
+    Own reach is only well defined per infoset under perfect recall; without
+    that the realization-equivalence argument does not hold, so the scorer
+    raises instead of returning a number derived from an arbitrary choice.
+    """
+    from src.cfr import prtcfr_eval
+
+    # P0 acts at "R", then acts again at "S" under BOTH of its actions, with
+    # "S" merged across them: the two histories of S disagree on which slot of
+    # R led there.
+    s_left = mk_decision(0, "S", [mk_terminal(1, -1), mk_terminal(-1, 1)])
+    s_right = mk_decision(0, "S", [mk_terminal(-1, 1), mk_terminal(1, -1)])
+    root = _wrap_root(mk_decision(0, "R", [s_left, s_right]))
+    weighted = [(1.0, _pol(R=[0.5, 0.5], S=[0.5, 0.5]))]
+    with pytest.raises(RuntimeError, match="perfect-recall"):
+        prtcfr_eval.combine_snapshot_policies(
+            root, weighted, objective=prtcfr_eval.SERVED
+        )
+
+
+# ---------------------------------------------------------------------------
 # Layer 2: differential bound (float64 vs exact) on fixtures.
 # ---------------------------------------------------------------------------
 
