@@ -442,20 +442,6 @@ func (g *CambiaGame) effectiveDiscardTop() (engine.Card, uuid.UUID, bool) {
 	return g.Engine.DiscardPile[topIdx], g.CardTracker.DiscardUUIDs[topIdx], true
 }
 
-// discardTopCard returns the top discard card and its UUID, or nil if empty.
-func (g *CambiaGame) discardTopCard() (*models.Card, uuid.UUID) {
-	if g.Engine.DiscardLen == 0 {
-		return nil, uuid.Nil
-	}
-	topIdx := g.Engine.DiscardLen - 1
-	topCard := g.Engine.DiscardPile[topIdx]
-	topUUID := g.CardTracker.DiscardUUIDs[topIdx]
-	if topUUID == uuid.Nil {
-		return nil, uuid.Nil
-	}
-	return engineCardToDetails(topCard, topUUID), topUUID
-}
-
 // applyToEngine hands an already-translated action index to the engine entry point that decodes
 // that action space: the N-player (620) space at a 3+ seat table, the legacy 146 space at a
 // 2-seat one.
@@ -1154,21 +1140,23 @@ func (g *CambiaGame) autoResolveArmedAbility(playerID uuid.UUID) {
 		// the client's own enum echoed by special_actions.go); this one sent the rank straight
 		// through (cambia-1239).
 		special := rankToSpecial(rank)
-		if g.Engine.ResolveUntargetableArmedAbility(g.isNPlayerTable()) {
-			log.Printf("Game %s: pending ability %d for player %s had no legal target; resolved it and advanced.", g.ID, pending, playerID)
-			g.logAction(playerID, "action_special_timeout_fizzle", map[string]interface{}{
-				"rank": rank, "special": special, "pending": pending,
-			})
-			g.SpecialAction = SpecialActionState{}
-			g.FireEventPrivateSpecialActionFail(playerID, "That ability had no legal target and was discharged.", special, nil, nil)
-			g.settleEngineResolution()
-			return
-		}
-		// The engine still has a legal target for the ability even though the action this path
-		// picked was refused, so the two are out of step rather than the ability being stranded.
-		// Leave the prompt and re-arm the clock rather than clearing state the engine still holds.
-		log.Printf("Game %s: cannot auto-resolve pending ability %d for player %s: no legal target.", g.ID, pending, playerID)
-		g.scheduleNextTurnTimer()
+		// ResolveUntargetableArmedAbility returns false only when Pending.Type is not an armed
+		// ability (excluded by the switch above), the discard pile is empty (every live arm site -
+		// discardWithAbility, replace - increments DiscardLen before arming, so that never holds
+		// once Pending.Type is one of these four), or its own abilityHasTargetNP/2P finds a legal
+		// target - which resolvable already ruled out, since it is gated on the identical legal mask
+		// engine/legal.go builds (engineActionLegal's doc comment). So this call always discharges
+		// the ability from here; there is no legal-target case left to fall back into, and this call
+		// site used to re-arm the clock on a false return, which is exactly the same-state-forever
+		// wedge ResolveUntargetableArmedAbility exists to close (cambia-1171, cambia-1773).
+		g.Engine.ResolveUntargetableArmedAbility(g.isNPlayerTable())
+		log.Printf("Game %s: pending ability %d for player %s had no legal target; resolved it and advanced.", g.ID, pending, playerID)
+		g.logAction(playerID, "action_special_timeout_fizzle", map[string]interface{}{
+			"rank": rank, "special": special, "pending": pending,
+		})
+		g.SpecialAction = SpecialActionState{}
+		g.FireEventPrivateSpecialActionFail(playerID, "That ability had no legal target and was discharged.", special, nil, nil)
+		g.settleEngineResolution()
 		return
 	}
 
@@ -1880,14 +1868,6 @@ func (g *CambiaGame) handleTimeoutEngine(playerID uuid.UUID) {
 			return
 		}
 		g.processSkipSpecialAction(playerID)
-		return
-	}
-
-	// If pending ability choice, resolve as no-ability. The card is already on the table's pile, so
-	// this settles the buffer without announcing it a second time (buffered_discard.go).
-	if g.pendingDiscardAbilityChoice && g.SpecialAction.Active && g.SpecialAction.PlayerID == playerID {
-		g.SpecialAction = SpecialActionState{}
-		g.applyBufferedDiscard(engine.ActionDiscardNoAbility, playerID)
 		return
 	}
 
