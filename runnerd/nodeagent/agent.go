@@ -81,10 +81,20 @@ type Agent struct {
 
 	canBuildLibcambia bool
 
-	mu          sync.Mutex
-	nodeEpoch   int64
-	policy      nashnet.Policy
-	drained     bool
+	mu        sync.Mutex
+	nodeEpoch int64
+	policy    nashnet.Policy
+	// hold is the coordinator's hold on this node, its reason verbatim off the
+	// wire and empty when there is none. Every call that can carry it sets it,
+	// so a hold learned from one of them is never undone by the next.
+	hold string
+	// gateDrain is this node's own hold, set when a gate breaches mid job with
+	// on_breach: drain (D46). It is separate from the coordinator's: the two
+	// have different owners and different lifetimes, and sharing one field let
+	// the next heartbeat answer for a gate it knows nothing about. It closes
+	// the window between a mid-job breach and the claim loop's next gate
+	// evaluation, and lifts on that evaluation once the gates admit again.
+	gateDrain   bool
 	active      map[string]*jobRun
 	haveCommits []string
 
@@ -195,6 +205,10 @@ func (a *Agent) register(ctx context.Context, live []nashnet.LiveLease) (map[str
 		a.policy = resp.Policy
 	}
 	a.mu.Unlock()
+	// A registration is the first call after a node restart, so the hold it
+	// answers with is what keeps a held node from claiming before its first
+	// heartbeat (D3, D63).
+	a.applyHold(resp.Hold)
 
 	rebound := map[string]bool{}
 	for _, id := range resp.ReboundLeases {
@@ -234,7 +248,12 @@ func (a *Agent) claimOnce(ctx context.Context) time.Duration {
 	report, obs := a.gateReport()
 	free := a.slotsFree(report)
 
-	if !report.Admit || free <= 0 || a.isDrained() {
+	if report.Admit {
+		// The gates this node evaluates are the authority on its own hold, so an
+		// admitting report lifts the one a mid-job breach set (D46).
+		a.setGateDrain(false)
+	}
+	if !report.Admit || free <= 0 || a.isHeld() || a.isGateDrained() {
 		a.heartbeat(ctx, report, obs, free)
 		return jitter(idleHeartbeatInterval)
 	}
@@ -366,15 +385,10 @@ func (a *Agent) applyEvents(resp nashnet.EventsResponse) {
 		case nashnet.EventRevoke:
 			a.revokeLease(ev.LeaseID, ev.Force)
 		case nashnet.EventDrain:
-			// The event's own boolean decides, so a lift takes effect on this
-			// round trip rather than waiting for the next heartbeat to correct a
-			// hold the node put on itself.
-			a.setDrained(ev.Drain)
-			if ev.Drain {
-				a.log.Printf("coordinator drained this node")
-			} else {
-				a.log.Printf("coordinator lifted this node's drain")
-			}
+			// The event's own hold decides, so both a new hold and a lift take
+			// effect on the round trip that delivers them rather than waiting for
+			// the next heartbeat.
+			a.applyHold(ev.Hold)
 		case nashnet.EventPolicy:
 			// Policy changes arrive with the next claim or heartbeat response;
 			// nothing to do beyond noting the event.
@@ -416,12 +430,33 @@ func (a *Agent) heartbeat(ctx context.Context, report gates.Report, obs Observat
 		}
 		return
 	}
+	a.noteHeartbeat(resp)
+}
+
+// noteHeartbeat applies one heartbeat answer: the epoch it fences on and the
+// hold it reports, which is the coordinator's alone and says nothing about the
+// node's own gates.
+func (a *Agent) noteHeartbeat(resp nashnet.HeartbeatResponse) {
 	a.mu.Lock()
 	if resp.NodeEpoch != 0 {
 		a.nodeEpoch = resp.NodeEpoch
 	}
-	a.drained = resp.Drain
 	a.mu.Unlock()
+	a.applyHold(resp.Hold)
+}
+
+// applyHold records a hold off the wire and logs the transitions. A hold and a
+// lift are both worth one line; a standing hold repeated on every heartbeat is
+// not.
+func (a *Agent) applyHold(hold string) {
+	if !a.setHold(hold) {
+		return
+	}
+	if hold == "" {
+		a.log.Printf("coordinator lifted this node's hold")
+		return
+	}
+	a.log.Printf("coordinator is holding this node: %s", hold)
 }
 
 // gateReport evaluates the node's gates against a fresh observation.
@@ -484,16 +519,40 @@ func (a *Agent) currentPolicy() nashnet.Policy {
 	return a.policy
 }
 
-func (a *Agent) isDrained() bool {
+// isHeld reports whether the coordinator is refusing this node's claims, for
+// either of its reasons (D63).
+func (a *Agent) isHeld() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.drained
+	return a.hold != ""
 }
 
-func (a *Agent) setDrained(v bool) {
+// setGateDrain records this node's own gate-driven hold (D46).
+func (a *Agent) setGateDrain(v bool) {
 	a.mu.Lock()
-	a.drained = v
+	a.gateDrain = v
 	a.mu.Unlock()
+}
+
+// isGateDrained reports whether a mid-job gate breach is holding this node off
+// new work.
+func (a *Agent) isGateDrained() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.gateDrain
+}
+
+// setHold records the hold a response or an event carried, and reports whether
+// it changed, which is all the caller needs to log a transition rather than
+// every repeat of a standing hold.
+func (a *Agent) setHold(hold string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.hold == hold {
+		return false
+	}
+	a.hold = hold
+	return true
 }
 
 // commits returns the mirror commits this node can negate a thin bundle

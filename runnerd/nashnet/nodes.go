@@ -63,9 +63,11 @@ type NodeRecord struct {
 	// ConnectedUntil is the deadline of the node's currently held events request,
 	// which is the session liveness fact of D45.
 	ConnectedUntil time.Time `json:"connected_until,omitzero"`
-	// Drained is the coordinator-side hold: an operator drain or the D63 circuit
-	// breaker. It is not the node's own drain gate, which is node-evaluated and
-	// arrives inside the gate report (D46).
+	// Drained is the operator drain alone, set and lifted only by the drain
+	// route. The D63 circuit breaker holds a node without touching it, so the
+	// question "is this node held" is the pool's effectiveHold rather than this
+	// flag. It is also not the node's own drain gate, which is node-evaluated
+	// and arrives inside the gate report (D46).
 	Drained   bool      `json:"drained,omitempty"`
 	Revoked   bool      `json:"revoked,omitempty"`
 	RevokedAt time.Time `json:"revoked_at,omitzero"`

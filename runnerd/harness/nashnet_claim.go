@@ -46,8 +46,7 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request, nodeID stri
 		writeRegistryError(w, err)
 		return
 	}
-	rec, _ := p.nodes.Get(nodeID)
-	if rec.Drained || p.breakerHeld(nodeID) {
+	if p.effectiveHold(nodeID) != "" {
 		// A coordinator-side hold (an operator drain or the D63 breaker) is not
 		// the node's own gate, and it is never clearable by the node: a node that
 		// could clear its own hold would loop claim, nack, register, claim at
