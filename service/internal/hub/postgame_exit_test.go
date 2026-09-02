@@ -145,7 +145,7 @@ func TestPendingResetInertAfterEarlyExit(t *testing.T) {
 	defer h.Shutdown()
 
 	// Game one ends, arming its reset.
-	h.dispatch(ClientMsg{Type: "_game_ended"})
+	h.dispatch(ClientMsg{Type: "_game_ended", internal: true})
 	require.Equal(t, PhasePostGame, h.Phase)
 	stale := waitForIncoming(t, h, 2*time.Second)
 	require.Equal(t, "_return_to_lobby", stale.Type)
@@ -159,7 +159,7 @@ func TestPendingResetInertAfterEarlyExit(t *testing.T) {
 	// Game two runs and ends: the hub is showing its results when the first game's reset lands.
 	h.Game = game.NewCambiaGame()
 	h.Phase = PhaseInGame
-	h.dispatch(ClientMsg{Type: "_game_ended"})
+	h.dispatch(ClientMsg{Type: "_game_ended", internal: true})
 	require.Equal(t, PhasePostGame, h.Phase)
 	drainEnvelopes(t, connA)
 
@@ -184,7 +184,7 @@ func TestReturnToLobbyRepeatedIsNoOp(t *testing.T) {
 	drainEnvelopes(t, connA)
 
 	h.dispatch(ClientMsg{UserID: idA, LastSeq: h.seq, Type: "return_to_lobby"})
-	h.dispatch(ClientMsg{Type: "_return_to_lobby"})
+	h.dispatch(ClientMsg{Type: "_return_to_lobby", internal: true})
 
 	assert.Equal(t, PhaseOpen, h.Phase)
 	assert.False(t, containsType(drainEnvelopes(t, connA), "phase_change"), "only the first exit transitions")
@@ -200,6 +200,21 @@ func TestInternalMessageFromSocketRefused(t *testing.T) {
 	h.dispatch(ClientMsg{ConnID: uuid.New(), UserID: idB, Type: "_return_to_lobby"})
 
 	assert.Equal(t, PhasePostGame, h.Phase, "a spoofed internal message must not walk past the host gate")
+	assert.NotNil(t, h.Game)
+	assert.False(t, containsType(drainEnvelopes(t, connB), "phase_change"))
+}
+
+// TestUnstampedInternalMessageRefused is the gate read from the other side: admission is the
+// internal flag and nothing else, so a message that names an internal type without it is refused
+// even though it carries no ConnID or UserID at all, which is exactly what the old identity check
+// took as proof the hub had built it. A timer site that forgets the flag therefore fails here and
+// logs, instead of a future socket-side producer that forgets an identity walking through.
+func TestUnstampedInternalMessageRefused(t *testing.T) {
+	h, _, _, _, connB := newPostGameHub(t)
+
+	h.dispatch(ClientMsg{Type: "_return_to_lobby", gen: h.postGameGen})
+
+	assert.Equal(t, PhasePostGame, h.Phase, "an unstamped internal message must not run the transition")
 	assert.NotNil(t, h.Game)
 	assert.False(t, containsType(drainEnvelopes(t, connB), "phase_change"))
 }

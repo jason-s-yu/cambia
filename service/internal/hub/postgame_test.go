@@ -52,7 +52,7 @@ func newPostGameHub(t *testing.T) (*Hub, uuid.UUID, uuid.UUID, *Connection, *Con
 func TestReturnToLobbyReopensLobbyForNextGame(t *testing.T) {
 	h, idA, idB, connA, connB := newPostGameHub(t)
 
-	h.dispatch(ClientMsg{Type: "_return_to_lobby"})
+	h.dispatch(ClientMsg{Type: "_return_to_lobby", internal: true})
 
 	assert.Equal(t, PhaseOpen, h.Phase, "hub must return to PhaseOpen after post-game")
 	assert.Nil(t, h.Game, "the finished game must be cleared so the next one can be created")
@@ -128,7 +128,7 @@ func TestSecondGameStartsAfterPostGameReset(t *testing.T) {
 	require.NotNil(t, h.Game)
 
 	// Game one ends: the hub shows results, then schedules its own return to the lobby.
-	h.dispatch(ClientMsg{Type: "_game_ended"})
+	h.dispatch(ClientMsg{Type: "_game_ended", internal: true})
 	require.Equal(t, PhasePostGame, h.Phase)
 
 	msg := waitForIncoming(t, h, 2*time.Second)
@@ -166,7 +166,7 @@ func TestGameEndedSchedulesPostGameReset(t *testing.T) {
 	h.conns[idB] = newFakeConn(idB, "B")
 	h.Phase = PhaseInGame
 
-	h.dispatch(ClientMsg{Type: "_game_ended"})
+	h.dispatch(ClientMsg{Type: "_game_ended", internal: true})
 	require.Equal(t, PhasePostGame, h.Phase)
 
 	msg := waitForIncoming(t, h, 2*time.Second)
@@ -187,7 +187,7 @@ func TestPostGameResetCancelledByShutdown(t *testing.T) {
 	h.Phase = PhaseInGame
 	h.conns[idA] = newFakeConn(idA, "A")
 
-	h.dispatch(ClientMsg{Type: "_game_ended"})
+	h.dispatch(ClientMsg{Type: "_game_ended", internal: true})
 	h.Shutdown()
 
 	select {
@@ -214,7 +214,7 @@ func TestReturnToLobbyIgnoredOutsidePostGame(t *testing.T) {
 	live := game.NewCambiaGame()
 	h.Game = live
 
-	h.dispatch(ClientMsg{Type: "_return_to_lobby"})
+	h.dispatch(ClientMsg{Type: "_return_to_lobby", internal: true})
 
 	assert.Equal(t, PhaseInGame, h.Phase, "_return_to_lobby outside PhasePostGame must be a no-op")
 	assert.Same(t, live, h.Game, "a live game must not be dropped by a stale reset")

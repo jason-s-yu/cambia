@@ -101,7 +101,7 @@ func TestCountdownFireFromAnEarlierGameIsDropped(t *testing.T) {
 	require.Equal(t, 1, *created)
 
 	// Game one ends and the lobby reopens.
-	h.dispatch(ClientMsg{Type: "_game_ended"})
+	h.dispatch(ClientMsg{Type: "_game_ended", internal: true})
 	require.Equal(t, PhasePostGame, h.Phase)
 	h.dispatch(waitForIncoming(t, h, 2*time.Second))
 	require.Equal(t, PhaseOpen, h.Phase)
@@ -140,7 +140,7 @@ func TestEveryExitFromCountdownDisownsItsPendingFire(t *testing.T) {
 
 			// Back in a countdown, with the earlier countdown's fire arriving late.
 			h.setPhase(PhaseCountdown)
-			h.dispatch(ClientMsg{Type: "_begin_game", gen: armed})
+			h.dispatch(ClientMsg{Type: "_begin_game", gen: armed, internal: true})
 			assert.Equal(t, PhaseCountdown, h.Phase, "the disowned fire must not start the game")
 			assert.Equal(t, 0, *created, "no game may be created by a disowned fire")
 		})
