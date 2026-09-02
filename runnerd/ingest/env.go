@@ -67,14 +67,15 @@ if _expected:
 // provenance carries the fields Prepare resolves during staging; writeEnvJSON
 // fills the remaining probe-derived fields.
 type provenance struct {
-	JobID         string
-	Commit        string
-	EngineTreeSha string
-	LibcambiaSha  string
-	UVLockSha     string
-	VenvCacheKey  string
-	PlatformTag   string
-	Device        string
+	JobID             string
+	Commit            string
+	EngineTreeSha     string
+	LibcambiaCacheKey string
+	LibcambiaSha      string
+	UVLockSha         string
+	VenvCacheKey      string
+	PlatformTag       string
+	Device            string
 }
 
 // envRecord is the on-disk env.json shape (design 3.6).
@@ -83,6 +84,7 @@ type envRecord struct {
 	OriginHost        string `json:"origin_host"`
 	Commit            string `json:"commit"`
 	EngineTreeSha     string `json:"engine_tree_sha"`
+	LibcambiaCacheKey string `json:"libcambia_cache_key"`
 	LibcambiaSha256   string `json:"libcambia_sha256"`
 	UVLockSha256      string `json:"uv_lock_sha256"`
 	VenvCacheKey      string `json:"venv_cache_key"`
@@ -143,6 +145,7 @@ func (m *Manager) writeEnvJSON(ctx context.Context, runDir, venvPython string, p
 		OriginHost:        resolveOriginHost(),
 		Commit:            prov.Commit,
 		EngineTreeSha:     prov.EngineTreeSha,
+		LibcambiaCacheKey: prov.LibcambiaCacheKey,
 		LibcambiaSha256:   prov.LibcambiaSha,
 		UVLockSha256:      prov.UVLockSha,
 		VenvCacheKey:      prov.VenvCacheKey,
