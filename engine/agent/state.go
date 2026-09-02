@@ -603,8 +603,10 @@ func (a *AgentState) processSnapOpponentMove(g *engine.GameState, isSelf bool, o
 		// slot it landed in; reading it before removeOwnCard destroys the slot is the whole
 		// of the fix (RULES.md 5, cambia-1552).
 		moved := a.OwnHand[ownIdx]
+		tag := a.SlotTags[ownIdx]
+		tagBucket := a.SlotBuckets[ownIdx]
 		a.removeOwnCard(ownIdx)
-		a.insertOppFromOwn(slotIdx, moved)
+		a.insertOppFromOwn(slotIdx, moved, tag, tagBucket)
 	} else {
 		// The opponent moved their card at ownIdx into our hand at slotIdx. The card keeps
 		// its identity, so a face we had already seen in their hand is a face we know in
@@ -802,11 +804,14 @@ func (a *AgentState) insertOppUnknown(slotIdx uint8) {
 }
 
 // insertOppFromOwn inserts a card the agent moved out of its OWN hand into the opponent
-// hand model at slotIdx, carrying what the agent knew about it. An unknown card is the
-// plain insertOppUnknown insert. The opponent model holds a bucket per slot and no card
-// identity, so the exact card cannot travel with it; the bucket and the turn it was last
-// seen do, which is what OppBelief and OppLastSeen represent (cambia-1552).
-func (a *AgentState) insertOppFromOwn(slotIdx uint8, moved KnownCardInfo) {
+// hand model at slotIdx, carrying what the agent knew about it. The opponent model holds
+// a bucket per slot and no card identity, so the exact card cannot travel with it; the
+// bucket and the turn it was last seen do, which is what OppBelief and OppLastSeen
+// represent (cambia-1552). The EP-PBS half takes the tag the source slot carried, the
+// same carry rule the receiving direction uses (cambia-1690).
+func (a *AgentState) insertOppFromOwn(
+	slotIdx uint8, moved KnownCardInfo, tag EpistemicTag, tagBucket CardBucket,
+) {
 	before := a.OppHandLen
 	a.insertOppUnknown(slotIdx)
 	if a.OppHandLen == before {
@@ -816,15 +821,14 @@ func (a *AgentState) insertOppFromOwn(slotIdx uint8, moved KnownCardInfo) {
 	if slotIdx > before {
 		slotIdx = before
 	}
-	if moved.Bucket == BucketUnknown {
-		return
+	if moved.Bucket != BucketUnknown {
+		a.OppBelief[slotIdx] = BucketBelief(moved.Bucket)
+		a.OppLastSeen[slotIdx] = moved.LastSeenTurn
+		a.OppHasLastSeen[slotIdx] = true
 	}
-	a.OppBelief[slotIdx] = BucketBelief(moved.Bucket)
-	a.OppLastSeen[slotIdx] = moved.LastSeenTurn
-	a.OppHasLastSeen[slotIdx] = true
-	// EP-PBS: the receiving physical slot holds a card the opponent has not seen, so it
-	// is ours alone to know regardless of what the slot held before.
-	a.eppbsForceOwnSlotKnown(OppSlotsStart+slotIdx, moved.Bucket)
+	// EP-PBS: the destination takes the tag the source slot carried, so a card both
+	// seats had seen stays public rather than collapsing to ours alone (cambia-1690).
+	a.eppbsCarrySlot(OppSlotsStart+slotIdx, tag, tagBucket)
 }
 
 // insertOwnFromOpp inserts a card the opponent moved out of their hand into the agent's

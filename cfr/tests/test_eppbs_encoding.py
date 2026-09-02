@@ -158,6 +158,153 @@ def _play_to_king_swap(seed: int):
         go_engine.close()
 
 
+# Seeds swept for a successful opponent snap followed by its RULES.md 5 fill. The driver
+# takes the snap line wherever it is legal; a seed that never reaches one is skipped.
+_SNAP_FILL_SEEDS = tuple(range(1, 121))
+
+_PASS_SNAP = 97
+_SNAP_OPP_MIN, _SNAP_OPP_MAX = 104, 110
+_SNAP_MOVE_MIN, _SNAP_MOVE_MAX = 110, 146
+
+
+def _hands_agree(go_engine, py_state) -> bool:
+    """True when both engines hold the same number of cards in both hands."""
+    try:
+        return all(
+            len(go_engine.get_hand_indices(seat)) == py_state.get_player_card_count(seat)
+            for seat in range(2)
+        )
+    except Exception:
+        return False
+
+
+def _slot_tags_from_encoding(enc):
+    """Read the 12 one-hot slot tags back out of a 224-dim EP-PBS encoding."""
+    return [int(np.argmax(enc[40 + 4 * s : 44 + 4 * s])) for s in range(12)]
+
+
+def _play_to_snap_fill(seed: int):
+    """Drive both engines to a successful opponent snap and the fill that answers it.
+
+    Returns a list of ``(label, [go_tags_per_seat], [py_tags_per_seat])`` snapshots taken
+    right after the snap (the victim's hand shrank) and right after the fill (it grew
+    again), or None if the seed never reached one in lockstep. Any step that leaves the
+    two engines holding different hand sizes ends the seed rather than comparing states
+    that have drifted apart.
+    """
+    from src.cfr.worker import _create_observation, _filter_observation
+    from src.constants import ActionSnapOpponent, ActionSnapOpponentMove
+    from src.encoding import action_to_index, encode_action_mask
+    from tests.test_cross_engine_samples import (
+        _setup_python_game_matching_go,
+        _TEST_RULES,
+    )
+    from tests.test_cross_validation import _build_py_agents, _make_config
+
+    go_engine = GoEngine(seed=seed, house_rules=_TEST_RULES)
+    try:
+        py_state = _setup_python_game_matching_go(seed)
+        go_agents = [GoAgentState(go_engine, i) for i in range(2)]
+        py_agents = _build_py_agents(py_state, _make_config())
+        snapshots = []
+
+        for _ in range(300):
+            if go_engine.is_terminal() or py_state.is_terminal():
+                return None
+            if not _hands_agree(go_engine, py_state):
+                return None
+
+            go_actions = set(np.where(go_engine.legal_actions_mask() > 0)[0].tolist())
+            py_legal = py_state.get_legal_actions()
+            py_actions = set(
+                np.where(encode_action_mask(list(py_legal)).astype(np.uint8) > 0)[
+                    0
+                ].tolist()
+            )
+            common = sorted(go_actions & py_actions)
+            if not common:
+                return None
+
+            py_action = None
+            for candidate in sorted(common, key=_snap_line_rank):
+                for a in py_legal:
+                    try:
+                        if action_to_index(a) == candidate:
+                            py_action = a
+                            break
+                    except Exception:
+                        continue
+                if py_action is not None:
+                    action_idx = candidate
+                    break
+            if py_action is None:
+                return None
+
+            actor = py_state.get_acting_player()
+            before = _py_fingerprint(py_state)
+            go_engine.apply_action(action_idx)
+            py_state.apply_action(py_action)
+            if _py_fingerprint(py_state) == before:
+                return None
+            go_engine.update_both(go_agents[0], go_agents[1])
+            obs = _create_observation(
+                None, py_action, py_state, actor, py_state.snap_results_log
+            )
+            if obs is None:
+                return None
+            for pid, pa in enumerate(py_agents):
+                pa.update(_filter_observation(obs, pid))
+
+            if not _hands_agree(go_engine, py_state):
+                return None
+            if (
+                isinstance(py_action, ActionSnapOpponentMove)
+                and py_state.snap_results_log
+            ):
+                # Another snapper is still owed a decision, so the engine deliberately
+                # keeps the snap log populated for the resumed snapper's observation. The
+                # belief tracker then applies the same removal a second time, which is a
+                # separate defect; this seed cannot measure the shift through it.
+                return None
+
+            label = None
+            if isinstance(py_action, ActionSnapOpponent):
+                label = "after the snap"
+            elif isinstance(py_action, ActionSnapOpponentMove):
+                label = "after the fill"
+            if label is not None:
+                ctx = go_engine.decision_ctx()
+                drawn = go_engine.get_drawn_card_bucket()
+                snapshots.append(
+                    (
+                        label,
+                        [
+                            _slot_tags_from_encoding(
+                                go_agents[i].encode_eppbs(ctx, drawn)
+                            )
+                            for i in range(2)
+                        ],
+                        [list(py_agents[i].slot_tags) for i in range(2)],
+                    )
+                )
+                if label == "after the fill":
+                    return snapshots
+        return None
+    finally:
+        go_engine.close()
+
+
+def _snap_line_rank(idx: int) -> int:
+    """Order action indices so a snap and its fill are taken ahead of anything else."""
+    if _SNAP_MOVE_MIN <= idx < _SNAP_MOVE_MAX:
+        return 0
+    if _SNAP_OPP_MIN <= idx < _SNAP_OPP_MAX:
+        return 1
+    if idx == _PASS_SNAP:
+        return 3
+    return 2
+
+
 def _py_fingerprint(py_state):
     """Enough of the Python state to tell a real apply from a declined one."""
     return (
@@ -354,6 +501,33 @@ class TestEPPBSEncoding:
                     )
 
         assert checked > 0, "no seed in the sweep reached a King look and swap"
+
+    @skipgo
+    def test_cross_engine_parity_across_a_hand_length_change(self):
+        """Go and Python agree on the slot tags after a hand shrinks and grows again.
+
+        Go shifts its EP-PBS slots whenever a hand does (removeOppCard closes the gap,
+        insertOppUnknown opens one), so a tag keeps naming the card it was recorded for.
+        Python reconciled whole hands and left the tag array where it was, so every tag
+        past a snapped slot named a different card until the next full sync (cambia-1690).
+        A successful opponent snap shrinks the victim's hand and the fill grows it back,
+        which exercises both directions in one game.
+        """
+        checked = 0
+        for seed in _SNAP_FILL_SEEDS:
+            snapshots = _play_to_snap_fill(seed)
+            if not snapshots:
+                continue
+            checked += 1
+            for label, go_tags, py_tags in snapshots:
+                for observer in range(2):
+                    assert go_tags[observer] == py_tags[observer], (
+                        f"seed {seed} {label}, observer {observer}: "
+                        f"go tags {go_tags[observer]} != python tags {py_tags[observer]}"
+                    )
+            assert [s[0] for s in snapshots][-1] == "after the fill"
+
+        assert checked > 0, "no seed in the sweep reached a snap and its fill"
 
 
 class TestEPPBSAgentStateTracking:

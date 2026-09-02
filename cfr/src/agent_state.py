@@ -30,6 +30,7 @@ from .constants import (
     ActionAbilityKingLookSelect,
     ActionAbilityKingSwapDecision,
     EP_PBS_MAX_ACTIVE_MASK,
+    EP_PBS_MAX_SLOTS,
     bucket_saliency,
 )
 from .config import Config
@@ -364,6 +365,70 @@ class AgentState:
                 self.opponent_belief[their_idx] = CardBucket.UNKNOWN
                 self.opponent_last_seen_turn.pop(their_idx, None)
 
+    def _eppbs_shift_band(
+        self,
+        base: int,
+        old_len: int,
+        removed: Set[int],
+        inserted_at: Optional[int],
+        new_len: int,
+    ):
+        """Shift one hand's EP-PBS slots the way the hand itself shifted.
+
+        A removal closes the gap and an insert opens one, so a slot's tag has to follow
+        its card to the index the card now sits at. Go does this inside removeOwnCard /
+        removeOppCard / insertOwnUnknown / insertOppUnknown; Python reconciles whole hands
+        at once, so the same transform runs here over the band ``base`` starts (0 for our
+        hand, 6 for the opponent's). Without it every tag after a snap named a different
+        card than the belief at the same index (cambia-1690).
+        """
+        band = EP_PBS_MAX_SLOTS // 2
+        seen_len = len(self.slot_last_seen_turn)
+        entries = []
+        mapping: Dict[int, int] = {}
+        for i in range(min(old_len, band)):
+            if i in removed:
+                continue
+            mapping[i] = len(entries)
+            entries.append(
+                (
+                    self.slot_tags[base + i],
+                    self.slot_buckets[base + i],
+                    self.slot_last_seen_turn[base + i] if base + i < seen_len else 0,
+                )
+            )
+        if inserted_at is not None:
+            pos = min(max(inserted_at, 0), len(entries))
+            for old_i, new_i in mapping.items():
+                if new_i >= pos:
+                    mapping[old_i] = new_i + 1
+            entries.insert(pos, (EpistemicTag.UNK, 0, 0))
+        while len(entries) < min(new_len, band):
+            entries.append((EpistemicTag.UNK, 0, 0))
+        del entries[band:]
+
+        for i in range(band):
+            tag, bucket, seen = (
+                entries[i] if i < len(entries) else (EpistemicTag.UNK, 0, 0)
+            )
+            self.slot_tags[base + i] = tag
+            self.slot_buckets[base + i] = bucket
+            if base + i < seen_len:
+                self.slot_last_seen_turn[base + i] = seen
+
+        # The masks name slots, so they follow the same remap; a slot whose card left the
+        # hand drops out of the mask entirely.
+        for mask in (self.own_active_mask, self.opp_active_mask):
+            remapped = []
+            for slot in mask:
+                if base <= slot < base + band:
+                    local = slot - base
+                    if local in mapping and mapping[local] < band:
+                        remapped.append(base + mapping[local])
+                else:
+                    remapped.append(slot)
+            mask[:] = remapped
+
     def _eppbs_swap_slots(self, slot_a: int, slot_b: int):
         """Exchange the EP-PBS state of two slots whose cards swapped.
 
@@ -528,7 +593,11 @@ class AgentState:
         self._last_tracked_discard_bucket = bucket_val
 
     def _eppbs_update_from_action(
-        self, action, actor: int, observation: "AgentObservation"
+        self,
+        action,
+        actor: int,
+        observation: "AgentObservation",
+        fill_source_tag: Optional[Tuple[int, int]] = None,
     ):
         """Update EP-PBS epistemic tags based on the observed action.
 
@@ -567,14 +636,6 @@ class AgentState:
         def _forget_slot(slot: int):
             """Card at `slot` moved/swapped: both players lose epistemic knowledge."""
             self._eppbs_set_tag(slot, EpistemicTag.UNK)
-
-        def _known_bucket(slot: int) -> int:
-            """Raw bucket of `slot` when WE know its identity, else 0."""
-            if not 0 <= slot < len(self.slot_tags):
-                return 0
-            if self.slot_tags[slot] in (EpistemicTag.PRIV_OWN, EpistemicTag.PUB):
-                return self.slot_buckets[slot]
-            return 0
 
         def _bucket_from_peeked(p_idx: int, h_idx: int) -> int:
             """Extract raw bucket value from peeked_cards observation."""
@@ -625,14 +686,14 @@ class AgentState:
                 self._eppbs_swap_slots(own_idx, 6 + opp_idx)
 
             elif isinstance(action, ActionSnapOpponentMove):
-                # RULES.md 5 fill: the card we paid keeps its identity in the slot our snap
-                # emptied, and the opponent never saw it, so that slot is ours alone to know.
-                own_idx = action.own_card_to_move_hand_index
+                # RULES.md 5 fill: the card we paid keeps its identity in the slot our
+                # snap emptied, so the destination takes the tag the source slot carried.
+                # Forcing PRIV_OWN collapsed a card both seats had seen into our private
+                # knowledge (cambia-1690).
                 target_slot = action.target_empty_slot_index
-                bv_paid = _known_bucket(own_idx)
-                _forget_slot(own_idx)
-                if bv_paid and 0 <= target_slot < 6:
-                    self._eppbs_set_tag(6 + target_slot, EpistemicTag.PRIV_OWN, bv_paid)
+                if fill_source_tag is not None and 0 <= target_slot < 6:
+                    tag, bucket = fill_source_tag
+                    self._eppbs_set_tag(6 + target_slot, tag, bucket)
 
         elif actor == self.opponent_id:
             if isinstance(action, ActionAbilityPeekOwnSelect):
@@ -666,12 +727,9 @@ class AgentState:
                 # The opponent paid the fill into the slot their snap emptied in OUR hand.
                 # The card keeps whatever was known about it and by whom, so the slot it
                 # landed in takes the tag of the slot it came from (cambia-1690).
-                opp_own_idx = action.own_card_to_move_hand_index
                 target_slot = action.target_empty_slot_index
-                if 0 <= target_slot < 6 and 0 <= 6 + opp_own_idx < len(self.slot_tags):
-                    tag = self.slot_tags[6 + opp_own_idx]
-                    bucket = self.slot_buckets[6 + opp_own_idx]
-                    _forget_slot(6 + opp_own_idx)
+                if fill_source_tag is not None and 0 <= target_slot < 6:
+                    tag, bucket = fill_source_tag
                     self._eppbs_set_tag(target_slot, tag, bucket)
 
     def update(self, observation: AgentObservation):
@@ -847,6 +905,9 @@ class AgentState:
         received_fill_turn: int = self._current_game_turn
         own_fill_slot: Optional[int] = None
         opp_fill_slot: Optional[int] = None
+        # The EP-PBS tag of the slot the fill came FROM, read before the reconciliation
+        # shifts the band out from under it (cambia-1690).
+        fill_source_tag: Optional[Tuple[int, int]] = None
         if isinstance(action, ActionSnapOpponentMove) and actor != -1:
             # The action contains the indices involved in the *move* step
             snapper_idx = actor  # The player who moved their card
@@ -860,6 +921,11 @@ class AgentState:
                 ):  # Check against pre-snap state
                     own_indices_removed.add(own_card_idx_moved)
                     moved_fill_info = original_own_hand[own_card_idx_moved]
+                    if 0 <= own_card_idx_moved < len(self.slot_tags):
+                        fill_source_tag = (
+                            self.slot_tags[own_card_idx_moved],
+                            self.slot_buckets[own_card_idx_moved],
+                        )
                     logger.debug(
                         " -> P%d moved card from own idx %d (marked removed)",
                         self.player_id,
@@ -873,6 +939,11 @@ class AgentState:
                     own_card_idx_moved in original_opponent_belief
                 ):  # Check against pre-snap state
                     opponent_indices_removed.add(own_card_idx_moved)
+                    if 0 <= 6 + own_card_idx_moved < len(self.slot_tags):
+                        fill_source_tag = (
+                            self.slot_tags[6 + own_card_idx_moved],
+                            self.slot_buckets[6 + own_card_idx_moved],
+                        )
                     prior = original_opponent_belief[own_card_idx_moved]
                     if isinstance(prior, CardBucket) and prior != CardBucket.UNKNOWN:
                         received_fill_bucket = prior
@@ -954,6 +1025,22 @@ class AgentState:
             self.opponent_last_seen_turn = rebuilt_opponent_last_seen
             self.opponent_card_count = (
                 observed_opp_count  # Update count *after* successful reconciliation
+            )
+
+            # The EP-PBS slots name physical positions, so they shift with the hands.
+            self._eppbs_shift_band(
+                0,
+                len(original_own_hand),
+                own_indices_removed,
+                own_fill_slot,
+                observed_own_count,
+            )
+            self._eppbs_shift_band(
+                EP_PBS_MAX_SLOTS // 2,
+                len(original_opponent_belief),
+                opponent_indices_removed,
+                opp_fill_slot,
+                observed_opp_count,
             )
 
             logger.debug(" Belief Reconciliation Successful.")
@@ -1284,7 +1371,7 @@ class AgentState:
 
         # --- 4b. EP-PBS epistemic tag updates from action ---
         try:
-            self._eppbs_update_from_action(action, actor, observation)
+            self._eppbs_update_from_action(action, actor, observation, fill_source_tag)
         except Exception as e_eppbs:
             # JUSTIFIED: EP-PBS update failure should not disrupt core belief tracking
             logger.debug(
