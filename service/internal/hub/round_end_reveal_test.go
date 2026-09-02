@@ -54,7 +54,7 @@ func TestReconnectIntoPostGameGetsTheRoundEndReveal(t *testing.T) {
 	h, ids, g, _ := newInGameHubStopped(t, 2, false, 0, 0, 0)
 
 	var reveal []game.FinalHand
-	g.OnGameEnd = func(_ uuid.UUID, _ uuid.UUID, _ map[uuid.UUID]int, _ map[uuid.UUID]string, _ map[uuid.UUID]int, _ uuid.UUID, finalHands []game.FinalHand) {
+	g.OnGameEnd = func(_ uuid.UUID, _ uuid.UUID, _ map[uuid.UUID]int, _ map[uuid.UUID]string, _ map[uuid.UUID]int, _ uuid.UUID, finalHands []game.FinalHand, _ game.EndReason) {
 		reveal = finalHands
 	}
 
