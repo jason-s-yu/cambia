@@ -92,10 +92,24 @@ class SnapLogicMixin:
                 legal_actions.add(ActionSnapOwn(own_card_hand_index=i))
 
         # Opponent snaps if allowed: every opponent hand slot is a legal target,
-        # gated only on the snapper having a card to move into the vacated slot.
+        # gated on the snapper having a card to move into the vacated slot, and on the target's
+        # hand not being frozen. A seat enters the snap window on its own matching card alone, so
+        # the snapper being unlocked says nothing about the hand it names; _initiate_snap_phase
+        # excludes the locked caller from the window and this excludes the caller's cards from
+        # everyone else's targets. Mirrors Go engine/legal.go legalSnapDecision (cambia-1239).
+        locked_caller = (
+            self.cambia_caller_id
+            if getattr(getattr(self, "house_rules", None), "lockCallerHand", False)
+            else None
+        )
         if self.house_rules.allowOpponentSnapping:
             opponent_idx = self.get_opponent_index(acting_player)
-            if not (
+            if locked_caller is not None and opponent_idx == locked_caller:
+                logger.debug(
+                    "P%d cannot SnapOpponent, the target's hand is locked.",
+                    acting_player,
+                )
+            elif not (
                 0 <= opponent_idx < len(self.players)
                 and hasattr(self.players[opponent_idx], "hand")
             ):

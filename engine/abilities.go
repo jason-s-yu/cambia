@@ -2,17 +2,21 @@ package engine
 
 import "fmt"
 
-// handLocked reports whether seat's hand is frozen by the LockCallerHand house rule. RULES.md 3C
+// HandLocked reports whether seat's hand is frozen by the LockCallerHand house rule. RULES.md 3C
 // makes the Cambia caller's hand untouchable for the rest of the round ("cannot be altered by any
 // player, including yourself (snaps, swaps, etc.)"), and the house rule decides whether that clause
 // applies at all: ranked play turns it off (MATCHMAKING.md 5.2), which leaves the caller's hand as
 // reachable as anyone else's.
 //
-// legal.go spells the same three-term condition inline at each mask site. This is the copy the
-// apply paths use, because a mask is not a guard for them: the service adapter hands an action
-// straight to ApplyAction or ApplyNPlayerAction without consulting one, so a hand-rolled or stale
-// client's swap reached the caller's hand unopposed (cambia-1118).
-func (g *GameState) handLocked(seat uint8) bool {
+// This is the single statement of the rule. The legal-mask sites in legal.go, the apply paths in
+// abilities.go, snap.go and nplayer_actions.go, and the service adapter's snap-path checks all
+// call it, so the mask and the guard cannot drift apart. The apply paths need their own call
+// because a mask is not a guard for them: the service adapter hands an action straight to
+// ApplyAction or ApplyNPlayerAction without consulting one, so a hand-rolled or stale client's
+// swap reached the caller's hand unopposed (cambia-1118). Exported because the service asked the
+// same question of its own HouseRules copy, which circuit mode diverges from: TournamentHouseRules
+// turns the lock off while the service's copy still says on (cambia-1239).
+func (g *GameState) HandLocked(seat uint8) bool {
 	return g.Rules.LockCallerHand && g.IsCambiaCalled() && int8(seat) == g.CambiaCaller
 }
 
@@ -129,7 +133,7 @@ func (g *GameState) blindSwap(ownIdx, oppIdx uint8) error {
 	}
 	acting := g.Pending.PlayerID
 	opp := g.seatOpponent(acting)
-	if g.handLocked(opp) {
+	if g.HandLocked(opp) {
 		return fmt.Errorf("blindSwap: opponent %d has called Cambia and their hand is locked", opp)
 	}
 	if ownIdx >= g.Players[acting].HandLen {
@@ -164,7 +168,7 @@ func (g *GameState) kingLook(ownIdx, oppIdx uint8) error {
 	}
 	acting := g.Pending.PlayerID
 	opp := g.seatOpponent(acting)
-	if g.handLocked(opp) {
+	if g.HandLocked(opp) {
 		return fmt.Errorf("kingLook: opponent %d has called Cambia and their hand is locked", opp)
 	}
 	if ownIdx >= g.Players[acting].HandLen {
@@ -286,7 +290,7 @@ func (g *GameState) blindSwapNPlayer(ownIdx, oppSlot uint8, targetPlayer uint8) 
 	}
 	// A swap moves a card out of the seat it names, so the lock refuses it (RULES.md 3C). This
 	// matches the mask that omits the same targets (nplayerLegalAbilitySelect, legal.go).
-	if g.handLocked(targetPlayer) {
+	if g.HandLocked(targetPlayer) {
 		return fmt.Errorf("blindSwapNPlayer: target player %d has called Cambia and their hand is locked", targetPlayer)
 	}
 	if ownIdx >= g.Players[acting].HandLen {
@@ -327,7 +331,7 @@ func (g *GameState) kingLookNPlayer(ownIdx, oppSlot uint8, targetPlayer uint8) e
 	}
 	// The look binds the pair its decision may then swap, so it is refused for the same reason
 	// blindSwapNPlayer is: the decision would move a card out of a locked hand.
-	if g.handLocked(targetPlayer) {
+	if g.HandLocked(targetPlayer) {
 		return fmt.Errorf("kingLookNPlayer: target player %d has called Cambia and their hand is locked", targetPlayer)
 	}
 	if ownIdx >= g.Players[acting].HandLen {
