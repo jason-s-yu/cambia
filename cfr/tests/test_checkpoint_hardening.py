@@ -244,10 +244,6 @@ def _extract_deep_cfr_config_class() -> type:
 class TestValueNetWorkerKey:
     """Verify deep_trainer.py serializes value_net under __value_net__ key."""
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason="Bug 2 fix pending impl-1: _get_network_weights_for_workers must add __value_net__",
-    )
     def test_worker_weights_include_value_net_key(self):
         """_get_network_weights_for_workers must serialize __value_net__ for ESCHER."""
         source = _read_source("cfr/deep_trainer.py")
