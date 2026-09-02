@@ -2475,9 +2475,9 @@ def benchmark_es_cmd(
         help="Number of traversals per (backend, depth) combination",
     ),
     backends: Optional[str] = typer.Option(
-        "python,go",
+        "go",
         "--backends",
-        help="Comma-separated list of backends to test (python,go)",
+        help="Comma-separated list of backends to test ('go' is the only one)",
     ),
     config: Path = typer.Option(
         "/workspace/config/parallel.config.yaml",

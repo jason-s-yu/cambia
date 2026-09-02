@@ -37,7 +37,7 @@ def benchmark_es(
     Args:
         depths: List of depth limits to benchmark (default: [5, 8, 10, 12])
         num_traversals: Number of traversals per combination
-        backends: List of backends to test (default: ["python", "go"])
+        backends: Backends to test; "go" is the only one (default: ["go"])
         config_path: Path to config file (defaults to parallel.config.yaml)
         device: Device for network initialization (cpu/cuda)
 
@@ -45,7 +45,14 @@ def benchmark_es(
         BenchmarkResult with per-(backend, depth) metrics
     """
     depths = depths or [5, 8, 10, 12]
-    backends = backends or ["python", "go"]
+    backends = backends or ["go"]
+    unsupported = [b for b in backends if b != "go"]
+    if unsupported:
+        raise ValueError(
+            f"Unsupported ES benchmark backend(s) {unsupported}: the Python "
+            "reference engine was retired (cambia-1422) and 'go' is the "
+            "traversal backend."
+        )
     config_path = config_path or "/workspace/config/parallel.config.yaml"
 
     config = load_config(config_path)

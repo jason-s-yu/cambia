@@ -25,7 +25,7 @@ The update is weighted by the opponent's reach probability `π_{-i}(I)`.
 
 **IS weight clipping:** `MAX_IS_WEIGHT = 20.0` (module-level constant in `deep_worker.py`). Any importance weight `1 / p(a*)` is clipped to 20.0 before being applied. This prevents extreme variance from very low-probability sampled actions at the cost of a small bias. Worst-case bias: approximately 3x at `σ=0` with 36 legal actions; typical case is under 1.7x.
 
-**H3 bug and fix (2026-02-27):** Prior to the fix, `exploration_epsilon` (default 0.6) was applied at opponent nodes as well as traverser nodes, but IS correction was only applied at traverser nodes. This caused the agent to train a best response to a 60%-random opponent rather than to the learned strategy. The fix: `epsilon=0` at opponent nodes (`if player == updating_player`). The affected functions were `_deep_traverse_os_go`, `_deep_traverse_os_go_nplayer`, and `_deep_traverse_os`. ES-MCCFR and ESCHER were not affected by this bug.
+**H3 bug and fix (2026-02-27):** Prior to the fix, `exploration_epsilon` (default 0.6) was applied at opponent nodes as well as traverser nodes, but IS correction was only applied at traverser nodes. This caused the agent to train a best response to a 60%-random opponent rather than to the learned strategy. The fix: `epsilon=0` at opponent nodes (`if player == updating_player`). The affected functions were `_deep_traverse_os_go`, `_deep_traverse_os_go_nplayer`, and the since-retired Python `_deep_traverse_os`. ES-MCCFR and ESCHER were not affected by this bug.
 
 **Pros:**
 - Lowest cost per traversal.
@@ -140,11 +140,10 @@ All three methods are implemented in `cfr/src/cfr/deep_worker.py`. Selection is 
 **OS-MCCFR:**
 - `_deep_traverse_os_go()`: Go engine backend via FFI. Used for production runs.
 - `_deep_traverse_os_go_nplayer()`: N-player variant (Go backend).
-- `_deep_traverse_os()`: Python engine backend. Slower; used for debugging.
 - Config: `sampling_method: outcome` (default).
 
 **ES-MCCFR:**
-- `_deep_traverse_es()`: Python engine backend only. No Go backend.
+- `_deep_traverse_go()`: Go engine backend via FFI.
 - Config: `sampling_method: external`.
 - Not recommended for full game runs due to cost.
 
