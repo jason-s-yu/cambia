@@ -291,15 +291,19 @@ class TestSDCFRAgentWrapper:
             )
             assert len(wrapper._snapshot_nets) == 3
 
-            # Test inference with fake game state (use default rules)
-            from src.game.engine import CambiaGameState
+            # Inference on the Go engine, which is what initialize_state takes:
+            # it attaches this seat's belief through the FFI (cambia-1522).
+            from src.agents import action_codec
+            from src.ffi.bridge import GoEngine
 
-            game = CambiaGameState()
-            wrapper.initialize_state(game)
+            with GoEngine(seed=7, house_rules=mock_config.cambia_rules) as game:
+                wrapper.initialize_state(game)
 
-            legal_actions = game.get_legal_actions()
-            action = wrapper.choose_action(game, legal_actions)
-            assert action in legal_actions
+                legal_actions = action_codec.actions_from_mask(game.legal_actions_mask())
+                assert legal_actions
+                action = wrapper.choose_action(game, legal_actions)
+                assert action in legal_actions
+                wrapper.release_belief()
 
 
 class TestEMAWeights:
