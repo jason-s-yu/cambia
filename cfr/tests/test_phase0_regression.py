@@ -72,8 +72,7 @@ class TestBug1KingSwapBeliefGap:
         assert obs.king_swap_indices is None
 
     def test_agent_state_handles_self_king_swap(self):
-        """After a self-initiated King Swap with indices, own hand is set to UNKNOWN
-        and opponent belief is decayed."""
+        """A self-initiated King Swap with indices moves both beliefs with the cards."""
         rules_stub = type(
             "Rules",
             (),
@@ -120,19 +119,14 @@ class TestBug1KingSwapBeliefGap:
         )
         state.update(obs)
 
-        # Own hand slot 1 should now be UNKNOWN (swapped away)
-        assert state.own_hand[1].bucket == CardBucket.UNKNOWN
-        # Opponent belief slot 2 should be decayed (not the original ACE)
-        # With memory_level=1, event decay should trigger
-        opp_belief_2 = state.opponent_belief[2]
-        # It should no longer be the specific CardBucket.ACE
-        # (should be decayed to a DecayCategory or UNKNOWN)
-        assert opp_belief_2 != CardBucket.ACE or opp_belief_2 == CardBucket.UNKNOWN
+        # The King look showed us both cards, so each face follows its card into the slot
+        # it landed in (cambia-1553): our slot 1 now holds the opponent's old ACE and
+        # their slot 2 holds the LOW_NUM we gave up.
+        assert state.own_hand[1].bucket == CardBucket.ACE
+        assert state.opponent_belief[2] == CardBucket.LOW_NUM
 
     def test_agent_state_handles_opponent_king_swap(self):
-        """After an opponent-initiated King Swap with indices, beliefs
-        update appropriately (our involved slot becomes UNKNOWN, opponent
-        slot decays)."""
+        """An opponent-initiated King Swap moves both beliefs with the cards too."""
         rules_stub = type(
             "Rules",
             (),
@@ -179,8 +173,10 @@ class TestBug1KingSwapBeliefGap:
         )
         state.update(obs)
 
-        # Our slot 1 should be set to UNKNOWN (swapped away by opponent)
-        assert state.own_hand[1].bucket == CardBucket.UNKNOWN
+        # We saw neither card, but a face we already knew still travels with its card:
+        # their ACE at slot 2 landed in our slot 1, and our LOW_NUM landed in theirs.
+        assert state.own_hand[1].bucket == CardBucket.ACE
+        assert state.opponent_belief[2] == CardBucket.LOW_NUM
 
 
 # ===================================================================
