@@ -63,10 +63,10 @@ const (
 	// deadline without starting a new turn. game_player_turn may not be announced over a pending
 	// ability, which is when most of those re-arms happen, so the clock needs a channel of its own
 	// (cambia-1556). See publishTurnDeadline.
-	EventGameTurnDeadline GameEventType = "game_turn_deadline" // Public: The current turn's clock was re-armed.
-	EventPrivateSyncState       GameEventType = "private_sync_state"             // Private: Full game state sync for a player.
-	EventPrivateInitialCards    GameEventType = "private_initial_cards"          // Private: Pregame peek cards revealed to their owner.
-	EventGameEnd                GameEventType = "game_end"                       // Public: Game has ended, includes results.
+	EventGameTurnDeadline    GameEventType = "game_turn_deadline"    // Public: The current turn's clock was re-armed.
+	EventPrivateSyncState    GameEventType = "private_sync_state"    // Private: Full game state sync for a player.
+	EventPrivateInitialCards GameEventType = "private_initial_cards" // Private: Pregame peek cards revealed to their owner.
+	EventGameEnd             GameEventType = "game_end"              // Public: Game has ended, includes results.
 
 	// Disconnect grace (cambia-955). A dropped socket no longer forfeits on the spot: the seat is
 	// held for HouseRules.DisconnectGraceSec and these three events report where a player stands

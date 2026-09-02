@@ -150,7 +150,7 @@ func TestCFRConvergence(t *testing.T) {
 	// Provide neutral leaf values (zero-sum, slight bias).
 	leafValues := make([]float32, numLeaves*2)
 	for i := 0; i < numLeaves; i++ {
-		leafValues[i*2] = 0.1   // slight bias toward player 0
+		leafValues[i*2] = 0.1 // slight bias toward player 0
 		leafValues[i*2+1] = -0.1
 	}
 

@@ -317,24 +317,24 @@ func (g *CambiaGame) updateCardTracker(actionIdx uint16, actorEngineIdx uint8, o
 		} else if actionIdx == engine.ActionPassSnap {
 			// No card movement.
 
-		// ActionIsSnapOwn and ActionIsSnapOpponent (the snap-penalty branches, cambia-1565) are
-		// deliberately absent: no caller of updateCardTracker ever passes a snap-classified index.
-		// The three callers are applyEngineActionSeat (reached only through applyEngineAction and
-		// direct applyEngineActionSeat calls, whose action set is
-		// ActionDrawStockpile/ActionDrawDiscard/ActionCallCambia/EncodePeekOwn/PeekOther/BlindSwap/
-		// KingLook/KingSwapYes/No/ActionDiscardNoAbility/EncodeReplace/ActionDiscardWithAbility -
-		// never a snap action), the ActionPassSnap call above, and applyEngineActionRaw
-		// (special_actions.go, reached only from applyBufferedDiscard with
-		// actionIdx == ActionDiscardWithAbility). The live snap path, handleSnapViaEngine, mutates
-		// Engine.Players[..].Hand and CardTracker inline instead of calling updateCardTracker, and
-		// its penalty draws go through handleSnapFailure -> engine.DrawPenaltyCard per card with the
-		// bool return checked (cambia-799), which already handles a short-paid penalty (hand cap or
-		// an exhausted deck) correctly. The removed branches computed the pre-penalty hand length as
-		// handLen-SnapPenalty and indexed HandUUIDs from there; since every engine fail path sets
-		// SnapPenalty to the full configured count up front and never revises it when the draw stops
-		// short, a short-paid penalty made that subtraction overwrite live hand UUIDs or wrap a
-		// uint8 and panic on the array. Dead code, but the same computation reachable, so it is
-		// removed rather than fixed.
+			// ActionIsSnapOwn and ActionIsSnapOpponent (the snap-penalty branches, cambia-1565) are
+			// deliberately absent: no caller of updateCardTracker ever passes a snap-classified index.
+			// The three callers are applyEngineActionSeat (reached only through applyEngineAction and
+			// direct applyEngineActionSeat calls, whose action set is
+			// ActionDrawStockpile/ActionDrawDiscard/ActionCallCambia/EncodePeekOwn/PeekOther/BlindSwap/
+			// KingLook/KingSwapYes/No/ActionDiscardNoAbility/EncodeReplace/ActionDiscardWithAbility -
+			// never a snap action), the ActionPassSnap call above, and applyEngineActionRaw
+			// (special_actions.go, reached only from applyBufferedDiscard with
+			// actionIdx == ActionDiscardWithAbility). The live snap path, handleSnapViaEngine, mutates
+			// Engine.Players[..].Hand and CardTracker inline instead of calling updateCardTracker, and
+			// its penalty draws go through handleSnapFailure -> engine.DrawPenaltyCard per card with the
+			// bool return checked (cambia-799), which already handles a short-paid penalty (hand cap or
+			// an exhausted deck) correctly. The removed branches computed the pre-penalty hand length as
+			// handLen-SnapPenalty and indexed HandUUIDs from there; since every engine fail path sets
+			// SnapPenalty to the full configured count up front and never revises it when the draw stops
+			// short, a short-paid penalty made that subtraction overwrite live hand UUIDs or wrap a
+			// uint8 and panic on the array. Dead code, but the same computation reachable, so it is
+			// removed rather than fixed.
 
 		} else if ownIdx, slotIdx, ok := engine.ActionIsSnapOpponentMove(actionIdx); ok {
 			// Move own hand card to opponent's hand.

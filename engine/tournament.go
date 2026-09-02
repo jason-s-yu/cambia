@@ -24,10 +24,10 @@ type TournamentConfig struct {
 
 // PlayerStanding tracks a player's tournament performance.
 type PlayerStanding struct {
-	PlayerID  int
-	Score     int
-	Wins      int
-	Losses    int
+	PlayerID   int
+	Score      int
+	Wins       int
+	Losses     int
 	Eliminated bool
 }
 
@@ -49,7 +49,7 @@ type BracketRound struct {
 // TournamentState is the full mutable state of a tournament.
 type TournamentState struct {
 	Config       TournamentConfig
-	Bracket      []BracketRound   // populated for elimination modes
+	Bracket      []BracketRound // populated for elimination modes
 	Standings    []PlayerStanding
 	CurrentRound int
 	Completed    bool
