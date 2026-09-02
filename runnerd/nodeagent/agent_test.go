@@ -19,7 +19,19 @@ import (
 // with a real forked job (a shell script), covering W2-T11 AC1 (the full
 // cycle), AC7 (no reserved path in the uploaded set) and AC9 (only D5 phases,
 // never stopping).
+//
+// It is also the one scheduling test that runs over both transports of D65.
+// The two legs share this body verbatim, the stub coordinator included: the
+// HTTPS leg reaches it over a pinned TLS socket and the loopback leg hands it
+// the same request in process. Anything the loopback shortcut would skip shows
+// up here as a leg that disagrees with the other.
 func TestClaimToResultCycle(t *testing.T) {
+	for _, tr := range transports() {
+		t.Run(tr.name, func(t *testing.T) { claimToResultCycle(t, tr) })
+	}
+}
+
+func claimToResultCycle(t *testing.T, tr transportCase) {
 	stub := newStubCoordinator(t)
 	worktree := t.TempDir()
 	writeFakeJob(t, worktree)
@@ -29,6 +41,7 @@ func TestClaimToResultCycle(t *testing.T) {
 		runsDir = o.Config.RunsDir
 		o.Env = &fakeEnv{worktree: worktree, runsDir: o.Config.RunsDir, writeEnvJSON: true}
 		o.Launcher = NewLauncher(procmgr.NewProcessManager(o.Config.RunsDir, "", "cambia", nil, nil))
+		tr.apply(t, stub, o)
 	})
 
 	spec := Spec{
