@@ -3,10 +3,12 @@ src/harness/cli.py
 
 Client-side `cambia harness` sub-app (cambia-256, design 2.5). Verbs: init,
 submit, status, list-remote, logs, cancel, resume, pull, push-run, watch,
-nodes, node (cambia-1725: nashnet node enrollment listing and acting verbs --
-grant/revoke/drain). The data plane is ssh/rsync + git push; the control
-plane is the TLS-pinned, JWT-authed runnerd API. Spelling throughout: plural
-`nodes` lists, singular `node` acts (design D3, cambia-1719).
+nodes (cambia-1722: pool listing -- declaration, gate verdicts, session
+state, leases, drain hold, breaker state, degraded marks), node
+(cambia-1725: the acting group -- grant/revoke/drain). The data plane is
+ssh/rsync + git push; the control plane is the TLS-pinned, JWT-authed
+runnerd API. Spelling throughout: plural `nodes` lists, singular `node` acts
+(design D3, cambia-1719).
 """
 
 import subprocess
@@ -357,11 +359,9 @@ def submit(
 
 
 def _render_job_row(job: dict) -> str:
-    name = job.get("job_id") or job.get("name") or "?"
-    state = job.get("state") or job.get("status") or "?"
-    qp = job.get("queue_pos")
-    qp_str = f" q={qp}" if qp is not None else ""
-    return f"  {name:32s} {state}{qp_str}"
+    from src.harness.views import render_job_row
+
+    return render_job_row(job)
 
 
 @harness_app.command("status")
@@ -371,15 +371,37 @@ def status(
 ):
     """Show one job's full state, or list all jobs when no id is given."""
     from src.harness.client import HarnessAPIError
+    from src.harness.views import format_job_placement
 
     cfg = _load_cfg(config)
     client = _build_client(cfg)
     try:
         if job_id:
-            job = client.get_job(job_id)
+            payload = client.get_job(job_id)
             import json
 
-            typer.echo(json.dumps(job, indent=2, default=str))
+            # GET /harness/jobs/{id} wraps the JobView as {"job": ..., "env":
+            # ...} (runnerd/harness/handlers.go handleGetJob); a bare JobView
+            # is also accepted so this keeps working against a test stub or a
+            # leaner future response. The placement/executed_on summary is
+            # printed before the raw dump so a node/placement/phase-bearing
+            # job (D23), and specifically a resume held reservoir_unavailable
+            # (D12), names itself in plain text rather than requiring the
+            # reader to parse JSON for it.
+            job_view = payload
+            env = None
+            if isinstance(payload, dict):
+                if isinstance(payload.get("job"), dict):
+                    job_view = payload["job"]
+                if isinstance(payload.get("env"), dict):
+                    env = payload["env"]
+            if isinstance(job_view, dict):
+                summary = format_job_placement(job_view)
+                if summary:
+                    typer.echo(summary)
+            if env and env.get("executed_on"):
+                typer.echo(f"  executed_on={env['executed_on']}")
+            typer.echo(json.dumps(payload, indent=2, default=str))
         else:
             jobs = client.list_jobs()
             if not jobs:
@@ -411,6 +433,46 @@ def list_remote(config: Optional[str] = _CONFIG_OPT):
         return
     for job in jobs:
         typer.echo(_render_job_row(job))
+
+
+# ---------------------------------------------------------------------------
+# nodes (design D23/D45, cambia-1722): the nashnet pool's listing verb. The
+# acting group (`harness node grant|revoke|drain`) is cambia-1725; this
+# command only renders what GET /nashnet/nodes returns.
+# ---------------------------------------------------------------------------
+
+
+@harness_app.command("nodes")
+def nodes_cmd(
+    as_json: bool = typer.Option(
+        False, "--json", help="Emit the raw GET /nashnet/nodes list as JSON"
+    ),
+    config: Optional[str] = _CONFIG_OPT,
+):
+    """List the nashnet pool's nodes: declaration, gate verdicts (with
+    next_eligible_at), session state, leases, the drain hold, the breaker
+    state, and per-job degraded marks."""
+    from src.harness.client import HarnessAPIError
+    from src.harness.views import render_nodes
+
+    # isinstance guard: a direct call (tests) leaves an unpassed typer Option
+    # as its OptionInfo sentinel, which must count as unset rather than truthy.
+    as_json_flag = bool(as_json) if isinstance(as_json, bool) else False
+    cfg = _load_cfg(config)
+    client = _build_client(cfg)
+    try:
+        nodes = client.nodes()
+    except HarnessAPIError as exc:
+        _fail(str(exc))
+    except Exception as exc:
+        _fail(f"nodes failed: {exc}")
+    if as_json_flag:
+        import json
+
+        typer.echo(json.dumps(nodes, indent=2, default=str))
+        return
+    for line in render_nodes(nodes):
+        typer.echo(line)
 
 
 # ---------------------------------------------------------------------------
@@ -658,9 +720,9 @@ def reflect_cmd(config: Optional[str] = _CONFIG_OPT):
 
 
 # ---------------------------------------------------------------------------
-# nodes / node <verb> <id> (design D3/D9/D46/D60, cambia-1725): the nashnet
-# node-enrollment listing and acting verbs. Spelling throughout: plural
-# `nodes` lists, singular `node` acts.
+# node <verb> <id> (design D3/D9/D46/D60, cambia-1725): the nashnet acting
+# group. `nodes` (the listing verb) is cambia-1722, above. Spelling
+# throughout: plural `nodes` lists, singular `node` acts.
 # ---------------------------------------------------------------------------
 
 node_app = typer.Typer(
@@ -668,79 +730,6 @@ node_app = typer.Typer(
     no_args_is_help=True,
 )
 harness_app.add_typer(node_app, name="node")
-
-
-def _gate_summary(node: dict) -> str:
-    report = node.get("gate_report")
-    if not isinstance(report, dict):
-        return "-"
-    checks = report.get("checks")
-    n_checks = len(checks) if isinstance(checks, list) else 0
-    admit_str = "admit" if report.get("admit") else "hold"
-    return f"{admit_str} ({n_checks} checks)"
-
-
-def _render_node_row(node: dict) -> str:
-    """One `cambia harness nodes` row: the enrollment-facing summary.
-
-    Renders every top-level field the NodeView wire (GET /nashnet/nodes,
-    runnerd/harness/nashnet_pool.go) carries -- state (presence), a gate-report
-    summary, staleness, and the live lease count -- at the raw/compact
-    altitude. Deeper interpretation (per-check `next_eligible_at`, remaining
-    breaker cooldown, degraded-job detail) is the dashboard/placement view's
-    job (cambia-1722), not duplicated here.
-    """
-    node_id = node.get("node_id") or "?"
-    presence = str(node.get("presence") or "?")
-    stale = node.get("stale_seconds")
-    stale_str = f"{stale}s" if stale is not None else "?"
-    slots_free = node.get("slots_free")
-    slots = node.get("slots")
-    slots_str = f"{slots_free}/{slots}" if slots is not None else "?"
-    holds = []
-    if node.get("revoked"):
-        holds.append("revoked")
-    if node.get("drained"):
-        holds.append("drained")
-    hold_str = "+".join(holds) if holds else "-"
-    leases = node.get("leases")
-    lease_str = str(len(leases)) if isinstance(leases, list) else "0"
-    return (
-        f"  {node_id:20s} {presence:12s} slots={slots_str:7s} stale={stale_str:6s} "
-        f"hold={hold_str:14s} leases={lease_str:>2s} gate={_gate_summary(node)}"
-    )
-
-
-@harness_app.command("nodes")
-def nodes_cmd(
-    as_json: bool = typer.Option(
-        False, "--json", help="Emit the raw GET /nashnet/nodes list as JSON"
-    ),
-    config: Optional[str] = _CONFIG_OPT,
-):
-    """List every enrolled nashnet node: id, session state, gate-report
-    summary, staleness, and live lease count (design D3/D45/D46/D60)."""
-    from src.harness.client import HarnessAPIError
-
-    cfg = _load_cfg(config)
-    client = _build_client(cfg)
-    try:
-        nodes = client.list_nodes()
-    except HarnessAPIError as exc:
-        _fail(str(exc))
-    except Exception as exc:
-        _fail(f"nodes failed: {exc}")
-
-    if as_json:
-        import json
-
-        typer.echo(json.dumps(nodes, indent=2, default=str))
-        return
-    if not nodes:
-        typer.echo("no enrolled nodes")
-        return
-    for node in nodes:
-        typer.echo(_render_node_row(node))
 
 
 @node_app.command("grant")

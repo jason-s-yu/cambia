@@ -6,10 +6,10 @@
 package engine
 
 const (
-	MaxPlayers      = 8
-	MaxHandSize     = 6
+	MaxPlayers       = 8
+	MaxHandSize      = 6
 	StandardDeckSize = 54
-	MaxDeckSize     = 216 // 4 × 54 - supports up to 4 decks shuffled together
+	MaxDeckSize      = 216 // 4 × 54 - supports up to 4 decks shuffled together
 )
 
 // PlayerState holds one player's hand and initial peek information.
@@ -22,13 +22,12 @@ type PlayerState struct {
 	_pad             [2]uint8           // 2 bytes → total 6+1+6+1+2=16
 }
 
-
 // GameState holds the complete, self-contained state of a Cambia game.
 // It is a flat value type (no pointers, no slices) for zero-allocation
 // use in CFR traversal. sizeof(GameState) ≤ 300 bytes.
 type GameState struct {
 	Players       [MaxPlayers]PlayerState // 2 * 16 = 32 bytes
-	Stockpile     [MaxDeckSize]Card        // up to 216 bytes (4 decks)
+	Stockpile     [MaxDeckSize]Card       // up to 216 bytes (4 decks)
 	StockLen      uint8                   // 1 byte
 	DiscardPile   [MaxDeckSize]Card       // up to 216 bytes (4 decks)
 	DiscardLen    uint8                   // 1 byte

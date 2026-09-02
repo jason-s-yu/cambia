@@ -657,6 +657,30 @@ The reveal is built once, in `endGame`, and carried by every frame that reports 
 | `round_end`         | a ranked round that is not the match's last         |
 | `match_end`         | the ranked match's last round                       |
 
+`game_end` is fired through `fireEvent` (game.go `endGame`), so on the wire it is a `GameEvent`:
+the envelope's `payload` is `{"type":"game_end", "payload":{...}}`, and `scores`/`winner`/`caller`
+live inside that inner `payload`, one level deeper than a client used to `game_results`'s flat map
+(`hub.Emit("game_results", map[string]interface{}{...})`, no `GameEvent` wrapper) would expect.
+`scores` is keyed by player id and already carries the Cambia-caller penalty and any circuit win
+bonus (`endGame`'s `adjustedScores`); a forfeited seat is omitted. `winner` is the nil UUID
+(`00000000-0000-0000-0000-000000000000`) only when no single winner exists, which a 2-player game
+never produces: the Cambia caller either ties or beats the other score, or the other player's score
+is strictly lower, so one of the two always wins outright.
+
+```json: server -> all clients (game_end)
+{
+  "type": "game_end",
+  "payload": {
+    "scores": { "{uuid}": 4, "{uuid}": 11 },
+    "winner": "{uuid}",
+    "caller": "{uuid}",
+    "penaltyApplied": false,
+    "winBonusApplied": false,
+    "finalHands": [ "...see finalHands below..." ]
+  }
+}
+```
+
 `game_results` needs its own copy: the game is dropped from the store the moment it is emitted, so
 a client that reconnects into the results is answered with the hub's held copy of that frame and
 never sees `game_end`. Every frame spells the field `finalHands`, so one client shape reads them

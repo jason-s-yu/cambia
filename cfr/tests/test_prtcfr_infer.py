@@ -30,7 +30,7 @@ from src.cfr.prtcfr_worker import (
     uniform_policy_production,
 )  # noqa: E402
 from src.constants import ActionCallCambia  # noqa: E402
-from src.encoding import NUM_ACTIONS  # noqa: E402
+from src.encoding import NUM_ACTIONS, action_to_index  # noqa: E402
 from src.sequence_encoding import BOS_ID, EOS_ID  # noqa: E402
 
 
@@ -66,13 +66,14 @@ def _real_long_token_sequence(min_len: int = 300) -> list:
     cap -- the same cohort observed reaching several thousand tokens. A single
     seed clears any realistic ``min_len`` under this policy; the seed loop and
     failure report below are a safety net, not the expected path."""
+    call_cambia_idx = action_to_index(ActionCallCambia())
     longest = 0
     for seed in range(200):
-        # Explicitly the Python stub backend: this helper mutates .seq_cap
-        # directly to force an uncapped-window generation run, a
-        # PythonEngineGameDriver-specific affordance (new_production_driver's
-        # S1W13 default is Go-backed).
-        driver = new_production_driver(seed=seed, backend="python")
+        # Mutates .seq_cap directly after construction to force an
+        # uncapped-window generation run; GoEngineGameDriver reads
+        # self.seq_cap at tokens()-call time, so this affordance works the
+        # same way it did on the retired PythonEngineGameDriver stub.
+        driver = new_production_driver(seed=seed, backend="go")
         driver.seq_cap = 20000
         rng = random.Random(seed)
         for _ in range(3000):
@@ -85,7 +86,15 @@ def _real_long_token_sequence(min_len: int = 300) -> list:
             if not legal:
                 break
             pool = legal
-            non_cambia = [a for a in legal if not isinstance(a, ActionCallCambia)]
+            # GoEngineGameDriver.legal_actions() returns int action indices,
+            # not ActionCallCambia NamedTuples (the retired
+            # PythonEngineGameDriver's representation), so the exclusion
+            # compares by index rather than isinstance.
+            non_cambia = [
+                a
+                for a in legal
+                if (a if isinstance(a, int) else action_to_index(a)) != call_cambia_idx
+            ]
             if non_cambia:
                 pool = non_cambia
             mask = _legal_mask(pool)

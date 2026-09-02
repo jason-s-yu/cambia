@@ -30,6 +30,7 @@ ascending seat order with the acting seat removed, so relative index ``j`` at
 seat ``p`` is the ``j``-th smallest seat that is not ``p``.
 """
 
+from collections.abc import Sequence
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import numpy as np
@@ -65,8 +66,13 @@ __all__ = [
     "N_PLAYER_NUM_ACTIONS",
     "MAX_HAND",
     "NPlayerAction",
+    "LazyLegalActions",
+    "DeferredLegalActions",
+    "TWO_PLAYER_INDEX",
+    "TWO_PLAYER_TABLE",
     "index_to_action",
     "actions_from_mask",
+    "actions_from_indices",
     "nplayer_index_to_action",
     "nplayer_actions_from_mask",
     "nplayer_index_for",
@@ -184,6 +190,10 @@ def _build_nplayer_table() -> Tuple[Optional[NPlayerAction], ...]:
 
 
 _TWO_PLAYER_TABLE = _build_two_player_table()
+
+#: Public alias, for a hot path that indexes the table directly rather than
+#: paying index_to_action's range check per decision (cambia-1487).
+TWO_PLAYER_TABLE = _TWO_PLAYER_TABLE
 _NPLAYER_TABLE = _build_nplayer_table()
 
 #: Forward map for the N-player space, so a chosen action can be re-encoded
@@ -192,6 +202,112 @@ _NPLAYER_INDEX: Dict[Tuple[GameAction, Optional[int]], int] = {}
 for _idx, _entry in enumerate(_NPLAYER_TABLE):
     if _entry is not None:
         _NPLAYER_INDEX.setdefault((_entry.action, _entry.opp_idx), _idx)
+
+
+#: Forward map for the 2-player space. The table is a bijection (its builder
+#: refuses a collision), so this inverts it exactly and a caller can re-encode a
+#: chosen action without rebuilding a per-decision index map.
+TWO_PLAYER_INDEX: Dict[GameAction, int] = {
+    action: idx for idx, action in enumerate(_TWO_PLAYER_TABLE) if action is not None
+}
+
+
+class LazyLegalActions(Sequence):
+    """The legal-action set, decoded from indices only if someone reads it.
+
+    An agent that decides from the engine handle itself (the Go-backed
+    baselines, cambia-1487) never touches the decoded list, and decoding one per
+    decision was the single largest cost in the evaluation loop. Holding the
+    indices and decoding on first access keeps every other consumer -- which
+    sees a plain ascending sequence of GameActions -- unchanged.
+
+    ``indices`` may be any int-indexable buffer, with ``count`` naming how many
+    of its entries are live. The eval loop passes the engine's scratch buffer
+    straight through, which is reused on the next decision, so this object is
+    only valid for the decision it was built for.
+    """
+
+    __slots__ = ("_indices", "_count", "_actions")
+
+    def __init__(self, indices, count: Optional[int] = None) -> None:
+        self._indices = indices
+        self._count = len(indices) if count is None else int(count)
+        self._actions: Optional[List[GameAction]] = None
+
+    @property
+    def indices(self) -> List[int]:
+        """The legal action indices, ascending. Never triggers a decode."""
+        return [int(self._indices[i]) for i in range(self._count)]
+
+    def _decoded(self) -> List[GameAction]:
+        if self._actions is None:
+            table = _TWO_PLAYER_TABLE
+            src = self._indices
+            self._actions = [table[src[i]] for i in range(self._count)]
+        return self._actions
+
+    def __bool__(self) -> bool:
+        return self._count > 0
+
+    def __len__(self) -> int:
+        return self._count
+
+    def __iter__(self):
+        return iter(self._decoded())
+
+    def __getitem__(self, index):
+        return self._decoded()[index]
+
+    def __contains__(self, action) -> bool:
+        return action in self._decoded()
+
+    def __repr__(self) -> str:
+        return f"LazyLegalActions({self.indices!r})"
+
+
+class DeferredLegalActions(LazyLegalActions):
+    """The legal set, not even fetched from the engine unless someone reads it.
+
+    Handed to an agent that decides inside the engine (cambia-1487). Such an
+    agent reads the legal set off the engine itself, so fetching it here costs a
+    wasted FFI crossing on every decision, and that crossing was the largest
+    remaining cost in the evaluation loop once the policies moved engine-side.
+
+    ``__bool__`` answers True without fetching, which hands the caller's
+    "non-terminal but no legal action" guard to the agent: the engine-side
+    choose call reports that state itself and the agent raises on it, so the
+    runner still counts it as an error rather than playing on.
+    """
+
+    __slots__ = ("_engine",)
+
+    def __init__(self, engine) -> None:
+        super().__init__((), 0)
+        self._engine = engine
+
+    def invalidate(self) -> None:
+        """Drop anything fetched for the previous decision."""
+        self._indices = ()
+        self._count = 0
+        self._actions = None
+
+    def _fetch(self) -> None:
+        if self._actions is None and not self._count:
+            self._indices, self._count = self._engine.legal_action_view()
+
+    def _decoded(self) -> List[GameAction]:
+        self._fetch()
+        return super()._decoded()
+
+    def __bool__(self) -> bool:
+        return True
+
+    def __len__(self) -> int:
+        self._fetch()
+        return self._count
+
+    def __repr__(self) -> str:
+        return "DeferredLegalActions(<engine>)"
 
 
 def index_to_action(index: int) -> GameAction:

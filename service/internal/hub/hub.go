@@ -310,7 +310,9 @@ func (h *Hub) Run(ctx context.Context) {
 // The recovery leaves no lock held: the game's own mutex is taken and released by defer inside
 // CambiaGame's public entry points (HandlePlayerAction, ProcessSpecialAction), so the unwind
 // releases it before it ever reaches this boundary, and the hub's own state belongs to this
-// goroutine, which is exiting.
+// goroutine, which is exiting. connsMu is the one lock this goroutine takes itself, and every
+// acquisition of it releases through a defer inside one of the accessors below, so no unwind
+// through here can leave it held and wedge the hub instead of dissolving it (cambia-1243).
 func (h *Hub) runStep(ctx context.Context) (stop bool) {
 	defer func() {
 		r := recover()
@@ -327,10 +329,7 @@ func (h *Hub) runStep(ctx context.Context) (stop bool) {
 		return true
 	case conn := <-h.join:
 		h.cancelIdleReap()
-		h.connsMu.Lock()
-		displaced := h.conns[conn.UserID]
-		h.conns[conn.UserID] = conn
-		h.connsMu.Unlock()
+		displaced := h.registerConn(conn)
 		// One user, one socket. h.conns is keyed by user, so a second tab or a reconnect that
 		// arrives before the old socket's ReadPump notices overwrites the entry; the displaced
 		// socket used to be registered nowhere and closed by nothing, and it kept submitting
@@ -391,13 +390,7 @@ func (h *Hub) reportFatalPanic() {
 //
 // Run() goroutine only.
 func (h *Hub) handleLeave(req leaveRequest) {
-	h.connsMu.Lock()
-	registered, ok := h.conns[req.userID]
-	superseded := ok && req.conn != nil && registered != req.conn
-	if ok && !superseded {
-		delete(h.conns, req.userID)
-	}
-	h.connsMu.Unlock()
+	registered, ok, superseded := h.dropConn(req.userID, req.conn)
 
 	if superseded {
 		// The socket owns nothing on this hub any more, so nothing is broadcast, no grace
@@ -630,13 +623,7 @@ func (h *Hub) exit() {
 func (h *Hub) cleanup() {
 	h.cancelIdleReap()
 
-	h.connsMu.Lock()
-	conns := make([]*Connection, 0, len(h.conns))
-	for _, conn := range h.conns {
-		conns = append(conns, conn)
-	}
-	h.conns = make(map[uuid.UUID]*Connection)
-	h.connsMu.Unlock()
+	conns := h.takeConns()
 
 drained:
 	for {
@@ -1460,13 +1447,7 @@ func (h *Hub) Emit(eventType string, payload any) {
 		log.Printf("hub %s: Emit envelope marshal error: %v", h.ID, err)
 		return
 	}
-	h.connsMu.RLock()
-	conns := make([]*Connection, 0, len(h.conns))
-	for _, conn := range h.conns {
-		conns = append(conns, conn)
-	}
-	h.connsMu.RUnlock()
-	for _, conn := range conns {
+	for _, conn := range h.snapshotConns() {
 		conn.Send(data)
 	}
 }
@@ -1544,6 +1525,56 @@ func (h *Hub) connUserIDs() []uuid.UUID {
 		ids = append(ids, uid)
 	}
 	return ids
+}
+
+// registerConn installs conn under its user id and returns the connection it displaced, or nil.
+// Acquires connsMu (write).
+func (h *Hub) registerConn(conn *Connection) *Connection {
+	h.connsMu.Lock()
+	defer h.connsMu.Unlock()
+	displaced := h.conns[conn.UserID]
+	h.conns[conn.UserID] = conn
+	return displaced
+}
+
+// dropConn removes userID's registered connection and reports what it found. registered is the
+// connection the hub held and ok whether it held one at all; superseded says the departing socket
+// had already been displaced by another one, in which case the entry is left where it is. A nil
+// conn is the user-addressed form and never supersedes. Acquires connsMu (write).
+func (h *Hub) dropConn(userID uuid.UUID, conn *Connection) (registered *Connection, ok, superseded bool) {
+	h.connsMu.Lock()
+	defer h.connsMu.Unlock()
+	registered, ok = h.conns[userID]
+	superseded = ok && conn != nil && registered != conn
+	if ok && !superseded {
+		delete(h.conns, userID)
+	}
+	return registered, ok, superseded
+}
+
+// takeConns empties the connection set and returns everything it held, so the caller can close
+// each one without holding the lock. Acquires connsMu (write).
+func (h *Hub) takeConns() []*Connection {
+	h.connsMu.Lock()
+	defer h.connsMu.Unlock()
+	conns := make([]*Connection, 0, len(h.conns))
+	for _, conn := range h.conns {
+		conns = append(conns, conn)
+	}
+	h.conns = make(map[uuid.UUID]*Connection)
+	return conns
+}
+
+// snapshotConns copies the connection set so a broadcast can send without holding the lock.
+// Acquires connsMu (read).
+func (h *Hub) snapshotConns() []*Connection {
+	h.connsMu.RLock()
+	defer h.connsMu.RUnlock()
+	conns := make([]*Connection, 0, len(h.conns))
+	for _, conn := range h.conns {
+		conns = append(conns, conn)
+	}
+	return conns
 }
 
 // buildLobbySnapshot builds a JSON-friendly lobby state payload for the given user. Hub fields

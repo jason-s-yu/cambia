@@ -180,6 +180,34 @@ def test_health(tmp_path):
     assert h["jobs_running"] == 1
 
 
+def test_nodes_unwraps_envelope(tmp_path):
+    # GET /nashnet/nodes (cambia-1722, D23): the operator listing route.
+    cert, key, fp = make_self_signed(tmp_path)
+    routes = {
+        ("GET", "/nashnet/nodes"): (
+            200,
+            {"nodes": [{"node_id": "node-a"}, {"node_id": "node-b"}]},
+        )
+    }
+    with RecordingServer(cert, key, routes) as srv:
+        client = _client(srv, fp)
+        nodes = client.nodes()
+    assert [n["node_id"] for n in nodes] == ["node-a", "node-b"]
+    req = srv.requests[-1]
+    assert req["method"] == "GET"
+    assert req["path"] == "/nashnet/nodes"
+    assert req["headers"].get("Authorization") == "Bearer minted-token"
+
+
+def test_nodes_empty_pool(tmp_path):
+    cert, key, fp = make_self_signed(tmp_path)
+    routes = {("GET", "/nashnet/nodes"): (200, {"nodes": []})}
+    with RecordingServer(cert, key, routes) as srv:
+        client = _client(srv, fp)
+        nodes = client.nodes()
+    assert nodes == []
+
+
 # ---------------------------------------------------------------------------
 # Client-side capability gate (design D30, cambia-1713): a spec needing a
 # daemon feature (currently: an `after` list, the fan-in wire shape) is
@@ -283,24 +311,11 @@ def test_parents_of_empty_for_no_dependency():
 
 
 # ---------------------------------------------------------------------------
-# nashnet node routes (design D3/D46/D60, cambia-1725): the operator-token
-# client half of GET /nashnet/nodes, GET /nashnet/nodes/{id},
+# nashnet node acting routes (design D3/D46/D60, cambia-1725): the
+# operator-token client half of GET /nashnet/nodes/{id},
 # POST /nashnet/nodes/{id}/drain, POST /nashnet/nodes/{id}/revoke.
+# nodes() (the listing route) is covered above (cambia-1722).
 # ---------------------------------------------------------------------------
-
-
-def test_list_nodes_unwraps_envelope(tmp_path):
-    cert, key, fp = make_self_signed(tmp_path)
-    routes = {
-        ("GET", "/nashnet/nodes"): (
-            200,
-            {"nodes": [{"node_id": "n-a"}, {"node_id": "n-b"}]},
-        )
-    }
-    with RecordingServer(cert, key, routes) as srv:
-        client = _client(srv, fp)
-        nodes = client.list_nodes()
-    assert [n["node_id"] for n in nodes] == ["n-a", "n-b"]
 
 
 def test_get_node_unwraps_envelope(tmp_path):

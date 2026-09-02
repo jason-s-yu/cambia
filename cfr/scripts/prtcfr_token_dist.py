@@ -22,7 +22,7 @@ comparison with the P100 numbers.
 
 Usage (from cfr/):
     python scripts/prtcfr_token_dist.py --k-games 256 --m-rollouts 4 \
-        --backend python --seq-cap 12288
+        --backend go --seq-cap 12288
 """
 
 from __future__ import annotations
@@ -121,7 +121,7 @@ def main() -> None:
     ap.add_argument("--k-games", type=int, default=256)
     ap.add_argument("--m-rollouts", type=int, default=4)
     ap.add_argument("--seq-cap", type=int, default=PRODUCTION_SEQ_CAP)
-    ap.add_argument("--backend", default="python", choices=["python", "go"])
+    ap.add_argument("--backend", default="go", choices=["go"])
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument(
         "--incremental",

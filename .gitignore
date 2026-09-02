@@ -57,3 +57,7 @@ runs/
 *.log
 
 .current_log
+
+# Python bytecode outside cfr/
+__pycache__/
+*.pyc

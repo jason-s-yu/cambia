@@ -7,6 +7,7 @@ import PageContainer from '@/components/common/PageContainer';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import StatusBadge from '@/components/training/StatusBadge';
 import HostBadge from '@/components/training/HostBadge';
+import NodeBadge from '@/components/training/NodeBadge';
 import SyncStatus from '@/components/training/SyncStatus';
 import CreateRunModal from '@/components/training/CreateRunModal';
 import ResourceMonitor from '@/components/training/ResourceMonitor';
@@ -139,6 +140,7 @@ const TrainingPage: React.FC = () => {
 											<div className="flex items-center gap-2">
 												<span>{run.name}</span>
 												<HostBadge host={run.host} />
+												<NodeBadge executedOn={run.executed_on} />
 											</div>
 										</td>
 										<td className="py-3 px-4">

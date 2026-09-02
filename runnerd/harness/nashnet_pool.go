@@ -222,6 +222,10 @@ type Pool struct {
 	quarGrants map[string]map[string]quarantine.Grant
 	// tickBytes is the per-lease upload budget since its last progress post.
 	tickBytes map[string]int64
+	// stopForce records whether the stop a lease is winding down under was a
+	// forced one, so the progress response of D5 carries the same force flag
+	// the revoke event does (D31).
+	stopForce map[string]bool
 	// logDropped is the coordinator-owned dropped-byte counter of D54; the
 	// in-band marker is advisory text and never the evidence.
 	logDropped map[string]int64
@@ -331,6 +335,7 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 		snapshots:  map[string]snapshotDescriptor{},
 		quarGrants: map[string]map[string]quarantine.Grant{},
 		tickBytes:  map[string]int64{},
+		stopForce:  map[string]bool{},
 		logDropped: map[string]int64{},
 		results:    map[string]nashnet.ResultResponse{},
 		resultAuth: map[string]string{},
@@ -392,6 +397,7 @@ func (p *Pool) releaseLeaseState(leaseID string) {
 	delete(p.snapshots, leaseID)
 	delete(p.quarGrants, leaseID)
 	delete(p.tickBytes, leaseID)
+	delete(p.stopForce, leaseID)
 	p.mu.Unlock()
 }
 

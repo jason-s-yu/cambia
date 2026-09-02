@@ -214,8 +214,8 @@ func TestTerminalEvalLinear_ZeroSum(t *testing.T) {
 // When deck is empty (all cards known), DP should match deterministic outcome.
 func TestTerminalEvalDP_2P_KnownCards(t *testing.T) {
 	tests := []struct {
-		p0    []int8
-		p1    []int8
+		p0     []int8
+		p1     []int8
 		cambia int8
 		wantU0 float32 // expected utility for player 0
 	}{

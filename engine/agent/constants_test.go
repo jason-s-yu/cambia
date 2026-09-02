@@ -213,9 +213,9 @@ func TestStockEstimateFromSize(t *testing.T) {
 		{0, StockEmpty},
 		{1, StockLow},
 		{9, StockLow},
-		{10, StockMedium},  // boundary: >=10
+		{10, StockMedium}, // boundary: >=10
 		{26, StockMedium},
-		{27, StockHigh},    // boundary: >=27
+		{27, StockHigh}, // boundary: >=27
 		{40, StockHigh},
 		{54, StockHigh},
 	}
@@ -246,14 +246,14 @@ func TestGamePhaseFromState(t *testing.T) {
 		{40, true, false, PhaseCambiaCalled},
 
 		// Stockpile-based phases (no cambia, not terminal)
-		{40, false, false, PhaseEarly},  // >=27 → Early
-		{27, false, false, PhaseEarly},  // ==27 → Early (boundary)
-		{26, false, false, PhaseMid},    // <27 → Mid
-		{15, false, false, PhaseMid},    // >=10 → Mid
-		{10, false, false, PhaseMid},    // ==10 → Mid (boundary)
-		{9, false, false, PhaseLate},    // <10 → Late
-		{1, false, false, PhaseLate},    // >0 → Late
-		{0, false, false, PhaseLate},    // ==0 → Late (empty)
+		{40, false, false, PhaseEarly}, // >=27 → Early
+		{27, false, false, PhaseEarly}, // ==27 → Early (boundary)
+		{26, false, false, PhaseMid},   // <27 → Mid
+		{15, false, false, PhaseMid},   // >=10 → Mid
+		{10, false, false, PhaseMid},   // ==10 → Mid (boundary)
+		{9, false, false, PhaseLate},   // <10 → Late
+		{1, false, false, PhaseLate},   // >0 → Late
+		{0, false, false, PhaseLate},   // ==0 → Late (empty)
 	}
 
 	for _, tc := range cases {

@@ -211,20 +211,24 @@ class HarnessClient:
     def health(self) -> Dict[str, Any]:
         return self._call("GET", "/harness/health")
 
-    # -----------------------------------------------------------------
-    # nashnet node routes (design D3/D46/D60, cambia-1719/cambia-1725):
-    # operator-token routes only. Node-audience routes (register, heartbeat,
-    # events) are the node agent's own (runnerd/nodeagent), never called from
-    # here.
-    # -----------------------------------------------------------------
-
-    def list_nodes(self) -> List[Dict[str, Any]]:
-        """GET /nashnet/nodes: every enrolled node's declaration, gate report,
-        session state, and live leases (the NodeView wire shape)."""
+    def nodes(self) -> List[Dict[str, Any]]:
+        """List the nashnet pool's node records: the D9 declaration, the D46
+        gate report, D3/D45 session state and staleness, live leases, the
+        coordinator-side drain hold, the D63 breaker state, and per-job D8
+        degraded marks (GET /nashnet/nodes, operator credential, design D23).
+        Empty on a daemon with no pool attached."""
         payload = self._call("GET", "/nashnet/nodes")
         if isinstance(payload, dict) and "nodes" in payload:
             return payload["nodes"]
         return payload if isinstance(payload, list) else []
+
+    # -----------------------------------------------------------------
+    # nashnet node acting routes (design D3/D46/D60, cambia-1725): the
+    # operator-token acting group (harness node grant/revoke/drain) this
+    # ticket adds alongside the cambia-1722 listing route above.
+    # Node-audience routes (register, heartbeat, events) are the node
+    # agent's own (runnerd/nodeagent), never called from here.
+    # -----------------------------------------------------------------
 
     def get_node(self, node_id: str) -> Dict[str, Any]:
         payload = self._call("GET", f"/nashnet/nodes/{quote(node_id, safe='')}")
