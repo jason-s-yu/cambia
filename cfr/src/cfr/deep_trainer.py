@@ -458,7 +458,7 @@ def _create_worker_file_handler(
 
 
 def _run_traversals_batch(
-    iteration_offset: int,
+    iteration: int,
     total_traversals_offset: int,
     config,
     network_weights: Dict[str, Any],
@@ -502,7 +502,7 @@ def _run_traversals_batch(
 
     try:
         for i in range(traversals_per_step):
-            iter_num = iteration_offset + i
+            iter_num = iteration
             args_tuple = (
                 iter_num,
                 config,
@@ -568,7 +568,7 @@ def _run_single_traversal(args_tuple, file_handler_override=None):
 
 
 def _run_traversals_threaded(
-    iteration_offset: int,
+    iteration: int,
     config,
     network_weights: Dict[str, Any],
     network_config: Dict[str, int],
@@ -607,7 +607,7 @@ def _run_traversals_threaded(
     worker_args_list = []
     handler_for_args = []
     for i in range(traversals_per_step):
-        iter_num = iteration_offset + i
+        iter_num = iteration
         slot = i % num_threads
         worker_args_list.append(
             (
@@ -1546,7 +1546,10 @@ class DeepCFRTrainer:
 
                         worker_args_list = []
                         for i in range(batch_size):
-                            iter_num = self.total_traversals + traversals_done + i
+                            # Every traversal of this step samples the same
+                            # policy, so they share one CFR iteration; the
+                            # pool slot index is not an iteration (cambia-720).
+                            iter_num = step
                             worker_args_list.append(
                                 (
                                     iter_num,
@@ -1620,7 +1623,7 @@ class DeepCFRTrainer:
                         traversals_done,
                         total_nodes,
                     ) = _run_traversals_threaded(
-                        self.total_traversals,
+                        step,
                         self.config,
                         network_weights,
                         network_config,
@@ -1641,7 +1644,7 @@ class DeepCFRTrainer:
                         total_nodes,
                         _trav_timing,
                     ) = _run_traversals_batch(
-                        self.total_traversals,
+                        step,
                         self.total_traversals,
                         self.config,
                         network_weights,
@@ -1702,7 +1705,7 @@ class DeepCFRTrainer:
                     next_weights = self._get_network_weights_for_workers()
                     pending_future = executor.submit(
                         _run_traversals_batch,
-                        self.total_traversals,  # iteration_offset
+                        step + 1,  # iteration: consumed at the next step
                         self.total_traversals,  # total_traversals_offset
                         self.config,
                         next_weights,
@@ -2311,6 +2314,47 @@ class DeepCFRTrainer:
                 f"Unexpected error saving checkpoint to {path}: {e}"
             ) from e
 
+    def _migrate_pre_step_iterations(self, traversals_per_step: int) -> None:
+        """Map a resumed buffer's per-traversal iteration values onto steps.
+
+        Buffers written before cambia-720 stamped a running traversal counter
+        on every sample instead of the training step. Left alone they would
+        share a buffer with the step numbers this run writes, and since the fit
+        loop weights by (iteration + 1)^alpha a stored traversal index of
+        100000 outweighs a fresh step 101 by about 3e4, so the resumed run
+        would train almost entirely on its old samples. Converting is exact
+        while traversals_per_step held constant, which is what the checkpoint's
+        own config records; rebuilding the buffer instead would throw away real
+        samples for a weighting detail.
+        """
+        if traversals_per_step <= 0 or self.training_step <= 0:
+            return
+
+        for name, buffer in (
+            ("advantage", self.advantage_buffer),
+            ("strategy", self.strategy_buffer),
+            ("value", self.value_buffer),
+        ):
+            if buffer is None:
+                continue
+            size = len(buffer)
+            if size == 0:
+                continue
+            stored = buffer._iterations[:size]
+            if int(stored.max()) <= self.training_step:
+                continue
+            buffer._iterations[:size] = np.clip(
+                stored // traversals_per_step + 1, 1, self.training_step
+            )
+            logger.warning(
+                "Converted %d %s samples from per-traversal iteration numbers to "
+                "training steps (checkpoint predates cambia-720; "
+                "traversals_per_step=%d).",
+                size,
+                name,
+                traversals_per_step,
+            )
+
     def load_checkpoint(self, filepath: Optional[str] = None):
         """
         Load training state from checkpoint.
@@ -2570,6 +2614,14 @@ class DeepCFRTrainer:
                             saved_rules.get(key),
                             current_rules.get(key),
                         )
+
+            self._migrate_pre_step_iterations(
+                int(
+                    saved_config.get(
+                        "traversals_per_step", self.dcfr_config.traversals_per_step
+                    )
+                )
+            )
 
             strat_len = (
                 len(self.strategy_buffer) if self.strategy_buffer is not None else 0
