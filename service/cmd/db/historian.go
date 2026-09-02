@@ -101,11 +101,15 @@ const DeadLetterQueueName = "cambia_actions_dead_letter"
 // HISTORIAN_RETRY_BASE_MS override both.
 //
 // maxFlushRetryWindow is the hard ceiling on one flush's retrying, whatever
-// those two are set to, because the final flush runs during shutdown: the
-// drain costs at most shutdownDrainTimeout + maxFlushRetryWindow +
-// deadLetterPushTimeout, 12s against the historian container's 15s
-// stop_grace_period (deploy/hawking/docker-compose.yml). Raising any of the
-// three past that budget makes a SIGTERM drain a kill.
+// those two are set to, and bounds the retry's database calls as well as its
+// waiting (writeBatch gives the retry a context that expires with it). It
+// exists because the final flush runs during shutdown: the drain costs
+// shutdownDrainTimeout + maxFlushRetryWindow + deadLetterPushTimeout, 12s
+// against the historian container's 15s stop_grace_period
+// (deploy/hawking/docker-compose.yml), plus however long the one batch
+// transaction ahead of the retry takes, which carries no deadline of its own
+// here and never has. Raising any of the three past that budget makes a
+// SIGTERM drain a kill.
 const (
 	defaultFlushRetryAttempts = 5
 	defaultFlushRetryBaseMs   = 50
@@ -298,8 +302,17 @@ func (hs *HistorianService) writeBatch(ctx context.Context, batch []GameActionRe
 
 	pending := batch
 	deadline := time.Now().Add(maxFlushRetryWindow)
+
+	// The retry runs against a context that expires with the window, not just
+	// a clock checked between passes: a database that has stopped answering
+	// would otherwise cost one dial timeout per record per pass, and a batch
+	// holds up to HISTORIAN_BATCH_SIZE of them. Dead-lettering keeps the
+	// original ctx, so an expired retry can still reach Redis.
+	retryCtx, cancelRetry := context.WithDeadline(ctx, deadline)
+	defer cancelRetry()
+
 	for attempt := 1; ; attempt++ {
-		failures := hs.writeRecords(ctx, pending)
+		failures := hs.writeRecords(retryCtx, pending)
 		if written := len(pending) - len(failures); written > 0 {
 			log.Printf("Flushed %d actions to DB on retry attempt %d.\n", written, attempt)
 		}
