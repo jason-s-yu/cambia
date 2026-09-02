@@ -1,27 +1,38 @@
 name: CI
 
-# cfr/** is excluded here on purpose; lifting that is the sprint-2 CI ticket.
-# One cfr path set is already covered, in its own workflow: the Go vs Python
-# parity gate (.github/workflows/parity-gate.yml, cambia-1234) triggers on
-# engine/**, cfr/src/game/** and cfr/src/encoding.py. It has to be a separate
-# workflow because this paths-ignore skips the whole workflow on a cfr-only
-# change and GitHub has no per-job path filter.
+# cfr/** used to sit in paths-ignore, which skipped this whole workflow on a
+# Python-only change; the cfr job below is what lifting it bought (cambia-1246).
+# The Go vs Python parity gate stays in its own workflow
+# (.github/workflows/parity-gate.yml, cambia-1234) because it is scoped to a
+# narrower path set than this one and has its own Python install.
 on:
   pull_request:
     paths-ignore:
-      - 'cfr/**'
       - '.docs/**'
       - 'docs/**'
   push:
     branches: [master]
     paths-ignore:
-      - 'cfr/**'
       - '.docs/**'
       - 'docs/**'
+  # 09:00 UTC is 02:00 Pacific. cfr-slow is the only job that runs on the
+  # schedule; the four pull-request jobs gate themselves off it and run on a
+  # manual dispatch, which is what makes a dispatch a full-CI button
+  # (cambia-1920).
+  schedule:
+    - cron: '0 9 * * *'
+  workflow_dispatch:
 
 jobs:
-  go-tests:
+  # Formatting and vet, split out from go-tests so a whitespace diff reports as
+  # itself rather than as a failed test run, and so it does not wait on the
+  # database containers. The 17-file engine formatting drift (cambia-1054)
+  # accumulated because nothing checked (cambia-1246).
+  go-checks:
     runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    # Off the nightly schedule: cfr-slow is what the schedule is for. A
+    # manual dispatch still runs this job.
+    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v4
 
@@ -36,18 +47,174 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.environment }}-go-${{ hashFiles('go.work.sum', 'engine/go.sum', 'service/go.sum') }}
+          key: ${{ runner.environment }}-go-${{ hashFiles('go.work.sum', 'engine/go.sum', 'runnerd/go.sum', 'service/go.sum') }}
+          restore-keys: |
+            ${{ runner.environment }}-go-
+
+      # All three go.work modules. runnerd/ was the one nothing checked
+      # (cambia-1920): deploy.yml builds its image and never runs a tool over
+      # its source.
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l engine runnerd service)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt would rewrite these files; run 'gofmt -w' on them:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Engine vet
+        run: cd engine && go vet ./...
+
+      - name: Runnerd vet
+        run: cd runnerd && go vet ./...
+
+      - name: Service vet
+        run: cd service && go vet ./...
+
+  go-tests:
+    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    # Off the nightly schedule: cfr-slow is what the schedule is for. A
+    # manual dispatch still runs this job.
+    if: github.event_name != 'schedule'
+
+    # The service's DB-backed tests read these five vars directly (see
+    # internal/testutil.PostgresDSN); there is no service/.env on a runner for
+    # the .env fallback to find, so the job exports them itself. RUN_MIGRATIONS
+    # is what brings the schema up: database.ConnectDB migrates only when it is
+    # set, and the containers start empty.
+    env:
+      PG_HOST: 127.0.0.1
+      PG_PORT: '5432'
+      POSTGRES_USER: cambia
+      POSTGRES_PASSWORD: cambia
+      PG_DATABASE: cambia_test
+      RUN_MIGRATIONS: 'true'
+      REDIS_ADDR: 127.0.0.1:6379
+      # A database of its own, on the second container: every TestLiveMigrate
+      # case starts by dropping and recreating the public schema, so pointing it
+      # at the shared one would pull the schema out from under whichever package
+      # ran next.
+      CAMBIA_MIGRATE_TEST_DSN: postgres://cambia:cambia@127.0.0.1:5433/cambia_migrate_test
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: cambia
+          POSTGRES_PASSWORD: cambia
+          POSTGRES_DB: cambia_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cambia -d cambia_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+      postgres-migrate:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: cambia
+          POSTGRES_PASSWORD: cambia
+          POSTGRES_DB: cambia_migrate_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U cambia -d cambia_migrate_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+      redis:
+        image: redis:alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: false
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.environment }}-go-${{ hashFiles('go.work.sum', 'engine/go.sum', 'runnerd/go.sum', 'service/go.sum') }}
           restore-keys: |
             ${{ runner.environment }}-go-
 
       - name: Engine tests
         run: cd engine && go test ./...
 
+      # The harness and nodeagent suites drive processes and temporary
+      # directories only, so they need none of this job's containers; runnerd
+      # rides here rather than in a job of its own so the required-check names
+      # stay as they are (cambia-1920). -count=1 keeps a cached PASS from
+      # standing in for a run.
+      - name: Runnerd tests
+        run: cd runnerd && go test ./... -count=1
+
+      # -p 1 serializes the package test binaries. internal/database,
+      # internal/game, internal/handlers and internal/historian share one
+      # database, and the connection budget internal/testutil sizes
+      # (TestPoolMaxConns, cambia-1830) assumes one binary holding it at a time.
+      # -v is what the two gates below read; it also makes a CI-only failure
+      # legible without a re-run.
       - name: Service tests
-        run: cd service && go test ./...
+        run: |
+          set -o pipefail
+          cd service
+          go test -p 1 -v ./... 2>&1 | tee "$RUNNER_TEMP/service-tests.log"
+
+      # Green-with-skips was the defect this job exists to close (cambia-1163):
+      # every DB-backed test self-skips when it cannot reach Postgres or Redis,
+      # so a job with no containers passed while testing none of them. With the
+      # containers up, nothing in the service module has a reason to skip, which
+      # makes "no skips at all" the gate rather than a list of test names that
+      # would rot. Scoped to the service module on purpose: engine/ has
+      # data-dependent skips that are legitimate.
+      - name: Service tests must not skip
+        run: |
+          if grep -E '^ *--- SKIP: ' "$RUNNER_TEMP/service-tests.log"; then
+            echo "::error::A service test skipped. With Postgres and Redis provisioned, a skip means the test could not reach them or is gated on something this job does not provide."
+            exit 1
+          fi
+
+      # A skip is not the only way a gate goes quiet: a renamed or deleted test
+      # leaves nothing to skip either. These four are the ones cambia-1163 found
+      # silently unrun, so they are named, and absence fails the job.
+      - name: Named database gates must have run
+        run: |
+          missing=0
+          for name in \
+            TestLiveMigrateFreshDatabase \
+            TestLiveMigratePartialCatchUp \
+            TestLiveMigrateBaselinesInitdbDatabase \
+            TestHistorianEndToEnd
+          do
+            if ! grep -qE "^ *--- PASS: ${name}( |\$)" "$RUNNER_TEMP/service-tests.log"; then
+              echo "::error::${name} did not run and pass. If it was renamed, rename it here too; if it was deleted, say so in the commit that deletes this line."
+              missing=1
+            fi
+          done
+          exit $missing
 
   web:
     runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    # Off the nightly schedule: cfr-slow is what the schedule is for. A
+    # manual dispatch still runs this job.
+    if: github.event_name != 'schedule'
     defaults:
       run:
         working-directory: web
@@ -68,9 +235,123 @@ jobs:
 
       - run: npm ci
       - run: npm run lint
+      # Reads src/, scripts/, index.html and DESIGN.md, so it runs before the
+      # build. `npm run build` still ends with it for anyone building locally;
+      # here it gets its own line so an em dash fails as a copy violation rather
+      # than as a failed build (cambia-971's pattern, cambia-1246).
+      - run: npm run check-copy
       # The unit tests (node --test) read src/ directly, so they run before the
       # build and fail on their own line rather than inside it (cambia-971).
-      - run: npm test
+      - run: npm run test:unit
+      # The jsdom render suite, split from `npm test` so a component regression
+      # is not reported as a node --test failure. `npm test` still runs both.
+      - run: npm run test:render
       - run: npm run build
       # Reads dist/, so it has to follow the build (cambia-914, DL-8 review F2).
       - run: npm run check-tokens
+
+  # cfr/ had no gate at all: the workflow-level paths-ignore skipped every job
+  # on a Python-only change, and the parity gate covers only src/game/ and
+  # src/encoding.py (cambia-1246).
+  cfr:
+    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    # Off the nightly schedule: cfr-slow is what the schedule is for. A
+    # manual dispatch still runs this job.
+    if: github.event_name != 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: false
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.environment }}-go-${{ hashFiles('go.work.sum', 'engine/go.sum', 'runnerd/go.sum', 'service/go.sum') }}
+          restore-keys: |
+            ${{ runner.environment }}-go-
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: cfr/pyproject.toml
+
+      # The cpu torch extra: nothing here runs on a GPU, and the cpu index keeps
+      # the wheel small.
+      - name: Install cfr (cpu extra)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ./cfr[cpu] \
+            --extra-index-url https://download.pytorch.org/whl/cpu
+
+      # A large part of the suite loads the Go engine through cffi, so the
+      # library has to exist before pytest starts.
+      - name: Build libcambia
+        run: make libcambia
+
+      # pyproject's addopts deselects the `slow` marker: the convergence runs,
+      # the large eval loops, and since cambia-1920 the whole-tree ES traversal
+      # cases in tests/test_deep_worker_go.py and tests/test_deep_worker_os.py,
+      # which were 263s of those two modules' 265s. Everything else runs here,
+      # the deselected set runs in cfr-slow below, so this is a move rather
+      # than a drop.
+      - name: cfr tests
+        env:
+          LIBCAMBIA_PATH: ${{ github.workspace }}/cfr/libcambia.so
+        run: cd cfr && python -m pytest tests/ -q -rs
+
+  # The other half of the split above: what the pull-request job deselects.
+  # Nightly plus a manual dispatch, off the same Python install and the same
+  # libcambia build as the cfr job, so a slow-marked test that breaks is found
+  # the next morning rather than at the next release (cambia-1920).
+  cfr-slow:
+    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # A runaway bound, not a target. The set is 27 tests, the convergence runs
+    # among them; six hours is the GitHub job ceiling and this is well under it.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: false
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.environment }}-go-${{ hashFiles('go.work.sum', 'engine/go.sum', 'runnerd/go.sum', 'service/go.sum') }}
+          restore-keys: |
+            ${{ runner.environment }}-go-
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: cfr/pyproject.toml
+
+      - name: Install cfr (cpu extra)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ./cfr[cpu] \
+            --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - name: Build libcambia
+        run: make libcambia
+
+      # `-m slow` on the command line replaces addopts' `-m 'not slow'`, so this
+      # is the complement of the cfr job's selection and not a second full run.
+      - name: cfr slow tests
+        env:
+          LIBCAMBIA_PATH: ${{ github.workspace }}/cfr/libcambia.so
+        run: cd cfr && python -m pytest tests/ -q -rs -m slow

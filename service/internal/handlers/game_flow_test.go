@@ -17,6 +17,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/jason-s-yu/cambia/service/internal/auth"
+	"github.com/jason-s-yu/cambia/service/internal/game"
 	"github.com/jason-s-yu/cambia/service/internal/hub"
 )
 
@@ -390,7 +391,7 @@ func TestCasualGameEndDrivesHubToPostGame(t *testing.T) {
 
 	// Simulate the game legitimately ending (mirrors the evidence log: scores 31/38), invoking
 	// the same OnGameEnd callback the engine calls from endGame() once terminal.
-	g.OnGameEnd(lobUUID, hostID, map[uuid.UUID]int{hostID: 31, p2ID: 38}, map[uuid.UUID]string{}, map[uuid.UUID]int{hostID: 31, p2ID: 38}, uuid.Nil, nil)
+	g.OnGameEnd(lobUUID, hostID, map[uuid.UUID]int{hostID: 31, p2ID: 38}, map[uuid.UUID]string{}, map[uuid.UUID]int{hostID: 31, p2ID: 38}, uuid.Nil, nil, game.EndReasonNormal)
 
 	hostPhase := host.waitForPhaseChange("post_game", 5*time.Second)
 	if hostPhase == nil {
@@ -474,7 +475,7 @@ func TestLobbyStartsSecondGameAfterPostGame(t *testing.T) {
 	}
 
 	// End game one through the engine's own callback, as endGame() does once terminal.
-	firstGame.OnGameEnd(lobUUID, hostID, map[uuid.UUID]int{hostID: 31, p2ID: 38}, map[uuid.UUID]string{}, map[uuid.UUID]int{hostID: 31, p2ID: 38}, uuid.Nil, nil)
+	firstGame.OnGameEnd(lobUUID, hostID, map[uuid.UUID]int{hostID: 31, p2ID: 38}, map[uuid.UUID]string{}, map[uuid.UUID]int{hostID: 31, p2ID: 38}, uuid.Nil, nil, game.EndReasonNormal)
 
 	if host.waitForPhaseChange("post_game", 5*time.Second) == nil {
 		t.Fatalf("host never received a post_game phase_change after game one ended")

@@ -8,7 +8,11 @@ of all training samples ever generated. Two separate buffers are used:
   - Mv: advantage/regret samples
   - Mpi: strategy samples
 
-Samples store iteration number for linear CFR weighting during training.
+Samples store the CFR iteration number for linear CFR weighting during
+training: the training step whose policy produced the sample, so every
+sample from one step carries one value. It is not a traversal counter;
+weighting by one would spread weights across samples drawn from the same
+policy (cambia-720).
 
 Storage is columnar: four contiguous numpy arrays (features, targets, masks,
 iterations) rather than a list of Python objects. This eliminates the
@@ -37,7 +41,7 @@ class ReservoirSample:
     features: np.ndarray  # (INPUT_DIM,) float32 -- encoded infoset
     target: np.ndarray  # (NUM_ACTIONS,) float32 -- regrets or strategy
     action_mask: np.ndarray  # (NUM_ACTIONS,) bool -- legal actions
-    iteration: int  # CFR iteration number for weighting
+    iteration: int  # training step that produced it; weighting key
     infoset_key_raw: Optional[Tuple] = None  # Optional debugging metadata
 
 
@@ -233,12 +237,21 @@ class ReservoirBuffer:
             self._masks[idx] = sample.action_mask
         self._iterations[idx] = sample.iteration
 
-    def sample_batch(self, batch_size: int) -> ColumnarBatch:
+    def sample_batch(
+        self, batch_size: int, rng: Optional[np.random.Generator] = None
+    ) -> ColumnarBatch:
         """
         Sample a random batch from the buffer.
 
         Args:
             batch_size: Number of samples to draw (without replacement).
+            rng: Optional seeded numpy Generator (cambia-1809). When given,
+                the draw uses this stream instead of the process-global
+                numpy RNG, so minibatch composition is reproducible under a
+                config seed; callers that want reproducibility must pass the
+                same Generator instance across calls (mirrors the shape
+                prtcfr_critic.py's ``_ArrayReservoir.sample_batch`` already
+                uses). Omitting it keeps the prior unseeded behavior.
 
         Returns:
             ColumnarBatch with pre-stacked arrays. len() == min(batch_size, buffer size).
@@ -256,7 +269,8 @@ class ReservoirBuffer:
                 iterations=np.empty(0, dtype=np.int64),
             )
 
-        indices = np.random.choice(self._size, actual_size, replace=False)
+        picker = rng if rng is not None else np.random
+        indices = picker.choice(self._size, actual_size, replace=False)
         return ColumnarBatch(
             features=self._features[indices],
             targets=self._targets[indices],
@@ -308,11 +322,18 @@ class ReservoirBuffer:
                 f"Unexpected error saving reservoir buffer to {path}: {e}"
             ) from e
 
-    def load(self, path: str):
+    def load(self, path: str, rng: Optional[np.random.Generator] = None):
         """
         Load the buffer from a numpy archive saved by save().
 
         Replaces the current buffer contents entirely.
+
+        Args:
+            path: Path to the saved ``.npz`` archive.
+            rng: Optional seeded numpy Generator (cambia-1809) for the
+                truncate-on-shrink subsample below; pass the same Generator
+                used elsewhere on this buffer to keep the whole eviction
+                stream seeded. Omitting it keeps the prior unseeded behavior.
 
         Raises:
             ReservoirIOError: If file I/O operations fail or file is corrupted.
@@ -362,7 +383,8 @@ class ReservoirBuffer:
                 )
                 if n > self.capacity:
                     # Truncate to current capacity via random subsample
-                    keep = np.random.choice(n, self.capacity, replace=False)
+                    picker = rng if rng is not None else np.random
+                    keep = picker.choice(n, self.capacity, replace=False)
                     features = features[keep]
                     targets = targets[keep]
                     if masks is not None:
@@ -422,7 +444,7 @@ class ReservoirBuffer:
                 f"Unexpected error loading reservoir buffer from {path}: {e}"
             ) from e
 
-    def resize(self, new_capacity: int):
+    def resize(self, new_capacity: int, rng: Optional[np.random.Generator] = None):
         """
         Resize the buffer capacity.
 
@@ -432,12 +454,17 @@ class ReservoirBuffer:
 
         Args:
             new_capacity: The new maximum capacity.
+            rng: Optional seeded numpy Generator (cambia-1809) for the
+                shrink-subsample draw below; pass the same Generator used
+                elsewhere on this buffer to keep the whole eviction stream
+                seeded. Omitting it keeps the prior unseeded behavior.
         """
         old_capacity = self.capacity
 
         if self._size > new_capacity:
             # Subsample to new capacity
-            keep = np.random.choice(self._size, new_capacity, replace=False)
+            picker = rng if rng is not None else np.random
+            keep = picker.choice(self._size, new_capacity, replace=False)
             new_features = np.zeros((new_capacity, self._input_dim), dtype=np.float32)
             new_targets = np.zeros((new_capacity, self._target_dim), dtype=np.float32)
             new_masks = (

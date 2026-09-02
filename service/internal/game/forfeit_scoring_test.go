@@ -35,7 +35,7 @@ type endResult struct {
 // runs under the game mutex, so it copies rather than calling back into the game.
 func captureGameEnd(g *CambiaGame) chan endResult {
 	ended := make(chan endResult, 1)
-	g.OnGameEnd = func(_ uuid.UUID, winner uuid.UUID, scores map[uuid.UUID]int, _ map[uuid.UUID]string, rawScores map[uuid.UUID]int, _ uuid.UUID, _ []FinalHand) {
+	g.OnGameEnd = func(_ uuid.UUID, winner uuid.UUID, scores map[uuid.UUID]int, _ map[uuid.UUID]string, rawScores map[uuid.UUID]int, _ uuid.UUID, _ []FinalHand, _ EndReason) {
 		res := endResult{
 			winner:    winner,
 			scores:    make(map[uuid.UUID]int, len(scores)),

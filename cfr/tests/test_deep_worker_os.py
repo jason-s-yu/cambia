@@ -177,6 +177,11 @@ def test_os_traversal_single_path(minimal_config):
     assert total_samples <= worker_stats.nodes_visited, "More samples than nodes visited"
 
 
+# The two ES cases in this module. Outcome sampling walks one path and costs
+# under a second; external sampling walks the whole tree, and these two measured
+# 221.6s of the module's roughly 223s, so they carry the mark and the rest of
+# the file stays in the pull-request run (cambia-1920).
+@pytest.mark.slow
 def test_os_vs_es_node_count(minimal_config):
     """Compare node counts between OS and ES to verify OS is single-path."""
     es_advantage: List[ReservoirSample] = []
@@ -388,6 +393,7 @@ def test_config_routing_outcome_sampling(minimal_config):
     ), f"OS visited {result.stats.nodes_visited} nodes, expected < 100"
 
 
+@pytest.mark.slow
 def test_config_routing_external_sampling(minimal_config):
     """Test that sampling_method='external' routes to ES traversal."""
     # Set config to external sampling

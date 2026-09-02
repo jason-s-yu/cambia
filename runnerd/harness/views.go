@@ -96,7 +96,7 @@ func (d *Dispatcher) pendingViewLocked(name string) JobView {
 		Priority:  j.spec.Priority,
 		Commit:    j.spec.Commit,
 		Config:    j.spec.Config,
-		Resume:    j.resume,
+		Resume:    j.spec.Resume,
 		After:     after,
 		AfterAll:  afterAll,
 		Exclusive: j.spec.Exclusive,
@@ -123,7 +123,7 @@ func (d *Dispatcher) resolveView(name string) (JobView, bool) {
 	var submitAt string
 	if pending {
 		pendingState = j.state
-		isResume = j.resume
+		isResume = j.spec.Resume
 		submitAt = j.submitAt
 		if j.state == StateQueued {
 			pos = d.queuePosLocked(name)

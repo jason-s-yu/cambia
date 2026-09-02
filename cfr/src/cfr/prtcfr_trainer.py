@@ -308,6 +308,7 @@ def _fit_from_scratch(
     grad_clip: float = 1.0,
     lr_min: float = 0.0,
     violation_box: Optional[List[int]] = None,
+    rng: Optional[np.random.Generator] = None,
 ) -> float:
     """Refit ``net`` (already freshly initialized) on the reservoir.
 
@@ -321,6 +322,11 @@ def _fit_from_scratch(
     ``violation_box[0]`` (the AC2 grad-norm-violation counter, S2W1). Default
     None leaves the counter untouched, so the tiny trainer's call site is
     byte-for-byte unchanged.
+
+    ``rng`` (cambia-1809): optional seeded Generator forwarded to
+    ``buf.sample_batch``. When ``buf`` does not accept ``rng`` (e.g. a
+    ``_MultiReservoirSampler`` over already-seeded DiskReservoirs), pass
+    ``None``.
     """
     if len(buf) == 0:
         return 0.0
@@ -357,7 +363,7 @@ def _fit_from_scratch(
     viol_t = torch.zeros((), dtype=accum_dtype, device=device)
     steps = 0
     for _step in range(num_steps):
-        batch = buf.sample_batch(batch_size)
+        batch = buf.sample_batch(batch_size, rng=rng)
         if not batch:
             break
         # features are token ids stored as float32 in the reservoir; cast to long.
@@ -404,14 +410,21 @@ def _fit_from_scratch(
 # would:
 #   - net weights -> the rolling checkpoint prtcfr_checkpoint.pt (Phase-1 dict).
 #   - reservoir contents + seen_count -> <run_dir>/reservoir.npz (ReservoirBuffer
-#     .save/.load; the in-RAM buffer has no dedicated RNG, so nothing else there).
+#     .save/.load).
 #   - BestSnapshotController fields -> resume_state.json (via _controller_to_dict).
-#   - GLOBAL RNG -> resume_state.json. The fit consumes numpy (np.random.choice
-#     in ReservoirBuffer.sample_batch) and torch (GRU inter-layer dropout, plus
-#     net init on from-scratch/reanchor) every iteration; buffer.add draws python
-#     `random` only at capacity. The worker seeds its OWN random.Random per t, so
-#     it needs no capture. All three global streams + the accelerator RNG are
-#     stored so the refit stream is reproduced bit-for-bit.
+#   - self._fit_rng (cambia-1809) -> resume_state.json ("reservoir_rng"). Owns
+#     every ReservoirBuffer sample_batch draw (and the rare load-truncation
+#     draw) each iteration, seeded from self.seed at construction instead of
+#     the process-global numpy stream, so minibatch composition is
+#     reproducible under a config seed; its bit_generator state is captured so
+#     the refit stream continues exactly across a resume.
+#   - GLOBAL RNG -> resume_state.json. Torch (GRU inter-layer dropout, plus net
+#     init on from-scratch/reanchor) consumes the torch global stream every
+#     iteration; buffer.add draws python `random` only at capacity. The worker
+#     seeds its OWN random.Random per t, so it needs no capture. numpy's legacy
+#     global RandomState is captured defensively (harmless if nothing in this
+#     class's fit path still touches it post-cambia-1809) alongside python
+#     `random` and torch so the refit stream is reproduced bit-for-bit.
 #   - iteration counter + written-snapshot list -> resume_state.json.
 # The peak LR and the per-iteration optimizer/scheduler are pure functions of t,
 # self.iterations, and the schedule (both are rebuilt each iteration), so they
@@ -658,6 +671,13 @@ class PRTCFRTinyTrainer:
             target_dim=NUM_ACTIONS,
             has_mask=True,
         )
+        # Dedicated Generator for the reservoir's sample_batch/load draws,
+        # seeded from the config seed (cambia-1809): keeps minibatch
+        # composition reproducible under a config seed instead of drawing
+        # from the shared global np.random stream. Offset +401 sits outside
+        # the worker-traversal seed space (self.seed + t * 1_000_003).
+        # Mirrors PRTCFRProductionTrainer's self._fit_rng.
+        self._fit_rng = np.random.default_rng(self.seed + 401)
         self.decision_nodes = _collect_decision_nodes(root)
         # Current net (refit each iteration). Initialized once; re-created per
         # iteration inside train() so iteration 1's sigma uses a fresh init.
@@ -888,6 +908,10 @@ class PRTCFRTinyTrainer:
                 if self.controller is not None
                 else None
             ),
+            # cambia-1809: self._fit_rng now owns the buffer's sample_batch
+            # (and load-truncation) draws instead of the process-global numpy
+            # stream, so its own state is captured for bit-exact resume.
+            "reservoir_rng": self._fit_rng.bit_generator.state,
         }
         state.update(_global_rng_save())
         state.update(_accel_rng_save(self.device))
@@ -941,10 +965,20 @@ class PRTCFRTinyTrainer:
                 f"partial iteration before resuming)"
             )
         if reservoir_file and os.path.exists(reservoir_file):
-            self.buffer.load(reservoir_file)
+            self.buffer.load(reservoir_file, rng=self._fit_rng)
         if self.controller is not None and state.get("controller") is not None:
             self.controller = _controller_from_dict(state["controller"])
         self._written_iters = [int(i) for i in state.get("snapshots", [])]
+        # cambia-1809: restore self._fit_rng's own stream LAST (same discipline
+        # as the global streams below) so the rare load-truncation branch above
+        # -- the only self._fit_rng draw before this point -- runs on the
+        # freshly-constructed stream, never a partially-restored one. Absent on
+        # pre-cambia-1809 resume_state.json files; self._fit_rng then keeps its
+        # fresh construction-time seed (non-bit-exact for that legacy resume,
+        # same limitation the global streams already had for this edge case).
+        reservoir_rng_state = state.get("reservoir_rng")
+        if reservoir_rng_state is not None:
+            self._fit_rng.bit_generator.state = reservoir_rng_state
         _global_rng_restore(state)
         logger.info(
             "[prtcfr-tiny] full-state restore from iter=%d: buffer=%d snapshots=%s",
@@ -1148,6 +1182,7 @@ class PRTCFRTinyTrainer:
             weight_decay=self.weight_decay,
             grad_clip=self.grad_clip,
             lr_min=self.lr_min,
+            rng=self._fit_rng,
         )
 
         snap = self._save_snapshot(t)
@@ -1357,6 +1392,7 @@ def build_tiny_nashconv_eval_fn(
     device: str = "cpu",
     seq_cap: int = SEQ_CAP,
     chunk_size: int = 2048,
+    objective: Optional[str] = None,
 ) -> Callable[["PRTCFRTinyTrainer", int], float]:
     """Ground-truth NashConv eval_fn for the tiny gate's stability controller.
 
@@ -1365,12 +1401,26 @@ def build_tiny_nashconv_eval_fn(
     IncrementalPolicyAccumulator is reused across calls: each snapshot is folded
     in ONCE ever (linear over the horizon, not quadratic), matching the technique
     the S1W11 launcher prototyped. The metric is exploitability on the tiny
-    perfect-recall tree, the X2 gate's arbiter."""
-    from .prtcfr_eval import IncrementalPolicyAccumulator, _load_net, discover_snapshots
+    perfect-recall tree, the X2 gate's arbiter.
+
+    ``objective`` defaults to the scorer's own default, ``SERVED``: the
+    controller records the exploitability of the policy prtcfr_mixture actually
+    plays (cambia-708), not the reach-unweighted per-decision mean it recorded
+    before."""
+    from .prtcfr_eval import (
+        DEFAULT_OBJECTIVE,
+        IncrementalPolicyAccumulator,
+        _load_net,
+        discover_snapshots,
+    )
     from tools.tiny_solver import exploitability
 
     acc = IncrementalPolicyAccumulator(
-        root, weighting="linear", seq_cap=seq_cap, chunk_size=chunk_size
+        root,
+        weighting="linear",
+        seq_cap=seq_cap,
+        chunk_size=chunk_size,
+        objective=DEFAULT_OBJECTIVE if objective is None else objective,
     )
     seen: set = set()
 
@@ -1570,7 +1620,16 @@ class _MultiReservoirSampler:
     def __len__(self) -> int:
         return sum(len(r) for r in self._rs)
 
-    def sample_batch(self, batch_size: int) -> ColumnarBatch:
+    def sample_batch(
+        self, batch_size: int, rng: Optional[np.random.Generator] = None
+    ) -> ColumnarBatch:
+        # `rng` accepted for interface parity with _fit_from_scratch's other
+        # buf argument (ReservoirBuffer), which does consume it (cambia-1809).
+        # The underlying DiskReservoirs sample from their own internally
+        # seeded RNG (set at construction) and take no per-call override, so
+        # there is nothing to forward it into; this sampler is already
+        # reproducible under the sub-reservoirs' own seeds.
+        del rng
         sizes = [len(r) for r in self._rs]
         total = sum(sizes)
         if total == 0:

@@ -74,7 +74,6 @@ type pick struct {
 	jobID   string
 	spec    JobSpec
 	attempt int
-	resume  bool
 }
 
 // attachPool wires the coordinator pool into the dispatcher: the lease store
@@ -154,7 +153,7 @@ func (d *Dispatcher) scanForNode(c candidate, skip map[string]bool, held func(jo
 		}
 		d.placing[id] = c.nodeID
 		delete(d.holds, id)
-		return &pick{jobID: id, spec: j.spec, attempt: 1, resume: j.resume}, ""
+		return &pick{jobID: id, spec: j.spec, attempt: 1}, ""
 	}
 	return nil, hold
 }

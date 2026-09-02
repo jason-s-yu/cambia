@@ -42,11 +42,17 @@ func (g *CambiaGame) guarded(what string, fn func()) func() {
 // it runs over state a panic already left behind, so it takes its own boundary rather than risking
 // a second unwind out of the same goroutine. endGame marks the game over and stops its timers
 // before it computes or broadcasts anything, so even a failed attempt leaves nothing armed.
+//
+// It ends the game as EndReasonInternalError rather than through the plain EndGame, which is the
+// difference between a table being told its game ended and being told why (cambia-1831). Scores
+// are still computed and recorded, off hands the panic may have left mid-move; the reason is what
+// keeps them from being read as a result, and what withholds the rating update they would
+// otherwise feed (ratePerGame).
 func (g *CambiaGame) abortAfterPanic(what string) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("Game %s: panic while ending the game after a panic in %s: %v", g.ID, what, r)
 		}
 	}()
-	g.EndGame()
+	g.endWithReason(EndReasonInternalError)
 }

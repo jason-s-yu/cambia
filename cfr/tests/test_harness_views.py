@@ -15,7 +15,7 @@ from src.harness.views import (
     render_breaker,
     render_declaration,
     render_degraded,
-    render_drain,
+    render_hold,
     render_gate_report,
     render_job_row,
     render_leases,
@@ -184,10 +184,13 @@ def test_render_leases_renders_job_lease_epoch_state_phase():
     assert "phase=running" in joined
 
 
-def test_render_drain_yes_and_no():
-    assert "yes" in render_drain({"drained": True})
-    assert "no" in render_drain({"drained": False})
-    assert "no" in render_drain({})
+def test_render_hold_names_which_hold_stands():
+    assert "breaker" in render_hold({"hold": "breaker"})
+    assert "drain" in render_hold({"hold": "drain", "drained": True})
+    assert "none" in render_hold({"drained": False})
+    assert "none" in render_hold({})
+    # The drain flag is the fallback for a coordinator that predates the field.
+    assert "drain" in render_hold({"drained": True})
 
 
 def test_render_breaker_defaults_to_zero_trips():
@@ -244,7 +247,7 @@ def test_render_node_block_combines_every_section():
     assert "presence=online" in joined
     assert "gate: admit=True" in joined
     assert "leases: none" in joined
-    assert "drain: no" in joined
+    assert "hold: none" in joined
     assert "breaker_trips=0" in joined
     assert "degraded jobs: none" in joined
 

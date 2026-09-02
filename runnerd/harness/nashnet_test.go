@@ -459,6 +459,23 @@ func (r *poolRig) register(t *testing.T, n fixtureNode, slots int) int64 {
 	return out.NodeEpoch
 }
 
+// registerHold registers a node and returns the hold its answer carried, which
+// is what a restarted agent reads before it claims anything.
+func (r *poolRig) registerHold(t *testing.T, n fixtureNode) string {
+	t.Helper()
+	resp := r.doNode(t, n, http.MethodPost, "/nashnet/nodes/register", nashnet.RegisterRequest{
+		AgentVersion: "1.1.0", Slots: 2, Capabilities: declaration(2),
+		GateReport: admitReport(2),
+	})
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("register %s: got %d, want 200", n.name, resp.StatusCode)
+	}
+	var out nashnet.RegisterResponse
+	decodeInto(t, resp, &out)
+	return out.Hold
+}
+
 // claim issues one non-blocking claim and returns the response plus the parsed
 // body when a job was handed out.
 func (r *poolRig) claim(t *testing.T, n fixtureNode, req nashnet.ClaimRequest) (*http.Response, *nashnet.ClaimResponse) {

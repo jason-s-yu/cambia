@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS eval_results (
     adv_loss REAL,
     strat_loss REAL,
     seat_balanced INTEGER DEFAULT 0,
+    policy_errors INTEGER,
     timestamp TEXT NOT NULL,
     UNIQUE(run_id, iteration, baseline)
 );
@@ -140,9 +141,10 @@ func setupTestDB(t *testing.T) (*TrainingStore, string) {
 			t.Fatal(err)
 		}
 	}
-	// Add a non-baseline eval.
-	_, err = db.Exec(`INSERT INTO eval_results (run_id, iteration, baseline, win_rate, ci_low, ci_high, games_played, adv_loss, strat_loss, timestamp)
-		VALUES (1, 100, 'random', 0.90, 0.88, 0.92, 5000, 0.5, 0.3, '2026-03-01T01:00:00Z')`)
+	// Add a non-baseline eval, with policy_errors set so GetMetrics's read of
+	// that column (cambia-1937) has a non-null value to round-trip.
+	_, err = db.Exec(`INSERT INTO eval_results (run_id, iteration, baseline, win_rate, ci_low, ci_high, games_played, adv_loss, strat_loss, policy_errors, timestamp)
+		VALUES (1, 100, 'random', 0.90, 0.88, 0.92, 5000, 0.5, 0.3, 2, '2026-03-01T01:00:00Z')`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,6 +259,30 @@ func TestGetMetricsFilteredByBaseline(t *testing.T) {
 	}
 	if metrics[0].Baseline != "random" {
 		t.Errorf("expected random, got %s", metrics[0].Baseline)
+	}
+	// cambia-1937: policy_errors reaches the eval view when non-null.
+	if metrics[0].PolicyErrors == nil || *metrics[0].PolicyErrors != 2 {
+		t.Errorf("expected policy_errors=2, got %v", metrics[0].PolicyErrors)
+	}
+}
+
+func TestGetMetricsPolicyErrorsNullForRowsThatNeverMeasuredIt(t *testing.T) {
+	store, _ := setupTestDB(t)
+	ctx := context.Background()
+
+	// The mean_imp-baseline fixture rows never set policy_errors; GetMetrics
+	// must surface that as a genuine nil, not a masquerading default.
+	metrics, err := store.GetMetrics(ctx, "test-run-1", "random_no_cambia")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metrics) == 0 {
+		t.Fatal("expected at least one metric for baseline=random_no_cambia")
+	}
+	for _, m := range metrics {
+		if m.PolicyErrors != nil {
+			t.Errorf("expected nil policy_errors, got %v", *m.PolicyErrors)
+		}
 	}
 }
 

@@ -327,6 +327,16 @@ _EVALS_WHITELIST = [
     "selection_mode",
     "crn_seed",
     "seat_scheme",
+    # cambia-1479 eval-integrity columns; a source db predating them (or a
+    # source row measured before they existed) carries NULL here, which must
+    # replay as NULL rather than a default that would masquerade as a
+    # measurement (cambia-1937).
+    "policy_errors",
+    "engine_errors",
+    "belief_protocol",
+    # cambia-721: which policy the row measured. Dropping it would make a
+    # replayed row indistinguishable from one measured before the column.
+    "served_policy",
     "timestamp",
 ]
 
@@ -511,6 +521,14 @@ def _read_evals(src: sqlite3.Connection, src_run_id: Any) -> List[Dict[str, Any]
             ),
             "seat_scheme": _str_or_none(
                 e.get("seat_scheme"), "eval.seat_scheme", _MAX_SHORT_STR_LEN
+            ),
+            "policy_errors": _int_or_none(e.get("policy_errors"), "eval.policy_errors"),
+            "engine_errors": _int_or_none(e.get("engine_errors"), "eval.engine_errors"),
+            "belief_protocol": _str_or_none(
+                e.get("belief_protocol"), "eval.belief_protocol", _MAX_SHORT_STR_LEN
+            ),
+            "served_policy": _str_or_none(
+                e.get("served_policy"), "eval.served_policy", _MAX_SHORT_STR_LEN
             ),
             "timestamp": _str_or_none(
                 e.get("timestamp"), "eval.timestamp", _MAX_SHORT_STR_LEN

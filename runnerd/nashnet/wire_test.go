@@ -77,9 +77,12 @@ func TestCodecRoundTripHeartbeatAndEvents(t *testing.T) {
 		GateReport:   json.RawMessage(`{"admit":false}`),
 		HaveCommits:  []string{"0123456789abcdef0123456789abcdef01234567"},
 	})
-	roundTrip(t, HeartbeatResponse{NodeEpoch: 3, Drain: true, ServerTime: "2026-09-01T12:00:00Z"})
+	roundTrip(t, HeartbeatResponse{NodeEpoch: 3, Hold: HoldReasonBreaker, ServerTime: "2026-09-01T12:00:00Z"})
 	roundTrip(t, EventsResponse{
-		Events:     []Event{{Type: EventRevoke, LeaseID: "01ARYZ6S41ABCDEFGHJKMNPQRS", Force: true}},
+		Events: []Event{
+			{Type: EventRevoke, LeaseID: "01ARYZ6S41ABCDEFGHJKMNPQRS", Force: true},
+			{Type: EventDrain, Hold: HoldReasonDrain},
+		},
 		NodeEpoch:  3,
 		ServerTime: "2026-09-01T12:00:00Z",
 	})
@@ -148,7 +151,7 @@ func TestCodecRoundTripProgressAndResult(t *testing.T) {
 	}
 	roundTrip(t, req)
 	roundTrip(t, ProgressResponse{
-		Revoke: true, Force: false, Drain: true,
+		Revoke: true, Force: false, Hold: HoldReasonDrain,
 		LeaseDeadline: "2026-09-01T12:02:00Z", RetryAfterSeconds: 30,
 	})
 

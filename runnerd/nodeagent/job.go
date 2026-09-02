@@ -303,7 +303,7 @@ func (j *jobRun) tick(ctx context.Context) bool {
 				j.applyStop(ctx)
 				return false
 			case "drain":
-				j.agent.setDrained(true)
+				j.agent.setGateDrain(true)
 			}
 		}
 	}
@@ -541,9 +541,9 @@ func (j *jobRun) postProgress(ctx context.Context) (nashnet.ProgressResponse, er
 	if resp.LeaseDeadline != "" {
 		j.rec.Deadline = resp.LeaseDeadline
 	}
-	if resp.Drain {
-		j.agent.setDrained(true)
-	}
+	// A tick carries the same hold every other call does, so a lift reaches a
+	// node holding a lease without waiting for it to fall idle and heartbeat.
+	j.agent.applyHold(resp.Hold)
 	if resp.Revoke {
 		j.requestStop(stopReason{kind: stopRevoked, force: resp.Force, detail: "coordinator revoke"})
 	}

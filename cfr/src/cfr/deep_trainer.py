@@ -48,7 +48,7 @@ from ..live_display import LiveDisplayManager
 from ..log_archiver import LogArchiver
 
 from .deep_worker import run_deep_cfr_worker, DeepCFRWorkerResult
-from .es_validator import ESValidator
+from .es_validator import ESValidator, ESValidatorError
 from .exceptions import (
     GracefulShutdownException,
     CheckpointSaveError,
@@ -201,6 +201,15 @@ class DeepCFRConfig:
     # When 0.0, uses fixed train_steps_per_iteration.
     value_target_buffer_passes: float = 2.0
 
+    # Seed for the reservoir buffers' sample_batch/load draws (cambia-1809):
+    # keeps minibatch composition reproducible under a config seed instead of
+    # drawing from the shared global np.random stream. None (default) leaves
+    # buffers on the prior unseeded behavior -- config.py's DeepCfrConfig has
+    # no matching YAML field yet, so this is populated only via an explicit
+    # override or direct DeepCFRConfig(seed=...) construction until that
+    # follow-up wiring lands.
+    seed: Optional[int] = None
+
     def __post_init__(self):
         if self.pipeline_training and self.num_traversal_threads > 1:
             raise ValueError(
@@ -294,6 +303,11 @@ class DeepCFRConfig:
             "psro_heuristic_types": deep_cfg.psro_heuristic_types,
             "target_buffer_passes": deep_cfg.target_buffer_passes,
             "value_target_buffer_passes": deep_cfg.value_target_buffer_passes,
+            # getattr: kept defensive so a config.deep_cfr stand-in without a
+            # seed field (e.g. tests/conftest.py's stub, or an older
+            # SimpleNamespace-shaped caller) still defaults to None instead of
+            # raising (cambia-1809).
+            "seed": getattr(deep_cfg, "seed", None),
         }
         # Apply CLI overrides (only non-None values)
         for key, value in overrides.items():
@@ -444,8 +458,7 @@ def _create_worker_file_handler(
 
 
 def _run_traversals_batch(
-    iteration_offset: int,
-    total_traversals_offset: int,
+    iteration: int,
     config,
     network_weights: Dict[str, Any],
     network_config: Dict[str, int],
@@ -488,7 +501,7 @@ def _run_traversals_batch(
 
     try:
         for i in range(traversals_per_step):
-            iter_num = iteration_offset + i
+            iter_num = iteration
             args_tuple = (
                 iter_num,
                 config,
@@ -554,7 +567,7 @@ def _run_single_traversal(args_tuple, file_handler_override=None):
 
 
 def _run_traversals_threaded(
-    iteration_offset: int,
+    iteration: int,
     config,
     network_weights: Dict[str, Any],
     network_config: Dict[str, int],
@@ -593,7 +606,7 @@ def _run_traversals_threaded(
     worker_args_list = []
     handler_for_args = []
     for i in range(traversals_per_step):
-        iter_num = iteration_offset + i
+        iter_num = iteration
         slot = i % num_threads
         worker_args_list.append(
             (
@@ -721,6 +734,25 @@ class DeepCFRTrainer:
         self.live_display_manager = live_display_manager
         self.archive_queue = archive_queue
         self.log_archiver_global_ref: Optional[LogArchiver] = None
+
+        # Dedicated Generator for the reservoir buffers' sample_batch/load
+        # draws, seeded from dcfr_config.seed (cambia-1809). None until the
+        # config.py/cli.py wiring lands (see DeepCFRConfig.seed's docstring);
+        # sample_batch/load treat rng=None as "no override" and fall back to
+        # the process-global numpy stream, same as before this change, so a
+        # missing seed only loses reproducibility, never raises. Warned once
+        # here (not per-call) naming the call site per cambia-1809 AC2.
+        if self.dcfr_config.seed is not None:
+            self._fit_rng: Optional[np.random.Generator] = np.random.default_rng(
+                self.dcfr_config.seed
+            )
+        else:
+            self._fit_rng = None
+            logger.warning(
+                "DeepCFRTrainer.__init__: dcfr_config.seed is None; "
+                "advantage/strategy/value buffer minibatch composition will "
+                "not be reproducible across runs (cambia-1809)."
+            )
 
         # Device selection
         resolved_device = _resolve_device(self.dcfr_config.device)
@@ -1132,7 +1164,7 @@ class DeepCFRTrainer:
             if self.shutdown_event.is_set():
                 logger.warning("Shutdown detected during value network training.")
                 break
-            batch = self.value_buffer.sample_batch(batch_size)
+            batch = self.value_buffer.sample_batch(batch_size, rng=self._fit_rng)
             if not batch:
                 break
 
@@ -1173,7 +1205,7 @@ class DeepCFRTrainer:
     def _prefetch_batches(self, buffer, batch_size, num_steps, prefetch_queue):
         """Background thread: prepare batches and put them in the queue."""
         for _ in range(num_steps):
-            batch = buffer.sample_batch(batch_size)
+            batch = buffer.sample_batch(batch_size, rng=self._fit_rng)
             if not batch:
                 break
             features_t = torch.from_numpy(batch.features).float().pin_memory()
@@ -1272,7 +1304,7 @@ class DeepCFRTrainer:
                     logger.warning("Shutdown detected during %s training.", network_name)
                     break
 
-                batch = buffer.sample_batch(batch_size)
+                batch = buffer.sample_batch(batch_size, rng=self._fit_rng)
                 if not batch:
                     break
 
@@ -1513,7 +1545,10 @@ class DeepCFRTrainer:
 
                         worker_args_list = []
                         for i in range(batch_size):
-                            iter_num = self.total_traversals + traversals_done + i
+                            # Every traversal of this step samples the same
+                            # policy, so they share one CFR iteration; the
+                            # pool slot index is not an iteration (cambia-720).
+                            iter_num = step
                             worker_args_list.append(
                                 (
                                     iter_num,
@@ -1587,7 +1622,7 @@ class DeepCFRTrainer:
                         traversals_done,
                         total_nodes,
                     ) = _run_traversals_threaded(
-                        self.total_traversals,
+                        step,
                         self.config,
                         network_weights,
                         network_config,
@@ -1608,8 +1643,7 @@ class DeepCFRTrainer:
                         total_nodes,
                         _trav_timing,
                     ) = _run_traversals_batch(
-                        self.total_traversals,
-                        self.total_traversals,
+                        step,
                         self.config,
                         network_weights,
                         network_config,
@@ -1669,8 +1703,7 @@ class DeepCFRTrainer:
                     next_weights = self._get_network_weights_for_workers()
                     pending_future = executor.submit(
                         _run_traversals_batch,
-                        self.total_traversals,  # iteration_offset
-                        self.total_traversals,  # total_traversals_offset
+                        step + 1,  # iteration: consumed at the next step
                         self.config,
                         next_weights,
                         network_config,
@@ -2005,6 +2038,21 @@ class DeepCFRTrainer:
                                 flush=True,
                             )
                         self.es_validation_history.append((step, es_metrics))
+                    except ESValidatorError:
+                        # The step produced no measurement at all: either the
+                        # network could not be built or loaded, or no traversal
+                        # completed. Neither clears on its own, and downgrading
+                        # them to warnings left es_validation silently dead for
+                        # a whole run; fail at this step (cambia-1880). A
+                        # partial traversal failure still measures something and
+                        # keeps its warning below.
+                        logger.critical(
+                            "ES validation produced no measurement at step %d; "
+                            "aborting training. Set es_validation_interval=0 to "
+                            "train without validation.",
+                            step,
+                        )
+                        raise
                     except Exception as e_val:
                         logger.warning("ES validation failed at step %d: %s", step, e_val)
 
@@ -2263,6 +2311,47 @@ class DeepCFRTrainer:
                 f"Unexpected error saving checkpoint to {path}: {e}"
             ) from e
 
+    def _migrate_pre_step_iterations(self, traversals_per_step: int) -> None:
+        """Map a resumed buffer's per-traversal iteration values onto steps.
+
+        Buffers written before cambia-720 stamped a running traversal counter
+        on every sample instead of the training step. Left alone they would
+        share a buffer with the step numbers this run writes, and since the fit
+        loop weights by (iteration + 1)^alpha a stored traversal index of
+        100000 outweighs a fresh step 101 by about 3e4, so the resumed run
+        would train almost entirely on its old samples. Converting is exact
+        while traversals_per_step held constant, which is what the checkpoint's
+        own config records; rebuilding the buffer instead would throw away real
+        samples for a weighting detail.
+        """
+        if traversals_per_step <= 0 or self.training_step <= 0:
+            return
+
+        for name, buffer in (
+            ("advantage", self.advantage_buffer),
+            ("strategy", self.strategy_buffer),
+            ("value", self.value_buffer),
+        ):
+            if buffer is None:
+                continue
+            size = len(buffer)
+            if size == 0:
+                continue
+            stored = buffer._iterations[:size]
+            if int(stored.max()) <= self.training_step:
+                continue
+            buffer._iterations[:size] = np.clip(
+                stored // traversals_per_step + 1, 1, self.training_step
+            )
+            logger.warning(
+                "Converted %d %s samples from per-traversal iteration numbers to "
+                "training steps (checkpoint predates cambia-720; "
+                "traversals_per_step=%d).",
+                size,
+                name,
+                traversals_per_step,
+            )
+
     def load_checkpoint(self, filepath: Optional[str] = None):
         """
         Load training state from checkpoint.
@@ -2341,7 +2430,7 @@ class DeepCFRTrainer:
                         capacity=self.dcfr_config.advantage_buffer_capacity,
                         input_dim=self.dcfr_config.input_dim,
                     )
-                    self.advantage_buffer.load(adv_buffer_path)
+                    self.advantage_buffer.load(adv_buffer_path, rng=self._fit_rng)
                     adv_loaded = True
                 else:
                     logger.warning(
@@ -2360,7 +2449,7 @@ class DeepCFRTrainer:
                         capacity=self.dcfr_config.strategy_buffer_capacity,
                         input_dim=self.dcfr_config.input_dim,
                     )
-                    self.strategy_buffer.load(strat_buffer_path)
+                    self.strategy_buffer.load(strat_buffer_path, rng=self._fit_rng)
                     strat_loaded = True
                 else:
                     logger.warning(
@@ -2389,7 +2478,7 @@ class DeepCFRTrainer:
                             target_dim=1,
                             has_mask=False,
                         )
-                        self.value_buffer.load(val_buffer_path)
+                        self.value_buffer.load(val_buffer_path, rng=self._fit_rng)
                         logger.info("Loaded value buffer from %s.", npz_path)
                     else:
                         logger.warning(
@@ -2522,6 +2611,14 @@ class DeepCFRTrainer:
                             saved_rules.get(key),
                             current_rules.get(key),
                         )
+
+            self._migrate_pre_step_iterations(
+                int(
+                    saved_config.get(
+                        "traversals_per_step", self.dcfr_config.traversals_per_step
+                    )
+                )
+            )
 
             strat_len = (
                 len(self.strategy_buffer) if self.strategy_buffer is not None else 0

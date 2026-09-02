@@ -470,6 +470,73 @@ def test_happy_replay_roundtrip(tmp_path):
         db.close()
 
 
+# ---------------------------------------------------------------------------
+# Eval-integrity columns (cambia-1479 policy_errors/belief_protocol, its
+# follow-up engine_errors): the whitelist must carry them so a replayed row is
+# not indistinguishable from a pre-1479 row (cambia-1937).
+# ---------------------------------------------------------------------------
+
+
+def test_eval_integrity_columns_replay_onto_client(tmp_path):
+    run_dir = tmp_path / "runs" / "v0.4-prtcfr-r1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    conn = _new_source(run_dir / "run_db.sqlite")
+    rid = _insert_run(conn)
+    _insert_eval(
+        conn,
+        rid,
+        10,
+        "random_no_cambia",
+        policy_errors=3,
+        engine_errors=1,
+        belief_protocol="advancing",
+    )
+    conn.close()
+
+    summary = replay(run_dir, _dest_path(tmp_path), origin_host="runner")
+    assert summary["evals"] == 1
+
+    dest = _open_dest(_dest_path(tmp_path))
+    try:
+        row = dest.execute(
+            "SELECT policy_errors, engine_errors, belief_protocol "
+            "FROM eval_results WHERE baseline='random_no_cambia'"
+        ).fetchone()
+    finally:
+        dest.close()
+    assert row["policy_errors"] == 3
+    assert row["engine_errors"] == 1
+    assert row["belief_protocol"] == "advancing"
+
+
+def test_pre_1479_eval_row_replays_null_not_a_masquerading_default(tmp_path):
+    """A row measured before the eval-integrity columns existed carries NULL
+    for all three; the reconciler must replay that NULL verbatim rather than
+    substituting a default (0 policy_errors, "advancing" belief_protocol)
+    that would read as a real measurement."""
+    run_dir = tmp_path / "runs" / "v0.4-prtcfr-r1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    conn = _new_source(run_dir / "run_db.sqlite")
+    rid = _insert_run(conn)
+    _insert_eval(conn, rid, 10, "random_no_cambia")  # no integrity columns set
+    conn.close()
+
+    summary = replay(run_dir, _dest_path(tmp_path), origin_host="runner")
+    assert summary["evals"] == 1
+
+    dest = _open_dest(_dest_path(tmp_path))
+    try:
+        row = dest.execute(
+            "SELECT policy_errors, engine_errors, belief_protocol "
+            "FROM eval_results WHERE baseline='random_no_cambia'"
+        ).fetchone()
+    finally:
+        dest.close()
+    assert row["policy_errors"] is None
+    assert row["engine_errors"] is None
+    assert row["belief_protocol"] is None
+
+
 def test_idempotent_rereplay(tmp_path):
     run_dir = _build_full_run(tmp_path / "runs" / "v0.4-prtcfr-r1")
     dest_path = _dest_path(tmp_path)
@@ -1091,3 +1158,53 @@ def test_evaluate_journal_runs_row_name_must_match_target(tmp_path):
 
     with pytest.raises(ReconcilerValidationError):
         replay(job_dir, dest_path, origin_host="runner")
+
+
+# ---------------------------------------------------------------------------
+# served_policy (cambia-721): which policy the numbers measured. A replayed row
+# that drops it is indistinguishable from one measured before the column, so
+# the whitelist carries it on the same terms as the eval-integrity columns.
+# ---------------------------------------------------------------------------
+
+
+def test_served_policy_replays_onto_client(tmp_path):
+    run_dir = tmp_path / "runs" / "v0.4-prtcfr-r1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    conn = _new_source(run_dir / "run_db.sqlite")
+    rid = _insert_run(conn)
+    _insert_eval(conn, rid, 10, "random_no_cambia", served_policy="average_strategy")
+    conn.close()
+
+    summary = replay(run_dir, _dest_path(tmp_path), origin_host="runner")
+    assert summary["evals"] == 1
+
+    dest = _open_dest(_dest_path(tmp_path))
+    try:
+        row = dest.execute(
+            "SELECT served_policy FROM eval_results " "WHERE baseline='random_no_cambia'"
+        ).fetchone()
+    finally:
+        dest.close()
+    assert row["served_policy"] == "average_strategy"
+
+
+def test_pre_721_eval_row_replays_served_policy_as_null(tmp_path):
+    """A row measured before the column existed must not gain a default that
+    would claim it measured the average strategy."""
+    run_dir = tmp_path / "runs" / "v0.4-prtcfr-r1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    conn = _new_source(run_dir / "run_db.sqlite")
+    rid = _insert_run(conn)
+    _insert_eval(conn, rid, 10, "random_no_cambia")
+    conn.close()
+
+    replay(run_dir, _dest_path(tmp_path), origin_host="runner")
+
+    dest = _open_dest(_dest_path(tmp_path))
+    try:
+        row = dest.execute(
+            "SELECT served_policy FROM eval_results " "WHERE baseline='random_no_cambia'"
+        ).fetchone()
+    finally:
+        dest.close()
+    assert row["served_policy"] is None
