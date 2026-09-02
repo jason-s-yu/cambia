@@ -26,16 +26,28 @@ each distinct infoset we:
      that diverges from training is the train/eval mismatch (RC-B) that caused
      the original wall, so the seam is single-sourced through the builder + that
      helper.
-  2. Realize the SD-CFR AVERAGE policy deterministically. For SD-CFR the served
-     strategy is the linear-iteration-weighted mean of per-snapshot regret-matched
-     strategies:
+  2. Realize the SD-CFR AVERAGE policy deterministically. SD-CFR serves a
+     MIXTURE: ``prtcfr_mixture.sample_episode`` draws one snapshot per episode
+     with probability proportional to w_t = t and plays the whole game with it.
+     Under perfect recall that mixture is realization equivalent (Kuhn) to the
+     single behavior strategy weighting each snapshot by the acting player's OWN
+     reach of the infoset:
 
-         strategy(I) = sum_t w_t * regret_match(net_t(tokens, mask)) / sum_t w_t,
+         strategy(I)[a] = sum_t w_t pi_i^{sigma_t}(I) sigma_t(I)[a]
+                          / sum_t w_t pi_i^{sigma_t}(I),
+         sigma_t(I) = regret_match(net_t(tokens, mask)),
          w_t = t   (linear weighting; matches deep_trainer sd_cfr_snapshot_weighting)
+
+     That is the ``SERVED`` object this module scores by default (cambia-708).
+     The reach-UNWEIGHTED per-decision mean ``sum_t w_t sigma_t(I) / sum_t w_t``
+     is a different strategy nothing plays; it was the gate's scored object
+     until cambia-708 and stays reachable as ``objective=PER_DECISION``. See
+     the "two SD-CFR policy objects" section below.
 
      Each ``net_t`` is one snapshot; the per-net regret-matched strategy over the
      146-action space comes from ``PRTCFRNet.strategy_from_tokens(tokens, mask)``.
-     A single checkpoint is the degenerate one-snapshot case (weight 1.0).
+     A single checkpoint is the degenerate one-snapshot case (weight 1.0), where
+     the two objects coincide.
   3. Materialize a plain ``{pkey: strategy_vector(nA)}`` dict aligned to the
      node's legal-action order (the 146-vector entries are read back per legal
      action via ``src.encoding.action_to_index``), then call
@@ -354,9 +366,7 @@ def _load_net(filepath: str, device: str = "cpu") -> Any:
     # under ``weights_only=True`` anyway; neither format is emitted by any
     # writer in the repo.
     if not (
-        isinstance(obj, dict)
-        and "encoder_state_dict" in obj
-        and "head_state_dict" in obj
+        isinstance(obj, dict) and "encoder_state_dict" in obj and "head_state_dict" in obj
     ):
         raise ValueError(
             f"snapshot {filepath!r} is not in the pinned PRT-CFR format "
@@ -441,10 +451,20 @@ def sd_cfr_average_strategy(
     weighting: str = "linear",
     seq_cap: int = SEQ_CAP,
 ) -> np.ndarray:
-    """SD-CFR served strategy at one infoset: weighted mean of per-net strategies.
+    """PER-DECISION mean of the per-net strategies at ONE infoset. NOT the served
+    policy.
 
-    w_t = t for linear weighting (default; matches the trainer), w_t = 1 for
-    uniform. Renormalized defensively.
+    ``sum_t w_t sigma^t(I) / sum_t w_t`` with w_t = t for linear weighting
+    (default; matches the trainer's snapshot weighting), w_t = 1 for uniform.
+    Renormalized defensively.
+
+    This is the ``PER_DECISION`` object, kept as the per-infoset reference for
+    ``materialize_policy(objective="per_decision")``. It is NOT what
+    ``prtcfr_mixture.sample_episode`` serves: the served policy weights each
+    snapshot by the acting player's own reach of the infoset under that
+    snapshot, a quantity that depends on the whole tree and so cannot be formed
+    one infoset at a time. Use ``combine_snapshot_policies`` (or the
+    ``objective="served"`` default of the materializers) for the served object.
     """
     nA = len(legal_actions)
     acc = np.zeros(nA, dtype=np.float64)
@@ -467,6 +487,312 @@ def sd_cfr_average_strategy(
 
 
 # ---------------------------------------------------------------------------
+# The two SD-CFR policy objects
+# ---------------------------------------------------------------------------
+#
+# SERVED (the default, and what the eval/serving stack plays). PRT-CFR keeps no
+# strategy net: the average strategy is realized by SD-CFR snapshot sampling
+# (prtcfr_mixture.sample_episode) -- one snapshot drawn per EPISODE with
+# probability proportional to w_s, playing the whole game. That is a mixture
+# over behavioral strategies. Under perfect recall Kuhn's theorem makes it
+# realization equivalent to the single behavioral strategy that weights each
+# snapshot by the acting player's OWN reach of the infoset:
+#
+#     b_served(I)[a] = sum_s w_s pi_i^{sigma_s}(I) sigma_s(I)[a]
+#                      / sum_s w_s pi_i^{sigma_s}(I)
+#
+# Realization equivalence preserves the distribution over terminal histories
+# against any opponent, hence both best-response values and the on-policy
+# value, so exploitability(b_served) IS the exploitability of the mixture the
+# wrapper plays.
+#
+# PER_DECISION (option, not the served policy). The reach-unweighted mean
+#
+#     b_per_decision(I)[a] = sum_s w_s sigma_s(I)[a] / sum_s w_s
+#
+# is a different strategy that nothing serves. It was the X2 gate's scored
+# object until cambia-708; cambia-737 measured the resulting gap on the X2R
+# runs (.docs/v0.4/phase2-throughput-pilot/x2-gate-vs-served-gap-2026-08-29/).
+# It stays reachable so the two can be compared and historical numbers
+# reproduced, never as a default.
+#
+# The own reach pi_i^{sigma_s}(I) excludes chance and the opponent, so it is
+# the product of sigma_s over the acting player's OWN ancestor decisions.
+# Perfect-recall keying is what makes it well defined per infoset;
+# ``own_decision_structure`` proves that per tree rather than assuming it.
+
+SERVED = "served"
+PER_DECISION = "per_decision"
+POLICY_OBJECTIVES = (SERVED, PER_DECISION)
+DEFAULT_OBJECTIVE = SERVED
+
+
+def _check_objective(objective: str) -> str:
+    if objective not in POLICY_OBJECTIVES:
+        raise ValueError(
+            f"objective={objective!r} is not one of {POLICY_OBJECTIVES}; "
+            f"{SERVED!r} is the policy prtcfr_mixture actually serves"
+        )
+    return objective
+
+
+def _legal_layout(nodes: List[Any]) -> Tuple[np.ndarray, np.ndarray]:
+    """Per-infoset legal-action counts and the offsets of the flat slice layout.
+
+    Strategies are carried as one concatenated ``(total_legal,)`` float64 array
+    in infoset order; ``flat[legal_off[i]:legal_off[i + 1]]`` is infoset ``i``'s
+    distribution over its legal actions.
+    """
+    counts = np.array([len(nd.actions) for nd in nodes], dtype=np.int64)
+    legal_off = np.zeros(len(nodes) + 1, dtype=np.int64)
+    if counts.size:
+        np.cumsum(counts, out=legal_off[1:])
+    return counts, legal_off
+
+
+def own_decision_structure(
+    root: Any, nodes: List[Any]
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Own-decision parent chain per infoset, proved consistent with perfect recall.
+
+    Walks every history. At each decision node the acting player's previous own
+    decision along that path is the candidate parent. Perfect recall says every
+    history in an infoset agrees on it; a disagreement means own reach is not
+    well defined per infoset and the realization-equivalence argument does not
+    hold, so that raises rather than silently producing a number.
+
+    Returns ``(parent_iset, parent_slot, owner, depth_order, depth_start)``:
+      parent_iset  (N,) index of the acting player's previous own decision
+                   infoset, -1 at an own-root.
+      parent_slot  (N,) which legal-action slot of that parent leads here, -1
+                   at an own-root.
+      owner        (N,) the acting player.
+      depth_order  (N,) infoset indices sorted by own-decision depth.
+      depth_start  (D+1,) block boundaries of each depth in ``depth_order``.
+    """
+    n = len(nodes)
+    index_of_pkey = {nd.pkey: i for i, nd in enumerate(nodes)}
+    parent_iset = np.full(n, -1, dtype=np.int64)
+    parent_slot = np.full(n, -1, dtype=np.int64)
+    owner = np.full(n, -1, dtype=np.int64)
+    seen = np.zeros(n, dtype=bool)
+    # stack entries: (node, (last_own_p0, last_own_p1)), each last_own either
+    # None or a (infoset index, action slot) pair.
+    stack: List[Tuple[Any, Tuple[Optional[Tuple[int, int]], ...]]] = [
+        (root, (None, None))
+    ]
+    while stack:
+        node, last_own = stack.pop()
+        kind = node.kind
+        if kind == "T":
+            continue
+        if kind == "C":
+            for child in node.children:
+                stack.append((child, last_own))
+            continue
+        p = node.player
+        i = index_of_pkey[node.pkey]
+        cand = last_own[p]
+        cand_iset = -1 if cand is None else cand[0]
+        cand_slot = -1 if cand is None else cand[1]
+        if seen[i]:
+            if owner[i] != p:
+                raise RuntimeError(
+                    f"infoset {i} ({node.pkey!r}) is acted on by both players; "
+                    f"one merged policy dict would conflate them"
+                )
+            if parent_iset[i] != cand_iset or parent_slot[i] != cand_slot:
+                raise RuntimeError(
+                    f"infoset {i} ({node.pkey!r}) has two distinct own-action "
+                    f"predecessors ({parent_iset[i]},{parent_slot[i]}) vs "
+                    f"({cand_iset},{cand_slot}); the tree is not perfect-recall "
+                    f"keyed and own reach is undefined"
+                )
+        else:
+            seen[i] = True
+            owner[i] = p
+            parent_iset[i] = cand_iset
+            parent_slot[i] = cand_slot
+        for k, child in enumerate(node.children):
+            new_last = list(last_own)
+            new_last[p] = (i, k)
+            stack.append((child, tuple(new_last)))
+    if n and not seen.all():
+        raise RuntimeError(
+            "some enumerated infoset was never reached by the history walk"
+        )
+    depth = np.full(n, -1, dtype=np.int64)
+    roots = np.flatnonzero(parent_iset < 0)
+    depth[roots] = 0
+    remaining = n - roots.size
+    d = 0
+    while remaining > 0:
+        nxt = np.flatnonzero((depth < 0) & (depth[parent_iset] == d))
+        if nxt.size == 0:
+            raise RuntimeError("own-decision parent graph has a cycle or a gap")
+        depth[nxt] = d + 1
+        remaining -= nxt.size
+        d += 1
+    depth_order = np.argsort(depth, kind="stable")
+    per_depth = np.bincount(depth, minlength=1) if n else np.zeros(1, dtype=np.int64)
+    depth_start = np.zeros(per_depth.size + 1, dtype=np.int64)
+    np.cumsum(per_depth, out=depth_start[1:])
+    return parent_iset, parent_slot, owner, depth_order, depth_start
+
+
+def own_reaches(
+    strat_flat: np.ndarray,
+    legal_off: np.ndarray,
+    parent_iset: np.ndarray,
+    parent_slot: np.ndarray,
+    depth_order: np.ndarray,
+    depth_start: np.ndarray,
+) -> np.ndarray:
+    """Own-reach probability of every infoset under ONE snapshot's strategy.
+
+    ``pi_i(I) = prod over the acting player's own ancestor decisions of
+    sigma(ancestor)[slot taken to get here]``: chance and the opponent are
+    excluded, which is exactly what realization equivalence weights by. Swept
+    depth by depth so each level is one vectorized gather.
+    """
+    n = int(legal_off.shape[0]) - 1
+    pi = np.empty(n, dtype=np.float64)
+    for d in range(int(depth_start.shape[0]) - 1):
+        idx = depth_order[depth_start[d] : depth_start[d + 1]]
+        if idx.size == 0:
+            continue
+        if d == 0:
+            pi[idx] = 1.0
+            continue
+        par = parent_iset[idx]
+        pi[idx] = pi[par] * strat_flat[legal_off[par] + parent_slot[idx]]
+    return pi
+
+
+def _renormalize_slices(flat: np.ndarray, legal_off: np.ndarray) -> None:
+    """In place: make every infoset slice a distribution (uniform if it sums to 0)."""
+    for i in range(int(legal_off.shape[0]) - 1):
+        lo, hi = int(legal_off[i]), int(legal_off[i + 1])
+        s = flat[lo:hi].sum()
+        if s > 1e-12:
+            flat[lo:hi] /= s
+        else:
+            flat[lo:hi] = 1.0 / (hi - lo)
+
+
+def _finalize_per_decision(
+    acc_flat: np.ndarray, weight_sum: float, legal_off: np.ndarray
+) -> np.ndarray:
+    """Per-decision mean: divide by the total weight, renormalize each slice."""
+    out = np.array(acc_flat, dtype=np.float64, copy=True)
+    if weight_sum <= 0.0:
+        for i in range(int(legal_off.shape[0]) - 1):
+            lo, hi = int(legal_off[i]), int(legal_off[i + 1])
+            out[lo:hi] = 1.0 / (hi - lo)
+        return out
+    out /= weight_sum
+    _renormalize_slices(out, legal_off)
+    return out
+
+
+def _finalize_served(
+    acc_flat: np.ndarray, reach_weight: np.ndarray, legal_off: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Served policy: divide each slice by its realization weight, renormalize.
+
+    ``reach_weight[i] = sum_s w_s pi_s(I_i)``. Where it is zero the infoset is
+    unreachable under every snapshot, so the mixture's behavior there is
+    unconstrained: it cannot move the terminal distribution, either
+    best-response value, or the on-policy value. Those slices fall back to
+    uniform, and the returned boolean array flags them.
+    """
+    out = np.array(acc_flat, dtype=np.float64, copy=True)
+    n = int(legal_off.shape[0]) - 1
+    unreached = np.zeros(n, dtype=bool)
+    for i in range(n):
+        lo, hi = int(legal_off[i]), int(legal_off[i + 1])
+        w = float(reach_weight[i])
+        if w <= 0.0:
+            unreached[i] = True
+            out[lo:hi] = 1.0 / (hi - lo)
+            continue
+        out[lo:hi] /= w
+        s = out[lo:hi].sum()
+        if s > 1e-12:
+            out[lo:hi] /= s
+        else:  # pragma: no cover - defensive; w > 0 implies s > 0 analytically
+            out[lo:hi] = 1.0 / (hi - lo)
+    return out, unreached
+
+
+def _policy_dict(
+    nodes: List[Any], flat: np.ndarray, legal_off: np.ndarray
+) -> Dict[Any, np.ndarray]:
+    """Flat slice layout -> the ``{pkey: strategy_vector(nA)}`` dict tiny_solver scores."""
+    return {
+        nd.pkey: np.array(flat[int(legal_off[i]) : int(legal_off[i + 1])], copy=True)
+        for i, nd in enumerate(nodes)
+    }
+
+
+def combine_snapshot_policies(
+    root: Any,
+    weighted_policies: List[Tuple[float, Dict[Any, np.ndarray]]],
+    objective: str = DEFAULT_OBJECTIVE,
+    nodes: Optional[List[Any]] = None,
+) -> Dict[Any, np.ndarray]:
+    """Combine per-snapshot policy dicts into one policy under ``objective``.
+
+    The net-free core of both materializers: ``weighted_policies`` is
+    ``[(w_s, {pkey: vector}), ...]``, one entry per SD-CFR snapshot, each dict
+    covering every infoset of ``root``. Returns the same dict shape.
+
+    ``objective=SERVED`` (default) produces the own-reach-weighted mixture
+    average -- the realized behavior strategy of what ``prtcfr_mixture`` serves.
+    ``objective=PER_DECISION`` produces the reach-unweighted mean, which nothing
+    serves.
+    """
+    _check_objective(objective)
+    if nodes is None:
+        nodes = enumerate_infosets(root)
+    n = len(nodes)
+    if n == 0:
+        return {}
+    counts, legal_off = _legal_layout(nodes)
+    total = int(legal_off[-1])
+    acc_flat = np.zeros(total, dtype=np.float64)
+    wsum = 0.0
+    if objective == SERVED:
+        parent_iset, parent_slot, _owner, depth_order, depth_start = (
+            own_decision_structure(root, nodes)
+        )
+        reach_weight = np.zeros(n, dtype=np.float64)
+    for w, pol in weighted_policies:
+        w = float(w)
+        if w <= 0.0:
+            continue
+        strat_flat = np.empty(total, dtype=np.float64)
+        for i, nd in enumerate(nodes):
+            strat_flat[int(legal_off[i]) : int(legal_off[i + 1])] = np.asarray(
+                pol[nd.pkey], dtype=np.float64
+            )
+        if objective == SERVED:
+            pi = own_reaches(
+                strat_flat, legal_off, parent_iset, parent_slot, depth_order, depth_start
+            )
+            acc_flat += (w * np.repeat(pi, counts)) * strat_flat
+            reach_weight += w * pi
+        else:
+            acc_flat += w * strat_flat
+        wsum += w
+    if objective == SERVED:
+        flat, _unreached = _finalize_served(acc_flat, reach_weight, legal_off)
+    else:
+        flat = _finalize_per_decision(acc_flat, wsum, legal_off)
+    return _policy_dict(nodes, flat, legal_off)
+
+
+# ---------------------------------------------------------------------------
 # Policy materialization + scoring
 # ---------------------------------------------------------------------------
 
@@ -476,11 +802,17 @@ def materialize_policy(
     nets_by_iter: List[Tuple[int, Any]],
     weighting: str = "linear",
     seq_cap: int = SEQ_CAP,
+    objective: str = DEFAULT_OBJECTIVE,
 ) -> Dict[Any, np.ndarray]:
     """Build the ``{pkey: strategy_vector(nA)}`` dict for tiny_solver.exploitability.
 
     One vector per distinct perfect-recall infoset, keyed by the BARE ``node.pkey``
     so the solver's existing ``_lookup`` dict path scores it without modification.
+
+    ``objective`` selects which SD-CFR object is materialized: ``SERVED``
+    (default, the own-reach-weighted mixture average that ``prtcfr_mixture``
+    realizes by sampling) or ``PER_DECISION`` (the reach-unweighted mean, which
+    nothing serves). See the module's "two SD-CFR policy objects" section.
 
     Batched: every infoset's padded token row and 146-mask are stacked into one
     ``(N, seq_cap)`` / ``(N, 146)`` pair, and each net's
@@ -488,10 +820,12 @@ def materialize_policy(
     infoset per net). The {A,6} tree has ~13k infosets; the per-infoset-per-net
     loop is tens of thousands of B=1 GRU forwards (minutes on CPU), the batched
     path is one forward per net (seconds). The two paths produce the same numbers
-    up to float order; ``sd_cfr_average_strategy`` is the per-infoset reference.
+    up to float order; ``sd_cfr_average_strategy`` is the per-infoset reference
+    for the ``PER_DECISION`` object.
     """
     import torch
 
+    _check_objective(objective)
     if tiny_node_to_tokens is None:
         raise RuntimeError(
             "src.cfr.prtcfr_net.tiny_node_to_tokens unavailable. Core has not "
@@ -504,16 +838,28 @@ def materialize_policy(
         return {}
 
     # Stack token rows + 146-masks once; record each node's legal head indices.
+    counts, legal_off = _legal_layout(nodes)
+    total = int(legal_off[-1])
     tok_rows = np.empty((n, seq_cap), dtype=np.int64)
     mask_rows = np.zeros((n, NUM_ACTIONS), dtype=bool)
-    legal_idx: List[List[int]] = []
+    legal_flat = np.empty(total, dtype=np.int64)
     for i, node in enumerate(nodes):
         tok_rows[i] = _pad_tokens(tiny_node_to_tokens(node), seq_cap=seq_cap)
         mask_rows[i] = encode_action_mask(node.actions)
-        legal_idx.append([action_to_index(a) for a in node.actions])
+        legal_flat[int(legal_off[i]) : int(legal_off[i + 1])] = [
+            action_to_index(a) for a in node.actions
+        ]
 
-    # SD-CFR weighted accumulation in 146-space, one batched forward per net.
-    acc146 = np.zeros((n, NUM_ACTIONS), dtype=np.float64)
+    if objective == SERVED:
+        parent_iset, parent_slot, _owner, depth_order, depth_start = (
+            own_decision_structure(root, nodes)
+        )
+        reach_weight = np.zeros(n, dtype=np.float64)
+
+    # SD-CFR weighted accumulation in the flat legal layout, one batched forward
+    # per net.
+    rows = np.repeat(np.arange(n, dtype=np.int64), counts)
+    acc_flat = np.zeros(total, dtype=np.float64)
     wsum = 0.0
     for it, net in nets_by_iter:
         w = float(it) if weighting == "linear" else 1.0
@@ -530,20 +876,22 @@ def materialize_policy(
                 f"strategy_from_tokens returned shape {strat.shape}, "
                 f"expected {(n, NUM_ACTIONS)}"
             )
-        acc146 += w * strat
+        strat_flat = strat[rows, legal_flat]
+        if objective == SERVED:
+            pi = own_reaches(
+                strat_flat, legal_off, parent_iset, parent_slot, depth_order, depth_start
+            )
+            acc_flat += (w * np.repeat(pi, counts)) * strat_flat
+            reach_weight += w * pi
+        else:
+            acc_flat += w * strat_flat
         wsum += w
 
-    policy: Dict[Any, np.ndarray] = {}
-    for i, node in enumerate(nodes):
-        idx = legal_idx[i]
-        nA = len(idx)
-        if wsum <= 0.0:
-            policy[node.pkey] = np.ones(nA, dtype=np.float64) / nA
-            continue
-        vec = acc146[i, idx] / wsum
-        s = vec.sum()
-        policy[node.pkey] = vec / s if s > 1e-12 else np.ones(nA, dtype=np.float64) / nA
-    return policy
+    if objective == SERVED:
+        flat, _unreached = _finalize_served(acc_flat, reach_weight, legal_off)
+    else:
+        flat = _finalize_per_decision(acc_flat, wsum, legal_off)
+    return _policy_dict(nodes, flat, legal_off)
 
 
 class IncrementalPolicyAccumulator:
@@ -577,7 +925,8 @@ class IncrementalPolicyAccumulator:
     (``cfr/scratch/prtcfr_x2_s1w11_gpu.py``, uncommitted).
 
     Equivalence to ``materialize_policy`` (same ``root``, ``nets_by_iter``,
-    ``weighting``, ``seq_cap``) holds up to float32 matmul-reordering noise
+    ``weighting``, ``seq_cap``, ``objective``) holds up to float32
+    matmul-reordering noise
     (chunking only changes how rows are grouped into the net's float32 batched
     matmuls; each row's own arithmetic is independent of which other rows
     share its batch since neither the GRU nor LayerNorm mixes across the
@@ -585,6 +934,16 @@ class IncrementalPolicyAccumulator:
     chunking) -- verified on a small tree by
     tests/test_prtcfr_x2_gate.py::test_incremental_policy_matches_materialize_policy_small_tree
     (empirically ~1.8e-6 max abs diff, well inside float32 precision).
+
+    ``objective`` (cambia-708) selects which SD-CFR object accumulates:
+    ``SERVED`` (default) folds each snapshot weighted by ``w_s`` times its own
+    reach of the infoset, the realized behavior strategy of the sampled
+    mixture; ``PER_DECISION`` folds by ``w_s`` alone. The own reach is a
+    per-snapshot, whole-tree quantity, so under ``SERVED`` each snapshot's
+    strategy is completed over every infoset before it is folded -- which the
+    chunked accumulation already does, one net at a time. ``SERVED`` costs one
+    extra ``(total_legal,)`` float64 buffer per net plus one depth sweep; the
+    per-net forwards, the dominant cost, are unchanged.
     """
 
     def __init__(
@@ -593,27 +952,46 @@ class IncrementalPolicyAccumulator:
         weighting: str = "linear",
         seq_cap: int = SEQ_CAP,
         chunk_size: int = 2048,
+        objective: str = DEFAULT_OBJECTIVE,
     ):
         if tiny_node_to_tokens is None:
             raise RuntimeError(
                 "src.cfr.prtcfr_net.tiny_node_to_tokens unavailable. Core has not "
                 "landed; the gate test injects a stub for plumbing runs."
             )
+        _check_objective(objective)
         self.weighting = weighting
         self.seq_cap = seq_cap
         self.chunk_size = max(1, int(chunk_size))
+        self.objective = objective
         self.nodes = enumerate_infosets(root)
         n = len(self.nodes)
+        self._counts, self._legal_off = _legal_layout(self.nodes)
+        total = int(self._legal_off[-1])
         self._tok_rows = np.empty((n, seq_cap), dtype=np.int64)
         self._mask_rows = np.zeros((n, NUM_ACTIONS), dtype=bool)
-        self._legal_idx: List[List[int]] = []
+        self._legal_flat = np.empty(total, dtype=np.int64)
         for i, node in enumerate(self.nodes):
             self._tok_rows[i] = _pad_tokens(tiny_node_to_tokens(node), seq_cap=seq_cap)
             self._mask_rows[i] = encode_action_mask(node.actions)
-            self._legal_idx.append([action_to_index(a) for a in node.actions])
-        self._acc146 = np.zeros((n, NUM_ACTIONS), dtype=np.float64)
+            self._legal_flat[int(self._legal_off[i]) : int(self._legal_off[i + 1])] = [
+                action_to_index(a) for a in node.actions
+            ]
+        self._acc_flat = np.zeros(total, dtype=np.float64)
         self._wsum = 0.0
         self._accumulated: set = set()
+        self._reach_weight = np.zeros(n, dtype=np.float64)
+        # Number of infosets the served finalize fell back to uniform on
+        # (unreachable under every folded snapshot); set by ``policy()``.
+        self.unreached_infosets = 0
+        if objective == SERVED:
+            (
+                self._parent_iset,
+                self._parent_slot,
+                _owner,
+                self._depth_order,
+                self._depth_start,
+            ) = own_decision_structure(root, self.nodes)
 
     def accumulate(self, nets_by_iter: List[Tuple[int, Any]]) -> None:
         """Fold every ``(iter, net)`` not already accumulated into the
@@ -622,6 +1000,7 @@ class IncrementalPolicyAccumulator:
         import torch
 
         n = len(self.nodes)
+        rows = np.repeat(np.arange(n, dtype=np.int64), self._counts)
         for it, net in nets_by_iter:
             if it in self._accumulated:
                 continue
@@ -630,6 +1009,7 @@ class IncrementalPolicyAccumulator:
             if w <= 0.0:
                 continue
             dev = getattr(net, "device", None) or torch.device("cpu")
+            strat_flat = np.empty(int(self._legal_off[-1]), dtype=np.float64)
             for lo in range(0, n, self.chunk_size):
                 hi = min(lo + self.chunk_size, n)
                 tok_t = torch.as_tensor(
@@ -646,24 +1026,38 @@ class IncrementalPolicyAccumulator:
                         f"strategy_from_tokens returned shape {strat_np.shape}, "
                         f"expected {(hi - lo, NUM_ACTIONS)}"
                     )
-                self._acc146[lo:hi] += w * strat_np
+                flat_lo, flat_hi = int(self._legal_off[lo]), int(self._legal_off[hi])
+                strat_flat[flat_lo:flat_hi] = strat_np[
+                    rows[flat_lo:flat_hi] - lo, self._legal_flat[flat_lo:flat_hi]
+                ]
+            if self.objective == SERVED:
+                pi = own_reaches(
+                    strat_flat,
+                    self._legal_off,
+                    self._parent_iset,
+                    self._parent_slot,
+                    self._depth_order,
+                    self._depth_start,
+                )
+                self._acc_flat += (w * np.repeat(pi, self._counts)) * strat_flat
+                self._reach_weight += w * pi
+            else:
+                self._acc_flat += w * strat_flat
             self._wsum += w
 
     def policy(self) -> Dict[Any, np.ndarray]:
         """Materialize the current ``{pkey: strategy_vector(nA)}`` dict from
         the running accumulation state (same normalization as
-        ``materialize_policy``)."""
-        out: Dict[Any, np.ndarray] = {}
-        for i, node in enumerate(self.nodes):
-            idx = self._legal_idx[i]
-            nA = len(idx)
-            if self._wsum <= 0.0:
-                out[node.pkey] = np.ones(nA, dtype=np.float64) / nA
-                continue
-            vec = self._acc146[i, idx] / self._wsum
-            s = vec.sum()
-            out[node.pkey] = vec / s if s > 1e-12 else np.ones(nA, dtype=np.float64) / nA
-        return out
+        ``materialize_policy`` under the same ``objective``)."""
+        if self.objective == SERVED:
+            flat, unreached = _finalize_served(
+                self._acc_flat, self._reach_weight, self._legal_off
+            )
+            self.unreached_infosets = int(unreached.sum())
+        else:
+            flat = _finalize_per_decision(self._acc_flat, self._wsum, self._legal_off)
+            self.unreached_infosets = 0
+        return _policy_dict(self.nodes, flat, self._legal_off)
 
 
 def materialize_policy_incremental(
@@ -672,6 +1066,7 @@ def materialize_policy_incremental(
     weighting: str = "linear",
     seq_cap: int = SEQ_CAP,
     chunk_size: int = 2048,
+    objective: str = DEFAULT_OBJECTIVE,
 ) -> Dict[Any, np.ndarray]:
     """Drop-in, memory-bounded replacement for ``materialize_policy`` (same
     signature; numerically equivalent up to float summation order -- see
@@ -681,10 +1076,15 @@ def materialize_policy_incremental(
     whenever N (infosets) times production net dims makes a single-shot batch
     forward too large -- which is always, for the real {A,6} tree at
     production net dims (see the class docstring for the concrete OOM this
-    avoids); ``materialize_policy`` itself is kept unchanged as the
-    equivalence-gate reference."""
+    avoids); ``materialize_policy`` is the single-batch equivalence reference.
+
+    ``objective`` defaults to ``SERVED``, the policy ``prtcfr_mixture`` plays."""
     acc = IncrementalPolicyAccumulator(
-        root, weighting=weighting, seq_cap=seq_cap, chunk_size=chunk_size
+        root,
+        weighting=weighting,
+        seq_cap=seq_cap,
+        chunk_size=chunk_size,
+        objective=objective,
     )
     acc.accumulate(nets_by_iter)
     return acc.policy()
@@ -696,6 +1096,7 @@ def score_policy_on_tiny_game(
     weighting: str = "linear",
     device: str = "cpu",
     seq_cap: int = SEQ_CAP,
+    objective: str = DEFAULT_OBJECTIVE,
 ) -> Dict[str, Any]:
     """End-to-end X2 scorer: load -> enumerate -> tokenize -> average -> score.
 
@@ -705,15 +1106,18 @@ def score_policy_on_tiny_game(
         config_path: tiny-game config (default the {A,6} plateau game).
         weighting: "linear" (w_t=t, default) or "uniform".
         device: torch map_location for loading nets.
+        objective: ``SERVED`` (default, the policy prtcfr_mixture plays) or
+            ``PER_DECISION`` (the reach-unweighted mean, which nothing serves).
 
     Returns a dict:
         {"nashconv": float, "components": (br0, br1, onp0, onp1),
          "num_infosets": int, "num_snapshots": int,
-         "snapshot_iters": [int, ...], "passed": bool}
+         "snapshot_iters": [int, ...], "objective": str, "passed": bool}
     where ``passed`` == (nashconv < X2_NASHCONV_BAR).
 
     @chief invokes this for the real verdict with a trained snapshot dir.
     """
+    _check_objective(objective)
     snaps = discover_snapshots(checkpoint_or_snapshot_dir)
     # Provenance gate (cambia-612): refuse a version-mismatched checkpoint before
     # loading it, and pick the observation path that matches its training-era
@@ -730,7 +1134,7 @@ def score_policy_on_tiny_game(
     # single N-row batched forward OOMs (see IncrementalPolicyAccumulator's
     # docstring); the chunked accumulator is numerically equivalent.
     policy = materialize_policy_incremental(
-        root, nets_by_iter, weighting=weighting, seq_cap=seq_cap
+        root, nets_by_iter, weighting=weighting, seq_cap=seq_cap, objective=objective
     )
     nashconv, components = exploitability(root, policy)
     return {
@@ -739,6 +1143,7 @@ def score_policy_on_tiny_game(
         "num_infosets": len(policy),
         "num_snapshots": len(snaps),
         "snapshot_iters": [it for it, _ in snaps],
+        "objective": objective,
         "passed": bool(nashconv < X2_NASHCONV_BAR),
     }
 
@@ -749,6 +1154,7 @@ def score_with_loaded_nets(
     weighting: str = "linear",
     seq_cap: int = SEQ_CAP,
     tokenizer_version: Optional[int] = None,
+    objective: str = DEFAULT_OBJECTIVE,
 ) -> Dict[str, Any]:
     """Same as score_policy_on_tiny_game but with nets already in memory.
 
@@ -760,6 +1166,7 @@ def score_with_loaded_nets(
     error on mismatch with the live tokenizer, loud warning + legacy path when
     None (unknown, the default for in-memory nets with no run_meta to consult).
     """
+    _check_objective(objective)
     production_obs = _resolve_scoring_obs_path(tokenizer_version)
     root, _isets, _n, _ab = build_tiny_tree(
         config_path, seq_cap=seq_cap, production_obs=production_obs
@@ -767,7 +1174,7 @@ def score_with_loaded_nets(
     # See score_policy_on_tiny_game: incremental/chunked, not the single-batch
     # materialize_policy, to stay well under a few GB RSS at production dims.
     policy = materialize_policy_incremental(
-        root, nets_by_iter, weighting=weighting, seq_cap=seq_cap
+        root, nets_by_iter, weighting=weighting, seq_cap=seq_cap, objective=objective
     )
     nashconv, components = exploitability(root, policy)
     return {
@@ -776,6 +1183,7 @@ def score_with_loaded_nets(
         "num_infosets": len(policy),
         "num_snapshots": len(nets_by_iter),
         "snapshot_iters": [it for it, _ in nets_by_iter],
+        "objective": objective,
         "passed": bool(nashconv < X2_NASHCONV_BAR),
     }
 
@@ -786,8 +1194,14 @@ def certify_policy_on_tiny_game(
     weighting: str = "linear",
     device: str = "cpu",
     seq_cap: int = SEQ_CAP,
+    objective: str = DEFAULT_OBJECTIVE,
 ) -> Dict[str, Any]:
     """Exact-rational X2 verdict: the authoritative scorer for the X2R5 ruling.
+
+    Scores the ``SERVED`` object by default (cambia-708): the exact NashConv of
+    the policy ``prtcfr_mixture`` actually plays, which puts the certifier on
+    the same footing as the reach-weighted X1 tabular baseline. Pass
+    ``objective=PER_DECISION`` to reproduce a pre-cambia-708 number.
 
     Same load -> enumerate -> tokenize -> SD-CFR average path as
     ``score_policy_on_tiny_game``, but the tree carries exact-rational chance
@@ -810,6 +1224,7 @@ def certify_policy_on_tiny_game(
     ``passed`` is the exact verdict; ``nashconv`` reports the exact value so the
     gate consumes exact by default.
     """
+    _check_objective(objective)
     snaps = discover_snapshots(checkpoint_or_snapshot_dir)
     # Provenance gate (cambia-612): same version check + obs-path selection as
     # score_policy_on_tiny_game, applied to the exact-rational verdict path.
@@ -821,7 +1236,7 @@ def certify_policy_on_tiny_game(
         config_path, seq_cap=seq_cap, exact_weights=True, production_obs=production_obs
     )
     policy = materialize_policy_incremental(
-        root, nets_by_iter, weighting=weighting, seq_cap=seq_cap
+        root, nets_by_iter, weighting=weighting, seq_cap=seq_cap, objective=objective
     )
     nc_f, comp_f = exploitability(root, policy)
     cert = tiny_exact.certify(root, policy, bar=tiny_exact.BAR_RESPEC)
@@ -841,6 +1256,7 @@ def certify_policy_on_tiny_game(
         "num_infosets": len(policy),
         "num_snapshots": len(snaps),
         "snapshot_iters": [it for it, _ in snaps],
+        "objective": objective,
         "bar": float(tiny_exact.BAR_RESPEC),
         "passed": cert["passed"],
     }
