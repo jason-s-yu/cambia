@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+
+	"github.com/jason-s-yu/cambia/runnerd/nashnet/capability"
 )
 
 // goldenNode is the fixture node the Python mint writes; every other fixture
@@ -331,16 +333,16 @@ func TestNewGrantStoreValidatesItsConfig(t *testing.T) {
 // goldenMeta mirrors runnerd/authtoken/testdata/nashnet/golden.json, written by
 // cfr/tests/test_harness_nashnet.py.
 type goldenMeta struct {
-	NodeName          string `json:"node_name"`
-	NodeID            string `json:"node_id"`
-	Subject           string `json:"subject"`
-	GrantFile         string `json:"grant_file"`
-	OperatorPubkeyHex string `json:"operator_pubkey_hex"`
-	NodeSeedHex       string `json:"node_seed_hex"`
-	IAT               int64  `json:"iat"`
-	Exp               int64  `json:"exp"`
-	LifetimeSeconds   int64  `json:"lifetime_seconds"`
-	Caps              Caps   `json:"caps"`
+	NodeName          string           `json:"node_name"`
+	NodeID            string           `json:"node_id"`
+	Subject           string           `json:"subject"`
+	GrantFile         string           `json:"grant_file"`
+	OperatorPubkeyHex string           `json:"operator_pubkey_hex"`
+	NodeSeedHex       string           `json:"node_seed_hex"`
+	IAT               int64            `json:"iat"`
+	Exp               int64            `json:"exp"`
+	LifetimeSeconds   int64            `json:"lifetime_seconds"`
+	Caps              capability.Grant `json:"caps"`
 }
 
 // TestGoldenPythonMintedGrantVerifies pins the two implementations of the grant
