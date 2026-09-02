@@ -38,6 +38,9 @@ function ctx(over = {}) {
         turnId: 4,
         currentPlayerId: SELF,
         discardTopId: 'discard-7',
+        discardTopRank: '7',
+        // race-OFF (SnapRace false) is the frozen default (service/internal/game/rules.go).
+        snapRace: false,
         pendingAction: null,
         specialRank: null,
         drawnCardId: null,
@@ -87,11 +90,33 @@ test('snap resends while the discard top and the turn are unmoved', () => {
     ), 'resend');
 });
 
-test('snap notifies once the discard top has moved', () => {
+test('snap notifies once the discard top has moved to a different rank', () => {
     // Same card id, different meaning: the server would score it against the new top and draw
     // a penalty (engine_adapter.go handleSnapViaEngine -> handleSnapFailure).
     const rec = record('action_snap', { cardRefs: [{ id: 'my-0' }] });
-    const moved = ctx({ discardTopId: 'discard-9', cardIds: ['my-0', 'my-1', 'opp-0', 'discard-9'] });
+    const moved = ctx({ discardTopId: 'discard-9', discardTopRank: '9', cardIds: ['my-0', 'my-1', 'opp-0', 'discard-9'] });
+    assert.equal(decideResend(rec, moved, 11), 'notify');
+});
+
+test('snap resends when the top moved to a same-rank card under snapRace off (cambia-1568)', () => {
+    // A second player's snap of the same discard is legal under the race-OFF default and drops
+    // this frame purely on a race (dispatch discarded it while B's snap was in flight): the top
+    // now names B's card, but it is still rank 7, and the server judges a snap on rank alone
+    // (engine_adapter.go), so this frame's own snap is exactly as legal as it was.
+    const rec = record('action_snap', { cardRefs: [{ id: 'my-0' }] });
+    const moved = ctx({ discardTopId: 'discard-7b', discardTopRank: '7', cardIds: ['my-0', 'my-1', 'opp-0', 'discard-7b'] });
+    assert.equal(decideResend(rec, moved, 11), 'resend');
+});
+
+test('snap still notifies on a same-rank top move when snapRace is on', () => {
+    // The relaxation does not hold under snapRace true: the server gates a repeat snap on the
+    // same discard there and refuses it with a 2-card penalty, so resending would cost the
+    // player a card rather than land the snap they meant.
+    const rec = record('action_snap', {
+        cardRefs: [{ id: 'my-0' }],
+        ctx: ctx({ snapRace: true })
+    });
+    const moved = ctx({ snapRace: true, discardTopId: 'discard-7b', discardTopRank: '7', cardIds: ['my-0', 'my-1', 'opp-0', 'discard-7b'] });
     assert.equal(decideResend(rec, moved, 11), 'notify');
 });
 
@@ -259,7 +284,8 @@ test('tableContext reads the snapshot the way the table does', () => {
         turnId: 4,
         currentPlayerId: SELF,
         cambiaCalled: false,
-        discardTop: { id: 'discard-7' },
+        discardTop: { id: 'discard-7', rank: '7' },
+        houseRules: { snapRace: true },
         specialAction: { active: true, playerId: SELF, cardRank: 'K' },
         players: [
             { playerId: SELF, revealedHand: [{ id: 'my-0' }, { id: 'my-1' }], drawnCard: { id: 'drawn-1' } },
@@ -268,6 +294,11 @@ test('tableContext reads the snapshot the way the table does', () => {
     };
     const c = tableContext(gs, 'special_action', 'in_game', SELF);
     assert.equal(c.discardTopId, 'discard-7');
+    // cambia-1568: the rank and the snap model, read for the action_snap resend relaxation.
+    assert.equal(c.discardTopRank, '7');
+    assert.equal(c.snapRace, true);
+    assert.equal(tableContext({ ...gs, houseRules: { snapRace: false } }, null, 'in_game', SELF).snapRace, false);
+    assert.equal(tableContext({ ...gs, houseRules: undefined }, null, 'in_game', SELF).snapRace, false);
     // Slots come from the server's ObfCard.idx where it is present (sync_state.go fills it for
     // the self view and the opponent view alike) and from the array position otherwise.
     assert.equal(c.slots[`${SELF}:my-1`], 1);
@@ -327,10 +358,11 @@ test('both frames dropped in one window are decided, not just the newest', () =>
 });
 
 test('each frame is judged on its own intent, not the newest one\'s', () => {
-    // A snap whose discard top moved is stale; a chat sent in the same window is not.
+    // A snap whose discard top moved to a different rank is stale; a chat sent in the same
+    // window is not.
     const snap = entry('action_snap', { cardRefs: [{ id: 'my-0' }] });
     const chat = entry('chat', { ctx: ctx({ phase: 'open' }) });
-    const moved = ctx({ phase: 'open', discardTopId: 'discard-9', cardIds: ['my-0', 'my-1', 'opp-0', 'discard-9'] });
+    const moved = ctx({ phase: 'open', discardTopId: 'discard-9', discardTopRank: '9', cardIds: ['my-0', 'my-1', 'opp-0', 'discard-9'] });
 
     const out = resolveOutbox([snap, chat], moved, 11, 1000);
     assert.deepEqual(out.resend.map((e) => e.record.type), ['chat']);

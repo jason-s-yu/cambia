@@ -16,10 +16,10 @@ func (g *GameState) initiateSnapPhase(discardedCard Card) {
 	// rule rather than the call, because with lockCallerHand off the caller keeps playing the snap
 	// window like anyone else - which is the configuration ranked play uses (MATCHMAKING.md 5.2),
 	// where an unconditional exclusion silently dropped a whole player's snaps (cambia-1118).
-	// NOTE: Per RULES.md the non-discarder should go first, but Python's
-	// _initiate_snap_phase computes discarder_player incorrectly (off by one),
-	// resulting in the actual discarder going first. We mirror that behavior
-	// for 2P. For N-player we keep the same discarder-first ordering.
+	// NOTE: race-OFF is the sequential discarder-first model, the ratified and
+	// frozen default recorded at engine/rules.go:14 (cambia-564); RULES.md 5
+	// describes the race-ON model instead, a simultaneous imperfect-info
+	// commit with no ordering. See also cambia-543.
 	discarder := g.CurrentPlayer
 	n := g.Rules.numPlayers()
 

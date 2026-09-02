@@ -53,6 +53,15 @@ type ObfSpecialActionState struct {
 	// Mandatory says the ability cannot be declined, so a client restoring this prompt after a
 	// reconnect knows not to offer a skip that the server would only refuse (cambia-1125).
 	Mandatory bool `json:"mandatory,omitempty"`
+	// FirstStepDone mirrors SpecialActionState.FirstStepDone for the King: whether the look half
+	// has already resolved and the pending decision is the swap/keep step. Without it, a client
+	// that mounts mid-King (reload, new tab, device switch, not a live-socket resync) had no way to
+	// tell the two King steps apart and re-rendered the look step, which the server refuses
+	// ("reveal already done"), stranding the swap half of the ability (cambia-1567). The peeked
+	// faces themselves are NOT re-delivered here or anywhere on remount: own and looked-at faces
+	// stay transient and never durable (cambia-763 F1, cambia-1094), and the swap step does not
+	// need them - doKingSwapYesEngine resolves the swap from this state alone.
+	FirstStepDone bool `json:"firstStepDone,omitempty"`
 }
 
 // ObfSnapMoveState is one outstanding snap fill (RULES.md 5, cambia-936): the snapper owes a card
@@ -158,10 +167,11 @@ func (g *CambiaGame) getCurrentObfuscatedGameState(forUser uuid.UUID) ObfGameSta
 	// Pending special action (cambia-763 F1). Public-safe projection only; see ObfSpecialActionState.
 	if g.SpecialAction.Active {
 		obf.SpecialAction = &ObfSpecialActionState{
-			Active:    true,
-			PlayerID:  g.SpecialAction.PlayerID,
-			CardRank:  g.SpecialAction.CardRank,
-			Mandatory: g.SpecialAction.MustResolve(),
+			Active:        true,
+			PlayerID:      g.SpecialAction.PlayerID,
+			CardRank:      g.SpecialAction.CardRank,
+			Mandatory:     g.SpecialAction.MustResolve(),
+			FirstStepDone: g.SpecialAction.FirstStepDone,
 		}
 	}
 

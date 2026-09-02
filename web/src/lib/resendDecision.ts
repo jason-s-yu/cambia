@@ -69,7 +69,7 @@ export interface GameSnapshotLike {
 	turnId: number;
 	currentPlayerId: string | null;
 	cambiaCalled: boolean;
-	discardTop?: { id: string } | null;
+	discardTop?: { id: string; rank?: string } | null;
 	players: {
 		playerId: string;
 		revealedHand?: { id: string; idx?: number }[];
@@ -78,6 +78,8 @@ export interface GameSnapshotLike {
 	specialAction?: { active: boolean; playerId: string; cardRank: string } | null;
 	/** Snap fills still owed, one per snapper (cambia-936). */
 	snapMoves?: { snapperId: string }[] | null;
+	/** House rules; only the snap model matters here (service/internal/game/rules.go SnapRace). */
+	houseRules?: { snapRace?: boolean } | null;
 }
 
 /** Everything the decision compares, captured at send time and again after the repair. */
@@ -89,6 +91,10 @@ export interface TableContext {
 	turnId: number | null;
 	currentPlayerId: string | null;
 	discardTopId: string | null;
+	/** Rank of the discard top, else null. Only action_snap's relaxation reads this. */
+	discardTopRank: string | null;
+	/** houseRules.snapRace at decision time (service/internal/game/rules.go). */
+	snapRace: boolean;
 	/** gameStore.pendingAction: null | 'discard_replace' | 'special_action'. */
 	pendingAction: string | null;
 	/** Rank of the special action this player owes, else null. */
@@ -190,6 +196,8 @@ export function tableContext(
 		turnId: typeof gs?.turnId === 'number' ? gs.turnId : null,
 		currentPlayerId: gs?.currentPlayerId ?? null,
 		discardTopId: gs?.discardTop?.id ?? null,
+		discardTopRank: gs?.discardTop?.rank ?? null,
+		snapRace: !!gs?.houseRules?.snapRace,
 		pendingAction,
 		specialRank: special?.active && special.playerId === selfId ? special.cardRank : null,
 		owesSnapMove: (gs?.snapMoves ?? []).some((m) => m.snapperId === selfId),
@@ -241,7 +249,23 @@ export function decideResend(rec: OutboundRecord, now: TableContext, syncSeq: nu
 	// opponent-hand branch), so an unchanged top means no slot was renumbered. It is checked for
 	// every game action, not only the two that read the top, because the client's own slot model
 	// is patched from events and can lag; this does not depend on that bookkeeping.
-	if (now.discardTopId !== rec.ctx.discardTopId) return 'notify';
+	//
+	// action_snap alone gets a narrower reading of a moved top. Under snapRace off (the default),
+	// a second player's snap of the same discard is legal and drops this frame purely on a race,
+	// and the server judges a snap on rank alone (engine_adapter.go), so a top that moved to
+	// another card of the SAME rank leaves this frame's own snap just as legal as it was. Under
+	// snapRace true the relaxation does not hold: a second commit on the same discard is refused
+	// and penalized (2 cards), so it must still notify. Every other action type keeps the strict
+	// check, since a moved top there is still evidence of a slot renumbered underneath it.
+	// cambia-1257 AC4 is where this race-OFF window assumption gets re-checked once it lands.
+	if (now.discardTopId !== rec.ctx.discardTopId) {
+		const snapSameRankUnderRaceOff =
+			rec.type === 'action_snap' &&
+			!now.snapRace &&
+			!!now.discardTopRank &&
+			now.discardTopRank === rec.ctx.discardTopRank;
+		if (!snapSameRankUnderRaceOff) return 'notify';
+	}
 
 	// Every card the frame names must still be in play, under the same owner and in the same
 	// slot. A snap removes a card and shifts the rest of that hand left (engine_adapter.go, and

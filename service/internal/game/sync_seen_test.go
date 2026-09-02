@@ -396,6 +396,59 @@ func TestSyncStateSerializesPendingSpecialAction(t *testing.T) {
 	assert.Nil(t, afterState.SpecialAction, "sync_state must omit the special action once it resolves")
 }
 
+// TestSyncStateSerializesKingFirstStepDone verifies the King's second-step marker (cambia-1567):
+// a client that mounts fresh mid-King (reload, new tab, device switch) needs to tell the look step
+// from the swap/keep step to render the right controls, since the swap decision has no exit but
+// the turn clock otherwise. sync_state must carry SpecialActionState.FirstStepDone once the look
+// half resolves, and must not carry it before.
+func TestSyncStateSerializesKingFirstStepDone(t *testing.T) {
+	g, _, _ := setupTestGame(t, 2, &HouseRules{TurnTimerSec: 0, PenaltyDrawCount: 2})
+
+	actor := currentTurnPlayer(g)
+	engineIdx := g.PlayerToEngine[actor.ID]
+	oppEngineIdx := uint8(1 - int(engineIdx))
+	oppID := g.EngineToPlayer[oppEngineIdx]
+
+	ownSlot0 := g.CardTracker.Players[engineIdx].HandUUIDs[0]
+	oppSlot0 := g.CardTracker.Players[oppEngineIdx].HandUUIDs[0]
+
+	kUUID := forceStockTop(g, engine.NewCard(engine.SuitSpades, engine.RankKing))
+	g.HandlePlayerAction(actor.ID, models.GameAction{ActionType: "action_draw_stockpile"})
+	g.HandlePlayerAction(actor.ID, models.GameAction{
+		ActionType: "action_discard",
+		Payload:    map[string]interface{}{"id": kUUID.String()},
+	})
+	require.True(t, g.SpecialAction.Active, "King discard should activate a special action")
+
+	// Before the look: the projection must not claim the second step is underway.
+	preLook := g.GetCurrentObfuscatedGameState(actor.ID)
+	require.NotNil(t, preLook.SpecialAction)
+	assert.False(t, preLook.SpecialAction.FirstStepDone, "sync_state must not report the second step before the look resolves")
+
+	// King look (the first step).
+	g.ProcessSpecialAction(actor.ID, "swap_peek", cardTarget(ownSlot0, actor.ID, 0), cardTarget(oppSlot0, oppID, 0))
+	require.True(t, g.SpecialAction.FirstStepDone, "engine state should record the look as done")
+
+	// After the look: both the acting player's and the opponent's projection must carry the marker,
+	// so a resync (either side) reflects the true step.
+	actorState := g.GetCurrentObfuscatedGameState(actor.ID)
+	require.NotNil(t, actorState.SpecialAction)
+	assert.True(t, actorState.SpecialAction.FirstStepDone, "sync_state must report the second step once the look resolves")
+
+	oppState := g.GetCurrentObfuscatedGameState(oppID)
+	require.NotNil(t, oppState.SpecialAction)
+	assert.True(t, oppState.SpecialAction.FirstStepDone)
+
+	// The peeked pair is deliberately absent from the projection: it does not carry a Card1/Card2
+	// (or equivalent) field, since the swap step does not need it (doKingSwapYesEngine resolves
+	// from SpecialActionState alone) and re-delivering it on remount would break the King
+	// information model (cambia-763 F1).
+	g.ProcessSpecialAction(actor.ID, "swap_peek_swap", nil, nil)
+	require.False(t, g.SpecialAction.Active, "swap should resolve the pending special action")
+	afterSwap := g.GetCurrentObfuscatedGameState(actor.ID)
+	assert.Nil(t, afterSwap.SpecialAction, "sync_state must omit the special action once the swap resolves")
+}
+
 // TestSnapRemovalDropsCardFromSelfView verifies a snapped own card leaves the owner's self view
 // entirely, rather than lingering as a slot the client would still target by id.
 func TestSnapRemovalDropsCardFromSelfView(t *testing.T) {

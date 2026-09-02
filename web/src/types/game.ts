@@ -96,7 +96,12 @@ export interface ObfGameState {
 		// allowReplaceAbilities is armed by the engine, which has no action that declines an armed
 		// ability, so the table must not offer a skip for it (cambia-1125).
 		mandatory?: boolean;
-		// Add other fields based on spec (e.g., peeked card info for King)
+		// King only: true once the look half has resolved, so the outstanding decision is
+		// swap/keep rather than the look. Lets a client that mounts fresh mid-King (reload, new
+		// tab, device switch) render the swap/keep controls straight from this snapshot instead of
+		// the look step, which the server refuses ("reveal already done"). The peeked pair is
+		// deliberately not carried here and is never re-delivered on remount (cambia-1567).
+		firstStepDone?: boolean;
 	} | null;
 	// Snap fills still owed (RULES.md 5, cambia-936): each snapper who took an opponent's card owes
 	// one of their own into the slot it left. One entry per snapper, since two players can each owe
