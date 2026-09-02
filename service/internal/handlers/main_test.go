@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jason-s-yu/cambia/service/internal/database"
 	"github.com/jason-s-yu/cambia/service/internal/testutil"
