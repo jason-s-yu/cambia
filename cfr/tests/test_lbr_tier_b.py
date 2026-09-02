@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from src.cfr.lbr import (
+    DEFAULT_ROLLOUT_OPPONENT,
     DEFAULT_TRAJECTORY_OPPONENT,
     GoSearchState,
     _make_random_opponent,
@@ -482,6 +483,27 @@ class _BeliefCarryingOpponent:
     def choose_action(self, view, legal_actions):
         assert self._bound is not None, "decided before being handed a belief"
         return list(legal_actions)[0]
+
+
+def test_tier_b_defaults_to_a_uniform_trajectory_and_a_strong_continuation():
+    """The default pairing is the one whose number means what Tier B says it
+    means: the sampled distribution held at Tier A's uniform opponent, and only
+    the continuation strengthened (cambia-1793).
+
+    A Tier-B row recorded before this default ran strong at both seats, which
+    is why the row names them: a number measured under one pairing cannot be
+    read against the other.
+    """
+    config = _Config()
+    result = tier_b_lbr(
+        _UniformWrapper(config), config, num_infosets=6, br_rollouts_per_infoset=2, seed=2
+    )
+    assert result["trajectory_opponent"] == "UniformRandomPolicy"
+    assert result["continuation_opponent"] == "ImperfectGreedyAgent"
+    # Pinned against the factories themselves, so repointing a constant cannot
+    # move the default without this failing.
+    assert DEFAULT_TRAJECTORY_OPPONENT is _make_random_opponent
+    assert DEFAULT_ROLLOUT_OPPONENT is _make_strong_opponent
 
 
 def test_tier_b_row_names_both_seat_one_roles():

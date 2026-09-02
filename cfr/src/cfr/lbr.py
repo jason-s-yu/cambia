@@ -529,9 +529,20 @@ def _accepts_game_view(agent: Any) -> bool:
     return bool(getattr(agent, "accepts_game_view", False))
 
 
-# Default Tier-B opponents: strong both for trajectory generation and for the
-# adversary seat during agent-policy continuation rollouts.
-DEFAULT_TRAJECTORY_OPPONENT: OpponentFactory = _make_strong_opponent
+# Default Tier-B opponents: uniform while the measured infosets are collected,
+# strong at the adversary seat during the continuation rollouts.
+#
+# The trajectory default was strong until cambia-1793, which measured what that
+# cost. Strengthening only the continuation, with collection left on the uniform
+# opponent Tier A uses, took PPO-200k from a Tier-A band of 0.2187-0.2312 to
+# 0.3780 +/- 0.0343 at seed 42: the direction the tier exists to show. Making
+# the trajectory opponent strong as well pulled the same measurement back to
+# 0.2245, inside the Tier-A band, because a strong opponent steers the agent
+# into positions where it has little left to gain and that cancels the whole
+# continuation effect. Only this pairing produces a number that means what Tier
+# B says it means, so it is the default; the other is still one driver flag
+# away for anyone who wants the narrower quantity.
+DEFAULT_TRAJECTORY_OPPONENT: OpponentFactory = _make_random_opponent
 DEFAULT_ROLLOUT_OPPONENT: OpponentFactory = _make_strong_opponent
 
 
@@ -1089,8 +1100,8 @@ def tier_b_lbr(
     """Compute the Tier-B sampled LBR exploitability estimate.
 
     Algorithm:
-      1. Collect P0 infosets along trajectories where the agent (seat 0) faces a
-         strong fixed opponent (seat 1).
+      1. Collect P0 infosets along trajectories where the agent (seat 0) faces
+         the trajectory opponent (seat 1), uniform-random by default.
       2. At each sampled infoset, replay the state, then for each legal action:
            rewind to the decision point, apply the candidate action, and roll the
            continuation out under agent-policy play (seat 0 = agent, seat 1 =
@@ -1103,10 +1114,20 @@ def tier_b_lbr(
     (cambia-1793). ``trajectory_opponent_factory`` decides WHICH positions are
     measured, since it plays seat 1 while the infosets are collected;
     ``rollout_opponent_factory`` decides HOW HARD the continuation is, since it
-    plays seat 1 after the candidate action. Both default to the strong
-    opponent, so moving Tier B onto the real strong opponent (cambia-1479)
-    moved both at once and the number could not say which change produced it.
-    The tier's rationale is about the continuation alone.
+    plays seat 1 after the candidate action. The tier's rationale is about the
+    continuation alone, so the default holds the trajectory at the uniform
+    opponent Tier A uses and strengthens only the continuation.
+
+    Reading a Tier-B number across that change: every Tier-B row recorded
+    before this default landed ran strong-plus-strong in effect, because both
+    factories pointed at the same one. That covers the 2026-09-01 leg (0.3265
+    +/- 0.0240, which fell back to UniformRandomPolicy at BOTH seats because no
+    baseline claimed ``accepts_game_view``) and the cambia-1479 legs (0.2245
+    +/- 0.0277 against the real strong opponent at both). None of them is
+    comparable to a row measured under this default, and none of them records
+    the two names, so a cross-era comparison reads ``trajectory_opponent`` and
+    ``continuation_opponent`` first and treats their absence as
+    strong-plus-strong.
 
     Each continuation opponent is seeded with the public history at the infoset
     before its first decision (see ``_begin_continuation``), so an opponent that

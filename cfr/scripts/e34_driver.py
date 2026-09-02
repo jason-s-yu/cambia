@@ -323,10 +323,13 @@ def main():
     lb.add_argument(
         "--trajectory-opponent",
         choices=["strong", "uniform"],
-        default="strong",
+        default="uniform",
         help=(
             "Tier B only: who plays seat 1 while the measured infosets are "
-            "collected, which decides WHICH positions are measured."
+            "collected, which decides WHICH positions are measured. Uniform by "
+            "default, matching Tier A, so a Tier-B leg varies only the "
+            "continuation. Pass strong for the narrower quantity: how "
+            "exploitable the agent is where a strong opponent steers it."
         ),
     )
     lb.add_argument(
