@@ -88,10 +88,13 @@ when present:
 A policy that raises while choosing is a defect, not a condition to route
 around: ``choose_action_pos`` re-raises it as a ``PolicyError`` carrying the
 seat and the phase, so a broken agent fails the run instead of scoring
-truncated playouts and reporting a low exploitability (cambia-1479). The
-failures that ARE absorbed (a lost optional-hook frame, a policy returning an
-action outside the legal set, an infoset whose replay diverged) are counted on
-a ``ToleratedFailures`` and the count rides on the result as ``policy_errors``.
+truncated playouts and reporting a low exploitability (cambia-1479). An engine
+read a utility depends on gets the same treatment as an ``EngineReadError``,
+since the 0.0 those reads used to fall back to is the value of a draw. Both are
+``MeasurementError``. The failures that ARE absorbed (a lost optional-hook
+frame, a policy returning an action outside the legal set, an infoset whose
+replay diverged) are counted on a ``ToleratedFailures`` and the count rides on
+the result as ``policy_errors``.
 
 Both tiers are pure eval-time measurement: no network or harness state is
 mutated.
@@ -528,7 +531,18 @@ DEFAULT_TRAJECTORY_OPPONENT: OpponentFactory = _make_strong_opponent
 DEFAULT_ROLLOUT_OPPONENT: OpponentFactory = _make_strong_opponent
 
 
-class PolicyError(RuntimeError):
+class MeasurementError(RuntimeError):
+    """Base for the failures an estimator refuses to absorb.
+
+    Both members answer the same question the wrong way round: an estimator
+    that routes around a failure still returns a number, and a number built on
+    a failure it hid is worse than no number (cambia-1479). Catch this base to
+    catch every such failure; the members say whether the policy or an engine
+    read was the thing that broke.
+    """
+
+
+class PolicyError(MeasurementError):
     """A policy raised while being asked for an action at a measured decision.
 
     Every estimator here used to catch this and break out of the playout, so a
@@ -537,6 +551,16 @@ class PolicyError(RuntimeError):
     error now propagates, carrying the context a bare traceback lacks: which
     policy, which seat, which phase of the measurement, and how many actions
     were on offer.
+    """
+
+
+class EngineReadError(MeasurementError):
+    """An engine read an estimator needs for a utility failed.
+
+    ``terminal_utility`` and ``hand_score_utility`` used to answer 0.0 here,
+    which is the value of a draw: an unreadable playout scored as a tie and
+    pulled the estimate toward zero with nothing on the row to say so. There is
+    no correct utility to substitute for a read that failed, so the run fails.
     """
 
 
@@ -703,13 +727,17 @@ def hand_score_utility(view: GameView, seat: int, opponent_seat: int) -> float:
     """Utility estimate for a game cut short by the decision cap.
 
     Lower hand score wins, matching the Tier-A/Tier-B/ISMCTS timeout convention
-    so the estimators stay comparable.
+    so the estimators stay comparable. A hand that cannot be read raises
+    ``EngineReadError`` rather than scoring the playout as a tie.
     """
     try:
         mine = sum(c.value for c in view.get_player_hand(seat))
         theirs = sum(c.value for c in view.get_player_hand(opponent_seat))
-    except Exception:  # JUSTIFIED: eval resilience on odd states
-        return 0.0
+    except Exception as exc:
+        raise EngineReadError(
+            f"reading hands for the timeout hand-score utility failed "
+            f"(seat {seat} vs seat {opponent_seat}): {type(exc).__name__}: {exc}"
+        ) from exc
     if mine < theirs:
         return 1.0
     if mine > theirs:
@@ -720,12 +748,20 @@ def hand_score_utility(view: GameView, seat: int, opponent_seat: int) -> float:
 def terminal_utility(
     state: GoSearchState, seat: int = _PLAYER_ID, opponent_seat: int = _OPPONENT_ID
 ) -> float:
-    """Terminal utility for ``seat``, or a hand-score estimate on timeout."""
+    """Terminal utility for ``seat``, or a hand-score estimate on timeout.
+
+    An unreadable terminal state raises ``EngineReadError``: the 0.0 this used
+    to return is the value of a draw, so an engine read that failed scored as
+    one and dragged the estimate toward zero without a trace.
+    """
     if state.is_terminal():
         try:
             return state.utility(seat)
-        except Exception:  # JUSTIFIED: eval resilience
-            return 0.0
+        except Exception as exc:
+            raise EngineReadError(
+                f"reading the terminal utility for seat {seat} failed: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
     return hand_score_utility(state.view(), seat, opponent_seat)
 
 
@@ -1049,7 +1085,16 @@ def tier_b_lbr(
         tolerated=tolerated,
     )
 
-    opp_label = type(rollout_opponent_factory(_OPPONENT_ID, config)).__name__
+    # One rollout opponent for the whole run when it can be reset to a fresh
+    # episode. Tier B runs len(legal) * br_rollouts_per_infoset rollouts per
+    # infoset, so a fresh opponent per rollout was tens of thousands of
+    # heuristic agents per leg; the reset is exactly what that construction
+    # bought, since ImperfectMemoryMixin rebuilds its whole memory on the next
+    # decision. An opponent without the hook keeps the per-rollout
+    # construction, the only way it starts a rollout free of the last one.
+    shared_rollout_opp = rollout_opponent_factory(_OPPONENT_ID, config)
+    opp_label = type(shared_rollout_opp).__name__
+    reusable_rollout_opp = hasattr(shared_rollout_opp, "reset_episode")
 
     def _empty(reason: str) -> Dict[str, Any]:
         logger.warning("tier_b_lbr: %s", reason)
@@ -1091,7 +1136,11 @@ def tier_b_lbr(
                     if not state.apply_index(action_idx):
                         utils.append(0.0)
                         continue
-                    rollout_opp = rollout_opponent_factory(_OPPONENT_ID, config)
+                    if reusable_rollout_opp:
+                        shared_rollout_opp.reset_episode()
+                        rollout_opp = shared_rollout_opp
+                    else:
+                        rollout_opp = rollout_opponent_factory(_OPPONENT_ID, config)
                     utils.append(
                         _agent_policy_rollout(
                             state, agent_wrapper, rollout_opp, max_turns, tolerated
