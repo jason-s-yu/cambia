@@ -283,7 +283,7 @@ class GTCFRSearch:
                     last_cfvs = self._cfr_traverse(root, reach, range_p0, range_p1)
 
                 # PUCT-guided expansion
-                self._expand_once(root, root_game_clone, range_p0, range_p1)
+                self._expand_once(root, range_p0, range_p1)
 
             # Collect depth stats and build result
             depths: List[int] = []
@@ -383,7 +383,6 @@ class GTCFRSearch:
     def _expand_once(
         self,
         root: GTCFRNode,
-        root_game: Any,
         range_p0: np.ndarray,
         range_p1: np.ndarray,
     ) -> int:

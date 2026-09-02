@@ -537,8 +537,8 @@ def test_backprop_projects_value_into_ancestor_perspective(small_cvpn: CVPN, mon
         searcher, "_select_action", lambda node, support_mask=None: next(selections)
     )
 
-    searcher._expand_once(root, None, r0, r1)
-    searcher._expand_once(root, None, r0, r1)
+    searcher._expand_once(root, r0, r1)
+    searcher._expand_once(root, r0, r1)
 
     assert root.visit_counts[action_a] == 1
     assert root.visit_counts[action_b] == 1
@@ -662,7 +662,7 @@ def test_expansion_steps_never_waste_the_budget(small_cvpn: CVPN, monkeypatch):
         searcher, "_make_child_engine", lambda parent, action: parent.child(action)
     )
 
-    added = [searcher._expand_once(root, root_engine, r0, r1) for _ in range(steps)]
+    added = [searcher._expand_once(root, r0, r1) for _ in range(steps)]
 
     assert min(added) > 0, f"Expansion steps grew nothing: {added}"
     # Each step expands one unexpanded node into expansion_k children.
@@ -703,7 +703,7 @@ def test_widening_off_keeps_the_fixed_expansion_k(small_cvpn: CVPN, monkeypatch)
         searcher, "_make_child_engine", lambda parent, action: parent.child(action)
     )
     for _ in range(20):
-        searcher._expand_once(root, engine, r0, r1)
+        searcher._expand_once(root, r0, r1)
 
     assert len(root.children) == 3, f"Child count drifted: {sorted(root.children)}"
     assert sorted(root.children) == [0, 1, 2]
@@ -731,7 +731,7 @@ def test_widening_opens_every_action_in_prior_order(small_cvpn: CVPN, monkeypatc
         searcher, "_make_child_engine", lambda parent, action: parent.child(action)
     )
     for _ in range(20):
-        searcher._expand_once(root, engine, r0, r1)
+        searcher._expand_once(root, r0, r1)
 
     assert list(root.children.keys()) == list(
         range(10)

@@ -228,11 +228,10 @@ class SoGSearch:
             else np.zeros((2, NUM_HAND_TYPES), dtype=np.float32)
         )
 
-        subtree_game = subtree.engine_handle
         for _ in range(self._current_budget):
             for _ in range(self._cfr_iters):
                 last_cfvs = self._inner._cfr_traverse(subtree, reach, range_p0, range_p1)
-            self._inner._expand_once(subtree, subtree_game, range_p0, range_p1)
+            self._inner._expand_once(subtree, range_p0, range_p1)
 
         # Collect depth stats
         depths: List[int] = []
@@ -365,7 +364,7 @@ class SoGSearch:
             for _ in range(self._current_budget):
                 for _ in range(self._cfr_iters):
                     last_cfvs = self._inner._cfr_traverse(root, reach, range_p0, range_p1)
-                self._inner._expand_once(root, root.engine_handle, range_p0, range_p1)
+                self._inner._expand_once(root, range_p0, range_p1)
 
             depths: List[int] = []
             self._inner._collect_depths(root, depths)
