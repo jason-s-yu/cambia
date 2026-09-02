@@ -15,9 +15,18 @@ import torch
 from ..config import Config
 from ..constants import NUM_PLAYERS
 from ..encoding import INPUT_DIM, NUM_ACTIONS
-from ..networks import AdvantageNetwork, get_strategy_from_advantages
+from ..networks import build_advantage_network, get_strategy_from_advantages
 
 logger = logging.getLogger(__name__)
+
+
+class ESValidatorNetworkError(RuntimeError):
+    """Raised when the validator cannot build or load its advantage network.
+
+    Separate from a traversal failure: the caller must not downgrade this to a
+    log line, because a validator whose network never loads reports nothing at
+    all while training continues (cambia-1880).
+    """
 
 
 def _compute_entropy(strategy: np.ndarray) -> float:
@@ -29,7 +38,7 @@ def _compute_entropy(strategy: np.ndarray) -> float:
 
 
 def _get_strategy_from_network(
-    network: AdvantageNetwork,
+    network: torch.nn.Module,
     features: np.ndarray,
     action_mask: np.ndarray,
 ) -> np.ndarray:
@@ -66,18 +75,43 @@ class ESValidator:
             getattr(config, "deep_cfr", None), "es_validation_depth", 10
         )
 
-        # Reconstruct advantage network from weights
-        input_dim = network_config.get("input_dim", INPUT_DIM)
-        hidden_dim = network_config.get("hidden_dim", 256)
-        output_dim = network_config.get("output_dim", NUM_ACTIONS)
+        # Rebuild the trainer's advantage network. Going through the same
+        # factory with the same settings is what makes the state_dict load for
+        # every supported network_type; hardcoding AdvantageNetwork here made
+        # every residual run's validation a silent no-op (cambia-1880).
+        factory_kwargs = {
+            "input_dim": network_config.get("input_dim", INPUT_DIM),
+            "hidden_dim": network_config.get("hidden_dim", 256),
+            "output_dim": network_config.get("output_dim", NUM_ACTIONS),
+        }
+        for key in (
+            "dropout",
+            "validate_inputs",
+            "num_hidden_layers",
+            "use_residual",
+            "network_type",
+            "use_pos_embed",
+            "num_players",
+        ):
+            if key in network_config:
+                factory_kwargs[key] = network_config[key]
 
-        self.network = AdvantageNetwork(
-            input_dim=input_dim,
-            hidden_dim=hidden_dim,
-            output_dim=output_dim,
-        )
+        try:
+            self.network = build_advantage_network(**factory_kwargs)
+        except Exception as e:
+            raise ESValidatorNetworkError(
+                f"ES validation could not build its advantage network from "
+                f"{factory_kwargs!r}: {e}"
+            ) from e
+
         state_dict = {k: torch.from_numpy(v) for k, v in network_weights.items()}
-        self.network.load_state_dict(state_dict)
+        try:
+            self.network.load_state_dict(state_dict)
+        except Exception as e:
+            raise ESValidatorNetworkError(
+                f"ES validation could not load the trainer's weights into a "
+                f"{type(self.network).__name__} built from {factory_kwargs!r}: {e}"
+            ) from e
         self.network.eval()
 
         self._network_config = network_config

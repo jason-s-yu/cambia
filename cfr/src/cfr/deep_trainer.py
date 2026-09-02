@@ -48,7 +48,7 @@ from ..live_display import LiveDisplayManager
 from ..log_archiver import LogArchiver
 
 from .deep_worker import run_deep_cfr_worker, DeepCFRWorkerResult
-from .es_validator import ESValidator
+from .es_validator import ESValidator, ESValidatorNetworkError
 from .exceptions import (
     GracefulShutdownException,
     CheckpointSaveError,
@@ -2005,6 +2005,18 @@ class DeepCFRTrainer:
                                 flush=True,
                             )
                         self.es_validation_history.append((step, es_metrics))
+                    except ESValidatorNetworkError:
+                        # The validator's network could not be built or loaded,
+                        # so it can never report anything. Downgrading that to a
+                        # warning left es_validation silently dead for a whole
+                        # run; fail at the first validation step (cambia-1880).
+                        logger.critical(
+                            "ES validation network is unusable at step %d; aborting "
+                            "training. Set es_validation_interval=0 to train "
+                            "without validation.",
+                            step,
+                        )
+                        raise
                     except Exception as e_val:
                         logger.warning("ES validation failed at step %d: %s", step, e_val)
 
