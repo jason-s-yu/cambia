@@ -193,6 +193,107 @@ func lastReceiptLine(t *testing.T, leaseDir string) quarantine.ReceiptLine {
 	return last
 }
 
+// TestEmbeddedProgressLeavesTheLocalRowToItsLauncher is the coordinator half
+// of cambia-2017: a phase reported by the node running inside this process is
+// not mirrored into process.json. That run dir is the coordinator's own, and
+// its row belongs to the ProcessManager that forks the job; a projection over
+// it left a starting status the embedded node's own launcher refused to adopt,
+// so every embedded claim nacked prepare_node_failed before Prepare ran and
+// three of those held the coordinator's node off its own queue.
+func TestEmbeddedProgressLeavesTheLocalRowToItsLauncher(t *testing.T) {
+	r := newPoolRig(t, poolRigConfig{embedded: true})
+	c := r.loopbackClient(t)
+	r.registerEmbedded(t, c, 1)
+	r.queueJob(t, JobSpec{Name: "embedded-progress"})
+	claim := r.claimEmbedded(t, c)
+
+	for _, phase := range []string{
+		nashnet.PhaseClaimed, nashnet.PhaseFetching, nashnet.PhasePreparing,
+	} {
+		if _, err := c.Progress(context.Background(), claim.LeaseID, claim.LeaseToken,
+			nashnet.ProgressRequest{LeaseEpoch: claim.LeaseEpoch, Phase: phase}); err != nil {
+			t.Fatalf("progress %s: %v", phase, err)
+		}
+		st := readProcessState(t, r.runsDir, "embedded-progress")
+		if st.Status != procmgr.StatusCreated {
+			t.Fatalf("phase %s left the local row at %q, want created", phase, st.Status)
+		}
+		if st.Host != "" {
+			t.Fatalf("phase %s stamped Host %q on a row in this host's own pid space",
+				phase, st.Host)
+		}
+	}
+
+	// The rule and the launcher's adopt rule meet here: the node that is about
+	// to fork this job shares the coordinator's ProcessManager, and Ensure
+	// adopts only a row that is not already running (nodeagent.procLauncher).
+	if err := nodeagent.NewLauncher(r.pm).Ensure("embedded-progress", KindTrain); err != nil {
+		t.Fatalf("the embedded launcher refused its own run dir: %v", err)
+	}
+
+	// A remote lease on the same coordinator is still mirrored: the rule turns
+	// on which node holds the lease, not on the route the progress arrived by.
+	r.register(t, r.nodeA, 1)
+	r.queueJob(t, JobSpec{Name: "remote-progress"})
+	_, remote := r.claim(t, r.nodeA, nashnet.ClaimRequest{})
+	if remote == nil {
+		t.Fatal("the remote node was handed no claim")
+	}
+	resp := r.doLease(t, remote.LeaseToken, http.MethodPost,
+		"/nashnet/leases/"+remote.LeaseID+"/progress",
+		nashnet.ProgressRequest{LeaseEpoch: remote.LeaseEpoch,
+			Phase: nashnet.PhaseFetching, PID: 4242})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("remote progress: got %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+	st := readProcessState(t, r.runsDir, "remote-progress")
+	if st.Status != procmgr.StatusStarting || st.Host != r.nodeA.id {
+		t.Fatalf("a remote lease projected status=%q host=%q, want starting on the node id",
+			st.Status, st.Host)
+	}
+}
+
+// TestCancelOfAnEmbeddedLeaseKeepsTheLocalPidAndPgid is the cancel half of the
+// same rule (cambia-2017): the coordinator writes its stopping witness (D31,
+// D35) and leaves the pid and pgid its own ProcessManager recorded at the fork.
+// Blanking them, which is right for a node in another pid space, would leave a
+// live local process group with no stop path to reach it once this daemon
+// restarts and its supervisor map is empty.
+func TestCancelOfAnEmbeddedLeaseKeepsTheLocalPidAndPgid(t *testing.T) {
+	r := newPoolRig(t, poolRigConfig{embedded: true})
+	c := r.loopbackClient(t)
+	r.registerEmbedded(t, c, 1)
+	r.queueJob(t, JobSpec{Name: "embedded-cancel"})
+	claim := r.claimEmbedded(t, c)
+
+	// The row shape the local ProcessManager leaves after forking a job: a
+	// live pid in this host's own pid space, and its group.
+	runDir := filepath.Join(r.runsDir, "embedded-cancel")
+	st := readProcessState(t, r.runsDir, "embedded-cancel")
+	st.Status = procmgr.StatusRunning
+	st.PID, st.PGID = os.Getpid(), os.Getpid()
+	if err := procmgr.WriteProcessState(runDir, st); err != nil {
+		t.Fatalf("seed the local row: %v", err)
+	}
+
+	r.cancelJob(t, "embedded-cancel", false)
+
+	st = readProcessState(t, r.runsDir, "embedded-cancel")
+	if st.Status != procmgr.StatusStopping {
+		t.Fatalf("projection = %q, want stopping", st.Status)
+	}
+	if st.Host != "" {
+		t.Fatalf("the embedded row carries Host %q, want none", st.Host)
+	}
+	if st.PID != os.Getpid() || st.PGID != os.Getpid() {
+		t.Fatalf("pid=%d pgid=%d, want the local pair the fork recorded", st.PID, st.PGID)
+	}
+	if l, ok := r.pool.leases.Get(claim.LeaseID); !ok || l.State != nashnet.LeaseRevoking {
+		t.Fatalf("lease state = %q, want revoking", l.State)
+	}
+}
+
 // TestEmbeddedRunCarriesExecutedOn covers the coordinator's half of AC7: the
 // run of an embedded lease gets env.json with executed_on naming the node that
 // produced it, exactly as a remote lease's run does, from the moment the claim
