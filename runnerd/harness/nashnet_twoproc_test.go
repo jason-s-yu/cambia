@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -89,7 +90,10 @@ type nodeRig struct {
 	nodePM   *procmgr.ProcessManager
 	requests *requestLog
 	repo     *gitFixture
-	worktree string
+	// embeddedEnv is the staging boundary of the coordinator's own node, set
+	// when a scenario builds one.
+	embeddedEnv *nodeEnv
+	worktree    string
 	// node is the fixture node this agent acts as: node-a of the pool rig, so
 	// the coordinator admits it through the same operator-signed grant every
 	// other suite uses.
@@ -108,11 +112,6 @@ func newNodeRig(t *testing.T, cfg nodeRigConfig) *nodeRig {
 	cfg.pool.bundles = repo.coordinator
 	requests := &requestLog{}
 	cfg.pool.rig.wrap = requests.wrap
-	if cfg.pool.rig.maxJobs == 0 {
-		// The coordinator never runs a pool job itself, but the dispatcher's
-		// own executor must have room for the dependency scenarios' parents.
-		cfg.pool.rig.maxJobs = 4
-	}
 
 	pr := newPoolRig(t, cfg.pool)
 	assertLoopbackOnly(t, pr.baseURL)
@@ -316,6 +315,7 @@ printf '{"iter":0}\n' > "$run/metrics.jsonl"
 case "$mode" in
   quick)
     printf 'weights-0' > "$run/snapshots/prtcfr_checkpoint.pt"
+    printf '{"iteration": 1}\n' > "$run/resume_state.json"
     echo "job finished"
     ;;
   steps)
@@ -384,28 +384,94 @@ func assertLoopbackOnly(t *testing.T, rawURL string) {
 // resumed download, the round trip a cancel arrives on, the offset a resumed
 // upload restarted at.
 type requestLog struct {
-	mu   sync.Mutex
-	rows []requestRow
+	mu     sync.Mutex
+	rows   []requestRow
+	before func(*http.Request)
 }
 
 type requestRow struct {
-	Method string
-	Path   string
-	Range  string
-	Status int
-	At     time.Time
+	Method       string
+	Path         string
+	Range        string
+	ContentRange string
+	Status       int
+	// Hold is the claim hold the coordinator answered a 204 with, read off the
+	// response header where the pool puts it (a 204 carries no body).
+	Hold string
+	At   time.Time
+}
+
+// rangeStart parses the first byte offset of a Range header, or -1.
+func (r requestRow) rangeStart() int64 {
+	if !strings.HasPrefix(r.Range, "bytes=") {
+		return -1
+	}
+	spec := strings.TrimPrefix(r.Range, "bytes=")
+	dash := strings.Index(spec, "-")
+	if dash <= 0 {
+		return -1
+	}
+	n, err := strconv.ParseInt(spec[:dash], 10, 64)
+	if err != nil {
+		return -1
+	}
+	return n
+}
+
+// chunkStart parses the first byte offset of a Content-Range header, or -1.
+func (r requestRow) chunkStart() int64 {
+	var start, end, total int64
+	if _, err := fmt.Sscanf(r.ContentRange, "bytes %d-%d/%d", &start, &end, &total); err != nil {
+		return -1
+	}
+	return start
 }
 
 func (l *requestLog) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		l.mu.Lock()
+		before := l.before
+		l.mu.Unlock()
+		if before != nil {
+			before(r)
+		}
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-		row := requestRow{Method: r.Method, Path: r.URL.Path, Range: r.Header.Get("Range"), At: time.Now()}
+		row := requestRow{
+			Method: r.Method, Path: r.URL.Path,
+			Range: r.Header.Get("Range"), ContentRange: r.Header.Get("Content-Range"),
+			At: time.Now(),
+		}
 		next.ServeHTTP(rec, r)
 		row.Status = rec.status
+		row.Hold = w.Header().Get(nashnet.HeaderClaimHold)
 		l.mu.Lock()
 		l.rows = append(l.rows, row)
 		l.mu.Unlock()
 	})
+}
+
+// interceptOnce installs a hook that runs before the named request reaches the
+// coordinator, exactly once. It is how a scenario provokes a condition the
+// coordinator answers legitimately but a test cannot otherwise time: a blob
+// lost between its upload and the commit that names it, a coordinator restart
+// arriving mid-upload.
+func (l *requestLog) interceptOnce(method, pathSubstr string, hook func()) {
+	var once sync.Once
+	l.mu.Lock()
+	l.before = func(r *http.Request) {
+		if r.Method != method || !strings.Contains(r.URL.Path, pathSubstr) {
+			return
+		}
+		once.Do(hook)
+	}
+	l.mu.Unlock()
+}
+
+// clearIntercept drops any installed hook.
+func (l *requestLog) clearIntercept() {
+	l.mu.Lock()
+	l.before = nil
+	l.mu.Unlock()
 }
 
 // statusRecorder captures the status code a handler wrote. It forwards Flush
@@ -474,10 +540,11 @@ type nodeEnv struct {
 	prepareErr error
 	skipFetch  bool
 
-	mu       sync.Mutex
-	fetched  []string
-	prepared int
-	cleaned  int
+	mu        sync.Mutex
+	fetched   []string
+	prepared  int
+	cleaned   int
+	lastError error
 	// onPrepare runs inside Prepare after the run dir exists, so a scenario
 	// can seed a run dir or observe the moment staging completes.
 	onPrepare func(runDir string) error
@@ -585,6 +652,7 @@ func (p *nodeProber) setFreeRAM(v float64) {
 // bare repositories under temp dirs; git runs locally and reaches no network.
 type gitFixture struct {
 	src         string
+	coordBase   string
 	coordDir    string
 	nodeDir     string
 	coordinator *ingest.Manager
@@ -623,7 +691,7 @@ func newGitFixture(t *testing.T) *gitFixture {
 	runGitCmd(t, "", "init", "--bare", "-q", coordMirror)
 
 	f := &gitFixture{
-		src: src, coordDir: coordMirror, nodeDir: nodeMirror, commits: commits,
+		src: src, coordBase: coordBase, coordDir: coordMirror, nodeDir: nodeMirror, commits: commits,
 		coordinator: ingest.New(ingest.Config{BaseDir: coordBase, RunsDir: t.TempDir()}),
 		node:        ingest.New(ingest.Config{BaseDir: nodeBase, RunsDir: t.TempDir()}),
 	}
@@ -760,14 +828,71 @@ func (r *nodeRig) commitCount(t *testing.T, job, lease string) int {
 	return len(entries)
 }
 
+// hasCachedBundle reports whether the coordinator built a bundle for the
+// commit. The cache key distinguishes the two shapes (D48): a full-tree bundle
+// is named for the commit alone, a thin one carries the basis digest as a
+// suffix, so the filename is the witness that a claim's have_commits reached
+// the build.
+func (f *gitFixture) hasCachedBundle(t *testing.T, sha string, thin bool) bool {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(f.coordBase, "snapshots"))
+	if err != nil {
+		t.Fatalf("read the snapshot cache: %v", err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".bundle") {
+			continue
+		}
+		stem := strings.TrimSuffix(name, ".bundle")
+		if thin && strings.HasPrefix(stem, sha+"-") {
+			return true
+		}
+		if !thin && stem == sha {
+			return true
+		}
+	}
+	return false
+}
+
+// lastLeaseFor names the most recent lease the node held on a job, read off
+// the quarantine tree rather than the live set, so it resolves after the lease
+// retired.
+func (r *nodeRig) lastLeaseFor(t *testing.T, job string) string {
+	t.Helper()
+	dir := filepath.Join(r.quarDir, r.node.id, job)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("no quarantine tree for %s: %v", job, err)
+	}
+	best := ""
+	for _, e := range entries {
+		if e.IsDir() && e.Name() > best {
+			best = e.Name()
+		}
+	}
+	if best == "" {
+		t.Fatalf("the quarantine tree for %s holds no lease", job)
+	}
+	return best
+}
+
 // queueFixtureJob pushes the named commit under the job's ref in the
 // coordinator mirror and queues a measure job pinned to it, which is the shape
 // every scheduling scenario starts from: a real ref, a real commit, and a job
 // the placement scan can hand out.
 func (r *nodeRig) queueFixtureJob(t *testing.T, name string, commitIdx int, mode string, extra ...string) string {
 	t.Helper()
+	return r.queueFixtureJobAt(t, name, commitIdx, r.nodeRunDir(name), mode, extra...)
+}
+
+// queueFixtureJobAt is queueFixtureJob with an explicit run dir, which the
+// embedded leg needs: an in-place run writes into the coordinator's own runs
+// dir rather than a node-local one (D40).
+func (r *nodeRig) queueFixtureJobAt(t *testing.T, name string, commitIdx int, runDir, mode string, extra ...string) string {
+	t.Helper()
 	sha := r.repo.push(t, name, commitIdx)
-	args := append([]string{r.nodeRunDir(name), mode}, extra...)
+	args := append([]string{runDir, mode}, extra...)
 	spec := integrationSpec(name, args...)
 	spec.Commit = sha
 	r.queueJob(t, spec)
