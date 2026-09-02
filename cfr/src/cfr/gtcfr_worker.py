@@ -133,6 +133,9 @@ def gtcfr_self_play_episode(
         cfr_iters_per_expansion=config.gtcfr_cfr_iters_per_expansion,
         expansion_k=config.gtcfr_expansion_k,
         device="cpu",
+        widening_enabled=config.gtcfr_widening_enabled,
+        widening_c=config.gtcfr_widening_c,
+        widening_alpha=config.gtcfr_widening_alpha,
     )
 
     with GoEngine(seed=seed, house_rules=game_config) as game:

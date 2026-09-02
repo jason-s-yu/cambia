@@ -119,6 +119,9 @@ def sog_self_play_episode(
         max_persist_handles=config.sog_max_persist_handles,
         safety_margin=config.sog_safety_margin,
         safety_check_enabled=False,  # training: low budget can't beat CVPN estimates
+        widening_enabled=config.gtcfr_widening_enabled,
+        widening_c=config.gtcfr_widening_c,
+        widening_alpha=config.gtcfr_widening_alpha,
     )
     sog_search.use_train_budget()
 

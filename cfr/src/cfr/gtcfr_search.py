@@ -149,6 +149,14 @@ class GTCFRNode:
         return strat
 
 
+def _children_mask(node: GTCFRNode) -> np.ndarray:
+    """Boolean mask over the actions that already hold a child of node."""
+    mask = np.zeros(NUM_ACTIONS, dtype=bool)
+    if node.children:
+        mask[list(node.children.keys())] = True
+    return mask
+
+
 # ---------------------------------------------------------------------------
 # Search result
 # ---------------------------------------------------------------------------
@@ -194,6 +202,9 @@ class GTCFRSearch:
         cfr_iters_per_expansion: int = 10,
         expansion_k: int = 3,
         device: str = "cpu",
+        widening_enabled: bool = False,
+        widening_c: float = 1.0,
+        widening_alpha: float = 0.5,
     ):
         self._cvpn = cvpn
         self._expansion_budget = expansion_budget
@@ -201,6 +212,9 @@ class GTCFRSearch:
         self._cfr_iters = cfr_iters_per_expansion
         self._expansion_k = expansion_k
         self._device = device
+        self._widening_enabled = widening_enabled
+        self._widening_c = widening_c
+        self._widening_alpha = widening_alpha
         self._cvpn.eval()
 
     def search(
@@ -269,7 +283,7 @@ class GTCFRSearch:
                     last_cfvs = self._cfr_traverse(root, reach, range_p0, range_p1)
 
                 # PUCT-guided expansion
-                self._expand_once(root, root_game_clone, range_p0, range_p1)
+                self._expand_once(root, range_p0, range_p1)
 
             # Collect depth stats and build result
             depths: List[int] = []
@@ -333,9 +347,7 @@ class GTCFRSearch:
         # actions while only the len(children) expanded ones are summed below,
         # scaling the node value by len(children) / n_legal and driving every
         # regret delta the same direction, which freezes the node in fallback.
-        expanded_mask = np.zeros(NUM_ACTIONS, dtype=bool)
-        expanded_mask[list(node.children.keys())] = True
-        strategy = node.current_strategy(expanded_mask)  # (NUM_ACTIONS,)
+        strategy = node.current_strategy(_children_mask(node))  # (NUM_ACTIONS,)
 
         # Traverse all children, collecting per-child CFVs
         child_cfvs: Dict[int, np.ndarray] = {}
@@ -371,15 +383,16 @@ class GTCFRSearch:
     def _expand_once(
         self,
         root: GTCFRNode,
-        root_game: Any,
         range_p0: np.ndarray,
         range_p1: np.ndarray,
     ) -> int:
         """Run one PUCT simulation to expand a leaf node.
 
         Walks down the tree using π_select = 0.5·PUCT + 0.5·CFR.
-        When reaching an unexpanded node, expands ALL legal children (k=∞).
-        Backpropagates Q-values up the selection path.
+        When reaching an unexpanded node, expands its top expansion_k legal
+        actions by PUCT score. If progressive widening is on and a node on the
+        way down is due a new child, that child is opened instead and becomes
+        this simulation's frontier. Backpropagates Q-values up the path.
 
         Returns:
             Number of new nodes added to the tree.
@@ -389,8 +402,14 @@ class GTCFRSearch:
         node = root
 
         while node.is_expanded and not node.is_terminal and node.children:
-            action_idx = self._select_action(node)
+            widen_action = self._widening_action(node)
+            if widen_action is not None:
+                return self._open_child(node, widen_action, path, range_p0, range_p1)
+
+            action_idx = self._select_action(node, _children_mask(node))
             if action_idx not in node.children:
+                # Unreachable while the support is the child set; kept so a
+                # future caller cannot silently descend into a missing child.
                 break
             path.append((node, action_idx))
             node = node.children[action_idx]
@@ -480,29 +499,11 @@ class GTCFRSearch:
                 util = child_utilities[idx]
                 child_node = self._make_terminal_node(node.depth + 1, child_eng, util)
             else:
-                child_lm = child_eng.legal_actions_mask().astype(bool)
-                child_nl = int(child_lm.sum())
-                child_acting = child_eng.acting_player()
-                leaf_vals = batch_leaf_values.get(idx)
-                prior = batch_priors.get(idx, np.zeros(NUM_ACTIONS, dtype=np.float32))
-
-                child_node = GTCFRNode(
-                    depth=node.depth + 1,
-                    acting_player=child_acting,
-                    is_terminal=False,
-                    terminal_values=None,
-                    legal_mask=child_lm,
-                    n_legal=child_nl,
-                    children={},
-                    is_expanded=False,
-                    cumulative_regret=np.zeros(NUM_ACTIONS, dtype=np.float32),
-                    cumulative_strategy=np.zeros(NUM_ACTIONS, dtype=np.float32),
-                    cfr_visits=0,
-                    visit_counts=np.zeros(NUM_ACTIONS, dtype=np.int32),
-                    total_action_value=np.zeros(NUM_ACTIONS, dtype=np.float32),
-                    policy_prior=prior,
-                    leaf_values=leaf_vals,
-                    engine_handle=child_eng,
+                child_node = self._make_leaf_node(
+                    node.depth + 1,
+                    child_eng,
+                    batch_leaf_values.get(idx),
+                    batch_priors.get(idx, np.zeros(NUM_ACTIONS, dtype=np.float32)),
                 )
 
             node.children[a] = child_node
@@ -510,43 +511,143 @@ class GTCFRSearch:
 
         node.is_expanded = True
 
-        # Value for PUCT backprop: range-weighted CFV per player. The CVPN emits
-        # both players' values, so each ancestor books the one for its own
-        # acting player instead of the expanded node's; adding the expanded
-        # node's own value to an ancestor with a different actor inverts that
-        # ancestor's Q and makes _puct_scores rank against its preference.
-        node_values = np.zeros(2, dtype=np.float32)
-        if node.leaf_values is not None:
-            node_values[0] = float(np.dot(range_p0, node.leaf_values[0]))
-            node_values[1] = float(np.dot(range_p1, node.leaf_values[1]))
+        self._backprop(path, node.leaf_values, range_p0, range_p1)
 
-        # Backprop visit counts and Q-values up the selection path
+        return n_added
+
+    def _backprop(
+        self,
+        path: List[Tuple[GTCFRNode, int]],
+        values: Optional[np.ndarray],
+        range_p0: np.ndarray,
+        range_p1: np.ndarray,
+    ) -> None:
+        """Add one visit and the frontier value to every node on the path.
+
+        values is a (2, NUM_HAND_TYPES) CFV array. Each node books the entry for
+        its OWN acting player: the CVPN emits both players' values, and adding
+        the frontier node's own value to an ancestor with a different actor
+        inverts that ancestor's Q and makes _puct_scores rank against its
+        preference.
+        """
+        node_values = np.zeros(2, dtype=np.float32)
+        if values is not None:
+            node_values[0] = float(np.dot(range_p0, values[0]))
+            node_values[1] = float(np.dot(range_p1, values[1]))
+
         for parent_node, action in reversed(path):
             parent_node.visit_counts[action] += 1
             actor = parent_node.acting_player
             if actor >= 0:
                 parent_node.total_action_value[action] += float(node_values[actor])
 
-        return n_added
+    def _allowed_width(self, node: GTCFRNode) -> int:
+        """Children the widening schedule allows at this node's visit count.
 
-    def _select_action(self, node: GTCFRNode) -> int:
-        """π_select = 0.5·PUCT + 0.5·CFR, normalized, then sample."""
+        ceil(widening_c * visits^widening_alpha), floored at expansion_k so the
+        initial expansion width is never reduced, and capped at n_legal.
+        """
+        floor = self._expansion_k if self._expansion_k > 0 else node.n_legal
+        visits = max(1, int(node.visit_counts.sum()))
+        width = int(np.ceil(self._widening_c * visits**self._widening_alpha))
+        return int(min(node.n_legal, max(floor, width)))
+
+    def _widening_action(self, node: GTCFRNode) -> Optional[int]:
+        """Next action to open at an expanded node, or None if the width holds.
+
+        The choice is the highest-scoring unopened legal action under the same
+        PUCT ranking the initial expansion uses; an unopened action has no
+        visits, so this reduces to its CVPN prior.
+        """
+        if not self._widening_enabled:
+            return None
+        n_children = len(node.children)
+        if n_children >= node.n_legal or n_children >= self._allowed_width(node):
+            return None
+
+        scores = self._puct_scores(node)
+        best_action = -1
+        best_score = -np.inf
+        for a in range(NUM_ACTIONS):
+            if not node.legal_mask[a] or a in node.children:
+                continue
+            if scores[a] > best_score:
+                best_score = scores[a]
+                best_action = a
+
+        return best_action if best_action >= 0 else None
+
+    def _open_child(
+        self,
+        node: GTCFRNode,
+        action: int,
+        path: List[Tuple[GTCFRNode, int]],
+        range_p0: np.ndarray,
+        range_p1: np.ndarray,
+    ) -> int:
+        """Open one further child of an already-expanded node.
+
+        The new child is this simulation's frontier: it is evaluated, its value
+        is backed up the path including node itself, and nothing below it is
+        expanded.
+
+        Returns:
+            Number of new nodes added to the tree (1, or 0 if node has no engine).
+        """
+        if node.engine_handle is None:
+            return 0
+
+        child_eng = self._make_child_engine(node.engine_handle, action)
+        try:
+            if child_eng.is_terminal():
+                util = child_eng.get_utility().astype(np.float32)
+                child_node = self._make_terminal_node(node.depth + 1, child_eng, util)
+                child_values = np.tile(util[:, None], (1, NUM_HAND_TYPES)).astype(
+                    np.float32
+                )
+            else:
+                leaf_values, prior = self._evaluate_node(child_eng, range_p0, range_p1)
+                child_node = self._make_leaf_node(
+                    node.depth + 1, child_eng, leaf_values, prior
+                )
+                child_values = leaf_values
+        except Exception:
+            try:
+                child_eng.close()
+            except Exception:
+                pass
+            raise
+
+        node.children[action] = child_node
+        self._backprop(path + [(node, action)], child_values, range_p0, range_p1)
+        return 1
+
+    def _select_action(
+        self, node: GTCFRNode, support_mask: Optional[np.ndarray] = None
+    ) -> int:
+        """π_select = 0.5·PUCT + 0.5·CFR over the support, normalized, then sample.
+
+        support_mask defaults to the legal actions. The walk-down passes the
+        node's children, because descending is only possible into an action
+        that already holds one: drawing any other action ends the simulation
+        with no tree growth.
+        """
+        support = node.legal_mask if support_mask is None else support_mask
         puct_scores = self._puct_scores(node)
-        cfr_strategy = node.current_strategy()
+        cfr_strategy = node.current_strategy(support_mask)
 
-        # Normalize PUCT scores to probabilities over legal actions
+        # Normalize PUCT scores to probabilities over the support
         puct_probs = np.zeros(NUM_ACTIONS, dtype=np.float32)
-        legal = node.legal_mask
-        if legal.any():
-            ls = puct_scores[legal]
+        if support.any():
+            ls = puct_scores[support]
             exp = np.exp(ls - ls.max())
-            puct_probs[legal] = exp / exp.sum()
+            puct_probs[support] = exp / exp.sum()
 
         blended = 0.5 * puct_probs + 0.5 * cfr_strategy
-        blended[~legal] = 0.0
+        blended[~support] = 0.0
         total = blended.sum()
         if total < 1e-10:
-            blended[legal] = 1.0 / max(node.n_legal, 1)
+            blended[support] = 1.0 / max(int(support.sum()), 1)
             total = blended.sum()
         blended /= total
 
@@ -662,6 +763,34 @@ class GTCFRSearch:
             total_action_value=np.zeros(NUM_ACTIONS, dtype=np.float32),
             policy_prior=np.zeros(NUM_ACTIONS, dtype=np.float32),
             leaf_values=None,
+            engine_handle=engine,
+        )
+
+    def _make_leaf_node(
+        self,
+        depth: int,
+        engine: Any,
+        leaf_values: Optional[np.ndarray],
+        prior: np.ndarray,
+    ) -> GTCFRNode:
+        """Create an unexpanded non-terminal GTCFRNode from an evaluated engine."""
+        legal_mask = engine.legal_actions_mask().astype(bool)
+        return GTCFRNode(
+            depth=depth,
+            acting_player=engine.acting_player(),
+            is_terminal=False,
+            terminal_values=None,
+            legal_mask=legal_mask,
+            n_legal=int(legal_mask.sum()),
+            children={},
+            is_expanded=False,
+            cumulative_regret=np.zeros(NUM_ACTIONS, dtype=np.float32),
+            cumulative_strategy=np.zeros(NUM_ACTIONS, dtype=np.float32),
+            cfr_visits=0,
+            visit_counts=np.zeros(NUM_ACTIONS, dtype=np.int32),
+            total_action_value=np.zeros(NUM_ACTIONS, dtype=np.float32),
+            policy_prior=prior,
+            leaf_values=leaf_values,
             engine_handle=engine,
         )
 
