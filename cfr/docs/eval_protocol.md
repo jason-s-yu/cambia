@@ -165,7 +165,7 @@ Each agent type has a corresponding wrapper class in `evaluate_agents.py`:
 
 | Agent type | Wrapper class | Notes |
 |-|-|-|
-| deep_cfr | DeepCFRAgentWrapper | OS-MCCFR, Deep CFR |
+| deep_cfr | DeepCFRAgentWrapper | OS-MCCFR, Deep CFR. Serves the StrategyNetwork's average strategy when the checkpoint has one, else regret matching on the final advantage net; the `served_policy` eval-row field says which. |
 | rebel | ReBeLAgentWrapper | PBS subgame solving |
 | gtcfr | GTCFRAgentWrapper | CVPN direct inference. `deterministic=True` (argmax), `per_hand_ranges=False` (fast tiled range updates). |
 | sog_inference | SoGInferenceAgentWrapper | CVPN-only (inherits GTCFRAgentWrapper). Overrides choose_action for fast tiled range updates. |
