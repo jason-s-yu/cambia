@@ -127,7 +127,7 @@ func (g *CambiaGame) beginSnapFill(snapperID uuid.UUID, snapperIdx uint8, victim
 		gen := fill.gen
 		// The callback runs in its own goroutine, so it takes mu and re-checks the obligation it
 		// was armed for before touching any hand.
-		fill.timer = time.AfterFunc(d, func() {
+		fill.timer = time.AfterFunc(d, g.guarded("a snap fill timer", func() {
 			g.mu.Lock()
 			defer g.mu.Unlock()
 			cur, owed := g.snapFills[snapperID]
@@ -136,7 +136,7 @@ func (g *CambiaGame) beginSnapFill(snapperID uuid.UUID, snapperIdx uint8, victim
 			}
 			log.Printf("Game %s: snap fill timer fired for player %s.", g.ID, snapperID)
 			g.autoSnapFill(cur)
-		})
+		}))
 	}
 
 	slotInt := int(slot)

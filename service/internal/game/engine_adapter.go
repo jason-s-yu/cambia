@@ -1773,7 +1773,7 @@ func (g *CambiaGame) scheduleNextTurnTimerEngine() {
 	// flight, so two guards drop a fire that no longer owns the clock: TurnID for a turn that has
 	// since advanced, and turnTimerGen for a re-arm inside this same turn, which is the case
 	// TurnID cannot see (cambia-1546).
-	g.turnTimer = time.AfterFunc(g.TurnDuration, func() {
+	g.turnTimer = time.AfterFunc(g.TurnDuration, g.guarded("a turn timer", func() {
 		g.mu.Lock()
 		defer g.mu.Unlock()
 		if g.GameOver || !g.Started || g.TurnID != curTurnID || g.turnTimerGen != gen {
@@ -1781,7 +1781,7 @@ func (g *CambiaGame) scheduleNextTurnTimerEngine() {
 		}
 		log.Printf("Game %s, Turn %d: Timer fired for player %s.", g.ID, g.TurnID, capturedPlayerUUID)
 		g.handleTimeoutEngine(capturedPlayerUUID)
-	})
+	}))
 }
 
 // publishTurnDeadline announces the turn clock as it now stands.
