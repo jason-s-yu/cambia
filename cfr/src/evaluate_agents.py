@@ -466,6 +466,9 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
         #: advanced by the engine in the same FFI crossing that applies an
         #: action, so there is no Python-side update step (cambia-1426).
         self.agent_state: Optional[GoAgentState] = None
+        #: True while agent_state is a handle another object owns and closes
+        #: (bind_go_state, cambia-1793).
+        self._belief_borrowed = False
         self._use_argmax = use_argmax
         self._num_players = 2
 
@@ -484,6 +487,7 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
         pool, and an eval run builds one per game.
         """
         self.release_belief()
+        self._belief_borrowed = False
         self._num_players = max(2, int(num_players))
         params = self.config.agent_params
         memory_level = int(getattr(params, "memory_level", 0))
@@ -506,8 +510,33 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
         return self.agent_state
 
     def belief_handle(self) -> int:
-        """This seat's agent handle for apply_games_batch, or -1 if unattached."""
-        return -1 if self.agent_state is None else int(self.agent_state.handle)
+        """This seat's agent handle for apply_games_batch, or -1 if unattached.
+
+        A borrowed belief reports -1: its owner already drives that handle
+        through apply/save/restore, and a caller that adopted it a second time
+        would repoint a seat mid-search (cambia-1793).
+        """
+        if self.agent_state is None or self._belief_borrowed:
+            return -1
+        return int(self.agent_state.handle)
+
+    def bind_go_state(self, view, agent_state: GoAgentState) -> None:
+        """Read this seat's belief off a handle someone else owns and advances.
+
+        The Tier-B continuation seat is the caller: its opponent is built at the
+        infoset rather than at the deal, so the only belief true to the history
+        is the one the search state carried through the sampled prefix
+        (cambia-1793, from cambia-1479 F4). ``attach_belief`` cannot serve
+        there, because it builds a belief from the view it is given and that
+        view is mid-game.
+
+        The handle is borrowed, never owned: ``release_belief`` drops the
+        reference instead of closing it, since closing a handle whose owner
+        still holds it would free it twice.
+        """
+        self.release_belief()
+        self.agent_state = agent_state
+        self._belief_borrowed = agent_state is not None
 
     def _belief_view(self):
         """This seat's belief as the Python AgentState attribute surface.
@@ -527,8 +556,12 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
         return GoBeliefView(st)
 
     def release_belief(self) -> None:
-        """Free this seat's belief handle. Idempotent."""
-        if self.agent_state is not None:
+        """Free this seat's belief handle. Idempotent.
+
+        A borrowed handle (``bind_go_state``) is dropped, not closed: it
+        belongs to the caller that lent it and is still in use there.
+        """
+        if self.agent_state is not None and not self._belief_borrowed:
             try:
                 self.agent_state.close()
             except Exception as e:  # JUSTIFIED: evaluation resilience
@@ -538,7 +571,8 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
                     self.player_id,
                     e,
                 )
-            self.agent_state = None
+        self.agent_state = None
+        self._belief_borrowed = False
 
     @abc.abstractmethod
     def choose_action(self, game_state, legal_actions: Set[GameAction]) -> GameAction:
@@ -1958,6 +1992,9 @@ class PPOAgentWrapper(BaseAgent):
         self._model = MaskablePPO.load(model_path, device=device)
         #: This seat's belief, owned by the Go engine (cambia-1426).
         self._agent_state: Optional[GoAgentState] = None
+        #: True while _agent_state is a handle another object owns and closes
+        #: (bind_go_state, cambia-1793).
+        self._belief_borrowed = False
         self._num_players = 2
         #: Per-instance RNG for the illegal-index fallback, so a fallback does
         #: not draw from the unseeded module-global stream (cambia-651 RC-B2).
@@ -1977,10 +2014,11 @@ class PPOAgentWrapper(BaseAgent):
         """Bind a fresh GoAgentState for this seat to ``engine``.
 
         Same lifecycle as NeuralAgentWrapper.attach_belief; PPOAgentWrapper does
-        not inherit from it (no torch net of its own to manage), so the three
+        not inherit from it (no torch net of its own to manage), so the four
         belief methods are spelled out here.
         """
         self.release_belief()
+        self._belief_borrowed = False
         self._num_players = max(2, int(num_players))
         params = self.config.agent_params
         memory_level = int(getattr(params, "memory_level", 0))
@@ -2003,17 +2041,37 @@ class PPOAgentWrapper(BaseAgent):
         return self._agent_state
 
     def belief_handle(self) -> int:
-        """This seat's agent handle for apply_games_batch, or -1 if unattached."""
-        return -1 if self._agent_state is None else int(self._agent_state.handle)
+        """This seat's agent handle for apply_games_batch, or -1 if unattached.
+
+        A borrowed belief reports -1, for the reason given on
+        NeuralAgentWrapper.belief_handle (cambia-1793).
+        """
+        if self._agent_state is None or self._belief_borrowed:
+            return -1
+        return int(self._agent_state.handle)
+
+    def bind_go_state(self, view, agent_state: GoAgentState) -> None:
+        """Read this seat's belief off a handle someone else owns and advances.
+
+        The Tier-B continuation seat's hook; see
+        NeuralAgentWrapper.bind_go_state for what it is for (cambia-1793).
+        """
+        self.release_belief()
+        self._agent_state = agent_state
+        self._belief_borrowed = agent_state is not None
 
     def release_belief(self) -> None:
-        """Free this seat's belief handle. Idempotent."""
-        if self._agent_state is not None:
+        """Free this seat's belief handle. Idempotent.
+
+        A borrowed handle is dropped, not closed: its owner still holds it.
+        """
+        if self._agent_state is not None and not self._belief_borrowed:
             try:
                 self._agent_state.close()
             except Exception as e:  # JUSTIFIED: evaluation resilience
                 logger.error("PPOAgent P%d belief release error: %s", self.player_id, e)
-            self._agent_state = None
+        self._agent_state = None
+        self._belief_borrowed = False
 
     def initialize_state(self, initial_game_state):
         """Reset this seat's belief for a new game (the GoEngine about to play)."""

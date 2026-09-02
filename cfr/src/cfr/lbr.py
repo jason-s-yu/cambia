@@ -65,7 +65,11 @@ when present:
 
   - ``bind_go_state(view, agent_state)``: hands a Go-native wrapper its own
     ``GoAgentState`` belief/token handle for the episode. This is the handle the
-    save/restore rewind keeps consistent.
+    save/restore rewind keeps consistent. Also fired at the Tier-B continuation
+    seat, where it is the whole of that opponent's initialisation: the handle it
+    receives is the one the engine advanced through the sampled prefix, so a
+    belief-carrying opponent starts its rollout knowing the public history
+    rather than knowing nothing (cambia-1793).
   - ``initialize_state(view)``: per-episode reset, at the start of a game and at
     the start of each infoset replay.
   - ``belief_handle()``: the ``GoAgentState`` handle a wrapper built for itself
@@ -525,9 +529,20 @@ def _accepts_game_view(agent: Any) -> bool:
     return bool(getattr(agent, "accepts_game_view", False))
 
 
-# Default Tier-B opponents: strong both for trajectory generation and for the
-# adversary seat during agent-policy continuation rollouts.
-DEFAULT_TRAJECTORY_OPPONENT: OpponentFactory = _make_strong_opponent
+# Default Tier-B opponents: uniform while the measured infosets are collected,
+# strong at the adversary seat during the continuation rollouts.
+#
+# The trajectory default was strong until cambia-1793, which measured what that
+# cost. Strengthening only the continuation, with collection left on the uniform
+# opponent Tier A uses, took PPO-200k from a Tier-A band of 0.2187-0.2312 to
+# 0.3780 +/- 0.0343 at seed 42: the direction the tier exists to show. Making
+# the trajectory opponent strong as well pulled the same measurement back to
+# 0.2245, inside the Tier-A band, because a strong opponent steers the agent
+# into positions where it has little left to gain and that cancels the whole
+# continuation effect. Only this pairing produces a number that means what Tier
+# B says it means, so it is the default; the other is still one driver flag
+# away for anyone who wants the narrower quantity.
+DEFAULT_TRAJECTORY_OPPONENT: OpponentFactory = _make_random_opponent
 DEFAULT_ROLLOUT_OPPONENT: OpponentFactory = _make_strong_opponent
 
 
@@ -721,6 +736,50 @@ def _begin_episode(
     _notify(agent_wrapper, "initialize_state", state.view(), tolerated=tolerated)
     if not frozen_beliefs:
         state.adopt_agent_belief(seat, agent_wrapper)
+
+
+def _begin_continuation(
+    state: GoSearchState,
+    policy: Any,
+    seat: int = _OPPONENT_ID,
+    tolerated: Optional[ToleratedFailures] = None,
+) -> None:
+    """Seed a continuation opponent built mid-game with the history it missed.
+
+    A Tier-B continuation opponent is constructed at the infoset, not at the
+    deal, so it has observed nothing: before cambia-1793 it took its first
+    decision with a belief built from thin air, which is why a belief-carrying
+    opponent could not be measured against at all (cambia-1479 F4).
+
+    It does not have to replay the prefix to catch up. The engine advanced
+    ``seat``'s own ``GoAgentState`` through every action of that prefix during
+    ``replay_infoset``, so the belief the opponent needs already exists on the
+    search state; binding hands it over. That keeps this O(1) per rollout, which
+    matters because Tier B builds one opponent per rollout (tens of thousands
+    per leg) since the shared-opponent reuse was reverted.
+
+    ``initialize_state`` is deliberately NOT fired here. It builds a fresh
+    belief from the view it is handed, and the view at an infoset is mid-game:
+    a wrapper would read the current position as an opening deal and take the
+    seat's current cards for its initial peek. Binding is the only seeding that
+    is true to the history.
+
+    Neither is the seat's belief ADOPTED from the policy the way seat 0's is.
+    The handle bound here is the search state's own, which ``apply_index``
+    advances and ``restore`` rewinds, so the opponent's belief already moves
+    with the rollout and unwinds with it. Swapping in a policy-owned handle
+    per rollout would repoint the seat while the infoset's snapshot is still
+    live, and that snapshot was taken against the handle it is now not holding.
+    ``frozen_beliefs`` therefore governs the measured agent's belief only; it
+    has never had anything to say about this seat.
+    """
+    _notify(
+        policy,
+        "bind_go_state",
+        state.view(),
+        state.agent_state(seat),
+        tolerated=tolerated,
+    )
 
 
 def hand_score_utility(view: GameView, seat: int, opponent_seat: int) -> float:
@@ -1041,8 +1100,8 @@ def tier_b_lbr(
     """Compute the Tier-B sampled LBR exploitability estimate.
 
     Algorithm:
-      1. Collect P0 infosets along trajectories where the agent (seat 0) faces a
-         strong fixed opponent (seat 1).
+      1. Collect P0 infosets along trajectories where the agent (seat 0) faces
+         the trajectory opponent (seat 1), uniform-random by default.
       2. At each sampled infoset, replay the state, then for each legal action:
            rewind to the decision point, apply the candidate action, and roll the
            continuation out under agent-policy play (seat 0 = agent, seat 1 =
@@ -1050,6 +1109,29 @@ def tier_b_lbr(
       3. BR value = max over actions of mean continuation utility.
          Agent value = mean continuation utility of the action the agent chose.
       4. Exploitability = mean(BR value - agent value) over infosets (>= 0).
+
+    The two seat-1 roles are separate knobs and the row records both
+    (cambia-1793). ``trajectory_opponent_factory`` decides WHICH positions are
+    measured, since it plays seat 1 while the infosets are collected;
+    ``rollout_opponent_factory`` decides HOW HARD the continuation is, since it
+    plays seat 1 after the candidate action. The tier's rationale is about the
+    continuation alone, so the default holds the trajectory at the uniform
+    opponent Tier A uses and strengthens only the continuation.
+
+    Reading a Tier-B number across that change: every Tier-B row recorded
+    before this default landed ran strong-plus-strong in effect, because both
+    factories pointed at the same one. That covers the 2026-09-01 leg (0.3265
+    +/- 0.0240, which fell back to UniformRandomPolicy at BOTH seats because no
+    baseline claimed ``accepts_game_view``) and the cambia-1479 legs (0.2245
+    +/- 0.0277 against the real strong opponent at both). None of them is
+    comparable to a row measured under this default, and none of them records
+    the two names, so a cross-era comparison reads ``trajectory_opponent`` and
+    ``continuation_opponent`` first and treats their absence as
+    strong-plus-strong.
+
+    Each continuation opponent is seeded with the public history at the infoset
+    before its first decision (see ``_begin_continuation``), so an opponent that
+    carries a belief can be measured against here at all.
 
     ``frozen_beliefs`` reproduces the pre-cambia-1479 protocol, where a policy
     owning a belief kept the one it built at the deal for the whole measurement.
@@ -1061,7 +1143,11 @@ def tier_b_lbr(
         num_infosets_sampled: int
         std_err: float (standard error of the per-infoset gap mean)
         tier: "B"
-        rollout_opponent: str (label of the rollout opponent class, for the row)
+        trajectory_opponent: str (class that played seat 1 during collection)
+        continuation_opponent: str (class that plays seat 1 in the rollouts)
+        rollout_opponent: str (the continuation opponent under the name this
+            row carried before the two were named apart; every consumer
+            written before cambia-1793 reads this one)
         seed: int (echoed, so a persisted row records what produced it)
         belief_protocol: "advancing" or "frozen"
         policy_errors: int (failures the run absorbed; a raising policy is not
@@ -1092,6 +1178,7 @@ def tier_b_lbr(
     # of a counterbalanced A/B on 2026-09-02 put the reusing arm at 210.8s of
     # CPU against 196.5s for this one, on identical estimates (cambia-1479).
     opp_label = type(rollout_opponent_factory(_OPPONENT_ID, config)).__name__
+    traj_label = type(trajectory_opponent_factory(_OPPONENT_ID, config)).__name__
 
     def _empty(reason: str) -> Dict[str, Any]:
         logger.warning("tier_b_lbr: %s", reason)
@@ -1100,6 +1187,8 @@ def tier_b_lbr(
             "num_infosets_sampled": 0,
             "std_err": 0.0,
             "tier": "B",
+            "trajectory_opponent": traj_label,
+            "continuation_opponent": opp_label,
             "rollout_opponent": opp_label,
             "seed": seed,
             "belief_protocol": protocol,
@@ -1134,6 +1223,9 @@ def tier_b_lbr(
                         utils.append(0.0)
                         continue
                     rollout_opp = rollout_opponent_factory(_OPPONENT_ID, config)
+                    _begin_continuation(
+                        state, rollout_opp, _OPPONENT_ID, tolerated=tolerated
+                    )
                     utils.append(
                         _agent_policy_rollout(
                             state, agent_wrapper, rollout_opp, max_turns, tolerated
@@ -1167,6 +1259,8 @@ def tier_b_lbr(
         "num_infosets_sampled": len(sampled),
         "std_err": std_err,
         "tier": "B",
+        "trajectory_opponent": traj_label,
+        "continuation_opponent": opp_label,
         "rollout_opponent": opp_label,
         "seed": seed,
         "belief_protocol": protocol,

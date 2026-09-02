@@ -23,14 +23,17 @@ from dataclasses import dataclass, field
 import pytest
 
 from src.cfr.lbr import (
+    DEFAULT_ROLLOUT_OPPONENT,
     DEFAULT_TRAJECTORY_OPPONENT,
     GoSearchState,
+    _make_random_opponent,
+    _make_strong_opponent,
     collect_infosets,
     replay_infoset,
     tier_b_lbr,
 )
 from src.cfr.sampled_lbr import sampled_lbr
-from src.ffi.bridge import get_handle_pool_stats
+from src.ffi.bridge import GoAgentState, get_handle_pool_stats
 
 # ---------------------------------------------------------------------------
 # Minimal config stubs (mirror tests/test_sampled_lbr.py, plus agents.greedy)
@@ -445,3 +448,142 @@ def test_sampled_lbr_tier_a_also_meets_count():
     assert (
         result["num_infosets_sampled"] >= requested
     ), f"Tier-A under-collected: {result['num_infosets_sampled']} of {requested}"
+
+
+# ---------------------------------------------------------------------------
+# The two seat-1 roles are separate knobs (cambia-1793)
+# ---------------------------------------------------------------------------
+
+
+class _BeliefCarryingOpponent:
+    """A continuation opponent that owns a belief, as the eval wrappers do.
+
+    Records, at every binding, the length of the token stream it was handed
+    against the length a belief built from nothing at that same position would
+    have. That difference is the public history the opponent used to be denied.
+    """
+
+    accepts_game_view = True
+    binds: list = []
+
+    def __init__(self, player_id, config):
+        self.player_id = player_id
+        self._bound = None
+
+    def bind_go_state(self, view, agent_state):
+        self._bound = agent_state
+        fresh = GoAgentState(view, self.player_id)
+        try:
+            type(self).binds.append(
+                (int(agent_state.token_len()), int(fresh.token_len()))
+            )
+        finally:
+            fresh.close()
+
+    def choose_action(self, view, legal_actions):
+        assert self._bound is not None, "decided before being handed a belief"
+        return list(legal_actions)[0]
+
+
+def test_tier_b_defaults_to_a_uniform_trajectory_and_a_strong_continuation():
+    """The default pairing is the one whose number means what Tier B says it
+    means: the sampled distribution held at Tier A's uniform opponent, and only
+    the continuation strengthened (cambia-1793).
+
+    A Tier-B row recorded before this default ran strong at both seats, which
+    is why the row names them: a number measured under one pairing cannot be
+    read against the other.
+    """
+    config = _Config()
+    result = tier_b_lbr(
+        _UniformWrapper(config), config, num_infosets=6, br_rollouts_per_infoset=2, seed=2
+    )
+    assert result["trajectory_opponent"] == "UniformRandomPolicy"
+    assert result["continuation_opponent"] == "ImperfectGreedyAgent"
+    # Pinned against the factories themselves, so repointing a constant cannot
+    # move the default without this failing.
+    assert DEFAULT_TRAJECTORY_OPPONENT is _make_random_opponent
+    assert DEFAULT_ROLLOUT_OPPONENT is _make_strong_opponent
+
+
+def test_tier_b_row_names_both_seat_one_roles():
+    """A Tier-B row says which distribution it measured as well as how hard the
+    continuation was, so the two can never move together unnoticed again."""
+    config = _Config()
+    result = tier_b_lbr(
+        _UniformWrapper(config),
+        config,
+        num_infosets=6,
+        br_rollouts_per_infoset=2,
+        seed=1,
+        trajectory_opponent_factory=_make_random_opponent,
+        rollout_opponent_factory=_make_strong_opponent,
+    )
+    assert result["trajectory_opponent"] == "UniformRandomPolicy"
+    assert result["continuation_opponent"] == "ImperfectGreedyAgent"
+    # The pre-cambia-1793 name still carries the continuation opponent, which is
+    # what it always held; consumers written against it keep working.
+    assert result["rollout_opponent"] == result["continuation_opponent"]
+
+
+def test_tier_b_factories_drive_the_roles_they_name():
+    """The trajectory factory builds only during collection and the
+    continuation factory only inside the rollouts, so a leg can hold the
+    sampled distribution fixed and vary the continuation alone."""
+    config = _Config()
+    built = {"trajectory": 0, "continuation": 0}
+
+    def _traj(player_id, cfg):
+        built["trajectory"] += 1
+        return _make_random_opponent(player_id, cfg)
+
+    def _cont(player_id, cfg):
+        built["continuation"] += 1
+        return _make_strong_opponent(player_id, cfg)
+
+    result = tier_b_lbr(
+        _UniformWrapper(config),
+        config,
+        num_infosets=8,
+        br_rollouts_per_infoset=3,
+        seed=42,
+        trajectory_opponent_factory=_traj,
+        rollout_opponent_factory=_cont,
+    )
+    if result["num_infosets_sampled"] == 0:
+        pytest.skip("no infosets sampled in this tiny config")
+    assert built["trajectory"] > 0
+    # One continuation opponent per rollout, so many more than there are
+    # infosets; the trajectory factory never enters that loop.
+    assert built["continuation"] > result["num_infosets_sampled"]
+
+
+def test_continuation_opponent_is_seeded_with_the_public_history():
+    """A continuation opponent is built at the infoset, not at the deal, so it
+    observed nothing on the way there. It must be handed the belief the engine
+    carried through the sampled prefix (cambia-1793, from cambia-1479 F4);
+    before that it took its first decision knowing only the current position."""
+    config = _Config()
+    _BeliefCarryingOpponent.binds = []
+    result = tier_b_lbr(
+        _UniformWrapper(config),
+        config,
+        num_infosets=10,
+        br_rollouts_per_infoset=2,
+        seed=4,
+        rollout_opponent_factory=_BeliefCarryingOpponent,
+    )
+    if result["num_infosets_sampled"] == 0:
+        pytest.skip("no infosets sampled in this tiny config")
+    binds = _BeliefCarryingOpponent.binds
+    assert binds, "no continuation opponent was handed a belief"
+    assert result["continuation_opponent"] == "_BeliefCarryingOpponent"
+    # A hook that raised would be absorbed onto the count rather than failing
+    # the run, so a silent bind failure cannot pass this test.
+    assert result["policy_errors"] == 0, result["policy_error_detail"]
+    assert any(
+        bound > fresh for bound, fresh in binds
+    ), f"every bound belief was as empty as a fresh one: {binds[:5]}"
+    assert all(
+        bound >= fresh for bound, fresh in binds
+    ), "a bound belief held less history than a belief built from nothing"
