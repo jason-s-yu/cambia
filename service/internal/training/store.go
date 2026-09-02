@@ -103,7 +103,11 @@ type EvalMetric struct {
 	GamesPlayed *int     `json:"games_played"`
 	AdvLoss     *float64 `json:"adv_loss"`
 	StratLoss   *float64 `json:"strat_loss"`
-	Timestamp   string   `json:"timestamp"`
+	// PolicyErrors is the count of policy-boundary failures an exploitability
+	// run absorbed (cambia-1479); NULL for a row that never measured it (every
+	// non-LBR baseline, and any row from before the column existed).
+	PolicyErrors *int   `json:"policy_errors"`
+	Timestamp    string `json:"timestamp"`
 }
 
 // MeanImpPoint is the mean win rate across the 5 baselines for one iteration.
@@ -568,7 +572,7 @@ func (s *TrainingStore) GetMetrics(ctx context.Context, runName string, baseline
 	if baseline != "" {
 		query = `
 			SELECT e.iteration, e.baseline, e.win_rate, e.ci_low, e.ci_high,
-			       e.games_played, e.adv_loss, e.strat_loss, e.timestamp
+			       e.games_played, e.adv_loss, e.strat_loss, e.policy_errors, e.timestamp
 			FROM eval_results e
 			JOIN runs r ON e.run_id = r.id
 			WHERE r.name = ? AND e.baseline = ?
@@ -578,7 +582,7 @@ func (s *TrainingStore) GetMetrics(ctx context.Context, runName string, baseline
 	} else {
 		query = `
 			SELECT e.iteration, e.baseline, e.win_rate, e.ci_low, e.ci_high,
-			       e.games_played, e.adv_loss, e.strat_loss, e.timestamp
+			       e.games_played, e.adv_loss, e.strat_loss, e.policy_errors, e.timestamp
 			FROM eval_results e
 			JOIN runs r ON e.run_id = r.id
 			WHERE r.name = ?
@@ -599,7 +603,7 @@ func (s *TrainingStore) GetMetrics(ctx context.Context, runName string, baseline
 		if err := rows.Scan(
 			&m.Iteration, &m.Baseline, &m.WinRate,
 			&m.CILow, &m.CIHigh, &m.GamesPlayed,
-			&m.AdvLoss, &m.StratLoss, &m.Timestamp,
+			&m.AdvLoss, &m.StratLoss, &m.PolicyErrors, &m.Timestamp,
 		); err != nil {
 			return nil, err
 		}

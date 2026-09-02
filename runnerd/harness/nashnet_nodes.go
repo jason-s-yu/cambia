@@ -50,6 +50,7 @@ func (s *Server) handleNodeRegister(w http.ResponseWriter, r *http.Request, node
 		NodeID:        nodeID,
 		NodeEpoch:     rec.NodeEpoch,
 		Policy:        p.policy,
+		Hold:          p.effectiveHold(nodeID),
 		ReboundLeases: rebind.Rebound,
 		RevokedLeases: revoked,
 		ServerTime:    rfc3339(p.now()),
@@ -73,7 +74,7 @@ func (s *Server) handleNodeHeartbeat(w http.ResponseWriter, r *http.Request, nod
 	}
 	writeJSON(w, http.StatusOK, nashnet.HeartbeatResponse{
 		NodeEpoch:  rec.NodeEpoch,
-		Drain:      rec.Drained,
+		Hold:       p.effectiveHold(nodeID),
 		ServerTime: rfc3339(p.now()),
 	})
 }
@@ -210,10 +211,12 @@ func (s *Server) handleNodeDrain(w http.ResponseWriter, r *http.Request) {
 	if req.ClearBreaker {
 		p.clearBreaker(id)
 	}
-	// The event carries the state it set. A node reading the arrival alone as a
-	// drain would hold itself off work the operator just released, until its
-	// next heartbeat happened to say otherwise.
-	p.postEvent(id, nashnet.Event{Type: nashnet.EventDrain, Drain: req.Drain})
+	// The event carries the hold that stands after both acts, not the drain the
+	// body asked for: lifting a drain off a node the breaker still holds is not
+	// a lift, and a node told otherwise would claim into a hold. A node reading
+	// the arrival alone as a drain would make the opposite mistake, holding
+	// itself off work the operator just released.
+	p.postEvent(id, nashnet.Event{Type: nashnet.EventDrain, Hold: p.effectiveHold(id)})
 	if !req.Drain {
 		p.signalPlacement()
 	}

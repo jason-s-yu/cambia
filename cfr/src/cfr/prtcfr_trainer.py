@@ -1392,6 +1392,7 @@ def build_tiny_nashconv_eval_fn(
     device: str = "cpu",
     seq_cap: int = SEQ_CAP,
     chunk_size: int = 2048,
+    objective: Optional[str] = None,
 ) -> Callable[["PRTCFRTinyTrainer", int], float]:
     """Ground-truth NashConv eval_fn for the tiny gate's stability controller.
 
@@ -1400,12 +1401,26 @@ def build_tiny_nashconv_eval_fn(
     IncrementalPolicyAccumulator is reused across calls: each snapshot is folded
     in ONCE ever (linear over the horizon, not quadratic), matching the technique
     the S1W11 launcher prototyped. The metric is exploitability on the tiny
-    perfect-recall tree, the X2 gate's arbiter."""
-    from .prtcfr_eval import IncrementalPolicyAccumulator, _load_net, discover_snapshots
+    perfect-recall tree, the X2 gate's arbiter.
+
+    ``objective`` defaults to the scorer's own default, ``SERVED``: the
+    controller records the exploitability of the policy prtcfr_mixture actually
+    plays (cambia-708), not the reach-unweighted per-decision mean it recorded
+    before."""
+    from .prtcfr_eval import (
+        DEFAULT_OBJECTIVE,
+        IncrementalPolicyAccumulator,
+        _load_net,
+        discover_snapshots,
+    )
     from tools.tiny_solver import exploitability
 
     acc = IncrementalPolicyAccumulator(
-        root, weighting="linear", seq_cap=seq_cap, chunk_size=chunk_size
+        root,
+        weighting="linear",
+        seq_cap=seq_cap,
+        chunk_size=chunk_size,
+        objective=DEFAULT_OBJECTIVE if objective is None else objective,
     )
     seen: set = set()
 

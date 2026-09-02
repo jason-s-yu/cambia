@@ -225,6 +225,12 @@ def test_infer_decision_context_bands_match_bridge_decision_ctx():
 # ---------------------------------------------------------------------------
 
 
+# Marked slow at the class, not per method: these drive _deep_traverse_go, which
+# walks the whole game tree, and four of them measured 41.8s of this module's
+# 42.0s (cambia-1920). The mark keeps them out of the pull-request run and puts
+# them in ci.yml's nightly cfr-slow job; a traversal test added here inherits
+# that placement instead of quietly costing every pull request minutes.
+@pytest.mark.slow
 @skip_if_no_go
 class TestGoTraversal:
     def _make_config(self, recursion_limit: int = 12) -> SimpleNamespace:

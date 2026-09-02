@@ -641,7 +641,12 @@ type NodeView struct {
 	Presence     string      `json:"presence"`
 	StaleSeconds int64       `json:"stale_seconds"`
 	Leases       []LeaseView `json:"leases,omitempty"`
-	BreakerTrips int         `json:"breaker_trips,omitempty"`
+	// Hold names why the coordinator is refusing this node's claims, or is
+	// absent when it is not. The drain flag alone cannot answer that: a node the
+	// breaker holds carries no drain flag, and an operator reading only the flag
+	// would see a node that takes no work and no reason for it (D63).
+	Hold         string `json:"hold,omitempty"`
+	BreakerTrips int    `json:"breaker_trips,omitempty"`
 	// BreakerHeldSeconds is how long the D63 hold has left, so an operator
 	// reads a time window rather than a bare trip count.
 	BreakerHeldSeconds int64            `json:"breaker_held_seconds,omitempty"`
@@ -690,6 +695,7 @@ func (p *Pool) nodeView(rec nashnet.NodeRecord, now time.Time) NodeView {
 			Attempt:    l.Attempt,
 		})
 	}
+	v.Hold = p.effectiveHold(rec.NodeID)
 	v.BreakerTrips, v.BreakerHeldSeconds = p.breakerReport(rec.NodeID, now)
 	p.mu.Lock()
 	if marks := p.degraded[rec.NodeID]; len(marks) > 0 {

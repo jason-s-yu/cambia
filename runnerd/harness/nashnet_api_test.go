@@ -430,15 +430,15 @@ func TestDrainIsTwoWay(t *testing.T) {
 	if trips, held := r.pool.breakerReport(r.nodeA.id, r.clock.now()); trips != 0 || held != 0 {
 		t.Fatalf("breaker after clear_breaker = %d trips, %ds held, want 0 and 0", trips, held)
 	}
-	// Both acts posted an event and each carries the state it set, so the node
-	// learns which way the hold moved off the event rather than off its next
-	// heartbeat.
+	// Both acts posted an event and each names the hold that stood after it, so
+	// the node learns which way the hold moved off the event rather than off its
+	// next heartbeat.
 	events := r.drainEvents(t, r.nodeA)
 	if len(events) != 2 {
 		t.Fatalf("drain events = %+v, want one per act", events)
 	}
-	if !events[0].Drain || events[1].Drain {
-		t.Fatalf("drain events = %+v, want the set then the lift", events)
+	if events[0].Hold != nashnet.HoldReasonDrain || events[1].Hold != "" {
+		t.Fatalf("drain events = %+v, want the drain then the lift", events)
 	}
 	if _, claimed := r.claim(t, r.nodeA, nashnet.ClaimRequest{}); claimed == nil {
 		t.Fatal("a node whose hold was lifted must claim again")
