@@ -1,17 +1,29 @@
 """
 tests/tabular_table_gate.py
 
-Shared runner for the tabular table-equality gate (cambia-1782). Not a test
-module: ``tests/test_tabular_table_gate.py`` is.
+Shared runner for the tabular table-equality gate (cambia-1782, re-based by
+cambia-718 and cambia-719). Not a test module:
+``tests/test_tabular_table_gate.py`` is.
 
 What the gate compares
 ----------------------
-The port moved ``src.cfr.worker``'s outcome-sampling traversal from the Python
-engine onto the Go engine. The claim it has to support is not "the new tables
-look reasonable" but "the new tables are the old tables": the same infoset keys,
-with the same float64 vectors, down to the last bit.
+The gate ran first as a port check: cambia-1782 moved ``src.cfr.worker``'s
+outcome-sampling traversal from the Python engine onto the Go engine, and the
+stored tables were the Python-engine traversal's, so "the new tables are the old
+tables" carried the port.
 
-Making that comparison exact takes pinning both sources of randomness.
+The estimator fixes then changed the tables on purpose. cambia-718 stopped the
+CFR+ averaging delay from zeroing regret updates and cambia-719 replaced the
+outcome-sampling estimator with the canonical one, so no table the pre-fix code
+wrote is reachable any more. The fixture is now the corrected estimator's own
+output, and the gate is a regression pin rather than a port check: it holds the
+traversal bit-for-bit against the tables it writes today, so an unrelated change
+to sampling, reach threading, or the averaging weight cannot pass unnoticed.
+
+What that costs is that the fixture no longer proves anything about the Python
+engine; what it keeps is an exact, cheap gate over the whole traversal.
+
+Making the comparison exact takes pinning both sources of randomness.
 
 * The deal. Neither engine's seeded shuffle reproduces the other's, so the deal
   cannot come from a seed on either side. It is recorded as an explicit deck
@@ -33,18 +45,17 @@ different shuffle RNGs and the comparison stops being about the traversal.
 
 Regenerating the fixture
 ------------------------
-The reference side is the Python-engine traversal as it stood at d2aff58 (the
-commit this port started from), which is no longer in the tree. Check that
-commit out somewhere, copy this file into its ``cfr/tests/``, and run:
+Regenerate only when a change to the traversal is meant to move the tables, and
+say in the commit body why the new numbers are the right ones:
 
-    cd <d2aff58 checkout>/cfr
+    cd cfr
     PYTHONPATH=$PWD LIBCAMBIA_PATH=$PWD/libcambia.so \\
         python tests/tabular_table_gate.py --out tests/fixtures/<name>.json
 
-The Python branch below drives that older ``run_cfr_simulation_worker``, which
+The Python branch in ``_run_iteration`` below drove the d2aff58 traversal, which
 has no ``deal`` argument, by replacing the ``CambiaGameState`` name it
-constructs through. Once cambia-1430 removes the Python engine that branch is
-dead and can go; the fixture and the Go side of the gate outlive it.
+constructs through. It is dead now that the fixture is the Go traversal's own
+output, and goes when cambia-1430 removes the Python engine.
 """
 
 import json
@@ -59,7 +70,7 @@ import numpy as np
 from src.config import load_config
 
 FIXTURE = os.path.join(
-    os.path.dirname(__file__), "fixtures", "tabular_tables_d2aff58.json"
+    os.path.dirname(__file__), "fixtures", "tabular_tables_cambia_718_719.json"
 )
 
 #: The gate's pinned run. tiny_cambia_tabular.yaml is the smallest shipped
@@ -67,7 +78,8 @@ FIXTURE = os.path.join(
 #: reshuffles and the whole gate runs in a couple of seconds. The iteration
 #: count clears the config's averaging_delay of 100, without which every
 #: strategy and reach entry would be zero and two thirds of the comparison would
-#: be checking nothing.
+#: be checking nothing. The regret table is populated from iteration 1 either
+#: way, since cambia-718 took the averaging delay off the regret update.
 CONFIG = "config/tiny_cambia_tabular.yaml"
 ITERATIONS = 150
 DEAL_SEED = 90210
