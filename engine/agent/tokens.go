@@ -347,6 +347,73 @@ func actionToken(idx uint16) int32 {
 	return actionBase + actionTagOffset[name] + rel
 }
 
+// actionLocalTagNPlayer is actionLocalTag for an index recorded in the 620-action
+// N-player space. It maps onto the SAME tags and strides as the 2-player space, so the
+// vocabulary is unchanged: the ACTION id carries the action and its hand slots, and the
+// target seat an N-player index also carries has no id to go in (the ACTION block is
+// pinned against sequence_encoding.py, so widening it is a tokenizer-version change).
+func actionLocalTagNPlayer(idx uint16) (name string, rel int32, ok bool) {
+	switch idx {
+	case engine.NPlayerActionDrawStockpile:
+		return "draw_stockpile", 0, true
+	case engine.NPlayerActionDrawDiscard:
+		return "draw_discard", 0, true
+	case engine.NPlayerActionCallCambia:
+		return "call_cambia", 0, true
+	case engine.NPlayerActionDiscardWithAbility:
+		return "discard_ability", 0, true
+	case engine.NPlayerActionDiscardNoAbility:
+		return "discard_no_ability", 0, true
+	case engine.NPlayerActionPassSnap:
+		return "pass_snap", 0, true
+	case engine.NPlayerActionKingSwapNo:
+		return "king_swap", 0, true
+	case engine.NPlayerActionKingSwapYes:
+		return "king_swap", 1, true
+	}
+	if t, k := engine.NPlayerDecodeReplace(idx); k {
+		return "replace", clampSlot(int(t)), true
+	}
+	if t, k := engine.NPlayerDecodePeekOwn(idx); k {
+		return "peek_own", clampSlot(int(t)), true
+	}
+	if t, _, k := engine.NPlayerDecodePeekOther(idx); k {
+		return "peek_other", clampSlot(int(t)), true
+	}
+	if own, opp, _, k := engine.NPlayerDecodeBlindSwap(idx); k {
+		return "blind_swap", clampSlot(int(own))*tokMaxSlots + clampSlot(int(opp)), true
+	}
+	if own, opp, _, k := engine.NPlayerDecodeKingLook(idx); k {
+		return "king_look", clampSlot(int(own))*tokMaxSlots + clampSlot(int(opp)), true
+	}
+	if t, k := engine.NPlayerDecodeSnapOwn(idx); k {
+		return "snap_own", clampSlot(int(t)), true
+	}
+	if t, _, k := engine.NPlayerDecodeSnapOpponent(idx); k {
+		return "snap_opp", clampSlot(int(t)), true
+	}
+	if own, k := engine.NPlayerDecodeSnapOpponentMove(idx); k {
+		// The N-player move encoding carries only the mover's own slot; the vacated slot
+		// rides in the engine's pending state and is read back off LastAction.
+		return "snap_opp_move", clampSlot(int(own))*tokMaxSlots + clampSlot(int(0)), true
+	}
+	return "", 0, false
+}
+
+// actionTokenIn returns the ACTION-block token for an index recorded in the given action
+// space, or -1 if that space's decoders do not claim it. The two spaces overlap, so the
+// space has to come from the record rather than from the index (cambia-1548).
+func actionTokenIn(idx uint16, space uint8) int32 {
+	if space == engine.ActionSpaceNPlayer {
+		name, rel, ok := actionLocalTagNPlayer(idx)
+		if !ok {
+			return -1
+		}
+		return actionBase + actionTagOffset[name] + rel
+	}
+	return actionToken(idx)
+}
+
 // isLoggedSnapAction reports whether an action index is one whose snap outcome
 // is recorded in the per-phase snap results log (PassSnap, SnapOwn, SnapOpponent).
 // SnapOpponentMove is NOT logged (it only completes a successful opponent snap).
@@ -363,10 +430,46 @@ func isLoggedSnapAction(idx uint16) bool {
 	return false
 }
 
+// isLoggedSnapActionIn is isLoggedSnapAction for a recorded action space.
+func isLoggedSnapActionIn(idx uint16, space uint8) bool {
+	if space != engine.ActionSpaceNPlayer {
+		return isLoggedSnapAction(idx)
+	}
+	if idx == engine.NPlayerActionPassSnap {
+		return true
+	}
+	if _, ok := engine.NPlayerDecodeSnapOwn(idx); ok {
+		return true
+	}
+	if _, _, ok := engine.NPlayerDecodeSnapOpponent(idx); ok {
+		return true
+	}
+	return false
+}
+
 // classifySnap reconstructs the (outcome, slot) of the last snap action from
 // LastAction, mirroring _classify_snap over the Python snap_results log entry.
 func classifySnap(g *engine.GameState) (outcome int, slot int) {
 	idx := g.LastAction.ActionIdx
+	if g.LastAction.ActionSpace() == engine.ActionSpaceNPlayer {
+		if idx == engine.NPlayerActionPassSnap {
+			return outcomeFail, -1
+		}
+		if t, ok := engine.NPlayerDecodeSnapOwn(idx); ok {
+			if g.LastAction.SnapSuccess {
+				return outcomeSuccessOwn, int(t)
+			}
+			return outcomePenalty, -1
+		}
+		if t, _, ok := engine.NPlayerDecodeSnapOpponent(idx); ok {
+			if g.LastAction.SnapSuccess {
+				return outcomeSuccessOpp, int(t)
+			}
+			return outcomePenalty, -1
+		}
+		// Should not be reached for logged snap actions.
+		return outcomeFail, -1
+	}
 	if idx == engine.ActionPassSnap {
 		return outcomeFail, -1
 	}
@@ -482,6 +585,12 @@ func (ts *TokenStream) Observe(g *engine.GameState, observerID uint8) error {
 
 	actor := g.LastAction.ActingPlayer
 	idx := g.LastAction.ActionIdx
+	// The space the engine recorded the index in. The 146- and 620-action spaces overlap,
+	// so every decode below is taken in the recorded space; a 2-seat game records the
+	// legacy space throughout, which is the path this file was written against
+	// (cambia-1548).
+	space := g.LastAction.ActionSpace()
+	nplayerSpace := space == engine.ActionSpaceNPlayer
 
 	// Race-ON snap-window observation (imperfect info, cambia-564). Per-commit
 	// public frames are suppressed so no committer's choice leaks before the race
@@ -523,7 +632,7 @@ func (ts *TokenStream) Observe(g *engine.GameState, observerID uint8) error {
 	}
 
 	// 2. Public turn frame: ACTOR, ACTION, CARD(discard top after action).
-	atok := actionToken(idx)
+	atok := actionTokenIn(idx, space)
 	if atok < 0 {
 		atok = tokSEP
 	}
@@ -539,42 +648,48 @@ func (ts *TokenStream) Observe(g *engine.GameState, observerID uint8) error {
 	// peek_own/peek_other reveal one card, recorded in LastAction (RevealedOwner/
 	// RevealedIdx/RevealedCard). King-look reveals two cards and leaves the state
 	// in PendingKingDecision with both looked cards + slots in Pending.Data (own:
-	// Data[0]/Data[2]); the own card is emitted first, matching sequence_encoding.py's
-	// own-owner-first ordering.
+	// Data[0]/Data[2], opponent: Data[1]/Data[3]); the own card is emitted first,
+	// matching sequence_encoding.py's own-owner-first ordering.
 	//
 	// Data[3]'s meaning depends on which apply path armed the pending state, the same split
 	// cambia_game_get_pending's PendingKingDecision branch keys on (cgo/exports.go): the
-	// 2-player kingLook always targets OpponentOf(actor) (1-acting, exact at two seats) and
-	// stores that seat's card in Data[3] directly. kingLookNPlayer, the path 3+ seats always
-	// takes (nplayer_actions.go), lets the actor target any other seat via oppRelIdxToAbsolute,
-	// not just seat+1, and Data[3] holds that recorded target SEAT instead - OpponentOf(actor)
-	// underflows there (cambia-1171 fixed the apply paths against exactly this; this frame was
-	// the one 3+-seat token consumer still deriving it that way). The opponent's card is not
-	// stored for that path, so it is read live off the recorded seat's hand, which the swap
-	// decision (a separate, later action) has not yet touched.
-	if actor == observerID {
+	// 2-player kingLook stores the looked opponent card in Data[3]; kingLookNPlayer stores the
+	// recorded target SEAT there and the card is read live off that seat's hand. The recorded
+	// action space (cambia-1548) says which path armed it, so the two readings never mix
+	// (cambia-1239 F4 first fixed the 3+-seat reading; the space tag replaces its seat-count test).
+	if actor == observerID && !nplayerSpace {
 		if _, ok := engine.ActionIsPeekOwn(idx); ok {
 			putPeek(g.LastAction.RevealedOwner, g.LastAction.RevealedIdx, g.LastAction.RevealedCard)
 		} else if _, ok := engine.ActionIsPeekOther(idx); ok {
 			putPeek(g.LastAction.RevealedOwner, g.LastAction.RevealedIdx, g.LastAction.RevealedCard)
 		} else if _, _, ok := engine.ActionIsKingLook(idx); ok && g.Pending.Type == engine.PendingKingDecision {
+			putPeek(actor, g.Pending.Data[0], engine.Card(g.Pending.Data[2]))
+			putPeek(g.OpponentOf(actor), g.Pending.Data[1], engine.Card(g.Pending.Data[3]))
+		}
+	} else if actor == observerID {
+		// N-player space. The King look's second card belongs to the seat the look named,
+		// which the N-player look keeps in Pending.Data[3] (where the 2-player look keeps
+		// the opponent card itself), so the card is read out of that seat's hand.
+		if _, ok := engine.NPlayerDecodePeekOwn(idx); ok {
+			putPeek(g.LastAction.RevealedOwner, g.LastAction.RevealedIdx, g.LastAction.RevealedCard)
+		} else if _, _, ok := engine.NPlayerDecodePeekOther(idx); ok {
+			putPeek(g.LastAction.RevealedOwner, g.LastAction.RevealedIdx, g.LastAction.RevealedCard)
+		} else if _, _, _, ok := engine.NPlayerDecodeKingLook(idx); ok && g.Pending.Type == engine.PendingKingDecision {
+			target := g.Pending.Data[3]
 			oppSlot := g.Pending.Data[1]
-			var opp uint8
-			var oppCard engine.Card
-			if g.NumActivePlayers() == 2 {
-				opp = g.OpponentOf(actor)
-				oppCard = engine.Card(g.Pending.Data[3])
-			} else {
-				opp = g.Pending.Data[3]
-				oppCard = g.Players[opp].Hand[oppSlot]
+			oppCard := engine.EmptyCard
+			if int(target) < engine.MaxPlayers && oppSlot < g.Players[target].HandLen {
+				oppCard = g.Players[target].Hand[oppSlot]
 			}
 			putPeek(actor, g.Pending.Data[0], engine.Card(g.Pending.Data[2]))
-			putPeek(opp, oppSlot, oppCard)
+			putPeek(target, oppSlot, oppCard)
 		}
 	}
 
 	// 3. Public cambia frame: only on the CallCambia action.
 	if idx == engine.ActionCallCambia && g.IsCambiaCalled() {
+		// ActionCallCambia and NPlayerActionCallCambia are the same index (2): the first
+		// seventeen indices are shared by both spaces.
 		caller := int(g.CambiaCaller)
 		if caller < 0 {
 			caller = int(actor)
@@ -587,7 +702,7 @@ func (ts *TokenStream) Observe(g *engine.GameState, observerID uint8) error {
 	// signal via the race-resolution frames above; the per-action accumulator is
 	// never used under race-ON (snapLen stays 0).
 	if g.Snap.Active && !g.Rules.SnapRace {
-		if isLoggedSnapAction(idx) {
+		if isLoggedSnapActionIn(idx, space) {
 			outcome, slot := classifySnap(g)
 			frame := [4]int32{
 				frameToken(frameSnap),

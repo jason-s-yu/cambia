@@ -46,6 +46,22 @@ func DecodeSnapCommit(action uint16) (kind, slot, oppRel uint8, ok bool) {
 	return 0, 0, 0, false
 }
 
+// SnapCommitSpace names the action space a raw committed snap action index belongs to.
+// The two snap ranges are disjoint, so the index names its own space; an index that is
+// not a snap action reports the legacy space, which is what an unstamped record means.
+func SnapCommitSpace(action uint16) uint8 {
+	if action == NPlayerActionPassSnap {
+		return ActionSpaceNPlayer
+	}
+	if _, ok := NPlayerDecodeSnapOwn(action); ok {
+		return ActionSpaceNPlayer
+	}
+	if _, _, ok := NPlayerDecodeSnapOpponent(action); ok {
+		return ActionSpaceNPlayer
+	}
+	return ActionSpaceLegacy
+}
+
 // recordSnapCommit stores one committer's choice without mutating any hand, then
 // advances to the next committer. advanceSnapper drives resolveSnapRace once the
 // final committer has committed. Works for both action spaces via DecodeSnapCommit.
@@ -64,8 +80,11 @@ func (g *GameState) recordSnapCommit(actionIdx uint16) error {
 	j := g.Snap.CurrentSnapperIdx
 	g.Snap.Commits[j] = actionIdx
 
-	// Record the commit as the last action (a commit resolves nothing yet).
+	// Record the commit as the last action (a commit resolves nothing yet). The commit is
+	// stored raw, in whichever space the caller drove, so the space is read back off the
+	// index rather than assumed from the seat count (cambia-1548).
 	g.LastAction.ActionIdx = actionIdx
+	g.recordActionSpace(SnapCommitSpace(actionIdx))
 	g.LastAction.ActingPlayer = g.Snap.Snappers[j]
 	g.LastAction.RevealedCard = EmptyCard
 	g.LastAction.RevealedIdx = 0
@@ -173,6 +192,7 @@ func (g *GameState) endSnapRacePhase() {
 // Mirrors snapOwn's own-card resolution body.
 func (g *GameState) resolveWinnerSnapOwn(p, idx uint8, rawIdx uint16) {
 	g.LastAction.ActionIdx = rawIdx
+	g.recordActionSpace(SnapCommitSpace(rawIdx))
 	g.LastAction.ActingPlayer = p
 
 	handLen := g.Players[p].HandLen
@@ -205,6 +225,7 @@ func (g *GameState) resolveWinnerSnapOwn(p, idx uint8, rawIdx uint16) {
 // vacated slot). Mirrors the resolution body of snapOpponent / nplayerSnapOpponent.
 func (g *GameState) resolveWinnerSnapOpp(p, oppRel, slot uint8, rawIdx uint16) bool {
 	g.LastAction.ActionIdx = rawIdx
+	g.recordActionSpace(SnapCommitSpace(rawIdx))
 	g.LastAction.ActingPlayer = p
 
 	opponent, ok := g.opponentByRel(p, oppRel)
