@@ -93,7 +93,7 @@ class TestThreadedTraversal:
             "output_dim": NUM_ACTIONS,
         }
 
-        adv, strat, val, done, nodes = _run_traversals_threaded(
+        adv, strat, val, done, nodes, _engine_errors = _run_traversals_threaded(
             iteration=0,
             config=config,
             network_weights=None,
@@ -138,7 +138,7 @@ class TestThreadedTraversal:
             "output_dim": NUM_ACTIONS,
         }
 
-        adv, strat, val, done, nodes = _run_traversals_threaded(
+        adv, strat, val, done, nodes, _engine_errors = _run_traversals_threaded(
             iteration=0,
             config=config,
             network_weights=None,
@@ -198,16 +198,18 @@ class TestThreadedTraversal:
             run_timestamp="test",
         )
 
-        # Threaded
-        adv_thr, strat_thr, val_thr, done_thr, nodes_thr = _run_traversals_threaded(
-            iteration=0,
-            config=config,
-            network_weights=None,
-            network_config=network_config,
-            traversals_per_step=traversals,
-            num_threads=2,
-            run_log_dir="/tmp/test_threaded_logs",
-            run_timestamp="test",
+        # Threaded (_run_traversals_threaded returns a 6-tuple with engine_errors)
+        adv_thr, strat_thr, val_thr, done_thr, nodes_thr, _errors_thr = (
+            _run_traversals_threaded(
+                iteration=0,
+                config=config,
+                network_weights=None,
+                network_config=network_config,
+                traversals_per_step=traversals,
+                num_threads=2,
+                run_log_dir="/tmp/test_threaded_logs",
+                run_timestamp="test",
+            )
         )
 
         assert done_seq == done_thr == traversals
@@ -227,7 +229,7 @@ class TestThreadedTraversal:
             "output_dim": NUM_ACTIONS,
         }
 
-        adv, strat, val, done, nodes = _run_traversals_threaded(
+        adv, strat, val, done, nodes, _engine_errors = _run_traversals_threaded(
             iteration=0,
             config=config,
             network_weights=None,
@@ -265,7 +267,7 @@ class TestThreadedBenchmark:
         }
 
         start = time.perf_counter()
-        adv, strat, val, done, nodes = _run_traversals_threaded(
+        adv, strat, val, done, nodes, _engine_errors = _run_traversals_threaded(
             iteration=0,
             config=config,
             network_weights=None,
