@@ -450,6 +450,36 @@ func (m *ProcessManager) launch(name string, opts StartOpts, lopts LaunchOpts, r
 	return ReadProcessState(runDir)
 }
 
+// childEnvAllowlist is the only ambient (agent-process) variables let through
+// to a parameterized launch's child (design 3.3, D17: the editable-install
+// trap on a dev host). Everything else - VIRTUAL_ENV, CONDA_PREFIX, PYENV_*,
+// PYTHONPATH, PYTHONHOME, PYTHONSTARTUP, UV_*, PIP_*, CAMBIA_RUN_DB,
+// LIBCAMBIA_PATH included - is dropped so a developer's own runnerd host
+// environment can never leak first-party src or a stray venv into a job's
+// interpreter. The harness-set variables the job actually needs (PYTHONPATH
+// pinned at the staged worktree, LIBCAMBIA_PATH, CAMBIA_EXPECTED_SRC_ROOT, ...)
+// still reach the child through lopts.Env (assembleEnv, ingest/env.go),
+// appended after this allowlist.
+var childEnvAllowlist = []string{"HOME", "PATH", "LANG", "TZ", "TMPDIR"}
+
+// constructedChildEnv builds the parameterized launch's child environment: the
+// allowlisted subset of ambient (in ambient's own values) plus harnessEnv
+// verbatim. ambient is os.Environ() in production; it is a parameter so the
+// filter is testable without mutating the test process's real environment.
+func constructedChildEnv(ambient, harnessEnv []string) []string {
+	allow := make(map[string]bool, len(childEnvAllowlist))
+	for _, k := range childEnvAllowlist {
+		allow[k] = true
+	}
+	out := make([]string, 0, len(childEnvAllowlist)+len(harnessEnv))
+	for _, kv := range ambient {
+		if k, _, ok := strings.Cut(kv, "="); ok && allow[k] {
+			out = append(out, kv)
+		}
+	}
+	return append(out, harnessEnv...)
+}
+
 // buildCmd constructs the child command for a launch, branching on LaunchOpts.
 // A zero LaunchOpts is the fixed-binary path: cambiaBin run from cfrDir with the
 // algorithm's subcommand plus --config/--run-name/--save-path (and --resume when
@@ -466,7 +496,7 @@ func (m *ProcessManager) buildCmd(name string, opts StartOpts, lopts LaunchOpts,
 		} else {
 			cmd.Dir = m.cfrDir
 		}
-		cmd.Env = append(os.Environ(), lopts.Env...)
+		cmd.Env = constructedChildEnv(os.Environ(), lopts.Env)
 		return cmd, nil
 	}
 

@@ -121,6 +121,102 @@ func TestStartWithOptsParameterized(t *testing.T) {
 	}
 }
 
+// TestStartWithOptsChildEnvAllowlist is AC(6): a parameterized launch's child
+// environment carries only the allowlist (HOME, PATH, LANG, TZ, TMPDIR, taken
+// from the agent's own ambient values) plus the harness-set variables in
+// LaunchOpts.Env - never the agent's own VIRTUAL_ENV, UV_*, or ambient
+// PYTHONPATH (design 3.3, D17: the editable-install trap on a dev host).
+func TestStartWithOptsChildEnvAllowlist(t *testing.T) {
+	base := t.TempDir()
+	capture := filepath.Join(base, "capture.txt")
+	interp := captureEnvScript(t, base, capture)
+
+	stagedCwd := filepath.Join(base, "worktree", "cfr")
+	if err := os.MkdirAll(stagedCwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ambient contamination the allowlist must drop.
+	t.Setenv("VIRTUAL_ENV", "/home/dev/.venv")
+	t.Setenv("UV_CACHE_DIR", "/home/dev/.cache/uv")
+	t.Setenv("PYTHONPATH", "/home/dev/ambient-src")
+	t.Setenv("CONDA_PREFIX", "/home/dev/conda")
+	// Ambient values the allowlist must let through unchanged.
+	t.Setenv("LANG", "en_US.UTF-8")
+
+	m, _ := newTestManager(t, crashStub)
+	createRun(t, m, "envopts", "prt-cfr")
+
+	lopts := LaunchOpts{
+		Python: interp,
+		Argv:   []string{"-c", "pass"},
+		Cwd:    stagedCwd,
+		Env: []string{
+			"PYTHONPATH=/staged/shim:/staged/cfr",
+			"LIBCAMBIA_PATH=/staged/libcambia.so",
+		},
+	}
+	if _, err := m.StartWithOpts("envopts", StartOpts{}, lopts); err != nil {
+		t.Fatalf("StartWithOpts: %v", err)
+	}
+	waitForStatus(t, m, "envopts", StatusStopped, 10*time.Second)
+
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatalf("read capture: %v", err)
+	}
+	kv := parseCaptureEnv(t, string(data))
+
+	if got := kv["VIRTUAL_ENV"]; got != "" {
+		t.Errorf("VIRTUAL_ENV leaked into child env: %q", got)
+	}
+	if got := kv["UV_CACHE_DIR"]; got != "" {
+		t.Errorf("UV_CACHE_DIR leaked into child env: %q", got)
+	}
+	if got := kv["CONDA_PREFIX"]; got != "" {
+		t.Errorf("CONDA_PREFIX leaked into child env: %q", got)
+	}
+	if got := kv["PYTHONPATH"]; got != "/staged/shim:/staged/cfr" {
+		t.Errorf("PYTHONPATH = %q, want the harness-set value, not the ambient one", got)
+	}
+	if got := kv["LIBCAMBIA_PATH"]; got != "/staged/libcambia.so" {
+		t.Errorf("LIBCAMBIA_PATH = %q, want /staged/libcambia.so", got)
+	}
+	if got := kv["LANG"]; got != "en_US.UTF-8" {
+		t.Errorf("LANG = %q, want the allowlisted ambient value en_US.UTF-8", got)
+	}
+	if got := kv["HOME"]; got == "" {
+		t.Error("HOME dropped; the allowlist should let it through")
+	}
+}
+
+// captureEnvScript writes a POSIX-sh script that dumps its full environment
+// (one KEY=VALUE per line) to capturePath, then exits 0.
+func captureEnvScript(t *testing.T, dir, capturePath string) string {
+	t.Helper()
+	p := filepath.Join(dir, "capture_env.sh")
+	body := "#!/bin/sh\nenv > \"" + capturePath + "\"\nexit 0\n"
+	if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// parseCaptureEnv parses `env` output (one KEY=VALUE per line) into a map.
+func parseCaptureEnv(t *testing.T, content string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	for _, line := range strings.Split(content, "\n") {
+		if line == "" {
+			continue
+		}
+		if i := strings.Index(line, "="); i >= 0 {
+			out[line[:i]] = line[i+1:]
+		}
+	}
+	return out
+}
+
 // TestStartWithOptsEmptyIsLegacy is the empty-opts regression: a zero LaunchOpts
 // must reproduce the exact fixed-binary launch - cambiaBin run from cfrDir with
 // the algorithm subcommand plus --config/--run-name/--save-path - proving the
