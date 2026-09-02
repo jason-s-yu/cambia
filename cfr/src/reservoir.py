@@ -8,7 +8,11 @@ of all training samples ever generated. Two separate buffers are used:
   - Mv: advantage/regret samples
   - Mpi: strategy samples
 
-Samples store iteration number for linear CFR weighting during training.
+Samples store the CFR iteration number for linear CFR weighting during
+training: the training step whose policy produced the sample, so every
+sample from one step carries one value. It is not a traversal counter;
+weighting by one would spread weights across samples drawn from the same
+policy (cambia-720).
 
 Storage is columnar: four contiguous numpy arrays (features, targets, masks,
 iterations) rather than a list of Python objects. This eliminates the
@@ -37,7 +41,7 @@ class ReservoirSample:
     features: np.ndarray  # (INPUT_DIM,) float32 -- encoded infoset
     target: np.ndarray  # (NUM_ACTIONS,) float32 -- regrets or strategy
     action_mask: np.ndarray  # (NUM_ACTIONS,) bool -- legal actions
-    iteration: int  # CFR iteration number for weighting
+    iteration: int  # training step that produced it; weighting key
     infoset_key_raw: Optional[Tuple] = None  # Optional debugging metadata
 
 
