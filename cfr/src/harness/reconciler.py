@@ -334,6 +334,9 @@ _EVALS_WHITELIST = [
     "policy_errors",
     "engine_errors",
     "belief_protocol",
+    # cambia-721: which policy the row measured. Dropping it would make a
+    # replayed row indistinguishable from one measured before the column.
+    "served_policy",
     "timestamp",
 ]
 
@@ -523,6 +526,9 @@ def _read_evals(src: sqlite3.Connection, src_run_id: Any) -> List[Dict[str, Any]
             "engine_errors": _int_or_none(e.get("engine_errors"), "eval.engine_errors"),
             "belief_protocol": _str_or_none(
                 e.get("belief_protocol"), "eval.belief_protocol", _MAX_SHORT_STR_LEN
+            ),
+            "served_policy": _str_or_none(
+                e.get("served_policy"), "eval.served_policy", _MAX_SHORT_STR_LEN
             ),
             "timestamp": _str_or_none(
                 e.get("timestamp"), "eval.timestamp", _MAX_SHORT_STR_LEN

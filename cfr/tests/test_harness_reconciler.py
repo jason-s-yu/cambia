@@ -1158,3 +1158,53 @@ def test_evaluate_journal_runs_row_name_must_match_target(tmp_path):
 
     with pytest.raises(ReconcilerValidationError):
         replay(job_dir, dest_path, origin_host="runner")
+
+
+# ---------------------------------------------------------------------------
+# served_policy (cambia-721): which policy the numbers measured. A replayed row
+# that drops it is indistinguishable from one measured before the column, so
+# the whitelist carries it on the same terms as the eval-integrity columns.
+# ---------------------------------------------------------------------------
+
+
+def test_served_policy_replays_onto_client(tmp_path):
+    run_dir = tmp_path / "runs" / "v0.4-prtcfr-r1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    conn = _new_source(run_dir / "run_db.sqlite")
+    rid = _insert_run(conn)
+    _insert_eval(conn, rid, 10, "random_no_cambia", served_policy="average_strategy")
+    conn.close()
+
+    summary = replay(run_dir, _dest_path(tmp_path), origin_host="runner")
+    assert summary["evals"] == 1
+
+    dest = _open_dest(_dest_path(tmp_path))
+    try:
+        row = dest.execute(
+            "SELECT served_policy FROM eval_results " "WHERE baseline='random_no_cambia'"
+        ).fetchone()
+    finally:
+        dest.close()
+    assert row["served_policy"] == "average_strategy"
+
+
+def test_pre_721_eval_row_replays_served_policy_as_null(tmp_path):
+    """A row measured before the column existed must not gain a default that
+    would claim it measured the average strategy."""
+    run_dir = tmp_path / "runs" / "v0.4-prtcfr-r1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    conn = _new_source(run_dir / "run_db.sqlite")
+    rid = _insert_run(conn)
+    _insert_eval(conn, rid, 10, "random_no_cambia")
+    conn.close()
+
+    replay(run_dir, _dest_path(tmp_path), origin_host="runner")
+
+    dest = _open_dest(_dest_path(tmp_path))
+    try:
+        row = dest.execute(
+            "SELECT served_policy FROM eval_results " "WHERE baseline='random_no_cambia'"
+        ).fetchone()
+    finally:
+        dest.close()
+    assert row["served_policy"] is None
