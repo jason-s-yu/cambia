@@ -120,28 +120,16 @@ func (p *Pool) project(lease nashnet.Lease, status string, req nashnet.ProgressR
 //
 // A terminal row is left alone. The two ways a return ends in a terminal
 // instead, a spent attempt budget and a promoted checkpoint, are written by the
-// caller before this runs.
-//
-// So is a job holding a promoted checkpoint, which is a resume the operator
-// asked for: the resume intent lives in the queue handle rather than in
-// jobspec.json, so a created row would come back from a restart as a fresh
-// launch over the run dir the checkpoint sits in. Leaving that row alone costs
-// an operator act after a restart, which is what D33 asks for anyway, rather
-// than restarting a job that ran.
+// caller before this runs. A job holding a checkpoint from an earlier run needs
+// no exception here: its resume intent and its node pin are in jobspec.json, so
+// the restart scan brings it back as the resume it was rather than as a fresh
+// launch over the checkpoint.
 func (p *Pool) projectReady(jobID string) {
-	runDir := filepath.Join(p.runsDir, jobID)
-	st, err := procmgr.ReadProcessState(runDir)
-	if err != nil || isTerminal(procmgr.EffectiveStatus(st)) || p.promotedCheckpoint(jobID) {
+	st, err := procmgr.ReadProcessState(filepath.Join(p.runsDir, jobID))
+	if err != nil || isTerminal(procmgr.EffectiveStatus(st)) {
 		return
 	}
-	st.Status = procmgr.StatusCreated
-	st.Host = ""
-	st.PID = 0
-	st.PGID = 0
-	st.StartedAt = ""
-	st.FinishedAt = ""
-	st.ExitCode = nil
-	if err := procmgr.WriteProcessState(runDir, st); err != nil {
+	if err := p.disp.projectQueued(jobID); err != nil {
 		poolLog("nashnet: returning %s to ready: %v", jobID, err)
 	}
 }

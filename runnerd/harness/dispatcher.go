@@ -43,10 +43,13 @@ var (
 // job is the in-memory handle for a queued or preparing job. Once launched it is
 // removed from the pending set and its state is read from process.json; once
 // terminal its runnerd-level state (canceled/failed) is persisted there too.
+//
+// It carries no resume flag of its own: the intent is spec.Resume, which
+// jobspec.json persists, so the queue this daemon holds and the queue a restart
+// rebuilds from disk answer that question the same way (D34).
 type job struct {
 	spec     JobSpec
 	state    string // StateQueued | StatePreparing
-	resume   bool
 	canceled bool
 	submitAt string
 	ctx      context.Context
@@ -309,7 +312,7 @@ func (d *Dispatcher) releaseSlotLocked(j *job) {
 // gateFail verdict, for the terminal message; it is empty for gateBlocked/
 // gateLaunch.
 func (d *Dispatcher) gateDecisionLocked(j *job) (decision gateDecision, culprit string) {
-	if j.resume || len(j.spec.After) == 0 {
+	if j.spec.Resume || len(j.spec.After) == 0 {
 		return gateLaunch, ""
 	}
 	blocked := false
@@ -481,7 +484,7 @@ func (d *Dispatcher) runJob(j *job) {
 		return
 	}
 	var lerr error
-	if j.resume {
+	if j.spec.Resume {
 		_, lerr = d.pm.ResumeWithOpts(name, procmgr.StartOpts{}, lopts)
 	} else {
 		_, lerr = d.pm.StartWithOpts(name, procmgr.StartOpts{}, lopts)
@@ -595,7 +598,7 @@ func (d *Dispatcher) launchOpts(j *job, prepared *ingestapi.Prepared) (procmgr.L
 			argv = append(argv, "--save-path", d.runDir(j.spec.Name))
 		}
 	}
-	if j.resume {
+	if j.spec.Resume {
 		argv = append(argv, "--resume")
 	}
 	// CAMBIA_RUN_DB points every run_db write of the job process (run
@@ -895,7 +898,31 @@ func (d *Dispatcher) Resume(name string) (JobView, error) {
 		cancel()
 		return JobView{}, ErrQueueFull
 	}
-	j := &job{spec: *spec, state: StateQueued, resume: true, submitAt: procmgr.NowRFC3339(), ctx: ctx, cancel: cancel}
+	// A resume is an admission, so it takes a fresh submit_seq. The live queue
+	// puts it at the back; the restart scan orders by submit_seq, and without a
+	// new one the two disagree, a resume of an old job re-entering ahead of
+	// everything submitted since.
+	spec.SubmitSeq = d.nextSeq
+	d.nextSeq++
+	// The intent, the pin and the sequence go to disk before the job is queued,
+	// because the restart scan rebuilds the queue out of jobspec.json: an intent
+	// held only on the queue handle comes back as a plain unpinned launch over
+	// the very checkpoint it was meant to resume from (D34). The row goes with
+	// it, since only a created row is re-enqueued and this one still carries the
+	// terminal of the run being resumed. Written after the admission checks, so
+	// a refused resume leaves nothing behind, and before dispatchLocked, which
+	// may launch the job on this call.
+	if werr := writeJobSpec(d.runDir(name), spec); werr != nil {
+		d.mu.Unlock()
+		cancel()
+		return JobView{}, werr
+	}
+	if perr := d.projectQueued(name); perr != nil {
+		d.mu.Unlock()
+		cancel()
+		return JobView{}, perr
+	}
+	j := &job{spec: *spec, state: StateQueued, submitAt: procmgr.NowRFC3339(), ctx: ctx, cancel: cancel}
 	d.pending[name] = j
 	d.queue = append(d.queue, name)
 	d.dispatchLocked()
@@ -1154,6 +1181,32 @@ func (d *Dispatcher) effectiveStateLocked(name string, st *procmgr.ProcessState)
 		return ""
 	}
 	return procmgr.EffectiveStatus(st)
+}
+
+// projectQueued rewrites a job's row as created, which is the one state the
+// restart scan re-enqueues (D34). Resume calls it because a resume is a new
+// launch over the terminal row of the run it continues, and the pool calls it
+// for a job returning to the ready set after a lease ended without one.
+//
+// The previous run's outcome goes with the status. A finished_at, an exit code
+// or a host left on a row that is about to run again describes a run that no
+// longer exists, and the host is the field the restart scan reads as "another
+// machine's process", which is what stranded a returned job before this.
+func (d *Dispatcher) projectQueued(name string) error {
+	runDir := d.runDir(name)
+	st, err := procmgr.ReadProcessState(runDir)
+	if err != nil {
+		return err
+	}
+	st.Status = procmgr.StatusCreated
+	st.Host = ""
+	st.PID = 0
+	st.PGID = 0
+	st.StartedAt = ""
+	st.FinishedAt = ""
+	st.ExitCode = nil
+	st.LastError = ""
+	return procmgr.WriteProcessState(runDir, st)
 }
 
 // hasResumableState mirrors the dashboard's hasCheckpoint gate: the rolling
