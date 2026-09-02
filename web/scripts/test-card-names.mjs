@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { toDsCardFace, cardFaceName, cardSlotName, LOCKED_SUFFIX } from '../src/components/game/dsCardMap.ts';
+import { toDsCardFace, cardFaceName, cardSlotName, LOCKED_SUFFIX, FORFEITED_SUFFIX } from '../src/components/game/dsCardMap.ts';
 
 const name = (rank, suit) => cardFaceName(toDsCardFace({ id: 'c', known: true, rank, suit }));
 
@@ -76,9 +76,24 @@ test('slots are named by their 1-based engine slot index', () => {
 });
 
 test('a locked hand keeps the reason it went inert, revealed or not', () => {
-    assert.equal(cardSlotName('Your', 0, shown('A', 'S'), true), 'Your card 1: ace of spades' + LOCKED_SUFFIX);
-    assert.equal(cardSlotName('Your', 0, null, true), 'Your card 1, face down' + LOCKED_SUFFIX);
+    assert.equal(cardSlotName('Your', 0, shown('A', 'S'), 'locked'), 'Your card 1: ace of spades' + LOCKED_SUFFIX);
+    assert.equal(cardSlotName('Your', 0, null, 'locked'), 'Your card 1, face down' + LOCKED_SUFFIX);
     assert.equal(LOCKED_SUFFIX, ', locked after calling Cambia');
+});
+
+// A seat whose reconnect window closed keeps its cards on the felt to watch with, so the slot
+// itself has to say the score behind it stopped counting (cambia-1468, carried from cambia-1237).
+test('a forfeited seat says its score stopped counting, revealed or not', () => {
+    assert.equal(cardSlotName('Your', 0, shown('A', 'S'), 'forfeited'), 'Your card 1: ace of spades' + FORFEITED_SUFFIX);
+    assert.equal(cardSlotName('Rival', 2, null, 'forfeited'), 'Rival card 3, face down' + FORFEITED_SUFFIX);
+    assert.equal(FORFEITED_SUFFIX, ', seat forfeited, not scored');
+});
+
+// The two states are one suffix, so a seat that called Cambia and then forfeited says the thing
+// that outranks: an unscored seat has nothing left for the lock to add.
+test('a slot with no state named reads plainly', () => {
+    assert.equal(cardSlotName('Your', 0, null, 'live'), 'Your card 1, face down');
+    assert.equal(cardSlotName('Your', 0, null), 'Your card 1, face down');
 });
 
 console.log('card name checks loaded');
