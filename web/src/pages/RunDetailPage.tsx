@@ -11,6 +11,7 @@ import LogViewer from '@/components/training/LogViewer';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import StatusBadge from '@/components/training/StatusBadge';
 import HostBadge from '@/components/training/HostBadge';
+import NodeBadge from '@/components/training/NodeBadge';
 import SyncStatus from '@/components/training/SyncStatus';
 import ProcessControls from '@/components/training/ProcessControls';
 import EvalControls from '@/components/training/EvalControls';
@@ -129,6 +130,7 @@ const RunDetailPage: React.FC = () => {
 					</span>
 					<StatusBadge status={processState.status} />
 					<HostBadge host={run.host} />
+					<NodeBadge executedOn={run.executed_on} />
 					<SyncStatus host={run.host} lastSyncAt={run.last_sync_at} stale={run.stale} />
 				</div>
 				<div className="text-sm text-gray-500 dark:text-gray-400 flex gap-4">
