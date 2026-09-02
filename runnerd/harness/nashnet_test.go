@@ -86,6 +86,8 @@ type poolRig struct {
 	pool     *Pool
 	bundles  *fakeBundles
 	grantDir string
+	quarDir  string
+	cfg      poolRigConfig
 	nodeA    fixtureNode
 	nodeB    fixtureNode
 	opPriv   ed25519.PrivateKey
@@ -186,7 +188,7 @@ func newPoolRig(t *testing.T, cfg poolRigConfig) *poolRig {
 
 	pr := &poolRig{
 		testRig: base, pool: pool, bundles: bundles, grantDir: grantDir,
-		opPriv: opPriv, clock: clock,
+		quarDir: quarDir, cfg: cfg, opPriv: opPriv, clock: clock,
 	}
 	pr.nodeA = pr.enroll(t, "node-a", capability.Grant{})
 	pr.nodeB = pr.enroll(t, "node-b", capability.Grant{})

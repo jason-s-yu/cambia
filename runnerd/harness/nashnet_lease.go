@@ -107,6 +107,35 @@ func (p *Pool) project(lease nashnet.Lease, status string, req nashnet.ProgressR
 	}
 }
 
+// projectReady un-projects a job returning to the ready set. The row a node's
+// progress ticks left behind names a host and a phase that describe nothing any
+// more, and the restart path of D34 re-enqueues created rows: a requeued job
+// left at starting or running is one a restart neither re-enqueues nor
+// reattaches, because its non-empty Host marks a process on another machine.
+// Resetting it to created is what puts it back in submit_seq order across a
+// restart, where the live queue already holds it.
+//
+// A terminal row is left alone. The two ways a return ends in a terminal
+// instead, a spent attempt budget and a promoted checkpoint, are written by the
+// caller before this runs.
+func (p *Pool) projectReady(jobID string) {
+	runDir := filepath.Join(p.runsDir, jobID)
+	st, err := procmgr.ReadProcessState(runDir)
+	if err != nil || isTerminal(procmgr.EffectiveStatus(st)) {
+		return
+	}
+	st.Status = procmgr.StatusCreated
+	st.Host = ""
+	st.PID = 0
+	st.PGID = 0
+	st.StartedAt = ""
+	st.FinishedAt = ""
+	st.ExitCode = nil
+	if err := procmgr.WriteProcessState(runDir, st); err != nil {
+		poolLog("nashnet: returning %s to ready: %v", jobID, err)
+	}
+}
+
 // nodeEpochFence is the registry's current epoch for a lease's node, supplied
 // by the coordinator rather than by the node: a lease route carries the lease
 // token and nothing else (D26). A node that has not registered since a
@@ -136,16 +165,28 @@ func (s *Server) handleNack(w http.ResponseWriter, r *http.Request, lease nashne
 		writeLeaseFenceError(w, err)
 		return
 	}
-	if _, err := p.leases.Revoke(lease.LeaseID, req.Reason); err != nil {
+	out, err := p.leases.Return(lease.LeaseID, req.Reason)
+	if err != nil {
 		nashnetError(w, http.StatusInternalServerError, "nack_failed", err.Error())
 		return
 	}
-	p.releaseLeaseState(lease.LeaseID)
-	p.noteNack(lease.NodeID, lease.JobID, req.Reason,
-		time.Duration(req.CooldownSeconds)*time.Second)
-	p.disp.reDispatch()
+	if p.noteNack(lease.NodeID, lease.JobID, req.Reason,
+		time.Duration(req.CooldownSeconds)*time.Second) {
+		// Three consecutive prepare_node_failed nacks: the node stops claiming
+		// until its own cooldown runs out or an operator lifts the hold (D63).
+		// The queue is untouched, so the job this nack returned goes to the next
+		// capable node on its next claim.
+		poolLog("nashnet: circuit breaker tripped for node %s", lease.NodeID)
+		p.postEvent(lease.NodeID, nashnet.Event{Type: nashnet.EventDrain})
+	}
+	// The lease settles through the same outcome path as every other ended one,
+	// so a nack posted after the process started finalizes rather than returning
+	// a job that ran (D32, D33).
+	p.applyOutcome(out)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"job_id": lease.JobID, "returned": true, "attempt": lease.Attempt,
+		"job_id":   lease.JobID,
+		"returned": out.Verdict == nashnet.VerdictRequeue,
+		"attempt":  out.NextAttempt,
 	})
 }
 
@@ -195,7 +236,16 @@ func (s *Server) handleResult(w http.ResponseWriter, r *http.Request, lease nash
 		}
 	}
 
-	p.writeTerminal(lease, req)
+	// A gate-driven stop is not an operator cancel (D62). Preempted with no
+	// promoted checkpoint is a gate release: the job returns to ready at its
+	// original submit_seq with no attempt increment and no terminal is written,
+	// so a capable node picks it up when its gate reopens. Preempted with a
+	// checkpoint is terminal and waits for an explicit operator resume, which is
+	// D33 unchanged.
+	gateRelease := req.State == nashnet.ResultPreempted && !p.promotedCheckpoint(lease.JobID)
+	if !gateRelease {
+		p.writeTerminal(lease, req)
+	}
 	if err := p.writeEnvRecord(lease.JobID, lease, "", req.State, &req); err != nil {
 		poolLog("nashnet result: env.json for %s: %v", lease.JobID, err)
 	}
@@ -214,13 +264,18 @@ func (s *Server) handleResult(w http.ResponseWriter, r *http.Request, lease nash
 		ExitCode:   req.ExitCode,
 		RecordedAt: rfc3339(p.now()),
 	}
-	p.mu.Lock()
-	p.results[lease.LeaseID] = resp
-	p.resultAuth[lease.LeaseID] = nashnet.HashLeaseToken(r.Header.Get(nashnet.HeaderLeaseToken))
-	p.mu.Unlock()
-	// Dependents gate on a settled parent, so the dispatch scan re-runs only
-	// after the terminal is on disk (D6).
-	p.disp.clearPlaced(lease.JobID)
+	p.recordResult(lease.LeaseID, resp,
+		nashnet.HashLeaseToken(r.Header.Get(nashnet.HeaderLeaseToken)))
+	if gateRelease {
+		// The queue still holds the job at its original position, so returning it
+		// costs one re-dispatch: nothing is dequeued and no attempt is charged.
+		p.projectReady(lease.JobID)
+		p.disp.reDispatch()
+	} else {
+		// Dependents gate on a settled parent, so the dispatch scan re-runs only
+		// after the terminal is on disk (D6).
+		p.disp.clearPlaced(lease.JobID)
+	}
 	p.signalPlacement()
 	writeJSON(w, http.StatusOK, resp)
 }

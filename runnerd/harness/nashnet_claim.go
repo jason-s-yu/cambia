@@ -47,9 +47,11 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request, nodeID stri
 		return
 	}
 	rec, _ := p.nodes.Get(nodeID)
-	if rec.Drained {
+	if rec.Drained || p.breakerHeld(nodeID) {
 		// A coordinator-side hold (an operator drain or the D63 breaker) is not
-		// the node's own gate, and it is never clearable by the node.
+		// the node's own gate, and it is never clearable by the node: a node that
+		// could clear its own hold would loop claim, nack, register, claim at
+		// request rate while nothing ever accumulated against it.
 		p.hold(w, nashnet.HoldNodeGated)
 		return
 	}
@@ -182,20 +184,17 @@ func (p *Pool) grantFor(ctx context.Context, cand candidate, req nashnet.ClaimRe
 		grantSet.Seeds[sd.SeedID] = entries
 	}
 
-	// A returned claim carries no attempt increment (D8), so a re-claim after a
-	// nack keeps the attempt the prior lease recorded. The increments of the
-	// D32 table belong to the retry ticket.
-	attempt := picked.attempt
-	if prev, ok := p.leases.ByJob(picked.jobID); ok && prev.Attempt > attempt {
-		attempt = prev.Attempt
-	}
+	// The attempt this lease runs at is the store's to decide: the prior lease's
+	// verdict recorded it, one higher for a requeue and unchanged for a nack
+	// (D8, D32). The floor passed here is the scan's, which is the first attempt
+	// for a job that has never been leased.
 	lease, token, err := p.leases.Grant(nashnet.GrantRequest{
 		JobID:      picked.jobID,
 		NodeID:     cand.nodeID,
 		NodeEpoch:  p.nodeEpoch(cand.nodeID),
-		Attempt:    attempt,
+		Attempt:    picked.attempt,
 		GrantSet:   grantSet,
-		MaxRuntime: time.Duration(picked.spec.MaxRuntimeHours * float64(time.Hour)),
+		MaxRuntime: p.leaseRuntimeCap(cand, picked.spec),
 	})
 	if err != nil {
 		return nil, err
@@ -233,6 +232,26 @@ func (p *Pool) grantFor(ctx context.Context, cand candidate, req nashnet.ClaimRe
 		Seeds:  seeds,
 		Policy: p.policy,
 	}, nil
+}
+
+// leaseRuntimeCap is the lease-lifetime bound this grant carries (D4): the
+// smaller of the job's own max_runtime_hours and the claiming node's declared
+// job_policy.max_runtime_hours, with zero meaning the pool's own
+// RUNNERD_NASHNET_MAX_LEASE_SECONDS applies alone.
+//
+// The node's number only ever shortens a lease. The coordinator's bound does
+// not depend on it, which is what D4 means by the node policy staying
+// node-evaluated: a node that omits the gate, as a hostile one does by
+// construction, is held to the pool cap exactly as before.
+func (p *Pool) leaseRuntimeCap(cand candidate, spec JobSpec) time.Duration {
+	cap := time.Duration(spec.MaxRuntimeHours * float64(time.Hour))
+	if h := nodeMaxRuntimeHours(cand.report); h > 0 {
+		nodeCap := time.Duration(h * float64(time.Hour))
+		if cap <= 0 || nodeCap < cap {
+			cap = nodeCap
+		}
+	}
+	return cap
 }
 
 // nodeEpoch reads the registry's current epoch for a node, which is the fence a

@@ -153,6 +153,10 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid_requires", "max_runtime_hours must not be negative")
 		return
 	}
+	if spec.MaxAttempts < 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid_requires", "max_attempts must not be negative")
+		return
+	}
 	// 4. path guards (config, checkpoints): lexical shape (reject absolute + ..).
 	for _, p := range spec.guardedPaths() {
 		if err := pathguard.CheckRel(p.value); err != nil {
