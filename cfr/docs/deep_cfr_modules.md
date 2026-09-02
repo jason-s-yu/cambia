@@ -395,7 +395,7 @@ class DeepCFRConfig:
 
     # SD-CFR mode
     use_sd_cfr: bool = False
-    use_ema: bool = True
+    use_ema: bool = False
     sd_cfr_max_snapshots: int = 200
 
     # ESCHER value network
@@ -460,7 +460,8 @@ new_sum = old_sum + w_T
 theta_EMA = (old_sum/new_sum) * theta_EMA + (w_T/new_sum) * theta_current
 ```
 
-Only runs when `use_sd_cfr=True` and `use_ema=True`.
+Only runs when `use_sd_cfr=True` and `use_ema=True`; `use_ema` is opt-in and the
+exponent comes from `sd_cfr_snapshot_weighting`, not `alpha`.
 
 ```python
 def _compute_train_steps(self, buffer) -> int:

@@ -162,7 +162,9 @@ class DeepCFRConfig:
     use_residual: bool = True
     network_type: str = "residual"  # "mlp", "residual", "slot_film", "slot_multiply"
     use_pos_embed: bool = True  # position embeddings in SlotFiLM
-    use_ema: bool = True  # EMA serving weights for O(1) SD-CFR inference
+    # O(1) parameter blend approximating the SD-CFR snapshot mixture; opt-in
+    # (cambia-712).
+    use_ema: bool = False
 
     # Profiling: gate traversal timing logs + handle pool stats behind this flag
     enable_traversal_profiling: bool = False
@@ -1076,20 +1078,31 @@ class DeepCFRTrainer:
 
     def _update_ema(self):
         """
-        Update EMA serving weights after each advantage snapshot.
+        Update the EMA serving weights after each advantage snapshot.
 
-        Uses the corrected formula for non-uniform alpha weighting:
-          w_T = (T+1)^alpha
+        This is an APPROXIMATION of the SD-CFR snapshot mixture, not the
+        mixture. It blends network parameters:
+          w_T = (T+1)^e, e from sd_cfr_snapshot_weighting
           new_sum = old_sum + w_T
-          θ_EMA = (old_sum / new_sum) * θ_EMA + (w_T / new_sum) * θ_current
+          theta_EMA = (old_sum / new_sum) * theta_EMA + (w_T / new_sum) * theta_T
+        whereas the mixture regret-matches each snapshot and averages the
+        resulting strategies. Regret matching is not linear in the parameters,
+        so the two agree only when the snapshots sit in one basin; warm-started
+        snapshots usually do, which is why the gap is a drift rather than a
+        collapse. It buys O(1) space and O(params) time per update.
 
-        This tracks the same weighted ensemble as full snapshot averaging
-        but in O(1) space and O(params) time per update.
+        The exponent follows sd_cfr_snapshot_weighting, the same rule the
+        mixture uses, so that toggling use_ema changes the estimator form and
+        not the weights (cambia-712). alpha is the fit loss's exponent and does
+        not belong here. One divergence remains and cannot be closed in O(1)
+        space: this blends every step, while the mixture averages the snapshots
+        the reservoir retained, and an evicted snapshot cannot be unblended.
         """
         if not self.dcfr_config.use_ema or not self.dcfr_config.use_sd_cfr:
             return
 
-        w_T = float((self.training_step + 1) ** self.dcfr_config.alpha)
+        exponent = 1.0 if self.dcfr_config.sd_cfr_snapshot_weighting == "linear" else 0.0
+        w_T = float((self.training_step + 1) ** exponent)
         new_sum = self._ema_weight_sum + w_T
         current_weights = {
             k: v.cpu().numpy() for k, v in self.advantage_net.state_dict().items()

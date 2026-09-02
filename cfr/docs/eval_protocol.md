@@ -170,7 +170,7 @@ Each agent type has a corresponding wrapper class in `evaluate_agents.py`:
 | gtcfr | GTCFRAgentWrapper | CVPN direct inference. `deterministic=True` (argmax), `per_hand_ranges=False` (fast tiled range updates). |
 | sog_inference | SoGInferenceAgentWrapper | CVPN-only (inherits GTCFRAgentWrapper). Overrides choose_action for fast tiled range updates. |
 | sog | SoGAgentWrapper | Full search at eval via GoEngine FFI. `deterministic=True`. Per-hand-type range updates via `range_utils`. |
-| sd_cfr | SDCFRAgentWrapper | Stochastic Discount CFR with snapshot averaging |
+| sd_cfr | SDCFRAgentWrapper | Stochastic Discount CFR. Serves the snapshot policy mixture; `use_ema` opts into the parameter blend, an approximation, and the `served_policy` eval-row field reads `mixture` or `ema_blend`. |
 | escher | ESCHERAgentWrapper | ESCHER or SD-CFR checkpoint |
 
 ## 6. Result Persistence
