@@ -39,6 +39,25 @@ MAX_MEASURE_ARG_LEN = 4096
 # a client check.
 ALLOWED_DEVICES = ("cpu", "cuda", "xpu")
 
+# requires block field names (design D10), mirroring the JSON tags of
+# runnerd/nashnet/capability.Requires (requires.go) exactly: device,
+# min_vram_gb, min_cores, min_ram_gb, min_disk_gb, needs_libcambia, node,
+# labels_any. The coordinator is the authoritative validator (D9: "the
+# coordinator validates shape and bounds"); this client only catches a typo'd
+# key and an obviously wrong type before the field round-trips to a 400.
+REQUIRES_KNOWN_KEYS = frozenset(
+    {
+        "device",
+        "min_vram_gb",
+        "min_cores",
+        "min_ram_gb",
+        "min_disk_gb",
+        "needs_libcambia",
+        "node",
+        "labels_any",
+    }
+)
+
 # on_failure policies for an `after` dependency (cambia-352). They govern only
 # the parent-failure branch; a parent success always runs the dependent. skip is
 # the default. Allowed on every kind.
@@ -92,6 +111,53 @@ def guard_relpath(value: Any, field_name: str) -> str:
     return value
 
 
+def _validate_requires(raw: Any) -> Dict[str, Any]:
+    """Shape-check a `requires` placement block (design D10, D12).
+
+    A typo'd key or an obviously wrong type is rejected here; every bound
+    (floors, allowed device set, `node` reachability) is the coordinator's
+    call at placement time (D9), so this deliberately does not replicate
+    capability.Requires.Validate.
+    """
+    if not isinstance(raw, dict):
+        raise HarnessSpecError("requires must be a mapping")
+    unknown = sorted(set(raw) - REQUIRES_KNOWN_KEYS)
+    if unknown:
+        raise HarnessSpecError(
+            f"unknown requires keys: {unknown}; allowed: {sorted(REQUIRES_KNOWN_KEYS)}"
+        )
+    if "device" in raw and raw["device"] not in ALLOWED_DEVICES:
+        raise HarnessSpecError(
+            f"requires.device must be one of {list(ALLOWED_DEVICES)}, got {raw['device']!r}"
+        )
+    for key in ("min_vram_gb", "min_ram_gb", "min_disk_gb"):
+        if key in raw:
+            v = raw[key]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+                raise HarnessSpecError(
+                    f"requires.{key} must be a non-negative number: {v!r}"
+                )
+    if "min_cores" in raw:
+        v = raw["min_cores"]
+        if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+            raise HarnessSpecError(
+                f"requires.min_cores must be a non-negative integer: {v!r}"
+            )
+    if "needs_libcambia" in raw and not isinstance(raw["needs_libcambia"], bool):
+        raise HarnessSpecError("requires.needs_libcambia must be a boolean")
+    if "node" in raw:
+        validate_name(raw["node"])
+    if "labels_any" in raw:
+        labels = raw["labels_any"]
+        if not isinstance(labels, list) or any(
+            not isinstance(lbl, str) or not lbl for lbl in labels
+        ):
+            raise HarnessSpecError(
+                "requires.labels_any must be a list of non-empty strings"
+            )
+    return dict(raw)
+
+
 @dataclass
 class JobSpec:
     """A parsed + validated harness job spec (design 2.6).
@@ -142,6 +208,12 @@ class JobSpec:
     # seeds, resolved through pathguard against the runs dir on the runner.
     # Forbidden for every other kind.
     reads: List[str] = field(default_factory=list)
+    # requires is the placement constraint block of D10/D12, matched against a
+    # node's declaration and grant at placement time. Absent on every job
+    # submitted before nashnet (the coordinator applies its own defaults);
+    # `--require-node` (cambia-1725) sets/merges requires.node from the CLI
+    # without needing a spec-file requires: block.
+    requires: Optional[Dict[str, Any]] = None
 
     _KNOWN_KEYS = frozenset(
         {
@@ -166,6 +238,7 @@ class JobSpec:
             "script",
             "args",
             "reads",
+            "requires",
         }
     )
 
@@ -348,6 +421,9 @@ class JobSpec:
         if hub_item is not None and (not isinstance(hub_item, str) or not hub_item):
             raise HarnessSpecError("hub_item must be a non-empty string when set")
 
+        requires_raw = raw.get("requires")
+        requires = _validate_requires(requires_raw) if requires_raw is not None else None
+
         return cls(
             kind=kind,
             name=name,
@@ -370,6 +446,7 @@ class JobSpec:
             script=script,
             args=args,
             reads=reads,
+            requires=requires,
         )
 
     def to_payload(self, commit: str) -> Dict[str, Any]:
@@ -418,6 +495,8 @@ class JobSpec:
             payload["args"] = self.args
         if self.reads:
             payload["reads"] = self.reads
+        if self.requires:
+            payload["requires"] = self.requires
         return payload
 
 

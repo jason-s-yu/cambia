@@ -280,3 +280,105 @@ def test_parents_of_falls_back_to_single_after_string():
 def test_parents_of_empty_for_no_dependency():
     job_view = {"job_id": "c1", "state": "queued"}
     assert parents_of(job_view) == []
+
+
+# ---------------------------------------------------------------------------
+# nashnet node routes (design D3/D46/D60, cambia-1725): the operator-token
+# client half of GET /nashnet/nodes, GET /nashnet/nodes/{id},
+# POST /nashnet/nodes/{id}/drain, POST /nashnet/nodes/{id}/revoke.
+# ---------------------------------------------------------------------------
+
+
+def test_list_nodes_unwraps_envelope(tmp_path):
+    cert, key, fp = make_self_signed(tmp_path)
+    routes = {
+        ("GET", "/nashnet/nodes"): (
+            200,
+            {"nodes": [{"node_id": "n-a"}, {"node_id": "n-b"}]},
+        )
+    }
+    with RecordingServer(cert, key, routes) as srv:
+        client = _client(srv, fp)
+        nodes = client.list_nodes()
+    assert [n["node_id"] for n in nodes] == ["n-a", "n-b"]
+
+
+def test_get_node_unwraps_envelope(tmp_path):
+    cert, key, fp = make_self_signed(tmp_path)
+    routes = {
+        ("GET", "/nashnet/nodes/n-a"): (
+            200,
+            {"node": {"node_id": "n-a", "revoked": False}},
+        )
+    }
+    with RecordingServer(cert, key, routes) as srv:
+        client = _client(srv, fp)
+        node = client.get_node("n-a")
+    assert node == {"node_id": "n-a", "revoked": False}
+
+
+def test_drain_node_sends_drain_and_clear_breaker(tmp_path):
+    cert, key, fp = make_self_signed(tmp_path)
+    routes = {
+        ("POST", "/nashnet/nodes/n-a/drain"): (
+            200,
+            {"node": {"node_id": "n-a", "drained": True}},
+        )
+    }
+    with RecordingServer(cert, key, routes) as srv:
+        client = _client(srv, fp)
+        node = client.drain_node("n-a", drain=True, clear_breaker=True)
+    assert node["drained"] is True
+    req = srv.requests[-1]
+    body = json.loads(req["body"])
+    assert body == {"drain": True, "clear_breaker": True}
+
+
+def test_drain_node_off_lifts_the_hold(tmp_path):
+    cert, key, fp = make_self_signed(tmp_path)
+    routes = {
+        ("POST", "/nashnet/nodes/n-a/drain"): (
+            200,
+            {"node": {"node_id": "n-a", "drained": False}},
+        )
+    }
+    with RecordingServer(cert, key, routes) as srv:
+        client = _client(srv, fp)
+        client.drain_node("n-a", drain=False, clear_breaker=False)
+    req = srv.requests[-1]
+    assert json.loads(req["body"]) == {"drain": False, "clear_breaker": False}
+
+
+def test_revoke_node_posts_to_revoke_route(tmp_path):
+    cert, key, fp = make_self_signed(tmp_path)
+    routes = {
+        ("POST", "/nashnet/nodes/n-a/revoke"): (
+            200,
+            {"node_id": "n-a", "revoked": True, "node_epoch": 2, "revoked_leases": []},
+        )
+    }
+    with RecordingServer(cert, key, routes) as srv:
+        client = _client(srv, fp)
+        resp = client.revoke_node("n-a")
+    assert resp["revoked"] is True
+    req = srv.requests[-1]
+    assert req["method"] == "POST"
+    assert req["headers"].get("Authorization") == "Bearer minted-token"
+
+
+def test_required_features_nashnet_pool_for_requires_block():
+    assert required_features({"kind": "train", "requires": {"node": "n-a"}}) == [
+        "nashnet-pool"
+    ]
+    assert required_features({"kind": "train"}) == []
+    assert required_features({"kind": "train", "requires": {}}) == []
+
+
+def test_submit_requires_block_needs_nashnet_pool_feature(tmp_path):
+    cert, key, fp = make_self_signed(tmp_path)
+    routes = {("GET", "/harness/health"): (200, {"queue_depth": 0})}
+    with RecordingServer(cert, key, routes) as srv:
+        client = _client(srv, fp)
+        with pytest.raises(UnsupportedFeatureError, match="nashnet-pool"):
+            client.submit({"kind": "train", "name": "r1", "requires": {"node": "n-a"}})
+    assert all(r["method"] != "POST" for r in srv.requests)
