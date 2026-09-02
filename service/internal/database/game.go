@@ -268,7 +268,11 @@ func StoreInitialGameStateInDB(ctx context.Context, gameID uuid.UUID, initSnapsh
 // FK and to record whether the game is rated (cambia-450). lobbyType must be a valid lobby_type
 // enum value ("private", "public", "matchmaking"); an empty/invalid value fails the insert and
 // the error is returned to the caller rather than discarded.
-func UpsertInitialGameState(ctx context.Context, gameID, lobbyID, hostUserID uuid.UUID, lobbyType string, rated bool, initialData interface{}) error {
+//
+// roundIndex is the 1-based circuit round this game belongs to (game.CambiaGame.RoundIndex),
+// or 0 for a non-circuit game; it is only ever set at creation and is left alone on the
+// ON CONFLICT branch (cambia-1240).
+func UpsertInitialGameState(ctx context.Context, gameID, lobbyID, hostUserID uuid.UUID, lobbyType string, rated bool, roundIndex int16, initialData interface{}) error {
 	dataBytes, err := json.Marshal(initialData)
 	if err != nil {
 		return fmt.Errorf("marshal initial game state for game %v: %w", gameID, err)
@@ -290,12 +294,12 @@ func UpsertInitialGameState(ctx context.Context, gameID, lobbyID, hostUserID uui
 		}
 
 		gameQ := `
-			INSERT INTO games (id, lobby_id, status, initial_game_state, start_time)
-			VALUES ($1, $2, 'in_progress', $3, NOW())
+			INSERT INTO games (id, lobby_id, round_index, status, initial_game_state, start_time)
+			VALUES ($1, $2, $3, 'in_progress', $4, NOW())
 			ON CONFLICT (id)
 			DO UPDATE SET initial_game_state = EXCLUDED.initial_game_state, status = 'in_progress'
 		`
-		if _, e := tx.Exec(ctx, gameQ, gameID, lobbyID, dataBytes); e != nil {
+		if _, e := tx.Exec(ctx, gameQ, gameID, lobbyID, roundIndex, dataBytes); e != nil {
 			return fmt.Errorf("upsert games row for game %v: %w", gameID, e)
 		}
 		return nil

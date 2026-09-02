@@ -33,8 +33,8 @@ describe('gameStore game_turn_deadline', () => {
     const state = useGameStore.getState();
     expect(state.gameState?.turnDeadline).toBe(moved);
     expect(state.gameState?.turnId).toBe(8);
-    // TimerBar counts (deadline + offset - Date.now()), so the offset has to come off this frame
-    // rather than the last snapshot, or the corrected countdown is wrong by the skew.
+    // TimerBar reads the deadline through this offset (lib/serverClock msUntil), so it has to come
+    // off this frame rather than the last snapshot, or the corrected countdown is wrong by the skew.
     expect(state.serverClockOffsetMs).toBeGreaterThan(3_000);
   });
 

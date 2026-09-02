@@ -29,6 +29,13 @@ export interface Run {
 	 * origin, or when no harness proxy is configured. The single flag the UI reads
 	 * to decide whether to render remote process controls. */
 	remote_controllable?: boolean;
+	/** Which nashnet node produced this run's numbers (serving-harness v1.1
+	 * design D23); absent for a run the pool never touched. A different fact
+	 * from `host` ("who owns and serves this run"): an embedded pool run
+	 * carries this even though its process record has no host (D5/D40), and a
+	 * genuinely remote run carries both. Sourced from the run_db row alone, no
+	 * run-dir read required. */
+	executed_on?: string;
 }
 
 export interface RunDetail extends Run {

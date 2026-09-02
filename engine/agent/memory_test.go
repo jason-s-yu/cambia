@@ -133,9 +133,9 @@ func TestMemoryHumanLike_CapacityLimit(t *testing.T) {
 	a.SlotTags[0] = TagPrivOwn
 	a.SlotBuckets[0] = BucketHighKing // saliency = |13-4.5| = 8.5
 	a.SlotTags[1] = TagPrivOwn
-	a.SlotBuckets[1] = BucketAce      // saliency = |1-4.5| = 3.5
+	a.SlotBuckets[1] = BucketAce // saliency = |1-4.5| = 3.5
 	a.SlotTags[2] = TagPrivOwn
-	a.SlotBuckets[2] = BucketZero     // saliency = |0-4.5| = 4.5
+	a.SlotBuckets[2] = BucketZero // saliency = |0-4.5| = 4.5
 	a.OwnActiveMask[0] = 0
 	a.OwnActiveMask[1] = 1
 	a.OwnActiveMask[2] = 2

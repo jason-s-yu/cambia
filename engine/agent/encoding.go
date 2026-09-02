@@ -3,10 +3,10 @@ package agent
 import engine "github.com/jason-s-yu/cambia/engine"
 
 const (
-	InputDim    = 222
-	NumActions  = 146
-	MaxHand     = engine.MaxHandSize // 6
-	SlotDim     = 15                 // per-slot one-hot dimension
+	InputDim     = 222
+	NumActions   = 146
+	MaxHand      = engine.MaxHandSize // 6
+	SlotDim      = 15                 // per-slot one-hot dimension
 	EmptySlotIdx = 14
 )
 
@@ -471,10 +471,10 @@ func (a *AgentState) EncodeEPPBSInterleavedV2(ctx engine.DecisionContext, drawnC
 // writeCardCountPosterior writes the 9-dim card-counting posterior at offset V2CardCountOffset.
 //
 // remaining[b] = DeckBucketCounts[b]
-//              - own-hand slots with tag in {TagPrivOwn, TagPub} at bucket b
-//              - opp-hand slots with tag == TagPub at bucket b (TagPrivOpp excluded:
-//                opp knows, but the agent does not, so the bucket is unknown)
-//              - DiscardBucketCounts[b]
+//   - own-hand slots with tag in {TagPrivOwn, TagPub} at bucket b
+//   - opp-hand slots with tag == TagPub at bucket b (TagPrivOpp excluded:
+//     opp knows, but the agent does not, so the bucket is unknown)
+//   - DiscardBucketCounts[b]
 //
 // The vector is clamped to >= 0 and normalized to sum to 1.0. If the clamped
 // total is 0 (pathological), returns the uniform 1/9 prior. Mirrors

@@ -15,12 +15,21 @@ export interface PlayingCardProps {
   /** Faded: not a legal target right now. */
   dimmed?: boolean;
   onClick?: () => void;
+  /**
+   * A control whose click is unavailable right now, for a card that is a control in
+   * every state: the piles, which stay the same control whether or not it is this
+   * player's turn. Keeps the role and the tab stop, drops the click (cambia-1242).
+   */
+  disabled?: boolean;
   /** Accessible name. Names the button, or the card as an image when it takes no click. */
   label?: string;
   /**
    * Toggle state for a card that is picked and unpicked (own-hand selection, an
-   * opponent card picked for a snap). Left undefined for a card whose click
-   * commits an action, where aria-pressed would report a state that does not exist.
+   * opponent card picked for a snap). Left undefined only for a card that holds no
+   * pick at all, where aria-pressed would report a state that does not exist; a card
+   * drawn as `selected` because it is picked passes the same value here, so the lift
+   * and the pressed state cannot part. A standing `true` keeps the card a control for
+   * as long as it stands, since a pressed state is something only a control reports.
    */
   pressed?: boolean;
   /** Stable e2e hook, e.g. `card-0-2`, `pile-stock`. */
@@ -84,14 +93,33 @@ const crosshatch = (pitch: number): string =>
  * 1.73:1 the empty slot's dashed line holds, which is the read this ticket
  * exists to fix; 0.7 keeps it at 1.67:1 (dark; 2.47 -> 1.93 light).
  *
- * A card that takes a click is a real <button>, so Enter and Space activate it
- * natively and it takes the global :focus-visible ring. A card that takes no
- * click is not focusable: it carries role='img' so a screen reader still reads
- * its name, since a generic element takes no accessible name from aria-label
- * (cambia-876, DL-4 review F13).
+ * The element is always a <button>, in every state, and only its attributes
+ * change (cambia-1242). It used to be a <button> where it took a click and a
+ * <div> where it did not, and React reconciles a changed element type by
+ * unmounting the old node: a card that stopped being clickable while the
+ * keyboard user had it focused sent that focus to <body>, which is nowhere.
+ * Three states on the one node:
+ *   - takes a click: a real button, so Enter and Space activate it natively and
+ *     it takes the global :focus-visible ring.
+ *   - `disabled`: still a control and still a tab stop, but unavailable. Marked
+ *     with aria-disabled rather than the disabled attribute, since the attribute
+ *     drops the focus it holds, which is the churn this exists to avoid.
+ *   - neither: not a control. It carries role='img' so a screen reader still
+ *     reads its name (cambia-876, DL-4 review F13) and tabIndex -1 so it leaves
+ *     the tab sequence while still able to hold focus it already has.
+ *
+ * A card holding a pick is a control whichever of those it would otherwise be:
+ * the lift and aria-pressed both read `pressed`, and only a control can report a
+ * pressed state, so a pick that outlives its click goes unavailable rather than
+ * dropping to an image. Letting it drop is what put the lift on screen with no
+ * pressed state under it, which is the divergence this ticket exists to close.
  */
-const PlayingCard: React.FC<PlayingCardProps> = ({ rank, suit, faceDown = false, size = 'md', selected = false, highlight = false, dimmed = false, onClick, label, pressed, testId, style }) => {
+const PlayingCard: React.FC<PlayingCardProps> = ({ rank, suit, faceDown = false, size = 'md', selected = false, highlight = false, dimmed = false, onClick, disabled = false, label, pressed, testId, style }) => {
   const d = DIMS[size] || DIMS.md;
+  // A disabled card keeps the control's role and swallows its click; a card with no click at all
+  // is not a control in the first place, unless it is holding a pick, which only a control has.
+  const interactive = !!onClick && !disabled;
+  const control = interactive || disabled || pressed === true;
   const joker = rank === 'JOKER';
   const glyph = joker ? '★' : suit ? GLYPHS[suit] || '' : '';
   const color = joker ? 'var(--accent-gold)' : suit && RED[suit] ? 'var(--suit-red)' : 'var(--suit-black)';
@@ -131,7 +159,7 @@ const PlayingCard: React.FC<PlayingCardProps> = ({ rank, suit, faceDown = false,
     opacity: dimmed ? (faceDown ? 0.7 : 0.55) : 1,
     transition:
       'transform var(--dur-med) var(--ease-snap), box-shadow var(--dur-fast) var(--ds-ease-out), border-color var(--dur-fast) var(--ds-ease-out), opacity var(--dur-med) var(--ds-ease-out)',
-    cursor: onClick ? 'pointer' : 'default',
+    cursor: interactive ? 'pointer' : 'default',
     userSelect: 'none',
     ...style
   };
@@ -174,24 +202,20 @@ const PlayingCard: React.FC<PlayingCardProps> = ({ rank, suit, faceDown = false,
     ? { backgroundColor: 'var(--card-back-fill)', backgroundImage: crosshatch(d.weave), color: 'inherit' }
     : { backgroundColor: 'var(--card-face)', backgroundImage: 'none', color };
 
-  if (onClick) {
-    return (
-      <button
-        type='button'
-        aria-label={label}
-        aria-pressed={pressed}
-        data-testid={testId}
-        onClick={onClick}
-        style={{ ...base, ...face }}
-      >
-        {body}
-      </button>
-    );
-  }
   return (
-    <div role={label ? 'img' : undefined} aria-label={label} data-testid={testId} style={{ ...base, ...face }}>
+    <button
+      type='button'
+      role={control ? undefined : label ? 'img' : 'presentation'}
+      tabIndex={control ? undefined : -1}
+      aria-label={label}
+      aria-disabled={control && !interactive ? true : undefined}
+      aria-pressed={control ? pressed : undefined}
+      data-testid={testId}
+      onClick={interactive ? onClick : undefined}
+      style={{ ...base, ...face }}
+    >
       {body}
-    </div>
+    </button>
   );
 };
 

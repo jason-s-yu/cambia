@@ -30,6 +30,14 @@ from src.agents.baseline_agents import (
     RandomLateCambiaAgent,
     HumanPlayerAgent,
 )
+from src.agents.go_baselines import (
+    GoAggressiveSnapAgent,
+    GoImperfectGreedyAgent,
+    GoMemoryHeuristicAgent,
+    GoRandomAgent,
+    GoRandomLateCambiaAgent,
+    GoRandomNoCambiaAgent,
+)
 from src.agent_state import AgentState, AgentObservation
 from src.utils import (
     InfosetKey,
@@ -2649,12 +2657,17 @@ MEAN_IMP_BASELINES: tuple[str, ...] = (
 
 # --- Agent Factory ---
 
+# The baseline entries name the Go-backed subclasses (cambia-1487): each one
+# decides inside the engine on a two-seat Go game and falls through to the
+# Python body it inherits everywhere else, so a registry lookup gets the same
+# decisions at engine speed. baseline_agents.py stays the reference, and
+# tests/test_go_baseline_parity.py scores the two against each other.
 AGENT_REGISTRY: Dict[str, Type[BaseAgent]] = {
-    "random": RandomAgent,
+    "random": GoRandomAgent,
     "greedy": GreedyAgent,
-    "imperfect_greedy": ImperfectGreedyAgent,
-    "memory_heuristic": MemoryHeuristicAgent,
-    "aggressive_snap": AggressiveSnapAgent,
+    "imperfect_greedy": GoImperfectGreedyAgent,
+    "memory_heuristic": GoMemoryHeuristicAgent,
+    "aggressive_snap": GoAggressiveSnapAgent,
     "cfr": CFRAgentWrapper,
     "deep_cfr": DeepCFRAgentWrapper,
     "escher": ESCHERAgentWrapper,
@@ -2668,8 +2681,8 @@ AGENT_REGISTRY: Dict[str, Type[BaseAgent]] = {
     "desca": DESCAAgentWrapper,
     "dense-escher": DESCAAgentWrapper,
     "prt_cfr": PRTCFRAgentWrapper,
-    "random_no_cambia": RandomNoCambiaAgent,
-    "random_late_cambia": RandomLateCambiaAgent,
+    "random_no_cambia": GoRandomNoCambiaAgent,
+    "random_late_cambia": GoRandomLateCambiaAgent,
     "human_player": HumanPlayerAgent,
 }
 
@@ -2835,6 +2848,9 @@ class _GoEvalGame:
         "_belief_agents",
         "_batch_handles",
         "_action_index",
+        "_acting_seat",
+        "_engine_decides",
+        "_deferred_legal",
         "_closed",
     )
 
@@ -2844,6 +2860,12 @@ class _GoEvalGame:
         self.agents = list(agents)
         self._closed = False
         self._action_index: Dict[GameAction, int] = {}
+        self._acting_seat = 0
+        # Which seats decide inside the engine and therefore never read a
+        # decoded legal-action list (cambia-1487).
+        self._engine_decides = [
+            bool(getattr(agent, "decides_engine_side", False)) for agent in self.agents
+        ]
 
         for agent in self.agents:
             if isinstance(agent, _PYTHON_ONLY_WRAPPER_TYPES):
@@ -2856,6 +2878,7 @@ class _GoEvalGame:
         self.engine = GoEngine(
             seed=seed, house_rules=house_rules, num_players=self.num_players
         )
+        self._deferred_legal = action_codec.DeferredLegalActions(self.engine)
 
         # Reset belief BEFORE any action is applied: a GoAgentState built at the
         # initial state is what carries the seat's initial-peek knowledge.
@@ -2897,7 +2920,9 @@ class _GoEvalGame:
         return self.engine.is_terminal()
 
     def acting_player(self) -> int:
-        return self.engine.acting_player()
+        seat = self.engine.acting_player()
+        self._acting_seat = seat
+        return seat
 
     def turn_number(self) -> int:
         return self.engine.turn_number()
@@ -2905,17 +2930,25 @@ class _GoEvalGame:
     def legal_actions(self) -> List[GameAction]:
         """The acting seat's legal actions, ascending by action index.
 
-        Also records the index each action was decoded from, so applying the
-        agent's choice does not have to re-derive it (and, at N seats, does not
-        have to re-derive which opponent it targeted).
+        Also records the map from action back to index, so applying the agent's
+        choice does not have to re-derive it (and, at N seats, does not have to
+        re-derive which opponent it targeted).
         """
         if not self._nplayer:
-            mask = self.engine.legal_actions_mask()
-            actions = action_codec.actions_from_mask(mask)
-            self._action_index = {
-                a: i for a, i in zip(actions, np.flatnonzero(np.asarray(mask)))
-            }
-            return actions
+            # The 2-player table is a bijection, so the module's forward map
+            # re-encodes a chosen action exactly as a per-decision map would,
+            # and the decode itself is deferred: an agent that decides from the
+            # engine handle (the Go-backed baselines, cambia-1487) never reads
+            # the list, and building one per decision was the single largest
+            # cost in this loop.
+            self._action_index = action_codec.TWO_PLAYER_INDEX
+            if self._engine_decides[self._acting_seat]:
+                # This seat's agent reads the legal set off the engine itself,
+                # so fetching it here would be a wasted crossing per decision.
+                self._deferred_legal.invalidate()
+                return self._deferred_legal
+            buf, count = self.engine.legal_action_view()
+            return action_codec.LazyLegalActions(buf, count)
 
         seat = self.engine.acting_player()
         pending = self.engine.get_pending()

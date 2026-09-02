@@ -211,7 +211,12 @@ func (s *Server) registerNashnet(mux *http.ServeMux) {
 		s.requireLeaseToken(nashnet.RouteBlobs, deadlineChunk, s.handleBlobPatch))
 	mux.Handle("DELETE /nashnet/leases/{lease}/blobs/{digest}", lease(nashnet.RouteBlobs, s.handleBlobDelete))
 	mux.Handle("GET /nashnet/leases/{lease}/manifest", lease(nashnet.RouteManifest, s.handleManifestGet))
-	mux.Handle("POST /nashnet/leases/{lease}/manifest", lease(nashnet.RouteManifest, s.handleManifestPost))
+	// The manifest POST admits the state a final commit is granted, because
+	// whether this one is final is in a body the middleware has not read. The
+	// per-body gate is the handler's own fence: a non-final commit on a
+	// revoking lease is refused there, and the final commit the grace exists
+	// for gets through (D4, D31).
+	mux.Handle("POST /nashnet/leases/{lease}/manifest", lease(nashnet.RouteManifestFinal, s.handleManifestPost))
 	mux.Handle("POST /nashnet/leases/{lease}/nack", lease(nashnet.RouteNack, s.handleNack))
 	mux.Handle("POST /nashnet/leases/{lease}/result", lease(nashnet.RouteResult, s.handleResult))
 
