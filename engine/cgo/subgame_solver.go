@@ -13,20 +13,20 @@ import (
 // larger table's state to BuildSubgameTree directly either.
 type SubgameNode struct {
 	State       engine.GameState
-	Player      uint8         // acting player at this node
+	Player      uint8 // acting player at this node
 	IsTerminal  bool
-	IsLeaf      bool          // depth limit reached (not terminal)
-	Utility     [2]float32    // filled if terminal; seats 0 and 1 only (2-player tree, see type doc)
-	LeafIndex   int           // index into leaf values array (if leaf), -1 otherwise
+	IsLeaf      bool       // depth limit reached (not terminal)
+	Utility     [2]float32 // filled if terminal; seats 0 and 1 only (2-player tree, see type doc)
+	LeafIndex   int        // index into leaf values array (if leaf), -1 otherwise
 	Children    []SubgameChild
-	RegretSum   []float32     // [numChildren] cumulative regrets
-	StrategySum []float32     // [numChildren] cumulative strategy
+	RegretSum   []float32 // [numChildren] cumulative regrets
+	StrategySum []float32 // [numChildren] cumulative strategy
 	NumVisits   int
 }
 
 // SubgameChild links a parent node to a child via an action.
 type SubgameChild struct {
-	ActionIdx uint16         // raw action index (legal action value)
+	ActionIdx uint16 // raw action index (legal action value)
 	Node      *SubgameNode
 }
 
@@ -291,7 +291,9 @@ func collectLeaves(node *SubgameNode, states []engine.GameState) {
 
 // CFRIterationRanged performs one CFR traversal with range-weighted regrets.
 // leafValues layout: [numLeaves * 2 * numHandTypes], indexed as
-//   leafValues[leafIdx*2*numHandTypes + player*numHandTypes + handType]
+//
+//	leafValues[leafIdx*2*numHandTypes + player*numHandTypes + handType]
+//
 // ranges[p] is the probability distribution over hand types for player p.
 // Returns per-hand-type CFVs for both players: [2][]float32 each of length numHandTypes.
 //

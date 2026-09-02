@@ -121,7 +121,7 @@ def _prod_config(**overrides):
         stability_min_iters=1,
         stability_patience=5,
         reservoir_capacity=1000,
-        backend="python",
+        backend="go",
         critic_enabled=True,
         critic_capacity=1000,
         critic_steps_per_iter=5,

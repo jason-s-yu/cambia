@@ -39,7 +39,7 @@ const (
 type CircuitConfig struct {
 	Format           CircuitFormat
 	NumPlayers       int
-	NumRounds        int           // 0 = auto from Format. Must be multiple of NumPlayers.
+	NumRounds        int // 0 = auto from Format. Must be multiple of NumPlayers.
 	PlayerIDs        []int
 	MissedRoundScore int           // Default ForfeitRoundScore
 	AbandonThreshold int           // Default 2 consecutive misses
@@ -49,10 +49,10 @@ type CircuitConfig struct {
 // CircuitRoundResult records the outcome of a single round.
 type CircuitRoundResult struct {
 	RoundNum       int
-	PlayerScores   map[int]int  // Raw hand scores per player
-	Placements     []int        // Player IDs sorted by score ascending (Cambia caller wins ties)
-	CambiaCallerID int          // -1 if none called Cambia
-	Subsidies      map[int]int  // Aggression bonus per player (negative = good)
+	PlayerScores   map[int]int // Raw hand scores per player
+	Placements     []int       // Player IDs sorted by score ascending (Cambia caller wins ties)
+	CambiaCallerID int         // -1 if none called Cambia
+	Subsidies      map[int]int // Aggression bonus per player (negative = good)
 	DealerID       int
 	FirstActorID   int
 	Forfeited      map[int]bool // Players who missed this round
@@ -77,7 +77,7 @@ type CircuitState struct {
 	Players      []CircuitPlayerState
 	Rounds       []CircuitRoundResult
 	CurrentRound int
-	DealerSeat   int  // Index into Config.PlayerIDs array
+	DealerSeat   int // Index into Config.PlayerIDs array
 	Completed    bool
 }
 

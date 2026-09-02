@@ -98,11 +98,13 @@ RANDOM_LEGAL_OPPONENT = "random_legal"
 
 SUPPORTED_OPPONENTS = (SELF_PLAY_OPPONENT, RANDOM_LEGAL_OPPONENT)
 
-#: Module a registered agent class must live in to be accepted as a fixed
+#: Modules a registered agent class must live in to be accepted as a fixed
 #: opponent here. These are cambia-1426's GameView port: checkpoint-free,
 #: undo-free, and reading the game only through GoEngine/GameView, so
-#: accepting one cannot revive the Python engine behind this env.
-_BASELINE_MODULE = "src.agents.baseline_agents"
+#: accepting one cannot revive the Python engine behind this env. go_baselines
+#: holds the engine-side subclasses of the same policies (cambia-1487), which
+#: the registry now names and which satisfy the same conditions.
+_BASELINE_MODULES = ("src.agents.baseline_agents", "src.agents.go_baselines")
 
 
 def is_baseline_opponent(name: str) -> bool:
@@ -115,7 +117,7 @@ def is_baseline_opponent(name: str) -> bool:
     from src.evaluate_agents import AGENT_REGISTRY
 
     agent_class = AGENT_REGISTRY.get(name.lower())
-    return agent_class is not None and agent_class.__module__ == _BASELINE_MODULE
+    return agent_class is not None and agent_class.__module__ in _BASELINE_MODULES
 
 
 class SelfPlayPolicyOpponent:

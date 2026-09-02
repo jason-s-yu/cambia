@@ -27,7 +27,7 @@ const (
 
 // HouseRules holds configurable game rule settings.
 type HouseRules struct {
-	MaxGameTurns          uint16 // 0 = unlimited
+	MaxGameTurns uint16 // 0 = unlimited
 	// DeckRanks selects which suited ranks the deck is built from, as a
 	// bitmask in the engine's rank order (bit 0 = RankAce ... bit 12 =
 	// RankKing). 0 is the documented sentinel for "every suited rank", so a

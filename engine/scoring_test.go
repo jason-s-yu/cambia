@@ -46,8 +46,8 @@ func TestComputeScoresBasic(t *testing.T) {
 // TestComputeScoresRedKing verifies Red King has value -1.
 func TestComputeScoresRedKing(t *testing.T) {
 	p0Hand := []Card{
-		NewCard(SuitHearts, RankKing),  // Red King = -1
-		NewCard(SuitHearts, RankTwo),   // 2
+		NewCard(SuitHearts, RankKing), // Red King = -1
+		NewCard(SuitHearts, RankTwo),  // 2
 	}
 	gs := makeTerminalGame(p0Hand, nil, -1)
 
@@ -61,8 +61,8 @@ func TestComputeScoresRedKing(t *testing.T) {
 // TestComputeScoresBlackKing verifies Black King has value 13.
 func TestComputeScoresBlackKing(t *testing.T) {
 	p0Hand := []Card{
-		NewCard(SuitSpades, RankKing),  // Black King = 13
-		NewCard(SuitHearts, RankAce),   // 1
+		NewCard(SuitSpades, RankKing), // Black King = 13
+		NewCard(SuitHearts, RankAce),  // 1
 	}
 	gs := makeTerminalGame(p0Hand, nil, -1)
 
@@ -106,9 +106,9 @@ func TestUtilityTieNoCambia(t *testing.T) {
 
 // TestUtilityCambiaCallerWins: Caller (P0) has lower score → caller wins.
 func TestUtilityCambiaCallerWins(t *testing.T) {
-	p0Hand := []Card{NewCard(SuitHearts, RankAce)}  // 1
+	p0Hand := []Card{NewCard(SuitHearts, RankAce)}   // 1
 	p1Hand := []Card{NewCard(SuitHearts, RankQueen)} // 12
-	gs := makeTerminalGame(p0Hand, p1Hand, 0) // P0 called Cambia
+	gs := makeTerminalGame(p0Hand, p1Hand, 0)        // P0 called Cambia
 
 	u := gs.GetUtility()
 	if u[0] != 1.0 {
@@ -123,7 +123,7 @@ func TestUtilityCambiaCallerWins(t *testing.T) {
 func TestUtilityCambiaCallerTies(t *testing.T) {
 	p0Hand := []Card{NewCard(SuitHearts, RankSeven)} // 7
 	p1Hand := []Card{NewCard(SuitClubs, RankSeven)}  // 7
-	gs := makeTerminalGame(p0Hand, p1Hand, 0) // P0 called Cambia, scores tied
+	gs := makeTerminalGame(p0Hand, p1Hand, 0)        // P0 called Cambia, scores tied
 
 	u := gs.GetUtility()
 	if u[0] != 1.0 {
@@ -138,7 +138,7 @@ func TestUtilityCambiaCallerTies(t *testing.T) {
 func TestUtilityFalseCambia(t *testing.T) {
 	p0Hand := []Card{NewCard(SuitSpades, RankKing)} // 13 (Black King)
 	p1Hand := []Card{NewCard(SuitHearts, RankAce)}  // 1
-	gs := makeTerminalGame(p0Hand, p1Hand, 0) // P0 called Cambia but has higher score
+	gs := makeTerminalGame(p0Hand, p1Hand, 0)       // P0 called Cambia but has higher score
 
 	u := gs.GetUtility()
 	if u[0] != -1.0 {

@@ -98,7 +98,8 @@ class TestRandomNoCambiaAgent:
 
     def test_registered_in_agent_registry(self):
         assert "random_no_cambia" in AGENT_REGISTRY
-        assert AGENT_REGISTRY["random_no_cambia"] is RandomNoCambiaAgent
+        # The registry names the Go-backed subclass (cambia-1487).
+        assert issubclass(AGENT_REGISTRY["random_no_cambia"], RandomNoCambiaAgent)
 
 
 # ---------------------------------------------------------------------------
@@ -152,4 +153,5 @@ class TestRandomLateCambiaAgent:
 
     def test_registered_in_agent_registry(self):
         assert "random_late_cambia" in AGENT_REGISTRY
-        assert AGENT_REGISTRY["random_late_cambia"] is RandomLateCambiaAgent
+        # The registry names the Go-backed subclass (cambia-1487).
+        assert issubclass(AGENT_REGISTRY["random_late_cambia"], RandomLateCambiaAgent)

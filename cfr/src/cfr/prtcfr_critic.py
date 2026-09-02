@@ -65,11 +65,13 @@ from .prtcfr_net import pad_tokens
 #
 # `compute_omniscient_features(engine)` is duck-typed: it only ever calls
 # `engine._get_all_cards_unsafe()` (see omniscient.py). The real GoEngine
-# (FFI) satisfies that directly. The current production sampler
-# (prtcfr_worker.PythonEngineGameDriver) wraps a pure-Python
-# `CambiaGameState` instead, which has no such method -- so a small adapter
-# is built here reading ground-truth hands directly off the Python engine and
-# re-packing them into the identical byte-format GoEngine._get_all_cards_unsafe
+# (FFI) satisfies that directly; the production sampler's GoEngineGameDriver
+# always exposes it, so this fallback is not on the production path. It is
+# kept as a generic adapter for any driver-like object exposing hands as
+# `.game.players[p].hand` (the shape the retired PythonEngineGameDriver
+# stub had, cambia-1784) -- a small adapter reading ground-truth hands
+# directly and re-packing them into the identical byte-format
+# GoEngine._get_all_cards_unsafe
 # documents (packed uint8 CardBucket per slot, 0xFF sentinel for
 # empty/unknown, MAX_HAND slots per player). This mirrors the established
 # codebase pattern for the same problem (cli.py's `_GoEngineAdapter`/
@@ -118,12 +120,11 @@ def omniscient_features_from_driver(driver: Any, num_players: int = 2) -> np.nda
     ``driver``, ALWAYS via ``compute_omniscient_features`` (never a bespoke
     extraction path in this function).
 
-    Prefers ``driver``'s own ``_get_all_cards_unsafe`` when present (a
-    GoEngine, or any future Go-FFI-backed driver duck-typed the same way --
-    the eventual S1W2-integrated production driver lands here for free with
-    zero change to this function). Falls back to wrapping
-    ``driver.game`` (the current ``PythonEngineGameDriver`` stub) with
-    ``_PythonEngineOmniscientAdapter``.
+    Prefers ``driver``'s own ``_get_all_cards_unsafe`` when present (the
+    production ``GoEngineGameDriver`` always has one, so this is the path
+    taken in practice). Falls back to wrapping ``driver.game`` with
+    ``_PythonEngineOmniscientAdapter`` for any driver-like object shaped
+    like the retired ``PythonEngineGameDriver`` stub (cambia-1784).
 
     Raises ``TypeError`` if neither is available -- an explicit failure
     rather than a silent zero-vector, so a misconfigured sink is caught at
