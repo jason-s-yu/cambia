@@ -549,6 +549,13 @@ class DeepCfrConfig(_CambiaBaseModel):
     target_buffer_passes: float = 0.0
     value_target_buffer_passes: float = 2.0
 
+    # Seeds the reservoir buffers' sample_batch/load draws (cambia-1809), so
+    # minibatch composition is reproducible run-to-run. Does NOT seed
+    # traversal (see cli.py's --deterministic, which seeds the process-global
+    # numpy/torch/python random streams traversal draws from). None (default)
+    # leaves the reservoir buffers on the unseeded process-global numpy path.
+    seed: Optional[int] = None
+
 
 # --- DESCA Configuration ---
 
