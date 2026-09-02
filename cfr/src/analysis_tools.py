@@ -189,9 +189,20 @@ def _br_action_worker(
     opponent_avg_strategy: PolicyDict,
     br_player: int,
     depth: int,
+    budget_limit: int = 0,
 ) -> float:
     """
     Target function for the BR pool. Applies one action and calls node logic.
+
+    ``budget_limit`` re-establishes the node bound inside this process. The pool
+    is forked before the search sets its budget, so a worker would otherwise
+    inherit no bound and walk its subtree without one. The bound it gets is a
+    fresh one, which makes the pooled bound per task rather than per search: a
+    single delegated subtree cannot run away, but N workers can between them
+    walk N times the configured budget. A bound shared exactly across processes
+    would need locked shared state on the hottest path in the search, and the
+    pool only ever fires at the root node with exploitability_num_workers > 1
+    (cambia-1785).
 
     The node arrives as (deal spec, action prefix) rather than as a copy of the
     game: an engine handle cannot cross a fork, so this rebuilds its own engine
@@ -201,7 +212,11 @@ def _br_action_worker(
     """
     # No direct access to the main shutdown event here.
     # Relies on the pool being terminated if shutdown is triggered.
+    global _ACTIVE_BUDGET
+
     state: Optional[GoBrState] = None
+    previous_budget = _ACTIVE_BUDGET
+    _ACTIVE_BUDGET = _NodeBudget(budget_limit)
     try:
         state = GoBrState.new(house_rules, deal, action_prefix)
         state.apply(action_idx)
@@ -246,7 +261,9 @@ def _br_action_worker(
         raise BestResponseCrashed(e, traceback.format_exc(), depth) from e
     finally:
         # The FFI handle pool is finite and this worker process is reused for
-        # every task the pool hands it, so the engine has to go back now.
+        # every task the pool hands it, so the engine has to go back now, and
+        # the budget with it: the next task gets its own.
+        _ACTIVE_BUDGET = previous_budget
         if state is not None:
             state.close()
 
@@ -904,6 +921,9 @@ class AnalysisTools:
                                 opponent_avg_strategy,
                                 br_player,
                                 depth,  # Pass depth for logging within worker
+                                # The worker forked before this search set its
+                                # budget, so the limit travels with the task.
+                                _ACTIVE_BUDGET.limit if _ACTIVE_BUDGET else 0,
                             )
                         )
 
