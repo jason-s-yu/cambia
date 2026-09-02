@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jason-s-yu/cambia/service/internal/database"
 	"github.com/jason-s-yu/cambia/service/internal/models"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -238,26 +239,56 @@ func TestEndGameRecordsResultsAndRating(t *testing.T) {
 	// landed, racing the rating assertions below against the second (cambia-908 L4).
 	awaitPersistence(t, g.PersistWG, 5*time.Second)
 
-	rows, err := database.DB.Query(context.Background(), `SELECT player_id, did_win FROM game_results WHERE game_id = $1`, g.ID)
+	rows, err := database.DB.Query(context.Background(), `SELECT player_id, score FROM game_results WHERE game_id = $1`, g.ID)
 	require.NoError(t, err)
-	seen := map[uuid.UUID]bool{}
+	scores := map[uuid.UUID]int{}
 	for rows.Next() {
 		var pid uuid.UUID
-		var didWin bool
-		require.NoError(t, rows.Scan(&pid, &didWin))
-		seen[pid] = true
+		var score int
+		require.NoError(t, rows.Scan(&pid, &score))
+		scores[pid] = score
 	}
 	rows.Close()
-	require.True(t, seen[userA.ID], "player A should have a game_results row")
-	require.True(t, seen[userB.ID], "player B should have a game_results row")
+	require.Contains(t, scores, userA.ID, "player A should have a game_results row")
+	require.Contains(t, scores, userB.ID, "player B should have a game_results row")
 
-	// Rating: a rated 2p game should move elo_1v1 off the 1500 default for at least one
-	// player (cannot assert direction here without recomputing Glicko-2; the point is that
-	// EndGame actually reached the rating step, not RecordGameAndResults' math).
+	// Rating: the outcome-independent proof that EndGame reached the rating step is the ratings
+	// rows applyRatingUpdate writes, one per player, attributed to this game and stamped with the
+	// pool the 2-player roster selects. Asserting on those rather than on elo alone is what makes
+	// this test deterministic: the deal is unseeded, so roughly one run in six deals a tie, and a
+	// Glicko-2 draw between two fresh 1500/350 ratings leaves both elo values at exactly 1500,
+	// which the old "elo moved for at least one player" assertion read as the rating step never
+	// having run (cambia-1244).
+	var ratingRows int
+	require.NoError(t, database.DB.QueryRow(context.Background(),
+		`SELECT count(*) FROM ratings WHERE game_id = $1 AND rating_mode = '1v1' AND old_rating = 1500`,
+		g.ID).Scan(&ratingRows))
+	require.Equal(t, 2, ratingRows,
+		"a rated 2p game reached via EndGame() should write one 1v1 ratings row per player")
+
 	afterA, err := database.GetUserByID(context.Background(), userA.ID)
 	require.NoError(t, err)
 	afterB, err := database.GetUserByID(context.Background(), userB.ID)
 	require.NoError(t, err)
-	require.False(t, afterA.Elo1v1 == 1500 && afterB.Elo1v1 == 1500,
-		"expected elo_1v1 to move for at least one player after a rated 2p game reached via EndGame()")
+
+	// Both deals the unseeded shuffle can produce are asserted, so the run's outcome selects the
+	// expectation instead of deciding whether the test passes. Lower score wins (RULES.md 6), and
+	// FinalizeRatings maps the 2-player ranking to a decisive 1/0 or a shared 0.5, so the sign of
+	// each move is fixed once the scores are known.
+	switch {
+	case scores[userA.ID] == scores[userB.ID]:
+		// A draw between two identical fresh ratings has expected score 0.5 against an actual
+		// 0.5, so mu does not move and both elo values stay at 1500. The deviation still shrinks
+		// off the 350.0 fresh-user default, which is what proves the update was applied.
+		assert.Equal(t, 1500, afterA.Elo1v1, "a tied 2p game must leave player A's elo_1v1 at 1500")
+		assert.Equal(t, 1500, afterB.Elo1v1, "a tied 2p game must leave player B's elo_1v1 at 1500")
+		assert.Less(t, afterA.Phi1v1, 350.0, "a tied rated game must still shrink player A's phi_1v1 off the default")
+		assert.Less(t, afterB.Phi1v1, 350.0, "a tied rated game must still shrink player B's phi_1v1 off the default")
+	case scores[userA.ID] < scores[userB.ID]:
+		assert.Greater(t, afterA.Elo1v1, 1500, "the lower-scoring player A should gain elo_1v1")
+		assert.Less(t, afterB.Elo1v1, 1500, "the higher-scoring player B should lose elo_1v1")
+	default:
+		assert.Greater(t, afterB.Elo1v1, 1500, "the lower-scoring player B should gain elo_1v1")
+		assert.Less(t, afterA.Elo1v1, 1500, "the higher-scoring player A should lose elo_1v1")
+	}
 }
