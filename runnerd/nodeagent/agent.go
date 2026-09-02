@@ -27,9 +27,11 @@ const idleHeartbeatInterval = 30 * time.Second
 // claim-to-result cycle runs offline against a stub coordinator, a fake ingest
 // environment, and a fake launcher.
 type Options struct {
-	Config   Config
-	Signer   *Signer
-	Client   *Client
+	Config Config
+	Signer *Signer
+	// Client is the coordinator transport: the pinned HTTPS client a remote
+	// node runs, or the coordinator's own in-process loopback (D65).
+	Client   NodeTransport
 	Env      Environment
 	Launcher Launcher
 	Prober   Prober
@@ -53,7 +55,7 @@ type Options struct {
 type Agent struct {
 	cfg      Config
 	signer   *Signer
-	client   *Client
+	client   NodeTransport
 	env      Environment
 	launcher Launcher
 	prober   Prober

@@ -43,7 +43,7 @@ type localFile struct {
 // It holds no lock of its own: the agent runs exactly one uploader per lease
 // and calls Sync from the job's own goroutine.
 type uploader struct {
-	client  *Client
+	client  NodeTransport
 	leaseID string
 	token   string
 	runDir  string

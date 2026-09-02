@@ -18,8 +18,9 @@ import (
 )
 
 // HeaderOffset carries the coordinator's true part offset on a resume probe and
-// on an offset mismatch (D50).
-const HeaderOffset = "X-Nashnet-Offset"
+// on an offset mismatch (D50). It is nashnet's own spelling, so the node's
+// HeaderBlobOffset and this cannot drift.
+const HeaderOffset = nashnet.HeaderBlobOffset
 
 // quarantineLease projects a lease record onto the quarantine store's view of
 // it: the node, job, and lease ids come from the authenticated record and never
