@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jason-s-yu/cambia/runnerd/ingestapi"
+	"github.com/jason-s-yu/cambia/runnerd/nashnet"
 	"github.com/jason-s-yu/cambia/runnerd/pathguard"
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 )
@@ -97,6 +98,18 @@ type Dispatcher struct {
 	// max(persisted submit_seq)+1 at Reconcile so restarts never reuse a seq, and
 	// increments under d.mu on every Submit.
 	nextSeq int64
+	// pool, leases, holds, placing, unplaceableGrace, and now are the coordinator
+	// pool's placement state (D11, D13, D14, D47). They are nil on a daemon with
+	// no pool attached, which is v1.0 behavior; every read below is guarded.
+	// The per-node lease ceiling and the per-node exclusive barrier live here
+	// rather than in the node agent because they are placement facts, not launch
+	// facts (D1).
+	pool             placementSource
+	leases           *nashnet.LeaseStore
+	holds            map[string]*placementHold
+	placing          map[string]string
+	unplaceableGrace time.Duration
+	now              func() time.Time
 }
 
 // NewDispatcher builds a Dispatcher. maxJobs is the concurrency cap (<=0
@@ -221,6 +234,16 @@ func (d *Dispatcher) dispatchLocked() {
 			j.cancel()
 			d.writeGateTerminalLocked(id, StateFailed, "parent "+culprit+" did not succeed (on_failure=fail)")
 		case gateLaunch:
+			if d.pool != nil {
+				// With a coordinator pool attached, placement is the pool's and a
+				// ready job waits here for a node to claim it (D1, D11). It keeps
+				// its queue position, so a nack or an expiry returns it to the
+				// ready set at its original submit_seq with nothing to rebuild.
+				// A daemon with no pool takes the local path below unchanged,
+				// which is the zero-node behavior of D40.
+				next = append(next, id)
+				continue
+			}
 			if barrier || !d.canLaunchLocked(j) {
 				next = append(next, id) // held: no slot, exclusive gate, or behind a deferred exclusive head
 				if j.spec.Exclusive {

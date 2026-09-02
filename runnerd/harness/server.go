@@ -9,12 +9,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/jason-s-yu/cambia/runnerd/authtoken"
+	"github.com/jason-s-yu/cambia/runnerd/nashnet"
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 	"github.com/jason-s-yu/cambia/runnerd/sysprobe"
 )
@@ -85,6 +87,9 @@ type Server struct {
 	ramQuery       RAMQueryFunc
 	renderNodeGlob procmgr.RenderNodeGlobFunc
 	xpuQuery       procmgr.XPUQueryFunc
+	// pool is the nashnet coordinator. Nil is the v1.0 surface: no /nashnet/
+	// route is registered and nothing else changes (D39).
+	pool *Pool
 }
 
 // NewServer builds the control-plane server. It fills preflight floors and the
@@ -173,8 +178,53 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /ws/harness/queue", a(http.HandlerFunc(s.handleQueueWS)))
 	mux.Handle("GET /ws/harness/jobs/{id}/logs", a(http.HandlerFunc(s.handleLogsWS)))
 
+	s.registerNashnet(mux)
 	return mux
 }
+
+// registerNashnet adds the twenty pool routes beside the v1.0 table (D39). They
+// are additive: every existing route keeps its path, method, semantics, and
+// status codes, and a daemon with no pool attached registers none of these, so
+// its surface is byte-for-byte the v1.0 one.
+func (s *Server) registerNashnet(mux *http.ServeMux) {
+	if s.pool == nil {
+		return
+	}
+	node := func(h nodeHandler) http.Handler { return s.requireNodeBearer(deadlineDefault, h) }
+	lease := func(route nashnet.Route, h leaseHandler) http.Handler {
+		return s.requireLeaseToken(route, deadlineDefault, h)
+	}
+	op := func(h http.HandlerFunc) http.Handler { return s.requireOperatorNashnet(h) }
+
+	mux.Handle("POST /nashnet/nodes/register", node(s.handleNodeRegister))
+	mux.Handle("POST /nashnet/nodes/{node}/heartbeat", node(s.handleNodeHeartbeat))
+	mux.Handle("GET /nashnet/nodes/{node}/events", node(s.handleNodeEvents))
+	mux.Handle("POST /nashnet/claim", node(s.handleClaim))
+
+	mux.Handle("GET /nashnet/leases/{lease}/snapshot", lease(nashnet.RouteSnapshot, s.handleSnapshot))
+	mux.Handle("GET /nashnet/leases/{lease}/seeds/{seed_id}/{path...}", lease(nashnet.RouteSeeds, s.handleSeed))
+	mux.Handle("POST /nashnet/leases/{lease}/progress", lease(nashnet.RouteProgress, s.handleProgress))
+	mux.Handle("POST /nashnet/leases/{lease}/logs", lease(nashnet.RouteLogs, s.handleLogs))
+	mux.Handle("POST /nashnet/leases/{lease}/blobs/probe", lease(nashnet.RouteBlobs, s.handleBlobProbe))
+	mux.Handle("HEAD /nashnet/leases/{lease}/blobs/{digest}", lease(nashnet.RouteBlobs, s.handleBlobHead))
+	mux.Handle("PATCH /nashnet/leases/{lease}/blobs/{digest}",
+		s.requireLeaseToken(nashnet.RouteBlobs, deadlineChunk, s.handleBlobPatch))
+	mux.Handle("DELETE /nashnet/leases/{lease}/blobs/{digest}", lease(nashnet.RouteBlobs, s.handleBlobDelete))
+	mux.Handle("GET /nashnet/leases/{lease}/manifest", lease(nashnet.RouteManifest, s.handleManifestGet))
+	mux.Handle("POST /nashnet/leases/{lease}/manifest", lease(nashnet.RouteManifest, s.handleManifestPost))
+	mux.Handle("POST /nashnet/leases/{lease}/nack", lease(nashnet.RouteNack, s.handleNack))
+	mux.Handle("POST /nashnet/leases/{lease}/result", lease(nashnet.RouteResult, s.handleResult))
+
+	mux.Handle("GET /nashnet/nodes", op(s.handleNodesList))
+	mux.Handle("GET /nashnet/nodes/{node}", op(s.handleNodeGet))
+	mux.Handle("POST /nashnet/nodes/{node}/drain", op(s.handleNodeDrain))
+	mux.Handle("POST /nashnet/nodes/{node}/revoke", op(s.handleNodeRevoke))
+}
+
+// AttachPool wires a coordinator pool into an already-built server, so the
+// daemon constructs the server, the pool, and the dispatcher in one direction
+// and the routes appear only once every store exists.
+func (s *Server) AttachPool(p *Pool) { s.pool = p }
 
 // ListenAndServeTLS serves the control plane over HTTPS only (design 5.1). There
 // is no plaintext listener: callers pass the cert and key, and a missing pair is
@@ -184,8 +234,24 @@ func (s *Server) ListenAndServeTLS(addr, certFile, keyFile string) error {
 		Addr:              addr,
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		// IdleTimeout bounds a kept-alive connection a peer holds without
+		// sending anything, which is the pre-authentication exposure ruling q3
+		// opened by making a node behind an arbitrary NAT an intended peer
+		// (D56). ReadTimeout and WriteTimeout stay unset here deliberately: the
+		// two WebSocket streams and the two long polls are open-ended by
+		// design, so a whole-server deadline would cut a running log tail. The
+		// per-route deadlines of setDeadlines carry the bound instead, and the
+		// connection cap below bounds what an unauthenticated peer can hold.
+		IdleTimeout: 120 * time.Second,
 	}
-	return srv.ListenAndServeTLS(certFile, keyFile)
+	if s.pool == nil {
+		return srv.ListenAndServeTLS(certFile, keyFile)
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	return srv.ServeTLS(newLimitListener(ln, s.pool.ceilings.GlobalConnections), certFile, keyFile)
 }
 
 // requireBearer verifies an Authorization: Bearer <jwt> header on every request.
@@ -200,7 +266,12 @@ func (s *Server) requireBearer(next http.Handler) http.Handler {
 		}
 		tok := strings.TrimSpace(h[len(prefix):])
 		if _, err := s.verifier.Verify(tok); err != nil {
-			writeJSONError(w, http.StatusUnauthorized, "unauthorized", "invalid token")
+			// A node or enrollment credential is real but not this route's, so
+			// it answers 403 wrong_audience rather than a bare 401; everything
+			// else stays 401, including a revoked or unknown node, so a caller
+			// cannot use the status to enumerate ids (D26).
+			status, code := authtoken.HTTPStatus(err)
+			writeJSONError(w, status, code, "invalid token")
 			return
 		}
 		next.ServeHTTP(w, r)

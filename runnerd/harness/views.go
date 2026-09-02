@@ -35,6 +35,21 @@ type JobView struct {
 	CreatedAt  string `json:"created_at,omitempty"`
 	StartedAt  string `json:"started_at,omitempty"`
 	FinishedAt string `json:"finished_at,omitempty"`
+	// Node names the node holding this job's lease, and Placement carries either
+	// "placed" or the hold reason a job that matched no node accumulated past
+	// the unplaceable grace, with the union of match rejection reasons in
+	// PlacementDetail (D14, D23). All three are empty on a job no pool touched.
+	Node            string   `json:"node,omitempty"`
+	Placement       string   `json:"placement,omitempty"`
+	PlacementDetail []string `json:"placement_detail,omitempty"`
+	// Phase is the node-reported lease phase (D5). It is deliberately not the
+	// process.json status: only procmgr enum values reach that file, and the
+	// fine-grained phase is carried here, where an operator wants the detail.
+	Phase string `json:"phase,omitempty"`
+	// LogBytesDropped is the coordinator-owned count of log bytes refused at the
+	// append route (D54). The in-band truncation marker is advisory text inside
+	// a stream the node authors; this counter is the evidence.
+	LogBytesDropped int64 `json:"log_bytes_dropped,omitempty"`
 }
 
 // viewAfterFields derives a JobView's after/after_all pair from a spec's After
@@ -60,6 +75,10 @@ type QueueSnapshot struct {
 	JobsRunning  int       `json:"jobs_running"`
 	Queue        []JobView `json:"queue"`
 	Active       []JobView `json:"active"`
+	// Nodes carries the pool's node records so harness status, harness nodes,
+	// and the dashboard show placement without reading run dirs (D23). It is
+	// absent on a daemon with no pool attached.
+	Nodes []NodeView `json:"nodes,omitempty"`
 }
 
 // pendingViewLocked builds the view of a queued/preparing job from its in-memory
@@ -147,7 +166,35 @@ func (d *Dispatcher) resolveView(name string) (JobView, bool) {
 			v.CreatedAt = submitAt
 		}
 	}
+	d.decoratePlacement(&v)
 	return v, true
+}
+
+// decoratePlacement fills a view's pool fields (D14, D23). A job a node holds a
+// live lease for never renders as queued: the node is preparing or running it,
+// so the projection's own status wins, and the queue position is dropped
+// because the job is no longer waiting for a slot.
+func (d *Dispatcher) decoratePlacement(v *JobView) {
+	pool := d.placementSourceRef()
+	if pool == nil {
+		return
+	}
+	if l, ok := pool.leaseForJob(v.JobID); ok && l.Live() {
+		v.Node = l.NodeID
+		v.Placement = PlacementPlaced
+		v.Phase = l.Phase
+		v.QueuePos = 0
+		if v.State == StateQueued || v.State == "" || v.State == procmgr.StatusCreated {
+			v.State = StatePreparing
+		}
+		v.LogBytesDropped = pool.logDroppedFor(v.JobID)
+		return
+	}
+	d.mu.Lock()
+	reason, detail := d.placementViewLocked(v.JobID)
+	d.mu.Unlock()
+	v.Placement = reason
+	v.PlacementDetail = detail
 }
 
 // List returns every known job (queued, preparing, running, terminal), FIFO
@@ -214,7 +261,17 @@ func (d *Dispatcher) Snapshot() QueueSnapshot {
 			snap.Active = append(snap.Active, v)
 		}
 	}
+	if pool := d.placementSourceRef(); pool != nil {
+		snap.Nodes = pool.nodeViews()
+	}
 	return snap
+}
+
+// placementSourceRef reads the attached pool under the lock.
+func (d *Dispatcher) placementSourceRef() placementSource {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.pool
 }
 
 // ReconciledAt returns the last reconcile timestamp (RFC3339).
@@ -249,7 +306,14 @@ func (d *Dispatcher) broadcast() {
 	for ch := range d.subs {
 		subs = append(subs, ch)
 	}
+	pool := d.pool
 	d.mu.Unlock()
+	if pool != nil {
+		// Every queue transition is a placement opportunity: waking the held
+		// claims here is what lets a chain of ready jobs run without poll
+		// latency (D2).
+		pool.signalPlacement()
+	}
 	for _, ch := range subs {
 		select {
 		case ch <- snap:
