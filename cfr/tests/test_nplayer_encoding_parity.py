@@ -44,7 +44,7 @@ a from-scratch Python belief tracker, since none suitable exists.
 from __future__ import annotations
 
 import random
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Set, Tuple
 
 import numpy as np
 import pytest
