@@ -18,7 +18,8 @@ from src.config import load_config, Config
 from src.agents import action_codec
 from src.agents.game_view import GameView, tracked_opponent_seat
 from src.agents.go_belief_view import GoBeliefView
-from src.ffi.bridge import GoAgentState, GoEngine, apply_games_batch
+from src.ffi.bridge import GoAgentState, GoEngine
+from src.agents.transition import TransitionBroadcaster
 from src.agents.baseline_agents import (
     BaseAgent,
     RandomAgent,
@@ -2636,7 +2637,16 @@ class PRTCFRAgentWrapper(NeuralAgentWrapper):
         self._overflow_warned = False
 
     def update_state(self, observation) -> None:
-        """No-op: the token stream is appended by the engine, per applied action."""
+        """No-op: the token stream is appended by the engine, per applied action.
+
+        This wrapper deliberately does NOT define ``observe_transition`` either.
+        That hook exists for a wrapper keeping a private Python-side stream, and
+        this one keeps none: the prefix it queries is the engine's own, advanced
+        by ``TransitionBroadcaster`` in the crossing that applies the action.
+        Feeding it a second, Python-derived frame is what the token stream was
+        built to stop doing (RC-B parity). What the wrapper does need is for
+        every game loop to run that shared step, which cambia-711 is.
+        """
         return
 
     def _token_body(self) -> np.ndarray:
@@ -2925,9 +2935,10 @@ def get_agent(agent_type: str, player_id: int, config, **kwargs) -> BaseAgent:
 
 # --- Go engine game session ---
 
-#: Wrapper types that carry belief across a game and therefore need a
-#: GoAgentState attached to each game. Their belief is advanced by the engine.
-_BELIEF_WRAPPER_TYPES = (NeuralAgentWrapper, PPOAgentWrapper)
+#: Which agents carry belief across a game is no longer a class list here: the
+#: shared transition step tests for ``belief_handle``, the accessor
+#: NeuralAgentWrapper and PPOAgentWrapper already publish so the Tier-B
+#: estimators can adopt their GoAgentState (src/agents/transition.py).
 
 #: Wrapper types this loop cannot drive. CFRAgentWrapper's tabular infoset key
 #: needs GamePhase, a function of who called Cambia, and the engine exports no
@@ -2942,8 +2953,10 @@ class UnsupportedAgentError(RuntimeError):
 class _GoEvalGame:
     """One evaluation game on the Go engine.
 
-    Owns the game handle and each belief-carrying agent's GoAgentState, hands
-    the acting agent a decoded legal-action list, and applies its choice.
+    Owns the game handle, hands the acting agent a decoded legal-action list,
+    and applies its choice through the shared ``TransitionBroadcaster``, which
+    owns each belief-carrying agent's GoAgentState and is the same step the
+    interactive loop in ``src/play.py`` applies through (cambia-711).
 
     Action space by seat count:
 
@@ -2974,8 +2987,7 @@ class _GoEvalGame:
         "agents",
         "num_players",
         "_nplayer",
-        "_belief_agents",
-        "_batch_handles",
+        "_broadcast",
         "_action_index",
         "_acting_seat",
         "_engine_decides",
@@ -3009,39 +3021,14 @@ class _GoEvalGame:
         )
         self._deferred_legal = action_codec.DeferredLegalActions(self.engine)
 
-        # Reset belief BEFORE any action is applied: a GoAgentState built at the
-        # initial state is what carries the seat's initial-peek knowledge.
-        # initialize_state, not attach_belief: it is the per-game reset hook the
-        # wrappers override, and several do real work in it (PRT-CFR samples the
-        # episode's snapshot and rebuilds its GRU cursor there; the PBS wrappers
-        # reset their ranges). Calling attach_belief directly would skip that and
-        # play every game with the first game's episode state.
-        self._belief_agents: List = []
-        for agent in self.agents:
-            if isinstance(agent, _BELIEF_WRAPPER_TYPES):
-                agent.initialize_state(self.engine)
-                self._belief_agents.append(agent)
-            elif hasattr(agent, "_last_game_id"):
-                # Baselines detect a new game by the id() of what they are
-                # handed. Handles come from a pool and an address can be reused,
-                # so the sentinel is invalidated explicitly rather than trusted
-                # to differ (a stale hit keeps the previous game's memory and
-                # collapses games to an immediate Cambia call).
-                agent._last_game_id = None
-
-        # Handle vector for apply_games_batch: seat 0 in a0, seat 1 in a1, -1
-        # for a seat whose agent carries no belief.
-        if self._nplayer:
-            self._batch_handles = None
-        else:
-            self._batch_handles = [
-                (
-                    self.agents[seat].belief_handle()
-                    if isinstance(self.agents[seat], _BELIEF_WRAPPER_TYPES)
-                    else -1
-                )
-                for seat in range(2)
-            ]
+        # The per-transition step, shared with the interactive loop
+        # (cambia-711). Built here, right after the engine and before any action
+        # is applied: its constructor fires each agent's per-game reset, and a
+        # GoAgentState built anywhere but the initial state misses that seat's
+        # initial-peek knowledge.
+        self._broadcast = TransitionBroadcaster(
+            self.engine, self.agents, self.num_players
+        )
 
     # --- Reads ---
 
@@ -3161,41 +3148,13 @@ class _GoEvalGame:
     def apply(self, action: GameAction) -> None:
         """Apply one action, advancing the game and every attached belief.
 
-        An action the agent built without checking legality (the baselines have
-        such fallbacks) is not in the decoded index; it is encoded directly and
-        left to the engine to reject, so an illegal choice surfaces as an engine
-        error exactly as it did on the Python engine.
+        Delegates to the shared per-transition step (cambia-711), which is also
+        what the interactive loop in ``src/play.py`` applies through. The acting
+        seat is left for the broadcaster to read off the engine rather than
+        taken from ``_acting_seat``: a caller may apply without having asked
+        this session who is acting.
         """
-        idx = self._action_index.get(action)
-
-        if self._nplayer:
-            if idx is None:
-                seat = self.engine.acting_player()
-                pending = self.engine.get_pending()
-                if pending.target_seat is not None and pending.target_seat != seat:
-                    target = int(pending.target_seat)
-                else:
-                    target = tracked_opponent_seat(seat, self.num_players)
-                rel = action_codec.relative_opponent_index(seat, target, self.num_players)
-                idx = action_codec.nplayer_index_for(action, rel)
-            self.engine.apply_nplayer_action(int(idx))
-            for agent in self._belief_agents:
-                agent.agent_state.update_nplayer(self.engine)
-            return
-
-        if idx is None:
-            from src.encoding import action_to_index
-
-            idx = action_to_index(action)
-        if self._belief_agents:
-            apply_games_batch(
-                [self.engine.handle],
-                [self._batch_handles[0]],
-                [self._batch_handles[1]],
-                [int(idx)],
-            )
-        else:
-            self.engine.apply_action(int(idx))
+        self._broadcast.apply(action, self._action_index)
 
     # --- Lifecycle ---
 
@@ -3204,8 +3163,7 @@ class _GoEvalGame:
         if self._closed:
             return
         self._closed = True
-        for agent in self._belief_agents:
-            agent.release_belief()
+        self._broadcast.release()
         try:
             self.engine.close()
         except Exception as e:  # JUSTIFIED: evaluation resilience

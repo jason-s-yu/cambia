@@ -153,13 +153,18 @@ def test_legal_actions_for_two_player_matches_mask_decode():
 
 @skiplib
 def test_legal_actions_for_four_player_returns_nonempty_actions():
+    from src.agents.transition import TransitionBroadcaster
     from src.config import load_config
     from src.ffi.bridge import GoEngine
-    from src.play import _apply_action, _legal_actions_for
+    from src.play import _legal_actions_for
 
     cfg = load_config(CONFIG_PATH)
     engine = GoEngine(house_rules=cfg.cambia_rules, num_players=4, seed=3)
     try:
+        # Applying is the shared transition step now (cambia-711); with no
+        # agent seated it is the plain N-player engine apply this asserted
+        # before.
+        broadcast = TransitionBroadcaster(engine, [None] * 4, 4)
         for _ in range(20):
             if engine.is_terminal():
                 break
@@ -167,6 +172,6 @@ def test_legal_actions_for_four_player_returns_nonempty_actions():
             actions, index = _legal_actions_for(engine, seat, 4)
             assert actions, "acting seat must always have at least one legal action"
             chosen = actions[0]
-            _apply_action(engine, chosen, index, seat, 4)
+            broadcast.apply(chosen, index, seat)
     finally:
         engine.close()

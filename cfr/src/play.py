@@ -31,7 +31,7 @@ from .constants import (
 )
 from .agents import action_codec
 from .agents.game_view import tracked_opponent_seat
-from .encoding import action_to_index
+from .agents.transition import TransitionBroadcaster
 from .ffi.bridge import GoEngine
 from .utils import resolve_run_seed
 
@@ -137,7 +137,7 @@ def card_value(card) -> int:
 
 
 # ---------------------------------------------------------------------------
-# GoEngine legal-action decode / apply
+# GoEngine legal-action decode
 # ---------------------------------------------------------------------------
 #
 # Mirrors _GoEvalGame in src/evaluate_agents.py: the 2-player action space is
@@ -148,6 +148,12 @@ def card_value(card) -> int:
 # selection over one legal_actions list. That list is not reusable from
 # evaluate_agents.py (a private, engine-owning class there), so the decode is
 # duplicated rather than imported.
+#
+# APPLYING a chosen action is not duplicated: TransitionBroadcaster is the one
+# per-transition step, shared with the evaluation and head-to-head loops
+# (cambia-711). The version this file used to carry advanced the engine only,
+# so an AI seat driven by a belief- or token-carrying wrapper played the whole
+# game on the state it was dealt.
 
 
 def _legal_actions_for(engine: GoEngine, acting_player: int, num_players: int):
@@ -192,36 +198,6 @@ def _legal_actions_for(engine: GoEngine, acting_player: int, num_players: int):
     if preferred:
         return preferred, preferred_index
     return fallback, fallback_index
-
-
-def _apply_action(
-    engine: GoEngine,
-    action: GameAction,
-    index_map: Dict[GameAction, int],
-    acting_player: int,
-    num_players: int,
-) -> None:
-    """Apply a chosen action, re-encoding it if it was not in the decoded set.
-
-    An action a seat builds without checking legality is left to the engine to
-    reject, exactly as it did on the Python engine.
-    """
-    idx = index_map.get(action)
-    if num_players == 2:
-        if idx is None:
-            idx = action_to_index(action)
-        engine.apply_action(int(idx))
-        return
-
-    if idx is None:
-        pending = engine.get_pending()
-        if pending.target_seat is not None and pending.target_seat != acting_player:
-            target = int(pending.target_seat)
-        else:
-            target = tracked_opponent_seat(acting_player, num_players)
-        rel = action_codec.relative_opponent_index(acting_player, target, num_players)
-        idx = action_codec.nplayer_index_for(action, rel)
-    engine.apply_nplayer_action(int(idx))
 
 
 # ---------------------------------------------------------------------------
@@ -564,6 +540,7 @@ def play_game(
     deal_seed = resolve_run_seed(seed)
     print(f"Deal seed: {deal_seed}")
     game = GoEngine(seed=deal_seed, house_rules=house_rules, num_players=num_players)
+    broadcast: Optional[TransitionBroadcaster] = None
     try:
         seats = game.num_players()
         if seats != num_players:
@@ -576,14 +553,17 @@ def play_game(
         for i, seat in enumerate(seat_configs):
             seat.seat_id = i
 
-        # Initialize AI agents that carry belief across the game (neural
-        # wrappers backed by GoAgentState). The GameView-ported baselines
-        # have no such hook: their per-game memory resets lazily on first
-        # choose_action (see ImperfectMemoryMixin._needs_reinit).
-        for seat in seat_configs:
-            if not seat.is_human and seat.agent is not None:
-                if hasattr(seat.agent, "initialize_state"):
-                    seat.agent.initialize_state(game)
+        # The per-transition step, shared with the evaluation and head-to-head
+        # loops (cambia-711). Built before any action is applied: its
+        # constructor resets each AI seat, which for a neural wrapper attaches
+        # its GoAgentState at the initial state (where the seat's initial-peek
+        # knowledge and, for the token wrappers, the private peek prefix come
+        # from). A human seat contributes None and is skipped.
+        broadcast = TransitionBroadcaster(
+            game,
+            [None if seat.is_human else seat.agent for seat in seat_configs],
+            num_players,
+        )
 
         # Initialize human knowledge with the initial peek: the first
         # initial_view_count slots, in deal order (the same convention
@@ -653,7 +633,7 @@ def play_game(
             if isinstance(chosen, ActionCallCambia):
                 cambia_caller_id = acting_player
 
-            _apply_action(game, chosen, index_map, acting_player, num_players)
+            broadcast.apply(chosen, index_map, acting_player)
 
             # Update knowledge for all human players
             for s in seat_configs:
@@ -662,4 +642,6 @@ def play_game(
 
         render_game_over(game, seat_configs, num_players)
     finally:
+        if broadcast is not None:
+            broadcast.release()
         game.close()
