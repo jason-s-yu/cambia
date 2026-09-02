@@ -60,6 +60,12 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         max_game_turns: int = 300
         lockCallerHand: bool = True
         num_decks: int = 1
+        # The reduced-deck rank subset (cambia-1478). Absent here, pydantic's
+        # default extra="ignore" dropped it without a word, so a stubbed profile
+        # that named five ranks still dealt all thirteen once it crossed to the
+        # Go engine: the silent divergence cambia-1478 closed, reopened by the
+        # stub (cambia-1996).
+        deck_ranks: Optional[List[str]] = None
 
     class _DeepCfrConfig(_BaseModel):
         """Stub for DeepCfrConfig with real defaults."""
