@@ -32,24 +32,21 @@ type GameActionRecord struct {
 	Timestamp     int64                  `json:"timestamp"` // epoch millis or similar
 }
 
-// HistorianService encapsulates the Redis + DB logic for capturing game actions
-// and marking games abandoned when a certain inactivity threshold is reached.
+// HistorianService encapsulates the Redis + DB logic for capturing game
+// actions.
 //
-// The historian is the only writer of game_actions and creates no games row of
-// its own. The game server owns that row and writes it at game start
-// (database.UpsertInitialGameState); the historian reads it as a foreign key,
-// so an action whose games row has not committed yet is retried rather than
+// game_actions is the one table the historian writes, and it writes nothing
+// else. The game server owns the games row: it creates it at game start
+// (database.UpsertInitialGameState) and closes it out at game end
+// (database.RecordGameAndResults). The historian reads it as a foreign key, so
+// an action whose games row has not committed yet is retried rather than
 // inserted around, and one that never gets a row is dead-lettered rather than
-// dropped. Its only writes to games advance an existing in_progress row, to
-// 'completed' on the terminal action (insertGameActionTx) and to 'abandoned'
-// after the inactivity timeout (markGameAbandoned). See writeBatch for the
-// retry and DeadLetterQueueName for where the rest goes.
+// dropped. See writeBatch for the retry and DeadLetterQueueName for where the
+// rest goes.
 type HistorianService struct {
-	redisClient  *redis.Client
-	batchSize    int
-	flushDelay   time.Duration
-	inactivity   time.Duration // duration until a game is marked "abandoned"
-	lastActivity sync.Map      // map[uuid.UUID]time.Time for tracking last activity per game
+	redisClient *redis.Client
+	batchSize   int
+	flushDelay  time.Duration
 
 	// retryAttempts and retryBase drive the per-record retry a failed batch
 	// falls back to; deadLetterQueue is the Redis list a record lands on once
@@ -121,7 +118,6 @@ const (
 func NewHistorianService() *HistorianService {
 	batchSize := getEnvInt("HISTORIAN_BATCH_SIZE", 20)
 	flushMs := getEnvInt("HISTORIAN_FLUSH_MS", 500)
-	inactivitySec := getEnvInt("GAME_INACTIVITY_TIMEOUT_SEC", 600) // default 10 min
 	retryAttempts := getEnvInt("HISTORIAN_RETRY_ATTEMPTS", defaultFlushRetryAttempts)
 	retryBaseMs := getEnvInt("HISTORIAN_RETRY_BASE_MS", defaultFlushRetryBaseMs)
 
@@ -145,7 +141,6 @@ func NewHistorianService() *HistorianService {
 		redisClient:     rdb,
 		batchSize:       batchSize,
 		flushDelay:      time.Duration(flushMs) * time.Millisecond,
-		inactivity:      time.Duration(inactivitySec) * time.Second,
 		retryAttempts:   retryAttempts,
 		retryBase:       time.Duration(retryBaseMs) * time.Millisecond,
 		deadLetterQueue: getEnv("HISTORIAN_DEAD_LETTER_QUEUE_NAME", DeadLetterQueueName),
@@ -157,16 +152,13 @@ func NewHistorianService() *HistorianService {
 	}
 }
 
-// Run starts the two main loops:
-//  1. A loop that reads from the Redis queue, accumulates messages in a batch, and flushes them to the DB.
-//  2. A periodic check for inactivity to mark games as abandoned.
+// Run reads from the Redis queue, accumulates messages in a batch, and flushes
+// them to the DB, until the service context is cancelled.
 func (hs *HistorianService) Run() {
 	// Connect to the database.
 	database.ConnectDB()
 
-	// Start the background loops.
 	go hs.readRedisLoop()
-	go hs.inactivityLoop()
 
 	log.Println("cambia-historian service started.")
 	<-hs.ctx.Done()
@@ -217,9 +209,6 @@ func (hs *HistorianService) readRedisLoop() {
 				log.Printf("invalid action record: %v\n", err)
 				continue
 			}
-
-			// Track last activity for the game.
-			hs.lastActivity.Store(record.GameID, time.Now())
 
 			hs.appendToBatch(record)
 		}
@@ -419,60 +408,14 @@ func (hs *HistorianService) deadLetter(ctx context.Context, failures []failedWri
 	}
 }
 
-// inactivityLoop periodically checks if any game has been inactive beyond the configured threshold,
-// and marks such games as abandoned.
-func (hs *HistorianService) inactivityLoop() {
-	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-hs.ctx.Done():
-			return
-
-		case <-ticker.C:
-			now := time.Now()
-			hs.lastActivity.Range(func(key, val interface{}) bool {
-				gameID, ok1 := key.(uuid.UUID)
-				last, ok2 := val.(time.Time)
-				if ok1 && ok2 && now.Sub(last) > hs.inactivity {
-					hs.markGameAbandoned(gameID)
-					hs.lastActivity.Delete(gameID)
-				}
-				return true
-			})
-		}
-	}
-}
-
-// markGameAbandoned marks a game as 'abandoned' in the database if it was still marked as
-// 'in_progress'. Like the terminal-action finalize, this advances a row the game server created
-// and creates nothing: no matching in_progress row updates nothing.
-func (hs *HistorianService) markGameAbandoned(gameID uuid.UUID) {
-	ctx := context.Background()
-	err := beginTxFunc(ctx, database.DB, pgx.TxOptions{}, func(tx pgx.Tx) error {
-		q := `
-			UPDATE games
-			SET status = 'abandoned', end_time = NOW()
-			WHERE id = $1 AND status = 'in_progress'
-		`
-		_, e := tx.Exec(ctx, q, gameID)
-		return e
-	})
-	if err != nil {
-		log.Printf("failed to mark game %v abandoned: %v", gameID, err)
-	} else {
-		log.Printf("Marked game %v as 'abandoned' due to inactivity.", gameID)
-	}
-}
-
 // insertGameActionTx inserts a single action record into the game_actions
-// table. If the action indicates game end, it closes the game out.
+// table. That insert is the whole of it: the historian does not touch games.
 //
-// It does not create a games row. The game server owns that row and writes it
-// at game start (database.UpsertInitialGameState, cambia-458 and cambia-1240),
+// The game server owns the games row end to end. It creates the row at game
+// start (database.UpsertInitialGameState, cambia-458 and cambia-1240),
 // supplying the lobby_id and the initial state the historian has no way to
-// know; game_actions.game_id is a foreign key onto it and nothing more.
+// know, and marks it completed at game end (database.RecordGameAndResults).
+// game_actions.game_id is a foreign key onto that row and nothing more.
 //
 // This function used to open with an upsert of its own, a fallback from before
 // the server wrote the row. Migration 5 made games.lobby_id NOT NULL with no
@@ -484,6 +427,12 @@ func (hs *HistorianService) markGameAbandoned(gameID uuid.UUID) {
 // have needed a lobby id the historian does not have, so ownership moved to
 // the one writer that does. The window where the row has not committed yet is
 // handled by writeBatch's retry, not by writing around it.
+//
+// It also used to close the game out on an action_type of "action_end_game",
+// setting games.status and games.end_time. That branch went with the rest of
+// the games writes, and it had never fired in production in any case: the
+// server's terminal action is "game_end" (game.EventGameEnd), a string nothing
+// compared against.
 func insertGameActionTx(ctx context.Context, tx pgx.Tx, rec GameActionRecord) error {
 	actionInsertQ := `
 		INSERT INTO game_actions (
@@ -495,28 +444,27 @@ func insertGameActionTx(ctx context.Context, tx pgx.Tx, rec GameActionRecord) er
 		return err
 	}
 	_, err = tx.Exec(ctx, actionInsertQ,
-		rec.GameID, rec.ActionIndex, rec.ActorUserID, rec.ActionType, jsonPayload,
+		rec.GameID, rec.ActionIndex, actorOrNull(rec), rec.ActionType, jsonPayload,
 	)
-	if err != nil {
-		return err
-	}
+	return err
+}
 
-	if rec.ActionType == "action_end_game" {
-		// A conditional advance of a row the game server already created, not
-		// a write that can bring one into existence: no matching in_progress
-		// row updates nothing and the action still lands. It is what sets
-		// games.end_time (database.GetUserGameHistory reads it).
-		finalizeQ := `
-			UPDATE games
-			SET status = 'completed', end_time = NOW()
-			WHERE id = $1 AND status = 'in_progress'
-		`
-		_, err = tx.Exec(ctx, finalizeQ, rec.GameID)
-		if err != nil {
-			return err
-		}
+// actorOrNull returns the value to store in game_actions.actor_user_id: the
+// acting player, or SQL NULL for an action no player took.
+//
+// uuid.Nil is the game server's "no actor" marker. It logs the game's own
+// events with it (game.logAction's four uuid.Nil callers: game_pregame_start,
+// game_start, game_initial_state_saved and game_end), and the column is
+// nullable for exactly those rows. Stored as-is the marker is an ordinary uuid
+// value with no matching users row, so every such event failed SQLSTATE 23503
+// on game_actions_actor_user_id_fkey, which after cambia-1881's retry meant
+// four dead-lettered records per game rather than four lost ones. Mapping it
+// to NULL here is what makes a game event storable at all.
+func actorOrNull(rec GameActionRecord) *uuid.UUID {
+	if rec.ActorUserID == uuid.Nil {
+		return nil
 	}
-	return nil
+	return &rec.ActorUserID
 }
 
 // beginTxFunc is a helper that starts a transaction using the provided pool,

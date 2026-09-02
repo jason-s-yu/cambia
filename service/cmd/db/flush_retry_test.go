@@ -381,30 +381,104 @@ func TestFlushLandsTheRestOfTheBatchWhenOneRecordDeadLetters(t *testing.T) {
 	}
 }
 
-// The terminal action closes the game out. This is an UPDATE of a row the game
-// server created, conditioned on it still being in progress, and is the only
-// write the historian makes outside game_actions.
-func TestFlushFinalizesTheGameOnTheTerminalAction(t *testing.T) {
+// A terminal action is an action like any other. The historian used to close
+// the game out on one, setting games.status and games.end_time; that write went
+// with the rest of the games writes, and the server's RecordGameAndResults is
+// what marks a game completed. Both spellings are covered: "action_end_game",
+// which the deleted branch keyed on, and "game_end", which is what the server
+// actually emits.
+func TestFlushDoesNotCloseOutTheGame(t *testing.T) {
 	f := newFlushFixture(t, defaultFlushRetryAttempts, time.Millisecond)
+
+	for _, actionType := range []string{"action_end_game", "game_end"} {
+		gameID := uuid.New()
+		f.insertGamesRow(t, gameID)
+
+		f.hs.appendToBatch(f.record(gameID, 0, "action_draw_stockpile"))
+		f.hs.appendToBatch(f.record(gameID, 1, actionType))
+		f.hs.flushBatchToDB()
+
+		if got := f.persistedIndexes(t, gameID); len(got) != 2 {
+			t.Fatalf("%s: expected both actions to land, got indexes %v", actionType, got)
+		}
+
+		var status string
+		var endTime *time.Time
+		if err := f.pool.QueryRow(context.Background(),
+			`SELECT status, end_time FROM games WHERE id = $1`, gameID).Scan(&status, &endTime); err != nil {
+			t.Fatalf("%s: read the games row: %v", actionType, err)
+		}
+		if status != "in_progress" {
+			t.Fatalf("%s: the historian moved the games row to status %q; games is the server's to write", actionType, status)
+		}
+		if endTime != nil {
+			t.Fatalf("%s: the historian set games.end_time to %v; games is the server's to write", actionType, *endTime)
+		}
+	}
+}
+
+// uuid.Nil is the game server's "no actor" value for a game's own events, and
+// game_actions.actor_user_id is nullable for exactly those rows. Stored as the
+// literal nil uuid it has no matching users row, so every game event failed
+// SQLSTATE 23503 on game_actions_actor_user_id_fkey and dead-lettered; mapping
+// it to NULL is what lets a game event persist.
+func TestFlushStoresANilActorAsNull(t *testing.T) {
+	f := newFlushFixture(t, 2, time.Millisecond)
 
 	gameID := uuid.New()
 	f.insertGamesRow(t, gameID)
 
-	f.hs.appendToBatch(f.record(gameID, 0, "action_draw_stockpile"))
-	f.hs.appendToBatch(f.record(gameID, 1, "action_end_game"))
+	// The four action types game.logAction passes uuid.Nil for, plus one
+	// ordinary player action to show the actor is still recorded when there
+	// is one.
+	events := []string{"game_pregame_start", "game_start", "game_initial_state_saved", "game_end"}
+	for i, actionType := range events {
+		rec := f.record(gameID, i, actionType)
+		rec.ActorUserID = uuid.Nil
+		f.hs.appendToBatch(rec)
+	}
+	f.hs.appendToBatch(f.record(gameID, len(events), "action_draw_stockpile"))
 	f.hs.flushBatchToDB()
 
-	var status string
-	var endTime *time.Time
-	if err := f.pool.QueryRow(context.Background(),
-		`SELECT status, end_time FROM games WHERE id = $1`, gameID).Scan(&status, &endTime); err != nil {
-		t.Fatalf("read the games row: %v", err)
+	if entries := f.deadLettered(t); len(entries) != 0 {
+		t.Fatalf("a nil actor dead-lettered %d records: %+v", len(entries), entries)
 	}
-	if status != "completed" {
-		t.Fatalf("the terminal action left the games row at status %q, want \"completed\"", status)
+
+	rows, err := f.pool.Query(context.Background(),
+		`SELECT action_index, action_type, actor_user_id FROM game_actions WHERE game_id = $1 ORDER BY action_index`, gameID)
+	if err != nil {
+		t.Fatalf("read persisted actions: %v", err)
 	}
-	if endTime == nil {
-		t.Fatal("the terminal action left games.end_time unset")
+	defer rows.Close()
+
+	seen := 0
+	for rows.Next() {
+		var index int
+		var actionType string
+		var actor *uuid.UUID
+		if err := rows.Scan(&index, &actionType, &actor); err != nil {
+			t.Fatalf("scan persisted action: %v", err)
+		}
+		if index != seen {
+			t.Fatalf("action %d persisted out of order, at index %d", seen, index)
+		}
+		if index < len(events) {
+			if actionType != events[index] {
+				t.Fatalf("action %d persisted type %q, want %q", index, actionType, events[index])
+			}
+			if actor != nil {
+				t.Fatalf("game event %q persisted actor %v, want NULL", actionType, *actor)
+			}
+		} else if actor == nil || *actor != f.userID {
+			t.Fatalf("player action %d persisted actor %v, want %v", index, actor, f.userID)
+		}
+		seen++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate persisted actions: %v", err)
+	}
+	if seen != len(events)+1 {
+		t.Fatalf("read back %d actions, want %d", seen, len(events)+1)
 	}
 }
 

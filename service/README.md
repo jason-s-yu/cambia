@@ -13,6 +13,7 @@
   - [Architecture Note](#architecture-note)
   - [Historian](#historian)
     - [Who owns the `games` row](#who-owns-the-games-row)
+    - [Actions with no actor](#actions-with-no-actor)
     - [Retries and the dead-letter list](#retries-and-the-dead-letter-list)
   - [License](#license)
 
@@ -71,18 +72,34 @@ The game server owns it. `database.UpsertInitialGameState` creates it at game st
 `lobby_id`, the round index and the initial deck and hands, and it is the only place a `games` row
 is created.
 
-The historian does not create one, does not update one back to `in_progress`, and has no fallback
-for a missing one: `game_actions.game_id` is a foreign key it reads, nothing more. Its two writes to
-`games` both advance an existing row's status and are conditioned on it still being `in_progress`:
-the terminal `action_end_game` record moves it to `completed` and sets `end_time`, and the
-inactivity loop moves it to `abandoned` after `GAME_INACTIVITY_TIMEOUT_SEC`. A row that is absent or
-already closed is left alone, and in the terminal case the action still lands.
+`database.RecordGameAndResults` closes it out at game end. The historian issues no write to `games`
+at all: it does not create a row, does not update one, and has no fallback for a missing one.
+`game_actions.game_id` is a foreign key it reads, nothing more.
 
-The upsert the historian used to run was a fallback from before the server wrote the row. Migration
-5 (`5_add_lobby_persistence.sql`) made `games.lobby_id` `NOT NULL` with no default, and the upsert
-never supplied it, so every flush failed with SQLSTATE 23502 and no game action was persisted at all
-between that migration and cambia-1881. It failed even when the row already existed, because
-Postgres validates `NOT NULL` against the proposed tuple before it resolves `ON CONFLICT`.
+The historian used to do three things it no longer does, all removed in cambia-1881:
+
+- **Upsert the `games` row** before every action insert, a fallback from before the server wrote the
+  row. Migration 5 (`5_add_lobby_persistence.sql`) made `games.lobby_id` `NOT NULL` with no default
+  and the upsert never supplied it, so every flush failed with SQLSTATE 23502 and no game action was
+  persisted at all between that migration and cambia-1881. It failed even when the row already
+  existed, because Postgres validates `NOT NULL` against the proposed tuple before it resolves
+  `ON CONFLICT`. Repairing it would have needed a `lobby_id` the historian has no way to know.
+- **Close the game out** on an action type of `action_end_game`, setting `status` and `end_time`.
+  That branch had never fired in production regardless: the server's terminal action is `game_end`.
+- **Mark an idle game `abandoned`** from a one-minute inactivity loop, after
+  `GAME_INACTIVITY_TIMEOUT_SEC`. The loop and its per-game activity tracking are gone with it.
+
+Setting `games.end_time` and marking abandoned games both move to the server, which is where the
+rest of the row's lifecycle already lives; until that lands, `end_time` stays NULL and no game is
+marked `abandoned`.
+
+### Actions with no actor
+
+`game_actions.actor_user_id` is nullable, and the historian writes NULL there when a record carries
+`uuid.Nil`, which is the game server's marker for an event no player took (`game_pregame_start`,
+`game_start`, `game_initial_state_saved` and `game_end`). Stored literally the nil UUID matches no
+`users` row, so those four events per game failed SQLSTATE 23503 on
+`game_actions_actor_user_id_fkey`.
 
 ### Retries and the dead-letter list
 
@@ -114,7 +131,6 @@ Environment variables, all optional:
 | `HISTORIAN_FLUSH_MS` | `500` | Ticker interval for the time-triggered flush |
 | `HISTORIAN_RETRY_ATTEMPTS` | `5` | Per-record write passes before a record is dead-lettered |
 | `HISTORIAN_RETRY_BASE_MS` | `50` | First backoff between those passes, doubling each time |
-| `GAME_INACTIVITY_TIMEOUT_SEC` | `600` | Idle time after which a game is marked `abandoned` |
 
 ## License
 
