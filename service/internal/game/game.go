@@ -1033,37 +1033,75 @@ func (g *CambiaGame) countConnectedPlayers() int {
 	return count
 }
 
+// actionPreconditionsOK runs the lifecycle, connection and snap-fill checks every player action
+// must pass ahead of its type-specific handling: GameOver, Started/PreGameActive, the sender's
+// Connected flag and engine-mapping presence, and (unless exempted) the outstanding-snap-fill
+// gate. Shared between HandlePlayerAction's generic dispatch and ProcessSpecialAction
+// (cambia-1566): action_special used to skip straight to its own SpecialAction.Active check,
+// which meant none of these applied to it. That let the prompt holder snap during their own
+// ability window, and let a snapper who owed a fill resolve the ability before paying it, because
+// the engine applies the buffered discard and ability cleanly regardless of the fill.
+//
+// exemptSnapFill mirrors HandlePlayerAction's own carve-out for action_snap_move: a fill payment
+// must go through even while one is owed, since it is how the debt gets paid. Every other action
+// type, action_special included, is never exempt.
+//
+// Assumes the lock is held by the caller. Returns the acting player's engine seat and true when
+// every check passes; on false the caller must return immediately without further action, since
+// the log line and (where HandlePlayerAction already fired one) the private-fail event have both
+// already been sent.
+func (g *CambiaGame) actionPreconditionsOK(playerID uuid.UUID, actionType string, exemptSnapFill bool) (uint8, bool) {
+	// --- Basic State Checks ---
+	if g.GameOver {
+		log.Printf("Game %s: Action %s from %s ignored (game over).", g.ID, actionType, playerID)
+		return 0, false
+	}
+	if !g.Started && !g.PreGameActive {
+		log.Printf("Game %s: Action %s from %s ignored (game not started).", g.ID, actionType, playerID)
+		return 0, false
+	}
+	if g.PreGameActive {
+		log.Printf("Game %s: Action %s from %s ignored (pre-game active).", g.ID, actionType, playerID)
+		g.fireEventToPlayer(playerID, GameEvent{Type: EventPrivateSpecialFail, Payload: map[string]interface{}{"message": "Cannot perform actions during pre-game reveal."}})
+		return 0, false
+	}
+
+	// --- Player Validation ---
+	player := g.getPlayerByID(playerID)
+	if player == nil || !player.Connected {
+		log.Printf("Game %s: Action %s from non-existent/disconnected player %s ignored.", g.ID, actionType, playerID)
+		return 0, false
+	}
+
+	engineIdx, inEngineMapping := g.PlayerToEngine[playerID]
+	if !inEngineMapping {
+		log.Printf("Game %s: Action %s from %s ignored (not in engine mapping).", g.ID, actionType, playerID)
+		return 0, false
+	}
+
+	// A snapper who took an opponent's card owes them one back before doing anything else
+	// (RULES.md 5, cambia-936). Another snap, or an ability resolution, is refused with the rest:
+	// either would open or settle other state against a hand that has not paid the first debt.
+	if !exemptSnapFill && g.owesSnapFill(playerID) && !g.dropUnpayableSnapFill(playerID, engineIdx) {
+		log.Printf("Game %s: Action %s from %s ignored (snap fill pending).", g.ID, actionType, playerID)
+		g.fireEventToPlayer(playerID, GameEvent{Type: EventPrivateSpecialFail, Payload: map[string]interface{}{"message": "You must move one of your cards into the slot you snapped first."}})
+		return 0, false
+	}
+
+	return engineIdx, true
+}
+
 // HandlePlayerAction routes incoming player actions (draw, discard, replace, snap, cambia).
 // Validates turn, state, and payload before executing the corresponding handler.
 // Public entry point: acquires mu.
 func (g *CambiaGame) HandlePlayerAction(playerID uuid.UUID, action models.GameAction) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	// --- Basic State Checks ---
-	if g.GameOver {
-		log.Printf("Game %s: Action %s from %s ignored (game over).", g.ID, action.ActionType, playerID)
-		return
-	}
-	if !g.Started && !g.PreGameActive {
-		log.Printf("Game %s: Action %s from %s ignored (game not started).", g.ID, action.ActionType, playerID)
-		return
-	}
-	if g.PreGameActive {
-		log.Printf("Game %s: Action %s from %s ignored (pre-game active).", g.ID, action.ActionType, playerID)
-		g.fireEventToPlayer(playerID, GameEvent{Type: EventPrivateSpecialFail, Payload: map[string]interface{}{"message": "Cannot perform actions during pre-game reveal."}})
-		return
-	}
 
-	// --- Player Validation ---
-	player := g.getPlayerByID(playerID)
-	if player == nil || !player.Connected {
-		log.Printf("Game %s: Action %s from non-existent/disconnected player %s ignored.", g.ID, action.ActionType, playerID)
-		return
-	}
-
-	engineIdx, inEngineMapping := g.PlayerToEngine[playerID]
-	if !inEngineMapping {
-		log.Printf("Game %s: Action %s from %s ignored (not in engine mapping).", g.ID, action.ActionType, playerID)
+	// action_snap_move is the payment for an owed snap fill, so it is the one action type exempt
+	// from the snap-fill gate below.
+	engineIdx, ok := g.actionPreconditionsOK(playerID, action.ActionType, action.ActionType == "action_snap_move")
+	if !ok {
 		return
 	}
 
@@ -1071,19 +1109,11 @@ func (g *CambiaGame) HandlePlayerAction(playerID uuid.UUID, action models.GameAc
 	actingPlayer := g.Engine.ActingPlayer()
 	isCurrentPlayer := (actingPlayer == engineIdx)
 
-	// Allow snap anytime, and the fill a snap owes with it: both are answers to another player's
-	// discard, so neither waits for the sender's turn (RULES.md 5).
+	// Allow snap anytime: it is an answer to another player's discard, so it does not wait for
+	// the sender's turn (RULES.md 5).
 	if action.ActionType != "action_snap" && action.ActionType != "action_snap_move" && !isCurrentPlayer {
 		log.Printf("Game %s: Action %s from %s ignored (not their turn).", g.ID, action.ActionType, playerID)
 		g.fireEventToPlayer(playerID, GameEvent{Type: EventPrivateSpecialFail, Payload: map[string]interface{}{"message": "It's not your turn."}})
-		return
-	}
-	// A snapper who took an opponent's card owes them one back before doing anything else
-	// (RULES.md 5, cambia-936). Another snap is refused with the rest: it would open a second
-	// obligation against a hand that has not paid the first.
-	if action.ActionType != "action_snap_move" && g.owesSnapFill(playerID) && !g.dropUnpayableSnapFill(playerID, engineIdx) {
-		log.Printf("Game %s: Action %s from %s ignored (snap fill pending).", g.ID, action.ActionType, playerID)
-		g.fireEventToPlayer(playerID, GameEvent{Type: EventPrivateSpecialFail, Payload: map[string]interface{}{"message": "You must move one of your cards into the slot you snapped first."}})
 		return
 	}
 	// Check if blocked by pending special action requiring resolution.
@@ -1202,6 +1232,17 @@ func (g *CambiaGame) endGame() {
 	// An unpaid snap fill dies with the game it was owed in: the hands are about to be scored as
 	// they stand, so moving a card between them now would rewrite a result already being read.
 	g.cancelSnapFills()
+
+	// A pending special action or buffered discard dies with the game the same way. Without this,
+	// a stale prompt in the race window between here and the queued _game_ended message reached
+	// ProcessSpecialAction, which applied to the dead game's engine state and, via
+	// processSkipSpecialAction's tail, called onTurnAdvanced on a finished game (cambia-1566).
+	// actionPreconditionsOK's GameOver check (set above) now refuses action_special outright once
+	// this has run, but the state is cleared regardless: nothing should read it as live again.
+	g.SpecialAction = SpecialActionState{}
+	g.pendingDiscardAbilityChoice = false
+	g.pendingDiscardCardID = uuid.Nil
+	g.pendingDiscardWindowSnaps = 0
 
 	// --- Scoring and Winner Determination ---
 	// Compute scores from engine hand state. Every seat is in this map, a forfeited one included
