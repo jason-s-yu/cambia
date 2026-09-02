@@ -2419,6 +2419,10 @@ def _persist_lbr_result(
     measurement, which decides what the number can be compared against, and the
     second is how many failures the run absorbed, which decides whether it
     should be trusted at all.
+
+    Tier B's two opponent names (cambia-1793) ride in the schemaless ``lbr``
+    object beside ``rollout_opponent`` rather than in columns of their own,
+    which is where the opponent name has always lived.
     """
     import json as _json
     from datetime import datetime, timezone
@@ -2473,6 +2477,13 @@ def _persist_lbr_result(
             "num_infosets_sampled": n_sampled,
             "br_rollouts_per_infoset": br_rollouts_per_infoset,
             "rollout_opponent": result.get("rollout_opponent"),
+            # cambia-1793: Tier B's two seat-1 roles, named apart. The
+            # trajectory opponent decides which positions were measured and
+            # the continuation opponent how hard the rollouts were, so a row
+            # missing them cannot say which of the two a number moved with.
+            # Both are absent from a Tier-A row, which has one opponent.
+            "trajectory_opponent": result.get("trajectory_opponent"),
+            "continuation_opponent": result.get("continuation_opponent"),
             "belief_protocol": belief_protocol,
             "policy_errors": policy_errors,
             "policy_error_detail": result.get("policy_error_detail") or {},
