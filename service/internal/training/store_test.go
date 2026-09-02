@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS runs (
     notes TEXT,
     parent_run_id INTEGER REFERENCES runs(id),
     origin_host TEXT,
+    executed_on TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -437,12 +438,21 @@ func setupRemoteTestDB(t *testing.T, lastSyncAt string) (*TrainingStore, string)
 		VALUES ('local-run', 'prt-cfr', 'running', '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO runs (name, algorithm, status, origin_host, created_at, updated_at)
-		VALUES ('v0.4-prtcfr-r12', 'prt-cfr', 'running', 'runner1', '2026-07-08T00:00:00Z', '2026-07-08T00:00:00Z')`); err != nil {
+	if _, err := db.Exec(`INSERT INTO runs (name, algorithm, status, origin_host, executed_on, created_at, updated_at)
+		VALUES ('v0.4-prtcfr-r12', 'prt-cfr', 'running', 'runner1', 'n-9c1f2a7b0d44', '2026-07-08T00:00:00Z', '2026-07-08T00:00:00Z')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO harness_sync (run_name, origin_host, last_sync_at, last_status)
 		VALUES ('v0.4-prtcfr-r12', 'runner1', ?, 'running')`, lastSyncAt); err != nil {
+		t.Fatal(err)
+	}
+	// An embedded-node pool run (serving-harness v1.1 design D23): origin_host
+	// is stamped by the coordinator the same as any pool job, and executed_on
+	// names the coordinator's own embedded node -- both without a Host from
+	// process.json (D5/D40: the embedded node's own progress reports carry no
+	// Host, since the pid is local).
+	if _, err := db.Exec(`INSERT INTO runs (name, algorithm, status, origin_host, executed_on, created_at, updated_at)
+		VALUES ('v0.4-prtcfr-embedded', 'prt-cfr', 'running', 'nash', 'n-embedded01', '2026-07-08T00:00:00Z', '2026-07-08T00:00:00Z')`); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
@@ -473,6 +483,9 @@ func TestRemoteRunProvenanceFresh(t *testing.T) {
 	}
 	if detail.Stale {
 		t.Error("fresh remote run flagged stale (last_sync_at within 3 intervals)")
+	}
+	if detail.ExecutedOn != "n-9c1f2a7b0d44" {
+		t.Errorf("executed_on = %q, want n-9c1f2a7b0d44", detail.ExecutedOn)
 	}
 }
 
@@ -506,6 +519,43 @@ func TestLocalRunNoProvenance(t *testing.T) {
 	}
 	if detail.Stale {
 		t.Error("local run must never be stale")
+	}
+	if detail.ExecutedOn != "" {
+		t.Errorf("local run executed_on = %q, want empty", detail.ExecutedOn)
+	}
+}
+
+// TestExecutedOnEmbeddedRun is AC3's embedded-node half (cambia-1722, design
+// D23): an embedded pool run's process.json carries no Host (D5/D40), but the
+// coordinator still stamps origin_host and executed_on on it exactly as it
+// does for a genuinely remote node, and the dashboard renders both from the
+// run_db row alone, with no run-dir read.
+func TestExecutedOnEmbeddedRun(t *testing.T) {
+	store, _ := setupRemoteTestDB(t, nowUTC())
+
+	detail, err := store.GetRun(context.Background(), "v0.4-prtcfr-embedded")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.ExecutedOn != "n-embedded01" {
+		t.Errorf("executed_on = %q, want n-embedded01", detail.ExecutedOn)
+	}
+	if detail.Host != "nash" {
+		t.Errorf("host = %q, want nash (origin_host is stamped for an embedded pool run too)", detail.Host)
+	}
+}
+
+// TestExecutedOnEmptyForRunThePoolNeverTouched: a run this dashboard launched
+// directly (never went through the harness) carries a NULL executed_on and
+// renders as empty, not a placeholder value.
+func TestExecutedOnEmptyForRunThePoolNeverTouched(t *testing.T) {
+	store, _ := setupTestDB(t)
+	detail, err := store.GetRun(context.Background(), "test-run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.ExecutedOn != "" {
+		t.Errorf("executed_on = %q, want empty for a run the pool never touched", detail.ExecutedOn)
 	}
 }
 
@@ -543,23 +593,38 @@ func TestListRunsRemoteProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var remote, local *Run
+	var remote, local, embedded *Run
 	for i := range runs {
 		switch runs[i].Name {
 		case "v0.4-prtcfr-r12":
 			remote = &runs[i]
 		case "local-run":
 			local = &runs[i]
+		case "v0.4-prtcfr-embedded":
+			embedded = &runs[i]
 		}
 	}
-	if remote == nil || local == nil {
-		t.Fatalf("expected both runs in list, got %d", len(runs))
+	if remote == nil || local == nil || embedded == nil {
+		t.Fatalf("expected all three runs in list, got %d", len(runs))
 	}
 	if remote.Host != "runner1" || !remote.Stale {
 		t.Errorf("remote run: host=%q stale=%v, want runner1/true", remote.Host, remote.Stale)
 	}
+	if remote.ExecutedOn != "n-9c1f2a7b0d44" {
+		t.Errorf("remote run: executed_on=%q, want n-9c1f2a7b0d44", remote.ExecutedOn)
+	}
 	if local.Host != "" || local.Stale {
 		t.Errorf("local run: host=%q stale=%v, want empty/false", local.Host, local.Stale)
+	}
+	if local.ExecutedOn != "" {
+		t.Errorf("local run: executed_on=%q, want empty", local.ExecutedOn)
+	}
+	// The embedded run has no harness_sync row (it never leaves this host), so
+	// it renders like a local run for staleness while still carrying its own
+	// executed_on -- the two facts are independent (design D23: origin_host
+	// answers "who serves this run", executed_on "which node produced it").
+	if embedded.ExecutedOn != "n-embedded01" {
+		t.Errorf("embedded run: executed_on=%q, want n-embedded01", embedded.ExecutedOn)
 	}
 }
 
