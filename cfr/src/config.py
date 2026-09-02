@@ -728,8 +728,9 @@ class PRTCFRConfig(_CambiaBaseModel):
     max_trajectory_steps: int = 4000
     # Production GameDriver backend. new_production_driver (prtcfr_worker.py)
     # raises ValueError for any other value -- constrained here (cambia-640)
-    # for the same reason as stability_stop_mode.
-    backend: Literal["go", "python"] = "go"
+    # for the same reason as stability_stop_mode. The 'python' reference
+    # backend was retired at cambia-1784; 'go' is the only supported value.
+    backend: Literal["go"] = "go"
     # --- Batched incremental production generation (S1W15). ---
     # gen_batched=True routes production generation through the batched
     # incremental PRTCFRInferenceService (all live games + their m rollouts

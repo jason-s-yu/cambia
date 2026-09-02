@@ -124,7 +124,7 @@ def _prod_config(**overrides):
         warm_start=True,
         stability_enabled=False,
         reservoir_capacity=1000,
-        backend="python",
+        backend="go",
         critic_enabled=False,
         num_players=2,
         max_trajectory_steps=50,
