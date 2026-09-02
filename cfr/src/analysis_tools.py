@@ -1310,6 +1310,9 @@ class AnalysisTools:
                 drawn_card=drawn_card_for_obs,
                 peeked_cards=peeked_cards_for_obs,
                 snap_results=copy.deepcopy(game_state.snap_results_log),
+                closing_snap_results=list(
+                    getattr(game_state, "snap_results_at_close", []) or []
+                ),
                 did_cambia_get_called=game_state.cambia_caller_id is not None,
                 who_called_cambia=game_state.cambia_caller_id,
                 is_game_over=game_state.is_terminal(),

@@ -138,6 +138,19 @@ class CambiaGameState(QueryMixin, SnapLogicMixin, AbilityMixin):
     snap_potential_snappers: List[int] = field(default_factory=list)
     snap_current_snapper_idx: int = 0
     snap_results_log: List[Dict[str, Any]] = field(default_factory=list)
+    # Snap entries a window-closing action produced (cambia-1985). snap_results_log
+    # is the tokenizer channel: its clear points mirror the Go tokenizer's Observe(),
+    # which emits public snap frames only while Snap.Active, so an action that closes
+    # the window has its entry cleared inside the same apply and no observation ever
+    # sees it. The belief needs that entry, because a successful own snap names the
+    # slot that left and without it the belief truncates the hand from the end. These
+    # two fields carry it there without moving a single token: snap_results_this_action
+    # accumulates what the action in flight appended, and snap_results_at_close holds
+    # what the closing clear took, live for the one Observe window right after that
+    # action and cleared at the start of the next apply_action, the same lifetime
+    # race_resolution has.
+    snap_results_this_action: List[Dict[str, Any]] = field(default_factory=list)
+    snap_results_at_close: List[Dict[str, Any]] = field(default_factory=list)
     # Race-ON commit buffer (house_rules.snapRace only; mirrors the Go engine's
     # SnapState.Commits). Parallel to snap_potential_snappers: snap_commits[i] is
     # snapper i's committed GameAction. Populated only on the race-ON path; unused
@@ -244,6 +257,8 @@ class CambiaGameState(QueryMixin, SnapLogicMixin, AbilityMixin):
         self.snap_potential_snappers = []
         self.snap_current_snapper_idx = 0
         self.snap_results_log = []
+        self.snap_results_this_action = []
+        self.snap_results_at_close = []
 
         logger.debug(
             "Game setup complete. Player %d starts (Turn %d). House Rules: %s",
@@ -269,6 +284,11 @@ class CambiaGameState(QueryMixin, SnapLogicMixin, AbilityMixin):
         # A race-ON resolution record is live only for the Observe window right
         # after the resolving action; clear it before applying the next action.
         self.race_resolution = None
+        # The window-closing snap entries have the same one-window lifetime, and
+        # snap_results_this_action is scratch for the action about to run
+        # (cambia-1985).
+        self.snap_results_at_close = []
+        self.snap_results_this_action = []
 
         acting_player = self.get_acting_player()  # Method from QueryMixin
         if acting_player == -1:
