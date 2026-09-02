@@ -57,6 +57,9 @@ class SoGSearch:
         max_persist_handles: int = 512,
         safety_margin: float = 0.01,
         safety_check_enabled: bool = True,
+        widening_enabled: bool = False,
+        widening_c: float = 1.0,
+        widening_alpha: float = 0.5,
     ):
         self._cvpn = cvpn
         self._train_budget = train_budget
@@ -69,6 +72,9 @@ class SoGSearch:
         self._max_persist_handles = max_persist_handles
         self._safety_margin = safety_margin
         self._safety_check_enabled = safety_check_enabled
+        self._widening_enabled = widening_enabled
+        self._widening_c = widening_c
+        self._widening_alpha = widening_alpha
         self._current_budget = train_budget
         self._last_tree: Optional[GTCFRNode] = None
         self._inner: GTCFRSearch = self._build_inner()
@@ -420,4 +426,7 @@ class SoGSearch:
             cfr_iters_per_expansion=self._cfr_iters,
             expansion_k=self._expansion_k,
             device=self._device,
+            widening_enabled=self._widening_enabled,
+            widening_c=self._widening_c,
+            widening_alpha=self._widening_alpha,
         )

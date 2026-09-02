@@ -668,3 +668,112 @@ def test_expansion_steps_never_waste_the_budget(small_cvpn: CVPN, monkeypatch):
     # Each step expands one unexpanded node into expansion_k children.
     assert added == [3] * steps, f"Unexpected growth per step: {added}"
     assert searcher._count_nodes(root) == 1 + sum(added)
+
+
+# ---------------------------------------------------------------------------
+# Test: progressive widening (cambia-1870)
+# ---------------------------------------------------------------------------
+
+
+def _widening_fixture(searcher: GTCFRSearch):
+    """Root over 10 legal actions with a strictly decreasing PUCT prior.
+
+    The prior order fixes both the initial top-k expansion and the order in
+    which widening opens the rest, so child insertion order is deterministic.
+    """
+    engine = _FakeEngine(n_legal=10, acting_player=0, depth=0, max_depth=20)
+    root = _make_node(
+        acting_player=0,
+        legal_mask=engine.legal_actions_mask(),
+        leaf_values=_constant_leaf_values(0.0, 0.0),
+        engine_handle=engine,
+    )
+    root.policy_prior[:10] = np.linspace(0.19, 0.01, 10).astype(np.float32)
+    return root, engine
+
+
+def test_widening_off_keeps_the_fixed_expansion_k(small_cvpn: CVPN, monkeypatch):
+    """With widening off a node never grows past expansion_k children."""
+    np.random.seed(0)
+    searcher = GTCFRSearch(small_cvpn, expansion_budget=1, expansion_k=3)
+    r0, r1 = _uniform_ranges()
+    root, engine = _widening_fixture(searcher)
+
+    monkeypatch.setattr(
+        searcher, "_make_child_engine", lambda parent, action: parent.child(action)
+    )
+    for _ in range(20):
+        searcher._expand_once(root, engine, r0, r1)
+
+    assert len(root.children) == 3, f"Child count drifted: {sorted(root.children)}"
+    assert sorted(root.children) == [0, 1, 2]
+
+
+def test_widening_opens_every_action_in_prior_order(small_cvpn: CVPN, monkeypatch):
+    """With widening on, all 10 actions open, in descending PUCT prior order.
+
+    An unopened action has no visits, so its PUCT score is its prior term and
+    the widening order matches the ranking the initial expansion uses.
+    """
+    np.random.seed(0)
+    searcher = GTCFRSearch(
+        small_cvpn,
+        expansion_budget=1,
+        expansion_k=3,
+        widening_enabled=True,
+        widening_c=3.0,
+        widening_alpha=0.5,
+    )
+    r0, r1 = _uniform_ranges()
+    root, engine = _widening_fixture(searcher)
+
+    monkeypatch.setattr(
+        searcher, "_make_child_engine", lambda parent, action: parent.child(action)
+    )
+    for _ in range(20):
+        searcher._expand_once(root, engine, r0, r1)
+
+    assert list(root.children.keys()) == list(
+        range(10)
+    ), f"Unexpected open order: {list(root.children.keys())}"
+
+
+def test_widening_schedule_bounds(small_cvpn: CVPN):
+    """_allowed_width is floored at expansion_k and capped at n_legal."""
+    searcher = GTCFRSearch(
+        small_cvpn,
+        expansion_budget=1,
+        expansion_k=3,
+        widening_enabled=True,
+        widening_c=1.0,
+        widening_alpha=0.5,
+    )
+    legal_mask = np.zeros(NUM_ACTIONS, dtype=bool)
+    legal_mask[:10] = True
+    node = _make_node(acting_player=0, legal_mask=legal_mask, is_expanded=True)
+
+    assert searcher._allowed_width(node) == 3  # ceil(sqrt(1)) floored at k
+    node.visit_counts[0] = 16
+    assert searcher._allowed_width(node) == 4  # ceil(sqrt(16))
+    node.visit_counts[0] = 10_000
+    assert searcher._allowed_width(node) == 10  # capped at n_legal
+
+
+def test_widening_on_search_returns_valid_policy(small_cvpn: CVPN):
+    """search() with widening on keeps the policy contract its consumers read."""
+    searcher = GTCFRSearch(
+        small_cvpn,
+        expansion_budget=5,
+        cfr_iters_per_expansion=3,
+        widening_enabled=True,
+        widening_c=2.0,
+        widening_alpha=0.5,
+    )
+    r0, r1 = _uniform_ranges()
+    with _make_game() as game:
+        result = searcher.search(game, r0, r1)
+
+    assert result.policy.shape == (NUM_ACTIONS,)
+    assert abs(result.policy.sum() - 1.0) < 1e-4
+    assert result.root_values.shape == (VALUE_DIM,)
+    assert np.isfinite(result.root_values).all()

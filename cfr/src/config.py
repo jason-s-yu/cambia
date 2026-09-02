@@ -432,6 +432,12 @@ class DeepCfrConfig(_CambiaBaseModel):
     gtcfr_c_puct: float = 2.0
     gtcfr_cfr_iters_per_expansion: int = 10
     gtcfr_expansion_k: int = 3
+    # Progressive widening: a node may hold ceil(c * visits^alpha) children,
+    # floored at gtcfr_expansion_k and capped at its legal action count.
+    # Disabled by default, which pins every node to gtcfr_expansion_k children.
+    gtcfr_widening_enabled: bool = False
+    gtcfr_widening_c: float = 1.0
+    gtcfr_widening_alpha: float = 0.5
     gtcfr_cvpn_hidden_dim: int = 512
     gtcfr_cvpn_num_blocks: int = 4
     gtcfr_cvpn_learning_rate: float = 3e-4
