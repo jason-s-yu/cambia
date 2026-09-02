@@ -14,7 +14,9 @@ would otherwise sanitize.
 """
 
 import json
+import shutil
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -28,6 +30,13 @@ from src.harness.reconciler import (
 
 _NOW = "2026-07-09T00:00:00Z"
 _RUNNER_SHA = "runner-sha-xyz"
+
+# Shared journal-validator fixture corpus (cambia-1717, runnerd/harness/testdata/
+# rundb/), consumed the same way cfr/tests/test_harness_rundb_corpus.py does:
+# relative to the repo root, not this file's own directory, since the corpus is
+# owned by runnerd/, not cfr/.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_CORPUS_DIR = _REPO_ROOT / "runnerd" / "harness" / "testdata" / "rundb"
 
 
 # ---------------------------------------------------------------------------
@@ -801,16 +810,14 @@ def test_replay_accepts_open_connection(tmp_path):
 
 
 def test_second_runs_row_rejected(tmp_path):
-    """AC (3): a journal with a second runs row is rejected on replay. Built
-    directly against run_db.py's schema as a stand-in for the shared W1-T8
-    fixture corpus (runnerd/harness/testdata/rundb/, cambia-1717); re-point
-    this test at that corpus's "second row" fixture once it lands."""
-    run_dir = tmp_path / "runs" / "v0.4-prtcfr-r1"
+    """AC (3): a journal with a second runs row is rejected on replay, against
+    the shared W1-T8 fixture corpus's second_row.sqlite (runnerd/harness/
+    testdata/rundb/, cambia-1717): job-train-0001 plus a stray
+    some-other-run-999 row, the same fixture the Go validator and
+    test_harness_rundb_corpus.py's reference validator reject as "identity"."""
+    run_dir = tmp_path / "runs" / "job-train-0001"
     run_dir.mkdir(parents=True, exist_ok=True)
-    conn = _new_source(run_dir / "run_db.sqlite")
-    _insert_run(conn, name="v0.4-prtcfr-r1")
-    _insert_run(conn, name="some-other-run")
-    conn.close()
+    shutil.copy2(_CORPUS_DIR / "second_row.sqlite", run_dir / "run_db.sqlite")
     with pytest.raises(ReconcilerValidationError):
         replay(run_dir, _dest_path(tmp_path), origin_host="runner")
 
@@ -825,12 +832,13 @@ def test_second_runs_row_rejected(tmp_path):
 
 def test_single_row_name_must_match_run_dir(tmp_path):
     """A single runs row is still rejected when its name does not match the
-    synced run dir it arrived in (design 5.7 D61)."""
-    run_dir = tmp_path / "runs" / "v0.4-prtcfr-r1"
+    synced run dir it arrived in (design 5.7 D61), against the shared W1-T8
+    corpus's wrong_name.sqlite (cambia-1717): one row named
+    a-completely-different-run, synced under job-train-0001, the same fixture
+    the Go validator rejects as "identity"."""
+    run_dir = tmp_path / "runs" / "job-train-0001"
     run_dir.mkdir(parents=True, exist_ok=True)
-    conn = _new_source(run_dir / "run_db.sqlite")
-    _insert_run(conn, name="a-different-run-name")
-    conn.close()
+    shutil.copy2(_CORPUS_DIR / "wrong_name.sqlite", run_dir / "run_db.sqlite")
     with pytest.raises(ReconcilerValidationError):
         replay(run_dir, _dest_path(tmp_path), origin_host="runner")
 
