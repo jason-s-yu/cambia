@@ -3829,6 +3829,7 @@ def run_head_to_head(
             turn = 0
             session = _GoEvalGame(config.cambia_rules, None, 2, agents)
 
+            turn_failed = False
             while not session.is_terminal() and turn < max_turns:
                 turn += 1
                 acting_player_id = session.acting_player()
@@ -3844,11 +3845,22 @@ def run_head_to_head(
                     )
                     session.apply(chosen_action)
                 except Exception as e_turn:
-                    logger.error("Head-to-head game %d turn error: %s", game_num, e_turn)
+                    # A game cut short by a failing agent used to fall through
+                    # and score as a tie, so a broken agent read as a drawing
+                    # one (cambia-1479). It is an error, counted and unscored.
+                    logger.exception(
+                        "Head-to-head game %d turn %d error: %s", game_num, turn, e_turn
+                    )
+                    errors_count += 1
+                    turn_failed = True
                     break
 
             turns_list.append(turn)
 
+            if turn_failed:
+                # Already counted as an error; scoring it would fold a failure
+                # into the win rate.
+                continue
             if session.is_terminal():
                 winner = session.winner()
                 if winner is None:
@@ -3983,6 +3995,7 @@ def run_head_to_head_typed(
             turn = 0
             session = _GoEvalGame(config.cambia_rules, None, 2, agents)
 
+            turn_failed = False
             while not session.is_terminal() and turn < max_turns:
                 turn += 1
                 acting_player_id = session.acting_player()
@@ -3998,13 +4011,25 @@ def run_head_to_head_typed(
                     )
                     session.apply(chosen_action)
                 except Exception as e_turn:
-                    logger.error(
-                        "Head-to-head-typed game %d turn error: %s", game_num, e_turn
+                    # Scored as a draw before cambia-1479, which turned a broken
+                    # agent into a drawing one. Counted as an error and left
+                    # out of the win rates instead.
+                    logger.exception(
+                        "Head-to-head-typed game %d turn %d error: %s",
+                        game_num,
+                        turn,
+                        e_turn,
                     )
+                    errors_count += 1
+                    turn_failed = True
                     break
 
             turns_list.append(turn)
 
+            if turn_failed:
+                # Already counted as an error; scoring it would fold a failure
+                # into the win rate.
+                continue
             if session.is_terminal():
                 winner = session.winner()
                 if winner is None:
@@ -4111,6 +4136,11 @@ def persist_eval_results(
             ci_low = max(0.0, center - margin)
             ci_high = min(1.0, center + margin)
 
+        # Games the loop could not finish are absent from `total`, so a row
+        # whose win rate was built on fewer games than were requested used to
+        # look identical to a clean one (cambia-1479). The count rides along.
+        policy_errors = int(results.get("Errors", 0) or 0)
+
         stats = getattr(results, "stats", {})
         avg_game_turns = stats.get("avg_game_turns")
         t1_cambia_rate = stats.get("t1_cambia_rate")
@@ -4159,6 +4189,7 @@ def persist_eval_results(
             "selection_mode": row_selection_mode,
             "crn_seed": None if row_crn_seed is None else str(row_crn_seed),
             "seat_balanced": row_seat_balanced,
+            "policy_errors": policy_errors,
         }
         all_rows.append(row)
 

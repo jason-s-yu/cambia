@@ -24,9 +24,12 @@ import numpy as np
 
 from src.cfr.lbr import (
     GoSearchState,
+    ToleratedFailures,
     UniformRandomPolicy,
     _make_random_opponent,
     _resolve_max_turns,
+    belief_protocol_label,
+    choose_action_pos,
     collect_infosets,
     replay_infoset,
     terminal_utility,
@@ -39,11 +42,18 @@ logger = logging.getLogger(__name__)
 _PLAYER_ID = 0
 
 
-def _rollout(state: GoSearchState, policies: list, max_turns: int) -> float:
+def _rollout(
+    state: GoSearchState,
+    policies: list,
+    max_turns: int,
+    tolerated: Optional[ToleratedFailures] = None,
+) -> float:
     """Roll out from the current state under ``policies`` (indexed by seat).
 
     Returns the final utility for _PLAYER_ID, or a hand-score estimate on
-    timeout.
+    timeout. A policy that raises here is not absorbed: it leaves as a
+    ``PolicyError`` rather than cutting the rollout short and depressing the
+    estimate (cambia-1479).
     """
     turns = 0
     while not state.is_terminal() and turns < max_turns:
@@ -55,11 +65,14 @@ def _rollout(state: GoSearchState, policies: list, max_turns: int) -> float:
         if not legal_indices:
             break
         legal_actions = actions_from_indices(legal_indices)
-        try:
-            act = policies[ap].choose_action(state.view(), legal_actions)
-            pos = legal_actions.index(act)
-        except Exception:  # JUSTIFIED: eval resilience
-            break
+        pos = choose_action_pos(
+            policies[ap],
+            state.view(),
+            legal_actions,
+            seat=ap,
+            phase="Tier-A continuation rollout",
+            tolerated=tolerated,
+        )
         if not state.apply_index(legal_indices[pos]):
             break
     return terminal_utility(state)
@@ -73,6 +86,7 @@ def sampled_lbr(
     seed: int = 42,
     rollout_seed: Optional[int] = None,
     deal_decks: Optional[Sequence[Any]] = None,
+    frozen_beliefs: bool = False,
 ) -> Dict[str, Any]:
     """Compute the Tier-A sampled LBR exploitability estimate.
 
@@ -106,6 +120,11 @@ def sampled_lbr(
         deal_decks: optional pool of explicit deck orders to deal from, required
             for configs whose deck the Go FFI rules struct cannot express (e.g.
             a ``deck_ranks`` tiny game). See ``src.cfr.lbr``.
+        frozen_beliefs: reproduce the pre-cambia-1479 protocol, where a policy
+            owning a belief kept the one it built at the deal for the whole
+            measurement. Default False: beliefs advance with every applied
+            action. A number is not comparable across the two protocols, so the
+            result names which one ran.
 
     Returns:
         dict with keys:
@@ -114,9 +133,15 @@ def sampled_lbr(
           - std_err: float (standard error of the mean)
           - tier: "A"
           - seed: int (echoed, so a persisted row records what produced it)
+          - belief_protocol: "advancing" or "frozen"
+          - policy_errors: int (failures the run absorbed; a raising policy is
+            not absorbed, it raises PolicyError)
+          - policy_error_detail: dict of absorbed-failure kind -> count
     """
     house_rules = config.cambia_rules
     max_turns = _resolve_max_turns(config)
+    tolerated = ToleratedFailures()
+    protocol = belief_protocol_label(frozen_beliefs)
 
     # Collect P0 infosets via the shared collector. Tier A uses a uniform-random
     # trajectory opponent (and random rollouts below). Routing through
@@ -131,6 +156,8 @@ def sampled_lbr(
         seed=seed,
         trajectory_opponent_factory=_make_random_opponent,
         deal_decks=deal_decks,
+        frozen_beliefs=frozen_beliefs,
+        tolerated=tolerated,
     )
 
     def _empty(reason: str) -> Dict[str, Any]:
@@ -141,6 +168,9 @@ def sampled_lbr(
             "std_err": 0.0,
             "tier": "A",
             "seed": seed,
+            "belief_protocol": protocol,
+            "policy_errors": tolerated.total,
+            "policy_error_detail": tolerated.as_dict(),
         }
 
     if not sampled_infosets:
@@ -155,9 +185,13 @@ def sampled_lbr(
 
     for infoset in sampled_infosets:
         try:
-            state = replay_infoset(house_rules, infoset, agent_wrapper)
+            state = replay_infoset(
+                house_rules, infoset, agent_wrapper, frozen_beliefs, tolerated
+            )
         except Exception as exc:  # JUSTIFIED: eval resilience
-            logger.warning("sampled_lbr: infoset replay failed (%s); skipping.", exc)
+            # A skipped infoset shrinks the sample behind the estimate, so it is
+            # counted onto the row rather than only logged.
+            tolerated.record("infoset_replay", "sampled_lbr infoset replay", exc)
             continue
 
         snap_h: Optional[int] = None
@@ -179,7 +213,9 @@ def sampled_lbr(
                             1, _random_module.Random(rollout_rng.getrandbits(63))
                         ),
                     ]
-                    utilities.append(_rollout(state, rollout_policies, max_turns))
+                    utilities.append(
+                        _rollout(state, rollout_policies, max_turns, tolerated)
+                    )
                 action_mean_utils.append(float(np.mean(utilities)) if utilities else 0.0)
         finally:
             if snap_h is not None:
@@ -211,4 +247,7 @@ def sampled_lbr(
         "std_err": std_err,
         "tier": "A",
         "seed": seed,
+        "belief_protocol": protocol,
+        "policy_errors": tolerated.total,
+        "policy_error_detail": tolerated.as_dict(),
     }

@@ -110,7 +110,10 @@ from src.agents.game_view import GameView
 from src.cfr.lbr import (
     DealSpec,
     GoSearchState,
+    ToleratedFailures,
     UniformRandomPolicy,
+    belief_protocol_label,
+    choose_action_pos,
     normalize_deal_decks,
     terminal_utility,
 )
@@ -389,10 +392,15 @@ def _rollout(
     opponent,
     rng: random.Random,
     max_turns: int,
+    tolerated: Optional[ToleratedFailures] = None,
 ) -> float:
     """Default MCTS rollout: responder uniform-random, opponent fixed. On the
     3-turn tiny game the tree covers almost the whole game, so the rollout only
     fills the last unexpanded ply.
+
+    An opponent that raises here is not absorbed: it leaves as a ``PolicyError``
+    instead of cutting the rollout short and biasing every value the search
+    backs up through it (cambia-1479).
     """
     turns = 0
     while not state.is_terminal() and turns < max_turns:
@@ -403,15 +411,17 @@ def _rollout(
         legal_indices = state.legal_indices()
         if not legal_indices:
             break
-        try:
-            if acting == responder:
-                pos = rng.randrange(len(legal_indices))
-            else:
-                legal_actions = actions_from_indices(legal_indices)
-                act = opponent.choose_action(state.view(), legal_actions)
-                pos = legal_actions.index(act)
-        except Exception:  # JUSTIFIED: eval resilience
-            break
+        if acting == responder:
+            pos = rng.randrange(len(legal_indices))
+        else:
+            pos = choose_action_pos(
+                opponent,
+                state.view(),
+                actions_from_indices(legal_indices),
+                seat=acting,
+                phase="ISMCTS rollout (opponent)",
+                tolerated=tolerated,
+            )
         if not state.apply_index(legal_indices[pos]):
             break
     return _terminal_util(state, responder)
@@ -466,6 +476,7 @@ def _simulate(
     rng: random.Random,
     ucb_c: float,
     max_turns: int,
+    tolerated: Optional[ToleratedFailures] = None,
 ) -> None:
     """One ISMCTS iteration over a single determinization.
 
@@ -525,16 +536,21 @@ def _simulate(
                 value = _terminal_util(state, responder)
                 break
             if expand:
-                value = _rollout(state, responder, opponent, rng, max_turns - turns)
+                value = _rollout(
+                    state, responder, opponent, rng, max_turns - turns, tolerated
+                )
                 break
             continue
 
         # Opponent (or any non-responder) node: fixed policy.
-        try:
-            action = opponent.choose_action(state.view(), legal_actions)
-            a_pos = legal_actions.index(action)
-        except Exception:  # JUSTIFIED: eval resilience
-            a_pos = rng.randrange(len(legal_indices))
+        a_pos = choose_action_pos(
+            opponent,
+            state.view(),
+            legal_actions,
+            seat=acting,
+            phase="ISMCTS search (opponent node)",
+            tolerated=tolerated,
+        )
         key, ok = _apply_and_track(
             state,
             legal_actions[a_pos],
@@ -561,6 +577,7 @@ def _play_greedy_br_game(
     opponent,
     rng: random.Random,
     max_turns: int,
+    tolerated: Optional[ToleratedFailures] = None,
 ) -> float:
     """Play one game with the responder following the tree's greedy (extracted BR)
     policy and the opponent fixed; return the responder's utility.
@@ -581,11 +598,14 @@ def _play_greedy_br_game(
             nkey = (key, len(legal_indices))
             a_pos = _greedy_action_index(tree.get(nkey), len(legal_indices), rng)
         else:
-            try:
-                action = opponent.choose_action(state.view(), legal_actions)
-                a_pos = legal_actions.index(action)
-            except Exception:  # JUSTIFIED: eval resilience
-                a_pos = rng.randrange(len(legal_indices))
+            a_pos = choose_action_pos(
+                opponent,
+                state.view(),
+                legal_actions,
+                seat=acting,
+                phase="ISMCTS BR-value game (opponent)",
+                tolerated=tolerated,
+            )
         key, ok = _apply_and_track(
             state,
             legal_actions[a_pos],
@@ -599,14 +619,19 @@ def _play_greedy_br_game(
     return _terminal_util(state, responder)
 
 
-def _notify(policy, method: str, *args) -> None:
+def _notify(policy, method: str, *args, tolerated=None) -> None:
+    """Call an optional agent hook, counting an absorbed failure rather than
+    dropping it on the floor (cambia-1479)."""
     fn = getattr(policy, method, None)
     if fn is None:
         return
     try:
         fn(*args)
-    except Exception:  # JUSTIFIED: eval resilience for optional agent hooks
-        pass
+    except Exception as exc:  # JUSTIFIED: eval resilience for optional agent hooks
+        if tolerated is not None:
+            tolerated.record(
+                f"hook_{method}", f"{type(policy).__name__} hook {method}", exc
+            )
 
 
 def _play_target_game(
@@ -614,16 +639,29 @@ def _play_target_game(
     responder: int,
     target,
     opponent,
-    rng: random.Random,
     max_turns: int,
+    frozen_beliefs: bool = False,
+    tolerated: Optional[ToleratedFailures] = None,
 ) -> float:
     """Self-play baseline: the responder plays the ``target`` policy, the opponent
     is fixed; return the responder's utility. The optional Go-native agent hooks
     (bind_go_state / initialize_state / observe_transition) are fed best-effort
     when present, matching the trajectory contract in ``src.cfr.lbr``.
+
+    A target that owns a belief has it adopted into the game's apply path, so it
+    advances with every action instead of staying at the deal (cambia-1479
+    defect 2); ``frozen_beliefs`` reproduces the old protocol.
     """
-    _notify(target, "bind_go_state", state.view(), state.agent_state(responder))
-    _notify(target, "initialize_state", state.view())
+    _notify(
+        target,
+        "bind_go_state",
+        state.view(),
+        state.agent_state(responder),
+        tolerated=tolerated,
+    )
+    _notify(target, "initialize_state", state.view(), tolerated=tolerated)
+    if not frozen_beliefs:
+        state.adopt_agent_belief(responder, target)
     turns = 0
     while not state.is_terminal() and turns < max_turns:
         turns += 1
@@ -634,17 +672,24 @@ def _play_target_game(
         if not legal_indices:
             break
         legal_actions = actions_from_indices(legal_indices)
-        try:
-            if acting == responder:
-                action = target.choose_action(state.view(), legal_actions)
-            else:
-                action = opponent.choose_action(state.view(), legal_actions)
-            a_pos = legal_actions.index(action)
-        except Exception:  # JUSTIFIED: eval resilience
-            a_pos = rng.randrange(len(legal_indices))
+        a_pos = choose_action_pos(
+            target if acting == responder else opponent,
+            state.view(),
+            legal_actions,
+            seat=acting,
+            phase="ISMCTS game-value game",
+            tolerated=tolerated,
+        )
         if not state.apply_index(legal_indices[a_pos]):
             break
-        _notify(target, "observe_transition", state.view(), legal_actions[a_pos], acting)
+        _notify(
+            target,
+            "observe_transition",
+            state.view(),
+            legal_actions[a_pos],
+            acting,
+            tolerated=tolerated,
+        )
     return _terminal_util(state, responder)
 
 
@@ -661,6 +706,7 @@ def ismcts_br(
     responder_id: int = _RESPONDER_ID,
     ucb_c: float = _DEFAULT_UCB_C,
     max_turns: Optional[int] = None,
+    frozen_beliefs: bool = False,
 ) -> Dict[str, Any]:
     """Estimate the exploitability of ``agent_wrapper`` by information-set MCTS
     best response.
@@ -692,6 +738,9 @@ def ismcts_br(
         ucb_c: UCB1 exploration constant.
         max_turns: per-playout DECISION safety cap; the engine terminates games on
             its own well before this (default: ``_resolve_decision_cap(config)``).
+        frozen_beliefs: reproduce the pre-cambia-1479 protocol, where a target
+            owning a belief kept the one it built at the deal for the whole
+            game-value leg. Default False: it advances with every action.
 
     Returns:
         dict:
@@ -702,9 +751,15 @@ def ismcts_br(
           std_err: float (standard error of the exploitability estimate)
           estimator: "ismcts_br"
           ismcts_iterations, eval_games, ucb_c, seed: echoed search knobs
+          belief_protocol: "advancing" or "frozen"
+          policy_errors: int (failures the run absorbed; a raising policy is not
+              absorbed, it raises PolicyError)
+          policy_error_detail: dict of absorbed-failure kind -> count
     """
     responder = responder_id
     house_rules = config.cambia_rules
+    tolerated = ToleratedFailures()
+    protocol = belief_protocol_label(frozen_beliefs)
     if max_turns is None:
         max_turns = _resolve_decision_cap(config)
 
@@ -717,7 +772,11 @@ def ismcts_br(
     br_deal_rng = random.Random(master.getrandbits(63))
     br_rng = random.Random(master.getrandbits(63))
     gv_deal_rng = random.Random(master.getrandbits(63))
-    gv_rng = random.Random(master.getrandbits(63))
+    # The game-value leg no longer draws: its only random use was the fallback
+    # taken when a policy raised, which now raises instead (cambia-1479). The
+    # draw off master is kept so opp_seed_stream below is still seeded with the
+    # same value, and a recorded ismcts_br seed still reproduces its number.
+    master.getrandbits(63)
     opp_seed_stream = random.Random(master.getrandbits(63))
 
     if opponent_factory is None:
@@ -732,7 +791,16 @@ def ismcts_br(
                 # A fresh opponent per simulation keeps stateful opponents (and the
                 # token prefix of a PRT-CFR opponent) from leaking across playouts.
                 opponent = opponent_factory(1 - responder, config)
-                _simulate(state, tree, responder, opponent, search_rng, ucb_c, max_turns)
+                _simulate(
+                    state,
+                    tree,
+                    responder,
+                    opponent,
+                    search_rng,
+                    ucb_c,
+                    max_turns,
+                    tolerated,
+                )
             finally:
                 state.close()
 
@@ -749,6 +817,9 @@ def ismcts_br(
             "eval_games": games,
             "ucb_c": ucb_c,
             "seed": seed,
+            "belief_protocol": protocol,
+            "policy_errors": tolerated.total,
+            "policy_error_detail": tolerated.as_dict(),
         }
 
     # ---- Eval phase: BR value (extracted greedy policy) and game value (target). ----
@@ -761,7 +832,7 @@ def ismcts_br(
                 opponent = opponent_factory(1 - responder, config)
                 br_outcomes.append(
                     _play_greedy_br_game(
-                        state, tree, responder, opponent, br_rng, max_turns
+                        state, tree, responder, opponent, br_rng, max_turns, tolerated
                     )
                 )
             finally:
@@ -772,7 +843,13 @@ def ismcts_br(
                 opponent = opponent_factory(1 - responder, config)
                 gv_outcomes.append(
                     _play_target_game(
-                        state, responder, agent_wrapper, opponent, gv_rng, max_turns
+                        state,
+                        responder,
+                        agent_wrapper,
+                        opponent,
+                        max_turns,
+                        frozen_beliefs,
+                        tolerated,
                     )
                 )
             finally:
@@ -803,4 +880,7 @@ def ismcts_br(
         "eval_games": games,
         "ucb_c": ucb_c,
         "seed": seed,
+        "belief_protocol": protocol,
+        "policy_errors": tolerated.total,
+        "policy_error_detail": tolerated.as_dict(),
     }

@@ -178,6 +178,8 @@ CREATE TABLE IF NOT EXISTS eval_results (
     selection_mode TEXT,
     crn_seed TEXT,
     seat_scheme TEXT,
+    policy_errors INTEGER,
+    belief_protocol TEXT,
     timestamp TEXT NOT NULL,
     UNIQUE(run_id, iteration, baseline)
 );
@@ -274,6 +276,11 @@ _COLUMN_MIGRATIONS: Dict[str, list] = {
         ("selection_mode", "TEXT"),
         ("crn_seed", "TEXT"),
         ("seat_scheme", "TEXT"),
+        # cambia-1479: how many failures the measurement absorbed, and (for an
+        # exploitability row) whether the policy's belief advanced during it.
+        # A row without them reads as NULL, i.e. measured before they existed.
+        ("policy_errors", "INTEGER"),
+        ("belief_protocol", "TEXT"),
     ],
     "harness_sync": [
         # cambia-449: permanently-unpullable classification (no run_db.sqlite on
@@ -862,7 +869,8 @@ def insert_eval_result(
     row_dict should contain: iteration, baseline, win_rate, games_played,
     p0_wins, p1_wins, ties, adv_loss, strat_loss, avg_game_turns,
     t1_cambia_rate, avg_score_margin, timestamp. Optional hygiene fields:
-    seat_balanced, selection_mode, crn_seed, seat_scheme (absent -> NULL).
+    seat_balanced, selection_mode, crn_seed, seat_scheme, policy_errors,
+    belief_protocol (absent -> NULL).
     """
     crn_seed = row_dict.get("crn_seed")
     db.execute(
@@ -871,8 +879,9 @@ def insert_eval_result(
             (run_id, checkpoint_id, iteration, baseline, win_rate, ci_low, ci_high,
              games_played, p0_wins, p1_wins, ties, avg_game_turns,
              t1_cambia_rate, avg_score_margin, adv_loss, strat_loss,
-             seat_balanced, selection_mode, crn_seed, seat_scheme, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             seat_balanced, selection_mode, crn_seed, seat_scheme,
+             policy_errors, belief_protocol, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             run_id,
@@ -895,6 +904,8 @@ def insert_eval_result(
             row_dict.get("selection_mode"),
             None if crn_seed is None else str(crn_seed),
             row_dict.get("seat_scheme"),
+            row_dict.get("policy_errors"),
+            row_dict.get("belief_protocol"),
             row_dict.get("timestamp", _now()),
         ),
     )

@@ -2575,6 +2575,12 @@ def _persist_lbr_result(
     exploitability column and adding one is outside this ticket. ``games_played``
     carries the number of infosets actually sampled, and ``crn_seed`` carries the
     LBR seed -- the field that makes the row reproducible.
+
+    ``belief_protocol`` and ``policy_errors`` (cambia-1479) have their own
+    columns: the first says whether the agent's belief advanced during the
+    measurement, which decides what the number can be compared against, and the
+    second is how many failures the run absorbed, which decides whether it
+    should be trusted at all.
     """
     import json as _json
     from datetime import datetime, timezone
@@ -2588,6 +2594,8 @@ def _persist_lbr_result(
     std_err = float(result.get("std_err", 0.0))
     n_sampled = int(result.get("num_infosets_sampled", 0))
     margin = 1.96 * std_err
+    belief_protocol = result.get("belief_protocol")
+    policy_errors = int(result.get("policy_errors", 0) or 0)
 
     row = {
         "run": run_name,
@@ -2610,6 +2618,8 @@ def _persist_lbr_result(
         "selection_mode": f"lbr_tier_{tier.lower()}",
         "crn_seed": str(seed),
         "seat_balanced": 0,
+        "belief_protocol": belief_protocol,
+        "policy_errors": policy_errors,
         # Estimator provenance, carried in the JSONL row (which is schemaless)
         # even though eval_results has no column for it.
         "lbr": {
@@ -2621,6 +2631,9 @@ def _persist_lbr_result(
             "num_infosets_sampled": n_sampled,
             "br_rollouts_per_infoset": br_rollouts_per_infoset,
             "rollout_opponent": result.get("rollout_opponent"),
+            "belief_protocol": belief_protocol,
+            "policy_errors": policy_errors,
+            "policy_error_detail": result.get("policy_error_detail") or {},
             "engine": "go",
         },
     }
@@ -2799,6 +2812,17 @@ def evaluate(
             "Seed for the LBR estimate. The whole measurement is a "
             "deterministic function of this seed, and it is recorded with the "
             "persisted row so a number can be reproduced or re-rolled."
+        ),
+    ),
+    lbr_frozen_beliefs: bool = typer.Option(
+        False,
+        "--lbr-frozen-beliefs",
+        help=(
+            "Measure under the pre-cambia-1479 protocol, where an agent that "
+            "owns a belief kept the one it built at the deal for the whole "
+            "measurement instead of advancing it with every action. Only for "
+            "reproducing a number recorded before the fix; the two protocols "
+            "are not comparable, and the row names which one ran."
         ),
     ),
     max_workers: Optional[int] = typer.Option(
@@ -3073,13 +3097,16 @@ def evaluate(
                     num_infosets=lbr_infosets,
                     br_rollouts_per_infoset=lbr_rollouts,
                     seed=lbr_seed,
+                    frozen_beliefs=lbr_frozen_beliefs,
                 )
                 opp = result.get("rollout_opponent", "?")
                 print(
                     f"[lbr] tier=B exploitability={result['exploitability']:.3f} "
                     f"({result['num_infosets_sampled']} infosets, "
                     f"stderr={result['std_err']:.3f}, opp={opp}, "
-                    f"seed={result.get('seed', lbr_seed)})"
+                    f"seed={result.get('seed', lbr_seed)}, "
+                    f"beliefs={result.get('belief_protocol', '?')}, "
+                    f"policy_errors={result.get('policy_errors', 0)})"
                 )
             else:
                 from .cfr.sampled_lbr import sampled_lbr as run_lbr
@@ -3090,12 +3117,15 @@ def evaluate(
                     num_infosets=lbr_infosets,
                     br_rollouts_per_infoset=lbr_rollouts,
                     seed=lbr_seed,
+                    frozen_beliefs=lbr_frozen_beliefs,
                 )
                 print(
                     f"[lbr] tier=A exploitability={result['exploitability']:.3f} "
                     f"({result['num_infosets_sampled']} infosets, "
                     f"stderr={result['std_err']:.3f}, "
-                    f"seed={result.get('seed', lbr_seed)})"
+                    f"seed={result.get('seed', lbr_seed)}, "
+                    f"beliefs={result.get('belief_protocol', '?')}, "
+                    f"policy_errors={result.get('policy_errors', 0)})"
                 )
 
             if run_dir is not None:
