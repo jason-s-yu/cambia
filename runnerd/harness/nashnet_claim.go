@@ -290,6 +290,14 @@ func (p *Pool) resolveSnapshot(ctx context.Context, nodeID, jobID string, have [
 	if err != nil {
 		return snapshotDescriptor{}, err
 	}
+	// One line per handout naming which of the two happened, so the sharing
+	// this cache exists for is readable in the log rather than inferred from
+	// the claim latency (cambia-2128).
+	origin := "built"
+	if desc.Cached {
+		origin = "snapshot cache hit"
+	}
+	poolLog("nashnet claim: job %s %s: %s (%d bytes)", jobID, origin, filepath.Base(desc.Path), desc.Size)
 	return snapshotDescriptor{BundleDescriptor: desc, Basis: basis}, nil
 }
 

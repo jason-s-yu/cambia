@@ -47,7 +47,7 @@ func TestBundleCreateFullBundleFetchPassesVerifyReceipt(t *testing.T) {
 	}
 
 	node, _ := testManager(t, ExecRunner{})
-	if err := node.BundleFetch(context.Background(), "job-full", desc.Path); err != nil {
+	if err := node.BundleFetch(context.Background(), "job-full", sha, desc.Path); err != nil {
 		t.Fatalf("BundleFetch: %v", err)
 	}
 	if err := node.verifyReceipt(context.Background(), "job-full", sha); err != nil {
@@ -77,16 +77,16 @@ func TestBundleCreateThinBundleBasisPresentAndAbsent(t *testing.T) {
 	// A mirror seeded with sha1 (via job-a's full bundle) already has the
 	// basis object; the thin fetch succeeds.
 	seeded, _ := testManager(t, ExecRunner{})
-	if err := seeded.BundleFetch(context.Background(), "job-a", fullA.Path); err != nil {
+	if err := seeded.BundleFetch(context.Background(), "job-a", sha1, fullA.Path); err != nil {
 		t.Fatalf("seed BundleFetch: %v", err)
 	}
-	if err := seeded.BundleFetch(context.Background(), "job-b", thinB.Path); err != nil {
+	if err := seeded.BundleFetch(context.Background(), "job-b", sha2, thinB.Path); err != nil {
 		t.Fatalf("thin BundleFetch against a mirror holding the basis: %v", err)
 	}
 
 	// A fresh, empty mirror lacks sha1; the thin fetch fails recognizably.
 	empty, _ := testManager(t, ExecRunner{})
-	err = empty.BundleFetch(context.Background(), "job-b", thinB.Path)
+	err = empty.BundleFetch(context.Background(), "job-b", sha2, thinB.Path)
 	if err == nil {
 		t.Fatal("expected thin BundleFetch to fail against a mirror lacking the basis")
 	}
@@ -146,9 +146,10 @@ func TestBundleCreateBasisCap(t *testing.T) {
 }
 
 // TestBundleCreateArgvVerbatim is AC(4): the recorded `git bundle create`
-// invocation carries core.useReplaceRefs=false, the job ref, and the negated
-// basis, and never carries --no-tags (git bundle create rejects it as an
-// unrecognized argument, git 2.34.1).
+// invocation carries core.useReplaceRefs=false, the job-neutral snapshot ref of
+// the pinned commit (cambia-2128), and the negated basis, and never carries
+// --no-tags (git bundle create rejects it as an unrecognized argument, git
+// 2.34.1).
 func TestBundleCreateArgvVerbatim(t *testing.T) {
 	fr := newFakeRunner()
 	m, _ := testManager(t, fr)
@@ -171,7 +172,7 @@ func TestBundleCreateArgvVerbatim(t *testing.T) {
 	if len(got) != 9 {
 		t.Fatalf("argv = %v, want 9 elements", got)
 	}
-	want := []string{"-C", m.mirrorDir, "-c", "core.useReplaceRefs=false", "bundle", "create", got[6], "refs/harness/job-argv", "^" + sha1}
+	want := []string{"-C", m.mirrorDir, "-c", "core.useReplaceRefs=false", "bundle", "create", got[6], snapshotRef(sha2), "^" + sha1}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("argv[%d] = %q, want %q (full argv %v)", i, got[i], want[i], got)
@@ -301,5 +302,37 @@ func TestBundleCreateRejectsUnknownJob(t *testing.T) {
 	_, err := m.BundleCreate(context.Background(), "no-such-job", nil)
 	if !errors.Is(err, ErrReceiptMismatch) {
 		t.Fatalf("want ErrReceiptMismatch for an unpushed job ref, got %v", err)
+	}
+}
+
+// TestCachedBundleImportsUnderTheRequestingJobsRef is the cambia-2128
+// regression: the cache is keyed by (commit, basis), so the second job pinned
+// to a commit is served the artifact the first job's claim built. A bundle
+// carrying the first job's ref name is importable by no fetch naming the
+// second job's ref, which failed every such claim.
+func TestCachedBundleImportsUnderTheRequestingJobsRef(t *testing.T) {
+	coord, _ := testManager(t, ExecRunner{})
+	src, sha := sourceRepo(t, "lock-v1")
+	pushJobRef(t, coord, src, sha, "job-first")
+	pushJobRef(t, coord, src, sha, "job-second")
+
+	first, err := coord.BundleCreate(context.Background(), "job-first", nil)
+	if err != nil {
+		t.Fatalf("BundleCreate(job-first): %v", err)
+	}
+	second, err := coord.BundleCreate(context.Background(), "job-second", nil)
+	if err != nil {
+		t.Fatalf("BundleCreate(job-second): %v", err)
+	}
+	if second.Path != first.Path {
+		t.Fatalf("the two jobs were served %q and %q, want the one cached artifact", first.Path, second.Path)
+	}
+
+	node, _ := testManager(t, ExecRunner{})
+	if err := node.BundleFetch(context.Background(), "job-second", sha, second.Path); err != nil {
+		t.Fatalf("BundleFetch of the cached bundle under the second job's ref: %v", err)
+	}
+	if err := node.verifyReceipt(context.Background(), "job-second", sha); err != nil {
+		t.Fatalf("verifyReceipt after importing the cached bundle: %v", err)
 	}
 }

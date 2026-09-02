@@ -323,10 +323,10 @@ func (m *Manager) PurgeRef(jobID string) error {
 
 // StartupSweep reconciles ingest state after a daemon restart. It prunes every
 // worktree whose job is neither live (in liveJobIDs) nor within an unexpired
-// failure TTL, deletes those job refs, prunes worktree metadata, and runs a
-// pruning gc on the mirror. It then trims the venv and libcambia caches to their
-// caps, protecting keys referenced by live jobs (read from their env.json). Run
-// dirs are never reaped.
+// failure TTL, deletes those job refs and every job-neutral bundle ref, prunes
+// worktree metadata, and runs a pruning gc on the mirror. It then trims the venv
+// and libcambia caches to their caps, protecting keys referenced by live jobs
+// (read from their env.json). Run dirs are never reaped.
 func (m *Manager) StartupSweep(liveJobIDs []string) error {
 	ctx := context.Background()
 	live := make(map[string]bool, len(liveJobIDs))
@@ -334,14 +334,22 @@ func (m *Manager) StartupSweep(liveJobIDs []string) error {
 		live[id] = true
 	}
 
+	// Reap the job-neutral bundle refs (cambia-2128). Each names the commit one
+	// cached bundle was built from and pins it, so leaving them would keep a
+	// purged job's objects alive through the gc below; no build is in flight at
+	// daemon start, and the next build republishes the ref it needs. This runs
+	// ahead of the worktree scan because a coordinator dispatching only to
+	// remote nodes builds bundles and stages no worktree of its own, so its
+	// worktrees dir may not exist at all.
+	firstErr := m.deleteSnapshotRefs(ctx)
+
 	entries, err := os.ReadDir(m.worktreesDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return firstErr
 		}
 		return err
 	}
-	var firstErr error
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue

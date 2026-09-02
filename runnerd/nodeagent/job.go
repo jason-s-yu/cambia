@@ -633,7 +633,7 @@ func (j *jobRun) fetchSnapshot(ctx context.Context) error {
 	if err := j.download(ctx, j.snapshotURL(), dest, j.snapshot.SHA256); err != nil {
 		return err
 	}
-	if err := j.agent.env.BundleFetch(ctx, j.rec.JobID, dest); err != nil {
+	if err := j.agent.env.BundleFetch(ctx, j.rec.JobID, j.rec.Commit, dest); err != nil {
 		return err
 	}
 	return nil
