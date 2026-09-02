@@ -1,10 +1,13 @@
 """Implements simple baseline agents for evaluation purposes."""
 
-import random
+import hashlib
 import logging
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Sequence, Set, Optional, List, Dict, Tuple
+from collections.abc import Sequence as AbcSequence
+from typing import Iterable, Sequence, Set, Optional, List, Dict, Tuple
+
+import numpy as np
 
 from .game_view import GameView, as_game_view, tracked_opponent_seat
 from ..constants import (
@@ -40,6 +43,28 @@ logger = logging.getLogger(__name__)
 # Average expected value of an unknown card in the deck (~6.5 for standard 54-card deck)
 UNKNOWN_CARD_EXPECTED_VALUE = 6.5
 
+#: Stream an agent built with no run seed draws its policy from.
+#:
+#: A constant, not OS entropy: an agent constructed outside an evaluation loop
+#: (a test, a script, an interactive seat) still plays reproducibly. It is never
+#: the global ``random`` module, which any Stable-Baselines3 model load reseeds
+#: to a fixed state (cambia-1974, cambia-2022).
+UNSEEDED_POLICY_STREAM = 0x2022_C0FFEE
+
+
+def derive_policy_seed(policy_seed: Optional[int], *labels: object) -> int:
+    """Seed for one policy stream, derived from a run seed and its labels.
+
+    ``labels`` separate the streams that descend from the same run seed: the
+    seat an agent sits at, and, one level up, which side of the match built it.
+    Two agents that share a run seed but differ in any label draw independent
+    streams; the same (seed, labels) pair replays exactly.
+    """
+    base = UNSEEDED_POLICY_STREAM if policy_seed is None else int(policy_seed)
+    key = "|".join(repr(label) for label in labels)
+    digest = hashlib.sha256(f"{base}|{key}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big")
+
 
 class BaseAgent(ABC):
     """Abstract base class for Cambia agents."""
@@ -57,13 +82,63 @@ class BaseAgent(ABC):
     opponent_id: int
     config: Config
 
-    def __init__(self, player_id: int, config: Config):
+    def __init__(self, player_id: int, config: Config, policy_seed: Optional[int] = None):
         self.player_id = player_id
         # Provisional: rebound to the real table on the first view (see
         # _bind_opponent). Two seats is the overwhelmingly common case and
         # several callers read opponent_id before ever passing a view.
         self.opponent_id = 1 - player_id
         self.config = config
+        #: The run seed this agent's policy draws descend from, or None for the
+        #: unseeded stream. Every evaluation loop threads its run seed here
+        #: (cambia-2022); before that, policy draws went to the global ``random``
+        #: module and numpy's global RNG, which an SB3 model load reseeds.
+        self._policy_seed = policy_seed
+        self._policy_rng: Optional[np.random.Generator] = None
+
+    @property
+    def policy_rng(self) -> np.random.Generator:
+        """This seat's policy stream: every draw that picks an action.
+
+        Built on first use rather than in ``__init__`` so a wrapper built
+        through ``object.__new__`` (the encoder tests do this to skip a
+        checkpoint load) still has a stream when a decision path reaches one.
+        """
+        if self._policy_rng is None:
+            # Seat, deliberately without the class name: a Go-side baseline is a
+            # subclass of its Python reference and the two have to draw the SAME
+            # stream, since the engine-side path returns a candidate index the
+            # Python body would have picked itself (src/agents/go_baselines.py).
+            # Telling two agents in one game apart is the caller's job, and every
+            # loop here does it by labelling the side that built them.
+            self._policy_rng = np.random.default_rng(
+                derive_policy_seed(getattr(self, "_policy_seed", None), self.player_id)
+            )
+        return self._policy_rng
+
+    def uniform_action(self, legal_actions: Iterable[GameAction]) -> GameAction:
+        """One action drawn uniformly off this seat's policy stream.
+
+        The draw is by index, so a Go-side baseline handed the same candidate
+        count lands on the same position (src/agents/go_baselines.py).
+
+        A sequence keeps its own order, which for every evaluation path is the
+        engine's ascending legal order. A set has no order to keep, so one is
+        imposed: iterating it would expose ``GameAction``'s PYTHONHASHSEED-salted
+        hash order and make the draw irreproducible across processes
+        (cambia-444).
+        """
+        actions = (
+            list(legal_actions)
+            if isinstance(legal_actions, AbcSequence)
+            else sorted(legal_actions, key=repr)
+        )
+        if not actions:
+            raise ValueError(
+                f"{type(self).__name__} P{self.player_id} cannot choose from an "
+                "empty legal set."
+            )
+        return actions[int(self.policy_rng.integers(len(actions)))]
 
     def _bind_opponent(self, view: GameView) -> None:
         """Name the single opponent seat this agent tracks, for this table.
@@ -88,22 +163,26 @@ class RandomAgent(BaseAgent):
 
     accepts_game_view = True
 
-    def __init__(self, player_id: int, config: Config, seed: Optional[int] = None):
-        super().__init__(player_id, config)
-        # RNG source (cambia-651 RC-B2): choose_action previously drew from
-        # the `random` module's global instance unconditionally, which is
-        # unseeded and order-dependent across processes -- eval outcomes
-        # varied run to run even at a fixed crn_seed_base. An explicit seed
-        # gets a dedicated per-instance RNG, decoupled from whatever else
-        # touches the global module during a run (run_evaluation threads
-        # crn_seed_base + player_id through here). seed=None falls back to
-        # the global `random` module itself (not a fresh entropy-seeded
-        # instance), preserving the pre-existing contract several callers
-        # rely on: src.cfr.lbr.collect_infosets reseeds the shared global
-        # module before a deterministic run and expects RandomAgent (built
-        # with no seed) to draw from that same reseeded stream
-        # (tests/test_baseline_agent_hashseed_determinism.py pins this).
-        self._rng = random if seed is None else random.Random(seed)
+    def __init__(
+        self,
+        player_id: int,
+        config: Config,
+        seed: Optional[int] = None,
+        policy_seed: Optional[int] = None,
+    ):
+        # RNG source (cambia-651 RC-B2, cambia-2022): choose_action drew from
+        # the `random` module's global instance whenever no explicit seed was
+        # given, which is unseeded, order-dependent across processes, and reset
+        # to a fixed state by any Stable-Baselines3 model load -- eval outcomes
+        # varied run to run even at a fixed crn_seed_base, and a match with a
+        # PPO side replayed one variate stream. Every draw now comes from
+        # BaseAgent's policy stream, seeded from the run seed the loop threads
+        # in. `seed` names that stream directly and wins over `policy_seed`,
+        # which is how the Go/Python baseline parity gate builds both sides of a
+        # pair on one stream (tests/test_go_baseline_parity.py).
+        super().__init__(
+            player_id, config, policy_seed=seed if seed is not None else policy_seed
+        )
 
     def choose_action(
         self, game_state: GameView, legal_actions: Sequence[GameAction]
@@ -122,8 +201,7 @@ class RandomAgent(BaseAgent):
                 f"RandomAgent P{self.player_id} cannot choose from empty legal actions."
             )
 
-        action_list = list(legal_actions)
-        chosen_action = self._rng.choice(action_list)
+        chosen_action = self.uniform_action(legal_actions)
         logger.debug("RandomAgent P%d chose action: %s", self.player_id, chosen_action)
         return chosen_action
 
@@ -993,7 +1071,7 @@ class RandomNoCambiaAgent(RandomAgent):
         self, game_state: GameView, legal_actions: Sequence[GameAction]
     ) -> GameAction:
         # List comprehension (not set): preserves legal_actions' canonical
-        # order so RandomAgent.choose_action's random.choice() draws against a
+        # order so RandomAgent.choose_action's draw runs against a
         # process-deterministic sequence for a given RNG state (cambia-444).
         filtered = [a for a in legal_actions if not isinstance(a, ActionCallCambia)]
         if not filtered:
@@ -1011,8 +1089,9 @@ class RandomLateCambiaAgent(RandomAgent):
         config: Config,
         n_turns: int = 8,
         seed: Optional[int] = None,
+        policy_seed: Optional[int] = None,
     ):
-        super().__init__(player_id, config, seed=seed)
+        super().__init__(player_id, config, seed=seed, policy_seed=policy_seed)
         self.n_turns = n_turns
 
     def choose_action(

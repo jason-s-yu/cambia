@@ -445,9 +445,10 @@ class UniformRandomPolicy:
     """Uniform-random over the engine's ascending legal-action order.
 
     Driven by an injected ``random.Random`` so a whole estimator run is
-    seed-deterministic. (``baseline_agents.RandomAgent`` draws from the GLOBAL
-    ``random`` module over an unsorted set, which is reproducible only if the
-    caller reseeds the global module first.)
+    seed-deterministic. (``baseline_agents.RandomAgent`` answers the same
+    description since cambia-2022, off a numpy Generator its constructor is
+    given; before that it drew from the GLOBAL ``random`` module, reproducible
+    only while nothing else in the process reseeded it.)
     """
 
     __slots__ = ("player_id", "_rng")
@@ -938,12 +939,13 @@ def collect_infosets(
     deal_specs = normalize_deal_decks(deal_decks) if deal_decks else []
     rng = np.random.default_rng(seed)
     seed_opponent_stream(seed)
-    # The global module is seeded too, but nothing here reads it: it is what
-    # makes a policy that draws from it (baseline_agents.RandomAgent, and the
-    # wrappers' illegal-action fallbacks) reproducible under this run's seed.
-    # Such a policy is still at the mercy of any library that reseeds the module
-    # mid-run, which is exactly why this module's own draws left it (cambia-1974).
-    _random_module.seed(seed)
+    # The global module is NOT seeded here. It used to be, for the benefit of
+    # the policies that drew from it (baseline_agents.RandomAgent, the wrappers'
+    # illegal-action fallbacks), which made them reproducible under this run's
+    # seed only while nothing else in the process reseeded the module -- and an
+    # SB3 model load does. Those draws now come from a per-agent stream the
+    # agent is constructed with (cambia-2022), so seeding a stream nothing reads
+    # would only suggest a guarantee this function no longer makes.
 
     house_rules = config.cambia_rules
     max_turns = _resolve_max_turns(config)

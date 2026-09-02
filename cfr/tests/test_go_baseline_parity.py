@@ -8,7 +8,7 @@ both seats and once with the Go-backed subclass from go_baselines.py, and
 requires the two applied-action sequences to be identical.
 
 Replaying rather than interleaving is deliberate. The random baselines draw
-from a CPython RNG whose stream is part of the metric, and a replay run
+from a CPython generator whose stream is part of the metric, and a replay run
 consumes that stream from the same starting state in the same order, so a fast
 path that drew a different number of words would desynchronise and show up as a
 diverged action rather than being masked by a shared generator.
@@ -116,8 +116,10 @@ def _compare(baseline: str, config_path: str, games: int) -> int:
         deck_seed = SEED_BASE + game * 7919
         agent_seed = SEED_BASE ^ (game * 2654435761 & 0xFFFF_FFFF)
 
-        # Reseed the global module too, so a policy that fell back to it would
-        # still start both runs from the same point rather than from entropy.
+        # The global module is reseeded as well. Nothing in a baseline reads it
+        # since cambia-2022, so this is only a guard: a policy that fell back to
+        # it would start both runs from the same point rather than from entropy,
+        # and would still have to match action for action.
         random.seed(agent_seed)
         ref = _play(_build(ref_cls, config, agent_seed, random_draw), config, deck_seed)
         random.seed(agent_seed)
@@ -159,19 +161,24 @@ def test_go_baseline_matches_python_full(baseline):
     assert decisions >= 2000, f"{baseline} compared only {decisions} decisions"
 
 
-def test_randrange_draws_what_choice_draws():
-    """`randrange(n)` picks what `choice(seq)` picks, off the same stream.
+def test_the_engine_side_draw_is_the_python_bodys_draw():
+    """The fast path draws a position; the Python body draws the same one.
 
     This is the identity the random baselines' fast path rests on: the engine
     returns the candidate sequence and the wrapper draws a position into it,
-    rather than drawing from a decoded action list. Both go through
-    `Random._randbelow(n)`, so the position and the consumed words match.
+    rather than drawing from a decoded action list. Since cambia-2022 both are
+    ``policy_rng.integers(n)`` on the seat's own stream, so the position and the
+    consumed words match by construction; before it they were ``Random.choice``
+    and ``Random.randrange``, which shared ``_randbelow``.
     """
-    for seed in range(200):
+    config = _config(RULE_CONFIGS[0])
+    for seed in range(50):
         for n in range(1, 40):
-            seq = list(range(n))
-            direct = random.Random(seed)
-            indexed = random.Random(seed)
+            candidates = list(range(n))
+            body = RandomAgent(0, config, seed=seed)
+            fast = GoRandomAgent(0, config, seed=seed)
             for _ in range(5):
-                assert direct.choice(seq) == indexed.randrange(n)
-            assert direct.getstate() == indexed.getstate()
+                assert body.uniform_action(candidates) == fast._draw_uniform(n)
+            assert (
+                body.policy_rng.bit_generator.state == fast.policy_rng.bit_generator.state
+            )

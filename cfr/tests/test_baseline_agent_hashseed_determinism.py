@@ -126,10 +126,11 @@ MAX_TURNS = 60
 trace = []
 for AgentClass in AGENT_CLASSES:
     for seed in SEEDS:
-        # RandomAgent (and RandomNoCambiaAgent/RandomLateCambiaAgent, which
-        # extend it) draw from the GLOBAL random module, not an instance RNG
-        # -- matching src.cfr.lbr.collect_infosets' own convention of
-        # reseeding the shared global module before a deterministic run.
+        # The global module is reseeded for the seat-1 opponent's own
+        # random.Random below. Since cambia-2022 the agent classes themselves
+        # never read it: RandomAgent and its subclasses draw from the per-seat
+        # stream their constructor derives, so what this pins is the hash-order
+        # fix, not an RNG convention.
         random.seed(seed * 31 + 7)
         config = _Config()
         agent = AgentClass(player_id=0, config=config)

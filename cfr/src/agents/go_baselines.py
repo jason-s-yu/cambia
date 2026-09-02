@@ -23,9 +23,9 @@ historical metric. Two things carry it:
     tests/test_go_baseline_parity.py.
   - The random policies keep their draw in CPython. The engine returns the
     candidate sequence its filter produced -- the same ascending sequence the
-    Python body builds -- and the draw is ``rng.randrange(n)``, which consumes
-    exactly the stream ``rng.choice(candidate_list)`` consumes and selects the
-    same position.
+    Python body builds -- and the draw is ``policy_rng.integers(n)``, the same
+    call ``BaseAgent.uniform_action`` makes over the Python sequence, so both
+    consume one word of the same stream and select the same position.
 
 Above two seats the engine's 2-player action space is not the space the runner
 drives (see _GoEvalGame), so the fast path declines and the Python body runs.
@@ -150,19 +150,19 @@ class GoBaselineMixin:
         """Pick one of ``count`` candidates.
 
         Only the random policies reach this; a heuristic never returns a
-        uniform answer. ``randrange(count)``, not ``choice(candidate_list)``:
-        ``Random.choice`` indexes its argument with ``self._randbelow(len(seq))``
-        and ``Random.randrange`` returns that same draw, so the two consume the
-        same words of the same stream and land on the same position. The
-        identity is pinned by tests/test_go_baseline_parity.py.
+        uniform answer. The draw is the one ``BaseAgent.uniform_action`` makes
+        for the Python body, ``policy_rng.integers(count)``, so both sides
+        consume the same word of the same stream and land on the same position
+        (cambia-2022 replaced a ``random.Random`` whose ``choice`` and
+        ``randrange`` shared that property). The identity is pinned by
+        tests/test_go_baseline_parity.py.
         """
-        rng = getattr(self, "_rng", None)
-        if rng is None:
+        if not isinstance(self, RandomAgent):
             raise RuntimeError(
                 f"{type(self).__name__} got a uniform answer from the engine but "
-                "carries no RNG; only the random baselines draw."
+                "is not a random baseline; only those draw."
             )
-        return rng.randrange(count)
+        return int(self.policy_rng.integers(count))
 
     # --- Decision ---
 
