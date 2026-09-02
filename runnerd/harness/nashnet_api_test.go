@@ -451,7 +451,16 @@ func TestResultNeedsAFinalManifest(t *testing.T) {
 	}
 	base := "/nashnet/leases/" + claimed.LeaseID
 
-	resp := r.doLease(t, claimed.LeaseToken, http.MethodPost, base+"/result",
+	// The job runs, so its terminal is gated on the artifact commit; a lease
+	// that never launched is exempt and has its own test.
+	resp := r.doLease(t, claimed.LeaseToken, http.MethodPost, base+"/progress",
+		nashnet.ProgressRequest{LeaseEpoch: claimed.LeaseEpoch, Phase: nashnet.PhaseRunning, PID: 5150})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("progress: got %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = r.doLease(t, claimed.LeaseToken, http.MethodPost, base+"/result",
 		nashnet.ResultRequest{LeaseEpoch: claimed.LeaseEpoch, State: nashnet.ResultStopped})
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("result with no manifest: got %d, want 409", resp.StatusCode)

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/jason-s-yu/cambia/runnerd/nashnet/quarantine"
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 )
 
@@ -88,9 +89,10 @@ func (s *Server) handleArtifacts(w http.ResponseWriter, r *http.Request) {
 }
 
 // nashnetStateDir is the run-dir subtree holding the coordinator's folded
-// manifest head (D49). It is coordinator-owned bookkeeping rather than a run
-// artifact, so neither listing returns it.
-const nashnetStateDir = ".nashnet"
+// manifest head (D49), named by the quarantine store that owns it. It is
+// coordinator bookkeeping rather than a run artifact, so neither listing
+// returns it.
+const nashnetStateDir = quarantine.NashnetDir
 
 // coordinatorAuthoredPaths are the files a manifest can never contain, because
 // D52 makes each one a rejected manifest path, and which the walk-derived

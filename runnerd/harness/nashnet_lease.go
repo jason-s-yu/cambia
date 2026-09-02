@@ -182,11 +182,17 @@ func (s *Server) handleResult(w http.ResponseWriter, r *http.Request, lease nash
 			"a stopping lease accepts only canceled or preempted")
 		return
 	}
-	head, err := p.quar.ReadHead(lease.JobID)
-	if err != nil || !head.Folded.Final || head.Digest == "" || head.Digest != req.FinalManifestDigest {
-		nashnetError(w, http.StatusConflict, nashnet.CodeArtifactsIncomplete,
-			"result needs a committed final manifest whose digest it carries")
-		return
+	// A job that never launched has no artifacts to commit and no journal to
+	// promote, so the gate of D6 does not apply to it: holding its lease for a
+	// grace period would only delay a terminal the node already knows. Every
+	// lease that reached a launched phase still needs its final manifest.
+	if nashnet.PhaseLaunched(lease.Phase) || lease.PIDProjected {
+		head, err := p.quar.ReadHead(lease.JobID)
+		if err != nil || !head.Folded.Final || head.Digest == "" || head.Digest != req.FinalManifestDigest {
+			nashnetError(w, http.StatusConflict, nashnet.CodeArtifactsIncomplete,
+				"result needs a committed final manifest whose digest it carries")
+			return
+		}
 	}
 
 	p.writeTerminal(lease, req)

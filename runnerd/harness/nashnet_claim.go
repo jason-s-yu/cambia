@@ -21,11 +21,6 @@ import (
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 )
 
-// reservoirDir is the one run-dir subtree that never leaves the node that wrote
-// it: bulk sampler state whose only consumer is a resume on the same host,
-// which is why a resume pins (D12, D50).
-const reservoirDir = "reservoir"
-
 // handleClaim is POST /nashnet/claim (D2): the long-poll handout of one
 // placeable job. It answers 200 with a job and its lease, or 204 with the hold
 // that explains the idleness. The acting node is the verified subject; a
@@ -402,19 +397,14 @@ func seedSources(spec JobSpec, resume bool) []string {
 	return out
 }
 
-// seedEntryExcluded drops the paths a seed never carries: the reservoir, whose
-// transfer cost is unbounded and whose only consumer is a resume on the same
-// host (D12, D50), and the coordinator-authored placement records, which are
-// not job inputs.
+// seedEntryExcluded drops the paths a seed never carries. It is exactly the
+// coordinator-authored reserved list of D52, read from the quarantine store so
+// there is one such list rather than a second copy that could drift: the
+// reservoir, whose transfer cost is unbounded and whose only consumer is a
+// resume on the same host (D12, D50), plus the placement records and the
+// manifest state, none of which is a job input.
 func seedEntryExcluded(rel string) bool {
-	if rel == reservoirDir || strings.HasPrefix(rel, reservoirDir+"/") {
-		return true
-	}
-	switch rel {
-	case "lease.json", "process.json", "jobspec.json":
-		return true
-	}
-	return strings.HasPrefix(rel, ".nashnet/")
+	return quarantine.ReservedPath(rel)
 }
 
 // seedFiles lists every regular file under a seed's source directory.

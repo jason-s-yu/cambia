@@ -112,6 +112,9 @@ func (s *Server) handleBlobPatch(w http.ResponseWriter, r *http.Request, lease n
 		return
 	}
 	chunk := end - start + 1
+	if total == 0 {
+		chunk = 0
+	}
 	if chunk > p.ceilings.ChunkBytes {
 		writeNashnetError(w, http.StatusRequestEntityTooLarge,
 			nashnet.ErrorBody{Error: nashnet.CodeOverCap, Detail: "chunk over the per-request cap"})
@@ -168,8 +171,16 @@ func (s *Server) handleManifestGet(w http.ResponseWriter, r *http.Request, lease
 		writeQuarantineError(w, err)
 		return
 	}
+	entries := head.Folded.Entries
+	if entries == nil {
+		entries = []quarantine.Entry{}
+	}
+	// final rides along with the head the node diffs against, so a restarted
+	// agent knows whether it already committed the final manifest before it
+	// re-posts a result.
 	writeJSON(w, http.StatusOK, map[string]any{
-		"seq": head.Folded.Seq, "digest": head.Digest, "entries": head.Folded.Entries,
+		"seq": head.Folded.Seq, "digest": head.Digest, "entries": entries,
+		"final": head.Folded.Final,
 	})
 }
 
@@ -417,6 +428,12 @@ func parseContentRange(h string) (start, end, total int64, err error) {
 		return 0, 0, 0, errors.New("Content-Range must be bytes <start>-<end>/<size>")
 	}
 	rest := strings.TrimSpace(h[len(prefix):])
+	if rest == "*/0" {
+		// A zero-byte artifact has no range to send, so the node sends a
+		// bodyless PATCH and the store creates the empty blob against the
+		// digest the empty string hashes to (D50).
+		return 0, -1, 0, nil
+	}
 	slash := strings.LastIndex(rest, "/")
 	dash := strings.Index(rest, "-")
 	if slash < 0 || dash < 0 || dash > slash {
