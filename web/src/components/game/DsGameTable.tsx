@@ -317,9 +317,13 @@ const FELT_LABEL: React.CSSProperties = {
 /**
  * Outlined empty pile slot: same footprint as a md card, hairline on the felt.
  * A clickable slot is a real button, so it keeps the pile's name and its
- * keyboard activation when the pile runs empty (cambia-959).
+ * keyboard activation when the pile runs empty (cambia-959). Element type and
+ * states match PlayingCard's: always a <button>, `disabled` for a control that
+ * is unavailable rather than absent (cambia-1242).
  */
-const EmptySlot: React.FC<{ onClick?: () => void; highlight?: boolean; label?: string; testId?: string }> = ({ onClick, highlight, label, testId }) => {
+const EmptySlot: React.FC<{ onClick?: () => void; highlight?: boolean; label?: string; testId?: string; disabled?: boolean }> = ({ onClick, highlight, label, testId, disabled = false }) => {
+  const interactive = !!onClick && !disabled;
+  const control = interactive || disabled;
   const box: React.CSSProperties = {
     appearance: 'none',
     margin: 0,
@@ -331,10 +335,20 @@ const EmptySlot: React.FC<{ onClick?: () => void; highlight?: boolean; label?: s
     boxSizing: 'border-box',
     borderRadius: 'var(--radius-playing-card)',
     border: '1px dashed ' + (highlight ? 'var(--card-targetable-ring)' : 'var(--border-on-felt)'),
-    cursor: onClick ? 'pointer' : 'default'
+    cursor: interactive ? 'pointer' : 'default'
   };
-  if (onClick) return <button type='button' aria-label={label} data-testid={testId} onClick={onClick} style={box} />;
-  return <div role={label ? 'img' : undefined} aria-label={label} data-testid={testId} style={box} />;
+  return (
+    <button
+      type='button'
+      role={control ? undefined : label ? 'img' : 'presentation'}
+      tabIndex={control ? undefined : -1}
+      aria-label={label}
+      aria-disabled={disabled || undefined}
+      data-testid={testId}
+      onClick={interactive ? onClick : undefined}
+      style={box}
+    />
+  );
 };
 
 const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage, onLeave, connected = true, gaveUp: gaveUpReason = null }) => {
@@ -605,6 +619,18 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     setKingPair(null);
   }, [kingPair, specialAction, selfId, busy, sendMessage]);
 
+  // A pick means "snap this card", and drawing takes the snap away: while a replace is pending an
+  // own-hand click commits the replace instead of toggling the pick, and the Snap button is gone.
+  // Left standing, the pick kept its gold lift on a card that no longer reported a pressed state,
+  // so the felt and the screen reader disagreed about the same card (cambia-1242). Cleared off the
+  // pending action rather than off the click, so a draw this client did not send - a resync that
+  // lands mid-draw - clears it too.
+  useEffect(() => {
+    if (pendingAction !== 'discard_replace') return;
+    setSelectedIdx(null);
+    setSnapTarget(null);
+  }, [pendingAction]);
+
   // --- Derived flags ---
 
   const roundOver = phase === 'round_end' || gameState.gameOver;
@@ -773,7 +799,11 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
       // one case the `?? card` fallback below carries.
       const face = toDsCardFace(revealById.get(card.id) ?? card);
       // aria-pressed tracks what the eye sees: the King's own card stays picked
-      // through the confirm step, which is why `selected` covers it too.
+      // through the confirm step, which is why `selected` covers it too. Both the
+      // lift and aria-pressed read this one value, and a pick that is already
+      // standing keeps reporting itself even where a fresh pick would not be legal
+      // - dropping aria-pressed off a card that is still lifted is the divergence
+      // this fixes (cambia-1242).
       const picked = selectedIdx === i || (kingConfirm && kingPair?.myIdx === i);
       return (
         <PlayingCard
@@ -788,7 +818,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
           // over: the caller's hand is then just a revealed hand like everyone else's.
           dimmed={selfHandLocked && !roundOver}
           label={cardSlotName('Your', i, face, selfHandLocked && !roundOver)}
-          pressed={ownSelects ? picked : undefined}
+          pressed={ownSelects || picked ? picked : undefined}
           testId={`card-${seat}-${i}`}
           style={ownHandPlacement(i, slots)}
           onClick={ownCommits || ownSelects ? () => handlePlayerCardClick(card, i) : undefined}
@@ -911,8 +941,10 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                           dimmed={!targetable && !shown && (locked || !!specialRank)}
                           label={cardSlotName(who, i, shown, locked)}
                           // An ability click commits on the card it lands on; a snap pick is the
-                          // one opponent click that toggles, so it is the one that is pressed.
-                          pressed={snappable && !targetable ? picked : undefined}
+                          // one opponent click that toggles, so it is the one that is pressed. A
+                          // standing pick keeps reporting itself, the same rule the own hand
+                          // follows, so the ring and aria-pressed cannot part (cambia-1242).
+                          pressed={(snappable && !targetable) || picked ? picked : undefined}
                           testId={`card-${seatIndexOf(opp.playerId)}-${i}`}
                           onClick={targetable || snappable ? () => handleOpponentCardClick(opp.playerId, card!, i) : undefined}
                         />
@@ -953,6 +985,11 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
           {/* Piles. */}
           <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'flex-start', gap: 28, flexWrap: 'wrap' }}>
             <div style={{ textAlign: 'center' }}>
+              {/* A pile is the same control all round: it is drawn from on this player's turn and
+                  unavailable on everyone else's, which is a state of the control and not the
+                  absence of one. Marked disabled rather than dropped, so its role and its tab stop
+                  stay put across the turn instead of appearing and disappearing under a screen
+                  reader (cambia-1242). */}
               {gameState.stockpileSize > 0 ? (
                 <PlayingCard
                   faceDown
@@ -960,10 +997,11 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                   highlight={deckInteractive}
                   label={`Stockpile, ${gameState.stockpileSize} ${gameState.stockpileSize === 1 ? 'card' : 'cards'}`}
                   testId='pile-stock'
-                  onClick={deckInteractive ? handleDeckClick : undefined}
+                  onClick={handleDeckClick}
+                  disabled={!deckInteractive}
                 />
               ) : (
-                <EmptySlot label='Stockpile, empty' testId='pile-stock' />
+                <EmptySlot label='Stockpile, empty' testId='pile-stock' disabled />
               )}
               <div style={FELT_LABEL}>Stock · {gameState.stockpileSize}</div>
             </div>
@@ -976,10 +1014,11 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                   highlight={discardInteractive}
                   label={`Discard pile, top ${cardFaceName(discardFace)}`}
                   testId='pile-discard'
-                  onClick={discardInteractive ? handleDiscardClick : undefined}
+                  onClick={handleDiscardClick}
+                  disabled={!discardInteractive}
                 />
               ) : (
-                <EmptySlot label='Discard pile, empty' testId='pile-discard' highlight={discardInteractive} onClick={discardInteractive ? handleDiscardClick : undefined} />
+                <EmptySlot label='Discard pile, empty' testId='pile-discard' highlight={discardInteractive} onClick={handleDiscardClick} disabled={!discardInteractive} />
               )}
               <div style={FELT_LABEL}>Discard · {gameState.discardSize}</div>
             </div>
