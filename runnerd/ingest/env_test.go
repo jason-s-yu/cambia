@@ -2,7 +2,9 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -142,6 +144,65 @@ func TestAssembleEnvAndShim(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "find_spec") {
 		t.Fatal("shim does not resolve src via find_spec")
+	}
+}
+
+// TestSitecustomizeGuardFiresOnStraySrcAheadOfWorktree is AC(7): the guard
+// still catches a stray `src` package that resolves ahead of the pinned
+// worktree's own cfr/src (the cambia-240 class trap), spawning a real python3
+// with only the harness-constructed environment (design 3.3, D17).
+//
+// A SystemExit raised from inside sitecustomize during interpreter startup
+// does not surface as its own exit code: CPython treats an uncaught exception
+// during site initialization as a fatal startup error and always exits 1
+// (verified here against the system python3 3.13.2 and pyenv 3.12.7; both
+// print "Fatal Python error: init_import_site"). The assertion below is on
+// the guard actually firing - a non-zero exit plus its diagnostic message -
+// not on a specific exit code, since 97 is never the process's own exit code
+// through this path.
+func TestSitecustomizeGuardFiresOnStraySrcAheadOfWorktree(t *testing.T) {
+	pythonBin, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+
+	fc := newFakeControl()
+	m, _ := fakeManager(t, fc)
+	worktreeDir := t.TempDir()
+	cfrDir := filepath.Join(worktreeDir, "cfr")
+	mustWrite(t, filepath.Join(cfrDir, "src", "__init__.py"), "")
+
+	// A stray decoy src package in its own directory, placed ahead of the
+	// pinned worktree's cfr dir on PYTHONPATH.
+	decoyDir := t.TempDir()
+	mustWrite(t, filepath.Join(decoyDir, "src", "__init__.py"), "")
+
+	env, err := m.assembleEnv(worktreeDir, "/fake/libcambia.so")
+	if err != nil {
+		t.Fatalf("assembleEnv: %v", err)
+	}
+	kv := envMap(env)
+	pythonPath := decoyDir + string(os.PathListSeparator) + kv["PYTHONPATH"]
+
+	cmd := exec.Command(pythonBin, "-c", "import src")
+	cmd.Env = []string{
+		"PYTHONPATH=" + pythonPath,
+		"CAMBIA_EXPECTED_SRC_ROOT=" + kv["CAMBIA_EXPECTED_SRC_ROOT"],
+		"PYTHONNOUSERSITE=1",
+		"HOME=" + os.Getenv("HOME"),
+		"PATH=" + os.Getenv("PATH"),
+	}
+	out, runErr := cmd.CombinedOutput()
+
+	var exitErr *exec.ExitError
+	if !errors.As(runErr, &exitErr) {
+		t.Fatalf("expected the guard to fail the process; err=%v output=%s", runErr, out)
+	}
+	if exitErr.ExitCode() == 0 {
+		t.Fatalf("exit code = 0, want non-zero; output=%s", out)
+	}
+	if !strings.Contains(string(out), "src resolves to") || !strings.Contains(string(out), decoyDir) {
+		t.Fatalf("guard did not report the decoy src as the resolved origin: %s", out)
 	}
 }
 
