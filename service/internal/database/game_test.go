@@ -78,7 +78,12 @@ func createGameTestUser(t *testing.T, uname string) models.User {
 	err := CreateUser(context.Background(), &u)
 	require.NoError(t, err, "CreateUser failed")
 	t.Cleanup(func() { cleanupGameTestUserRows(t, u.ID) })
-	return u
+
+	// Read the row back: CreateUser's INSERT names no rating column, so the struct it was handed
+	// still carries Go zero values where the row took the schema defaults (cambia-1830 F4).
+	created, err := GetUserByID(context.Background(), u.ID)
+	require.NoError(t, err, "read back the created user")
+	return *created
 }
 
 // cleanupGameTestUserRows deletes every row this package's DB-backed tests could have left
