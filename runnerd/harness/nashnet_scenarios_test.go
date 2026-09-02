@@ -688,7 +688,6 @@ func (r *nodeRig) newEmbeddedAgent(t *testing.T) *nodeagent.Agent {
 	cfg.RunsDir = r.runsDir
 	cfg.BaseDir = t.TempDir()
 	env := &nodeEnv{worktree: r.worktree, runsDir: r.runsDir, mirror: r.repo.node, skipFetch: true}
-	r.embeddedEnv = env
 	agent, err := nodeagent.New(nodeagent.Options{
 		Config: cfg,
 		Signer: signer,

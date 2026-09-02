@@ -66,14 +66,6 @@ type nodeRigConfig struct {
 	// long polls answer at once, which is what a one-shot cycle wants; a
 	// scenario that keeps the agent running sets it so neither loop spins.
 	claimWaitSeconds int
-	// pollInterval is how often the agent re-reads a launched job's
-	// process.json.
-	pollInterval time.Duration
-	// prepareErr, when set, is what the node's staging step returns.
-	prepareErr error
-	// noBundleFetch skips the real git import, for a scenario whose subject is
-	// not snapshot delivery. The bundle is still served and downloaded.
-	noBundleFetch bool
 	// verbose sends the agent's own log to stderr. Off by default: a passing
 	// scenario's log is noise, and a failing one is diagnosed by re-running
 	// with it on.
@@ -85,16 +77,12 @@ type nodeRig struct {
 	*poolRig
 	agent    *nodeagent.Agent
 	nodeCfg  nodeagent.Config
-	client   *nodeagent.Client
 	env      *nodeEnv
 	prober   *nodeProber
 	nodePM   *procmgr.ProcessManager
 	requests *requestLog
 	repo     *gitFixture
-	// embeddedEnv is the staging boundary of the coordinator's own node, set
-	// when a scenario builds one.
-	embeddedEnv *nodeEnv
-	worktree    string
+	worktree string
 	// node is the fixture node this agent acts as: node-a of the pool rig, so
 	// the coordinator admits it through the same operator-signed grant every
 	// other suite uses.
@@ -129,10 +117,6 @@ func newNodeRig(t *testing.T, cfg nodeRigConfig) *nodeRig {
 	if slots == 0 {
 		slots = 2
 	}
-	poll := cfg.pollInterval
-	if poll == 0 {
-		poll = 10 * time.Millisecond
-	}
 
 	nodeCfg := nodeagent.Config{
 		Coordinator: nodeagent.Coordinator{
@@ -163,13 +147,7 @@ func newNodeRig(t *testing.T, cfg nodeRigConfig) *nodeRig {
 		t.Fatalf("node client: %v", err)
 	}
 
-	env := &nodeEnv{
-		worktree:   worktree,
-		runsDir:    nodeRunsDir,
-		mirror:     repo.node,
-		prepareErr: cfg.prepareErr,
-		skipFetch:  cfg.noBundleFetch,
-	}
+	env := &nodeEnv{worktree: worktree, runsDir: nodeRunsDir, mirror: repo.node}
 	pm := procmgr.NewProcessManager(nodeRunsDir, "", "cambia", NewRunResolver(nodeRunsDir), nil)
 	prober := newNodeProber()
 
@@ -182,7 +160,7 @@ func newNodeRig(t *testing.T, cfg nodeRigConfig) *nodeRig {
 		Prober:            prober,
 		Logger:            agentLogger(cfg.verbose),
 		Now:               pr.clock.now,
-		PollInterval:      poll,
+		PollInterval:      nodePollInterval,
 		CanBuildLibcambia: true,
 		ClaimOnce:         cfg.claimOnce,
 	})
@@ -192,11 +170,16 @@ func newNodeRig(t *testing.T, cfg nodeRigConfig) *nodeRig {
 	t.Cleanup(pm.KillAll)
 
 	return &nodeRig{
-		poolRig: pr, agent: agent, nodeCfg: nodeCfg, client: client,
+		poolRig: pr, agent: agent, nodeCfg: nodeCfg,
 		env: env, prober: prober, nodePM: pm, requests: requests,
 		repo: repo, worktree: worktree, node: pr.nodeA,
 	}
 }
+
+// nodePollInterval is how often an agent re-reads a launched job's
+// process.json. It is short because every fixture job is a shell script that
+// exits in seconds.
+const nodePollInterval = 10 * time.Millisecond
 
 // agentLogger is the node agent's log sink.
 func agentLogger(verbose bool) *log.Logger {
@@ -402,10 +385,7 @@ type requestRow struct {
 	Range        string
 	ContentRange string
 	Status       int
-	// Hold is the claim hold the coordinator answered a 204 with, read off the
-	// response header where the pool puts it (a 204 carries no body).
-	Hold string
-	At   time.Time
+	At           time.Time
 }
 
 // rangeStart parses the first byte offset of a Range header, or -1.
@@ -471,7 +451,6 @@ func (l *requestLog) wrap(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(rec, r)
 		row.Status = rec.status
-		row.Hold = w.Header().Get(nashnet.HeaderClaimHold)
 		l.mu.Lock()
 		l.rows = append(l.rows, row)
 		l.mu.Unlock()
@@ -606,11 +585,10 @@ type nodeEnv struct {
 	prepareErr error
 	skipFetch  bool
 
-	mu        sync.Mutex
-	fetched   []string
-	prepared  int
-	cleaned   int
-	lastError error
+	mu       sync.Mutex
+	fetched  []string
+	prepared int
+	cleaned  int
 	// onPrepare runs inside Prepare after the run dir exists, so a scenario
 	// can seed a run dir or observe the moment staging completes.
 	onPrepare func(runDir string) error
@@ -706,12 +684,6 @@ func (p *nodeProber) Observe(string) nodeagent.Observation {
 	return p.obs
 }
 
-func (p *nodeProber) setFreeRAM(v float64) {
-	p.mu.Lock()
-	p.obs.RAMFreeGB = &v
-	p.mu.Unlock()
-}
-
 // gitFixture is the real repository behind the snapshot route: a source repo
 // with three commits, a bare coordinator mirror the job refs are pushed into,
 // and a node-side mirror the bundles are fetched into. Both mirrors are real
@@ -792,16 +764,6 @@ func (f *gitFixture) nodeRef(t *testing.T, jobID string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
-}
-
-// seedNodeMirror imports one commit into the node's mirror ahead of time,
-// which is what makes a later claim ask for a thin bundle.
-func (f *gitFixture) seedNodeMirror(t *testing.T, jobID string, commitIdx int) string {
-	t.Helper()
-	sha := f.commits[commitIdx]
-	runGitCmd(t, "", "init", "--bare", "-q", f.nodeDir)
-	runGitCmd(t, f.src, "push", "-q", f.nodeDir, sha+":refs/harness/"+jobID)
-	return sha
 }
 
 // runGitCmd runs git in dir (or with no working directory when dir is empty)
