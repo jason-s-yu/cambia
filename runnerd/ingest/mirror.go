@@ -19,6 +19,23 @@ func jobRef(jobID string) string {
 	return "refs/harness/" + jobID
 }
 
+// snapshotRefPrefix is the namespace the job-neutral bundle refs live in. It
+// sits outside refs/harness/ so a snapshot ref can never collide with the job
+// ref of a job whose id is "snapshot", and so the job-ref sweep keeps seeing
+// exactly the job refs.
+const snapshotRefPrefix = "refs/harness-snapshots/"
+
+// snapshotRef returns the job-neutral ref a bundle for commit is built under
+// (cambia-2128). A bundle records the ref named on the build argv, so building
+// under the requesting job's ref put that job's identity inside an artifact the
+// cache keys by commit and basis alone: the next job served that cache entry
+// fetched a ref the bundle did not carry. Naming the commit instead makes the
+// artifact match its key, and BundleFetch maps it onto the requesting job's
+// ref.
+func snapshotRef(commit string) string {
+	return snapshotRefPrefix + commit
+}
+
 // git runs a git subcommand against the bare mirror (git -C <mirror> ...) through
 // the injected runner and returns trimmed stdout. On failure the error carries
 // stderr for diagnosis.
@@ -151,11 +168,17 @@ func (m *Manager) verifyCommitSignature(ctx context.Context, commit string) erro
 	return nil
 }
 
-// BundleFetch is the file-drop fallback transport (design 3.1): it fetches from a
-// git bundle into the same job-ref shape without force. Because the fetch omits
-// the "+" force prefix, a job ref that already points elsewhere and is not
-// fast-forwardable is refused by git rather than overwritten. After the fetch the
-// caller runs verifyReceipt as usual.
+// BundleFetch is the file-drop fallback transport (design 3.1): it fetches the
+// bundle's job-neutral snapshot ref for commit into this job's own ref, without
+// force. Because the fetch omits the "+" force prefix, a job ref that already
+// points elsewhere and is not fast-forwardable is refused by git rather than
+// overwritten. After the fetch the caller runs verifyReceipt as usual.
+//
+// Naming the commit rather than the job on the bundle's side is what lets one
+// cached artifact serve every job pinned to that commit (cambia-2128), and it
+// makes the fetch itself assert what the bundle delivers: a bundle built for
+// another commit carries no such ref and fails here rather than importing
+// something the receipt check would have to catch.
 //
 // A thin bundle (BundleCreate with a non-empty basis) whose negated basis
 // commit this mirror does not already hold fails the fetch with git's
@@ -163,14 +186,17 @@ func (m *Manager) verifyCommitSignature(ctx context.Context, commit string) erro
 // ErrBundlePrereqMissing so the node-side caller can nack bundle_prereq_miss and
 // re-claim with an empty basis (design 3.3, D48) instead of treating it as a
 // generic transport failure.
-func (m *Manager) BundleFetch(ctx context.Context, jobID, bundlePath string) error {
+func (m *Manager) BundleFetch(ctx context.Context, jobID, commit, bundlePath string) error {
 	if err := validateJobID(jobID); err != nil {
+		return err
+	}
+	if err := validateCommit(commit); err != nil {
 		return err
 	}
 	if err := m.ensureMirror(ctx); err != nil {
 		return err
 	}
-	refspec := "refs/harness/" + jobID + ":" + jobRef(jobID)
+	refspec := snapshotRef(commit) + ":" + jobRef(jobID)
 	if _, err := m.git(ctx, "fetch", bundlePath, refspec); err != nil {
 		if strings.Contains(err.Error(), "lacks these prerequisite commits") {
 			return fmt.Errorf("%w: %v", ErrBundlePrereqMissing, err)
@@ -201,6 +227,11 @@ type BundleDescriptor struct {
 	Path   string
 	Size   int64
 	SHA256 string
+	// Cached reports that the artifact was already on disk when this call
+	// asked for it, which is the sharing D48 is built for: one bundle per
+	// (commit, basis) rather than one per job. It is what a caller logs the
+	// hit from and rides outside the digest and size a claim response carries.
+	Cached bool
 }
 
 // bundleCacheKey derives the cache filename stem from the commit and a
@@ -268,7 +299,7 @@ func (m *Manager) BundleCreate(ctx context.Context, jobID string, basis []string
 		if desc, ok := m.bundleCacheHit(path); ok {
 			return desc, nil
 		}
-		desc, berr := m.buildBundle(ctx, jobID, clean, path)
+		desc, berr := m.buildBundle(ctx, commit, clean, path)
 		if berr != nil {
 			return BundleDescriptor{}, berr
 		}
@@ -291,13 +322,20 @@ func (m *Manager) bundleCacheHit(path string) (BundleDescriptor, bool) {
 		return BundleDescriptor{}, false
 	}
 	touch(path, m.now())
-	return BundleDescriptor{Path: path, Size: info.Size(), SHA256: strings.TrimSpace(string(digest))}, true
+	return BundleDescriptor{Path: path, Size: info.Size(), SHA256: strings.TrimSpace(string(digest)), Cached: true}, true
 }
 
 // buildBundle forks the actual `git bundle create`, hashes the result, and
 // publishes it (and its sidecar digest) atomically so a reader never observes
-// a partially written bundle.
-func (m *Manager) buildBundle(ctx context.Context, jobID string, basis []string, path string) (BundleDescriptor, error) {
+// a partially written bundle. The build first publishes the job-neutral
+// snapshot ref for the commit, because that ref name is what the bundle
+// records and what every job's BundleFetch names (cambia-2128). The ref is
+// idempotent across concurrent builds of one commit and is reaped by
+// StartupSweep, which is where the mirror's gc runs.
+func (m *Manager) buildBundle(ctx context.Context, commit string, basis []string, path string) (BundleDescriptor, error) {
+	if _, err := m.git(ctx, "update-ref", snapshotRef(commit), commit); err != nil {
+		return BundleDescriptor{}, fmt.Errorf("publish snapshot ref: %w", err)
+	}
 	tmp, err := os.CreateTemp(m.snapshotDir, filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return BundleDescriptor{}, err
@@ -306,7 +344,7 @@ func (m *Manager) buildBundle(ctx context.Context, jobID string, basis []string,
 	_ = tmp.Close()
 	defer os.Remove(tmpPath) // no-op once renamed away below
 
-	args := []string{"bundle", "create", tmpPath, jobRef(jobID)}
+	args := []string{"bundle", "create", tmpPath, snapshotRef(commit)}
 	for _, b := range basis {
 		args = append(args, "^"+b)
 	}
@@ -348,6 +386,45 @@ func (m *Manager) listJobRefs(ctx context.Context) ([]string, error) {
 		}
 	}
 	return ids, nil
+}
+
+// listSnapshotRefs returns every job-neutral bundle ref in the mirror, by full
+// ref name.
+func (m *Manager) listSnapshotRefs(ctx context.Context) ([]string, error) {
+	out, err := m.git(ctx, "for-each-ref", "--format=%(refname)", snapshotRefPrefix)
+	if err != nil {
+		return nil, err
+	}
+	var refs []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, snapshotRefPrefix) && line != snapshotRefPrefix {
+			refs = append(refs, line)
+		}
+	}
+	return refs, nil
+}
+
+// deleteSnapshotRefs removes every job-neutral bundle ref, and is a no-op on a
+// base dir with no mirror yet. A snapshot ref is needed only while the build it
+// names runs, and it outlives the build only so concurrent builds of one commit
+// never delete each other's ref; the sweep is where it goes, because the sweep
+// runs at daemon start with no build in flight and is the only place the
+// mirror's pruning gc runs (cambia-2128).
+func (m *Manager) deleteSnapshotRefs(ctx context.Context) error {
+	if !isGitDir(m.mirrorDir) {
+		return nil
+	}
+	refs, err := m.listSnapshotRefs(ctx)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, ref := range refs {
+		if _, derr := m.git(ctx, "update-ref", "-d", ref); derr != nil && firstErr == nil {
+			firstErr = derr
+		}
+	}
+	return firstErr
 }
 
 // deleteJobRef removes the job-scoped ref (idempotent: a missing ref is not an

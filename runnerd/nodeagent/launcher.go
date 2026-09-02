@@ -15,9 +15,10 @@ import (
 // and no git, no uv, and no cgo toolchain.
 type Environment interface {
 	// BundleFetch imports a coordinator-served git bundle into the node's own
-	// mirror; its non-force fetch refuses a job ref that already points
-	// elsewhere (D48).
-	BundleFetch(ctx context.Context, jobID, bundlePath string) error
+	// mirror, mapping the bundle's job-neutral ref for commit onto this job's
+	// ref; its non-force fetch refuses a job ref that already points elsewhere
+	// (D48, cambia-2128).
+	BundleFetch(ctx context.Context, jobID, commit, bundlePath string) error
 	// Prepare stages the job at the pinned commit exactly as it does on the
 	// coordinator: worktree, venv, libcambia, rendered config, env.json.
 	Prepare(ctx context.Context, jobID, commit, kind, configRel, device, warmStart string, overrides map[string]string) (*ingestapi.Prepared, error)

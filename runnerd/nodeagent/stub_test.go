@@ -598,7 +598,7 @@ type fakeEnv struct {
 	cleaned  int
 }
 
-func (e *fakeEnv) BundleFetch(context.Context, string, string) error {
+func (e *fakeEnv) BundleFetch(context.Context, string, string, string) error {
 	e.mu.Lock()
 	e.fetched++
 	e.mu.Unlock()

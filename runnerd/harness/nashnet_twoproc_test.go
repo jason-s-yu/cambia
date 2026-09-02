@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -573,6 +574,50 @@ func (l *requestLog) reset() {
 	l.mu.Unlock()
 }
 
+// coordinatorLog captures what poolLog writes for the length of one scenario,
+// which is how a scenario reads a decision the coordinator only reports in its
+// log. The pool logs through the standard logger, so the capture is a redirect
+// of it; no test in this package runs in parallel, and the buffer is guarded
+// because the handler goroutines write it while the test reads.
+type coordinatorLog struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (l *coordinatorLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *coordinatorLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
+// reset drops what was captured, so a scenario reads the lines of one phase.
+func (l *coordinatorLog) reset() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.buf.Reset()
+}
+
+// captureCoordinatorLog redirects the standard logger into a buffer for one
+// test and restores it afterwards.
+func captureCoordinatorLog(t *testing.T) *coordinatorLog {
+	t.Helper()
+	l := &coordinatorLog{}
+	out, flags, prefix := log.Writer(), log.Flags(), log.Prefix()
+	log.SetOutput(l)
+	t.Cleanup(func() {
+		log.SetOutput(out)
+		log.SetFlags(flags)
+		log.SetPrefix(prefix)
+	})
+	return l
+}
+
 // nodeEnv is the node's ingest boundary: a real mirror on the git path and a
 // fake one everywhere else (D42). BundleFetch imports the coordinator-served
 // bundle into a real bare repository with real git, so the snapshot scenarios
@@ -594,7 +639,7 @@ type nodeEnv struct {
 	onPrepare func(runDir string) error
 }
 
-func (e *nodeEnv) BundleFetch(ctx context.Context, jobID, bundlePath string) error {
+func (e *nodeEnv) BundleFetch(ctx context.Context, jobID, commit, bundlePath string) error {
 	e.mu.Lock()
 	e.fetched = append(e.fetched, jobID)
 	skip := e.skipFetch
@@ -602,7 +647,7 @@ func (e *nodeEnv) BundleFetch(ctx context.Context, jobID, bundlePath string) err
 	if skip {
 		return nil
 	}
-	return e.mirror.BundleFetch(ctx, jobID, bundlePath)
+	return e.mirror.BundleFetch(ctx, jobID, commit, bundlePath)
 }
 
 func (e *nodeEnv) Prepare(_ context.Context, jobID, _, _, _, _, _ string, _ map[string]string) (*ingestapi.Prepared, error) {

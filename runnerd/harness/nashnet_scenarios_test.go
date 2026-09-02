@@ -111,6 +111,53 @@ func TestSnapshotDeliveredThin(t *testing.T) {
 	}
 }
 
+// TestTwoJobsAtOneCommitShareTheCachedBundle is the cambia-2128 regression at
+// the wire: two jobs pinned to one commit run on one node in sequence, and the
+// coordinator serves the second the artifact the first job's claim built,
+// because the cache is keyed by commit and basis. That artifact used to carry
+// the first job's ref name, so the second job's import found no ref to fetch
+// and the claim nacked snapshot_failed.
+func TestTwoJobsAtOneCommitShareTheCachedBundle(t *testing.T) {
+	logs := captureCoordinatorLog(t)
+	r := newNodeRig(t, nodeRigConfig{claimOnce: true})
+	sha := r.queueFixtureJob(t, "shared-commit-first", 2, "quick")
+	r.runCycle(t, 60*time.Second)
+	if !r.repo.nodeHas(t, sha) {
+		t.Fatalf("the first job left %s out of the node's mirror", sha)
+	}
+
+	r.requests.reset()
+	logs.reset()
+	if second := r.queueFixtureJob(t, "shared-commit-second", 2, "quick"); second != sha {
+		t.Fatalf("the second job pinned %s, want the same commit %s", second, sha)
+	}
+	r.runCycle(t, 60*time.Second)
+
+	if nacks := r.requests.forPath("/nack"); len(nacks) != 0 {
+		t.Fatalf("the second job nacked %d times: %+v", len(nacks), nacks)
+	}
+	if got := r.repo.nodeRef(t, "shared-commit-second"); got != sha {
+		t.Fatalf("the second job's ref in the node mirror = %q, want the pinned commit %s", got, sha)
+	}
+	view, ok := r.disp.resolveView("shared-commit-second")
+	if !ok {
+		t.Fatal("the coordinator holds no view for shared-commit-second after its cycle")
+	}
+	if view.State != procmgr.StatusStopped {
+		t.Fatalf("state after the second job = %q, want the clean terminal", view.State)
+	}
+	if got := logs.String(); !strings.Contains(got, "snapshot cache hit") {
+		t.Fatalf("the coordinator log records no cache hit for the second claim:\n%s", got)
+	}
+	// One artifact for the commit, shared: the second claim advertised the
+	// commit it already holds, which no bundle can be built against, so it was
+	// served the full-tree bundle the first claim built rather than one of its
+	// own.
+	if r.repo.hasCachedBundle(t, sha, true) {
+		t.Fatalf("the coordinator built a second bundle for %s: the cache did not serve the shared one", sha)
+	}
+}
+
 // TestSnapshotInterruptedResumesByRange is D42's interrupted snapshot: 40% of
 // the bundle is already on the node's disk when the fetch starts, so the node
 // asks for the rest with a Range header and the coordinator answers 206. The
