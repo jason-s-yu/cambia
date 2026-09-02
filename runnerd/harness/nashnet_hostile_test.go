@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jason-s-yu/cambia/runnerd/authtoken"
 	"github.com/jason-s-yu/cambia/runnerd/nashnet"
 	"github.com/jason-s-yu/cambia/runnerd/nashnet/quarantine"
 )
@@ -1051,6 +1053,172 @@ func TestHostileNodeCannotClaimAKindItsGrantForbids(t *testing.T) {
 	view, _ := h.disp.resolveView("gated-job")
 	if view.State != StateQueued {
 		t.Fatalf("gated-job = %q, want it still queued for a node that will take it", view.State)
+	}
+}
+
+// TestHostileNodeCannotMintItsOwnAdmission covers the enrollment line: a node
+// cannot enroll itself, mint a credential, or squat another node's id, because
+// the coordinator holds no signing key and admits only what an operator-signed
+// grant already names (D60). Both refusals are 401: an unknown subject and a
+// known one whose signature does not verify are the same answer, so neither
+// tells the caller which node ids exist.
+func TestHostileNodeCannotMintItsOwnAdmission(t *testing.T) {
+	h := newHostileNode(t, nodeRigConfig{})
+
+	// A key nobody ever granted, acting under its own honestly derived id.
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	strangerID, err := authtoken.DeriveNodeID(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stranger := fixtureNode{name: "stranger", id: strangerID, priv: priv}
+
+	// The same key, claiming the victim's id: a squat that the signature check
+	// refuses because the grant names the victim's public key, not this one.
+	squatter := fixtureNode{name: "squatter", id: h.victim.id, priv: priv}
+
+	for _, c := range []struct {
+		what string
+		node fixtureNode
+	}{
+		{"a key nobody granted", stranger},
+		{"a key squatting another node's id", squatter},
+	} {
+		before := h.snapshot(t)
+		resp := h.doNode(t, c.node, http.MethodPost, "/nashnet/nodes/register",
+			nashnet.RegisterRequest{AgentVersion: "1.1.0", Slots: 2,
+				Capabilities: declaration(2), GateReport: admitReport(2)})
+		if resp.StatusCode != http.StatusUnauthorized {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			t.Fatalf("register with %s: got %d, want 401 (%s)", c.what, resp.StatusCode, body)
+		}
+		resp.Body.Close()
+		h.assertUntouched(t, "register with "+c.what, before)
+
+		before = h.snapshot(t)
+		resp = h.doNode(t, c.node, http.MethodPost, "/nashnet/claim",
+			nashnet.ClaimRequest{SlotsFree: 1, Capabilities: declaration(1), GateReport: admitReport(1)})
+		if resp.StatusCode != http.StatusUnauthorized {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			t.Fatalf("claim with %s: got %d, want 401 (%s)", c.what, resp.StatusCode, body)
+		}
+		resp.Body.Close()
+		h.assertUntouched(t, "claim with "+c.what, before)
+	}
+
+	// No grant file appeared: the coordinator cannot author trust, so the only
+	// grants that exist are the ones the operator wrote (D60).
+	entries, err := os.ReadDir(h.grantDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), strangerID) {
+			t.Fatalf("a grant appeared for a node nobody enrolled: %s", e.Name())
+		}
+	}
+}
+
+// TestHostileNodeCannotOutrunItsRequestBudget covers the connection and request
+// exhaustion line of D56: the per-node request bucket refuses past its rate by
+// name, and a refused call changes nothing. The bucket refills from the
+// injected clock, so this is a rate the test moves rather than a wall-clock
+// race.
+func TestHostileNodeCannotOutrunItsRequestBudget(t *testing.T) {
+	const budget = 8
+	h := newHostileNode(t, nodeRigConfig{
+		pool: poolRigConfig{ceilings: Ceilings{RequestsPerMinute: budget}},
+	})
+
+	before := h.snapshot(t)
+	limited := 0
+	for i := 0; i < budget*4; i++ {
+		resp := h.doLease(t, h.lease.LeaseToken, http.MethodPost,
+			"/nashnet/leases/"+h.lease.LeaseID+"/progress",
+			nashnet.ProgressRequest{LeaseEpoch: h.lease.LeaseEpoch, Phase: nashnet.PhasePreparing})
+		if resp.StatusCode == http.StatusTooManyRequests {
+			limited++
+			if code := errorCode(t, resp); code != nashnet.CodeRateLimited {
+				t.Fatalf("a throttled call answered %q, want rate_limited", code)
+			}
+			continue
+		}
+		resp.Body.Close()
+	}
+	if limited == 0 {
+		t.Fatalf("%d calls in one frozen minute were all admitted under a budget of %d",
+			budget*4, budget)
+	}
+
+	// The refusals wrote nothing beyond what the admitted progress posts
+	// legitimately projected, and the node's own run dir is the only place
+	// anything moved.
+	after := h.snapshot(t)
+	for key := range after {
+		if _, ok := before[key]; ok {
+			continue
+		}
+		if strings.HasPrefix(key, "runs/hostile-job/") {
+			continue
+		}
+		t.Fatalf("a throttled call created %s", key)
+	}
+
+	// The bucket refills: the same node is admitted again a minute later.
+	h.clock.advance(time.Minute)
+	resp := h.doLease(t, h.lease.LeaseToken, http.MethodPost,
+		"/nashnet/leases/"+h.lease.LeaseID+"/progress",
+		nashnet.ProgressRequest{LeaseEpoch: h.lease.LeaseEpoch, Phase: nashnet.PhasePreparing})
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("after the bucket refilled: got %d, want 200 (%s)", resp.StatusCode, body)
+	}
+	resp.Body.Close()
+}
+
+// TestHostileNodeCannotDeleteWhatItDoesNotOwn covers the delete half of the
+// containment line: a manifest's deletes name paths the same way its entries
+// do, so an escape shape or a reserved name removes nothing and the
+// coordinator's own files survive (D49, D52).
+func TestHostileNodeCannotDeleteWhatItDoesNotOwn(t *testing.T) {
+	h := newHostileNode(t, nodeRigConfig{})
+
+	before := h.snapshot(t)
+	resp := h.doLease(t, h.lease.LeaseToken, http.MethodPost,
+		"/nashnet/leases/"+h.lease.LeaseID+"/manifest", quarantine.CommitRequest{
+			ManifestVersion: quarantine.ManifestVersion,
+			LeaseEpoch:      h.lease.LeaseEpoch,
+			Seq:             1,
+			Deletes: []string{
+				"process.json", "jobspec.json", "lease.json", "env.json",
+				".nashnet/current.json", "logs/training.log",
+				"../../etc/passwd", "/etc/passwd", "../hostile-job",
+			},
+		})
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusUnprocessableEntity {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("a commit deleting reserved and escaping paths: got %d (%s)", resp.StatusCode, body)
+	}
+	resp.Body.Close()
+
+	// Whatever the commit recorded, nothing the coordinator owns was removed:
+	// every file in the before snapshot is still there with the same bytes.
+	after := h.snapshot(t)
+	for key, was := range before {
+		now, ok := after[key]
+		if !ok {
+			t.Fatalf("a node-supplied delete removed %s", key)
+		}
+		if now.Digest != was.Digest {
+			t.Fatalf("a node-supplied delete rewrote %s", key)
+		}
 	}
 }
 

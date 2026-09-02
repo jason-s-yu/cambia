@@ -23,11 +23,12 @@ import (
 // HTTPS transport; the rig is in nashnet_twoproc_test.go and the hostile-node
 // suite is in nashnet_hostile_test.go.
 //
-// Two scenarios are named here as re-run candidates against other lanes:
-// TestNodeDeathMidJobIsRecoveredByAReattach and TestDrainReachesTheNode touch
-// resume persistence and the drain event that cambia-1887 changed, and
-// TestNackCooldownTripsTheCircuitBreaker touches the hold reporting that
-// cambia-1919 is adding to the heartbeat and register responses.
+// Three scenarios were written against lanes that landed while this suite was
+// built and carry a note saying so: TestNodeDeathMidJobIsRecoveredByAReattach
+// and TestDrainReachesTheNodeAndLiftsOnTheRoundTrip against cambia-1887 (resume
+// persistence and the drain event), and TestNackCooldownTripsTheCircuitBreaker
+// and the drain scenario against cambia-1919 (the named hold on the register
+// and heartbeat responses).
 
 // TestRegisterAndClaim is the first D42 scenario: a node agent registers over
 // the pinned HTTPS transport and is handed the one ready job. Everything after
@@ -500,9 +501,8 @@ func assertScheduledAndPromoted(t *testing.T, r *poolRig, job string) {
 // (D8, D63). The job survives every one of them at the same attempt, because a
 // nack is a scheduling event and not an attempt.
 //
-// Re-run after cambia-1919, which adds the effective hold to the heartbeat and
-// register responses: this scenario reads the hold off the claim's 204 header,
-// which is where master reports it today.
+// Written against cambia-1919: the hold a node is told about names the breaker
+// rather than a drain, on the register response as well as the claim's header.
 func TestNackCooldownTripsTheCircuitBreaker(t *testing.T) {
 	r := newNodeRig(t, nodeRigConfig{claimOnce: true})
 	// Three jobs rather than one retried job: a nack holds this node off the
@@ -530,6 +530,13 @@ func TestNackCooldownTripsTheCircuitBreaker(t *testing.T) {
 	if !r.pool.breakerHeld(r.node.id) {
 		t.Fatalf("%d consecutive prepare_node_failed nacks did not trip the breaker", BreakerThreshold)
 	}
+	// The hold the node is told about names the breaker, not a drain. A
+	// coordinator that reported a drain here would have the node clear it off
+	// its own next call, undraining itself under the hold (cambia-1919).
+	if got := r.pool.effectiveHold(r.node.id); got != nashnet.HoldReasonBreaker {
+		t.Fatalf("effective hold = %q after a breaker trip, want breaker", got)
+	}
+
 	// The held node is answered node_gated rather than handed the job again,
 	// and the hold is not clearable by re-registering.
 	resp, claimed := r.claim(t, r.node, nashnet.ClaimRequest{})
@@ -539,13 +546,87 @@ func TestNackCooldownTripsTheCircuitBreaker(t *testing.T) {
 	if hold := holdReason(resp); hold != nashnet.HoldNodeGated {
 		t.Fatalf("held claim hold = %q, want node_gated", hold)
 	}
-	r.register(t, r.node, 2)
+
+	reg := r.doNode(t, r.node, http.MethodPost, "/nashnet/nodes/register",
+		nashnet.RegisterRequest{AgentVersion: "1.1.0", Slots: 2,
+			Capabilities: declaration(2), GateReport: admitReport(2)})
+	if reg.StatusCode != http.StatusOK {
+		t.Fatalf("register while held: got %d, want 200", reg.StatusCode)
+	}
+	var regBody nashnet.RegisterResponse
+	decodeInto(t, reg, &regBody)
+	if regBody.Hold != nashnet.HoldReasonBreaker {
+		t.Fatalf("register hold after a trip = %q, want breaker", regBody.Hold)
+	}
+
 	resp, claimed = r.claim(t, r.node, nashnet.ClaimRequest{})
 	if claimed != nil {
 		t.Fatalf("re-registering cleared the breaker and the node was handed %s", claimed.JobID)
 	}
 	if hold := holdReason(resp); hold != nashnet.HoldNodeGated {
 		t.Fatalf("hold after a re-register = %q, want node_gated", hold)
+	}
+}
+
+// TestDrainReachesTheNodeAndLiftsOnTheRoundTrip is the drain half of D36 and
+// D45: an operator drain holds the node off the claim route, the node learns
+// which hold it is by name rather than by inference, and a lift applies on the
+// round trip that delivers it rather than on some later call.
+//
+// Written against cambia-1887 and cambia-1919: the drain event carries the
+// boolean the route set, and the register and heartbeat responses carry a hold
+// field whose value is drain or breaker.
+func TestDrainReachesTheNodeAndLiftsOnTheRoundTrip(t *testing.T) {
+	r := newNodeRig(t, nodeRigConfig{claimOnce: true})
+	r.register(t, r.node, 2)
+	r.queueFixtureJob(t, "drained-job", 2, "quick")
+
+	resp := r.do(http.MethodPost, "/nashnet/nodes/"+r.node.id+"/drain", map[string]any{"drain": true})
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("drain: got %d, want 200 or 202", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	if got := r.pool.effectiveHold(r.node.id); got != nashnet.HoldReasonDrain {
+		t.Fatalf("effective hold = %q after an operator drain, want drain", got)
+	}
+	claimResp, claimed := r.claim(t, r.node, nashnet.ClaimRequest{})
+	if claimed != nil {
+		t.Fatalf("a drained node was handed %s", claimed.JobID)
+	}
+	if hold := holdReason(claimResp); hold != nashnet.HoldNodeGated {
+		t.Fatalf("hold = %q for a drained node, want node_gated", hold)
+	}
+
+	reg := r.doNode(t, r.node, http.MethodPost, "/nashnet/nodes/register",
+		nashnet.RegisterRequest{AgentVersion: "1.1.0", Slots: 2,
+			Capabilities: declaration(2), GateReport: admitReport(2)})
+	if reg.StatusCode != http.StatusOK {
+		t.Fatalf("register while drained: got %d, want 200", reg.StatusCode)
+	}
+	var regBody nashnet.RegisterResponse
+	decodeInto(t, reg, &regBody)
+	if regBody.Hold != nashnet.HoldReasonDrain {
+		t.Fatalf("register hold = %q while drained, want drain", regBody.Hold)
+	}
+	if view, _ := r.disp.resolveView("drained-job"); view.State != StateQueued {
+		t.Fatalf("drained-job = %q, want it queued for a node that will take it", view.State)
+	}
+
+	lift := r.do(http.MethodPost, "/nashnet/nodes/"+r.node.id+"/drain", map[string]any{"drain": false})
+	if lift.StatusCode != http.StatusOK && lift.StatusCode != http.StatusAccepted {
+		t.Fatalf("drain lift: got %d, want 200 or 202", lift.StatusCode)
+	}
+	lift.Body.Close()
+	if got := r.pool.effectiveHold(r.node.id); got != "" {
+		t.Fatalf("effective hold = %q after the lift, want none", got)
+	}
+	_, taken := r.claim(t, r.node, nashnet.ClaimRequest{})
+	if taken == nil {
+		t.Fatal("the node was still held off the queue on the call after its drain lifted")
+	}
+	if taken.JobID != "drained-job" {
+		t.Fatalf("claimed %q, want drained-job", taken.JobID)
 	}
 }
 

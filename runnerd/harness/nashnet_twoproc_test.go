@@ -388,6 +388,12 @@ type requestLog struct {
 	mu     sync.Mutex
 	rows   []requestRow
 	before func(*http.Request)
+	// paused, when non-nil, holds every new request until it is closed;
+	// inFlight counts the ones already inside a handler. Together they let a
+	// scenario reach a moment with no request in flight, which is what a
+	// process restart gives a node for free.
+	paused   chan struct{}
+	inFlight int
 }
 
 type requestRow struct {
@@ -430,6 +436,27 @@ func (r requestRow) chunkStart() int64 {
 
 func (l *requestLog) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for {
+			l.mu.Lock()
+			paused := l.paused
+			if paused == nil {
+				l.inFlight++
+				l.mu.Unlock()
+				break
+			}
+			l.mu.Unlock()
+			select {
+			case <-paused:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		defer func() {
+			l.mu.Lock()
+			l.inFlight--
+			l.mu.Unlock()
+		}()
+
 		l.mu.Lock()
 		before := l.before
 		l.mu.Unlock()
@@ -473,6 +500,44 @@ func (l *requestLog) clearIntercept() {
 	l.mu.Lock()
 	l.before = nil
 	l.mu.Unlock()
+}
+
+// quiesce holds every new request at the listener, waits for the in-flight ones
+// to finish, runs fn, and lets the held ones through. It is how a scenario
+// restarts the coordinator: a real restart replaces the process, so no request
+// is ever served by two versions of the daemon and the node sees a gap rather
+// than a handler reading state another goroutine is replacing. The rig swaps
+// the pool's stores under a listener that stays up, so without this the swap
+// would race every request the live node has in flight, which is a property of
+// the rig and not of the daemon (AttachPool runs once, before the listener,
+// in cmd/runnerd).
+func (l *requestLog) quiesce(t *testing.T, fn func()) {
+	t.Helper()
+	l.mu.Lock()
+	l.paused = make(chan struct{})
+	paused := l.paused
+	l.mu.Unlock()
+	defer func() {
+		l.mu.Lock()
+		l.paused = nil
+		l.mu.Unlock()
+		close(paused)
+	}()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		l.mu.Lock()
+		inFlight := l.inFlight
+		l.mu.Unlock()
+		if inFlight == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d requests were still in flight 30s into the restart", inFlight)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	fn()
 }
 
 // statusRecorder captures the status code a handler wrote. It forwards Flush

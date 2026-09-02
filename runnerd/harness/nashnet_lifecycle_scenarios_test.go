@@ -338,7 +338,7 @@ func TestCoordinatorRestartMidUploadResumesFromThePartSize(t *testing.T) {
 	}
 
 	restartedAt := time.Now()
-	r.restartCoordinator(t)
+	r.requests.quiesce(t, func() { r.restartCoordinator(t) })
 
 	waitUntil(t, "the job to promote its last step", 60*time.Second, func() bool {
 		body, err := os.ReadFile(filepath.Join(r.coordRunDir("restart-upload"),
