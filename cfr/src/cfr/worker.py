@@ -41,7 +41,7 @@ from typing import Dict, List, Optional, Tuple, TypeAlias, Union, Any
 import numpy as np
 
 from ..agent_state import AgentObservation, AgentState
-from ..config import Config
+from ..config import CfrPlusParamsConfig, Config
 from .exceptions import (
     GameStateError,
     AgentStateError,
@@ -117,13 +117,28 @@ def _serialize_action_for_history(action: GameAction) -> Any:
         return type(action).__name__
 
 
+def averaging_weight(iteration: int, params: CfrPlusParamsConfig) -> float:
+    """The CFR+ delayed linear averaging weight for a 0-based iteration index.
+
+    Tammelin et al. (2015) weight the average-strategy accumulation by
+    ``max(0, t - d)`` for 1-based iteration ``t`` and delay ``d``, discarding the
+    early iterations whose strategies are still arbitrary. The weight belongs to
+    that accumulation alone: regret updates in CFR+ are unweighted, and applying
+    the delay to them instead zeroes every update until the delay elapses
+    (cambia-718).
+    """
+    if not params.weighted_averaging_enabled:
+        return 1.0
+    return float(max(0, (iteration + 1) - params.averaging_delay))
+
+
 def _traverse_game_for_worker(
     game_state: GoBrState,
     agent_states: List[AgentState],
     reach_probs: np.ndarray,
     iteration: int,
     updating_player: int,  # The player whose regret/strategy is being updated this iteration
-    weight: float,  # Weight for this iteration (e.g., for CFR+)
+    averaging_weight: float,  # CFR+ delayed averaging weight; strategy sum only
     regret_sum_snapshot: RegretSnapshotDict,
     config: Config,
     local_regret_updates: LocalRegretUpdateDict,
@@ -373,7 +388,7 @@ def _traverse_game_for_worker(
 
     # --- Strategy Sum Update (Common to all CFR variants) ---
     player_reach = reach_probs[player]
-    if weight > 0 and player_reach > 1e-9:
+    if averaging_weight > 0 and player_reach > 1e-9:
         if len(strategy) == num_actions:
             # Ensure local update entry exists and has correct dimension
             if (
@@ -383,8 +398,10 @@ def _traverse_game_for_worker(
                 local_strategy_sum_updates[infoset_key] = np.zeros(
                     num_actions, dtype=np.float64
                 )
-            local_strategy_sum_updates[infoset_key] += weight * player_reach * strategy
-            local_reach_prob_updates[infoset_key] += weight * player_reach
+            local_strategy_sum_updates[infoset_key] += (
+                averaging_weight * player_reach * strategy
+            )
+            local_reach_prob_updates[infoset_key] += averaging_weight * player_reach
         else:
             logger_traverse.error(
                 "W%d D%d: Strategy len %d != num_actions %d for key %s. Skip strat update.",
@@ -568,7 +585,7 @@ def _traverse_game_for_worker(
                             next_reach_probs,  # Pass original reach probs down
                             iteration,
                             updating_player,
-                            weight,
+                            averaging_weight,
                             regret_sum_snapshot,
                             config,
                             local_regret_updates,
@@ -646,9 +663,13 @@ def _traverse_game_for_worker(
                         num_actions, dtype=np.float64
                     )
 
+                # CFR+ regret updates carry no iteration weight. The delayed
+                # linear weight applies to the average strategy only; folding it
+                # in here zeroed every update up to the delay (cambia-718).
                 opponent_reach = reach_probs[opponent]
-                update_weight = opponent_reach * weight  # Include iteration weight
-                local_regret_updates[infoset_key] += update_weight * instantaneous_regrets
+                local_regret_updates[infoset_key] += (
+                    opponent_reach * instantaneous_regrets
+                )
 
             else:  # Sampling probability near zero
                 logger_traverse.debug(
@@ -917,11 +938,7 @@ def run_cfr_simulation_worker(
 
         # --- Traversal ---
         updating_player = iteration % NUM_PLAYERS
-        weight = (
-            float(max(0, (iteration + 1) - (config.cfr_plus_params.averaging_delay + 1)))
-            if config.cfr_plus_params.weighted_averaging_enabled
-            else 1.0
-        )
+        iteration_averaging_weight = averaging_weight(iteration, config.cfr_plus_params)
         local_regret_updates: LocalRegretUpdateDict = defaultdict(
             lambda: np.array([], dtype=np.float64)
         )
@@ -939,7 +956,7 @@ def run_cfr_simulation_worker(
             reach_probs=np.ones(NUM_PLAYERS, dtype=np.float64),
             iteration=iteration,
             updating_player=updating_player,
-            weight=weight,
+            averaging_weight=iteration_averaging_weight,
             regret_sum_snapshot=regret_sum_snapshot,
             config=config,
             local_regret_updates=local_regret_updates,

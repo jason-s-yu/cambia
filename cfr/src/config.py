@@ -239,9 +239,19 @@ class CfrTrainingConfig(_CambiaBaseModel):
 
 
 class CfrPlusParamsConfig(_CambiaBaseModel):
-    """Parameters specific to CFR+ algorithm variants."""
+    """Parameters specific to CFR+ algorithm variants.
 
+    Both settings govern the average-strategy accumulation and nothing else.
+    CFR+ regret updates are unweighted (Tammelin et al. 2015), so neither
+    setting can stop an iteration from moving regrets; applying the delay to
+    the regret update instead is the cambia-718 defect.
+    """
+
+    #: Weight the average strategy by ``max(0, t - averaging_delay)`` for
+    #: 1-based iteration ``t``. False weights every iteration equally.
     weighted_averaging_enabled: bool = True
+    #: Iterations whose strategies are discarded from the average. With the
+    #: default of 100, iteration 101 is the first to carry weight (of 1).
     averaging_delay: int = 100
 
 

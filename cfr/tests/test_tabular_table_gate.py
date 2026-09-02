@@ -1,16 +1,21 @@
 """
 tests/test_tabular_table_gate.py
 
-Table-equality gate for the tabular traversal's move onto the Go engine
-(cambia-1782).
+Table-equality gate for the tabular traversal (cambia-1782, re-based by
+cambia-718 and cambia-719).
 
-The port is only sound if it writes the same policy table the Python-engine
-traversal wrote: the same infoset keys, with the same float64 regret and
-strategy vectors. This runs the ported traversal over the pinned deals and
-seeds recorded in ``tests/fixtures/tabular_tables_d2aff58.json`` and asserts the
-result is bit-for-bit what the Python-engine traversal at d2aff58 produced from
-the same input. ``tests/tabular_table_gate.py`` carries the runner, why each
-source of randomness is pinned the way it is, and how to regenerate the fixture.
+This runs the traversal over the pinned deals and seeds recorded in
+``tests/fixtures/tabular_tables_cambia_718_719.json`` and asserts the result is
+bit-for-bit the stored table: the same infoset keys, with the same float64
+regret and strategy vectors.
+
+The fixture started as the Python-engine traversal's output, so that the port
+onto the Go engine had to reproduce it exactly. The estimator fixes changed the
+tables on purpose, so the fixture is now the corrected traversal's own output
+and the gate is a regression pin over sampling, reach threading and the
+averaging weight. ``tests/tabular_table_gate.py`` carries the runner, why each
+source of randomness is pinned the way it is, and how to regenerate the
+fixture.
 
 A gate against a stored table can rot into a tautology if the stored table is
 empty or all zeros, so the coverage assertions below fail if the fixture stops
@@ -59,9 +64,16 @@ def produced(reference):
     return gate.as_json(tables)
 
 
-def test_the_fixture_is_the_python_engine_reference(reference):
-    """The stored tables came from the Python-engine traversal, not this one."""
-    assert reference["meta"]["engine"] == "python"
+def test_the_fixture_is_a_clean_reference_run(reference):
+    """The stored tables came from a traversal that logged no errors.
+
+    Through cambia-1782 this asserted ``engine == "python"``, because the
+    fixture was then the pre-port traversal's output and the gate's job was to
+    show the port reproduced it. cambia-718 and cambia-719 corrected the
+    estimator on purpose, so no Python-engine table is reachable any more and
+    the fixture is the corrected traversal's own output.
+    """
+    assert reference["meta"]["engine"] == "go"
     assert reference["meta"]["error_count"] == 0
 
 
