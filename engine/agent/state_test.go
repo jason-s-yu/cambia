@@ -307,17 +307,19 @@ func TestUpdateBlindSwap(t *testing.T) {
 	// Blind swap: player 0's card at ownIdx=2 with opp card at oppIdx=1.
 	ownIdx := uint8(2)
 	oppIdx := uint8(1)
+	peekedBucket := a0.OppBelief[oppIdx].Bucket()
 	applyAndUpdate(t, &g, engine.EncodeBlindSwap(ownIdx, oppIdx), &a0, &a1)
 
-	// For a0 (the acting player):
-	// - own card at ownIdx should be UNKNOWN (got opponent's card - unknown to us).
-	if a0.OwnHand[ownIdx].Bucket != BucketUnknown {
-		t.Errorf("After blind swap (acting), a0.OwnHand[%d].Bucket = %d, want BucketUnknown",
-			ownIdx, a0.OwnHand[ownIdx].Bucket)
+	// For a0 (the acting player): it peeked opp slot oppIdx two turns ago, so it knows
+	// exactly which card the swap handed it. "Blind" is what the swap itself shows, not a
+	// licence to forget a face already seen (cambia-1690).
+	if a0.OwnHand[ownIdx].Bucket != peekedBucket {
+		t.Errorf("After blind swap (acting), a0.OwnHand[%d].Bucket = %d, want %d",
+			ownIdx, a0.OwnHand[ownIdx].Bucket, peekedBucket)
 	}
-	// - opponent slot at oppIdx should now be decayed (event decay, memory=1).
+	// - a0 never saw its own card at ownIdx, so the slot it landed in is unknown to a0.
 	if a0.OppBelief[oppIdx].IsBucket() && a0.OppBelief[oppIdx].Bucket() != BucketUnknown {
-		t.Errorf("After blind swap (acting), a0.OppBelief[%d] should be decayed, got bucket %d",
+		t.Errorf("After blind swap (acting), a0.OppBelief[%d] should be unknown, got bucket %d",
 			oppIdx, a0.OppBelief[oppIdx].Bucket())
 	}
 
@@ -331,8 +333,10 @@ func TestUpdateBlindSwap(t *testing.T) {
 	skipSnapAndUpdate(t, &g, &a0, &a1)
 }
 
-// TestUpdateKingLookAndSwap verifies king look reveals both cards, and swap
-// makes own card unknown while decaying opponent slot.
+// TestUpdateKingLookAndSwap verifies that the King look reveals both cards and that the
+// swap then carries each face to the slot its card landed in. The look is the whole point
+// of the King: an agent that forgets both faces the moment it acts on them learned nothing
+// (cambia-1553).
 func TestUpdateKingLookAndSwap(t *testing.T) {
 	g := newDealtGame()
 	a := NewAgentState(0, 1, 1, 3)
@@ -373,18 +377,87 @@ func TestUpdateKingLookAndSwap(t *testing.T) {
 		t.Errorf("OppHasLastSeen[%d] should be true after king look", oppIdx)
 	}
 
-	// Now decide to swap.
+	// Now decide to swap. Both faces are ones the look just showed us.
+	ownBucketBefore := CardToBucket(ownCard)
+	oppBucketBefore := CardToBucket(oppCard)
 	applyAndUpdate(t, &g, engine.ActionKingSwapYes, &a)
 
-	// After swap, our own card at ownIdx should be UNKNOWN (we gave it away).
-	if a.OwnHand[ownIdx].Bucket != BucketUnknown {
-		t.Errorf("After king swap yes, OwnHand[%d].Bucket = %d, want BucketUnknown",
-			ownIdx, a.OwnHand[ownIdx].Bucket)
+	// Our slot at ownIdx now holds the opponent's card, whose face we saw.
+	if a.OwnHand[ownIdx].Bucket != oppBucketBefore {
+		t.Errorf("After king swap yes, OwnHand[%d].Bucket = %d, want %d",
+			ownIdx, a.OwnHand[ownIdx].Bucket, oppBucketBefore)
+	}
+	// The opponent's slot at oppIdx now holds our old card, whose face we also saw.
+	if got := a.OppBelief[oppIdx]; !got.IsBucket() || got.Bucket() != ownBucketBefore {
+		t.Errorf("After king swap yes, OppBelief[%d] = %v, want bucket %d",
+			oppIdx, got, ownBucketBefore)
+	}
+	if !a.OppHasLastSeen[oppIdx] {
+		t.Errorf("OppHasLastSeen[%d] should be true after the swap moved a seen face", oppIdx)
+	}
+	// EP-PBS: both slots keep their tags, swapped along with the cards.
+	if tag := a.SlotTags[ownIdx]; tag != TagPrivOwn {
+		t.Errorf("EP-PBS tag for own slot %d = %d, want TagPrivOwn (%d)", ownIdx, tag, TagPrivOwn)
+	}
+	if tag := a.SlotTags[OppSlotsStart+oppIdx]; tag != TagPrivOwn {
+		t.Errorf("EP-PBS tag for opp slot %d = %d, want TagPrivOwn (%d)",
+			oppIdx, tag, TagPrivOwn)
+	}
+	if b := a.SlotBuckets[ownIdx]; b != oppBucketBefore {
+		t.Errorf("EP-PBS bucket for own slot %d = %d, want %d", ownIdx, b, oppBucketBefore)
+	}
+	if b := a.SlotBuckets[OppSlotsStart+oppIdx]; b != ownBucketBefore {
+		t.Errorf("EP-PBS bucket for opp slot %d = %d, want %d", oppIdx, b, ownBucketBefore)
 	}
 
-	// Opponent's slot at oppIdx should now be decayed (memory level 1 = event decay).
-	if a.OppBelief[oppIdx].IsBucket() && a.OppBelief[oppIdx].Bucket() != BucketUnknown {
-		t.Errorf("After king swap yes, OppBelief[%d] should be decayed", oppIdx)
+	skipSnapAndUpdate(t, &g, &a)
+}
+
+// TestUpdateBlindSwapCarriesTheFaceTheSwapperKnew pins the same rule for a blind swap: the
+// card the swapper hands over keeps its face in the slot it lands in, which is what
+// separates a swap from a card the swapper never saw (cambia-1553).
+func TestUpdateBlindSwapCarriesTheFaceTheSwapperKnew(t *testing.T) {
+	g := newDealtGame()
+	a := NewAgentState(0, 1, 1, 3)
+	a.Initialize(&g)
+
+	advanceToPlayer(t, &g, 0, &a)
+
+	// Peek our own slot 3 with a 7 so we know the card we are about to give away.
+	sevenCard := engine.NewCard(engine.SuitClubs, engine.RankSeven)
+	g.Stockpile[g.StockLen-1] = sevenCard
+	applyAndUpdate(t, &g, engine.ActionDrawStockpile, &a)
+	applyAndUpdate(t, &g, engine.ActionDiscardWithAbility, &a)
+	ownIdx := uint8(3)
+	applyAndUpdate(t, &g, engine.EncodePeekOwn(ownIdx), &a)
+	skipSnapAndUpdate(t, &g, &a)
+
+	knownBucket := a.OwnHand[ownIdx].Bucket
+	if knownBucket == BucketUnknown {
+		t.Fatalf("peek own left slot %d unknown", ownIdx)
+	}
+	peekTurn := a.OwnHand[ownIdx].LastSeenTurn
+
+	advanceToPlayer(t, &g, 0, &a)
+	jackCard := engine.NewCard(engine.SuitHearts, engine.RankJack)
+	g.Stockpile[g.StockLen-1] = jackCard
+	applyAndUpdate(t, &g, engine.ActionDrawStockpile, &a)
+	applyAndUpdate(t, &g, engine.ActionDiscardWithAbility, &a)
+
+	oppIdx := uint8(0)
+	applyAndUpdate(t, &g, engine.EncodeBlindSwap(ownIdx, oppIdx), &a)
+
+	if got := a.OppBelief[oppIdx]; !got.IsBucket() || got.Bucket() != knownBucket {
+		t.Errorf("After blind swap, OppBelief[%d] = %v, want bucket %d", oppIdx, got, knownBucket)
+	}
+	if !a.OppHasLastSeen[oppIdx] || a.OppLastSeen[oppIdx] != peekTurn {
+		t.Errorf("After blind swap, last-seen for opp slot %d = (%v, %d), want (true, %d)",
+			oppIdx, a.OppHasLastSeen[oppIdx], a.OppLastSeen[oppIdx], peekTurn)
+	}
+	// We never saw the card we received, so our own slot goes unknown.
+	if a.OwnHand[ownIdx].Bucket != BucketUnknown {
+		t.Errorf("After blind swap, OwnHand[%d].Bucket = %d, want BucketUnknown",
+			ownIdx, a.OwnHand[ownIdx].Bucket)
 	}
 
 	skipSnapAndUpdate(t, &g, &a)
