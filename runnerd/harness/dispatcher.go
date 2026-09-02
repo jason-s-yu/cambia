@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -461,6 +462,13 @@ func (d *Dispatcher) launchOpts(j *job, prepared *ingestapi.Prepared) (procmgr.L
 	if prepared == nil || prepared.VenvPython == "" {
 		return procmgr.LaunchOpts{}, nil
 	}
+	// measure (design D38) branches before AlgoSubcommand: there is no cambia
+	// subcommand for it, so the injected algos table is never consulted for
+	// this kind (HarnessAlgorithms' KindMeasure entry exists only to pass the
+	// submit allowlist).
+	if j.spec.Kind == KindMeasure {
+		return d.measureLaunchOpts(j, prepared)
+	}
 	sub, err := d.pm.AlgoSubcommand(j.spec.Kind)
 	if err != nil {
 		return procmgr.LaunchOpts{}, err
@@ -540,6 +548,51 @@ func (d *Dispatcher) launchOpts(j *job, prepared *ingestapi.Prepared) (procmgr.L
 	// loop syncs (design 4.2: runs/<name>/run_db.sqlite IS the wire format).
 	env := append([]string(nil), prepared.Env...)
 	env = append(env, "CAMBIA_RUN_DB="+filepath.Join(d.runsDir, journalRun, "run_db.sqlite"))
+	return procmgr.LaunchOpts{
+		Python: prepared.VenvPython,
+		Argv:   argv,
+		Cwd:    filepath.Join(prepared.WorktreeDir, "cfr"),
+		Env:    env,
+	}, nil
+}
+
+// measureLaunchOpts builds the launch for kind=measure (design D38): argv is
+// the staged script path followed by spec.Args verbatim, with no "-m src.cli"
+// prefix and no cambia subcommand. The staged script's presence at the pinned
+// commit is checked here, once the worktree exists (submit already validated
+// script's shape and root); its absence fails the job with a named error
+// before launch, mirroring the other launchOpts helpers' "field: reason"
+// wrapping. journalRun is always the job's own name (unlike evaluate's
+// borrowed target journal): a measure job owns its own run dir and its own
+// run_db.sqlite. reads (already containment- and existence-checked at
+// submit) are re-resolved here for the same defense-in-depth reason
+// evaluateTargetArgv and headToHeadArgv re-resolve their path fields, and
+// exported as CAMBIA_MEASURE_READ_DIRS, os.pathsep-joined, so the script can
+// locate its read-only seeds without re-deriving the runs dir itself.
+func (d *Dispatcher) measureLaunchOpts(j *job, prepared *ingestapi.Prepared) (procmgr.LaunchOpts, error) {
+	scriptAbs := filepath.Join(prepared.WorktreeDir, j.spec.Script)
+	if _, err := os.Stat(scriptAbs); err != nil {
+		return procmgr.LaunchOpts{}, fmt.Errorf("script: not found at pinned commit: %s", j.spec.Script)
+	}
+
+	argv := make([]string, 0, 1+len(j.spec.Args))
+	argv = append(argv, scriptAbs)
+	argv = append(argv, j.spec.Args...)
+
+	env := append([]string(nil), prepared.Env...)
+	env = append(env, "CAMBIA_RUN_DB="+filepath.Join(d.runsDir, j.spec.Name, "run_db.sqlite"))
+	if len(j.spec.Reads) > 0 {
+		reads := make([]string, 0, len(j.spec.Reads))
+		for i, r := range j.spec.Reads {
+			resolved, rerr := pathguard.Resolve(d.runsDir, r)
+			if rerr != nil {
+				return procmgr.LaunchOpts{}, fmt.Errorf("reads[%d]: %w", i, rerr)
+			}
+			reads = append(reads, resolved)
+		}
+		env = append(env, "CAMBIA_MEASURE_READ_DIRS="+strings.Join(reads, string(os.PathListSeparator)))
+	}
+
 	return procmgr.LaunchOpts{
 		Python: prepared.VenvPython,
 		Argv:   argv,

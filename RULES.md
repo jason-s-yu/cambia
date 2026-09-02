@@ -142,7 +142,7 @@ To mathematically offset the statistical risk of calling Cambia, fixed score red
 
 ## T5. Disconnection & Forfeiture
 
-* 60 second grace period for reconnections. AI takes over defensively if absent.
+* `disconnectGraceSec` default: 90 second grace period for reconnections. AI takes over defensively if absent.
 * If a player misses an entire round, they receive a score of 41 points (the $+2\sigma$ statistical maximum for a blind hand) to punish the player without corrupting lobby MMR.
 * Abandonment: Missing 2+ consecutive rounds abandons the tournament. All remaining rounds are scored as 41.
 

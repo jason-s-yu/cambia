@@ -19,7 +19,19 @@ from typing import Any, Dict, List, Optional
 
 # Kind allowlist (design 1 / 2.6). The runner further restricts train to the
 # `prtcfr` algorithm in v1; that is a runner-side preflight, not a client check.
-ALLOWED_KINDS = ("train", "evaluate", "head-to-head", "bench")
+# measure (design D38, cambia-1072) runs a pinned script instead of a cambia
+# subcommand.
+ALLOWED_KINDS = ("train", "evaluate", "head-to-head", "bench", "measure")
+
+# The worktree-relative root a measure job's script must resolve under (design
+# D38), mirroring runnerd/harness/jobspec.go's measureScriptRoot.
+MEASURE_SCRIPT_ROOT = "cfr/scripts/"
+
+# Per-entry byte cap for a measure job's args (design D38: "each entry
+# rejected on a NUL or over a length cap"), mirroring runnerd/harness/
+# jobspec.go's maxMeasureArgLen so the client rejects exactly what the runner
+# would.
+MAX_MEASURE_ARG_LEN = 4096
 
 # Device allowlist (cambia-329). The client stays permissive within this set;
 # the runner enforces its own RUNNERD_ALLOWED_DEVICES capability list against
@@ -114,6 +126,18 @@ class JobSpec:
     # into an idle daemon and holds every other job around. Default false (a normal
     # job that shares the concurrency pool). Allowed on every kind.
     exclusive: bool = False
+    # script is a kind=measure job's worktree-relative pinned script path
+    # (design D38), e.g. "cfr/scripts/measure_gate_gap.py". Required for
+    # measure, forbidden for every other kind.
+    script: Optional[str] = None
+    # args is a kind=measure job's argv tail, appended verbatim after the
+    # staged script path with no shell involved. Forbidden for every other
+    # kind.
+    args: List[str] = field(default_factory=list)
+    # reads names other run directories a kind=measure job reads as read-only
+    # seeds, resolved through pathguard against the runs dir on the runner.
+    # Forbidden for every other kind.
+    reads: List[str] = field(default_factory=list)
 
     _KNOWN_KEYS = frozenset(
         {
@@ -135,6 +159,9 @@ class JobSpec:
             "on_failure",
             "hub_item",
             "exclusive",
+            "script",
+            "args",
+            "reads",
         }
     )
 
@@ -184,6 +211,52 @@ class JobSpec:
         warm_start = raw.get("warm_start")
         if warm_start is not None:
             guard_relpath(warm_start, "warm_start")
+
+        script = raw.get("script")
+        if script is not None and kind != "measure":
+            raise HarnessSpecError("script is valid for kind='measure' only")
+        if kind == "measure":
+            if script is None:
+                raise HarnessSpecError("kind 'measure' requires a 'script' path")
+            guard_relpath(script, "script")
+            if (
+                not script.startswith(MEASURE_SCRIPT_ROOT)
+                or script == MEASURE_SCRIPT_ROOT
+            ):
+                raise HarnessSpecError(
+                    f"script must resolve under {MEASURE_SCRIPT_ROOT!r}: {script!r}"
+                )
+
+        args_raw = raw.get("args")
+        if args_raw is not None and kind != "measure":
+            raise HarnessSpecError("args is valid for kind='measure' only")
+        args: List[str] = []
+        if args_raw is not None:
+            if not isinstance(args_raw, list) or any(
+                not isinstance(a, str) for a in args_raw
+            ):
+                raise HarnessSpecError("args must be a list of strings")
+            for i, a in enumerate(args_raw):
+                if "\x00" in a:
+                    raise HarnessSpecError(f"args[{i}] contains a NUL byte")
+                if len(a) > MAX_MEASURE_ARG_LEN:
+                    raise HarnessSpecError(
+                        f"args[{i}] exceeds {MAX_MEASURE_ARG_LEN} bytes"
+                    )
+            args = list(args_raw)
+
+        reads_raw = raw.get("reads")
+        if reads_raw is not None and kind != "measure":
+            raise HarnessSpecError("reads is valid for kind='measure' only")
+        reads: List[str] = []
+        if reads_raw is not None:
+            if not isinstance(reads_raw, list) or any(
+                not isinstance(r, str) for r in reads_raw
+            ):
+                raise HarnessSpecError("reads must be a list of strings")
+            for i, r in enumerate(reads_raw):
+                guard_relpath(r, f"reads[{i}]")
+            reads = list(reads_raw)
 
         overrides = raw.get("overrides", {}) or {}
         if not isinstance(overrides, dict):
@@ -275,6 +348,9 @@ class JobSpec:
             on_failure=on_failure,
             hub_item=hub_item,
             exclusive=bool(raw.get("exclusive", False)),
+            script=script,
+            args=args,
+            reads=reads,
         )
 
     def to_payload(self, commit: str) -> Dict[str, Any]:
@@ -317,6 +393,12 @@ class JobSpec:
         # exclusive is only forwarded when set; absent, the runner defaults false.
         if self.exclusive:
             payload["exclusive"] = True
+        if self.script is not None:
+            payload["script"] = self.script
+        if self.args:
+            payload["args"] = self.args
+        if self.reads:
+            payload["reads"] = self.reads
         return payload
 
 

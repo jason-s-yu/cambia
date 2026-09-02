@@ -230,14 +230,15 @@ func (m *Manager) Prepare(ctx context.Context, jobID, commit, kind, configRel, d
 	}
 
 	prov := provenance{
-		JobID:         jobID,
-		Commit:        commit,
-		EngineTreeSha: lib.engineTreeSha,
-		LibcambiaSha:  lib.sha256,
-		UVLockSha:     venv.lockSha256,
-		VenvCacheKey:  venv.key,
-		PlatformTag:   platformTag(),
-		Device:        device,
+		JobID:             jobID,
+		Commit:            commit,
+		EngineTreeSha:     lib.engineTreeSha,
+		LibcambiaCacheKey: lib.cacheKey,
+		LibcambiaSha:      lib.sha256,
+		UVLockSha:         venv.lockSha256,
+		VenvCacheKey:      venv.key,
+		PlatformTag:       platformTag(),
+		Device:            device,
 	}
 	if err := m.writeEnvJSON(ctx, runDir, venv.python, prov); err != nil {
 		return nil, fmt.Errorf("env.json: %w", err)
@@ -245,7 +246,7 @@ func (m *Manager) Prepare(ctx context.Context, jobID, commit, kind, configRel, d
 
 	// Best-effort LRU trims, protecting the keys this job just staked.
 	m.evictVenvs(map[string]bool{venv.key: true})
-	m.evictLibcambia(map[string]bool{lib.engineTreeSha: true})
+	m.evictLibcambia(map[string]bool{lib.cacheKey: true})
 
 	return &ingestapi.Prepared{
 		WorktreeDir:    worktreeDir,
@@ -360,8 +361,9 @@ func (m *Manager) StartupSweep(liveJobIDs []string) error {
 }
 
 // liveCacheKeys reads each live job's env.json to collect the venv cache keys and
-// engine-tree shas still in use, so cache eviction never drops a running job's
-// interpreter or shared library. Unreadable env.json is skipped (best-effort).
+// libcambia cache keys still in use, so cache eviction never drops a running
+// job's interpreter or shared library. Unreadable env.json is skipped
+// (best-effort).
 func (m *Manager) liveCacheKeys(liveJobIDs []string) (venvKeys, libKeys map[string]bool) {
 	venvKeys = map[string]bool{}
 	libKeys = map[string]bool{}
@@ -373,8 +375,8 @@ func (m *Manager) liveCacheKeys(liveJobIDs []string) (venvKeys, libKeys map[stri
 		if p.VenvCacheKey != "" {
 			venvKeys[p.VenvCacheKey] = true
 		}
-		if p.EngineTreeSha != "" {
-			libKeys[p.EngineTreeSha] = true
+		if p.LibcambiaCacheKey != "" {
+			libKeys[p.LibcambiaCacheKey] = true
 		}
 	}
 	return venvKeys, libKeys

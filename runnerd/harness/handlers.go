@@ -56,6 +56,42 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid_warm_start", "warm_start is only valid for kind=train")
 		return
 	}
+	// 3b''. script/args/reads kind-scoping (design D38): measure-only fields.
+	// script is required for measure and must resolve under measureScriptRoot;
+	// the worktree does not exist yet, so this is a lexical prefix check (the
+	// staged file's existence at the pinned commit is checked at launch). args
+	// entries are validated for shape (no NUL, under the length cap) so a bad
+	// spec never reaches a launch attempt.
+	if spec.scriptForbidden() {
+		writeJSONError(w, http.StatusBadRequest, "invalid_script", "script is only valid for kind=measure")
+		return
+	}
+	if spec.Kind == KindMeasure {
+		if spec.scriptRequired() {
+			writeJSONError(w, http.StatusBadRequest, "invalid_script", "script is required for kind=measure")
+			return
+		}
+		if err := pathguard.CheckRel(spec.Script); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_script", "script: "+err.Error())
+			return
+		}
+		if !spec.scriptRootValid() {
+			writeJSONError(w, http.StatusBadRequest, "invalid_script", "script must resolve under "+measureScriptRoot)
+			return
+		}
+	}
+	if spec.argsForbidden() {
+		writeJSONError(w, http.StatusBadRequest, "invalid_args", "args is only valid for kind=measure")
+		return
+	}
+	if err := spec.validateArgs(); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_args", err.Error())
+		return
+	}
+	if spec.readsForbidden() {
+		writeJSONError(w, http.StatusBadRequest, "invalid_reads", "reads is only valid for kind=measure")
+		return
+	}
 	// 3c. device shape validation: device must be one of cpu/cuda/xpu.
 	if !spec.deviceValid() {
 		writeJSONError(w, http.StatusBadRequest, "invalid_device", "device not supported: "+spec.device())
@@ -121,6 +157,21 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		}
 		if _, err := os.Stat(resolved); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "warm_start_not_found", p.label+": "+resolved)
+			return
+		}
+	}
+	// 4d. reads containment + existence (design D38): each measure read must
+	// resolve inside the runs dir and already exist -- the same
+	// containment+existence guard warm_start uses above, so a bad seed
+	// reference never reaches prepare.
+	for _, p := range spec.containedReads() {
+		resolved, err := pathguard.Resolve(s.runsDir, p.value)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_path", p.label+": "+err.Error())
+			return
+		}
+		if _, err := os.Stat(resolved); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "reads_not_found", p.label+": "+resolved)
 			return
 		}
 	}

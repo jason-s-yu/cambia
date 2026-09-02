@@ -612,7 +612,7 @@ def _deep_traverse_os_go_nplayer(
 ) -> np.ndarray:
 ```
 
-N-player variant of `_deep_traverse_os_go`. Uses 620-action space and 856-dim encoding. Structure mirrors the 2-player version; returns utility vector `(num_players,)` float64.
+N-player variant of `_deep_traverse_os_go`. Uses 620-action space and 936-dim encoding. Structure mirrors the 2-player version; returns utility vector `(num_players,)` float64.
 
 #### `_escher_traverse_go`
 
@@ -735,7 +735,7 @@ The full FFI surface is declared via `_ffi.cdef(...)` at module load time. The l
 class GoEngine:
     INPUT_DIM: int = 222
     NUM_ACTIONS: int = 146
-    N_PLAYER_INPUT_DIM: int = 856
+    N_PLAYER_INPUT_DIM: int = 936
     N_PLAYER_NUM_ACTIONS: int = 620
 
     def __init__(
@@ -839,7 +839,7 @@ class GoAgentState:
     def encode_eppbs(self, decision_context: int, drawn_bucket: int = -1) -> np.ndarray  # (224,) float32
     def encode_eppbs_interleaved(self, ...) -> np.ndarray                                 # (224,) float32
     def encode_eppbs_dealiased(self, ...) -> np.ndarray                                   # (224,) float32
-    def encode_nplayer(self, ...) -> np.ndarray                                           # (856,) float32
+    def encode_nplayer(self, ...) -> np.ndarray                                           # (936,) float32
     def nplayer_action_mask(self, engine: GoEngine) -> np.ndarray                         # (620,) uint8
 ```
 

@@ -124,42 +124,42 @@ class TestInferDecisionContext:
 
         mask = np.zeros(146, dtype=np.uint8)
         mask[11] = 1  # ActionPeekOwn(0)
-        assert _infer_decision_context(mask) == 2
+        assert _infer_decision_context(mask) == 3
 
     def test_ability_select_peek_other(self):
         from src.cfr.deep_worker import _infer_decision_context  # noqa: PLC0415
 
         mask = np.zeros(146, dtype=np.uint8)
         mask[17] = 1  # ActionPeekOther(0)
-        assert _infer_decision_context(mask) == 2
+        assert _infer_decision_context(mask) == 3
 
     def test_ability_select_blind_swap(self):
         from src.cfr.deep_worker import _infer_decision_context  # noqa: PLC0415
 
         mask = np.zeros(146, dtype=np.uint8)
         mask[23] = 1  # ActionBlindSwap
-        assert _infer_decision_context(mask) == 2
+        assert _infer_decision_context(mask) == 3
 
     def test_ability_select_king_swap(self):
         from src.cfr.deep_worker import _infer_decision_context  # noqa: PLC0415
 
         mask = np.zeros(146, dtype=np.uint8)
         mask[95] = 1  # ActionKingSwapNo
-        assert _infer_decision_context(mask) == 2
+        assert _infer_decision_context(mask) == 3
 
     def test_snap_decision_pass(self):
         from src.cfr.deep_worker import _infer_decision_context  # noqa: PLC0415
 
         mask = np.zeros(146, dtype=np.uint8)
         mask[97] = 1  # PassSnap
-        assert _infer_decision_context(mask) == 3
+        assert _infer_decision_context(mask) == 2
 
     def test_snap_decision_own(self):
         from src.cfr.deep_worker import _infer_decision_context  # noqa: PLC0415
 
         mask = np.zeros(146, dtype=np.uint8)
         mask[98] = 1  # SnapOwn(0)
-        assert _infer_decision_context(mask) == 3
+        assert _infer_decision_context(mask) == 2
 
     def test_snap_move(self):
         from src.cfr.deep_worker import _infer_decision_context  # noqa: PLC0415
@@ -173,6 +173,55 @@ class TestInferDecisionContext:
 
         mask = np.zeros(146, dtype=np.uint8)
         assert _infer_decision_context(mask) == 0  # fallback
+
+
+# ---------------------------------------------------------------------------
+# Decision-context numbering pin (cambia-1688)
+#
+# _infer_decision_context used to return the SnapDecision and AbilitySelect
+# ints reversed relative to engine/types.go (2=CtxSnapDecision,
+# 3=CtxAbilitySelect there; this function returned 2 for AbilitySelect and 3
+# for SnapDecision). cambia-1484 fixed the same swap in
+# tests/test_cross_validation.py's engine-side map; this pins the
+# mask-inference path the same way, against bridge.DecisionCtx rather than a
+# bare literal, so a future engine renumbering fails here instead of silently
+# re-encoding every ability and snap node under the wrong one-hot.
+# ---------------------------------------------------------------------------
+
+
+#: Engine action index band per decision context, half-open, matching the
+#: engine/types.go action index constants used by _infer_decision_context's
+#: docstring: StartTurn 0-2, PostDraw 3-10, AbilitySelect 11-96, SnapDecision
+#: 97-109, SnapMove 110-145.
+_INFER_CTX_ACTION_BANDS = {
+    "START_TURN": (0, 3),
+    "POST_DRAW": (3, 11),
+    "ABILITY_SELECT": (11, 97),
+    "SNAP_DECISION": (97, 110),
+    "SNAP_MOVE": (110, 146),
+}
+
+
+def test_infer_decision_context_bands_match_bridge_decision_ctx():
+    """Each action band resolves to the DecisionCtx value the engine assigns.
+
+    Sets one legal action per band and asserts _infer_decision_context returns
+    DecisionCtx[name].value rather than a hand-copied int, so this fails if the
+    SnapDecision/AbilitySelect swap (cambia-1688) or any other reordering of
+    engine/types.go's DecisionContext reappears.
+    """
+    from src.cfr.deep_worker import _infer_decision_context  # noqa: PLC0415
+    from src.ffi.bridge import DecisionCtx  # noqa: PLC0415
+
+    for name, (low, _high) in _INFER_CTX_ACTION_BANDS.items():
+        mask = np.zeros(146, dtype=np.uint8)
+        mask[low] = 1
+        got = _infer_decision_context(mask)
+        want = DecisionCtx[name].value
+        assert got == want, (
+            f"action index {low} (start of the {name} band) resolved to "
+            f"decision context {got}, expected {want} (DecisionCtx.{name})"
+        )
 
 
 # ---------------------------------------------------------------------------

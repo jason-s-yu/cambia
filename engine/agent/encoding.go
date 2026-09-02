@@ -579,36 +579,87 @@ func ActionMask(legalActions [3]uint64, out *[NumActions]bool) {
 	}
 }
 
-// EncodeNPlayer writes the 856-dim N-player feature vector into out.
+// nplayerSeatOrder returns the seat order the N-player encoding lays its per-seat blocks
+// out in: index 0 is this agent's own seat, index r>0 is its r-th opponent in ascending
+// seat order. That is the order the N-player action space indexes an opponent target in
+// (NPlayerEncodeSnapOpponent and friends take a relative index), so a slot block and the
+// action that targets it now carry the same index (cambia-1551). inPlay reports which
+// entries name a seat of the current table; entries past the seat count name none.
+func (a *AgentState) nplayerSeatOrder() (order [MaxKnowledgePlayers]uint8, inPlay [MaxKnowledgePlayers]bool) {
+	n := a.NumPlayers
+	if n == 0 {
+		n = 2
+	}
+	if int(n) > MaxKnowledgePlayers {
+		n = MaxKnowledgePlayers
+	}
+	if int(a.PlayerID) >= int(n) {
+		return order, inPlay
+	}
+	order[0] = a.PlayerID
+	inPlay[0] = true
+	idx := 1
+	for seat := uint8(0); seat < n; seat++ {
+		if seat == a.PlayerID {
+			continue
+		}
+		order[idx] = seat
+		inPlay[idx] = true
+		idx++
+	}
+	return order, inPlay
+}
+
+// EncodeNPlayer writes the NPlayerInputDim-dim N-player feature vector into out.
 // Layout:
 //
 //	[0-383]   Powerset masks: 48 slots × 8 bits (which players know each card)
 //	[384-815] Slot identities: 48 slots × 9 buckets (one-hot, zeroed if agent doesn't know)
 //	[816-855] Public features: discard(10) + stock(4) + phase(6) + ctx(6) + cambia(3) + drawn(11) = 40
+//	[856-863] This agent's own seat (one-hot over 8 seats)
+//	[864-871] The table's active seat count (one-hot at numPlayers-1)
+//	[872-935] Per seat, in the same relative order: hand length one-hot(7) + in-play bit(1)
+//
+// Both slot blocks and the per-seat block are ordered RELATIVE to this agent's seat (see
+// nplayerSeatOrder), and so is the knower axis of the powerset block, so a seat reads its
+// own table the same way whichever chair it sits in. Slots past a seat's hand length, and
+// every slot of a seat that is not in play, encode as zero in both blocks: the vector used
+// to emit all 48 slots unmasked, which read a shrunk hand's stale tail as a card
+// (cambia-1550, cambia-1551).
 func (a *AgentState) EncodeNPlayer(ctx engine.DecisionContext, drawnCardBucket int8, out *[NPlayerInputDim]float32) {
 	*out = [NPlayerInputDim]float32{}
 	offset := 0
+	order, inPlay := a.nplayerSeatOrder()
 
 	// Powerset masks: 48 slots × 8 bits = 384
-	for slot := 0; slot < MaxTotalSlots; slot++ {
-		for p := 0; p < MaxKnowledgePlayers; p++ {
-			if a.KnowledgeMask[slot][p] {
-				out[offset] = 1.0
+	for r := 0; r < MaxKnowledgePlayers; r++ {
+		seat := order[r]
+		for c := 0; c < engine.MaxHandSize; c++ {
+			slot := nplayerSlot(seat, uint8(c))
+			held := inPlay[r] && uint8(c) < a.NPlayerHandLen[seat]
+			for k := 0; k < MaxKnowledgePlayers; k++ {
+				if held && inPlay[k] && a.KnowledgeMask[slot][order[k]] {
+					out[offset] = 1.0
+				}
+				offset++
 			}
-			offset++
 		}
 	}
 	// offset = 384
 
 	// Slot identities: 48 slots × 9 buckets = 432
-	for slot := 0; slot < MaxTotalSlots; slot++ {
-		if a.NPlayerSlotKnown[slot] {
-			b := a.NPlayerSlotBuckets[slot]
-			if b < BucketUnknown { // 0-8
-				out[offset+int(b)] = 1.0
+	for r := 0; r < MaxKnowledgePlayers; r++ {
+		seat := order[r]
+		for c := 0; c < engine.MaxHandSize; c++ {
+			slot := nplayerSlot(seat, uint8(c))
+			if inPlay[r] && uint8(c) < a.NPlayerHandLen[seat] && a.NPlayerSlotKnown[slot] {
+				b := a.NPlayerSlotBuckets[slot]
+				if b < BucketUnknown { // 0-8
+					out[offset+int(b)] = 1.0
+				}
 			}
+			offset += 9
 		}
-		offset += 9
 	}
 	// offset = 816
 
@@ -630,7 +681,39 @@ func (a *AgentState) EncodeNPlayer(ctx engine.DecisionContext, drawnCardBucket i
 	offset += 3
 	// Drawn card (11)
 	out[offset+int(drawnCardOneHotIndex(drawnCardBucket))] = 1.0
+	offset += 11
 	// offset = 856
+
+	// Own seat (8)
+	if int(a.PlayerID) < NPlayerSeatDim {
+		out[offset+int(a.PlayerID)] = 1.0
+	}
+	offset += NPlayerSeatDim
+
+	// Active seat count (8), one-hot at numPlayers-1.
+	seats := a.NumPlayers
+	if seats == 0 {
+		seats = 2
+	}
+	if int(seats) > NPlayerSeatCountDim {
+		seats = NPlayerSeatCountDim
+	}
+	out[offset+int(seats)-1] = 1.0
+	offset += NPlayerSeatCountDim
+
+	// Per-seat hand length (7) plus an in-play bit (1), in the relative seat order.
+	for r := 0; r < MaxKnowledgePlayers; r++ {
+		if inPlay[r] {
+			handLen := a.NPlayerHandLen[order[r]]
+			if handLen > engine.MaxHandSize {
+				handLen = engine.MaxHandSize
+			}
+			out[offset+int(handLen)] = 1.0
+			out[offset+NPlayerHandLenDim] = 1.0
+		}
+		offset += NPlayerSeatBlockDim
+	}
+	// offset = 936
 }
 
 // NPlayerActionMask writes the N-player legal action mask into out.

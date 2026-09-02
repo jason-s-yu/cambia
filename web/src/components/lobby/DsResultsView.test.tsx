@@ -6,7 +6,8 @@
 // now sees a waiting label instead, naming the results timer only where post_game actually
 // arms one (match_end arms none, see service/doc/lobby_actions.md "Post-game exit").
 import { render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import userEvent from '@testing-library/user-event';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import DsResultsView from './DsResultsView';
 import { useAuthStore } from '@/stores/authStore';
 import { useCurrentLobbyStore } from '@/stores/lobbyStore';
@@ -72,5 +73,38 @@ describe('DsResultsView post-game exit gate', () => {
     expect(screen.queryByRole('button', { name: 'Back to lobby' })).not.toBeInTheDocument();
     expect(screen.getByText('Waiting for the host to return to the lobby.')).toBeInTheDocument();
     expect(screen.queryByText(/timer/i)).not.toBeInTheDocument();
+  });
+});
+
+// Where the card puts focus when it opens (cambia-1239 review). The card is a real dialog over
+// the table, and its mount effect used to take the first button in it. That was the primary
+// "Back to lobby" until cambia-1516 replaced it with a plain label for any seat the hub would
+// refuse, after which every non-host seat opened with "Leave lobby" armed: an Enter or a Space on
+// a dialog that had just appeared left the lobby, and requestLeave asks nothing in post_game.
+describe('DsResultsView opening focus', () => {
+  it('opens on the primary action for a seat that has one', () => {
+    seedLobby({ your_is_host: true, system_host: false });
+    render(<DsResultsView phase='post_game' onReturnToLobby={() => {}} onLeave={() => {}} />);
+
+    expect(screen.getByRole('button', { name: 'Back to lobby' })).toHaveFocus();
+  });
+
+  it('opens on the card, not on Leave lobby, for a seat with no primary action', () => {
+    seedLobby({ your_is_host: false, system_host: false });
+    render(<DsResultsView phase='post_game' onReturnToLobby={() => {}} onLeave={() => {}} />);
+
+    expect(screen.getByRole('button', { name: 'Leave lobby' })).not.toHaveFocus();
+    expect(screen.getByRole('dialog')).toHaveFocus();
+  });
+
+  it('arms nothing under the reflex Enter on a freshly opened dialog', async () => {
+    const onLeave = vi.fn();
+    seedLobby({ your_is_host: false, system_host: false });
+    render(<DsResultsView phase='post_game' onReturnToLobby={() => {}} onLeave={onLeave} />);
+
+    await userEvent.keyboard('{Enter}');
+    await userEvent.keyboard(' ');
+
+    expect(onLeave).not.toHaveBeenCalled();
   });
 });

@@ -21,9 +21,13 @@
 // overlay above it, so the last board state stays visible under the scrim.
 // Without one (a reload straight into post_game) the card sits on the ground.
 //
-// Over the table the card is a modal: aria-modal, focus moves to the primary
-// action on mount, Tab cycles inside the card, and the table underneath is
-// inert so its cards and leave control drop out of the tab order (cambia-848).
+// Over the table the card is a modal: aria-modal, Tab cycles inside the card,
+// and the table underneath is inert so its cards and leave control drop out of
+// the tab order (cambia-848). Focus opens on the primary action where the seat
+// has one and on the card itself where it does not: taking the first button
+// instead put a non-host seat's opening focus on "Leave lobby" once cambia-1516
+// replaced the primary with a waiting label, so the reflex Enter on a dialog
+// that had just appeared left the lobby, unasked (cambia-1239 review).
 import React, { useEffect, useMemo, useRef } from 'react';
 import { useCurrentLobbyStore, type LobbyPhase } from '@/stores/lobbyStore';
 import { useAuthStore } from '@/stores/authStore';
@@ -83,7 +87,11 @@ const DsResultsView: React.FC<DsResultsViewProps> = ({ phase, onReturnToLobby, o
 
   const cardRef = useRef<HTMLElement>(null);
   useEffect(() => {
-    cardRef.current?.querySelector<HTMLElement>('button')?.focus();
+    // The primary action marks itself, so a card that renders none opens on the card (tabIndex -1)
+    // rather than on whatever control happens to be drawn first. Nothing is armed under Enter, and
+    // the reader still lands inside the dialog.
+    const primary = cardRef.current?.querySelector<HTMLElement>('[data-autofocus]');
+    (primary ?? cardRef.current)?.focus();
   }, []);
 
   // Keep Tab inside the card while it covers the table. The table is inert, but the app
@@ -95,7 +103,9 @@ const DsResultsView: React.FC<DsResultsViewProps> = ({ phase, onReturnToLobby, o
     const first = focusable[0];
     const last = focusable[focusable.length - 1];
     const active = document.activeElement;
-    if (e.shiftKey && (active === first || !cardRef.current.contains(active))) {
+    // The card itself holds focus when no primary action rendered, and it is the start of the
+    // cycle as much as the first control is, so shift+Tab from it wraps rather than leaving.
+    if (e.shiftKey && (active === first || active === cardRef.current || !cardRef.current.contains(active))) {
       e.preventDefault();
       last.focus();
     } else if (!e.shiftKey && (active === last || !cardRef.current.contains(active))) {
@@ -151,6 +161,9 @@ const DsResultsView: React.FC<DsResultsViewProps> = ({ phase, onReturnToLobby, o
       role='dialog'
       aria-modal={overTable ? 'true' : undefined}
       aria-labelledby='results-title'
+      // Focusable only as the fallback target above: -1 keeps it out of the tab cycle, which is
+      // also why trapTab's own query passes over it.
+      tabIndex={-1}
       onKeyDown={trapTab}
       style={{
         width: '100%',
@@ -255,7 +268,7 @@ const DsResultsView: React.FC<DsResultsViewProps> = ({ phase, onReturnToLobby, o
 
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', padding: '14px 20px', borderTop: '1px solid var(--border-subtle)', background: 'var(--surface-2)' }}>
         {canReturnToLobby ? (
-          <Button variant='primary' onClick={onReturnToLobby}>Back to lobby</Button>
+          <Button variant='primary' autoFocus onClick={onReturnToLobby}>Back to lobby</Button>
         ) : (
           // post_game arms a results timer (returnToLobby fires on its own after
           // PostGameDuration); match_end arms none, so it names no timer that is not there
