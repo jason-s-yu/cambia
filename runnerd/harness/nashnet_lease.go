@@ -72,9 +72,8 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request, lease na
 	delete(p.tickBytes, lease.LeaseID)
 	p.mu.Unlock()
 
-	rec, _ := p.nodes.Get(updated.NodeID)
 	resp := nashnet.ProgressResponse{
-		Drain:         rec.Drained,
+		Hold:          p.effectiveHold(updated.NodeID),
 		LeaseDeadline: rfc3339(updated.Deadline),
 	}
 	if updated.State == nashnet.LeaseRevoking {
@@ -171,13 +170,15 @@ func (s *Server) handleNack(w http.ResponseWriter, r *http.Request, lease nashne
 	if p.noteNack(lease.NodeID, lease.JobID, req.Reason,
 		time.Duration(req.CooldownSeconds)*time.Second) {
 		// Three consecutive prepare_node_failed nacks: the node's claims are
-		// refused node_gated until its own cooldown runs out or an operator lifts
-		// the hold (D63). No event is posted, because the only one that would say
-		// this is drain, which names an operator act the node clears off its next
-		// heartbeat; the 204 and its Retry-After are the whole signal, and the
-		// queue is untouched, so the job this nack returned goes to the next
-		// capable node.
+		// refused until its own cooldown runs out or an operator lifts the hold
+		// (D63). The event names the breaker, so the node stops claiming at once
+		// rather than after one more refused round trip, and its next heartbeat
+		// reports the same hold instead of undraining it. The queue is untouched,
+		// so the job this nack returned goes to the next capable node.
 		poolLog("nashnet: circuit breaker tripped for node %s", lease.NodeID)
+		p.postEvent(lease.NodeID, nashnet.Event{
+			Type: nashnet.EventDrain, Hold: nashnet.HoldReasonBreaker,
+		})
 	}
 	// The lease settles through the same outcome path as every other ended one,
 	// so a nack posted after the process started finalizes rather than returning

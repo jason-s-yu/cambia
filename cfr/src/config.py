@@ -140,6 +140,35 @@ RETIRED_ENGINE_BACKEND_MESSAGE = (
 )
 
 
+class TabularSnapRaceError(ValueError):
+    """Raised when a tabular config asks for a rule its substrate cannot drive."""
+
+
+TABULAR_SNAP_RACE_MESSAGE = (
+    "snapRace: true is not available to tabular CFR. The tabular traversal "
+    "runs on GoBrState (cambia-1782), whose snap-result reconstruction does "
+    "not model the race path, where the engine resolves every committed snap "
+    "at once. Set snapRace: false, or run this ruleset through a lane that "
+    "does not use GoBrState."
+)
+
+
+def validate_tabular_rules(algorithm: Any, rules: Any) -> None:
+    """Refuse a tabular config whose rules the tabular substrate cannot run.
+
+    Keyed on the file's own ``algorithm`` line so the deep, PRT-CFR, GT-CFR and
+    evaluation lanes, which drive snapRace through other code, are untouched.
+    Without this the run still started: the traversal refused per iteration,
+    logged it to a run file and returned nothing, so training appeared to
+    proceed while learning nothing at all.
+    """
+    if str(algorithm).strip().lower() != "tabular":
+        return
+    snap_race = rules.get("snapRace") if isinstance(rules, dict) else None
+    if snap_race:
+        raise TabularSnapRaceError(TABULAR_SNAP_RACE_MESSAGE)
+
+
 def validate_engine_backend(engine_backend: str) -> str:
     """Validate an engine_backend config value.
 
@@ -214,11 +243,28 @@ class AnalysisConfig(_CambiaBaseModel):
     """Parameters for analysis tools, like exploitability calculation."""
 
     exploitability_num_workers: int = 1
+    # Node ceiling for one seat's best-response search. The search walks the
+    # whole game tree, which on tiny_cambia_tabular.yaml is over 800,000 nodes
+    # per seat and left `train tabular` running for hours without reaching its
+    # end-of-run save (cambia-1785). Nodes rather than wall clock so the bound
+    # is reproducible: the same run stops in the same place on any host. 0
+    # removes the bound, for a run that wants the exact number and will wait.
+    exploitability_max_nodes: int = 2_000_000
 
     @field_validator("exploitability_num_workers", mode="before")
     @classmethod
     def _parse_workers(cls, v: Any) -> int:
         return parse_num_workers(v)
+
+    @field_validator("exploitability_max_nodes")
+    @classmethod
+    def _check_max_nodes(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(
+                f"analysis.exploitability_max_nodes must be >= 0 (0 disables the "
+                f"bound). Got: {v}."
+            )
+        return v
 
 
 class CfrTrainingConfig(_CambiaBaseModel):
@@ -1006,10 +1052,14 @@ def load_config(config_path: str = "config.yaml") -> Config:
         # default config, which would drop every other setting in the file.
         if "engine_backend" in deep:
             validate_engine_backend(deep["engine_backend"])
+        validate_tabular_rules(raw.get("algorithm"), raw.get("cambia_rules"))
         cfg = Config.model_validate(raw)
         cfg._source_path = os.path.abspath(config_path)
         return cfg
-    except RetiredEngineBackendError:
+    except (RetiredEngineBackendError, TabularSnapRaceError):
+        # Both are ValueErrors, so without this they land in the handler below
+        # and become a silent fall back to the default config, which drops every
+        # other setting in the file and trains on something nobody asked for.
         raise
     except FileNotFoundError:
         log.warning(

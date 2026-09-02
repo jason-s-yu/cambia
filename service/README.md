@@ -89,9 +89,14 @@ The historian used to do three things it no longer does, all removed in cambia-1
 - **Mark an idle game `abandoned`** from a one-minute inactivity loop, after
   `GAME_INACTIVITY_TIMEOUT_SEC`. The loop and its per-game activity tracking are gone with it.
 
-Setting `games.end_time` and marking abandoned games both move to the server, which is where the
-rest of the row's lifecycle already lives; until that lands, `end_time` stays NULL and no game is
-marked `abandoned`.
+Both moved to the server in cambia-1904, which is where the rest of the row's lifecycle already
+lives. `RecordGameAndResults` stamps `end_time` in the transaction that marks a game completed, and
+`AbandonStaleGames` runs at server boot to close out any game whose process went away mid-play,
+which is most of what the historian's timer was covering: a live server ends the games it is
+serving through `game.endGame`, so no inactivity signal is needed to find them. The exception is a
+table that all disconnects under a lobby with `forfeitOnDisconnect` off and `turnTimerSec` at 0,
+where nothing forfeits the seats and no turn clock plays them; that game stays in progress until
+the next restart sweeps it.
 
 ### Actions with no actor
 

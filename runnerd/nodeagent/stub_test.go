@@ -78,8 +78,8 @@ type stubCoordinator struct {
 	failProgressCode string
 	// revokeOnProgress makes the next progress response carry revoke:true.
 	revokeOnProgress bool
-	// drainOnProgress makes progress responses carry drain:true.
-	drainOnProgress bool
+	// holdOnProgress makes progress responses carry that hold reason.
+	holdOnProgress string
 }
 
 func newStubCoordinator(t *testing.T) *stubCoordinator {
@@ -200,6 +200,14 @@ func (s *stubCoordinator) handleEvents(w http.ResponseWriter) {
 	writeJSON(w, http.StatusOK, nashnet.EventsResponse{Events: events, NodeEpoch: epoch, ServerTime: nowText()})
 }
 
+// claimCount is how many claims the node has sent, which is what a hold is
+// supposed to stop.
+func (s *stubCoordinator) claimCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.claims)
+}
+
 func (s *stubCoordinator) handleClaim(w http.ResponseWriter, r *http.Request) {
 	var req nashnet.ClaimRequest
 	_ = json.NewDecoder(r.Body).Decode(&req)
@@ -283,7 +291,7 @@ func (s *stubCoordinator) handleProgress(w http.ResponseWriter, r *http.Request)
 	s.progress = append(s.progress, req)
 	s.phasesSeen = append(s.phasesSeen, req.Phase)
 	status, code := s.failProgress, s.failProgressCode
-	revoke, drain := s.revokeOnProgress, s.drainOnProgress
+	revoke, hold := s.revokeOnProgress, s.holdOnProgress
 	s.revokeOnProgress = false
 	s.mu.Unlock()
 
@@ -293,7 +301,7 @@ func (s *stubCoordinator) handleProgress(w http.ResponseWriter, r *http.Request)
 	}
 	writeJSON(w, http.StatusOK, nashnet.ProgressResponse{
 		Revoke:        revoke,
-		Drain:         drain,
+		Hold:          hold,
 		LeaseDeadline: time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano),
 	})
 }

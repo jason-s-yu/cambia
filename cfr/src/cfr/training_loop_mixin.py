@@ -204,9 +204,16 @@ class CFRTrainingLoopMixin:
                         self.exploitability_results, list
                     ):
                         self.exploitability_results.append((iteration, exploit))
-                    self._last_exploit_str = (
-                        f"{exploit:.4f}" if exploit != float("inf") else "N/A"
-                    )
+                    if exploit != float("inf"):
+                        self._last_exploit_str = f"{exploit:.4f}"
+                    else:
+                        # A pass stopped at analysis.exploitability_max_nodes is
+                        # not the same as one that failed, and the reader needs
+                        # to know which knob to turn (cambia-1785).
+                        outcome = getattr(self.analysis, "last_pass_outcome", None)
+                        self._last_exploit_str = (
+                            "N/A (bounded)" if outcome == "bounded" else "N/A"
+                        )
                     logger.info(
                         "Exploitability: %s (took %.2fs)",
                         self._last_exploit_str,

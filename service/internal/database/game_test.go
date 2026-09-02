@@ -123,10 +123,13 @@ func cleanupGameTestUserRows(t *testing.T, userID uuid.UUID) {
 }
 
 // seedGameRow inserts a lobby and a games row for gameID directly, bypassing the normal
-// lobby/game-start flow. RecordGameAndResults only upserts games.status ('completed') and
+// lobby/game-start flow. RecordGameAndResults only updates games.status and games.end_time and
 // has no notion of lobby_id, but games.lobby_id is NOT NULL with no default, so a fresh
-// gameID needs a backing row seeded here or the upsert's INSERT branch fails Postgres's
-// constraint. In production this row already exists by the time a game finishes.
+// gameID needs a backing row seeded here. In production this row already exists by the time a
+// game finishes.
+//
+// start_time is set because UpsertInitialGameState sets it in production, and a test that
+// compares end_time against it needs the row to carry the same shape.
 func seedGameRow(t *testing.T, gameID, hostUserID uuid.UUID) {
 	ctx := context.Background()
 	var lobbyID uuid.UUID
@@ -135,7 +138,7 @@ func seedGameRow(t *testing.T, gameID, hostUserID uuid.UUID) {
 		hostUserID,
 	).Scan(&lobbyID))
 	_, err := DB.Exec(ctx,
-		`INSERT INTO games (id, lobby_id, status) VALUES ($1, $2, 'in_progress')`,
+		`INSERT INTO games (id, lobby_id, status, start_time) VALUES ($1, $2, 'in_progress', NOW())`,
 		gameID, lobbyID,
 	)
 	require.NoError(t, err, "seedGameRow: failed to insert games row")

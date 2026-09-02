@@ -85,6 +85,24 @@ func (p *Pool) breakerHeld(nodeID string) bool {
 	return b != nil && b.heldUntil.After(now)
 }
 
+// effectiveHold is why the coordinator refuses this node's claims, or the empty
+// string when it does not (D63). It is the one answer the claim route gates on
+// and the one every response and event carries, so a node can never be told one
+// thing by its heartbeat and another by an event.
+//
+// The operator drain outranks the breaker when both stand: an operator reading
+// a node they drained wants to see their own act, and the breaker's own timer
+// keeps running underneath.
+func (p *Pool) effectiveHold(nodeID string) string {
+	if rec, ok := p.nodes.Get(nodeID); ok && rec.Drained {
+		return nashnet.HoldReasonDrain
+	}
+	if p.breakerHeld(nodeID) {
+		return nashnet.HoldReasonBreaker
+	}
+	return ""
+}
+
 // breakerReport renders a node's breaker for the operator listing: how many
 // times it has tripped and how long the current hold has left.
 func (p *Pool) breakerReport(nodeID string, now time.Time) (trips int, heldSeconds int64) {

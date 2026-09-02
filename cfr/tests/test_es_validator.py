@@ -454,3 +454,290 @@ class TestTrainerESValidationIntegration:
         assert dcfr_cfg.es_validation_depth == 7
         assert dcfr_cfg.es_validation_interval == 5
         assert dcfr_cfg.es_validation_traversals == 42
+
+
+# ---------------------------------------------------------------------------
+# Test 11: validator network is built through the trainer's factory
+# ---------------------------------------------------------------------------
+
+
+def make_residual_weights(hidden_dim: int = 32, num_hidden_layers: int = 3) -> dict:
+    """Return a ResidualAdvantageNetwork state-dict as numpy arrays."""
+    from src.networks import ResidualAdvantageNetwork
+
+    net = ResidualAdvantageNetwork(
+        input_dim=INPUT_DIM,
+        hidden_dim=hidden_dim,
+        num_hidden_layers=num_hidden_layers,
+        output_dim=NUM_ACTIONS,
+    )
+    return {k: v.cpu().numpy() for k, v in net.state_dict().items()}
+
+
+def make_residual_network_config(
+    hidden_dim: int = 32, num_hidden_layers: int = 3
+) -> dict:
+    """Network config as the trainer emits it for the residual default."""
+    return {
+        "input_dim": INPUT_DIM,
+        "hidden_dim": hidden_dim,
+        "output_dim": NUM_ACTIONS,
+        "network_type": "residual",
+        "use_residual": True,
+        "num_hidden_layers": num_hidden_layers,
+        "validate_inputs": True,
+        "use_pos_embed": True,
+    }
+
+
+SUPPORTED_NETWORKS = [
+    ("mlp", {}, "AdvantageNetwork"),
+    (
+        "residual",
+        {"use_residual": True, "num_hidden_layers": 3},
+        "ResidualAdvantageNetwork",
+    ),
+    ("slot_film", {"use_pos_embed": True}, "SlotFiLMAdvantageNetwork"),
+    ("slot_multiply", {"use_pos_embed": True}, "SlotFiLMAdvantageNetwork"),
+]
+
+
+class TestESValidatorNetworkFactory:
+    @pytest.mark.parametrize("network_type,extra,expected", SUPPORTED_NETWORKS)
+    def test_every_supported_network_loads(self, network_type, extra, expected):
+        """Weights from any supported network load into the validator."""
+        from src.networks import build_advantage_network
+
+        net_cfg = {
+            "input_dim": INPUT_DIM,
+            "hidden_dim": 32,
+            "output_dim": NUM_ACTIONS,
+            "network_type": network_type,
+            **extra,
+        }
+        trained = build_advantage_network(**net_cfg)
+        weights = {k: v.cpu().numpy() for k, v in trained.state_dict().items()}
+
+        validator = ESValidator(
+            config=make_test_config(),
+            network_weights=weights,
+            network_config=dict(net_cfg),
+        )
+
+        assert type(validator.network).__name__ == expected
+
+    def test_bare_network_config_still_builds_the_mlp(self):
+        """A config carrying only dimensions keeps the historical MLP shape."""
+        validator = ESValidator(
+            config=make_test_config(),
+            network_weights=make_random_weights(),
+            network_config=make_network_config(),
+        )
+
+        assert isinstance(validator.network, AdvantageNetwork)
+
+    def test_unknown_network_type_raises_named_error(self):
+        """An unbuildable network_type raises the named error, not ValueError."""
+        from src.cfr.es_validator import ESValidatorNetworkError
+
+        net_cfg = make_residual_network_config()
+        net_cfg["network_type"] = "nonesuch"
+
+        with pytest.raises(ESValidatorNetworkError):
+            ESValidator(
+                config=make_test_config(),
+                network_weights=make_residual_weights(),
+                network_config=net_cfg,
+            )
+
+    def test_mismatched_weights_raise_named_error(self):
+        """Residual weights against an mlp network_config raise, not warn."""
+        from src.cfr.es_validator import ESValidatorNetworkError
+
+        net_cfg = make_residual_network_config()
+        net_cfg["network_type"] = "mlp"
+
+        with pytest.raises(ESValidatorNetworkError) as exc_info:
+            ESValidator(
+                config=make_test_config(),
+                network_weights=make_residual_weights(),
+                network_config=net_cfg,
+            )
+
+        assert "ES validation" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# Test 12: a validator network failure is fatal, not a log line
+# ---------------------------------------------------------------------------
+
+
+def _residual_dcfr_config():
+    """DeepCFRConfig at the residual default, sized for a one-step CPU run."""
+    from src.cfr.deep_trainer import DeepCFRConfig
+
+    return DeepCFRConfig(
+        engine_backend="go",
+        sampling_method="outcome",
+        device="cpu",
+        hidden_dim=32,
+        batch_size=4,
+        train_steps_per_iteration=1,
+        traversals_per_step=2,
+        traversal_depth_limit=6,
+        advantage_buffer_capacity=1000,
+        strategy_buffer_capacity=1000,
+        save_interval=0,
+        pipeline_training=False,
+        num_traversal_threads=1,
+        es_validation_interval=1,
+        es_validation_depth=3,
+        es_validation_traversals=2,
+    )
+
+
+def _small_trainer_config():
+    """Config for a one-step trainer run: short games, single sampled path.
+
+    The worker reads sampling_method and traversal_depth_limit off the Config,
+    not off DeepCFRConfig, so both are pinned here. External sampling over a
+    20-turn game enumerates a tree far too large for a unit test.
+    """
+    config = make_test_config(depth=3, interval=1, traversals=2)
+    config.deep_cfr.sampling_method = "outcome"
+    config.deep_cfr.traversal_depth_limit = 6
+    config.cambia_rules.max_game_turns = 6
+    return config
+
+
+class TestTrainerESValidationIsNotSilent:
+    @needs_go
+    def test_residual_default_run_reports_mean_regret(self):
+        """One training step at the residual default records an ES metric."""
+        from src.cfr.deep_trainer import DeepCFRTrainer
+
+        dcfr_cfg = _residual_dcfr_config()
+        assert dcfr_cfg.use_residual is True
+        assert dcfr_cfg.network_type == "residual"
+
+        trainer = DeepCFRTrainer(config=_small_trainer_config(), deep_cfr_config=dcfr_cfg)
+        trainer.train(num_training_steps=1)
+
+        assert len(trainer.es_validation_history) == 1
+        step, metrics = trainer.es_validation_history[0]
+        assert step == 1
+        assert "mean_regret" in metrics
+        assert metrics["mean_regret"] >= 0.0
+        assert metrics["traversals"] > 0
+
+    @needs_go
+    def test_mismatched_validator_network_aborts_training(self, monkeypatch):
+        """A validator network that cannot load raises out of the training loop."""
+        from src.cfr.deep_trainer import DeepCFRTrainer
+        from src.cfr.es_validator import ESValidatorNetworkError
+
+        trainer = DeepCFRTrainer(
+            config=_small_trainer_config(), deep_cfr_config=_residual_dcfr_config()
+        )
+
+        # The trainer trains a residual net; declare an mlp so the load fails.
+        real_get = trainer._get_network_config
+
+        def mismatched():
+            cfg = dict(real_get())
+            cfg["network_type"] = "mlp"
+            return cfg
+
+        monkeypatch.setattr(trainer, "_get_network_config", mismatched)
+
+        with pytest.raises(ESValidatorNetworkError):
+            trainer.train(num_training_steps=1)
+
+    @needs_go
+    def test_disabled_validation_ignores_a_broken_validator_network(self):
+        """es_validation_interval=0 trains to completion, mismatch or not."""
+        from src.cfr.deep_trainer import DeepCFRTrainer
+
+        dcfr_cfg = _residual_dcfr_config()
+        dcfr_cfg.es_validation_interval = 0
+
+        trainer = DeepCFRTrainer(config=_small_trainer_config(), deep_cfr_config=dcfr_cfg)
+        trainer._get_network_config = lambda: {"network_type": "nonesuch"}
+
+        trainer.train(num_training_steps=1)
+
+        assert trainer.es_validation_history == []
+
+
+# ---------------------------------------------------------------------------
+# Test 13: a validation step that completes no traversal is fatal
+# ---------------------------------------------------------------------------
+
+
+class TestESValidatorTraversalFailures:
+    def _validator(self):
+        return ESValidator(
+            config=make_test_config(depth=3, traversals=4),
+            network_weights=make_random_weights(),
+            network_config=make_network_config(),
+        )
+
+    def test_every_traversal_failing_raises(self):
+        """Zero completed traversals is never a measurement, so it raises."""
+        from src.cfr.es_validator import ESValidatorError
+
+        validator = self._validator()
+
+        def boom(updating_player):
+            raise RuntimeError("libcambia.so is gone")
+
+        validator._traverse_go = boom
+
+        with pytest.raises(ESValidatorError) as exc_info:
+            validator.compute_exploitability(num_traversals=4)
+
+        assert "0 of 4" in str(exc_info.value)
+
+    @needs_go
+    def test_one_failed_traversal_of_four_still_reports(self, caplog):
+        """A partial failure keeps its warning and still reports metrics."""
+        import logging
+
+        validator = self._validator()
+        real = validator._traverse_go
+        calls = []
+
+        def flaky(updating_player):
+            calls.append(updating_player)
+            if len(calls) == 2:
+                raise RuntimeError("transient hiccup")
+            return real(updating_player)
+
+        validator._traverse_go = flaky
+
+        with caplog.at_level(logging.WARNING, logger="src.cfr.es_validator"):
+            metrics = validator.compute_exploitability(num_traversals=4)
+
+        assert metrics["traversals"] == 3
+        assert metrics["mean_regret"] >= 0.0
+        assert any("traversal 1 failed" in r.getMessage() for r in caplog.records)
+
+
+class TestTrainerAbortsOnDeadValidation:
+    @needs_go
+    def test_all_traversals_failing_aborts_training(self, monkeypatch):
+        """A validation step that completes nothing stops the run."""
+        from src.cfr.deep_trainer import DeepCFRTrainer
+        from src.cfr.es_validator import ESValidatorError
+
+        def boom(self, updating_player):
+            raise RuntimeError("libcambia.so is gone")
+
+        monkeypatch.setattr(ESValidator, "_traverse_go", boom)
+
+        trainer = DeepCFRTrainer(
+            config=_small_trainer_config(), deep_cfr_config=_residual_dcfr_config()
+        )
+
+        with pytest.raises(ESValidatorError):
+            trainer.train(num_training_steps=1)

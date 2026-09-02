@@ -2338,6 +2338,221 @@ func cambia_game_get_house_rules(game_h C.int32_t, out_buf *C.uint8_t, buf_len C
 }
 
 // ---------------------------------------------------------------------------
+// Batched traversal state read (cambia-1902)
+// ---------------------------------------------------------------------------
+//
+// The tabular traversal used to read a node one export at a time: terminality,
+// acting seat, decision context, turn number, stockpile, discard top, Cambia
+// caller, the snap window, the pending record, the legal set and both hands,
+// each a separate crossing. On the pinned gate run that came to 20.9 crossings
+// per applied action, of which only four (save, apply, restore, snapshot free)
+// are irreducible. cambia_game_apply_and_read folds the whole read into the
+// apply's own crossing.
+
+const (
+	// Offsets into the packed state record. Each embedded sub-record repeats
+	// the layout of the single-purpose export it comes from, byte for byte, so
+	// one reader serves both.
+	evalStateSnapOff    = 9
+	evalStatePendingOff = evalStateSnapOff + evalSnapFields
+	evalStateMaskOff    = evalStatePendingOff + evalPendingFields
+	evalStateHandsOff   = evalStateMaskOff + agent.NumActions
+
+	// evalStateHandStride is one seat's hand block: its length byte followed by
+	// engine.MaxHandSize canonical card indices.
+	evalStateHandStride = 1 + engine.MaxHandSize
+
+	// evalStateFields is the full record width. It does not vary with seat
+	// count: hand blocks are always written for engine.MaxPlayers seats so a
+	// reader can index a seat without first knowing how many are in play.
+	evalStateFields = evalStateHandsOff + engine.MaxPlayers*evalStateHandStride
+)
+
+// cambia_game_apply_and_read optionally applies one 2-player action index, then
+// fills out_buf with the evalStateFields-byte state record and out_util with
+// engine.MaxPlayers utilities.
+//
+// action_idx < 0 reads without applying, which is how a caller takes the record
+// for a state it did not just step (a fresh deal, or a snapshot restore).
+// Otherwise the action is applied first and the record describes the state after
+// it.
+//
+// Returns evalStateFields on success, -1 on a bad handle or a buffer shorter
+// than its record, and -2 when the engine rejected the action, in which case
+// neither buffer is written and the game is unchanged.
+//
+// Record layout:
+//
+//	[0]        terminal            1 when the game is over, else 0
+//	[1]        acting seat         cardIndexNone when terminal, since
+//	                               ActingPlayer has no meaning there
+//	[2]        decision context    engine.DecisionContext, CtxTerminal included
+//	[3]        turn number low byte
+//	[4]        turn number high byte
+//	[5]        stockpile length
+//	[6]        discard top         canonical card index, cardIndexNone when the
+//	                               pile is empty
+//	[7]        Cambia caller       seat, cardIndexNone when nobody has called
+//	[8]        seats in play       NumActivePlayers()
+//	[9..15)    snap record         cambia_game_get_snap_state's layout
+//	[15..25)   pending record      cambia_game_get_pending's layout
+//	[25..171)  legal action mask   cambia_agent_action_mask's layout; all zero
+//	                               on a terminal state, where LegalActions
+//	                               reports the empty set
+//	[171..227) hands               engine.MaxPlayers blocks of evalStateHandStride
+//	                               bytes: the seat's hand length, then its slots
+//	                               as canonical card indices with cardIndexNone
+//	                               past the length. Seats not in play carry
+//	                               length 0 and all-sentinel slots.
+//
+// out_util is written only on a terminal state and zeroed otherwise: GetUtility
+// scores every hand, and a traversal reads it at terminals only.
+//
+// Read-only apart from the optional apply, allocation-free, and takes no poolMu,
+// matching cambia_game_apply_action and the other single-handle exports.
+//
+//export cambia_game_apply_and_read
+func cambia_game_apply_and_read(game_h C.int32_t, action_idx C.int32_t, out_buf *C.uint8_t, buf_len C.int32_t, out_util *C.float, util_len C.int32_t) C.int32_t {
+	if game_h < 0 || game_h >= maxGames || !gameInUse[game_h] {
+		return -1
+	}
+	if int(buf_len) < evalStateFields || int(util_len) < engine.MaxPlayers {
+		return -1
+	}
+	g := &gamePool[game_h]
+
+	if action_idx >= 0 {
+		if action_idx > C.int32_t(^uint16(0)) {
+			return -2
+		}
+		if err := g.ApplyAction(uint16(action_idx)); err != nil {
+			return -2
+		}
+	}
+
+	out := (*[evalStateFields]C.uint8_t)(unsafe.Pointer(out_buf))
+	terminal := g.IsTerminal()
+
+	if terminal {
+		out[0] = 1
+		out[1] = C.uint8_t(cardIndexNone)
+	} else {
+		out[0] = 0
+		out[1] = C.uint8_t(g.ActingPlayer())
+	}
+	out[2] = C.uint8_t(g.DecisionCtx())
+	out[3] = C.uint8_t(uint8(g.TurnNumber & 0xFF))
+	out[4] = C.uint8_t(uint8(g.TurnNumber >> 8))
+	out[5] = C.uint8_t(g.StockLen)
+	out[6] = C.uint8_t(cardToIndex(g.DiscardTop()))
+	if g.CambiaCaller < 0 {
+		out[7] = C.uint8_t(cardIndexNone)
+	} else {
+		out[7] = C.uint8_t(uint8(g.CambiaCaller))
+	}
+	nSeats := g.NumActivePlayers()
+	out[8] = C.uint8_t(nSeats)
+
+	// Snap window, cambia_game_get_snap_state's layout.
+	snap := out[evalStateSnapOff : evalStateSnapOff+evalSnapFields]
+	if !g.Snap.Active {
+		snap[0] = 0
+		snap[1] = C.uint8_t(cardIndexNone)
+		snap[2] = C.uint8_t(cardIndexNone)
+		snap[3] = 0
+		snap[4] = 0
+		snap[5] = C.uint8_t(cardIndexNone)
+	} else {
+		snap[0] = 1
+		snap[1] = C.uint8_t(g.Snap.DiscardedRank)
+		snap[2] = C.uint8_t(cardToIndex(g.DiscardTop()))
+		snap[3] = C.uint8_t(g.Snap.NumSnappers)
+		snap[4] = C.uint8_t(g.Snap.CurrentSnapperIdx)
+		if g.Snap.CurrentSnapperIdx < g.Snap.NumSnappers {
+			snap[5] = C.uint8_t(g.Snap.Snappers[g.Snap.CurrentSnapperIdx])
+		} else {
+			snap[5] = C.uint8_t(cardIndexNone)
+		}
+	}
+
+	// Pending record, cambia_game_get_pending's layout.
+	pending := out[evalStatePendingOff : evalStatePendingOff+evalPendingFields]
+	for i := range pending {
+		pending[i] = C.uint8_t(cardIndexNone)
+	}
+	pending[0] = C.uint8_t(uint8(g.Pending.Type))
+	pending[9] = 0
+	if g.Pending.Type != engine.PendingNone {
+		pending[1] = C.uint8_t(g.Pending.PlayerID)
+		switch g.Pending.Type {
+		case engine.PendingDiscard:
+			pending[2] = C.uint8_t(cardToIndex(engine.Card(g.Pending.Data[0])))
+			pending[3] = C.uint8_t(g.Pending.Data[1])
+		case engine.PendingKingDecision:
+			pending[4] = C.uint8_t(g.Pending.Data[0])
+			pending[5] = C.uint8_t(g.Pending.Data[1])
+			pending[7] = C.uint8_t(cardToIndex(engine.Card(g.Pending.Data[2])))
+			if nSeats == 2 {
+				pending[6] = C.uint8_t(g.OpponentOf(g.Pending.PlayerID))
+				pending[8] = C.uint8_t(cardToIndex(engine.Card(g.Pending.Data[3])))
+			} else {
+				pending[6] = C.uint8_t(g.Pending.Data[3])
+			}
+		case engine.PendingSnapMove:
+			pending[5] = C.uint8_t(g.Pending.Data[1])
+			pending[6] = C.uint8_t(g.Pending.Data[0])
+		}
+	}
+
+	// Legal set, cambia_agent_action_mask's layout.
+	var boolMask [agent.NumActions]bool
+	agent.ActionMask(g.LegalActions(), &boolMask)
+	maskOut := out[evalStateMaskOff : evalStateMaskOff+agent.NumActions]
+	for i := 0; i < agent.NumActions; i++ {
+		if boolMask[i] {
+			maskOut[i] = 1
+		} else {
+			maskOut[i] = 0
+		}
+	}
+
+	// Hands, one fixed-width block a seat.
+	for p := 0; p < engine.MaxPlayers; p++ {
+		block := out[evalStateHandsOff+p*evalStateHandStride:]
+		if uint8(p) >= nSeats {
+			block[0] = 0
+			for s := 0; s < engine.MaxHandSize; s++ {
+				block[1+s] = C.uint8_t(cardIndexNone)
+			}
+			continue
+		}
+		ps := &g.Players[p]
+		block[0] = C.uint8_t(ps.HandLen)
+		for s := 0; s < engine.MaxHandSize; s++ {
+			if s < int(ps.HandLen) {
+				block[1+s] = C.uint8_t(cardToIndex(ps.Hand[s]))
+			} else {
+				block[1+s] = C.uint8_t(cardIndexNone)
+			}
+		}
+	}
+
+	utilOut := (*[engine.MaxPlayers]C.float)(unsafe.Pointer(out_util))
+	if terminal {
+		u := g.GetUtility()
+		for i := 0; i < engine.MaxPlayers; i++ {
+			utilOut[i] = C.float(u[i])
+		}
+	} else {
+		for i := 0; i < engine.MaxPlayers; i++ {
+			utilOut[i] = 0
+		}
+	}
+
+	return C.int32_t(evalStateFields)
+}
+
+// ---------------------------------------------------------------------------
 // Test-only wrappers for the eval surface
 // ---------------------------------------------------------------------------
 //
