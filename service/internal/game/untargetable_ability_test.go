@@ -24,7 +24,7 @@ import (
 func TestArmedAbilityWithNoLegalTargetResolvesInsteadOfRearming(t *testing.T) {
 	hr := replaceRules(0) // no turn timer, so nothing races the manual call below
 	hr.LockCallerHand = true
-	g, _, _ := setupTestGame(t, 4, hr)
+	g, _, mb := setupTestGame(t, 4, hr)
 
 	g.Engine.CurrentPlayer = 0
 	caller := currentTurnPlayer(g)
@@ -63,12 +63,31 @@ func TestArmedAbilityWithNoLegalTargetResolvesInsteadOfRearming(t *testing.T) {
 	assert.False(t, g.Engine.Snap.Active, "the snap phase the resolution opened is played out")
 	assert.True(t, g.Engine.ActingPlayer() != seat || g.Engine.IsTerminal(),
 		"the turn moves off the seat that could not act")
+
+	// The frame that tells the player why carries the special enum the protocol defines
+	// (game_actions.md), not the card rank that armed the ability: this emitter passed the rank
+	// straight through onto the wire and into the game_actions row (cambia-1239).
+	var fail *GameEvent
+	for i, ev := range mb.playerEvents[actor.ID] {
+		if ev.Type == EventPrivateSpecialFail {
+			fail = &mb.playerEvents[actor.ID][i]
+		}
+	}
+	require.NotNil(t, fail, "the discharged player is told why")
+	assert.Equal(t, "swap_blind", fail.Special, "the Jack's ability is swap_blind on the wire")
 }
 
-// TestArmedAbilityWithALegalTargetStillRearms is the other half: a targetable ability whose chosen
-// action the engine refused is not the stranded case, so the prompt and the clock stand rather than
-// the ability being discharged out from under a player who can still play it.
-func TestArmedAbilityWithALegalTargetStillRearms(t *testing.T) {
+// TestArmedAbilityWithALegalTargetIsPlayedNotDischarged is the other half: an ability the mask can
+// still resolve is not the stranded case, so the timeout plays it against a legal target instead of
+// discharging it out from under a player who could have played it. Same table as above with the
+// swap's targets left in place, driven through the same entry point, so the two tests differ only
+// in whether a target survives.
+//
+// It went by TestArmedAbilityWithALegalTargetStillRearms and never called autoResolveArmedAbility,
+// asserting the engine predicate the test above already covers; the adapter branch that name points
+// at is a guard against the adapter and the engine disagreeing about one action, which no state
+// reachable from play produces (cambia-1239).
+func TestArmedAbilityWithALegalTargetIsPlayedNotDischarged(t *testing.T) {
 	hr := replaceRules(0)
 	hr.LockCallerHand = true
 	g, _, _ := setupTestGame(t, 4, hr)
@@ -80,17 +99,32 @@ func TestArmedAbilityWithALegalTargetStillRearms(t *testing.T) {
 
 	actor := currentTurnPlayer(g)
 	seat := g.PlayerToEngine[actor.ID]
+	require.Equal(t, uint8(1), seat, "the turn moved to seat 1")
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	// Seats 2 and 3 still hold cards, so the swap has a target the mask accepts.
+	// Seats 2 and 3 still hold cards, so the swap has a target the mask accepts, and the lock
+	// keeps seat 0 out of reach: the auto-resolution must take the first unlocked one.
 	g.Engine.Pending.Type = engine.PendingBlindSwap
 	g.Engine.Pending.PlayerID = seat
+	g.SpecialAction = SpecialActionState{
+		Active:    true,
+		PlayerID:  actor.ID,
+		CardRank:  "J",
+		Mandatory: true,
+	}
 	require.NotEmpty(t, g.Engine.NPlayerLegalActionsList(), "premise: the ability is resolvable")
 
-	if g.Engine.ResolveUntargetableArmedAbility(g.isNPlayerTable()) {
-		t.Fatal("a resolvable ability was discharged")
-	}
-	assert.Equal(t, engine.PendingBlindSwap, g.Engine.Pending.Type, "the ability stands")
+	ownBefore := g.Engine.Players[seat].Hand[0]
+	targetBefore := g.Engine.Players[2].Hand[0]
+	callerBefore := g.Engine.Players[0].Hand
+
+	g.autoResolveArmedAbility(actor.ID)
+
+	assert.Equal(t, targetBefore, g.Engine.Players[seat].Hand[0], "the swap was played against seat 2")
+	assert.Equal(t, ownBefore, g.Engine.Players[2].Hand[0], "and seat 2 got the actor's card")
+	assert.Equal(t, callerBefore, g.Engine.Players[0].Hand, "the locked caller's hand is not a target")
+	assert.Equal(t, engine.PendingNone, g.Engine.Pending.Type, "the ability was resolved, not left armed")
+	assert.False(t, g.SpecialAction.Active, "and the prompt does not outlive it")
 }

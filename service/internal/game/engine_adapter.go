@@ -1148,13 +1148,19 @@ func (g *CambiaGame) autoResolveArmedAbility(playerID uuid.UUID) {
 		// (cambia-1171). The loop this replaces was never reproduced; this is a guard.
 		pending := g.Engine.Pending.Type
 		rank := g.SpecialAction.CardRank
+		// The frame's special field is the peek_self/peek_other/swap_blind/swap_peek enum
+		// (service/doc/game_actions.md), not a card rank, and it reaches both the wire and the
+		// game_actions row. The sibling emitters convert the same way (RejectSpecialAction, and
+		// the client's own enum echoed by special_actions.go); this one sent the rank straight
+		// through (cambia-1239).
+		special := rankToSpecial(rank)
 		if g.Engine.ResolveUntargetableArmedAbility(g.isNPlayerTable()) {
 			log.Printf("Game %s: pending ability %d for player %s had no legal target; resolved it and advanced.", g.ID, pending, playerID)
 			g.logAction(playerID, "action_special_timeout_fizzle", map[string]interface{}{
-				"rank": rank, "pending": pending,
+				"rank": rank, "special": special, "pending": pending,
 			})
 			g.SpecialAction = SpecialActionState{}
-			g.FireEventPrivateSpecialActionFail(playerID, "That ability had no legal target and was discharged.", rank, nil, nil)
+			g.FireEventPrivateSpecialActionFail(playerID, "That ability had no legal target and was discharged.", special, nil, nil)
 			g.settleEngineResolution()
 			return
 		}
