@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 )
@@ -56,7 +57,25 @@ const (
 	KindEvaluate   = "evaluate"
 	KindHeadToHead = "head-to-head"
 	KindBench      = "bench"
+	// KindMeasure runs a pinned script under an allowlisted root instead of a
+	// cambia subcommand (design D38, cambia-1072): no cambia subcommand exists
+	// for it, so it is registered in HarnessAlgorithms only to pass the submit
+	// allowlist below; the launch template never consults that entry (see
+	// Dispatcher.launchOpts).
+	KindMeasure = "measure"
 )
+
+// measureScriptRoot is the allowlisted worktree-relative root a measure job's
+// script must resolve under (design D38). script is validated against it
+// lexically at submit (handlers.go, before a worktree exists) and the staged
+// file is required to exist there at launch (Dispatcher.launchOpts).
+const measureScriptRoot = "cfr/scripts/"
+
+// maxMeasureArgLen caps a single measure args entry in bytes (design D38:
+// "each entry rejected on a NUL or over a length cap"). 4096 comfortably
+// covers a path or flag value while bounding a submitter's ability to inflate
+// argv.
+const maxMeasureArgLen = 4096
 
 // HarnessAlgorithms returns the runnerd job-kind -> cambia-subcommand allowlist
 // injected into the ProcessManager. It is the superset the daemon supervises
@@ -73,6 +92,11 @@ func HarnessAlgorithms() map[string][]string {
 		KindEvaluate:   {"evaluate"},
 		KindHeadToHead: {"head-to-head"},
 		KindBench:      {"benchmark", "all"},
+		// KindMeasure carries no cambia subcommand (design D38): its launch
+		// template builds argv from the staged script + args directly and never
+		// calls AlgoSubcommand, so this value is unused. The entry exists only
+		// so the kind allowlist check at handlers.go admits it.
+		KindMeasure: {},
 	}
 }
 
@@ -120,6 +144,22 @@ type JobSpec struct {
 	// JobView, letting the client-side reflector link a job's note to a hub item
 	// (recoverable from a pulled run dir). Empty means an unlinked job.
 	HubItem string `json:"hub_item,omitempty"`
+	// Script is the worktree-relative path to a kind=measure job's pinned
+	// script (design D38), e.g. "cfr/scripts/measure_gate_gap.py". Required for
+	// measure, forbidden for every other kind: it must resolve under
+	// measureScriptRoot and must exist at the pinned commit (checked at launch,
+	// once the worktree is staged).
+	Script string `json:"script,omitempty"`
+	// Args is a kind=measure job's argv tail, appended verbatim after the
+	// staged script path with no shell involved (design D38). Forbidden for
+	// every other kind.
+	Args []string `json:"args,omitempty"`
+	// Reads names other run directories a kind=measure job reads as read-only
+	// seeds (design D38), resolved through pathguard against the runs dir and
+	// required to already exist at submit. Exported to the job process as
+	// CAMBIA_MEASURE_READ_DIRS (os.pathsep-joined). Forbidden for every other
+	// kind.
+	Reads []string `json:"reads,omitempty"`
 	// Exclusive marks a timing-sensitive job that must run alone (cambia-655): the
 	// dispatcher launches it only when no other job is active and holds every other
 	// job while it prepares or runs. Absent decodes false (a normal job that shares
@@ -200,6 +240,69 @@ func (s *JobSpec) targetForbidden() bool {
 // for it.
 func (s *JobSpec) warmStartForbidden() bool {
 	return s.Kind != KindTrain && s.WarmStart != ""
+}
+
+// scriptRequired reports whether kind=measure has left script unset (design
+// D38: script is required for measure).
+func (s *JobSpec) scriptRequired() bool {
+	return s.Kind == KindMeasure && s.Script == ""
+}
+
+// scriptForbidden reports whether script is set on a kind other than measure
+// (design D38: script is measure-only, like target is evaluate-only).
+func (s *JobSpec) scriptForbidden() bool {
+	return s.Kind != KindMeasure && s.Script != ""
+}
+
+// scriptRootValid reports whether script (already passed through
+// pathguard.CheckRel, so it carries no ".." segment and is not absolute)
+// lexically resolves under measureScriptRoot. This is a fixed-literal-prefix
+// check, not filesystem containment: the worktree does not exist yet at
+// submit time. The staged file's existence is checked at launch instead.
+func (s *JobSpec) scriptRootValid() bool {
+	return strings.HasPrefix(s.Script, measureScriptRoot) && s.Script != measureScriptRoot
+}
+
+// argsForbidden reports whether args is set on a kind other than measure
+// (design D38).
+func (s *JobSpec) argsForbidden() bool {
+	return len(s.Args) > 0 && s.Kind != KindMeasure
+}
+
+// validateArgs rejects a measure job's args entries containing a NUL byte or
+// exceeding maxMeasureArgLen (design D38). A no-op when args is empty (every
+// other kind, or a measure job with no argv tail).
+func (s *JobSpec) validateArgs() error {
+	for i, a := range s.Args {
+		if strings.IndexByte(a, 0) >= 0 {
+			return fmt.Errorf("args[%d]: contains a NUL byte", i)
+		}
+		if len(a) > maxMeasureArgLen {
+			return fmt.Errorf("args[%d]: exceeds %d bytes", i, maxMeasureArgLen)
+		}
+	}
+	return nil
+}
+
+// readsForbidden reports whether reads is set on a kind other than measure
+// (design D38).
+func (s *JobSpec) readsForbidden() bool {
+	return len(s.Reads) > 0 && s.Kind != KindMeasure
+}
+
+// containedReads returns a measure job's reads entries for the same
+// containment-resolve guard as containedTarget/containedWarmStart (design
+// D38): each read names an existing run directory under the runs dir, so its
+// containment base is known at submit time.
+func (s *JobSpec) containedReads() []struct{ label, value string } {
+	if s.Kind != KindMeasure {
+		return nil
+	}
+	out := make([]struct{ label, value string }, len(s.Reads))
+	for i, r := range s.Reads {
+		out[i] = struct{ label, value string }{fmt.Sprintf("reads[%d]", i), r}
+	}
+	return out
 }
 
 // overridesStr renders the dotted-key overrides as a string map for the ingest
