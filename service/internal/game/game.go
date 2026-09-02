@@ -16,6 +16,23 @@ import (
 	"github.com/coder/websocket"
 )
 
+// EndReason names why a game ended. It is the value of the `reason` field on the frames that
+// report a result (game_end, and the game_results the hub holds and re-sends), and the empty
+// value is what an ordinary ending carries: a called Cambia, the turn cap, an exhausted stockpile
+// and a table emptied by forfeits all end a game that was played, so those frames say nothing
+// about why and omit the field entirely.
+type EndReason string
+
+const (
+	// EndReasonNormal is a game that reached one of its rulebook endings.
+	EndReasonNormal EndReason = ""
+	// EndReasonInternalError is a game the panic guard ended (panic_guard.go, cambia-1243). The
+	// scores that ride the results frames are computed from whatever state the panic left behind,
+	// so they are not a result anybody played to: a client that sees this reason reports an
+	// internal error in place of the scoreboard, and the game is not rated (see ratePerGame).
+	EndReasonInternalError EndReason = "internal_error"
+)
+
 // OnGameEndFunc defines the signature for a callback function executed when a game ends.
 // It receives the lobby ID, the primary winner's ID (can be Nil), the final (display-adjusted)
 // scores, and each participant's username keyed by player ID (cambia-877). usernames is supplied
@@ -31,7 +48,12 @@ import (
 // finalHands is the round-end reveal (RULES.md 3C, cambia-1542): every scored seat's hand as the
 // round ended. It is passed here for the same reason usernames is, and because the game is dropped
 // from the store immediately after the callback returns, so a later read has nothing to read from.
-type OnGameEndFunc func(lobbyID uuid.UUID, winner uuid.UUID, scores map[uuid.UUID]int, usernames map[uuid.UUID]string, rawScores map[uuid.UUID]int, cambiaCallerID uuid.UUID, finalHands []FinalHand)
+//
+// reason says why the game ended (cambia-1831). It is EndReasonNormal for every game that reached
+// one of its rulebook endings and EndReasonInternalError for one the panic guard aborted, and it
+// travels as an argument for the same reason the rest of this data does: the callback cannot read
+// it back off the game without taking the lock its caller still holds.
+type OnGameEndFunc func(lobbyID uuid.UUID, winner uuid.UUID, scores map[uuid.UUID]int, usernames map[uuid.UUID]string, rawScores map[uuid.UUID]int, cambiaCallerID uuid.UUID, finalHands []FinalHand, reason EndReason)
 
 // GameEventType represents the type of a game-related event broadcast via WebSockets.
 type GameEventType string
@@ -240,6 +262,12 @@ type CambiaGame struct {
 	Started       bool // Has the game started (after pre-game)?
 	GameOver      bool // Has the game finished?
 	PreGameActive bool // Is the initial pre-game card reveal phase active?
+
+	// endReason is why this game ended, written once by endWithReason under mu just before the
+	// game is marked over and read by everything endGame produces from there: the results frames,
+	// the action log entry and the rating gate. It stays EndReasonNormal for a game that is still
+	// being played and for every ordinary ending (cambia-1831).
+	endReason EndReason
 
 	lastSeen map[uuid.UUID]time.Time // Tracks last activity time for players (potential future use).
 
@@ -1218,8 +1246,24 @@ func rankToSpecial(rank string) string {
 // It acquires mu and delegates to endGame. Internal callers that already hold mu (the action
 // apply path and disconnect handling) call endGame directly.
 func (g *CambiaGame) EndGame() {
+	g.endWithReason(EndReasonNormal)
+}
+
+// endWithReason takes mu, records why the game is ending and ends it. One acquisition covers
+// both, so nothing can observe a finished game without the reason that finished it: endGame
+// builds every frame and every record from that value on the same goroutine, still holding the
+// lock (cambia-1831).
+//
+// The reason is only written for a game this call is actually going to end. A second caller
+// arriving after the game is over would otherwise relabel a result already reported, which is a
+// live case here: the panic guard's abort runs over state a panic left behind, and the panic may
+// well have happened inside the endGame that had already reported the game.
+func (g *CambiaGame) endWithReason(reason EndReason) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if !g.GameOver {
+		g.endReason = reason
+	}
 	g.endGame()
 }
 
@@ -1333,13 +1377,20 @@ func (g *CambiaGame) endGame() {
 	}
 	// --- End Scoring ---
 
-	g.logAction(uuid.Nil, string(EventGameEnd), map[string]interface{}{
+	endLog := map[string]interface{}{
 		"scores":         adjustedScores,
 		"winners":        winners,
 		"caller":         callerID,
 		"penaltyApplied": penaltyApplies,
 		"winBonus":       g.Circuit.Rules.WinBonus,
-	})
+	}
+	if g.endReason != EndReasonNormal {
+		// The replay table is the only durable account of how a game ended, and a game the panic
+		// guard aborted is exactly the one a later reader must not mistake for a played-out
+		// result (cambia-1831).
+		endLog["reason"] = string(g.endReason)
+	}
+	g.logAction(uuid.Nil, string(EventGameEnd), endLog)
 	g.persistFinalGameState(adjustedScores, winners)
 
 	// Determine primary winner for event payload.
@@ -1365,6 +1416,13 @@ func (g *CambiaGame) endGame() {
 	for pid, score := range displayScores {
 		resultsPayload["scores"].(map[string]int)[pid.String()] = score
 	}
+	// Why the game ended, on the frame that reports it ending (cambia-1831). Present only for an
+	// abnormal ending, so every ordinary result keeps the shape every existing consumer reads.
+	// The scores still ride the frame: they are what the record path stored, and the reason is
+	// what tells a client not to present them as a result.
+	if g.endReason != EndReasonNormal {
+		resultsPayload["reason"] = string(g.endReason)
+	}
 	g.fireEvent(GameEvent{
 		Type:    EventGameEnd,
 		Payload: resultsPayload,
@@ -1378,10 +1436,16 @@ func (g *CambiaGame) endGame() {
 				usernames[p.ID] = p.User.Username
 			}
 		}
-		g.OnGameEnd(g.LobbyID, firstWinner, displayScores, usernames, finalScores, callerID, finalHands)
+		g.OnGameEnd(g.LobbyID, firstWinner, displayScores, usernames, finalScores, callerID, finalHands, g.endReason)
 	}
 
-	log.Printf("Game %s: Ended. Winner(s): %v. Final Scores (Adj): %v", g.ID, winners, adjustedScores)
+	if g.endReason != EndReasonNormal {
+		// Named separately because the winner is the misleading half of the ordinary line here:
+		// there is one in the data, computed from a state nobody played into.
+		log.Printf("Game %s: Ended by %s. Scores off the state the abort found: %v", g.ID, g.endReason, adjustedScores)
+	} else {
+		log.Printf("Game %s: Ended. Winner(s): %v. Final Scores (Adj): %v", g.ID, winners, adjustedScores)
+	}
 }
 
 // computeScoresFromEngine calculates the final score of every seated player.
@@ -1476,8 +1540,14 @@ func (g *CambiaGame) findWinnersWithCambiaLogicEngine(scores map[uuid.UUID]int, 
 // scores. The round is still recorded and displayed like any other game; only its rating update
 // is withheld, deferring to the single one the circuit's completion triggers
 // (handlers.finalizeCircuitRatings -> database.RecordCircuitRatings).
+//
+// A game the panic guard ended is not rated either, and this one is withheld outright rather than
+// deferred: its scores are read off whatever state the panic left behind, so rating them would
+// move real ratings on a result nobody played to (cambia-1831). The game_results rows are still
+// written - RecordGameAndResults writes them whether or not the game is rated - so the record of
+// what the abort found survives for anyone diagnosing it.
 func (g *CambiaGame) ratePerGame() bool {
-	return g.Rated && !g.Circuit.Enabled
+	return g.Rated && !g.Circuit.Enabled && g.endReason == EndReasonNormal
 }
 
 // FinalHandCard is one card of a seat's hand as the round ended: the wire id every event already
@@ -1604,9 +1674,14 @@ func (g *CambiaGame) persistFinalGameState(finalScores map[uuid.UUID]int, winner
 		players := g.Players
 		rated := g.ratePerGame()
 		if g.Rated && !rated {
-			// Logged separately so a circuit round is distinguishable from a genuinely unrated
-			// game downstream, where RecordGameAndResults reports both as "unrated".
-			log.Printf("Game %s: circuit round; per-game rating deferred to the circuit's conclusion.", gameID)
+			// Logged separately so a circuit round and an aborted game are each distinguishable
+			// from a genuinely unrated one downstream, where RecordGameAndResults reports all
+			// three as "unrated".
+			if g.Circuit.Enabled {
+				log.Printf("Game %s: circuit round; per-game rating deferred to the circuit's conclusion.", gameID)
+			} else {
+				log.Printf("Game %s: ended by %s; rating withheld from a result nobody played to.", gameID, g.endReason)
+			}
 		}
 		go g.runGuarded("the results and rating write", func() {
 			if wg != nil {

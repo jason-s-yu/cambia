@@ -97,13 +97,13 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request, nodeID stri
 	}
 }
 
-// HeaderClaimHold and HeaderClaimRetry carry a 204 claim's hold reason and
-// backoff. The brief writes the hold as a 204 body, which HTTP does not permit
-// and net/http drops on the floor, so the two fields ride headers instead and
-// the status stays the 204 the protocol table names.
+// HeaderClaimHold and HeaderClaimRetry are the header names of nashnet's own
+// wire vocabulary, re-exported here for the route tests that read them. Both
+// sides of the claim read the one spelling, so a rename cannot silently
+// degrade every hold to no_match on the node.
 const (
-	HeaderClaimHold  = "X-Nashnet-Hold"
-	HeaderClaimRetry = "X-Nashnet-Retry-After"
+	HeaderClaimHold  = nashnet.HeaderClaimHold
+	HeaderClaimRetry = nashnet.HeaderClaimRetry
 )
 
 // hold answers a claim that placed nothing (D2).

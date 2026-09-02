@@ -63,7 +63,10 @@ const (
 // they do not (D49).
 type MaterializeMode string
 
-// The two materialize modes.
+// The two remote materialize modes. A third mode is not listed here because
+// it is not a store setting: an embedded lease materializes in place (D40),
+// which Lease.InPlace selects per commit, since one coordinator serves remote
+// and embedded leases at once.
 const (
 	ModeLink MaterializeMode = "link"
 	ModeCopy MaterializeMode = "copy"
@@ -200,6 +203,13 @@ type Lease struct {
 	// means the job id, which is right for every kind but evaluate, where the
 	// coordinator resolves spec.target instead (D64).
 	RunDBName string
+	// InPlace marks the embedded node's lease (D40). Its job wrote every file
+	// straight into the run dir the manifest names, so a commit proves each
+	// entry against the file already at its destination and promotes nothing.
+	// The coordinator sets it from the lease's node id, never from a request:
+	// a remote node claiming to run in place would be claiming the right to
+	// have its manifest believed without uploading a byte.
+	InPlace bool
 }
 
 // rundbName is the identity the journal validator checks the runs row against.

@@ -87,6 +87,55 @@ class TestPersistEvalResults:
         persist_eval_results(str(run_dir), 100, {"random": results})
         assert (run_dir / "evaluations" / "iter_100").is_dir()
 
+    def test_metrics_dir_splits_the_write_from_the_evaluated_run(self, tmp_path):
+        """The rows land in the metrics root; the evaluated run keeps its name.
+
+        This is the D64 split. An evaluate job on a node holds a lease on its
+        own run dir and nothing else, and the run it evaluates arrives as a
+        read-only seed, so metrics.jsonl and evaluations/ must not be written
+        into the target. What still comes from the target is identity: every
+        row is keyed by its name, because the numbers are about that run.
+        """
+        from src.evaluate_agents import persist_eval_results
+
+        target = tmp_path / "prior-run"
+        target.mkdir()
+        job_dir = tmp_path / "eval-job"
+        job_dir.mkdir()
+
+        results = Counter({"P0 Wins": 60, "P1 Wins": 40})
+        results.stats = {}
+
+        persist_eval_results(
+            run_dir=str(target),
+            iteration=100,
+            results_map={"random": results},
+            metrics_dir=str(job_dir),
+        )
+
+        assert not (target / "metrics.jsonl").exists()
+        assert not (target / "evaluations").exists()
+        assert (job_dir / "evaluations" / "iter_100").is_dir()
+
+        with open(job_dir / "metrics.jsonl") as f:
+            row = json.loads(f.readline())
+        assert row["run"] == "prior-run"
+        assert row["iter"] == 100
+
+    def test_metrics_dir_defaults_to_the_evaluated_run(self, tmp_path):
+        """Without a metrics root the single-host behavior is unchanged."""
+        from src.evaluate_agents import persist_eval_results
+
+        run_dir = tmp_path / "local-run"
+        run_dir.mkdir()
+
+        results = Counter({"P0 Wins": 60, "P1 Wins": 40})
+        results.stats = {}
+
+        persist_eval_results(str(run_dir), 100, {"random": results})
+        assert (run_dir / "metrics.jsonl").exists()
+        assert (run_dir / "evaluations" / "iter_100").is_dir()
+
     def test_handles_empty_results(self, tmp_path):
         """persist_eval_results handles empty results gracefully."""
         from src.evaluate_agents import persist_eval_results

@@ -60,7 +60,12 @@ import numpy as np
 from ..agent_state import AgentObservation
 from ..agents.action_codec import index_to_action
 from ..constants import (
+    ActionAbilityKingLookSelect,
+    ActionAbilityKingSwapDecision,
+    ActionAbilityPeekOtherSelect,
+    ActionAbilityPeekOwnSelect,
     ActionDiscard,
+    ActionDrawDiscard,
     ActionDrawStockpile,
     ActionPassSnap,
     ActionReplace,
@@ -135,11 +140,13 @@ class _SnapLogMirror:
 
 class Checkpoint(NamedTuple):
     """A rewind token. ``snap_h`` is None once the engine snapshot pool is full,
-    in which case ``rewind`` replays ``prefix`` from the deal instead."""
+    in which case ``rewind`` replays ``prefix`` forward from the deepest live
+    snapshot that lies on the way to it (the deal, when there is none)."""
 
     snap_h: Optional[int]
     prefix: Tuple[int, ...]
     snap_log: _SnapLogMirror
+    king_swap: Optional[Tuple[int, int]]
 
 
 class GoBrState:
@@ -155,6 +162,8 @@ class GoBrState:
         "house_rules",
         "_prefix",
         "_snap_log",
+        "_king_swap",
+        "_live_snaps",
         "_num_players",
         "_closed",
     )
@@ -165,6 +174,8 @@ class GoBrState:
         self.house_rules = house_rules
         self._prefix: List[int] = []
         self._snap_log = _SnapLogMirror()
+        self._king_swap: Optional[Tuple[int, int]] = None
+        self._live_snaps: List[Tuple[Tuple[int, ...], int]] = []
         self._num_players = int(engine.num_players())
         self._closed = False
 
@@ -294,6 +305,7 @@ class GoBrState:
         the work behind it is several, and the search spends most of its edges
         nowhere near a snap.
         """
+        action = index_to_action(int(action_idx))
         snap_before = self.engine.get_snap_state()
         entry = None
         if (
@@ -301,10 +313,11 @@ class GoBrState:
             and self.decision_context() is DecisionContext.SNAP_DECISION
         ):
             entry = self._snap_entry(
-                index_to_action(int(action_idx)),
+                action,
                 int(self.engine.acting_player()),
                 snap_before,
             )
+        self._king_swap = self._pre_apply_king_swap(action)
 
         self.engine.apply_action(int(action_idx))
         self._prefix.append(int(action_idx))
@@ -333,6 +346,7 @@ class GoBrState:
         worth knowing about, so it says so once per process.
         """
         global _REPLAY_FALLBACK_WARNED
+        prefix = tuple(self._prefix)
         try:
             snap_h: Optional[int] = self.engine.save()
         except RuntimeError:
@@ -340,12 +354,14 @@ class GoBrState:
             if not _REPLAY_FALLBACK_WARNED:
                 _REPLAY_FALLBACK_WARNED = True
                 logger.warning(
-                    "Best-response search exhausted the engine snapshot pool at "
-                    "depth %d; rewinding by replaying the action prefix from the "
-                    "deal instead. Correct but much slower.",
-                    len(self._prefix),
+                    "Exhausted the engine snapshot pool at depth %d; rewinding "
+                    "by replaying forward from the deepest live snapshot "
+                    "instead. Correct but slower.",
+                    len(prefix),
                 )
-        return Checkpoint(snap_h, tuple(self._prefix), self._snap_log.clone())
+        else:
+            self._live_snaps.append((prefix, snap_h))
+        return Checkpoint(snap_h, prefix, self._snap_log.clone(), self._king_swap)
 
     def rewind(self, cp: Checkpoint) -> None:
         """Restore the state the checkpoint was taken at."""
@@ -355,25 +371,53 @@ class GoBrState:
             self._replay(cp.prefix)
         self._prefix = list(cp.prefix)
         self._snap_log = cp.snap_log.clone()
+        self._king_swap = cp.king_swap
 
     def release(self, cp: Checkpoint) -> None:
         """Release a checkpoint's engine snapshot, if it took one."""
-        if cp.snap_h is not None:
-            self.engine.free_snapshot(cp.snap_h)
+        if cp.snap_h is None:
+            return
+        self.engine.free_snapshot(cp.snap_h)
+        for i in range(len(self._live_snaps) - 1, -1, -1):
+            if self._live_snaps[i][1] == cp.snap_h:
+                del self._live_snaps[i]
+                break
 
     def _replay(self, prefix: Tuple[int, ...]) -> None:
-        """Rebuild the engine from the deal and re-apply ``prefix``."""
-        fresh = self._deal_engine(self.house_rules, self.deal)
-        old = self.engine
-        self.engine = fresh
-        old.close()
-        for action_idx in prefix:
+        """Restore the closest live snapshot on the way to ``prefix``, then
+        re-apply the rest.
+
+        Every live snapshot sits on the path this state walked, so the deepest
+        one that ``prefix`` extends is a valid starting point and replaying from
+        it costs the tail rather than the whole game. With none to start from
+        the engine is re-dealt, which is the same work the search used to do on
+        every fallback rewind.
+        """
+        start = 0
+        base: Optional[int] = None
+        for snap_prefix, snap_h in self._live_snaps:
+            n = len(snap_prefix)
+            if n <= len(prefix) and n >= start and prefix[:n] == snap_prefix:
+                start, base = n, snap_h
+        if base is not None:
+            self.engine.restore(base)
+        else:
+            fresh = self._deal_engine(self.house_rules, self.deal)
+            old = self.engine
+            self.engine = fresh
+            old.close()
+        for action_idx in prefix[start:]:
             self.engine.apply_action(int(action_idx))
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        # The snapshot pool is global and finite, so a checkpoint an aborted
+        # recursion never released would be lost for the life of the process.
+        for _, snap_h in self._live_snaps:
+            self.engine.free_snapshot(snap_h)
+        self._live_snaps = []
         self.engine.close()
 
     def __enter__(self) -> "GoBrState":
@@ -384,18 +428,32 @@ class GoBrState:
 
     # --- Observation ---
 
-    def initial_observation(self) -> AgentObservation:
+    def initial_observation(self, ability_reveals: bool = False) -> AgentObservation:
         """The pre-first-action frame ``AgentState.initialize`` consumes."""
-        return self.observation(None, -1)
+        return self.observation(None, -1, ability_reveals=ability_reveals)
 
     def observation(
-        self, action: Optional[GameAction], acting_player: int
+        self,
+        action: Optional[GameAction],
+        acting_player: int,
+        ability_reveals: bool = False,
     ) -> AgentObservation:
         """The post-action frame, field for field as the Python builder had it.
 
-        ``peeked_cards`` is None here exactly as it was on the Python path: the
-        best-response search never surfaced a peek to either belief, and
-        ``_filter_observation_for_br`` nulled the field regardless.
+        ``ability_reveals`` selects which of the two frames the Python engine
+        produced. Off (the default, and what ``src.analysis_tools``' search
+        asks for) reproduces ``AnalysisTools._create_observation_for_br``: a
+        peek reveals nothing to either belief and a King swap moves no known
+        face. On reproduces the production frame
+        ``src.cfr.worker._create_observation`` built, which the tabular
+        traversal's belief layer needs -- the peeked cards, which
+        ``_filter_observation`` then masks down to the peeker, and the King
+        swap's slot pair, which is public and tells both beliefs which two
+        faces travelled.
+
+        The two frames are not interchangeable: the search's belief was
+        verified against the reduced one, and handing it the fuller frame would
+        move its exploitability numbers.
         """
         engine = self.engine
         caller = engine.cambia_caller()
@@ -408,12 +466,15 @@ class GoBrState:
             ],
             stockpile_size=engine.stock_len(),
             drawn_card=self._drawn_card(action, acting_player),
-            peeked_cards=None,
+            peeked_cards=(
+                self._peeked_cards(action, acting_player) if ability_reveals else None
+            ),
             snap_results=self._snap_log.entries(),
             did_cambia_get_called=caller is not None,
             who_called_cambia=caller,
             is_game_over=engine.is_terminal(),
             current_turn=engine.turn_number(),
+            king_swap_indices=self._king_swap if ability_reveals else None,
         )
 
     # --- Internals ---
@@ -442,10 +503,85 @@ class GoBrState:
                 len(hand),
             )
             return None
-        if isinstance(action, ActionDrawStockpile):
+        if isinstance(action, (ActionDrawStockpile, ActionDrawDiscard)):
             pending = engine.get_pending()
             if pending.seat == acting_player:
                 return pending.drawn_card
+        return None
+
+    def _pre_apply_king_swap(self, action: GameAction) -> Optional[Tuple[int, int]]:
+        """The (own slot, target slot) pair a King swap is about to move.
+
+        Read before the action applies, because applying it clears the pending
+        King record that names the two slots -- the same reason
+        ``src.cfr.worker`` captured the pair off ``pending_action_data`` before
+        calling ``apply_action``. Declining the swap moves nothing and records
+        nothing.
+        """
+        if not isinstance(action, ActionAbilityKingSwapDecision):
+            return None
+        if not action.perform_swap:
+            return None
+        pending = self.engine.get_pending()
+        if pending.own_slot is None or pending.target_slot is None:
+            return None
+        return (int(pending.own_slot), int(pending.target_slot))
+
+    def _peeked_cards(self, action: Optional[GameAction], acting_player: int):
+        """The faces this ability turned up, keyed by (seat, hand slot).
+
+        None for every other action, matching the production builder. The
+        engine is read after the action applies, which is where the Python
+        builder read too and is safe because none of the three look abilities
+        moves a card: the King's swap is a separate later decision.
+        """
+        if acting_player < 0 or action is None:
+            return None
+        engine = self.engine
+        opponent = 1 - acting_player
+
+        if isinstance(action, ActionAbilityPeekOwnSelect):
+            hand = engine.get_player_hand(acting_player)
+            idx = action.target_hand_index
+            if 0 <= idx < len(hand):
+                return {(acting_player, idx): hand[idx]}
+            logger.warning(
+                "Create Obs: PeekOwn index %d invalid for hand size %d.",
+                idx,
+                len(hand),
+            )
+            return None
+
+        if isinstance(action, ActionAbilityPeekOtherSelect):
+            opp_hand = engine.get_player_hand(opponent)
+            idx = action.target_opponent_hand_index
+            if 0 <= idx < len(opp_hand):
+                return {(opponent, idx): opp_hand[idx]}
+            logger.warning(
+                "Create Obs: PeekOther index %d invalid for opp hand size %d.",
+                idx,
+                len(opp_hand),
+            )
+            return None
+
+        if isinstance(action, ActionAbilityKingLookSelect):
+            own_hand = engine.get_player_hand(acting_player)
+            opp_hand = engine.get_player_hand(opponent)
+            own_idx, opp_idx = action.own_hand_index, action.opponent_hand_index
+            if 0 <= own_idx < len(own_hand) and 0 <= opp_idx < len(opp_hand):
+                return {
+                    (acting_player, own_idx): own_hand[own_idx],
+                    (opponent, opp_idx): opp_hand[opp_idx],
+                }
+            logger.warning(
+                "Create Obs: KingLook indices invalid. Own %s/%d, Opp %s/%d",
+                own_idx,
+                len(own_hand),
+                opp_idx,
+                len(opp_hand),
+            )
+            return None
+
         return None
 
     def _snap_entry(

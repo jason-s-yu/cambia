@@ -18,8 +18,9 @@ import (
 )
 
 // HeaderOffset carries the coordinator's true part offset on a resume probe and
-// on an offset mismatch (D50).
-const HeaderOffset = "X-Nashnet-Offset"
+// on an offset mismatch (D50). It is nashnet's own spelling, so the node's
+// HeaderBlobOffset and this cannot drift.
+const HeaderOffset = nashnet.HeaderBlobOffset
 
 // quarantineLease projects a lease record onto the quarantine store's view of
 // it: the node, job, and lease ids come from the authenticated record and never
@@ -35,6 +36,10 @@ func (p *Pool) quarantineLease(l nashnet.Lease) quarantine.Lease {
 		Epoch:     l.LeaseEpoch,
 		Grants:    grants,
 		RunDBName: p.runDBName(l.JobID),
+		// In place only for the node running inside this process, decided from
+		// the authenticated lease record rather than from anything the node
+		// says about itself (D40).
+		InPlace: p.embedded != "" && l.NodeID == p.embedded,
 	}
 }
 

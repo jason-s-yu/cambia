@@ -135,6 +135,23 @@ func LoadConfig(path string) (Config, error) {
 // every field passes before the agent starts, so no later code re-checks a
 // scheme or re-expands a path.
 func (c *Config) normalize() error {
+	if err := c.normalizeCoordinator(); err != nil {
+		return err
+	}
+	return c.NormalizeEmbedded()
+}
+
+// NormalizeEmbedded is normalize without the coordinator URL and certificate
+// pin. The embedded node of --role both reaches its coordinator over an
+// in-process handler (D65), so there is no URL to parse and no certificate to
+// pin; every other default, expansion, and check is the one a remote node
+// gets, because the two nodes are otherwise the same node.
+func (c *Config) NormalizeEmbedded() error {
+	return c.normalizeLocal()
+}
+
+// normalizeCoordinator validates the one coordinator a remote node serves.
+func (c *Config) normalizeCoordinator() error {
 	raw := strings.TrimSpace(c.Coordinator.URL)
 	if raw == "" {
 		return fmt.Errorf("%w: coordinator.url is required", ErrConfig)
@@ -157,7 +174,12 @@ func (c *Config) normalize() error {
 		return fmt.Errorf("%w: coordinator.cert_sha256 must be 64 hex characters", ErrConfig)
 	}
 	c.Coordinator.CertSHA256 = strings.ToLower(m[1])
+	return nil
+}
 
+// normalizeLocal applies every default, expansion, and check that describes
+// the node itself rather than its coordinator.
+func (c *Config) normalizeLocal() error {
 	for _, f := range []struct {
 		name string
 		p    *string

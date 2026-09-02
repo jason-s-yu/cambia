@@ -101,6 +101,13 @@ func NewSigner(priv ed25519.PrivateKey, now func() time.Time) (*Signer, error) {
 // NodeID returns the derived node id.
 func (s *Signer) NodeID() string { return s.nodeID }
 
+// PublicKey returns the public half, which is what the coordinator's
+// in-process grant for the embedded node is keyed on (D40).
+func (s *Signer) PublicKey() ed25519.PublicKey {
+	pub, _ := s.priv.Public().(ed25519.PublicKey)
+	return pub
+}
+
 // PublicKeyBase64 renders the public half as the base64url the enrollment
 // grant carries in its node_pubkey claim (D60).
 func (s *Signer) PublicKeyBase64() string {

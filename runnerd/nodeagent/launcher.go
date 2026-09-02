@@ -26,12 +26,16 @@ type Environment interface {
 	Cleanup(jobID string, keepForDebug bool) error
 }
 
-// ProcessStatus is the node's view of one supervised process.
+// ProcessStatus is the node's view of one supervised process. Status is the
+// row verbatim and Effective is the same row with pid liveness applied, which
+// is the only way to observe the exit of a process this daemon did not fork
+// (procmgr.EffectiveStatus).
 type ProcessStatus struct {
-	Status   string
-	PID      int
-	ExitCode *int
-	Found    bool
+	Status    string
+	Effective string
+	PID       int
+	ExitCode  *int
+	Found     bool
 }
 
 // Launcher is the procmgr boundary. The node forks jobs into their own process
@@ -109,7 +113,13 @@ func (p *procLauncher) Status(name string) ProcessStatus {
 	if !ok {
 		return ProcessStatus{}
 	}
-	return ProcessStatus{Status: st.Status, PID: st.PID, ExitCode: st.ExitCode, Found: true}
+	return ProcessStatus{
+		Status:    st.Status,
+		Effective: procmgr.EffectiveStatus(st),
+		PID:       st.PID,
+		ExitCode:  st.ExitCode,
+		Found:     true,
+	}
 }
 
 // NewEnvironment builds the node's ingest Manager with node-local paths (D15,
@@ -117,7 +127,24 @@ func (p *procLauncher) Status(name string) ProcessStatus {
 // are on the coordinator, so two nodes never collide and a node reuses its own
 // artifacts across jobs.
 func NewEnvironment(cfg Config, coresCap int) Environment {
-	return ingest.New(ingest.Config{
+	return ingest.New(ingestConfig(cfg, coresCap, ""))
+}
+
+// NewEmbeddedEnvironment builds the embedded node's ingest Manager. It is the
+// coordinator's own base dir, mirror, worktrees, and caches, because the node
+// runs in the coordinator's process and staging a second copy of them would
+// double the disk for nothing (D40). The one difference is the provenance
+// record: the coordinator has already authored env.json with executed_on in
+// the run dir this stage writes into, so the staging record is written as
+// env.node.json, the name a remote node's own copy is promoted under (D52).
+func NewEmbeddedEnvironment(cfg Config, coresCap int) Environment {
+	return ingest.New(ingestConfig(cfg, coresCap, envNodeJSONName))
+}
+
+// ingestConfig is the one ingest.Config both environments are built from, so a
+// field added for a remote node reaches the embedded one without a second edit.
+func ingestConfig(cfg Config, coresCap int, envJSONName string) ingest.Config {
+	return ingest.Config{
 		BaseDir:              cfg.BaseDir,
 		RunsDir:              cfg.RunsDir,
 		MaxVenvs:             cfg.Caches.MaxVenvs,
@@ -126,5 +153,6 @@ func NewEnvironment(cfg Config, coresCap int) Environment {
 		PythonBin:            cfg.PythonBin,
 		RequireSignedCommits: cfg.RequireSignedCommits,
 		AllowedSignersPath:   cfg.AllowedSignersPath,
-	})
+		EnvJSONName:          envJSONName,
+	}
 }

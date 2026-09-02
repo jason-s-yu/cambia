@@ -4,18 +4,21 @@ Mixin class originally intended for CFR+ recursive traversal logic.
 The core recursion is now handled by src/cfr/worker.py for parallelization.
 This mixin retains helper methods related to observation creation/filtering,
 delegating to the canonical implementations in worker.py.
+
+The two helpers are duck-typed on whatever game state they are handed rather
+than importing one, so this module carries no dependency on the retiring Python
+engine (cambia-1782). The tabular traversal reads its own frames off the Go
+engine in GoBrState.observation and calls neither.
 """
 
 import logging
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from ..agent_state import AgentObservation
 from ..constants import (
     GameAction,
     CardObject,
 )
-
-from ..game.engine import CambiaGameState
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +52,9 @@ class CFRRecursionMixin:
 
     def _create_observation(
         self,
-        prev_state: Optional[CambiaGameState],  # Not currently used
+        prev_state: Any,  # Not currently used
         action: Optional[GameAction],
-        next_state: CambiaGameState,
+        next_state: Any,
         acting_player: int,  # Player who took the action
         snap_results: List[Dict],  # Snap results during this step
         explicit_drawn_card: Optional[

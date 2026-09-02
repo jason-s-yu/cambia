@@ -600,3 +600,62 @@ func TestProcessStartInvalidName(t *testing.T) {
 		t.Errorf("Start(../evil): err = %v, want ErrInvalidName", err)
 	}
 }
+
+// TestProjectedRowNeverSignalsOrProbesLocally is the D5 invariant: a row a node
+// projected (Host set) names a pid and pgid in another host's pid space, so
+// this host must neither probe them for liveness nor signal them. The row here
+// names the test process's own pgid with its own verified starttime, so every
+// guard except the Host short-circuit would admit the signal; without it an
+// ordinary DELETE would SIGINT the test binary's own process group.
+func TestProjectedRowNeverSignalsOrProbesLocally(t *testing.T) {
+	m, runsDir := newTestManager(t, crashStub)
+
+	ticks, err := readProcStarttime(os.Getpid())
+	if err != nil {
+		t.Skipf("cannot read /proc/%d/stat on this host: %v", os.Getpid(), err)
+	}
+	boot, _ := readBootTime()
+
+	name := "projected-row"
+	runDir := filepath.Join(runsDir, name)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	st := &ProcessState{
+		Name: name, Status: StatusRunning, Algorithm: "prt-cfr", Host: "n-9c1f2a7b0d44",
+		PID: os.Getpid(), PGID: os.Getpid(), StartTicks: ticks, BootID: boot,
+		CreatedAt: NowRFC3339(),
+	}
+	if err := WriteProcessState(runDir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	if pidAlive(st) {
+		t.Error("pidAlive probed a remote row's pid in the local pid space")
+	}
+	if got := EffectiveStatus(st); got != StatusRunning {
+		t.Errorf("EffectiveStatus = %q, want running verbatim for a remote row", got)
+	}
+
+	orig := killGroupFunc
+	var signaled []int
+	killGroupFunc = func(pgid int, sig syscall.Signal) error {
+		signaled = append(signaled, pgid)
+		return nil
+	}
+	t.Cleanup(func() { killGroupFunc = orig })
+
+	if _, err := m.Stop(name, true); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if len(signaled) != 0 {
+		t.Fatalf("Stop signalled pgid %v for a remote row", signaled)
+	}
+	after, err := ReadProcessState(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != StatusRunning {
+		t.Errorf("status = %q, want running (a remote row is not advanced to stopping locally)", after.Status)
+	}
+}

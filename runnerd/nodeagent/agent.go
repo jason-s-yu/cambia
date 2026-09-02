@@ -27,9 +27,11 @@ const idleHeartbeatInterval = 30 * time.Second
 // claim-to-result cycle runs offline against a stub coordinator, a fake ingest
 // environment, and a fake launcher.
 type Options struct {
-	Config   Config
-	Signer   *Signer
-	Client   *Client
+	Config Config
+	Signer *Signer
+	// Client is the coordinator transport: the pinned HTTPS client a remote
+	// node runs, or the coordinator's own in-process loopback (D65).
+	Client   NodeTransport
 	Env      Environment
 	Launcher Launcher
 	Prober   Prober
@@ -41,6 +43,16 @@ type Options struct {
 	// CanBuildLibcambia is the declaration's can_build_libcambia. The caller
 	// probes it once at startup rather than on every heartbeat.
 	CanBuildLibcambia bool
+	// AlgoSubcommand resolves a job kind to its cambia subcommand. Nil selects
+	// this package's own Subcommand table.
+	AlgoSubcommand AlgoResolver
+	// InPlace runs the node against the coordinator's own runs dir and mirror,
+	// which is what --role both does: no snapshot fetch, no seed fetch, no log
+	// push, and no blob upload, because every byte those steps would move is
+	// already at its destination (D40). The manifest commit still runs, so a
+	// reserved path an embedded run writes is validated and recorded exactly
+	// as a remote one would be.
+	InPlace bool
 	// ClaimOnce stops the claim loop after one claim attempt. It exists for
 	// tests, which drive one cycle deterministically instead of racing a
 	// background loop.
@@ -53,7 +65,7 @@ type Options struct {
 type Agent struct {
 	cfg      Config
 	signer   *Signer
-	client   *Client
+	client   NodeTransport
 	env      Environment
 	launcher Launcher
 	prober   Prober
@@ -61,6 +73,11 @@ type Agent struct {
 	now      func() time.Time
 	poll     time.Duration
 	claimOne bool
+	algo     AlgoResolver
+	inPlace  bool
+	// slots is this node's launch accounting, moved here from the dispatcher
+	// with the launch path it guards (D1).
+	slots *Slots
 
 	canBuildLibcambia bool
 
@@ -105,6 +122,9 @@ func New(opts Options) (*Agent, error) {
 	if opts.PollInterval <= 0 {
 		opts.PollInterval = time.Second
 	}
+	if opts.AlgoSubcommand == nil {
+		opts.AlgoSubcommand = Subcommand
+	}
 	return &Agent{
 		cfg:               opts.Config,
 		signer:            opts.Signer,
@@ -116,6 +136,9 @@ func New(opts Options) (*Agent, error) {
 		now:               opts.Now,
 		poll:              opts.PollInterval,
 		claimOne:          opts.ClaimOnce,
+		algo:              opts.AlgoSubcommand,
+		inPlace:           opts.InPlace,
+		slots:             NewSlots(opts.Config.Slots),
 		canBuildLibcambia: opts.CanBuildLibcambia,
 		policy:            nashnet.DefaultPolicy(),
 		active:            map[string]*jobRun{},
@@ -271,23 +294,31 @@ func (a *Agent) startJob(ctx context.Context, claim *nashnet.ClaimResponse) {
 		a.log.Printf("persist lease %s: %v", rec.LeaseID, err)
 	}
 	job := &jobRun{agent: a, rec: rec, snapshot: claim.Snapshot}
+	if spec, derr := decodeSpec(claim.Spec); derr == nil {
+		// The exclusive flag is read before the goroutine starts because the
+		// slot it holds is claimed here, in the caller, so a second claim
+		// racing this one sees the occupancy (D13).
+		job.spec = spec
+	}
 	a.mu.Lock()
 	a.active[rec.JobID] = job
 	a.mu.Unlock()
+	a.slots.Claim(job.spec.Exclusive)
 
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		defer a.finishJob(rec.JobID)
+		defer a.finishJob(job)
 		job.run(ctx)
 	}()
 }
 
-// finishJob drops a job from the active set.
-func (a *Agent) finishJob(jobID string) {
+// finishJob drops a job from the active set and frees the slot it held.
+func (a *Agent) finishJob(j *jobRun) {
 	a.mu.Lock()
-	delete(a.active, jobID)
+	delete(a.active, j.rec.JobID)
 	a.mu.Unlock()
+	a.slots.Release(j.spec.Exclusive)
 }
 
 // eventsLoop keeps exactly one events request open at all times, re-issuing it
@@ -417,11 +448,11 @@ func (a *Agent) running() running {
 }
 
 // slotsFree is the smaller of the node's own free slots and what its gates
-// offer, so a coordinator bug cannot oversubscribe the node (D13).
+// offer, so a coordinator bug cannot oversubscribe the node (D13). The slot
+// accounting reports zero while an exclusive job holds the node, so a claim
+// never advertises capacity the launch would refuse.
 func (a *Agent) slotsFree(report gates.Report) int {
-	a.mu.Lock()
-	free := a.cfg.Slots - len(a.active)
-	a.mu.Unlock()
+	free := a.slots.Free()
 	if report.SlotsOffered < free {
 		free = report.SlotsOffered
 	}

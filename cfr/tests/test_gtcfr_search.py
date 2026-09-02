@@ -19,6 +19,7 @@ from src.cfr.gtcfr_search import (
     SearchResult,
     NUM_HAND_TYPES,
     VALUE_DIM,
+    _children_mask,
 )
 from src.encoding import NUM_ACTIONS
 from src.networks import CVPN
@@ -532,10 +533,12 @@ def test_backprop_projects_value_into_ancestor_perspective(small_cvpn: CVPN, mon
         lambda parent, action: _FakeTerminalEngine([0.0, 0.0]),
     )
     selections = iter([action_a, action_b])
-    monkeypatch.setattr(searcher, "_select_action", lambda node: next(selections))
+    monkeypatch.setattr(
+        searcher, "_select_action", lambda node, support_mask=None: next(selections)
+    )
 
-    searcher._expand_once(root, None, r0, r1)
-    searcher._expand_once(root, None, r0, r1)
+    searcher._expand_once(root, r0, r1)
+    searcher._expand_once(root, r0, r1)
 
     assert root.visit_counts[action_a] == 1
     assert root.visit_counts[action_b] == 1
@@ -551,3 +554,272 @@ def test_backprop_projects_value_into_ancestor_perspective(small_cvpn: CVPN, mon
         f"PUCT ranks against the root actor's preference: "
         f"{scores[action_a]:.3f} vs {scores[action_b]:.3f}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test: selection is masked to the expanded children (cambia-1869)
+# ---------------------------------------------------------------------------
+
+
+class _FakeEngine:
+    """Depth-limited stand-in GoEngine exposing only what the search reads.
+
+    Engines past max_depth report terminal; the rest report a fixed legal set
+    and enough public features for _build_pbs.
+    """
+
+    def __init__(self, n_legal: int, acting_player: int, depth: int, max_depth: int):
+        self.n_legal = n_legal
+        self._acting = acting_player
+        self.depth = depth
+        self.max_depth = max_depth
+
+    def is_terminal(self) -> bool:
+        return self.depth >= self.max_depth
+
+    def get_utility(self) -> np.ndarray:
+        return np.array([1.0, -1.0], dtype=np.float32)
+
+    def acting_player(self) -> int:
+        return self._acting
+
+    def legal_actions_mask(self) -> np.ndarray:
+        mask = np.zeros(NUM_ACTIONS, dtype=bool)
+        mask[: self.n_legal] = True
+        return mask
+
+    def decision_ctx(self) -> int:
+        return 0
+
+    def turn_number(self) -> int:
+        return self.depth
+
+    def discard_top(self) -> int:
+        return 0
+
+    def stock_len(self) -> int:
+        return max(1, 40 - self.depth)
+
+    def close(self) -> None:
+        pass
+
+    def child(self, action: int) -> "_FakeEngine":
+        return _FakeEngine(
+            n_legal=self.n_legal,
+            acting_player=1 - self._acting,
+            depth=self.depth + 1,
+            max_depth=self.max_depth,
+        )
+
+
+def test_select_action_restricted_to_expanded_children(small_cvpn: CVPN):
+    """At an expanded node, selection only draws actions that hold a child.
+
+    Drawing any other action ends the walk-down at an already-expanded node and
+    the whole expansion step grows nothing.
+    """
+    np.random.seed(0)
+    searcher = GTCFRSearch(small_cvpn, expansion_budget=1, expansion_k=3)
+
+    legal_mask = np.zeros(NUM_ACTIONS, dtype=bool)
+    legal_mask[:10] = True
+    node = _make_node(acting_player=0, legal_mask=legal_mask, is_expanded=True)
+    node.policy_prior[:10] = 0.1
+
+    for a in (0, 1, 2):
+        node.children[a] = searcher._make_terminal_node(
+            1, None, np.array([0.0, 0.0], dtype=np.float32)
+        )
+
+    draws = {searcher._select_action(node, _children_mask(node)) for _ in range(200)}
+    assert draws <= set(node.children), f"Selected childless actions: {draws}"
+    assert len(draws) > 1, "Selection collapsed onto a single child"
+
+
+def test_expansion_steps_never_waste_the_budget(small_cvpn: CVPN, monkeypatch):
+    """Every expansion step grows the tree when unexpanded nodes remain.
+
+    n_legal = 10 against expansion_k = 3 leaves 7 childless actions at every
+    expanded node; before the mask those carried selection mass and the step
+    returned without adding a node.
+    """
+    np.random.seed(0)
+    steps = 12
+    searcher = GTCFRSearch(small_cvpn, expansion_budget=1, expansion_k=3)
+    r0, r1 = _uniform_ranges()
+
+    # max_depth well past the reachable depth, so no step ends on a terminal.
+    root_engine = _FakeEngine(n_legal=10, acting_player=0, depth=0, max_depth=20)
+    root = _make_node(
+        acting_player=0,
+        legal_mask=root_engine.legal_actions_mask(),
+        leaf_values=_constant_leaf_values(0.0, 0.0),
+        engine_handle=root_engine,
+    )
+    root.policy_prior[:10] = 0.1
+
+    monkeypatch.setattr(
+        searcher, "_make_child_engine", lambda parent, action: parent.child(action)
+    )
+
+    added = [searcher._expand_once(root, r0, r1) for _ in range(steps)]
+
+    assert min(added) > 0, f"Expansion steps grew nothing: {added}"
+    # Each step expands one unexpanded node into expansion_k children.
+    assert added == [3] * steps, f"Unexpected growth per step: {added}"
+    assert searcher._count_nodes(root) == 1 + sum(added)
+
+
+# ---------------------------------------------------------------------------
+# Test: progressive widening (cambia-1870)
+# ---------------------------------------------------------------------------
+
+
+def _widening_fixture(searcher: GTCFRSearch):
+    """Root over 10 legal actions with a strictly decreasing PUCT prior.
+
+    The prior order fixes both the initial top-k expansion and the order in
+    which widening opens the rest, so child insertion order is deterministic.
+    """
+    engine = _FakeEngine(n_legal=10, acting_player=0, depth=0, max_depth=20)
+    root = _make_node(
+        acting_player=0,
+        legal_mask=engine.legal_actions_mask(),
+        leaf_values=_constant_leaf_values(0.0, 0.0),
+        engine_handle=engine,
+    )
+    root.policy_prior[:10] = np.linspace(0.19, 0.01, 10).astype(np.float32)
+    return root, engine
+
+
+def test_widening_off_keeps_the_fixed_expansion_k(small_cvpn: CVPN, monkeypatch):
+    """With widening off a node never grows past expansion_k children."""
+    np.random.seed(0)
+    searcher = GTCFRSearch(small_cvpn, expansion_budget=1, expansion_k=3)
+    r0, r1 = _uniform_ranges()
+    root, engine = _widening_fixture(searcher)
+
+    monkeypatch.setattr(
+        searcher, "_make_child_engine", lambda parent, action: parent.child(action)
+    )
+    for _ in range(20):
+        searcher._expand_once(root, r0, r1)
+
+    assert len(root.children) == 3, f"Child count drifted: {sorted(root.children)}"
+    assert sorted(root.children) == [0, 1, 2]
+
+
+def test_widening_opens_every_action_in_prior_order(small_cvpn: CVPN, monkeypatch):
+    """With widening on, all 10 actions open, in descending PUCT prior order.
+
+    An unopened action has no visits, so its PUCT score is its prior term and
+    the widening order matches the ranking the initial expansion uses.
+    """
+    np.random.seed(0)
+    searcher = GTCFRSearch(
+        small_cvpn,
+        expansion_budget=1,
+        expansion_k=3,
+        widening_enabled=True,
+        widening_c=3.0,
+        widening_alpha=0.5,
+    )
+    r0, r1 = _uniform_ranges()
+    root, engine = _widening_fixture(searcher)
+
+    monkeypatch.setattr(
+        searcher, "_make_child_engine", lambda parent, action: parent.child(action)
+    )
+    for _ in range(20):
+        searcher._expand_once(root, r0, r1)
+
+    assert list(root.children.keys()) == list(
+        range(10)
+    ), f"Unexpected open order: {list(root.children.keys())}"
+
+
+def test_widening_schedule_bounds(small_cvpn: CVPN):
+    """_allowed_width is floored at expansion_k and capped at n_legal."""
+    searcher = GTCFRSearch(
+        small_cvpn,
+        expansion_budget=1,
+        expansion_k=3,
+        widening_enabled=True,
+        widening_c=1.0,
+        widening_alpha=0.5,
+    )
+    legal_mask = np.zeros(NUM_ACTIONS, dtype=bool)
+    legal_mask[:10] = True
+    node = _make_node(acting_player=0, legal_mask=legal_mask, is_expanded=True)
+
+    assert searcher._allowed_width(node) == 3  # ceil(sqrt(1)) floored at k
+    node.visit_counts[0] = 16
+    assert searcher._allowed_width(node) == 4  # ceil(sqrt(16))
+    node.visit_counts[0] = 10_000
+    assert searcher._allowed_width(node) == 10  # capped at n_legal
+
+
+def test_widening_on_search_returns_valid_policy(small_cvpn: CVPN):
+    """search() with widening on keeps the policy contract its consumers read."""
+    searcher = GTCFRSearch(
+        small_cvpn,
+        expansion_budget=5,
+        cfr_iters_per_expansion=3,
+        widening_enabled=True,
+        widening_c=2.0,
+        widening_alpha=0.5,
+    )
+    r0, r1 = _uniform_ranges()
+    with _make_game() as game:
+        result = searcher.search(game, r0, r1)
+
+    assert result.policy.shape == (NUM_ACTIONS,)
+    assert abs(result.policy.sum() - 1.0) < 1e-4
+    assert result.root_values.shape == (VALUE_DIM,)
+    assert np.isfinite(result.root_values).all()
+
+
+# ---------------------------------------------------------------------------
+# Test: widening config keys reach the searcher (cambia-1870)
+# ---------------------------------------------------------------------------
+
+
+def test_config_widening_keys_reach_the_searcher(small_cvpn: CVPN, monkeypatch):
+    """A DeepCfrConfig with widening on builds a GTCFRSearch with widening on.
+
+    gtcfr_self_play_episode builds the searcher before touching the engine, so
+    a recording stand-in that stops there captures the settings it passes.
+    """
+    from src.cfr import gtcfr_worker
+    from src.config import DeepCfrConfig
+
+    config = DeepCfrConfig(
+        gtcfr_widening_enabled=True,
+        gtcfr_widening_c=2.5,
+        gtcfr_widening_alpha=0.75,
+    )
+
+    class _StopAfterConstruction(Exception):
+        pass
+
+    captured: dict = {}
+
+    def _recorder(**kwargs):
+        captured.update(kwargs)
+        raise _StopAfterConstruction
+
+    monkeypatch.setattr(gtcfr_worker, "GTCFRSearch", _recorder)
+    with pytest.raises(_StopAfterConstruction):
+        gtcfr_worker.gtcfr_self_play_episode(None, small_cvpn, config)
+
+    assert captured["widening_enabled"] is True
+    assert captured["widening_c"] == 2.5
+    assert captured["widening_alpha"] == 0.75
+
+    # The captured settings build a searcher that actually widens.
+    searcher = GTCFRSearch(**captured)
+    legal_mask = np.zeros(NUM_ACTIONS, dtype=bool)
+    legal_mask[:10] = True
+    node = _make_node(acting_player=0, legal_mask=legal_mask, is_expanded=True)
+    node.visit_counts[0] = 16
+    assert searcher._allowed_width(node) > config.gtcfr_expansion_k

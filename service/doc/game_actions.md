@@ -708,6 +708,62 @@ their `rank`/`suit`/`value`, own hand and opponents alike. That is the one carve
 face-down rule above, so a client that resyncs or reconnects into a finished round sees the same
 table as one that watched it end.
 
+## Ending on an internal error
+
+A panic in a game-owned goroutine or timer is recovered by that game's own boundary, which then
+ends the game (`internal/game/panic_guard.go`, cambia-1243). It ends through the same `endGame`
+every ordinary ending runs through, so the table receives the same two frames; what separates them
+is a `reason` field:
+
+| Value            | Meaning                                                                 |
+|------------------|-------------------------------------------------------------------------|
+| absent           | The game reached one of its rulebook endings and the result stands       |
+| `internal_error` | The panic guard ended the game; the scores on the frame are not a result |
+
+`reason` is present only for an abnormal ending, so every ordinary result carries exactly the shape
+it always has. It rides both frames that report a result, for the reason `finalHands` does: a
+client that reconnects into a finished game is answered with the hub's held copy of `game_results`
+alone (`Hub.rememberTerminal`/`resendTerminal`) and never sees `game_end`, so naming the error on
+only one of them would leave a returning player reading an ordinary scoreboard.
+
+```json: server -> all clients (game_end for a game the panic guard ended)
+{
+  "type": "game_end",
+  "payload": {
+    "scores": { "{uuid}": 4, "{uuid}": 11 },
+    "winner": "{uuid}",
+    "caller": "00000000-0000-0000-0000-000000000000",
+    "penaltyApplied": false,
+    "winBonusApplied": false,
+    "reason": "internal_error"
+  }
+}
+```
+
+```json: server -> all clients, and to a reconnect (game_results for the same game)
+{
+  "type": "game_results",
+  "winner": "{uuid}",
+  "scores": { "{uuid}": 4, "{uuid}": 11 },
+  "finalHands": [ "...see the round-end reveal above..." ],
+  "lobby_status": { "...": "..." },
+  "reason": "internal_error"
+}
+```
+
+The scores still ride the frames and are still written to `game_results` rows, because they are the
+record of what the abort found and the only evidence of it left after the game is dropped. They are
+not a result: they are read off whatever hands the panic left, mid-move if that is where it landed.
+The client renders the error in place of the scoreboard (`web/src/components/lobby/DsResultsView`),
+and the game is not rated - `ratePerGame` withholds the per-game rating update outright rather than
+deferring it the way a circuit round does. The replay row for `game_end` carries the same `reason`,
+so the action log distinguishes an aborted game from a played-out one.
+
+This is the game-level counterpart to the hub's own `error` frame with `code: "hub_fatal"`, which
+reports a panic in the hub's message loop and is followed by the hub dissolving. A `reason` on the
+results frames says the opposite thing: the hub is fine and the lobby carries on; it is this one
+game that has no result.
+
 ## Disconnect grace
 
 A dropped socket does not forfeit on the spot. The seat is held for the lobby's
@@ -807,4 +863,7 @@ lobby snapshot a joining connection gets carries the phase but no results, which
 reload used to land on a results screen with no winner and no scores.
 
 Both of those frames carry `finalHands`, and the `private_sync_state` sent ahead of them has the
-hands face-up, so the returning client gets the round-end reveal as well as the scores.
+hands face-up, so the returning client gets the round-end reveal as well as the scores. A game the
+panic guard ended carries its `reason` on the same held frame, so the returning player is told the
+game hit an internal error rather than being handed a scoreboard built from what the abort found
+(see "Ending on an internal error").

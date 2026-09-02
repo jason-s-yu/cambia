@@ -118,6 +118,11 @@ func (j *jobRun) init(phase string) {
 		index:   LoadIndex(indexPath(j.agent.cfg.BaseDir, j.rec.JobID)),
 		policy:  j.rec.Policy,
 		log:     j.agent.log,
+		// An embedded run wrote its artifacts at the destination, so there is
+		// nothing to push: the coordinator proves each digest against the file
+		// already in the run dir and the commit still validates and records
+		// every entry (D40).
+		inPlace: j.agent.inPlace,
 	}
 }
 
@@ -165,7 +170,7 @@ func (j *jobRun) stage(ctx context.Context) bool {
 	j.setPhase(nashnet.PhaseFetching)
 	j.postProgress(ctx)
 
-	if err := j.fetchSnapshot(ctx); err != nil {
+	if err := j.fetch(ctx); err != nil {
 		if errors.Is(err, ingest.ErrBundlePrereqMissing) {
 			// The thin bundle's basis is not in this node's mirror. Drop the
 			// advertised commits so the re-claim asks for a full tree (D48).
@@ -175,15 +180,14 @@ func (j *jobRun) stage(ctx context.Context) bool {
 			j.nack(ctx, nashnet.NackBundlePrereqMiss, defaultNackCooldownSeconds, err.Error())
 			return false
 		}
+		if errors.Is(err, errSeedUnavailable) {
+			j.nack(ctx, nashnet.NackSeedUnavailable, defaultNackCooldownSeconds, err.Error())
+			return false
+		}
 		j.nack(ctx, nashnet.NackSnapshotFailed, defaultNackCooldownSeconds, err.Error())
 		return false
 	}
 	j.agent.noteCommit(j.rec.Commit)
-
-	if err := j.fetchSeeds(ctx); err != nil {
-		j.nack(ctx, nashnet.NackSeedUnavailable, defaultNackCooldownSeconds, err.Error())
-		return false
-	}
 
 	// Gate evaluation point two (D46): immediately before Prepare. A gate that
 	// passed at claim and no longer holds is a scheduling event, not a job
@@ -217,7 +221,15 @@ func (j *jobRun) stage(ctx context.Context) bool {
 		return false
 	}
 
-	launch, lerr := buildLaunch(j.spec, prepared, j.agent.cfg.RunsDir)
+	if j.agent.inPlace {
+		// Ingest writes its provenance record under its own name on an
+		// embedded run, so the coordinator's env.json (which carries
+		// executed_on, D23) and ingest's own copy both survive: the node's is
+		// env.node.json, exactly the name a remote node's copy is promoted
+		// under (D52, D64).
+		j.agent.log.Printf("lease %s: staging %s in place", j.rec.LeaseID, j.spec.Name)
+	}
+	launch, lerr := BuildLaunch(j.spec, prepared, j.agent.cfg.RunsDir, j.agent.algo)
 	if lerr != nil {
 		if isSpecFatal(lerr) {
 			j.postFailure(ctx, lerr.Error())
@@ -541,6 +553,11 @@ func (j *jobRun) postProgress(ctx context.Context) (nashnet.ProgressResponse, er
 // offset the coordinator holds (D54). A 409 offset_mismatch carries the true
 // offset, so the node seeks rather than duplicating or losing bytes.
 func (j *jobRun) pushLogs(ctx context.Context) {
+	if j.agent.inPlace {
+		// The embedded node's job writes straight into the file the log route
+		// appends to, so pushing would duplicate every line (D40).
+		return
+	}
 	limit := j.rec.Policy.LogBytesPerCall
 	if limit <= 0 {
 		limit = nashnet.DefaultLogBytesPerCall
@@ -579,6 +596,27 @@ func (j *jobRun) pushLogs(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// errSeedUnavailable classifies a seed fetch failure so the nack that follows
+// names seed_unavailable rather than snapshot_failed (D8).
+var errSeedUnavailable = errors.New("seed unavailable")
+
+// fetch stages the job's inputs: the code snapshot and every granted seed. An
+// embedded node shares the coordinator's mirror and runs dir, so both are
+// already where the launch will look for them and the whole step is skipped
+// (D40); nothing else about the lease changes.
+func (j *jobRun) fetch(ctx context.Context) error {
+	if j.agent.inPlace {
+		return nil
+	}
+	if err := j.fetchSnapshot(ctx); err != nil {
+		return err
+	}
+	if err := j.fetchSeeds(ctx); err != nil {
+		return fmt.Errorf("%w: %v", errSeedUnavailable, err)
+	}
+	return nil
 }
 
 // fetchSnapshot downloads the coordinator-served bundle, verifies its digest,
@@ -740,11 +778,12 @@ func (j *jobRun) lastContact() time.Time {
 	return j.lastOK
 }
 
-// isTerminalStatus reports whether a procmgr status is one a job does not
-// leave.
+// isTerminalStatus reports whether a status is one a job does not leave. It
+// spans both alphabets: the procmgr terminals and the runnerd-level ones a
+// gate or an operator writes.
 func isTerminalStatus(status string) bool {
 	switch status {
-	case procmgr.StatusStopped, procmgr.StatusCrashed, "canceled", "failed":
+	case procmgr.StatusStopped, procmgr.StatusCrashed, "canceled", "failed", "skipped":
 		return true
 	}
 	return false

@@ -217,3 +217,56 @@ func envMap(env []string) map[string]string {
 	}
 	return out
 }
+
+// TestEnvJSONNameRedirectsTheStagingRecord covers the embedded node's half of
+// D40: on --role both the coordinator has already authored env.json with
+// executed_on in the run dir this stage writes into, so the manager is pointed
+// at env.node.json. Without the redirect the write-once rule would silently
+// drop the staging record, leaving the run with no venv or libcambia cache key
+// on disk and the cache sweep unable to protect a live job's interpreter.
+func TestEnvJSONNameRedirectsTheStagingRecord(t *testing.T) {
+	fr := newFakeRunner()
+	fr.hook = newFakeControl().hook()
+	base := t.TempDir()
+	m := New(Config{
+		BaseDir:     base,
+		RunsDir:     filepath.Join(base, "runs"),
+		Runner:      fr,
+		EnvJSONName: "env.node.json",
+	})
+	runDir := filepath.Join(base, "runs", "job-embedded")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	coordinator := []byte(`{"job_id":"job-embedded","executed_on":"n-abcdef012345"}`)
+	if err := os.WriteFile(filepath.Join(runDir, envJSONFile), coordinator, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prov := provenance{JobID: "job-embedded", VenvCacheKey: "lock-py311", Device: "cpu"}
+	if err := m.writeEnvJSON(context.Background(), runDir, "python", prov); err != nil {
+		t.Fatalf("writeEnvJSON: %v", err)
+	}
+
+	staged, err := readEnvJSON(filepath.Join(runDir, "env.node.json"))
+	if err != nil {
+		t.Fatalf("the staging record was not written under its own name: %v", err)
+	}
+	if staged.VenvCacheKey != "lock-py311" {
+		t.Errorf("env.node.json venv_cache_key = %q, want lock-py311", staged.VenvCacheKey)
+	}
+	kept, err := os.ReadFile(filepath.Join(runDir, envJSONFile))
+	if err != nil {
+		t.Fatalf("read the coordinator's env.json: %v", err)
+	}
+	if string(kept) != string(coordinator) {
+		t.Errorf("the coordinator's env.json was rewritten: %q", kept)
+	}
+
+	// The cache sweep reads the same name it writes, so a live embedded job's
+	// interpreter is still protected from eviction.
+	venvKeys, _ := m.liveCacheKeys([]string{"job-embedded"})
+	if !venvKeys["lock-py311"] {
+		t.Errorf("live venv keys = %v, want the embedded run's key protected", venvKeys)
+	}
+}

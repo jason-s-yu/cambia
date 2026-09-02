@@ -25,7 +25,7 @@ import (
 
 // HeaderBlobOffset is the resume-probe header a HEAD on a blob answers with
 // (D50 step 2).
-const HeaderBlobOffset = "X-Nashnet-Offset"
+const HeaderBlobOffset = nashnet.HeaderBlobOffset
 
 // ErrCertificatePin is the handshake failure a mismatched coordinator
 // certificate produces (D27). It fires inside VerifyPeerCertificate, so it
@@ -133,6 +133,9 @@ func AsAPIError(err error) (*APIError, bool) {
 	ok := errors.As(err, &api)
 	return api, ok
 }
+
+// Client implements the whole node protocol over HTTPS (D65).
+var _ NodeTransport = (*Client)(nil)
 
 // Client is the node's half of the transport: one fingerprint-pinned HTTPS
 // connection pool to one coordinator, with the node token minted per request
@@ -259,11 +262,16 @@ func (c *Client) Claim(ctx context.Context, req nashnet.ClaimRequest) (*nashnet.
 		return &out, nil, nil
 	case http.StatusNoContent, http.StatusAccepted:
 		// A 204 carries no body by the HTTP rules the design's own example
-		// bends; the hold and its retry_after_seconds are read from the body
-		// when one is present and defaulted otherwise, so a strict 204 and the
-		// design's illustrated body both work.
-		hold := nashnet.ClaimHold{Hold: nashnet.HoldNoMatch}
+		// bends, so the coordinator rides the hold on X-Nashnet-Hold and its
+		// backoff on Retry-After. The headers are read first and a body, where
+		// one is present, refines them. Without the header read every hold
+		// would default to no_match and an operator would never see
+		// node_gated, exclusive_pending, or waiters_full.
+		hold := nashnet.ClaimHold{Hold: resp.Header.Get(nashnet.HeaderClaimHold)}
 		_ = json.NewDecoder(resp.Body).Decode(&hold)
+		if hold.Hold == "" {
+			hold.Hold = nashnet.HoldNoMatch
+		}
 		if hold.RetryAfterSeconds <= 0 {
 			hold.RetryAfterSeconds = retryAfterHeader(resp, defaultClaimBackoffSeconds)
 		}

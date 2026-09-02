@@ -135,6 +135,14 @@ type GrantStore struct {
 
 	mu    sync.Mutex
 	cache map[string]cachedGrant
+	// local is the in-process grant of the embedded node (D40): a node that
+	// shares the coordinator's address space, whose key the coordinator itself
+	// generated. It is never written to disk and never signed, because there is
+	// no channel between the two halves for an operator-signed grant to
+	// authenticate; what it authenticates is that the caller holds a key this
+	// process minted. Everything past the lookup is unchanged, the tombstone
+	// included, so revoking the embedded id still stops it.
+	local *Grant
 }
 
 // NewGrantStore builds a store over the nodes directory.
@@ -175,6 +183,33 @@ func NewGrantStore(cfg GrantStoreConfig) (*GrantStore, error) {
 	return s, nil
 }
 
+// SetLocalGrant installs the in-process grant of the embedded node (D40).
+// pub is the public half of the key the coordinator generated for its own
+// executor and caps is the ceiling its declaration is clamped by; an unset cap
+// leaves that field unclamped, matching an enrollment grant that omits it. The
+// derived id is returned so the caller names the node by the same rule every
+// enrolled node is named by.
+func (s *GrantStore) SetLocalGrant(pub ed25519.PublicKey, caps capability.Grant, lifetime time.Duration) (string, error) {
+	nodeID, err := DeriveNodeID(pub)
+	if err != nil {
+		return "", err
+	}
+	if lifetime <= 0 {
+		lifetime = DefaultGrantLifetime
+	}
+	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.local = &Grant{
+		NodeID:    nodeID,
+		PublicKey: append(ed25519.PublicKey(nil), pub...),
+		Caps:      caps,
+		IssuedAt:  now,
+		ExpiresAt: now.Add(lifetime),
+	}
+	return nodeID, nil
+}
+
 // Grant returns the verified grant for nodeID. It consults the tombstone and
 // re-checks the grant's own exp on every call, so revocation and expiry both
 // take effect at the next verification rather than at the next cache refresh.
@@ -188,6 +223,13 @@ func (s *GrantStore) Grant(nodeID string) (*Grant, error) {
 	if s.revoked(nodeID) {
 		delete(s.cache, nodeID)
 		return nil, fmt.Errorf("%w: %s", ErrRevoked, nodeID)
+	}
+	if s.local != nil && s.local.NodeID == nodeID {
+		if !s.local.ExpiresAt.After(now.Add(-ClockSkewLeeway)) {
+			return nil, fmt.Errorf("%w: %s expired at %s", ErrGrantExpired, nodeID,
+				s.local.ExpiresAt.UTC().Format(time.RFC3339))
+		}
+		return s.local, nil
 	}
 	entry, ok := s.cache[nodeID]
 	if !ok || now.Sub(entry.loadedAt) >= s.ttl {

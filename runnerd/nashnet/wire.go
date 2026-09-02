@@ -17,6 +17,20 @@ package nashnet
 
 import "encoding/json"
 
+// HeaderClaimHold and HeaderClaimRetry carry a 204 claim's hold reason and its
+// backoff. The design writes the hold as a 204 body, which HTTP does not permit
+// and net/http drops on the floor, so the two fields ride headers instead and
+// the status stays the 204 the protocol table names (D2). Both sides read this
+// spelling, so a header rename cannot silently degrade every hold to no_match.
+const (
+	HeaderClaimHold  = "X-Nashnet-Hold"
+	HeaderClaimRetry = "X-Nashnet-Retry-After"
+)
+
+// HeaderBlobOffset is the resume-probe header a HEAD on a blob answers with,
+// and the header an offset mismatch repeats the true offset in (D50 step 2).
+const HeaderBlobOffset = "X-Nashnet-Offset"
+
 // HeaderLeaseToken carries the opaque lease token on every lease route (D44).
 // The token never travels in a URL, a query parameter, or a body, so it stays
 // out of access logs and out of anything fronting the listener.
