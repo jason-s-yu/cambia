@@ -1,6 +1,7 @@
 package nodeagent
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -68,7 +69,7 @@ func (t LoopbackTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		Proto:         "HTTP/1.1",
 		ProtoMajor:    1,
 		ProtoMinor:    1,
-		Header:        w.header,
+		Header:        w.sent,
 		Body:          pr,
 		ContentLength: -1,
 		Request:       req,
@@ -76,11 +77,7 @@ func (t LoopbackTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 }
 
 // errPanic is what a panicking handler surfaces as on the node's side.
-var errPanic = &loopbackError{"nashnet: loopback handler panicked"}
-
-type loopbackError struct{ msg string }
-
-func (e *loopbackError) Error() string { return e.msg }
+var errPanic = errors.New("nashnet: loopback handler panicked")
 
 // loopbackWriter is the http.ResponseWriter the in-process handler writes
 // through. It publishes the status and headers once, on the first Write or
@@ -91,6 +88,11 @@ type loopbackWriter struct {
 	once   sync.Once
 	ready  chan struct{}
 	status int
+	// sent is the header map as it stood when the status line was published.
+	// net/http snapshots at WriteHeader too, and taking a copy is also what
+	// keeps a handler that keeps mutating its header map from racing the
+	// reader holding the response.
+	sent http.Header
 }
 
 func (w *loopbackWriter) Header() http.Header { return w.header }
@@ -100,6 +102,7 @@ func (w *loopbackWriter) Header() http.Header { return w.header }
 func (w *loopbackWriter) start(status int) {
 	w.once.Do(func() {
 		w.status = status
+		w.sent = w.header.Clone()
 		close(w.ready)
 	})
 }
