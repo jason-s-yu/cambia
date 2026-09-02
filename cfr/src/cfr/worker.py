@@ -4,6 +4,27 @@ src/cfr/worker.py
 Implements the worker process logic for CFR+ training using External Sampling Monte Carlo CFR (ESMCFR).
 Each worker simulates games based on a strategy snapshot provided by the main process,
 accumulates local updates, and returns them. Uses Outcome Sampling for action selection.
+
+Engine (cambia-1782)
+--------------------
+The rules run on the Go engine, through ``src.cfr.br_state.GoBrState`` -- the
+same substrate the tabular best-response search moved onto in cambia-1428, so
+training and exploitability read one implementation of the rules. Only the
+rules moved. The policy table is keyed by ``InfosetKey`` built from the Python
+``AgentState`` belief machinery, so the belief layer stays exactly where it
+was and tables written before the port stay addressable; ``GoBrState`` hands
+that unchanged machinery the observation stream it always consumed, read off a
+``GoEngine``.
+
+The Python engine's ``apply_action`` returned an undo callable. The Go engine
+has none, so the traversal brackets each sampled action with
+``GoBrState.checkpoint`` / ``rewind`` / ``release``, which restores the same
+state the undo did.
+
+``_create_observation`` and ``_filter_observation`` below are the production
+observation builders that several other lanes import. They are duck-typed on
+whatever game state they are handed rather than importing one, so this module
+carries no dependency on the retiring Python engine.
 """
 
 import copy
@@ -11,6 +32,7 @@ import logging
 import multiprocessing
 import os
 import queue
+import random
 import sys
 import traceback
 from collections import defaultdict
@@ -22,8 +44,6 @@ from ..agent_state import AgentObservation, AgentState
 from ..config import Config
 from .exceptions import (
     GameStateError,
-    ActionApplicationError,
-    UndoFailureError,
     AgentStateError,
     ObservationUpdateError,
     EncodingError,
@@ -35,7 +55,6 @@ from .exceptions import (
 from ..card import Card
 from ..constants import (
     NUM_PLAYERS,
-    ActionAbilityBlindSwapSelect,
     ActionAbilityKingLookSelect,
     ActionAbilityKingSwapDecision,
     ActionAbilityPeekOtherSelect,
@@ -46,13 +65,10 @@ from ..constants import (
     ActionPassSnap,
     ActionReplace,
     ActionSnapOpponent,
-    ActionSnapOpponentMove,
     ActionSnapOwn,
-    DecisionContext,
     GameAction,
 )
-from ..game.engine import CambiaGameState
-from ..game.types import StateDelta, UndoInfo
+from .br_state import Checkpoint, DealSpec, GoBrState
 from ..serial_rotating_handler import SerialRotatingFileHandler
 from ..utils import (
     InfosetKey,
@@ -65,7 +81,6 @@ from ..utils import (
     normalize_probabilities,
     SimulationNodeData,
 )
-from ..game.helpers import serialize_card
 
 # Type Aliases
 RegretSnapshotDict: TypeAlias = Dict[InfosetKey, np.ndarray]
@@ -87,7 +102,7 @@ def _serialize_action_for_history(action: GameAction) -> Any:
         for k, v in action_dict.items():
             # Use the imported Card class directly for the check
             if isinstance(v, Card):
-                serialized_dict[k] = serialize_card(v)
+                serialized_dict[k] = str(v)
             else:
                 # Basic serialization for other types
                 serialized_dict[k] = (
@@ -95,7 +110,7 @@ def _serialize_action_for_history(action: GameAction) -> Any:
                 )
         return {type(action).__name__: serialized_dict}  # Include type name
     elif isinstance(action, Card):  # Check against Card directly
-        return serialize_card(action)
+        return str(action)
     elif action is None:
         return None
     else:  # Fallback for simple actions or unexpected types
@@ -103,7 +118,7 @@ def _serialize_action_for_history(action: GameAction) -> Any:
 
 
 def _traverse_game_for_worker(
-    game_state: CambiaGameState,
+    game_state: GoBrState,
     agent_states: List[AgentState],
     reach_probs: np.ndarray,
     iteration: int,
@@ -168,7 +183,7 @@ def _traverse_game_for_worker(
             min_depth_after_bottom_out_tracker[0], float(depth)
         )
         return np.array(
-            [game_state.get_utility(i) for i in range(NUM_PLAYERS)], dtype=np.float64
+            [game_state.utility(i) for i in range(NUM_PLAYERS)], dtype=np.float64
         )
 
     if depth >= config.system.recursion_limit:
@@ -182,39 +197,14 @@ def _traverse_game_for_worker(
         worker_stats.error_count += 1
         return np.zeros(NUM_PLAYERS, dtype=np.float64)
 
-    # Determine context
-    if game_state.snap_phase_active:
-        current_context = DecisionContext.SNAP_DECISION
-    elif game_state.pending_action:
-        pending = game_state.pending_action
-        if isinstance(pending, ActionDiscard):
-            current_context = DecisionContext.POST_DRAW
-        elif isinstance(
-            pending,
-            (
-                ActionAbilityPeekOwnSelect,
-                ActionAbilityPeekOtherSelect,
-                ActionAbilityBlindSwapSelect,
-                ActionAbilityKingLookSelect,
-                ActionAbilityKingSwapDecision,
-            ),
-        ):
-            current_context = DecisionContext.ABILITY_SELECT
-        elif isinstance(pending, ActionSnapOpponentMove):
-            current_context = DecisionContext.SNAP_MOVE
-        else:
-            logger_traverse.warning(
-                "W%d D%d: Unknown pending action type (%s) for context.",
-                worker_id,
-                depth,
-                type(pending).__name__,
-            )
-            worker_stats.warning_count += 1
-            current_context = DecisionContext.START_TURN
-    else:
-        current_context = DecisionContext.START_TURN
+    # Determine context. engine/legal.go's DecisionCtx partitions states exactly
+    # as the Python pending-record walk did and its values are numerically
+    # identical to DecisionContext's, so this is the mapping rather than a
+    # re-derivation -- and it is total, so there is no unknown-pending fallback
+    # left to warn about.
+    current_context = game_state.decision_context()
 
-    player = game_state.get_acting_player()
+    player = game_state.acting_player()
     if player == -1:
         logger_traverse.error(
             "W%d D%d: Could not determine acting player. State: %s Context: %s",
@@ -282,9 +272,10 @@ def _traverse_game_for_worker(
         return np.zeros(NUM_PLAYERS, dtype=np.float64)
 
     try:
-        legal_actions_set = game_state.get_legal_actions()
-        # Sort actions for deterministic mapping between strategy index and action
-        legal_actions = sorted(list(legal_actions_set), key=repr)
+        # Already sorted by repr, which is what indexes the stored strategy
+        # vector; each action carries the engine index that applies it.
+        legal_pairs = game_state.legal_actions()
+        legal_actions = [action for _, action in legal_pairs]
     except GameStateError as e_legal:
         logger_traverse.warning(
             "W%d D%d: Game state error getting legal actions P%d: %s. Context: %s",
@@ -300,12 +291,12 @@ def _traverse_game_for_worker(
         Exception
     ) as e_legal:  # JUSTIFIED: worker resilience - workers must not crash the training pool
         logger_traverse.error(
-            "W%d D%d: Error getting legal actions P%d: %s. State: %s Context: %s",
+            "W%d D%d: Error getting legal actions P%d: %s. Prefix: %s Context: %s",
             worker_id,
             depth,
             player,
             e_legal,
-            game_state,
+            game_state.action_prefix,
             current_context.name,
             exc_info=True,
         )
@@ -317,11 +308,11 @@ def _traverse_game_for_worker(
     if num_actions == 0:
         if not game_state.is_terminal():
             logger_traverse.error(
-                "W%d D%d: No legal actions P%d, but state non-terminal! State: %s Context: %s",
+                "W%d D%d: No legal actions P%d, but state non-terminal! Prefix: %s Context: %s",
                 worker_id,
                 depth,
                 player,
-                game_state,
+                game_state.action_prefix,
                 current_context.name,
             )
             worker_stats.error_count += 1
@@ -344,7 +335,7 @@ def _traverse_game_for_worker(
                 min_depth_after_bottom_out_tracker[0], float(depth)
             )
             return np.array(
-                [game_state.get_utility(i) for i in range(NUM_PLAYERS)], dtype=np.float64
+                [game_state.utility(i) for i in range(NUM_PLAYERS)], dtype=np.float64
             )
 
     # Get strategy from regrets
@@ -477,77 +468,42 @@ def _traverse_game_for_worker(
         # Calculate reach probability for the next state (pass unchanged reach probs down)
         next_reach_probs = reach_probs.copy()
 
-        # Apply action and recurse
-        # Capture king swap indices before apply_action clears pending_action_data
-        pre_apply_king_swap_indices = None
-        if (
-            isinstance(chosen_action, ActionAbilityKingSwapDecision)
-            and chosen_action.perform_swap
-            and game_state.pending_action_data
-        ):
-            pad = game_state.pending_action_data
-            if "own_idx" in pad and "opp_idx" in pad:
-                pre_apply_king_swap_indices = (pad["own_idx"], pad["opp_idx"])
-
-        state_delta: Optional[StateDelta] = None
-        undo_info: Optional[UndoInfo] = None
+        # Apply the sampled action under a checkpoint. The Go engine has no
+        # undo callable, so the checkpoint taken here is what the recursion
+        # rewinds to on the way back up (cambia-1782).
+        chosen_engine_index = legal_pairs[chosen_action_index][0]
+        checkpoint: Optional[Checkpoint] = None
         apply_success = False
         try:
-            state_delta, undo_info = game_state.apply_action(chosen_action)
-            if callable(undo_info):
-                apply_success = True
-                # Update node_data with delta if tracing
-                if (
-                    config.logging.log_simulation_traces
-                    and simulation_nodes
-                    and simulation_nodes[-1] is node_data
-                ):
-                    node_data["state_delta"] = [list(d) for d in state_delta]
-
-            else:
-                logger_traverse.error(
-                    "W%d D%d P%d: apply_action for sampled %s returned invalid undo_info. State:%s",
-                    worker_id,
-                    depth,
-                    player,
-                    chosen_action,
-                    game_state,
-                )
-                worker_stats.error_count += 1
-        except ActionApplicationError as apply_err:
-            logger_traverse.warning(
-                "W%d D%d P%d: Action application error for %s: %s. Context:%s",
-                worker_id,
-                depth,
-                player,
-                chosen_action,
-                apply_err,
-                current_context.name,
-            )
-            worker_stats.error_count += 1
-            # Update node_data with error if tracing
+            checkpoint = game_state.checkpoint()
+            game_state.apply(chosen_engine_index)
+            apply_success = True
             if (
                 config.logging.log_simulation_traces
                 and simulation_nodes
                 and simulation_nodes[-1] is node_data
             ):
-                node_data["state_delta"] = [("apply_error", str(apply_err))]
+                # The Go engine exports no per-action state delta. The applied
+                # action index is the replayable record in its place: a deal
+                # spec plus the action prefix reconstructs the node exactly,
+                # which is the substrate's own record-and-replay contract.
+                node_data["state_delta"] = [("action_index", str(chosen_engine_index))]
         except (
             Exception
         ) as apply_err:  # JUSTIFIED: worker resilience - workers must not crash the training pool
             logger_traverse.error(
-                "W%d D%d P%d: Error applying sampled action %s: %s. State:%s Context:%s",
+                "W%d D%d P%d: Error applying sampled action %s (index %d): %s. Prefix:%s Context:%s",
                 worker_id,
                 depth,
                 player,
                 chosen_action,
+                chosen_engine_index,
                 apply_err,
-                game_state,
+                game_state.action_prefix,
                 current_context.name,
                 exc_info=True,
             )
             worker_stats.error_count += 1
-            # Update node_data with error if tracing
             if (
                 config.logging.log_simulation_traces
                 and simulation_nodes
@@ -555,49 +511,19 @@ def _traverse_game_for_worker(
             ):
                 node_data["state_delta"] = [("apply_error", str(apply_err))]
 
-        if apply_success:
-            # Create observation
-            observation = _create_observation(
-                None,
-                chosen_action,
-                game_state,
-                player,
-                game_state.snap_results_log,  # Pass CURRENT snap log
-                king_swap_indices=pre_apply_king_swap_indices,
-            )
-            next_agent_states = []
-            agent_update_failed = False
-            player_specific_obs_for_log = None
-            if observation is None:  # Check if observation creation failed
-                logger_traverse.error(
-                    "W%d D%d: Failed to create observation after action %s.",
-                    worker_id,
-                    depth,
-                    chosen_action,
-                )
-                agent_update_failed = True  # Mark as failed to prevent recursion
-                worker_stats.error_count += 1
-                if undo_info:
-                    try:
-                        undo_info()
-                    except UndoFailureError as undo_e:
-                        logger_traverse.warning(
-                            "W%d D%d: Undo failure after obs create fail: %s",
-                            worker_id,
-                            depth,
-                            undo_e,
-                        )
-                    except (
-                        Exception
-                    ) as undo_e:  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
-                        logger_traverse.error(
-                            "W%d D%d: Error undoing after obs create fail: %s",
-                            worker_id,
-                            depth,
-                            undo_e,
-                        )
-            else:
+        try:
+            if apply_success:
+                next_agent_states = []
+                agent_update_failed = False
+                player_specific_obs_for_log = None
+                agent_idx = -1
                 try:
+                    # ability_reveals: the production frame, so a peek reaches
+                    # the peeker's belief and a King swap moves the faces both
+                    # beliefs had already seen.
+                    observation = game_state.observation(
+                        chosen_action, player, ability_reveals=True
+                    )
                     for agent_idx, agent_state in enumerate(agent_states):
                         cloned_agent = agent_state.clone()
                         player_specific_obs = _filter_observation(observation, agent_idx)
@@ -606,204 +532,94 @@ def _traverse_game_for_worker(
                         cloned_agent.update(player_specific_obs)
                         next_agent_states.append(cloned_agent)
                 except (AgentStateError, ObservationUpdateError) as e_update:
-                    failed_agent_idx = agent_idx  # Capture index where failure occurred
                     logger_traverse.warning(
                         "W%d D%d: Agent state update error P%d after action %s: %s",
                         worker_id,
                         depth,
-                        failed_agent_idx,
+                        agent_idx,
                         chosen_action,
                         e_update,
                     )
                     worker_stats.error_count += 1
                     agent_update_failed = True
-                    if undo_info:
-                        try:
-                            undo_info()
-                        except UndoFailureError as undo_e:
-                            logger_traverse.warning(
-                                "W%d D%d: Undo failure after agent update fail: %s",
-                                worker_id,
-                                depth,
-                                undo_e,
-                            )
-                            worker_stats.error_count += 1
-                        except (
-                            Exception
-                        ) as undo_e:  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
-                            logger_traverse.error(
-                                "W%d D%d: Error undoing after agent update fail: %s",
-                                worker_id,
-                                depth,
-                                undo_e,
-                                exc_info=True,
-                            )
-                            worker_stats.error_count += 1
                 except (
                     Exception
                 ) as e_update:  # JUSTIFIED: worker resilience - workers must not crash the training pool
-                    failed_agent_idx = agent_idx  # Capture index where failure occurred
                     logger_traverse.error(
-                        "W%d D%d: Error updating agent P%d after action %s: %s. State(post-action):%s FilteredObs:%s",
+                        "W%d D%d: Error updating agent P%d after action %s: %s. Prefix:%s FilteredObs:%s",
                         worker_id,
                         depth,
-                        failed_agent_idx,
+                        agent_idx,
                         chosen_action,
                         e_update,
-                        game_state,
+                        game_state.action_prefix,
                         player_specific_obs_for_log,  # May be None if error happened before P0 update
                         exc_info=True,
                     )
                     worker_stats.error_count += 1
                     agent_update_failed = True
-                    if undo_info:
-                        try:
-                            undo_info()
-                        except UndoFailureError as undo_e:
-                            logger_traverse.warning(
-                                "W%d D%d: Undo failure after agent update fail: %s",
-                                worker_id,
-                                depth,
-                                undo_e,
-                            )
-                            worker_stats.error_count += 1
-                        except (
-                            Exception
-                        ) as undo_e:  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
-                            logger_traverse.error(
-                                "W%d D%d: Error undoing after agent update fail: %s",
-                                worker_id,
-                                depth,
-                                undo_e,
-                                exc_info=True,
-                            )
-                            worker_stats.error_count += 1
 
-            if not agent_update_failed:
-                try:
-                    # Single recursive call for the sampled action
-                    node_value = _traverse_game_for_worker(
-                        game_state,
-                        next_agent_states,
-                        next_reach_probs,  # Pass original reach probs down
-                        iteration,
-                        updating_player,
-                        weight,
-                        regret_sum_snapshot,
-                        config,
-                        local_regret_updates,
-                        local_strategy_sum_updates,
-                        local_reach_prob_updates,
-                        depth + 1,
-                        worker_stats,
-                        progress_queue,
-                        worker_id,
-                        min_depth_after_bottom_out_tracker,
-                        has_bottomed_out_tracker,
-                        simulation_nodes,
-                    )
-                except TraversalError as recursive_err:
-                    logger_traverse.warning(
-                        "W%d D%d: Traversal error in recursive call after action %s: %s",
-                        worker_id,
-                        depth,
-                        chosen_action,
-                        recursive_err,
-                    )
-                    worker_stats.error_count += 1
-                    node_value = np.zeros(NUM_PLAYERS, dtype=np.float64)
-                    if undo_info:
-                        try:
-                            undo_info()
-                        except UndoFailureError as undo_e:
-                            logger_traverse.warning(
-                                "W%d D%d: Undo failure after traversal error: %s",
-                                worker_id,
-                                depth,
-                                undo_e,
-                            )
-                            worker_stats.error_count += 1
-                        except (
-                            Exception
-                        ) as undo_e:  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
-                            logger_traverse.error(
-                                "W%d D%d: Error undoing after traversal error: %s",
-                                worker_id,
-                                depth,
-                                undo_e,
-                                exc_info=True,
-                            )
-                            worker_stats.error_count += 1
-                except (
-                    Exception
-                ) as recursive_err:  # JUSTIFIED: worker resilience - workers must not crash the training pool
-                    logger_traverse.error(
-                        "W%d D%d: Error in recursive call after action %s: %s. State:%s Context:%s",
-                        worker_id,
-                        depth,
-                        chosen_action,
-                        recursive_err,
-                        game_state,
-                        current_context.name,
-                        exc_info=True,
-                    )
-                    worker_stats.error_count += 1
-                    node_value = np.zeros(
-                        NUM_PLAYERS, dtype=np.float64
-                    )  # Set to zero on error
-                    if undo_info:
-                        try:
-                            undo_info()
-                        except UndoFailureError as undo_e:
-                            logger_traverse.warning(
-                                "W%d D%d: Undo failure after recursion error: %s",
-                                worker_id,
-                                depth,
-                                undo_e,
-                            )
-                            worker_stats.error_count += 1
-                        except (
-                            Exception
-                        ) as undo_e:  # JUSTIFIED: worker resilience - must attempt cleanup even after undo errors
-                            logger_traverse.error(
-                                "W%d D%d: Error undoing after recursion error: %s",
-                                worker_id,
-                                depth,
-                                undo_e,
-                                exc_info=True,
-                            )
-                            worker_stats.error_count += 1
-
-                # Undo action after recursion returns
-                if undo_info:
+                if not agent_update_failed:
                     try:
-                        undo_info()
-                    except UndoFailureError as undo_e:
-                        logger_traverse.error(
-                            "W%d D%d P%d: Undo failure for action %s: %s. State likely corrupt. Returning zero.",
+                        # Single recursive call for the sampled action
+                        node_value = _traverse_game_for_worker(
+                            game_state,
+                            next_agent_states,
+                            next_reach_probs,  # Pass original reach probs down
+                            iteration,
+                            updating_player,
+                            weight,
+                            regret_sum_snapshot,
+                            config,
+                            local_regret_updates,
+                            local_strategy_sum_updates,
+                            local_reach_prob_updates,
+                            depth + 1,
+                            worker_stats,
+                            progress_queue,
+                            worker_id,
+                            min_depth_after_bottom_out_tracker,
+                            has_bottomed_out_tracker,
+                            simulation_nodes,
+                        )
+                    except TraversalError as recursive_err:
+                        logger_traverse.warning(
+                            "W%d D%d: Traversal error in recursive call after action %s: %s",
                             worker_id,
                             depth,
-                            player,
                             chosen_action,
-                            undo_e,
-                            exc_info=True,
+                            recursive_err,
                         )
                         worker_stats.error_count += 1
-                        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+                        node_value = np.zeros(NUM_PLAYERS, dtype=np.float64)
                     except (
                         Exception
-                    ) as undo_e:  # JUSTIFIED: worker resilience - must not crash on undo, state likely corrupt
+                    ) as recursive_err:  # JUSTIFIED: worker resilience - workers must not crash the training pool
                         logger_traverse.error(
-                            "W%d D%d P%d: Error undoing action %s: %s. State likely corrupt. Returning zero.",
+                            "W%d D%d: Error in recursive call after action %s: %s. Prefix:%s Context:%s",
                             worker_id,
                             depth,
-                            player,
                             chosen_action,
-                            undo_e,
+                            recursive_err,
+                            game_state.action_prefix,
+                            current_context.name,
                             exc_info=True,
                         )
                         worker_stats.error_count += 1
-                        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+                        node_value = np.zeros(
+                            NUM_PLAYERS, dtype=np.float64
+                        )  # Set to zero on error
+        finally:
+            # Rewind once, on every path out. The Python engine's undo ran
+            # twice when the recursive call raised (once in the handler and
+            # again after it), which a checkpoint restore makes both
+            # unnecessary and unsafe -- the snapshot handle is freed here.
+            if checkpoint is not None:
+                try:
+                    if apply_success:
+                        game_state.rewind(checkpoint)
+                finally:
+                    game_state.release(checkpoint)
 
     # --- Outcome Sampling Regret Update ---
     if player == updating_player and chosen_action_index is not None:
@@ -866,8 +682,16 @@ def run_cfr_simulation_worker(
         str,
         str,
     ],
+    deal: Optional[DealSpec] = None,
 ) -> Optional[WorkerResult]:
-    """Top-level function executed by each worker process. Sets up per-worker logging."""
+    """Top-level function executed by each worker process. Sets up per-worker logging.
+
+    ``deal`` pins the deal instead of drawing a fresh one, which is what the
+    table-equality gate needs to put two engines on the same game. The training
+    pool maps this function over a single argument and never passes it, so a
+    production run keeps dealing from process entropy exactly as the Python
+    engine's unseeded shuffle did.
+    """
     # Initialize logger_instance to None
     logger_instance: Optional[logging.Logger] = None
     worker_stats = WorkerStats()
@@ -888,6 +712,7 @@ def run_cfr_simulation_worker(
     # Initialize trace list for this simulation
     simulation_nodes_this_sim: List[SimulationNodeData] = []
     final_utility_value: Optional[np.ndarray] = None
+    game_state: Optional[GoBrState] = None
 
     worker_root_logger = logging.getLogger()
     try:
@@ -962,7 +787,10 @@ def run_cfr_simulation_worker(
     try:
         # --- Game and Agent State Initialization ---
         try:
-            game_state = CambiaGameState(house_rules=config.cambia_rules)
+            game_state = GoBrState.new(
+                config.cambia_rules,
+                deal if deal is not None else DealSpec(seed=random.getrandbits(63)),
+            )
         except GameStateError as game_init_e:
             if logger_instance:
                 logger_instance.warning(
@@ -1000,14 +828,14 @@ def run_cfr_simulation_worker(
         if not game_state.is_terminal():
             try:
                 # Create observation needed for AgentState initialization
-                initial_obs = _create_observation(
-                    None, None, game_state, -1, []
-                )  # No explicit card needed
-                if initial_obs is None:
-                    raise ValueError("Failed to create initial observation.")
-
-                initial_hands = [list(p.hand) for p in game_state.players]
-                initial_peeks = [p.initial_peek_indices for p in game_state.players]
+                initial_obs = game_state.initial_observation(ability_reveals=True)
+                initial_hands = [
+                    game_state.hand(i) for i in range(game_state.num_players())
+                ]
+                initial_peeks = [
+                    game_state.initial_peek_indices()
+                    for _ in range(game_state.num_players())
+                ]
                 for i in range(NUM_PLAYERS):
                     agent = AgentState(
                         player_id=i,
@@ -1042,11 +870,11 @@ def run_cfr_simulation_worker(
             ) as agent_init_e:  # JUSTIFIED: worker resilience - workers must not crash the training pool
                 if logger_instance:
                     logger_instance.error(
-                        "W%d Iter %d: Failed AgentStates init: %s. GameState: %s",
+                        "W%d Iter %d: Failed AgentStates init: %s. Deal: %s",
                         worker_id,
                         iteration,
                         agent_init_e,
-                        game_state,
+                        game_state.deal,
                         exc_info=True,
                     )
                 worker_stats.error_count += 1
@@ -1058,13 +886,13 @@ def run_cfr_simulation_worker(
         else:  # Game terminal at start
             if logger_instance:
                 logger_instance.warning(
-                    "W%d Iter %d: Game terminal at init. State: %s",
+                    "W%d Iter %d: Game terminal at init. Deal: %s",
                     worker_id,
                     iteration,
-                    game_state,
+                    game_state.deal,
                 )
             final_utility_value = np.array(
-                [game_state.get_utility(i) for i in range(NUM_PLAYERS)], dtype=np.float64
+                [game_state.utility(i) for i in range(NUM_PLAYERS)], dtype=np.float64
             )
             return WorkerResult(
                 stats=worker_stats,
@@ -1194,6 +1022,11 @@ def run_cfr_simulation_worker(
             final_utility=None,
         )
     finally:
+        # The engine handle pool is finite and a worker process is reused across
+        # iterations, so the state is closed on every exit path, early returns
+        # included.
+        if game_state is not None:
+            game_state.close()
         # Ensure logs are flushed and handlers closed on worker exit
         if logger_instance:
             for handler in logger_instance.handlers[:]:
@@ -1210,18 +1043,26 @@ def run_cfr_simulation_worker(
 
 
 # --- Observation Helpers ---
-# (Keep these helpers here as they are used by the worker's traversal logic)
+#
+# The tabular traversal above no longer calls these: it reads its frames off the
+# engine in GoBrState.observation. They stay because the deep-CFR, PRT-CFR and
+# evaluation lanes import them, and they are duck-typed on the game state they
+# are handed rather than importing one, so this module carries no dependency on
+# the retiring Python engine (cambia-1782).
 def _create_observation(
-    prev_state: Optional[
-        CambiaGameState
-    ],  # Kept for signature consistency if needed elsewhere
+    prev_state: Any,  # Kept for signature consistency if needed elsewhere
     action: Optional[GameAction],
-    next_state: CambiaGameState,
+    next_state: Any,
     acting_player: int,
     snap_results: List[Dict],
     king_swap_indices: Optional[tuple] = None,  # (own_idx, opp_idx) for king swap
 ) -> Optional[AgentObservation]:
-    """Creates the AgentObservation object based on the state *after* the action."""
+    """Creates the AgentObservation object based on the state *after* the action.
+
+    ``next_state`` is any game state exposing the Python engine's read surface
+    (get_discard_top, get_player_card_count, get_stockpile_size, players,
+    pending_action_data, cambia_caller_id, is_terminal, get_turn_number).
+    """
     logger_obs = logging.getLogger(__name__)  # Use module logger
     try:
         discard_top = next_state.get_discard_top()
@@ -1335,12 +1176,8 @@ def _create_observation(
         # non-snap actions leave both cleared.
         race_resolution = getattr(next_state, "race_resolution", None)
         is_race_commit = False
-        if race_resolution is None and getattr(
-            next_state.house_rules, "snapRace", False
-        ):
-            if isinstance(
-                action, (ActionPassSnap, ActionSnapOwn, ActionSnapOpponent)
-            ):
+        if race_resolution is None and getattr(next_state.house_rules, "snapRace", False):
+            if isinstance(action, (ActionPassSnap, ActionSnapOwn, ActionSnapOpponent)):
                 is_race_commit = True
 
         # Populate king_swap_indices if this action is a performed king swap
