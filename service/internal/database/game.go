@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jason-s-yu/cambia/service/internal/models"
 	"github.com/jason-s-yu/cambia/service/internal/rating"
 )
@@ -37,12 +38,19 @@ func RecordGameAndResults(ctx context.Context, gameID uuid.UUID, players []*mode
 	var alreadyRecorded bool
 
 	err := pgx.BeginTxFunc(ctx, DB, pgx.TxOptions{}, func(tx pgx.Tx) error {
-		// Mark the game row completed. This assumes the row already exists (created at
-		// game-start via UpsertInitialGameState, which supplies lobby_id): games.lobby_id is NOT NULL
-		// with no default, so an INSERT here would always fail a not-null violation; a plain
-		// conditional UPDATE matches this function's actual invariant and doubles as the
-		// idempotency guard (status != 'completed' skips duplicate end-events).
-		updGame := `UPDATE games SET status = 'completed' WHERE id = $1 AND status != 'completed'`
+		// Mark the game row completed and stamp when it ended. This assumes the row already
+		// exists (created at game-start via UpsertInitialGameState, which supplies lobby_id):
+		// games.lobby_id is NOT NULL with no default, so an INSERT here would always fail a
+		// not-null violation; a plain conditional UPDATE matches this function's actual
+		// invariant and doubles as the idempotency guard (status != 'completed' skips duplicate
+		// end-events), which is also what keeps end_time at the first completion rather than
+		// the latest duplicate end-event.
+		//
+		// end_time moved here in cambia-1904. It had been written only by the historian, on an
+		// action name nothing emitted, so it was NULL for every game ever played; the server is
+		// the single writer of games rows since cambia-1881, and this transaction is where a
+		// game becomes finished.
+		updGame := `UPDATE games SET status = 'completed', end_time = NOW() WHERE id = $1 AND status != 'completed'`
 		ct, e := tx.Exec(ctx, updGame, gameID)
 		if e != nil {
 			return e
@@ -304,4 +312,55 @@ func UpsertInitialGameState(ctx context.Context, gameID, lobbyID, hostUserID uui
 		}
 		return nil
 	})
+}
+
+// AbandonStaleGames marks every games row still 'in_progress' as abandoned and stamps its
+// end_time, reporting how many rows it closed. It is the server's boot sweep: ConnectDBAsync runs
+// it once, after the first successful connection and after migrations, before the process serves
+// play.
+//
+// A game exists only in the server's memory. game.CambiaGame is held by the handlers' in-memory
+// game store and nothing rehydrates one from the database, so a row still 'in_progress' when the
+// process starts belongs to a game whose process is gone: a crash, a kill, or a deploy that
+// landed mid-game. No server path will ever end it, because every path that does end a game (a
+// rulebook ending, a forfeit that empties the table, the disconnect grace, the panic guard) runs
+// through game.endGame on the object that no longer exists.
+//
+// Until cambia-1881 the historian covered this from the outside, marking a game abandoned off a
+// ten-minute inactivity timer kept in its own process. That went with the historian's games
+// writes, and this replaces it exactly rather than on a delay: at boot there is no such thing as
+// a legitimately in-progress game, so no activity signal is needed to tell the two apart.
+//
+// One case this closes only at the next restart rather than promptly: a table where every player
+// has dropped, under a lobby that set forfeitOnDisconnect off and turnTimerSec to 0. Nothing then
+// forfeits the seats and no turn clock plays them, so the game sits in progress with nobody in it
+// until the process ends. Under the default rules (forfeit on, a 15s turn clock) it cannot arise;
+// the game.endGame paths close every other game while the server is up.
+//
+// This assumes one server process per database, which is what the deployment runs
+// (deploy/hawking/docker-compose.yml defines a single cambia-server container) and what the
+// in-memory game and lobby state already require. A second instance sharing one database would
+// abandon the first instance's live games.
+// db is the pool in production. It is a parameter rather than the package-level DB because this
+// is the one query here that rewrites rows it was not handed the ids of: its test passes a
+// transaction and rolls it back, since the dev Postgres is shared by every checkout on the
+// machine and a test that really abandoned every in-progress game would reach into other
+// packages' fixtures and other people's runs.
+func AbandonStaleGames(ctx context.Context, db gamesExecer) (int64, error) {
+	q := `
+		UPDATE games
+		SET status = 'abandoned', end_time = NOW()
+		WHERE status = 'in_progress'
+	`
+	ct, err := db.Exec(ctx, q)
+	if err != nil {
+		return 0, fmt.Errorf("abandon stale in-progress games: %w", err)
+	}
+	return ct.RowsAffected(), nil
+}
+
+// gamesExecer is the exec surface AbandonStaleGames needs, satisfied by both *pgxpool.Pool and
+// pgx.Tx.
+type gamesExecer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
