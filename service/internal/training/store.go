@@ -74,6 +74,15 @@ type Run struct {
 	// to render remote process controls (mirrored as remote_controllable in
 	// web/src/types/training.ts).
 	RemoteControllable bool `json:"remote_controllable"`
+	// ExecutedOn is which nashnet node produced this run's numbers
+	// (runs.executed_on, serving-harness v1.1 design D23): a different fact
+	// from Host/origin_host ("who owns and serves this run"). It comes
+	// straight from the run_db column the reconciler populates from the
+	// coordinator-authored env.json, so it renders for a genuinely remote node
+	// and for the coordinator's own embedded node alike, and it never requires
+	// reading a run dir. Empty for a pre-pool run and for a run this dashboard
+	// launched directly (never went through the harness).
+	ExecutedOn string `json:"executed_on,omitempty"`
 }
 
 // RunDetail extends Run with configuration and metadata.
@@ -136,6 +145,10 @@ type TrainingStore struct {
 	// never wrong-but-confident).
 	hasOriginHost  bool
 	hasHarnessSync bool
+	// hasExecutedOn records whether the opened db carries the additive
+	// runs.executed_on column (serving-harness v1.1 design D23, cfr/src/run_db.py
+	// _COLUMN_MIGRATIONS). A db predating the nashnet pool is read without it.
+	hasExecutedOn bool
 	// proxy is the harness control-plane client, or nil when no harness config
 	// is present (the no-proxy state: remote runs stay read-only, log tails use
 	// the synced file). It supplies the origin host used to mark a remote run
@@ -214,9 +227,10 @@ func syncIntervalFromEnv() int {
 }
 
 // detectHarnessSchema probes for the serving-harness additions (runs.origin_host
-// column and the harness_sync table) so remote-provenance queries are only
-// issued against a db that carries them. A db predating those additions is
-// served as local-only rather than 500ing every list/detail request.
+// and runs.executed_on columns, the harness_sync table) so remote-provenance
+// and placement queries are only issued against a db that carries them. A db
+// predating those additions is served as local-only rather than 500ing every
+// list/detail request.
 func (s *TrainingStore) detectHarnessSchema(ctx context.Context) {
 	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(runs)`)
 	if err == nil {
@@ -230,6 +244,9 @@ func (s *TrainingStore) detectHarnessSchema(ctx context.Context) {
 			}
 			if name == "origin_host" {
 				s.hasOriginHost = true
+			}
+			if name == "executed_on" {
+				s.hasExecutedOn = true
 			}
 		}
 		rows.Close()
@@ -393,13 +410,17 @@ func (s *TrainingStore) queryRuns(ctx context.Context) ([]Run, error) {
 	if s.hasOriginHost {
 		originSel = "origin_host"
 	}
+	executedOnSel := "NULL AS executed_on"
+	if s.hasExecutedOn {
+		executedOnSel = "executed_on"
+	}
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT id, name, algorithm, status,
 		       best_metric_value, best_metric_iter,
-		       created_at, updated_at, %s
+		       created_at, updated_at, %s, %s
 		FROM runs
 		ORDER BY updated_at DESC
-	`, originSel))
+	`, originSel, executedOnSel))
 	if err != nil {
 		return nil, err
 	}
@@ -410,14 +431,15 @@ func (s *TrainingStore) queryRuns(ctx context.Context) ([]Run, error) {
 	var runs []Run
 	for rows.Next() {
 		var r Run
-		var originHost sql.NullString
+		var originHost, executedOn sql.NullString
 		if err := rows.Scan(
 			&r.ID, &r.Name, &r.Algorithm, &r.Status,
 			&r.BestMetricValue, &r.BestMetricIter,
-			&r.CreatedAt, &r.UpdatedAt, &originHost,
+			&r.CreatedAt, &r.UpdatedAt, &originHost, &executedOn,
 		); err != nil {
 			return nil, err
 		}
+		r.ExecutedOn = nullString(executedOn)
 		// Overlay the process.json current state (status + pid liveness) and the
 		// remote provenance (host + staleness).
 		s.applyProcessState(&r, nullString(originHost), syncMap[r.Name])
@@ -474,23 +496,27 @@ func (s *TrainingStore) ListRuns(ctx context.Context) ([]Run, error) {
 // GetRun returns detail for a single run by name, including the latest config snapshot.
 func (s *TrainingStore) GetRun(ctx context.Context, name string) (*RunDetail, error) {
 	var rd RunDetail
-	var notes, tags, originHost sql.NullString
+	var notes, tags, originHost, executedOn sql.NullString
 	originSel := "NULL AS origin_host"
 	if s.hasOriginHost {
 		originSel = "r.origin_host"
+	}
+	executedOnSel := "NULL AS executed_on"
+	if s.hasExecutedOn {
+		executedOnSel = "r.executed_on"
 	}
 	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT r.id, r.name, r.algorithm, r.status,
 		       r.best_metric_value, r.best_metric_iter,
 		       r.created_at, r.updated_at,
-		       r.notes, r.tags, %s
+		       r.notes, r.tags, %s, %s
 		FROM runs r
 		WHERE r.name = ?
-	`, originSel), name).Scan(
+	`, originSel, executedOnSel), name).Scan(
 		&rd.ID, &rd.Name, &rd.Algorithm, &rd.Status,
 		&rd.BestMetricValue, &rd.BestMetricIter,
 		&rd.CreatedAt, &rd.UpdatedAt,
-		&notes, &tags, &originHost,
+		&notes, &tags, &originHost, &executedOn,
 	)
 	if err == sql.ErrNoRows {
 		// No run_db row yet: a dashboard-created run lives only in process.json.
@@ -505,6 +531,7 @@ func (s *TrainingStore) GetRun(ctx context.Context, name string) (*RunDetail, er
 	if tags.Valid {
 		rd.Tags = tags.String
 	}
+	rd.ExecutedOn = nullString(executedOn)
 
 	// Overlay the process.json current state (status + pid liveness + record)
 	// and the remote provenance (host + staleness). Host is stamped before

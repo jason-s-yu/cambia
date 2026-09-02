@@ -121,6 +121,10 @@ type rigConfig struct {
 	// (job-preserving restart, unstamped "dev" build).
 	killJobsOnStop bool
 	buildCommit    string
+	// attach runs after the server is built and before the test listener
+	// starts, so a rig can wire a coordinator pool whose routes must exist in
+	// the handler the listener serves.
+	attach func(*Server, *Dispatcher)
 }
 
 type testRig struct {
@@ -135,6 +139,7 @@ type testRig struct {
 	pm      *procmgr.ProcessManager
 	env     *fakeEnv
 	origin  string
+	srv     *Server
 }
 
 func newRig(t *testing.T, cfg rigConfig) *testRig {
@@ -212,6 +217,9 @@ func newRig(t *testing.T, cfg rigConfig) *testRig {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if cfg.attach != nil {
+		cfg.attach(srv, disp)
+	}
 	ts := httptest.NewTLSServer(srv.Handler())
 	t.Cleanup(func() {
 		pm.KillAll()
@@ -244,6 +252,7 @@ func newRig(t *testing.T, cfg rigConfig) *testRig {
 		pm:      pm,
 		env:     fe,
 		origin:  cfg.origin,
+		srv:     srv,
 	}
 }
 

@@ -139,6 +139,20 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid_on_failure", "on_failure must be one of skip|run|fail")
 		return
 	}
+	// 3f. placement constraints (D10). A malformed block is invalid_requires;
+	// an absent one places under the defaults derived from the spec, which is
+	// what every v1.0 spec does. A device with no declaring node waits as
+	// unplaceable rather than being rejected here (D14, D40).
+	if spec.Requires != nil {
+		if err := spec.Requires.Validate(); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_requires", err.Error())
+			return
+		}
+	}
+	if spec.MaxRuntimeHours < 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid_requires", "max_runtime_hours must not be negative")
+		return
+	}
 	// 4. path guards (config, checkpoints): lexical shape (reject absolute + ..).
 	for _, p := range spec.guardedPaths() {
 		if err := pathguard.CheckRel(p.value); err != nil {

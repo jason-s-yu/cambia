@@ -535,16 +535,15 @@ class TestPRTCFREnumFieldsConstrained:
         _, PRTCFRConfig = _get_real_config_classes()
         assert PRTCFRConfig(lr_schedule=schedule).lr_schedule == schedule
 
-    @pytest.mark.parametrize("bad_backend", ["rust", "Go", "GO", ""])
+    @pytest.mark.parametrize("bad_backend", ["rust", "python", "Go", "GO", ""])
     def test_invalid_backend_rejected(self, bad_backend):
         _, PRTCFRConfig = _get_real_config_classes()
         with pytest.raises(Exception) as exc_info:
             PRTCFRConfig(backend=bad_backend)
         msg = str(exc_info.value)
         assert "go" in msg
-        assert "python" in msg
 
-    @pytest.mark.parametrize("backend", ["go", "python"])
+    @pytest.mark.parametrize("backend", ["go"])
     def test_valid_backend_accepted(self, backend):
         _, PRTCFRConfig = _get_real_config_classes()
         assert PRTCFRConfig(backend=backend).backend == backend

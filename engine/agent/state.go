@@ -1056,17 +1056,24 @@ func (a *AgentState) InitializeNPlayer(g *engine.GameState) {
 		a.NPlayerHandLen[seat] = g.Players[seat].HandLen
 	}
 
-	// Own initial peeks: set knowledge and bucket for peeked slots.
-	nps := g.Players[a.PlayerID]
-	for i := uint8(0); i < nps.InitialPeekCount; i++ {
-		peekIdx := nps.InitialPeek[i]
-		if peekIdx < a.OwnHandLen {
-			slot := int(a.PlayerID)*int(engine.MaxHandSize) + int(peekIdx)
-			card := g.Players[a.PlayerID].Hand[peekIdx]
-			bucket := CardToBucket(card)
-			a.NPlayerSlotBuckets[slot] = bucket
-			a.NPlayerSlotKnown[slot] = true
-			a.KnowledgeMask[slot][a.PlayerID] = true
+	// Initial peeks: every seat peeks its own cards at deal time (RULES.md 2), and
+	// Deal populates InitialPeek/InitialPeekCount for every seat, not just this agent's
+	// own. The knower mask records that fact for every seat; the bucket is revealed into
+	// this agent's own belief only for its own seat, since a card the agent never saw is
+	// not something its belief state can name (cambia-1751).
+	for seat := 0; seat < engine.MaxPlayers; seat++ {
+		seatPlayer := g.Players[seat]
+		for i := uint8(0); i < seatPlayer.InitialPeekCount; i++ {
+			peekIdx := seatPlayer.InitialPeek[i]
+			if peekIdx >= a.NPlayerHandLen[seat] {
+				continue
+			}
+			slot := nplayerSlot(uint8(seat), peekIdx)
+			a.KnowledgeMask[slot][seat] = true
+			if uint8(seat) == a.PlayerID {
+				a.NPlayerSlotBuckets[slot] = CardToBucket(seatPlayer.Hand[peekIdx])
+				a.NPlayerSlotKnown[slot] = true
+			}
 		}
 	}
 

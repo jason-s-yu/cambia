@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/jason-s-yu/cambia/runnerd/nashnet/capability"
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 )
 
@@ -176,6 +177,16 @@ type JobSpec struct {
 	// client against an old daemon is the only degradation: the field is dropped
 	// and the job runs shared.
 	Exclusive bool `json:"exclusive,omitempty"`
+	// Requires is the placement constraint block of D10, matched against a
+	// node's grant-clamped capability declaration. Absent means the defaults
+	// derived from the spec alone (device from device(), min_cores 1,
+	// needs_libcambia true), which is what every v1.0 spec places under.
+	Requires *capability.Requires `json:"requires,omitempty"`
+	// MaxRuntimeHours optionally lowers the pool's own lease-lifetime cap for
+	// this job (D4). Zero means the pool cap alone applies. It is a coordinator
+	// bound, checked from granted_at regardless of renewals, and is not the
+	// node's own job_policy gate.
+	MaxRuntimeHours float64 `json:"max_runtime_hours,omitempty"`
 }
 
 // jobSpecAlias has JobSpec's exact field set but none of its methods, so
