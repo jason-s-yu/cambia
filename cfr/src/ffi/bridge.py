@@ -392,7 +392,7 @@ class HouseRulesView(NamedTuple):
 # ignored by the SysV calling convention, so a stale .so keeps loading and
 # keeps answering, just with the wrong rules. _check_abi_generation refuses
 # to hand back a library whose reported generation does not match this.
-ABI_GENERATION = 1
+ABI_GENERATION = 2
 
 _ffi = cffi.FFI()
 _ffi.cdef("""
