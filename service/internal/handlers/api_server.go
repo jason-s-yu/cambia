@@ -282,7 +282,7 @@ func (gs *GameServer) hubGameFactory() hub.GameFactory {
 
 // attachOnGameEnd wires the OnGameEnd callback that resets lobby state and emits results.
 func (gs *GameServer) attachOnGameEnd(g *game.CambiaGame, lobbyID uuid.UUID) {
-	g.OnGameEnd = func(endedLobbyID uuid.UUID, winner uuid.UUID, scores map[uuid.UUID]int, usernames map[uuid.UUID]string, rawScores map[uuid.UUID]int, cambiaCallerID uuid.UUID, finalHands []game.FinalHand) {
+	g.OnGameEnd = func(endedLobbyID uuid.UUID, winner uuid.UUID, scores map[uuid.UUID]int, usernames map[uuid.UUID]string, rawScores map[uuid.UUID]int, cambiaCallerID uuid.UUID, finalHands []game.FinalHand, reason game.EndReason) {
 		log.Printf("Game %s ended. OnGameEnd executing for lobby %s.", g.ID, endedLobbyID)
 
 		lobInstance, exists := gs.LobbyStore.GetLobby(endedLobbyID)
@@ -342,6 +342,15 @@ func (gs *GameServer) attachOnGameEnd(g *game.CambiaGame, lobbyID uuid.UUID) {
 			}
 			for pid, sc := range scores {
 				resultMsg["scores"].(map[string]int)[pid.String()] = sc
+			}
+			// Why the game ended rides this frame as well as game_end, and for the same reason
+			// finalHands does: this is the only one of the two a client that reconnects into the
+			// results ever sees, and it is the one the hub holds and re-sends
+			// (Hub.rememberTerminal/resendTerminal). Without it, a game the panic guard aborted
+			// reached a reconnecting player as an ordinary scoreboard (cambia-1831). Absent for
+			// an ordinary ending, so that frame keeps the shape it has always had.
+			if reason != game.EndReasonNormal {
+				resultMsg["reason"] = string(reason)
 			}
 			h.Emit("game_results", resultMsg)
 

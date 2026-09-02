@@ -363,6 +363,13 @@ export interface PlayerCambiaEvent {
 	user: { id: string };
 }
 
+/** Why a game ended, on the frames that report the result (service/doc/game_actions.md, "Ending on
+ *  an internal error"). Absent on every ordinary ending: a called Cambia, the turn cap, an
+ *  exhausted stockpile and a table emptied by forfeits all end a game that was played, and those
+ *  frames say nothing about why. 'internal_error' is a game the service's panic guard aborted; the
+ *  scores beside it are read off whatever state the panic left, so they are not a result. */
+export type GameEndReason = 'internal_error';
+
 /** Structure for game end events (public) */
 export interface GameEndEvent {
 	type: 'game_end';
@@ -372,6 +379,7 @@ export interface GameEndEvent {
 		caller: string; // UUID string of the player who called Cambia, or NIL UUID
 		penaltyApplied: boolean; // Did the Cambia caller penalty get applied?
 		winBonusApplied: boolean; // Was a circuit win bonus applied?
+		reason?: GameEndReason; // Present only for an abnormal ending (cambia-1831).
 	};
 }
 
@@ -424,6 +432,10 @@ export interface GameResultsEvent {
 	winner: string;
 	scores: Record<string, number>;
 	lobby_status: unknown;
+	/** Why the game ended (cambia-1831). Absent for an ordinary result. This frame is the only one
+	 *  a client that reconnects into a finished game ever sees, so it carries the reason as well as
+	 *  game_end does. */
+	reason?: GameEndReason;
 }
 
 // --- Union Type for Server Events ---
