@@ -18,6 +18,7 @@ import { render } from '@testing-library/react';
 import type { RenderResult } from '@testing-library/react';
 import { vi } from 'vitest';
 import DsGameTable from '@/components/game/DsGameTable';
+import type { GiveUpReason } from '@/hooks/useSocket';
 import type { ObfGameState } from '@/types/game';
 import type { LobbyPhase } from '@/stores/lobbyStore';
 import { useAuthStore } from '@/stores/authStore';
@@ -41,7 +42,8 @@ export interface RenderDsGameTableOptions {
   gameState?: ObfGameState;
   phase?: LobbyPhase;
   connected?: boolean;
-  connectionError?: string | null;
+  /** Why useSocket stopped dialing, or null while it is still retrying. */
+  gaveUp?: GiveUpReason | null;
   /** The signed-in user's id; defaults to the fixture's own seat (SELF_ID). */
   selfId?: string;
   /** Patches applied to useGameStore after `gameState` is seeded, e.g. `{ pendingAction: 'discard_replace' }`. */
@@ -73,7 +75,7 @@ export function renderDsGameTable(options: RenderDsGameTableOptions = {}): Rende
       sendMessage={sendMessage}
       onLeave={onLeave}
       connected={options.connected ?? true}
-      connectionError={options.connectionError ?? null}
+      gaveUp={options.gaveUp ?? null}
     />
   );
 

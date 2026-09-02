@@ -12,6 +12,7 @@
 // (player_snap_success, player_snap_penalty, game_reshuffle_stockpile).
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ObfCard, ObfGameState, ObfPlayerState, ClientGameAction } from '@/types/game';
+import type { GiveUpReason } from '@/hooks/useSocket';
 import {
   drawStockpileAction,
   drawDiscardPileAction,
@@ -67,8 +68,14 @@ interface DsGameTableProps {
    * locked and a reconnect notice in the top strip; the hook reconnects on its own.
    */
   connected?: boolean;
-  /** The hook's last connection error, used to tell a live retry from a dead socket. */
-  connectionError?: string | null;
+  /**
+   * Why the socket hook stopped dialing, or null while it is still retrying (useSocket's
+   * GiveUpReason). The table tells a live retry from a dead socket by this and nothing else: it
+   * used to match a regex against `connectionError`, which read a clean close from the hub as an
+   * ongoing reconnect and left the felt saying "Reconnecting" with every control locked for the
+   * rest of the round (cambia-1239 review).
+   */
+  gaveUp?: GiveUpReason | null;
 }
 
 /** Ability name by the discarded rank, for seat notes and prompts. */
@@ -330,7 +337,7 @@ const EmptySlot: React.FC<{ onClick?: () => void; highlight?: boolean; label?: s
   return <div role={label ? 'img' : undefined} aria-label={label} data-testid={testId} style={box} />;
 };
 
-const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage, onLeave, connected = true, connectionError = null }) => {
+const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage, onLeave, connected = true, gaveUp: gaveUpReason = null }) => {
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
   const [kingPair, setKingPair] = useState<KingPair | null>(null);
   /**
@@ -354,9 +361,9 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
   const pendingSnapMove = useGameStore(selectPendingSnapMove);
   // Every interaction gate reads `busy`: an action in flight or a dropped socket both lock
   // the felt. The hook retries a dropped socket by itself, so the notice says so unless it
-  // reported that it stopped (cambia-848 F1).
+  // reported that it stopped (cambia-848 F1), which it reports as a state and not as copy.
   const offline = !connected;
-  const gaveUp = offline && !!connectionError && /stopped|after \d+ retries/i.test(connectionError);
+  const gaveUp = offline && gaveUpReason !== null;
   const owesSnapMove = !!pendingSnapMove;
   const busy = isProcessing || offline || owesSnapMove;
   const displayedDrawnCard = useGameStore(selectDisplayedDrawnCard);

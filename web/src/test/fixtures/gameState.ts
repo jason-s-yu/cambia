@@ -29,7 +29,7 @@ function handSlot(ownerId: string, idx: number): ObfCard {
   return { id: `${ownerId}-card-${idx}`, known: false, idx };
 }
 
-function buildPlayer(playerId: string, overrides: Partial<ObfPlayerState> = {}): ObfPlayerState {
+function buildPlayer(playerId: string, currentPlayerId: string | null, overrides: Partial<ObfPlayerState> = {}): ObfPlayerState {
   const handSize = overrides.handSize ?? 4;
   return {
     playerId,
@@ -37,7 +37,11 @@ function buildPlayer(playerId: string, overrides: Partial<ObfPlayerState> = {}):
     handSize,
     hasCalledCambia: false,
     connected: true,
-    isCurrentTurn: playerId === SELF_ID,
+    // Read off the state's own currentPlayerId, not assumed to be the own seat: the server sets
+    // both from the same fact, so a fixture that moved the turn used to hand back a seat flagged
+    // to act on a snapshot saying somebody else was. A per-seat override still forces a mismatch
+    // deliberately, since the overrides spread last.
+    isCurrentTurn: playerId === currentPlayerId,
     revealedHand: Array.from({ length: handSize }, (_, i) => handSlot(playerId, i)),
     drawnCard: null,
     ...overrides
@@ -54,12 +58,17 @@ export interface GameStateOverrides extends Partial<ObfGameState> {
 /**
  * Baseline two-seat table: SELF_ID to act on turn 3, a five-card discard pile with a live top
  * card, nothing pending. `self`/`opponent` patch one seat; every other ObfGameState field
- * (`currentPlayerId`, `cambiaCalled`, `specialAction`, ...) overrides directly.
+ * (`currentPlayerId`, `cambiaCalled`, `specialAction`, ...) overrides directly. Overriding
+ * `currentPlayerId` moves the seat flags with it, so `{ currentPlayerId: OPP_ID }` alone is a
+ * snapshot the server could have sent.
  */
 export function buildGameState(overrides: GameStateOverrides = {}): ObfGameState {
   const { self, opponent, ...rest } = overrides;
-  const selfPlayer = buildPlayer(SELF_ID, self);
-  const oppPlayer = buildPlayer(OPP_ID, opponent);
+  // Resolved before the seats are built: `isCurrentTurn` is a restatement of this field, and a
+  // fixture whose two halves disagree is a state no client ever receives (cambia-1239 review).
+  const currentPlayerId = rest.currentPlayerId !== undefined ? rest.currentPlayerId : SELF_ID;
+  const selfPlayer = buildPlayer(SELF_ID, currentPlayerId, self);
+  const oppPlayer = buildPlayer(OPP_ID, currentPlayerId, opponent);
 
   return {
     gameId: 'fixture-game-1',
