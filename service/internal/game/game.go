@@ -177,6 +177,12 @@ type CambiaGame struct {
 	LobbyType  string    // Lobby type ("private"/"public"/"matchmaking"), satisfies lobbies.type.
 	Rated      bool      // Whether this game's results should feed the rating system.
 
+	// RoundIndex is the 1-based circuit round this game belongs to (satisfies
+	// games.round_index), or 0 when the game is not part of a circuit. Set by the constructor
+	// (CreateGameInstance) from the CircuitState CurrentRound at creation time, the same
+	// counter RecordRound advances on round completion (cambia-1240).
+	RoundIndex int16
+
 	HouseRules HouseRules // Configurable game rules.
 	Circuit    Circuit    // Circuit mode settings.
 
@@ -550,7 +556,7 @@ func (g *CambiaGame) persistInitialGameState() {
 	}
 
 	if database.DB != nil {
-		gameID, lobbyID, hostUserID, lobbyType, rated := g.ID, g.LobbyID, g.HostUserID, g.LobbyType, g.Rated
+		gameID, lobbyID, hostUserID, lobbyType, rated, roundIndex := g.ID, g.LobbyID, g.HostUserID, g.LobbyType, g.Rated, g.RoundIndex
 		wg := g.PersistWG
 		if wg != nil {
 			wg.Add(1)
@@ -559,7 +565,7 @@ func (g *CambiaGame) persistInitialGameState() {
 			if wg != nil {
 				defer wg.Done()
 			}
-			if err := database.UpsertInitialGameState(context.Background(), gameID, lobbyID, hostUserID, lobbyType, rated, snap); err != nil {
+			if err := database.UpsertInitialGameState(context.Background(), gameID, lobbyID, hostUserID, lobbyType, rated, roundIndex, snap); err != nil {
 				log.Printf("Game %s: failed to persist initial game state: %v", gameID, err)
 			}
 		}()
