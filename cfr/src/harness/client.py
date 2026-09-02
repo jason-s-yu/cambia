@@ -26,6 +26,62 @@ class HarnessAPIError(Exception):
         super().__init__(message)
 
 
+class UnsupportedFeatureError(Exception):
+    """A job spec needs a daemon capability the target does not advertise
+    (design D30, cambia-1713). Raised locally, before the request reaches the
+    control plane: a daemon with no `features` field on GET /harness/health
+    advertises nothing, so a new client submitting e.g. a fan-in `after` list
+    against it fails here with a named message instead of the field silently
+    dropping on the wire."""
+
+
+def required_features(payload: Dict[str, Any]) -> List[str]:
+    """Daemon feature names `payload` (a POST /harness/jobs body) needs (D30).
+
+    Only the `after` list shape is checked here: a bare string is the pre-r2
+    wire shape and needs nothing. `requires`/`kind=measure` extend this list
+    when those spec fields land (W1-T3, W1-T6); this function is the single
+    place a future feature-gated field registers its requirement.
+    """
+    needed = []
+    if isinstance(payload.get("after"), list):
+        needed.append("fan-in")
+    return needed
+
+
+def check_feature_support(payload: Dict[str, Any], health: Dict[str, Any]) -> None:
+    """Raise UnsupportedFeatureError when `payload` needs a feature `health`
+    (a GET /harness/health body) does not advertise. A daemon with no
+    `features` key advertises nothing, so every gated payload fails against it.
+    """
+    advertised = set(health.get("features") or [])
+    missing = [f for f in required_features(payload) if f not in advertised]
+    if missing:
+        raise UnsupportedFeatureError(
+            f"target daemon does not advertise required feature(s): {missing} "
+            f"(advertised: {sorted(advertised)})"
+        )
+
+
+def parents_of(job: Dict[str, Any]) -> List[str]:
+    """Return every parent of a JobView/queue-snapshot entry (design D29).
+
+    `after_all` carries every parent when the daemon advertises `fan-in`
+    (runnerd/harness/views.go viewAfterFields); a daemon or job with no
+    dependency has neither key, and the pre-r2 shape carries a single parent in
+    `after` alone. Preferring after_all keeps this correct against a fan-in
+    job even if a caller reads a job dict that also carries the legacy
+    single-parent `after` string alongside it.
+    """
+    after_all = job.get("after_all")
+    if isinstance(after_all, list):
+        return list(after_all)
+    after = job.get("after")
+    if isinstance(after, str) and after:
+        return [after]
+    return []
+
+
 def _extract_detail(payload: Any) -> Any:
     if isinstance(payload, dict):
         parts = []
@@ -101,6 +157,13 @@ class HarnessClient:
         body = dict(payload)
         if force:
             body["force"] = True
+        # Client-side capability gate (design D30): only when body actually
+        # needs a gated feature does this cost a health round trip, so a
+        # plain single-parent/no-dependency submit (the common case) pays
+        # nothing extra.
+        needed = required_features(body)
+        if needed:
+            check_feature_support(body, self.health())
         return self._call("POST", "/harness/jobs", body=body, ok=(201,))
 
     def get_job(self, job_id: str) -> Dict[str, Any]:

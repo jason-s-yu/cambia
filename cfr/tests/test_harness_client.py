@@ -10,7 +10,14 @@ import json
 
 import pytest
 
-from src.harness.client import HarnessAPIError, HarnessClient
+from src.harness.client import (
+    HarnessAPIError,
+    HarnessClient,
+    UnsupportedFeatureError,
+    check_feature_support,
+    parents_of,
+    required_features,
+)
 from src.harness.transport import ControlPlaneTransport
 from tests.harness_tls_util import RecordingServer, make_self_signed
 
@@ -171,3 +178,105 @@ def test_health(tmp_path):
         client = _client(srv, fp)
         h = client.health()
     assert h["jobs_running"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Client-side capability gate (design D30, cambia-1713): a spec needing a
+# daemon feature (currently: an `after` list, the fan-in wire shape) is
+# refused locally when the target's advertised features do not include it.
+# ---------------------------------------------------------------------------
+
+
+def test_required_features_empty_for_plain_payload():
+    assert required_features({"kind": "train", "name": "r1"}) == []
+    assert required_features({"kind": "train", "name": "r1", "after": "p1"}) == []
+
+
+def test_required_features_fan_in_for_after_list():
+    assert required_features({"kind": "train", "after": ["p1", "p2"]}) == ["fan-in"]
+
+
+def test_check_feature_support_passes_when_advertised():
+    check_feature_support({"after": ["p1", "p2"]}, {"features": ["fan-in"]})
+
+
+def test_check_feature_support_raises_when_missing():
+    with pytest.raises(UnsupportedFeatureError, match="fan-in"):
+        check_feature_support({"after": ["p1", "p2"]}, {"features": []})
+
+
+def test_check_feature_support_raises_when_features_key_absent():
+    # A daemon with no `features` field advertises nothing (D30): the gate
+    # must fail closed, not treat an absent key as "everything supported".
+    with pytest.raises(UnsupportedFeatureError):
+        check_feature_support({"after": ["p1", "p2"]}, {"queue_depth": 0})
+
+
+def test_submit_after_list_requires_fan_in_feature(tmp_path):
+    cert, key, fp = make_self_signed(tmp_path)
+    # No /harness/jobs route registered: if the gate leaked the request through
+    # to the control plane, RecordingServer would 404/error instead of the
+    # refusal happening locally, so this also proves the refusal never made
+    # the POST.
+    routes = {("GET", "/harness/health"): (200, {"queue_depth": 0})}
+    with RecordingServer(cert, key, routes) as srv:
+        client = _client(srv, fp)
+        with pytest.raises(UnsupportedFeatureError, match="fan-in"):
+            client.submit({"kind": "train", "name": "r1", "after": ["p1", "p2"]})
+    assert all(r["method"] != "POST" for r in srv.requests)
+
+
+def test_submit_after_list_allowed_when_feature_advertised(tmp_path):
+    cert, key, fp = make_self_signed(tmp_path)
+    routes = {
+        ("GET", "/harness/health"): (200, {"features": ["fan-in"]}),
+        ("POST", "/harness/jobs"): (201, {"job_id": "r1", "state": "queued"}),
+    }
+    with RecordingServer(cert, key, routes) as srv:
+        client = _client(srv, fp)
+        resp = client.submit({"kind": "train", "name": "r1", "after": ["p1", "p2"]})
+    assert resp["job_id"] == "r1"
+
+
+def test_submit_single_after_string_skips_health_round_trip(tmp_path):
+    # The pre-r2 wire shape needs no capability check at all, so it must not
+    # even call health -- only /harness/jobs is registered here.
+    cert, key, fp = make_self_signed(tmp_path)
+    routes = {("POST", "/harness/jobs"): (201, {"job_id": "r1", "state": "queued"})}
+    with RecordingServer(cert, key, routes) as srv:
+        client = _client(srv, fp)
+        resp = client.submit({"kind": "train", "name": "r1", "after": "p1"})
+    assert resp["job_id"] == "r1"
+    assert all(r["path"] != "/harness/health" for r in srv.requests)
+
+
+# ---------------------------------------------------------------------------
+# parents_of (design D29): reads a JobView/queue-snapshot entry's parent list.
+# The dict literals below mirror runnerd/harness/views.go's JobView JSON
+# shape exactly (job_id/state/after/after_all field names), the same shape
+# runnerd/harness/views_after_test.go's TestJobViewRendersFanInAfterAll
+# asserts the Go marshaler emits, so this is the cross-language half of that
+# assertion (AC7).
+# ---------------------------------------------------------------------------
+
+
+def test_parents_of_prefers_after_all_for_fan_in_job():
+    job_view = {
+        "job_id": "fav-child",
+        "state": "running",
+        "after": "fav-p1",
+        "after_all": ["fav-p1", "fav-p2", "fav-p3"],
+    }
+    assert parents_of(job_view) == ["fav-p1", "fav-p2", "fav-p3"]
+
+
+def test_parents_of_falls_back_to_single_after_string():
+    # A daemon that predates fan-in (or a single-parent job even on a fan-in
+    # daemon, per viewAfterFields) carries only the legacy string field.
+    job_view = {"job_id": "c1", "state": "queued", "after": "p1"}
+    assert parents_of(job_view) == ["p1"]
+
+
+def test_parents_of_empty_for_no_dependency():
+    job_view = {"job_id": "c1", "state": "queued"}
+    assert parents_of(job_view) == []
