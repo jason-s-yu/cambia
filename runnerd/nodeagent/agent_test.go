@@ -525,3 +525,25 @@ func keys(m map[string]bool) []string {
 	}
 	return out
 }
+
+// TestADrainEventAppliesItsOwnBoolean pins the node half of the drain contract:
+// the event carries the state the operator set and the node applies it as given,
+// so a lift takes effect on the round trip that delivers it rather than waiting
+// for a heartbeat to correct a hold the node put on itself.
+func TestADrainEventAppliesItsOwnBoolean(t *testing.T) {
+	stub := newStubCoordinator(t)
+	agent, _ := testAgent(t, stub, nil)
+
+	agent.applyEvents(nashnet.EventsResponse{
+		Events: []nashnet.Event{{Type: nashnet.EventDrain, Drain: true}},
+	})
+	if !agent.isDrained() {
+		t.Fatal("a drain event did not hold the node")
+	}
+	agent.applyEvents(nashnet.EventsResponse{
+		Events: []nashnet.Event{{Type: nashnet.EventDrain, Drain: false}},
+	})
+	if agent.isDrained() {
+		t.Fatal("the lift did not reach the node: it waited for a heartbeat")
+	}
+}

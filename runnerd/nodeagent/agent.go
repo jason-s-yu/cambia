@@ -335,8 +335,15 @@ func (a *Agent) applyEvents(resp nashnet.EventsResponse) {
 		case nashnet.EventRevoke:
 			a.revokeLease(ev.LeaseID, ev.Force)
 		case nashnet.EventDrain:
-			a.setDrained(true)
-			a.log.Printf("coordinator drained this node")
+			// The event's own boolean decides, so a lift takes effect on this
+			// round trip rather than waiting for the next heartbeat to correct a
+			// hold the node put on itself.
+			a.setDrained(ev.Drain)
+			if ev.Drain {
+				a.log.Printf("coordinator drained this node")
+			} else {
+				a.log.Printf("coordinator lifted this node's drain")
+			}
 		case nashnet.EventPolicy:
 			// Policy changes arrive with the next claim or heartbeat response;
 			// nothing to do beyond noting the event.

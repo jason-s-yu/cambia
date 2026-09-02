@@ -210,7 +210,10 @@ func (s *Server) handleNodeDrain(w http.ResponseWriter, r *http.Request) {
 	if req.ClearBreaker {
 		p.clearBreaker(id)
 	}
-	p.postEvent(id, nashnet.Event{Type: nashnet.EventDrain})
+	// The event carries the state it set. A node reading the arrival alone as a
+	// drain would hold itself off work the operator just released, until its
+	// next heartbeat happened to say otherwise.
+	p.postEvent(id, nashnet.Event{Type: nashnet.EventDrain, Drain: req.Drain})
 	if !req.Drain {
 		p.signalPlacement()
 	}
