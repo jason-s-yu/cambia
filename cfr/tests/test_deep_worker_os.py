@@ -415,8 +415,10 @@ def test_config_routing_external_sampling(minimal_config):
     assert result.stats.nodes_visited > 0
 
     # ES enumerates every action at traverser nodes, so it walks a partial tree
-    # rather than the single path OS takes.
-    assert result.stats.nodes_visited > 100
+    # rather than the single root-to-leaf path OS takes (which visits exactly
+    # max_depth + 1 nodes). A node-count threshold would be seed-dependent:
+    # an early Cambia call ends the game in under 20 nodes.
+    assert result.stats.nodes_visited > result.stats.max_depth + 1
 
 
 def test_os_smoke_test_multiple_traversals(minimal_config):
