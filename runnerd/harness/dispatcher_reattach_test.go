@@ -387,10 +387,10 @@ func TestReconcileTwiceDoesNotDoubleCountReattached(t *testing.T) {
 	r.disp.Reconcile()
 	r.disp.Reconcile()
 
-	r.disp.mu.Lock()
-	active := r.disp.active
-	r.disp.mu.Unlock()
-	if active != 1 {
+	// The accounting itself moved to runnerd/nodeagent (D1); what this asserts
+	// is the coordinator's adoption rule, which stays here: a repeat Reconcile
+	// re-finds the same live row and must not claim a second slot for it.
+	if active := r.disp.slots.Active(); active != 1 {
 		t.Fatalf("active = %d after two Reconciles, want 1", active)
 	}
 
@@ -401,15 +401,12 @@ func TestReconcileTwiceDoesNotDoubleCountReattached(t *testing.T) {
 	})
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		r.disp.mu.Lock()
-		active = r.disp.active
-		r.disp.mu.Unlock()
-		if active == 0 {
+		if r.disp.slots.Active() == 0 {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("active = %d after the reattached job exited, want 0", active)
+	t.Fatalf("active = %d after the reattached job exited, want 0", r.disp.slots.Active())
 }
 
 // TestReattachedOperatorStopFinalizesCanceled is the third finalize branch: an

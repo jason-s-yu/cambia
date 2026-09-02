@@ -55,6 +55,13 @@ type uploader struct {
 	// acted on: three consecutive ones mark the lease degraded coordinator
 	// side (D55).
 	rejectedRunDB int
+	// inPlace marks the embedded node, whose run dir IS the coordinator's
+	// (D40): no blob crosses anything, the coordinator proves each digest
+	// against the file already at its destination, and ingest wrote its own
+	// provenance record under env.node.json rather than env.json, so the
+	// upload rename that a remote node needs would here rebrand the
+	// coordinator's own record as the node's.
+	inPlace bool
 }
 
 // Sync runs one commit cycle: fold the journal's WAL, scan the run dir, diff
@@ -62,16 +69,20 @@ type uploader struct {
 // marks the commit that closes the lease's artifact stream, which the result
 // route requires (D6).
 func (u *uploader) Sync(ctx context.Context, final bool) (quarantine.CommitResponse, error) {
-	if err := foldRunDB(filepath.Join(u.runDir, runDBName)); err != nil {
+	res, err := FoldRunDB(filepath.Join(u.runDir, runDBName))
+	if err == nil && res.Busy != 0 {
+		err = fmt.Errorf("wal_checkpoint reported busy (%d frames pending)", res.Log)
+	}
+	if err != nil {
 		// A journal the node cannot fold is still worth offering: the
 		// coordinator validates the bytes it receives and rejects them per
 		// entry, so a fold failure degrades to a possibly-rejected entry
 		// rather than to a stalled upload.
 		u.logf("wal fold: %v", err)
 	}
-	files, err := scanRunDir(u.runDir)
-	if err != nil {
-		return quarantine.CommitResponse{}, err
+	files, ferr := scanRunDir(u.runDir, !u.inPlace)
+	if ferr != nil {
+		return quarantine.CommitResponse{}, ferr
 	}
 	entries, err := u.entries(files)
 	if err != nil {
@@ -92,8 +103,10 @@ func (u *uploader) Sync(ctx context.Context, final bool) (quarantine.CommitRespo
 		if len(changed) == 0 && len(deletes) == 0 && !final {
 			return quarantine.CommitResponse{Seq: head.Seq, Digest: head.Digest}, nil
 		}
-		if err := u.push(ctx, changed); err != nil {
-			return quarantine.CommitResponse{}, err
+		if !u.inPlace {
+			if err := u.push(ctx, changed); err != nil {
+				return quarantine.CommitResponse{}, err
+			}
 		}
 		req := quarantine.CommitRequest{
 			ManifestVersion: quarantine.ManifestVersion,
@@ -261,7 +274,7 @@ func (u *uploader) uploadOne(ctx context.Context, e quarantine.Entry) error {
 // absFor maps a manifest path back to the local file it came from, undoing the
 // env.node.json rename.
 func (u *uploader) absFor(rel string) string {
-	if rel == envNodeJSONName {
+	if rel == envNodeJSONName && !u.inPlace {
 		return filepath.Join(u.runDir, envJSONName)
 	}
 	return filepath.Join(u.runDir, filepath.FromSlash(rel))
@@ -321,7 +334,11 @@ func diff(head ManifestHead, local []quarantine.Entry) (changed []quarantine.Ent
 // Reserved paths are filtered here rather than left to the coordinator, so the
 // uploaded set never contains one: the filter is quarantine.ReservedPath, the
 // same predicate the coordinator enforces with, so the two cannot drift.
-func scanRunDir(runDir string) ([]localFile, error) {
+// renameEnv offers a remote node's Prepare-written env.json under the promoted
+// name env.node.json; an embedded node's ingest writes that name already, and
+// the env.json beside it is the coordinator's own record, so the rename is off
+// there and the file is simply reserved (D40, D52).
+func scanRunDir(runDir string, renameEnv bool) ([]localFile, error) {
 	var out []localFile
 	err := filepath.WalkDir(runDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -350,7 +367,7 @@ func scanRunDir(runDir string) ([]localFile, error) {
 			return nil
 		}
 		name := rel
-		if rel == envJSONName {
+		if renameEnv && rel == envJSONName {
 			name = envNodeJSONName
 		}
 		if quarantine.ReservedPath(name) {
@@ -373,30 +390,42 @@ func scanRunDir(runDir string) ([]localFile, error) {
 	return out, nil
 }
 
-// foldRunDB runs PRAGMA wal_checkpoint(TRUNCATE) against the node's local
-// journal before it is hashed (D22). A blob is immutable once verified, so the
-// fold has to happen node-side: exactly one self-contained journal file ever
-// crosses the wire, and its -wal, -shm, and -journal siblings are rejected
-// manifest paths.
-func foldRunDB(dbPath string) error {
+// WALCheckpoint mirrors the three integer columns "PRAGMA wal_checkpoint(MODE)"
+// returns: busy (1 when a conflicting lock, e.g. a long-lived reader, stopped
+// the checkpoint short), log (WAL frames present), and checkpointed (frames
+// actually moved into the main db file). A TRUNCATE checkpoint that completes
+// with busy 0 truncates the -wal file to zero length.
+type WALCheckpoint struct {
+	Busy         int
+	Log          int
+	Checkpointed int
+}
+
+// FoldRunDB runs PRAGMA wal_checkpoint(TRUNCATE) against a per-run journal
+// (D22). It is the one such fold in the daemon: a node runs it before hashing,
+// because a blob is immutable once verified and exactly one self-contained
+// journal file ever crosses the wire, and the coordinator's rundb-checkpoint
+// route runs it on the promoted copy so a client pull syncs a current main
+// file rather than a lagging one. An absent journal is not an error.
+//
+// The busy_timeout gives a concurrent writer (the training process still
+// appending) a short window to release its lock rather than failing outright.
+func FoldRunDB(dbPath string) (WALCheckpoint, error) {
+	var res WALCheckpoint
 	if _, err := os.Stat(dbPath); err != nil {
-		return nil
+		return res, nil
 	}
 	dsn := "file:" + dbPath + "?_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", dbPath, err)
+		return res, fmt.Errorf("open %s: %w", dbPath, err)
 	}
 	defer db.Close()
-	var busy, logFrames, checkpointed int
 	row := db.QueryRow("PRAGMA wal_checkpoint(TRUNCATE);")
-	if err := row.Scan(&busy, &logFrames, &checkpointed); err != nil {
-		return fmt.Errorf("wal_checkpoint: %w", err)
+	if err := row.Scan(&res.Busy, &res.Log, &res.Checkpointed); err != nil {
+		return res, fmt.Errorf("wal_checkpoint: %w", err)
 	}
-	if busy != 0 {
-		return fmt.Errorf("wal_checkpoint reported busy (%d frames pending)", logFrames)
-	}
-	return nil
+	return res, nil
 }
 
 func min64(a, b int64) int64 {

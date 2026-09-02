@@ -50,7 +50,7 @@ func TestScanRunDirExcludesReservedPaths(t *testing.T) {
 		}
 	}
 
-	scanned, err := scanRunDir(runDir)
+	scanned, err := scanRunDir(runDir, true)
 	if err != nil {
 		t.Fatalf("scanRunDir: %v", err)
 	}
@@ -113,8 +113,8 @@ func TestFoldRunDBTruncatesWAL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := foldRunDB(dbPath); err != nil {
-		t.Fatalf("foldRunDB: %v", err)
+	if _, err := FoldRunDB(dbPath); err != nil {
+		t.Fatalf("FoldRunDB: %v", err)
 	}
 	if fi, err := os.Stat(dbPath + "-wal"); err == nil && fi.Size() != 0 {
 		t.Errorf("wal file is %d bytes after a TRUNCATE checkpoint", fi.Size())
@@ -128,7 +128,7 @@ func TestFoldRunDBTruncatesWAL(t *testing.T) {
 	}
 
 	// Whatever the fold did, the sibling files stay off the wire.
-	scanned, err := scanRunDir(runDir)
+	scanned, err := scanRunDir(runDir, true)
 	if err != nil {
 		t.Fatal(err)
 	}

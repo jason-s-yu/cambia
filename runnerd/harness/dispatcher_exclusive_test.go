@@ -39,47 +39,12 @@ func (r *testRig) assertQueuedFor(id string, window time.Duration) {
 	}
 }
 
-// TestExclusiveAdmissionUnit (white-box) pins canLaunchLocked: an exclusive job
-// launches only into an idle daemon, while any exclusive job is active nothing
-// else launches, and a normal job respects the plain concurrency cap.
-func TestExclusiveAdmissionUnit(t *testing.T) {
-	runsDir := t.TempDir()
-	fe := &fakeEnv{runsDir: runsDir}
-	pm := procmgr.NewProcessManager(runsDir, t.TempDir(), "cambia", NewRunResolver(runsDir), fakeAlgos())
-	disp := NewDispatcher(pm, fe, runsDir, 3, 16, 15*time.Millisecond)
-
-	disp.mu.Lock()
-	defer disp.mu.Unlock()
-
-	excl := &job{spec: JobSpec{Name: "e", Exclusive: true}, state: StateQueued}
-	norm := &job{spec: JobSpec{Name: "n"}, state: StateQueued}
-
-	if !disp.canLaunchLocked(excl) {
-		t.Fatal("exclusive should launch when active==0")
-	}
-	disp.active = 1
-	if disp.canLaunchLocked(excl) {
-		t.Fatal("exclusive must not launch when active!=0")
-	}
-	if !disp.canLaunchLocked(norm) {
-		t.Fatal("normal job should launch with a free slot (1<3)")
-	}
-
-	disp.active = 0
-	disp.exclusiveHolds = 1
-	if disp.canLaunchLocked(norm) {
-		t.Fatal("normal job must not launch while an exclusive job is active")
-	}
-	if disp.canLaunchLocked(excl) {
-		t.Fatal("second exclusive must not launch while an exclusive job is active")
-	}
-
-	disp.exclusiveHolds = 0
-	disp.active = 3
-	if disp.canLaunchLocked(norm) {
-		t.Fatal("normal job must not launch when full (3>=3)")
-	}
-}
+// The white-box unit that pinned canLaunchLocked moved to
+// runnerd/nodeagent with the slot accounting it exercised, where it is
+// TestSlotsAdmission, rewritten for the per-node exclusivity of D13 (D1). What
+// stays here is the black-box half: every assertion below drives the
+// dispatcher through submit, cancel, and Reconcile and reads the states an
+// operator would.
 
 // TestExclusiveJSONDefaultsFalse pins the wire + on-disk contract: an absent
 // `exclusive` field decodes false (backward compat), a set field decodes true,

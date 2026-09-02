@@ -26,12 +26,16 @@ type Environment interface {
 	Cleanup(jobID string, keepForDebug bool) error
 }
 
-// ProcessStatus is the node's view of one supervised process.
+// ProcessStatus is the node's view of one supervised process. Status is the
+// row verbatim and Effective is the same row with pid liveness applied, which
+// is the only way to observe the exit of a process this daemon did not fork
+// (procmgr.EffectiveStatus).
 type ProcessStatus struct {
-	Status   string
-	PID      int
-	ExitCode *int
-	Found    bool
+	Status    string
+	Effective string
+	PID       int
+	ExitCode  *int
+	Found     bool
 }
 
 // Launcher is the procmgr boundary. The node forks jobs into their own process
@@ -109,7 +113,13 @@ func (p *procLauncher) Status(name string) ProcessStatus {
 	if !ok {
 		return ProcessStatus{}
 	}
-	return ProcessStatus{Status: st.Status, PID: st.PID, ExitCode: st.ExitCode, Found: true}
+	return ProcessStatus{
+		Status:    st.Status,
+		Effective: procmgr.EffectiveStatus(st),
+		PID:       st.PID,
+		ExitCode:  st.ExitCode,
+		Found:     true,
+	}
 }
 
 // NewEnvironment builds the node's ingest Manager with node-local paths (D15,
