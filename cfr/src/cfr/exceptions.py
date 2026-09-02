@@ -155,6 +155,18 @@ class TraversalError(TrainingError):
     """
 
 
+class EngineErrorRateExceeded(TraversalError):
+    """
+    Raised when a training step's traversals reported engine failures above
+    ``deep_cfr.max_engine_error_fraction`` (cambia-722).
+
+    Traversals discard the samples a failed engine call would have fabricated, so
+    a broken engine build no longer poisons the reservoir; it starves it instead.
+    Without this ceiling that failure is silent, and a run keeps training on
+    whatever fraction of the tree still works.
+    """
+
+
 # ============================================================================
 # Storage Errors
 # ============================================================================

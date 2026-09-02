@@ -53,6 +53,7 @@ from .exceptions import (
     GracefulShutdownException,
     CheckpointSaveError,
     CheckpointLoadError,
+    EngineErrorRateExceeded,
 )
 from ..serial_rotating_handler import SerialRotatingFileHandler
 
@@ -127,6 +128,12 @@ class DeepCFRConfig:
 
     # Max traversal depth (0 = unlimited, backward compatible)
     traversal_depth_limit: int = 0
+
+    # Ceiling on the share of a step's traversals that may report engine errors.
+    # Traversals drop the samples a failed engine call would have fabricated, so a
+    # broken engine build starves the reservoir instead of poisoning it; this turns
+    # that quiet starvation into a failed step. 0 disables the ceiling.
+    max_engine_error_fraction: float = 0.01
 
     # Worker recycling to prevent RSS growth from glibc malloc fragmentation.
     # Pipeline workers' RSS grows ~723 MB/step without recycling.
@@ -272,6 +279,9 @@ class DeepCFRConfig:
             "num_traversal_threads": deep_cfg.num_traversal_threads,
             "validate_inputs": deep_cfg.validate_inputs,
             "traversal_depth_limit": deep_cfg.traversal_depth_limit,
+            "max_engine_error_fraction": getattr(
+                deep_cfg, "max_engine_error_fraction", 0.01
+            ),
             "max_tasks_per_child": deep_cfg.max_tasks_per_child,
             "worker_memory_budget_pct": deep_cfg.worker_memory_budget_pct,
             "traversal_method": deep_cfg.traversal_method,
@@ -488,6 +498,7 @@ def _run_traversals_batch(
     traversals_done = 0
     total_nodes = 0
     traversal_times: List[float] = []
+    engine_errors = 0
     _escher_sampled_mags: List[float] = []
     _escher_cf_mags: List[float] = []
 
@@ -523,6 +534,7 @@ def _run_traversals_batch(
                 if hasattr(result, "value_samples") and result.value_samples:
                     value_samples.extend(result.value_samples)
                 total_nodes += result.stats.nodes_visited
+                engine_errors += result.stats.error_count
                 if result.stats.error_count > 0:
                     logger.warning("Worker reported %d errors.", result.stats.error_count)
                 if result.escher_sampled_regret_mag is not None:
@@ -550,6 +562,9 @@ def _run_traversals_batch(
         "escher_cf_regret_mag": (
             float(np.mean(_escher_cf_mags)) if _escher_cf_mags else 0.0
         ),
+        # Engine failures reported by this batch's traversals. Carried on the stats
+        # dict so the step can fail on the rate rather than only logging it.
+        "engine_errors": float(engine_errors),
     }
     return (
         advantage_samples,
@@ -578,20 +593,24 @@ def _run_traversals_threaded(
     run_timestamp: str,
     progress_queue=None,
     archive_queue=None,
-) -> Tuple[List[ReservoirSample], List[ReservoirSample], List[ReservoirSample], int, int]:
+) -> Tuple[
+    List[ReservoirSample], List[ReservoirSample], List[ReservoirSample], int, int, int
+]:
     """Run traversals using ThreadPoolExecutor for Go FFI backend.
 
     Threads share process memory so the advantage network can be used read-only
     without serialization. Each thread creates its own GoEngine instance; the
     Go handle pool is mutex-protected (task #6).
 
-    Returns (adv_samples, strat_samples, value_samples, traversals_done, total_nodes).
+    Returns (adv_samples, strat_samples, value_samples, traversals_done, total_nodes,
+    engine_errors).
     """
     advantage_samples: List[ReservoirSample] = []
     strategy_samples: List[ReservoirSample] = []
     value_samples: List[ReservoirSample] = []
     traversals_done = 0
     total_nodes = 0
+    engine_errors = 0
 
     # Create one file handler per thread slot ONCE: avoids glob.glob() per traversal.
     worker_handlers: Dict[int, SerialRotatingFileHandler] = {}
@@ -640,6 +659,7 @@ def _run_traversals_threaded(
                     if hasattr(result, "value_samples") and result.value_samples:
                         value_samples.extend(result.value_samples)
                     total_nodes += result.stats.nodes_visited
+                    engine_errors += result.stats.error_count
                     if result.stats.error_count > 0:
                         logger.warning(
                             "Worker reported %d errors.", result.stats.error_count
@@ -658,6 +678,7 @@ def _run_traversals_threaded(
         value_samples,
         traversals_done,
         total_nodes,
+        engine_errors,
     )
 
 
@@ -1505,6 +1526,7 @@ class DeepCFRTrainer:
 
                 # Collect traversal results: either from pipeline future or synchronously
                 _trav_timing: Dict[str, float] = {}
+                step_engine_errors = 0
                 _trav_start = time.time()
                 if pending_future is not None:
                     # B3: Collect results from pipelined traversal started after prev step's adv training
@@ -1599,6 +1621,7 @@ class DeepCFRTrainer:
                                 ):
                                     step_value_samples.extend(result.value_samples)
                                 total_nodes += result.stats.nodes_visited
+                                step_engine_errors += result.stats.error_count
                                 if result.stats.error_count > 0:
                                     logger.warning(
                                         "Worker reported %d errors.",
@@ -1619,6 +1642,7 @@ class DeepCFRTrainer:
                         step_value_samples,
                         traversals_done,
                         total_nodes,
+                        step_engine_errors,
                     ) = _run_traversals_threaded(
                         self.total_traversals,
                         self.config,
@@ -1666,6 +1690,34 @@ class DeepCFRTrainer:
 
                 phase_times["traversal"] = time.time() - _trav_start
                 self.total_traversals += traversals_done
+
+                # Engine failures reported by this step's traversals. The pipeline and
+                # sequential paths carry the count on the stats dict; the pool and
+                # threaded paths accumulate it above.
+                if "engine_errors" in _trav_timing:
+                    step_engine_errors = int(_trav_timing["engine_errors"])
+                step_error_fraction = step_engine_errors / max(1, traversals_done)
+                _max_error_fraction = getattr(
+                    self.dcfr_config, "max_engine_error_fraction", 0.01
+                )
+                if step_engine_errors > 0:
+                    logger.warning(
+                        "Step %d: %d engine errors across %d traversals (%.4f of them); "
+                        "the samples those nodes would have carried were discarded.",
+                        step,
+                        step_engine_errors,
+                        traversals_done,
+                        step_error_fraction,
+                    )
+                if _max_error_fraction > 0 and step_error_fraction > _max_error_fraction:
+                    raise EngineErrorRateExceeded(
+                        f"Step {step}: {step_engine_errors} engine errors across "
+                        f"{traversals_done} traversals ({step_error_fraction:.4f}) "
+                        f"exceeds deep_cfr.max_engine_error_fraction "
+                        f"({_max_error_fraction}). Traversals discard the samples a "
+                        "failed engine call would have fabricated, so this step would "
+                        "have trained on a silently thinned reservoir."
+                    )
 
                 # Add samples to reservoir buffers
                 _buf_start = time.time()
@@ -1852,6 +1904,11 @@ class DeepCFRTrainer:
                     )
                 if display is None:
                     phase_str = " ".join(f"{k}={v:.2f}s" for k, v in phase_times.items())
+                    _err_str = (
+                        f" engine_errors={step_engine_errors}"
+                        if step_engine_errors
+                        else ""
+                    )
                     if self.dcfr_config.use_sd_cfr:
                         _val_str = f" val_mse={val_loss:.6f}" if val_loss > 0 else ""
                         print(
@@ -1859,7 +1916,7 @@ class DeepCFRTrainer:
                             f"adv_loss={adv_loss:.6f}{_val_str} "
                             f"adv_buf={len(self.advantage_buffer)} "
                             f"snapshots={len(self._sd_snapshots)} "
-                            f"traversals={self.total_traversals} "
+                            f"traversals={self.total_traversals}{_err_str} "
                             f"| {phase_str}",
                             flush=True,
                         )
@@ -1869,7 +1926,7 @@ class DeepCFRTrainer:
                             f"adv_loss={adv_loss:.6f} strat_loss={strat_loss:.6f} "
                             f"adv_buf={len(self.advantage_buffer)} "
                             f"str_buf={len(self.strategy_buffer)} "
-                            f"traversals={self.total_traversals} "
+                            f"traversals={self.total_traversals}{_err_str} "
                             f"| {phase_str}",
                             flush=True,
                         )
@@ -1922,6 +1979,7 @@ class DeepCFRTrainer:
                             ),
                             "buffer_size": len(self.advantage_buffer),
                             "samples_this_step": _samples_this_step,
+                            "engine_errors": step_engine_errors,
                         }
                         _jsonl_file.write(json.dumps(_record) + "\n")
                         _jsonl_file.flush()
