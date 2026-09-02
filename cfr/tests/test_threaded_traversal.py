@@ -94,7 +94,7 @@ class TestThreadedTraversal:
         }
 
         adv, strat, val, done, nodes = _run_traversals_threaded(
-            iteration_offset=0,
+            iteration=0,
             config=config,
             network_weights=None,
             network_config=network_config,
@@ -139,7 +139,7 @@ class TestThreadedTraversal:
         }
 
         adv, strat, val, done, nodes = _run_traversals_threaded(
-            iteration_offset=0,
+            iteration=0,
             config=config,
             network_weights=None,
             network_config=network_config,
@@ -188,8 +188,7 @@ class TestThreadedTraversal:
 
         # Sequential (_run_traversals_batch returns 6-tuple with timing_stats)
         adv_seq, strat_seq, val_seq, done_seq, nodes_seq, _timing = _run_traversals_batch(
-            iteration_offset=0,
-            total_traversals_offset=0,
+            iteration=0,
             config=config,
             network_weights=None,
             network_config=network_config,
@@ -201,7 +200,7 @@ class TestThreadedTraversal:
 
         # Threaded
         adv_thr, strat_thr, val_thr, done_thr, nodes_thr = _run_traversals_threaded(
-            iteration_offset=0,
+            iteration=0,
             config=config,
             network_weights=None,
             network_config=network_config,
@@ -229,7 +228,7 @@ class TestThreadedTraversal:
         }
 
         adv, strat, val, done, nodes = _run_traversals_threaded(
-            iteration_offset=0,
+            iteration=0,
             config=config,
             network_weights=None,
             network_config=network_config,
@@ -267,7 +266,7 @@ class TestThreadedBenchmark:
 
         start = time.perf_counter()
         adv, strat, val, done, nodes = _run_traversals_threaded(
-            iteration_offset=0,
+            iteration=0,
             config=config,
             network_weights=None,
             network_config=network_config,

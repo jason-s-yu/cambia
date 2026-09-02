@@ -459,7 +459,6 @@ def _create_worker_file_handler(
 
 def _run_traversals_batch(
     iteration: int,
-    total_traversals_offset: int,
     config,
     network_weights: Dict[str, Any],
     network_config: Dict[str, int],
@@ -1645,7 +1644,6 @@ class DeepCFRTrainer:
                         _trav_timing,
                     ) = _run_traversals_batch(
                         step,
-                        self.total_traversals,
                         self.config,
                         network_weights,
                         network_config,
@@ -1706,7 +1704,6 @@ class DeepCFRTrainer:
                     pending_future = executor.submit(
                         _run_traversals_batch,
                         step + 1,  # iteration: consumed at the next step
-                        self.total_traversals,  # total_traversals_offset
                         self.config,
                         next_weights,
                         network_config,

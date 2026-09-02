@@ -232,7 +232,6 @@ class TestBatchHelperStampsOneIteration:
 
         adv, strat, _values, done, _nodes, _timing = dt._run_traversals_batch(
             7,
-            0,
             _make_config(),
             {},
             {},
