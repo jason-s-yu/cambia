@@ -149,6 +149,14 @@ class GTCFRNode:
         return strat
 
 
+def _children_mask(node: GTCFRNode) -> np.ndarray:
+    """Boolean mask over the actions that already hold a child of node."""
+    mask = np.zeros(NUM_ACTIONS, dtype=bool)
+    if node.children:
+        mask[list(node.children.keys())] = True
+    return mask
+
+
 # ---------------------------------------------------------------------------
 # Search result
 # ---------------------------------------------------------------------------
@@ -333,9 +341,7 @@ class GTCFRSearch:
         # actions while only the len(children) expanded ones are summed below,
         # scaling the node value by len(children) / n_legal and driving every
         # regret delta the same direction, which freezes the node in fallback.
-        expanded_mask = np.zeros(NUM_ACTIONS, dtype=bool)
-        expanded_mask[list(node.children.keys())] = True
-        strategy = node.current_strategy(expanded_mask)  # (NUM_ACTIONS,)
+        strategy = node.current_strategy(_children_mask(node))  # (NUM_ACTIONS,)
 
         # Traverse all children, collecting per-child CFVs
         child_cfvs: Dict[int, np.ndarray] = {}
@@ -389,8 +395,10 @@ class GTCFRSearch:
         node = root
 
         while node.is_expanded and not node.is_terminal and node.children:
-            action_idx = self._select_action(node)
+            action_idx = self._select_action(node, _children_mask(node))
             if action_idx not in node.children:
+                # Unreachable while the support is the child set; kept so a
+                # future caller cannot silently descend into a missing child.
                 break
             path.append((node, action_idx))
             node = node.children[action_idx]
@@ -529,24 +537,32 @@ class GTCFRSearch:
 
         return n_added
 
-    def _select_action(self, node: GTCFRNode) -> int:
-        """π_select = 0.5·PUCT + 0.5·CFR, normalized, then sample."""
-        puct_scores = self._puct_scores(node)
-        cfr_strategy = node.current_strategy()
+    def _select_action(
+        self, node: GTCFRNode, support_mask: Optional[np.ndarray] = None
+    ) -> int:
+        """π_select = 0.5·PUCT + 0.5·CFR over the support, normalized, then sample.
 
-        # Normalize PUCT scores to probabilities over legal actions
+        support_mask defaults to the legal actions. The walk-down passes the
+        node's children, because descending is only possible into an action
+        that already holds one: drawing any other action ends the simulation
+        with no tree growth.
+        """
+        support = node.legal_mask if support_mask is None else support_mask
+        puct_scores = self._puct_scores(node)
+        cfr_strategy = node.current_strategy(support_mask)
+
+        # Normalize PUCT scores to probabilities over the support
         puct_probs = np.zeros(NUM_ACTIONS, dtype=np.float32)
-        legal = node.legal_mask
-        if legal.any():
-            ls = puct_scores[legal]
+        if support.any():
+            ls = puct_scores[support]
             exp = np.exp(ls - ls.max())
-            puct_probs[legal] = exp / exp.sum()
+            puct_probs[support] = exp / exp.sum()
 
         blended = 0.5 * puct_probs + 0.5 * cfr_strategy
-        blended[~legal] = 0.0
+        blended[~support] = 0.0
         total = blended.sum()
         if total < 1e-10:
-            blended[legal] = 1.0 / max(node.n_legal, 1)
+            blended[support] = 1.0 / max(int(support.sum()), 1)
             total = blended.sum()
         blended /= total
 

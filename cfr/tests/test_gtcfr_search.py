@@ -19,6 +19,7 @@ from src.cfr.gtcfr_search import (
     SearchResult,
     NUM_HAND_TYPES,
     VALUE_DIM,
+    _children_mask,
 )
 from src.encoding import NUM_ACTIONS
 from src.networks import CVPN
@@ -532,7 +533,9 @@ def test_backprop_projects_value_into_ancestor_perspective(small_cvpn: CVPN, mon
         lambda parent, action: _FakeTerminalEngine([0.0, 0.0]),
     )
     selections = iter([action_a, action_b])
-    monkeypatch.setattr(searcher, "_select_action", lambda node: next(selections))
+    monkeypatch.setattr(
+        searcher, "_select_action", lambda node, support_mask=None: next(selections)
+    )
 
     searcher._expand_once(root, None, r0, r1)
     searcher._expand_once(root, None, r0, r1)
@@ -551,3 +554,117 @@ def test_backprop_projects_value_into_ancestor_perspective(small_cvpn: CVPN, mon
         f"PUCT ranks against the root actor's preference: "
         f"{scores[action_a]:.3f} vs {scores[action_b]:.3f}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test: selection is masked to the expanded children (cambia-1869)
+# ---------------------------------------------------------------------------
+
+
+class _FakeEngine:
+    """Depth-limited stand-in GoEngine exposing only what the search reads.
+
+    Engines past max_depth report terminal; the rest report a fixed legal set
+    and enough public features for _build_pbs.
+    """
+
+    def __init__(self, n_legal: int, acting_player: int, depth: int, max_depth: int):
+        self.n_legal = n_legal
+        self._acting = acting_player
+        self.depth = depth
+        self.max_depth = max_depth
+
+    def is_terminal(self) -> bool:
+        return self.depth >= self.max_depth
+
+    def get_utility(self) -> np.ndarray:
+        return np.array([1.0, -1.0], dtype=np.float32)
+
+    def acting_player(self) -> int:
+        return self._acting
+
+    def legal_actions_mask(self) -> np.ndarray:
+        mask = np.zeros(NUM_ACTIONS, dtype=bool)
+        mask[: self.n_legal] = True
+        return mask
+
+    def decision_ctx(self) -> int:
+        return 0
+
+    def turn_number(self) -> int:
+        return self.depth
+
+    def discard_top(self) -> int:
+        return 0
+
+    def stock_len(self) -> int:
+        return max(1, 40 - self.depth)
+
+    def close(self) -> None:
+        pass
+
+    def child(self, action: int) -> "_FakeEngine":
+        return _FakeEngine(
+            n_legal=self.n_legal,
+            acting_player=1 - self._acting,
+            depth=self.depth + 1,
+            max_depth=self.max_depth,
+        )
+
+
+def test_select_action_restricted_to_expanded_children(small_cvpn: CVPN):
+    """At an expanded node, selection only draws actions that hold a child.
+
+    Drawing any other action ends the walk-down at an already-expanded node and
+    the whole expansion step grows nothing.
+    """
+    np.random.seed(0)
+    searcher = GTCFRSearch(small_cvpn, expansion_budget=1, expansion_k=3)
+
+    legal_mask = np.zeros(NUM_ACTIONS, dtype=bool)
+    legal_mask[:10] = True
+    node = _make_node(acting_player=0, legal_mask=legal_mask, is_expanded=True)
+    node.policy_prior[:10] = 0.1
+
+    for a in (0, 1, 2):
+        node.children[a] = searcher._make_terminal_node(
+            1, None, np.array([0.0, 0.0], dtype=np.float32)
+        )
+
+    draws = {searcher._select_action(node, _children_mask(node)) for _ in range(200)}
+    assert draws <= set(node.children), f"Selected childless actions: {draws}"
+    assert len(draws) > 1, "Selection collapsed onto a single child"
+
+
+def test_expansion_steps_never_waste_the_budget(small_cvpn: CVPN, monkeypatch):
+    """Every expansion step grows the tree when unexpanded nodes remain.
+
+    n_legal = 10 against expansion_k = 3 leaves 7 childless actions at every
+    expanded node; before the mask those carried selection mass and the step
+    returned without adding a node.
+    """
+    np.random.seed(0)
+    steps = 12
+    searcher = GTCFRSearch(small_cvpn, expansion_budget=1, expansion_k=3)
+    r0, r1 = _uniform_ranges()
+
+    # max_depth well past the reachable depth, so no step ends on a terminal.
+    root_engine = _FakeEngine(n_legal=10, acting_player=0, depth=0, max_depth=20)
+    root = _make_node(
+        acting_player=0,
+        legal_mask=root_engine.legal_actions_mask(),
+        leaf_values=_constant_leaf_values(0.0, 0.0),
+        engine_handle=root_engine,
+    )
+    root.policy_prior[:10] = 0.1
+
+    monkeypatch.setattr(
+        searcher, "_make_child_engine", lambda parent, action: parent.child(action)
+    )
+
+    added = [searcher._expand_once(root, root_engine, r0, r1) for _ in range(steps)]
+
+    assert min(added) > 0, f"Expansion steps grew nothing: {added}"
+    # Each step expands one unexpanded node into expansion_k children.
+    assert added == [3] * steps, f"Unexpected growth per step: {added}"
+    assert searcher._count_nodes(root) == 1 + sum(added)
