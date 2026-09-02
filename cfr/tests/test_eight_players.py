@@ -16,6 +16,11 @@ from src.constants import (
     N_PLAYER_POWERSET_DIM,
     N_PLAYER_IDENTITY_DIM,
     N_PLAYER_PUBLIC_DIM,
+    N_PLAYER_SEAT_DIM,
+    N_PLAYER_SEAT_COUNT_DIM,
+    N_PLAYER_HAND_LEN_DIM,
+    N_PLAYER_SEAT_BLOCK_DIM,
+    N_PLAYER_TABLE_DIM,
     N_PLAYER_INPUT_DIM,
     N_PLAYER_NUM_ACTIONS,
 )
@@ -74,17 +79,29 @@ def test_n_player_identity_dim():
 
 
 def test_n_player_input_dim():
-    """856 = 384 (powerset) + 432 (identity) + 40 (public)."""
-    assert N_PLAYER_INPUT_DIM == 856, f"N_PLAYER_INPUT_DIM={N_PLAYER_INPUT_DIM}, want 856"
+    """936 = 384 (powerset) + 432 (identity) + 40 (public) + 8 + 8 + 64 (table)."""
+    assert N_PLAYER_INPUT_DIM == 936, f"N_PLAYER_INPUT_DIM={N_PLAYER_INPUT_DIM}, want 936"
     assert (
         N_PLAYER_INPUT_DIM
-        == N_PLAYER_POWERSET_DIM + N_PLAYER_IDENTITY_DIM + N_PLAYER_PUBLIC_DIM
+        == N_PLAYER_POWERSET_DIM
+        + N_PLAYER_IDENTITY_DIM
+        + N_PLAYER_PUBLIC_DIM
+        + N_PLAYER_SEAT_DIM
+        + N_PLAYER_SEAT_COUNT_DIM
+        + N_PLAYER_TABLE_DIM
     )
 
 
 def test_n_player_public_dim_unchanged():
-    """Public features (40 dims) are player-count independent."""
+    """The original public block (40 dims) is player-count independent."""
     assert N_PLAYER_PUBLIC_DIM == 40
+
+
+def test_n_player_table_dim():
+    """The table block carries one hand-length one-hot and one in-play bit per seat."""
+    assert N_PLAYER_HAND_LEN_DIM == 7
+    assert N_PLAYER_SEAT_BLOCK_DIM == 8
+    assert N_PLAYER_TABLE_DIM == N_PLAYER_MAX_PLAYERS * N_PLAYER_SEAT_BLOCK_DIM == 64
 
 
 def test_n_player_num_actions():
@@ -109,8 +126,9 @@ def test_n_player_num_actions():
 
 def test_go_python_input_dim_parity():
     """Go NPlayerInputDim must equal Python N_PLAYER_INPUT_DIM."""
-    # These are the same formula: MaxTotalSlots*MaxKnowledgePlayers + MaxTotalSlots*9 + 40
-    go_value = 856  # from engine/agent/constants.go NPlayerInputDim
+    # Same formula both sides: MaxTotalSlots*MaxKnowledgePlayers + MaxTotalSlots*9 + 40
+    # public + 8 own seat + 8 seat count + 8*8 per-seat table block.
+    go_value = 936  # from engine/agent/constants.go NPlayerInputDim
     assert (
         N_PLAYER_INPUT_DIM == go_value
     ), f"Python N_PLAYER_INPUT_DIM={N_PLAYER_INPUT_DIM} != Go NPlayerInputDim={go_value}"
