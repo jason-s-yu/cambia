@@ -58,6 +58,13 @@ type stubCoordinator struct {
 	seeds map[string][]byte
 
 	token string
+	// leaseEpoch is the epoch the stub granted alongside token. Every manifest
+	// commit must carry it, because the real coordinator fences a commit on
+	// (lease_id, lease_epoch, node_epoch) and refuses any other value with
+	// 409 lease_superseded. A stub that ignored the field let this package
+	// pass commits the coordinator rejects, which is exactly what shipped
+	// (cambia-1726).
+	leaseEpoch int64
 
 	blobs map[string][]byte
 	parts map[string][]byte
@@ -129,7 +136,11 @@ func (s *stubCoordinator) enqueue(resp nashnet.ClaimResponse) {
 	if resp.Policy.LeaseTTLSeconds == 0 {
 		resp.Policy = s.policy
 	}
+	if resp.LeaseEpoch == 0 {
+		resp.LeaseEpoch = 1
+	}
 	s.token = resp.LeaseToken
+	s.leaseEpoch = resp.LeaseEpoch
 	s.queue = append(s.queue, resp)
 }
 
@@ -392,6 +403,13 @@ func (s *stubCoordinator) handleManifest(w http.ResponseWriter, r *http.Request)
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.leaseEpoch != 0 && req.LeaseEpoch != s.leaseEpoch {
+		writeJSON(w, http.StatusConflict, nashnet.ErrorBody{
+			Error:  nashnet.CodeLeaseSuperseded,
+			Detail: fmt.Sprintf("commit carried lease epoch %d, lease is at %d", req.LeaseEpoch, s.leaseEpoch),
+		})
+		return
+	}
 	if req.Seq != s.head.Seq+1 || req.Parent != s.head.Digest {
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"error": nashnet.CodeManifestOutOfOrder, "seq": s.head.Seq, "digest": s.head.Digest,
@@ -477,6 +495,15 @@ func (s *stubCoordinator) requestCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.requests
+}
+
+// setLease records the credential pair a hand-built lease record holds, so a
+// test driving a jobRun directly fences the same way a claimed lease does.
+func (s *stubCoordinator) setLease(token string, epoch int64) {
+	s.mu.Lock()
+	s.token = token
+	s.leaseEpoch = epoch
+	s.mu.Unlock()
 }
 
 func (s *stubCoordinator) setProgressFailure(status int, code string) {

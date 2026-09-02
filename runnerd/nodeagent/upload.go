@@ -45,11 +45,17 @@ type localFile struct {
 type uploader struct {
 	client  NodeTransport
 	leaseID string
-	token   string
-	runDir  string
-	index   *Index
-	policy  nashnet.Policy
-	log     *log.Logger
+	// leaseEpoch is the epoch the claim granted. Every manifest commit carries
+	// it, because the coordinator fences the commit on
+	// (lease_id, lease_epoch, node_epoch) and compares any value but SkipEpoch
+	// exactly (D4, D51): a request that omits it fences out at epoch 0 and the
+	// lease loses its whole output to 409 lease_superseded.
+	leaseEpoch int64
+	token      string
+	runDir     string
+	index      *Index
+	policy     nashnet.Policy
+	log        *log.Logger
 	// rejectedRunDB counts consecutive rundb_invalid rejections. The journal
 	// is not retried on a rejection, so the count is reported rather than
 	// acted on: three consecutive ones mark the lease degraded coordinator
@@ -110,6 +116,7 @@ func (u *uploader) Sync(ctx context.Context, final bool) (quarantine.CommitRespo
 		}
 		req := quarantine.CommitRequest{
 			ManifestVersion: quarantine.ManifestVersion,
+			LeaseEpoch:      u.leaseEpoch,
 			Seq:             head.Seq + 1,
 			Parent:          head.Digest,
 			Entries:         changed,

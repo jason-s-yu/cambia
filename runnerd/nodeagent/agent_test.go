@@ -327,8 +327,8 @@ func TestRestartReattachesAndResumesUpload(t *testing.T) {
 	const resumeAt = 100
 	stub.mu.Lock()
 	stub.parts[digest] = append([]byte(nil), payload[:resumeAt]...)
-	stub.token = "lease-token-restart"
 	stub.mu.Unlock()
+	stub.setLease("lease-token-restart", 2)
 
 	rec := &leaseRecord{
 		JobID: spec.Name, LeaseID: "01JRESTART000000000000000A", LeaseEpoch: 2,
@@ -412,9 +412,7 @@ func newTestJob(t *testing.T, agent *Agent, stub *stubCoordinator, spec Spec) *j
 		Token: "lease-token-stage", Attempt: 1, Commit: spec.Commit,
 		Spec: specJSON(t, spec), Policy: fastPolicy(), Phase: nashnet.PhaseClaimed,
 	}
-	stub.mu.Lock()
-	stub.token = rec.Token
-	stub.mu.Unlock()
+	stub.setLease(rec.Token, rec.LeaseEpoch)
 	if err := writeLeaseRecord(agent.cfg.BaseDir, rec); err != nil {
 		t.Fatal(err)
 	}
@@ -437,9 +435,7 @@ func newRunningJob(t *testing.T, agent *Agent, stub *stubCoordinator, name strin
 		Spec: specJSON(t, spec), Policy: fastPolicy(), Launched: true,
 		Phase: nashnet.PhaseRunning,
 	}
-	stub.mu.Lock()
-	stub.token = rec.Token
-	stub.mu.Unlock()
+	stub.setLease(rec.Token, rec.LeaseEpoch)
 	if err := os.MkdirAll(filepath.Join(agent.cfg.RunsDir, name), 0o755); err != nil {
 		t.Fatal(err)
 	}
