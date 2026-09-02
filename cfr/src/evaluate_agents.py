@@ -4138,8 +4138,11 @@ def persist_eval_results(
 
         # Games the loop could not finish are absent from `total`, so a row
         # whose win rate was built on fewer games than were requested used to
-        # look identical to a clean one (cambia-1479). The count rides along.
-        policy_errors = int(results.get("Errors", 0) or 0)
+        # look identical to a clean one (cambia-1479). The count rides along in
+        # its own field: these are whole games lost to an engine or agent-state
+        # error, not the policy-boundary failures an exploitability run counts,
+        # and folding the two into one number would make neither readable.
+        engine_errors = int(results.get("Errors", 0) or 0)
 
         stats = getattr(results, "stats", {})
         avg_game_turns = stats.get("avg_game_turns")
@@ -4189,7 +4192,7 @@ def persist_eval_results(
             "selection_mode": row_selection_mode,
             "crn_seed": None if row_crn_seed is None else str(row_crn_seed),
             "seat_balanced": row_seat_balanced,
-            "policy_errors": policy_errors,
+            "engine_errors": engine_errors,
         }
         all_rows.append(row)
 
