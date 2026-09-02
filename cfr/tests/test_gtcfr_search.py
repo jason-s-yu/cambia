@@ -777,3 +777,49 @@ def test_widening_on_search_returns_valid_policy(small_cvpn: CVPN):
     assert abs(result.policy.sum() - 1.0) < 1e-4
     assert result.root_values.shape == (VALUE_DIM,)
     assert np.isfinite(result.root_values).all()
+
+
+# ---------------------------------------------------------------------------
+# Test: widening config keys reach the searcher (cambia-1870)
+# ---------------------------------------------------------------------------
+
+
+def test_config_widening_keys_reach_the_searcher(small_cvpn: CVPN, monkeypatch):
+    """A DeepCfrConfig with widening on builds a GTCFRSearch with widening on.
+
+    gtcfr_self_play_episode builds the searcher before touching the engine, so
+    a recording stand-in that stops there captures the settings it passes.
+    """
+    from src.cfr import gtcfr_worker
+    from src.config import DeepCfrConfig
+
+    config = DeepCfrConfig(
+        gtcfr_widening_enabled=True,
+        gtcfr_widening_c=2.5,
+        gtcfr_widening_alpha=0.75,
+    )
+
+    class _StopAfterConstruction(Exception):
+        pass
+
+    captured: dict = {}
+
+    def _recorder(**kwargs):
+        captured.update(kwargs)
+        raise _StopAfterConstruction
+
+    monkeypatch.setattr(gtcfr_worker, "GTCFRSearch", _recorder)
+    with pytest.raises(_StopAfterConstruction):
+        gtcfr_worker.gtcfr_self_play_episode(None, small_cvpn, config)
+
+    assert captured["widening_enabled"] is True
+    assert captured["widening_c"] == 2.5
+    assert captured["widening_alpha"] == 0.75
+
+    # The captured settings build a searcher that actually widens.
+    searcher = GTCFRSearch(**captured)
+    legal_mask = np.zeros(NUM_ACTIONS, dtype=bool)
+    legal_mask[:10] = True
+    node = _make_node(acting_player=0, legal_mask=legal_mask, is_expanded=True)
+    node.visit_counts[0] = 16
+    assert searcher._allowed_width(node) > config.gtcfr_expansion_k

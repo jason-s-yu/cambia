@@ -1418,6 +1418,7 @@ class SoGAgentWrapper(GTCFRAgentWrapper):
                 self.config.deep_cfr, "gtcfr_expansion_k"
             ):
                 _exp_k = self.config.deep_cfr.gtcfr_expansion_k
+            _deep = getattr(self.config, "deep_cfr", None)
             self._sog_search = SoGSearch(
                 self._cvpn,
                 train_budget=self._eval_budget,
@@ -1426,6 +1427,9 @@ class SoGAgentWrapper(GTCFRAgentWrapper):
                 cfr_iters_per_expansion=self._sog_cfr_iters,
                 expansion_k=_exp_k,
                 device=str(self.device),
+                widening_enabled=getattr(_deep, "gtcfr_widening_enabled", False),
+                widening_c=getattr(_deep, "gtcfr_widening_c", 1.0),
+                widening_alpha=getattr(_deep, "gtcfr_widening_alpha", 0.5),
             )
         except Exception as e:
             logger.warning(
