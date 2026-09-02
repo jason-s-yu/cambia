@@ -348,3 +348,116 @@ def test_engine_handles_freed(small_cvpn: CVPN):
     assert (
         after_all == before
     ), f"Handle leak after context exit: before={before}, after={after_all}"
+
+
+# ---------------------------------------------------------------------------
+# Helper: synthetic nodes for traversal / backprop tests
+# ---------------------------------------------------------------------------
+
+
+def _make_node(
+    acting_player: int,
+    legal_mask: np.ndarray,
+    depth: int = 0,
+    is_expanded: bool = False,
+    leaf_values=None,
+    engine_handle=None,
+) -> GTCFRNode:
+    """Build a non-terminal GTCFRNode with zeroed CFR and PUCT state."""
+    return GTCFRNode(
+        depth=depth,
+        acting_player=acting_player,
+        is_terminal=False,
+        terminal_values=None,
+        legal_mask=legal_mask,
+        n_legal=int(legal_mask.sum()),
+        children={},
+        is_expanded=is_expanded,
+        cumulative_regret=np.zeros(NUM_ACTIONS, dtype=np.float32),
+        cumulative_strategy=np.zeros(NUM_ACTIONS, dtype=np.float32),
+        cfr_visits=0,
+        visit_counts=np.zeros(NUM_ACTIONS, dtype=np.int32),
+        total_action_value=np.zeros(NUM_ACTIONS, dtype=np.float32),
+        policy_prior=np.zeros(NUM_ACTIONS, dtype=np.float32),
+        leaf_values=leaf_values,
+        engine_handle=engine_handle,
+    )
+
+
+def _fallback_node(searcher: GTCFRSearch, n_legal: int, child_utils: dict) -> GTCFRNode:
+    """Node in the uniform fallback: n_legal actions, len(child_utils) expanded.
+
+    Every cumulative regret is negative, so regret matching falls back to the
+    uniform strategy. Children are terminal, so their CFVs are the given
+    utilities broadcast across hand types.
+    """
+    legal_mask = np.zeros(NUM_ACTIONS, dtype=bool)
+    legal_mask[:n_legal] = True
+
+    node = _make_node(acting_player=0, legal_mask=legal_mask, is_expanded=True)
+    node.cumulative_regret[legal_mask] = -1.0
+
+    for a, util in child_utils.items():
+        node.children[a] = searcher._make_terminal_node(
+            1, None, np.array(util, dtype=np.float32)
+        )
+    return node
+
+
+# ---------------------------------------------------------------------------
+# Test: uniform fallback does not drop unexpanded-action mass (cambia-716)
+# ---------------------------------------------------------------------------
+
+
+def test_uniform_fallback_mixes_over_expanded_children(small_cvpn: CVPN):
+    """The fallback node value is the expanded-children mean, not k/n_legal of it.
+
+    With 10 legal actions and 3 expanded children, a 1/n_legal strategy summed
+    over the children alone yields 3/10 of their mean and drives every regret
+    delta the same direction.
+    """
+    searcher = GTCFRSearch(small_cvpn, expansion_budget=1, expansion_k=3)
+    child_utils = {0: (-1.0, 1.0), 1: (-0.5, 0.5), 2: (-0.2, 0.2)}
+    node = _fallback_node(searcher, n_legal=10, child_utils=child_utils)
+
+    r0, r1 = _uniform_ranges()
+    before = node.cumulative_regret.copy()
+    cfvs = searcher._cfr_traverse(node, np.ones(2, dtype=np.float32), r0, r1)
+
+    expected_p0 = np.mean([u[0] for u in child_utils.values()])
+    deflated_p0 = expected_p0 * len(child_utils) / 10.0
+
+    assert np.allclose(
+        cfvs[0], expected_p0
+    ), f"Expected expanded-children mean {expected_p0}, got {cfvs[0][0]}"
+    assert not np.isclose(
+        cfvs[0][0], deflated_p0
+    ), f"Node value still deflated to k/n_legal ({deflated_p0})"
+
+    # Regret deltas are centered on the node value, so they cannot all be negative.
+    deltas = [float(node.cumulative_regret[a] - before[a]) for a in child_utils]
+    assert max(deltas) > 0.0, f"All regret deltas non-positive: {deltas}"
+    assert min(deltas) < 0.0, f"All regret deltas non-negative: {deltas}"
+    assert sum(deltas) == pytest.approx(0.0, abs=1e-5)
+
+
+def test_uniform_fallback_node_escapes_fallback(small_cvpn: CVPN):
+    """Repeated iterations lift the best action's regret above zero.
+
+    Under a k/n_legal node value every delta stays negative and the node is
+    pinned to uniform-over-all-legal forever.
+    """
+    searcher = GTCFRSearch(small_cvpn, expansion_budget=1, expansion_k=3)
+    child_utils = {0: (-1.0, 1.0), 1: (-0.5, 0.5), 2: (-0.2, 0.2)}
+    node = _fallback_node(searcher, n_legal=10, child_utils=child_utils)
+
+    r0, r1 = _uniform_ranges()
+    for _ in range(5):
+        searcher._cfr_traverse(node, np.ones(2, dtype=np.float32), r0, r1)
+
+    assert (
+        node.cumulative_regret > 0.0
+    ).any(), f"Node still frozen in fallback: {node.cumulative_regret[:3]}"
+    # Action 2 has the best value for the acting player and should hold the mass.
+    strategy = node.current_strategy()
+    assert strategy[2] > strategy[0]

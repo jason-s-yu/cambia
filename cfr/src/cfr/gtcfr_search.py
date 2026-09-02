@@ -114,17 +114,27 @@ class GTCFRNode:
     # Game engine handle (GoEngine instance)
     engine_handle: Any
 
-    def current_strategy(self) -> np.ndarray:
-        """Regret-matching strategy from cumulative regrets."""
+    def current_strategy(self, support_mask: Optional[np.ndarray] = None) -> np.ndarray:
+        """Regret-matching strategy from cumulative regrets.
+
+        support_mask restricts the strategy to a subset of the legal actions,
+        defaulting to all of them. Tree CFR passes the expanded children so the
+        strategy is a distribution over the actions the tree actually holds.
+        Restricting the support changes only the uniform fallback: an action
+        with no child never has its regret updated, so its positive part stays
+        zero and it already carries no mass under active regret matching.
+        """
+        mask = self.legal_mask if support_mask is None else support_mask
+        n_support = self.n_legal if support_mask is None else int(mask.sum())
         pos = np.maximum(self.cumulative_regret, 0.0)
-        total = float(pos[self.legal_mask].sum())
+        total = float(pos[mask].sum())
         strat = np.zeros(NUM_ACTIONS, dtype=np.float32)
         if total > 1e-10:
-            strat[self.legal_mask] = pos[self.legal_mask] / total
+            strat[mask] = pos[mask] / total
         else:
-            # Uniform fallback
-            if self.n_legal > 0:
-                strat[self.legal_mask] = 1.0 / self.n_legal
+            # Uniform fallback over the support
+            if n_support > 0:
+                strat[mask] = 1.0 / n_support
         return strat
 
     def average_strategy(self) -> np.ndarray:
@@ -316,7 +326,16 @@ class GTCFRSearch:
             return np.zeros((2, NUM_HAND_TYPES), dtype=np.float32)
 
         acting = node.acting_player
-        strategy = node.current_strategy()  # (NUM_ACTIONS,)
+
+        # Tree CFR runs on the actions the tree holds, so the mixing strategy is
+        # renormalized over the expanded children. Without this the uniform
+        # fallback (every cumulative regret <= 0) spreads mass over all n_legal
+        # actions while only the len(children) expanded ones are summed below,
+        # scaling the node value by len(children) / n_legal and driving every
+        # regret delta the same direction, which freezes the node in fallback.
+        expanded_mask = np.zeros(NUM_ACTIONS, dtype=bool)
+        expanded_mask[list(node.children.keys())] = True
+        strategy = node.current_strategy(expanded_mask)  # (NUM_ACTIONS,)
 
         # Traverse all children, collecting per-child CFVs
         child_cfvs: Dict[int, np.ndarray] = {}
