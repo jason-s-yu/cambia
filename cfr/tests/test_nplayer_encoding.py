@@ -519,11 +519,34 @@ class TestAgentStateNPlayerMasks:
 
     def test_nplayer_initialize(self):
         state = self._make_agent_state()
-        state.nplayer_initialize(num_players=4, initial_peek_indices=(0, 1))
+        state.nplayer_initialize(
+            num_players=4,
+            initial_peek_indices_by_player={
+                0: (0, 1),
+                1: (0, 1),
+                2: (0, 1),
+                3: (0, 1),
+            },
+        )
         assert state.num_players == 4
         # Player 0 knows their own slots 0 and 1
         assert 0 in state.knowledge_masks[(0, 0)]
         assert 0 in state.knowledge_masks[(0, 1)]
+        # Every other seat knows exactly its own peeked slots, and nothing else knows them.
+        for seat in (1, 2, 3):
+            assert state.knowledge_masks[(seat, 0)] == {seat}
+            assert state.knowledge_masks[(seat, 1)] == {seat}
+        # Nobody else is recorded as knowing player 0's cards.
+        assert state.nplayer_get_knowledge_mask(0, 0) == {0}
+        assert state.nplayer_get_knowledge_mask(0, 1) == {0}
+
+    def test_nplayer_initialize_omits_seats_with_no_peeks(self):
+        state = self._make_agent_state()
+        state.nplayer_initialize(
+            num_players=3, initial_peek_indices_by_player={0: (0, 1)}
+        )
+        assert state.nplayer_get_knowledge_mask(1, 0) == set()
+        assert state.nplayer_get_knowledge_mask(2, 0) == set()
 
     def test_record_peek(self):
         state = self._make_agent_state()
@@ -554,7 +577,7 @@ class TestAgentStateNPlayerMasks:
 
     def test_clone_copies_knowledge_masks(self):
         state = self._make_agent_state()
-        state.nplayer_initialize(3, initial_peek_indices=(0,))
+        state.nplayer_initialize(3, initial_peek_indices_by_player={0: (0,)})
         cloned = state.clone()
         assert cloned.num_players == 3
         assert cloned.knowledge_masks == state.knowledge_masks
