@@ -7,6 +7,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"os"
@@ -123,12 +124,15 @@ func main() {
 	pm := procmgr.NewProcessManager(runsDir, cfrDir, cambiaBin, harness.NewRunResolver(runsDir), harness.HarnessAlgorithms())
 	pm.SetMaxConcurrent(maxJobs)
 
+	nashCfg, poolEnabled := loadNashnetConfig(baseDir)
 	env := ingest.New(ingest.Config{
 		BaseDir:              baseDir,
 		RunsDir:              runsDir,
 		CoresCap:             runtime.NumCPU() - 2,
 		RequireSignedCommits: requireSignedCommits,
 		AllowedSignersPath:   allowedSignersPath,
+		SnapshotDir:          nashCfg.snapshotDir,
+		MaxSnapshots:         nashCfg.snapshotCache,
 	})
 	disp := harness.NewDispatcher(pm, env, runsDir, maxJobs, maxQueue, 0)
 
@@ -149,6 +153,19 @@ func main() {
 	})
 	if err != nil {
 		log.Fatalf("build server: %v", err)
+	}
+
+	// The nashnet coordinator is opt-in on RUNNERD_NASHNET_NODES_DIR: with it
+	// unset the daemon serves exactly the v1.0 surface (D39, D40).
+	if poolEnabled {
+		sweeper, serr := startNashnet(nashCfg, srv, disp, env, runsDir, pubKeyPath, minDisk)
+		if serr != nil {
+			log.Fatalf("start nashnet coordinator: %v", serr)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go sweeper.Run(ctx)
+		log.Printf("nashnet coordinator enabled (nodes=%s)", nashCfg.nodesDir)
 	}
 
 	// Job-preserving restart (cambia-655): SIGTERM (systemd stop/restart) detaches
