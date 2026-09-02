@@ -50,7 +50,10 @@ const LobbyPage: React.FC = () => {
 
   const isValidLobbyId = useMemo(() => urlLobbyId && typeof urlLobbyId === 'string' && urlLobbyId.length > 5, [urlLobbyId]);
 
-  const { sendMessage, closeSocket, reopenSocket } = useSocket(isValidLobbyId ? urlLobbyId : null);
+  // `gaveUp` is the hook's own record of why it stopped dialing, handed to the table as a state.
+  // The table used to rebuild it from the error copy in the store, which read a clean close from
+  // the hub as an ongoing reconnect (cambia-1239 review).
+  const { sendMessage, closeSocket, reopenSocket, gaveUp } = useSocket(isValidLobbyId ? urlLobbyId : null);
 
   // Synchronize URL id with the store id and trigger connection.
   useEffect(() => {
@@ -182,7 +185,7 @@ const LobbyPage: React.FC = () => {
             sendMessage={sendMessage}
             onLeave={requestLeave}
             connected={isConnected}
-            connectionError={storeError}
+            gaveUp={gaveUp}
           />
         </ErrorBoundary>
       );
