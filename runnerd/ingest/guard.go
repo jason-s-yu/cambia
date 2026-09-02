@@ -34,6 +34,17 @@ var (
 	// ErrStaleLock is returned when `uv lock --check` rejects the worktree lock
 	// before a venv build (design 3.3).
 	ErrStaleLock = errors.New("stale uv.lock")
+	// ErrInvalidBasis is returned when a bundle basis (a claimed have_commits
+	// entry) fails the 40-hex commit contract, is absent from the mirror, or
+	// the basis list exceeds the cap; refused before it ever reaches a git argv
+	// (design 3.3, D48).
+	ErrInvalidBasis = errors.New("invalid bundle basis")
+	// ErrBundlePrereqMissing is returned by BundleFetch when a thin bundle's
+	// negated basis commit is not present in the receiving mirror's object
+	// store (git's "Repository lacks these prerequisite commits" failure). The
+	// node maps this to a bundle_prereq_miss nack and re-claims with an empty
+	// basis (design 3.3, D48).
+	ErrBundlePrereqMissing = errors.New("mirror lacks bundle prerequisite commit")
 )
 
 // commitRe matches a full 40-hex git object id.
