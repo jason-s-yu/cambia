@@ -161,13 +161,12 @@ func TestNodeDeathMidJobIsRecoveredByAReattach(t *testing.T) {
 // inside it, which is the assertion: the event woke the poll rather than the
 // poll timing out.
 //
-// What this scenario does not assert is the node-posted canceled result, and
-// the reason is F4 rather than timing: a revoking lease refuses RouteManifest,
-// the GET of the folded head every commit fast-forwards from, while admitting
-// RouteManifestFinal, so the node's final commit is refused at its first call
-// and it orphans its output instead of committing and posting a terminal. The
-// job still reaches a terminal, by the sweep at the end of the grace, which is
-// what the last block here checks.
+// The second half is what the grace is for (D4, D62, cambia-2019): the stopped
+// node commits its final manifest and posts canceled under the token the
+// revoking state preserves, so the terminal comes from the node inside the
+// grace rather than from the sweep at the end of it, and the output the run
+// produced is promoted rather than orphaned. The pool clock never advances
+// here, so nothing but the node can settle this job.
 func TestCancelReachesTheNodeOnTheEventsPoll(t *testing.T) {
 	r := newNodeRig(t, nodeRigConfig{
 		slots: 1, claimWaitSeconds: 10, pool: poolRigConfig{policy: longLeasePolicy()},
@@ -181,15 +180,11 @@ func TestCancelReachesTheNodeOnTheEventsPoll(t *testing.T) {
 
 	started := time.Now()
 	r.cancelJob(t, "cancel-me", false)
-	waitUntil(t, "the node to stop the canceled job", 8*time.Second, func() bool {
-		return !processAlive(pid)
-	})
-	if elapsed := time.Since(started); elapsed > 8*time.Second {
-		t.Fatalf("the cancel took %s to reach the node, longer than one held poll", elapsed)
-	}
 
 	// The cancel routed through the lease: the coordinator asked, it did not
-	// signal, and the local terminal path never ran (cambia-1724).
+	// signal (cambia-1724). The handler moves the lease before it answers, and
+	// the node needs a round trip to hear about it, so the revoking state is
+	// read here rather than after the stop the node posts a terminal for.
 	got, ok := r.pool.leases.Get(lease.LeaseID)
 	if !ok {
 		t.Fatal("the lease is gone: a cancel revokes it, it does not drop it")
@@ -197,18 +192,45 @@ func TestCancelReachesTheNodeOnTheEventsPoll(t *testing.T) {
 	if got.State != nashnet.LeaseRevoking {
 		t.Fatalf("lease state = %q after a cancel, want revoking", got.State)
 	}
+
+	waitUntil(t, "the node to stop the canceled job", 8*time.Second, func() bool {
+		return !processAlive(pid)
+	})
+	if elapsed := time.Since(started); elapsed > 8*time.Second {
+		t.Fatalf("the cancel took %s to reach the node, longer than one held poll", elapsed)
+	}
 	if n := r.cleanupCount("cancel-me"); n != 0 {
 		t.Fatalf("the local cleanup path ran %d times for a leased job", n)
 	}
 
-	// The grace runs out and the sweep settles the job, so a cancel reaches a
-	// terminal whether or not the node posts one.
-	stop()
-	r.clock.advance(2 * time.Duration(r.rigPolicy().LeaseTTLSeconds) * time.Second)
-	r.pool.Sweeper().Tick()
+	// The grace admits the wind-down: the node commits a final manifest and
+	// posts canceled under the surviving token. No clock advance and no sweep
+	// stand behind this terminal.
+	waitUntil(t, "the node to post a canceled result", 20*time.Second, func() bool {
+		return r.resultState(lease.LeaseID) == nashnet.ResultCanceled
+	})
+	head, err := r.pool.quar.ReadHead("cancel-me")
+	if err != nil {
+		t.Fatalf("read the manifest head of the canceled job: %v", err)
+	}
+	if !head.Folded.Final || head.Digest == "" {
+		t.Fatalf("manifest head = %+v, want a final commit: a canceled run still commits (D62)", head.Folded)
+	}
+	if body := r.promotedBody(t, "cancel-me", "metrics.jsonl"); string(body) != "{\"iter\":0}\n" {
+		t.Fatalf("promoted metrics.jsonl = %q: the canceled run's output was orphaned", body)
+	}
+
+	// The result finalizes the lease and settles the job.
+	done, ok := r.pool.leases.Get(lease.LeaseID)
+	if !ok {
+		t.Fatal("the lease record is gone: a posted result releases it, it does not delete it")
+	}
+	if done.State != nashnet.LeaseReleased {
+		t.Fatalf("lease state = %q after the node posted its terminal, want released", done.State)
+	}
 	view, _ := r.disp.resolveView("cancel-me")
-	if !isTerminal(view.State) {
-		t.Fatalf("state = %q after the grace, want a terminal", view.State)
+	if view.State != nashnet.ResultCanceled {
+		t.Fatalf("state = %q after the node's terminal, want canceled", view.State)
 	}
 }
 
