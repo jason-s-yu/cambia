@@ -111,13 +111,14 @@ func (j *jobRun) init(phase string) {
 	j.lastOK = j.agent.now()
 	j.phase = phase
 	j.up = &uploader{
-		client:  j.agent.client,
-		leaseID: j.rec.LeaseID,
-		token:   j.rec.Token,
-		runDir:  j.runDir(),
-		index:   LoadIndex(indexPath(j.agent.cfg.BaseDir, j.rec.JobID)),
-		policy:  j.rec.Policy,
-		log:     j.agent.log,
+		client:     j.agent.client,
+		leaseID:    j.rec.LeaseID,
+		leaseEpoch: j.rec.LeaseEpoch,
+		token:      j.rec.Token,
+		runDir:     j.runDir(),
+		index:      LoadIndex(indexPath(j.agent.cfg.BaseDir, j.rec.JobID)),
+		policy:     j.rec.Policy,
+		log:        j.agent.log,
 		// An embedded run wrote its artifacts at the destination, so there is
 		// nothing to push: the coordinator proves each digest against the file
 		// already in the run dir and the commit still validates and records

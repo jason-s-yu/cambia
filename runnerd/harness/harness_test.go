@@ -125,6 +125,12 @@ type rigConfig struct {
 	// starts, so a rig can wire a coordinator pool whose routes must exist in
 	// the handler the listener serves.
 	attach func(*Server, *Dispatcher)
+	// wrap decorates the handler the test listener serves. The two-process
+	// integration suite uses it to record every request a node makes, which is
+	// the only observation point outside the node's own transport: the
+	// production nodeagent.Client builds its own http.Transport, so a test
+	// cannot inject a round tripper into it.
+	wrap func(http.Handler) http.Handler
 }
 
 type testRig struct {
@@ -220,7 +226,11 @@ func newRig(t *testing.T, cfg rigConfig) *testRig {
 	if cfg.attach != nil {
 		cfg.attach(srv, disp)
 	}
-	ts := httptest.NewTLSServer(srv.Handler())
+	handler := srv.Handler()
+	if cfg.wrap != nil {
+		handler = cfg.wrap(handler)
+	}
+	ts := httptest.NewTLSServer(handler)
 	t.Cleanup(func() {
 		pm.KillAll()
 		// Wait for supervised processes and their monitor goroutines to settle

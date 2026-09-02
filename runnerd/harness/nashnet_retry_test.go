@@ -28,7 +28,7 @@ import (
 func (r *poolRig) restartCoordinator(t *testing.T) {
 	t.Helper()
 	leases, err := nashnet.NewLeaseStore(nashnet.StoreConfig{
-		RunsDir: r.runsDir, Policy: nashnet.DefaultPolicy(), Now: r.clock.now,
+		RunsDir: r.runsDir, Policy: r.rigPolicy(), Now: r.clock.now,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -59,12 +59,12 @@ func (r *poolRig) restartCoordinator(t *testing.T) {
 		Leases:           leases,
 		Registry:         registry,
 		Quarantine:       quar,
-		Bundles:          r.bundles,
+		Bundles:          r.pool.bundles,
 		RunsDir:          r.runsDir,
 		NodesDir:         r.grantDir,
 		OriginHost:       "coordinator.test",
-		Policy:           nashnet.DefaultPolicy(),
-		Ceilings:         Ceilings{MaxClaimWaiters: r.cfg.maxClaimWaiters},
+		Policy:           r.rigPolicy(),
+		Ceilings:         r.rigCeilings(),
 		MaxLeasesPerNode: r.cfg.maxLeases,
 		UnplaceableGrace: r.cfg.grace,
 		Now:              r.clock.now,
