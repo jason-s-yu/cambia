@@ -19,6 +19,9 @@ Coverage:
      them.
   5. The PPO wrapper's belief lifecycle matches the neural wrappers', which is
      what lets run_evaluation drive it (cambia-1039).
+  6. A belief bound through bind_go_state is borrowed: the borrower reads it and
+     never frees it, which is what lets a Tier-B continuation opponent be
+     handed the search state's own belief (cambia-1793).
 """
 
 import pytest
@@ -27,7 +30,7 @@ from src.agents import action_codec
 from src.config import load_config
 from src.constants import CardBucket
 from src.evaluate_agents import NeuralAgentWrapper, _GoEvalGame
-from src.ffi.bridge import GoEngine, get_handle_pool_stats
+from src.ffi.bridge import GoAgentState, GoEngine, get_handle_pool_stats
 
 CONFIG_PATH = "config/deep_train.yaml"
 
@@ -167,6 +170,50 @@ def test_belief_handles_do_not_leak_across_games(config):
                 f"{key} went {before[key]} -> {after[key]} over 12 games; "
                 "handles leaked"
             )
+
+
+def test_bind_go_state_borrows_a_belief_without_taking_it_over(config):
+    """A bound belief is read, not owned: the lender still holds the handle.
+
+    The Tier-B continuation seat lends the search state's own GoAgentState to an
+    opponent built at the infoset (cambia-1793). If the borrower closed it on
+    release, the lender would be left driving a freed handle for the rest of the
+    infoset, and the pool would see a double free.
+    """
+    lender = _ProbeBeliefAgent(0, config)
+    borrower = _ProbeBeliefAgent(1, config)
+    with GoEngine(seed=17, house_rules=config.cambia_rules) as engine:
+        lender.attach_belief(engine, 2)
+        lent = lender.agent_state
+        borrower.bind_go_state(engine, lent)
+        assert borrower.agent_state is lent, "bind did not take the handle"
+        # A borrowed belief is not offered for adoption: its lender already
+        # drives it through apply/save/restore.
+        assert borrower.belief_handle() == -1
+        assert lender.belief_handle() == int(lent.handle)
+
+        borrower.release_belief()
+        assert borrower.agent_state is None
+        # Still the lender's, still usable: reading it here would raise on a
+        # closed handle.
+        assert lender.agent_state is lent
+        assert int(lent.get_current_turn()) >= 0
+        assert lender.belief_handle() == int(lent.handle)
+        lender.release_belief()
+
+
+def test_a_borrowed_belief_is_replaced_by_a_fresh_attach(config):
+    """attach_belief after a borrow owns its belief again, and reports it."""
+    agent = _ProbeBeliefAgent(1, config)
+    with GoEngine(seed=18, house_rules=config.cambia_rules) as engine:
+        with GoAgentState(engine, 0) as lent:
+            agent.bind_go_state(engine, lent)
+            assert agent.belief_handle() == -1
+            agent.attach_belief(engine, 2)
+            assert agent.agent_state is not lent
+            assert agent.belief_handle() == int(agent.agent_state.handle)
+            agent.release_belief()
+            assert int(lent.get_current_turn()) >= 0, "the lent handle was freed"
 
 
 def test_ppo_wrapper_belief_lifecycle(config):

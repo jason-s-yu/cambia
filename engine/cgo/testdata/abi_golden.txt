@@ -2,7 +2,7 @@
 # Regenerate after bumping engine/cgo/abiver.Generation for any
 # exported-signature change:
 #   go test ./cgo/ -run TestABIGolden -update
-generation=2
+generation=3
 extern float cambia_terminal_eval_dp(int32_t h, uint8_t player);
 extern float cambia_terminal_eval_linear(int32_t h, uint8_t player);
 extern float cambia_terminal_eval_mc(int32_t h, uint8_t player, int32_t num_samples);
@@ -34,6 +34,7 @@ extern int32_t cambia_baseline_choose(int32_t h, int32_t game_h, int32_t* out, i
 extern int32_t cambia_baseline_new(uint8_t kind, uint8_t seat, int32_t cambiaThreshold, int32_t lateCambiaTurns);
 extern int32_t cambia_baseline_reset(int32_t h);
 extern int32_t cambia_game_apply_action(int32_t h, uint16_t action_idx);
+extern int32_t cambia_game_apply_and_read(int32_t game_h, int32_t action_idx, uint8_t* out_buf, int32_t buf_len, float* out_util, int32_t util_len);
 extern int32_t cambia_game_apply_nplayer_action(int32_t h, uint16_t action_idx);
 extern int32_t cambia_game_discard_len(int32_t game_h);
 extern int32_t cambia_game_discard_top(int32_t game_h);

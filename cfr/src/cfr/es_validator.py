@@ -15,9 +15,30 @@ import torch
 from ..config import Config
 from ..constants import NUM_PLAYERS
 from ..encoding import INPUT_DIM, NUM_ACTIONS
-from ..networks import AdvantageNetwork, get_strategy_from_advantages
+from ..networks import build_advantage_network, get_strategy_from_advantages
 
 logger = logging.getLogger(__name__)
+
+
+class ESValidatorError(RuntimeError):
+    """A validation step that produced no measurement at all.
+
+    The caller must not downgrade this to a log line: every subclass means the
+    step reported nothing while training carried on, which is the silence this
+    class of error exists to end (cambia-1880).
+    """
+
+
+class ESValidatorNetworkError(ESValidatorError):
+    """Raised when the validator cannot build or load its advantage network."""
+
+
+class ESValidatorTraversalError(ESValidatorError):
+    """Raised when no traversal in a validation step completed.
+
+    A partial failure is not this: some traversals completing still yields a
+    measurement, so those keep their per-traversal warning.
+    """
 
 
 def _compute_entropy(strategy: np.ndarray) -> float:
@@ -29,7 +50,7 @@ def _compute_entropy(strategy: np.ndarray) -> float:
 
 
 def _get_strategy_from_network(
-    network: AdvantageNetwork,
+    network: torch.nn.Module,
     features: np.ndarray,
     action_mask: np.ndarray,
 ) -> np.ndarray:
@@ -66,18 +87,43 @@ class ESValidator:
             getattr(config, "deep_cfr", None), "es_validation_depth", 10
         )
 
-        # Reconstruct advantage network from weights
-        input_dim = network_config.get("input_dim", INPUT_DIM)
-        hidden_dim = network_config.get("hidden_dim", 256)
-        output_dim = network_config.get("output_dim", NUM_ACTIONS)
+        # Rebuild the trainer's advantage network. Going through the same
+        # factory with the same settings is what makes the state_dict load for
+        # every supported network_type; hardcoding AdvantageNetwork here made
+        # every residual run's validation a silent no-op (cambia-1880).
+        factory_kwargs = {
+            "input_dim": network_config.get("input_dim", INPUT_DIM),
+            "hidden_dim": network_config.get("hidden_dim", 256),
+            "output_dim": network_config.get("output_dim", NUM_ACTIONS),
+        }
+        for key in (
+            "dropout",
+            "validate_inputs",
+            "num_hidden_layers",
+            "use_residual",
+            "network_type",
+            "use_pos_embed",
+            "num_players",
+        ):
+            if key in network_config:
+                factory_kwargs[key] = network_config[key]
 
-        self.network = AdvantageNetwork(
-            input_dim=input_dim,
-            hidden_dim=hidden_dim,
-            output_dim=output_dim,
-        )
+        try:
+            self.network = build_advantage_network(**factory_kwargs)
+        except Exception as e:
+            raise ESValidatorNetworkError(
+                f"ES validation could not build its advantage network from "
+                f"{factory_kwargs!r}: {e}"
+            ) from e
+
         state_dict = {k: torch.from_numpy(v) for k, v in network_weights.items()}
-        self.network.load_state_dict(state_dict)
+        try:
+            self.network.load_state_dict(state_dict)
+        except Exception as e:
+            raise ESValidatorNetworkError(
+                f"ES validation could not load the trainer's weights into a "
+                f"{type(self.network).__name__} built from {factory_kwargs!r}: {e}"
+            ) from e
         self.network.eval()
 
         self._network_config = network_config
@@ -128,9 +174,12 @@ class ESValidator:
 
         # Zeroed metrics read as "converged", so a run where every traversal
         # failed (most often a missing libcambia.so) must raise rather than
-        # report zeros (cambia-1783).
+        # report zeros (cambia-1783). The caller treats this like an unusable
+        # network and stops the run: nothing completed is never a healthy
+        # measurement, and the usual cause does not clear on its own
+        # (cambia-1880).
         if num_traversals > 0 and completed_traversals == 0:
-            raise RuntimeError(
+            raise ESValidatorTraversalError(
                 f"ES validation completed 0 of {num_traversals} traversals on the "
                 f"Go engine; first error: {first_error}"
             ) from first_error

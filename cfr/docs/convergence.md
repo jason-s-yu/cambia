@@ -211,7 +211,7 @@ SD-CFR uses exponential moving average over network parameters (weights). At eva
 
 Example: if network_1 outputs [5, -3] and network_2 outputs [-2, 4], their correct average strategy is [0.5, 0.5]. The EMA of parameters might produce [1.5, 0.5], yielding strategy [0.75, 0.25], which is wrong.
 
-The snapshot-averaging path in SDCFRAgentWrapper (without EMA) does it correctly by averaging strategies post-RM. The EMA fast path, which is the default and was used in all Phase 2 runs, violates Jensen's inequality. The fix is strategy-space EMA: average regret-matched strategies across K recent snapshots rather than averaging parameters.
+The snapshot-averaging path in SDCFRAgentWrapper does it correctly by averaging strategies post-RM. The EMA parameter blend violates Jensen's inequality. It was the default and served every Phase 2 sd-cfr row; since cambia-712 the mixture is served and the blend is opt-in, labelled on the eval row as `ema_blend`. Strategy-space EMA, averaging regret-matched strategies across K recent snapshots, remains the way to keep an O(1) path that does not violate the inequality; it is not implemented.
 
 ### 6.2 Early Overtraining (~2-3pp)
 

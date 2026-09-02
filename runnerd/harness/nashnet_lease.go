@@ -72,9 +72,8 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request, lease na
 	delete(p.tickBytes, lease.LeaseID)
 	p.mu.Unlock()
 
-	rec, _ := p.nodes.Get(updated.NodeID)
 	resp := nashnet.ProgressResponse{
-		Drain:         rec.Drained,
+		Hold:          p.effectiveHold(updated.NodeID),
 		LeaseDeadline: rfc3339(updated.Deadline),
 	}
 	if updated.State == nashnet.LeaseRevoking {
@@ -120,28 +119,16 @@ func (p *Pool) project(lease nashnet.Lease, status string, req nashnet.ProgressR
 //
 // A terminal row is left alone. The two ways a return ends in a terminal
 // instead, a spent attempt budget and a promoted checkpoint, are written by the
-// caller before this runs.
-//
-// So is a job holding a promoted checkpoint, which is a resume the operator
-// asked for: the resume intent lives in the queue handle rather than in
-// jobspec.json, so a created row would come back from a restart as a fresh
-// launch over the run dir the checkpoint sits in. Leaving that row alone costs
-// an operator act after a restart, which is what D33 asks for anyway, rather
-// than restarting a job that ran.
+// caller before this runs. A job holding a checkpoint from an earlier run needs
+// no exception here: its resume intent and its node pin are in jobspec.json, so
+// the restart scan brings it back as the resume it was rather than as a fresh
+// launch over the checkpoint.
 func (p *Pool) projectReady(jobID string) {
-	runDir := filepath.Join(p.runsDir, jobID)
-	st, err := procmgr.ReadProcessState(runDir)
-	if err != nil || isTerminal(procmgr.EffectiveStatus(st)) || p.promotedCheckpoint(jobID) {
+	st, err := procmgr.ReadProcessState(filepath.Join(p.runsDir, jobID))
+	if err != nil || isTerminal(procmgr.EffectiveStatus(st)) {
 		return
 	}
-	st.Status = procmgr.StatusCreated
-	st.Host = ""
-	st.PID = 0
-	st.PGID = 0
-	st.StartedAt = ""
-	st.FinishedAt = ""
-	st.ExitCode = nil
-	if err := procmgr.WriteProcessState(runDir, st); err != nil {
+	if err := p.disp.projectQueued(jobID); err != nil {
 		poolLog("nashnet: returning %s to ready: %v", jobID, err)
 	}
 }
@@ -183,13 +170,15 @@ func (s *Server) handleNack(w http.ResponseWriter, r *http.Request, lease nashne
 	if p.noteNack(lease.NodeID, lease.JobID, req.Reason,
 		time.Duration(req.CooldownSeconds)*time.Second) {
 		// Three consecutive prepare_node_failed nacks: the node's claims are
-		// refused node_gated until its own cooldown runs out or an operator lifts
-		// the hold (D63). No event is posted, because the only one that would say
-		// this is drain, which names an operator act the node clears off its next
-		// heartbeat; the 204 and its Retry-After are the whole signal, and the
-		// queue is untouched, so the job this nack returned goes to the next
-		// capable node.
+		// refused until its own cooldown runs out or an operator lifts the hold
+		// (D63). The event names the breaker, so the node stops claiming at once
+		// rather than after one more refused round trip, and its next heartbeat
+		// reports the same hold instead of undraining it. The queue is untouched,
+		// so the job this nack returned goes to the next capable node.
 		poolLog("nashnet: circuit breaker tripped for node %s", lease.NodeID)
+		p.postEvent(lease.NodeID, nashnet.Event{
+			Type: nashnet.EventDrain, Hold: nashnet.HoldReasonBreaker,
+		})
 	}
 	// The lease settles through the same outcome path as every other ended one,
 	// so a nack posted after the process started finalizes rather than returning

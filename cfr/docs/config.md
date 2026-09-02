@@ -462,11 +462,18 @@ Parameters controlling analysis tools, such as exploitability calculation.
   * Default: `max(1, cfr_training.num_workers // 2)`
   * Examples: `1` (sequential BR action eval), `0` (auto), `"auto"` (auto), `4` (4 workers per BR process)
 
+* **`exploitability_max_nodes`**:
+  * Description: Ceiling on the number of tree nodes one seat's Best Response search may visit. The search is exhaustive, and on `tiny_cambia_tabular.yaml` the tree runs past 800,000 nodes per seat, which left `train tabular` running for hours without reaching its end-of-run checkpoint. A search that reaches the ceiling stops and says so: the pass reports no exploitability number, because a truncated search yields a lower bound on the best-response value rather than the exploitability itself. The bound counts nodes rather than seconds so the same run stops in the same place on any host. Set `0` to remove the bound when the exact number is wanted and the wait is acceptable. With `exploitability_num_workers` above `1`, each delegated subtree gets its own budget, so the bound is per task rather than per search.
+  * Type: `integer`
+  * Default: `2000000`
+  * Examples: `2000000` (default), `200000` (stop sooner), `0` (no bound)
+
 * Example:
 
     ```yaml
     analysis:
       exploitability_num_workers: 4 # Use 4 workers inside each of the 2 BR processes
+      exploitability_max_nodes: 2000000 # Stop a BR search at 2M nodes; 0 = no bound
     ```
 
 ## `deep_cfr`
@@ -641,9 +648,9 @@ Parameters for Deep CFR training. These values are loaded from the YAML config a
   * Type: `string` (`"linear"` or `"uniform"`)
   * Default: `"linear"`
 * **`use_ema`**:
-  * Description: If `true`, maintain an exponential moving average of advantage network weights for O(1) SD-CFR inference at eval time, instead of averaging all snapshots on every query.
+  * Description: If `true`, maintain an exponential moving average of advantage network weights and serve that blend at eval time instead of the snapshot policy mixture. The blend approximates the mixture in O(1) rather than equalling it, since regret matching is not linear in the parameters, so it is opt-in and the eval row's `served_policy` reads `ema_blend` instead of `mixture`. Its snapshot weighting follows `sd_cfr_snapshot_weighting`, not `alpha`.
   * Type: `boolean`
-  * Default: `true`
+  * Default: `false`
 
 **Network Architecture:**
 

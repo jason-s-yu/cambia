@@ -194,9 +194,13 @@ type RegisterRequest struct {
 // immediately which of its leases it may keep supervising and which it must
 // abandon (D36).
 type RegisterResponse struct {
-	NodeID        string   `json:"node_id"`
-	NodeEpoch     int64    `json:"node_epoch"`
-	Policy        Policy   `json:"policy"`
+	NodeID    string `json:"node_id"`
+	NodeEpoch int64  `json:"node_epoch"`
+	Policy    Policy `json:"policy"`
+	// Hold is the coordinator's hold on this node, carried here because a
+	// registration is a node's first call after a restart and it would
+	// otherwise start claiming into a hold it has no way to know about (D3).
+	Hold          string   `json:"hold,omitempty"`
 	ReboundLeases []string `json:"rebound_leases,omitempty"`
 	RevokedLeases []string `json:"revoked_leases,omitempty"`
 	ServerTime    string   `json:"server_time"`
@@ -214,18 +218,38 @@ type HeartbeatRequest struct {
 }
 
 // HeartbeatResponse tells an idle node its current epoch and whether the
-// coordinator holds it (an operator drain or the circuit breaker, D63).
+// coordinator holds it.
 type HeartbeatResponse struct {
 	NodeEpoch  int64  `json:"node_epoch"`
-	Drain      bool   `json:"drain,omitempty"`
+	Hold       string `json:"hold,omitempty"`
 	ServerTime string `json:"server_time"`
 }
 
+// Hold reasons name why the coordinator refuses a node's claims. The empty
+// string is no hold, which is what a lift carries.
+//
+// One vocabulary answers everywhere a node can learn it: the register and
+// heartbeat responses, a progress tick, and the drain event. A boolean could
+// not say which of the two holds stands, so a breaker trip had no truthful
+// event to post: telling a node it was drained named an operator act that the
+// registry's own flag would then deny on the node's next call, undraining it
+// under the hold (D63).
+const (
+	HoldReasonDrain   = "drain"
+	HoldReasonBreaker = "breaker"
+)
+
 // Event is one entry of an events response (D45).
+//
+// Hold carries the state a drain event sets, so the event says which way the
+// coordinator moved the hold and which hold it is. It is the whole payload of
+// that event type: absent is the lift, and a node applies the value rather than
+// reading the event's arrival as a drain.
 type Event struct {
 	Type    string `json:"type"`
 	LeaseID string `json:"lease_id,omitempty"`
 	Force   bool   `json:"force,omitempty"`
+	Hold    string `json:"hold,omitempty"`
 }
 
 // EventsResponse answers GET /nashnet/nodes/{node}/events, held up to 30s and
@@ -337,7 +361,7 @@ type ProgressRequest struct {
 type ProgressResponse struct {
 	Revoke            bool   `json:"revoke,omitempty"`
 	Force             bool   `json:"force,omitempty"`
-	Drain             bool   `json:"drain,omitempty"`
+	Hold              string `json:"hold,omitempty"`
 	LeaseDeadline     string `json:"lease_deadline,omitempty"`
 	RetryAfterSeconds int    `json:"retry_after_seconds,omitempty"`
 }

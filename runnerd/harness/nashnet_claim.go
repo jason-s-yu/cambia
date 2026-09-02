@@ -46,8 +46,7 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request, nodeID stri
 		writeRegistryError(w, err)
 		return
 	}
-	rec, _ := p.nodes.Get(nodeID)
-	if rec.Drained || p.breakerHeld(nodeID) {
+	if p.effectiveHold(nodeID) != "" {
 		// A coordinator-side hold (an operator drain or the D63 breaker) is not
 		// the node's own gate, and it is never clearable by the node: a node that
 		// could clear its own hold would loop claim, nack, register, claim at
@@ -162,7 +161,7 @@ func (p *Pool) placeOnce(ctx context.Context, cand candidate, req nashnet.ClaimR
 // snapshot digest and the seed entries), grants the lease, writes the
 // coordinator-authored env.json, and builds the claim response.
 func (p *Pool) grantFor(ctx context.Context, cand candidate, req nashnet.ClaimRequest, picked *pick) (*nashnet.ClaimResponse, error) {
-	seeds, grants, err := p.resolveSeeds(picked.spec, picked.resume)
+	seeds, grants, err := p.resolveSeeds(picked.spec, picked.spec.Resume)
 	if err != nil {
 		return nil, err
 	}
@@ -220,7 +219,7 @@ func (p *Pool) grantFor(ctx context.Context, cand candidate, req nashnet.ClaimRe
 		LeaseDeadline: rfc3339(lease.Deadline),
 		LeaseToken:    token,
 		Spec:          specJSON,
-		Resume:        picked.resume,
+		Resume:        picked.spec.Resume,
 		Attempt:       lease.Attempt,
 		Snapshot: nashnet.SnapshotRef{
 			URL:       "/nashnet/leases/" + lease.LeaseID + "/snapshot",

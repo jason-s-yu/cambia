@@ -37,6 +37,23 @@ record-and-replay idiom ``lbr.SampledInfoset`` uses; a Go deal is a pure
 function of its seed or deck and the engine is deterministic given an action
 sequence).
 
+One read a node
+---------------
+Every read below comes off a ``GameStateView``: one ``cambia_game_apply_and_read``
+crossing hands back terminality, the acting seat, the decision context, the turn
+number, the stockpile, the discard top, the Cambia caller, the snap window, the
+pending record, the legal set and both hands together, and the apply that
+produces a node shares that node's crossing (cambia-1902). Before this the
+traversal paid about 21 crossings for every applied action, which is why the Go
+engine bought it no throughput over the Python one.
+
+The view is a snapshot, so this class drops it at every mutation --
+``apply``, ``rewind``, ``_replay`` -- and takes a fresh one lazily. That is
+correct exactly as long as nothing else moves ``self.engine`` behind its back;
+the engine attribute is public for reads (the lockstep test reads pile lengths
+straight off it), and a caller that applies an action through it instead of
+through ``apply`` would leave a view describing the previous state.
+
 Snap results
 ------------
 ``AgentObservation.snap_results`` is the one field with no engine accessor: the
@@ -74,7 +91,7 @@ from ..constants import (
     DecisionContext,
     GameAction,
 )
-from ..ffi.bridge import GoEngine
+from ..ffi.bridge import GameStateView, GoEngine, HouseRulesView
 from .lbr import DealSpec
 
 logger = logging.getLogger(__name__)
@@ -117,22 +134,54 @@ class _SnapLogMirror:
     a single rule. A SnapOpponentMove that resumes the phase for a remaining
     snapper is deliberately NOT a clear on either engine: the accumulated block
     stays visible to that snapper's decision.
+
+    A clear that drops entries the closing action itself produced hands them to
+    ``closing`` first (cambia-1985). Those entries are the ones no observation
+    would otherwise ever see, and the belief needs them: a successful own snap
+    names the slot that left, and without it the belief truncates the hand from
+    the end and keeps the removed card's bucket. They ride their own field on the
+    observation rather than going back into the log, because the log is the
+    tokenizer channel and Go emits public snap frames only while ``Snap.Active``.
+    Entries an earlier observation already delivered are not carried over.
     """
 
-    __slots__ = ("_entries",)
+    __slots__ = ("_entries", "_closing")
 
-    def __init__(self, entries: Optional[List[Dict[str, Any]]] = None) -> None:
+    def __init__(
+        self,
+        entries: Optional[List[Dict[str, Any]]] = None,
+        closing: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
         self._entries: List[Dict[str, Any]] = list(entries or [])
+        self._closing: List[Dict[str, Any]] = list(closing or [])
 
     def clone(self) -> "_SnapLogMirror":
-        return _SnapLogMirror([dict(e) for e in self._entries])
+        return _SnapLogMirror(
+            [dict(e) for e in self._entries], [dict(e) for e in self._closing]
+        )
 
     def entries(self) -> List[Dict[str, Any]]:
         """A copy, matching the Python builder's ``copy.deepcopy`` of the log."""
         return [dict(e) for e in self._entries]
 
-    def clear(self) -> None:
+    def closing_entries(self) -> List[Dict[str, Any]]:
+        """A copy of the entries the last window-closing action produced."""
+        return [dict(e) for e in self._closing]
+
+    def clear(self, closed_by: Optional[List[Dict[str, Any]]] = None) -> None:
+        """Drop the log. ``closed_by`` names the entries the closing action just
+        appended, which are handed to the belief instead of being lost."""
         self._entries = []
+        self._closing = list(closed_by or [])
+
+    def start_action(self) -> None:
+        """Drop the previous action's closing entries.
+
+        They are live for exactly the one observation taken after the action that
+        produced them, the same lifetime the Python engine gives
+        ``race_resolution``.
+        """
+        self._closing = []
 
     def append(self, entry: Dict[str, Any]) -> None:
         self._entries.append(entry)
@@ -166,6 +215,8 @@ class GoBrState:
         "_live_snaps",
         "_num_players",
         "_closed",
+        "_state",
+        "_rules",
     )
 
     def __init__(self, engine: GoEngine, deal: DealSpec, house_rules: Any) -> None:
@@ -176,8 +227,10 @@ class GoBrState:
         self._snap_log = _SnapLogMirror()
         self._king_swap: Optional[Tuple[int, int]] = None
         self._live_snaps: List[Tuple[Tuple[int, ...], int]] = []
-        self._num_players = int(engine.num_players())
         self._closed = False
+        self._state: Optional[GameStateView] = None
+        self._rules: Optional[HouseRulesView] = None
+        self._num_players = self._view().num_players
 
     @classmethod
     def new(
@@ -243,19 +296,42 @@ class GoBrState:
 
     # --- Read surface ---
 
+    def _view(self) -> GameStateView:
+        """This node's state, read in one crossing and reused until it moves."""
+        state = self._state
+        if state is None:
+            state = self._state = self.engine.read_state()
+        return state
+
+    def _house_rules(self) -> HouseRulesView:
+        """The game's rules, read once. They do not change over a game, and a
+        replay rewind rebuilds the engine from the same ``house_rules``."""
+        rules = self._rules
+        if rules is None:
+            rules = self._rules = self.engine.get_house_rules()
+        return rules
+
     def num_players(self) -> int:
         return self._num_players
 
     def is_terminal(self) -> bool:
-        return bool(self.engine.is_terminal())
+        return self._view().terminal
 
     def utility(self, seat: int) -> float:
-        return float(self.engine.get_utility()[seat])
+        """A seat's utility. Only meaningful once the game is terminal.
+
+        The batched read carries the utilities of a terminal state only, since
+        scoring every hand is real work and a traversal asks for them nowhere
+        else. The engine still answers for a live state, which is what the
+        no-legal-actions error path in ``src.analysis_tools`` reads.
+        """
+        utils = self._view().utility
+        if utils is None:
+            return float(self.engine.get_utility()[seat])
+        return float(utils[seat])
 
     def acting_player(self) -> int:
-        if self.engine.is_terminal():
-            return -1
-        return int(self.engine.acting_player())
+        return self._view().acting_player
 
     def decision_context(self) -> DecisionContext:
         """The acting seat's decision context.
@@ -266,7 +342,7 @@ class GoBrState:
         the mapping is the identity rather than a re-derivation off a pending
         record.
         """
-        return DecisionContext(int(self.engine.decision_ctx()))
+        return DecisionContext(self._view().decision_ctx)
 
     def legal_actions(self) -> List[Tuple[int, GameAction]]:
         """Legal ``(action index, GameAction)`` pairs, sorted by ``repr``.
@@ -277,14 +353,14 @@ class GoBrState:
         the probability of a different action. The engine's own ascending index
         order is a different order and would silently mis-index.
         """
-        mask = self.engine.legal_actions_mask()
+        mask = self._view().legal_mask
         pairs = [(int(i), index_to_action(int(i))) for i in np.flatnonzero(mask)]
         pairs.sort(key=lambda pair: repr(pair[1]))
         return pairs
 
     def hand(self, seat: int):
         """A seat's true hand, slot 0 first."""
-        return self.engine.get_player_hand(seat)
+        return self._view().hand(seat)
 
     def initial_peek_indices(self) -> Tuple[int, ...]:
         """The slots dealt face-up to every seat at the start.
@@ -292,50 +368,56 @@ class GoBrState:
         ``PlayerState`` gives every seat ``tuple(range(initial_view_count))``,
         so the rules record is the whole story.
         """
-        count = int(self.engine.get_house_rules().initial_view_count)
-        return tuple(range(count))
+        return tuple(range(int(self._house_rules().initial_view_count)))
 
     # --- Mutation + rewind ---
 
     def apply(self, action_idx: int) -> None:
         """Apply an action index, keeping the snap-log mirror in step.
 
-        The snap bookkeeping reads the pre-apply state, so it has to run first;
-        it is gated on an open snap window because that gate is one FFI call and
-        the work behind it is several, and the search spends most of its edges
-        nowhere near a snap.
+        The snap bookkeeping reads the pre-apply state, so it has to run before
+        the action lands; the pre-apply view is already in hand, since the node
+        this action leaves was itself read in one crossing, so the whole of it
+        is free here.
         """
         action = index_to_action(int(action_idx))
-        snap_before = self.engine.get_snap_state()
+        self._snap_log.start_action()
+        before = self._view()
+        snap_before = before.snap
         entry = None
         if (
             snap_before.active
-            and self.decision_context() is DecisionContext.SNAP_DECISION
+            and DecisionContext(before.decision_ctx) is DecisionContext.SNAP_DECISION
         ):
-            entry = self._snap_entry(
-                action,
-                int(self.engine.acting_player()),
-                snap_before,
-            )
-        self._king_swap = self._pre_apply_king_swap(action)
+            entry = self._snap_entry(action, before)
+        self._king_swap = self._pre_apply_king_swap(action, before)
 
-        self.engine.apply_action(int(action_idx))
+        # Dropped before the call, not after: a rejected action raises out of
+        # here, and a stale view would then outlive the failure.
+        self._state = None
+        self._state = self.engine.apply_and_read_state(int(action_idx))
         self._prefix.append(int(action_idx))
 
-        snap_after = self.engine.get_snap_state()
+        snap_after = self._state.snap
         if entry is not None:
             self._snap_log.append(entry)
         if snap_after.active != snap_before.active:
             # A phase starting clears for the new phase (change_snap_start); a
             # phase ending clears inside the same apply that appended the last
-            # snapper's entry (change_snap_end), which is why that entry never
-            # reaches an observation. The SnapOpponentMove flush
+            # snapper's entry (change_snap_end). The SnapOpponentMove flush
             # (_flush_snap_results_log) is the same edge seen from the other
             # side: Python flushes only when no snapper remains, which is
             # exactly when Go's Snap.Active drops. A move that RESUMES the
             # phase for the next snapper deliberately keeps the block visible
             # on both engines, so no clear belongs there.
-            self._snap_log.clear()
+            #
+            # The entry this action appended is what the clear would otherwise
+            # lose, so it goes to the belief on the closing channel instead
+            # (cambia-1985). A phase START clears a block belonging to an
+            # earlier window that every interested observation already saw, so
+            # nothing is carried there.
+            closed_by = [entry] if (entry is not None and not snap_after.active) else []
+            self._snap_log.clear(closed_by)
 
     def checkpoint(self) -> Checkpoint:
         """Take a rewind token for the current node.
@@ -365,6 +447,7 @@ class GoBrState:
 
     def rewind(self, cp: Checkpoint) -> None:
         """Restore the state the checkpoint was taken at."""
+        self._state = None
         if cp.snap_h is not None:
             self.engine.restore(cp.snap_h)
         else:
@@ -393,6 +476,7 @@ class GoBrState:
         the engine is re-dealt, which is the same work the search used to do on
         every fallback rewind.
         """
+        self._state = None
         start = 0
         base: Optional[int] = None
         for snap_prefix, snap_h in self._live_snaps:
@@ -455,44 +539,46 @@ class GoBrState:
         verified against the reduced one, and handing it the fuller frame would
         move its exploitability numbers.
         """
-        engine = self.engine
-        caller = engine.cambia_caller()
+        view = self._view()
+        caller = view.cambia_caller
         return AgentObservation(
             acting_player=acting_player,
             action=action,
-            discard_top_card=engine.get_discard_top(),
-            player_hand_sizes=[
-                len(engine.get_hand_indices(i)) for i in range(self._num_players)
-            ],
-            stockpile_size=engine.stock_len(),
-            drawn_card=self._drawn_card(action, acting_player),
+            discard_top_card=view.discard_top,
+            player_hand_sizes=[view.hand_len(i) for i in range(self._num_players)],
+            stockpile_size=view.stock_len,
+            drawn_card=self._drawn_card(action, acting_player, view),
             peeked_cards=(
-                self._peeked_cards(action, acting_player) if ability_reveals else None
+                self._peeked_cards(action, acting_player, view)
+                if ability_reveals
+                else None
             ),
             snap_results=self._snap_log.entries(),
+            closing_snap_results=self._snap_log.closing_entries(),
             did_cambia_get_called=caller is not None,
             who_called_cambia=caller,
-            is_game_over=engine.is_terminal(),
-            current_turn=engine.turn_number(),
+            is_game_over=view.terminal,
+            current_turn=view.turn_number,
             king_swap_indices=self._king_swap if ability_reveals else None,
         )
 
     # --- Internals ---
 
-    def _drawn_card(self, action: Optional[GameAction], acting_player: int):
+    def _drawn_card(
+        self, action: Optional[GameAction], acting_player: int, view: GameStateView
+    ):
         """The card this action surfaced to its actor, or None.
 
         The same three cases the Python builder handled and no others: a
         discard puts the drawn card on top of the pile, a replace leaves it in
         the addressed slot, and a stockpile draw parks it on the pending record.
         """
-        engine = self.engine
         if isinstance(action, ActionDiscard):
-            return engine.get_discard_top()
+            return view.discard_top
         if isinstance(action, ActionReplace):
             if acting_player < 0:
                 return None
-            hand = engine.get_player_hand(acting_player)
+            hand = view.hand(acting_player)
             if 0 <= action.target_hand_index < len(hand):
                 return hand[action.target_hand_index]
             logger.error(
@@ -504,12 +590,14 @@ class GoBrState:
             )
             return None
         if isinstance(action, (ActionDrawStockpile, ActionDrawDiscard)):
-            pending = engine.get_pending()
+            pending = view.pending
             if pending.seat == acting_player:
                 return pending.drawn_card
         return None
 
-    def _pre_apply_king_swap(self, action: GameAction) -> Optional[Tuple[int, int]]:
+    def _pre_apply_king_swap(
+        self, action: GameAction, view: GameStateView
+    ) -> Optional[Tuple[int, int]]:
         """The (own slot, target slot) pair a King swap is about to move.
 
         Read before the action applies, because applying it clears the pending
@@ -522,12 +610,14 @@ class GoBrState:
             return None
         if not action.perform_swap:
             return None
-        pending = self.engine.get_pending()
+        pending = view.pending
         if pending.own_slot is None or pending.target_slot is None:
             return None
         return (int(pending.own_slot), int(pending.target_slot))
 
-    def _peeked_cards(self, action: Optional[GameAction], acting_player: int):
+    def _peeked_cards(
+        self, action: Optional[GameAction], acting_player: int, view: GameStateView
+    ):
         """The faces this ability turned up, keyed by (seat, hand slot).
 
         None for every other action, matching the production builder. The
@@ -537,11 +627,10 @@ class GoBrState:
         """
         if acting_player < 0 or action is None:
             return None
-        engine = self.engine
         opponent = 1 - acting_player
 
         if isinstance(action, ActionAbilityPeekOwnSelect):
-            hand = engine.get_player_hand(acting_player)
+            hand = view.hand(acting_player)
             idx = action.target_hand_index
             if 0 <= idx < len(hand):
                 return {(acting_player, idx): hand[idx]}
@@ -553,7 +642,7 @@ class GoBrState:
             return None
 
         if isinstance(action, ActionAbilityPeekOtherSelect):
-            opp_hand = engine.get_player_hand(opponent)
+            opp_hand = view.hand(opponent)
             idx = action.target_opponent_hand_index
             if 0 <= idx < len(opp_hand):
                 return {(opponent, idx): opp_hand[idx]}
@@ -565,8 +654,8 @@ class GoBrState:
             return None
 
         if isinstance(action, ActionAbilityKingLookSelect):
-            own_hand = engine.get_player_hand(acting_player)
-            opp_hand = engine.get_player_hand(opponent)
+            own_hand = view.hand(acting_player)
+            opp_hand = view.hand(opponent)
             own_idx, opp_idx = action.own_hand_index, action.opponent_hand_index
             if 0 <= own_idx < len(own_hand) and 0 <= opp_idx < len(opp_hand):
                 return {
@@ -585,9 +674,12 @@ class GoBrState:
         return None
 
     def _snap_entry(
-        self, action: GameAction, actor: int, snap
+        self, action: GameAction, view: GameStateView
     ) -> Optional[Dict[str, Any]]:
         """The log entry a snap-phase action appends, decided pre-apply.
+
+        ``view`` is the pre-apply node: the snapper, the open window and both
+        hands all come off it.
 
         Returns None for anything Python's ``_handle_snap_action`` does not
         log: the SnapOpponentMove that resolves a successful opponent snap goes
@@ -602,14 +694,15 @@ class GoBrState:
         if not isinstance(action, (ActionPassSnap, ActionSnapOwn, ActionSnapOpponent)):
             return None
 
-        target_rank = snap.rank
+        actor = view.acting_player
+        target_rank = view.snap.rank
         success = False
         penalty = False
         snapped_card = None
         attempted_card_str: Optional[str] = None
 
         if isinstance(action, ActionSnapOwn):
-            hand = self.engine.get_player_hand(actor)
+            hand = view.hand(actor)
             idx = action.own_card_hand_index
             if not (0 <= idx < len(hand)):
                 penalty = True
@@ -621,13 +714,13 @@ class GoBrState:
                 penalty = True
                 attempted_card_str = str(hand[idx])
         elif isinstance(action, ActionSnapOpponent):
-            rules = self.engine.get_house_rules()
-            opp_hand = self.engine.get_player_hand(1 - actor)
+            rules = self._house_rules()
+            opp_hand = view.hand(1 - actor)
             idx = action.opponent_target_hand_index
             if not rules.allow_opponent_snapping:
                 penalty = True
                 attempted_card_str = "Disallowed Action"
-            elif len(self.engine.get_hand_indices(actor)) == 0:
+            elif view.hand_len(actor) == 0:
                 penalty = True
                 attempted_card_str = "No cards to move"
             elif not (0 <= idx < len(opp_hand)):

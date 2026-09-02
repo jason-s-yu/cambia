@@ -767,11 +767,72 @@ func TestANackOfAResumedJobStillReturnsIt(t *testing.T) {
 	}
 }
 
-// TestARequeuedResumeIsNotUnProjected is the other half of the resume case: the
-// row of a job holding a promoted checkpoint is left as it stands, because the
-// resume intent lives in the queue handle and a created row would come back
-// from a restart as a fresh launch over the checkpoint's own run dir.
-func TestARequeuedResumeIsNotUnProjected(t *testing.T) {
+// restartDispatcher is what a coordinator restart leaves the dispatcher: rows on
+// disk and nothing in memory, rebuilt by the reconcile scan. The pool, the lease
+// store and the listener stay up, so the assertions are about what the scan
+// rebuilt rather than about a second process.
+func (r *poolRig) restartDispatcher(t *testing.T) {
+	t.Helper()
+	r.disp.mu.Lock()
+	for _, j := range r.disp.pending {
+		j.cancel()
+	}
+	r.disp.pending = map[string]*job{}
+	r.disp.queue = nil
+	r.disp.holds = map[string]*placementHold{}
+	r.disp.placing = map[string]string{}
+	r.disp.reattachDone = false
+	r.disp.mu.Unlock()
+	r.disp.Reconcile()
+}
+
+// TestAQueuedResumeSurvivesACoordinatorRestart is the restart half of the resume
+// contract: the intent and the reservoir pin are in jobspec.json and the row is
+// created, so the reconcile scan brings the job back as the resume it was, still
+// pinned to the node holding its reservoir, rather than as a fresh launch over
+// the checkpoint it meant to continue from.
+func TestAQueuedResumeSurvivesACoordinatorRestart(t *testing.T) {
+	r := newPoolRig(t, poolRigConfig{})
+	r.register(t, r.nodeA, 2)
+	r.register(t, r.nodeB, 2)
+	r.finishPoolRun(t, "restarted-resume")
+
+	if _, err := r.disp.Resume("restarted-resume"); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	spec := readJobSpec(filepath.Join(r.runsDir, "restarted-resume"))
+	if spec == nil || !spec.Resume {
+		t.Fatalf("persisted spec = %+v, want resume recorded", spec)
+	}
+	if node := requiresFor(spec).Node; node != r.nodeA.id {
+		t.Fatalf("persisted pin = %q, want the node holding the reservoir %q", node, r.nodeA.id)
+	}
+	if st := readProcessState(t, r.runsDir, "restarted-resume"); st.Status != procmgr.StatusCreated {
+		t.Fatalf("row after a resume = %q, want created: only a created row is re-enqueued", st.Status)
+	}
+
+	r.restartDispatcher(t)
+
+	if view, _ := r.disp.resolveView("restarted-resume"); !view.Resume || view.State != StateQueued {
+		t.Fatalf("rebuilt view = %+v, want a queued resume", view)
+	}
+	if _, other := r.claim(t, r.nodeB, nashnet.ClaimRequest{}); other != nil {
+		t.Fatalf("the pin did not survive the restart: node-b took %s", other.JobID)
+	}
+	_, mine := r.claim(t, r.nodeA, nashnet.ClaimRequest{})
+	if mine == nil || mine.JobID != "restarted-resume" {
+		t.Fatalf("the pinned node did not get its resume back, got %+v", mine)
+	}
+	if !mine.Resume {
+		t.Fatal("the claim after the restart did not carry resume")
+	}
+}
+
+// TestARequeuedResumeSurvivesTheRestartToo is the workaround cambia-1723 needed
+// before the intent was persisted: a resume whose lease expired before launch is
+// un-projected like any other returning job, and the scan still brings it back
+// as a pinned resume rather than as a fresh launch.
+func TestARequeuedResumeSurvivesTheRestartToo(t *testing.T) {
 	r := newPoolRig(t, poolRigConfig{})
 	sweeper := r.pool.Sweeper()
 	r.register(t, r.nodeA, 2)
@@ -789,7 +850,86 @@ func TestARequeuedResumeIsNotUnProjected(t *testing.T) {
 	if out := sweeper.Tick(); len(out) != 1 || out[0].Verdict != nashnet.VerdictRequeue {
 		t.Fatalf("sweep = %+v, want one requeue: the lease never launched", out)
 	}
-	if st := readProcessState(t, r.runsDir, "resumed-expiry-job"); st.Status == procmgr.StatusCreated {
-		t.Fatal("a resume with a promoted checkpoint was un-projected to created")
+	if st := readProcessState(t, r.runsDir, "resumed-expiry-job"); st.Status != procmgr.StatusCreated {
+		t.Fatalf("requeued resume projects %q, want created", st.Status)
+	}
+
+	r.restartDispatcher(t)
+
+	r.clock.advance(2 * time.Second) // past the expiry cooldown on that pair
+	_, again := r.claim(t, r.nodeA, nashnet.ClaimRequest{})
+	if again == nil || !again.Resume {
+		t.Fatalf("re-claim after the restart = %+v, want the resume back", again)
+	}
+}
+
+// heartbeat posts one idle heartbeat and returns the coordinator's answer.
+func (r *poolRig) heartbeat(t *testing.T, n fixtureNode) nashnet.HeartbeatResponse {
+	t.Helper()
+	resp := r.doNode(t, n, http.MethodPost, "/nashnet/nodes/"+n.id+"/heartbeat",
+		nashnet.HeartbeatRequest{AgentVersion: "1.1.0", SlotsFree: 2,
+			Capabilities: declaration(2), GateReport: admitReport(2)})
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("heartbeat for %s: got %d, want 200", n.name, resp.StatusCode)
+	}
+	var out nashnet.HeartbeatResponse
+	decodeInto(t, resp, &out)
+	return out
+}
+
+// TestABreakerHoldSurvivesTheNodesOwnCalls is the coordinator half of the
+// truthful drain event: the trip posts an event naming the breaker, and the
+// register and heartbeat answers a held node makes keep reporting that hold
+// instead of the registry's drain flag, which stands at false throughout. A
+// node believing those answers claims nothing until the cooldown runs out.
+func TestABreakerHoldSurvivesTheNodesOwnCalls(t *testing.T) {
+	r := newPoolRig(t, poolRigConfig{})
+	r.register(t, r.nodeA, 4)
+	r.register(t, r.nodeB, 4)
+	for i := 0; i < BreakerThreshold+1; i++ {
+		r.queueJob(t, JobSpec{Name: fmt.Sprintf("held-job-%d", i)})
+	}
+	for i := 0; i < BreakerThreshold; i++ {
+		_, c := r.claim(t, r.nodeA, nashnet.ClaimRequest{})
+		if c == nil {
+			t.Fatalf("nack %d: no claim", i)
+		}
+		r.nack(t, c, nashnet.NackPrepareNodeFailed)
+	}
+
+	// The trip announces itself, and it names the breaker rather than an
+	// operator act the registry would deny on the node's next call.
+	events := r.drainEvents(t, r.nodeA)
+	if len(events) != 1 || events[0].Hold != nashnet.HoldReasonBreaker {
+		t.Fatalf("events after the trip = %+v, want one naming the breaker", events)
+	}
+	if rec, _ := r.pool.nodes.Get(r.nodeA.id); rec.Drained {
+		t.Fatal("the breaker set the registry drain flag, which is the operator's alone")
+	}
+
+	// The node's own calls report the hold back to it rather than clearing it.
+	if hold := r.heartbeat(t, r.nodeA).Hold; hold != nashnet.HoldReasonBreaker {
+		t.Fatalf("heartbeat hold = %q, want breaker: the node would undrain itself", hold)
+	}
+	r.register(t, r.nodeA, 4)
+	if hold := r.registerHold(t, r.nodeA); hold != nashnet.HoldReasonBreaker {
+		t.Fatalf("register hold = %q, want breaker", hold)
+	}
+	resp, _ := r.claim(t, r.nodeA, nashnet.ClaimRequest{})
+	if got := holdReason(resp); got != nashnet.HoldNodeGated {
+		t.Fatalf("claim while held = %q, want node_gated", got)
+	}
+	if _, other := r.claim(t, r.nodeB, nashnet.ClaimRequest{}); other == nil {
+		t.Fatal("one node's breaker stopped the queue")
+	}
+
+	// The cooldown runs out on its own timer and every answer agrees.
+	r.clock.advance(BreakerCooldown + time.Second)
+	if hold := r.heartbeat(t, r.nodeA).Hold; hold != "" {
+		t.Fatalf("heartbeat hold after the cooldown = %q, want none", hold)
+	}
+	if _, again := r.claim(t, r.nodeA, nashnet.ClaimRequest{}); again == nil {
+		t.Fatal("the node was not handed work after its hold lapsed")
 	}
 }

@@ -140,6 +140,35 @@ RETIRED_ENGINE_BACKEND_MESSAGE = (
 )
 
 
+class TabularSnapRaceError(ValueError):
+    """Raised when a tabular config asks for a rule its substrate cannot drive."""
+
+
+TABULAR_SNAP_RACE_MESSAGE = (
+    "snapRace: true is not available to tabular CFR. The tabular traversal "
+    "runs on GoBrState (cambia-1782), whose snap-result reconstruction does "
+    "not model the race path, where the engine resolves every committed snap "
+    "at once. Set snapRace: false, or run this ruleset through a lane that "
+    "does not use GoBrState."
+)
+
+
+def validate_tabular_rules(algorithm: Any, rules: Any) -> None:
+    """Refuse a tabular config whose rules the tabular substrate cannot run.
+
+    Keyed on the file's own ``algorithm`` line so the deep, PRT-CFR, GT-CFR and
+    evaluation lanes, which drive snapRace through other code, are untouched.
+    Without this the run still started: the traversal refused per iteration,
+    logged it to a run file and returned nothing, so training appeared to
+    proceed while learning nothing at all.
+    """
+    if str(algorithm).strip().lower() != "tabular":
+        return
+    snap_race = rules.get("snapRace") if isinstance(rules, dict) else None
+    if snap_race:
+        raise TabularSnapRaceError(TABULAR_SNAP_RACE_MESSAGE)
+
+
 def validate_engine_backend(engine_backend: str) -> str:
     """Validate an engine_backend config value.
 
@@ -214,11 +243,28 @@ class AnalysisConfig(_CambiaBaseModel):
     """Parameters for analysis tools, like exploitability calculation."""
 
     exploitability_num_workers: int = 1
+    # Node ceiling for one seat's best-response search. The search walks the
+    # whole game tree, which on tiny_cambia_tabular.yaml is over 800,000 nodes
+    # per seat and left `train tabular` running for hours without reaching its
+    # end-of-run save (cambia-1785). Nodes rather than wall clock so the bound
+    # is reproducible: the same run stops in the same place on any host. 0
+    # removes the bound, for a run that wants the exact number and will wait.
+    exploitability_max_nodes: int = 2_000_000
 
     @field_validator("exploitability_num_workers", mode="before")
     @classmethod
     def _parse_workers(cls, v: Any) -> int:
         return parse_num_workers(v)
+
+    @field_validator("exploitability_max_nodes")
+    @classmethod
+    def _check_max_nodes(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(
+                f"analysis.exploitability_max_nodes must be >= 0 (0 disables the "
+                f"bound). Got: {v}."
+            )
+        return v
 
 
 class CfrTrainingConfig(_CambiaBaseModel):
@@ -239,10 +285,30 @@ class CfrTrainingConfig(_CambiaBaseModel):
 
 
 class CfrPlusParamsConfig(_CambiaBaseModel):
-    """Parameters specific to CFR+ algorithm variants."""
+    """Parameters specific to CFR+ algorithm variants.
 
+    Both settings govern the average-strategy accumulation and nothing else.
+    CFR+ regret updates are unweighted (Tammelin et al. 2015), so neither
+    setting can stop an iteration from moving regrets; applying the delay to
+    the regret update instead is the cambia-718 defect.
+    """
+
+    #: Weight the average strategy by ``max(0, t - averaging_delay)`` for
+    #: 1-based iteration ``t``. False weights every iteration equally.
     weighted_averaging_enabled: bool = True
+    #: Iterations whose strategies are discarded from the average. With the
+    #: default of 100, iteration 101 is the first to carry weight (of 1).
     averaging_delay: int = 100
+    #: Exploration mixed into the tabular outcome-sampling behaviour policy at
+    #: the traverser's own nodes, as in Lanctot et al. (2009) and the deep
+    #: path's DeepCfrConfig.exploration_epsilon. The traversal sampled purely on
+    #: policy before cambia-719, which is this value at 0: an action regret
+    #: matching had driven to probability zero could never be sampled again and
+    #: so stayed frozen for the rest of the run. The estimate stays unbiased at
+    #: any value in (0, 1] because the regret carries the matching 1/q
+    #: correction; the value trades sampling variance against how fast an
+    #: abandoned action can come back.
+    outcome_sampling_epsilon: float = 0.6
 
 
 class AgentParamsConfig(_CambiaBaseModel):
@@ -508,7 +574,12 @@ class DeepCfrConfig(_CambiaBaseModel):
     use_residual: bool = True
     network_type: str = "residual"
     use_pos_embed: bool = True
-    use_ema: bool = True
+    # SD-CFR serving: blending network parameters approximates the snapshot
+    # policy mixture but is not it, since regret matching is not linear in
+    # the parameters. Opt in per run; serving reads the eval-side flag, not
+    # this one, so a stale checkpoint value cannot switch what is served
+    # (cambia-712).
+    use_ema: bool = False
 
     # Profiling
     enable_traversal_profiling: bool = False
@@ -1006,10 +1077,14 @@ def load_config(config_path: str = "config.yaml") -> Config:
         # default config, which would drop every other setting in the file.
         if "engine_backend" in deep:
             validate_engine_backend(deep["engine_backend"])
+        validate_tabular_rules(raw.get("algorithm"), raw.get("cambia_rules"))
         cfg = Config.model_validate(raw)
         cfg._source_path = os.path.abspath(config_path)
         return cfg
-    except RetiredEngineBackendError:
+    except (RetiredEngineBackendError, TabularSnapRaceError):
+        # Both are ValueErrors, so without this they land in the handler below
+        # and become a silent fall back to the default config, which drops every
+        # other setting in the file and trains on something nobody asked for.
         raise
     except FileNotFoundError:
         log.warning(

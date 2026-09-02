@@ -28,7 +28,7 @@ import threading
 import multiprocessing
 import multiprocessing.pool
 import traceback
-from typing import Any, Optional, List, Tuple
+from typing import Any, NamedTuple, Optional, List, Tuple
 from dataclasses import asdict, is_dataclass
 import numpy as np
 
@@ -68,6 +68,113 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# --- Best-response abort and budget (cambia-1785) ---
+#
+# These derive from BaseException, not Exception, on purpose. The search below
+# is written for resilience and catches Exception in a dozen places, returning a
+# value so one bad node cannot end a training run. That is right for a node and
+# wrong for the search as a whole: a RecursionError used to be caught by those
+# same handlers and turned into 0.0, so a corrupted number was reported as a
+# converged exploitability. An abort has to pass through every one of those
+# handlers untouched, which is exactly what BaseException is for.
+
+
+class BestResponseAborted(BaseException):
+    """The best-response search stopped without an answer."""
+
+
+class BestResponseBudgetExceeded(BestResponseAborted):
+    """The search reached ``analysis.exploitability_max_nodes``."""
+
+    def __init__(self, nodes: int):
+        self.nodes = nodes
+        super().__init__(
+            f"best-response search stopped at its node budget of {nodes}; the "
+            f"result is a partial search, not an exploitability value. Raise "
+            f"analysis.exploitability_max_nodes, or set it to 0 to remove the "
+            f"bound and wait for the exact number."
+        )
+
+
+class BestResponseCrashed(BestResponseAborted):
+    """An error inside the search, carried out with its traceback."""
+
+    def __init__(self, cause: BaseException, traceback_text: str, depth: int):
+        self.cause = cause
+        self.traceback_text = traceback_text
+        self.depth = depth
+        super().__init__(f"{type(cause).__name__} at depth {depth}: {cause}")
+
+
+class _NodeBudget:
+    """Counts node-logic entries for one search and trips at the limit.
+
+    One instance per search rather than a module global, so a second search in
+    the same process starts from zero: a leaked counter would silently bound
+    every exploitability pass after the first.
+    """
+
+    __slots__ = ("limit", "count")
+
+    def __init__(self, limit: int):
+        self.limit = int(limit)
+        self.count = 0
+
+    def charge(self) -> None:
+        self.count += 1
+        if self.limit and self.count > self.limit:
+            self.count = self.limit
+            raise BestResponseBudgetExceeded(self.limit)
+
+
+class BestResponseOutcome(NamedTuple):
+    """What one seat's search produced, and whether it is an answer.
+
+    ``kind`` is the field that matters: a value carried out of a bounded search
+    is a lower bound on the best-response value, never the exploitability the
+    caller asked for, so the two are never handed back as the same thing. It is
+    a field rather than something read back out of ``detail``, because ``detail``
+    carries tracebacks and any word looked for in one will eventually be found
+    in a source line quoted there.
+    """
+
+    value: float
+    nodes: int
+    kind: str  # "converged" | "bounded" | "failed"
+    detail: str
+
+    @property
+    def converged(self) -> bool:
+        return self.kind == "converged"
+
+
+#: The budget for the search running on this thread, or None outside one.
+_ACTIVE_BUDGET: Optional[_NodeBudget] = None
+
+
+def _report_failure(result_queue, br_player: int, detail: str, traceback_text: str):
+    """Put a failed outcome on the result queue.
+
+    The queue always gets an entry, because the parent's only other way to learn
+    a search is over is to notice the process died, and a failure that arrives
+    as a value is a failure the caller can print.
+    """
+    outcome = BestResponseOutcome(
+        value=float("nan"),
+        nodes=0,
+        kind="failed",
+        detail=f"{detail}\n{traceback_text}",
+    )
+    try:
+        result_queue.put((br_player, outcome))
+    except Exception as q_err:  # JUSTIFIED: nothing useful remains if this fails
+        logger.error(
+            "BR Process P%d: Failed to put error signal on queue: %s",
+            br_player,
+            q_err,
+        )
+
+
 # --- Top-level functions for parallel BR calculation ---
 
 
@@ -82,9 +189,20 @@ def _br_action_worker(
     opponent_avg_strategy: PolicyDict,
     br_player: int,
     depth: int,
+    budget_limit: int = 0,
 ) -> float:
     """
     Target function for the BR pool. Applies one action and calls node logic.
+
+    ``budget_limit`` re-establishes the node bound inside this process. The pool
+    is forked before the search sets its budget, so a worker would otherwise
+    inherit no bound and walk its subtree without one. The bound it gets is a
+    fresh one, which makes the pooled bound per task rather than per search: a
+    single delegated subtree cannot run away, but N workers can between them
+    walk N times the configured budget. A bound shared exactly across processes
+    would need locked shared state on the hottest path in the search, and the
+    pool only ever fires at the root node with exploitability_num_workers > 1
+    (cambia-1785).
 
     The node arrives as (deal spec, action prefix) rather than as a copy of the
     game: an engine handle cannot cross a fork, so this rebuilds its own engine
@@ -94,7 +212,11 @@ def _br_action_worker(
     """
     # No direct access to the main shutdown event here.
     # Relies on the pool being terminated if shutdown is triggered.
+    global _ACTIVE_BUDGET
+
     state: Optional[GoBrState] = None
+    previous_budget = _ACTIVE_BUDGET
+    _ACTIVE_BUDGET = _NodeBudget(budget_limit)
     try:
         state = GoBrState.new(house_rules, deal, action_prefix)
         state.apply(action_idx)
@@ -123,39 +245,25 @@ def _br_action_worker(
             pool=None,  # No pool for recursive calls within worker
         )
         return action_value
-    except GameStateError as e:
+    except Exception as e:
+        # Fatal to the search, as in the node logic (cambia-1785). Returning
+        # -inf here left the parent taking the max over the actions that
+        # happened to work, so a broken branch quietly lowered the reported
+        # best response instead of failing the pass.
         logger.error(
-            "BR ActionWorker(D%d, P%d): Game state error processing action %s: %s",
+            "BR ActionWorker(D%d, P%d): %s processing action %s: %s",
             depth,
             br_player,
+            type(e).__name__,
             action,
             e,
         )
-        return -float("inf")  # Indicate failure
-    except (AgentStateError, ObservationUpdateError) as e:
-        logger.error(
-            "BR ActionWorker(D%d, P%d): Agent state error processing action %s: %s",
-            depth,
-            br_player,
-            action,
-            e,
-        )
-        return -float("inf")  # Indicate failure
-    except Exception as e:  # JUSTIFIED: BR calculation resilience
-        # Log error from within the worker process
-        logger.error(
-            "BR ActionWorker(D%d, P%d): Error processing action %s: %s\n%s",
-            depth,
-            br_player,
-            action,
-            e,
-            traceback.format_exc(),
-            exc_info=False,  # Keep log cleaner
-        )
-        return -float("inf")  # Indicate failure
+        raise BestResponseCrashed(e, traceback.format_exc(), depth) from e
     finally:
         # The FFI handle pool is finite and this worker process is reused for
-        # every task the pool hands it, so the engine has to go back now.
+        # every task the pool hands it, so the engine has to go back now, and
+        # the budget with it: the next task gets its own.
+        _ACTIVE_BUDGET = previous_budget
         if state is not None:
             state.close()
 
@@ -169,7 +277,12 @@ def _best_response_recursive_entry(
     pool: Optional[multiprocessing.pool.Pool],  # Pool for parallelizing actions
     depth: int = 0,
 ) -> float:
-    """Entry point for the recursive best response calculation."""
+    """Entry point for the recursive best response calculation.
+
+    Raises ``BestResponseAborted`` when the search hits its node budget or an
+    error inside it; callers that want those as data use
+    ``AnalysisTools.best_response_value``.
+    """
     return AnalysisTools._best_response_node_logic(
         game_state,
         opponent_avg_strategy,
@@ -286,68 +399,53 @@ def _run_br_calculation_process(
         logger.debug("BR Process P%d: Game and Agent states initialized.", br_player)
 
         # Call the entry point for BR calculation
-        br_value = _best_response_recursive_entry(
+        outcome = AnalysisTools.best_response_value(
             state,
             avg_strat,
             br_player,
             br_agent_state,
             opp_view_agent_state,
+            config,
             pool,  # Pass the pool
-            depth=0,
         )
-        logger.info(
-            "BR Process P%d: Calculation complete. Value: %.6f", br_player, br_value
-        )
+        if outcome.converged:
+            logger.info(
+                "BR Process P%d: Calculation complete over %d nodes. Value: %.6f",
+                br_player,
+                outcome.nodes,
+                outcome.value,
+            )
+        else:
+            logger.warning("BR Process P%d: %s", br_player, outcome.detail)
 
         # Put result on the queue
-        result_queue.put((br_player, br_value))
+        result_queue.put((br_player, outcome))
 
-    except GameStateError as e:
+    except BestResponseCrashed as crashed:
+        # The search hit an error and stopped rather than absorbing it. The
+        # traceback travels with the outcome so the parent can print the real
+        # stack instead of a process exit code (cambia-1785).
         logger.error(
-            "!!! BR Process P%d: Game state error during calculation: %s",
+            "!!! BR Process P%d: search failed: %s\n%s",
             br_player,
-            e,
+            crashed,
+            crashed.traceback_text,
         )
-        try:
-            result_queue.put((br_player, float("inf")))
-        except Exception as q_err:  # JUSTIFIED: BR calculation resilience
-            logger.error(
-                "BR Process P%d: Failed to put error signal on queue: %s",
-                br_player,
-                q_err,
-            )
-    except (AgentStateError, ObservationUpdateError) as e:
-        logger.error(
-            "!!! BR Process P%d: Agent state error during calculation: %s",
-            br_player,
-            e,
-        )
-        try:
-            result_queue.put((br_player, float("inf")))
-        except Exception as q_err:  # JUSTIFIED: BR calculation resilience
-            logger.error(
-                "BR Process P%d: Failed to put error signal on queue: %s",
-                br_player,
-                q_err,
-            )
-    except Exception as e:  # JUSTIFIED: BR calculation resilience
-        # Log the error from within the BR process
+        _report_failure(result_queue, br_player, str(crashed), crashed.traceback_text)
+    except Exception as e:  # JUSTIFIED: the queue must carry a result either way
         logger.error(
             "!!! BR Process P%d: Unhandled exception during calculation: %s\n%s",
             br_player,
             e,
-            traceback.format_exc(),  # Log full traceback from process
+            traceback.format_exc(),
             exc_info=False,  # Prevent duplicate logging by root logger if propagated
         )
-        try:
-            # Attempt to put failure signal on queue
-            result_queue.put((br_player, float("inf")))
-        except Exception as q_err:  # JUSTIFIED: BR calculation resilience
-            logger.error(
-                "BR Process P%d: Failed to put error signal on queue: %s",
-                br_player,
-                q_err,
-            )
+        _report_failure(
+            result_queue,
+            br_player,
+            f"{type(e).__name__}: {e}",
+            traceback.format_exc(),
+        )
     finally:
         # Clean up the local pool associated with *this* BR process
         if pool:
@@ -478,9 +576,20 @@ class AnalysisTools:
         # Add shutdown_event from trainer
         shutdown_event: Optional[threading.Event] = None,
     ) -> float:
-        """Calculates the exploitability of the agent's average strategy using parallel processes."""
+        """Calculates the exploitability of the agent's average strategy using parallel processes.
+
+        Returns infinity when the pass did not produce a number, which covers a
+        search stopped at ``analysis.exploitability_max_nodes`` and a search that
+        failed. ``last_pass_outcome`` says which of "converged", "bounded" and
+        "failed" happened and ``last_pass_detail`` carries the reason, including
+        the traceback of a failure (cambia-1785).
+        """
+        self.last_pass_outcome = "failed"
+        self.last_pass_detail = "the pass did not run"
+
         if not average_strategy:
             logger.warning("Cannot calculate exploitability: Average strategy is empty.")
+            self.last_pass_detail = "the average strategy was empty"
             return float("inf")
 
         exploitability = float("inf")  # Default to infinity
@@ -543,10 +652,10 @@ class AnalysisTools:
 
                 try:
                     # Use timeout to allow periodic checks
-                    p_id, value = result_queue.get(timeout=0.5)  # Shorter timeout
-                    results_dict[p_id] = value
+                    p_id, outcome = result_queue.get(timeout=0.5)  # Shorter timeout
+                    results_dict[p_id] = outcome
                     processes_completed += 1
-                    logger.info("BR Process P%d finished. Result: %.6f", p_id, value)
+                    logger.info("BR Process P%d finished: %s", p_id, outcome.detail)
                 except queue.Empty:
                     # Check if any process terminated unexpectedly ONLY if not shutting down
                     if not (shutdown_event and shutdown_event.is_set()):
@@ -554,11 +663,21 @@ class AnalysisTools:
                             # Check if process is dead AND we haven't received its result yet
                             if not p.is_alive() and i not in results_dict:
                                 logger.error(
-                                    "BR Process P%d terminated unexpectedly (exit code %s). Assigning inf.",
+                                    "BR Process P%d terminated unexpectedly (exit "
+                                    "code %s) without reporting a result.",
                                     i,
                                     p.exitcode,
                                 )
-                                results_dict[i] = float("inf")
+                                results_dict[i] = BestResponseOutcome(
+                                    value=float("nan"),
+                                    nodes=0,
+                                    kind="failed",
+                                    detail=(
+                                        f"the best-response process for seat {i} "
+                                        f"exited with code {p.exitcode} without "
+                                        f"reporting a result"
+                                    ),
+                                )
                                 processes_completed += 1  # Mark as completed (failed)
                     continue  # Continue waiting or checking shutdown/dead processes
                 except Exception as q_get_err:
@@ -581,17 +700,37 @@ class AnalysisTools:
                     logger.error("Error joining BR process %s: %s", process.name, e_join)
             logger.debug("BR processes joined.")
 
-            # Calculate final exploitability
-            br_value_p0 = results_dict.get(0, float("inf"))
-            br_value_p1 = results_dict.get(1, float("inf"))
-
-            if br_value_p0 == float("inf") or br_value_p1 == float("inf"):
+            # Calculate final exploitability. Both seats have to have searched
+            # their whole tree: averaging a converged value with a truncated one
+            # gives a number that is neither (cambia-1785).
+            outcomes = [results_dict.get(p) for p in range(NUM_PLAYERS)]
+            unfinished = [
+                (seat, o)
+                for seat, o in enumerate(outcomes)
+                if o is None or not o.converged
+            ]
+            if unfinished:
+                reasons = "; ".join(
+                    f"seat {seat}: {'no result' if o is None else o.detail}"
+                    for seat, o in unfinished
+                )
+                bounded = all(
+                    o is not None and o.kind == "bounded" for _, o in unfinished
+                )
+                self.last_pass_outcome = "bounded" if bounded else "failed"
+                self.last_pass_detail = reasons
                 logger.warning(
-                    "Exploitability calculation resulted in infinity (BR failed/aborted for at least one player)."
+                    "Exploitability not computed (%s): %s",
+                    self.last_pass_outcome,
+                    reasons,
                 )
                 exploitability = float("inf")
             else:
-                exploitability = (br_value_p0 + br_value_p1) / 2.0
+                exploitability = sum(o.value for o in outcomes) / float(NUM_PLAYERS)
+                self.last_pass_outcome = "converged"
+                self.last_pass_detail = "; ".join(
+                    f"seat {seat}: {o.detail}" for seat, o in enumerate(outcomes)
+                )
                 logger.info("Calculated Exploitability: %.6f", exploitability)
 
         except GracefulShutdownException:
@@ -640,6 +779,59 @@ class AnalysisTools:
         return exploitability
 
     @staticmethod
+    def best_response_value(
+        game_state: GoBrState,
+        opponent_avg_strategy: PolicyDict,
+        br_player: int,
+        br_agent_state: AgentState,
+        opp_view_agent_state: AgentState,
+        config: Config,
+        pool: Optional[multiprocessing.pool.Pool] = None,
+    ) -> BestResponseOutcome:
+        """Search one seat's best response under the configured node budget.
+
+        Returns the outcome rather than a bare float so a bounded search is
+        distinguishable from a converged one. A crash inside the search is not
+        an outcome and propagates as ``BestResponseCrashed`` with its traceback:
+        a wrong exploitability number is worse than none (cambia-1785).
+        """
+        global _ACTIVE_BUDGET
+
+        limit = int(getattr(config.analysis, "exploitability_max_nodes", 0) or 0)
+        budget = _NodeBudget(limit)
+        previous, _ACTIVE_BUDGET = _ACTIVE_BUDGET, budget
+        try:
+            value = _best_response_recursive_entry(
+                game_state,
+                opponent_avg_strategy,
+                br_player,
+                br_agent_state,
+                opp_view_agent_state,
+                pool,
+            )
+        except BestResponseBudgetExceeded as bounded:
+            logger.warning(
+                "BR P%d: %s",
+                br_player,
+                bounded,
+            )
+            return BestResponseOutcome(
+                value=float("nan"),
+                nodes=budget.count,
+                kind="bounded",
+                detail=str(bounded),
+            )
+        finally:
+            _ACTIVE_BUDGET = previous
+
+        return BestResponseOutcome(
+            value=value,
+            nodes=budget.count,
+            kind="converged",
+            detail=f"searched {budget.count} nodes to completion",
+        )
+
+    @staticmethod
     def _best_response_node_logic(
         game_state: GoBrState,
         opponent_avg_strategy: PolicyDict,
@@ -656,6 +848,8 @@ class AnalysisTools:
         one checkpoint and rewinds to it after each child. Belief rewinds by
         cloning the Python AgentState per branch, exactly as before.
         """
+        if _ACTIVE_BUDGET is not None:
+            _ACTIVE_BUDGET.charge()
         try:
             if game_state.is_terminal():
                 return game_state.utility(br_player)
@@ -727,16 +921,20 @@ class AnalysisTools:
                                 opponent_avg_strategy,
                                 br_player,
                                 depth,  # Pass depth for logging within worker
+                                # The worker forked before this search set its
+                                # budget, so the limit travels with the task.
+                                _ACTIVE_BUDGET.limit if _ACTIVE_BUDGET else 0,
                             )
                         )
 
                     if pool:  # Check if pool wasn't disabled by clone error
                         try:
+                            # A worker that fails raises BestResponseCrashed,
+                            # which is a BaseException and so passes through the
+                            # handler below rather than being averaged away
+                            # (cambia-1785).
                             results = pool.starmap(_br_action_worker, tasks)
-                            valid_results = [r for r in results if r != -float("inf")]
-                            if not valid_results:
-                                return 0.0
-                            return max(valid_results)
+                            return max(results)
                         except Exception as e_starmap:
                             logger.error(
                                 "BR NodeLogic(D%d): Error in pool.starmap: %s",
@@ -979,28 +1177,23 @@ class AnalysisTools:
 
                 return expected_value
 
-        except GameStateError as e_br_rec:
+        except Exception as e_br_rec:
+            # Fatal to the search, not to this node (cambia-1785). These three
+            # cases each used to return 0.0, which made a RecursionError look
+            # like a genuinely zero-valued node and let the pass report a
+            # converged number built on it. The value of an exploitability
+            # measurement is that it is right, so a search that cannot compute
+            # one says so and stops.
             logger.error(
-                "BR NodeLogic(D%d): Game state error in recursion: %s",
+                "BR NodeLogic(D%d): %s in recursion at prefix %s: %s",
                 depth,
-                e_br_rec,
-            )
-            return 0.0
-        except (AgentStateError, ObservationUpdateError) as e_br_rec:
-            logger.error(
-                "BR NodeLogic(D%d): Agent state error in recursion: %s",
-                depth,
-                e_br_rec,
-            )
-            return 0.0
-        except Exception as e_br_rec:  # JUSTIFIED: BR calculation resilience
-            logger.exception(
-                "BR NodeLogic(D%d): Unhandled error in recursion at prefix %s: %s",
-                depth,
+                type(e_br_rec).__name__,
                 game_state.action_prefix,
                 e_br_rec,
             )
-            return 0.0
+            raise BestResponseCrashed(
+                e_br_rec, traceback.format_exc(), depth
+            ) from e_br_rec
 
     # --- Python-engine helpers (tools/ only) ---
     #
@@ -1117,6 +1310,9 @@ class AnalysisTools:
                 drawn_card=drawn_card_for_obs,
                 peeked_cards=peeked_cards_for_obs,
                 snap_results=copy.deepcopy(game_state.snap_results_log),
+                closing_snap_results=list(
+                    getattr(game_state, "snap_results_at_close", []) or []
+                ),
                 did_cambia_get_called=game_state.cambia_caller_id is not None,
                 who_called_cambia=game_state.cambia_caller_id,
                 is_game_over=game_state.is_terminal(),

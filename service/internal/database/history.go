@@ -49,10 +49,13 @@ type GameHistoryEntry struct {
 // GetUserGameHistory returns one page of the games userID has a recorded result for,
 // newest first, plus the total number of such games so a caller can paginate.
 //
-// A game's timestamp is COALESCE(end_time, updated_at, created_at): end_time is set only
-// by the historian's action_end_game path (cmd/db/historian.go), while a game finished
-// through RecordGameAndResults gets its completion recorded via the updated_at trigger,
-// so neither column alone covers every row. created_at is NOT NULL and backstops both.
+// A game's timestamp is COALESCE(end_time, updated_at, created_at). end_time is when the game
+// finished: RecordGameAndResults stamps it in the transaction that marks the game completed, and
+// the boot sweep stamps it on a game abandoned with its process (AbandonStaleGames). The
+// fallbacks cover the rows written before either did. end_time was NULL for every game until
+// cambia-1904, because the only writer of it had been the historian, on an action name nothing
+// emitted; those rows fall back to updated_at, which the completion UPDATE's trigger set.
+// created_at is NOT NULL and backstops both.
 //
 // game_results rows are only ever written by RecordGameAndResults, which marks the game
 // 'completed' in the same transaction, so this is a completed-game list without needing a

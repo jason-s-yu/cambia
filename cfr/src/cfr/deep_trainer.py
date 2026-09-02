@@ -48,7 +48,7 @@ from ..live_display import LiveDisplayManager
 from ..log_archiver import LogArchiver
 
 from .deep_worker import run_deep_cfr_worker, DeepCFRWorkerResult
-from .es_validator import ESValidator
+from .es_validator import ESValidator, ESValidatorError
 from .exceptions import (
     GracefulShutdownException,
     CheckpointSaveError,
@@ -162,7 +162,9 @@ class DeepCFRConfig:
     use_residual: bool = True
     network_type: str = "residual"  # "mlp", "residual", "slot_film", "slot_multiply"
     use_pos_embed: bool = True  # position embeddings in SlotFiLM
-    use_ema: bool = True  # EMA serving weights for O(1) SD-CFR inference
+    # O(1) parameter blend approximating the SD-CFR snapshot mixture; opt-in
+    # (cambia-712).
+    use_ema: bool = False
 
     # Profiling: gate traversal timing logs + handle pool stats behind this flag
     enable_traversal_profiling: bool = False
@@ -458,8 +460,7 @@ def _create_worker_file_handler(
 
 
 def _run_traversals_batch(
-    iteration_offset: int,
-    total_traversals_offset: int,
+    iteration: int,
     config,
     network_weights: Dict[str, Any],
     network_config: Dict[str, int],
@@ -502,7 +503,7 @@ def _run_traversals_batch(
 
     try:
         for i in range(traversals_per_step):
-            iter_num = iteration_offset + i
+            iter_num = iteration
             args_tuple = (
                 iter_num,
                 config,
@@ -568,7 +569,7 @@ def _run_single_traversal(args_tuple, file_handler_override=None):
 
 
 def _run_traversals_threaded(
-    iteration_offset: int,
+    iteration: int,
     config,
     network_weights: Dict[str, Any],
     network_config: Dict[str, int],
@@ -607,7 +608,7 @@ def _run_traversals_threaded(
     worker_args_list = []
     handler_for_args = []
     for i in range(traversals_per_step):
-        iter_num = iteration_offset + i
+        iter_num = iteration
         slot = i % num_threads
         worker_args_list.append(
             (
@@ -1077,20 +1078,31 @@ class DeepCFRTrainer:
 
     def _update_ema(self):
         """
-        Update EMA serving weights after each advantage snapshot.
+        Update the EMA serving weights after each advantage snapshot.
 
-        Uses the corrected formula for non-uniform alpha weighting:
-          w_T = (T+1)^alpha
+        This is an APPROXIMATION of the SD-CFR snapshot mixture, not the
+        mixture. It blends network parameters:
+          w_T = (T+1)^e, e from sd_cfr_snapshot_weighting
           new_sum = old_sum + w_T
-          θ_EMA = (old_sum / new_sum) * θ_EMA + (w_T / new_sum) * θ_current
+          theta_EMA = (old_sum / new_sum) * theta_EMA + (w_T / new_sum) * theta_T
+        whereas the mixture regret-matches each snapshot and averages the
+        resulting strategies. Regret matching is not linear in the parameters,
+        so the two agree only when the snapshots sit in one basin; warm-started
+        snapshots usually do, which is why the gap is a drift rather than a
+        collapse. It buys O(1) space and O(params) time per update.
 
-        This tracks the same weighted ensemble as full snapshot averaging
-        but in O(1) space and O(params) time per update.
+        The exponent follows sd_cfr_snapshot_weighting, the same rule the
+        mixture uses, so that toggling use_ema changes the estimator form and
+        not the weights (cambia-712). alpha is the fit loss's exponent and does
+        not belong here. One divergence remains and cannot be closed in O(1)
+        space: this blends every step, while the mixture averages the snapshots
+        the reservoir retained, and an evicted snapshot cannot be unblended.
         """
         if not self.dcfr_config.use_ema or not self.dcfr_config.use_sd_cfr:
             return
 
-        w_T = float((self.training_step + 1) ** self.dcfr_config.alpha)
+        exponent = 1.0 if self.dcfr_config.sd_cfr_snapshot_weighting == "linear" else 0.0
+        w_T = float((self.training_step + 1) ** exponent)
         new_sum = self._ema_weight_sum + w_T
         current_weights = {
             k: v.cpu().numpy() for k, v in self.advantage_net.state_dict().items()
@@ -1546,7 +1558,10 @@ class DeepCFRTrainer:
 
                         worker_args_list = []
                         for i in range(batch_size):
-                            iter_num = self.total_traversals + traversals_done + i
+                            # Every traversal of this step samples the same
+                            # policy, so they share one CFR iteration; the
+                            # pool slot index is not an iteration (cambia-720).
+                            iter_num = step
                             worker_args_list.append(
                                 (
                                     iter_num,
@@ -1620,7 +1635,7 @@ class DeepCFRTrainer:
                         traversals_done,
                         total_nodes,
                     ) = _run_traversals_threaded(
-                        self.total_traversals,
+                        step,
                         self.config,
                         network_weights,
                         network_config,
@@ -1641,8 +1656,7 @@ class DeepCFRTrainer:
                         total_nodes,
                         _trav_timing,
                     ) = _run_traversals_batch(
-                        self.total_traversals,
-                        self.total_traversals,
+                        step,
                         self.config,
                         network_weights,
                         network_config,
@@ -1702,8 +1716,7 @@ class DeepCFRTrainer:
                     next_weights = self._get_network_weights_for_workers()
                     pending_future = executor.submit(
                         _run_traversals_batch,
-                        self.total_traversals,  # iteration_offset
-                        self.total_traversals,  # total_traversals_offset
+                        step + 1,  # iteration: consumed at the next step
                         self.config,
                         next_weights,
                         network_config,
@@ -2038,6 +2051,21 @@ class DeepCFRTrainer:
                                 flush=True,
                             )
                         self.es_validation_history.append((step, es_metrics))
+                    except ESValidatorError:
+                        # The step produced no measurement at all: either the
+                        # network could not be built or loaded, or no traversal
+                        # completed. Neither clears on its own, and downgrading
+                        # them to warnings left es_validation silently dead for
+                        # a whole run; fail at this step (cambia-1880). A
+                        # partial traversal failure still measures something and
+                        # keeps its warning below.
+                        logger.critical(
+                            "ES validation produced no measurement at step %d; "
+                            "aborting training. Set es_validation_interval=0 to "
+                            "train without validation.",
+                            step,
+                        )
+                        raise
                     except Exception as e_val:
                         logger.warning("ES validation failed at step %d: %s", step, e_val)
 
@@ -2295,6 +2323,47 @@ class DeepCFRTrainer:
             raise CheckpointSaveError(
                 f"Unexpected error saving checkpoint to {path}: {e}"
             ) from e
+
+    def _migrate_pre_step_iterations(self, traversals_per_step: int) -> None:
+        """Map a resumed buffer's per-traversal iteration values onto steps.
+
+        Buffers written before cambia-720 stamped a running traversal counter
+        on every sample instead of the training step. Left alone they would
+        share a buffer with the step numbers this run writes, and since the fit
+        loop weights by (iteration + 1)^alpha a stored traversal index of
+        100000 outweighs a fresh step 101 by about 3e4, so the resumed run
+        would train almost entirely on its old samples. Converting is exact
+        while traversals_per_step held constant, which is what the checkpoint's
+        own config records; rebuilding the buffer instead would throw away real
+        samples for a weighting detail.
+        """
+        if traversals_per_step <= 0 or self.training_step <= 0:
+            return
+
+        for name, buffer in (
+            ("advantage", self.advantage_buffer),
+            ("strategy", self.strategy_buffer),
+            ("value", self.value_buffer),
+        ):
+            if buffer is None:
+                continue
+            size = len(buffer)
+            if size == 0:
+                continue
+            stored = buffer._iterations[:size]
+            if int(stored.max()) <= self.training_step:
+                continue
+            buffer._iterations[:size] = np.clip(
+                stored // traversals_per_step + 1, 1, self.training_step
+            )
+            logger.warning(
+                "Converted %d %s samples from per-traversal iteration numbers to "
+                "training steps (checkpoint predates cambia-720; "
+                "traversals_per_step=%d).",
+                size,
+                name,
+                traversals_per_step,
+            )
 
     def load_checkpoint(self, filepath: Optional[str] = None):
         """
@@ -2555,6 +2624,14 @@ class DeepCFRTrainer:
                             saved_rules.get(key),
                             current_rules.get(key),
                         )
+
+            self._migrate_pre_step_iterations(
+                int(
+                    saved_config.get(
+                        "traversals_per_step", self.dcfr_config.traversals_per_step
+                    )
+                )
+            )
 
             strat_len = (
                 len(self.strategy_buffer) if self.strategy_buffer is not None else 0

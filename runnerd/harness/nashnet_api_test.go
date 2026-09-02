@@ -430,6 +430,16 @@ func TestDrainIsTwoWay(t *testing.T) {
 	if trips, held := r.pool.breakerReport(r.nodeA.id, r.clock.now()); trips != 0 || held != 0 {
 		t.Fatalf("breaker after clear_breaker = %d trips, %ds held, want 0 and 0", trips, held)
 	}
+	// Both acts posted an event and each names the hold that stood after it, so
+	// the node learns which way the hold moved off the event rather than off its
+	// next heartbeat.
+	events := r.drainEvents(t, r.nodeA)
+	if len(events) != 2 {
+		t.Fatalf("drain events = %+v, want one per act", events)
+	}
+	if events[0].Hold != nashnet.HoldReasonDrain || events[1].Hold != "" {
+		t.Fatalf("drain events = %+v, want the drain then the lift", events)
+	}
 	if _, claimed := r.claim(t, r.nodeA, nashnet.ClaimRequest{}); claimed == nil {
 		t.Fatal("a node whose hold was lifted must claim again")
 	}
@@ -621,4 +631,25 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatal("condition never held within the timeout")
+}
+
+// drainEvents reads the node's pending events and returns the drain ones, which
+// is how a node learns an operator moved its hold.
+func (r *poolRig) drainEvents(t *testing.T, n fixtureNode) []nashnet.Event {
+	t.Helper()
+	resp := r.doNode(t, n, http.MethodGet,
+		"/nashnet/nodes/"+n.id+"/events?wait_seconds=0", nil)
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("events poll: got %d, want 200", resp.StatusCode)
+	}
+	var out nashnet.EventsResponse
+	decodeInto(t, resp, &out)
+	var drains []nashnet.Event
+	for _, ev := range out.Events {
+		if ev.Type == nashnet.EventDrain {
+			drains = append(drains, ev)
+		}
+	}
+	return drains
 }

@@ -83,6 +83,16 @@ class AgentObservation:
     # both empty/False under race-OFF.
     is_race_commit: bool = False
     race_resolution: Optional[List[Dict[str, Any]]] = None
+    # Snap entries a window-closing action produced (cambia-1985). snap_results is
+    # the tokenizer channel and is kept byte-identical to the Go tokenizer's
+    # Observe(), which emits public snap frames only while Snap.Active: when a snap
+    # closes the window the engine clears the log inside that same apply, so the
+    # entry naming the removal never reaches an observation and the belief truncated
+    # the snapper's hand from the end instead of dropping the slot that left. This
+    # carries those entries to the belief without changing a single token. It holds
+    # only the entries the closing action itself produced, so an entry an earlier
+    # observation already delivered is not replayed here.
+    closing_snap_results: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -808,7 +818,13 @@ class AgentState:
         # --- 2. Process Snap Results & Determine Removals/Adds ---
         action = observation.action
         actor = observation.acting_player
-        snap_results = observation.snap_results
+        # The window-closing entries ride a separate field so the tokenizer channel
+        # stays byte-identical to Go's; to the belief they are the same entries and
+        # go through the same loop (cambia-1985). The two are disjoint by
+        # construction: the engine clears the log exactly when it publishes them.
+        snap_results = list(observation.snap_results) + list(
+            observation.closing_snap_results
+        )
 
         own_indices_removed: Set[int] = set()
         opponent_indices_removed: Set[int] = set()

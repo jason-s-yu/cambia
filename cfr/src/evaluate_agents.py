@@ -183,6 +183,9 @@ def _build_python_public_observation(
             drawn_card=None,
             peeked_cards=None,
             snap_results=copy.deepcopy(game_state.snap_results_log),
+            closing_snap_results=list(
+                getattr(game_state, "snap_results_at_close", []) or []
+            ),
             did_cambia_get_called=game_state.cambia_caller_id is not None,
             who_called_cambia=game_state.cambia_caller_id,
             is_game_over=game_state.is_terminal(),
@@ -466,6 +469,9 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
         #: advanced by the engine in the same FFI crossing that applies an
         #: action, so there is no Python-side update step (cambia-1426).
         self.agent_state: Optional[GoAgentState] = None
+        #: True while agent_state is a handle another object owns and closes
+        #: (bind_go_state, cambia-1793).
+        self._belief_borrowed = False
         self._use_argmax = use_argmax
         self._num_players = 2
 
@@ -484,6 +490,7 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
         pool, and an eval run builds one per game.
         """
         self.release_belief()
+        self._belief_borrowed = False
         self._num_players = max(2, int(num_players))
         params = self.config.agent_params
         memory_level = int(getattr(params, "memory_level", 0))
@@ -506,8 +513,33 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
         return self.agent_state
 
     def belief_handle(self) -> int:
-        """This seat's agent handle for apply_games_batch, or -1 if unattached."""
-        return -1 if self.agent_state is None else int(self.agent_state.handle)
+        """This seat's agent handle for apply_games_batch, or -1 if unattached.
+
+        A borrowed belief reports -1: its owner already drives that handle
+        through apply/save/restore, and a caller that adopted it a second time
+        would repoint a seat mid-search (cambia-1793).
+        """
+        if self.agent_state is None or self._belief_borrowed:
+            return -1
+        return int(self.agent_state.handle)
+
+    def bind_go_state(self, view, agent_state: GoAgentState) -> None:
+        """Read this seat's belief off a handle someone else owns and advances.
+
+        The Tier-B continuation seat is the caller: its opponent is built at the
+        infoset rather than at the deal, so the only belief true to the history
+        is the one the search state carried through the sampled prefix
+        (cambia-1793, from cambia-1479 F4). ``attach_belief`` cannot serve
+        there, because it builds a belief from the view it is given and that
+        view is mid-game.
+
+        The handle is borrowed, never owned: ``release_belief`` drops the
+        reference instead of closing it, since closing a handle whose owner
+        still holds it would free it twice.
+        """
+        self.release_belief()
+        self.agent_state = agent_state
+        self._belief_borrowed = agent_state is not None
 
     def _belief_view(self):
         """This seat's belief as the Python AgentState attribute surface.
@@ -527,8 +559,12 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
         return GoBeliefView(st)
 
     def release_belief(self) -> None:
-        """Free this seat's belief handle. Idempotent."""
-        if self.agent_state is not None:
+        """Free this seat's belief handle. Idempotent.
+
+        A borrowed handle (``bind_go_state``) is dropped, not closed: it
+        belongs to the caller that lent it and is still in use there.
+        """
+        if self.agent_state is not None and not self._belief_borrowed:
             try:
                 self.agent_state.close()
             except Exception as e:  # JUSTIFIED: evaluation resilience
@@ -538,7 +574,8 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
                     self.player_id,
                     e,
                 )
-            self.agent_state = None
+        self.agent_state = None
+        self._belief_borrowed = False
 
     @abc.abstractmethod
     def choose_action(self, game_state, legal_actions: Set[GameAction]) -> GameAction:
@@ -664,10 +701,13 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
 
 class DeepCFRAgentWrapper(NeuralAgentWrapper):
     """
-    Wraps a trained Deep CFR AdvantageNetwork for use in evaluation.
+    Wraps a trained Deep CFR checkpoint for use in evaluation.
 
-    Loads a .pt checkpoint, reconstructs the AdvantageNetwork, and uses
-    get_strategy_from_advantages() to sample actions during play.
+    Serves the StrategyNetwork's average strategy, which is the policy Deep CFR
+    converges to, whenever the checkpoint carries one. A checkpoint without a
+    strategy net falls back to regret matching on the final advantage net, which
+    is the last iterate and carries no convergence guarantee. ``served_policy``
+    names whichever is in use and reaches the eval row (cambia-721).
     """
 
     def __init__(
@@ -681,6 +721,7 @@ class DeepCFRAgentWrapper(NeuralAgentWrapper):
         super().__init__(player_id, config, device=device, use_argmax=use_argmax)
         from src.networks import (
             AdvantageNetwork,
+            StrategyNetwork,
             get_strategy_from_advantages,
             build_advantage_network,
         )
@@ -731,17 +772,48 @@ class DeepCFRAgentWrapper(NeuralAgentWrapper):
         self.advantage_net.to(self.device)
         self.advantage_net.eval()
 
+        # Deep CFR's solution is the average strategy, which the StrategyNetwork
+        # holds. Regret matching on the final advantage net serves sigma^{T+1},
+        # the last iterate, which the algorithm gives no convergence guarantee
+        # for. Serve the strategy net whenever the checkpoint carries one, and
+        # name whichever is served so an eval row says what it measured
+        # (cambia-721).
+        strategy_state = checkpoint.get("strategy_net_state_dict")
+        if strategy_state:
+            self.strategy_net = StrategyNetwork(
+                input_dim=net_input_dim,
+                hidden_dim=hidden_dim,
+                output_dim=NUM_ACTIONS,
+                dropout=0.1,
+                validate_inputs=False,
+            )
+            # A checkpoint whose strategy net will not load must not fall back
+            # silently: that would serve a different policy than the row claims.
+            self.strategy_net.load_state_dict(strategy_state)
+            self.strategy_net.to(self.device)
+            self.strategy_net.eval()
+            self.served_policy = "average_strategy"
+        else:
+            self.strategy_net = None
+            self.served_policy = "last_iterate"
+
         logger.info(
-            "DeepCFRAgent P%d loaded checkpoint (step=%s, traversals=%s)",
+            "DeepCFRAgent P%d loaded checkpoint (step=%s, traversals=%s, "
+            "served_policy=%s)",
             self.player_id,
             checkpoint.get("training_step", "N/A"),
             checkpoint.get("total_traversals", "N/A"),
+            self.served_policy,
         )
 
     def choose_action(
         self, game_state: GameView, legal_actions: Set[GameAction]
     ) -> GameAction:
-        """Choose an action using the AdvantageNetwork via regret-matching strategy."""
+        """Choose an action from the served policy (cambia-721).
+
+        The StrategyNetwork's average strategy when the checkpoint carries one,
+        otherwise regret matching on the final advantage net.
+        """
         from src.encoding import (
             encode_infoset,
             encode_infoset_eppbs,
@@ -770,8 +842,11 @@ class DeepCFRAgentWrapper(NeuralAgentWrapper):
         with torch.inference_mode():
             feat_t = torch.from_numpy(features).unsqueeze(0).to(self.device)
             mask_t = torch.from_numpy(action_mask).unsqueeze(0).to(self.device)
-            advantages = self.advantage_net(feat_t, mask_t)
-            strategy = self._get_strategy_from_advantages(advantages, mask_t)
+            if self.strategy_net is not None:
+                strategy = self.strategy_net(feat_t, mask_t)
+            else:
+                advantages = self.advantage_net(feat_t, mask_t)
+                strategy = self._get_strategy_from_advantages(advantages, mask_t)
             probs = strategy.squeeze(0).cpu().numpy()
 
         # Sample from legal action probabilities
@@ -1671,8 +1746,15 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
     """
     Wraps SD-CFR advantage network snapshots for evaluation.
 
-    Loads all snapshots, runs each through regret matching, and averages
-    the resulting strategies with linear or uniform weighting.
+    Serves the snapshot policy mixture: each snapshot is run through regret
+    matching and the resulting strategies are averaged with linear or uniform
+    weighting. That mixture is what SD-CFR defines.
+
+    ``use_ema`` opts into the EMA parameter blend instead, an O(1)
+    approximation of that mixture rather than the mixture itself. It is off by
+    default and a sibling ``*_ema.pt`` no longer switches it on by itself
+    (cambia-712). ``served_policy`` names whichever is in use and reaches the
+    eval row.
     """
 
     def __init__(
@@ -1681,7 +1763,7 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
         config,
         checkpoint_path: str,
         device: str = "cpu",
-        use_ema: bool = True,
+        use_ema: bool = False,
         use_argmax: bool = False,
     ):
         super().__init__(player_id, config, device=device, use_argmax=use_argmax)
@@ -1721,13 +1803,19 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
 
         base_path = os.path.splitext(checkpoint_path)[0]
 
-        # Try EMA fast path: single network, O(1) inference
+        # The EMA parameter blend is served only when this evaluation asks for
+        # it. Reading the checkpoint's use_ema, or the mere presence of the
+        # sibling file, used to switch serving to an approximation without the
+        # row saying so (cambia-712).
         ema_path = f"{base_path}_ema.pt"
-        ema_enabled = (
-            use_ema and dcfr_config.get("use_ema", True) and os.path.exists(ema_path)
-        )
+        if use_ema and not os.path.exists(ema_path):
+            raise FileNotFoundError(
+                f"use_ema was requested but no EMA weights exist at {ema_path}. "
+                "Serving the snapshot mixture instead would label the row as a "
+                "blend it never used."
+            )
 
-        if ema_enabled:
+        if use_ema:
             ema_data = torch.load(ema_path, map_location=self.device, weights_only=True)
             ema_net = build_advantage_network(
                 input_dim=net_input_dim,
@@ -1746,6 +1834,7 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
             self._ema_net = ema_net
             self._snapshot_nets = []
             self._snapshot_iterations = []
+            self.served_policy = "ema_blend"
             logger.info(
                 "SDCFRAgent P%d loaded EMA weights (step=%s) for O(1) inference.",
                 self.player_id,
@@ -1753,7 +1842,8 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
             )
         else:
             self._ema_net = None
-            # Fall back to full snapshot averaging
+            self.served_policy = "mixture"
+            # The snapshot policy mixture: SD-CFR's own definition.
             sd_snapshots_path = checkpoint.get(
                 "sd_snapshots_path", f"{base_path}_sd_snapshots.pt"
             )
@@ -1850,11 +1940,12 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
             mask_t = torch.from_numpy(action_mask).unsqueeze(0).to(self.device)
 
             if self._ema_net is not None:
-                # O(1) EMA fast path: single forward pass
+                # Opted-in O(1) blend: regret matching on averaged parameters,
+                # which approximates the mixture below rather than equalling it.
                 advantages = self._ema_net(feat_t, mask_t)
                 avg_strategy = self._get_strategy_from_advantages(advantages, mask_t)
             else:
-                # Full snapshot averaging fallback
+                # The snapshot policy mixture SD-CFR defines.
                 avg_strategy = torch.zeros(1, self._NUM_ACTIONS, device=self.device)
                 total_weight = 0.0
 
@@ -1920,6 +2011,9 @@ class PPOAgentWrapper(BaseAgent):
         self._model = MaskablePPO.load(model_path, device=device)
         #: This seat's belief, owned by the Go engine (cambia-1426).
         self._agent_state: Optional[GoAgentState] = None
+        #: True while _agent_state is a handle another object owns and closes
+        #: (bind_go_state, cambia-1793).
+        self._belief_borrowed = False
         self._num_players = 2
         #: Per-instance RNG for the illegal-index fallback, so a fallback does
         #: not draw from the unseeded module-global stream (cambia-651 RC-B2).
@@ -1939,10 +2033,11 @@ class PPOAgentWrapper(BaseAgent):
         """Bind a fresh GoAgentState for this seat to ``engine``.
 
         Same lifecycle as NeuralAgentWrapper.attach_belief; PPOAgentWrapper does
-        not inherit from it (no torch net of its own to manage), so the three
+        not inherit from it (no torch net of its own to manage), so the four
         belief methods are spelled out here.
         """
         self.release_belief()
+        self._belief_borrowed = False
         self._num_players = max(2, int(num_players))
         params = self.config.agent_params
         memory_level = int(getattr(params, "memory_level", 0))
@@ -1965,17 +2060,37 @@ class PPOAgentWrapper(BaseAgent):
         return self._agent_state
 
     def belief_handle(self) -> int:
-        """This seat's agent handle for apply_games_batch, or -1 if unattached."""
-        return -1 if self._agent_state is None else int(self._agent_state.handle)
+        """This seat's agent handle for apply_games_batch, or -1 if unattached.
+
+        A borrowed belief reports -1, for the reason given on
+        NeuralAgentWrapper.belief_handle (cambia-1793).
+        """
+        if self._agent_state is None or self._belief_borrowed:
+            return -1
+        return int(self._agent_state.handle)
+
+    def bind_go_state(self, view, agent_state: GoAgentState) -> None:
+        """Read this seat's belief off a handle someone else owns and advances.
+
+        The Tier-B continuation seat's hook; see
+        NeuralAgentWrapper.bind_go_state for what it is for (cambia-1793).
+        """
+        self.release_belief()
+        self._agent_state = agent_state
+        self._belief_borrowed = agent_state is not None
 
     def release_belief(self) -> None:
-        """Free this seat's belief handle. Idempotent."""
-        if self._agent_state is not None:
+        """Free this seat's belief handle. Idempotent.
+
+        A borrowed handle is dropped, not closed: its owner still holds it.
+        """
+        if self._agent_state is not None and not self._belief_borrowed:
             try:
                 self._agent_state.close()
             except Exception as e:  # JUSTIFIED: evaluation resilience
                 logger.error("PPOAgent P%d belief release error: %s", self.player_id, e)
-            self._agent_state = None
+        self._agent_state = None
+        self._belief_borrowed = False
 
     def initialize_state(self, initial_game_state):
         """Reset this seat's belief for a new game (the GoEngine about to play)."""
@@ -2710,6 +2825,15 @@ def get_agent(agent_type: str, player_id: int, config, **kwargs) -> BaseAgent:
             raise ValueError(f"{agent_class.__name__} requires 'checkpoint_path'.")
         device = kwargs.get("device", "cpu")
         use_argmax = kwargs.get("use_argmax", False)
+        if agent_type.lower() == "sd_cfr":
+            return agent_class(
+                player_id,
+                config,
+                checkpoint_path,
+                device=device,
+                use_ema=bool(kwargs.get("use_ema", False)),
+                use_argmax=use_argmax,
+            )
         return agent_class(
             player_id, config, checkpoint_path, device=device, use_argmax=use_argmax
         )
@@ -3608,6 +3732,14 @@ def run_evaluation(
     )
     enhanced_stats["num_players"] = num_players
     enhanced_stats["selection_mode"] = "argmax" if use_argmax else "stochastic"
+    enhanced_stats["served_policy"] = next(
+        (
+            getattr(agent, "served_policy", None)
+            for agent in agent1_by_seat.values()
+            if getattr(agent, "served_policy", None)
+        ),
+        None,
+    )
     enhanced_stats["crn_seed"] = crn_seed_base
     # Attach as attribute so CLI and tests can access enhanced stats without
     # polluting the Counter sum that existing tests rely on.
@@ -3866,6 +3998,7 @@ def run_head_to_head(
             turn = 0
             session = _GoEvalGame(config.cambia_rules, None, 2, agents)
 
+            turn_failed = False
             while not session.is_terminal() and turn < max_turns:
                 turn += 1
                 acting_player_id = session.acting_player()
@@ -3881,11 +4014,22 @@ def run_head_to_head(
                     )
                     session.apply(chosen_action)
                 except Exception as e_turn:
-                    logger.error("Head-to-head game %d turn error: %s", game_num, e_turn)
+                    # A game cut short by a failing agent used to fall through
+                    # and score as a tie, so a broken agent read as a drawing
+                    # one (cambia-1479). It is an error, counted and unscored.
+                    logger.exception(
+                        "Head-to-head game %d turn %d error: %s", game_num, turn, e_turn
+                    )
+                    errors_count += 1
+                    turn_failed = True
                     break
 
             turns_list.append(turn)
 
+            if turn_failed:
+                # Already counted as an error; scoring it would fold a failure
+                # into the win rate.
+                continue
             if session.is_terminal():
                 winner = session.winner()
                 if winner is None:
@@ -4020,6 +4164,7 @@ def run_head_to_head_typed(
             turn = 0
             session = _GoEvalGame(config.cambia_rules, None, 2, agents)
 
+            turn_failed = False
             while not session.is_terminal() and turn < max_turns:
                 turn += 1
                 acting_player_id = session.acting_player()
@@ -4035,13 +4180,25 @@ def run_head_to_head_typed(
                     )
                     session.apply(chosen_action)
                 except Exception as e_turn:
-                    logger.error(
-                        "Head-to-head-typed game %d turn error: %s", game_num, e_turn
+                    # Scored as a draw before cambia-1479, which turned a broken
+                    # agent into a drawing one. Counted as an error and left
+                    # out of the win rates instead.
+                    logger.exception(
+                        "Head-to-head-typed game %d turn %d error: %s",
+                        game_num,
+                        turn,
+                        e_turn,
                     )
+                    errors_count += 1
+                    turn_failed = True
                     break
 
             turns_list.append(turn)
 
+            if turn_failed:
+                # Already counted as an error; scoring it would fold a failure
+                # into the win rate.
+                continue
             if session.is_terminal():
                 winner = session.winner()
                 if winner is None:
@@ -4165,6 +4322,14 @@ def persist_eval_results(
             ci_low = max(0.0, center - margin)
             ci_high = min(1.0, center + margin)
 
+        # Games the loop could not finish are absent from `total`, so a row
+        # whose win rate was built on fewer games than were requested used to
+        # look identical to a clean one (cambia-1479). The count rides along in
+        # its own field: these are whole games lost to an engine or agent-state
+        # error, not the policy-boundary failures an exploitability run counts,
+        # and folding the two into one number would make neither readable.
+        engine_errors = int(results.get("Errors", 0) or 0)
+
         stats = getattr(results, "stats", {})
         avg_game_turns = stats.get("avg_game_turns")
         t1_cambia_rate = stats.get("t1_cambia_rate")
@@ -4179,6 +4344,11 @@ def persist_eval_results(
         # seat_balanced is only true when alternation actually ran and the agent
         # under test played both seats; default 0 keeps legacy/fixed runs honest.
         row_seat_balanced = int(bool(stats.get("seat_balanced", False)))
+        # Which policy the agent under test actually served: "average_strategy"
+        # (the StrategyNetwork, Deep CFR's solution) or "last_iterate" (regret
+        # matching on the final advantage net). None for agents that serve no
+        # network. Rows written before cambia-721 carry no key at all.
+        row_served_policy = stats.get("served_policy")
 
         row = {
             "run": run_name,
@@ -4213,6 +4383,8 @@ def persist_eval_results(
             "selection_mode": row_selection_mode,
             "crn_seed": None if row_crn_seed is None else str(row_crn_seed),
             "seat_balanced": row_seat_balanced,
+            "served_policy": row_served_policy,
+            "engine_errors": engine_errors,
         }
         all_rows.append(row)
 

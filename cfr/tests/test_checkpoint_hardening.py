@@ -244,10 +244,6 @@ def _extract_deep_cfr_config_class() -> type:
 class TestValueNetWorkerKey:
     """Verify deep_trainer.py serializes value_net under __value_net__ key."""
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason="Bug 2 fix pending impl-1: _get_network_weights_for_workers must add __value_net__",
-    )
     def test_worker_weights_include_value_net_key(self):
         """_get_network_weights_for_workers must serialize __value_net__ for ESCHER."""
         source = _read_source("cfr/deep_trainer.py")
@@ -336,10 +332,13 @@ class TestESCHEREPBSCheckpoint:
         assert agent._encoding_mode == "ep_pbs"
         assert agent._encoding_layout == "interleaved"
 
-    def test_ep_pbs_checkpoint_produces_valid_action(self, tmp_path):
+    def test_ep_pbs_checkpoint_produces_valid_action(self, tmp_path, caplog):
         """ESCHERAgentWrapper with EP-PBS checkpoint chooses a valid legal action."""
+        import logging
+
+        from src.agents import action_codec
         from src.evaluate_agents import ESCHERAgentWrapper
-        from src.game.engine import CambiaGameState
+        from src.ffi.bridge import GoEngine
 
         ckpt_path = str(tmp_path / "escher_ep_pbs.pt")
         _make_escher_ep_pbs_checkpoint(ckpt_path)
@@ -347,13 +346,29 @@ class TestESCHEREPBSCheckpoint:
         config = self._make_config()
         agent = ESCHERAgentWrapper(0, config, ckpt_path, device="cpu")
 
-        game_state = CambiaGameState(house_rules=config.cambia_rules)
-        agent.initialize_state(game_state)
+        # The Go engine is what the eval loop plays on: initialize_state binds
+        # this seat's belief as a GoAgentState on the engine handle, so the
+        # argument has to be the GoEngine, not a Python CambiaGameState
+        # (cambia-1522).
+        with GoEngine(seed=7, house_rules=config.cambia_rules) as game:
+            agent.initialize_state(game)
 
-        legal_actions = game_state.get_legal_actions()
-        assert len(legal_actions) > 0
-        chosen = agent.choose_action(game_state, legal_actions)
-        assert chosen in legal_actions
+            legal_actions = action_codec.actions_from_mask(game.legal_actions_mask())
+            assert len(legal_actions) > 0
+            with caplog.at_level(logging.ERROR, logger="src.evaluate_agents"):
+                chosen = agent.choose_action(game, legal_actions)
+            assert chosen in legal_actions
+
+            agent.release_belief()
+
+        # choose_action answers a random legal action when encoding raises, so a
+        # legal answer alone does not show the network was consulted. The
+        # fallback logs first; an empty error log is what makes this a test of
+        # the EP-PBS inference path.
+        assert caplog.records == [], (
+            "ESCHERAgentWrapper fell back to a random action: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
 
 
 class TestDeepCFRConfigMutualExclusion:

@@ -433,3 +433,39 @@ class TestPPOCheckpointDiscovery:
         assert _checkpoint_iteration_from_name("ppo_model_eval_2000.zip") == 2000
         assert _checkpoint_iteration_from_name("deep_cfr_checkpoint_iter_50.pt") == 50
         assert _checkpoint_iteration_from_name("no_number_here.pt") == 0
+
+
+class TestServedPolicyOnTheRow:
+    """The eval row names which policy the numbers measured (cambia-721)."""
+
+    def _row(self, tmp_path, stats):
+        from src.evaluate_agents import persist_eval_results
+
+        run_dir = tmp_path / "served-run"
+        run_dir.mkdir()
+        results = Counter({"P0 Wins": 6, "P1 Wins": 4, "Ties": 0})
+        results.stats = stats
+
+        persist_eval_results(
+            run_dir=str(run_dir),
+            iteration=1,
+            results_map={"random_no_cambia": results},
+        )
+        lines = (run_dir / "metrics.jsonl").read_text().strip().splitlines()
+        assert len(lines) == 1
+        return json.loads(lines[0])
+
+    def test_average_strategy_is_recorded(self, tmp_path):
+        row = self._row(tmp_path, {"served_policy": "average_strategy"})
+
+        assert row["served_policy"] == "average_strategy"
+
+    def test_last_iterate_is_recorded(self, tmp_path):
+        row = self._row(tmp_path, {"served_policy": "last_iterate"})
+
+        assert row["served_policy"] == "last_iterate"
+
+    def test_absent_for_agents_that_serve_no_network(self, tmp_path):
+        row = self._row(tmp_path, {"avg_game_turns": 12.0})
+
+        assert row["served_policy"] is None
