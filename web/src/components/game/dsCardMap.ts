@@ -53,9 +53,30 @@ export function cardFaceName(face: DsCardFace | null | undefined): string | null
 export const LOCKED_SUFFIX = ', locked after calling Cambia';
 
 /**
- * Accessible name for one hand slot: who owns it, which slot it is, and the face it is showing
- * right now. `owner` is 'Your' on the player's own side and the opponent's username across the
- * table; `slot` is the engine slot index, spoken 1-based (cambia-1095).
+ * Spoken suffix for a card in a seat whose reconnect window closed (cambia-955). The seat keeps
+ * its cards on the felt to watch the round out with, and nothing about a slot says the score
+ * behind it stopped counting, so a screen reader read a forfeited hand as an ordinary live one
+ * (cambia-1468, carried from cambia-1237).
+ */
+export const FORFEITED_SUFFIX = ', seat forfeited, not scored';
+
+/**
+ * What the seat is doing to the slot right now, spoken as one suffix. 'forfeited' outranks
+ * 'locked': a seat that is not scored at all has nothing left for the Cambia lock to say about it.
+ */
+export type CardSlotState = 'live' | 'locked' | 'forfeited';
+
+const SLOT_SUFFIX: Record<CardSlotState, string> = {
+  live: '',
+  locked: LOCKED_SUFFIX,
+  forfeited: FORFEITED_SUFFIX
+};
+
+/**
+ * Accessible name for one hand slot: who owns it, which slot it is, the face it is showing right
+ * now, and what its seat is doing to it. `owner` is 'Your' on the player's own side and the
+ * opponent's username across the table; `slot` is the engine slot index, spoken 1-based
+ * (cambia-1095).
  *
  * The name takes the same face the slot is drawing, so a transient reveal is named while it is
  * up and the slot goes back to 'face down' the moment the hold ends (cambia-1094, cambia-1124).
@@ -63,8 +84,8 @@ export const LOCKED_SUFFIX = ', locked after calling Cambia';
  * two from drifting: a caller that named a card off its own state could leave a face-up card
  * announced as face down.
  */
-export function cardSlotName(owner: string, slot: number, face: DsCardFace | null | undefined, locked = false): string {
+export function cardSlotName(owner: string, slot: number, face: DsCardFace | null | undefined, state: CardSlotState = 'live'): string {
   const spoken = cardFaceName(face);
   const named = spoken ? `${owner} card ${slot + 1}: ${spoken}` : `${owner} card ${slot + 1}, face down`;
-  return locked ? named + LOCKED_SUFFIX : named;
+  return named + SLOT_SUFFIX[state];
 }

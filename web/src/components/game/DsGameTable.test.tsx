@@ -127,10 +127,12 @@ describe('DsGameTable forfeited own seat', () => {
     const { sendMessage } = renderDsGameTable({ gameState: forfeitedSelf() });
 
     // A live seat's own cards are snap picks and an opponent's are snappable out of turn. A
-    // forfeited seat is out of the round, so neither is offered: PlayingCard renders a <button>
-    // only where it takes a click, and with no pick there is no Snap button to reach.
-    expect(screen.getByTestId('card-0-0').tagName).not.toBe('BUTTON');
-    expect(screen.getByTestId('card-1-0').tagName).not.toBe('BUTTON');
+    // forfeited seat is out of the round, so neither is offered: a card that takes no click drops
+    // to role='img' and out of the tab sequence, and with no pick there is no Snap button to
+    // reach. The element stays a <button> in every state, so the node survives the change
+    // (cambia-1242); the role is what says whether it is a control.
+    expect(screen.getByTestId('card-0-0')).toHaveAttribute('role', 'img');
+    expect(screen.getByTestId('card-1-0')).toHaveAttribute('role', 'img');
     expect(screen.queryByTestId('action-snap')).not.toBeInTheDocument();
     expect(sendMessage).not.toHaveBeenCalled();
   });
