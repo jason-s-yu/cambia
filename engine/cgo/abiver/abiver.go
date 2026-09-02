@@ -22,4 +22,4 @@
 package abiver
 
 // Generation is the current libcambia.so C ABI generation.
-const Generation = 3
+const Generation = 4

@@ -2362,20 +2362,39 @@ const (
 	// engine.MaxHandSize canonical card indices.
 	evalStateHandStride = 1 + engine.MaxHandSize
 
+	// evalStateBeliefOff starts the belief block: two seats of belief, in the
+	// order the agent handles are passed (cambia-1971). The tabular traversal
+	// keys its policy table off the acting seat's belief, so carrying it in the
+	// same record that carries the engine state is what keeps a node at one
+	// crossing once the belief moved off Python.
+	evalStateBeliefOff = evalStateHandsOff + engine.MaxPlayers*evalStateHandStride
+
+	// evalStateBeliefStride is one seat's belief block: own hand length, own
+	// hand buckets, opponent hand length, opponent belief buckets.
+	evalStateBeliefStride = 2 * (1 + engine.MaxHandSize)
+
 	// evalStateFields is the full record width. It does not vary with seat
 	// count: hand blocks are always written for engine.MaxPlayers seats so a
 	// reader can index a seat without first knowing how many are in play.
-	evalStateFields = evalStateHandsOff + engine.MaxPlayers*evalStateHandStride
+	evalStateFields = evalStateBeliefOff + 2*evalStateBeliefStride
 )
 
-// cambia_game_apply_and_read optionally applies one 2-player action index, then
-// fills out_buf with the evalStateFields-byte state record and out_util with
-// engine.MaxPlayers utilities.
+// cambia_game_apply_and_read optionally applies one 2-player action index,
+// advances the two attached beliefs, then fills out_buf with the
+// evalStateFields-byte state record and out_util with engine.MaxPlayers
+// utilities.
 //
 // action_idx < 0 reads without applying, which is how a caller takes the record
-// for a state it did not just step (a fresh deal, or a snapshot restore).
-// Otherwise the action is applied first and the record describes the state after
-// it.
+// for a state it did not just step (a fresh deal, or a snapshot restore). No
+// belief advances on that path either: a fresh agent is already bound to the
+// state it was built on, and a restore rewinds the belief with the game.
+// Otherwise the action is applied first, both beliefs are advanced over the
+// state it produced, and the record describes that state.
+//
+// a0_h and a1_h are AgentState handles whose beliefs ride the record's belief
+// block, in that order. Pass -1 for either to run without a belief: no update
+// happens and that seat's block is all sentinel, which is what a caller driving
+// its belief elsewhere wants (cambia-1971).
 //
 // Returns evalStateFields on success, -1 on a bad handle or a buffer shorter
 // than its record, and -2 when the engine rejected the action, in which case
@@ -2404,6 +2423,19 @@ const (
 //	                               as canonical card indices with cardIndexNone
 //	                               past the length. Seats not in play carry
 //	                               length 0 and all-sentinel slots.
+//	[227..255) beliefs             two blocks of evalStateBeliefStride bytes, one
+//	                               per agent handle in the order passed: own hand
+//	                               length, engine.MaxHandSize own-hand buckets,
+//	                               opponent hand length, engine.MaxHandSize
+//	                               opponent-belief buckets. Slots past a length
+//	                               and every slot of an absent handle carry
+//	                               cardIndexNone. Bucket values match
+//	                               cambia_agent_get_own_hand and
+//	                               cambia_agent_get_opp_belief byte for byte,
+//	                               decay beliefs included: anything the opponent
+//	                               model holds that is not a bucket reads as
+//	                               BucketUnknown (9), which is what the action
+//	                               abstraction does with it.
 //
 // out_util is written only on a terminal state and zeroed otherwise: GetUtility
 // scores every hand, and a traversal reads it at terminals only.
@@ -2412,7 +2444,7 @@ const (
 // matching cambia_game_apply_action and the other single-handle exports.
 //
 //export cambia_game_apply_and_read
-func cambia_game_apply_and_read(game_h C.int32_t, action_idx C.int32_t, out_buf *C.uint8_t, buf_len C.int32_t, out_util *C.float, util_len C.int32_t) C.int32_t {
+func cambia_game_apply_and_read(game_h C.int32_t, action_idx C.int32_t, a0_h C.int32_t, a1_h C.int32_t, out_buf *C.uint8_t, buf_len C.int32_t, out_util *C.float, util_len C.int32_t) C.int32_t {
 	if game_h < 0 || game_h >= maxGames || !gameInUse[game_h] {
 		return -1
 	}
@@ -2421,12 +2453,26 @@ func cambia_game_apply_and_read(game_h C.int32_t, action_idx C.int32_t, out_buf 
 	}
 	g := &gamePool[game_h]
 
+	agents := [2]C.int32_t{a0_h, a1_h}
+	for _, h := range agents {
+		if h >= 0 && (h >= maxAgents || !agentInUse[h]) {
+			return -1
+		}
+	}
+
 	if action_idx >= 0 {
 		if action_idx > C.int32_t(^uint16(0)) {
 			return -2
 		}
 		if err := g.ApplyAction(uint16(action_idx)); err != nil {
 			return -2
+		}
+		// Both beliefs advance over the state the action produced, which is the
+		// same order and the same call cambia_agents_update_both makes.
+		for _, h := range agents {
+			if h >= 0 {
+				agentPool[h].Update(g)
+			}
 		}
 	}
 
@@ -2533,6 +2579,41 @@ func cambia_game_apply_and_read(game_h C.int32_t, action_idx C.int32_t, out_buf 
 				block[1+s] = C.uint8_t(cardToIndex(ps.Hand[s]))
 			} else {
 				block[1+s] = C.uint8_t(cardIndexNone)
+			}
+		}
+	}
+
+	// Beliefs, one block per handle passed.
+	for i, h := range agents {
+		block := out[evalStateBeliefOff+i*evalStateBeliefStride:]
+		for b := 0; b < evalStateBeliefStride; b++ {
+			block[b] = C.uint8_t(cardIndexNone)
+		}
+		if h < 0 {
+			block[0] = 0
+			block[1+engine.MaxHandSize] = 0
+			continue
+		}
+		a := &agentPool[h]
+		block[0] = C.uint8_t(a.OwnHandLen)
+		for slot := 0; slot < engine.MaxHandSize; slot++ {
+			if uint8(slot) < a.OwnHandLen {
+				block[1+slot] = C.uint8_t(a.OwnHand[slot].Bucket)
+			}
+		}
+		oppOff := 1 + engine.MaxHandSize
+		block[oppOff] = C.uint8_t(a.OppHandLen)
+		for slot := 0; slot < engine.MaxHandSize; slot++ {
+			if uint8(slot) >= a.OppHandLen {
+				continue
+			}
+			bv := a.OppBelief[slot]
+			if bv.IsBucket() {
+				block[oppOff+1+slot] = C.uint8_t(uint8(bv.Bucket()))
+			} else {
+				// A decayed belief is not a bucket; the action abstraction reads
+				// it as unknown, and cambia_agent_get_opp_belief says the same.
+				block[oppOff+1+slot] = C.uint8_t(uint8(agent.BucketUnknown))
 			}
 		}
 	}

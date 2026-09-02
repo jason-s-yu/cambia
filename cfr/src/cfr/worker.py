@@ -13,16 +13,23 @@ epsilon-mixed behaviour policy at the traverser's nodes, the full 1/q correction
 carried down the trajectory, and counterfactual reaches threaded so the regret
 of an infoset is weighted by the opponents' probability of reaching it.
 
-Engine (cambia-1782)
---------------------
+Engine (cambia-1782) and belief (cambia-1971)
+---------------------------------------------
 The rules run on the Go engine, through ``src.cfr.br_state.GoBrState`` -- the
 same substrate the tabular best-response search moved onto in cambia-1428, so
-training and exploitability read one implementation of the rules. Only the
-rules moved. The policy table is keyed by ``InfosetKey`` built from the Python
-``AgentState`` belief machinery, so the belief layer stays exactly where it
-was and tables written before the port stay addressable; ``GoBrState`` hands
-that unchanged machinery the observation stream it always consumed, read off a
-``GoEngine``.
+training and exploitability read one implementation of the rules.
+
+The belief followed. cambia-1782 kept it on the Python ``AgentState`` so tables
+written before the port stayed addressable, and cambia-1902 then measured that
+choice as the traversal's cost: with the per-node engine reads batched, the FFI
+was 5.9 percent of traversal time against 23 percent in ``src.agent_state`` plus
+the action codec. The belief now lives on a Go ``AgentState`` the game state
+carries, advancing inside the apply crossing and riding its key back in the same
+record, so a node still costs one crossing. The keys did not move: the two
+beliefs agree at every live seat-node (cambia-1985 reconciled the one place they
+did not), and the three components that are not belief at all -- discard-top
+bucket, stockpile estimate, game phase -- still go through the production
+estimator. The table gate holds bit-for-bit across the change.
 
 The Python engine's ``apply_action`` returned an undo callable. The Go engine
 has none, so the traversal brackets each sampled action with
@@ -48,12 +55,11 @@ from typing import Dict, List, Optional, Tuple, TypeAlias, Union, Any
 
 import numpy as np
 
-from ..agent_state import AgentObservation, AgentState
+from ..agent_state import AgentObservation
 from ..config import CfrPlusParamsConfig, Config
 from .exceptions import (
     GameStateError,
     AgentStateError,
-    ObservationUpdateError,
     EncodingError,
     InfosetEncodingError,
     ActionEncodingError,
@@ -207,7 +213,6 @@ def suffix_reach_ratio(
 
 def _traverse_game_for_worker(
     game_state: GoBrState,
-    agent_states: List[AgentState],
     my_reach: float,
     opp_reach: float,
     sample_reach: float,
@@ -325,19 +330,9 @@ def _traverse_game_for_worker(
         return np.zeros(NUM_PLAYERS, dtype=np.float64), 1.0
 
     try:
-        current_agent_state = agent_states[player]
-        if not callable(current_agent_state.get_infoset_key):
-            logger_traverse.error(
-                "W%d D%d: Agent state P%d missing get_infoset_key. State: %s",
-                worker_id,
-                depth,
-                player,
-                current_agent_state,
-            )
-            worker_stats.error_count += 1
-            return np.zeros(NUM_PLAYERS, dtype=np.float64), 1.0
-
-        base_infoset_tuple = current_agent_state.get_infoset_key()
+        # The belief lives on the Go agent the state carries, and its key rides
+        # the same crossing that read the node (cambia-1971).
+        base_infoset_tuple = game_state.infoset_key(player)
         if not isinstance(base_infoset_tuple, tuple):
             logger_traverse.error(
                 "W%d D%d: get_infoset_key did not return a tuple for P%d. Got %s.",
@@ -366,12 +361,12 @@ def _traverse_game_for_worker(
         Exception
     ) as e_key:  # JUSTIFIED: worker resilience - workers must not crash the training pool
         logger_traverse.error(
-            "W%d D%d: Error getting infoset key P%d: %s. AgentState: %s Context: %s",
+            "W%d D%d: Error getting infoset key P%d: %s. Prefix: %s Context: %s",
             worker_id,
             depth,
             player,
             e_key,
-            current_agent_state,
+            game_state.action_prefix,
             current_context.name,
             exc_info=True,
         )
@@ -660,106 +655,62 @@ def _traverse_game_for_worker(
 
         try:
             if apply_success:
-                next_agent_states = []
-                agent_update_failed = False
-                player_specific_obs_for_log = None
-                agent_idx = -1
+                # Both beliefs advanced inside the apply crossing, and the
+                # rewind below restores them with the game, so there is no
+                # per-branch clone and no observation frame to build here any
+                # more (cambia-1971).
                 try:
-                    # ability_reveals: the production frame, so a peek reaches
-                    # the peeker's belief and a King swap moves the faces both
-                    # beliefs had already seen.
-                    observation = game_state.observation(
-                        chosen_action, player, ability_reveals=True
+                    # Single recursive call for the sampled action
+                    node_value, tail_prob = _traverse_game_for_worker(
+                        game_state,
+                        my_reach=next_my_reach,
+                        opp_reach=next_opp_reach,
+                        sample_reach=next_sample_reach,
+                        iteration=iteration,
+                        updating_player=updating_player,
+                        averaging_weight=averaging_weight,
+                        regret_sum_snapshot=regret_sum_snapshot,
+                        config=config,
+                        local_regret_updates=local_regret_updates,
+                        local_strategy_sum_updates=local_strategy_sum_updates,
+                        local_reach_prob_updates=local_reach_prob_updates,
+                        depth=depth + 1,
+                        worker_stats=worker_stats,
+                        progress_queue=progress_queue,
+                        worker_id=worker_id,
+                        min_depth_after_bottom_out_tracker=(
+                            min_depth_after_bottom_out_tracker
+                        ),
+                        has_bottomed_out_tracker=has_bottomed_out_tracker,
+                        simulation_nodes=simulation_nodes,
                     )
-                    for agent_idx, agent_state in enumerate(agent_states):
-                        cloned_agent = agent_state.clone()
-                        player_specific_obs = _filter_observation(observation, agent_idx)
-                        if agent_idx == player:
-                            player_specific_obs_for_log = player_specific_obs
-                        cloned_agent.update(player_specific_obs)
-                        next_agent_states.append(cloned_agent)
-                except (AgentStateError, ObservationUpdateError) as e_update:
+                except TraversalError as recursive_err:
                     logger_traverse.warning(
-                        "W%d D%d: Agent state update error P%d after action %s: %s",
+                        "W%d D%d: Traversal error in recursive call after action %s: %s",
                         worker_id,
                         depth,
-                        agent_idx,
                         chosen_action,
-                        e_update,
+                        recursive_err,
                     )
                     worker_stats.error_count += 1
-                    agent_update_failed = True
+                    node_value = np.zeros(NUM_PLAYERS, dtype=np.float64)
                 except (
                     Exception
-                ) as e_update:  # JUSTIFIED: worker resilience - workers must not crash the training pool
+                ) as recursive_err:  # JUSTIFIED: worker resilience - workers must not crash the training pool
                     logger_traverse.error(
-                        "W%d D%d: Error updating agent P%d after action %s: %s. Prefix:%s FilteredObs:%s",
+                        "W%d D%d: Error in recursive call after action %s: %s. Prefix:%s Context:%s",
                         worker_id,
                         depth,
-                        agent_idx,
                         chosen_action,
-                        e_update,
+                        recursive_err,
                         game_state.action_prefix,
-                        player_specific_obs_for_log,  # May be None if error happened before P0 update
+                        current_context.name,
                         exc_info=True,
                     )
                     worker_stats.error_count += 1
-                    agent_update_failed = True
-
-                if not agent_update_failed:
-                    try:
-                        # Single recursive call for the sampled action
-                        node_value, tail_prob = _traverse_game_for_worker(
-                            game_state,
-                            next_agent_states,
-                            my_reach=next_my_reach,
-                            opp_reach=next_opp_reach,
-                            sample_reach=next_sample_reach,
-                            iteration=iteration,
-                            updating_player=updating_player,
-                            averaging_weight=averaging_weight,
-                            regret_sum_snapshot=regret_sum_snapshot,
-                            config=config,
-                            local_regret_updates=local_regret_updates,
-                            local_strategy_sum_updates=local_strategy_sum_updates,
-                            local_reach_prob_updates=local_reach_prob_updates,
-                            depth=depth + 1,
-                            worker_stats=worker_stats,
-                            progress_queue=progress_queue,
-                            worker_id=worker_id,
-                            min_depth_after_bottom_out_tracker=(
-                                min_depth_after_bottom_out_tracker
-                            ),
-                            has_bottomed_out_tracker=has_bottomed_out_tracker,
-                            simulation_nodes=simulation_nodes,
-                        )
-                    except TraversalError as recursive_err:
-                        logger_traverse.warning(
-                            "W%d D%d: Traversal error in recursive call after action %s: %s",
-                            worker_id,
-                            depth,
-                            chosen_action,
-                            recursive_err,
-                        )
-                        worker_stats.error_count += 1
-                        node_value = np.zeros(NUM_PLAYERS, dtype=np.float64)
-                    except (
-                        Exception
-                    ) as recursive_err:  # JUSTIFIED: worker resilience - workers must not crash the training pool
-                        logger_traverse.error(
-                            "W%d D%d: Error in recursive call after action %s: %s. Prefix:%s Context:%s",
-                            worker_id,
-                            depth,
-                            chosen_action,
-                            recursive_err,
-                            game_state.action_prefix,
-                            current_context.name,
-                            exc_info=True,
-                        )
-                        worker_stats.error_count += 1
-                        node_value = np.zeros(
-                            NUM_PLAYERS, dtype=np.float64
-                        )  # Set to zero on error
+                    node_value = np.zeros(
+                        NUM_PLAYERS, dtype=np.float64
+                    )  # Set to zero on error
         finally:
             # Rewind once, on every path out. The Python engine's undo ran
             # twice when the recursive call raised (once in the handler and
@@ -956,9 +907,13 @@ def run_cfr_simulation_worker(
     try:
         # --- Game and Agent State Initialization ---
         try:
+            # config attaches the Go-side belief a seat: the traversal's infoset
+            # key comes off it, and it advances inside the apply crossing
+            # (cambia-1971).
             game_state = GoBrState.new(
                 config.cambia_rules,
                 deal if deal is not None else DealSpec(seed=random.getrandbits(63)),
+                config=config,
             )
         except GameStateError as game_init_e:
             if logger_instance:
@@ -993,66 +948,7 @@ def run_cfr_simulation_worker(
                 final_utility=None,
             )
 
-        initial_agent_states = []
-        if not game_state.is_terminal():
-            try:
-                # Create observation needed for AgentState initialization
-                initial_obs = game_state.initial_observation(ability_reveals=True)
-                initial_hands = [
-                    game_state.hand(i) for i in range(game_state.num_players())
-                ]
-                initial_peeks = [
-                    game_state.initial_peek_indices()
-                    for _ in range(game_state.num_players())
-                ]
-                for i in range(NUM_PLAYERS):
-                    agent = AgentState(
-                        player_id=i,
-                        opponent_id=1 - i,
-                        memory_level=config.agent_params.memory_level,
-                        time_decay_turns=config.agent_params.time_decay_turns,
-                        initial_hand_size=len(initial_hands[i]),
-                        config=config,
-                    )
-                    agent.initialize(initial_obs, initial_hands[i], initial_peeks[i])
-                    initial_agent_states.append(agent)
-            except (
-                AgentStateError,
-                ObservationUpdateError,
-                EncodingError,
-            ) as agent_init_e:
-                if logger_instance:
-                    logger_instance.warning(
-                        "W%d Iter %d: Agent state initialization error: %s",
-                        worker_id,
-                        iteration,
-                        agent_init_e,
-                    )
-                worker_stats.error_count += 1
-                return WorkerResult(
-                    stats=worker_stats,
-                    simulation_nodes=simulation_nodes_this_sim,
-                    final_utility=None,
-                )
-            except (
-                Exception
-            ) as agent_init_e:  # JUSTIFIED: worker resilience - workers must not crash the training pool
-                if logger_instance:
-                    logger_instance.error(
-                        "W%d Iter %d: Failed AgentStates init: %s. Deal: %s",
-                        worker_id,
-                        iteration,
-                        agent_init_e,
-                        game_state.deal,
-                        exc_info=True,
-                    )
-                worker_stats.error_count += 1
-                return WorkerResult(
-                    stats=worker_stats,
-                    simulation_nodes=simulation_nodes_this_sim,
-                    final_utility=None,
-                )
-        else:  # Game terminal at start
+        if game_state.is_terminal():  # Game terminal at start
             if logger_instance:
                 logger_instance.warning(
                     "W%d Iter %d: Game terminal at init. Deal: %s",
@@ -1069,13 +965,12 @@ def run_cfr_simulation_worker(
                 final_utility=final_utility_value.tolist(),
             )
 
-        if len(initial_agent_states) != NUM_PLAYERS:
+        if not game_state.has_belief:
             if logger_instance:
                 logger_instance.error(
-                    "W%d Iter %d: Incorrect agent states initialized (%d).",
+                    "W%d Iter %d: The game state carries no belief to key on.",
                     worker_id,
                     iteration,
-                    len(initial_agent_states),
                 )
             worker_stats.error_count += 1
             return WorkerResult(
@@ -1100,7 +995,6 @@ def run_cfr_simulation_worker(
         # Run the outcome-sampling traversal
         final_utility_value, _root_tail = _traverse_game_for_worker(
             game_state=game_state,
-            agent_states=initial_agent_states,
             my_reach=1.0,
             opp_reach=1.0,
             sample_reach=1.0,
