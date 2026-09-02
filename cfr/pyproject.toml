@@ -83,7 +83,7 @@ filterwarnings = [
 addopts = "-m 'not slow'"
 markers = [
     "integration: slow end-to-end tests requiring libcambia.so (>10s)",
-    "slow: tests that run >30s (convergence, large eval loops); excluded from default CI run",
+    "slow: tests that run >30s (convergence, large eval loops, whole-tree ES traversal); deselected by the addopts above, and run nightly by ci.yml's cfr-slow job",
 ]
 
 [tool.black]

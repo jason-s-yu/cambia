@@ -4,13 +4,22 @@ name: Parity gate
 #
 # Migration acceptance for retiring the Python reference engine (cambia-1424):
 # while both engines exist, they must agree. Go (engine/) is the RULES.md
-# reference. This is deliberately a separate workflow rather than a job in
-# ci.yml: ci.yml carries a workflow-level `paths-ignore: cfr/**` that skips the
-# whole workflow on a cfr-only change, and GitHub has no per-job path filter,
-# so a job added there could never fire on cfr/src/game/** or
-# cfr/src/encoding.py. Lifting that ignore belongs to the sprint-2 CI ticket;
-# scoping this gate with its own `paths` needs no change to it, and keeps the
-# go-tests/web jobs from being dragged along on a Python-engine edit.
+# reference. ci.yml holds each engine to its own tests (go-tests for engine/,
+# cfr for the Python suite); what this workflow adds is the comparison between
+# them, a lockstep replay over the seed set in cfr/tests/parity_seeds.py that
+# fails on the first disagreement in acting player, legal action set, pile
+# lengths, hands, token stream or terminal utilities.
+#
+# Still a separate workflow rather than a job in ci.yml, for two reasons that
+# outlived the original one. cambia-1246 lifted the workflow-level
+# `paths-ignore: cfr/**` that used to make a job there impossible, so that half
+# of this note was stale (cambia-1920); what stands is:
+#   - GitHub has no per-job path filter. A job in ci.yml would build
+#     libcambia and install torch on every non-docs pull request, web-only ones
+#     included. The `paths` below hold this to the two engines and what feeds
+#     them.
+#   - parity-gate is a required check by name, and a job in ci.yml reports
+#     under a different one.
 #
 # Retires with cambia-1430, alongside the Python engine.
 
