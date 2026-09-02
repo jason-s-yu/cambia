@@ -1,7 +1,7 @@
 # CAMBIA (a.k.a. Cabo, Cambio) RULES
 
 **Objective:** End the game with the lowest total score.
-**Players:** 2-6
+**Players:** 2-8 (deck count scales with seat count; see MATCHMAKING.md 1.1)
 **Deck:** Standard 52-card deck + 2 Jokers.
 
 ## 1. Card Values

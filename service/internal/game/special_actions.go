@@ -21,6 +21,18 @@ func (g *CambiaGame) ProcessSpecialAction(
 ) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+
+	// Same lifecycle, connection and snap-fill preconditions as every other action type
+	// (cambia-1566): before this, ProcessSpecialAction's whole gate was SpecialAction.Active,
+	// which re-checked neither GameOver, Started, the sender's Connected flag, nor the
+	// outstanding-snap-fill gate HandlePlayerAction applies to everything else. action_special is
+	// never exempt from the snap-fill gate, so a snapper who owes a fill cannot resolve an
+	// ability before paying it.
+	engineIdx, ok := g.actionPreconditionsOK(userID, "action_special", false)
+	if !ok {
+		return
+	}
+
 	// Verify special action state is active for this player.
 	if !g.SpecialAction.Active || g.SpecialAction.PlayerID != userID {
 		log.Printf("Game %s: ProcessSpecialAction called by player %s, but no matching special action is active. Ignoring.", g.ID, userID)
@@ -34,12 +46,6 @@ func (g *CambiaGame) ProcessSpecialAction(
 	// Handle "skip" universally.
 	if special == "skip" {
 		g.processSkipSpecialAction(userID)
-		return
-	}
-
-	engineIdx, ok := g.PlayerToEngine[userID]
-	if !ok {
-		g.FireEventPrivateSpecialActionFail(userID, "Player not in engine mapping.", special, nil, nil)
 		return
 	}
 

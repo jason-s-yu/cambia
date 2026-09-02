@@ -189,6 +189,16 @@ engine's own limits: `penaltyDrawCount` 0-6, `turnTimerSec` 0-86400, `maxGameTur
 `cardsPerPlayer`: the pregame peek cannot cover more cards than the hand holds, and the pair is
 checked after the whole update is applied, so both keys may move in one message.
 
+A `numDecks` the host never sends (the lobby is still carrying `DefaultHouseRules`'s value)
+resolves at game creation from the seated player count instead, per MATCHMAKING.md 1.1: one
+deck for 2-4 seated players, two for 5-8. The rule sheet itself keeps reporting whatever it last
+held (1 by default), since the resolved count is a property of the game that gets dealt, not a
+value written back to the lobby; a game created from a 5-8 seat casual lobby that never touched
+`numDecks` deals from two decks even though `lobby_state.house_rules.numDecks` still reads 1. An
+explicit `numDecks` from the host, including a value equal to the default, is honored as sent at
+every seat count and is never upgraded or downgraded; there is no separate warning for an
+under-provisioned choice.
+
 **`Circuit` Object Structure (within `lobby_state`, used by `update_rules`):**
 (See `internal/game/game.go` for field definitions)
 

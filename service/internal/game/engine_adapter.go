@@ -134,8 +134,8 @@ func engineCardToDetails(c engine.Card, id uuid.UUID) *models.Card {
 // wholesale from a struct built without DefaultHouseRules (an older persisted payload, or a
 // caller that only set the field it cared about): 0 penalty cards and 0 dealt cards are not
 // configurations any lobby can produce, so they are read as "unset" rather than obeyed.
-// Every other count is taken literally, since 0 is a meaningful setting for it (no jokers,
-// no pregame peek, unlimited turns) and NumDecks==0 already means one deck in NewGame.
+// Every other count is taken literally, since 0 is a meaningful setting for it (no jokers, no
+// pregame peek, unlimited turns). NumDecks is its own case, resolved separately below.
 func (g *CambiaGame) mapHouseRulesToEngine() engine.HouseRules {
 	penaltyCount := uint8(g.HouseRules.PenaltyDrawCount)
 	if penaltyCount == 0 {
@@ -144,6 +144,15 @@ func (g *CambiaGame) mapHouseRulesToEngine() engine.HouseRules {
 	cardsPerPlayer := uint8(g.HouseRules.CardsPerPlayer)
 	if cardsPerPlayer == 0 {
 		cardsPerPlayer = 4
+	}
+	// A NumDecks the host never touched resolves from the seated player count rather than the
+	// DefaultHouseRules literal (MATCHMAKING.md 1.1, cambia-1564): left at a flat 1, a 5-8 seat
+	// casual table dealt from a 21-card stockpile and reshuffled repeatedly. An explicit host
+	// choice, including one equal to the default, is honored as-is at every seat count. Circuit
+	// mode is untouched (cambia-1117 owns TournamentHouseRules' own NumDecks).
+	numDecks := g.HouseRules.NumDecks
+	if !g.HouseRules.numDecksExplicit {
+		numDecks = DefaultNumDecksForPlayers(len(g.Players))
 	}
 	// In circuit mode, use tournament-enforced rules.
 	if g.Circuit.Enabled {
@@ -168,7 +177,7 @@ func (g *CambiaGame) mapHouseRulesToEngine() engine.HouseRules {
 		// rule: the player count comes from the lobby roster, never from the settings panel.
 		NumPlayers:       uint8(len(g.Players)),
 		InitialViewCount: uint8(g.HouseRules.InitialViewCount),
-		NumDecks:         uint8(g.HouseRules.NumDecks),
+		NumDecks:         uint8(numDecks),
 	}
 }
 
@@ -308,14 +317,24 @@ func (g *CambiaGame) updateCardTracker(actionIdx uint16, actorEngineIdx uint8, o
 		} else if actionIdx == engine.ActionPassSnap {
 			// No card movement.
 
-		} else if targetIdx, ok := engine.ActionIsSnapOwn(actionIdx); ok {
-			g.updateTrackerForSnap(actorEngineIdx, targetIdx, true, preStockLen)
-
-		} else if targetIdx, ok := engine.ActionIsSnapOpponent(actionIdx); ok {
-			if !g.trackerSeatOK(oppEngineIdx, "snap opponent") {
-				return
-			}
-			g.updateTrackerForSnapOpponent(actorEngineIdx, oppEngineIdx, targetIdx, preStockLen)
+		// ActionIsSnapOwn and ActionIsSnapOpponent (the snap-penalty branches, cambia-1565) are
+		// deliberately absent: no caller of updateCardTracker ever passes a snap-classified index.
+		// The three callers are applyEngineActionSeat (reached only through applyEngineAction and
+		// direct applyEngineActionSeat calls, whose action set is
+		// ActionDrawStockpile/ActionDrawDiscard/ActionCallCambia/EncodePeekOwn/PeekOther/BlindSwap/
+		// KingLook/KingSwapYes/No/ActionDiscardNoAbility/EncodeReplace/ActionDiscardWithAbility -
+		// never a snap action), the ActionPassSnap call above, and applyEngineActionRaw
+		// (special_actions.go, reached only from applyBufferedDiscard with
+		// actionIdx == ActionDiscardWithAbility). The live snap path, handleSnapViaEngine, mutates
+		// Engine.Players[..].Hand and CardTracker inline instead of calling updateCardTracker, and
+		// its penalty draws go through handleSnapFailure -> engine.DrawPenaltyCard per card with the
+		// bool return checked (cambia-799), which already handles a short-paid penalty (hand cap or
+		// an exhausted deck) correctly. The removed branches computed the pre-penalty hand length as
+		// handLen-SnapPenalty and indexed HandUUIDs from there; since every engine fail path sets
+		// SnapPenalty to the full configured count up front and never revises it when the draw stops
+		// short, a short-paid penalty made that subtraction overwrite live hand UUIDs or wrap a
+		// uint8 and panic on the array. Dead code, but the same computation reachable, so it is
+		// removed rather than fixed.
 
 		} else if ownIdx, slotIdx, ok := engine.ActionIsSnapOpponentMove(actionIdx); ok {
 			// Move own hand card to opponent's hand.
@@ -335,79 +354,6 @@ func (g *CambiaGame) updateCardTracker(actionIdx uint16, actorEngineIdx uint8, o
 			}
 			tracker.Players[oppEngineIdx].HandUUIDs[slotIdx] = movedUUID
 		}
-	}
-}
-
-// updateTrackerForSnap updates UUID positions for a snap of own card.
-func (g *CambiaGame) updateTrackerForSnap(snapperIdx uint8, targetIdx uint8, isOwnSnap bool, preStockLen uint8) {
-	tracker := &g.CardTracker
-	snapSuccess := g.Engine.LastAction.SnapSuccess
-	penaltyCount := g.Engine.LastAction.SnapPenalty
-
-	if snapSuccess {
-		// Card at targetIdx moves to discard.
-		snappedUUID := tracker.Players[snapperIdx].HandUUIDs[targetIdx]
-		handLen := g.Engine.Players[snapperIdx].HandLen
-		// Shift UUIDs left.
-		for i := int(targetIdx); i < int(handLen); i++ {
-			tracker.Players[snapperIdx].HandUUIDs[i] = tracker.Players[snapperIdx].HandUUIDs[i+1]
-		}
-		tracker.Players[snapperIdx].HandUUIDs[handLen] = uuid.Nil
-		// Add to discard.
-		newDiscardLen := g.Engine.DiscardLen
-		if newDiscardLen > 0 {
-			tracker.DiscardUUIDs[newDiscardLen-1] = snappedUUID
-		}
-		tracker.DiscardLen = newDiscardLen
-	} else {
-		// Failed snap: penalty cards drawn from stockpile.
-		handLen := g.Engine.Players[snapperIdx].HandLen
-		oldHandLen := handLen - penaltyCount
-		for i := uint8(0); i < penaltyCount; i++ {
-			stockIdx := preStockLen - 1 - i
-			if stockIdx < preStockLen { // bounds check
-				penaltyUUID := tracker.StockUUIDs[stockIdx]
-				tracker.Players[snapperIdx].HandUUIDs[oldHandLen+i] = penaltyUUID
-				// Register the card in Registry if not already there.
-			}
-		}
-		tracker.StockLen = g.Engine.StockLen
-	}
-}
-
-// updateTrackerForSnapOpponent updates UUID positions for a snap of opponent's card.
-func (g *CambiaGame) updateTrackerForSnapOpponent(snapperIdx uint8, oppIdx uint8, targetIdx uint8, preStockLen uint8) {
-	tracker := &g.CardTracker
-	snapSuccess := g.Engine.LastAction.SnapSuccess
-	penaltyCount := g.Engine.LastAction.SnapPenalty
-
-	if snapSuccess {
-		// Opponent's card at targetIdx moves to discard.
-		snappedUUID := tracker.Players[oppIdx].HandUUIDs[targetIdx]
-		oppHandLen := g.Engine.Players[oppIdx].HandLen
-		// Shift opponent's UUIDs left.
-		for i := int(targetIdx); i < int(oppHandLen); i++ {
-			tracker.Players[oppIdx].HandUUIDs[i] = tracker.Players[oppIdx].HandUUIDs[i+1]
-		}
-		tracker.Players[oppIdx].HandUUIDs[oppHandLen] = uuid.Nil
-		// Add to discard.
-		newDiscardLen := g.Engine.DiscardLen
-		if newDiscardLen > 0 {
-			tracker.DiscardUUIDs[newDiscardLen-1] = snappedUUID
-		}
-		tracker.DiscardLen = newDiscardLen
-	} else {
-		// Failed snap penalty: cards go to snapper's hand.
-		handLen := g.Engine.Players[snapperIdx].HandLen
-		oldHandLen := handLen - penaltyCount
-		for i := uint8(0); i < penaltyCount; i++ {
-			stockIdx := preStockLen - 1 - i
-			if stockIdx < preStockLen {
-				penaltyUUID := tracker.StockUUIDs[stockIdx]
-				tracker.Players[snapperIdx].HandUUIDs[oldHandLen+i] = penaltyUUID
-			}
-		}
-		tracker.StockLen = g.Engine.StockLen
 	}
 }
 

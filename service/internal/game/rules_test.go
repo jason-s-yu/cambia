@@ -47,6 +47,7 @@ func TestHouseRulesUpdate_AcceptsInRangeValues(t *testing.T) {
 		NumJokers:                0,
 		NumDecks:                 4,
 		InitialViewCount:         0,
+		numDecksExplicit:         true,
 	}, rules)
 }
 

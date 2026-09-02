@@ -260,6 +260,10 @@ func TestBeginPreGame_HonorsExposedDealRules(t *testing.T) {
 		hr.CardsPerPlayer = 6
 		hr.NumJokers = 0
 		hr.NumDecks = 2
+		// A direct field set bypasses Update's explicit-tracking (cambia-1564), so mark it here
+		// too: 3 players would otherwise default to 1 deck (DefaultNumDecksForPlayers) and
+		// silently downgrade this case's 2-deck deal.
+		hr.numDecksExplicit = true
 		g, players, _ := setupTestGame(t, 3, hr)
 
 		for i, p := range players {
@@ -275,6 +279,9 @@ func TestBeginPreGame_HonorsExposedDealRules(t *testing.T) {
 		hr.NumDecks = 4
 		hr.NumJokers = 2
 		hr.CardsPerPlayer = 6
+		// See the numDecksExplicit note above: engine.MaxPlayers (8) would otherwise default to
+		// 2 decks and never reach the 4-deck ceiling this case tests.
+		hr.numDecksExplicit = true
 		g, players, _ := setupTestGame(t, engine.MaxPlayers, hr)
 
 		// 4 * 54 is exactly engine.MaxDeckSize, the ceiling numDecks is validated against.
@@ -325,4 +332,90 @@ func TestBeginPreGame_HonorsExposedDealRules(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestDefaultNumDecksForPlayers pins the MATCHMAKING.md 1.1 boundary: one deck for 2-4 seated
+// players, two for 5-8 (cambia-1564).
+func TestDefaultNumDecksForPlayers(t *testing.T) {
+	cases := []struct {
+		players int
+		want    int
+	}{
+		{2, 1}, {3, 1}, {4, 1},
+		{5, 2}, {6, 2}, {7, 2}, {8, 2},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, DefaultNumDecksForPlayers(tc.players), "%d players", tc.players)
+	}
+}
+
+// TestMapHouseRulesToEngine_NumDecksDefaultsFromSeatCount covers the mapper-level resolution: a
+// lobby whose host never touched numDecks resolves it from the seated player count rather than
+// the flat DefaultHouseRules literal, so a 5-8 seat casual table no longer deals a single deck
+// out of a 21-card stockpile (cambia-1564).
+func TestMapHouseRulesToEngine_NumDecksDefaultsFromSeatCount(t *testing.T) {
+	cases := []struct {
+		players  int
+		wantDeck uint8
+	}{
+		{2, 1}, {4, 1}, {5, 2}, {6, 2}, {8, 2},
+	}
+	for _, tc := range cases {
+		g := NewCambiaGame()
+		addTestPlayers(g, tc.players)
+
+		got := g.mapHouseRulesToEngine()
+
+		assert.Equal(t, tc.wantDeck, got.NumDecks, "%d players", tc.players)
+	}
+}
+
+// TestMapHouseRulesToEngine_ExplicitNumDecksSurvivesEverySeatCount covers the honored-as-set
+// half of cambia-1564: an explicit host choice, including one below the MATCHMAKING.md 1.1
+// reference for the seat count, is never silently upgraded, and one above it is never
+// downgraded.
+func TestMapHouseRulesToEngine_ExplicitNumDecksSurvivesEverySeatCount(t *testing.T) {
+	t.Run("explicit 1 deck at 6 seats is honored, not upgraded to 2", func(t *testing.T) {
+		g := NewCambiaGame()
+		addTestPlayers(g, 6)
+		require.NoError(t, g.HouseRules.Update(map[string]interface{}{"numDecks": float64(1)}))
+
+		got := g.mapHouseRulesToEngine()
+
+		assert.Equal(t, uint8(1), got.NumDecks)
+	})
+
+	t.Run("explicit 4 decks at 2 seats is honored, not downgraded to 1", func(t *testing.T) {
+		g := NewCambiaGame()
+		addTestPlayers(g, 2)
+		require.NoError(t, g.HouseRules.Update(map[string]interface{}{"numDecks": float64(4)}))
+
+		got := g.mapHouseRulesToEngine()
+
+		assert.Equal(t, uint8(4), got.NumDecks)
+	})
+}
+
+// TestBeginPreGame_CasualLobbyDefaultDecksScaleWithSeats drives cambia-1564 AC2 end to end: a
+// 6- and an 8-seat casual lobby that never touches numDecks deals from two decks, through the
+// real BeginPreGame -> Deal() path rather than the mapper alone.
+func TestBeginPreGame_CasualLobbyDefaultDecksScaleWithSeats(t *testing.T) {
+	for _, numPlayers := range []int{6, 8} {
+		t.Run(fmt.Sprintf("%d players", numPlayers), func(t *testing.T) {
+			g, players, _ := setupTestGame(t, numPlayers, nil)
+
+			assert.Equal(t, uint8(2), g.Engine.Rules.NumDecks, "engine rules should record two decks")
+
+			// 2 decks * 54 cards (52 + 2 jokers, the default) minus numPlayers*4 dealt minus the
+			// discard flip: the full two-deck count must actually be in play, not just recorded.
+			dealt := uint8(numPlayers * 4)
+			wantStock := uint8(2*54) - dealt - 1
+			assert.Equal(t, wantStock, g.Engine.StockLen, "stockpile should reflect two decks, not one")
+
+			for i, p := range players {
+				engineIdx := g.PlayerToEngine[p.ID]
+				assert.Equal(t, uint8(4), g.Engine.Players[engineIdx].HandLen, "player %d should have a dealt hand", i)
+			}
+		})
+	}
 }
