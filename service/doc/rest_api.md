@@ -12,13 +12,32 @@ Most endpoints require authentication by a JWT, carried by an `auth_token` cooki
 * **Ephemeral Guests:** Connecting to a WebSocket endpoint (`/lobby/ws/*` or `/game/ws/*`) *without* a valid `auth_token` cookie will automatically create a temporary guest user, set the `auth_token` cookie, and return the user's ephemeral ID.
 * **Claiming Guests:** Guests can call `POST /user/claim` (`ClaimEphemeralHandler`) to convert an ephemeral guest account into a persistent one by adding email/username/password.
 * **Token Verification:** The server uses an Ed25519 key pair (generated at runtime by default) to sign and verify JWTs.
-* **Duplicate cookies:** A request can carry more than one `auth_token` cookie (localhost cookies are shared across ports/apps on a multi-app host, and a dev-server restart that rotates the signing key can leave a stale cookie in the jar alongside a fresh one). All auth in this service - `middleware.RequireAuth` (gating `/training/*` and `/ws/training/*`) and the REST handlers that authenticate directly off the request (`GET /user/me`, `POST /user/claim`, `EnsureEphemeralUser` guest bootstrap, `/friend/*`) - goes through the shared `auth.ResolveAuthToken` helper, whose cookie step is `auth.ResolveAuthTokenCookie`. It checks every `auth_token` cookie on the request and accepts the first one that verifies, rather than only the first cookie in the header. Any invalid `auth_token` cookie seen along the way gets an expiring `Set-Cookie` in the response so the browser drops it instead of resending it on every request. An invalid explicit token never triggers that expiry: one tab's stale token must not clear the jar the other tabs are using.
+* **Duplicate cookies:** A request can carry more than one `auth_token` cookie (localhost cookies are shared across ports/apps on a multi-app host, and a dev-server restart that rotates the signing key can leave a stale cookie in the jar alongside a fresh one). All auth in this service - `middleware.RequireAuth` (gating `/training/*` and `/ws/training/*`) and the REST handlers that authenticate directly off the request (`GET /user/me`, `POST /user/claim`, `GET /user/history`, `GET /user/ratings`, `GET /leaderboard`, `EnsureEphemeralUser` guest bootstrap, `/friend/*`) - goes through the shared `auth.ResolveAuthToken` helper, whose cookie step is `auth.ResolveAuthTokenCookie`. It checks every `auth_token` cookie on the request and accepts the first one that verifies, rather than only the first cookie in the header. Any invalid `auth_token` cookie seen along the way gets an expiring `Set-Cookie` in the response so the browser drops it instead of resending it on every request. An invalid explicit token never triggers that expiry: one tab's stale token must not clear the jar the other tabs are using.
 
 ## HTTP REST Endpoints
 
 These endpoints handle user management, friends, and lobby setup. They require the `auth_token` cookie unless otherwise specified.
 
 *(Note: All handlers are registered in `cmd/server/main.go`.)*
+
+---
+
+### Health Check
+
+#### `GET /healthz`
+
+* **Description:** Liveness/readiness probe. Reports service status plus whether the database and Redis are currently reachable (each pinged with a 2s timeout; either can be `false` without failing the request - Redis is non-fatal to the service, and the probe still answers `200` while a dependency is down).
+* **Authentication:** None required.
+* **Request Body:** None. `HEAD` is also accepted.
+* **Response (Success: 200 OK):** `application/json`
+    ```json
+    {
+      "status": "ok",
+      "db": true,
+      "redis": true
+    }
+    ```
+* **Response (Error):** `405 Method Not Allowed` for anything but `GET`/`HEAD`.
 
 ---
 
@@ -83,6 +102,13 @@ Handled by `internal/handlers/user.go`.
     * `500 Internal Server Error`: Failed to create JWT or write response.
 * **Tab mode:** with `X-Cambia-Session: tab` the response body is unchanged and no `Set-Cookie` is written, so the caller pins the returned token to one tab and the shared cookie identity is left as it was.
 
+#### `POST /user/logout`
+
+* **Description:** Clears the `auth_token` cookie (`Max-Age=-1`). Unconditional: it expires whatever cookie is present without verifying it, and does not read a request body or check method.
+* **Authentication:** None required.
+* **Request Body:** None.
+* **Response (Success: 200 OK):** No body.
+
 #### `POST /user/guest`
 
 * **Description:** Provisions an ephemeral guest session without a WebSocket. Without the tab header it returns the caller's existing identity when a valid credential is present, and otherwise creates a guest and sets the `auth_token` cookie.
@@ -123,6 +149,104 @@ Handled by `internal/handlers/user.go`.
     * `403 Forbidden`: Invalid or missing token.
     * `404 Not Found`: User ID from token not found in database.
     * `500 Internal Server Error`: Failed to write response.
+
+#### `POST /user/claim`
+
+* **Description:** Converts the caller's ephemeral guest account into a persistent one by attaching email, password, and (optionally) a new username. The account already exists; this updates it in place rather than creating a new user, so the caller's id and history carry over.
+* **Authentication:** `auth_token` cookie or explicit token required.
+* **Request Body:** `application/json`
+    ```json
+    {
+      "email": "user@example.com", // string, required
+      "password": "securepassword", // string, required
+      "username": "preferred_username" // string, optional; keeps the current username if omitted
+    }
+    ```
+* **Response (Success: 200 OK):** `text/plain` - "Account claimed successfully."
+* **Response (Error):**
+    * `400 Bad Request`: Invalid payload, missing email/password, or the account is not ephemeral (already claimed).
+    * `403 Forbidden`: Invalid or missing token.
+    * `404 Not Found`: User ID from token not found in database.
+    * `409 Conflict`: Email already in use by another account.
+    * `500 Internal Server Error`: Database error.
+
+#### `GET /user/history`
+
+* **Description:** Returns the authenticated caller's own recent games, newest first: each game's opponents, the caller's score/outcome, the lobby context it was played under, and the rating change it produced when rated. Never exposes another user's history; the caller is read from their token, not a request parameter. A caller with no games gets `200 OK` with an empty `games` array.
+* **Authentication:** `auth_token` cookie or explicit token required.
+* **Request Body:** None. Query parameters: `limit` (optional, default 20, capped at 100), `offset` (optional, default 0).
+* **Response (Success: 200 OK):** `application/json`
+    ```json
+    {
+      "games": [
+        {
+          "gameId": "{uuid}",
+          "playedAt": "{RFC3339 timestamp}",
+          "status": "...",          // string, e.g. "completed"
+          "roundIndex": 0,          // int16, see note below
+          "lobbyType": "private",   // string
+          "mode": "casual",         // string
+          "rated": false,           // boolean
+          "playerCount": 2,         // integer
+          "score": 12,              // int, nullable
+          "didWin": true,           // boolean, nullable
+          "ranking": 1,             // int16, nullable (finishing place)
+          "rating": {               // object, null when the game was not rated
+            "pool": "1v1",          // string
+            "old": 1500,            // integer
+            "new": 1512,            // integer
+            "delta": 12             // integer, new - old
+          },
+          "opponents": [
+            {
+              "userId": "{uuid}",
+              "username": "...",
+              "score": 8,           // int, nullable
+              "didWin": false,      // boolean, nullable
+              "ranking": 2          // int16, nullable
+            }
+          ]
+        }
+      ],
+      "limit": 20,
+      "offset": 0,
+      "total": 37 // total games the caller has, for paging without a second request
+    }
+    ```
+    **`roundIndex`** is `games.round_index`: `0` for a game played outside a circuit (a casual single game, or a non-circuit ranked match), and otherwise the 1-based round the game was within its circuit - `1` for a fresh circuit's first game, `N+1` once `N` rounds have been recorded. It is written once, from `CambiaGame.RoundIndex`, when the game's row is created, and is never revised afterward even if the circuit that produced it is later abandoned (cambia-1240).
+* **Response (Error):**
+    * `400 Bad Request`: `limit` or `offset` present and not a valid non-negative integer (`limit` must be positive).
+    * `401 Unauthorized`: No credential presented.
+    * `403 Forbidden`: Credential present but invalid.
+    * `500 Internal Server Error`: Database error.
+
+#### `GET /user/ratings`
+
+* **Description:** Returns the authenticated caller's current Glicko-2 standing (rating, deviation, volatility, game/win counts, peak rating) in every rating pool, the OpenSkill mu/sigma pair used for circuit play, and the caller's lifetime win/loss record. Every pool is always present, at baseline values for a pool the caller has never played, so the response shape does not change with play history.
+* **Authentication:** `auth_token` cookie or explicit token required.
+* **Request Body:** None.
+* **Response (Success: 200 OK):** `application/json`
+    ```json
+    {
+      "pools": [
+        {
+          "pool": "1v1",       // string: "1v1" | "4p" | "7p8p"
+          "rating": 1500,      // integer
+          "rd": 350.0,         // float64
+          "volatility": 0.06,  // float64
+          "games": 12,         // integer, rated games played in this pool
+          "wins": 7,           // integer
+          "peak": 1540         // integer, highest rating ever reached in this pool
+        }
+      ],
+      "openSkill": { "mu": 25.0, "sigma": 8.333 },
+      "record": { "games": 40, "wins": 21 } // lifetime, across all pools
+    }
+    ```
+* **Response (Error):**
+    * `401 Unauthorized`: No credential presented.
+    * `403 Forbidden`: Credential present but invalid.
+    * `500 Internal Server Error`: Database error.
 
 ---
 
@@ -519,42 +643,58 @@ Handled by `internal/handlers/lobby.go` (`ListQueuesHandler`), registered at `/m
 
 ---
 
-### Game Endpoints (Legacy/Debug)
+### Leaderboard Endpoint
 
-Handled by `internal/handlers/game.go`.
+Handled by `internal/handlers/leaderboard.go`.
 
-#### `POST /game/create`
+#### `GET /leaderboard`
 
-* **Description:** (Debug/Legacy) Creates a game instance directly in memory without going through a lobby. Does not handle player joining or auth via HTTP. Use lobby flow instead.
-* **Authentication:** None (intended for debug).
-* **Request Body:** None.
+* **Description:** Returns the top-rated users in one rating pool, plus the authenticated caller's own row: present with the caller's true global rank even when it falls outside the returned page, `null` when the caller has no rated games in that pool.
+* **Authentication:** `auth_token` cookie or explicit token required.
+* **Request Body:** None. Query parameters: `pool` (required, one of `1v1`, `4p`, `7p8p`), `limit` (optional, default 50, capped at 100).
 * **Response (Success: 200 OK):** `application/json`
     ```json
     {
-      "game_id": "{uuid}"
+      "pool": "1v1",
+      "rows": [
+        {
+          "rank": 1,
+          "userId": "{uuid}",
+          "username": "...",
+          "rating": 1912,
+          "rd": 45.2,
+          "games": 130
+        }
+      ],
+      "you": {
+        "rank": 57,
+        "userId": "{uuid}",
+        "username": "...",
+        "rating": 1502,
+        "rd": 210.0,
+        "games": 4
+      }
     }
     ```
-* **Response (Error):** `500 Internal Server Error`.
-
-#### `GET /game/reconnect/{game_id}`
-
-* **Description:** (Deprecated) Acknowledges a reconnect attempt via HTTP but cannot fully re-establish WebSocket state. Use the WebSocket endpoint `/game/ws/{game_id}` for actual reconnection.
-* **Authentication:** Requires `auth_token` cookie (logic commented out in handler but intended).
-* **Response (Success: 200 OK):** `text/plain` - "Reconnect acknowledged via HTTP. Please establish a WebSocket connection..."
-* **Response (Error):** `400 Bad Request` (invalid game_id), `403 Forbidden` (invalid token), `404 Not Found` (game not found).
+* **Response (Error):**
+    * `400 Bad Request`: `pool` missing or not one of `1v1`, `4p`, `7p8p`.
+    * `401 Unauthorized`: No credential presented.
+    * `403 Forbidden`: Credential present but invalid.
+    * `500 Internal Server Error`: Database error.
 
 ## WebSocket Endpoints
 
-These endpoints handle real-time communication for lobbies and active games. They require the `auth_token` cookie (or trigger guest creation) and specific subprotocols.
+These endpoints handle real-time communication for lobbies and active games. They require the `auth_token` cookie (or trigger guest creation) and the `cambia` subprotocol.
 
 **Token carrier and subprotocol selection.** A browser cannot set headers on `new WebSocket`, so a tab-held token rides the handshake: the client offers `['cambia', 'cambia-token.<jwt>']`, and the server resolves the second entry as an explicit token (see Authentication above). Every socket in the service - the gameplay socket at `/ws/{lobby_id}` and the training sockets at `/ws/training/*` - accepts with `wsopts.AcceptOptions(wsopts.Subprotocol)` and therefore always selects `cambia`; the `cambia-token.` entry is never selected. A client that offers subprotocols and is handed none back must fail the handshake per RFC 6455, which is why the training sockets select `cambia` too. A client that offers no subprotocol still connects, with none negotiated. `?token=` in the URL is not supported: it would put tokens in proxy and access logs.
 
-*(Note: WebSocket handlers upgrade HTTP connections initiated at these paths. See `cmd/server/main.go` for registration.)*
+*(Note: the WebSocket handler upgrades HTTP connections initiated at this path. See `cmd/server/main.go` for registration.)*
 
-| Path                    | Subprotocol | Description                                                               | Handler Location               | Payload Details Reference     |
-| :---------------------- | :---------- | :------------------------------------------------------------------------ | :----------------------------- | :-------------------------- |
-| `/lobby/ws/{lobby_id}`  | `lobby`     | Handles joining, leaving, chat, readiness, and game start orchestration.  | `internal/handlers/lobby_ws.go` | `docs/lobby_actions.md` |
-| `/game/ws/{game_id}`    | `game`      | Handles all in-game actions (drawing, discarding, special abilities, etc.). | `internal/handlers/game_ws.go` | `docs/game_actions.md`  |
+There is one gameplay accept site, not one per phase: separate lobby and game endpoints, each with their own handler file, predate the hub unification and no longer exist. A single socket carries a lobby through joining, readiness, an in-progress game, and back to the lobby, since a hub's `Phase` - not the URL - decides whether an incoming frame is lobby-handled or game-handled (`internal/hub/hub.go`, `dispatch`).
+
+| Path             | Subprotocol | Description                                                               | Handler Location                           | Payload Details Reference                       |
+| :---------------- | :---------- | :--------------------------------------------------------------------------- | :------------------------------------------- | :------------------------------------------------ |
+| `/ws/{lobby_id}`  | `cambia`    | Unified socket for a lobby: joining, readiness, chat, rule edits, in-game actions, and results, routed by the hub's current phase. | `internal/handlers/ws.go` (`HubWSHandler`) | `docs/lobby_actions.md`, `docs/game_actions.md` |
 
 ---
 
