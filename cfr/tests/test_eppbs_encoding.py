@@ -10,6 +10,189 @@ from src.encoding import (
     EP_PBS_MAX_ACTIVE_MASK,
 )
 
+try:
+    from src.ffi.bridge import GoEngine, GoAgentState
+
+    _HAS_GO = True
+except Exception:  # pragma: no cover - libcambia not built
+    _HAS_GO = False
+
+skipgo = pytest.mark.skipif(not _HAS_GO, reason="libcambia.so not available")
+
+# EP-PBS slot layout: own hand is slots 0-5, the opponent's is 6-11.
+_OPP_SLOTS_START = 6
+
+# Seeds swept for a King look followed by a swap. The driver forces the King line
+# wherever it is legal, so a seed contributes as soon as a King reaches a discard with
+# its ability live; seeds that never deal one are skipped, not failed.
+_KING_SWAP_SEEDS = tuple(range(1, 61))
+
+
+def _play_to_king_swap(seed: int):
+    """Drive both engines in lockstep until the first King look followed by a swap.
+
+    Returns ``(go_agents, py_agents, actor, own_idx, opp_idx, decision_ctx,
+    drawn_bucket)`` at the state just after the swap, or None if the game ended first.
+    Both engines are fed the same action indices, and the Python agents are updated
+    through the production observation builder so the King look actually reveals cards.
+    """
+    from src.cfr.worker import _create_observation, _filter_observation
+    from src.constants import (
+        ActionAbilityKingLookSelect,
+        ActionAbilityKingSwapDecision,
+        ActionPassSnap,
+    )
+    from src.encoding import action_to_index, encode_action_mask, NUM_ACTIONS
+    from tests.test_cross_engine_samples import (
+        _setup_python_game_matching_go,
+        _is_snap_only,
+        _PASS_SNAP_IDX,
+        _TEST_RULES,
+    )
+    from tests.test_cross_validation import _build_py_agents, _make_config
+
+    go_engine = GoEngine(seed=seed, house_rules=_TEST_RULES)
+    try:
+        py_state = _setup_python_game_matching_go(seed)
+        go_agents = [GoAgentState(go_engine, i) for i in range(2)]
+        py_agents = _build_py_agents(py_state, _make_config())
+        snap_indices = set(range(_PASS_SNAP_IDX, NUM_ACTIONS))
+
+        looked = None  # (own_idx, opp_idx) once a King look has resolved
+        for _ in range(300):
+            if go_engine.is_terminal() or py_state.is_terminal():
+                return None
+
+            go_actions = set(np.where(go_engine.legal_actions_mask() > 0)[0].tolist())
+            py_legal = py_state.get_legal_actions()
+            py_actions = set(
+                np.where(encode_action_mask(list(py_legal)).astype(np.uint8) > 0)[
+                    0
+                ].tolist()
+            )
+
+            # Snap phases resolve independently in the two engines; pass through them
+            # without touching the agents, exactly as the sibling parity tests do.
+            if _is_snap_only(go_actions):
+                go_engine.apply_action(_PASS_SNAP_IDX)
+                if py_state.snap_phase_active:
+                    py_state.apply_action(ActionPassSnap())
+                continue
+            if py_state.snap_phase_active:
+                py_state.apply_action(ActionPassSnap())
+                continue
+
+            common = sorted((go_actions & py_actions) - snap_indices)
+            if not common:
+                return None
+
+            py_action = None
+            for candidate in _prefer_king_line(common, py_legal):
+                for a in py_legal:
+                    try:
+                        if action_to_index(a) == candidate:
+                            py_action = a
+                            break
+                    except Exception:
+                        continue
+                if py_action is not None:
+                    action_idx = candidate
+                    break
+            if py_action is None:
+                return None
+
+            actor = py_state.get_acting_player()
+            pre_swap = None
+            if (
+                isinstance(py_action, ActionAbilityKingSwapDecision)
+                and py_action.perform_swap
+                and py_state.pending_action_data
+            ):
+                pad = py_state.pending_action_data
+                if "own_idx" in pad and "opp_idx" in pad:
+                    pre_swap = (pad["own_idx"], pad["opp_idx"])
+
+            before = _py_fingerprint(py_state)
+            had_pending = py_state.pending_action is not None
+            go_engine.apply_action(action_idx)
+            py_state.apply_action(py_action)
+            # A declined action leaves the Python engine's pending state where it was
+            # while Go advances; comparing the two from there compares different games.
+            if _py_fingerprint(py_state) == before:
+                return None
+            if had_pending and repr(py_state.pending_action) == before[1]:
+                return None
+            go_engine.update_both(go_agents[0], go_agents[1])
+            obs = _create_observation(
+                None,
+                py_action,
+                py_state,
+                actor,
+                py_state.snap_results_log,
+                king_swap_indices=pre_swap,
+            )
+            if obs is None:
+                return None
+            for pid, pa in enumerate(py_agents):
+                pa.update(_filter_observation(obs, pid))
+
+            if isinstance(py_action, ActionAbilityKingLookSelect):
+                looked = (py_action.own_hand_index, py_action.opponent_hand_index)
+            elif (
+                isinstance(py_action, ActionAbilityKingSwapDecision)
+                and py_action.perform_swap
+                and looked is not None
+            ):
+                own_idx, opp_idx = pre_swap if pre_swap is not None else looked
+                return (
+                    go_agents,
+                    py_agents,
+                    actor,
+                    own_idx,
+                    opp_idx,
+                    go_engine.decision_ctx(),
+                    go_engine.get_drawn_card_bucket(),
+                )
+        return None
+    finally:
+        go_engine.close()
+
+
+def _py_fingerprint(py_state):
+    """Enough of the Python state to tell a real apply from a declined one."""
+    return (
+        py_state.get_turn_number(),
+        repr(py_state.pending_action),
+        py_state.get_player_card_count(0),
+        py_state.get_player_card_count(1),
+        py_state.get_stockpile_size(),
+        py_state.snap_phase_active,
+    )
+
+
+def _prefer_king_line(common, py_legal):
+    """Order the common legal actions so the King line is taken wherever it is legal."""
+    from src.constants import (
+        ActionAbilityKingLookSelect,
+        ActionAbilityKingSwapDecision,
+        ActionDiscard,
+    )
+    from src.encoding import action_to_index
+
+    ranked = {}
+    for a in py_legal:
+        try:
+            idx = action_to_index(a)
+        except Exception:
+            continue
+        if isinstance(a, ActionAbilityKingSwapDecision):
+            ranked[idx] = 0 if a.perform_swap else 3
+        elif isinstance(a, ActionAbilityKingLookSelect):
+            ranked[idx] = 1
+        elif isinstance(a, ActionDiscard) and getattr(a, "use_ability", False):
+            ranked[idx] = 2
+    return sorted(common, key=lambda i: (ranked.get(i, 4), i))
+
 
 class TestEPPBSEncoding:
     def test_dimension(self):
@@ -115,10 +298,62 @@ class TestEPPBSEncoding:
         out = encode_infoset_eppbs(tags, buckets, 0, 0, 0, 0, 0)
         assert np.all(out[196:200] == 0.0)
 
-    @pytest.mark.skip(reason="Requires rebuilt libcambia with EP-PBS exports")
+    @skipgo
     def test_cross_engine_parity(self):
-        """Cross-engine parity test: enable after libcambia rebuilt."""
-        pass
+        """Go and Python agree on the slot tags a King look and swap leaves behind.
+
+        The two backends used to disagree here: Go swapped the tags of the two slots, so
+        both stayed known, while Python marked its own slot learned and forgot the
+        opponent slot outright, and its own docstring claimed both went UNK (cambia-1553).
+        The tags are one-hot in the 224-dim EP-PBS input on both sides, so the Go tag is
+        read back out of ``cambia_agent_encode_eppbs`` rather than through a new export.
+
+        Both perspectives are checked: the actor, who looked at both cards, and the
+        observer, who saw neither and whose tags follow the cards all the same.
+        """
+        from src.encoding import EP_PBS_INPUT_DIM
+
+        checked = 0
+        for seed in _KING_SWAP_SEEDS:
+            result = _play_to_king_swap(seed)
+            if result is None:
+                continue
+            go_agents, py_agents, actor, own_idx, opp_idx, ctx, drawn = result
+            checked += 1
+
+            for observer in range(2):
+                go_enc = go_agents[observer].encode_eppbs(ctx, drawn)
+                assert go_enc.shape == (EP_PBS_INPUT_DIM,)
+                py_tags = py_agents[observer].slot_tags
+
+                # The slots the swap touched, named from each observer's own seat.
+                if observer == actor:
+                    slots = (own_idx, _OPP_SLOTS_START + opp_idx)
+                else:
+                    slots = (opp_idx, _OPP_SLOTS_START + own_idx)
+
+                for slot in slots:
+                    go_tag = int(np.argmax(go_enc[40 + 4 * slot : 44 + 4 * slot]))
+                    assert go_tag == int(py_tags[slot]), (
+                        f"seed {seed} observer {observer} slot {slot}: "
+                        f"go tag {go_tag} != python tag {int(py_tags[slot])}"
+                    )
+
+                # Whichever seat is reading, the King look showed the actor both cards
+                # and the swap only moved them, so neither slot may come out UNK. That is
+                # what the pre-fix Python did to the opponent slot, and what the earlier
+                # docstring claimed it did to both.
+                known_to_us = (EpistemicTag.PRIV_OWN, EpistemicTag.PUB)
+                known_to_them = (EpistemicTag.PRIV_OPP, EpistemicTag.PUB)
+                expected = known_to_us if observer == actor else known_to_them
+                for slot in slots:
+                    assert int(py_tags[slot]) in expected, (
+                        f"seed {seed} observer {observer}: slot {slot} tag "
+                        f"{int(py_tags[slot])} is not one of {expected} after a King "
+                        "look and swap"
+                    )
+
+        assert checked > 0, "no seed in the sweep reached a King look and swap"
 
 
 class TestEPPBSAgentStateTracking:
