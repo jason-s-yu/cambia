@@ -1,8 +1,10 @@
 package harness
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -122,12 +124,16 @@ type JobSpec struct {
 	// job initializes from (design cambia-334). Empty means no warm start. Valid
 	// only for kind=train; see warmStartForbidden.
 	WarmStart string `json:"warm_start"`
-	// After optionally gates this job on another job (its single parent) finishing
-	// first (cambia-352). Empty means no dependency; allowed on every kind. A
-	// parent success always runs the dependent; OnFailure governs only the
-	// parent-failure branch. The parent must exist at submit (validated in the
-	// handler); the gate resolves the parent's outcome at dispatch time.
-	After string `json:"after,omitempty"`
+	// After optionally gates this job on one or more parent jobs finishing first
+	// (cambia-352, widened to an AND-join list by D29/cambia-1713). An empty list
+	// means no dependency; allowed on every kind. The dependent launches only
+	// once every named parent has reached a clean terminal; any parent reaching a
+	// non-success terminal routes the whole dependent through OnFailure. Every
+	// parent must exist at submit (validated in the handler); the gate resolves
+	// each parent's outcome at dispatch time. The wire shape accepts a bare
+	// string (the pre-r2 single-parent shape) or a list of 0..N names; see
+	// UnmarshalJSON.
+	After []string `json:"after,omitempty"`
 	// OnFailure selects the failure-branch behavior when After's parent reaches a
 	// non-success terminal (crashed/failed/canceled/skipped, a graceful-stop with
 	// a nonzero exit, or a purged run dir): skip (default) marks this job
@@ -170,6 +176,84 @@ type JobSpec struct {
 	// client against an old daemon is the only degradation: the field is dropped
 	// and the job runs shared.
 	Exclusive bool `json:"exclusive,omitempty"`
+}
+
+// jobSpecAlias has JobSpec's exact field set but none of its methods, so
+// decoding into it cannot recurse into JobSpec.UnmarshalJSON.
+type jobSpecAlias JobSpec
+
+// UnmarshalJSON decodes a JobSpec, accepting `after` as either a bare string
+// (the pre-r2 single-parent wire shape) or a JSON array of 0..N parent names
+// (D29 fan-in, cambia-1713), so a jobspec.json written before this change still
+// decodes (AC1). Every other field keeps standard decoding, including the
+// json.Number preservation for Overrides that decodeJSON's UseNumber() gives
+// the request path: since a custom UnmarshalJSON receives only raw bytes with
+// no access to the caller's decoder options, this re-establishes UseNumber()
+// on an inner decoder rather than losing it.
+func (s *JobSpec) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		jobSpecAlias
+		After json.RawMessage `json:"after,omitempty"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	if err := dec.Decode(&raw); err != nil {
+		return err
+	}
+	*s = JobSpec(raw.jobSpecAlias)
+	s.After = nil
+	if len(raw.After) == 0 || string(raw.After) == "null" {
+		return nil
+	}
+	var single string
+	if err := json.Unmarshal(raw.After, &single); err == nil {
+		s.After = []string{single}
+		return nil
+	}
+	var list []string
+	if err := json.Unmarshal(raw.After, &list); err != nil {
+		return fmt.Errorf("after: must be a string or an array of strings: %w", err)
+	}
+	s.After = list
+	return nil
+}
+
+// maxDependencyDepth caps the length of an after-chain a submission may extend
+// (D29): parents must already be admitted at submit, which makes the graph a
+// DAG by construction, and this bounds how long a chain within that DAG may
+// grow.
+const maxDependencyDepth = 32
+
+// dependencyDepth returns the longest after-chain ending at a job whose direct
+// parents are `after`, reading each ancestor's persisted jobspec.json from
+// runsDir. budget is how many more ancestor levels may be counted below this
+// point; it returns ok=false the instant a still-unexplored parent would need
+// more budget than remains, so a submission with too deep an ancestry fails
+// fast instead of walking the rest of the DAG. The top-level caller passes
+// budget=maxDependencyDepth. Called at submit time only; every named parent
+// already exists on disk by then (validated before this runs).
+func dependencyDepth(runsDir string, after []string, budget int) (int, bool) {
+	if len(after) == 0 {
+		return 0, true
+	}
+	if budget <= 0 {
+		return 0, false
+	}
+	depth := 0
+	for _, parent := range after {
+		var parentAfter []string
+		if spec := readJobSpec(filepath.Join(runsDir, parent)); spec != nil {
+			parentAfter = spec.After
+		}
+		d, ok := dependencyDepth(runsDir, parentAfter, budget-1)
+		if !ok {
+			return 0, false
+		}
+		if d+1 > depth {
+			depth = d + 1
+		}
+	}
+	return depth, true
 }
 
 // onFailureOrDefault returns the spec's on_failure policy, defaulting to skip.

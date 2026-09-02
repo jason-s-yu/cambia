@@ -15,7 +15,7 @@ resolves them inside the job worktree.
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 # Kind allowlist (design 1 / 2.6). The runner further restricts train to the
 # `prtcfr` algorithm in v1; that is a runner-side preflight, not a client check.
@@ -115,7 +115,11 @@ class JobSpec:
     priority: str = "normal"
     force: bool = False
     warm_start: Optional[str] = None
-    after: Optional[str] = None
+    # after names the job's parents (design D29, cambia-1713): a bare string is
+    # the pre-r2 single-parent wire shape, a list is the AND-join fan-in shape
+    # (0..N names). Whichever shape parse() receives is the shape to_payload()
+    # emits, so a plain --after flag stays byte-identical against an old daemon.
+    after: Optional[Union[str, List[str]]] = None
     on_failure: str = "skip"
     # Optional Codebridge hub work-item handle (cambia-353), e.g. "cambia-359".
     # Telemetry-only: it links the job's reflected note to a hub item and is
@@ -309,15 +313,30 @@ class JobSpec:
         if kind == "train" and target is not None:
             raise HarnessSpecError("target is not valid for kind='train'")
 
-        # Cross-job dependency (cambia-352): after names a single parent job
-        # (same name rules as the job itself); a self-reference is rejected. The
-        # runner re-checks that the parent exists. on_failure governs only the
-        # failure branch. Both are allowed on every kind.
+        # Cross-job dependency (cambia-352, widened to an AND-join list by D29
+        # / cambia-1713): after names the job's parents, either a bare string
+        # (the pre-r2 single-parent shape) or a list of 0..N names (same name
+        # rules as the job itself, applied to every entry); a self-reference by
+        # any parent is rejected. The runner re-checks that each parent exists
+        # and enforces the dependency-depth cap. on_failure governs only the
+        # failure branch, shared across every parent. Both are allowed on every
+        # kind.
         after = raw.get("after")
         if after is not None:
-            validate_name(after)
-            if after == name:
-                raise HarnessSpecError("after must not reference the job itself")
+            if isinstance(after, str):
+                parents = [after]
+            elif isinstance(after, list):
+                if not all(isinstance(p, str) for p in after):
+                    raise HarnessSpecError("after list entries must be strings")
+                parents = after
+            else:
+                raise HarnessSpecError(
+                    f"after must be a string or a list of strings, got {type(after).__name__}"
+                )
+            for parent in parents:
+                validate_name(parent)
+                if parent == name:
+                    raise HarnessSpecError("after must not reference the job itself")
 
         on_failure = raw.get("on_failure", "skip")
         if on_failure not in ON_FAILURE_POLICIES:

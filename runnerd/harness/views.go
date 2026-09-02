@@ -13,7 +13,14 @@ type JobView struct {
 	Commit   string `json:"commit,omitempty"`
 	Config   string `json:"config,omitempty"`
 	Resume   bool   `json:"resume,omitempty"`
-	After    string `json:"after,omitempty"`
+	// After keeps its pre-r2 string shape and carries the first parent, so a
+	// v1.0 client parsing `after` as it always did keeps working unannounced
+	// (D29). AfterAll carries every parent of a fan-in job; a client that
+	// advertised understanding of the `fan-in` feature reads it instead.
+	// Widening After itself to an array here would be the unannounced payload
+	// shape break D30's features list exists to prevent.
+	After    string   `json:"after,omitempty"`
+	AfterAll []string `json:"after_all,omitempty"`
 	// Exclusive echoes the accepted spec's run-alone flag (cambia-655) so an
 	// operator listing jobs sees which one holds (or will hold) the daemon. Omitted
 	// when false (a normal, concurrency-shared job).
@@ -28,6 +35,20 @@ type JobView struct {
 	CreatedAt  string `json:"created_at,omitempty"`
 	StartedAt  string `json:"started_at,omitempty"`
 	FinishedAt string `json:"finished_at,omitempty"`
+}
+
+// viewAfterFields derives a JobView's after/after_all pair from a spec's After
+// list (D29): after keeps its pre-r2 string shape, carrying the first parent,
+// so a v1.0 client's existing parse of "after" keeps working unannounced;
+// after_all carries every parent for a client that reads it. Both are the zero
+// value for a job with no parents, matching omitempty on both fields. The
+// queue snapshot (Queue/Active, both []JobView) renders the same way, since
+// every entry is a JobView built through this helper.
+func viewAfterFields(after []string) (string, []string) {
+	if len(after) == 0 {
+		return "", nil
+	}
+	return after[0], after
 }
 
 // QueueSnapshot is the payload of GET /harness/health-adjacent listings and the
@@ -48,6 +69,7 @@ func (d *Dispatcher) pendingViewLocked(name string) JobView {
 	if j == nil {
 		return JobView{JobID: name}
 	}
+	after, afterAll := viewAfterFields(j.spec.After)
 	v := JobView{
 		JobID:     name,
 		State:     j.state,
@@ -56,7 +78,8 @@ func (d *Dispatcher) pendingViewLocked(name string) JobView {
 		Commit:    j.spec.Commit,
 		Config:    j.spec.Config,
 		Resume:    j.resume,
-		After:     j.spec.After,
+		After:     after,
+		AfterAll:  afterAll,
 		Exclusive: j.spec.Exclusive,
 		HubItem:   j.spec.HubItem,
 		CreatedAt: j.submitAt,
@@ -112,7 +135,7 @@ func (d *Dispatcher) resolveView(name string) (JobView, bool) {
 		v.Config = spec.Config
 		v.Priority = spec.Priority
 		v.Resume = spec.Resume
-		v.After = spec.After
+		v.After, v.AfterAll = viewAfterFields(spec.After)
 		v.Exclusive = spec.Exclusive
 		v.HubItem = spec.HubItem
 	}

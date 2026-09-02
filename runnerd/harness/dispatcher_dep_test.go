@@ -11,10 +11,24 @@ import (
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 )
 
-// depSpec is a minimal cpu spec carrying an after/on_failure dependency
+// depSpec is a minimal cpu spec carrying a single after/on_failure dependency
 // (cambia-352). kind selects the fake script behavior (fake=sleep, fake-quick=
-// exit 0, fake-fail=exit 3).
+// exit 0, fake-fail=exit 3). An empty after means no dependency.
 func depSpec(name, kind, after, onFailure string) JobSpec {
+	return depSpecFanIn(name, kind, afterList(after), onFailure)
+}
+
+// afterList builds an After slice from a single (possibly empty) parent name.
+func afterList(after string) []string {
+	if after == "" {
+		return nil
+	}
+	return []string{after}
+}
+
+// depSpecFanIn is depSpec's fan-in generalization (D29, cambia-1713): after
+// names every parent an AND-join dependent waits on.
+func depSpecFanIn(name, kind string, after []string, onFailure string) JobSpec {
 	return JobSpec{
 		Kind:      kind,
 		Commit:    strings.Repeat("a", 40),
@@ -64,7 +78,7 @@ func setupResumable(t *testing.T, runsDir, name, kind, after, onFailure string) 
 	if err := procmgr.WriteProcessState(dir, st); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeJobSpec(dir, &JobSpec{Name: name, Kind: kind, After: after, OnFailure: onFailure}); err != nil {
+	if err := writeJobSpec(dir, &JobSpec{Name: name, Kind: kind, After: afterList(after), OnFailure: onFailure}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -180,10 +194,10 @@ func TestGateReEvaluatesParentAcrossResume(t *testing.T) {
 	disp := NewDispatcher(pm, fe, runsDir, 2, 16, 15*time.Millisecond)
 
 	writeTerminalParent(t, runsDir, "P", procmgr.StatusStopped, 0)
-	child := &job{spec: JobSpec{Name: "C", After: "P", OnFailure: "run"}, state: StateQueued}
+	child := &job{spec: JobSpec{Name: "C", After: []string{"P"}, OnFailure: "run"}, state: StateQueued}
 
 	disp.mu.Lock()
-	d1 := disp.gateDecisionLocked(child)
+	d1, _ := disp.gateDecisionLocked(child)
 	disp.mu.Unlock()
 	if d1 != gateLaunch {
 		t.Fatalf("parent stopped-exit0: decision = %d, want gateLaunch", d1)
@@ -192,7 +206,7 @@ func TestGateReEvaluatesParentAcrossResume(t *testing.T) {
 	// Parent resumed -> now a live pending (queued) job, i.e. non-terminal again.
 	disp.mu.Lock()
 	disp.pending["P"] = &job{spec: JobSpec{Name: "P"}, state: StateQueued}
-	d2 := disp.gateDecisionLocked(child)
+	d2, _ := disp.gateDecisionLocked(child)
 	disp.mu.Unlock()
 	if d2 != gateBlocked {
 		t.Fatalf("parent resumed (non-terminal): decision = %d, want gateBlocked", d2)
@@ -201,7 +215,7 @@ func TestGateReEvaluatesParentAcrossResume(t *testing.T) {
 	// Parent finishes again (out of pending, terminal on disk) -> re-arm.
 	disp.mu.Lock()
 	delete(disp.pending, "P")
-	d3 := disp.gateDecisionLocked(child)
+	d3, _ := disp.gateDecisionLocked(child)
 	disp.mu.Unlock()
 	if d3 != gateLaunch {
 		t.Fatalf("parent re-completed: decision = %d, want gateLaunch", d3)
@@ -246,4 +260,75 @@ func TestDependentResumeIgnoresAfter(t *testing.T) {
 	}
 	// Launches despite di-P being crashed: a resumed dependent ignores its after.
 	r.waitForState("di-C", procmgr.StatusRunning, 3*time.Second)
+}
+
+// TestFanInLaunchesOnlyWhenAllParentsSucceed (AC2, D29): a dependent named
+// after three parents stays queued while any one of them is still running,
+// and launches only once every parent has reached a clean terminal.
+func TestFanInLaunchesOnlyWhenAllParentsSucceed(t *testing.T) {
+	r := newRig(t, rigConfig{maxJobs: 4})
+	writeTerminalParent(t, r.runsDir, "fi-p1", procmgr.StatusStopped, 0)
+	writeTerminalParent(t, r.runsDir, "fi-p2", procmgr.StatusStopped, 0)
+	// fi-p3 is left non-terminal (a live pending job, mirroring
+	// TestGateReEvaluatesParentAcrossResume's white-box pattern): the AND-join
+	// must not launch on two of three parents succeeding. The on-disk record
+	// only needs to exist (ReadProcessState must succeed) -- effectiveStateLocked
+	// overrides it with the in-memory pending state.
+	writeTerminalParent(t, r.runsDir, "fi-p3", procmgr.StatusStopped, 0)
+	r.disp.mu.Lock()
+	r.disp.pending["fi-p3"] = &job{spec: JobSpec{Name: "fi-p3"}, state: StateQueued}
+	r.disp.mu.Unlock()
+
+	child := depSpecFanIn("fi-child", "fake", []string{"fi-p1", "fi-p2", "fi-p3"}, "skip")
+	if _, err := r.disp.Submit(child); err != nil {
+		t.Fatal(err)
+	}
+	if s, _ := r.getState("fi-child"); s != StateQueued {
+		t.Fatalf("fi-child state = %q, want queued (fi-p3 still running, 2/3 succeeded)", s)
+	}
+
+	// fi-p3 finishes cleanly -> all three parents are now clean terminals.
+	writeTerminalParent(t, r.runsDir, "fi-p3", procmgr.StatusStopped, 0)
+	r.disp.mu.Lock()
+	delete(r.disp.pending, "fi-p3")
+	r.disp.mu.Unlock()
+	r.disp.reDispatch()
+	r.waitForState("fi-child", procmgr.StatusRunning, 3*time.Second)
+}
+
+// TestFanInOnFailurePolicyMixedParents (AC3, D29): with a three-parent fan-in
+// where one parent fails and the other two succeed, each on_failure policy is
+// exercised: skip marks the dependent skipped, fail marks it failed, and run
+// launches it anyway -- all from the SAME mixed parent set, and regardless of
+// where the failing parent sits in the list.
+func TestFanInOnFailurePolicyMixedParents(t *testing.T) {
+	r := newRig(t, rigConfig{maxJobs: 4})
+	writeTerminalParent(t, r.runsDir, "mp-ok1", procmgr.StatusStopped, 0)
+	writeTerminalParent(t, r.runsDir, "mp-ok2", procmgr.StatusStopped, 0)
+	writeTerminalParent(t, r.runsDir, "mp-bad", procmgr.StatusCrashed, 3)
+
+	cases := []struct {
+		policy string
+		want   string
+	}{
+		{"skip", StateSkipped},
+		{"fail", StateFailed},
+		{"run", procmgr.StatusRunning},
+	}
+	for _, c := range cases {
+		name := "mp-child-" + c.policy
+		// The failing parent's position varies (front/middle/back) across the
+		// three cases, proving the scan is not order-dependent.
+		parents := []string{"mp-ok1", "mp-ok2", "mp-bad"}
+		if c.policy == "fail" {
+			parents = []string{"mp-bad", "mp-ok1", "mp-ok2"}
+		} else if c.policy == "run" {
+			parents = []string{"mp-ok1", "mp-bad", "mp-ok2"}
+		}
+		child := depSpecFanIn(name, "fake", parents, c.policy)
+		if _, err := r.disp.Submit(child); err != nil {
+			t.Fatalf("%s: submit: %v", c.policy, err)
+		}
+		r.waitForState(name, c.want, 3*time.Second)
+	}
 }
