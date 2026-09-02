@@ -42,7 +42,6 @@ This is flagged to @chief as a spec deviation requiring sign-off.
 
 from __future__ import annotations
 
-import copy
 import random
 from typing import (
     Any,
@@ -328,14 +327,15 @@ def first_traverser_decision(node, traverser: int):
 # GameDriver is the seam the sampler traverses through. It mirrors the S1W2
 # Go event-stream FFI surface pinned in the sprint-1 plan (token_len/tokens/
 # tokens_since, vectorized apply, token-inclusive state save/restore) at the
-# semantic level, so the sampler is driver-agnostic: PythonEngineGameDriver
-# below is the "thin stub" the S1W3 stage-2 spawn note calls for (a Python
-# fake driven by the existing Python engine), and the real Go-FFI-backed
-# driver replaces it at S1W2 integration without changing sampler logic.
+# semantic level. The S1W3 stage-2 spawn note originally developed the
+# sampler against a "thin stub" driven by the Python engine
+# (PythonEngineGameDriver); the real Go-FFI-backed GoEngineGameDriver
+# replaced it at S1W13 without changing sampler logic, and the stub was
+# retired (cambia-1784) once nothing but its own tests still exercised it.
 #
-# Window semantics: PythonEngineGameDriver.tokens() always requests the FULL
-# observation-action prefix via encode_observation_sequence(..., strict=True)
-# at PRODUCTION_SEQ_CAP. strict=True turns "would truncate" into a hard
+# Window semantics: GoEngineGameDriver.tokens() always requests the FULL
+# observation-action prefix at PRODUCTION_SEQ_CAP with a strict overflow
+# guard. strict overflow turns "would truncate" into a hard
 # SequenceOverflowError instead of a silent drop (the v0.4 Phase 2
 # window-semantics decision note, sign-off conditions 1+2).
 # PRODUCTION_SEQ_CAP is a separate module-level constant from the tiny-game
@@ -345,7 +345,7 @@ def first_traverser_decision(node, traverser: int):
 
 #: Production sequence cap. Kept distinct from the tiny-game SEQ_CAP constant
 #: (coexistence rule): tiny paths import SEQ_CAP=256 unchanged; only
-#: production call sites (PythonEngineGameDriver, PRTCFRProductionWorker) use
+#: production call sites (GoEngineGameDriver, PRTCFRProductionWorker) use
 #: this value. See the module docstring above and
 #: scripts/prtcfr_p100_instrument.py for the P100 instrumentation that pins it.
 #:
@@ -420,131 +420,12 @@ class GameDriver(Protocol):
     def close(self) -> None: ...
 
 
-class PythonEngineGameDriver:
-    """Thin reference GameDriver over the Python engine (src.game.engine).
-
-    Stub for the S1W2 Go-FFI driver: correctness-first, not throughput-first.
-    ``tokens()`` re-encodes the observer's full observation list from scratch
-    on every call (O(prefix length)) rather than incrementally appending (the
-    real FFI's planned ``cambia_agent_tokens_since``); ``clone()`` deep-copies
-    the whole engine GameState (Python-side ``copy.deepcopy``, not the Go
-    engine's ~250B memcpy). Both are explicitly acceptable here -- this driver
-    is swapped for the real incremental/cheap-clone FFI driver at S1W2
-    integration, and none of the sampler logic above this seam changes.
-    """
-
-    def __init__(
-        self,
-        game: Any,
-        init_hands: Dict[int, list],
-        init_peeks: Dict[int, tuple],
-        obs_streams: Optional[Dict[int, List[Any]]] = None,
-        seq_cap: int = PRODUCTION_SEQ_CAP,
-    ):
-        self.game = game
-        self.init_hands = init_hands
-        self.init_peeks = init_peeks
-        num_players = len(init_hands)
-        self.obs_streams: Dict[int, List[Any]] = (
-            obs_streams
-            if obs_streams is not None
-            else {p: [] for p in range(num_players)}
-        )
-        self.seq_cap = seq_cap
-
-    def current_player(self) -> int:
-        return self.game.get_acting_player()
-
-    def is_terminal(self) -> bool:
-        return self.game.is_terminal()
-
-    def utility(self, player: int) -> float:
-        return self.game.get_utility(player)
-
-    def legal_actions(self) -> List[Any]:
-        # get_legal_actions() returns a Set[GameAction]; Python set iteration
-        # order is not a stable function of content alone (string-field hash
-        # randomization varies per process). Sort by the canonical
-        # action_to_index so two runs with identical seeds see the identical
-        # ordering (index-based sampling, CRN pairing, and this driver's own
-        # determinism tests all rely on that).
-        return sorted(self.game.get_legal_actions(), key=action_to_index)
-
-    def apply(self, action: Any) -> bool:
-        """Apply ``action``; return True iff the engine actually processed it
-        (state changed). Returns False, WITHOUT recording any observation, if
-        the engine rejected ``action`` for the current pending sub-decision.
-
-        This rejection is a pre-existing engine/random-policy interaction,
-        confirmed present even with zero cloning or driver code involved
-        (``CambiaGameState.apply_action`` logs "Invalid action ... for
-        pending state ... Waiting." and returns an EMPTY delta_list,
-        i.e. no state mutation, for certain ability-pending-chain sequences
-        under some house-rule combinations -- observed at ~1.4% of applies
-        under uniform-random play with allowReplaceAbilities=True). Root-
-        causing that engine/ability-mixin behavior is out of this task's
-        scope; what IS in scope is never fabricating a token-stream frame
-        for an action that never happened, since that would corrupt PRT-CFR's
-        full-recall guarantee. ``apply_action``'s own ``delta_list`` return
-        value is the engine's authoritative "did state change" signal (every
-        successful mutation branch appends to it for undo support), so its
-        truthiness is the check here. Callers must retry with a freshly
-        sampled action on False (see ``_sample_and_apply`` below).
-        """
-        from .worker import _create_observation, _filter_observation
-
-        actor = self.game.get_acting_player()
-        delta_list, _undo = self.game.apply_action(action)
-        if not delta_list:
-            return False
-        snap_results = list(getattr(self.game, "snap_results_log", []) or [])
-        full_obs = _create_observation(None, action, self.game, actor, snap_results)
-        if full_obs is None:
-            raise RuntimeError(
-                f"PythonEngineGameDriver.apply: observation creation failed for "
-                f"actor {actor} action {action!r}"
-            )
-        for observer in self.obs_streams:
-            self.obs_streams[observer].append(_filter_observation(full_obs, observer))
-        return True
-
-    def tokens(self, player: int) -> List[int]:
-        from .. import sequence_encoding as se
-
-        return se.encode_observation_sequence(
-            self.init_hands[player],
-            self.init_peeks[player],
-            self.obs_streams[player],
-            player,
-            seq_cap=self.seq_cap,
-            strict=True,
-        )
-
-    def clone(self) -> "PythonEngineGameDriver":
-        cloned_game = copy.deepcopy(self.game)
-        # AgentObservation entries are appended once and never mutated in
-        # place (_filter_observation returns a fresh shallow copy per
-        # observer), so a shallow per-list copy is a correct, cheap clone of
-        # the streams; the expensive part is the game-state deepcopy above.
-        cloned_streams = {p: list(v) for p, v in self.obs_streams.items()}
-        return PythonEngineGameDriver(
-            cloned_game,
-            dict(self.init_hands),
-            dict(self.init_peeks),
-            cloned_streams,
-            self.seq_cap,
-        )
-
-    def close(self) -> None:
-        """No-op: nothing to free (plain Python objects, GC'd normally)."""
-
-
 class GoEngineGameDriver:
     """GameDriver backed by the real Go engine via the FFI bridge (S1W13).
 
-    The production substrate: correctness AND throughput (unlike
-    PythonEngineGameDriver, the "thin stub" this file developed against
-    before S1W12/S1W13 landed).
+    The production substrate: correctness AND throughput (unlike the retired
+    PythonEngineGameDriver "thin stub" this file developed against before
+    S1W12/S1W13 landed and before it was deleted at cambia-1784).
 
     ``clone()`` uses ``bridge.state_clone_wrapped`` (S1W12's
     ``cambia_state_clone``): a TRUE independent clone onto FRESH handles
@@ -555,8 +436,9 @@ class GoEngineGameDriver:
 
     ``tokens()`` reads the raw per-agent token body via the FFI and
     frame-aligns it at ``seq_cap`` with an explicit STRICT overflow guard
-    (mirrors ``PythonEngineGameDriver``'s ``strict=True`` contract): the Go
-    side's own ``MaxTokenStream`` hard-errors at APPEND time (surfaced via
+    (the same full-recall, never-truncate contract the retired
+    PythonEngineGameDriver held): the Go side's own ``MaxTokenStream``
+    hard-errors at APPEND time (surfaced via
     ``apply()``) before a body could ever exceed it, but
     ``bridge.frame_aligned_window`` itself has no strict mode and would
     silently window a body that's exactly at the raw cap if the BOS/EOS
@@ -609,9 +491,9 @@ class GoEngineGameDriver:
         risk from a partially-applied action.
 
         Returns True on success. Returns False if the engine rejected the
-        action for the current state (mirrors PythonEngineGameDriver.apply's
-        bool contract so ``_sample_and_apply`` retries uniformly across
-        drivers). A token-stream OVERFLOW is a different, non-retryable
+        action for the current state (the ``GameDriver.apply`` bool contract
+        every driver satisfies so ``_sample_and_apply`` retries uniformly).
+        A token-stream OVERFLOW is a different, non-retryable
         condition -- retrying with a different action cannot help since the
         stream is already too long -- so it is re-raised, not swallowed.
         """
@@ -674,30 +556,6 @@ def _default_production_house_rules() -> Any:
     return house_rules
 
 
-def _new_python_production_driver(
-    seed: int, house_rules: Optional[Any] = None, num_players: int = 2
-) -> PythonEngineGameDriver:
-    """Build a fresh production game + PythonEngineGameDriver for ``seed``.
-
-    Uses the engine's own internal deal (``CambiaGameState(house_rules=...,
-    _rng=...)``, the same construction path tiny_solver's tree builder uses),
-    NOT the Go-deal-matching test helper: self-play generation only needs an
-    internally consistent engine instance here, independent of Go-parity,
-    which is covered separately by the FFI cross-path parity tests.
-    """
-    from ..game.engine import CambiaGameState
-
-    if house_rules is None:
-        house_rules = _default_production_house_rules()
-
-    game = CambiaGameState(house_rules=house_rules, _rng=random.Random(seed))
-    init_hands = {p: list(game.players[p].hand) for p in range(num_players)}
-    init_peeks = {
-        p: tuple(game.players[p].initial_peek_indices) for p in range(num_players)
-    }
-    return PythonEngineGameDriver(game, init_hands, init_peeks)
-
-
 def _new_go_production_driver(
     seed: int, house_rules: Optional[Any] = None, seq_cap: int = PRODUCTION_SEQ_CAP
 ) -> "GoEngineGameDriver":
@@ -722,20 +580,25 @@ def new_production_driver(
 ) -> "GameDriver":
     """Build a fresh production game + driver for ``seed``.
 
-    ``backend="go"`` (default, S1W13): the real Go engine via the FFI bridge
-    (``GoEngineGameDriver``) -- the production substrate. ``backend="python"``:
-    ``PythonEngineGameDriver``, the reference/stub implementation this file
+    ``backend="go"`` (default and only supported value, S1W13): the real Go
+    engine via the FFI bridge (``GoEngineGameDriver``), the production
+    substrate. The ``PythonEngineGameDriver`` reference/stub this file
     developed against before the Go clone-to-fresh-handles FFI export
-    (``cambia_state_clone``, S1W12) landed; kept for tests exercising its
-    specific internals and as a fallback where ``libcambia.so`` is
-    unavailable. Both satisfy the same ``GameDriver`` protocol; sampler code
-    (``PRTCFRProductionWorker``) never branches on which one it was handed.
+    (``cambia_state_clone``, S1W12) landed was retired at cambia-1784: the Go
+    driver's own test coverage (``tests/test_prtcfr_go_bridge_integration.py``)
+    already exercised every sampler-agnostic property the stub's dedicated
+    tests checked (well-formed samples, clone independence, CRN-pairing
+    determinism, overflow hard-erroring), and the stub's Python engine is a
+    known-divergent reference on snap/reshuffle order (S1W11), so it could
+    never validate the Go engine's real production behavior in those cases.
+    Any other ``backend`` value raises.
     """
     if backend == "go":
         return _new_go_production_driver(seed, house_rules, seq_cap=PRODUCTION_SEQ_CAP)
-    if backend == "python":
-        return _new_python_production_driver(seed, house_rules, num_players)
-    raise ValueError(f"unknown backend {backend!r}; expected 'go' or 'python'")
+    raise ValueError(
+        f"unknown backend {backend!r}; only 'go' is supported "
+        "(the 'python' reference backend was retired at cambia-1784)"
+    )
 
 
 # Production sigma^t signature: (full-recall token prefix, legal action mask)
@@ -760,14 +623,15 @@ def uniform_policy_production(tokens: List[int], legal_mask: np.ndarray) -> np.n
 def _action_index(action: Any) -> int:
     """Global [0, NUM_ACTIONS) index for a production-driver action.
 
-    Driver-agnostic: PythonEngineGameDriver's legal_actions()/apply() traffic
-    in GameAction NamedTuples (routed through encoding.action_to_index);
-    GoEngineGameDriver's traffic in the same integer indices GoEngine.
-    apply_action already uses (legal_actions_mask() is index-native, so no
-    translation is needed there). This adapter lets every driver-agnostic
-    helper below (_legal_mask, _sample_legal_action, the traverser's regret
-    bookkeeping) accept whichever action representation the active driver
-    produces without branching on driver type.
+    GoEngineGameDriver's legal_actions()/apply() traffic in the same integer
+    indices GoEngine.apply_action already uses (legal_actions_mask() is
+    index-native, so no translation is needed there); the int branch below
+    handles that case directly. The GameAction-NamedTuple branch (routed
+    through encoding.action_to_index) is kept for the retired
+    PythonEngineGameDriver's representation and any driver reintroduced on
+    that contract, so this adapter still lets driver-agnostic helpers below
+    (_legal_mask, _sample_legal_action, the traverser's regret bookkeeping)
+    accept whichever action representation the active driver produces.
     """
     if isinstance(action, (int, np.integer)):
         return int(action)
@@ -813,14 +677,15 @@ def _sample_and_apply(
 ) -> Any:
     """Sample an action from ``legal`` per ``probs`` and apply it to
     ``driver``, RESAMPLING (same ``legal``/``probs``, fresh draw) if the
-    engine rejects it (``driver.apply`` returns False -- see
-    ``PythonEngineGameDriver.apply``'s docstring for the pre-existing
-    engine/ability-pending-chain interaction this guards against). Legitimate
-    because ``get_legal_actions()`` is unchanged after a rejection (no state
-    mutated), so resampling from the identical distribution is a valid retry,
-    not a bias -- it just avoids the SPECIFIC member the engine just refused.
-    Returns the action that was actually applied; raises ``DriverStuckError``
-    if ``max_attempts`` consecutive draws are all rejected (a true stall).
+    engine rejects it (``driver.apply`` returns False -- every ``GameDriver``
+    implementation's ``apply`` contract signals a rejected action this way;
+    see ``GoEngineGameDriver.apply``'s docstring for the current driver's
+    rejection cases). Legitimate because ``get_legal_actions()`` is unchanged
+    after a rejection (no state mutated), so resampling from the identical
+    distribution is a valid retry, not a bias -- it just avoids the SPECIFIC
+    member the engine just refused. Returns the action that was actually
+    applied; raises ``DriverStuckError`` if ``max_attempts`` consecutive
+    draws are all rejected (a true stall).
     """
     for _ in range(max_attempts):
         action = _sample_legal_action(legal, probs, rng)
@@ -952,10 +817,10 @@ class PRTCFRProductionWorker:
                 try:
                     if not child.apply(action):
                         # The engine rejected this nominally-"legal" action
-                        # for the current pending sub-decision (the same
+                        # for the current pending sub-decision (the
                         # pre-existing engine/ability-pending-chain
-                        # interaction PythonEngineGameDriver.apply guards
-                        # against). Exclude it from THIS decision's regret
+                        # interaction GameDriver.apply's bool contract
+                        # guards against). Exclude it from THIS decision's regret
                         # sample rather than fabricate a q-value for an
                         # action that was never actually applied to the
                         # clone.

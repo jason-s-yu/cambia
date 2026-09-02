@@ -3,7 +3,9 @@
 Scoped smoke tests for scripts/prtcfr_bench.py (the X3 throughput bench
 harness, v0.4 Phase 2 S1W7). Fast, CPU-only, tiny K -- the real X3 measurement
 (K=8192, m=4, Go backend, GPU) is a one-off operator invocation captured in
-the sprint's X3 verdict artifact, not part of the scoped suite.
+the sprint's X3 verdict artifact, not part of the scoped suite. Go is the
+only backend (the Python reference backend was retired at cambia-1784), so
+these tests need libcambia.so built (``make libcambia``) even at tiny K on CPU.
 """
 
 from __future__ import annotations
@@ -49,7 +51,7 @@ def _tiny_args(**overrides) -> argparse.Namespace:
             "--seq-cap",
             "128",
             "--backend",
-            "python",
+            "go",
             "--device",
             "cpu",
             "--max-trajectory-steps",
@@ -94,7 +96,7 @@ def test_build_bench_config_overrides_apply(tmp_path):
     assert cfg.batch_size == 16
     assert cfg.train_steps == 5
     assert cfg.seq_cap == 128
-    assert cfg.backend == "python"
+    assert cfg.backend == "go"
     assert cfg.device == "cpu"
     # critic/stability disabled by default (out of X3 gate scope).
     assert cfg.critic_enabled is False
@@ -104,18 +106,18 @@ def test_build_bench_config_overrides_apply(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# End-to-end tiny cell (python backend, CPU)
+# End-to-end tiny cell (go backend, CPU)
 # ---------------------------------------------------------------------------
 
 
-def test_run_cell_tiny_python_backend_cpu(tmp_path):
+def test_run_cell_tiny_go_backend_cpu(tmp_path):
     args = _tiny_args(run_dir=str(tmp_path / "run"))
     result = run_cell(args)
 
     assert result["gen_seconds"] >= 0.0
     assert result["fit_seconds"] >= 0.0
     assert result["config"]["k_games"] == 4
-    assert result["config"]["backend"] == "python"
+    assert result["config"]["backend"] == "go"
 
     # Profile buckets are present and sum consistently with the phase totals.
     # Each bucket is independently rounded to 3dp before being stored, so the
@@ -225,7 +227,7 @@ def test_replicate_reservoir_to_size_noop_when_already_at_target(tmp_path):
     assert len(disk) == 0
 
 
-def test_run_fit_scale_probe_tiny_python_backend_cpu(tmp_path):
+def test_run_fit_scale_probe_tiny_go_backend_cpu(tmp_path):
     args = _tiny_args(
         run_dir=str(tmp_path / "fitprobe"),
         batch_size=24,
