@@ -137,6 +137,10 @@ type poolRigConfig struct {
 	// fakeBundles above; the two-process suite substitutes a real ingest
 	// Manager so a real git bundle flows into a real temp mirror (D42).
 	bundles BundleBuilder
+	// ceilings overrides the route-layer quota block. Every zero field takes
+	// its documented default, so a suite lowers only the ceiling it drives:
+	// the hostile suite exhausts quotas that would otherwise need gigabytes.
+	ceilings Ceilings
 	// embedded attaches the coordinator's own node: an in-process grant over a
 	// key this rig generated, and the pool told which node id materializes in
 	// place (D40). It is off by default so the existing suites keep describing
@@ -177,6 +181,10 @@ func newPoolRig(t *testing.T, cfg poolRigConfig) *poolRig {
 	var bundleSource BundleBuilder = bundles
 	if cfg.bundles != nil {
 		bundleSource = cfg.bundles
+	}
+	ceilings := cfg.ceilings
+	if cfg.maxClaimWaiters != 0 {
+		ceilings.MaxClaimWaiters = cfg.maxClaimWaiters
 	}
 
 	var pool *Pool
@@ -219,7 +227,7 @@ func newPoolRig(t *testing.T, cfg poolRigConfig) *poolRig {
 			NodesDir:         grantDir,
 			OriginHost:       "coordinator.test",
 			Policy:           policy,
-			Ceilings:         Ceilings{MaxClaimWaiters: cfg.maxClaimWaiters},
+			Ceilings:         ceilings,
 			MaxLeasesPerNode: cfg.maxLeases,
 			UnplaceableGrace: cfg.grace,
 			EmbeddedNodeID:   embeddedNode.id,
@@ -241,6 +249,16 @@ func newPoolRig(t *testing.T, cfg poolRigConfig) *poolRig {
 	pr.nodeB = pr.enroll(t, "node-b", capability.Grant{})
 	pr.nodeE = embeddedNode
 	return pr
+}
+
+// rigCeilings is the quota block this rig was built with, so a restart rebuilds
+// the pool under the same numbers.
+func (r *poolRig) rigCeilings() Ceilings {
+	c := r.cfg.ceilings
+	if r.cfg.maxClaimWaiters != 0 {
+		c.MaxClaimWaiters = r.cfg.maxClaimWaiters
+	}
+	return c
 }
 
 // rigPolicy is the pool policy this rig was built with, so a restart rebuilds

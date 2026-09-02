@@ -64,7 +64,7 @@ func (r *poolRig) restartCoordinator(t *testing.T) {
 		NodesDir:         r.grantDir,
 		OriginHost:       "coordinator.test",
 		Policy:           r.rigPolicy(),
-		Ceilings:         Ceilings{MaxClaimWaiters: r.cfg.maxClaimWaiters},
+		Ceilings:         r.rigCeilings(),
 		MaxLeasesPerNode: r.cfg.maxLeases,
 		UnplaceableGrace: r.cfg.grace,
 		Now:              r.clock.now,
