@@ -26,9 +26,9 @@ type DecayCategory uint8
 
 const (
 	DecayLikelyLow  DecayCategory = iota // 0: Joker/NegKing/Ace/2-4
-	DecayLikelyMid                        // 1: 5-8
-	DecayLikelyHigh                       // 2: 9-T/J-Q/BlackKing
-	DecayUnknown                          // 3: Fully decayed
+	DecayLikelyMid                       // 1: 5-8
+	DecayLikelyHigh                      // 2: 9-T/J-Q/BlackKing
+	DecayUnknown                         // 3: Fully decayed
 )
 
 // StockpileEstimate represents abstract remaining stockpile size.
@@ -165,8 +165,8 @@ var DeckBucketCounts = [V2CardCountDim]uint8{2, 2, 4, 12, 8, 8, 8, 8, 2}
 //	1 = DISCARD phase: Discard*, Replace
 //	2 = ABILITY_OR_SNAP: peek/look/swap (including king swap), snap_*, pass_snap
 const (
-	ActionCategoryDraw         uint8 = 0
-	ActionCategoryDiscard      uint8 = 1
+	ActionCategoryDraw          uint8 = 0
+	ActionCategoryDiscard       uint8 = 1
 	ActionCategoryAbilityOrSnap uint8 = 2
 )
 
@@ -223,33 +223,34 @@ func CategorizeAction(actionIdx uint16) (category uint8, targetSlot uint8, hasSl
 
 // N-Player constants (used when NumPlayers > 2).
 // Derived from MaxPlayers=8 and MaxHandSize=6:
-//   MaxTotalSlots       = MaxPlayers × MaxHandSize = 8 × 6 = 48
-//   MaxKnowledgePlayers = MaxPlayers = 8
-//   NPlayerPowersetDim  = MaxTotalSlots × MaxKnowledgePlayers = 48 × 8 = 384
-//   NPlayerIdentityDim  = MaxTotalSlots × 9 (buckets) = 48 × 9 = 432
-//   NPlayerPublicDim    = 40 (discard 10, stock 4, phase 6, ctx 6, cambia 3, drawn 11)
-//   NPlayerSeatDim      = 8 (this agent's own seat, one-hot)
-//   NPlayerSeatCountDim = 8 (the table's active seat count, one-hot at numPlayers-1)
-//   NPlayerHandLenDim   = MaxHandSize + 1 = 7 (one seat's hand length, one-hot over 0..6)
-//   NPlayerSeatBlockDim = NPlayerHandLenDim + 1 = 8 (that, plus an in-play bit)
-//   NPlayerTableDim     = MaxKnowledgePlayers × NPlayerSeatBlockDim = 64
-//   NPlayerInputDim     = 384 + 432 + 40 + 8 + 8 + 64 = 936
-//   NPlayerNumActions   = 620 (see engine.NPlayerNumActions; scales with MaxOpponents=7)
+//
+//	MaxTotalSlots       = MaxPlayers × MaxHandSize = 8 × 6 = 48
+//	MaxKnowledgePlayers = MaxPlayers = 8
+//	NPlayerPowersetDim  = MaxTotalSlots × MaxKnowledgePlayers = 48 × 8 = 384
+//	NPlayerIdentityDim  = MaxTotalSlots × 9 (buckets) = 48 × 9 = 432
+//	NPlayerPublicDim    = 40 (discard 10, stock 4, phase 6, ctx 6, cambia 3, drawn 11)
+//	NPlayerSeatDim      = 8 (this agent's own seat, one-hot)
+//	NPlayerSeatCountDim = 8 (the table's active seat count, one-hot at numPlayers-1)
+//	NPlayerHandLenDim   = MaxHandSize + 1 = 7 (one seat's hand length, one-hot over 0..6)
+//	NPlayerSeatBlockDim = NPlayerHandLenDim + 1 = 8 (that, plus an in-play bit)
+//	NPlayerTableDim     = MaxKnowledgePlayers × NPlayerSeatBlockDim = 64
+//	NPlayerInputDim     = 384 + 432 + 40 + 8 + 8 + 64 = 936
+//	NPlayerNumActions   = 620 (see engine.NPlayerNumActions; scales with MaxOpponents=7)
 //
 // The seat, seat-count and per-seat blocks were added in cambia-1551: the vector used to
 // carry no seat count, no hand length and no seat identity at all, so a four-seat table
 // and an eight-seat one encoded alike and every slot past a hand's end read as a card.
 // cfr/src/constants.py mirrors these; the FFI dim export pairs them.
 const (
-	MaxTotalSlots       = 48                                  // 8 players × 6 cards
-	MaxKnowledgePlayers = engine.MaxPlayers                   // 8
-	NPlayerPowersetDim  = MaxTotalSlots * MaxKnowledgePlayers // 48 × 8 = 384
-	NPlayerIdentityDim  = MaxTotalSlots * 9                   // 48 × 9 = 432
-	NPlayerPublicDim    = 40                                  // discard+stock+phase+ctx+cambia+drawn
-	NPlayerSeatDim      = MaxKnowledgePlayers                 // 8
-	NPlayerSeatCountDim = MaxKnowledgePlayers                 // 8
-	NPlayerHandLenDim   = engine.MaxHandSize + 1              // 7
-	NPlayerSeatBlockDim = NPlayerHandLenDim + 1               // 8
+	MaxTotalSlots       = 48                                        // 8 players × 6 cards
+	MaxKnowledgePlayers = engine.MaxPlayers                         // 8
+	NPlayerPowersetDim  = MaxTotalSlots * MaxKnowledgePlayers       // 48 × 8 = 384
+	NPlayerIdentityDim  = MaxTotalSlots * 9                         // 48 × 9 = 432
+	NPlayerPublicDim    = 40                                        // discard+stock+phase+ctx+cambia+drawn
+	NPlayerSeatDim      = MaxKnowledgePlayers                       // 8
+	NPlayerSeatCountDim = MaxKnowledgePlayers                       // 8
+	NPlayerHandLenDim   = engine.MaxHandSize + 1                    // 7
+	NPlayerSeatBlockDim = NPlayerHandLenDim + 1                     // 8
 	NPlayerTableDim     = MaxKnowledgePlayers * NPlayerSeatBlockDim // 64
 	NPlayerInputDim     = NPlayerPowersetDim + NPlayerIdentityDim + NPlayerPublicDim +
 		NPlayerSeatDim + NPlayerSeatCountDim + NPlayerTableDim // 936
@@ -261,8 +262,8 @@ type MemoryArchetype uint8
 
 const (
 	MemoryPerfect   MemoryArchetype = iota // No decay or eviction; retains all observations
-	MemoryDecaying                          // Bayesian diffusion: PrivOwn slots decay with prob p = 1-exp(-λ)
-	MemoryHumanLike                         // Stochastic saliency eviction; OwnActiveMask capped at MemoryCapacity
+	MemoryDecaying                         // Bayesian diffusion: PrivOwn slots decay with prob p = 1-exp(-λ)
+	MemoryHumanLike                        // Stochastic saliency eviction; OwnActiveMask capped at MemoryCapacity
 )
 
 // BucketMidpoint returns the approximate midpoint card value for a CardBucket.

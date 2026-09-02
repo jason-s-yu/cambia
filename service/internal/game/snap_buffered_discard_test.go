@@ -148,3 +148,30 @@ func TestSnapAgainstCoveredCardRejectedDuringAbilityWindow(t *testing.T) {
 	assert.Nil(t, mb.findEventByType(EventPlayerSnapSuccess), "the snap must not succeed")
 	assert.Equal(t, handBefore+2, int(g.Engine.Players[snapperIdx].HandLen), "the invalid snap should draw the two-card penalty")
 }
+
+// TestBufferedDiscardTimeoutSkipsAbility pins the reachable path a turn timeout takes over a
+// buffered ability discard. handleTimeoutEngine used to carry a second check for exactly this state
+// (g.pendingDiscardAbilityChoice && g.SpecialAction.Active && ...) below one that already handles
+// every SpecialAction.Active case and always returns, so the second check could never run: the
+// buffered-choice SpecialAction this test builds (handleDiscardViaEngine) sets Active true for the
+// same player it sets pendingDiscardAbilityChoice for, so the first check always catches it first
+// (cambia-1054). The actually-reachable route is SpecialAction.MustResolve() reading false for this
+// non-Mandatory prompt, falling into processSkipSpecialAction, which resolves the same buffered
+// discard as no-ability (special_actions.go).
+func TestBufferedDiscardTimeoutSkipsAbility(t *testing.T) {
+	g, players, mb := setupTestGame(t, 2, testHouseRules(0, 2))
+
+	seven := engine.NewCard(engine.SuitHearts, engine.RankSeven)
+	actor, _, discardedUUID := bufferedAbilityDiscard(t, g, players, seven)
+	require.True(t, g.SpecialAction.Active, "the buffered choice activates the special-action prompt")
+	require.False(t, g.SpecialAction.Mandatory, "a buffered ability choice is declinable, unlike an engine-armed one")
+
+	g.mu.Lock()
+	g.handleTimeoutEngine(actor.ID)
+	g.mu.Unlock()
+
+	assert.False(t, g.pendingDiscardAbilityChoice, "the timeout resolves the buffer instead of leaving it pending")
+	assert.False(t, g.SpecialAction.Active, "and the prompt does not outlive it")
+	assert.Equal(t, discardedUUID, g.CardTracker.DiscardUUIDs[g.Engine.DiscardLen-1], "the buffered card lands on the pile without a second announcement")
+	assert.Equal(t, 1, countDiscardsOfCard(mb, discardedUUID), "the card was already announced when it was played; the timeout must not announce it again")
+}
