@@ -383,3 +383,44 @@ func TestReconcileLeavesALeasedRowToItsLeaseHolder(t *testing.T) {
 		t.Fatalf("status = %q, want running: the lease holder finalizes it, not Reconcile", st.Status)
 	}
 }
+
+// TestPoolNarrowsTheSubmitPreflightToDisk is D19. RAM and VRAM describe
+// whichever host ends up running the job, which the coordinator does not know
+// at submit and may not be, so with a pool attached they are node gates,
+// measured on the node and reported in its gate report; a breach between claim
+// and Prepare is a nack, not a submit refusal. Disk stays, and stays measured
+// on the coordinator's runs dir, because every node's artifacts land there.
+func TestPoolNarrowsTheSubmitPreflightToDisk(t *testing.T) {
+	starved := rigConfig{
+		minRAMGB: 8,
+		ramQuery: func() (float64, error) { return 0.1, nil },
+	}
+
+	// With no pool this host runs the job, so the floor describes it and the
+	// v1.0 refusal stands.
+	local := newRig(t, starved)
+	resp := local.do(http.MethodPost, "/harness/jobs", baseSpec("ram-starved", "fake-quick"))
+	if resp.StatusCode != http.StatusPreconditionFailed {
+		t.Fatalf("submit with no pool: got %d, want 412", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	pooled := newPoolRig(t, poolRigConfig{embedded: true, rig: starved})
+	resp = pooled.do(http.MethodPost, "/harness/jobs", baseSpec("ram-starved", "fake-quick"))
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("submit with a pool: got %d, want 201 (RAM is a node gate)", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// The disk floor is not narrowed away: it still refuses on the
+	// coordinator's own runs dir.
+	full := newPoolRig(t, poolRigConfig{
+		embedded: true,
+		rig:      rigConfig{minDiskGB: 1e9},
+	})
+	resp = full.do(http.MethodPost, "/harness/jobs", baseSpec("disk-starved", "fake-quick"))
+	if resp.StatusCode != http.StatusPreconditionFailed {
+		t.Fatalf("submit with no disk: got %d, want 412 (the disk floor stays)", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
