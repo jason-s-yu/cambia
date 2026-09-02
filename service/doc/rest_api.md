@@ -213,6 +213,8 @@ Handled by `internal/handlers/user.go`.
       "total": 37 // total games the caller has, for paging without a second request
     }
     ```
+    **`playedAt`** is when the game finished: `games.end_time`, which the server stamps in the transaction that marks a game completed, and also on a game closed out by the boot sweep because the process serving it went away. `end_time` itself is not a separate field in this response. Games recorded before cambia-1904 have no `end_time` and fall back to `games.updated_at`, then `games.created_at`, so `playedAt` is always present.
+
     **`roundIndex`** is `games.round_index`: `0` for a game played outside a circuit (a casual single game, or a non-circuit ranked match), and otherwise the 1-based round the game was within its circuit - `1` for a fresh circuit's first game, `N+1` once `N` rounds have been recorded. It is written once, from `CambiaGame.RoundIndex`, when the game's row is created, and is never revised afterward even if the circuit that produced it is later abandoned (cambia-1240).
 * **Response (Error):**
     * `400 Bad Request`: `limit` or `offset` present and not a valid non-negative integer (`limit` must be positive).
