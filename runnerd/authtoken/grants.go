@@ -17,6 +17,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
+	"github.com/jason-s-yu/cambia/runnerd/nashnet/capability"
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 )
 
@@ -69,29 +70,17 @@ const (
 	DefaultGrantLifetime = 90 * 24 * time.Hour
 )
 
-// Caps is the clamp set an enrollment grant carries (D60), the bound on every
-// declaration field placement reads (D47). A nil or empty field means the cap
-// is unset, which is the enrolling operator's explicit choice to let the
-// declared value pass unclamped. The clamp itself lives with the matcher; this
-// type is only the parsed claim.
-type Caps struct {
-	MaxSlots      *int               `json:"max_slots,omitempty"`
-	Kinds         []string           `json:"kinds,omitempty"`
-	DeviceKinds   []string           `json:"device_kinds,omitempty"`
-	MaxVRAMGB     map[string]float64 `json:"max_vram_gb,omitempty"`
-	MaxCores      *int               `json:"max_cores,omitempty"`
-	MaxRAMGB      *float64           `json:"max_ram_gb,omitempty"`
-	MaxDiskGB     *float64           `json:"max_disk_gb,omitempty"`
-	Labels        []string           `json:"labels,omitempty"`
-	MaxLeaseBytes *int64             `json:"max_lease_bytes,omitempty"`
-}
-
 // Grant is a verified enrollment grant: the node's identity, its key, its caps,
-// and its validity window.
+// and its validity window. Caps is capability.Grant (D60's clamp set, D47's
+// bound on every declaration field placement reads): a nil or empty field
+// means the cap is unset, the enrolling operator's explicit choice to let the
+// declared value pass unclamped. capability is the leaf package that also
+// applies the clamp (capability.Clamp), so this package imports it rather than
+// keeping a second, duplicate claim type.
 type Grant struct {
 	NodeID    string
 	PublicKey ed25519.PublicKey
-	Caps      Caps
+	Caps      capability.Grant
 	IssuedAt  time.Time
 	ExpiresAt time.Time
 }
@@ -329,8 +318,8 @@ func parseGrant(compact string, v *Verifier) (*Grant, error) {
 // parseCaps decodes the caps claim strictly: an unrecognized key is refused
 // rather than ignored, so a misspelled cap is a load failure instead of a
 // silently unclamped field.
-func parseCaps(v any) (Caps, error) {
-	var caps Caps
+func parseCaps(v any) (capability.Grant, error) {
+	var caps capability.Grant
 	if v == nil {
 		return caps, nil
 	}
