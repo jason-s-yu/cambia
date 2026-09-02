@@ -477,12 +477,13 @@ _STRONG_OPPONENT_WARNED = False
 def _make_strong_opponent(player_id: int, config: Any):
     """The default strong fixed opponent (ImperfectGreedyAgent), if available.
 
-    The heuristic baselines are being ported to the ``GameView`` protocol
-    separately (cambia-1426). Until that lands they are still written against
-    the Python reference engine and cannot read a ``GoEngine``, so this falls
-    back to uniform-random and says so: a Tier-B run on the fallback is a Tier-A
-    continuation wearing a Tier-B label, which the returned
-    ``rollout_opponent`` field names so a row is never silently mislabelled.
+    The fallback to uniform-random stays for an agent that cannot read a
+    ``GoEngine``: a Tier-B run on it is a Tier-A continuation wearing a Tier-B
+    label, which the returned ``rollout_opponent`` field names so a row is never
+    silently mislabelled. That fallback is no longer the normal case --
+    ImperfectGreedyAgent claims ``accepts_game_view`` since cambia-1479, having
+    only been ported (cambia-1426) and never marked, which put both Tier-B legs
+    of 2026-09-01 on UniformRandomPolicy.
     """
     global _STRONG_OPPONENT_WARNED
     try:
@@ -514,8 +515,9 @@ def _make_strong_opponent(player_id: int, config: Any):
 def _accepts_game_view(agent: Any) -> bool:
     """True if ``agent`` declares itself runnable against a ``GameView``.
 
-    The opt-in marker a ported baseline/wrapper sets; absent it, an agent is
-    assumed to still want the Python reference engine.
+    The opt-in marker a ported baseline/wrapper sets (see
+    ``src.agents.baseline_agents.BaseAgent.accepts_game_view``); absent it, an
+    agent is assumed to still want the Python reference engine.
     """
     return bool(getattr(agent, "accepts_game_view", False))
 
