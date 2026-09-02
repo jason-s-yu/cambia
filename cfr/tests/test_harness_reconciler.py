@@ -217,6 +217,75 @@ def test_origin_host_additive_migration(tmp_path):
         db.close()
 
 
+# ---------------------------------------------------------------------------
+# executed_on column (cambia-1718, design 4.2 D23 client half)
+# ---------------------------------------------------------------------------
+
+
+def test_executed_on_in_fresh_ddl(tmp_path):
+    db = _open_dest(str(tmp_path / "fresh.db"))
+    try:
+        cols = {r[1] for r in db.execute("PRAGMA table_info(runs)").fetchall()}
+        assert "executed_on" in cols
+    finally:
+        db.close()
+
+
+def test_executed_on_additive_migration(tmp_path):
+    """AC (1): a db created before executed_on existed gains the column via
+    _migrate_schema and reads NULL for the pre-existing row."""
+    path = str(tmp_path / "old.db")
+    legacy_ddl = """
+    CREATE TABLE runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        algorithm TEXT,
+        status TEXT NOT NULL DEFAULT 'created',
+        engine_commit_hash TEXT,
+        origin_host TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    """
+    old = sqlite3.connect(path)
+    old.executescript(legacy_ddl)
+    old.execute(
+        "INSERT INTO runs (name, status, created_at, updated_at) VALUES (?,?,?,?)",
+        ("legacy-run", "completed", _NOW, _NOW),
+    )
+    old.commit()
+    old.close()
+
+    db = _open_dest(path)
+    try:
+        cols = {r[1] for r in db.execute("PRAGMA table_info(runs)").fetchall()}
+        assert "executed_on" in cols
+        row = db.execute(
+            "SELECT executed_on FROM runs WHERE name='legacy-run'"
+        ).fetchone()
+        assert row is not None
+        assert row["executed_on"] is None
+    finally:
+        db.close()
+
+
+def test_upsert_run_executed_on_stamped_and_preserved_on_reset(tmp_path):
+    db = _open_dest(str(tmp_path / "u.db"))
+    try:
+        run_db.upsert_run(db, name="r1", algorithm="prt-cfr", executed_on="node-9c1f")
+        row = db.execute("SELECT executed_on FROM runs WHERE name='r1'").fetchone()
+        assert row["executed_on"] == "node-9c1f"
+
+        # A later upsert with executed_on=None (e.g. a re-replay whose env.json
+        # momentarily carried no value) preserves the established value rather
+        # than regressing it to NULL.
+        run_db.upsert_run(db, name="r1", algorithm="prt-cfr")
+        row = db.execute("SELECT executed_on FROM runs WHERE name='r1'").fetchone()
+        assert row["executed_on"] == "node-9c1f"
+    finally:
+        db.close()
+
+
 def test_upsert_run_engine_commit_default_stamps_local(tmp_path):
     db = _open_dest(str(tmp_path / "u.db"))
     try:
@@ -713,5 +782,30 @@ def test_replay_accepts_open_connection(tmp_path):
         replay(run_dir, db, origin_host="runner")
         # connection still usable after replay
         assert db.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# preempted status (cambia-1718, design 7 D62)
+# ---------------------------------------------------------------------------
+
+
+def test_preempted_status_replays(tmp_path):
+    """AC (5): preempted replays -- a gate-driven stop is a valid run status,
+    not an out-of-range enum rejection."""
+    run_dir = tmp_path / "runs" / "v0.4-prtcfr-r1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    conn = _new_source(run_dir / "run_db.sqlite")
+    _insert_run(conn, status="preempted")
+    conn.close()
+
+    summary = replay(run_dir, _dest_path(tmp_path), origin_host="runner")
+    assert summary["runs"] == 1
+
+    db = _open_dest(_dest_path(tmp_path))
+    try:
+        row = db.execute("SELECT status FROM runs WHERE name='v0.4-prtcfr-r1'").fetchone()
+        assert row["status"] == "preempted"
     finally:
         db.close()

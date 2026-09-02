@@ -106,6 +106,10 @@ _ALLOWED_STATUS: Set[str] = {
     "finished",
     "done",
     "interrupted",
+    # A gate-driven stop (design 7 D62), distinct from an operator cancel: with
+    # no promoted checkpoint the job returns to ready with no attempt increment,
+    # with a checkpoint it is terminal pending an explicit operator resume.
+    "preempted",
 }
 
 
