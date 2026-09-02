@@ -266,6 +266,21 @@ func (d *Dispatcher) dispatchLocked() {
 	d.queue = next
 }
 
+// leasedLive reports whether a live lease holds this job, which makes its
+// supervision the lease holder's rather than this dispatcher's. The store
+// pointer is read under d.mu because attachPool writes it there; the lookup
+// itself runs outside the lock, against the store's own.
+func (d *Dispatcher) leasedLive(jobID string) bool {
+	d.mu.Lock()
+	leases := d.leases
+	d.mu.Unlock()
+	if leases == nil {
+		return false
+	}
+	l, ok := leases.ByJob(jobID)
+	return ok && l.Live()
+}
+
 // canLaunch reports whether a gate-passed (ready) job may claim a slot now,
 // under the exclusive-admission rules of cambia-655 as D13 re-scopes them to
 // one node. The accounting is the node agent's, so the coordinator's own
@@ -797,6 +812,16 @@ func (d *Dispatcher) Reconcile() {
 			// capacity and a local pid probe on it is the cross-host pid-reuse
 			// bug, so it is neither counted nor watched.
 			if st.Host != "" {
+				continue
+			}
+			// A live lease already owns this job's supervision, and its holder
+			// finalizes it through the result route (D6, D7). The embedded node
+			// is why this test is not the Host one: it runs in place, so its
+			// rows carry no Host (the node's own liveness probe needs the local
+			// pid), and adopting one here would put two watchers on one process
+			// and race two terminal writes. A daemon with no pool has no lease
+			// store and adopts every live row exactly as v1.0 does.
+			if d.leasedLive(st.Name) {
 				continue
 			}
 			rj := &job{spec: JobSpec{Name: st.Name, Kind: st.Algorithm}, state: st.Status}

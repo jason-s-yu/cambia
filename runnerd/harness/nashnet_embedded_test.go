@@ -351,3 +351,35 @@ func TestZeroNodeDaemonKeepsTheV1Surface(t *testing.T) {
 		}
 	}
 }
+
+// TestReconcileLeavesALeasedRowToItsLeaseHolder pins the restart rule the
+// embedded node makes load-bearing. An in-place run's process.json carries no
+// Host, because the node's own liveness probe needs the local pid; that is
+// exactly the shape Reconcile adopts for a v1.0 job it launched itself. With a
+// live lease on the job, adopting it would put a second watcher on one process
+// and race two terminal writes against the lease holder's result post.
+func TestReconcileLeavesALeasedRowToItsLeaseHolder(t *testing.T) {
+	r := newPoolRig(t, poolRigConfig{embedded: true})
+	c := r.loopbackClient(t)
+	r.registerEmbedded(t, c, 1)
+	r.queueJob(t, JobSpec{Name: "leased-row"})
+	claim := r.claimEmbedded(t, c)
+	if claim.JobID != "leased-row" {
+		t.Fatalf("claimed %q, want leased-row", claim.JobID)
+	}
+
+	// The shape an in-place launch leaves behind: a running row this host can
+	// probe, with no Host to mark it remote.
+	child := startReattachedChild(t, r.runsDir, "leased-row", "fake", false)
+	defer child.kill(t)
+
+	r.disp.Reconcile()
+
+	if active := r.disp.slots.Active(); active != 0 {
+		t.Fatalf("dispatcher claimed %d slots for a leased job, want 0", active)
+	}
+	st := readProcessState(t, r.runsDir, "leased-row")
+	if st.Status != procmgr.StatusRunning {
+		t.Fatalf("status = %q, want running: the lease holder finalizes it, not Reconcile", st.Status)
+	}
+}
