@@ -37,6 +37,17 @@ NODE_SUBJECT_PREFIX = "node:"
 NODE_ID_PREFIX = "n-"
 NODE_ID_HEX_LEN = 12
 
+# The revocation tombstone suffix (D60), matching
+# runnerd/authtoken.TombstoneFileSuffix. The coordinator writes
+# "<node_id>.revoked" beside the grant when `POST /nashnet/nodes/{id}/revoke`
+# runs (runnerd/harness/nashnet_pool.go:writeTombstone); this client never
+# writes the file itself; revocation is a coordinator API call
+# (cambia harness node revoke), so the tombstone always reflects an act the
+# coordinator's own audit log recorded. The name is pinned here so the CLI and
+# the enrollment runbook have one place to point at when they explain what
+# revoke does server-side.
+TOMBSTONE_SUFFIX = ".revoked"
+
 # Default grant validity, paired with authtoken.DefaultGrantLifetime, which is
 # also the coordinator's default ceiling on exp - iat. Raising one without the
 # other mints grants the coordinator refuses.
@@ -99,6 +110,37 @@ def grant_filename(node_id: str) -> str:
     return f"{node_id}.grant"
 
 
+def tombstone_filename(node_id: str) -> str:
+    """Return the revocation tombstone file name for node_id (D60).
+
+    Mirrors runnerd/authtoken.TombstoneFileSuffix so the two sides never
+    drift: the coordinator checks for exactly this name
+    (authtoken.GrantStore.revoked) on every token and lease-token
+    verification.
+    """
+    return f"{node_id}{TOMBSTONE_SUFFIX}"
+
+
+def decode_node_public_key(text: str | bytes) -> bytes:
+    """Decode a node's public key from text: base64 (with or without padding,
+    standard or url-safe alphabet). Shared by ``load_node_public_key`` (a
+    file) and the ``--pubkey`` CLI flag (a literal argument), the two shapes
+    ``cambia-runnerd node init`` can hand an operator (D60).
+    """
+    raw_text = text.encode() if isinstance(text, str) else text
+    raw_text = raw_text.strip()
+    for decode in (base64.urlsafe_b64decode, base64.b64decode):
+        try:
+            raw = decode(raw_text + b"=" * (-len(raw_text) % 4))
+        except (binascii.Error, ValueError):
+            continue
+        if len(raw) == 32:
+            return raw
+    raise NashnetError(
+        f"unrecognized node public key {text!r}: expected base64 of 32 bytes"
+    )
+
+
 def load_node_public_key(path: str | Path) -> bytes:
     """Read a node's public key as raw bytes.
 
@@ -110,18 +152,13 @@ def load_node_public_key(path: str | Path) -> bytes:
     data = Path(path).expanduser().read_bytes()
     if len(data) == 32:
         return data
-    text = data.strip()
-    for decode in (base64.urlsafe_b64decode, base64.b64decode):
-        try:
-            raw = decode(text + b"=" * (-len(text) % 4))
-        except (binascii.Error, ValueError):
-            continue
-        if len(raw) == 32:
-            return raw
-    raise NashnetError(
-        f"unrecognized node public key at {path}: expected 32 raw bytes or "
-        f"base64 of 32 bytes, got {len(data)} bytes"
-    )
+    try:
+        return decode_node_public_key(data)
+    except NashnetError:
+        raise NashnetError(
+            f"unrecognized node public key at {path}: expected 32 raw bytes or "
+            f"base64 of 32 bytes, got {len(data)} bytes"
+        ) from None
 
 
 def _validate_caps(caps: Optional[Mapping[str, Any]]) -> dict[str, Any]:

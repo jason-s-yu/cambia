@@ -573,6 +573,99 @@ def test_parse_overrides_must_be_mapping():
         JobSpec.parse(_train_spec(overrides=["a=b"]))
 
 
+# ---------------------------------------------------------------------------
+# requires block (design D10/D12, cambia-1725): a client-side shape gate over
+# runnerd/nashnet/capability.Requires's JSON tags. The coordinator is the
+# authoritative validator (D9); this only catches a typo'd key or an
+# obviously wrong type before a submit round-trips a 400.
+# ---------------------------------------------------------------------------
+
+
+def test_parse_requires_round_trips_every_known_field():
+    block = {
+        "device": "cuda",
+        "min_vram_gb": 24,
+        "min_cores": 8,
+        "min_ram_gb": 32.5,
+        "min_disk_gb": 100,
+        "needs_libcambia": True,
+        "node": "n-abc123def456",
+        "labels_any": ["gpu", "fast"],
+    }
+    spec = JobSpec.parse(_train_spec(requires=block))
+    assert spec.requires == block
+    payload = spec.to_payload("f" * 40)
+    assert payload["requires"] == block
+
+
+def test_parse_requires_defaults_to_none():
+    spec = JobSpec.parse(_train_spec())
+    assert spec.requires is None
+    payload = spec.to_payload("f" * 40)
+    assert "requires" not in payload
+
+
+def test_parse_requires_must_be_mapping():
+    with pytest.raises(HarnessSpecError, match="requires must be a mapping"):
+        JobSpec.parse(_train_spec(requires=["node=n-a"]))
+
+
+def test_parse_requires_rejects_unknown_key():
+    with pytest.raises(HarnessSpecError, match="unknown requires keys"):
+        JobSpec.parse(_train_spec(requires={"nod": "n-a"}))
+
+
+def test_parse_requires_rejects_bad_device():
+    with pytest.raises(HarnessSpecError, match="requires.device"):
+        JobSpec.parse(_train_spec(requires={"device": "tpu"}))
+
+
+@pytest.mark.parametrize("key", ["min_vram_gb", "min_ram_gb", "min_disk_gb"])
+def test_parse_requires_rejects_negative_floor(key):
+    with pytest.raises(HarnessSpecError, match=f"requires.{key}"):
+        JobSpec.parse(_train_spec(requires={key: -1}))
+
+
+def test_parse_requires_rejects_non_numeric_floor():
+    with pytest.raises(HarnessSpecError, match="requires.min_ram_gb"):
+        JobSpec.parse(_train_spec(requires={"min_ram_gb": "lots"}))
+
+
+def test_parse_requires_rejects_bool_as_numeric_floor():
+    # isinstance(True, int) is True in Python; a bool must not sneak past the
+    # numeric-floor check.
+    with pytest.raises(HarnessSpecError, match="requires.min_cores"):
+        JobSpec.parse(_train_spec(requires={"min_cores": True}))
+
+
+def test_parse_requires_rejects_negative_min_cores():
+    with pytest.raises(HarnessSpecError, match="requires.min_cores"):
+        JobSpec.parse(_train_spec(requires={"min_cores": -1}))
+
+
+def test_parse_requires_rejects_non_bool_needs_libcambia():
+    with pytest.raises(HarnessSpecError, match="needs_libcambia"):
+        JobSpec.parse(_train_spec(requires={"needs_libcambia": "yes"}))
+
+
+def test_parse_requires_validates_node_name():
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_train_spec(requires={"node": "../etc/passwd"}))
+
+
+def test_parse_requires_rejects_bad_labels_any():
+    with pytest.raises(HarnessSpecError, match="labels_any"):
+        JobSpec.parse(_train_spec(requires={"labels_any": ["ok", ""]}))
+    with pytest.raises(HarnessSpecError, match="labels_any"):
+        JobSpec.parse(_train_spec(requires={"labels_any": "gpu"}))
+
+
+def test_to_payload_omits_requires_when_empty_dict():
+    spec = JobSpec.parse(_train_spec(requires={}))
+    payload = spec.to_payload("f" * 40)
+    assert "requires" not in payload
+
+
 def test_to_payload_stamps_commit():
     spec = JobSpec.parse(_train_spec(overrides={"prt_cfr.iterations": 500}))
     payload = spec.to_payload("f" * 40)
@@ -730,6 +823,115 @@ def test_submit_after_flag_overrides_and_posts(tmp_path, monkeypatch):
 
     assert posted["payload"]["after"] == "parent-run"
     assert posted["payload"]["on_failure"] == "run"
+
+
+def _submit_harness(tmp_path, monkeypatch, name):
+    """Shared submit() test rig: a clean temp repo, a fake client that
+    records the posted payload, and a trivial spec file. Returns (cli module,
+    spec_file path, posted dict)."""
+    import src.harness.cli as cli
+
+    repo = _init_repo(tmp_path)
+    monkeypatch.setattr(cli, "_load_cfg", lambda c: _FakeCfg())
+    monkeypatch.setattr(cli, "_repo_root", lambda: repo)
+    real_git = cli._git
+    monkeypatch.setattr(
+        cli, "_git", lambda a, cwd: "" if a[:1] == ["push"] else real_git(a, cwd)
+    )
+
+    posted = {}
+
+    class FakeClient:
+        def submit(self, payload, force=False):
+            posted["payload"] = payload
+            return {"job_id": payload["name"], "state": "queued", "queue_pos": 0}
+
+    monkeypatch.setattr(cli, "_build_client", lambda cfg: FakeClient())
+
+    spec_file = tmp_path / f"{name}.yaml"
+    spec_file.write_text(f"kind: train\nname: {name}\nconfig: cfr/config/x.yaml\n")
+    return cli, spec_file, posted
+
+
+def test_submit_after_repeated_becomes_fan_in_list(tmp_path, monkeypatch):
+    # --after given twice matches the fan-in AND-join wire shape (design D29,
+    # cambia-1713/cambia-1725): a list of 2+ names, not the pre-r2 string.
+    cli, spec_file, posted = _submit_harness(tmp_path, monkeypatch, "r5")
+
+    cli.submit(spec_file=spec_file, force=False, after=["p1", "p2"], config=None)
+
+    assert posted["payload"]["after"] == ["p1", "p2"]
+
+
+def test_submit_after_single_value_keeps_string_wire_shape(tmp_path, monkeypatch):
+    # Exactly one --after (via the real CLI's list form) stays a bare string,
+    # byte-identical against a daemon that predates fan-in.
+    cli, spec_file, posted = _submit_harness(tmp_path, monkeypatch, "r6")
+
+    cli.submit(spec_file=spec_file, force=False, after=["parent-only"], config=None)
+
+    assert posted["payload"]["after"] == "parent-only"
+
+
+def test_submit_after_empty_list_is_unset(tmp_path, monkeypatch):
+    # typer hands back None when --after is never passed; an explicit empty
+    # list (a direct call) must behave identically.
+    cli, spec_file, posted = _submit_harness(tmp_path, monkeypatch, "r7")
+
+    cli.submit(spec_file=spec_file, force=False, after=[], config=None)
+
+    assert "after" not in posted["payload"]
+
+
+def test_submit_require_node_sets_requires_node(tmp_path, monkeypatch):
+    # --require-node (cambia-1725) sets requires.node without a spec-file
+    # requires: block.
+    cli, spec_file, posted = _submit_harness(tmp_path, monkeypatch, "r8")
+
+    cli.submit(
+        spec_file=spec_file, force=False, require_node="n-abc123def456", config=None
+    )
+
+    assert posted["payload"]["requires"] == {"node": "n-abc123def456"}
+
+
+def test_submit_require_node_preserves_existing_requires_block(tmp_path, monkeypatch):
+    # --require-node merges into an existing spec-file requires: block rather
+    # than discarding its other constraints.
+    import src.harness.cli as cli
+
+    repo = _init_repo(tmp_path)
+    monkeypatch.setattr(cli, "_load_cfg", lambda c: _FakeCfg())
+    monkeypatch.setattr(cli, "_repo_root", lambda: repo)
+    real_git = cli._git
+    monkeypatch.setattr(
+        cli, "_git", lambda a, cwd: "" if a[:1] == ["push"] else real_git(a, cwd)
+    )
+
+    posted = {}
+
+    class FakeClient:
+        def submit(self, payload, force=False):
+            posted["payload"] = payload
+            return {"job_id": payload["name"], "state": "queued", "queue_pos": 0}
+
+    monkeypatch.setattr(cli, "_build_client", lambda cfg: FakeClient())
+
+    spec_file = tmp_path / "r9.yaml"
+    spec_file.write_text(
+        "kind: train\nname: r9\nconfig: cfr/config/x.yaml\n"
+        "requires:\n  device: cuda\n  min_vram_gb: 16\n"
+    )
+
+    cli.submit(
+        spec_file=spec_file, force=False, require_node="n-abc123def456", config=None
+    )
+
+    assert posted["payload"]["requires"] == {
+        "device": "cuda",
+        "min_vram_gb": 16,
+        "node": "n-abc123def456",
+    }
 
 
 def test_submit_exclusive_flag_overrides_and_posts(tmp_path, monkeypatch):

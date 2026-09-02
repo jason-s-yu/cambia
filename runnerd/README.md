@@ -73,6 +73,74 @@ Environment=RUNNERD_ALLOWED_ORIGIN=https://your-dashboard-host.example
 
 Notable settings baked into the unit: `KillMode=process`, `PrivateTmp=no`, and `TimeoutStopSec=35` are what make a restart job-preserving (see Restart semantics below) -- do not change `KillMode` or `PrivateTmp` without reading that section; `NoNewPrivileges=yes` sandboxes the process; `Restart=on-failure` with a 5s backoff recovers from crashes, relying on reconcile-on-boot rather than in-place state recovery.
 
+## Nashnet node enrollment
+
+Nashnet (design `.docs/serving-harness/v1.1-compute-pool-design.md`) lets a coordinator hand work out to enrolled nodes instead of running every job itself. A node holds **no ssh key and needs none**: its complete set of secrets is its own ed25519 keypair and the coordinator's pinned TLS certificate fingerprint (D27). Enrollment is an operator-signed grant file, never ssh access, a join endpoint, or a shared secret (D60).
+
+The coordinator opts into the pool by setting `RUNNERD_NASHNET_NODES_DIR` (default `/srv/cambia/keys/nodes/`); with it unset the daemon serves the unchanged v1.0 surface and no `/nashnet/*` route exists (D39, D40).
+
+**1. Generate the node's key and config, on the node itself.**
+
+```bash
+cambia-runnerd node init \
+  --coordinator-url https://<coordinator-host>:8090 \
+  --coordinator-fingerprint <sha256, from step 1a below> \
+  --config nashnet-node.yaml \
+  --base-dir /srv/cambia \
+  --slots 2
+```
+
+This mints the node's ed25519 private key (`<base-dir>/nashnet-node.key` by default, mode 0600, never leaves the node) and writes `nashnet-node.yaml`, a `nashnet:` config template that already validates against the same loader `--role node` uses at startup. It prints the derived node id (`n-<12 hex>`) and the node's public key.
+
+1a. Fetch the coordinator's TLS fingerprint from anywhere with network access to it (this does not require an account on the coordinator host):
+
+```bash
+openssl s_client -connect <coordinator-host>:8090 </dev/null 2>/dev/null | openssl x509 -fingerprint -sha256 -noout
+```
+
+**2. Mint the enrollment grant, from the operator's own machine.**
+
+```bash
+cambia harness node grant --pubkey <public key from step 1> --slots 2 --expires 90d
+```
+
+This runs entirely offline: it signs with the operator's own client key (the same key `cambia harness init` set up, `auth.private_key_path`) and writes `<node_id>.grant` to the current directory. Nothing is sent over the network by this command, and no node is contacted.
+
+**3. Drop the grant onto the coordinator, over the operator's own path.**
+
+```bash
+scp ./<node_id>.grant <coordinator-ssh-target>:$RUNNERD_NASHNET_NODES_DIR/<node_id>.grant
+```
+
+This is the operator's own ssh/admin access to the coordinator host, the same access used to deploy `cambia-runnerd` itself -- never a node's path, because a node has no ssh access to give. The coordinator picks up a new or changed grant within its keyset cache TTL (30s) with no restart required.
+
+**4. Start the node.**
+
+```bash
+cambia-runnerd --role node --node-config nashnet-node.yaml
+```
+
+The node registers itself, evaluates its own gates (D46), and begins long-polling for work. There is no push from the coordinator to the node beyond that poll's response: the node has no listener of its own.
+
+**5. Smoke claim.** Confirm the node is visible and can actually run a job:
+
+```bash
+cambia harness nodes
+```
+
+The enrolled node should show a `connected` (or `idle`) presence, a passing gate report, and the slot count the grant clamped it to. Then submit any spec pinned to it to prove a claim round-trips end to end (a `bench` job is the cheapest kind for this):
+
+```bash
+cambia harness submit path/to/spec.yaml --require-node <node_id>
+cambia harness status <job-name>
+```
+
+A successful run confirms enrollment, claim, ingest, launch, and result-post all work for that node.
+
+**Revoke and drain.** `cambia harness node revoke <node_id>` is permanent and immediate: it writes `<node_id>.revoked`, settles every lease the node held, and leaves no grace period, because a revoke means the operator has declared the node untrusted (D60). `cambia harness node drain <node_id>` (and `--off` to lift it) is the reversible version for planned maintenance: the node keeps its credential and its in-flight leases but is excluded from new placement; `--clear-breaker` additionally resets the D63 circuit breaker's trip count.
+
+**The client-side ssh scope (D61).** The rule above is "nodes get no ssh", never "no ssh anywhere". The operator's own client machine (the one running `cambia harness submit`/`pull`/`push-run`) keeps using ssh exactly as it does in v1.0: rsync to pull job artifacts and git push to update the coordinator's mirror. A single machine can hold both roles -- client and node -- at once; when it does, the two roles have separate directories, separate configs, and the node role never gains a path to the client's mint key. Nashnet does not add or remove any ssh surface on the client side; it only removes the node's.
+
 ## API endpoints
 
 | Method + path | Purpose |

@@ -27,12 +27,15 @@ from src.harness.nashnet import (  # noqa: E402
     DEFAULT_GRANT_LIFETIME_DAYS,
     GRANT_AUDIENCE,
     NODE_SUBJECT_PREFIX,
+    TOMBSTONE_SUFFIX,
     NashnetError,
+    decode_node_public_key,
     derive_node_id,
     grant_filename,
     load_node_public_key,
     mint_grant,
     parse_duration,
+    tombstone_filename,
 )
 
 # Deterministic test-only keys. Seeds are hashes of fixed strings so the golden
@@ -78,6 +81,14 @@ def test_derive_node_id_is_the_key_hash():
 def test_derive_node_id_rejects_a_wrong_sized_key():
     with pytest.raises(NashnetError):
         derive_node_id(b"too-short")
+
+
+def test_tombstone_filename_matches_the_go_suffix():
+    # runnerd/authtoken.TombstoneFileSuffix = ".revoked"; pinned here so a
+    # rename on either side fails the pairing loudly instead of silently.
+    assert TOMBSTONE_SUFFIX == ".revoked"
+    node_id = derive_node_id(_raw_public(_key(NODE_A_SEED)))
+    assert tombstone_filename(node_id) == f"{node_id}.revoked"
 
 
 def test_mint_grant_carries_the_enrollment_claims():
@@ -137,6 +148,20 @@ def test_load_node_public_key_accepts_raw_and_base64(tmp_path):
     bad.write_text("not a key\n")
     with pytest.raises(NashnetError):
         load_node_public_key(bad)
+
+
+def test_decode_node_public_key_accepts_urlsafe_and_standard_base64():
+    import base64
+
+    pub = _raw_public(_key(NODE_A_SEED))
+    assert decode_node_public_key(base64.urlsafe_b64encode(pub).decode()) == pub
+    assert decode_node_public_key(base64.b64encode(pub).decode()) == pub
+    # No padding, matching signer.PublicKeyBase64() (RawURLEncoding).
+    assert (
+        decode_node_public_key(base64.urlsafe_b64encode(pub).rstrip(b"=").decode()) == pub
+    )
+    with pytest.raises(NashnetError):
+        decode_node_public_key("not-a-key")
 
 
 @pytest.mark.skipif(
