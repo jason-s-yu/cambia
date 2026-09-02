@@ -44,6 +44,15 @@ UNKNOWN_CARD_EXPECTED_VALUE = 6.5
 class BaseAgent(ABC):
     """Abstract base class for Cambia agents."""
 
+    #: Whether ``choose_action`` runs against any ``GameView`` -- the GoEngine
+    #: included -- rather than only the Python reference engine. False here on
+    #: purpose: ``src.cfr.lbr`` gates its strong-opponent factory on this
+    #: marker, so a subclass claims it only once a test has driven it through a
+    #: whole game on a GoEngine. cambia-1426 put the baselines on the protocol
+    #: but left the marker unclaimed, which silently dropped every Tier-B run
+    #: onto UniformRandomPolicy (cambia-1479 defect 3).
+    accepts_game_view = False
+
     player_id: int
     opponent_id: int
     config: Config
@@ -76,6 +85,8 @@ class BaseAgent(ABC):
 
 class RandomAgent(BaseAgent):
     """An agent that chooses actions randomly from the legal set."""
+
+    accepts_game_view = True
 
     def __init__(self, player_id: int, config: Config, seed: Optional[int] = None):
         super().__init__(player_id, config)
@@ -123,6 +134,8 @@ class GreedyAgent(BaseAgent):
     Assumes perfect information (direct access to game_state) for decision making.
     Uses configurable parameters for some decisions.
     """
+
+    accepts_game_view = True
 
     def __init__(self, player_id: int, config: Config):
         super().__init__(player_id, config)
@@ -736,6 +749,8 @@ class ImperfectGreedyAgent(ImperfectMemoryMixin, BaseAgent):
     Snap: only snaps own cards it has seen and knows match discard.
     """
 
+    accepts_game_view = True
+
     def __init__(self, player_id: int, config: Config):
         super().__init__(player_id, config)
         self.cambia_threshold = config.agents.greedy_agent.cambia_call_threshold
@@ -862,6 +877,8 @@ class MemoryHeuristicAgent(ImperfectMemoryMixin, BaseAgent):
     - Snaps own when confident (seen card matches discard).
     - Calls Cambia when estimated hand total <= cambia_threshold.
     """
+
+    accepts_game_view = True
 
     def __init__(self, player_id: int, config: Config):
         super().__init__(player_id, config)
@@ -1021,6 +1038,8 @@ class AggressiveSnapAgent(ImperfectMemoryMixin, BaseAgent):
     - Uses King look-and-swap to offload known high cards.
     - Calls Cambia aggressively when hand size <= 2 or total <= 4.
     """
+
+    accepts_game_view = True
 
     CAMBIA_HAND_SIZE_THRESHOLD = 2
     CAMBIA_VALUE_THRESHOLD = 4
