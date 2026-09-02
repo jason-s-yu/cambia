@@ -184,10 +184,17 @@ def render_leases(node: Dict[str, Any]) -> List[str]:
     return lines
 
 
-def render_drain(node: Dict[str, Any]) -> str:
+def render_hold(node: Dict[str, Any]) -> str:
     """The coordinator-side hold (an operator drain or the D63 breaker), not
-    the node's own drain gate, which arrives only inside the gate report."""
-    return f"  drain: {'yes' if node.get('drained') else 'no'}"
+    the node's own drain gate, which arrives only inside the gate report.
+
+    The wire names which of the two stands. The drain flag alone cannot: a node
+    the breaker holds carries no drain flag, so reading that flag would report a
+    node taking no work and no reason for it. The flag is still the fallback,
+    for a coordinator that predates the named hold.
+    """
+    hold = node.get("hold") or ("drain" if node.get("drained") else "")
+    return f"  hold: {hold or 'none'}"
 
 
 def render_breaker(node: Dict[str, Any]) -> str:
@@ -213,7 +220,8 @@ def render_degraded(node: Dict[str, Any]) -> str:
 
 def render_node_block(node: Dict[str, Any]) -> List[str]:
     """The full multi-line block for one node: declaration, session state,
-    gate verdicts, leases, drain hold, breaker state, and degraded marks."""
+    gate verdicts, leases, the coordinator hold, breaker state, and degraded
+    marks."""
     node_id = node.get("node_id") or "?"
     epoch = node.get("node_epoch")
     lines = [f"node {node_id}  epoch={epoch}"]
@@ -221,7 +229,7 @@ def render_node_block(node: Dict[str, Any]) -> List[str]:
     lines.append(render_session(node))
     lines.extend(render_gate_report(node.get("gate_report")))
     lines.extend(render_leases(node))
-    lines.append(render_drain(node))
+    lines.append(render_hold(node))
     lines.append(render_breaker(node))
     lines.append(render_degraded(node))
     return lines

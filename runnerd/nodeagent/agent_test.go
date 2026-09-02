@@ -539,24 +539,84 @@ func keys(m map[string]bool) []string {
 	return out
 }
 
-// TestADrainEventAppliesItsOwnBoolean pins the node half of the drain contract:
-// the event carries the state the operator set and the node applies it as given,
-// so a lift takes effect on the round trip that delivers it rather than waiting
-// for a heartbeat to correct a hold the node put on itself.
-func TestADrainEventAppliesItsOwnBoolean(t *testing.T) {
+// TestADrainEventAppliesItsOwnHold pins the node half of the hold contract: the
+// event names the hold the coordinator set and the node applies it as given, so
+// both a hold and a lift take effect on the round trip that delivers them
+// rather than waiting for a heartbeat to correct one the node put on itself.
+func TestADrainEventAppliesItsOwnHold(t *testing.T) {
 	stub := newStubCoordinator(t)
 	agent, _ := testAgent(t, stub, nil)
 
-	agent.applyEvents(nashnet.EventsResponse{
-		Events: []nashnet.Event{{Type: nashnet.EventDrain, Drain: true}},
-	})
-	if !agent.isDrained() {
-		t.Fatal("a drain event did not hold the node")
+	for _, reason := range []string{nashnet.HoldReasonDrain, nashnet.HoldReasonBreaker} {
+		agent.applyEvents(nashnet.EventsResponse{
+			Events: []nashnet.Event{{Type: nashnet.EventDrain, Hold: reason}},
+		})
+		if !agent.isHeld() {
+			t.Fatalf("a %s event did not hold the node", reason)
+		}
+		agent.applyEvents(nashnet.EventsResponse{
+			Events: []nashnet.Event{{Type: nashnet.EventDrain}},
+		})
+		if agent.isHeld() {
+			t.Fatalf("the lift after a %s hold did not reach the node", reason)
+		}
 	}
-	agent.applyEvents(nashnet.EventsResponse{
-		Events: []nashnet.Event{{Type: nashnet.EventDrain, Drain: false}},
-	})
-	if agent.isDrained() {
-		t.Fatal("the lift did not reach the node: it waited for a heartbeat")
+}
+
+// TestAHeldNodeStaysHeldAcrossItsHeartbeat is the node half of AC2: a hold the
+// coordinator still reports is not undone by the call that reports it, which is
+// what stopped a breaker trip from posting a truthful event before this. The
+// node's own gate drain is separate and survives that call untouched, since the
+// coordinator answers for its hold and not for the node's gates.
+func TestAHeldNodeStaysHeldAcrossItsHeartbeat(t *testing.T) {
+	stub := newStubCoordinator(t)
+	agent, _ := testAgent(t, stub, nil)
+
+	agent.applyHold(nashnet.HoldReasonBreaker)
+	agent.setGateDrain(true)
+
+	agent.noteHeartbeat(nashnet.HeartbeatResponse{NodeEpoch: 2, Hold: nashnet.HoldReasonBreaker})
+	if !agent.isHeld() {
+		t.Fatal("the node undrained itself on the heartbeat that reported its hold")
+	}
+	if !agent.isGateDrained() {
+		t.Fatal("a coordinator response cleared the node's own gate drain")
+	}
+
+	agent.noteHeartbeat(nashnet.HeartbeatResponse{NodeEpoch: 2})
+	if agent.isHeld() {
+		t.Fatal("the lift the heartbeat reported did not reach the node")
+	}
+}
+
+// TestAHeldNodeClaimsNothing is the other node half of AC2: the claim loop
+// sends nothing while the coordinator's hold stands, whichever hold it is, and
+// sends again once it lifts. The node's own gate drain is separate and is
+// lifted by the node's own gates, never by a coordinator answer.
+func TestAHeldNodeClaimsNothing(t *testing.T) {
+	stub := newStubCoordinator(t)
+	agent, _ := testAgent(t, stub, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	for _, reason := range []string{nashnet.HoldReasonDrain, nashnet.HoldReasonBreaker} {
+		agent.applyHold(reason)
+		agent.claimOnce(ctx)
+		if n := stub.claimCount(); n != 0 {
+			t.Fatalf("a node held by the %s sent %d claims, want none", reason, n)
+		}
+	}
+	agent.applyHold("")
+
+	// The node's own gate drain covers the window between a mid-job breach and
+	// the next gate evaluation, and that evaluation lifts it: these gates admit,
+	// so this pass clears the hold and claims.
+	agent.setGateDrain(true)
+	agent.claimOnce(ctx)
+	if agent.isGateDrained() {
+		t.Fatal("an admitting gate report did not lift the node's own hold")
+	}
+	if n := stub.claimCount(); n != 1 {
+		t.Fatalf("claims after both holds lifted = %d, want 1", n)
 	}
 }

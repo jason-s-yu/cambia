@@ -862,3 +862,74 @@ func TestARequeuedResumeSurvivesTheRestartToo(t *testing.T) {
 		t.Fatalf("re-claim after the restart = %+v, want the resume back", again)
 	}
 }
+
+// heartbeat posts one idle heartbeat and returns the coordinator's answer.
+func (r *poolRig) heartbeat(t *testing.T, n fixtureNode) nashnet.HeartbeatResponse {
+	t.Helper()
+	resp := r.doNode(t, n, http.MethodPost, "/nashnet/nodes/"+n.id+"/heartbeat",
+		nashnet.HeartbeatRequest{AgentVersion: "1.1.0", SlotsFree: 2,
+			Capabilities: declaration(2), GateReport: admitReport(2)})
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("heartbeat for %s: got %d, want 200", n.name, resp.StatusCode)
+	}
+	var out nashnet.HeartbeatResponse
+	decodeInto(t, resp, &out)
+	return out
+}
+
+// TestABreakerHoldSurvivesTheNodesOwnCalls is the coordinator half of the
+// truthful drain event: the trip posts an event naming the breaker, and the
+// register and heartbeat answers a held node makes keep reporting that hold
+// instead of the registry's drain flag, which stands at false throughout. A
+// node believing those answers claims nothing until the cooldown runs out.
+func TestABreakerHoldSurvivesTheNodesOwnCalls(t *testing.T) {
+	r := newPoolRig(t, poolRigConfig{})
+	r.register(t, r.nodeA, 4)
+	r.register(t, r.nodeB, 4)
+	for i := 0; i < BreakerThreshold+1; i++ {
+		r.queueJob(t, JobSpec{Name: fmt.Sprintf("held-job-%d", i)})
+	}
+	for i := 0; i < BreakerThreshold; i++ {
+		_, c := r.claim(t, r.nodeA, nashnet.ClaimRequest{})
+		if c == nil {
+			t.Fatalf("nack %d: no claim", i)
+		}
+		r.nack(t, c, nashnet.NackPrepareNodeFailed)
+	}
+
+	// The trip announces itself, and it names the breaker rather than an
+	// operator act the registry would deny on the node's next call.
+	events := r.drainEvents(t, r.nodeA)
+	if len(events) != 1 || events[0].Hold != nashnet.HoldReasonBreaker {
+		t.Fatalf("events after the trip = %+v, want one naming the breaker", events)
+	}
+	if rec, _ := r.pool.nodes.Get(r.nodeA.id); rec.Drained {
+		t.Fatal("the breaker set the registry drain flag, which is the operator's alone")
+	}
+
+	// The node's own calls report the hold back to it rather than clearing it.
+	if hold := r.heartbeat(t, r.nodeA).Hold; hold != nashnet.HoldReasonBreaker {
+		t.Fatalf("heartbeat hold = %q, want breaker: the node would undrain itself", hold)
+	}
+	r.register(t, r.nodeA, 4)
+	if hold := r.registerHold(t, r.nodeA); hold != nashnet.HoldReasonBreaker {
+		t.Fatalf("register hold = %q, want breaker", hold)
+	}
+	resp, _ := r.claim(t, r.nodeA, nashnet.ClaimRequest{})
+	if got := holdReason(resp); got != nashnet.HoldNodeGated {
+		t.Fatalf("claim while held = %q, want node_gated", got)
+	}
+	if _, other := r.claim(t, r.nodeB, nashnet.ClaimRequest{}); other == nil {
+		t.Fatal("one node's breaker stopped the queue")
+	}
+
+	// The cooldown runs out on its own timer and every answer agrees.
+	r.clock.advance(BreakerCooldown + time.Second)
+	if hold := r.heartbeat(t, r.nodeA).Hold; hold != "" {
+		t.Fatalf("heartbeat hold after the cooldown = %q, want none", hold)
+	}
+	if _, again := r.claim(t, r.nodeA, nashnet.ClaimRequest{}); again == nil {
+		t.Fatal("the node was not handed work after its hold lapsed")
+	}
+}
