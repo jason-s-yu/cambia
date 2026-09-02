@@ -210,6 +210,55 @@ func TestLeaveMidGameForfeitsTheSeatWhenAsked(t *testing.T) {
 	}
 }
 
+// TestForfeitedLeaverStaysForfeitedOnReconnect: a seat given up on purpose does not come back.
+// HandleReconnect lifts a forfeit so a player who missed part of a round is not scored out of it,
+// which is right for a closed grace window and wrong for a leave the player confirmed, and the way
+// back is open at a public or matchmade lobby: the WS gate demands membership only for a private
+// one, so browser Back after the confirm dialog reached this path and undid the whole leave,
+// scoring a ranked round on the played hand instead of ForfeitRoundScore (cambia-1239).
+func TestForfeitedLeaverStaysForfeitedOnReconnect(t *testing.T) {
+	auth.Init()
+	gs := NewGameServer()
+
+	hostID := uuid.New()
+	hostToken, _ := auth.CreateJWT(hostID.String())
+	playerID := uuid.New()
+	playerToken, _ := auth.CreateJWT(playerID.String())
+	thirdID := uuid.New()
+	thirdToken, _ := auth.CreateJWT(thirdID.String())
+
+	lob, _, _ := newRunningLobby(t, gs, hostToken, `{"type":"public","gameMode":"group_of_4"}`)
+	joinLobbyAs(t, gs, lob.ID, hostToken)
+	joinLobbyAs(t, gs, lob.ID, playerToken)
+	joinLobbyAs(t, gs, lob.ID, thirdToken)
+	g := startTestGame(t, gs, lob, []uuid.UUID{hostID, playerID, thirdID})
+
+	// The round has to actually be running: HandleReconnect only reaches the lift at all while
+	// the game is in progress, so a created-but-unstarted game would pass this test whatever the
+	// lift does. EndGame afterwards drops the pre-game timer BeginPreGame arms.
+	g.BeginPreGame()
+	t.Cleanup(g.EndGame)
+	if !g.GetCurrentObfuscatedGameState(playerID).PreGameActive {
+		t.Fatalf("the game under test must be in progress before the leave")
+	}
+
+	if w := forfeitLobbyAs(t, gs, lob.ID, playerToken); w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from an explicit mid-game forfeit, got %d: %s", w.Code, w.Body.String())
+	}
+	if !g.IsForfeited(playerID) {
+		t.Fatalf("an explicit mid-game leave must forfeit the seat there and then")
+	}
+
+	g.HandleReconnect(playerID, nil)
+
+	if !g.IsForfeited(playerID) {
+		t.Fatalf("reconnecting after a confirmed leave lifted the forfeit; the seat was given up on purpose")
+	}
+	if g.IsGameOver() {
+		t.Fatalf("the leaver returning as a spectator must not end the game the others are playing")
+	}
+}
+
 // TestLeaveMidGameAllowedForAForfeitedSeat is the refusal's blind spot (cambia-1520): a seat that
 // has already forfeited is not a seat the game is waiting on, so a leave takes nothing from it.
 // Refusing that caller stranded the exit affordance cambia-1237 put on the table for exactly this

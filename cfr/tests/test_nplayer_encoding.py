@@ -16,9 +16,14 @@ from src.constants import (
     N_PLAYER_POWERSET_DIM,
     N_PLAYER_IDENTITY_DIM,
     N_PLAYER_PUBLIC_DIM,
+    N_PLAYER_SEAT_DIM,
+    N_PLAYER_SEAT_COUNT_DIM,
+    N_PLAYER_HAND_LEN_DIM,
+    N_PLAYER_SEAT_BLOCK_DIM,
 )
 from src.encoding import (
     encode_infoset_nplayer,
+    nplayer_seat_order,
     nplayer_action_to_index,
     encode_nplayer_action_mask,
 )
@@ -389,7 +394,12 @@ class TestSlotIdentityEncoding:
         assert np.all(out[identity_base : identity_base + 9] == 0.0)
 
     def test_public_knowledge_sets_identity(self):
-        """When a card is public knowledge, any encoding player sees the identity."""
+        """When a card is public knowledge, any encoding player sees the identity.
+
+        The slot blocks are ordered relative to the encoding player, so seat 1 sits in
+        block 2 for a player seated at 2 (its opponents are 0 then 1), not in block 1
+        (cambia-1551).
+        """
         all_players = {0, 1, 2}
         km = {(1, 3): all_players}
         sb = {(1, 3): 7}  # bucket 7 = SWAP_BLIND
@@ -404,9 +414,13 @@ class TestSlotIdentityEncoding:
             decision_context=0,
             cambia_state=2,
         )
-        global_slot = 1 * 6 + 3  # = 9
-        identity_base = N_PLAYER_POWERSET_DIM + global_slot * 9
+        assert nplayer_seat_order(2, 3)[2] == 1
+        rel_slot = 2 * 6 + 3  # relative block 2, card 3
+        identity_base = N_PLAYER_POWERSET_DIM + rel_slot * 9
         assert out[identity_base + 7] == 1.0
+        # The absolute-seat position it used to occupy now belongs to another seat.
+        stale_base = N_PLAYER_POWERSET_DIM + (1 * 6 + 3) * 9
+        assert np.all(out[stale_base : stale_base + 9] == 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -505,11 +519,34 @@ class TestAgentStateNPlayerMasks:
 
     def test_nplayer_initialize(self):
         state = self._make_agent_state()
-        state.nplayer_initialize(num_players=4, initial_peek_indices=(0, 1))
+        state.nplayer_initialize(
+            num_players=4,
+            initial_peek_indices_by_player={
+                0: (0, 1),
+                1: (0, 1),
+                2: (0, 1),
+                3: (0, 1),
+            },
+        )
         assert state.num_players == 4
         # Player 0 knows their own slots 0 and 1
         assert 0 in state.knowledge_masks[(0, 0)]
         assert 0 in state.knowledge_masks[(0, 1)]
+        # Every other seat knows exactly its own peeked slots, and nothing else knows them.
+        for seat in (1, 2, 3):
+            assert state.knowledge_masks[(seat, 0)] == {seat}
+            assert state.knowledge_masks[(seat, 1)] == {seat}
+        # Nobody else is recorded as knowing player 0's cards.
+        assert state.nplayer_get_knowledge_mask(0, 0) == {0}
+        assert state.nplayer_get_knowledge_mask(0, 1) == {0}
+
+    def test_nplayer_initialize_omits_seats_with_no_peeks(self):
+        state = self._make_agent_state()
+        state.nplayer_initialize(
+            num_players=3, initial_peek_indices_by_player={0: (0, 1)}
+        )
+        assert state.nplayer_get_knowledge_mask(1, 0) == set()
+        assert state.nplayer_get_knowledge_mask(2, 0) == set()
 
     def test_record_peek(self):
         state = self._make_agent_state()
@@ -540,7 +577,7 @@ class TestAgentStateNPlayerMasks:
 
     def test_clone_copies_knowledge_masks(self):
         state = self._make_agent_state()
-        state.nplayer_initialize(3, initial_peek_indices=(0,))
+        state.nplayer_initialize(3, initial_peek_indices_by_player={0: (0,)})
         cloned = state.clone()
         assert cloned.num_players == 3
         assert cloned.knowledge_masks == state.knowledge_masks
@@ -698,3 +735,64 @@ class TestNPlayerDimCrossCheck:
         go_input_dim, go_num_actions = get_nplayer_dims()
         assert go_input_dim == GoEngine.N_PLAYER_INPUT_DIM
         assert go_num_actions == GoEngine.N_PLAYER_NUM_ACTIONS
+
+
+# ---------------------------------------------------------------------------
+# 8. Table shape: seat count and hand lengths reach the vector (cambia-1551)
+# ---------------------------------------------------------------------------
+
+
+class TestNPlayerTableShape:
+    """The vector used to carry no seat count and no hand length, so a four-seat table
+    and an eight-seat one encoded alike and every slot past a hand's end read as a card.
+    """
+
+    def _encode(self, num_players, hand_lens):
+        return encode_infoset_nplayer(
+            knowledge_masks={(0, 0): {0}},
+            slot_buckets={(0, 0): 3},
+            encoding_player=0,
+            num_players=num_players,
+            discard_top_bucket=0,
+            stock_estimate=0,
+            game_phase=0,
+            decision_context=0,
+            cambia_state=2,
+            hand_lens=hand_lens,
+        )
+
+    def test_seat_count_changes_the_vector(self):
+        four = self._encode(4, [4, 4, 4, 4, 0, 0, 0, 0])
+        five = self._encode(5, [4, 4, 4, 4, 4, 0, 0, 0])
+        assert not np.array_equal(four, five)
+
+    def test_opponent_hand_length_changes_the_vector(self):
+        full = self._encode(4, [4, 4, 4, 4, 0, 0, 0, 0])
+        short = self._encode(4, [4, 3, 4, 4, 0, 0, 0, 0])
+        assert not np.array_equal(full, short)
+
+    def test_slots_past_the_hand_length_are_masked(self):
+        out = self._encode(4, [1, 4, 4, 4, 0, 0, 0, 0])
+        # Own slot 0 is still there; the encoding player holds exactly one card, so its
+        # slots 1-5 carry neither a knower bit nor an identity.
+        assert out[0] == 1.0
+        assert np.all(out[N_PLAYER_MAX_PLAYERS : 6 * N_PLAYER_MAX_PLAYERS] == 0.0)
+        identity = N_PLAYER_POWERSET_DIM
+        assert np.all(out[identity + 9 : identity + 6 * 9] == 0.0)
+
+    def test_go_python_layout_agree_on_the_table_block(self):
+        """The per-seat block reads the same offsets the Go encoder writes."""
+        out = self._encode(3, [4, 2, 5, 0, 0, 0, 0, 0])
+        table = (
+            N_PLAYER_POWERSET_DIM
+            + N_PLAYER_IDENTITY_DIM
+            + N_PLAYER_PUBLIC_DIM
+            + N_PLAYER_SEAT_DIM
+            + N_PLAYER_SEAT_COUNT_DIM
+        )
+        for rel, hand_len in enumerate([4, 2, 5]):
+            base = table + rel * N_PLAYER_SEAT_BLOCK_DIM
+            assert out[base + hand_len] == 1.0
+            assert out[base + N_PLAYER_HAND_LEN_DIM] == 1.0
+        empty = table + 3 * N_PLAYER_SEAT_BLOCK_DIM
+        assert np.all(out[empty : empty + N_PLAYER_SEAT_BLOCK_DIM] == 0.0)

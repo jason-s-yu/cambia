@@ -189,6 +189,12 @@ func (g *GameState) nplayerSnapOpponent(slot, oppRelIdx uint8) error {
 	opponent := opps[oppRelIdx]
 	oppHandLen := g.Players[opponent].HandLen
 
+	// Same refusal as snapOpponent: a locked caller's hand was never a legal target, so this
+	// returns before any hand is touched and draws no penalty (cambia-1239).
+	if g.HandLocked(opponent) {
+		return fmt.Errorf("target's hand is locked by LockCallerHand")
+	}
+
 	g.recordNPlayerAction(NPlayerEncodeSnapOpponent(slot, oppRelIdx))
 	g.LastAction.ActingPlayer = snapperIdx
 	g.recordSwapTargetPlayer(opponent)

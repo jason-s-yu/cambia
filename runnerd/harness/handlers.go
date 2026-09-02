@@ -3,10 +3,12 @@ package harness
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/jason-s-yu/cambia/runnerd/pathguard"
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
@@ -56,6 +58,42 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid_warm_start", "warm_start is only valid for kind=train")
 		return
 	}
+	// 3b''. script/args/reads kind-scoping (design D38): measure-only fields.
+	// script is required for measure and must resolve under measureScriptRoot;
+	// the worktree does not exist yet, so this is a lexical prefix check (the
+	// staged file's existence at the pinned commit is checked at launch). args
+	// entries are validated for shape (no NUL, under the length cap) so a bad
+	// spec never reaches a launch attempt.
+	if spec.scriptForbidden() {
+		writeJSONError(w, http.StatusBadRequest, "invalid_script", "script is only valid for kind=measure")
+		return
+	}
+	if spec.Kind == KindMeasure {
+		if spec.scriptRequired() {
+			writeJSONError(w, http.StatusBadRequest, "invalid_script", "script is required for kind=measure")
+			return
+		}
+		if err := pathguard.CheckRel(spec.Script); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_script", "script: "+err.Error())
+			return
+		}
+		if !spec.scriptRootValid() {
+			writeJSONError(w, http.StatusBadRequest, "invalid_script", "script must resolve under "+measureScriptRoot)
+			return
+		}
+	}
+	if spec.argsForbidden() {
+		writeJSONError(w, http.StatusBadRequest, "invalid_args", "args is only valid for kind=measure")
+		return
+	}
+	if err := spec.validateArgs(); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_args", err.Error())
+		return
+	}
+	if spec.readsForbidden() {
+		writeJSONError(w, http.StatusBadRequest, "invalid_reads", "reads is only valid for kind=measure")
+		return
+	}
 	// 3c. device shape validation: device must be one of cpu/cuda/xpu.
 	if !spec.deviceValid() {
 		writeJSONError(w, http.StatusBadRequest, "invalid_device", "device not supported: "+spec.device())
@@ -68,22 +106,32 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "device_unsupported", "device not enabled on this runner: "+spec.device())
 		return
 	}
-	// 3e. cross-job dependency (cambia-352): after names a single parent job that
-	// must already exist; a terminal parent is allowed (the gate resolves its
-	// outcome at dispatch). Self-reference is rejected; cycles are structurally
-	// impossible since a parent must exist strictly before its child. on_failure
-	// governs only the parent-failure branch.
-	if spec.After != "" {
-		if err := procmgr.ValidateName(spec.After); err != nil {
+	// 3e. cross-job dependency (cambia-352, widened to an AND-join list by D29):
+	// after names 0..N parent jobs that must already exist; a terminal parent is
+	// allowed (the gate resolves its outcome at dispatch). Self-reference is
+	// rejected for every named parent; cycles are structurally impossible since a
+	// parent must exist strictly before its child. on_failure governs only the
+	// parent-failure branch, shared across every parent. Parents-first admission
+	// also bounds the ancestor chain: dependencyDepth walks it and rejects a
+	// submission that would extend it past maxDependencyDepth.
+	for _, parent := range spec.After {
+		if err := procmgr.ValidateName(parent); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid_after", err.Error())
 			return
 		}
-		if spec.After == spec.Name {
+		if parent == spec.Name {
 			writeJSONError(w, http.StatusBadRequest, "invalid_after", "after must not reference the job itself")
 			return
 		}
-		if _, err := procmgr.ReadProcessState(filepath.Join(s.runsDir, spec.After)); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "after_not_found", "parent job not found: "+spec.After)
+		if _, err := procmgr.ReadProcessState(filepath.Join(s.runsDir, parent)); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "after_not_found", "parent job not found: "+parent)
+			return
+		}
+	}
+	if len(spec.After) > 0 {
+		if _, ok := dependencyDepth(s.runsDir, spec.After, maxDependencyDepth); !ok {
+			writeJSONError(w, http.StatusBadRequest, "dependency_depth_exceeded",
+				fmt.Sprintf("after chain exceeds the %d-level depth cap", maxDependencyDepth))
 			return
 		}
 	}
@@ -121,6 +169,21 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		}
 		if _, err := os.Stat(resolved); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "warm_start_not_found", p.label+": "+resolved)
+			return
+		}
+	}
+	// 4d. reads containment + existence (design D38): each measure read must
+	// resolve inside the runs dir and already exist -- the same
+	// containment+existence guard warm_start uses above, so a bad seed
+	// reference never reaches prepare.
+	for _, p := range spec.containedReads() {
+		resolved, err := pathguard.Resolve(s.runsDir, p.value)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_path", p.label+": "+err.Error())
+			return
+		}
+		if _, err := os.Stat(resolved); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "reads_not_found", p.label+": "+resolved)
 			return
 		}
 	}
@@ -285,24 +348,60 @@ func (s *Server) handleResumeJob(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// harnessFeatures is the capability list GET /harness/health advertises (D30).
+// A client refuses locally to submit a spec that needs a feature absent from
+// this list, so an old daemon that omits the field entirely (advertising
+// nothing) fails a new client's fan-in/requires/measure submission fast
+// instead of the field silently dropping on the wire.
+var harnessFeatures = []string{
+	"job-sequencing",
+	"fan-in",
+	"nashnet-pool",
+	"resumable-upload",
+	"measure-kind",
+}
+
+// healthAuthenticated reports whether the request carries a bearer token that
+// verifies under the operator audience. GET /harness/health stays reachable
+// without one (the LAN monitoring consumer, cambia-330/network-552), but the
+// host-identifying counters free_ram_gb/free_disk_gb describe the coordinator
+// host rather than the queue, so ruling q3 (D30) narrows the token-free
+// payload and returns them only when the caller authenticates.
+func (s *Server) healthAuthenticated(r *http.Request) bool {
+	const prefix = "Bearer "
+	h := r.Header.Get("Authorization")
+	if !strings.HasPrefix(h, prefix) {
+		return false
+	}
+	tok := strings.TrimSpace(h[len(prefix):])
+	_, err := s.verifier.Verify(tok)
+	return err == nil
+}
+
 // handleHealth is GET /harness/health. restart_preserves_jobs tells a monitoring
 // consumer (and an operator about to redeploy) whether a daemon stop leaves the
 // job process groups running for reattach; it is false only when the operator
 // set RUNNERD_KILL_JOBS_ON_STOP. build_commit identifies the serving binary.
-// Both are non-sensitive by design: this route is deliberately token-free, so
-// nothing job-identifying (ids, commits, configs) may be added to it.
+// features and the counters below are non-sensitive by design: this route is
+// deliberately token-free, so nothing job-identifying (ids, commits, configs)
+// may be added to it. free_ram_gb/free_disk_gb are the one exception, gated on
+// healthAuthenticated (D30): they describe the coordinator host, not the queue.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	snap := s.disp.Snapshot()
-	freeRAM, _ := s.ramQuery()
-	writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"reconciled_at":          snap.ReconciledAt,
 		"jobs_running":           snap.JobsRunning,
 		"queue_depth":            snap.QueueDepth,
-		"free_ram_gb":            round1(freeRAM),
-		"free_disk_gb":           round1(diskFreeGB(s.runsDir)),
 		"restart_preserves_jobs": !s.killJobsOnStop,
 		"build_commit":           s.buildCommit,
-	})
+		"features":               harnessFeatures,
+	}
+	if s.healthAuthenticated(r) {
+		freeRAM, _ := s.ramQuery()
+		body["free_ram_gb"] = round1(freeRAM)
+		body["free_disk_gb"] = round1(diskFreeGB(s.runsDir))
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // readEnvJSON reads runs/<name>/env.json as a raw map (M3 provenance record),

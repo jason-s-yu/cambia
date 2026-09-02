@@ -18,7 +18,7 @@ Feature vector layout (222 dimensions total):
 Action space: 146 fixed indices mapping all GameAction types.
 """
 
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -66,6 +66,10 @@ from .constants import (
     N_PLAYER_POWERSET_DIM,
     N_PLAYER_IDENTITY_DIM,
     N_PLAYER_PUBLIC_DIM,
+    N_PLAYER_SEAT_DIM,
+    N_PLAYER_SEAT_COUNT_DIM,
+    N_PLAYER_HAND_LEN_DIM,
+    N_PLAYER_SEAT_BLOCK_DIM,
     bucket_saliency,
 )
 from src.cfr.exceptions import InfosetEncodingError, ActionEncodingError
@@ -1322,6 +1326,28 @@ def encode_nplayer_action_mask(uint8_mask: np.ndarray) -> np.ndarray:
     return uint8_mask.astype(bool)
 
 
+def nplayer_seat_order(encoding_player: int, num_players: int) -> List[Optional[int]]:
+    """
+    Return the seat order the N-player encoding lays its per-seat blocks out in.
+
+    Index 0 is the encoding player's own seat and index r>0 is its r-th opponent in
+    ascending seat order, which is the order the N-player action space indexes an opponent
+    target in. Entries past the seat count are None (no seat). Mirrors nplayerSeatOrder in
+    engine/agent/encoding.go.
+    """
+    order: List[Optional[int]] = [None] * N_PLAYER_MAX_PLAYERS
+    if not 0 <= encoding_player < num_players:
+        return order
+    order[0] = encoding_player
+    idx = 1
+    for seat in range(num_players):
+        if seat == encoding_player:
+            continue
+        order[idx] = seat
+        idx += 1
+    return order
+
+
 def encode_infoset_nplayer(
     knowledge_masks: dict,  # (player_idx, slot_idx) → set of player IDs who know
     slot_buckets: dict,  # (player_idx, slot_idx) → bucket int (0-8) or -1 unknown
@@ -1333,39 +1359,63 @@ def encode_infoset_nplayer(
     decision_context: int,  # 0-5
     cambia_state: int,  # 0=self, 1=opponent, 2=none
     drawn_card_bucket: int = -1,  # -1=none, 0-9=bucket
+    hand_lens: Optional[Sequence[int]] = None,  # cards per seat, by absolute seat index
 ) -> np.ndarray:
     """
     N-player EP-PBS encoding. Returns ndarray of shape (N_PLAYER_INPUT_DIM,).
 
     Layout (N_PLAYER_MAX_PLAYERS=8, MAX_HAND=6 -> 48 slots):
-      [0-383]   Powerset masks: 48 slots x N_PLAYER_MAX_PLAYERS bits (which players know each card)
+      [0-383]   Powerset masks: 48 slots x N_PLAYER_MAX_PLAYERS knower bits
       [384-815] Slot identities: 48 slots x 9-dim one-hot (zeroed if encoding player doesn't know)
       [816-855] Public features (40 dims)
+      [856-863] The encoding player's own seat (one-hot over 8 seats)
+      [864-871] The table's active seat count (one-hot at num_players-1)
+      [872-935] Per seat, same relative order: hand length one-hot (7) + in-play bit (1)
 
-    Slot layout: slot = player_idx * MAX_HAND + card_idx (row-major over players then cards).
+    Both slot blocks and the per-seat block are ordered RELATIVE to encoding_player (see
+    nplayer_seat_order), and so is the knower axis of the powerset block, so a seat reads
+    its own table the same way whichever chair it sits in. Slots past a seat's hand length,
+    and every slot of a seat that is not in play, encode as zero in both blocks.
+
+    hand_lens gives each seat's card count by absolute seat index; None means every seat in
+    play holds a full hand, which masks nothing. Mirrors EncodeNPlayer in
+    engine/agent/encoding.go, which reads the lengths off AgentState.NPlayerHandLen
+    (cambia-1550, cambia-1551).
     """
     out = np.zeros(N_PLAYER_INPUT_DIM, dtype=np.float32)
+    seats = max(2, min(int(num_players), N_PLAYER_MAX_PLAYERS))
+    order = nplayer_seat_order(encoding_player, seats)
+    if hand_lens is None:
+        lens = [MAX_HAND if p < seats else 0 for p in range(N_PLAYER_MAX_PLAYERS)]
+    else:
+        lens = [
+            int(hand_lens[p]) if p < len(hand_lens) else 0
+            for p in range(N_PLAYER_MAX_PLAYERS)
+        ]
 
     # --- Powerset masks (N_PLAYER_POWERSET_DIM dims): 48 slots x 8 bits ---
     offset = 0
-    for p in range(N_PLAYER_MAX_PLAYERS):
+    for seat in order:
         for c in range(MAX_HAND):
-            global_slot = p * MAX_HAND + c
-            if p < num_players:
-                knowers = knowledge_masks.get((p, c), set())
-                for bit in range(N_PLAYER_MAX_PLAYERS):
-                    if bit in knowers:
+            if seat is not None and c < lens[seat]:
+                knowers = knowledge_masks.get((seat, c), set())
+                for bit, knower in enumerate(order):
+                    if knower is not None and knower in knowers:
                         out[offset + bit] = 1.0
-            # else: non-existent player slots remain zero
+            # else: an empty slot, or a seat not in play, stays zero
             offset += N_PLAYER_MAX_PLAYERS
     # offset == N_PLAYER_POWERSET_DIM (384)
 
     # --- Slot identities (N_PLAYER_IDENTITY_DIM dims): 48 slots x 9-dim one-hot ---
     identity_offset = N_PLAYER_POWERSET_DIM  # 384
-    for p in range(N_PLAYER_MAX_PLAYERS):
+    for seat in order:
         for c in range(MAX_HAND):
-            if p < num_players and encoding_player in knowledge_masks.get((p, c), set()):
-                bucket = slot_buckets.get((p, c), -1)
+            if (
+                seat is not None
+                and c < lens[seat]
+                and encoding_player in knowledge_masks.get((seat, c), set())
+            ):
+                bucket = slot_buckets.get((seat, c), -1)
                 if 0 <= bucket <= 8:
                     out[identity_offset + bucket] = 1.0
             identity_offset += EP_PBS_BUCKET_DIM
@@ -1404,6 +1454,24 @@ def encode_infoset_nplayer(
         out[pub_offset + 10] = 1.0  # NONE
     elif 0 <= drawn_card_bucket <= 9:
         out[pub_offset + drawn_card_bucket] = 1.0
-    # pub_offset += 11 -> total == N_PLAYER_INPUT_DIM (856)
+    pub_offset += 11
+    # pub_offset == 856
+
+    # own seat (8-dim one-hot)
+    if 0 <= encoding_player < N_PLAYER_SEAT_DIM:
+        out[pub_offset + encoding_player] = 1.0
+    pub_offset += N_PLAYER_SEAT_DIM
+
+    # active seat count (8-dim one-hot at num_players-1)
+    out[pub_offset + seats - 1] = 1.0
+    pub_offset += N_PLAYER_SEAT_COUNT_DIM
+
+    # per seat, in the relative order: hand length one-hot (7) + in-play bit (1)
+    for seat in order:
+        if seat is not None:
+            out[pub_offset + min(max(lens[seat], 0), MAX_HAND)] = 1.0
+            out[pub_offset + N_PLAYER_HAND_LEN_DIM] = 1.0
+        pub_offset += N_PLAYER_SEAT_BLOCK_DIM
+    # pub_offset == N_PLAYER_INPUT_DIM (936)
 
     return out

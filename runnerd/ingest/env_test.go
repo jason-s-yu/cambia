@@ -2,7 +2,9 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -19,14 +21,15 @@ func TestWriteEnvJSONCompleteness(t *testing.T) {
 	venvPython := filepath.Join(t.TempDir(), "venv", "bin", "python")
 
 	prov := provenance{
-		JobID:         "job-e",
-		Commit:        strings.Repeat("a", 40),
-		EngineTreeSha: "engtree123",
-		LibcambiaSha:  "libsha456",
-		UVLockSha:     "locksha789",
-		VenvCacheKey:  "locksha789-py3.11-linux_amd64",
-		PlatformTag:   "linux_amd64",
-		Device:        "cpu",
+		JobID:             "job-e",
+		Commit:            strings.Repeat("a", 40),
+		EngineTreeSha:     "engtree123",
+		LibcambiaCacheKey: "engtree123-abigen1",
+		LibcambiaSha:      "libsha456",
+		UVLockSha:         "locksha789",
+		VenvCacheKey:      "locksha789-py3.11-linux_amd64",
+		PlatformTag:       "linux_amd64",
+		Device:            "cpu",
 	}
 	if err := m.writeEnvJSON(context.Background(), runDir, venvPython, prov); err != nil {
 		t.Fatalf("writeEnvJSON: %v", err)
@@ -42,6 +45,7 @@ func TestWriteEnvJSONCompleteness(t *testing.T) {
 		"origin_host":         rec.OriginHost,
 		"commit":              rec.Commit,
 		"engine_tree_sha":     rec.EngineTreeSha,
+		"libcambia_cache_key": rec.LibcambiaCacheKey,
 		"libcambia_sha256":    rec.LibcambiaSha256,
 		"uv_lock_sha256":      rec.UVLockSha256,
 		"venv_cache_key":      rec.VenvCacheKey,
@@ -142,6 +146,65 @@ func TestAssembleEnvAndShim(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "find_spec") {
 		t.Fatal("shim does not resolve src via find_spec")
+	}
+}
+
+// TestSitecustomizeGuardFiresOnStraySrcAheadOfWorktree is AC(7): the guard
+// still catches a stray `src` package that resolves ahead of the pinned
+// worktree's own cfr/src (the cambia-240 class trap), spawning a real python3
+// with only the harness-constructed environment (design 3.3, D17).
+//
+// A SystemExit raised from inside sitecustomize during interpreter startup
+// does not surface as its own exit code: CPython treats an uncaught exception
+// during site initialization as a fatal startup error and always exits 1
+// (verified here against the system python3 3.13.2 and pyenv 3.12.7; both
+// print "Fatal Python error: init_import_site"). The assertion below is on
+// the guard actually firing - a non-zero exit plus its diagnostic message -
+// not on a specific exit code, since 97 is never the process's own exit code
+// through this path.
+func TestSitecustomizeGuardFiresOnStraySrcAheadOfWorktree(t *testing.T) {
+	pythonBin, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+
+	fc := newFakeControl()
+	m, _ := fakeManager(t, fc)
+	worktreeDir := t.TempDir()
+	cfrDir := filepath.Join(worktreeDir, "cfr")
+	mustWrite(t, filepath.Join(cfrDir, "src", "__init__.py"), "")
+
+	// A stray decoy src package in its own directory, placed ahead of the
+	// pinned worktree's cfr dir on PYTHONPATH.
+	decoyDir := t.TempDir()
+	mustWrite(t, filepath.Join(decoyDir, "src", "__init__.py"), "")
+
+	env, err := m.assembleEnv(worktreeDir, "/fake/libcambia.so")
+	if err != nil {
+		t.Fatalf("assembleEnv: %v", err)
+	}
+	kv := envMap(env)
+	pythonPath := decoyDir + string(os.PathListSeparator) + kv["PYTHONPATH"]
+
+	cmd := exec.Command(pythonBin, "-c", "import src")
+	cmd.Env = []string{
+		"PYTHONPATH=" + pythonPath,
+		"CAMBIA_EXPECTED_SRC_ROOT=" + kv["CAMBIA_EXPECTED_SRC_ROOT"],
+		"PYTHONNOUSERSITE=1",
+		"HOME=" + os.Getenv("HOME"),
+		"PATH=" + os.Getenv("PATH"),
+	}
+	out, runErr := cmd.CombinedOutput()
+
+	var exitErr *exec.ExitError
+	if !errors.As(runErr, &exitErr) {
+		t.Fatalf("expected the guard to fail the process; err=%v output=%s", runErr, out)
+	}
+	if exitErr.ExitCode() == 0 {
+		t.Fatalf("exit code = 0, want non-zero; output=%s", out)
+	}
+	if !strings.Contains(string(out), "src resolves to") || !strings.Contains(string(out), decoyDir) {
+		t.Fatalf("guard did not report the decoy src as the resolved origin: %s", out)
 	}
 }
 

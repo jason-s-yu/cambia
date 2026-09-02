@@ -5,8 +5,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/jason-s-yu/cambia/engine/cgo/abiver"
 )
 
 // TestPrepareEndToEnd exercises the full staging pipeline with real git and a
@@ -48,8 +51,9 @@ func TestPrepareEndToEnd(t *testing.T) {
 		t.Fatalf("libcambia missing: %v", err)
 	}
 	engSha := runGit(t, src, "rev-parse", sha+":engine")
-	if filepath.Base(prep.LibcambiaPath) != engSha+".so" {
-		t.Fatalf("libcambia %q not keyed by engine tree %q", prep.LibcambiaPath, engSha)
+	wantCacheKey := engSha + "-abigen" + strconv.Itoa(abiver.Generation)
+	if filepath.Base(prep.LibcambiaPath) != wantCacheKey+".so" {
+		t.Fatalf("libcambia %q not keyed by cache key %q", prep.LibcambiaPath, wantCacheKey)
 	}
 	// Rendered config written.
 	if prep.RenderedConfig != filepath.Join(prep.RunDir, "config.yaml") {
@@ -71,6 +75,9 @@ func TestPrepareEndToEnd(t *testing.T) {
 	}
 	if rec.EngineTreeSha != engSha {
 		t.Fatalf("env.json engine_tree_sha = %q, want %q", rec.EngineTreeSha, engSha)
+	}
+	if rec.LibcambiaCacheKey != wantCacheKey {
+		t.Fatalf("env.json libcambia_cache_key = %q, want %q", rec.LibcambiaCacheKey, wantCacheKey)
 	}
 
 	// Launch env carries the containment pin.

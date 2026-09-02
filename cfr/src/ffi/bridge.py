@@ -385,8 +385,21 @@ class HouseRulesView(NamedTuple):
 # Library loading: module-level singleton
 # ---------------------------------------------------------------------------
 
+# Expected libcambia.so C ABI generation (engine/cgo/abiver.Generation).
+# Bumped by hand in lockstep with the Go constant whenever an //export
+# function's C-visible signature changes (cambia-1689): an appended
+# constructor argument or a widened read-back record is otherwise silently
+# ignored by the SysV calling convention, so a stale .so keeps loading and
+# keeps answering, just with the wrong rules. _check_abi_generation refuses
+# to hand back a library whose reported generation does not match this.
+ABI_GENERATION = 1
+
 _ffi = cffi.FFI()
 _ffi.cdef("""
+    /* ABI version handshake (cambia-1689) */
+    int32_t cambia_abi_generation(void);
+    int32_t cambia_abi_commit(uint8_t *out_buf, int32_t buf_len);
+
     /* Game lifecycle */
     int32_t cambia_game_new(uint64_t seed);
     int32_t cambia_game_new_with_deck(
@@ -550,6 +563,50 @@ _ffi.cdef("""
 _LIB = None
 
 
+def _read_abi_commit(lib) -> str:
+    """Best-effort read of the engine commit libcambia.so was built from.
+
+    Diagnostic only: an empty string (missing export, unstamped build, or a
+    read error) is reported as "unknown" rather than raised, since the
+    generation check is the actual gate.
+    """
+    try:
+        buf = _ffi.new("uint8_t[]", 64)
+        n = int(lib.cambia_abi_commit(buf, 64))
+    except AttributeError:
+        return ""
+    if n <= 0:
+        return ""
+    return bytes(_ffi.buffer(buf, n)).decode("ascii", errors="replace")
+
+
+def _check_abi_generation(lib, so_path) -> int:
+    """Refuse a libcambia.so whose ABI generation does not match ABI_GENERATION.
+
+    cambia_abi_generation() is the handshake this bridge and the shared
+    library run at every load (cambia-1689): a stale .so built before an
+    //export signature change would otherwise keep loading and keep
+    answering, silently dropping an appended trailing argument (harmless on
+    the SysV calling convention) or serving a narrower read-back record,
+    with the mismatch invisible until something downstream broke on the
+    wrong rules. A library with no cambia_abi_generation export at all
+    (older than this handshake) is treated as generation 0.
+    """
+    try:
+        generation = int(lib.cambia_abi_generation())
+    except AttributeError:
+        generation = 0
+
+    if generation != ABI_GENERATION:
+        commit = _read_abi_commit(lib) or "unknown"
+        raise RuntimeError(
+            f"libcambia.so ABI generation mismatch at {so_path}: this bridge.py "
+            f"expects generation {ABI_GENERATION}, the loaded library reports "
+            f"{generation} (commit {commit}). Rebuild it with `make libcambia`."
+        )
+    return generation
+
+
 def _load_library():
     """Load libcambia.so, trying several search paths in order."""
     candidates = []
@@ -567,7 +624,9 @@ def _load_library():
 
     for path in candidates:
         if path.exists():
-            return _ffi.dlopen(str(path))
+            lib = _ffi.dlopen(str(path))
+            _check_abi_generation(lib, path)
+            return lib
 
     searched = "\n  ".join(str(p) for p in candidates)
     raise FileNotFoundError(
@@ -602,7 +661,8 @@ class GoEngine:
     # Single-sourced from cfr/src/constants.py (which mirrors the Go
     # engine/agent constants) rather than hardcoded -- cambia-542 F8: this
     # module previously hardcoded stale 580/452 values that drifted from the
-    # 856/620 dims after the MaxPlayers 6->8 bump (commit 9073646), causing
+    # 856/620 dims of the time after the MaxPlayers 6->8 bump (commit 9073646;
+    # the input dim is 936 since cambia-1551), causing
     # malloc-crash buffer overflows in encode_nplayer/nplayer_action_mask/
     # nplayer_legal_actions_mask. get_nplayer_dims() below cross-checks these
     # against the live Go values through the FFI.

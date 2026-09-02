@@ -30,6 +30,7 @@ make libcambia
 ```bash
 make test           # engine + service + cfr test suites
 make parity-gate     # Go vs Python cross-engine lockstep parity
+cd web && npm test   # web client: node --test suites, then the vitest render suite (npm run test:render)
 ```
 
 `make parity-gate` is the migration acceptance for retiring the Python reference engine: it builds
@@ -40,6 +41,14 @@ override it with `CAMBIA_PARITY_SEEDS=200 make parity-gate`. The 4-seat leg is c
 skip, blocked on cambia-1419 (the Python engine cannot play above 2 seats); 2-seat parity is strict.
 CI runs this gate on changes to `engine/`, `cfr/src/game/`, and `cfr/src/encoding.py`
 (`.github/workflows/parity-gate.yml`).
+
+`cfr/tests/test_nplayer_encoding_parity.py` covers the 936-dim N-player encoder the
+same way at the encoding layer: it drives seeded 4-seat games through the Go FFI
+(`cambia_agent_new_nplayer` / `cambia_agent_encode_nplayer`), decodes each resulting
+vector against the documented block layout, and asserts the Python mirror
+(`encode_infoset_nplayer`) reproduces it element-for-element at every decision, over
+20 seeds with SnapRace on and off. It runs in the default `cfr` test suite whenever
+`libcambia.so` is present.
 
 ## Serving Harness
 

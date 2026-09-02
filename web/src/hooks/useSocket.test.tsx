@@ -74,6 +74,14 @@ class FakeWebSocket {
     this.readyState = FakeWebSocket.CLOSED;
     this.onclose?.({ wasClean: false, code, reason: '' } as CloseEvent);
   }
+
+  /** The hub ends the socket itself: a completed close handshake the client never asked for.
+   *  Its defaults are what Connection.Close sends (StatusGoingAway, "connection closed",
+   *  service/internal/hub/connection.go). */
+  serverClose(code = 1001, reason = 'connection closed'): void {
+    this.readyState = FakeWebSocket.CLOSED;
+    this.onclose?.({ wasClean: true, code, reason } as CloseEvent);
+  }
 }
 
 const RealWebSocket = globalThis.WebSocket;
@@ -154,8 +162,8 @@ afterEach(() => {
 });
 
 describe('useSocket retry budget', () => {
-  it('stops dialing after MAX_RETRIES and leaves the table its stopped-trying copy', () => {
-    renderHook(() => useSocket(LOBBY_ID));
+  it('stops dialing after MAX_RETRIES and reports the spent budget as a state', () => {
+    const { result } = renderHook(() => useSocket(LOBBY_ID));
     expect(FakeWebSocket.instances).toHaveLength(1);
 
     // Each drop spends one retry and the backoff redials, so the budget buys MAX_RETRIES redials
@@ -170,8 +178,10 @@ describe('useSocket retry budget', () => {
     });
     expect(FakeWebSocket.instances).toHaveLength(1 + MAX_RETRIES);
 
-    // DsGameTable reads `gaveUp` off this copy (its /stopped|after \d+ retries/i test), so the
-    // wording is load-bearing, not cosmetic.
+    // What DsGameTable branches on. The copy below is the player-facing sentence and nothing
+    // reads it back: the table used to rebuild this state with a regex over it, and a give-up the
+    // regex did not match left the felt reconnecting forever (cambia-1239 review).
+    expect(result.current.gaveUp).toBe('retries');
     const lobby = useCurrentLobbyStore.getState();
     expect(lobby.error).toBe(`Lost connection after ${MAX_RETRIES} retries.`);
     expect(lobby.isConnected).toBe(false);
@@ -384,7 +394,7 @@ describe('useSocket backgrounded tab (cambia-1521)', () => {
   });
 
   it('does not redial a lobby the hub refused by name', () => {
-    renderHook(() => useSocket(LOBBY_ID));
+    const { result } = renderHook(() => useSocket(LOBBY_ID));
     const socket = latestSocket();
     act(() => {
       socket.accept();
@@ -398,12 +408,14 @@ describe('useSocket backgrounded tab (cambia-1521)', () => {
       } as MessageEvent);
     });
     expect(useCurrentLobbyStore.getState().currentLobbyId).toBeNull();
+    expect(result.current.gaveUp).toBe('refused');
 
     returnToForeground();
     act(() => {
       vi.advanceTimersByTime(10 * PAST_ANY_BACKOFF_MS);
     });
     expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(result.current.gaveUp).toBe('refused');
   });
 
   it('does not undo an explicit close on return', () => {
@@ -418,6 +430,81 @@ describe('useSocket backgrounded tab (cambia-1521)', () => {
     returnToForeground();
     expect(FakeWebSocket.instances).toHaveLength(1);
     expect(useCurrentLobbyStore.getState().isConnected).toBe(false);
+  });
+});
+
+/**
+ * The close the client did not ask for (cambia-1239 review). The hub ends a socket cleanly in
+ * ordinary play: opening the lobby in a second tab displaces the first one's socket, and leave and
+ * hub cleanup after a dissolve or an idle reap do the same (service/internal/hub/hub.go). Nothing
+ * redials it, so the state the hook reports has to say that; while it was reconstructed from the
+ * error copy the felt read this as a reconnect in progress and locked every control for the rest
+ * of the round.
+ */
+describe('useSocket hub-initiated close', () => {
+  it('reports a clean close from the hub as terminal, not as a reconnect', () => {
+    const { result } = renderHook(() => useSocket(LOBBY_ID));
+    act(() => {
+      latestSocket().accept();
+    });
+    expect(result.current.gaveUp).toBeNull();
+
+    act(() => {
+      latestSocket().serverClose();
+    });
+
+    expect(result.current.gaveUp).toBe('closed');
+    expect(useCurrentLobbyStore.getState().isConnected).toBe(false);
+    expect(useCurrentLobbyStore.getState().isLoading).toBe(false);
+    // The copy that goes with it, which nothing branches on any more.
+    expect(useCurrentLobbyStore.getState().error).toBe('Disconnected: connection closed');
+  });
+
+  it('does not dial again after one, on the clock or on a return to the tab', () => {
+    const { result } = renderHook(() => useSocket(LOBBY_ID));
+    act(() => {
+      latestSocket().accept();
+    });
+    act(() => {
+      latestSocket().serverClose();
+    });
+
+    act(() => {
+      vi.advanceTimersByTime(10 * PAST_ANY_BACKOFF_MS);
+    });
+    leaveForBackground();
+    returnToForeground();
+
+    // A displaced socket stays displaced: dialing again would take the lobby back off whichever
+    // tab now holds it. Only a fresh decision to connect (reopenSocket, a different lobby) does.
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(result.current.gaveUp).toBe('closed');
+  });
+
+  it('clears the state when the connection is deliberately taken back', () => {
+    const { result } = renderHook(() => useSocket(LOBBY_ID));
+    act(() => {
+      latestSocket().accept();
+    });
+    act(() => {
+      latestSocket().serverClose();
+    });
+    expect(result.current.gaveUp).toBe('closed');
+
+    // reopenSocket is the refused-leave path (cambia-1520): the player is still at the table and
+    // asked for the connection back, so the felt must stop showing a dead socket.
+    act(() => {
+      result.current.reopenSocket();
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(result.current.gaveUp).toBeNull();
+
+    act(() => {
+      latestSocket().accept();
+    });
+    expect(result.current.gaveUp).toBeNull();
+    expect(useCurrentLobbyStore.getState().isConnected).toBe(true);
+    expectNoAbandonedHandshake();
   });
 });
 

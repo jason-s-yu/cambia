@@ -15,11 +15,23 @@ resolves them inside the job worktree.
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 # Kind allowlist (design 1 / 2.6). The runner further restricts train to the
 # `prtcfr` algorithm in v1; that is a runner-side preflight, not a client check.
-ALLOWED_KINDS = ("train", "evaluate", "head-to-head", "bench")
+# measure (design D38, cambia-1072) runs a pinned script instead of a cambia
+# subcommand.
+ALLOWED_KINDS = ("train", "evaluate", "head-to-head", "bench", "measure")
+
+# The worktree-relative root a measure job's script must resolve under (design
+# D38), mirroring runnerd/harness/jobspec.go's measureScriptRoot.
+MEASURE_SCRIPT_ROOT = "cfr/scripts/"
+
+# Per-entry byte cap for a measure job's args (design D38: "each entry
+# rejected on a NUL or over a length cap"), mirroring runnerd/harness/
+# jobspec.go's maxMeasureArgLen so the client rejects exactly what the runner
+# would.
+MAX_MEASURE_ARG_LEN = 4096
 
 # Device allowlist (cambia-329). The client stays permissive within this set;
 # the runner enforces its own RUNNERD_ALLOWED_DEVICES capability list against
@@ -103,7 +115,11 @@ class JobSpec:
     priority: str = "normal"
     force: bool = False
     warm_start: Optional[str] = None
-    after: Optional[str] = None
+    # after names the job's parents (design D29, cambia-1713): a bare string is
+    # the pre-r2 single-parent wire shape, a list is the AND-join fan-in shape
+    # (0..N names). Whichever shape parse() receives is the shape to_payload()
+    # emits, so a plain --after flag stays byte-identical against an old daemon.
+    after: Optional[Union[str, List[str]]] = None
     on_failure: str = "skip"
     # Optional Codebridge hub work-item handle (cambia-353), e.g. "cambia-359".
     # Telemetry-only: it links the job's reflected note to a hub item and is
@@ -114,6 +130,18 @@ class JobSpec:
     # into an idle daemon and holds every other job around. Default false (a normal
     # job that shares the concurrency pool). Allowed on every kind.
     exclusive: bool = False
+    # script is a kind=measure job's worktree-relative pinned script path
+    # (design D38), e.g. "cfr/scripts/measure_gate_gap.py". Required for
+    # measure, forbidden for every other kind.
+    script: Optional[str] = None
+    # args is a kind=measure job's argv tail, appended verbatim after the
+    # staged script path with no shell involved. Forbidden for every other
+    # kind.
+    args: List[str] = field(default_factory=list)
+    # reads names other run directories a kind=measure job reads as read-only
+    # seeds, resolved through pathguard against the runs dir on the runner.
+    # Forbidden for every other kind.
+    reads: List[str] = field(default_factory=list)
 
     _KNOWN_KEYS = frozenset(
         {
@@ -135,6 +163,9 @@ class JobSpec:
             "on_failure",
             "hub_item",
             "exclusive",
+            "script",
+            "args",
+            "reads",
         }
     )
 
@@ -184,6 +215,52 @@ class JobSpec:
         warm_start = raw.get("warm_start")
         if warm_start is not None:
             guard_relpath(warm_start, "warm_start")
+
+        script = raw.get("script")
+        if script is not None and kind != "measure":
+            raise HarnessSpecError("script is valid for kind='measure' only")
+        if kind == "measure":
+            if script is None:
+                raise HarnessSpecError("kind 'measure' requires a 'script' path")
+            guard_relpath(script, "script")
+            if (
+                not script.startswith(MEASURE_SCRIPT_ROOT)
+                or script == MEASURE_SCRIPT_ROOT
+            ):
+                raise HarnessSpecError(
+                    f"script must resolve under {MEASURE_SCRIPT_ROOT!r}: {script!r}"
+                )
+
+        args_raw = raw.get("args")
+        if args_raw is not None and kind != "measure":
+            raise HarnessSpecError("args is valid for kind='measure' only")
+        args: List[str] = []
+        if args_raw is not None:
+            if not isinstance(args_raw, list) or any(
+                not isinstance(a, str) for a in args_raw
+            ):
+                raise HarnessSpecError("args must be a list of strings")
+            for i, a in enumerate(args_raw):
+                if "\x00" in a:
+                    raise HarnessSpecError(f"args[{i}] contains a NUL byte")
+                if len(a) > MAX_MEASURE_ARG_LEN:
+                    raise HarnessSpecError(
+                        f"args[{i}] exceeds {MAX_MEASURE_ARG_LEN} bytes"
+                    )
+            args = list(args_raw)
+
+        reads_raw = raw.get("reads")
+        if reads_raw is not None and kind != "measure":
+            raise HarnessSpecError("reads is valid for kind='measure' only")
+        reads: List[str] = []
+        if reads_raw is not None:
+            if not isinstance(reads_raw, list) or any(
+                not isinstance(r, str) for r in reads_raw
+            ):
+                raise HarnessSpecError("reads must be a list of strings")
+            for i, r in enumerate(reads_raw):
+                guard_relpath(r, f"reads[{i}]")
+            reads = list(reads_raw)
 
         overrides = raw.get("overrides", {}) or {}
         if not isinstance(overrides, dict):
@@ -236,15 +313,30 @@ class JobSpec:
         if kind == "train" and target is not None:
             raise HarnessSpecError("target is not valid for kind='train'")
 
-        # Cross-job dependency (cambia-352): after names a single parent job
-        # (same name rules as the job itself); a self-reference is rejected. The
-        # runner re-checks that the parent exists. on_failure governs only the
-        # failure branch. Both are allowed on every kind.
+        # Cross-job dependency (cambia-352, widened to an AND-join list by D29
+        # / cambia-1713): after names the job's parents, either a bare string
+        # (the pre-r2 single-parent shape) or a list of 0..N names (same name
+        # rules as the job itself, applied to every entry); a self-reference by
+        # any parent is rejected. The runner re-checks that each parent exists
+        # and enforces the dependency-depth cap. on_failure governs only the
+        # failure branch, shared across every parent. Both are allowed on every
+        # kind.
         after = raw.get("after")
         if after is not None:
-            validate_name(after)
-            if after == name:
-                raise HarnessSpecError("after must not reference the job itself")
+            if isinstance(after, str):
+                parents = [after]
+            elif isinstance(after, list):
+                if not all(isinstance(p, str) for p in after):
+                    raise HarnessSpecError("after list entries must be strings")
+                parents = after
+            else:
+                raise HarnessSpecError(
+                    f"after must be a string or a list of strings, got {type(after).__name__}"
+                )
+            for parent in parents:
+                validate_name(parent)
+                if parent == name:
+                    raise HarnessSpecError("after must not reference the job itself")
 
         on_failure = raw.get("on_failure", "skip")
         if on_failure not in ON_FAILURE_POLICIES:
@@ -275,6 +367,9 @@ class JobSpec:
             on_failure=on_failure,
             hub_item=hub_item,
             exclusive=bool(raw.get("exclusive", False)),
+            script=script,
+            args=args,
+            reads=reads,
         )
 
     def to_payload(self, commit: str) -> Dict[str, Any]:
@@ -317,6 +412,12 @@ class JobSpec:
         # exclusive is only forwarded when set; absent, the runner defaults false.
         if self.exclusive:
             payload["exclusive"] = True
+        if self.script is not None:
+            payload["script"] = self.script
+        if self.args:
+            payload["args"] = self.args
+        if self.reads:
+            payload["reads"] = self.reads
         return payload
 
 

@@ -1,9 +1,12 @@
 package harness
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 )
@@ -56,7 +59,25 @@ const (
 	KindEvaluate   = "evaluate"
 	KindHeadToHead = "head-to-head"
 	KindBench      = "bench"
+	// KindMeasure runs a pinned script under an allowlisted root instead of a
+	// cambia subcommand (design D38, cambia-1072): no cambia subcommand exists
+	// for it, so it is registered in HarnessAlgorithms only to pass the submit
+	// allowlist below; the launch template never consults that entry (see
+	// Dispatcher.launchOpts).
+	KindMeasure = "measure"
 )
+
+// measureScriptRoot is the allowlisted worktree-relative root a measure job's
+// script must resolve under (design D38). script is validated against it
+// lexically at submit (handlers.go, before a worktree exists) and the staged
+// file is required to exist there at launch (Dispatcher.launchOpts).
+const measureScriptRoot = "cfr/scripts/"
+
+// maxMeasureArgLen caps a single measure args entry in bytes (design D38:
+// "each entry rejected on a NUL or over a length cap"). 4096 comfortably
+// covers a path or flag value while bounding a submitter's ability to inflate
+// argv.
+const maxMeasureArgLen = 4096
 
 // HarnessAlgorithms returns the runnerd job-kind -> cambia-subcommand allowlist
 // injected into the ProcessManager. It is the superset the daemon supervises
@@ -73,6 +94,11 @@ func HarnessAlgorithms() map[string][]string {
 		KindEvaluate:   {"evaluate"},
 		KindHeadToHead: {"head-to-head"},
 		KindBench:      {"benchmark", "all"},
+		// KindMeasure carries no cambia subcommand (design D38): its launch
+		// template builds argv from the staged script + args directly and never
+		// calls AlgoSubcommand, so this value is unused. The entry exists only
+		// so the kind allowlist check at handlers.go admits it.
+		KindMeasure: {},
 	}
 }
 
@@ -98,12 +124,16 @@ type JobSpec struct {
 	// job initializes from (design cambia-334). Empty means no warm start. Valid
 	// only for kind=train; see warmStartForbidden.
 	WarmStart string `json:"warm_start"`
-	// After optionally gates this job on another job (its single parent) finishing
-	// first (cambia-352). Empty means no dependency; allowed on every kind. A
-	// parent success always runs the dependent; OnFailure governs only the
-	// parent-failure branch. The parent must exist at submit (validated in the
-	// handler); the gate resolves the parent's outcome at dispatch time.
-	After string `json:"after,omitempty"`
+	// After optionally gates this job on one or more parent jobs finishing first
+	// (cambia-352, widened to an AND-join list by D29/cambia-1713). An empty list
+	// means no dependency; allowed on every kind. The dependent launches only
+	// once every named parent has reached a clean terminal; any parent reaching a
+	// non-success terminal routes the whole dependent through OnFailure. Every
+	// parent must exist at submit (validated in the handler); the gate resolves
+	// each parent's outcome at dispatch time. The wire shape accepts a bare
+	// string (the pre-r2 single-parent shape) or a list of 0..N names; see
+	// UnmarshalJSON.
+	After []string `json:"after,omitempty"`
 	// OnFailure selects the failure-branch behavior when After's parent reaches a
 	// non-success terminal (crashed/failed/canceled/skipped, a graceful-stop with
 	// a nonzero exit, or a purged run dir): skip (default) marks this job
@@ -120,6 +150,22 @@ type JobSpec struct {
 	// JobView, letting the client-side reflector link a job's note to a hub item
 	// (recoverable from a pulled run dir). Empty means an unlinked job.
 	HubItem string `json:"hub_item,omitempty"`
+	// Script is the worktree-relative path to a kind=measure job's pinned
+	// script (design D38), e.g. "cfr/scripts/measure_gate_gap.py". Required for
+	// measure, forbidden for every other kind: it must resolve under
+	// measureScriptRoot and must exist at the pinned commit (checked at launch,
+	// once the worktree is staged).
+	Script string `json:"script,omitempty"`
+	// Args is a kind=measure job's argv tail, appended verbatim after the
+	// staged script path with no shell involved (design D38). Forbidden for
+	// every other kind.
+	Args []string `json:"args,omitempty"`
+	// Reads names other run directories a kind=measure job reads as read-only
+	// seeds (design D38), resolved through pathguard against the runs dir and
+	// required to already exist at submit. Exported to the job process as
+	// CAMBIA_MEASURE_READ_DIRS (os.pathsep-joined). Forbidden for every other
+	// kind.
+	Reads []string `json:"reads,omitempty"`
 	// Exclusive marks a timing-sensitive job that must run alone (cambia-655): the
 	// dispatcher launches it only when no other job is active and holds every other
 	// job while it prepares or runs. Absent decodes false (a normal job that shares
@@ -130,6 +176,84 @@ type JobSpec struct {
 	// client against an old daemon is the only degradation: the field is dropped
 	// and the job runs shared.
 	Exclusive bool `json:"exclusive,omitempty"`
+}
+
+// jobSpecAlias has JobSpec's exact field set but none of its methods, so
+// decoding into it cannot recurse into JobSpec.UnmarshalJSON.
+type jobSpecAlias JobSpec
+
+// UnmarshalJSON decodes a JobSpec, accepting `after` as either a bare string
+// (the pre-r2 single-parent wire shape) or a JSON array of 0..N parent names
+// (D29 fan-in, cambia-1713), so a jobspec.json written before this change still
+// decodes (AC1). Every other field keeps standard decoding, including the
+// json.Number preservation for Overrides that decodeJSON's UseNumber() gives
+// the request path: since a custom UnmarshalJSON receives only raw bytes with
+// no access to the caller's decoder options, this re-establishes UseNumber()
+// on an inner decoder rather than losing it.
+func (s *JobSpec) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		jobSpecAlias
+		After json.RawMessage `json:"after,omitempty"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	if err := dec.Decode(&raw); err != nil {
+		return err
+	}
+	*s = JobSpec(raw.jobSpecAlias)
+	s.After = nil
+	if len(raw.After) == 0 || string(raw.After) == "null" {
+		return nil
+	}
+	var single string
+	if err := json.Unmarshal(raw.After, &single); err == nil {
+		s.After = []string{single}
+		return nil
+	}
+	var list []string
+	if err := json.Unmarshal(raw.After, &list); err != nil {
+		return fmt.Errorf("after: must be a string or an array of strings: %w", err)
+	}
+	s.After = list
+	return nil
+}
+
+// maxDependencyDepth caps the length of an after-chain a submission may extend
+// (D29): parents must already be admitted at submit, which makes the graph a
+// DAG by construction, and this bounds how long a chain within that DAG may
+// grow.
+const maxDependencyDepth = 32
+
+// dependencyDepth returns the longest after-chain ending at a job whose direct
+// parents are `after`, reading each ancestor's persisted jobspec.json from
+// runsDir. budget is how many more ancestor levels may be counted below this
+// point; it returns ok=false the instant a still-unexplored parent would need
+// more budget than remains, so a submission with too deep an ancestry fails
+// fast instead of walking the rest of the DAG. The top-level caller passes
+// budget=maxDependencyDepth. Called at submit time only; every named parent
+// already exists on disk by then (validated before this runs).
+func dependencyDepth(runsDir string, after []string, budget int) (int, bool) {
+	if len(after) == 0 {
+		return 0, true
+	}
+	if budget <= 0 {
+		return 0, false
+	}
+	depth := 0
+	for _, parent := range after {
+		var parentAfter []string
+		if spec := readJobSpec(filepath.Join(runsDir, parent)); spec != nil {
+			parentAfter = spec.After
+		}
+		d, ok := dependencyDepth(runsDir, parentAfter, budget-1)
+		if !ok {
+			return 0, false
+		}
+		if d+1 > depth {
+			depth = d + 1
+		}
+	}
+	return depth, true
 }
 
 // onFailureOrDefault returns the spec's on_failure policy, defaulting to skip.
@@ -200,6 +324,69 @@ func (s *JobSpec) targetForbidden() bool {
 // for it.
 func (s *JobSpec) warmStartForbidden() bool {
 	return s.Kind != KindTrain && s.WarmStart != ""
+}
+
+// scriptRequired reports whether kind=measure has left script unset (design
+// D38: script is required for measure).
+func (s *JobSpec) scriptRequired() bool {
+	return s.Kind == KindMeasure && s.Script == ""
+}
+
+// scriptForbidden reports whether script is set on a kind other than measure
+// (design D38: script is measure-only, like target is evaluate-only).
+func (s *JobSpec) scriptForbidden() bool {
+	return s.Kind != KindMeasure && s.Script != ""
+}
+
+// scriptRootValid reports whether script (already passed through
+// pathguard.CheckRel, so it carries no ".." segment and is not absolute)
+// lexically resolves under measureScriptRoot. This is a fixed-literal-prefix
+// check, not filesystem containment: the worktree does not exist yet at
+// submit time. The staged file's existence is checked at launch instead.
+func (s *JobSpec) scriptRootValid() bool {
+	return strings.HasPrefix(s.Script, measureScriptRoot) && s.Script != measureScriptRoot
+}
+
+// argsForbidden reports whether args is set on a kind other than measure
+// (design D38).
+func (s *JobSpec) argsForbidden() bool {
+	return len(s.Args) > 0 && s.Kind != KindMeasure
+}
+
+// validateArgs rejects a measure job's args entries containing a NUL byte or
+// exceeding maxMeasureArgLen (design D38). A no-op when args is empty (every
+// other kind, or a measure job with no argv tail).
+func (s *JobSpec) validateArgs() error {
+	for i, a := range s.Args {
+		if strings.IndexByte(a, 0) >= 0 {
+			return fmt.Errorf("args[%d]: contains a NUL byte", i)
+		}
+		if len(a) > maxMeasureArgLen {
+			return fmt.Errorf("args[%d]: exceeds %d bytes", i, maxMeasureArgLen)
+		}
+	}
+	return nil
+}
+
+// readsForbidden reports whether reads is set on a kind other than measure
+// (design D38).
+func (s *JobSpec) readsForbidden() bool {
+	return len(s.Reads) > 0 && s.Kind != KindMeasure
+}
+
+// containedReads returns a measure job's reads entries for the same
+// containment-resolve guard as containedTarget/containedWarmStart (design
+// D38): each read names an existing run directory under the runs dir, so its
+// containment base is known at submit time.
+func (s *JobSpec) containedReads() []struct{ label, value string } {
+	if s.Kind != KindMeasure {
+		return nil
+	}
+	out := make([]struct{ label, value string }, len(s.Reads))
+	for i, r := range s.Reads {
+		out[i] = struct{ label, value string }{fmt.Sprintf("reads[%d]", i), r}
+	}
+	return out
 }
 
 // overridesStr renders the dotted-key overrides as a string map for the ingest

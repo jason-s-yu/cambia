@@ -125,6 +125,7 @@ CREATE TABLE IF NOT EXISTS runs (
     config_schema_version INTEGER DEFAULT 1,
     engine_commit_hash TEXT,
     origin_host TEXT,
+    executed_on TEXT,
     best_metric_name TEXT,
     best_metric_value REAL,
     best_metric_iter INTEGER,
@@ -271,6 +272,12 @@ _COLUMN_MIGRATIONS: Dict[str, list] = {
         # ingested by the serving-harness reconciler (design 4.3). Registered here
         # so databases created before this column gain it without a rebuild.
         ("origin_host", "TEXT"),
+        # NULL for every pre-pool row; the reconciler populates it from a pulled
+        # env.json's `executed_on` field (serving-harness v1.1 design 4.2 D23):
+        # "which node produced these numbers", distinct from origin_host ("who
+        # owns and serves this run"). Registered here so databases created
+        # before this column gain it without a rebuild.
+        ("executed_on", "TEXT"),
     ],
     "eval_results": [
         ("seat_balanced", "INTEGER DEFAULT 0"),
@@ -468,12 +475,13 @@ def upsert_run(
     parent_run_id: Optional[int] = None,
     engine_commit_hash: Optional[str] = None,
     origin_host: Optional[str] = None,
+    executed_on: Optional[str] = None,
 ) -> int:
     """
     Insert or update a run record.
 
-    On conflict (same name), updates algorithm, status, config hashes, origin_host,
-    and updated_at.
+    On conflict (same name), updates algorithm, status, config hashes,
+    origin_host, executed_on, and updated_at.
 
     Args:
         engine_commit_hash: If None (default), the current checkout's short HEAD is
@@ -482,6 +490,11 @@ def upsert_run(
             instead of re-stamping the client's HEAD (design 4.2).
         origin_host: NULL/None (default) for a local run; the reconciler passes the
             source host so remote-ingested runs are distinguishable (design 4.3).
+        executed_on: NULL/None (default) for a local run or a pre-pool synced
+            run; the reconciler passes the node identity read from a pulled
+            env.json (serving-harness v1.1 design 4.2 D23). None on a re-replay
+            preserves the last known value (COALESCE) rather than regressing an
+            established value to NULL when a later sync momentarily lacks it.
         status: None means "do not touch lifecycle status": an existing row keeps
             its status, a fresh insert gets 'created'. Callers that merely attach
             data to a run (eval persistence) use this so evaluating a completed
@@ -501,9 +514,9 @@ def upsert_run(
     cur = db.execute(
         """
         INSERT INTO runs (name, algorithm, status, config_hash, house_rules_hash,
-                          engine_commit_hash, origin_host, tags, notes, parent_run_id,
-                          created_at, updated_at)
-        VALUES (?, ?, COALESCE(?, 'created'), ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                          engine_commit_hash, origin_host, executed_on, tags, notes,
+                          parent_run_id, created_at, updated_at)
+        VALUES (?, ?, COALESCE(?, 'created'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(name) DO UPDATE SET
             algorithm=excluded.algorithm,
             status=COALESCE(?, runs.status),
@@ -511,6 +524,7 @@ def upsert_run(
             house_rules_hash=excluded.house_rules_hash,
             engine_commit_hash=excluded.engine_commit_hash,
             origin_host=excluded.origin_host,
+            executed_on=COALESCE(excluded.executed_on, runs.executed_on),
             updated_at=excluded.updated_at
         """,
         (
@@ -521,6 +535,7 @@ def upsert_run(
             hr_hash,
             engine_commit,
             origin_host,
+            executed_on,
             tags_json,
             notes,
             parent_run_id,

@@ -232,7 +232,21 @@ If the card discarded in the previous step has a special action which can be uti
     where "special" is a field of the following enums: `peek_self` (7 or 8), `peek_other` (9 or 10), `swap_blind` (J or Q), `swap_peek` (K)
     The clients intercept this message, and the player with the matching id will be faced with the decision of invoking the special turn option, with timer. Optionally, they will also be able to skip. They respond with the payload:
 
-    An ability triggered by a **replace** (`allowReplaceAbilities`) carries `"payload": {"mandatory": true}` and **cannot be skipped**. The engine folds the decline into the discard action (`DiscardNoAbility` vs `DiscardWithAbility`) and offers an already-armed ability nothing but targets, so a `skip` against it is refused with `private_special_action_fail` and the prompt stands. Clients must not render a skip affordance for it; the turn timer resolves it by playing the first legal target (a King looks and then declines the swap). The same flag is carried in `private_sync_state` under `specialAction.mandatory` so a reconnecting client restores the prompt without the affordance.
+    An ability triggered by a **replace** (`allowReplaceAbilities`) carries `"payload": {"mandatory": true}` and **cannot be skipped**. The engine folds the decline into the discard action (`DiscardNoAbility` vs `DiscardWithAbility`) and offers an already-armed ability nothing but targets, so a `skip` against it is refused with `private_special_action_fail` and the prompt stands. Clients must not render a skip affordance for it; the turn timer resolves it by playing the first legal target (a King looks and then declines the swap).
+
+    A mandatory ability can also lose its only legal target after it arms, typically a snap taken during the ability window that empties the hand it would have targeted. There the turn timer's replay-first-target resolution has nothing to replay, so the server discharges the ability itself instead: it clears the prompt, advances the turn, and sends the acting player a private frame naming the same `special` enum used everywhere else in this document:
+
+    ```json: server -> client whose ability had no target (discharged, not a retry)
+    {
+      "type": "private_special_action_fail",
+      "special": "swap_blind",
+      "payload": { "message": "That ability had no legal target and was discharged." }
+    }
+    ```
+
+    Unlike the swap-against-a-locked-hand fail case above, this one is terminal: the prompt is already gone and the turn has already moved on, so the client must not answer it with a new `action_special`. Distinguish the two by whether a prompt (`player_special_choice`) is still outstanding for this ability when the fail frame arrives. (At cambia-1239, the discharge path sends the card's raw rank, e.g. `"K"`, in `special` rather than the `swap_peek` enum shown above; the enum is the documented contract and a fix to send it is tracked separately.)
+
+    The same flag is carried in `private_sync_state` under `specialAction.mandatory` so a reconnecting client restores the prompt without the affordance.
 
     A King's two steps are told apart in `private_sync_state` by `specialAction.firstStepDone`: false while the look is still pending, true once it resolves and the outstanding decision is swap/keep. This lets a client that mounts fresh mid-King (a reload, a new tab, a device switch, not a live-socket resync) render the swap/keep controls straight from the snapshot instead of the look step, which the server would refuse with "reveal already done." The peeked pair itself is not part of this projection and is never re-delivered on remount: own and looked-at faces stay transient (cambia-763 F1, cambia-1094), and the swap step does not need them, since the server resolves `swap_peek_swap` from this state alone (cambia-1567).
 
@@ -299,7 +313,7 @@ If the card discarded in the previous step has a special action which can be uti
     }
     ```
 
-    There is an additional caveat with any sort of swap action. If a target player has already called cambia, their cards cannot be moved (though, they can be viewed only either by a peek or swap peek). If a player attempts to make this action, they receive a private payload from the server, and must issue a new `action_special`.
+    There is an additional caveat with any sort of swap action, gated by the `lockCallerHand` house rule (on by default; off for every ranked queue, MATCHMAKING.md 5.2). While it is on, a target who has already called Cambia refuses both swap abilities: `swap_blind` (J/Q) and `swap_peek` (K) alike, and a King can no longer even look at a locked hand, since the look is the first half of the swap and is refused before it happens. `peek_other` (9/T) is never gated by this rule and stays legal against a locked hand regardless of its setting. A player who attempts a refused swap receives a private payload from the server and must issue a new `action_special`; with the rule off, or against any other target, the swap proceeds normally.
 
     ```json: server -> client taking bad action
     {
@@ -501,7 +515,7 @@ If the card discarded in the previous step has a special action which can be uti
 
 ## Calling Cambia Action
 
-If a player decides to call Cambia, their turn ends. All players will get another turn, and the game ends when the turn reaches the original caller. Whoever calls Cambia "locks" their hand, so their cards are unmoveable. However, other players can peek at them to gain more information. This state and locking mechanism should be fully implemented.
+If a player decides to call Cambia, their turn ends. All players will get another turn, and the game ends when the turn reaches the original caller. Under the `lockCallerHand` house rule (on by default; off for every ranked queue), calling Cambia locks the caller's hand for the rest of the round: `swap_blind` and `swap_peek` refuse to target it, though `peek_other` can still view it (see the swap caveat above). With the rule off, the caller's hand plays like anyone else's.
 
 The client action payload for this will look like:
 
@@ -671,11 +685,16 @@ table as one that watched it end.
 ## Disconnect grace
 
 A dropped socket does not forfeit on the spot. The seat is held for the lobby's
-`disconnectGraceSec` house rule (default 90 seconds; 0 restores the immediate forfeit), and only
-when that window closes does `forfeitOnDisconnect` take it. Three public events report where a
-player stands, alongside the `connected`, `forfeited` and `reconnectDeadline` fields every
-`private_sync_state` carries, so a client that joins or resyncs mid-window renders the same state
-as one that watched it happen.
+`disconnectGraceSec` house rule (default 90 seconds; 0 restores the immediate forfeit), and what
+happens when that window closes depends on `forfeitOnDisconnect`. Where that rule is on, the
+closed window forfeits the seat as described below. A circuit round is created with
+`forfeitOnDisconnect` off (cambia-1233), so there the window closing instead hands the seat to the
+turn clock: no `player_forfeited` fires, `forfeited` stays false, and the seat keeps playing
+defensively for the rest of the round exactly as it did inside the window. The sync snapshot is the
+only frame a client sees for that case; nothing else marks the takeover. Three public events report
+where a player stands under the forfeit rule, alongside the `connected`, `forfeited` and
+`reconnectDeadline` fields every `private_sync_state` carries, so a client that joins or resyncs
+mid-window renders the same state as one that watched it happen.
 
 The table keeps playing throughout: the turn timer stays armed for a player inside their window
 and its timeout draws and discards without touching their hand, which is the defensive play
@@ -707,12 +726,16 @@ event's send time, the same skew-correction pair `game_player_turn` uses for the
 The returning player is separately sent a `private_sync_state` with the table as they left it:
 same hand, same stockpile, same turn.
 
-```json: server -> all clients (window closed with nobody there)
+```json: server -> all clients (window closed with nobody there, forfeitOnDisconnect on)
 {
   "type": "player_forfeited",
   "user": { "id": "{id}" }
 }
 ```
+
+This event, and everything below it in this section, is the forfeit rule's outcome. A circuit
+round's window closing (`forfeitOnDisconnect` off, see above) never fires it: the seat stays in
+the round under the turn clock instead.
 
 A forfeited player is scored at **41 points**, the flat forfeit score MATCHMAKING.md 8 and
 RULES.md T5 put a round nobody played at (`engine.ForfeitRoundScore`, the same constant a missed
@@ -736,9 +759,11 @@ the miss as a 0, which is what used to happen: a forfeited seat was left out of 
 as the best score at the table. Two fresh 1500 ratings came out 1662 for the player who quit and
 1338 for the player who stayed (cambia-1541).
 
-Giving the seat up on purpose costs the same as letting the reconnect window close: `leave_table`
-mid-game forfeits the seat immediately (cambia-1520) and it is scored at 41 like any other
-forfeit, so leaving early is never the cheaper exit.
+Giving the seat up on purpose is not a WebSocket frame: it is `POST /lobby/{id}/leave` (see
+lobby_actions.md, "Leave Lobby"). A live seat's plain leave is refused with 409 and the
+client-rendered refusal message; sending `{"forfeit": true}` forfeits the seat at 41 points, the
+same as a closed reconnect window (cambia-1520), and then releases lobby membership, so leaving
+early is never the cheaper exit.
 
 The window opens from the deal onwards, not from the first turn: a drop during the initial card
 reveal holds the seat and forfeits it on expiry exactly as a mid-game drop does, whether the

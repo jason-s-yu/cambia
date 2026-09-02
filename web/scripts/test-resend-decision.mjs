@@ -508,6 +508,24 @@ test('a lobby snapshot acks the ready it shows, and a countdown acks the frame t
     assert.deepEqual(ackOutbound(outbox, 'phase_change', { phase: 'countdown' }, SELF), []);
 });
 
+test('the reopened lobby acks the post-game exit that asked for it', () => {
+    // return_to_lobby joined the repair path in cambia-1515 with no acking case here, so an
+    // accepted one stayed in the outbox for the whole TTL. The hub answers it with a phase_change
+    // to 'open' and a lobby_state, both of which advance h.seq, so any sync_state inside that
+    // window judged the frame against the reopened lobby - phase 'open' against the recorded
+    // 'post_game' - and told the player their accepted exit had been dropped (cambia-1239 review).
+    assert.equal(ackedType('phase_change', { phase: 'open' }, SELF), 'return_to_lobby');
+    assert.equal(ackedType('phase_change', { phase: 'post_game' }, SELF), null);
+
+    const outbox = recordOutbound([], entry('return_to_lobby', { ctx: ctx({ phase: 'post_game' }) }));
+    // Left in the outbox, that is exactly the false report: a repair inside the TTL calls it dropped.
+    assert.equal(resolveOutbox(outbox, ctx({ phase: 'open' }), 11, 1000).notify.length, 1);
+    // Acked, there is nothing left for a repair to judge.
+    assert.deepEqual(ackOutbound(outbox, 'phase_change', { phase: 'open' }, SELF), []);
+    // The countdown case still answers its own frame and nothing else.
+    assert.deepEqual(ackOutbound(outbox, 'phase_change', { phase: 'countdown' }, SELF), outbox);
+});
+
 test('one event acks one frame, the oldest of its kind', () => {
     // Two chat lines cannot both have landed on one broadcast, and the outbox is in send order.
     const first = entry('chat', { sentSeq: 10, ctx: ctx({ phase: 'open' }) });

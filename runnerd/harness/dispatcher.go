@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -207,17 +208,18 @@ func (d *Dispatcher) dispatchLocked() {
 			delete(d.pending, id)
 			continue
 		}
-		switch d.gateDecisionLocked(j) {
+		decision, culprit := d.gateDecisionLocked(j)
+		switch decision {
 		case gateBlocked:
 			next = append(next, id) // parent still pending: wait, without blocking others
 		case gateSkip:
 			delete(d.pending, id)
 			j.cancel()
-			d.writeGateTerminalLocked(id, StateSkipped, "parent "+j.spec.After+" did not succeed (on_failure=skip)")
+			d.writeGateTerminalLocked(id, StateSkipped, "parent "+culprit+" did not succeed (on_failure=skip)")
 		case gateFail:
 			delete(d.pending, id)
 			j.cancel()
-			d.writeGateTerminalLocked(id, StateFailed, "parent "+j.spec.After+" did not succeed (on_failure=fail)")
+			d.writeGateTerminalLocked(id, StateFailed, "parent "+culprit+" did not succeed (on_failure=fail)")
 		case gateLaunch:
 			if barrier || !d.canLaunchLocked(j) {
 				next = append(next, id) // held: no slot, exclusive gate, or behind a deferred exclusive head
@@ -269,31 +271,49 @@ func (d *Dispatcher) releaseSlotLocked(j *job) {
 	}
 }
 
-// gateDecisionLocked resolves whether a queued job may launch, from its `after`
-// parent's current effective state (cambia-352). Callers hold d.mu. A job with
-// no parent, or a resume launch (a resumed dependent ignores its own after,
-// design 2.3), always launches. The parent read is a single bounded
-// ReadProcessState under d.mu.
-func (d *Dispatcher) gateDecisionLocked(j *job) gateDecision {
-	if j.resume || j.spec.After == "" {
-		return gateLaunch
+// gateDecisionLocked resolves whether a queued job may launch, from the
+// current effective state of every named `after` parent (D29 AND-join, widened
+// from cambia-352's single parent). Callers hold d.mu. A job with no parents,
+// or a resume launch (a resumed dependent ignores its own after, design 2.3),
+// always launches. The dependent launches only once every parent has reached a
+// clean terminal; any parent reaching a non-success terminal routes the whole
+// dependent through the single on_failure policy immediately, even while other
+// parents are still pending -- there is no reason to wait out the rest of the
+// fan-in once one branch has already doomed it. The full parent list is
+// scanned on every call (each read a bounded ReadProcessState under d.mu) so a
+// failure appearing later in the list is never missed behind an earlier
+// still-pending parent. culprit is the parent responsible for a gateSkip/
+// gateFail verdict, for the terminal message; it is empty for gateBlocked/
+// gateLaunch.
+func (d *Dispatcher) gateDecisionLocked(j *job) (decision gateDecision, culprit string) {
+	if j.resume || len(j.spec.After) == 0 {
+		return gateLaunch, ""
 	}
-	parent := j.spec.After
-	st, err := procmgr.ReadProcessState(d.runDir(parent))
-	if err != nil {
-		// Parent run dir gone (e.g. purged out from under a waiting dependent):
-		// treat as a non-success terminal so the dependent is never stranded.
-		return d.gateFailureLocked(j)
+	blocked := false
+	for _, parent := range j.spec.After {
+		st, err := procmgr.ReadProcessState(d.runDir(parent))
+		if err != nil {
+			// Parent run dir gone (e.g. purged out from under a waiting
+			// dependent): treat as a non-success terminal so the dependent is
+			// never stranded.
+			return d.gateFailureLocked(j), parent
+		}
+		pstate := d.effectiveStateLocked(parent, st)
+		if !isTerminal(pstate) {
+			blocked = true // parent queued/preparing/running/starting/stopping
+			continue
+		}
+		if pstate == procmgr.StatusStopped && exitCodeIsZero(st) {
+			continue // clean exit: this parent's half of the join is satisfied
+		}
+		// crashed / failed / canceled / skipped / a graceful-stop with a
+		// nonzero exit: this parent alone routes the dependent to on_failure.
+		return d.gateFailureLocked(j), parent
 	}
-	pstate := d.effectiveStateLocked(parent, st)
-	if !isTerminal(pstate) {
-		return gateBlocked // parent queued/preparing/running/starting/stopping
+	if blocked {
+		return gateBlocked, ""
 	}
-	if pstate == procmgr.StatusStopped && exitCodeIsZero(st) {
-		return gateLaunch // clean exit: parent success always runs the dependent
-	}
-	// crashed / failed / canceled / skipped / a graceful-stop with a nonzero exit.
-	return d.gateFailureLocked(j)
+	return gateLaunch, ""
 }
 
 // gateFailureLocked maps a job's on_failure policy to its parent-failure verdict.
@@ -344,13 +364,20 @@ func (d *Dispatcher) reDispatch() {
 }
 
 // pendingDependentsLocked returns the names of jobs still QUEUED (gate unresolved)
-// whose parent is `parent`. Preparing/running dependents already passed the gate
+// whose after list names `parent` among its parents (D29 fan-in: any position,
+// not just a sole parent). Preparing/running dependents already passed the gate
 // and no longer need the parent, so they do not count. Callers hold d.mu.
 func (d *Dispatcher) pendingDependentsLocked(parent string) []string {
 	var out []string
 	for name, j := range d.pending {
-		if j.state == StateQueued && j.spec.After == parent {
-			out = append(out, name)
+		if j.state != StateQueued {
+			continue
+		}
+		for _, p := range j.spec.After {
+			if p == parent {
+				out = append(out, name)
+				break
+			}
 		}
 	}
 	return out
@@ -461,6 +488,13 @@ func (d *Dispatcher) launchOpts(j *job, prepared *ingestapi.Prepared) (procmgr.L
 	if prepared == nil || prepared.VenvPython == "" {
 		return procmgr.LaunchOpts{}, nil
 	}
+	// measure (design D38) branches before AlgoSubcommand: there is no cambia
+	// subcommand for it, so the injected algos table is never consulted for
+	// this kind (HarnessAlgorithms' KindMeasure entry exists only to pass the
+	// submit allowlist).
+	if j.spec.Kind == KindMeasure {
+		return d.measureLaunchOpts(j, prepared)
+	}
 	sub, err := d.pm.AlgoSubcommand(j.spec.Kind)
 	if err != nil {
 		return procmgr.LaunchOpts{}, err
@@ -540,6 +574,51 @@ func (d *Dispatcher) launchOpts(j *job, prepared *ingestapi.Prepared) (procmgr.L
 	// loop syncs (design 4.2: runs/<name>/run_db.sqlite IS the wire format).
 	env := append([]string(nil), prepared.Env...)
 	env = append(env, "CAMBIA_RUN_DB="+filepath.Join(d.runsDir, journalRun, "run_db.sqlite"))
+	return procmgr.LaunchOpts{
+		Python: prepared.VenvPython,
+		Argv:   argv,
+		Cwd:    filepath.Join(prepared.WorktreeDir, "cfr"),
+		Env:    env,
+	}, nil
+}
+
+// measureLaunchOpts builds the launch for kind=measure (design D38): argv is
+// the staged script path followed by spec.Args verbatim, with no "-m src.cli"
+// prefix and no cambia subcommand. The staged script's presence at the pinned
+// commit is checked here, once the worktree exists (submit already validated
+// script's shape and root); its absence fails the job with a named error
+// before launch, mirroring the other launchOpts helpers' "field: reason"
+// wrapping. journalRun is always the job's own name (unlike evaluate's
+// borrowed target journal): a measure job owns its own run dir and its own
+// run_db.sqlite. reads (already containment- and existence-checked at
+// submit) are re-resolved here for the same defense-in-depth reason
+// evaluateTargetArgv and headToHeadArgv re-resolve their path fields, and
+// exported as CAMBIA_MEASURE_READ_DIRS, os.pathsep-joined, so the script can
+// locate its read-only seeds without re-deriving the runs dir itself.
+func (d *Dispatcher) measureLaunchOpts(j *job, prepared *ingestapi.Prepared) (procmgr.LaunchOpts, error) {
+	scriptAbs := filepath.Join(prepared.WorktreeDir, j.spec.Script)
+	if _, err := os.Stat(scriptAbs); err != nil {
+		return procmgr.LaunchOpts{}, fmt.Errorf("script: not found at pinned commit: %s", j.spec.Script)
+	}
+
+	argv := make([]string, 0, 1+len(j.spec.Args))
+	argv = append(argv, scriptAbs)
+	argv = append(argv, j.spec.Args...)
+
+	env := append([]string(nil), prepared.Env...)
+	env = append(env, "CAMBIA_RUN_DB="+filepath.Join(d.runsDir, j.spec.Name, "run_db.sqlite"))
+	if len(j.spec.Reads) > 0 {
+		reads := make([]string, 0, len(j.spec.Reads))
+		for i, r := range j.spec.Reads {
+			resolved, rerr := pathguard.Resolve(d.runsDir, r)
+			if rerr != nil {
+				return procmgr.LaunchOpts{}, fmt.Errorf("reads[%d]: %w", i, rerr)
+			}
+			reads = append(reads, resolved)
+		}
+		env = append(env, "CAMBIA_MEASURE_READ_DIRS="+strings.Join(reads, string(os.PathListSeparator)))
+	}
+
 	return procmgr.LaunchOpts{
 		Python: prepared.VenvPython,
 		Argv:   argv,

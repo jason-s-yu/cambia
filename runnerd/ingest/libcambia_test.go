@@ -4,8 +4,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
+
+	"github.com/jason-s-yu/cambia/engine/cgo/abiver"
 )
 
 func TestEnsureLibcambiaKeyedByEngineTree(t *testing.T) {
@@ -23,8 +26,12 @@ func TestEnsureLibcambiaKeyedByEngineTree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensureLibcambia c1: %v", err)
 	}
-	if filepath.Base(lib1.path) != lib1.engineTreeSha+".so" {
-		t.Fatalf("cache path %q not keyed by engine tree sha %q", lib1.path, lib1.engineTreeSha)
+	wantCacheKey := lib1.engineTreeSha + "-abigen" + strconv.Itoa(abiver.Generation)
+	if lib1.cacheKey != wantCacheKey {
+		t.Fatalf("cacheKey = %q, want %q", lib1.cacheKey, wantCacheKey)
+	}
+	if filepath.Base(lib1.path) != lib1.cacheKey+".so" {
+		t.Fatalf("cache path %q not keyed by cache key %q", lib1.path, lib1.cacheKey)
 	}
 	wantEngineSha := runGit(t, src, "rev-parse", sha1+":engine")
 	if lib1.engineTreeSha != wantEngineSha {

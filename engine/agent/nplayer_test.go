@@ -81,15 +81,16 @@ func TestNPlayerEncoding(t *testing.T) {
 	a.EncodeNPlayer(engine.CtxStartTurn, -1, &out)
 
 	// NPlayerPowersetDim = 48*8 = 384; NPlayerIdentityDim = 48*9 = 432.
-	// Check powerset section [0-383]: should have exactly 2 bits set (player 0 knows 2 slots).
+	// Check powerset section [0-383]: every one of the 4 seats knows its own 2 initial
+	// peeks (cambia-1751), so 4 seats x 2 slots x 1 knower bit = 8 bits set.
 	powBitsSet := 0
 	for i := 0; i < NPlayerPowersetDim; i++ {
 		if out[i] != 0.0 {
 			powBitsSet++
 		}
 	}
-	if powBitsSet != 2 {
-		t.Errorf("powerset section: %d bits set, want 2 (initial peeks for player 0)", powBitsSet)
+	if powBitsSet != 8 {
+		t.Errorf("powerset section: %d bits set, want 8 (every seat's own initial peeks)", powBitsSet)
 	}
 
 	// Slot identity section [384-815]: should have exactly 2 one-hot entries.
@@ -103,8 +104,10 @@ func TestNPlayerEncoding(t *testing.T) {
 		t.Errorf("identity section: %d bits set, want 2", idBitsSet)
 	}
 
-	// Public section [816-855]: should have exactly 6 one-hot bits.
-	// (discard(1), stock(1), phase(1), ctx(1), cambia(1), drawn(1) = 6)
+	// Public section [816-935]: 6 one-hot bits for the original 40 dims
+	// (discard, stock, phase, ctx, cambia, drawn), 1 for the own seat, 1 for the seat
+	// count, and 2 per seat in play (hand length one-hot plus the in-play bit) = 16 at
+	// four seats.
 	pubBitsSet := 0
 	pubStart := NPlayerPowersetDim + NPlayerIdentityDim
 	for i := pubStart; i < NPlayerInputDim; i++ {
@@ -112,8 +115,8 @@ func TestNPlayerEncoding(t *testing.T) {
 			pubBitsSet++
 		}
 	}
-	if pubBitsSet != 6 {
-		t.Errorf("public section: %d bits set, want 6", pubBitsSet)
+	if pubBitsSet != 16 {
+		t.Errorf("public section: %d bits set, want 16", pubBitsSet)
 	}
 }
 
@@ -122,9 +125,13 @@ func TestNPlayerEncodingDimConstant(t *testing.T) {
 	// 48 slots × 8 bits = 384
 	// 48 slots × 9 buckets = 432
 	// public: 10+4+6+6+3+11 = 40
-	// total = 856
-	if NPlayerInputDim != 856 {
-		t.Errorf("NPlayerInputDim = %d, want 856", NPlayerInputDim)
+	// own seat 8, seat count 8, per-seat hand length and in-play bit 8 × 8 = 64
+	// total = 936
+	if NPlayerInputDim != 936 {
+		t.Errorf("NPlayerInputDim = %d, want 936", NPlayerInputDim)
+	}
+	if NPlayerTableDim != 64 {
+		t.Errorf("NPlayerTableDim = %d, want 64", NPlayerTableDim)
 	}
 	if NPlayerNumActions != 620 {
 		t.Errorf("NPlayerNumActions = %d, want 620", NPlayerNumActions)

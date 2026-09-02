@@ -206,7 +206,7 @@ func TestReattachedNonExclusiveHoldsSlotAndFinalizes(t *testing.T) {
 
 	// A dependent gated on the reattached job: blocked while the parent lives.
 	dep := exclSpec("dep-run", "fake", false)
-	dep.After = "adopted"
+	dep.After = []string{"adopted"}
 	dep.OnFailure = OnFailureRun
 	if _, err := r.disp.Submit(dep); err != nil {
 		t.Fatal(err)
@@ -250,7 +250,7 @@ func TestReattachedFinalizeInfersCleanExitFromRunDB(t *testing.T) {
 	r.disp.Reconcile()
 
 	dep := exclSpec("dep-skip-ok", "fake", false)
-	dep.After = "adopted-ok"
+	dep.After = []string{"adopted-ok"}
 	dep.OnFailure = OnFailureSkip
 	if _, err := r.disp.Submit(dep); err != nil {
 		t.Fatal(err)
@@ -287,7 +287,7 @@ func TestReattachedFinalizeWithoutRunDBSkipsDependent(t *testing.T) {
 	r.disp.Reconcile()
 
 	dep := exclSpec("dep-skip-bad", "fake", false)
-	dep.After = "adopted-bad"
+	dep.After = []string{"adopted-bad"}
 	dep.OnFailure = OnFailureSkip
 	if _, err := r.disp.Submit(dep); err != nil {
 		t.Fatal(err)
@@ -425,7 +425,7 @@ func TestReattachedOperatorStopFinalizesCanceled(t *testing.T) {
 	r.disp.Reconcile()
 
 	dep := exclSpec("dep-after-stop", "fake", false)
-	dep.After = "adopted-stop"
+	dep.After = []string{"adopted-stop"}
 	dep.OnFailure = OnFailureSkip
 	if _, err := r.disp.Submit(dep); err != nil {
 		t.Fatal(err)

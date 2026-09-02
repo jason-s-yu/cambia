@@ -36,7 +36,7 @@ func writeCreatedJob(t *testing.T, runsDir, name, kind string, seq int64, after,
 	if err := procmgr.WriteProcessState(filepath.Join(runsDir, name), st); err != nil {
 		t.Fatal(err)
 	}
-	spec := &JobSpec{Name: name, Kind: kind, Config: "cfr/config/x.yaml", SubmitSeq: seq, After: after, OnFailure: onFailure}
+	spec := &JobSpec{Name: name, Kind: kind, Config: "cfr/config/x.yaml", SubmitSeq: seq, After: afterList(after), OnFailure: onFailure}
 	if err := writeJobSpec(filepath.Join(runsDir, name), spec); err != nil {
 		t.Fatal(err)
 	}
