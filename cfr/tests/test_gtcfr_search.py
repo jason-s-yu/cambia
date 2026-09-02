@@ -348,3 +348,206 @@ def test_engine_handles_freed(small_cvpn: CVPN):
     assert (
         after_all == before
     ), f"Handle leak after context exit: before={before}, after={after_all}"
+
+
+# ---------------------------------------------------------------------------
+# Helper: synthetic nodes for traversal / backprop tests
+# ---------------------------------------------------------------------------
+
+
+def _make_node(
+    acting_player: int,
+    legal_mask: np.ndarray,
+    depth: int = 0,
+    is_expanded: bool = False,
+    leaf_values=None,
+    engine_handle=None,
+) -> GTCFRNode:
+    """Build a non-terminal GTCFRNode with zeroed CFR and PUCT state."""
+    return GTCFRNode(
+        depth=depth,
+        acting_player=acting_player,
+        is_terminal=False,
+        terminal_values=None,
+        legal_mask=legal_mask,
+        n_legal=int(legal_mask.sum()),
+        children={},
+        is_expanded=is_expanded,
+        cumulative_regret=np.zeros(NUM_ACTIONS, dtype=np.float32),
+        cumulative_strategy=np.zeros(NUM_ACTIONS, dtype=np.float32),
+        cfr_visits=0,
+        visit_counts=np.zeros(NUM_ACTIONS, dtype=np.int32),
+        total_action_value=np.zeros(NUM_ACTIONS, dtype=np.float32),
+        policy_prior=np.zeros(NUM_ACTIONS, dtype=np.float32),
+        leaf_values=leaf_values,
+        engine_handle=engine_handle,
+    )
+
+
+def _fallback_node(searcher: GTCFRSearch, n_legal: int, child_utils: dict) -> GTCFRNode:
+    """Node in the uniform fallback: n_legal actions, len(child_utils) expanded.
+
+    Every cumulative regret is negative, so regret matching falls back to the
+    uniform strategy. Children are terminal, so their CFVs are the given
+    utilities broadcast across hand types.
+    """
+    legal_mask = np.zeros(NUM_ACTIONS, dtype=bool)
+    legal_mask[:n_legal] = True
+
+    node = _make_node(acting_player=0, legal_mask=legal_mask, is_expanded=True)
+    node.cumulative_regret[legal_mask] = -1.0
+
+    for a, util in child_utils.items():
+        node.children[a] = searcher._make_terminal_node(
+            1, None, np.array(util, dtype=np.float32)
+        )
+    return node
+
+
+# ---------------------------------------------------------------------------
+# Test: uniform fallback does not drop unexpanded-action mass (cambia-716)
+# ---------------------------------------------------------------------------
+
+
+def test_uniform_fallback_mixes_over_expanded_children(small_cvpn: CVPN):
+    """The fallback node value is the expanded-children mean, not k/n_legal of it.
+
+    With 10 legal actions and 3 expanded children, a 1/n_legal strategy summed
+    over the children alone yields 3/10 of their mean and drives every regret
+    delta the same direction.
+    """
+    searcher = GTCFRSearch(small_cvpn, expansion_budget=1, expansion_k=3)
+    child_utils = {0: (-1.0, 1.0), 1: (-0.5, 0.5), 2: (-0.2, 0.2)}
+    node = _fallback_node(searcher, n_legal=10, child_utils=child_utils)
+
+    r0, r1 = _uniform_ranges()
+    before = node.cumulative_regret.copy()
+    cfvs = searcher._cfr_traverse(node, np.ones(2, dtype=np.float32), r0, r1)
+
+    expected_p0 = np.mean([u[0] for u in child_utils.values()])
+    deflated_p0 = expected_p0 * len(child_utils) / 10.0
+
+    assert np.allclose(
+        cfvs[0], expected_p0
+    ), f"Expected expanded-children mean {expected_p0}, got {cfvs[0][0]}"
+    assert not np.isclose(
+        cfvs[0][0], deflated_p0
+    ), f"Node value still deflated to k/n_legal ({deflated_p0})"
+
+    # Regret deltas are centered on the node value, so they cannot all be negative.
+    deltas = [float(node.cumulative_regret[a] - before[a]) for a in child_utils]
+    assert max(deltas) > 0.0, f"All regret deltas non-positive: {deltas}"
+    assert min(deltas) < 0.0, f"All regret deltas non-negative: {deltas}"
+    assert sum(deltas) == pytest.approx(0.0, abs=1e-5)
+
+
+def test_uniform_fallback_node_escapes_fallback(small_cvpn: CVPN):
+    """Repeated iterations lift the best action's regret above zero.
+
+    Under a k/n_legal node value every delta stays negative and the node is
+    pinned to uniform-over-all-legal forever.
+    """
+    searcher = GTCFRSearch(small_cvpn, expansion_budget=1, expansion_k=3)
+    child_utils = {0: (-1.0, 1.0), 1: (-0.5, 0.5), 2: (-0.2, 0.2)}
+    node = _fallback_node(searcher, n_legal=10, child_utils=child_utils)
+
+    r0, r1 = _uniform_ranges()
+    for _ in range(5):
+        searcher._cfr_traverse(node, np.ones(2, dtype=np.float32), r0, r1)
+
+    assert (
+        node.cumulative_regret > 0.0
+    ).any(), f"Node still frozen in fallback: {node.cumulative_regret[:3]}"
+    # Action 2 has the best value for the acting player and should hold the mass.
+    strategy = node.current_strategy()
+    assert strategy[2] > strategy[0]
+
+
+# ---------------------------------------------------------------------------
+# Test: PUCT backprop uses the ancestor's perspective (cambia-717)
+# ---------------------------------------------------------------------------
+
+
+class _FakeTerminalEngine:
+    """Stand-in child engine reporting a terminal state with fixed utilities."""
+
+    def __init__(self, util):
+        self._util = np.asarray(util, dtype=np.float32)
+
+    def is_terminal(self) -> bool:
+        return True
+
+    def get_utility(self) -> np.ndarray:
+        return self._util.copy()
+
+    def close(self) -> None:
+        pass
+
+
+def _constant_leaf_values(v0: float, v1: float) -> np.ndarray:
+    """(2, NUM_HAND_TYPES) leaf values constant across hand types."""
+    lv = np.zeros((2, NUM_HAND_TYPES), dtype=np.float32)
+    lv[0, :] = v0
+    lv[1, :] = v1
+    return lv
+
+
+def test_backprop_projects_value_into_ancestor_perspective(small_cvpn: CVPN, monkeypatch):
+    """A parent books the expanded node's value for the parent's own actor.
+
+    The root acts as player 0 and both children act as player 1. Leaf values are
+    deliberately not zero-sum, so indexing by the ancestor's actor is
+    distinguishable from negating the expanded node's own value.
+    """
+    searcher = GTCFRSearch(small_cvpn, expansion_budget=1, c_puct=2.0, expansion_k=2)
+    r0, r1 = _uniform_ranges()
+
+    action_a, action_b = 0, 1
+    root_legal = np.zeros(NUM_ACTIONS, dtype=bool)
+    root_legal[[action_a, action_b]] = True
+    root = _make_node(acting_player=0, legal_mask=root_legal, is_expanded=True)
+    root.policy_prior[[action_a, action_b]] = 0.5  # equal exploration terms
+
+    child_legal = np.zeros(NUM_ACTIONS, dtype=bool)
+    child_legal[2] = True
+    child_a = _make_node(
+        acting_player=1,
+        legal_mask=child_legal,
+        depth=1,
+        leaf_values=_constant_leaf_values(0.8, -0.5),
+        engine_handle=_FakeTerminalEngine([0.0, 0.0]),
+    )
+    child_b = _make_node(
+        acting_player=1,
+        legal_mask=child_legal,
+        depth=1,
+        leaf_values=_constant_leaf_values(-0.6, 0.7),
+        engine_handle=_FakeTerminalEngine([0.0, 0.0]),
+    )
+    root.children = {action_a: child_a, action_b: child_b}
+
+    monkeypatch.setattr(
+        searcher,
+        "_make_child_engine",
+        lambda parent, action: _FakeTerminalEngine([0.0, 0.0]),
+    )
+    selections = iter([action_a, action_b])
+    monkeypatch.setattr(searcher, "_select_action", lambda node: next(selections))
+
+    searcher._expand_once(root, None, r0, r1)
+    searcher._expand_once(root, None, r0, r1)
+
+    assert root.visit_counts[action_a] == 1
+    assert root.visit_counts[action_b] == 1
+
+    # Player 0's values (0.8 / -0.6), not player 1's (-0.5 / 0.7) and not their
+    # negations (0.5 / -0.7).
+    assert root.total_action_value[action_a] == pytest.approx(0.8, abs=1e-5)
+    assert root.total_action_value[action_b] == pytest.approx(-0.6, abs=1e-5)
+
+    # Equal priors and equal visit counts, so Q decides the ranking.
+    scores = searcher._puct_scores(root)
+    assert scores[action_a] > scores[action_b], (
+        f"PUCT ranks against the root actor's preference: "
+        f"{scores[action_a]:.3f} vs {scores[action_b]:.3f}"
+    )

@@ -645,8 +645,10 @@ a client.
 
 RULES.md 3C ends a round with all cards revealed, and the service reveals on every terminal path it
 reaches, not just a called Cambia: the turn cap, an exhausted stockpile, and a forfeit that empties
-the table all run through the same `endGame`. A seat that forfeited is left out, since it is not
-scored either.
+the table all run through the same `endGame`. A seat that forfeited is left out of the reveal: it
+has no hand the round played out. It is still scored, at the flat 41 points RULES.md T5 and
+MATCHMAKING.md 8 put a forfeited round at; what the results frame omits is the scoreboard entry,
+not the score. See the disconnect grace section below for where that 41 is recorded.
 
 The reveal is built once, in `endGame`, and carried by every frame that reports the result:
 

@@ -47,6 +47,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { useCurrentLobbyStore, type LobbyPhase } from '@/stores/lobbyStore';
 import { lockedPlayerId, isHandLocked, canSnapCard } from '@/lib/handLock';
 import { roundCounterLabel } from '@/lib/roundCounter';
+import { secondsUntil } from '@/lib/serverClock';
 import Button from '@/components/ds/core/Button';
 import Badge from '@/components/ds/core/Badge';
 import Panel from '@/components/ds/chrome/Panel';
@@ -134,6 +135,23 @@ interface PileSnapshot {
 }
 
 /**
+ * Wall-clock reading, refreshed on an interval while `active` and frozen otherwise. The felt's one
+ * ticking clock that belongs to a seat rather than to the action column: a reconnect window is
+ * drawn on the chip of the player it is holding, and every held seat counts down off this single
+ * timer instead of arming one apiece (cambia-1241).
+ */
+function useNowMs(active: boolean, intervalMs = 500): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const id = window.setInterval(() => setNow(Date.now()), intervalMs);
+    return () => window.clearInterval(id);
+  }, [active, intervalMs]);
+  return now;
+}
+
+/**
  * Transient table notice derived from state deltas. A hand that grows is a snap
  * penalty (nothing else adds a card to a hand mid-game; the drawn card is held
  * apart from the hand) and a stockpile that grows is a reshuffle. A successful
@@ -200,6 +218,7 @@ function useTableNotice(gs: ObfGameState, selfId: string | undefined, names: Map
   // cards would otherwise miss. The grace length comes off the event so the notice quotes the
   // rule in force rather than a hardcoded minute.
   const lastPresence = useGameStore(selectLastPresence);
+  const presenceClockOffsetMs = useGameStore(selectServerClockOffsetMs);
   const seenPresence = useRef(lastPresence?.nonce ?? 0);
   useEffect(() => {
     if (!lastPresence || lastPresence.nonce === seenPresence.current) return;
@@ -207,14 +226,22 @@ function useTableNotice(gs: ObfGameState, selfId: string | undefined, names: Map
     if (lastPresence.playerId === selfId) return; // your own drop is the offline strip, not a notice
     const who = names.get(lastPresence.playerId) ?? 'Opponent';
     if (lastPresence.kind === 'reconnecting') {
-      const secs = lastPresence.deadline ? Math.max(1, Math.round((lastPresence.deadline - Date.now()) / 1000)) : null;
+      // The deadline is a server-clock stamp, so it is read through the offset the same frame
+      // carried rather than against this client's clock: a client a minute off its server used to
+      // announce a window that had already closed, or one twice as long as the rule allows
+      // (cambia-1241). The house rule stands in only where the frame carried no deadline at all,
+      // never for one that has run out: quoting the rule's full length there would restart a
+      // window the server has already closed.
+      const secs = lastPresence.deadline != null
+        ? secondsUntil(lastPresence.deadline, presenceClockOffsetMs)
+        : lastPresence.graceSeconds;
       setNotice({ id: Date.now(), tone: 'warning', text: secs ? `${who} dropped. ${secs}s to reconnect.` : `${who} dropped.` });
     } else if (lastPresence.kind === 'reconnected') {
       setNotice({ id: Date.now(), tone: 'success', text: `${who} is back.` });
     } else {
       setNotice({ id: Date.now(), tone: 'danger', text: `${who} forfeited.` });
     }
-  }, [lastPresence, selfId, names]);
+  }, [lastPresence, presenceClockOffsetMs, selfId, names]);
 
   // Consumed by the delta pass below, separately from the notice effect above: the two answer
   // different questions about the same event and neither may swallow it for the other.
@@ -399,6 +426,11 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
 
   const selfState = gameState.players.find((p) => p.playerId === selfId);
   const opponents = gameState.players.filter((p) => p.playerId !== selfId);
+  // A seat inside its reconnect window (cambia-955). `reconnectDeadline` rides every sync
+  // snapshot and not only the player_reconnecting event, so a client that joined or resynced
+  // mid-window counts the same window down as one that watched the drop happen (cambia-1241).
+  const graceWindowOpen = gameState.players.some((p) => !p.forfeited && p.reconnectDeadline != null);
+  const nowMs = useNowMs(graceWindowOpen);
   // LockCallerHand: the seat whose hand is frozen for the rest of the round, and whether that is
   // this player (cambia-1069). Nothing the server would refuse is offered on the felt: no snap
   // into the locked hand, no snap out of it by its owner, no swap ability naming it. See
@@ -905,10 +937,20 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
               // a stale 'Look and swap' under the seat behind the results overlay
               // (cambia-876, DL-4 review F12).
               const acting = !roundOver && !!specialAction?.active && specialAction.playerId === opp.playerId;
-              const note = acting ? abilityName(specialAction?.cardRank) ?? undefined : undefined;
+              const seatState = seatStateFor(opp, gameState.currentPlayerId);
+              // A held seat says how long it is held for, read off the server's deadline through
+              // the clock offset that deadline was stamped against. The bare "Reconnecting" the
+              // seat would otherwise carry is the one thing a player looking at an empty chair
+              // already knows; how long the table waits is the part they cannot see (cambia-1241).
+              const heldForSec = seatState === 'disconnected'
+                ? secondsUntil(opp.reconnectDeadline, serverClockOffsetMs, nowMs)
+                : null;
+              const note = acting
+                ? abilityName(specialAction?.cardRank) ?? undefined
+                : heldForSec != null ? `Reconnecting ${heldForSec}s` : undefined;
               return (
                 <div key={opp.playerId} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
-                  <PlayerSeat username={nameOf(opp.playerId)} compact handSize={opp.handSize} note={note} state={seatStateFor(opp, gameState.currentPlayerId)} />
+                  <PlayerSeat username={nameOf(opp.playerId)} compact handSize={opp.handSize} note={note} state={seatState} />
                   {/* Every opponent seat, at any player count, is drawn across the table above its
                       hand, so the row nearest that opponent is the TOP row on screen and plain
                       row-major order already puts slots 0 and 1 there (cambia-1095). */}

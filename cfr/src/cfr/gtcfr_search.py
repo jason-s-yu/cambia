@@ -114,17 +114,27 @@ class GTCFRNode:
     # Game engine handle (GoEngine instance)
     engine_handle: Any
 
-    def current_strategy(self) -> np.ndarray:
-        """Regret-matching strategy from cumulative regrets."""
+    def current_strategy(self, support_mask: Optional[np.ndarray] = None) -> np.ndarray:
+        """Regret-matching strategy from cumulative regrets.
+
+        support_mask restricts the strategy to a subset of the legal actions,
+        defaulting to all of them. Tree CFR passes the expanded children so the
+        strategy is a distribution over the actions the tree actually holds.
+        Restricting the support changes only the uniform fallback: an action
+        with no child never has its regret updated, so its positive part stays
+        zero and it already carries no mass under active regret matching.
+        """
+        mask = self.legal_mask if support_mask is None else support_mask
+        n_support = self.n_legal if support_mask is None else int(mask.sum())
         pos = np.maximum(self.cumulative_regret, 0.0)
-        total = float(pos[self.legal_mask].sum())
+        total = float(pos[mask].sum())
         strat = np.zeros(NUM_ACTIONS, dtype=np.float32)
         if total > 1e-10:
-            strat[self.legal_mask] = pos[self.legal_mask] / total
+            strat[mask] = pos[mask] / total
         else:
-            # Uniform fallback
-            if self.n_legal > 0:
-                strat[self.legal_mask] = 1.0 / self.n_legal
+            # Uniform fallback over the support
+            if n_support > 0:
+                strat[mask] = 1.0 / n_support
         return strat
 
     def average_strategy(self) -> np.ndarray:
@@ -316,7 +326,16 @@ class GTCFRSearch:
             return np.zeros((2, NUM_HAND_TYPES), dtype=np.float32)
 
         acting = node.acting_player
-        strategy = node.current_strategy()  # (NUM_ACTIONS,)
+
+        # Tree CFR runs on the actions the tree holds, so the mixing strategy is
+        # renormalized over the expanded children. Without this the uniform
+        # fallback (every cumulative regret <= 0) spreads mass over all n_legal
+        # actions while only the len(children) expanded ones are summed below,
+        # scaling the node value by len(children) / n_legal and driving every
+        # regret delta the same direction, which freezes the node in fallback.
+        expanded_mask = np.zeros(NUM_ACTIONS, dtype=bool)
+        expanded_mask[list(node.children.keys())] = True
+        strategy = node.current_strategy(expanded_mask)  # (NUM_ACTIONS,)
 
         # Traverse all children, collecting per-child CFVs
         child_cfvs: Dict[int, np.ndarray] = {}
@@ -452,7 +471,6 @@ class GTCFRSearch:
 
         # Build child nodes
         n_added = 0
-        node_value = 0.0  # value of expanded node for PUCT backprop
 
         for idx, a in enumerate(legal_actions):
             child_eng = child_engines[idx]
@@ -492,15 +510,22 @@ class GTCFRSearch:
 
         node.is_expanded = True
 
-        # Value for PUCT backprop: collapse acting player's range-weighted CFV
-        if node.leaf_values is not None and node.acting_player >= 0:
-            r = range_p0 if node.acting_player == 0 else range_p1
-            node_value = float(np.dot(r, node.leaf_values[node.acting_player]))
+        # Value for PUCT backprop: range-weighted CFV per player. The CVPN emits
+        # both players' values, so each ancestor books the one for its own
+        # acting player instead of the expanded node's; adding the expanded
+        # node's own value to an ancestor with a different actor inverts that
+        # ancestor's Q and makes _puct_scores rank against its preference.
+        node_values = np.zeros(2, dtype=np.float32)
+        if node.leaf_values is not None:
+            node_values[0] = float(np.dot(range_p0, node.leaf_values[0]))
+            node_values[1] = float(np.dot(range_p1, node.leaf_values[1]))
 
         # Backprop visit counts and Q-values up the selection path
         for parent_node, action in reversed(path):
             parent_node.visit_counts[action] += 1
-            parent_node.total_action_value[action] += node_value
+            actor = parent_node.acting_player
+            if actor >= 0:
+                parent_node.total_action_value[action] += float(node_values[actor])
 
         return n_added
 
