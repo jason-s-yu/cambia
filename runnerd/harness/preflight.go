@@ -2,11 +2,9 @@ package harness
 
 import (
 	"fmt"
-	"os"
-	"strconv"
-	"strings"
 
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
+	"github.com/jason-s-yu/cambia/runnerd/sysprobe"
 )
 
 // Default preflight floors (design 6). Higher than the dashboard's because the
@@ -28,28 +26,17 @@ var runnerOverridable = map[string]bool{
 }
 
 // RAMQueryFunc returns the available RAM in GiB. It is a seam so tests inject a
-// value without depending on the host's live memory.
-type RAMQueryFunc func() (float64, error)
+// value without depending on the host's live memory. Alias of
+// sysprobe.RAMQueryFunc so existing callers are unaffected by the move.
+type RAMQueryFunc = sysprobe.RAMQueryFunc
 
 // DefaultRAMQuery reads MemAvailable from /proc/meminfo (lxcfs presents
-// container-scoped values inside the runner LXC) and returns it in GiB.
+// container-scoped values inside the runner LXC) and returns it in GiB. Moved
+// to runnerd/sysprobe (design D46) so the nashnet node package can probe RAM
+// without importing this HTTP-carrying package; this forwarder keeps the name
+// so server.go's wiring needs no change.
 func DefaultRAMQuery() (float64, error) {
-	data, err := os.ReadFile("/proc/meminfo")
-	if err != nil {
-		return 0, err
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 2 || fields[0] != "MemAvailable:" {
-			continue
-		}
-		kb, perr := strconv.ParseFloat(fields[1], 64)
-		if perr != nil {
-			return 0, perr
-		}
-		return kb / (1 << 20), nil // kB -> GiB
-	}
-	return 0, fmt.Errorf("MemAvailable not found in /proc/meminfo")
+	return sysprobe.DefaultRAMQuery()
 }
 
 // MinFreeRAMCheck passes when at least minGB of RAM is available, or when no RAM

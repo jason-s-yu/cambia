@@ -12,11 +12,11 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/jason-s-yu/cambia/runnerd/authtoken"
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
+	"github.com/jason-s-yu/cambia/runnerd/sysprobe"
 )
 
 // ServerConfig configures NewServer. Dispatcher and Verifier are required.
@@ -234,13 +234,11 @@ func (s *Server) originHostPattern() string {
 }
 
 // diskFreeGB returns the unprivileged-available space in GiB on the filesystem
-// backing path (Bavail, matching procmgr.DiskSpaceCheck semantics).
+// backing path (Bavail, matching procmgr.DiskSpaceCheck semantics). Moved to
+// runnerd/sysprobe (design D46); this forwarder keeps the name so callers in
+// this package need no change.
 func diskFreeGB(path string) float64 {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(path, &st); err != nil {
-		return 0
-	}
-	return float64(st.Bavail*uint64(st.Bsize)) / (1 << 30)
+	return sysprobe.DiskFreeGB(path)
 }
 
 // writeJSON writes v as JSON with the given status.
