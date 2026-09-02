@@ -47,8 +47,36 @@ logger = logging.getLogger(__name__)
 # Progress update interval (nodes)
 PROGRESS_UPDATE_NODE_INTERVAL = 2500
 
-# Importance sampling weight clipping bound (OS-MCCFR variance reduction)
+# Importance sampling weight clipping bound (OS-MCCFR variance reduction).
+# Applied to the FULL weight pi^sigma(h a, z) / q(h -> z), not to the local 1/q(a|h)
+# alone: clipping only the local factor leaves the tail uncorrected, which is the
+# defect this bound used to hide.
+#
+# BIAS: the clip is a truncated importance sampling estimator. Weights above the
+# bound are pulled down to it, so trajectories that sigma strongly prefers but the
+# epsilon-mixed sampler rarely draws are under-counted, and the regret target is
+# biased low on exactly those actions. The estimator is unbiased only on nodes
+# where the clip does not bind. The bound trades that bias for a finite second
+# moment: the unclipped weight is a product of per-node ratios over the traverser's
+# whole remaining decision horizon, and its variance grows without bound in the
+# horizon. See docs/sampling.md.
 MAX_IS_WEIGHT = 20.0
+
+
+def _clipped_is_weight(tail_ratio: float, sampling_prob: float) -> float:
+    """
+    Full outcome-sampling importance weight for one traverser decision, clipped.
+
+    ``tail_ratio`` is pi^sigma(h a, z) / q(h a -> z), the ratio accumulated below the
+    sampled action; ``sampling_prob`` is q(a|h) at this node. The product is the
+    weight that makes ``u(z) * w`` an unbiased estimate of the counterfactual value
+    v^sigma(h a). Non-finite products (over/underflow over a long horizon) collapse
+    to the bound.
+    """
+    weight = tail_ratio / sampling_prob
+    if not np.isfinite(weight):
+        return MAX_IS_WEIGHT
+    return min(weight, MAX_IS_WEIGHT)
 
 
 @dataclass
@@ -189,7 +217,7 @@ def _deep_traverse_go(
     simulation_nodes: List[SimulationNodeData],
     _feat_buf: Optional[torch.Tensor] = None,
     _mask_buf: Optional[torch.Tensor] = None,
-) -> np.ndarray:
+) -> Optional[np.ndarray]:
     """
     Recursive External Sampling traversal for Deep CFR using the Go engine backend.
 
@@ -198,7 +226,12 @@ def _deep_traverse_go(
     At traverser's node: enumerate ALL legal actions, recurse on each, compute exact regrets.
     At opponent's node: sample ONE action from strategy (network), recurse.
 
-    Returns utility vector (shape (2,) float64) for both players.
+    Returns the utility vector (shape (2,) float64) for both players, or None when an
+    engine call failed anywhere at or below this node. None is the failure channel,
+    not a zero utility: 0 is inside the legal utility range, so a fabricated zero is
+    indistinguishable from a genuine draw once it reaches the reservoir. A node that
+    returns None has emitted no sample whose target depends on the failed subtree,
+    and its caller masks the action leading here out of its own target.
     """
     logger = logging.getLogger(__name__)
 
@@ -245,7 +278,7 @@ def _deep_traverse_go(
     except Exception as e_term:
         logger.error("W%d D%d: Error checking terminal: %s", worker_id, depth, e_term)
         worker_stats.error_count += 1
-        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+        return None
 
     # Depth limit check (system recursion limit)
     if depth >= config.system.recursion_limit:
@@ -255,6 +288,10 @@ def _deep_traverse_go(
             min_depth_after_bottom_out_tracker[0], float(depth)
         )
         worker_stats.error_count += 1
+        # A depth rail, not an engine failure: the subtree is cut short, so this
+        # returns the truncated-subtree value of 0 exactly as traversal_depth_limit
+        # does. It stays counted as an error because reaching it means the recursion
+        # ran away, but the samples above it are real.
         return np.zeros(NUM_PLAYERS, dtype=np.float64)
 
     # Traversal depth cap (0 = unlimited)
@@ -274,7 +311,7 @@ def _deep_traverse_go(
             "W%d D%d: Error getting legal action mask: %s", worker_id, depth, e_legal
         )
         worker_stats.error_count += 1
-        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+        return None
 
     legal_indices = np.where(legal_mask > 0)[0]
     num_actions = len(legal_indices)
@@ -282,7 +319,7 @@ def _deep_traverse_go(
     if num_actions == 0:
         logger.error("W%d D%d: No legal actions but non-terminal!", worker_id, depth)
         worker_stats.error_count += 1
-        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+        return None
 
     # Get decision context directly from Go engine
     current_context = engine.decision_ctx()
@@ -295,7 +332,7 @@ def _deep_traverse_go(
             "W%d D%d: Error getting acting player: %s", worker_id, depth, e_player
         )
         worker_stats.error_count += 1
-        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+        return None
 
     # Get drawn card bucket for POST_DRAW encoding
     drawn_bucket = -1
@@ -325,7 +362,7 @@ def _deep_traverse_go(
     except Exception as e_encode:
         logger.error("W%d D%d: Error encoding infoset: %s", worker_id, depth, e_encode)
         worker_stats.error_count += 1
-        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+        return None
 
     # Compute strategy from advantage network
     if network is not None:
@@ -378,7 +415,7 @@ def _deep_traverse_go(
                 "W%d D%d: Failed to save engine state: %s", worker_id, depth, e_save
             )
             worker_stats.error_count += 1
-            return np.zeros(NUM_PLAYERS, dtype=np.float64)
+            return None
 
         try:
             agent_clones = [a.clone() for a in agent_states]
@@ -388,7 +425,13 @@ def _deep_traverse_go(
             )
             worker_stats.error_count += 1
             engine.free_snapshot(snap)
-            return np.zeros(NUM_PLAYERS, dtype=np.float64)
+            return None
+
+        # Per-action outcome. A slot stays False unless the action was applied and
+        # its subtree returned a real value, so a failed action is never read as a
+        # utility of 0 (which is inside the legal [-1, +1] range and therefore
+        # indistinguishable from a genuine draw downstream).
+        action_ok = [False] * num_actions
 
         for i, action_idx in enumerate(legal_indices):
             if i > 0:
@@ -404,6 +447,7 @@ def _deep_traverse_go(
                     )
                     worker_stats.error_count += 1
                     break
+                agents_restored = True
                 for j, a in enumerate(agent_states):
                     a.close()
                     try:
@@ -417,7 +461,12 @@ def _deep_traverse_go(
                             e_clone2,
                         )
                         worker_stats.error_count += 1
+                        agents_restored = False
                         break
+                if not agents_restored:
+                    # The agent states are half-restored; applying the next action
+                    # against them would produce a plausible but wrong subtree.
+                    break
 
             try:
                 engine.apply_action(int(action_idx))
@@ -434,7 +483,7 @@ def _deep_traverse_go(
                 continue
 
             try:
-                action_values[i] = _deep_traverse_go(
+                child_value = _deep_traverse_go(
                     engine,
                     agent_states,
                     updating_player,
@@ -453,6 +502,11 @@ def _deep_traverse_go(
                     _feat_buf,
                     _mask_buf,
                 )
+                if child_value is None:
+                    # The subtree reported a failure; leave the slot unusable.
+                    continue
+                action_values[i] = child_value
+                action_ok[i] = True
             except Exception as e_recurse:  # JUSTIFIED: worker resilience
                 logger.error(
                     "W%d D%d: Recursion error after action %d: %s",
@@ -465,6 +519,7 @@ def _deep_traverse_go(
                 worker_stats.error_count += 1
 
         # Final restore of engine and agent states
+        final_restore_ok = True
         try:
             engine.restore(snap)
         except Exception as e_restore_final:
@@ -475,10 +530,26 @@ def _deep_traverse_go(
                 e_restore_final,
             )
             worker_stats.error_count += 1
+            final_restore_ok = False
         for j, a in enumerate(agent_states):
             a.close()
             agent_states[j] = agent_clones[j]  # swap in backup directly
         engine.free_snapshot(snap)
+
+        if not all(action_ok) or not final_restore_ok:
+            # v(I) = sum_a sigma(a) v(I a) needs every action's value, so one missing
+            # action contaminates the baseline and with it every regret at this node,
+            # not just the failed action's. Emit nothing and report the failure so the
+            # caller masks the action that leads here out of its own target.
+            logger.error(
+                "W%d D%d: Discarding advantage sample: %d of %d actions unusable%s.",
+                worker_id,
+                depth,
+                num_actions - sum(action_ok),
+                num_actions,
+                "" if final_restore_ok else ", final restore failed",
+            )
+            return None
 
         # Compute exact counterfactual values
         node_value = local_strategy @ action_values  # shape: (NUM_PLAYERS,)
@@ -545,7 +616,7 @@ def _deep_traverse_go(
                 e_save,
             )
             worker_stats.error_count += 1
-            return node_value
+            return None
 
         try:
             agent_clones = [a.clone() for a in agent_states]
@@ -558,7 +629,7 @@ def _deep_traverse_go(
             )
             worker_stats.error_count += 1
             engine.free_snapshot(snap)
-            return node_value
+            return None
 
         apply_ok = False
         try:
@@ -575,9 +646,10 @@ def _deep_traverse_go(
             )
             worker_stats.error_count += 1
 
+        subtree_ok = False
         if apply_ok:
             try:
-                node_value = _deep_traverse_go(
+                child_value = _deep_traverse_go(
                     engine,
                     agent_states,
                     updating_player,
@@ -596,6 +668,9 @@ def _deep_traverse_go(
                     _feat_buf,
                     _mask_buf,
                 )
+                if child_value is not None:
+                    node_value = child_value
+                    subtree_ok = True
             except Exception as e_recurse:  # JUSTIFIED: worker resilience
                 logger.error(
                     "W%d D%d: Recursion error after sampled action %d: %s",
@@ -618,12 +693,16 @@ def _deep_traverse_go(
                 e_restore,
             )
             worker_stats.error_count += 1
+            subtree_ok = False
         for j, a in enumerate(agent_states):
             a.close()
             agent_states[j] = agent_clones[j]  # swap in backup directly
         engine.free_snapshot(snap)
 
-        return node_value
+        # The strategy sample above was taken before the recursion and its target is
+        # sigma at this infoset, so a failure below it does not fabricate anything in
+        # that sample; it stays. The utility does not: report the failure upward.
+        return node_value if subtree_ok else None
 
 
 def _deep_traverse_os_go(
@@ -647,17 +726,35 @@ def _deep_traverse_os_go(
     _mask_buf: Optional[torch.Tensor] = None,
     depth_limit: Optional[int] = None,
     recursion_limit: Optional[int] = None,
-) -> np.ndarray:
+) -> Tuple[Optional[np.ndarray], float]:
     """
     Recursive Outcome Sampling traversal for Deep CFR using the Go engine backend.
 
     Uses GoEngine (save/restore) and GoAgentState (encode directly).
 
-    At ALL nodes (both traverser and opponent): sample ONE action using exploration policy
-    q(a|h) = epsilon * uniform + (1-epsilon) * sigma(a|h), then apply importance sampling
-    correction to compute regrets.
+    At traverser nodes the action is sampled from the exploration policy
+    q(a|h) = epsilon * uniform + (1-epsilon) * sigma(a|h); at opponent nodes it is
+    sampled from sigma itself.
 
-    Returns utility vector (shape (2,) float64) for both players.
+    Because the traverser explores off sigma at every node of the sampled path, the
+    raw utility that comes back from the recursion is the value of the epsilon-mixed
+    continuation, not of sigma's. The correction is the tail importance ratio
+    pi^sigma(h, z) / q(h -> z) (Lanctot et al. 2009, "Monte Carlo Sampling for
+    Regret Minimization in Extensive Games"): each node multiplies in
+    sigma(a|h) / q(a|h) for the action it sampled and hands the running product to
+    its parent. Opponent nodes contribute 1 on the normal path, since they sample
+    from sigma. The traverser then weights the sampled utility by
+    tail_ratio(child) / q(a|h) rather than by 1 / q(a|h).
+
+    Returns (utility vector of shape (2,) float64, tail importance ratio from this
+    node down to the sampled terminal). The ratio is returned unclipped: the
+    MAX_IS_WEIGHT bound is applied once, where the weight is consumed, so it does
+    not compound down the recursion.
+
+    The utility is None when an engine call failed at or below this node. None is
+    the failure channel rather than a zero utility, since 0 is inside the legal
+    utility range and a fabricated zero is indistinguishable from a genuine draw
+    once it reaches the reservoir.
     """
     # Resolve config values once at the root call; propagated via params on recursion
     if recursion_limit is None:
@@ -708,11 +805,11 @@ def _deep_traverse_os_go(
                 min_depth_after_bottom_out_tracker[0], float(depth)
             )
             util = engine.get_utility().astype(np.float64)
-            return util
+            return util, 1.0
     except Exception as e_term:
         logger.error("W%d D%d: Error checking terminal: %s", worker_id, depth, e_term)
         worker_stats.error_count += 1
-        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+        return None, 1.0
 
     # Depth limit check (system recursion limit)
     if depth >= recursion_limit:
@@ -722,7 +819,11 @@ def _deep_traverse_os_go(
             min_depth_after_bottom_out_tracker[0], float(depth)
         )
         worker_stats.error_count += 1
-        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+        # A depth rail, not an engine failure: the subtree is cut short, so this
+        # returns the truncated-subtree value of 0 exactly as traversal_depth_limit
+        # does. It stays counted as an error because reaching it means the recursion
+        # ran away, but the samples above it are real.
+        return np.zeros(NUM_PLAYERS, dtype=np.float64), 1.0
 
     # Traversal depth cap (0 = unlimited)
     if depth_limit > 0 and depth >= depth_limit:
@@ -730,7 +831,7 @@ def _deep_traverse_os_go(
         min_depth_after_bottom_out_tracker[0] = min(
             min_depth_after_bottom_out_tracker[0], float(depth)
         )
-        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+        return np.zeros(NUM_PLAYERS, dtype=np.float64), 1.0
 
     # Get legal actions mask
     try:
@@ -740,7 +841,7 @@ def _deep_traverse_os_go(
             "W%d D%d: Error getting legal action mask: %s", worker_id, depth, e_legal
         )
         worker_stats.error_count += 1
-        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+        return None, 1.0
 
     legal_indices = np.where(legal_mask > 0)[0]
     num_actions = len(legal_indices)
@@ -748,7 +849,7 @@ def _deep_traverse_os_go(
     if num_actions == 0:
         logger.error("W%d D%d: No legal actions but non-terminal!", worker_id, depth)
         worker_stats.error_count += 1
-        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+        return None, 1.0
 
     # Get decision context directly from Go engine
     current_context = engine.decision_ctx()
@@ -761,7 +862,7 @@ def _deep_traverse_os_go(
             "W%d D%d: Error getting acting player: %s", worker_id, depth, e_player
         )
         worker_stats.error_count += 1
-        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+        return None, 1.0
 
     # Get drawn card bucket for POST_DRAW encoding
     drawn_bucket = -1
@@ -791,7 +892,7 @@ def _deep_traverse_os_go(
     except Exception as e_encode:
         logger.error("W%d D%d: Error encoding infoset: %s", worker_id, depth, e_encode)
         worker_stats.error_count += 1
-        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+        return None, 1.0
 
     # Compute strategy from advantage network
     if network is not None:
@@ -851,15 +952,27 @@ def _deep_traverse_os_go(
     else:
         exploration_policy = np.ones(num_actions, dtype=np.float64) / num_actions
 
-    # Sample ONE action from exploration policy
+    # Sample ONE action from exploration policy. q(a|h) has to be the probability the
+    # action was actually drawn with, the degenerate fallback included, or the
+    # importance ratio is taken against a distribution that was never sampled from.
     try:
         chosen_local_idx = np.random.choice(num_actions, p=exploration_policy)
+        sampling_prob = float(exploration_policy[chosen_local_idx])
     except ValueError:
         chosen_local_idx = np.random.choice(num_actions)
+        sampling_prob = 1.0 / num_actions
         worker_stats.warning_count += 1
 
     chosen_action_idx = int(legal_indices[chosen_local_idx])
-    sampling_prob = exploration_policy[chosen_local_idx]
+
+    # sigma(a|h) / q(a|h) for the action just sampled: this node's factor of the tail
+    # importance ratio handed to the parent. Exactly 1.0 at opponent nodes on the
+    # normal path, where the exploration policy is sigma itself.
+    node_ratio = (
+        float(local_strategy[chosen_local_idx]) / sampling_prob
+        if sampling_prob > 1e-12
+        else 0.0
+    )
 
     # Save engine state and clone agent states
     node_value = np.zeros(NUM_PLAYERS, dtype=np.float64)
@@ -869,7 +982,7 @@ def _deep_traverse_os_go(
     except Exception as e_save:
         logger.error("W%d D%d: Failed to save engine state: %s", worker_id, depth, e_save)
         worker_stats.error_count += 1
-        return node_value
+        return None, 1.0
 
     try:
         agent_clones = [a.clone() for a in agent_states]
@@ -879,7 +992,7 @@ def _deep_traverse_os_go(
         )
         worker_stats.error_count += 1
         engine.free_snapshot(snap)
-        return node_value
+        return None, 1.0
 
     apply_ok = False
     try:
@@ -896,9 +1009,14 @@ def _deep_traverse_os_go(
         )
         worker_stats.error_count += 1
 
+    # pi^sigma(h a, z) / q(h a -> z) below the sampled action. Stays 1.0 when the
+    # subtree was never entered, in which case node_value is zero anyway.
+    child_tail_ratio = 1.0
+    subtree_ok = False
+
     if apply_ok:
         try:
-            node_value = _deep_traverse_os_go(
+            child_value, child_tail_ratio = _deep_traverse_os_go(
                 engine,
                 agent_states,
                 updating_player,
@@ -920,6 +1038,9 @@ def _deep_traverse_os_go(
                 depth_limit,
                 recursion_limit,
             )
+            if child_value is not None:
+                node_value = child_value
+                subtree_ok = True
         except Exception as e_recurse:  # JUSTIFIED: worker resilience
             logger.error(
                 "W%d D%d: Recursion error after sampled action %d: %s",
@@ -937,6 +1058,7 @@ def _deep_traverse_os_go(
     except Exception as e_restore:
         logger.error("W%d D%d: Failed to restore engine: %s", worker_id, depth, e_restore)
         worker_stats.error_count += 1
+        subtree_ok = False
     for j, a in enumerate(agent_states):
         a.close()
         agent_states[j] = agent_clones[j]  # swap in backup directly
@@ -944,11 +1066,20 @@ def _deep_traverse_os_go(
 
     # --- Compute IS-corrected regrets and store samples ---
     if player == updating_player:
-        # TRAVERSER: compute IS-weighted regrets
+        # TRAVERSER: compute IS-weighted regrets. A failed subtree leaves node_value
+        # at zeros, which is a legal utility rather than a missing one, so the sample
+        # is dropped rather than carried into the reservoir.
         sampled_utility = node_value[player]
 
-        if sampling_prob > 1e-9:
-            utility_estimate = sampled_utility * min(1.0 / sampling_prob, MAX_IS_WEIGHT)
+        if subtree_ok and sampling_prob > 1e-9:
+            # u(z) * pi^sigma(h a*, z) / q(h a* -> z) is the unbiased estimate of
+            # sigma's continuation value v^sigma(h a*); dividing by q(a*|h) turns it
+            # into the unbiased estimate of the counterfactual value of the sampled
+            # action. Every unsampled action estimates to zero, and the baseline
+            # sigma(a*|h) * utility_estimate estimates v^sigma(h).
+            utility_estimate = sampled_utility * _clipped_is_weight(
+                child_tail_ratio, sampling_prob
+            )
 
             # Compute IS-corrected regrets (constant baseline from sampled action)
             regrets = np.zeros(num_actions, dtype=np.float64)
@@ -988,7 +1119,10 @@ def _deep_traverse_os_go(
             )
         )
 
-    return node_value
+    # The opponent-node strategy sample above targets sigma at this infoset and does
+    # not depend on the subtree, so it stands even when the subtree failed. The
+    # utility does not: hand the failure to the caller.
+    return (node_value if subtree_ok else None), node_ratio * child_tail_ratio
 
 
 # ---------------------------------------------------------------------------
@@ -1018,18 +1152,24 @@ def _deep_traverse_os_go_nplayer(
     _mask_buf: Optional[torch.Tensor] = None,
     depth_limit: Optional[int] = None,
     recursion_limit: Optional[int] = None,
-) -> np.ndarray:
+) -> Tuple[Optional[np.ndarray], float]:
     """
     Recursive Outcome Sampling traversal for Deep CFR using the Go engine backend
     with N-player support (2-6 players).
 
     Uses GoEngine (save/restore) and GoAgentState (encode_nplayer directly).
 
-    At ALL nodes: sample ONE action using exploration policy
-    q(a|h) = epsilon * uniform + (1-epsilon) * sigma(a|h), then apply importance
-    sampling correction to compute regrets.
+    Sampling and the importance correction match the two-player variant
+    (_deep_traverse_os_go): traverser nodes sample from the epsilon-mixed policy,
+    every other seat samples from sigma, and each node passes the running tail
+    importance ratio pi^sigma(h, z) / q(h -> z) up to its parent so the traverser's
+    regret target estimates sigma's counterfactual value rather than the value of
+    the epsilon-mixed continuation.
 
-    Returns utility vector of shape (num_players,) float64.
+    Returns (utility vector of shape (num_players,) float64, tail importance ratio
+    from this node down to the sampled terminal, unclipped). The utility is None
+    when an engine call failed at or below this node, for the reason given on
+    _deep_traverse_os_go.
     """
     # Resolve config values once at root; propagated via params on recursion
     if recursion_limit is None:
@@ -1080,11 +1220,11 @@ def _deep_traverse_os_go_nplayer(
                 min_depth_after_bottom_out_tracker[0], float(depth)
             )
             util = engine.get_nplayer_utility().astype(np.float64)
-            return util
+            return util, 1.0
     except Exception as e_term:
         logger.error("W%d D%d: Error checking terminal: %s", worker_id, depth, e_term)
         worker_stats.error_count += 1
-        return np.zeros(num_players, dtype=np.float64)
+        return None, 1.0
 
     # Depth limit check (system recursion limit)
     if depth >= recursion_limit:
@@ -1094,7 +1234,11 @@ def _deep_traverse_os_go_nplayer(
             min_depth_after_bottom_out_tracker[0], float(depth)
         )
         worker_stats.error_count += 1
-        return np.zeros(num_players, dtype=np.float64)
+        # A depth rail, not an engine failure: the subtree is cut short, so this
+        # returns the truncated-subtree value of 0 exactly as traversal_depth_limit
+        # does. It stays counted as an error because reaching it means the recursion
+        # ran away, but the samples above it are real.
+        return np.zeros(num_players, dtype=np.float64), 1.0
 
     # Traversal depth cap (0 = unlimited)
     if depth_limit > 0 and depth >= depth_limit:
@@ -1102,7 +1246,7 @@ def _deep_traverse_os_go_nplayer(
         min_depth_after_bottom_out_tracker[0] = min(
             min_depth_after_bottom_out_tracker[0], float(depth)
         )
-        return np.zeros(num_players, dtype=np.float64)
+        return np.zeros(num_players, dtype=np.float64), 1.0
 
     # Get legal actions mask (N-player 452-action space)
     try:
@@ -1115,7 +1259,7 @@ def _deep_traverse_os_go_nplayer(
             e_legal,
         )
         worker_stats.error_count += 1
-        return np.zeros(num_players, dtype=np.float64)
+        return None, 1.0
 
     legal_indices = np.where(legal_mask > 0)[0]
     num_actions = len(legal_indices)
@@ -1125,7 +1269,7 @@ def _deep_traverse_os_go_nplayer(
             "W%d D%d: No legal N-player actions but non-terminal!", worker_id, depth
         )
         worker_stats.error_count += 1
-        return np.zeros(num_players, dtype=np.float64)
+        return None, 1.0
 
     # Get decision context directly from Go engine
     current_context = engine.decision_ctx()
@@ -1138,7 +1282,7 @@ def _deep_traverse_os_go_nplayer(
             "W%d D%d: Error getting acting player: %s", worker_id, depth, e_player
         )
         worker_stats.error_count += 1
-        return np.zeros(num_players, dtype=np.float64)
+        return None, 1.0
 
     # Get drawn card bucket for POST_DRAW encoding
     drawn_bucket = -1
@@ -1156,7 +1300,7 @@ def _deep_traverse_os_go_nplayer(
             "W%d D%d: Error encoding N-player infoset: %s", worker_id, depth, e_encode
         )
         worker_stats.error_count += 1
-        return np.zeros(num_players, dtype=np.float64)
+        return None, 1.0
 
     # Compute strategy from advantage network
     if network is not None:
@@ -1216,15 +1360,27 @@ def _deep_traverse_os_go_nplayer(
     else:
         exploration_policy = np.ones(num_actions, dtype=np.float64) / num_actions
 
-    # Sample ONE action from exploration policy
+    # Sample ONE action from exploration policy. q(a|h) has to be the probability the
+    # action was actually drawn with, the degenerate fallback included, or the
+    # importance ratio is taken against a distribution that was never sampled from.
     try:
         chosen_local_idx = np.random.choice(num_actions, p=exploration_policy)
+        sampling_prob = float(exploration_policy[chosen_local_idx])
     except ValueError:
         chosen_local_idx = np.random.choice(num_actions)
+        sampling_prob = 1.0 / num_actions
         worker_stats.warning_count += 1
 
     chosen_action_idx = int(legal_indices[chosen_local_idx])
-    sampling_prob = exploration_policy[chosen_local_idx]
+
+    # sigma(a|h) / q(a|h) for the action just sampled: this node's factor of the tail
+    # importance ratio handed to the parent. Exactly 1.0 at opponent nodes on the
+    # normal path, where the exploration policy is sigma itself.
+    node_ratio = (
+        float(local_strategy[chosen_local_idx]) / sampling_prob
+        if sampling_prob > 1e-12
+        else 0.0
+    )
 
     # Save engine state and clone all agent states
     node_value = np.zeros(num_players, dtype=np.float64)
@@ -1234,7 +1390,7 @@ def _deep_traverse_os_go_nplayer(
     except Exception as e_save:
         logger.error("W%d D%d: Failed to save engine state: %s", worker_id, depth, e_save)
         worker_stats.error_count += 1
-        return node_value
+        return None, 1.0
 
     try:
         agent_clones = [a.clone() for a in agent_states]
@@ -1247,7 +1403,7 @@ def _deep_traverse_os_go_nplayer(
         )
         worker_stats.error_count += 1
         engine.free_snapshot(snap)
-        return node_value
+        return None, 1.0
 
     apply_ok = False
     try:
@@ -1265,9 +1421,14 @@ def _deep_traverse_os_go_nplayer(
         )
         worker_stats.error_count += 1
 
+    # pi^sigma(h a, z) / q(h a -> z) below the sampled action. Stays 1.0 when the
+    # subtree was never entered, in which case node_value is zero anyway.
+    child_tail_ratio = 1.0
+    subtree_ok = False
+
     if apply_ok:
         try:
-            node_value = _deep_traverse_os_go_nplayer(
+            child_value, child_tail_ratio = _deep_traverse_os_go_nplayer(
                 engine,
                 agent_states,
                 updating_player,
@@ -1290,6 +1451,9 @@ def _deep_traverse_os_go_nplayer(
                 depth_limit,
                 recursion_limit,
             )
+            if child_value is not None:
+                node_value = child_value
+                subtree_ok = True
         except Exception as e_recurse:  # JUSTIFIED: worker resilience
             logger.error(
                 "W%d D%d: Recursion error after N-player sampled action %d: %s",
@@ -1307,6 +1471,7 @@ def _deep_traverse_os_go_nplayer(
     except Exception as e_restore:
         logger.error("W%d D%d: Failed to restore engine: %s", worker_id, depth, e_restore)
         worker_stats.error_count += 1
+        subtree_ok = False
     for j, a in enumerate(agent_states):
         a.close()
         agent_states[j] = agent_clones[j]  # swap in backup directly
@@ -1314,11 +1479,20 @@ def _deep_traverse_os_go_nplayer(
 
     # --- Compute IS-corrected regrets and store samples ---
     if player == updating_player:
-        # TRAVERSER: compute IS-weighted regrets
+        # TRAVERSER: compute IS-weighted regrets. A failed subtree leaves node_value
+        # at zeros, which is a legal utility rather than a missing one, so the sample
+        # is dropped rather than carried into the reservoir.
         sampled_utility = node_value[player]
 
-        if sampling_prob > 1e-9:
-            utility_estimate = sampled_utility * min(1.0 / sampling_prob, MAX_IS_WEIGHT)
+        if subtree_ok and sampling_prob > 1e-9:
+            # u(z) * pi^sigma(h a*, z) / q(h a* -> z) is the unbiased estimate of
+            # sigma's continuation value v^sigma(h a*); dividing by q(a*|h) turns it
+            # into the unbiased estimate of the counterfactual value of the sampled
+            # action. Every unsampled action estimates to zero, and the baseline
+            # sigma(a*|h) * utility_estimate estimates v^sigma(h).
+            utility_estimate = sampled_utility * _clipped_is_weight(
+                child_tail_ratio, sampling_prob
+            )
 
             # Compute IS-corrected regrets (constant baseline from sampled action)
             regrets = np.zeros(num_actions, dtype=np.float64)
@@ -1358,7 +1532,10 @@ def _deep_traverse_os_go_nplayer(
             )
         )
 
-    return node_value
+    # The opponent-node strategy sample above targets sigma at this infoset and does
+    # not depend on the subtree, so it stands even when the subtree failed. The
+    # utility does not: hand the failure to the caller.
+    return (node_value if subtree_ok else None), node_ratio * child_tail_ratio
 
 
 # ---------------------------------------------------------------------------
@@ -1410,7 +1587,7 @@ def _escher_traverse_go(
     recursion_limit: Optional[int] = None,
     _sampled_regret_track: Optional[List[float]] = None,
     _cf_regret_track: Optional[List[float]] = None,
-) -> np.ndarray:
+) -> Optional[np.ndarray]:
     """
     ESCHER traversal for Deep CFR using Go engine backend.
 
@@ -1422,7 +1599,12 @@ def _escher_traverse_go(
     - Stores regret samples only at traverser nodes (not IS-weighted)
     - Stores policy samples only at opponent nodes
 
-    Returns utility vector (shape (2,) float64) for both players.
+    Returns the utility vector (shape (2,) float64) for both players, or None when an
+    engine call failed at or below this node. A node that returns None has stored no
+    value sample (its target would have been a fabricated 0.0) and no regret sample
+    whose baseline or entries rest on the failure; entries for individual actions that
+    could not be evaluated are masked out of the regret sample's action mask instead
+    of being left at a fabricated regret of zero.
     """
     # Resolve config values once at the root call
     if recursion_limit is None:
@@ -1478,7 +1660,7 @@ def _escher_traverse_go(
     except Exception as e_term:
         logger.error("W%d D%d: Error checking terminal: %s", worker_id, depth, e_term)
         worker_stats.error_count += 1
-        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+        return None
 
     # Depth limit checks
     if depth >= recursion_limit:
@@ -1488,6 +1670,10 @@ def _escher_traverse_go(
             min_depth_after_bottom_out_tracker[0], float(depth)
         )
         worker_stats.error_count += 1
+        # A depth rail, not an engine failure: the subtree is cut short, so this
+        # returns the truncated-subtree value of 0 exactly as traversal_depth_limit
+        # does. It stays counted as an error because reaching it means the recursion
+        # ran away, but the samples above it are real.
         return np.zeros(NUM_PLAYERS, dtype=np.float64)
 
     if depth_limit > 0 and depth >= depth_limit:
@@ -1505,7 +1691,7 @@ def _escher_traverse_go(
             "W%d D%d: Error getting legal action mask: %s", worker_id, depth, e_legal
         )
         worker_stats.error_count += 1
-        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+        return None
 
     legal_indices = np.where(legal_mask > 0)[0]
     num_actions = len(legal_indices)
@@ -1513,7 +1699,7 @@ def _escher_traverse_go(
     if num_actions == 0:
         logger.error("W%d D%d: No legal actions but non-terminal!", worker_id, depth)
         worker_stats.error_count += 1
-        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+        return None
 
     # Get decision context and acting player
     current_context = engine.decision_ctx()
@@ -1524,7 +1710,7 @@ def _escher_traverse_go(
             "W%d D%d: Error getting acting player: %s", worker_id, depth, e_player
         )
         worker_stats.error_count += 1
-        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+        return None
 
     # Get drawn card bucket for POST_DRAW encoding (acting player only)
     drawn_bucket = -1
@@ -1559,7 +1745,7 @@ def _escher_traverse_go(
             e_encode,
         )
         worker_stats.error_count += 1
-        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+        return None
 
     # Compute strategy from regret network (no epsilon mixing - pure strategy sampling)
     if regret_net is not None:
@@ -1616,7 +1802,7 @@ def _escher_traverse_go(
     except Exception as e_save:
         logger.error("W%d D%d: Failed to save engine state: %s", worker_id, depth, e_save)
         worker_stats.error_count += 1
-        return node_value
+        return None
 
     try:
         agent_clones = [a.clone() for a in agent_states]
@@ -1626,7 +1812,7 @@ def _escher_traverse_go(
         )
         worker_stats.error_count += 1
         engine.free_snapshot(snap)
-        return node_value
+        return None
 
     apply_ok = False
     try:
@@ -1643,9 +1829,10 @@ def _escher_traverse_go(
         )
         worker_stats.error_count += 1
 
+    subtree_ok = False
     if apply_ok:
         try:
-            node_value = _escher_traverse_go(
+            child_value = _escher_traverse_go(
                 engine,
                 agent_states,
                 updating_player,
@@ -1672,6 +1859,9 @@ def _escher_traverse_go(
                 _sampled_regret_track,
                 _cf_regret_track,
             )
+            if child_value is not None:
+                node_value = child_value
+                subtree_ok = True
         except Exception as e_recurse:  # JUSTIFIED: worker resilience
             logger.error(
                 "W%d D%d: Recursion error after sampled action %d: %s",
@@ -1684,11 +1874,17 @@ def _escher_traverse_go(
             worker_stats.error_count += 1
 
     # Restore engine and agent states
+    restore_ok = True
     try:
         engine.restore(snap)
     except Exception as e_restore:
         logger.error("W%d D%d: Failed to restore engine: %s", worker_id, depth, e_restore)
         worker_stats.error_count += 1
+        subtree_ok = False
+        # Everything below reads the engine at this node: the opponent encode, v_hat,
+        # and every counterfactual apply. A failed restore leaves the engine at the
+        # child, so all of it would describe the wrong state.
+        restore_ok = False
     for j, a in enumerate(agent_states):
         a.close()
         agent_states[j] = agent_clones[j]  # swap in backup directly
@@ -1698,6 +1894,7 @@ def _escher_traverse_go(
     # Non-acting player uses context 0 (START_TURN) and drawn_bucket=-1 (not in POST_DRAW)
     opponent = 1 - player
     opp_context = engine.decision_ctx()
+    opp_encode_ok = True
     try:
         if _encoding_mode == "ep_pbs":
             features_opp = _encode_ep_pbs(
@@ -1706,13 +1903,15 @@ def _escher_traverse_go(
         else:
             features_opp = agent_states[opponent].encode(opp_context, drawn_bucket=-1)
     except Exception as e_enc_opp:
-        logger.warning(
-            "W%d D%d: Error encoding opponent infoset: %s. Skipping value sample.",
+        logger.error(
+            "W%d D%d: Error encoding opponent infoset: %s. Dropping value sample and "
+            "regret sample at this node.",
             worker_id,
             depth,
             e_enc_opp,
         )
-        worker_stats.warning_count += 1
+        worker_stats.error_count += 1
+        opp_encode_ok = False
         _opp_dim = EP_PBS_INPUT_DIM if _encoding_mode == "ep_pbs" else INPUT_DIM
         features_opp = np.zeros(_opp_dim, dtype=np.float32)
 
@@ -1721,43 +1920,60 @@ def _escher_traverse_go(
     else:
         features_both = np.concatenate([features_opp, features_player]).astype(np.float32)
 
-    # --- Store value sample at EVERY non-terminal node ---
-    # Target = realized utility for updating_player from this subtree
-    value_target = float(node_value[updating_player])
-    value_samples.append(
-        ReservoirSample(
-            features=features_both,
-            target=np.array([value_target], dtype=np.float32),
-            action_mask=np.empty(0, dtype=np.bool_),
-            iteration=iteration,
+    # --- Store value sample at every non-terminal node whose target is real ---
+    # Target = realized utility for updating_player from this subtree. A failed
+    # subtree leaves node_value at zeros, and zeros over the concatenated features of
+    # a failed encode are not an observation of anything, so neither is stored.
+    if subtree_ok and opp_encode_ok and restore_ok:
+        value_target = float(node_value[updating_player])
+        value_samples.append(
+            ReservoirSample(
+                features=features_both,
+                target=np.array([value_target], dtype=np.float32),
+                action_mask=np.empty(0, dtype=np.bool_),
+                iteration=iteration,
+            )
         )
-    )
 
     # --- Per-player sample logic ---
     if player == updating_player:
         # TRAVERSER NODE: compute value-based counterfactual regrets
         # First, get V(h) prediction from value network at current (pre-action) state
         v_hat = 0.0
+        # v_hat is the baseline of every entry in the regret vector, so a fabricated
+        # one contaminates the whole sample, not one action. It is real when there is
+        # no value net (0.0 is then the defined baseline) and when the prediction
+        # succeeds on features that were encoded successfully.
+        v_hat_ok = opp_encode_ok and restore_ok
         if value_net is not None:
             try:
                 v_hat = _value_net_predict(value_net, features_both, value_net_device)
             except Exception as e_vnet:
-                logger.warning(
-                    "W%d D%d: Value net predict failed: %s. Using 0.0.",
+                logger.error(
+                    "W%d D%d: Value net predict failed: %s. Dropping regret sample.",
                     worker_id,
                     depth,
                     e_vnet,
                 )
-                worker_stats.warning_count += 1
+                worker_stats.error_count += 1
+                v_hat_ok = False
 
         # Regret vector: regret[a] = V(h,a) - V(h)
         # For sampled action: V(h, chosen) = actual child_value[player]
         # For other actions: V(h, a) = value_net(features_both after applying a)
+        #
+        # regret_mask starts at the legal set and loses every action whose entry could
+        # not be computed. A masked entry is left at 0 but the loss no longer reads it,
+        # so a failed action is not trained toward a regret of exactly zero.
         regret_full = np.zeros(NUM_ACTIONS, dtype=np.float32)
-        sampled_regret = float(node_value[player]) - v_hat
-        regret_full[chosen_action_idx] = sampled_regret
-        if _sampled_regret_track is not None:
-            _sampled_regret_track.append(abs(sampled_regret))
+        regret_mask = action_mask.astype(np.bool_).copy()
+        if subtree_ok:
+            sampled_regret = float(node_value[player]) - v_hat
+            regret_full[chosen_action_idx] = sampled_regret
+            if _sampled_regret_track is not None:
+                _sampled_regret_track.append(abs(sampled_regret))
+        else:
+            regret_mask[chosen_action_idx] = False
 
         if num_actions > 1 and value_net is not None:
             if batch_counterfactuals:
@@ -1780,6 +1996,7 @@ def _escher_traverse_go(
                             e_cf_save,
                         )
                         worker_stats.warning_count += 1
+                        regret_mask[int(action_idx)] = False
                         continue
 
                     try:
@@ -1792,6 +2009,7 @@ def _escher_traverse_go(
                             e_cf_clone,
                         )
                         worker_stats.warning_count += 1
+                        regret_mask[int(action_idx)] = False
                         engine.free_snapshot(cf_snap)
                         continue
 
@@ -1863,6 +2081,8 @@ def _escher_traverse_go(
                     if cf_ok and cf_feat_both is not None:
                         cf_features_list.append(cf_feat_both)
                         cf_action_indices.append(int(action_idx))
+                    else:
+                        regret_mask[int(action_idx)] = False
 
                 # Batch predict all counterfactual values
                 if cf_features_list:
@@ -1881,6 +2101,8 @@ def _escher_traverse_go(
                             e_batch,
                         )
                         worker_stats.warning_count += 1
+                        for cf_action_idx in cf_action_indices:
+                            regret_mask[cf_action_idx] = False
             else:
                 # Unbatched: one-at-a-time counterfactual evaluation
                 for local_idx, action_idx in enumerate(legal_indices):
@@ -1898,6 +2120,7 @@ def _escher_traverse_go(
                             e_cf_save,
                         )
                         worker_stats.warning_count += 1
+                        regret_mask[int(action_idx)] = False
                         continue
 
                     try:
@@ -1910,10 +2133,14 @@ def _escher_traverse_go(
                             e_cf_clone,
                         )
                         worker_stats.warning_count += 1
+                        regret_mask[int(action_idx)] = False
                         engine.free_snapshot(cf_snap)
                         continue
 
-                    cf_val = v_hat  # default to v_hat if we fail
+                    # Defaulting to v_hat would write a regret of exactly 0 for this
+                    # action, which is a fabricated estimate, not a missing one.
+                    cf_val = 0.0
+                    cf_val_ok = False
                     try:
                         engine.apply_action(int(action_idx))
                         engine.update_both(agent_states[0], agent_states[1])
@@ -1952,6 +2179,7 @@ def _escher_traverse_go(
                         cf_val = _value_net_predict(
                             value_net, cf_feat_both, value_net_device
                         )
+                        cf_val_ok = True
                     except Exception as e_cf_apply:
                         logger.warning(
                             "W%d D%d: CF apply/encode/predict failed for action %d: %s",
@@ -1978,23 +2206,37 @@ def _escher_traverse_go(
                         agent_states[j] = cf_agent_clones[j]
                     engine.free_snapshot(cf_snap)
 
-                    regret_full[int(action_idx)] = cf_val - v_hat
+                    if cf_val_ok:
+                        regret_full[int(action_idx)] = cf_val - v_hat
+                    else:
+                        regret_mask[int(action_idx)] = False
 
-        # Track CF regret magnitudes for telemetry
+        # Track CF regret magnitudes for telemetry, over the entries that exist
         if _cf_regret_track is not None and num_actions > 1:
             for _cf_idx in legal_indices:
-                if int(_cf_idx) != chosen_action_idx:
+                if int(_cf_idx) != chosen_action_idx and regret_mask[int(_cf_idx)]:
                     _cf_regret_track.append(abs(float(regret_full[int(_cf_idx)])))
 
-        # Store regret sample
-        regret_samples.append(
-            ReservoirSample(
-                features=features_player.astype(np.float32),
-                target=regret_full,
-                action_mask=action_mask.astype(np.bool_),
-                iteration=iteration,
+        # Store regret sample. A contaminated baseline takes the whole vector with
+        # it, and a vector with no surviving action carries no signal.
+        if v_hat_ok and bool(regret_mask.any()):
+            regret_samples.append(
+                ReservoirSample(
+                    features=features_player.astype(np.float32),
+                    target=regret_full,
+                    action_mask=regret_mask,
+                    iteration=iteration,
+                )
             )
-        )
+        else:
+            logger.error(
+                "W%d D%d: Discarding ESCHER regret sample (baseline usable: %s, "
+                "actions surviving: %d).",
+                worker_id,
+                depth,
+                v_hat_ok,
+                int(regret_mask.sum()),
+            )
 
     else:
         # OPPONENT NODE: store policy sample (average strategy)
@@ -2011,7 +2253,9 @@ def _escher_traverse_go(
             )
         )
 
-    return node_value
+    # The policy sample targets sigma at this infoset and does not depend on the
+    # subtree, so it stands regardless. The utility does not.
+    return node_value if subtree_ok else None
 
 
 def run_deep_cfr_worker(
@@ -2307,7 +2551,7 @@ def run_deep_cfr_worker(
                 recursion_limit = getattr(
                     getattr(config, "system", None), "recursion_limit", 10000
                 )
-                final_utility_value = _deep_traverse_os_go(
+                final_utility_value, _root_tail_ratio = _deep_traverse_os_go(
                     engine=go_engine,
                     agent_states=go_agents,
                     updating_player=updating_player,

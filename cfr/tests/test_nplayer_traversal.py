@@ -79,7 +79,7 @@ def _call_traversal(engine, agents, num_players, config, depth_limit=None):
     worker_stats = WorkerStats()
     min_depth_tracker, bottom_out_tracker = _make_tracker()
 
-    result = _deep_traverse_os_go_nplayer(
+    result, _tail_ratio = _deep_traverse_os_go_nplayer(
         engine=engine,
         agent_states=agents,
         updating_player=0,

@@ -532,7 +532,7 @@ class TestGoTraversal:
             stats = WorkerStats()
 
             try:
-                utility = _deep_traverse_os_go(
+                utility, _tail_ratio = _deep_traverse_os_go(
                     engine=engine,
                     agent_states=agents,
                     updating_player=0,

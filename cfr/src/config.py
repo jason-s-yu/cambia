@@ -506,6 +506,9 @@ class DeepCfrConfig(_CambiaBaseModel):
     num_traversal_threads: int = 1
     validate_inputs: bool = True
     traversal_depth_limit: int = 0
+    # Fraction of a step's traversals that may report engine errors before the step
+    # is failed rather than trained on (cambia-722). 0 disables the ceiling.
+    max_engine_error_fraction: float = 0.01
     max_tasks_per_child: Optional[Union[int, str]] = "auto"
     worker_memory_budget_pct: float = 0.10
 
