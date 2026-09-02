@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -897,4 +898,100 @@ func (r *nodeRig) queueFixtureJobAt(t *testing.T, name string, commitIdx int, ru
 	spec.Commit = sha
 	r.queueJob(t, spec)
 	return sha
+}
+
+// restartNodeAgent builds a second agent over the same key, base dir, and runs
+// dir as the first: the shape of an agent that died and came back (D37). Its
+// reattach reads the lease records the dead agent left on disk, and its
+// register names them in live_leases.
+func (r *nodeRig) restartNodeAgent(t *testing.T, claimOnce bool) *nodeagent.Agent {
+	t.Helper()
+	signer, err := nodeagent.NewSigner(r.node.priv, r.clock.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := nodeagent.NewClient(r.nodeCfg, signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := nodeagent.New(nodeagent.Options{
+		Config:            r.nodeCfg,
+		Signer:            signer,
+		Client:            client,
+		Env:               r.env,
+		Launcher:          nodeagent.NewLauncher(r.nodePM),
+		Prober:            r.prober,
+		Logger:            agentLogger(false),
+		Now:               r.clock.now,
+		PollInterval:      10 * time.Millisecond,
+		CanBuildLibcambia: true,
+		ClaimOnce:         claimOnce,
+	})
+	if err != nil {
+		t.Fatalf("restarted agent: %v", err)
+	}
+	return agent
+}
+
+// waitForNodePhase blocks until the coordinator's lease record for the job
+// reports the phase, which is the node's own report rather than a guess about
+// how far along it is.
+func (r *nodeRig) waitForNodePhase(t *testing.T, job, phase string, timeout time.Duration) nashnet.Lease {
+	t.Helper()
+	var found nashnet.Lease
+	waitUntil(t, job+" reaching phase "+phase, timeout, func() bool {
+		for _, l := range r.pool.leases.LiveForNode(r.node.id) {
+			if l.JobID == job && l.Phase == phase {
+				found = l
+				return true
+			}
+		}
+		return false
+	})
+	return found
+}
+
+// nodePID reads the pid of a job's process out of the node's own process.json,
+// waiting for the launch to record one.
+func (r *nodeRig) nodePID(t *testing.T, job string, timeout time.Duration) int {
+	t.Helper()
+	pid := 0
+	waitUntil(t, "a pid for "+job+" on the node", timeout, func() bool {
+		st, err := procmgr.ReadProcessState(r.nodeRunDir(job))
+		if err != nil || st.PID == 0 {
+			return false
+		}
+		pid = st.PID
+		return true
+	})
+	return pid
+}
+
+// processAlive reports whether a pid still names a live process. Signal 0 is
+// the liveness probe procmgr's own pid guard uses.
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return p.Signal(syscall.Signal(0)) == nil
+}
+
+// sha256Of is the digest a blob route keys a file on.
+func sha256Of(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// resultState reads the terminal a lease posted, or "" when it posted none.
+// The pool retains it keyed by lease id so a lost response can be replayed
+// (D6), which makes it the one place a test reads what the node reported
+// rather than what the coordinator projected.
+func (r *nodeRig) resultState(leaseID string) string {
+	r.pool.mu.Lock()
+	defer r.pool.mu.Unlock()
+	return r.pool.results[leaseID].State
 }
