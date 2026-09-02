@@ -107,7 +107,7 @@ func (g *GameState) legalPostDraw(mask *[3]uint64) {
 	// Replace(i): legal for each i < acting player's hand length.
 	// When LockCallerHand is true and Cambia has been called, the caller
 	// cannot replace cards - they may only discard.
-	if !(g.Rules.LockCallerHand && g.IsCambiaCalled() && int8(acting) == g.CambiaCaller) {
+	if !g.HandLocked(acting) {
 		handLen := g.Players[acting].HandLen
 		for i := uint8(0); i < handLen; i++ {
 			setBit(mask, EncodeReplace(i))
@@ -174,8 +174,9 @@ func pendingForAbility(ability AbilityType) PendingType {
 // action while it holds a pending ability, so arming one stops the table: the arm sites resolve it
 // instead (cambia-1171).
 //
-// Kept in step with legalAbilitySelect below by construction - same seat via seatOpponent, same
-// LockCallerHand condition - and by TestAbilityHasTargetMatchesAbilitySelectMask.
+// Kept in step with legalAbilitySelect below by construction - same seat via seatOpponent, and
+// both ask HandLocked rather than restating the rule - and by
+// TestAbilityHasTargetMatchesAbilitySelectMask.
 func (g *GameState) abilityHasTarget2P(pending PendingType, acting uint8) bool {
 	opp := g.seatOpponent(acting)
 	ownHandLen := g.Players[acting].HandLen
@@ -189,7 +190,7 @@ func (g *GameState) abilityHasTarget2P(pending PendingType, acting uint8) bool {
 		// legalAbilitySelect does not gate it either.
 		return oppHandLen > 0
 	case PendingBlindSwap, PendingKingLook:
-		if g.Rules.LockCallerHand && g.IsCambiaCalled() && int8(opp) == g.CambiaCaller {
+		if g.HandLocked(opp) {
 			return false
 		}
 		return ownHandLen > 0 && oppHandLen > 0
@@ -214,7 +215,7 @@ func (g *GameState) abilityHasTargetNP(pending PendingType, acting uint8) bool {
 			if opp == acting || g.Players[opp].HandLen == 0 {
 				continue
 			}
-			if skipLockedCaller && g.Rules.LockCallerHand && g.IsCambiaCalled() && int8(opp) == g.CambiaCaller {
+			if skipLockedCaller && g.HandLocked(opp) {
 				continue
 			}
 			return true
@@ -262,7 +263,7 @@ func (g *GameState) legalAbilitySelect(mask *[3]uint64) {
 		// BlindSwap(own_i, opp_j) for all valid combinations.
 		// When LockCallerHand is true and opponent is the Cambia caller,
 		// targeting their hand is forbidden - ability produces no actions.
-		if !(g.Rules.LockCallerHand && g.IsCambiaCalled() && int8(opp) == g.CambiaCaller) {
+		if !g.HandLocked(opp) {
 			for i := uint8(0); i < ownHandLen; i++ {
 				for j := uint8(0); j < oppHandLen; j++ {
 					setBit(mask, EncodeBlindSwap(i, j))
@@ -274,7 +275,7 @@ func (g *GameState) legalAbilitySelect(mask *[3]uint64) {
 		// KingLook(own_i, opp_j) for all valid combinations.
 		// When LockCallerHand is true and opponent is the Cambia caller,
 		// targeting their hand is forbidden - ability produces no actions.
-		if !(g.Rules.LockCallerHand && g.IsCambiaCalled() && int8(opp) == g.CambiaCaller) {
+		if !g.HandLocked(opp) {
 			for i := uint8(0); i < ownHandLen; i++ {
 				for j := uint8(0); j < oppHandLen; j++ {
 					setBit(mask, EncodeKingLook(i, j))
@@ -305,7 +306,10 @@ func (g *GameState) legalSnapDecision(mask *[3]uint64) {
 	}
 
 	// SnapOpponent(i): legal for each i < opponent's hand length, only if rule allows.
-	if g.Rules.AllowOpponentSnapping && ownHandLen > 0 {
+	// A locked caller's hand is not a snap target either (RULES.md 3C names snaps first), and a
+	// seat reaches this mask on canSnapOwn alone, so the snapper being unlocked says nothing
+	// about the target. snapOpponent refuses the same position on the apply side.
+	if g.Rules.AllowOpponentSnapping && ownHandLen > 0 && !g.HandLocked(opp) {
 		for i := uint8(0); i < oppHandLen; i++ {
 			setBit(mask, EncodeSnapOpponent(i))
 		}
@@ -405,7 +409,7 @@ func (g *GameState) nplayerLegalPostDraw(mask *[10]uint64) {
 		}
 	}
 
-	if !(g.Rules.LockCallerHand && g.IsCambiaCalled() && int8(acting) == g.CambiaCaller) {
+	if !g.HandLocked(acting) {
 		handLen := g.Players[acting].HandLen
 		for i := uint8(0); i < handLen; i++ {
 			nplayerSetBit(mask, NPlayerEncodeReplace(i))
@@ -434,7 +438,7 @@ func (g *GameState) nplayerLegalAbilitySelect(mask *[10]uint64) {
 
 	case PendingBlindSwap:
 		for oppRelIdx, opp := range opps {
-			if g.Rules.LockCallerHand && g.IsCambiaCalled() && int8(opp) == g.CambiaCaller {
+			if g.HandLocked(opp) {
 				continue
 			}
 			oppHandLen := g.Players[opp].HandLen
@@ -447,7 +451,7 @@ func (g *GameState) nplayerLegalAbilitySelect(mask *[10]uint64) {
 
 	case PendingKingLook:
 		for oppRelIdx, opp := range opps {
-			if g.Rules.LockCallerHand && g.IsCambiaCalled() && int8(opp) == g.CambiaCaller {
+			if g.HandLocked(opp) {
 				continue
 			}
 			oppHandLen := g.Players[opp].HandLen
@@ -477,6 +481,12 @@ func (g *GameState) nplayerLegalSnapDecision(mask *[10]uint64) {
 
 	if g.Rules.AllowOpponentSnapping && ownHandLen > 0 {
 		for oppRelIdx, opp := range opps {
+			// The locked caller is an opponent like any other here, and at three or more seats
+			// the snapper reaching this mask is usually not the caller, so the target needs its
+			// own test. nplayerSnapOpponent refuses the same position on the apply side.
+			if g.HandLocked(opp) {
+				continue
+			}
 			oppHandLen := g.Players[opp].HandLen
 			for i := uint8(0); i < oppHandLen; i++ {
 				nplayerSetBit(mask, NPlayerEncodeSnapOpponent(i, uint8(oppRelIdx)))

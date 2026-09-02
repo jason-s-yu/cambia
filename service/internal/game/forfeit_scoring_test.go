@@ -138,6 +138,42 @@ func TestVoluntaryForfeitScoresLikeAClosedReconnectWindow(t *testing.T) {
 	assert.Equal(t, stayer.ID, res.winner)
 }
 
+// TestReconnectLiftsOnlyTheForfeitTheWindowTook is where the two forfeits part company. A player
+// who was merely away did not miss the round, so returning to a game still in progress hands the
+// seat back; a player who confirmed "leave and forfeit" said they were not coming back, and a
+// lift there would undo the decision on a browser Back (cambia-1239).
+func TestReconnectLiftsOnlyTheForfeitTheWindowTook(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		deliberate    bool
+		stillForfeits bool
+	}{
+		{"closed reconnect window", false, false},
+		{"seat given up on purpose", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g, players, _ := buildDropTestGame(t, 4, false, true, 60, 30*time.Second, 60*time.Second)
+			quitter := players[3]
+
+			if tc.deliberate {
+				require.True(t, g.ForfeitSeat(quitter.ID), "the seat must be given up on the spot")
+			} else {
+				// What disconnectGraceElapsed leaves behind once the window closes: the forfeit
+				// recorded, with no leave request behind it.
+				g.mu.Lock()
+				g.forfeited[quitter.ID] = true
+				g.mu.Unlock()
+			}
+			require.True(t, g.IsForfeited(quitter.ID), "the seat under test must start forfeited")
+
+			g.HandleReconnect(quitter.ID, nil)
+
+			assert.Equal(t, tc.stillForfeits, g.IsForfeited(quitter.ID))
+			assert.False(t, g.IsGameOver(), "one seat of four returning must not end the game")
+		})
+	}
+}
+
 // TestFourSeatForfeitNeverOutranksASeatThatFinished is the forfeit that does not end the game:
 // three seats are still there, so the table plays on and the forfeited seat is scored alongside
 // them when it does end. The map asserted here is the one that becomes both the game_results rows

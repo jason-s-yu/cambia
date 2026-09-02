@@ -31,7 +31,7 @@ func (g *GameState) initiateSnapPhase(discardedCard Card) {
 	// Collect players in discarder-first order.
 	for step := uint8(0); step < n; step++ {
 		p := (discarder + step) % n
-		if g.handLocked(p) {
+		if g.HandLocked(p) {
 			continue
 		}
 		// Check if this player can snap own card.
@@ -47,7 +47,7 @@ func (g *GameState) initiateSnapPhase(discardedCard Card) {
 		canSnapOpp := false
 		if g.Rules.AllowOpponentSnapping && hand.HandLen > 0 {
 			for opp := uint8(0); opp < n; opp++ {
-				if opp == p || g.handLocked(opp) {
+				if opp == p || g.HandLocked(opp) {
 					continue
 				}
 				oppHand := &g.Players[opp]
@@ -157,6 +157,13 @@ func (g *GameState) snapOpponent(oppIdx uint8) error {
 	snapperIdx := g.Snap.Snappers[g.Snap.CurrentSnapperIdx]
 	opponent := g.seatOpponent(snapperIdx)
 	oppHandLen := g.Players[opponent].HandLen
+
+	// A target the house rules never made legal to name draws no penalty, the same answer the
+	// AllowOpponentSnapping check above gives, and it returns before any hand is touched
+	// (cambia-1239).
+	if g.HandLocked(opponent) {
+		return fmt.Errorf("target's hand is locked by LockCallerHand")
+	}
 
 	g.recordLegacyAction(EncodeSnapOpponent(oppIdx))
 	g.LastAction.ActingPlayer = snapperIdx

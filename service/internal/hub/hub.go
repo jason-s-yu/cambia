@@ -658,13 +658,16 @@ func (h *Hub) dispatch(msg ClientMsg) {
 	// Synthetic internal messages (timer callbacks) carry no client seq and must be handled
 	// before the sequence check, which would otherwise discard them as stale.
 	//
-	// They are the hub's own, and a socket may not name one. ReadPump takes the type straight
-	// off the frame and stamps the message with the connection and the authenticated user it
-	// arrived on, while a timer builds one with neither, so an underscore type carrying either
-	// was typed by a client. Each of these runs a phase transition with no check on the sender:
-	// a client naming _return_to_lobby would walk straight past the host gate the results exit
-	// is admitted through below (cambia-1238).
-	if strings.HasPrefix(msg.Type, "_") && (msg.ConnID != uuid.Nil || msg.UserID != uuid.Nil) {
+	// They are the hub's own, and a socket may not name one. Each of these runs a phase
+	// transition with no check on the sender: a client naming _return_to_lobby would walk
+	// straight past the host gate the results exit is admitted through below (cambia-1238).
+	//
+	// The proof is the unexported internal flag, which ReadPump cannot set because it parses the
+	// frame into the exported fields alone. Asking instead whether the message carried no ConnID
+	// and no UserID answered the same question today and failed in the dangerous direction: it
+	// admitted anything a future socket-side producer forgot to stamp with an identity, whereas a
+	// future timer that forgets the flag is refused here and says so (cambia-1239).
+	if strings.HasPrefix(msg.Type, "_") && !msg.internal {
 		log.Printf("hub %s: refusing internal message type %q sent by user %s", h.ID, msg.Type, msg.UserID)
 		return
 	}
@@ -1159,7 +1162,7 @@ func (h *Hub) HandleRoundEnd(scores map[uuid.UUID]int, cambiaCallerID uuid.UUID,
 		// Auto-advance to next round after 10 seconds.
 		go func() {
 			time.Sleep(10 * time.Second)
-			h.incoming <- ClientMsg{Type: "_start_next_round"}
+			h.incoming <- ClientMsg{Type: "_start_next_round", internal: true}
 		}()
 	}
 }
@@ -1218,7 +1221,7 @@ func (h *Hub) scheduleGameStart() {
 		select {
 		case <-timer.C:
 			select {
-			case h.incoming <- ClientMsg{Type: "_begin_game", gen: gen}:
+			case h.incoming <- ClientMsg{Type: "_begin_game", gen: gen, internal: true}:
 			case <-h.shutdown:
 			}
 		case <-h.shutdown:
@@ -1275,7 +1278,7 @@ func (h *Hub) schedulePostGameReset() {
 		select {
 		case <-timer.C:
 			select {
-			case h.incoming <- ClientMsg{Type: "_return_to_lobby", gen: gen}:
+			case h.incoming <- ClientMsg{Type: "_return_to_lobby", gen: gen, internal: true}:
 			case <-h.shutdown:
 			}
 		case <-h.shutdown:
@@ -1754,11 +1757,11 @@ func (h *Hub) Alive() bool {
 // released by shutdown if the hub stops first.
 func (h *Hub) NotifyGameEnded() {
 	select {
-	case h.incoming <- ClientMsg{Type: "_game_ended"}:
+	case h.incoming <- ClientMsg{Type: "_game_ended", internal: true}:
 	default:
 		go func() {
 			select {
-			case h.incoming <- ClientMsg{Type: "_game_ended"}:
+			case h.incoming <- ClientMsg{Type: "_game_ended", internal: true}:
 			case <-h.shutdown:
 			}
 		}()

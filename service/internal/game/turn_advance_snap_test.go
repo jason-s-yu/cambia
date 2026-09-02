@@ -162,11 +162,11 @@ func TestSkipAbilityAdvancesTurnThroughSnapPhase(t *testing.T) {
 // resolves through a snap phase. Before the fix it fired ("timed out without drawing") and drew for
 // the previous player; after the fix it is neutralized.
 //
-// The advance is isolated down to that one timer by hand. This test used to get the isolation for
-// free by disconnecting the opponent, since the scheduler then declined to clock them; a
-// disconnected player is clocked like everyone else as of cambia-1117 D4, and letting their timer
-// run would auto-play the round back around to the previous player inside the observation window,
-// which is the game working rather than the wedge.
+// The advance is isolated down to that one timer by lengthening the turn before it happens. This
+// test used to get the isolation for free by disconnecting the opponent, since the scheduler then
+// declined to clock them; a disconnected player is clocked like everyone else as of cambia-1117
+// D4, and letting their timer run would auto-play the round back around to the previous player
+// inside the observation window, which is the game working rather than the wedge.
 func TestNoStaleTimeoutAfterAbilitySnapAdvance(t *testing.T) {
 	g, ids, mb := buildTimedTestGame(t, 80*time.Millisecond)
 	defer stopGameTimer(g)
@@ -185,18 +185,25 @@ func TestNoStaleTimeoutAfterAbilitySnapAdvance(t *testing.T) {
 	}
 	g.mu.Unlock()
 
+	// Put the opponent's clock out of reach of the observation window before the advance arms it,
+	// leaving the previous player's stale 80ms timer as the only candidate that can fire inside
+	// that window. The stale timer keeps the deadline it was armed with, so lengthening the turn
+	// moves one timer and not the other. Stopping the opponent's timer by hand after the fact did
+	// the same job only if the stop won a race nothing bounded: an 80ms stall between arming it
+	// inside ProcessSpecialAction and stopping it here let the callback block on mu, survive the
+	// stop, auto-play the disconnected opponent and hand the turn back, which trips the assertion
+	// below and reads as the regression the ticket fixed (cambia-1239).
+	g.mu.Lock()
+	g.TurnDuration = 10 * time.Second
+	g.mu.Unlock()
+
 	ownSlot0 := g.CardTracker.Players[curIdx].HandUUIDs[0]
 	g.ProcessSpecialAction(curID, "peek_self", cardTarget(ownSlot0, curID, 0), nil)
 
 	require.Equal(t, oppIdx, g.Engine.ActingPlayer(), "engine turn should have advanced to the opponent")
 
-	// Stop the timer the advance armed for the opponent, leaving the previous player's stale timer
-	// as the only candidate left to fire. Stopping it here cannot race the fire it prevents: the
-	// timer was armed under mu inside ProcessSpecialAction and its duration is the same 80ms the
-	// observation window below waits out.
 	g.mu.Lock()
 	require.NotNil(t, g.turnTimer, "the advance must have armed a timer for the disconnected opponent")
-	g.turnTimer.Stop()
 	g.mu.Unlock()
 
 	// Observe past the stale timer's original deadline.
