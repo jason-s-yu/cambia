@@ -2,12 +2,15 @@ package nodeagent
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -629,7 +632,7 @@ func (j *jobRun) fetchSnapshot(ctx context.Context) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	dest := filepath.Join(dir, j.rec.JobID+".bundle")
+	dest := filepath.Join(dir, j.snapshotCacheKey()+bundleExt)
 	if err := j.download(ctx, j.snapshotURL(), dest, j.snapshot.SHA256); err != nil {
 		return err
 	}
@@ -637,6 +640,51 @@ func (j *jobRun) fetchSnapshot(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// bundleExt is the suffix of a cached bundle on the node, the same one the
+// coordinator's own snapshot cache uses.
+const bundleExt = ".bundle"
+
+// snapshotCacheKey names the node's cached bundle the way the coordinator
+// names the artifact it serves: the pinned commit for a full bundle, and the
+// commit plus a digest of the sorted thin basis for a thin one (D48, the
+// coordinator's own key in ingest.bundleCacheKey). Keying by job id instead
+// pointed two claims of one job at one file whose bytes belonged to neither
+// key, so the second claim resumed a complete file and asked for a range past
+// the end of what the coordinator serves (cambia-2018). A claim whose snapshot
+// ref carries no 40-hex commit falls back to the job id, which is the shape
+// this replaces and no worse than it.
+func (j *jobRun) snapshotCacheKey() string {
+	commit := j.snapshot.Commit
+	if commit == "" {
+		commit = j.rec.Commit
+	}
+	if !isCommitSHA(commit) {
+		return j.rec.JobID
+	}
+	if len(j.snapshot.ThinBasis) == 0 {
+		return commit
+	}
+	sorted := append([]string(nil), j.snapshot.ThinBasis...)
+	sort.Strings(sorted)
+	sum := sha256.Sum256([]byte(strings.Join(sorted, "\n")))
+	return commit + "-" + hex.EncodeToString(sum[:])[:16]
+}
+
+// isCommitSHA reports whether s is a 40-hex sha, the only commit shape the
+// coordinator pins and the only one safe to spell into a cache file name.
+func isCommitSHA(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // snapshotURL is the coordinator-relative snapshot path, defaulted from the
@@ -698,10 +746,16 @@ func (j *jobRun) seedRoot(seed nashnet.Seed) (string, error) {
 }
 
 // download fetches a lease-scoped file, resuming at whatever is already on
-// disk, and verifies the expected digest before the file is used.
+// disk, and verifies the expected digest before the file is used. A complete
+// copy already on disk is the answer and no request goes out; a resume the
+// coordinator answers 416 for is decided the same way, by the digest, and
+// restarts from zero when the local bytes are not the artifact (cambia-2018).
 func (j *jobRun) download(ctx context.Context, url, dest, wantDigest string) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
+	}
+	if holdsComplete(dest, wantDigest) {
+		return nil
 	}
 	for attempt := 0; attempt < 2; attempt++ {
 		offset := int64(0)
@@ -720,6 +774,17 @@ func (j *jobRun) download(ctx context.Context, url, dest, wantDigest string) err
 		closeErr := f.Close()
 		if derr != nil {
 			if errors.Is(derr, errRangeIgnored) {
+				_ = os.Remove(dest)
+				continue
+			}
+			if errors.Is(derr, errRangeUnsatisfiable) {
+				// The resume offset is at or past the end of the served file.
+				// Either the local copy is the whole artifact, which the
+				// digest says, or it is not this artifact at all and the fetch
+				// starts over from zero.
+				if holdsComplete(dest, wantDigest) {
+					return nil
+				}
 				_ = os.Remove(dest)
 				continue
 			}
@@ -742,6 +807,19 @@ func (j *jobRun) download(ctx context.Context, url, dest, wantDigest string) err
 		return nil
 	}
 	return fmt.Errorf("download %s: exhausted retries", url)
+}
+
+// holdsComplete reports whether dest already holds the whole artifact the
+// grant names, which is the one thing that makes skipping a fetch safe. An
+// unreadable file, a missing one, and a grant that names no digest are all
+// answered false: without a digest to check against there is nothing to
+// validate the local bytes with, so they are re-fetched.
+func holdsComplete(dest, wantDigest string) bool {
+	if wantDigest == "" {
+		return false
+	}
+	got, err := hashFile(dest)
+	return err == nil && got == wantDigest
 }
 
 // noteCommit records the manifest head the coordinator acknowledged.

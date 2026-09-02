@@ -473,7 +473,12 @@ func (s *stubCoordinator) serveBytes(w http.ResponseWriter, r *http.Request, bod
 		return
 	}
 	var start int64
-	if _, err := fmt.Sscanf(rng, "bytes=%d-", &start); err != nil || start > int64(len(body)) {
+	// A first byte at or past the end is unsatisfiable, which is what
+	// net/http.ServeContent answers on the real routes. The stub admitted
+	// start == len and replied 206 with an empty body, so this package could
+	// not see the defect the two-process suite caught (cambia-2018).
+	if _, err := fmt.Sscanf(rng, "bytes=%d-", &start); err != nil || start >= int64(len(body)) {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", len(body)))
 		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 		return
 	}
