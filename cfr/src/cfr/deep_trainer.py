@@ -48,7 +48,7 @@ from ..live_display import LiveDisplayManager
 from ..log_archiver import LogArchiver
 
 from .deep_worker import run_deep_cfr_worker, DeepCFRWorkerResult
-from .es_validator import ESValidator
+from .es_validator import ESValidator, ESValidatorError
 from .exceptions import (
     GracefulShutdownException,
     CheckpointSaveError,
@@ -2038,6 +2038,21 @@ class DeepCFRTrainer:
                                 flush=True,
                             )
                         self.es_validation_history.append((step, es_metrics))
+                    except ESValidatorError:
+                        # The step produced no measurement at all: either the
+                        # network could not be built or loaded, or no traversal
+                        # completed. Neither clears on its own, and downgrading
+                        # them to warnings left es_validation silently dead for
+                        # a whole run; fail at this step (cambia-1880). A
+                        # partial traversal failure still measures something and
+                        # keeps its warning below.
+                        logger.critical(
+                            "ES validation produced no measurement at step %d; "
+                            "aborting training. Set es_validation_interval=0 to "
+                            "train without validation.",
+                            step,
+                        )
+                        raise
                     except Exception as e_val:
                         logger.warning("ES validation failed at step %d: %s", step, e_val)
 
