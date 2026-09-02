@@ -103,8 +103,10 @@ func TestNPlayerEncoding(t *testing.T) {
 		t.Errorf("identity section: %d bits set, want 2", idBitsSet)
 	}
 
-	// Public section [816-855]: should have exactly 6 one-hot bits.
-	// (discard(1), stock(1), phase(1), ctx(1), cambia(1), drawn(1) = 6)
+	// Public section [816-935]: 6 one-hot bits for the original 40 dims
+	// (discard, stock, phase, ctx, cambia, drawn), 1 for the own seat, 1 for the seat
+	// count, and 2 per seat in play (hand length one-hot plus the in-play bit) = 16 at
+	// four seats.
 	pubBitsSet := 0
 	pubStart := NPlayerPowersetDim + NPlayerIdentityDim
 	for i := pubStart; i < NPlayerInputDim; i++ {
@@ -112,8 +114,8 @@ func TestNPlayerEncoding(t *testing.T) {
 			pubBitsSet++
 		}
 	}
-	if pubBitsSet != 6 {
-		t.Errorf("public section: %d bits set, want 6", pubBitsSet)
+	if pubBitsSet != 16 {
+		t.Errorf("public section: %d bits set, want 16", pubBitsSet)
 	}
 }
 
@@ -122,9 +124,13 @@ func TestNPlayerEncodingDimConstant(t *testing.T) {
 	// 48 slots × 8 bits = 384
 	// 48 slots × 9 buckets = 432
 	// public: 10+4+6+6+3+11 = 40
-	// total = 856
-	if NPlayerInputDim != 856 {
-		t.Errorf("NPlayerInputDim = %d, want 856", NPlayerInputDim)
+	// own seat 8, seat count 8, per-seat hand length and in-play bit 8 × 8 = 64
+	// total = 936
+	if NPlayerInputDim != 936 {
+		t.Errorf("NPlayerInputDim = %d, want 936", NPlayerInputDim)
+	}
+	if NPlayerTableDim != 64 {
+		t.Errorf("NPlayerTableDim = %d, want 64", NPlayerTableDim)
 	}
 	if NPlayerNumActions != 620 {
 		t.Errorf("NPlayerNumActions = %d, want 620", NPlayerNumActions)
