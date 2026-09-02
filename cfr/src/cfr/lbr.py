@@ -466,14 +466,36 @@ class UniformRandomPolicy:
         return actions[self._rng.randrange(len(actions))]
 
 
-def _make_random_opponent(player_id: int, config: Any):
-    """Uniform-random opponent, seeded off the global ``random`` stream.
+#: Sub-stream every uniform opponent this module builds is seeded from, reseeded
+#: per run by ``seed_opponent_stream``.
+#:
+#: Private on purpose. It used to be the global ``random`` module, which
+#: ``collect_infosets`` seeded before a run, so an opponent's stream was
+#: reproducible only while nothing else in the process reseeded that module.
+#: Things do: loading a Stable-Baselines3 model reseeds it to a fixed state, so
+#: building a PPO wrapper part-way through a measurement moved every opponent
+#: built afterwards onto the same stream (cambia-1974). Nothing outside this
+#: module touches the stream below, so no library can perturb it.
+_OPPONENT_SEED_STREAM = _random_module.Random(0)
 
-    ``collect_infosets`` seeds that stream before a run, so a fresh opponent per
-    game stays reproducible under the estimator's ``seed``.
+
+def seed_opponent_stream(seed: int) -> None:
+    """Reseed the uniform opponents' sub-stream from a run seed.
+
+    Called at the start of a run, before any opponent is built, so a whole
+    estimator run is reproducible from its ``seed`` alone.
+    """
+    _OPPONENT_SEED_STREAM.seed(int(seed))
+
+
+def _make_random_opponent(player_id: int, config: Any):
+    """Uniform-random opponent, seeded off this module's own sub-stream.
+
+    One deterministic sub-stream per opponent, drawn from a stream the run
+    seeds, so a fresh opponent per game (or per rollout) stays reproducible.
     """
     return UniformRandomPolicy(
-        player_id, _random_module.Random(_random_module.getrandbits(63))
+        player_id, _random_module.Random(_OPPONENT_SEED_STREAM.getrandbits(63))
     )
 
 
@@ -915,6 +937,12 @@ def collect_infosets(
     """
     deal_specs = normalize_deal_decks(deal_decks) if deal_decks else []
     rng = np.random.default_rng(seed)
+    seed_opponent_stream(seed)
+    # The global module is seeded too, but nothing here reads it: it is what
+    # makes a policy that draws from it (baseline_agents.RandomAgent, and the
+    # wrappers' illegal-action fallbacks) reproducible under this run's seed.
+    # Such a policy is still at the mercy of any library that reseeds the module
+    # mid-run, which is exactly why this module's own draws left it (cambia-1974).
     _random_module.seed(seed)
 
     house_rules = config.cambia_rules

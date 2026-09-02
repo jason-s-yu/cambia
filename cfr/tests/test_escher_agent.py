@@ -462,18 +462,15 @@ class TestRunHeadToHeadTyped:
             os.unlink(ckpt_b)
 
     def test_seat_alternation(self):
-        """Seat assignment alternates: odd games have A as P0, even games have B as P0."""
-        from src.evaluate_agents import run_head_to_head_typed, ESCHERAgentWrapper
+        """Seat assignment alternates: odd games have A as P0, even games have B as P0.
 
-        # Track which checkpoint each P0 uses across 4 games
-        p0_types: list = []
-
-        original_init = ESCHERAgentWrapper.__init__
-        original_deep_init = None
-
-        from src.evaluate_agents import DeepCFRAgentWrapper
-
-        original_deep_init = DeepCFRAgentWrapper.__init__
+        Read off which agent sits at seat 0 in each game, not off how many
+        agents were built. Since cambia-1974 the four agents (each side at each
+        seat) are constructed once for the whole match: building them inside
+        the loop is what let a model load reseed the global random module
+        between games, which left every game dealt from the same number.
+        """
+        from src.evaluate_agents import run_head_to_head_typed
 
         config = _make_config()
         with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as fa:
@@ -486,44 +483,49 @@ class TestRunHeadToHeadTyped:
             _make_escher_checkpoint(ckpt_b)
 
             instantiated: list = []
+            seat0_per_game: list = []
 
-            real_get_agent = None
             from src import evaluate_agents as ea
 
             real_get_agent_fn = ea.get_agent
+            real_game = ea._GoEvalGame
 
             def mock_get_agent(agent_type, player_id, cfg, **kwargs):
                 agent = real_get_agent_fn(agent_type, player_id, cfg, **kwargs)
-                # Record (player_id, checkpoint_path) pairs
                 instantiated.append((player_id, kwargs.get("checkpoint_path", "")))
                 return agent
+
+            class _RecordingGame(real_game):
+                def __init__(self, house_rules, seed, num_players, agents):
+                    super().__init__(house_rules, seed, num_players, agents)
+                    seat0_per_game.append(id(agents[0]))
 
             import unittest.mock as mock
 
             with mock.patch("src.evaluate_agents.get_agent", side_effect=mock_get_agent):
-                run_head_to_head_typed(
-                    agent_a_type="escher",
-                    checkpoint_a=ckpt_a,
-                    agent_b_type="escher",
-                    checkpoint_b=ckpt_b,
-                    num_games=4,
-                    config=config,
-                    device="cpu",
-                )
+                with mock.patch.object(ea, "_GoEvalGame", _RecordingGame):
+                    run_head_to_head_typed(
+                        agent_a_type="escher",
+                        checkpoint_a=ckpt_a,
+                        agent_b_type="escher",
+                        checkpoint_b=ckpt_b,
+                        num_games=4,
+                        config=config,
+                        device="cpu",
+                    )
 
-            # Games 1 and 3 (odd): A is P0 (ckpt_a assigned to player_id=0)
-            # Games 2 and 4 (even): B is P0 (ckpt_b assigned to player_id=0)
-            # Each game creates 2 agents, so instantiated has 8 entries for 4 games
-            assert len(instantiated) == 8
+            # One agent per (side, seat), built once for the match.
+            assert len(instantiated) == 4, f"built {len(instantiated)} agents for 4 games"
+            assert sorted(instantiated) == sorted(
+                [(0, ckpt_a), (1, ckpt_a), (0, ckpt_b), (1, ckpt_b)]
+            )
 
-            # Game 1 (index 0,1): P0 should have ckpt_a
-            assert instantiated[0] == (0, ckpt_a)
-            # Game 2 (index 2,3): P0 should have ckpt_b
-            assert instantiated[2] == (0, ckpt_b)
-            # Game 3 (index 4,5): P0 should have ckpt_a
-            assert instantiated[4] == (0, ckpt_a)
-            # Game 4 (index 6,7): P0 should have ckpt_b
-            assert instantiated[6] == (0, ckpt_b)
+            # Odd games seat A at P0, even games seat B, so seat 0 alternates
+            # between exactly two agents and neither holds it twice running.
+            assert len(seat0_per_game) == 4
+            assert seat0_per_game[0] == seat0_per_game[2], "A did not return to P0"
+            assert seat0_per_game[1] == seat0_per_game[3], "B did not return to P0"
+            assert seat0_per_game[0] != seat0_per_game[1], "seats did not alternate"
         finally:
             os.unlink(ckpt_a)
             os.unlink(ckpt_b)

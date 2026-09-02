@@ -3131,6 +3131,11 @@ def play(
         "--name",
         help="Your player name",
     ),
+    seed: Optional[int] = typer.Option(
+        None,
+        "--seed",
+        help="Deal seed. Omitted, one is drawn and printed so a hand can be replayed.",
+    ),
 ):
     """Play a game of Cambia against AI opponents interactively."""
     from .constants import N_PLAYER_MAX_PLAYERS
@@ -3194,7 +3199,7 @@ def play(
         )
         raise typer.Exit(1)
 
-    play_game(seats, cfg.cambia_rules, num_players=num_players)
+    play_game(seats, cfg.cambia_rules, num_players=num_players, seed=seed)
 
 
 @app.command("head-to-head", help="Play two Deep CFR checkpoints against each other")
@@ -3232,6 +3237,14 @@ def head_to_head(
         "-d",
         help="Torch device for inference (cpu, cuda, or xpu)",
     ),
+    seed: Optional[int] = typer.Option(
+        None,
+        "--seed",
+        help=(
+            "Run seed every deal descends from. Omitted, one is drawn and "
+            "reported, so a match can be replayed by passing it back."
+        ),
+    ),
 ):
     """Play two Deep CFR checkpoints head-to-head and report win rates."""
     from rich.console import Console
@@ -3250,6 +3263,7 @@ def head_to_head(
         num_games=games,
         config=cfg,
         device=device,
+        seed=seed,
     )
 
     total = results["total_games"]
@@ -3280,6 +3294,9 @@ def head_to_head(
         f"{results['avg_game_turns']:.1f} ± {results['std_game_turns']:.1f}",
         "",
     )
+    # Printed whether or not one was passed: without it a match that was not
+    # given a seed cannot be replayed (cambia-1974).
+    table.add_row("Run Seed", str(results.get("run_seed", "")), "")
 
     console.print(table)
 

@@ -33,6 +33,7 @@ from .agents import action_codec
 from .agents.game_view import tracked_opponent_seat
 from .encoding import action_to_index
 from .ffi.bridge import GoEngine
+from .utils import resolve_run_seed
 
 console = Console()
 
@@ -540,8 +541,15 @@ def play_game(
     seat_configs: List[SeatConfig],
     house_rules,
     num_players: Optional[int] = None,
+    seed: Optional[int] = None,
 ) -> None:
     """Run an interactive game.
+
+    ``seed`` is the deal, drawn from OS entropy and printed when not given, so
+    a hand can be replayed by passing the number back. It is never left for the
+    engine to fill from the global ``random`` module: loading a
+    Stable-Baselines3 model resets that module to a fixed state, so a seat
+    played by a PPO agent used to deal the same hand every time (cambia-1974).
 
     ``num_players`` defaults to ``len(seat_configs)`` and is passed straight
     through to ``GoEngine``, which sizes its N-player utility buffer from it.
@@ -553,7 +561,9 @@ def play_game(
     one.
     """
     num_players = num_players or len(seat_configs)
-    game = GoEngine(house_rules=house_rules, num_players=num_players)
+    deal_seed = resolve_run_seed(seed)
+    print(f"Deal seed: {deal_seed}")
+    game = GoEngine(seed=deal_seed, house_rules=house_rules, num_players=num_players)
     try:
         seats = game.num_players()
         if seats != num_players:

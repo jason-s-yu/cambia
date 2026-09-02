@@ -178,6 +178,7 @@ CREATE TABLE IF NOT EXISTS eval_results (
     seat_balanced INTEGER DEFAULT 0,
     selection_mode TEXT,
     crn_seed TEXT,
+    run_seed TEXT,
     seat_scheme TEXT,
     policy_errors INTEGER,
     engine_errors INTEGER,
@@ -295,6 +296,12 @@ _COLUMN_MIGRATIONS: Dict[str, list] = {
         ("policy_errors", "INTEGER"),
         ("engine_errors", "INTEGER"),
         ("belief_protocol", "TEXT"),
+        # cambia-1974: the seed every deal of the measurement descended from.
+        # NULL on a row written before the loops took one, which is the era
+        # whose deals cannot be reconstructed at all: a head-to-head with a PPO
+        # seat dealt one hand for the whole match. TEXT, like crn_seed, because
+        # a 64-bit seed does not fit SQLite's signed INTEGER without care.
+        ("run_seed", "TEXT"),
         # cambia-721: which policy the agent under test served,
         # "average_strategy" (the trained StrategyNetwork) or "last_iterate"
         # (regret matching on the final advantage net). NULL on a row measured
@@ -897,21 +904,23 @@ def insert_eval_result(
     row_dict should contain: iteration, baseline, win_rate, games_played,
     p0_wins, p1_wins, ties, adv_loss, strat_loss, avg_game_turns,
     t1_cambia_rate, avg_score_margin, timestamp. Optional hygiene fields:
-    seat_balanced, selection_mode, crn_seed, seat_scheme, policy_errors,
-    engine_errors, belief_protocol, served_policy (absent -> NULL).
+    seat_balanced, selection_mode, crn_seed, run_seed, seat_scheme,
+    policy_errors, engine_errors, belief_protocol, served_policy
+    (absent -> NULL).
     """
     crn_seed = row_dict.get("crn_seed")
+    run_seed = row_dict.get("run_seed")
     db.execute(
         """
         INSERT OR REPLACE INTO eval_results
             (run_id, checkpoint_id, iteration, baseline, win_rate, ci_low, ci_high,
              games_played, p0_wins, p1_wins, ties, avg_game_turns,
              t1_cambia_rate, avg_score_margin, adv_loss, strat_loss,
-             seat_balanced, selection_mode, crn_seed, seat_scheme,
+             seat_balanced, selection_mode, crn_seed, run_seed, seat_scheme,
              policy_errors, engine_errors, belief_protocol, served_policy,
              timestamp)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?)
+                ?, ?)
         """,
         (
             run_id,
@@ -933,6 +942,7 @@ def insert_eval_result(
             row_dict.get("seat_balanced", 0),
             row_dict.get("selection_mode"),
             None if crn_seed is None else str(crn_seed),
+            None if run_seed is None else str(run_seed),
             row_dict.get("seat_scheme"),
             row_dict.get("policy_errors"),
             row_dict.get("engine_errors"),
