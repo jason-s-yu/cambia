@@ -135,7 +135,7 @@ func (m *Manager) writeShim() error {
 // probe-derived fields (python version, pip freeze, torch, go, kernel, cpu) then
 // writes env.json atomically. An existing env.json is left untouched (write-once).
 func (m *Manager) writeEnvJSON(ctx context.Context, runDir, venvPython string, prov provenance) error {
-	path := filepath.Join(runDir, envJSONFile)
+	path := filepath.Join(runDir, m.cfg.EnvJSONName)
 	if _, err := os.Stat(path); err == nil {
 		return nil
 	}

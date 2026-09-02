@@ -127,7 +127,24 @@ func (p *procLauncher) Status(name string) ProcessStatus {
 // are on the coordinator, so two nodes never collide and a node reuses its own
 // artifacts across jobs.
 func NewEnvironment(cfg Config, coresCap int) Environment {
-	return ingest.New(ingest.Config{
+	return ingest.New(ingestConfig(cfg, coresCap, ""))
+}
+
+// NewEmbeddedEnvironment builds the embedded node's ingest Manager. It is the
+// coordinator's own base dir, mirror, worktrees, and caches, because the node
+// runs in the coordinator's process and staging a second copy of them would
+// double the disk for nothing (D40). The one difference is the provenance
+// record: the coordinator has already authored env.json with executed_on in
+// the run dir this stage writes into, so the staging record is written as
+// env.node.json, the name a remote node's own copy is promoted under (D52).
+func NewEmbeddedEnvironment(cfg Config, coresCap int) Environment {
+	return ingest.New(ingestConfig(cfg, coresCap, envNodeJSONName))
+}
+
+// ingestConfig is the one ingest.Config both environments are built from, so a
+// field added for a remote node reaches the embedded one without a second edit.
+func ingestConfig(cfg Config, coresCap int, envJSONName string) ingest.Config {
+	return ingest.Config{
 		BaseDir:              cfg.BaseDir,
 		RunsDir:              cfg.RunsDir,
 		MaxVenvs:             cfg.Caches.MaxVenvs,
@@ -136,5 +153,6 @@ func NewEnvironment(cfg Config, coresCap int) Environment {
 		PythonBin:            cfg.PythonBin,
 		RequireSignedCommits: cfg.RequireSignedCommits,
 		AllowedSignersPath:   cfg.AllowedSignersPath,
-	})
+		EnvJSONName:          envJSONName,
+	}
 }

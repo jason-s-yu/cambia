@@ -13,6 +13,7 @@ import (
 	"github.com/jason-s-yu/cambia/runnerd/harness"
 	"github.com/jason-s-yu/cambia/runnerd/ingest"
 	"github.com/jason-s-yu/cambia/runnerd/nashnet"
+	"github.com/jason-s-yu/cambia/runnerd/nashnet/capability"
 	"github.com/jason-s-yu/cambia/runnerd/nashnet/quarantine"
 )
 
@@ -77,7 +78,8 @@ func loadNashnetConfig(baseDir string) (nashnetConfig, bool) {
 // carry, the quarantine store, and the expiry sweeper. It returns the sweeper
 // so the caller runs it beside the listener.
 func startNashnet(cfg nashnetConfig, srv *harness.Server, disp *harness.Dispatcher,
-	mgr *ingest.Manager, runsDir, pubKeyPath string, minDiskGB float64) (*nashnet.Sweeper, error) {
+	mgr *ingest.Manager, runsDir, pubKeyPath string, minDiskGB float64,
+	embedded *embeddedNode) (*nashnet.Sweeper, error) {
 
 	opKey, err := os.ReadFile(pubKeyPath)
 	if err != nil {
@@ -93,6 +95,14 @@ func startNashnet(cfg nashnetConfig, srv *harness.Server, disp *harness.Dispatch
 	})
 	if err != nil {
 		return nil, fmt.Errorf("load enrollment grants: %w", err)
+	}
+	// The embedded node is admitted by an in-process grant over the key this
+	// process generated for it (D40). It is installed before anything can
+	// claim, so the node's first register already verifies.
+	if embedded != nil {
+		if _, err := grants.SetLocalGrant(embedded.signer.PublicKey(), capability.Grant{}, cfg.grantLifetime); err != nil {
+			return nil, fmt.Errorf("admit the embedded node: %w", err)
+		}
 	}
 
 	policy := nashnet.DefaultPolicy()
@@ -169,6 +179,7 @@ func startNashnet(cfg nashnetConfig, srv *harness.Server, disp *harness.Dispatch
 		UnplaceableGrace: cfg.unplaceableGrace,
 		NodeTTL:          cfg.nodeTTL,
 		SessionGrace:     cfg.sessionGrace,
+		EmbeddedNodeID:   embeddedID(embedded),
 	})
 	if err != nil {
 		return nil, err
@@ -197,4 +208,13 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 		}
 	}
 	return fallback
+}
+
+// embeddedID is the embedded node's id, or "" when this daemon runs none. The
+// pool reads it to decide which leases materialize in place (D40).
+func embeddedID(e *embeddedNode) string {
+	if e == nil {
+		return ""
+	}
+	return e.nodeID()
 }

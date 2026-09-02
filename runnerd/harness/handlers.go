@@ -102,7 +102,15 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	// 3d. device capability gate (design cambia-329): device must be enabled on
 	// this runner via RUNNERD_ALLOWED_DEVICES. Not forceable -- a captured
 	// token cannot ask a cpu-only runner to admit a GPU job.
-	if !s.allowedDevices[spec.device()] {
+	//
+	// With a pool attached the gate moves to placement (D40): the env now
+	// configures the embedded node's devices_allowed gate, and which devices
+	// exist is a fact about the nodes rather than about the coordinator, so a
+	// cuda job with no cuda-declaring node waits as unplaceable and runs the
+	// moment such a node enrolls. Rejecting it here would make an operator
+	// re-submit every queued job after adding a GPU node. A daemon with no
+	// pool keeps the v1.0 refusal, where this host is the only host.
+	if s.pool == nil && !s.allowedDevices[spec.device()] {
 		writeJSONError(w, http.StatusBadRequest, "device_unsupported", "device not enabled on this runner: "+spec.device())
 		return
 	}
@@ -242,7 +250,24 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 // device (design cambia-329): cpu skips the GPU check entirely; cuda runs the
 // existing nvidia-smi VRAM check; xpu runs the render-node + xpu-smi VRAM
 // check (procmgr.XPUChecks). Disk and RAM floors always apply.
+//
+// With a pool attached the set narrows to disk (D19). RAM and VRAM describe
+// whichever host ends up running the job, which the coordinator does not know
+// at submit and may not be; they are node gates now, measured on the node and
+// reported in its gate report, and a breach between claim and Prepare is a
+// nack rather than a submit refusal. Disk stays, and stays measured on the
+// coordinator's own runs dir, because every artifact of every node lands
+// there. The narrowing is scoped to a pool for the same reason the device gate
+// is: on a daemon with no pool this host runs the job, so the floors describe
+// it and the v1.0 refusal is the right answer.
 func (s *Server) submitPreflights(spec *JobSpec) []procmgr.PreflightCheck {
+	if s.pool != nil {
+		return []procmgr.PreflightCheck{
+			{Name: "gpu_vram", OK: true, Detail: "pool attached: VRAM is a node gate (D19)"},
+			procmgr.DiskSpaceCheck(s.runsDir, s.minDiskGB),
+			{Name: "min_free_ram", OK: true, Detail: "pool attached: RAM is a node gate (D19)"},
+		}
+	}
 	var checks []procmgr.PreflightCheck
 	switch spec.device() {
 	case "cuda":

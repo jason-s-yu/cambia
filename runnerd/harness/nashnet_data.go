@@ -36,6 +36,10 @@ func (p *Pool) quarantineLease(l nashnet.Lease) quarantine.Lease {
 		Epoch:     l.LeaseEpoch,
 		Grants:    grants,
 		RunDBName: p.runDBName(l.JobID),
+		// In place only for the node running inside this process, decided from
+		// the authenticated lease record rather than from anything the node
+		// says about itself (D40).
+		InPlace: p.embedded != "" && l.NodeID == p.embedded,
 	}
 }
 

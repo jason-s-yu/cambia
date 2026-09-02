@@ -174,6 +174,12 @@ type PoolConfig struct {
 	// NodeTTL and SessionGrace drive the presence rendering of D3 and D45.
 	NodeTTL      time.Duration
 	SessionGrace time.Duration
+	// EmbeddedNodeID names the node running inside this process over the
+	// loopback transport (D40, D65). Its leases materialize in place, because
+	// its jobs write straight into the run dir the manifest names. It is
+	// configured here rather than reported by the node, so no remote node can
+	// claim the right to have its manifest believed without uploading a byte.
+	EmbeddedNodeID string
 	// Now is the injected clock. Nil means time.Now.
 	Now func() time.Time
 }
@@ -193,6 +199,7 @@ type Pool struct {
 	runsDir    string
 	nodesDir   string
 	originHost string
+	embedded   string
 	policy     nashnet.Policy
 	ceilings   Ceilings
 	maxLeases  int
@@ -314,6 +321,7 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 		runsDir:    cfg.RunsDir,
 		nodesDir:   cfg.NodesDir,
 		originHost: origin,
+		embedded:   cfg.EmbeddedNodeID,
 		policy:     policy,
 		ceilings:   ceil,
 		maxLeases:  maxLeases,
