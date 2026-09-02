@@ -7,6 +7,7 @@ import (
 	"github.com/jason-s-yu/cambia/runnerd/nashnet"
 	"github.com/jason-s-yu/cambia/runnerd/nashnet/capability"
 	"github.com/jason-s-yu/cambia/runnerd/nashnet/gates"
+	"github.com/jason-s-yu/cambia/runnerd/nashnet/quarantine"
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 )
 
@@ -30,6 +31,16 @@ type placementSource interface {
 	nodeViews() []NodeView
 	logDroppedFor(jobID string) int64
 	signalPlacement()
+	// stopLease moves a live lease to revoking and tells its node to stop,
+	// which is the whole of a cancel on a leased job (D31).
+	stopLease(lease nashnet.Lease, force bool) error
+	// purgeQuarantine deletes every lease tree a purged job left behind (D31).
+	purgeQuarantine(jobID string) error
+	// nodePresent reports whether a pinned node could still claim (D12).
+	nodePresent(nodeID string) bool
+	// manifestHead is the job's promoted manifest head, which is what the
+	// resume gate reads rather than the run dir's raw contents (D31).
+	manifestHead(jobID string) (quarantine.Head, bool)
 }
 
 // placementHold is one job's accumulated match rejection, rendered after the

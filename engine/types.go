@@ -2,11 +2,11 @@ package engine
 
 // Suit constants - packed into upper 4 bits of Card.
 const (
-	SuitHearts    uint8 = 0
-	SuitDiamonds  uint8 = 1
-	SuitClubs     uint8 = 2
-	SuitSpades    uint8 = 3
-	SuitRedJoker  uint8 = 4
+	SuitHearts     uint8 = 0
+	SuitDiamonds   uint8 = 1
+	SuitClubs      uint8 = 2
+	SuitSpades     uint8 = 3
+	SuitRedJoker   uint8 = 4
 	SuitBlackJoker uint8 = 5
 )
 
@@ -116,26 +116,26 @@ func (c Card) Ability() AbilityType {
 type DecisionContext uint8
 
 const (
-	CtxStartTurn    DecisionContext = iota // 0
-	CtxPostDraw                            // 1
-	CtxSnapDecision                        // 2
-	CtxAbilitySelect                       // 3
-	CtxSnapMove                            // 4
-	CtxTerminal                            // 5
+	CtxStartTurn     DecisionContext = iota // 0
+	CtxPostDraw                             // 1
+	CtxSnapDecision                         // 2
+	CtxAbilitySelect                        // 3
+	CtxSnapMove                             // 4
+	CtxTerminal                             // 5
 )
 
 // PendingType describes a pending ability or action waiting for resolution.
 type PendingType uint8
 
 const (
-	PendingNone        PendingType = iota // 0
-	PendingDiscard                        // 1
-	PendingPeekOwn                        // 2
-	PendingPeekOther                      // 3
-	PendingBlindSwap                      // 4
-	PendingKingLook                       // 5
-	PendingKingDecision                   // 6
-	PendingSnapMove                       // 7
+	PendingNone         PendingType = iota // 0
+	PendingDiscard                         // 1
+	PendingPeekOwn                         // 2
+	PendingPeekOther                       // 3
+	PendingBlindSwap                       // 4
+	PendingKingLook                        // 5
+	PendingKingDecision                    // 6
+	PendingSnapMove                        // 7
 )
 
 // PendingAction holds a pending ability action waiting to be resolved.
@@ -188,17 +188,17 @@ type SnapState struct {
 // ---------------------------------------------------------------------------
 
 const (
-	ActionDrawStockpile    uint16 = 0
-	ActionDrawDiscard      uint16 = 1
-	ActionCallCambia       uint16 = 2
-	ActionDiscardNoAbility uint16 = 3
+	ActionDrawStockpile      uint16 = 0
+	ActionDrawDiscard        uint16 = 1
+	ActionCallCambia         uint16 = 2
+	ActionDiscardNoAbility   uint16 = 3
 	ActionDiscardWithAbility uint16 = 4
 
-	ActionBaseReplace          uint16 = 5   // Replace(0)..Replace(5)
-	ActionBasePeekOwn          uint16 = 11  // PeekOwn(0)..PeekOwn(5)
-	ActionBasePeekOther        uint16 = 17  // PeekOther(0)..PeekOther(5)
-	ActionBaseBlindSwap        uint16 = 23  // BlindSwap(own*6+opp), 36 entries
-	ActionBaseKingLook         uint16 = 59  // KingLook(own*6+opp), 36 entries
+	ActionBaseReplace          uint16 = 5  // Replace(0)..Replace(5)
+	ActionBasePeekOwn          uint16 = 11 // PeekOwn(0)..PeekOwn(5)
+	ActionBasePeekOther        uint16 = 17 // PeekOther(0)..PeekOther(5)
+	ActionBaseBlindSwap        uint16 = 23 // BlindSwap(own*6+opp), 36 entries
+	ActionBaseKingLook         uint16 = 59 // KingLook(own*6+opp), 36 entries
 	ActionKingSwapNo           uint16 = 95
 	ActionKingSwapYes          uint16 = 96
 	ActionPassSnap             uint16 = 97
@@ -333,16 +333,16 @@ func ActionIsSnapOpponentMove(idx uint16) (ownIdx, slotIdx uint8, ok bool) {
 
 // LastActionInfo encodes a fully observable summary of the most recent action.
 type LastActionInfo struct {
-	ActionIdx    uint16
-	ActingPlayer uint8
-	RevealedCard Card
-	RevealedIdx  uint8
+	ActionIdx     uint16
+	ActingPlayer  uint8
+	RevealedCard  Card
+	RevealedIdx   uint8
 	RevealedOwner uint8
-	SwapOwnIdx   uint8
-	SwapOppIdx   uint8
-	SnapSuccess  bool
-	SnapPenalty  uint8
-	DrawnFrom    uint8 // DrawnFromStockpile or DrawnFromDiscard
+	SwapOwnIdx    uint8
+	SwapOppIdx    uint8
+	SnapSuccess   bool
+	SnapPenalty   uint8
+	DrawnFrom     uint8 // DrawnFromStockpile or DrawnFromDiscard
 
 	// ActionMeta carries the two facts about the recorded action that ActionIdx cannot,
 	// packed into the single byte of padding this struct has to spend: GameState is
