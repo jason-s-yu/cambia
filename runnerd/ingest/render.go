@@ -174,7 +174,7 @@ func (m *Manager) renderConfig(ctx context.Context, worktreeDir, runDir, venvPyt
 		Dir:  cfrDir,
 		Env:  m.renderEnv(worktreeDir),
 	}); err != nil {
-		return "", fmt.Errorf("render: %w: %s", err, strings.TrimSpace(string(res.Stderr)))
+		return "", fmt.Errorf("render: %w: %v: %s", ErrConfigRender, err, strings.TrimSpace(string(res.Stderr)))
 	}
 
 	// Hard validation gate.
@@ -184,7 +184,7 @@ func (m *Manager) renderConfig(ctx context.Context, worktreeDir, runDir, venvPyt
 		Dir:  cfrDir,
 		Env:  m.renderEnv(worktreeDir),
 	}); err != nil {
-		return "", fmt.Errorf("validate: %w: %s", err, strings.TrimSpace(string(res.Stderr)))
+		return "", fmt.Errorf("validate: %w: %v: %s", ErrConfigValidate, err, strings.TrimSpace(string(res.Stderr)))
 	}
 	return outPath, nil
 }

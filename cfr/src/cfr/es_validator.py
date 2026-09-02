@@ -7,38 +7,15 @@ exploitability metrics during Deep CFR training.
 
 import logging
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 
-from ..agent_state import AgentState
 from ..config import Config
-from ..constants import (
-    NUM_PLAYERS,
-    ActionAbilityBlindSwapSelect,
-    ActionAbilityKingLookSelect,
-    ActionAbilityKingSwapDecision,
-    ActionAbilityPeekOtherSelect,
-    ActionAbilityPeekOwnSelect,
-    ActionDiscard,
-    ActionSnapOpponentMove,
-    DecisionContext,
-)
-from ..encoding import (
-    INPUT_DIM,
-    NUM_ACTIONS,
-    encode_infoset,
-    encode_action_mask,
-    action_to_index,
-)
-from ..abstraction import get_card_bucket
-from ..game.engine import CambiaGameState
+from ..constants import NUM_PLAYERS
+from ..encoding import INPUT_DIM, NUM_ACTIONS
 from ..networks import AdvantageNetwork, get_strategy_from_advantages
-from ..reservoir import ReservoirSample
-
-# Re-use observation helpers from tabular worker
-from .worker import _create_observation, _filter_observation
 
 logger = logging.getLogger(__name__)
 
@@ -75,30 +52,6 @@ def _get_strategy_from_network(
     )
 
 
-def _infer_decision_context_python(game_state: "CambiaGameState") -> DecisionContext:
-    """Infer DecisionContext from CambiaGameState (Python engine)."""
-    if game_state.snap_phase_active:
-        return DecisionContext.SNAP_DECISION
-    if game_state.pending_action:
-        pending = game_state.pending_action
-        if isinstance(pending, ActionDiscard):
-            return DecisionContext.POST_DRAW
-        if isinstance(
-            pending,
-            (
-                ActionAbilityPeekOwnSelect,
-                ActionAbilityPeekOtherSelect,
-                ActionAbilityBlindSwapSelect,
-                ActionAbilityKingLookSelect,
-                ActionAbilityKingSwapDecision,
-            ),
-        ):
-            return DecisionContext.ABILITY_SELECT
-        if isinstance(pending, ActionSnapOpponentMove):
-            return DecisionContext.SNAP_MOVE
-    return DecisionContext.START_TURN
-
-
 class ESValidator:
     """Runs short-depth ES validation passes to check convergence."""
 
@@ -111,9 +64,6 @@ class ESValidator:
         self.config = config
         self.depth_limit = getattr(
             getattr(config, "deep_cfr", None), "es_validation_depth", 10
-        )
-        self.engine_backend = getattr(
-            getattr(config, "deep_cfr", None), "engine_backend", "python"
         )
 
         # Reconstruct advantage network from weights
@@ -157,21 +107,33 @@ class ESValidator:
         all_entropies: List[float] = []
         completed_traversals = 0
         total_nodes = 0
+        first_error: Optional[Exception] = None
 
         for t in range(num_traversals):
             updating_player = t % NUM_PLAYERS
 
             try:
-                regrets, entropies, nodes = self._run_single_traversal(updating_player)
+                regrets, entropies, nodes = self._traverse_go(updating_player)
                 all_regrets.extend(regrets)
                 all_entropies.extend(entropies)
                 total_nodes += nodes
                 completed_traversals += 1
             except Exception as e:
+                if first_error is None:
+                    first_error = e
                 logger.warning("ES validation traversal %d failed: %s", t, e)
                 continue
 
         elapsed = time.time() - start_time
+
+        # Zeroed metrics read as "converged", so a run where every traversal
+        # failed (most often a missing libcambia.so) must raise rather than
+        # report zeros (cambia-1783).
+        if num_traversals > 0 and completed_traversals == 0:
+            raise RuntimeError(
+                f"ES validation completed 0 of {num_traversals} traversals on the "
+                f"Go engine; first error: {first_error}"
+            ) from first_error
 
         if not all_regrets:
             return {
@@ -197,305 +159,24 @@ class ESValidator:
             "total_nodes": total_nodes,
         }
 
-    def _run_single_traversal(
-        self, updating_player: int
-    ) -> Tuple[List[float], List[float], int]:
-        """Run one ES traversal, returns (regrets_list, entropies_list, nodes_count)."""
-        if self.engine_backend == "go":
-            return self._traverse_go(updating_player)
-        else:
-            return self._traverse_python(updating_player)
-
-    def _traverse_python(
-        self, updating_player: int
-    ) -> Tuple[List[float], List[float], int]:
+    def _traverse_go(self, updating_player: int) -> Tuple[List[float], List[float], int]:
         """
-        Run one ES traversal using the Python game engine.
+        Run one ES traversal on the Go engine.
 
         Returns (regrets_list, entropies_list, nodes_count).
         """
-        regrets: List[float] = []
-        entropies: List[float] = []
-        nodes_counter = [0]
-
-        # Initialise game
-        game_state = CambiaGameState(
-            house_rules=getattr(self.config, "cambia_rules", None)
-        )
-
-        if game_state.is_terminal():
-            return regrets, entropies, 0
-
-        # Initialise agent states (mirror deep_worker pattern)
-        initial_obs = _create_observation(None, None, game_state, -1, [])
-        if initial_obs is None:
-            return regrets, entropies, 0
-
-        initial_hands = [list(p.hand) for p in game_state.players]
-        initial_peeks = [p.initial_peek_indices for p in game_state.players]
-        agent_states: List[AgentState] = []
-        for i in range(NUM_PLAYERS):
-            agent = AgentState(
-                player_id=i,
-                opponent_id=1 - i,
-                memory_level=getattr(
-                    getattr(self.config, "agent_params", None), "memory_level", 1
-                ),
-                time_decay_turns=getattr(
-                    getattr(self.config, "agent_params", None), "time_decay_turns", 3
-                ),
-                initial_hand_size=len(initial_hands[i]),
-                config=self.config,
-            )
-            agent.initialize(initial_obs, initial_hands[i], initial_peeks[i])
-            agent_states.append(agent)
-
-        self._traverse_python_recursive(
-            game_state=game_state,
-            agent_states=agent_states,
-            updating_player=updating_player,
-            depth=0,
-            regrets=regrets,
-            entropies=entropies,
-            nodes_counter=nodes_counter,
-        )
-
-        return regrets, entropies, nodes_counter[0]
-
-    def _traverse_python_recursive(
-        self,
-        game_state: "CambiaGameState",
-        agent_states: List[AgentState],
-        updating_player: int,
-        depth: int,
-        regrets: List[float],
-        entropies: List[float],
-        nodes_counter: List[int],
-    ) -> np.ndarray:
-        """
-        Recursive ES traversal (Python engine).
-
-        Returns utility vector for both players.
-        """
-        nodes_counter[0] += 1
-
-        if game_state.is_terminal():
-            return np.array(
-                [game_state.get_utility(i) for i in range(NUM_PLAYERS)], dtype=np.float64
-            )
-
-        if depth >= self.depth_limit:
-            return np.zeros(NUM_PLAYERS, dtype=np.float64)
-
-        # Legal actions
-        try:
-            legal_actions_set = game_state.get_legal_actions()
-            legal_actions = sorted(list(legal_actions_set), key=repr)
-        except Exception:
-            return np.zeros(NUM_PLAYERS, dtype=np.float64)
-
-        num_actions = len(legal_actions)
-        if num_actions == 0:
-            return np.zeros(NUM_PLAYERS, dtype=np.float64)
-
-        player = game_state.get_acting_player()
-        if player == -1:
-            return np.zeros(NUM_PLAYERS, dtype=np.float64)
-
-        # Determine context and encode
-        current_context = _infer_decision_context_python(game_state)
-        current_agent_state = agent_states[player]
-
-        drawn_card_bucket = None
-        if current_context == DecisionContext.POST_DRAW:
-            drawn_card_obj = game_state.pending_action_data.get("drawn_card")
-            if drawn_card_obj is not None:
-                drawn_card_bucket = get_card_bucket(drawn_card_obj)
-
-        try:
-            features = encode_infoset(
-                current_agent_state, current_context, drawn_card_bucket=drawn_card_bucket
-            )
-            action_mask = encode_action_mask(legal_actions)
-        except Exception:
-            return np.zeros(NUM_PLAYERS, dtype=np.float64)
-
-        # Compute strategy
-        try:
-            strategy_full = _get_strategy_from_network(
-                self.network, features, action_mask
-            )
-        except Exception:
-            strategy_full = None
-
-        # Extract local strategy over legal actions
-        if strategy_full is not None and len(strategy_full) == NUM_ACTIONS:
-            local_strategy = np.zeros(num_actions, dtype=np.float64)
-            for a_idx, action in enumerate(legal_actions):
-                global_idx = action_to_index(action)
-                local_strategy[a_idx] = strategy_full[global_idx]
-            total = local_strategy.sum()
-            if total > 1e-9:
-                local_strategy /= total
-            else:
-                local_strategy = np.ones(num_actions, dtype=np.float64) / num_actions
-        else:
-            local_strategy = np.ones(num_actions, dtype=np.float64) / num_actions
-
-        # Record entropy for this node
-        entropies.append(_compute_entropy(local_strategy))
-
-        # --- External Sampling Logic ---
-        if player == updating_player:
-            # TRAVERSER'S NODE: enumerate ALL legal actions
-            action_values = np.zeros((num_actions, NUM_PLAYERS), dtype=np.float64)
-
-            for a_idx, action in enumerate(legal_actions):
-                try:
-                    state_delta, undo_info = game_state.apply_action(action)
-                    if not callable(undo_info):
-                        continue
-                except Exception:
-                    continue
-
-                observation = _create_observation(
-                    None, action, game_state, player, game_state.snap_results_log
-                )
-                if observation is None:
-                    try:
-                        undo_info()
-                    except Exception:
-                        pass
-                    continue
-
-                next_agent_states = []
-                agent_update_failed = False
-                try:
-                    for agent_idx, agent_state in enumerate(agent_states):
-                        cloned_agent = agent_state.clone()
-                        player_specific_obs = _filter_observation(observation, agent_idx)
-                        cloned_agent.update(player_specific_obs)
-                        next_agent_states.append(cloned_agent)
-                except Exception:
-                    agent_update_failed = True
-                    try:
-                        undo_info()
-                    except Exception:
-                        pass
-
-                if not agent_update_failed:
-                    try:
-                        action_values[a_idx] = self._traverse_python_recursive(
-                            game_state=game_state,
-                            agent_states=next_agent_states,
-                            updating_player=updating_player,
-                            depth=depth + 1,
-                            regrets=regrets,
-                            entropies=entropies,
-                            nodes_counter=nodes_counter,
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        undo_info()
-                    except Exception:
-                        return np.zeros(NUM_PLAYERS, dtype=np.float64)
-
-            # Compute counterfactual values and regrets
-            node_value = local_strategy @ action_values  # shape: (NUM_PLAYERS,)
-            action_regrets = action_values[:, player] - node_value[player]
-
-            # Record per-action regrets
-            for r in action_regrets:
-                regrets.append(float(r))
-
-            return node_value
-
-        else:
-            # OPPONENT'S NODE: sample ONE action from strategy
-            if np.sum(local_strategy) > 1e-9:
-                try:
-                    chosen_idx = np.random.choice(num_actions, p=local_strategy)
-                except ValueError:
-                    chosen_idx = np.random.choice(num_actions)
-            else:
-                chosen_idx = np.random.choice(num_actions)
-
-            chosen_action = legal_actions[chosen_idx]
-
-            try:
-                state_delta, undo_info = game_state.apply_action(chosen_action)
-                if not callable(undo_info):
-                    return np.zeros(NUM_PLAYERS, dtype=np.float64)
-            except Exception:
-                return np.zeros(NUM_PLAYERS, dtype=np.float64)
-
-            observation = _create_observation(
-                None, chosen_action, game_state, player, game_state.snap_results_log
-            )
-            if observation is None:
-                try:
-                    undo_info()
-                except Exception:
-                    pass
-                return np.zeros(NUM_PLAYERS, dtype=np.float64)
-
-            next_agent_states = []
-            try:
-                for agent_idx, agent_state in enumerate(agent_states):
-                    cloned_agent = agent_state.clone()
-                    player_specific_obs = _filter_observation(observation, agent_idx)
-                    cloned_agent.update(player_specific_obs)
-                    next_agent_states.append(cloned_agent)
-            except Exception:
-                try:
-                    undo_info()
-                except Exception:
-                    pass
-                return np.zeros(NUM_PLAYERS, dtype=np.float64)
-
-            try:
-                node_value = self._traverse_python_recursive(
-                    game_state=game_state,
-                    agent_states=next_agent_states,
-                    updating_player=updating_player,
-                    depth=depth + 1,
-                    regrets=regrets,
-                    entropies=entropies,
-                    nodes_counter=nodes_counter,
-                )
-            except Exception:
-                node_value = np.zeros(NUM_PLAYERS, dtype=np.float64)
-
-            try:
-                undo_info()
-            except Exception:
-                return np.zeros(NUM_PLAYERS, dtype=np.float64)
-
-            return node_value
-
-    def _traverse_go(self, updating_player: int) -> Tuple[List[float], List[float], int]:
-        """
-        Run one ES traversal using the Go engine backend.
-
-        Falls back to Python if the Go engine cannot be imported.
-        """
-        try:
-            from ..ffi.bridge import GoEngine, GoAgentState  # noqa: PLC0415
-        except ImportError:
-            logger.warning(
-                "Go engine (ffi.bridge) not available; falling back to Python backend."
-            )
-            return self._traverse_python(updating_player)
+        from ..ffi.bridge import GoEngine, GoAgentState  # noqa: PLC0415
 
         regrets: List[float] = []
         entropies: List[float] = []
         nodes_counter = [0]
 
-        go_engine = None
+        # Engine and agent construction stay outside the tolerant block: a
+        # missing or mismatched libcambia.so must surface, not be logged away
+        # as one more failed traversal.
+        go_engine = GoEngine(house_rules=getattr(self.config, "cambia_rules", None))
         go_agents: List["GoAgentState"] = []
         try:
-            go_engine = GoEngine(house_rules=getattr(self.config, "cambia_rules", None))
             go_agents = [
                 GoAgentState(
                     go_engine,
@@ -509,6 +190,11 @@ class ESValidator:
                 )
                 for pid in range(NUM_PLAYERS)
             ]
+        except Exception:
+            go_engine.close()
+            raise
+
+        try:
             self._traverse_go_recursive(
                 engine=go_engine,
                 agent_states=go_agents,
@@ -526,11 +212,10 @@ class ESValidator:
                     a.close()
                 except Exception:
                     pass
-            if go_engine is not None:
-                try:
-                    go_engine.close()
-                except Exception:
-                    pass
+            try:
+                go_engine.close()
+            except Exception:
+                pass
 
         return regrets, entropies, nodes_counter[0]
 

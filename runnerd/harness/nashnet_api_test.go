@@ -427,11 +427,8 @@ func TestDrainIsTwoWay(t *testing.T) {
 	if rec, _ := r.pool.nodes.Get(r.nodeA.id); rec.Drained {
 		t.Fatal("drain: false did not lift the hold")
 	}
-	r.pool.mu.Lock()
-	trips := r.pool.breaker[r.nodeA.id]
-	r.pool.mu.Unlock()
-	if trips != 0 {
-		t.Fatalf("breaker counter = %d after clear_breaker, want 0", trips)
+	if trips, held := r.pool.breakerReport(r.nodeA.id, r.clock.now()); trips != 0 || held != 0 {
+		t.Fatalf("breaker after clear_breaker = %d trips, %ds held, want 0 and 0", trips, held)
 	}
 	if _, claimed := r.claim(t, r.nodeA, nashnet.ClaimRequest{}); claimed == nil {
 		t.Fatal("a node whose hold was lifted must claim again")

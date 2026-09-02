@@ -135,6 +135,10 @@ def test_is_terminal():
     assert is_terminal("crashed")
     assert not is_terminal("running")
     assert not is_terminal(None)
+    # A gate stop that promoted a checkpoint (design 7 D62) is the only
+    # preempted a client ever sees, and it waits for an operator rather than
+    # producing anything further.
+    assert is_terminal("preempted")
 
 
 # ---------------------------------------------------------------------------

@@ -3,16 +3,16 @@ package handlers
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jason-s-yu/cambia/service/internal/database"
+	"github.com/jason-s-yu/cambia/service/internal/testutil"
+	"github.com/stretchr/testify/require"
 )
 
 // dbAvailable reports whether a Postgres instance matching this package's
@@ -24,7 +24,8 @@ import (
 var dbAvailable bool
 
 func TestMain(m *testing.M) {
-	dbAvailable = pingTestDB()
+	testutil.LoadServiceEnv()
+	dbAvailable = testutil.PingPostgres()
 	os.Exit(m.Run())
 }
 
@@ -37,17 +38,30 @@ func TestMain(m *testing.M) {
 // the connect happens exactly once; database.ConnectDB's production call path is untouched.
 var dbOnce sync.Once
 
+// dbPoolErr records a failure from that single pool open so every DB-backed test reports it.
+var dbPoolErr error
+
 // ensureTestDB skips the calling test up front when no database is reachable (dbAvailable, set
-// once in TestMain), then connects via database.ConnectDB exactly once for the whole package.
+// once in TestMain), then opens testutil.NewBoundedPool exactly once for the whole package: the
+// dev Postgres is shared by every checkout on the machine and database.ConnectDB's default
+// MaxConns exhausted its connections under concurrent worktrees (cambia-1830).
 // Every caller after the first still synchronizes with that one connect (sync.Once guarantees
 // this), so a game-end persistence goroutine spawned by any test always observes the same,
 // never-reassigned database.DB.
 func ensureTestDB(t *testing.T) {
 	t.Helper()
 	if !dbAvailable {
-		t.Skip("skipping: no Postgres reachable via PG_HOST/PG_PORT/POSTGRES_USER/POSTGRES_PASSWORD/PG_DATABASE (see service/.env.template); set these to point at a running dev database to run this test")
+		t.Skip(testutil.SkipMessage)
 	}
-	dbOnce.Do(database.ConnectDB)
+	dbOnce.Do(func() {
+		pool, err := testutil.NewBoundedPool(context.Background())
+		if err != nil {
+			dbPoolErr = err
+			return
+		}
+		database.DB = pool
+	})
+	require.NoError(t, dbPoolErr, "open this package's bounded test pool")
 }
 
 // TestEnsureTestDBConnectsOnce is the cambia-908 regression for the first half of the fix:
@@ -194,35 +208,4 @@ func drainLobbyPersistence(t *testing.T, gs *GameServer, lobbyID uuid.UUID) {
 		// no longer race-free, so it must not pass silently.
 		t.Errorf("cambia-942 F4: persistence goroutines for lobby %s did not finish within 5s; deleting its rows anyway", lobbyID)
 	}
-}
-
-// pingTestDB attempts a short-timeout connection to the database configured
-// via the package's standard env vars. Unlike database.ConnectDB, it never
-// calls log.Fatalf: an unreachable DB is an expected condition on dev
-// machines and callers use the returned bool to skip DB-dependent tests.
-func pingTestDB() bool {
-	connStr := fmt.Sprintf(
-		"postgres://%s:%s@%s:%s/%s",
-		os.Getenv("POSTGRES_USER"),
-		os.Getenv("POSTGRES_PASSWORD"),
-		os.Getenv("PG_HOST"),
-		os.Getenv("PG_PORT"),
-		os.Getenv("PG_DATABASE"),
-	)
-
-	config, err := pgxpool.ParseConfig(connStr)
-	if err != nil {
-		return false
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	pool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		return false
-	}
-	defer pool.Close()
-
-	return pool.Ping(ctx) == nil
 }

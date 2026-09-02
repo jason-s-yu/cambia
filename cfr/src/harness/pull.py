@@ -71,6 +71,16 @@ _KNOWN_SYNC_STATUSES: Set[str] = _ALLOWED_STATUS | {"starting"}
 
 # Terminal run states (design 2.3 terminal set + run_db lifecycle completions).
 # A run in one of these has no further artifact changes coming.
+#
+# "preempted" is terminal here because it is the only form of it that reaches a
+# client. A gate-driven stop (design 7 D62) has two outcomes and the coordinator
+# writes a status for one of them: with no promoted checkpoint the job returns
+# to ready with no status written at all, so a watch loop sees it stay running
+# or queued; with a checkpoint it is terminal and waits for an explicit operator
+# resume, because nothing auto-resumes a job that produced one (D33). Leaving it
+# out would keep such a run in the active pull set forever, re-pulling every
+# tick against a run dir that never changes again and never posting its terminal
+# transition.
 TERMINAL_STATUSES: Set[str] = {
     "stopped",
     "crashed",
@@ -80,6 +90,7 @@ TERMINAL_STATUSES: Set[str] = {
     "completed",
     "finished",
     "done",
+    "preempted",
 }
 
 

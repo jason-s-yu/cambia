@@ -49,6 +49,15 @@ func killJobsOnSignal(sig os.Signal, env string) bool {
 }
 
 func main() {
+	// `cambia-runnerd node <verb>` (currently just init, design D25) is
+	// offline operator tooling with its own flag set, dispatched ahead of the
+	// daemon's --listen/--role/--node-config flags so it never needs the
+	// coordinator's TLS/JWT environment.
+	if len(os.Args) > 1 && os.Args[1] == "node" {
+		runNodeSubcommand(os.Args[2:])
+		return
+	}
+
 	listen := flag.String("listen", envOr("RUNNERD_LISTEN", "127.0.0.1:8090"),
 		"control-plane listen address (dev default 127.0.0.1:8090; prod binds the runner's LAN address)")
 	role := flag.String("role", envOr("RUNNERD_ROLE", roleBoth),

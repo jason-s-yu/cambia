@@ -371,6 +371,46 @@ def _get_real_config_classes():
             sys.modules["src.config"] = _orig
 
 
+# ---------------------------------------------------------------------------
+# cambia-1783: the Python traversal backend is retired
+# ---------------------------------------------------------------------------
+
+
+class TestEngineBackendValidation:
+    def test_default_backend_is_go(self):
+        DeepCfrConfig, _ = _get_real_config_classes()
+        assert DeepCfrConfig().engine_backend == "go"
+
+    def test_explicit_go_accepted(self):
+        DeepCfrConfig, _ = _get_real_config_classes()
+        assert DeepCfrConfig(engine_backend="go").engine_backend == "go"
+
+    def test_python_backend_refused_with_named_message(self):
+        DeepCfrConfig, _ = _get_real_config_classes()
+        with pytest.raises(Exception) as excinfo:
+            DeepCfrConfig(engine_backend="python")
+        message = str(excinfo.value)
+        assert "Python" in message and "retired" in message
+        assert "go" in message
+
+    def test_unknown_backend_refused(self):
+        DeepCfrConfig, _ = _get_real_config_classes()
+        with pytest.raises(Exception):
+            DeepCfrConfig(engine_backend="rust")
+
+    def test_python_backend_refused_at_config_load(self, tmp_path):
+        """A YAML config pinning the retired backend fails to load."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.dump({"deep_cfr": {"engine_backend": "python"}}))
+
+        load_config = _get_real_load_config()
+        with pytest.raises(Exception) as excinfo:
+            load_config(str(config_file))
+        message = str(excinfo.value)
+        assert "engine_backend" in message
+        assert "retired" in message
+
+
 class TestNumPlayersValidation:
     @pytest.mark.parametrize("num_players", [2, 4, 8])
     def test_valid_num_players_accepted(self, num_players):

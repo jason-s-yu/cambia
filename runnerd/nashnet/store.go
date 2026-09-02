@@ -196,7 +196,21 @@ func (s *LeaseStore) Grant(req GrantRequest) (Lease, string, error) {
 	if err != nil {
 		return Lease{}, "", err
 	}
+	// The attempt is resolved here rather than by the caller, so every path
+	// that grants a lease counts the same way (D32). The previous lease's
+	// verdict already decided the number: NextAttempt is one higher than its
+	// own attempt for a requeue and equal to it for a nack, and it is on disk,
+	// so a coordinator restart between the verdict and the re-claim does not
+	// restart the count.
 	attempt := req.Attempt
+	if prev != nil {
+		if prev.NextAttempt > attempt {
+			attempt = prev.NextAttempt
+		}
+		if prev.Attempt > attempt {
+			attempt = prev.Attempt
+		}
+	}
 	if attempt <= 0 {
 		attempt = 1
 	}
@@ -415,10 +429,55 @@ func (s *LeaseStore) revokeLocked(leaseID, reason string) (Outcome, error) {
 	l.LeaseEpoch++
 	l.TokenHash = ""
 	l.State = LeaseReleased
+	o := s.outcomeLocked(l, reason)
+	l.NextAttempt = o.NextAttempt
 	if err := s.persistLocked(l); err != nil {
 		return Outcome{}, err
 	}
-	return s.outcomeLocked(l, reason), nil
+	return o, nil
+}
+
+// Return ends a lease its node handed back (D8): the job returns to the ready
+// set at its original position with no attempt increment, since a wrong
+// placement is a scheduling event rather than a job failure. The lease record
+// is retained like any other released one.
+//
+// A lease that already reached a launched phase is revoked instead, and settles
+// by the D7 verdict for that phase. A nack is a pre-launch act by construction,
+// so this only bites a node that returns a claim after starting the process,
+// and re-running a job that ran is the one thing the retry rules never do
+// (D33).
+func (s *LeaseStore) Return(leaseID, reason string) (Outcome, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	l, ok := s.leases[leaseID]
+	if !ok {
+		return Outcome{}, fmt.Errorf("%w: %s", ErrUnknownLease, leaseID)
+	}
+	if !l.Live() {
+		return Outcome{}, fmt.Errorf("%w: state %s", ErrLeaseSuperseded, l.State)
+	}
+	if l.PIDProjected || PhaseLaunched(l.Phase) || !l.StopRequestedAt.IsZero() {
+		return s.revokeLocked(leaseID, reason)
+	}
+	l.LeaseEpoch++
+	l.TokenHash = ""
+	l.State = LeaseReleased
+	l.NextAttempt = l.Attempt
+	if err := s.persistLocked(l); err != nil {
+		return Outcome{}, err
+	}
+	return Outcome{
+		JobID:       l.JobID,
+		LeaseID:     l.LeaseID,
+		NodeID:      l.NodeID,
+		LeaseEpoch:  l.LeaseEpoch,
+		State:       l.State,
+		Verdict:     VerdictRequeue,
+		NextAttempt: l.Attempt,
+		Reason:      reason,
+	}, nil
 }
 
 // outcomeLocked renders a released lease as an Outcome. Callers hold s.mu.
@@ -574,16 +633,6 @@ func (s *LeaseStore) Sweep() ([]Outcome, error) {
 				LeaseEpoch: l.LeaseEpoch, State: l.State, NextAttempt: l.Attempt,
 				Reason: ReasonRuntimeCap,
 			})
-		case l.Expired(now):
-			reason := ReasonExpired
-			if l.State == LeaseRevoking {
-				reason = ReasonGraceElapsed
-			}
-			o, err := s.revokeLocked(id, reason)
-			if err != nil {
-				return out, err
-			}
-			out = append(out, o)
 		}
 	}
 	return out, nil

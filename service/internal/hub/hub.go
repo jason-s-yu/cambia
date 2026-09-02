@@ -179,7 +179,8 @@ type Hub struct {
 	// (game_results, or match_end for a ranked circuit). Emit records it from whichever goroutine
 	// ended the game, and notePlayerReconnected replays it to a connection that arrives after the
 	// fact, so a player who reloads into a finished game gets the scores instead of an empty
-	// "Game over" (cambia-955). Cleared when the next game starts.
+	// "Game over" (cambia-955). Cleared when the next game starts, and only then: the frame
+	// outlives both the results phase and the game object itself (cambia-1241, forgetTerminal).
 	terminalMu      sync.RWMutex
 	terminalType    string
 	terminalPayload json.RawMessage
@@ -437,26 +438,50 @@ func (h *Hub) notePlayerDisconnected(userID uuid.UUID) {
 // WebSocket would give HandleReconnect's not-a-player path the power to close a connection the
 // hub is still serving.
 // Since cambia-955 it also answers the other reconnect a hub has to serve: one into a game that
-// is already over. The hub holds its finished game for the results interval (cambia-793), so a
-// player who reloads in that window is handed the final table and the results frame again. The
-// lobby snapshot they get on join carries the phase but no scores, and nothing else re-sends
-// them, which is why that reload landed on a "Game over" screen with no winner and no scores.
+// is already over, where the reload is handed the results frame again. The lobby snapshot a join
+// gets carries the phase but no scores, and nothing else re-sends them, which is why that reload
+// landed on a "Game over" screen with no winner and no scores. The final table comes with it for
+// as long as the hub still holds the finished game (the results interval, cambia-793); the
+// results themselves outlast it (cambia-1241, see maySeeTerminal).
 func (h *Hub) notePlayerReconnected(userID uuid.UUID) {
-	if h.Game == nil || !h.Game.HasPlayer(userID) {
-		return
-	}
 	// Phase is not a gate here the way it is on the disconnect side: the reconnect is safe in
 	// every phase that still holds a game. In PhaseInGame it cancels a pending forfeit and
 	// restores the seat; in PhasePostGame/PhaseMatchEnd the game is finished, so HandleReconnect
 	// only re-sends its terminal snapshot (its turn-timer and grace branches are all guarded by
 	// Started/GameOver).
-	h.Game.HandleReconnect(userID, nil)
-	// The phase can still read in_game for the moment between the game ending and the queued
-	// _game_ended landing (NotifyGameEnded routes it through this same loop), so the game's own
-	// verdict is what decides, with the post-game phases covering a hub whose game was cleared.
-	if h.Game.IsGameOver() || h.Phase == PhasePostGame || h.Phase == PhaseMatchEnd {
+	if h.Game != nil && h.Game.HasPlayer(userID) {
+		h.Game.HandleReconnect(userID, nil)
+	}
+	// The resend is not gated on the hub having already noticed the game end, and no longer on
+	// there being a game at all (cambia-1241). Both gates lost results: the phase still reads
+	// in_game for the moment between the game ending and the queued _game_ended landing, and the
+	// game itself is dropped when the results screen closes (returnToLobby), which ended the
+	// resend after PostGameDuration even though the stored frame was still the last result this
+	// table produced. What decides instead is whether there is a stored frame at all, which is
+	// exactly the question "has a result happened that no new game has replaced" - see
+	// forgetTerminal.
+	if h.maySeeTerminal(userID) {
 		h.resendTerminal(userID)
 	}
+}
+
+// maySeeTerminal reports whether userID may be handed the stored results frame: a seat of the
+// game still routed as h.Game, or - once that game has been dropped with the results screen
+// (returnToLobby) - a member of the lobby those results were played in. Membership is the widest
+// this gets, and it reaches nobody the frame did not already reach: Emit broadcast it to every
+// connection on this hub, seated or not, so replaying it to a member is strictly narrower than
+// the send that produced it. A socket alone is not enough, which is what keeps a stranger who
+// dials a reopened lobby from being handed the last table's scores.
+func (h *Hub) maySeeTerminal(userID uuid.UUID) bool {
+	if h.Game != nil {
+		return h.Game.HasPlayer(userID)
+	}
+	if h.Lobby == nil {
+		return false
+	}
+	h.Lobby.Mu.Lock()
+	defer h.Lobby.Mu.Unlock()
+	return h.Lobby.Users[userID]
 }
 
 // rememberTerminal stores the last results broadcast so a late joiner can be given it.
@@ -467,8 +492,12 @@ func (h *Hub) rememberTerminal(eventType string, payload json.RawMessage) {
 	h.terminalMu.Unlock()
 }
 
-// forgetTerminal drops the stored results. A new game's results are the only ones worth
-// re-sending, so the previous round's are cleared the moment one starts.
+// forgetTerminal drops the stored results. A new game starting is the one transition that
+// invalidates them, and Emit's game_started case is the only caller for that reason: every other
+// phase move a finished game makes - post_game, match_end, the return to an open lobby - leaves
+// the last result standing as the last result, and a reconnect through any of them is still owed
+// it (cambia-1241). A live game therefore holds no stored frame, which is what keeps the resend
+// in notePlayerReconnected from ever replaying an earlier round into one.
 func (h *Hub) forgetTerminal() {
 	h.terminalMu.Lock()
 	h.terminalType = ""
@@ -476,8 +505,10 @@ func (h *Hub) forgetTerminal() {
 	h.terminalMu.Unlock()
 }
 
-// resendTerminal replays the stored results frame to one connection. Private, so it stamps the
-// current seq and consumes none (see the Hub.seq invariant).
+// resendTerminal replays the stored results frame to one connection, through EmitTo like every
+// other private frame: it is one, so it stamps the current seq and consumes none (see the Hub.seq
+// invariant, and EmitTo's own comment for why a private frame must not take one). The payload is
+// already marshalled, and marshalling a json.RawMessage again returns the same bytes.
 func (h *Hub) resendTerminal(userID uuid.UUID) {
 	h.terminalMu.RLock()
 	eventType, payload := h.terminalType, h.terminalPayload
@@ -485,11 +516,7 @@ func (h *Hub) resendTerminal(userID uuid.UUID) {
 	if eventType == "" || payload == nil {
 		return
 	}
-	conn := h.getConn(userID)
-	if conn == nil {
-		return
-	}
-	conn.SendEnvelope(Envelope{Seq: atomic.LoadUint64(&h.seq), Type: eventType, Payload: payload})
+	h.EmitTo(userID, eventType, payload)
 }
 
 // armIdleReap opens a fresh idle window. Called from Run() only, so idleTimer and idleGen need no
@@ -1322,8 +1349,10 @@ func (h *Hub) mayReturnToLobby(userID uuid.UUID) bool {
 // the one it belongs to. Runs for PhaseMatchEnd as well, so a finished match's seats are not
 // stranded (nothing arms a timer for that phase), but it touches no circuit or cumulative state:
 // RoundsPlayed, CumulativeScores and RoundHistory stay where the match left them, since what
-// becomes of a finished ranked match's lobby is the unratified half of cambia-466. Must run in
-// the Run() goroutine.
+// becomes of a finished ranked match's lobby is the unratified half of cambia-466. The stored
+// results frame stays too: closing the screen does not unmake the result, and a seat that reloads
+// into the reopened lobby is still owed it until a new game starts (cambia-1241, forgetTerminal).
+// Must run in the Run() goroutine.
 func (h *Hub) returnToLobby() {
 	h.Game = nil
 	h.setPhase(PhaseOpen)

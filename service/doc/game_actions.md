@@ -645,8 +645,10 @@ a client.
 
 RULES.md 3C ends a round with all cards revealed, and the service reveals on every terminal path it
 reaches, not just a called Cambia: the turn cap, an exhausted stockpile, and a forfeit that empties
-the table all run through the same `endGame`. A seat that forfeited is left out, since it is not
-scored either.
+the table all run through the same `endGame`. A seat that forfeited is left out of the reveal: it
+has no hand the round played out. It is still scored, at the flat 41 points RULES.md T5 and
+MATCHMAKING.md 8 put a forfeited round at; what the results frame omits is the scoreboard entry,
+not the score. See the disconnect grace section below for where that 41 is recorded.
 
 The reveal is built once, in `endGame`, and carried by every frame that reports the result:
 
@@ -656,6 +658,30 @@ The reveal is built once, in `endGame`, and carried by every frame that reports 
 | `game_results`      | the same clients, and any that reconnect afterwards |
 | `round_end`         | a ranked round that is not the match's last         |
 | `match_end`         | the ranked match's last round                       |
+
+`game_end` is fired through `fireEvent` (game.go `endGame`), so on the wire it is a `GameEvent`:
+the envelope's `payload` is `{"type":"game_end", "payload":{...}}`, and `scores`/`winner`/`caller`
+live inside that inner `payload`, one level deeper than a client used to `game_results`'s flat map
+(`hub.Emit("game_results", map[string]interface{}{...})`, no `GameEvent` wrapper) would expect.
+`scores` is keyed by player id and already carries the Cambia-caller penalty and any circuit win
+bonus (`endGame`'s `adjustedScores`); a forfeited seat is omitted. `winner` is the nil UUID
+(`00000000-0000-0000-0000-000000000000`) only when no single winner exists, which a 2-player game
+never produces: the Cambia caller either ties or beats the other score, or the other player's score
+is strictly lower, so one of the two always wins outright.
+
+```json: server -> all clients (game_end)
+{
+  "type": "game_end",
+  "payload": {
+    "scores": { "{uuid}": 4, "{uuid}": 11 },
+    "winner": "{uuid}",
+    "caller": "{uuid}",
+    "penaltyApplied": false,
+    "winBonusApplied": false,
+    "finalHands": [ "...see finalHands below..." ]
+  }
+}
+```
 
 `game_results` needs its own copy: the game is dropped from the store the moment it is emitted, so
 a client that reconnects into the results is answered with the hub's held copy of that frame and

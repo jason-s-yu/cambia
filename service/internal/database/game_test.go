@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jason-s-yu/cambia/service/internal/models"
+	"github.com/jason-s-yu/cambia/service/internal/testutil"
 	_ "github.com/joho/godotenv/autoload" // Load .env for database connection.
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -25,41 +25,12 @@ import (
 var dbAvailable bool
 
 func TestMain(m *testing.M) {
-	dbAvailable = pingTestDB()
+	testutil.LoadServiceEnv()
+	dbAvailable = testutil.PingPostgres()
 	os.Exit(m.Run())
 }
 
-// pingTestDB attempts a short-timeout connection to the database configured via the
-// package's standard env vars. An unreachable DB is an expected condition on dev
-// machines; callers use the returned bool to skip DB-dependent tests.
-func pingTestDB() bool {
-	connStr := fmt.Sprintf(
-		"postgres://%s:%s@%s:%s/%s",
-		os.Getenv("POSTGRES_USER"),
-		os.Getenv("POSTGRES_PASSWORD"),
-		os.Getenv("PG_HOST"),
-		os.Getenv("PG_PORT"),
-		os.Getenv("PG_DATABASE"),
-	)
-
-	config, err := pgxpool.ParseConfig(connStr)
-	if err != nil {
-		return false
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	pool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		return false
-	}
-	defer pool.Close()
-
-	return pool.Ping(ctx) == nil
-}
-
-// dbOnce guards the single ConnectDB() call this package's test binary makes, mirroring
+// dbOnce guards the single pool this package's test binary opens, mirroring
 // internal/handlers/main_test.go's dbOnce/ensureTestDB and internal/game/game_db_test.go's
 // gameDBOnce/setupGameDBTest (cambia-908, cambia-915 F1): ConnectDB reassigns the package-level
 // DB pool on every call, so every DB-backed test in this package used to reconnect on its own -
@@ -67,13 +38,32 @@ func pingTestDB() bool {
 // diverging from the connect-once pattern the rest of the package tests already established.
 var dbOnce sync.Once
 
-// setupGameTest skips the test when no dev Postgres is reachable, otherwise connects via
-// ConnectDB exactly once for the whole package (dbOnce).
+// dbPoolErr records a failure from that single pool open, so every test that needs the pool
+// reports it rather than only the one that happened to run first.
+var dbPoolErr error
+
+// setupGameTest skips the test when no dev Postgres is reachable, otherwise installs this
+// package's single database pool (dbOnce).
+//
+// The pool comes from testutil.NewBoundedPool rather than ConnectDB because the dev Postgres is
+// shared by every checkout on the machine: ConnectDB takes pgxpool's default MaxConns of
+// max(4, NumCPU), and concurrent test runs across worktrees exhaust the server's 100 connections
+// that way (testutil.TestPoolMaxConns carries the measurement, cambia-1830). Building the pool
+// here also keeps a test binary from running migrations against that shared database, which
+// ConnectDB does whenever RUN_MIGRATIONS is set in the environment.
 func setupGameTest(t *testing.T) {
 	if !dbAvailable {
-		t.Skip("skipping: no Postgres reachable via PG_HOST/PG_PORT/POSTGRES_USER/POSTGRES_PASSWORD/PG_DATABASE (see service/.env.template); set these to point at a running dev database to run this test")
+		t.Skip(testutil.SkipMessage)
 	}
-	dbOnce.Do(ConnectDB)
+	dbOnce.Do(func() {
+		pool, err := testutil.NewBoundedPool(context.Background())
+		if err != nil {
+			dbPoolErr = err
+			return
+		}
+		DB = pool
+	})
+	require.NoError(t, dbPoolErr, "open this package's bounded test pool")
 }
 
 // createGameTestUser inserts a bare user (unique random username, no email) directly via
@@ -88,7 +78,12 @@ func createGameTestUser(t *testing.T, uname string) models.User {
 	err := CreateUser(context.Background(), &u)
 	require.NoError(t, err, "CreateUser failed")
 	t.Cleanup(func() { cleanupGameTestUserRows(t, u.ID) })
-	return u
+
+	// Read the row back: CreateUser's INSERT names no rating column, so the struct it was handed
+	// still carries Go zero values where the row took the schema defaults (cambia-1830 F4).
+	created, err := GetUserByID(context.Background(), u.ID)
+	require.NoError(t, err, "read back the created user")
+	return *created
 }
 
 // cleanupGameTestUserRows deletes every row this package's DB-backed tests could have left

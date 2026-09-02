@@ -31,7 +31,9 @@ type nashnetConfig struct {
 	leaseTTL         time.Duration
 	maxLeaseSeconds  time.Duration
 	maxLeasesPerNode int
+	maxAttempts      int
 	maxClaimWaiters  int
+	nodeMBPS         int
 	nodeTTL          time.Duration
 	sessionGrace     time.Duration
 	unplaceableGrace time.Duration
@@ -59,7 +61,9 @@ func loadNashnetConfig(baseDir string) (nashnetConfig, bool) {
 		leaseTTL:         envDuration("RUNNERD_NASHNET_LEASE_TTL", nashnet.DefaultLeaseTTLSeconds*time.Second),
 		maxLeaseSeconds:  envDuration("RUNNERD_NASHNET_MAX_LEASE_SECONDS", nashnet.DefaultMaxLeaseSeconds*time.Second),
 		maxLeasesPerNode: envInt("RUNNERD_NASHNET_MAX_LEASES_PER_NODE", nashnet.DefaultMaxLeasesPerNode),
+		maxAttempts:      envInt("RUNNERD_NASHNET_MAX_ATTEMPTS", harness.DefaultMaxAttempts),
 		maxClaimWaiters:  envInt("RUNNERD_NASHNET_MAX_CLAIM_WAITERS", harness.DefaultMaxClaimWaiters),
+		nodeMBPS:         envInt("RUNNERD_NASHNET_NODE_MBPS", harness.DefaultNodeMBPS),
 		nodeTTL:          envDuration("RUNNERD_NASHNET_NODE_TTL", nashnet.DefaultNodeTTLSeconds*time.Second),
 		sessionGrace:     envDuration("RUNNERD_NASHNET_SESSION_GRACE", nashnet.DefaultSessionGraceSeconds*time.Second),
 		unplaceableGrace: envDuration("RUNNERD_NASHNET_UNPLACEABLE_GRACE", harness.DefaultUnplaceableGrace),
@@ -154,18 +158,22 @@ func startNashnet(cfg nashnetConfig, srv *harness.Server, disp *harness.Dispatch
 		cfg.quarantineDir, quar.MaterializeMode(), quar.MaterializeReason())
 
 	pool, err := harness.NewPool(harness.PoolConfig{
-		Dispatcher:       disp,
-		Grants:           grants,
-		Leases:           leases,
-		Registry:         registry,
-		Quarantine:       quar,
-		Bundles:          mgr,
-		RunsDir:          runsDir,
-		NodesDir:         cfg.nodesDir,
-		OriginHost:       cfg.originHost,
-		Policy:           policy,
-		Ceilings:         harness.Ceilings{MaxClaimWaiters: cfg.maxClaimWaiters},
+		Dispatcher: disp,
+		Grants:     grants,
+		Leases:     leases,
+		Registry:   registry,
+		Quarantine: quar,
+		Bundles:    mgr,
+		RunsDir:    runsDir,
+		NodesDir:   cfg.nodesDir,
+		OriginHost: cfg.originHost,
+		Policy:     policy,
+		Ceilings: harness.Ceilings{
+			MaxClaimWaiters: cfg.maxClaimWaiters,
+			NodeMBPS:        cfg.nodeMBPS,
+		},
 		MaxLeasesPerNode: cfg.maxLeasesPerNode,
+		MaxAttempts:      cfg.maxAttempts,
 		UnplaceableGrace: cfg.unplaceableGrace,
 		NodeTTL:          cfg.nodeTTL,
 		SessionGrace:     cfg.sessionGrace,
@@ -174,6 +182,15 @@ func startNashnet(cfg nashnetConfig, srv *harness.Server, disp *harness.Dispatch
 		return nil, err
 	}
 	srv.AttachPool(pool)
+	// The restart half of D34: quarantine trees whose lease did not survive the
+	// restart, and the parts under them, go once their debug TTL has passed. A
+	// live lease's tree is untouched, which is what leaves a node with an upload
+	// in flight noticing nothing.
+	if removed, serr := pool.StartupSweep(); serr != nil {
+		log.Printf("nashnet: startup quarantine sweep: %v", serr)
+	} else if removed > 0 {
+		log.Printf("nashnet: startup quarantine sweep removed %d lease trees", removed)
+	}
 	return pool.Sweeper(), nil
 }
 

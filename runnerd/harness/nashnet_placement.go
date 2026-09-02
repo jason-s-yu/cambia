@@ -238,8 +238,10 @@ func allowedDevices(devices []capability.Device, allowed []string) []capability.
 
 // nodeMaxRuntimeHours reads the node's own job_policy.max_runtime_hours from
 // its gate report, where a node that runs the check publishes it as a check
-// with its required value. It is a placement input only: the coordinator's own
-// runtime bound is the lease cap of D4, which does not depend on a node number.
+// with its required value. It has both halves of D46: a job asking for longer
+// is not placed here, and the grant lowers the lease lifetime cap of D4 to it.
+// The number only ever shortens a lease, so a node that omits the gate, as a
+// hostile one does by construction, is held to the pool cap exactly as before.
 func nodeMaxRuntimeHours(report gates.Report) float64 {
 	for _, c := range report.Checks {
 		if c.Gate == "job_policy.max_runtime_hours" && c.Required != nil {

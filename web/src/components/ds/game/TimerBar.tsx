@@ -1,19 +1,22 @@
 import React, { useEffect, useState } from 'react';
+import { msUntil } from '@/lib/serverClock';
 
 export interface TimerBarProps {
   totalSec?: number;
   remainingSec?: number;
   /**
    * Absolute server-clock epoch-ms deadline for a live countdown (cambia-488). When set
-   * (non-null), remainingSec is ignored and the bar ticks down in real time:
-   * remaining = (deadlineMs + clockOffsetMs - Date.now()) / 1000, clamped to [0, totalSec].
+   * (non-null), remainingSec is ignored and the bar ticks down in real time against that stamp
+   * read on this client's clock (lib/serverClock msUntil), clamped to [0, totalSec].
    * Leave null/undefined to fall back to the static informational render (remainingSec as-is,
    * used when the game has no turn timer configured).
    */
   deadlineMs?: number | null;
   /**
    * serverNow - clientNow offset in ms, captured from the same event that carried deadlineMs.
-   * Corrects for client clock skew so the countdown tracks the server's actual deadline.
+   * Corrects for client clock skew so the countdown tracks the server's actual deadline. It is
+   * subtracted from the deadline, not added: adding it doubles the skew instead of cancelling it,
+   * which ran this bar out by twice a skewed client's error (cambia-1241, see lib/serverClock).
    */
   clockOffsetMs?: number;
   label?: string;
@@ -39,12 +42,12 @@ const TimerBar: React.FC<TimerBarProps> = ({
   const isLive = deadlineMs != null;
 
   const [liveRemainingSec, setLiveRemainingSec] = useState(() =>
-    deadlineMs != null ? Math.max(0, (deadlineMs + clockOffsetMs - Date.now()) / 1000) : remainingSec
+    deadlineMs != null ? Math.max(0, msUntil(deadlineMs, clockOffsetMs) / 1000) : remainingSec
   );
 
   useEffect(() => {
     if (deadlineMs == null) return;
-    const tick = () => Math.max(0, (deadlineMs + clockOffsetMs - Date.now()) / 1000);
+    const tick = () => Math.max(0, msUntil(deadlineMs, clockOffsetMs) / 1000);
     setLiveRemainingSec(tick());
     const id = setInterval(() => {
       const next = tick();

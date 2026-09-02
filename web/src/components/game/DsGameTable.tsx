@@ -47,6 +47,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { useCurrentLobbyStore, type LobbyPhase } from '@/stores/lobbyStore';
 import { lockedPlayerId, isHandLocked, canSnapCard } from '@/lib/handLock';
 import { roundCounterLabel } from '@/lib/roundCounter';
+import { secondsUntil } from '@/lib/serverClock';
 import Button from '@/components/ds/core/Button';
 import Badge from '@/components/ds/core/Badge';
 import Panel from '@/components/ds/chrome/Panel';
@@ -56,6 +57,7 @@ import PlayerSeat, { type PlayerSeatState } from '@/components/ds/game/PlayerSea
 import ScorePill from '@/components/ds/game/ScorePill';
 import TimerBar from '@/components/ds/game/TimerBar';
 import { toDsCardFace, cardFaceName, cardSlotName } from './dsCardMap';
+import type { CardSlotState } from './dsCardMap';
 import { ownHandPlacement } from './handLayout';
 
 interface DsGameTableProps {
@@ -133,6 +135,23 @@ interface PileSnapshot {
 }
 
 /**
+ * Wall-clock reading, refreshed on an interval while `active` and frozen otherwise. The felt's one
+ * ticking clock that belongs to a seat rather than to the action column: a reconnect window is
+ * drawn on the chip of the player it is holding, and every held seat counts down off this single
+ * timer instead of arming one apiece (cambia-1241).
+ */
+function useNowMs(active: boolean, intervalMs = 500): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const id = window.setInterval(() => setNow(Date.now()), intervalMs);
+    return () => window.clearInterval(id);
+  }, [active, intervalMs]);
+  return now;
+}
+
+/**
  * Transient table notice derived from state deltas. A hand that grows is a snap
  * penalty (nothing else adds a card to a hand mid-game; the drawn card is held
  * apart from the hand) and a stockpile that grows is a reshuffle. A successful
@@ -199,6 +218,7 @@ function useTableNotice(gs: ObfGameState, selfId: string | undefined, names: Map
   // cards would otherwise miss. The grace length comes off the event so the notice quotes the
   // rule in force rather than a hardcoded minute.
   const lastPresence = useGameStore(selectLastPresence);
+  const presenceClockOffsetMs = useGameStore(selectServerClockOffsetMs);
   const seenPresence = useRef(lastPresence?.nonce ?? 0);
   useEffect(() => {
     if (!lastPresence || lastPresence.nonce === seenPresence.current) return;
@@ -206,14 +226,22 @@ function useTableNotice(gs: ObfGameState, selfId: string | undefined, names: Map
     if (lastPresence.playerId === selfId) return; // your own drop is the offline strip, not a notice
     const who = names.get(lastPresence.playerId) ?? 'Opponent';
     if (lastPresence.kind === 'reconnecting') {
-      const secs = lastPresence.deadline ? Math.max(1, Math.round((lastPresence.deadline - Date.now()) / 1000)) : null;
+      // The deadline is a server-clock stamp, so it is read through the offset the same frame
+      // carried rather than against this client's clock: a client a minute off its server used to
+      // announce a window that had already closed, or one twice as long as the rule allows
+      // (cambia-1241). The house rule stands in only where the frame carried no deadline at all,
+      // never for one that has run out: quoting the rule's full length there would restart a
+      // window the server has already closed.
+      const secs = lastPresence.deadline != null
+        ? secondsUntil(lastPresence.deadline, presenceClockOffsetMs)
+        : lastPresence.graceSeconds;
       setNotice({ id: Date.now(), tone: 'warning', text: secs ? `${who} dropped. ${secs}s to reconnect.` : `${who} dropped.` });
     } else if (lastPresence.kind === 'reconnected') {
       setNotice({ id: Date.now(), tone: 'success', text: `${who} is back.` });
     } else {
       setNotice({ id: Date.now(), tone: 'danger', text: `${who} forfeited.` });
     }
-  }, [lastPresence, selfId, names]);
+  }, [lastPresence, presenceClockOffsetMs, selfId, names]);
 
   // Consumed by the delta pass below, separately from the notice effect above: the two answer
   // different questions about the same event and neither may swallow it for the other.
@@ -317,9 +345,13 @@ const FELT_LABEL: React.CSSProperties = {
 /**
  * Outlined empty pile slot: same footprint as a md card, hairline on the felt.
  * A clickable slot is a real button, so it keeps the pile's name and its
- * keyboard activation when the pile runs empty (cambia-959).
+ * keyboard activation when the pile runs empty (cambia-959). Element type and
+ * states match PlayingCard's: always a <button>, `disabled` for a control that
+ * is unavailable rather than absent (cambia-1242).
  */
-const EmptySlot: React.FC<{ onClick?: () => void; highlight?: boolean; label?: string; testId?: string }> = ({ onClick, highlight, label, testId }) => {
+const EmptySlot: React.FC<{ onClick?: () => void; highlight?: boolean; label?: string; testId?: string; disabled?: boolean }> = ({ onClick, highlight, label, testId, disabled = false }) => {
+  const interactive = !!onClick && !disabled;
+  const control = interactive || disabled;
   const box: React.CSSProperties = {
     appearance: 'none',
     margin: 0,
@@ -331,10 +363,20 @@ const EmptySlot: React.FC<{ onClick?: () => void; highlight?: boolean; label?: s
     boxSizing: 'border-box',
     borderRadius: 'var(--radius-playing-card)',
     border: '1px dashed ' + (highlight ? 'var(--card-targetable-ring)' : 'var(--border-on-felt)'),
-    cursor: onClick ? 'pointer' : 'default'
+    cursor: interactive ? 'pointer' : 'default'
   };
-  if (onClick) return <button type='button' aria-label={label} data-testid={testId} onClick={onClick} style={box} />;
-  return <div role={label ? 'img' : undefined} aria-label={label} data-testid={testId} style={box} />;
+  return (
+    <button
+      type='button'
+      role={control ? undefined : label ? 'img' : 'presentation'}
+      tabIndex={control ? undefined : -1}
+      aria-label={label}
+      aria-disabled={disabled || undefined}
+      data-testid={testId}
+      onClick={interactive ? onClick : undefined}
+      style={box}
+    />
+  );
 };
 
 const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage, onLeave, connected = true, gaveUp: gaveUpReason = null }) => {
@@ -384,6 +426,11 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
 
   const selfState = gameState.players.find((p) => p.playerId === selfId);
   const opponents = gameState.players.filter((p) => p.playerId !== selfId);
+  // A seat inside its reconnect window (cambia-955). `reconnectDeadline` rides every sync
+  // snapshot and not only the player_reconnecting event, so a client that joined or resynced
+  // mid-window counts the same window down as one that watched the drop happen (cambia-1241).
+  const graceWindowOpen = gameState.players.some((p) => !p.forfeited && p.reconnectDeadline != null);
+  const nowMs = useNowMs(graceWindowOpen);
   // LockCallerHand: the seat whose hand is frozen for the rest of the round, and whether that is
   // this player (cambia-1069). Nothing the server would refuse is offered on the felt: no snap
   // into the locked hand, no snap out of it by its owner, no swap ability naming it. See
@@ -605,6 +652,18 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     setKingPair(null);
   }, [kingPair, specialAction, selfId, busy, sendMessage]);
 
+  // A pick means "snap this card", and drawing takes the snap away: while a replace is pending an
+  // own-hand click commits the replace instead of toggling the pick, and the Snap button is gone.
+  // Left standing, the pick kept its gold lift on a card that no longer reported a pressed state,
+  // so the felt and the screen reader disagreed about the same card (cambia-1242). Cleared off the
+  // pending action rather than off the click, so a draw this client did not send - a resync that
+  // lands mid-draw - clears it too.
+  useEffect(() => {
+    if (pendingAction !== 'discard_replace') return;
+    setSelectedIdx(null);
+    setSnapTarget(null);
+  }, [pendingAction]);
+
   // --- Derived flags ---
 
   const roundOver = phase === 'round_end' || gameState.gameOver;
@@ -764,6 +823,11 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     // stays slot order: the tab sequence and the 'Your card N' names still run 1, 2, 3, 4 and the
     // card-<seat>-<i> hooks stay keyed by the engine slot index.
     const slots = Math.max(hand.length, selfState?.handSize ?? 0);
+    // One state for the whole own hand, read by the dim and by the spoken name together so the
+    // two cannot part (cambia-1468). The lock dim says "out of reach until the round ends" and
+    // stops meaning anything once it has; a forfeited seat is still unscored after the round, and
+    // its cards stay face down while everyone else's turn over, so its dim and its name hold.
+    const slotState: CardSlotState = selfForfeited ? 'forfeited' : selfHandLocked && !roundOver ? 'locked' : 'live';
     const known = hand.map((card, i) => {
       // While the round runs, a slot shows a face only while something is holding it up: a live
       // transient reveal, or the pregame peek the store keeps on the slot for the length of that
@@ -773,7 +837,11 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
       // one case the `?? card` fallback below carries.
       const face = toDsCardFace(revealById.get(card.id) ?? card);
       // aria-pressed tracks what the eye sees: the King's own card stays picked
-      // through the confirm step, which is why `selected` covers it too.
+      // through the confirm step, which is why `selected` covers it too. Both the
+      // lift and aria-pressed read this one value, and a pick that is already
+      // standing keeps reporting itself even where a fresh pick would not be legal
+      // - dropping aria-pressed off a card that is still lifted is the divergence
+      // this fixes (cambia-1242).
       const picked = selectedIdx === i || (kingConfirm && kingPair?.myIdx === i);
       return (
         <PlayingCard
@@ -784,11 +852,9 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
           size='md'
           selected={picked}
           highlight={ownTargetable && selectedIdx !== i}
-          // The lock dim says "out of reach", which stops meaning anything once the round is
-          // over: the caller's hand is then just a revealed hand like everyone else's.
-          dimmed={selfHandLocked && !roundOver}
-          label={cardSlotName('Your', i, face, selfHandLocked && !roundOver)}
-          pressed={ownSelects ? picked : undefined}
+          dimmed={slotState !== 'live'}
+          label={cardSlotName('Your', i, face, slotState)}
+          pressed={ownSelects || picked ? picked : undefined}
           testId={`card-${seat}-${i}`}
           style={ownHandPlacement(i, slots)}
           onClick={ownCommits || ownSelects ? () => handlePlayerCardClick(card, i) : undefined}
@@ -804,8 +870,8 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
         key={`pad-${j}`}
         faceDown
         size='md'
-        dimmed={selfHandLocked}
-        label={cardSlotName('Your', hand.length + j, null, selfHandLocked)}
+        dimmed={slotState !== 'live'}
+        label={cardSlotName('Your', hand.length + j, null, slotState)}
         testId={`card-${seat}-${hand.length + j}`}
         style={ownHandPlacement(hand.length + j, slots)}
       />
@@ -871,10 +937,20 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
               // a stale 'Look and swap' under the seat behind the results overlay
               // (cambia-876, DL-4 review F12).
               const acting = !roundOver && !!specialAction?.active && specialAction.playerId === opp.playerId;
-              const note = acting ? abilityName(specialAction?.cardRank) ?? undefined : undefined;
+              const seatState = seatStateFor(opp, gameState.currentPlayerId);
+              // A held seat says how long it is held for, read off the server's deadline through
+              // the clock offset that deadline was stamped against. The bare "Reconnecting" the
+              // seat would otherwise carry is the one thing a player looking at an empty chair
+              // already knows; how long the table waits is the part they cannot see (cambia-1241).
+              const heldForSec = seatState === 'disconnected'
+                ? secondsUntil(opp.reconnectDeadline, serverClockOffsetMs, nowMs)
+                : null;
+              const note = acting
+                ? abilityName(specialAction?.cardRank) ?? undefined
+                : heldForSec != null ? `Reconnecting ${heldForSec}s` : undefined;
               return (
                 <div key={opp.playerId} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
-                  <PlayerSeat username={nameOf(opp.playerId)} compact handSize={opp.handSize} note={note} state={seatStateFor(opp, gameState.currentPlayerId)} />
+                  <PlayerSeat username={nameOf(opp.playerId)} compact handSize={opp.handSize} note={note} state={seatState} />
                   {/* Every opponent seat, at any player count, is drawn across the table above its
                       hand, so the row nearest that opponent is the TOP row on screen and plain
                       row-major order already puts slots 0 and 1 there (cambia-1095). */}
@@ -888,6 +964,10 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                       // stays a legal 9/T peek target, so the lock only closes those two
                       // (cambia-1069, see src/lib/handLock.ts).
                       const locked = lockedPlayer === opp.playerId;
+                      // The same spoken state the own hand carries: a seat across the table that
+                      // forfeited keeps its cards on the felt, and its slots said nothing about it
+                      // (cambia-1468).
+                      const oppSlotState: CardSlotState = opp.forfeited ? 'forfeited' : locked ? 'locked' : 'live';
                       const targetable = opponentTargetable && !!card && !(locked && swapTargeting);
                       const snappable = opponentSnappable && !!card && !locked;
                       const picked = !!card && snapTarget?.cardId === card.id;
@@ -909,10 +989,12 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                           selected={!!peeked || picked}
                           highlight={targetable}
                           dimmed={!targetable && !shown && (locked || !!specialRank)}
-                          label={cardSlotName(who, i, shown, locked)}
+                          label={cardSlotName(who, i, shown, oppSlotState)}
                           // An ability click commits on the card it lands on; a snap pick is the
-                          // one opponent click that toggles, so it is the one that is pressed.
-                          pressed={snappable && !targetable ? picked : undefined}
+                          // one opponent click that toggles, so it is the one that is pressed. A
+                          // standing pick keeps reporting itself, the same rule the own hand
+                          // follows, so the ring and aria-pressed cannot part (cambia-1242).
+                          pressed={(snappable && !targetable) || picked ? picked : undefined}
                           testId={`card-${seatIndexOf(opp.playerId)}-${i}`}
                           onClick={targetable || snappable ? () => handleOpponentCardClick(opp.playerId, card!, i) : undefined}
                         />
@@ -953,6 +1035,11 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
           {/* Piles. */}
           <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'flex-start', gap: 28, flexWrap: 'wrap' }}>
             <div style={{ textAlign: 'center' }}>
+              {/* A pile is the same control all round: it is drawn from on this player's turn and
+                  unavailable on everyone else's, which is a state of the control and not the
+                  absence of one. Marked disabled rather than dropped, so its role and its tab stop
+                  stay put across the turn instead of appearing and disappearing under a screen
+                  reader (cambia-1242). */}
               {gameState.stockpileSize > 0 ? (
                 <PlayingCard
                   faceDown
@@ -960,10 +1047,11 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                   highlight={deckInteractive}
                   label={`Stockpile, ${gameState.stockpileSize} ${gameState.stockpileSize === 1 ? 'card' : 'cards'}`}
                   testId='pile-stock'
-                  onClick={deckInteractive ? handleDeckClick : undefined}
+                  onClick={handleDeckClick}
+                  disabled={!deckInteractive}
                 />
               ) : (
-                <EmptySlot label='Stockpile, empty' testId='pile-stock' />
+                <EmptySlot label='Stockpile, empty' testId='pile-stock' disabled />
               )}
               <div style={FELT_LABEL}>Stock · {gameState.stockpileSize}</div>
             </div>
@@ -976,10 +1064,11 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                   highlight={discardInteractive}
                   label={`Discard pile, top ${cardFaceName(discardFace)}`}
                   testId='pile-discard'
-                  onClick={discardInteractive ? handleDiscardClick : undefined}
+                  onClick={handleDiscardClick}
+                  disabled={!discardInteractive}
                 />
               ) : (
-                <EmptySlot label='Discard pile, empty' testId='pile-discard' highlight={discardInteractive} onClick={discardInteractive ? handleDiscardClick : undefined} />
+                <EmptySlot label='Discard pile, empty' testId='pile-discard' highlight={discardInteractive} onClick={handleDiscardClick} disabled={!discardInteractive} />
               )}
               <div style={FELT_LABEL}>Discard · {gameState.discardSize}</div>
             </div>

@@ -1,5 +1,5 @@
 """
-Tests for Deep CFR Outcome Sampling implementation.
+Tests for Deep CFR Outcome Sampling on the Go engine.
 
 Covers:
 - OS traversal walks single path (node count O(depth), not exponential)
@@ -7,28 +7,42 @@ Covers:
 - Advantage and strategy samples are generated correctly
 - Config routing between OS and ES
 - Smoke test for short games
+
+These were Python-engine tests until cambia-1783 retired that backend; each one
+now asserts the same property against _deep_traverse_os_go / _deep_traverse_go.
 """
 
-import multiprocessing
-import queue
+from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import List
 
 import numpy as np
 import pytest
 
-from src.agent_state import AgentState
 from src.cfr.deep_worker import (
     DeepCFRWorkerResult,
-    _deep_traverse,
-    _deep_traverse_os,
+    _deep_traverse_go,
+    _deep_traverse_os_go,
     run_deep_cfr_worker,
 )
 from src.config import CambiaRulesConfig
 from src.constants import NUM_PLAYERS
-from src.game.engine import CambiaGameState
 from src.reservoir import ReservoirSample
 from src.utils import WorkerStats
+
+
+def _go_available() -> bool:
+    try:
+        from src.ffi.bridge import GoEngine  # noqa: PLC0415
+
+        e = GoEngine(house_rules=CambiaRulesConfig())
+        e.close()
+        return True
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(not _go_available(), reason="libcambia.so not available")
 
 
 @pytest.fixture
@@ -53,6 +67,7 @@ def minimal_config():
 
     # DeepCfrConfig
     config.deep_cfr = SimpleNamespace()
+    config.deep_cfr.engine_backend = "go"
     config.deep_cfr.sampling_method = "outcome"
     config.deep_cfr.exploration_epsilon = 0.6
     config.deep_cfr.hidden_dim = 256
@@ -84,45 +99,36 @@ def minimal_config():
 
     config.logging.get_worker_log_level = get_worker_log_level
 
+    config.cfr_training = SimpleNamespace()
+    config.cfr_training.num_workers = 1
+
     return config
 
 
-@pytest.fixture
-def short_game_state(minimal_config):
-    """Create a short game state for testing."""
-    game_state = CambiaGameState(house_rules=minimal_config.cambia_rules)
-    return game_state
+@contextmanager
+def go_engine_and_agents(config, seed=None):
+    """Yield (engine, agent_states) on the Go backend and close them after."""
+    from src.ffi.bridge import GoEngine, GoAgentState  # noqa: PLC0415
 
-
-@pytest.fixture
-def initial_agent_states(minimal_config, short_game_state):
-    """Create initial agent states."""
-    from src.cfr.worker import _create_observation, _filter_observation
-
-    initial_obs = _create_observation(None, None, short_game_state, -1, [])
-    if initial_obs is None:
-        raise ValueError("Failed to create initial observation")
-
-    initial_hands = [list(p.hand) for p in short_game_state.players]
-    initial_peeks = [p.initial_peek_indices for p in short_game_state.players]
-
-    agent_states = []
-    for i in range(NUM_PLAYERS):
-        agent = AgentState(
-            player_id=i,
-            opponent_id=1 - i,
-            memory_level=minimal_config.agent_params.memory_level,
-            time_decay_turns=minimal_config.agent_params.time_decay_turns,
-            initial_hand_size=len(initial_hands[i]),
-            config=minimal_config,
+    engine = GoEngine(house_rules=config.cambia_rules, seed=seed)
+    agents = [
+        GoAgentState(
+            engine,
+            pid,
+            config.agent_params.memory_level,
+            config.agent_params.time_decay_turns,
         )
-        agent.initialize(initial_obs, initial_hands[i], initial_peeks[i])
-        agent_states.append(agent)
+        for pid in range(NUM_PLAYERS)
+    ]
+    try:
+        yield engine, agents
+    finally:
+        for a in agents:
+            a.close()
+        engine.close()
 
-    return agent_states
 
-
-def test_os_traversal_single_path(minimal_config, short_game_state, initial_agent_states):
+def test_os_traversal_single_path(minimal_config):
     """Test that OS traversal walks exactly one root-to-terminal path."""
     advantage_samples: List[ReservoirSample] = []
     strategy_samples: List[ReservoirSample] = []
@@ -133,25 +139,25 @@ def test_os_traversal_single_path(minimal_config, short_game_state, initial_agen
     has_bottomed_out_tracker = [False]
     simulation_nodes: List = []
 
-    # Run OS traversal
-    utility = _deep_traverse_os(
-        game_state=short_game_state,
-        agent_states=initial_agent_states,
-        updating_player=0,
-        network=None,  # Use uniform strategy
-        iteration=0,
-        config=minimal_config,
-        advantage_samples=advantage_samples,
-        strategy_samples=strategy_samples,
-        depth=0,
-        worker_stats=worker_stats,
-        progress_queue=None,
-        worker_id=0,
-        min_depth_after_bottom_out_tracker=min_depth_after_bottom_out_tracker,
-        has_bottomed_out_tracker=has_bottomed_out_tracker,
-        simulation_nodes=simulation_nodes,
-        exploration_epsilon=0.6,
-    )
+    with go_engine_and_agents(minimal_config, seed=11) as (engine, agents):
+        utility = _deep_traverse_os_go(
+            engine=engine,
+            agent_states=agents,
+            updating_player=0,
+            network=None,  # Use uniform strategy
+            iteration=0,
+            config=minimal_config,
+            advantage_samples=advantage_samples,
+            strategy_samples=strategy_samples,
+            depth=0,
+            worker_stats=worker_stats,
+            progress_queue=None,
+            worker_id=0,
+            min_depth_after_bottom_out_tracker=min_depth_after_bottom_out_tracker,
+            has_bottomed_out_tracker=has_bottomed_out_tracker,
+            simulation_nodes=simulation_nodes,
+            exploration_epsilon=0.6,
+        )
 
     # Verify utility is valid
     assert utility is not None
@@ -173,92 +179,54 @@ def test_os_traversal_single_path(minimal_config, short_game_state, initial_agen
 
 def test_os_vs_es_node_count(minimal_config):
     """Compare node counts between OS and ES to verify OS is single-path."""
-    # Create fresh game states for each traversal
-    from src.cfr.worker import _create_observation, _filter_observation
-
-    es_game = CambiaGameState(house_rules=minimal_config.cambia_rules)
-    es_obs = _create_observation(None, None, es_game, -1, [])
-    es_hands = [list(p.hand) for p in es_game.players]
-    es_peeks = [p.initial_peek_indices for p in es_game.players]
-    es_agents = []
-    for i in range(NUM_PLAYERS):
-        agent = AgentState(
-            player_id=i,
-            opponent_id=1 - i,
-            memory_level=minimal_config.agent_params.memory_level,
-            time_decay_turns=minimal_config.agent_params.time_decay_turns,
-            initial_hand_size=len(es_hands[i]),
-            config=minimal_config,
-        )
-        agent.initialize(es_obs, es_hands[i], es_peeks[i])
-        es_agents.append(agent)
-
-    # Run ES traversal
     es_advantage: List[ReservoirSample] = []
     es_strategy: List[ReservoirSample] = []
     es_stats = WorkerStats()
     es_stats.worker_id = 0
 
-    _ = _deep_traverse(
-        game_state=es_game,
-        agent_states=es_agents,
-        updating_player=0,
-        network=None,
-        iteration=0,
-        config=minimal_config,
-        advantage_samples=es_advantage,
-        strategy_samples=es_strategy,
-        depth=0,
-        worker_stats=es_stats,
-        progress_queue=None,
-        worker_id=0,
-        min_depth_after_bottom_out_tracker=[float("inf")],
-        has_bottomed_out_tracker=[False],
-        simulation_nodes=[],
-    )
-
-    # Create fresh game state for OS traversal
-    os_game = CambiaGameState(house_rules=minimal_config.cambia_rules)
-    os_obs = _create_observation(None, None, os_game, -1, [])
-    os_hands = [list(p.hand) for p in os_game.players]
-    os_peeks = [p.initial_peek_indices for p in os_game.players]
-    os_agents = []
-    for i in range(NUM_PLAYERS):
-        agent = AgentState(
-            player_id=i,
-            opponent_id=1 - i,
-            memory_level=minimal_config.agent_params.memory_level,
-            time_decay_turns=minimal_config.agent_params.time_decay_turns,
-            initial_hand_size=len(os_hands[i]),
+    with go_engine_and_agents(minimal_config, seed=23) as (engine, agents):
+        _ = _deep_traverse_go(
+            engine=engine,
+            agent_states=agents,
+            updating_player=0,
+            network=None,
+            iteration=0,
             config=minimal_config,
+            advantage_samples=es_advantage,
+            strategy_samples=es_strategy,
+            depth=0,
+            worker_stats=es_stats,
+            progress_queue=None,
+            worker_id=0,
+            min_depth_after_bottom_out_tracker=[float("inf")],
+            has_bottomed_out_tracker=[False],
+            simulation_nodes=[],
         )
-        agent.initialize(os_obs, os_hands[i], os_peeks[i])
-        os_agents.append(agent)
 
-    # Run OS traversal
     os_advantage: List[ReservoirSample] = []
     os_strategy: List[ReservoirSample] = []
     os_stats = WorkerStats()
     os_stats.worker_id = 1
 
-    _ = _deep_traverse_os(
-        game_state=os_game,
-        agent_states=os_agents,
-        updating_player=0,
-        network=None,
-        iteration=0,
-        config=minimal_config,
-        advantage_samples=os_advantage,
-        strategy_samples=os_strategy,
-        depth=0,
-        worker_stats=os_stats,
-        progress_queue=None,
-        worker_id=1,
-        min_depth_after_bottom_out_tracker=[float("inf")],
-        has_bottomed_out_tracker=[False],
-        simulation_nodes=[],
-        exploration_epsilon=0.6,
-    )
+    with go_engine_and_agents(minimal_config, seed=23) as (engine, agents):
+        _ = _deep_traverse_os_go(
+            engine=engine,
+            agent_states=agents,
+            updating_player=0,
+            network=None,
+            iteration=0,
+            config=minimal_config,
+            advantage_samples=os_advantage,
+            strategy_samples=os_strategy,
+            depth=0,
+            worker_stats=os_stats,
+            progress_queue=None,
+            worker_id=1,
+            min_depth_after_bottom_out_tracker=[float("inf")],
+            has_bottomed_out_tracker=[False],
+            simulation_nodes=[],
+            exploration_epsilon=0.6,
+        )
 
     # OS should visit far fewer nodes than ES
     # ES enumerates all actions at traverser nodes, OS samples one action everywhere
@@ -274,30 +242,31 @@ def test_os_vs_es_node_count(minimal_config):
     ), f"OS visited {os_stats.nodes_visited} nodes, expected < 50"
 
 
-def test_os_regret_values_valid(minimal_config, short_game_state, initial_agent_states):
+def test_os_regret_values_valid(minimal_config):
     """Test that IS-weighted regrets are valid (no NaN, no explosion)."""
     advantage_samples: List[ReservoirSample] = []
     strategy_samples: List[ReservoirSample] = []
     worker_stats = WorkerStats()
 
-    _ = _deep_traverse_os(
-        game_state=short_game_state,
-        agent_states=initial_agent_states,
-        updating_player=0,
-        network=None,
-        iteration=0,
-        config=minimal_config,
-        advantage_samples=advantage_samples,
-        strategy_samples=strategy_samples,
-        depth=0,
-        worker_stats=worker_stats,
-        progress_queue=None,
-        worker_id=0,
-        min_depth_after_bottom_out_tracker=[float("inf")],
-        has_bottomed_out_tracker=[False],
-        simulation_nodes=[],
-        exploration_epsilon=0.6,
-    )
+    with go_engine_and_agents(minimal_config, seed=31) as (engine, agents):
+        _ = _deep_traverse_os_go(
+            engine=engine,
+            agent_states=agents,
+            updating_player=0,
+            network=None,
+            iteration=0,
+            config=minimal_config,
+            advantage_samples=advantage_samples,
+            strategy_samples=strategy_samples,
+            depth=0,
+            worker_stats=worker_stats,
+            progress_queue=None,
+            worker_id=0,
+            min_depth_after_bottom_out_tracker=[float("inf")],
+            has_bottomed_out_tracker=[False],
+            simulation_nodes=[],
+            exploration_epsilon=0.6,
+        )
 
     # Check advantage samples
     for sample in advantage_samples:
@@ -308,32 +277,31 @@ def test_os_regret_values_valid(minimal_config, short_game_state, initial_agent_
         assert max_abs_regret < 1000, f"Regret magnitude {max_abs_regret} too large"
 
 
-def test_os_advantage_samples_generation(
-    minimal_config, short_game_state, initial_agent_states
-):
+def test_os_advantage_samples_generation(minimal_config):
     """Test that advantage samples are generated at traverser nodes."""
     advantage_samples: List[ReservoirSample] = []
     strategy_samples: List[ReservoirSample] = []
     worker_stats = WorkerStats()
 
-    _ = _deep_traverse_os(
-        game_state=short_game_state,
-        agent_states=initial_agent_states,
-        updating_player=0,
-        network=None,
-        iteration=0,
-        config=minimal_config,
-        advantage_samples=advantage_samples,
-        strategy_samples=strategy_samples,
-        depth=0,
-        worker_stats=worker_stats,
-        progress_queue=None,
-        worker_id=0,
-        min_depth_after_bottom_out_tracker=[float("inf")],
-        has_bottomed_out_tracker=[False],
-        simulation_nodes=[],
-        exploration_epsilon=0.6,
-    )
+    with go_engine_and_agents(minimal_config, seed=37) as (engine, agents):
+        _ = _deep_traverse_os_go(
+            engine=engine,
+            agent_states=agents,
+            updating_player=0,
+            network=None,
+            iteration=0,
+            config=minimal_config,
+            advantage_samples=advantage_samples,
+            strategy_samples=strategy_samples,
+            depth=0,
+            worker_stats=worker_stats,
+            progress_queue=None,
+            worker_id=0,
+            min_depth_after_bottom_out_tracker=[float("inf")],
+            has_bottomed_out_tracker=[False],
+            simulation_nodes=[],
+            exploration_epsilon=0.6,
+        )
 
     # Should have some advantage samples (from traverser's nodes)
     assert len(advantage_samples) > 0, "No advantage samples generated"
@@ -347,32 +315,31 @@ def test_os_advantage_samples_generation(
         assert len(sample.target) > 0
 
 
-def test_os_strategy_samples_generation(
-    minimal_config, short_game_state, initial_agent_states
-):
+def test_os_strategy_samples_generation(minimal_config):
     """Test that strategy samples are generated at opponent nodes."""
     advantage_samples: List[ReservoirSample] = []
     strategy_samples: List[ReservoirSample] = []
     worker_stats = WorkerStats()
 
-    _ = _deep_traverse_os(
-        game_state=short_game_state,
-        agent_states=initial_agent_states,
-        updating_player=0,
-        network=None,
-        iteration=0,
-        config=minimal_config,
-        advantage_samples=advantage_samples,
-        strategy_samples=strategy_samples,
-        depth=0,
-        worker_stats=worker_stats,
-        progress_queue=None,
-        worker_id=0,
-        min_depth_after_bottom_out_tracker=[float("inf")],
-        has_bottomed_out_tracker=[False],
-        simulation_nodes=[],
-        exploration_epsilon=0.6,
-    )
+    with go_engine_and_agents(minimal_config, seed=41) as (engine, agents):
+        _ = _deep_traverse_os_go(
+            engine=engine,
+            agent_states=agents,
+            updating_player=0,
+            network=None,
+            iteration=0,
+            config=minimal_config,
+            advantage_samples=advantage_samples,
+            strategy_samples=strategy_samples,
+            depth=0,
+            worker_stats=worker_stats,
+            progress_queue=None,
+            worker_id=0,
+            min_depth_after_bottom_out_tracker=[float("inf")],
+            has_bottomed_out_tracker=[False],
+            simulation_nodes=[],
+            exploration_epsilon=0.6,
+        )
 
     # Should have some strategy samples (from opponent's nodes)
     assert len(strategy_samples) > 0, "No strategy samples generated"
@@ -447,8 +414,11 @@ def test_config_routing_external_sampling(minimal_config):
     assert isinstance(result, DeepCFRWorkerResult)
     assert result.stats.nodes_visited > 0
 
-    # ES should visit more nodes (partial tree exploration)
-    # For short games with max_game_turns=8, ES can visit hundreds of nodes
+    # ES enumerates every action at traverser nodes, so it walks a partial tree
+    # rather than the single root-to-leaf path OS takes (which visits exactly
+    # max_depth + 1 nodes). A node-count threshold would be seed-dependent:
+    # an early Cambia call ends the game in under 20 nodes.
+    assert result.stats.nodes_visited > result.stats.max_depth + 1
 
 
 def test_os_smoke_test_multiple_traversals(minimal_config):
@@ -494,85 +464,49 @@ def test_os_smoke_test_multiple_traversals(minimal_config):
 
 def test_exploration_epsilon_affects_sampling(minimal_config):
     """Test that different exploration_epsilon values affect action selection."""
-    from src.cfr.worker import _create_observation, _filter_observation
-
-    # Create game state for high epsilon
-    high_eps_game = CambiaGameState(house_rules=minimal_config.cambia_rules)
-    high_eps_obs = _create_observation(None, None, high_eps_game, -1, [])
-    high_eps_hands = [list(p.hand) for p in high_eps_game.players]
-    high_eps_peeks = [p.initial_peek_indices for p in high_eps_game.players]
-    high_eps_agents = []
-    for i in range(NUM_PLAYERS):
-        agent = AgentState(
-            player_id=i,
-            opponent_id=1 - i,
-            memory_level=minimal_config.agent_params.memory_level,
-            time_decay_turns=minimal_config.agent_params.time_decay_turns,
-            initial_hand_size=len(high_eps_hands[i]),
-            config=minimal_config,
-        )
-        agent.initialize(high_eps_obs, high_eps_hands[i], high_eps_peeks[i])
-        high_eps_agents.append(agent)
-
     # Run with high epsilon (more uniform exploration)
     high_eps_samples: List[ReservoirSample] = []
-    _ = _deep_traverse_os(
-        game_state=high_eps_game,
-        agent_states=high_eps_agents,
-        updating_player=0,
-        network=None,
-        iteration=0,
-        config=minimal_config,
-        advantage_samples=high_eps_samples,
-        strategy_samples=[],
-        depth=0,
-        worker_stats=WorkerStats(),
-        progress_queue=None,
-        worker_id=0,
-        min_depth_after_bottom_out_tracker=[float("inf")],
-        has_bottomed_out_tracker=[False],
-        simulation_nodes=[],
-        exploration_epsilon=0.9,  # High epsilon = more uniform
-    )
-
-    # Create game state for low epsilon
-    low_eps_game = CambiaGameState(house_rules=minimal_config.cambia_rules)
-    low_eps_obs = _create_observation(None, None, low_eps_game, -1, [])
-    low_eps_hands = [list(p.hand) for p in low_eps_game.players]
-    low_eps_peeks = [p.initial_peek_indices for p in low_eps_game.players]
-    low_eps_agents = []
-    for i in range(NUM_PLAYERS):
-        agent = AgentState(
-            player_id=i,
-            opponent_id=1 - i,
-            memory_level=minimal_config.agent_params.memory_level,
-            time_decay_turns=minimal_config.agent_params.time_decay_turns,
-            initial_hand_size=len(low_eps_hands[i]),
+    with go_engine_and_agents(minimal_config, seed=53) as (engine, agents):
+        _ = _deep_traverse_os_go(
+            engine=engine,
+            agent_states=agents,
+            updating_player=0,
+            network=None,
+            iteration=0,
             config=minimal_config,
+            advantage_samples=high_eps_samples,
+            strategy_samples=[],
+            depth=0,
+            worker_stats=WorkerStats(),
+            progress_queue=None,
+            worker_id=0,
+            min_depth_after_bottom_out_tracker=[float("inf")],
+            has_bottomed_out_tracker=[False],
+            simulation_nodes=[],
+            exploration_epsilon=0.9,  # High epsilon = more uniform
         )
-        agent.initialize(low_eps_obs, low_eps_hands[i], low_eps_peeks[i])
-        low_eps_agents.append(agent)
 
     # Run with low epsilon (more strategy-based)
     low_eps_samples: List[ReservoirSample] = []
-    _ = _deep_traverse_os(
-        game_state=low_eps_game,
-        agent_states=low_eps_agents,
-        updating_player=0,
-        network=None,
-        iteration=0,
-        config=minimal_config,
-        advantage_samples=low_eps_samples,
-        strategy_samples=[],
-        depth=0,
-        worker_stats=WorkerStats(),
-        progress_queue=None,
-        worker_id=0,
-        min_depth_after_bottom_out_tracker=[float("inf")],
-        has_bottomed_out_tracker=[False],
-        simulation_nodes=[],
-        exploration_epsilon=0.1,  # Low epsilon = more strategy-based
-    )
+    with go_engine_and_agents(minimal_config, seed=53) as (engine, agents):
+        _ = _deep_traverse_os_go(
+            engine=engine,
+            agent_states=agents,
+            updating_player=0,
+            network=None,
+            iteration=0,
+            config=minimal_config,
+            advantage_samples=low_eps_samples,
+            strategy_samples=[],
+            depth=0,
+            worker_stats=WorkerStats(),
+            progress_queue=None,
+            worker_id=0,
+            min_depth_after_bottom_out_tracker=[float("inf")],
+            has_bottomed_out_tracker=[False],
+            simulation_nodes=[],
+            exploration_epsilon=0.1,  # Low epsilon = more strategy-based
+        )
 
     # Both should generate samples
     assert len(high_eps_samples) > 0

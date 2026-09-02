@@ -527,9 +527,9 @@ Parameters for Deep CFR training. These values are loaded from the YAML config a
   * Default: `"auto"`
   * CLI Override: `--device`
 * **`engine_backend`**:
-  * Description: Controls which game engine the deep worker uses for traversal. `"python"` uses the Python `CambiaGameState` engine. `"go"` routes through the FFI bridge (`src/ffi/bridge.py`) to `libcambia.so`, which wraps the Go engine. The Go backend is significantly faster per traversal but requires building the shared library first (`make libcambia` from the repo root).
-  * Type: `string` (`"python"` or `"go"`)
-  * Default: `"python"`
+  * Description: Game engine the deep worker traverses on. `"go"` routes through the FFI bridge (`src/ffi/bridge.py`) to `libcambia.so`, which wraps the Go engine, and is the only accepted value; build the shared library first (`make libcambia` from the repo root). The field is kept so existing configs load, and `"python"` is refused at config load by name (the Python reference engine was retired, cambia-1422).
+  * Type: `string` (`"go"`)
+  * Default: `"go"`
   * Example: `"go"`
 * **`es_validation_interval`**:
   * Description: How often (in training steps) to run ES validation. At each interval, `ESValidator.compute_exploitability` runs short-depth traversals and logs the resulting regret and entropy metrics. Set to `0` to disable ES validation entirely.

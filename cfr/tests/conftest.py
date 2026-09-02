@@ -77,7 +77,7 @@ if _config_mod is None or not hasattr(_config_mod, "Config"):
         device: str = "cpu"
         sampling_method: str = "outcome"
         exploration_epsilon: float = 0.6
-        engine_backend: str = "python"
+        engine_backend: str = "go"
         es_validation_interval: int = 10
         es_validation_depth: int = 10
         es_validation_traversals: int = 1000

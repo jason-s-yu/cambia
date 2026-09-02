@@ -387,7 +387,7 @@ class DeepCFRConfig:
     exploration_epsilon: float = 0.6
 
     # Engine backend
-    engine_backend: str = "python"      # "python" or "go"
+    engine_backend: str = "go"          # "go" is the only backend
 
     # Buffer capacities
     advantage_buffer_capacity: int = 2_000_000
@@ -648,10 +648,6 @@ ESCHER traversal using the Go engine backend. Key differences from OS-MCCFR:
 
 `batch_counterfactuals=True` groups counterfactual value queries into a single batched forward pass rather than one call per unchosen action.
 
-#### `_deep_traverse_os` and `_deep_traverse_es` (Python-engine variants)
-
-Python-engine traversal functions. Same logic as the Go variants but use `CambiaGameState.apply_action()` + `AgentState.update()` rather than FFI handles. Used as fallback when `engine_backend="python"`. The Go backend is the production path; these are retained for testing and reference.
-
 ### Encoding Layout Dispatch
 
 ```python
@@ -699,9 +695,7 @@ deep_worker.py
   +-- encoding.py: _encode_ep_pbs() dispatches to appropriate encoder
   +-- networks.py: AdvantageNetwork, HistoryValueNetwork, get_strategy_from_advantages()
   +-- reservoir.py: ReservoirSample
-  +-- ffi/bridge.py: GoEngine, GoAgentState (when engine_backend="go")
-  +-- game/engine.py: CambiaGameState (when engine_backend="python")
-  +-- agent_state.py: AgentState (Python-engine path)
+  +-- ffi/bridge.py: GoEngine, GoAgentState (the only traversal backend)
 ```
 
 ### Design Decisions
@@ -875,7 +869,7 @@ ffi/bridge.py
   |     cambia_agent_encode_nplayer, cambia_agent_apply_decay
   |     cambia_handle_pool_stats
   |     cambia_game_resolve_untargetable_armed_ability, cambia_game_cambia_caller
-  +-- deep_worker.py: GoEngine and GoAgentState used when engine_backend="go"
+  +-- deep_worker.py: GoEngine and GoAgentState drive every traversal
   +-- evaluate_agents.py: NeuralAgentWrapper uses GoAgentState for eval encoding
 ```
 
@@ -891,7 +885,6 @@ class ESValidator:
         self,
         config: Config,
         deep_cfr_config: DeepCFRConfig,
-        engine_backend: str = "python",
     )
 
     def compute_exploitability(
@@ -919,7 +912,7 @@ The returned dict contains:
 
 ### Backend Support
 
-The validator accepts the same `engine_backend` config flag as the main training loop. With `engine_backend="go"`, it imports `GoEngine` and `GoAgentState` from `ffi/bridge.py`. The import is deferred (inside `compute_exploitability`) so that the validator can be constructed without the library present. With `engine_backend="python"`, no FFI dependency is needed.
+The validator traverses on the Go engine only. It imports `GoEngine` and `GoAgentState` from `ffi/bridge.py` inside `_traverse_go()`, so the validator can still be constructed without the library present, but a run where every traversal fails raises rather than reporting zeroed metrics.
 
 ### Integration with DeepCFRTrainer
 

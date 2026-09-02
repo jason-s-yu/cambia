@@ -153,6 +153,13 @@ func (g GrantSet) clone() GrantSet {
 // coordinator restart D34 restores a lease across. MaxRuntime is the
 // spec-supplied max_runtime_hours resolved at grant, so the runtime cap of D4
 // stays a lease fact rather than a second lookup into the spec at sweep time.
+//
+// NextAttempt is the attempt the job runs at once this lease has ended: equal
+// to Attempt for every verdict but requeue, one higher for that one (D32). It
+// is written with the released record rather than held in memory, so a
+// coordinator restart resumes the count where the last verdict left it instead
+// of handing every requeued job a fresh attempt 1 and never exhausting
+// max_attempts.
 type Lease struct {
 	JobID           string
 	NodeID          string
@@ -165,6 +172,7 @@ type Lease struct {
 	Deadline        time.Time
 	StopRequestedAt time.Time
 	Attempt         int
+	NextAttempt     int
 	GrantSet        GrantSet
 	ManifestSeq     int64
 	ManifestDigest  string
@@ -304,6 +312,7 @@ type leaseFile struct {
 	Deadline        string   `json:"deadline"`
 	StopRequestedAt string   `json:"stop_requested_at"`
 	Attempt         int      `json:"attempt"`
+	NextAttempt     int      `json:"next_attempt,omitempty"`
 	GrantSet        GrantSet `json:"grant_set"`
 	ManifestSeq     int64    `json:"manifest_seq"`
 	ManifestDigest  string   `json:"manifest_digest"`
@@ -342,6 +351,7 @@ func (l *Lease) toFile() leaseFile {
 		Deadline:        rfc3339(l.Deadline),
 		StopRequestedAt: rfc3339(l.StopRequestedAt),
 		Attempt:         l.Attempt,
+		NextAttempt:     l.NextAttempt,
 		GrantSet:        l.GrantSet,
 		ManifestSeq:     l.ManifestSeq,
 		ManifestDigest:  l.ManifestDigest,
@@ -376,6 +386,7 @@ func (f *leaseFile) toLease() (*Lease, error) {
 		Deadline:        deadline,
 		StopRequestedAt: stop,
 		Attempt:         f.Attempt,
+		NextAttempt:     f.NextAttempt,
 		GrantSet:        f.GrantSet,
 		ManifestSeq:     f.ManifestSeq,
 		ManifestDigest:  f.ManifestDigest,

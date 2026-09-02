@@ -38,14 +38,17 @@ class UnsupportedFeatureError(Exception):
 def required_features(payload: Dict[str, Any]) -> List[str]:
     """Daemon feature names `payload` (a POST /harness/jobs body) needs (D30).
 
-    Only the `after` list shape is checked here: a bare string is the pre-r2
-    wire shape and needs nothing. `requires`/`kind=measure` extend this list
-    when those spec fields land (W1-T3, W1-T6); this function is the single
-    place a future feature-gated field registers its requirement.
+    A bare `after` string is the pre-r2 wire shape and needs nothing; a list
+    needs `fan-in`. A `requires` block (D10/D12, cambia-1725) is meaningless
+    against a daemon with no node pool, so it needs `nashnet-pool`. This
+    function is the single place a future feature-gated field registers its
+    requirement.
     """
     needed = []
     if isinstance(payload.get("after"), list):
         needed.append("fan-in")
+    if payload.get("requires"):
+        needed.append("nashnet-pool")
     return needed
 
 
@@ -218,3 +221,43 @@ class HarnessClient:
         if isinstance(payload, dict) and "nodes" in payload:
             return payload["nodes"]
         return payload if isinstance(payload, list) else []
+
+    # -----------------------------------------------------------------
+    # nashnet node acting routes (design D3/D46/D60, cambia-1725): the
+    # operator-token acting group (harness node grant/revoke/drain) this
+    # ticket adds alongside the cambia-1722 listing route above.
+    # Node-audience routes (register, heartbeat, events) are the node
+    # agent's own (runnerd/nodeagent), never called from here.
+    # -----------------------------------------------------------------
+
+    def get_node(self, node_id: str) -> Dict[str, Any]:
+        payload = self._call("GET", f"/nashnet/nodes/{quote(node_id, safe='')}")
+        if isinstance(payload, dict) and "node" in payload:
+            return payload["node"]
+        return payload
+
+    def drain_node(
+        self, node_id: str, drain: bool = True, clear_breaker: bool = False
+    ) -> Dict[str, Any]:
+        """POST /nashnet/nodes/{id}/drain. Two-way: drain=False lifts a hold
+        without a second route. clear_breaker also resets the D63 circuit
+        breaker's trip count and the per-job degraded marks of D8."""
+        body = {"drain": drain, "clear_breaker": clear_breaker}
+        payload = self._call(
+            "POST",
+            f"/nashnet/nodes/{quote(node_id, safe='')}/drain",
+            body=body,
+            ok=(200,),
+        )
+        if isinstance(payload, dict) and "node" in payload:
+            return payload["node"]
+        return payload
+
+    def revoke_node(self, node_id: str) -> Dict[str, Any]:
+        """POST /nashnet/nodes/{id}/revoke (D60): writes the coordinator's
+        <node_id>.revoked tombstone, bumps the node epoch, and settles every
+        lease the node held against whatever was already promoted. There is
+        no grace period and no way to undo this short of a fresh grant."""
+        return self._call(
+            "POST", f"/nashnet/nodes/{quote(node_id, safe='')}/revoke", ok=(200,)
+        )
