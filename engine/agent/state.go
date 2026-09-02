@@ -85,17 +85,24 @@ type AgentState struct {
 
 	// N-Player fields (used when NumPlayers > 2).
 	// NumPlayers is the total number of players in the game.
-	// OpponentIDs holds the player IDs of opponents (up to 5).
+	// OpponentIDs holds the player IDs of opponents, sized from engine.MaxOpponents so a
+	// full table fits: it used to hold five, which panicked the moment a seven or eight
+	// seat agent was constructed (cambia-1551).
 	// KnowledgeMask[slot][playerID] is true when playerID has observed the card at slot.
 	// Slot indices are: playerIndex * MaxHandSize + cardSlot.
 	// NPlayerSlotBuckets holds the bucket for a slot when this agent knows it.
 	// NPlayerSlotKnown indicates whether THIS agent knows the card at each slot.
+	// NPlayerHandLen holds each seat's hand length, which every hand-length change has to
+	// be modelled against: the slot knowledge above is a fixed 48-slot array with nothing
+	// to append to, so a snap that shifts a hand shifts the knowledge with it and a
+	// penalty draw clears the slots it newly occupies (cambia-1550).
 	NumPlayers         uint8
-	OpponentIDs        [5]uint8
+	OpponentIDs        [engine.MaxOpponents]uint8
 	NumOpponents       uint8
 	KnowledgeMask      [MaxTotalSlots][MaxKnowledgePlayers]bool
 	NPlayerSlotBuckets [MaxTotalSlots]CardBucket
 	NPlayerSlotKnown   [MaxTotalSlots]bool
+	NPlayerHandLen     [engine.MaxPlayers]uint8
 
 	// Memory archetype controls per-turn decay/eviction behavior.
 	// MemoryPerfect (default): no decay, full retention.
@@ -959,7 +966,13 @@ func (a *AgentState) ApplyMemoryDecay(rng *rand.Rand) {
 // NewNPlayerAgentState creates an AgentState for N-player games.
 // Sets up OpponentIDs from playerID and numPlayers.
 // For backward compatibility, 2P games also set OpponentID.
+//
+// numPlayers above engine.MaxPlayers is clamped to it: the belief state is sized for a
+// full table and has no room for a seat the engine cannot deal to either.
 func NewNPlayerAgentState(playerID, numPlayers, memoryLevel, timeDecayTurns uint8) AgentState {
+	if numPlayers > engine.MaxPlayers {
+		numPlayers = engine.MaxPlayers
+	}
 	a := AgentState{
 		PlayerID:       playerID,
 		NumPlayers:     numPlayers,
@@ -968,7 +981,7 @@ func NewNPlayerAgentState(playerID, numPlayers, memoryLevel, timeDecayTurns uint
 	}
 	idx := uint8(0)
 	for i := uint8(0); i < numPlayers; i++ {
-		if i != playerID {
+		if i != playerID && int(idx) < len(a.OpponentIDs) {
 			a.OpponentIDs[idx] = i
 			idx++
 		}
@@ -990,6 +1003,9 @@ func (a *AgentState) InitializeNPlayer(g *engine.GameState) {
 	a.NumPlayers = n
 
 	a.OwnHandLen = g.Players[a.PlayerID].HandLen
+	for seat := 0; seat < engine.MaxPlayers; seat++ {
+		a.NPlayerHandLen[seat] = g.Players[seat].HandLen
+	}
 
 	// Own initial peeks: set knowledge and bucket for peeked slots.
 	nps := g.Players[a.PlayerID]
@@ -1053,9 +1069,42 @@ func (a *AgentState) UpdateNPlayer(g *engine.GameState) {
 	// between two slots that never moved (cambia-1548).
 	if g.LastAction.ActionSpace() == engine.ActionSpaceNPlayer {
 		a.updateNPlayerFromNPlayerSpace(g, act, actingPlayer)
-		return
+	} else {
+		a.updateNPlayerFromLegacySpace(g, act, actingPlayer)
 	}
-	a.updateNPlayerFromLegacySpace(g, act, actingPlayer)
+
+	a.nplayerSyncHandLens(g)
+}
+
+// nplayerSyncHandLens reconciles the tracked per-seat hand lengths against the engine's
+// and clears the knowledge of every slot the difference covers. The handlers above shift
+// the slots the recorded action moved; what is left over is a hand that grew or shrank for
+// a reason the action index does not name, and a snap penalty draw is exactly that. Under
+// race-OFF the failed snapper draws inside an action that names only the snap, and under
+// race-ON every losing committer draws inside the winner's resolving action, which names
+// neither them nor their draw. A penalty draw only appends, so the slots it newly occupies
+// are the ones past the tracked length, and nobody has seen those cards (RULES.md 3B:
+// they are dealt face down), so they are cleared (cambia-1550).
+func (a *AgentState) nplayerSyncHandLens(g *engine.GameState) {
+	for seat := 0; seat < engine.MaxPlayers; seat++ {
+		actual := g.Players[seat].HandLen
+		tracked := a.NPlayerHandLen[seat]
+		if actual == tracked {
+			continue
+		}
+		lo, hi := actual, tracked
+		if tracked < actual {
+			lo, hi = tracked, actual
+		}
+		if hi > engine.MaxHandSize {
+			hi = engine.MaxHandSize
+		}
+		base := seat * int(engine.MaxHandSize)
+		for i := lo; i < hi; i++ {
+			a.nplayerClearKnowledge(base + int(i))
+		}
+		a.NPlayerHandLen[seat] = actual
+	}
 }
 
 // updateNPlayerFromNPlayerSpace applies an action recorded in the 620-action N-player
@@ -1097,7 +1146,8 @@ func (a *AgentState) updateNPlayerFromNPlayerSpace(g *engine.GameState, act uint
 		} else if slot, oppIdx, ok := engine.NPlayerDecodeSnapOpponent(act); ok {
 			a.nplayerProcessSnapOpponent(g, actingPlayer, slot, oppIdx)
 		} else if ownIdx, ok := engine.NPlayerDecodeSnapOpponentMove(act); ok {
-			a.nplayerProcessSnapOpponentMove(g, actingPlayer, ownIdx)
+			a.nplayerProcessSnapOpponentMove(g, actingPlayer, ownIdx,
+				g.LastAction.SwapTargetPlayer(), g.LastAction.SwapOppIdx)
 		}
 	}
 }
@@ -1144,8 +1194,12 @@ func (a *AgentState) updateNPlayerFromLegacySpace(g *engine.GameState, act uint1
 			a.nplayerProcessSnapOwn(g, actingPlayer, slot)
 		} else if slot, ok := engine.ActionIsSnapOpponent(act); ok {
 			a.nplayerProcessSnapOpponent(g, actingPlayer, slot, firstOpp)
-		} else if ownIdx, _, ok := engine.ActionIsSnapOpponentMove(act); ok {
-			a.nplayerProcessSnapOpponentMove(g, actingPlayer, ownIdx)
+		} else if ownIdx, slotIdx, ok := engine.ActionIsSnapOpponentMove(act); ok {
+			// The legacy index carries the destination slot itself and names no seat, and
+			// the legacy handler records neither, so the destination comes from the index
+			// and the target is the acting seat's sole opponent.
+			a.nplayerProcessSnapOpponentMove(g, actingPlayer, ownIdx,
+				a.nplayerOpponentAt(g, actingPlayer, firstOpp), slotIdx)
 		}
 	}
 }
@@ -1203,6 +1257,88 @@ func (a *AgentState) nplayerSwapKnowledge(slotA, slotB int) {
 	a.NPlayerSlotKnown[slotA], a.NPlayerSlotKnown[slotB] = a.NPlayerSlotKnown[slotB], a.NPlayerSlotKnown[slotA]
 	a.NPlayerSlotBuckets[slotA], a.NPlayerSlotBuckets[slotB] = a.NPlayerSlotBuckets[slotB], a.NPlayerSlotBuckets[slotA]
 	a.KnowledgeMask[slotA], a.KnowledgeMask[slotB] = a.KnowledgeMask[slotB], a.KnowledgeMask[slotA]
+}
+
+// nplayerSlotKnowledge is everything the agent state records about one slot: whether this
+// agent knows the card, which bucket it is, and which seats have seen it. Moving a card
+// between slots moves this whole record with it.
+type nplayerSlotKnowledge struct {
+	Known  bool
+	Bucket CardBucket
+	Mask   [MaxKnowledgePlayers]bool
+}
+
+// nplayerReadSlot returns the knowledge held at a slot.
+func (a *AgentState) nplayerReadSlot(slot int) nplayerSlotKnowledge {
+	if slot < 0 || slot >= MaxTotalSlots {
+		return nplayerSlotKnowledge{}
+	}
+	return nplayerSlotKnowledge{
+		Known:  a.NPlayerSlotKnown[slot],
+		Bucket: a.NPlayerSlotBuckets[slot],
+		Mask:   a.KnowledgeMask[slot],
+	}
+}
+
+// nplayerWriteSlot overwrites a slot with the given knowledge.
+func (a *AgentState) nplayerWriteSlot(slot int, k nplayerSlotKnowledge) {
+	if slot < 0 || slot >= MaxTotalSlots {
+		return
+	}
+	a.NPlayerSlotKnown[slot] = k.Known
+	if k.Known {
+		a.NPlayerSlotBuckets[slot] = k.Bucket
+	} else {
+		a.NPlayerSlotBuckets[slot] = 0
+	}
+	a.KnowledgeMask[slot] = k.Mask
+}
+
+// nplayerRemoveSlot shifts a seat's slot knowledge left over cardSlot the way
+// removeCardFromHand shifts the cards: every higher slot moves down one and the vacated
+// tail slot is cleared. Without the shift, every slot above a snapped card names the card
+// that used to sit below it (cambia-1550). It returns what the removed slot held, for the
+// callers that move the card somewhere rather than discard it.
+func (a *AgentState) nplayerRemoveSlot(seat, cardSlot uint8) nplayerSlotKnowledge {
+	if int(seat) >= engine.MaxPlayers {
+		return nplayerSlotKnowledge{}
+	}
+	handLen := a.NPlayerHandLen[seat]
+	if cardSlot >= handLen || handLen > engine.MaxHandSize {
+		return nplayerSlotKnowledge{}
+	}
+	base := nplayerSlot(seat, 0)
+	removed := a.nplayerReadSlot(base + int(cardSlot))
+	for i := int(cardSlot); i+1 < int(handLen); i++ {
+		a.nplayerWriteSlot(base+i, a.nplayerReadSlot(base+i+1))
+	}
+	a.nplayerClearKnowledge(base + int(handLen) - 1)
+	a.NPlayerHandLen[seat] = handLen - 1
+	return removed
+}
+
+// nplayerInsertSlot opens cardSlot in a seat's hand the way SnapMoveCard's fill opens it,
+// shifting every slot from cardSlot up one higher, and writes the moved card's knowledge
+// into the opened slot. A cardSlot past the hand's end appends, matching the engine's own
+// clamp. It reports false when the hand is already full.
+func (a *AgentState) nplayerInsertSlot(seat, cardSlot uint8, k nplayerSlotKnowledge) bool {
+	if int(seat) >= engine.MaxPlayers {
+		return false
+	}
+	handLen := a.NPlayerHandLen[seat]
+	if handLen >= engine.MaxHandSize {
+		return false
+	}
+	if cardSlot > handLen {
+		cardSlot = handLen
+	}
+	base := nplayerSlot(seat, 0)
+	for i := int(handLen); i > int(cardSlot); i-- {
+		a.nplayerWriteSlot(base+i, a.nplayerReadSlot(base+i-1))
+	}
+	a.nplayerWriteSlot(base+int(cardSlot), k)
+	a.NPlayerHandLen[seat] = handLen + 1
+	return true
 }
 
 func (a *AgentState) nplayerProcessReplace(g *engine.GameState, actingPlayer, slot uint8) {
@@ -1298,58 +1434,40 @@ func (a *AgentState) nplayerProcessKingSwapYes(g *engine.GameState, actingPlayer
 }
 
 func (a *AgentState) nplayerProcessSnapOwn(g *engine.GameState, actingPlayer, slot uint8) {
-	// Snap outcome: if successful, the card is publicly revealed and removed.
-	// We just clear knowledge of that slot; hand shrinks (tracked via OwnHandLen update above).
-	globalSlot := nplayerSlot(actingPlayer, slot)
-	if g.LastAction.SnapSuccess {
-		// Card is now gone - mark all knowledge cleared.
-		a.nplayerClearKnowledge(globalSlot)
+	// A successful snap discards the card and shifts the rest of that hand left, so the
+	// slot knowledge shifts with it. A failed snap draws the penalty instead, which only
+	// appends; nplayerSyncHandLens clears the slots that draw newly occupies.
+	if !g.LastAction.SnapSuccess {
+		return
 	}
-	// If snap failed: penalty cards added (unknown) - OwnHandLen already updated.
+	a.nplayerRemoveSlot(actingPlayer, slot)
 }
 
 func (a *AgentState) nplayerProcessSnapOpponent(g *engine.GameState, actingPlayer, slot, oppIdx uint8) {
+	if !g.LastAction.SnapSuccess {
+		return
+	}
 	targetPlayer := a.nplayerOpponentAt(g, actingPlayer, oppIdx)
 	if targetPlayer == 255 {
 		return
 	}
-	globalSlot := nplayerSlot(targetPlayer, slot)
-	if g.LastAction.SnapSuccess {
-		a.nplayerClearKnowledge(globalSlot)
-	}
+	a.nplayerRemoveSlot(targetPlayer, slot)
 }
 
-func (a *AgentState) nplayerProcessSnapOpponentMove(g *engine.GameState, actingPlayer, ownIdx uint8) {
-	// The acting player moves their card at ownIdx into the slot their snap emptied in the
-	// target seat's hand. The card keeps its identity, so everything known about it moves
-	// with it: the mover still knows the card it paid, and so does anyone else who had
-	// seen it (RULES.md 5, cambia-1552). The engine records the destination seat and slot,
-	// which the move's own action index does not carry.
-	from := nplayerSlot(actingPlayer, ownIdx)
-	known := a.NPlayerSlotKnown[from]
-	bucket := a.NPlayerSlotBuckets[from]
-	var mask [MaxKnowledgePlayers]bool
-	if from >= 0 && from < MaxTotalSlots {
-		mask = a.KnowledgeMask[from]
-	}
-	a.nplayerClearKnowledge(from)
-
-	target := g.LastAction.SwapTargetPlayer()
-	slot := g.LastAction.SwapOppIdx
-	if target == actingPlayer || target >= g.NumActivePlayers() || slot >= engine.MaxHandSize {
+// nplayerProcessSnapOpponentMove models the RULES.md 5 fill: the acting player moves their
+// card at ownIdx into the slot their snap emptied in the target seat's hand. The card keeps
+// its identity, so everything known about it moves with it: the mover still knows the card
+// it paid, and so does anyone else who had seen it (cambia-1552). Both hands change length,
+// so both shift: the mover's left over ownIdx, the target's right from destSlot
+// (cambia-1550). The destination is passed in because the two action spaces record it
+// differently - the N-player index carries only ownIdx, so its caller reads the seat and
+// slot off the engine's record, while the legacy index carries the slot and names no seat.
+func (a *AgentState) nplayerProcessSnapOpponentMove(g *engine.GameState, actingPlayer, ownIdx, target, destSlot uint8) {
+	moved := a.nplayerRemoveSlot(actingPlayer, ownIdx)
+	if target == actingPlayer || target >= g.NumActivePlayers() || destSlot >= engine.MaxHandSize {
 		return
 	}
-	to := nplayerSlot(target, slot)
-	if to < 0 || to >= MaxTotalSlots {
-		return
-	}
-	a.KnowledgeMask[to] = mask
-	a.NPlayerSlotKnown[to] = known
-	if known {
-		a.NPlayerSlotBuckets[to] = bucket
-	} else {
-		a.NPlayerSlotBuckets[to] = 0
-	}
+	a.nplayerInsertSlot(target, destSlot, moved)
 }
 
 // InfosetKey encodes the belief state into a fixed-size 16-byte array.
