@@ -231,7 +231,7 @@ func (d *Dispatcher) refreshPinHolds() {
 	d.mu.Lock()
 	for _, id := range d.queue {
 		j := d.pending[id]
-		if j == nil || j.canceled || !j.resume || j.state != StateQueued {
+		if j == nil || j.canceled || !j.spec.Resume || j.state != StateQueued {
 			continue
 		}
 		if node := requiresFor(&j.spec).Node; node != "" {
