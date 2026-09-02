@@ -5,36 +5,33 @@
 # It is NOT compatible with the Deep CFR pipeline (neural network checkpoints).
 # For Deep CFR evaluation, use evaluate_agents.py and es_validator.py.
 #
-# cambia-1428 (Python engine retirement, R2/R3): this module still imports and
-# constructs the Python CambiaGameState (see the recursive best-response tree
-# search below -- _run_br_calculation_process, _best_response_node_logic,
-# _br_action_worker). That search deep-copies the mutable game state across
-# process boundaries and mutates it with an undo callback per branch, neither
-# of which GoEngine (index-based apply, save()/restore() snapshots, no
-# in-process undo) offers a drop-in replacement for; the InfosetKey/PolicyDict
-# tabular-CFR lookups it drives are also unrelated to GoAgentState. Porting it
-# is a standalone rewrite of the tabular CFR exploitability path (only
-# reachable through `train tabular` / main_train.py, which are outside this
-# ticket's scope), not a import swap, so it was left as a named, tracked gap
-# rather than attempted or stubbed here. The tiny/exact solver's own
-# exploitability path is already Go-backed and does not import this module
-# (see tests/test_tiny_solver_go_backend.py).
+# cambia-1428 (Python engine retirement): the recursive best-response tree
+# search below runs on the Go engine. Only the rules substrate moved: the
+# search still keys the opponent's average strategy by InfosetKey built from
+# the Python AgentState, because src.cfr.worker writes that table with the same
+# belief machinery during training and a key rebuilt off GoAgentState would
+# silently look up different entries. src.cfr.br_state.GoBrState is the
+# adapter -- it deals a GoEngine, branches under checkpoint/rewind instead of
+# the retired apply/undo pair, and rebuilds the AgentObservation stream off the
+# engine's eval surface. Pool workers cannot receive an engine handle across a
+# fork, so a parallel branch travels as (deal spec, action prefix, action) and
+# the worker replays it onto its own engine.
 
 import logging
 import json
 import os
 import copy
 import queue
+import random
 import time
 import threading
 import multiprocessing
 import multiprocessing.pool
 import traceback
-from typing import Optional, List, Set
+from typing import Any, Optional, List, Tuple
 from dataclasses import asdict, is_dataclass
 import numpy as np
 
-from .game.engine import CambiaGameState
 from .card import Card
 from .agent_state import AgentState, AgentObservation
 from .constants import (
@@ -53,6 +50,7 @@ from .constants import (
 )
 from .config import Config
 from .utils import InfosetKey, PolicyDict, normalize_probabilities, SimulationTrace
+from .cfr.br_state import DealSpec, GoBrState
 
 from .cfr.exceptions import (
     GracefulShutdownException,
@@ -74,7 +72,10 @@ logger = logging.getLogger(__name__)
 
 
 def _br_action_worker(
-    game_state_copy: CambiaGameState,
+    house_rules: Any,
+    deal: DealSpec,
+    action_prefix: Tuple[int, ...],
+    action_idx: int,
     br_agent_state_copy: AgentState,
     opp_view_agent_state_copy: AgentState,
     action: GameAction,
@@ -84,30 +85,22 @@ def _br_action_worker(
 ) -> float:
     """
     Target function for the BR pool. Applies one action and calls node logic.
+
+    The node arrives as (deal spec, action prefix) rather than as a copy of the
+    game: an engine handle cannot cross a fork, so this rebuilds its own engine
+    and replays the prefix onto it. The replay is exact -- the deal is a pure
+    function of the spec and the engine is deterministic given an action
+    sequence -- so the worker starts from the identical state its parent was on.
     """
     # No direct access to the main shutdown event here.
     # Relies on the pool being terminated if shutdown is triggered.
+    state: Optional[GoBrState] = None
     try:
-        # Apply the action to the copied state
-        state_delta, undo_info = game_state_copy.apply_action(action)
-        if not callable(undo_info):
-            logger.error(
-                "BR ActionWorker(D%d): Action %s returned invalid undo.", depth, action
-            )
-            return -float("inf")  # Indicate failure
+        state = GoBrState.new(house_rules, deal, action_prefix)
+        state.apply(action_idx)
 
-        # Create observation AFTER action (use static helper)
-        obs_after_action = AnalysisTools._create_observation_for_br(
-            game_state_copy, action, br_agent_state_copy.player_id
-        )
-        if obs_after_action is None:
-            # Undo is not possible here as it's in a different process
-            logger.error(
-                "BR ActionWorker(D%d): Failed to create observation after action %s.",
-                depth,
-                action,
-            )
-            return -float("inf")  # Indicate failure
+        # Create observation AFTER action
+        obs_after_action = state.observation(action, br_agent_state_copy.player_id)
 
         # Update agent states using static helpers
         br_obs_filtered = AnalysisTools._filter_observation_for_br(
@@ -121,7 +114,7 @@ def _br_action_worker(
 
         # Recursive call to node logic (serially within this worker)
         action_value = AnalysisTools._best_response_node_logic(
-            game_state_copy,
+            state,
             opponent_avg_strategy,
             br_player,
             br_agent_state_copy,
@@ -129,7 +122,6 @@ def _br_action_worker(
             depth + 1,
             pool=None,  # No pool for recursive calls within worker
         )
-        # No undo needed as we work on copies
         return action_value
     except GameStateError as e:
         logger.error(
@@ -161,10 +153,15 @@ def _br_action_worker(
             exc_info=False,  # Keep log cleaner
         )
         return -float("inf")  # Indicate failure
+    finally:
+        # The FFI handle pool is finite and this worker process is reused for
+        # every task the pool hands it, so the engine has to go back now.
+        if state is not None:
+            state.close()
 
 
 def _best_response_recursive_entry(
-    game_state: CambiaGameState,
+    game_state: GoBrState,
     opponent_avg_strategy: PolicyDict,
     br_player: int,
     br_agent_state: AgentState,
@@ -184,6 +181,52 @@ def _best_response_recursive_entry(
     )
 
 
+def build_br_start_state(
+    config: Config,
+    br_player: int,
+    deal: DealSpec,
+) -> Tuple[GoBrState, AgentState, AgentState]:
+    """Deal the root of one best-response search and both belief states.
+
+    Returns the engine-backed state plus the BR seat's belief and the BR seat's
+    model of the opponent's belief, both initialized from the pre-first-action
+    frame. Split out of _run_br_calculation_process so the cross-engine equality
+    harness can start a search on a pinned deal without a process and a queue.
+
+    The caller owns the returned state and must close it: the FFI handle pool is
+    finite.
+    """
+    opponent_player = 1 - br_player
+    state = GoBrState.new(config.cambia_rules, deal)
+    try:
+        initial_obs = state.initial_observation()
+        peeks = state.initial_peek_indices()
+
+        br_agent_state = AgentState(
+            player_id=br_player,
+            opponent_id=opponent_player,
+            memory_level=config.agent_params.memory_level,
+            time_decay_turns=config.agent_params.time_decay_turns,
+            initial_hand_size=len(state.hand(br_player)),
+            config=config,
+        )
+        br_agent_state.initialize(initial_obs, state.hand(br_player), peeks)
+
+        opp_view_agent_state = AgentState(
+            player_id=opponent_player,
+            opponent_id=br_player,
+            memory_level=config.agent_params.memory_level,
+            time_decay_turns=config.agent_params.time_decay_turns,
+            initial_hand_size=len(state.hand(opponent_player)),
+            config=config,
+        )
+        opp_view_agent_state.initialize(initial_obs, state.hand(opponent_player), peeks)
+    except Exception:
+        state.close()
+        raise
+    return state, br_agent_state, opp_view_agent_state
+
+
 def _run_br_calculation_process(
     avg_strat: PolicyDict,
     config: Config,
@@ -194,12 +237,19 @@ def _run_br_calculation_process(
     # This check is primarily for reacting if the main process signalled shutdown
     # *before* this process started its main work.
     shutdown_event_copy: Optional[threading.Event],
+    deal: Optional[DealSpec] = None,
 ):
     """
     Function executed by each of the two main BR calculation processes.
     Sets up a local pool and calls the BR entry point. Includes basic error handling.
+
+    The engine is dealt inside this process, after the pool is forked: an engine
+    handle cannot cross a fork, and forking a process that has already started
+    the Go runtime is not safe either. `deal` defaults to a fresh random seed,
+    which is the unseeded per-process deal the Python-engine search had.
     """
     pool: Optional[multiprocessing.pool.Pool] = None  # Define pool here for finally block
+    state: Optional[GoBrState] = None
     try:
         # --- Check for immediate shutdown ---
         if shutdown_event_copy is not None and shutdown_event_copy.is_set():
@@ -220,50 +270,24 @@ def _run_br_calculation_process(
             exploit_workers,
         )
 
+        # The pool is forked BEFORE the engine is dealt, deliberately: a worker
+        # forked from a process that has already loaded libcambia would inherit
+        # a Go runtime it cannot safely use.
         if exploit_workers > 1:
             pool = multiprocessing.Pool(processes=exploit_workers)
             logger.debug("BR Process P%d: Worker pool created.", br_player)
 
         # Initialize game state and agent states *within this process*
-        game_state = CambiaGameState(house_rules=config.cambia_rules)
-        opponent_player = 1 - br_player
-
-        initial_obs = AnalysisTools._create_observation_for_br(game_state, None, -1)
-        if initial_obs is None:
-            raise RuntimeError("BR Process P%d: Failed to create initial observation.")
-
-        br_agent_state = AgentState(
-            player_id=br_player,
-            opponent_id=opponent_player,
-            memory_level=config.agent_params.memory_level,
-            time_decay_turns=config.agent_params.time_decay_turns,
-            initial_hand_size=len(game_state.players[br_player].hand),
-            config=config,
-        )
-        br_agent_state.initialize(
-            initial_obs,
-            game_state.players[br_player].hand,
-            game_state.players[br_player].initial_peek_indices,
-        )
-
-        opp_view_agent_state = AgentState(
-            player_id=opponent_player,
-            opponent_id=br_player,
-            memory_level=config.agent_params.memory_level,
-            time_decay_turns=config.agent_params.time_decay_turns,
-            initial_hand_size=len(game_state.players[opponent_player].hand),
-            config=config,
-        )
-        opp_view_agent_state.initialize(
-            initial_obs,
-            game_state.players[opponent_player].hand,
-            game_state.players[opponent_player].initial_peek_indices,
+        if deal is None:
+            deal = DealSpec(seed=random.getrandbits(63))
+        state, br_agent_state, opp_view_agent_state = build_br_start_state(
+            config, br_player, deal
         )
         logger.debug("BR Process P%d: Game and Agent states initialized.", br_player)
 
         # Call the entry point for BR calculation
         br_value = _best_response_recursive_entry(
-            game_state,
+            state,
             avg_strat,
             br_player,
             br_agent_state,
@@ -336,6 +360,8 @@ def _run_br_calculation_process(
                 logger.error(
                     "BR Process P%d: Error closing pool: %s", br_player, e_pool_close
                 )
+        if state is not None:
+            state.close()
         logger.info("BR Process P%d: Exiting.", br_player)
 
 
@@ -615,7 +641,7 @@ class AnalysisTools:
 
     @staticmethod
     def _best_response_node_logic(
-        game_state: CambiaGameState,
+        game_state: GoBrState,
         opponent_avg_strategy: PolicyDict,
         br_player: int,
         br_agent_state: AgentState,
@@ -623,43 +649,44 @@ class AnalysisTools:
         depth: int,
         pool: Optional[multiprocessing.pool.Pool],  # Pool for parallelizing actions
     ) -> float:
-        """Recursive logic for a node in the Best Response calculation."""
+        """Recursive logic for a node in the Best Response calculation.
+
+        Branching is checkpoint / apply / rewind rather than the retired
+        apply/undo pair: the Go engine has no in-process undo, so the node takes
+        one checkpoint and rewinds to it after each child. Belief rewinds by
+        cloning the Python AgentState per branch, exactly as before.
+        """
         try:
             if game_state.is_terminal():
-                return game_state.get_utility(br_player)
+                return game_state.utility(br_player)
 
-            acting_player = game_state.get_acting_player()
+            acting_player = game_state.acting_player()
             if acting_player == -1:
                 logger.error(
-                    "BR NodeLogic(D%d): Invalid acting player. State: %s",
+                    "BR NodeLogic(D%d): Invalid acting player at prefix %s.",
                     depth,
-                    game_state,
+                    game_state.action_prefix,
                 )
                 return 0.0
 
             opponent_player = 1 - br_player
-            legal_actions_set: Set[GameAction] = game_state.get_legal_actions()
-            # Sort for deterministic behavior, helpful for debugging
-            legal_actions: List[GameAction] = sorted(list(legal_actions_set), key=repr)
-            num_actions = len(legal_actions)
+            # Sorted by repr: src.cfr.worker indexes each stored strategy vector
+            # in that order, so reading one in the engine's ascending index
+            # order would read the probability of a different action.
+            legal_pairs: List[Tuple[int, GameAction]] = game_state.legal_actions()
+            num_actions = len(legal_pairs)
 
             if num_actions == 0:
                 if not game_state.is_terminal():
                     logger.error(
-                        "BR NodeLogic(D%d): No legal actions but non-terminal! State: %s",
+                        "BR NodeLogic(D%d): No legal actions but non-terminal at "
+                        "prefix %s!",
                         depth,
-                        game_state,
+                        game_state.action_prefix,
                     )
-                return game_state.get_utility(br_player)  # Return current utility
+                return game_state.utility(br_player)  # Return current utility
 
-            current_context = AnalysisTools._get_decision_context(game_state)
-            if current_context is None:
-                logger.error(
-                    "BR NodeLogic(D%d): Could not determine decision context. State: %s",
-                    depth,
-                    game_state,
-                )
-                return 0.0  # Error case
+            current_context = game_state.decision_context()
 
             # --- Node Logic ---
             if acting_player == br_player:
@@ -668,15 +695,20 @@ class AnalysisTools:
                 # Parallel execution for BR player's actions
                 if pool and num_actions > 1:
                     tasks = []
-                    for action in legal_actions:
-                        # Create deep copies of game and agent states for the worker
+                    deal = game_state.deal
+                    prefix = game_state.action_prefix
+                    house_rules = game_state.house_rules
+                    for action_idx, action in legal_pairs:
+                        # The worker rebuilds the node from (deal, prefix): an
+                        # engine handle cannot cross a fork. Only the belief
+                        # states travel, and those are plain Python objects.
                         try:
-                            game_state_copy = copy.deepcopy(game_state)
                             br_agent_state_copy = br_agent_state.clone()
                             opp_view_agent_state_copy = opp_view_agent_state.clone()
                         except Exception as e_copy:
                             logger.error(
-                                "BR NodeLogic(D%d): Error deep copying states for parallel task: %s",
+                                "BR NodeLogic(D%d): Error cloning belief states for "
+                                "parallel task: %s",
                                 depth,
                                 e_copy,
                             )
@@ -685,7 +717,10 @@ class AnalysisTools:
 
                         tasks.append(
                             (
-                                game_state_copy,
+                                house_rules,
+                                deal,
+                                prefix,
+                                action_idx,
                                 br_agent_state_copy,
                                 opp_view_agent_state_copy,
                                 action,
@@ -695,16 +730,11 @@ class AnalysisTools:
                             )
                         )
 
-                    if pool:  # Check if pool wasn't disabled by copy error
+                    if pool:  # Check if pool wasn't disabled by clone error
                         try:
                             results = pool.starmap(_br_action_worker, tasks)
                             valid_results = [r for r in results if r != -float("inf")]
                             if not valid_results:
-                                # logger.warning( # Reduce log noise
-                                #     "BR NodeLogic(D%d): BR player P%d (parallel) had no successful action paths. Returning 0.",
-                                #     depth,
-                                #     br_player,
-                                # )
                                 return 0.0
                             return max(valid_results)
                         except Exception as e_starmap:
@@ -718,103 +748,74 @@ class AnalysisTools:
                 # Serial execution for BR player's actions
                 max_value = -float("inf")
                 actions_attempted_serially = 0
-                for action in legal_actions:
-                    state_delta, undo_info = game_state.apply_action(action)
-                    if not callable(undo_info):
-                        logger.error(
-                            "BR NodeLogic(D%d): BR Action %s returned invalid undo. State:%s",
-                            depth,
-                            action,
+                checkpoint = game_state.checkpoint()
+                try:
+                    for action_idx, action in legal_pairs:
+                        try:
+                            game_state.apply(action_idx)
+                        except Exception as e_apply:
+                            logger.error(
+                                "BR NodeLogic(D%d): Engine rejected BR action %s: %s",
+                                depth,
+                                action,
+                                e_apply,
+                            )
+                            game_state.rewind(checkpoint)
+                            continue
+
+                        obs_after_action = game_state.observation(action, acting_player)
+
+                        next_br_agent_state = br_agent_state.clone()
+                        next_opp_view_agent_state = opp_view_agent_state.clone()
+                        try:
+                            br_obs_filtered = AnalysisTools._filter_observation_for_br(
+                                obs_after_action, br_player
+                            )
+                            next_br_agent_state.update(br_obs_filtered)
+                            opp_obs_filtered = AnalysisTools._filter_observation_for_br(
+                                obs_after_action, opponent_player
+                            )
+                            next_opp_view_agent_state.update(opp_obs_filtered)
+                        except (AgentStateError, ObservationUpdateError) as e_update:
+                            logger.error(
+                                "BR NodeLogic(D%d): Agent state error updating after "
+                                "BR action %s: %s",
+                                depth,
+                                action,
+                                e_update,
+                            )
+                            game_state.rewind(checkpoint)
+                            continue
+                        except (
+                            Exception
+                        ) as e_update:  # JUSTIFIED: BR calculation resilience
+                            logger.error(
+                                "BR NodeLogic(D%d): Error updating agent states after "
+                                "BR action %s: %s",
+                                depth,
+                                action,
+                                e_update,
+                                exc_info=False,
+                            )
+                            game_state.rewind(checkpoint)
+                            continue
+
+                        action_value = AnalysisTools._best_response_node_logic(
                             game_state,
+                            opponent_avg_strategy,
+                            br_player,
+                            next_br_agent_state,
+                            next_opp_view_agent_state,
+                            depth + 1,
+                            pool=None,
                         )
-                        continue
-
-                    obs_after_action = AnalysisTools._create_observation_for_br(
-                        game_state, action, acting_player
-                    )
-                    if obs_after_action is None:
-                        try:
-                            undo_info()
-                        except GameStateError as e:
-                            logger.debug(
-                                "BR NodeLogic(D%d): Game state error undoing action: %s",
-                                depth,
-                                e,
-                            )
-                        continue
-
-                    next_br_agent_state = br_agent_state.clone()
-                    next_opp_view_agent_state = opp_view_agent_state.clone()
-                    try:
-                        br_obs_filtered = AnalysisTools._filter_observation_for_br(
-                            obs_after_action, br_player
-                        )
-                        next_br_agent_state.update(br_obs_filtered)
-                        opp_obs_filtered = AnalysisTools._filter_observation_for_br(
-                            obs_after_action, opponent_player
-                        )
-                        next_opp_view_agent_state.update(opp_obs_filtered)
-                    except (AgentStateError, ObservationUpdateError) as e_update:
-                        logger.error(
-                            "BR NodeLogic(D%d): Agent state error updating after BR action %s: %s",
-                            depth,
-                            action,
-                            e_update,
-                        )
-                        try:
-                            undo_info()
-                        except GameStateError as e:
-                            logger.debug(
-                                "BR NodeLogic(D%d): Game state error undoing action: %s",
-                                depth,
-                                e,
-                            )
-                        continue
-                    except Exception as e_update:  # JUSTIFIED: BR calculation resilience
-                        logger.error(
-                            "BR NodeLogic(D%d): Error updating agent states after BR action %s: %s",
-                            depth,
-                            action,
-                            e_update,
-                            exc_info=False,
-                        )
-                        try:
-                            undo_info()
-                        except GameStateError as e:
-                            logger.debug(
-                                "BR NodeLogic(D%d): Game state error undoing action: %s",
-                                depth,
-                                e,
-                            )
-                        continue
-
-                    action_value = AnalysisTools._best_response_node_logic(
-                        game_state,
-                        opponent_avg_strategy,
-                        br_player,
-                        next_br_agent_state,
-                        next_opp_view_agent_state,
-                        depth + 1,
-                        pool=None,
-                    )
-                    try:
-                        undo_info()  # Restore state
-                    except GameStateError as e_undo:
-                        logger.error(
-                            "BR NodeLogic(D%d): Game state error undoing BR action %s: %s",
-                            depth,
-                            action,
-                            e_undo,
-                        )
-                    max_value = max(max_value, action_value)
-                    actions_attempted_serially += 1
+                        game_state.rewind(checkpoint)
+                        max_value = max(max_value, action_value)
+                        actions_attempted_serially += 1
+                finally:
+                    game_state.release(checkpoint)
 
                 if max_value == -float("inf") and actions_attempted_serially == 0:
-                    # logger.warning( # Reduce log noise
-                    #     "BR NodeLogic(D%d): BR player P%d (serial) had no successful action paths. Returning 0.",
-                    #     depth,
-                    #     br_player,
-                    # )
                     return 0.0
                 return max_value
 
@@ -826,7 +827,8 @@ class AnalysisTools:
                     infoset_key = InfosetKey(*base_infoset_tuple, current_context.value)
                 except AgentStateError as e_key:
                     logger.error(
-                        "BR NodeLogic(D%d): Agent state error getting Opponent P%d infoset key: %s",
+                        "BR NodeLogic(D%d): Agent state error getting Opponent P%d "
+                        "infoset key: %s",
                         depth,
                         acting_player,
                         e_key,
@@ -834,7 +836,8 @@ class AnalysisTools:
                     return 0.0
                 except Exception as e_key:  # JUSTIFIED: BR calculation resilience
                     logger.error(
-                        "BR NodeLogic(D%d): Error getting Opponent P%d infoset key: %s. OppView State: %s",
+                        "BR NodeLogic(D%d): Error getting Opponent P%d infoset key: "
+                        "%s. OppView State: %s",
                         depth,
                         acting_player,
                         e_key,
@@ -855,7 +858,8 @@ class AnalysisTools:
                     )
                 elif len(opponent_strategy) != num_actions:
                     logger.warning(
-                        "BR NodeLogic(D%d): Dim mismatch Opp P%d strategy at OppView key %s. Have %d, need %d. Using uniform.",
+                        "BR NodeLogic(D%d): Dim mismatch Opp P%d strategy at OppView "
+                        "key %s. Have %d, need %d. Using uniform.",
                         depth,
                         acting_player,
                         infoset_key,
@@ -877,19 +881,14 @@ class AnalysisTools:
                 if num_actions > 0 and strategy_sum > 1e-9:
                     if not np.isclose(strategy_sum, 1.0):
                         if not strategy_was_missing and not dim_mismatch:
-                            # logger.warning( # Reduce log noise
-                            #     "BR NodeLogic(D%d): Normalizing opponent strategy key %s (Sum: %f)",
-                            #     depth,
-                            #     infoset_key,
-                            #     strategy_sum,
-                            # )
                             pass
                         opponent_strategy = normalize_probabilities(opponent_strategy)
                         if len(opponent_strategy) == 0 or not np.isclose(
                             opponent_strategy.sum(), 1.0
                         ):
                             logger.error(
-                                "BR NodeLogic(D%d): Failed to normalize opp strategy for %s. Using uniform.",
+                                "BR NodeLogic(D%d): Failed to normalize opp strategy "
+                                "for %s. Using uniform.",
                                 depth,
                                 infoset_key,
                             )
@@ -899,111 +898,84 @@ class AnalysisTools:
                                 else np.array([])
                             )
 
-                    for i, action in enumerate(legal_actions):
-                        action_prob = opponent_strategy[i]
-                        if action_prob < 1e-9:
-                            continue
+                    checkpoint = game_state.checkpoint()
+                    try:
+                        for i, (action_idx, action) in enumerate(legal_pairs):
+                            action_prob = opponent_strategy[i]
+                            if action_prob < 1e-9:
+                                continue
 
-                        state_delta, undo_info = game_state.apply_action(action)
-                        if not callable(undo_info):
-                            logger.error(
-                                "BR NodeLogic(D%d): Opponent Action %s returned invalid undo. State:%s",
-                                depth,
-                                action,
+                            try:
+                                game_state.apply(action_idx)
+                            except Exception as e_apply:
+                                logger.error(
+                                    "BR NodeLogic(D%d): Engine rejected Opponent "
+                                    "action %s: %s",
+                                    depth,
+                                    action,
+                                    e_apply,
+                                )
+                                game_state.rewind(checkpoint)
+                                continue
+
+                            obs_after_action = game_state.observation(
+                                action, acting_player
+                            )
+
+                            next_br_agent_state = br_agent_state.clone()
+                            next_opp_view_agent_state = opp_view_agent_state.clone()
+                            try:
+                                br_obs_filtered = (
+                                    AnalysisTools._filter_observation_for_br(
+                                        obs_after_action, br_player
+                                    )
+                                )
+                                next_br_agent_state.update(br_obs_filtered)
+                                opp_obs_filtered = (
+                                    AnalysisTools._filter_observation_for_br(
+                                        obs_after_action, opponent_player
+                                    )
+                                )
+                                next_opp_view_agent_state.update(opp_obs_filtered)
+                            except (AgentStateError, ObservationUpdateError) as e_update:
+                                logger.error(
+                                    "BR NodeLogic(D%d): Agent state error updating "
+                                    "after Opp action %s: %s",
+                                    depth,
+                                    action,
+                                    e_update,
+                                )
+                                game_state.rewind(checkpoint)
+                                continue
+                            except (
+                                Exception
+                            ) as e_update:  # JUSTIFIED: BR calculation resilience
+                                logger.error(
+                                    "BR NodeLogic(D%d): Error updating agent states "
+                                    "after Opp action %s: %s",
+                                    depth,
+                                    action,
+                                    e_update,
+                                    exc_info=False,
+                                )
+                                game_state.rewind(checkpoint)
+                                continue
+
+                            recursive_value = AnalysisTools._best_response_node_logic(
                                 game_state,
+                                opponent_avg_strategy,
+                                br_player,
+                                next_br_agent_state,
+                                next_opp_view_agent_state,
+                                depth + 1,
+                                pool=None,
                             )
-                            continue
-
-                        obs_after_action = AnalysisTools._create_observation_for_br(
-                            game_state, action, acting_player
-                        )
-                        if obs_after_action is None:
-                            try:
-                                undo_info()
-                            except GameStateError as e:
-                                logger.debug(
-                                    "BR NodeLogic(D%d): Game state error undoing action: %s",
-                                    depth,
-                                    e,
-                                )
-                            continue
-
-                        next_br_agent_state = br_agent_state.clone()
-                        next_opp_view_agent_state = opp_view_agent_state.clone()
-                        try:
-                            br_obs_filtered = AnalysisTools._filter_observation_for_br(
-                                obs_after_action, br_player
-                            )
-                            next_br_agent_state.update(br_obs_filtered)
-                            opp_obs_filtered = AnalysisTools._filter_observation_for_br(
-                                obs_after_action, opponent_player
-                            )
-                            next_opp_view_agent_state.update(opp_obs_filtered)
-                        except (AgentStateError, ObservationUpdateError) as e_update:
-                            logger.error(
-                                "BR NodeLogic(D%d): Agent state error updating after Opp action %s: %s",
-                                depth,
-                                action,
-                                e_update,
-                            )
-                            try:
-                                undo_info()
-                            except GameStateError as e:
-                                logger.debug(
-                                    "BR NodeLogic(D%d): Game state error undoing action: %s",
-                                    depth,
-                                    e,
-                                )
-                            continue
-                        except (
-                            Exception
-                        ) as e_update:  # JUSTIFIED: BR calculation resilience
-                            logger.error(
-                                "BR NodeLogic(D%d): Error updating agent states after Opp action %s: %s",
-                                depth,
-                                action,
-                                e_update,
-                                exc_info=False,
-                            )
-                            try:
-                                undo_info()
-                            except GameStateError as e:
-                                logger.debug(
-                                    "BR NodeLogic(D%d): Game state error undoing action: %s",
-                                    depth,
-                                    e,
-                                )
-                            continue
-
-                        recursive_value = AnalysisTools._best_response_node_logic(
-                            game_state,
-                            opponent_avg_strategy,
-                            br_player,
-                            next_br_agent_state,
-                            next_opp_view_agent_state,
-                            depth + 1,
-                            pool=None,
-                        )
-                        try:
-                            undo_info()
-                        except GameStateError as e_undo:
-                            logger.error(
-                                "BR NodeLogic(D%d): Game state error undoing Opp action %s: %s",
-                                depth,
-                                action,
-                                e_undo,
-                            )
-                        expected_value += action_prob * recursive_value
+                            game_state.rewind(checkpoint)
+                            expected_value += action_prob * recursive_value
+                    finally:
+                        game_state.release(checkpoint)
                 else:
-                    if num_actions > 0:
-                        # logger.warning( # Reduce log noise
-                        #     "BR NodeLogic(D%d): Opponent P%d zero strategy sum at OppView infoset %s.",
-                        #     depth,
-                        #     acting_player,
-                        #     infoset_key,
-                        # )
-                        pass
-                    return game_state.get_utility(br_player)
+                    return game_state.utility(br_player)
 
                 return expected_value
 
@@ -1023,16 +995,26 @@ class AnalysisTools:
             return 0.0
         except Exception as e_br_rec:  # JUSTIFIED: BR calculation resilience
             logger.exception(
-                "BR NodeLogic(D%d): Unhandled error in recursion: %s. State: %s",
+                "BR NodeLogic(D%d): Unhandled error in recursion at prefix %s: %s",
                 depth,
+                game_state.action_prefix,
                 e_br_rec,
-                game_state,
             )
             return 0.0
 
+    # --- Python-engine helpers (tools/ only) ---
+    #
+    # The best-response search no longer calls these two: it reads the decision
+    # context straight off the engine (engine/legal.go's DecisionCtx) and builds
+    # its observations in GoBrState. They stay because the reduced-deck research
+    # tools -- tools/tiny_solver.py's python backend, tools/tiny_probe.py,
+    # tools/tiny_exploit.py -- key their infosets through them and still recurse
+    # a Python CambiaGameState. They are duck-typed on that state rather than
+    # importing it, so this module carries no dependency on the retiring engine.
+
     @staticmethod
-    def _get_decision_context(game_state: CambiaGameState) -> Optional[DecisionContext]:
-        """Determine DecisionContext from game state."""
+    def _get_decision_context(game_state) -> Optional[DecisionContext]:
+        """Determine DecisionContext from a Python CambiaGameState."""
         try:
             if game_state.snap_phase_active:
                 return DecisionContext.SNAP_DECISION
@@ -1072,11 +1054,17 @@ class AnalysisTools:
 
     @staticmethod
     def _create_observation_for_br(
-        game_state: CambiaGameState,
+        game_state,
         action: Optional[GameAction],
         acting_player: int,
     ) -> Optional[AgentObservation]:
-        """Helper to create a basic observation for BR agent updates."""
+        """Observation for belief updates, off a Python CambiaGameState.
+
+        GoBrState.observation is the engine-backed counterpart and the one the
+        best-response search uses; this stays for the reduced-deck tools noted
+        above, and the two must keep producing the same frame for the same
+        position.
+        """
         try:
             drawn_card_for_obs = None
             if isinstance(action, ActionDiscard):
