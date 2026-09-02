@@ -1,9 +1,17 @@
 """
 src/cfr/worker.py
 
-Implements the worker process logic for CFR+ training using External Sampling Monte Carlo CFR (ESMCFR).
-Each worker simulates games based on a strategy snapshot provided by the main process,
-accumulates local updates, and returns them. Uses Outcome Sampling for action selection.
+Implements the worker process logic for CFR+ training using outcome-sampling
+Monte Carlo CFR (OS-MCCFR, Lanctot et al. 2009). Each worker plays one sampled
+trajectory against a strategy snapshot provided by the main process, accumulates
+local regret and average-strategy updates along it, and returns them.
+
+The module described itself as external sampling (ES-MCCFR) through cambia-719
+while sampling a single action at every node, the updating player's included.
+That is outcome sampling, and it is what the estimator below implements: an
+epsilon-mixed behaviour policy at the traverser's nodes, the full 1/q correction
+carried down the trajectory, and counterfactual reaches threaded so the regret
+of an infoset is weighted by the opponents' probability of reaching it.
 
 Engine (cambia-1782)
 --------------------
@@ -132,10 +140,77 @@ def averaging_weight(iteration: int, params: CfrPlusParamsConfig) -> float:
     return float(max(0, (iteration + 1) - params.averaging_delay))
 
 
+def sampling_policy(strategy: np.ndarray, epsilon: float) -> np.ndarray:
+    """The epsilon-mixed behaviour policy outcome sampling explores with.
+
+    Sampling from the current strategy alone can never revisit an action regret
+    matching has driven to zero, so one unlucky early sample freezes that action
+    out for the rest of the run. Mixing epsilon of a uniform policy into the
+    sampling distribution keeps every legal action reachable; the 1/q correction
+    in the regret estimate removes the bias this introduces (Lanctot et al.
+    2009). The strategy itself is untouched, only what gets sampled from it.
+    """
+    num_actions = len(strategy)
+    if num_actions == 0:
+        return np.array([], dtype=np.float64)
+    probs = np.asarray(strategy, dtype=np.float64)
+    if epsilon <= 0.0:
+        return probs
+    uniform = np.ones(num_actions, dtype=np.float64) / num_actions
+    return (1.0 - epsilon) * probs + epsilon * uniform
+
+
+def sampled_regrets(
+    strategy: np.ndarray, chosen_index: int, action_value: float
+) -> np.ndarray:
+    """Instantaneous sampled counterfactual regrets at one infoset.
+
+    Outcome sampling estimates the value of the sampled action alone, so the
+    estimate is ``action_value`` for that action and zero for every other. The
+    node value is the strategy's own expectation over those estimates, which is
+    ``sigma[a*] * action_value``, and each action's regret is that baseline
+    subtracted from its estimate. The regrets are therefore orthogonal to the
+    strategy: ``sum_a sigma(a) r(a) == 0``.
+
+    Subtracting a per-action ``sigma[a] * action_value`` instead, as the code
+    did before cambia-719, understates every unsampled action's regret by a
+    factor that varies with the strategy, and the RM+ floor then rectifies the
+    resulting drift asymmetrically.
+    """
+    chosen_prob = float(strategy[chosen_index])
+    regrets = np.full(len(strategy), -chosen_prob * action_value, dtype=np.float64)
+    regrets[chosen_index] = action_value * (1.0 - chosen_prob)
+    return regrets
+
+
+def suffix_reach_ratio(
+    child_ratio: float, own_action_prob: float, sampling_prob: float
+) -> float:
+    """The suffix factor a node hands its caller, composed one level up.
+
+    The counterfactual value of a sampled action is the leaf utility weighted by
+    the updating player's own probability of playing the suffix and divided by
+    the behaviour policy's probability of sampling it. Both are products over
+    the same nodes, so the recursion carries their ratio rather than either
+    alone: a terminal returns 1, and each node multiplies in its own action
+    probability (1 for a node the updating player does not own) over the
+    probability the sampler drew that action.
+
+    Dividing by ``sampling_prob`` is the part that is easy to lose. Without it
+    the trajectory's prefix is corrected for and its suffix is not, which biases
+    every value estimated above a node that had more than one continuation.
+    """
+    if sampling_prob <= 0.0:
+        return 0.0
+    return child_ratio * own_action_prob / sampling_prob
+
+
 def _traverse_game_for_worker(
     game_state: GoBrState,
     agent_states: List[AgentState],
-    reach_probs: np.ndarray,
+    my_reach: float,
+    opp_reach: float,
+    sample_reach: float,
     iteration: int,
     updating_player: int,  # The player whose regret/strategy is being updated this iteration
     averaging_weight: float,  # CFR+ delayed averaging weight; strategy sum only
@@ -151,11 +226,26 @@ def _traverse_game_for_worker(
     min_depth_after_bottom_out_tracker: List[float],
     has_bottomed_out_tracker: List[bool],
     simulation_nodes: List[SimulationNodeData],
-) -> np.ndarray:
-    """
-    Recursive traversal logic for ESMCFR using Outcome Sampling.
-    Samples a single action based on the current strategy and recurses.
-    Applies importance-weighted regret updates.
+) -> Tuple[np.ndarray, float]:
+    """One node of the outcome-sampling traversal (Lanctot et al. 2009).
+
+    Samples a single action and recurses on it, then updates the average
+    strategy at every node and the sampled counterfactual regrets at the
+    updating player's nodes.
+
+    Three reach probabilities are threaded down, all measured from the root to
+    this node: ``my_reach`` is the updating player's own probability of playing
+    here, ``opp_reach`` the probability everyone else does, and ``sample_reach``
+    the probability the behaviour policy had of sampling this trajectory prefix.
+    Dividing by ``sample_reach`` is what makes the single-trajectory estimate
+    unbiased; before cambia-719 all three were held at the constant 1, so the
+    correction was inert and no counterfactual weighting was applied.
+
+    Returns the utility vector of the sampled leaf together with the suffix
+    factor described in ``suffix_reach_ratio``: the updating player's own
+    probability of playing from this node to that leaf, over the behaviour
+    policy's probability of having sampled it. The caller needs that ratio to
+    weight the sampled action's counterfactual value.
     """
     # Use the module-level logger
     logger_traverse = logging.getLogger(__name__)
@@ -197,8 +287,11 @@ def _traverse_game_for_worker(
         min_depth_after_bottom_out_tracker[0] = min(
             min_depth_after_bottom_out_tracker[0], float(depth)
         )
-        return np.array(
-            [game_state.utility(i) for i in range(NUM_PLAYERS)], dtype=np.float64
+        return (
+            np.array(
+                [game_state.utility(i) for i in range(NUM_PLAYERS)], dtype=np.float64
+            ),
+            1.0,
         )
 
     if depth >= config.system.recursion_limit:
@@ -210,7 +303,7 @@ def _traverse_game_for_worker(
             min_depth_after_bottom_out_tracker[0], float(depth)
         )
         worker_stats.error_count += 1
-        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+        return np.zeros(NUM_PLAYERS, dtype=np.float64), 1.0
 
     # Determine context. engine/legal.go's DecisionCtx partitions states exactly
     # as the Python pending-record walk did and its values are numerically
@@ -229,9 +322,8 @@ def _traverse_game_for_worker(
             current_context.name,
         )
         worker_stats.error_count += 1
-        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+        return np.zeros(NUM_PLAYERS, dtype=np.float64), 1.0
 
-    opponent = 1 - player
     try:
         current_agent_state = agent_states[player]
         if not callable(current_agent_state.get_infoset_key):
@@ -243,7 +335,7 @@ def _traverse_game_for_worker(
                 current_agent_state,
             )
             worker_stats.error_count += 1
-            return np.zeros(NUM_PLAYERS, dtype=np.float64)
+            return np.zeros(NUM_PLAYERS, dtype=np.float64), 1.0
 
         base_infoset_tuple = current_agent_state.get_infoset_key()
         if not isinstance(base_infoset_tuple, tuple):
@@ -255,7 +347,7 @@ def _traverse_game_for_worker(
                 type(base_infoset_tuple).__name__,
             )
             worker_stats.error_count += 1
-            return np.zeros(NUM_PLAYERS, dtype=np.float64)
+            return np.zeros(NUM_PLAYERS, dtype=np.float64), 1.0
 
         infoset_key = InfosetKey(*base_infoset_tuple, current_context.value)
         infoset_key_tuple = infoset_key.astuple()
@@ -269,7 +361,7 @@ def _traverse_game_for_worker(
             current_context.name,
         )
         worker_stats.error_count += 1
-        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+        return np.zeros(NUM_PLAYERS, dtype=np.float64), 1.0
     except (
         Exception
     ) as e_key:  # JUSTIFIED: worker resilience - workers must not crash the training pool
@@ -284,7 +376,7 @@ def _traverse_game_for_worker(
             exc_info=True,
         )
         worker_stats.error_count += 1
-        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+        return np.zeros(NUM_PLAYERS, dtype=np.float64), 1.0
 
     try:
         # Already sorted by repr, which is what indexes the stored strategy
@@ -301,7 +393,7 @@ def _traverse_game_for_worker(
             current_context.name,
         )
         worker_stats.error_count += 1
-        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+        return np.zeros(NUM_PLAYERS, dtype=np.float64), 1.0
     except (
         Exception
     ) as e_legal:  # JUSTIFIED: worker resilience - workers must not crash the training pool
@@ -316,7 +408,7 @@ def _traverse_game_for_worker(
             exc_info=True,
         )
         worker_stats.error_count += 1
-        return np.zeros(NUM_PLAYERS, dtype=np.float64)
+        return np.zeros(NUM_PLAYERS, dtype=np.float64), 1.0
 
     num_actions = len(legal_actions)
 
@@ -343,14 +435,18 @@ def _traverse_game_for_worker(
             )
             if config.logging.log_simulation_traces:
                 simulation_nodes.append(stall_node)
-            return np.zeros(NUM_PLAYERS, dtype=np.float64)
+            return np.zeros(NUM_PLAYERS, dtype=np.float64), 1.0
         else:  # Terminal due to no legal actions
             has_bottomed_out_tracker[0] = True
             min_depth_after_bottom_out_tracker[0] = min(
                 min_depth_after_bottom_out_tracker[0], float(depth)
             )
-            return np.array(
-                [game_state.utility(i) for i in range(NUM_PLAYERS)], dtype=np.float64
+            return (
+                np.array(
+                    [game_state.utility(i) for i in range(NUM_PLAYERS)],
+                    dtype=np.float64,
+                ),
+                1.0,
             )
 
     # Get strategy from regrets
@@ -387,8 +483,17 @@ def _traverse_game_for_worker(
             )
 
     # --- Strategy Sum Update (Common to all CFR variants) ---
-    player_reach = reach_probs[player]
-    if averaging_weight > 0 and player_reach > 1e-9:
+    # The acting player's own reach to this infoset. In a two-player game the
+    # opponents' reach is exactly the other seat's, so opp_reach is that seat's
+    # own reach whenever it is the one acting.
+    player_reach = my_reach if player == updating_player else opp_reach
+    # Averaging an outcome-sampled trajectory needs the same 1/q correction the
+    # regrets get, or infosets the behaviour policy reaches often are
+    # over-represented in the average strategy (cambia-719).
+    strategy_sum_weight = (
+        averaging_weight * player_reach / sample_reach if sample_reach > 0.0 else 0.0
+    )
+    if strategy_sum_weight > 0 and player_reach > 1e-9:
         if len(strategy) == num_actions:
             # Ensure local update entry exists and has correct dimension
             if (
@@ -398,10 +503,8 @@ def _traverse_game_for_worker(
                 local_strategy_sum_updates[infoset_key] = np.zeros(
                     num_actions, dtype=np.float64
                 )
-            local_strategy_sum_updates[infoset_key] += (
-                averaging_weight * player_reach * strategy
-            )
-            local_reach_prob_updates[infoset_key] += averaging_weight * player_reach
+            local_strategy_sum_updates[infoset_key] += strategy_sum_weight * strategy
+            local_reach_prob_updates[infoset_key] += strategy_sum_weight
         else:
             logger_traverse.error(
                 "W%d D%d: Strategy len %d != num_actions %d for key %s. Skip strat update.",
@@ -418,16 +521,29 @@ def _traverse_game_for_worker(
     chosen_action_index: Optional[int] = None
     chosen_action: Optional[GameAction] = None
     sampling_prob_chosen = 0.0
+    # The sampling reach and suffix reach of the sampled continuation, set once
+    # an action is drawn; the regret update below reads both.
+    next_sample_reach = 0.0
+    tail_prob = 1.0
 
     if num_actions > 0 and len(strategy) == num_actions and np.sum(strategy) > 1e-9:
         # Normalize strategy before sampling just in case
         if not np.isclose(np.sum(strategy), 1.0):
             strategy = normalize_probabilities(strategy)
 
+        # Explore only at the updating player's nodes: the other seat's actions
+        # are chance from this traversal's point of view and are sampled on
+        # policy, which is what makes opp_reach a counterfactual weight.
+        sampling_probs = (
+            sampling_policy(strategy, config.cfr_plus_params.outcome_sampling_epsilon)
+            if player == updating_player
+            else strategy
+        )
+
         try:
-            chosen_action_index = np.random.choice(num_actions, p=strategy)
+            chosen_action_index = np.random.choice(num_actions, p=sampling_probs)
             chosen_action = legal_actions[chosen_action_index]
-            sampling_prob_chosen = strategy[chosen_action_index]
+            sampling_prob_chosen = float(sampling_probs[chosen_action_index])
         except (
             ValueError
         ) as e_choice:  # Catch potential errors from invalid probabilities
@@ -482,8 +598,22 @@ def _traverse_game_for_worker(
         if config.logging.log_simulation_traces:
             simulation_nodes.append(node_data)
 
-        # Calculate reach probability for the next state (pass unchanged reach probs down)
-        next_reach_probs = reach_probs.copy()
+        # The reaches the sampled action produces. A player's own action
+        # multiplies its own reach; the sampling reach takes the behaviour
+        # policy's probability, which differs from the strategy's wherever
+        # exploration was mixed in.
+        chosen_strategy_prob = (
+            float(strategy[chosen_action_index])
+            if len(strategy) == num_actions
+            else 1.0 / num_actions
+        )
+        if player == updating_player:
+            next_my_reach = my_reach * chosen_strategy_prob
+            next_opp_reach = opp_reach
+        else:
+            next_my_reach = my_reach
+            next_opp_reach = opp_reach * chosen_strategy_prob
+        next_sample_reach = sample_reach * sampling_prob_chosen
 
         # Apply the sampled action under a checkpoint. The Go engine has no
         # undo callable, so the checkpoint taken here is what the recursion
@@ -579,25 +709,29 @@ def _traverse_game_for_worker(
                 if not agent_update_failed:
                     try:
                         # Single recursive call for the sampled action
-                        node_value = _traverse_game_for_worker(
+                        node_value, tail_prob = _traverse_game_for_worker(
                             game_state,
                             next_agent_states,
-                            next_reach_probs,  # Pass original reach probs down
-                            iteration,
-                            updating_player,
-                            averaging_weight,
-                            regret_sum_snapshot,
-                            config,
-                            local_regret_updates,
-                            local_strategy_sum_updates,
-                            local_reach_prob_updates,
-                            depth + 1,
-                            worker_stats,
-                            progress_queue,
-                            worker_id,
-                            min_depth_after_bottom_out_tracker,
-                            has_bottomed_out_tracker,
-                            simulation_nodes,
+                            my_reach=next_my_reach,
+                            opp_reach=next_opp_reach,
+                            sample_reach=next_sample_reach,
+                            iteration=iteration,
+                            updating_player=updating_player,
+                            averaging_weight=averaging_weight,
+                            regret_sum_snapshot=regret_sum_snapshot,
+                            config=config,
+                            local_regret_updates=local_regret_updates,
+                            local_strategy_sum_updates=local_strategy_sum_updates,
+                            local_reach_prob_updates=local_reach_prob_updates,
+                            depth=depth + 1,
+                            worker_stats=worker_stats,
+                            progress_queue=progress_queue,
+                            worker_id=worker_id,
+                            min_depth_after_bottom_out_tracker=(
+                                min_depth_after_bottom_out_tracker
+                            ),
+                            has_bottomed_out_tracker=has_bottomed_out_tracker,
+                            simulation_nodes=simulation_nodes,
                         )
                     except TraversalError as recursive_err:
                         logger_traverse.warning(
@@ -641,18 +775,16 @@ def _traverse_game_for_worker(
     # --- Outcome Sampling Regret Update ---
     if player == updating_player and chosen_action_index is not None:
         if len(strategy) == num_actions:  # Check strategy validity
-            sampled_utility = node_value[player]
-            if sampling_prob_chosen > 1e-9:
-                utility_estimate = sampled_utility / sampling_prob_chosen
-
-                instantaneous_regrets = np.zeros(num_actions, dtype=np.float64)
-                for a_idx in range(num_actions):
-                    action_value_estimate = (
-                        1.0 if a_idx == chosen_action_index else 0.0
-                    ) * utility_estimate
-                    instantaneous_regrets[a_idx] = (
-                        action_value_estimate - strategy[a_idx] * utility_estimate
-                    )
+            if next_sample_reach > 0.0:
+                # The sampled action's counterfactual value: the leaf utility,
+                # weighted by the opponents' reach to this infoset and by the
+                # updating player's own reach over the suffix, and corrected by
+                # the behaviour policy's probability of the whole trajectory
+                # prefix through this action (Lanctot et al. 2009). Every
+                # unsampled action's estimate is zero.
+                action_value = (
+                    opp_reach * tail_prob * node_value[player] / next_sample_reach
+                )
 
                 # Ensure local regret update entry exists and has correct dimension
                 if (
@@ -666,18 +798,23 @@ def _traverse_game_for_worker(
                 # CFR+ regret updates carry no iteration weight. The delayed
                 # linear weight applies to the average strategy only; folding it
                 # in here zeroed every update up to the delay (cambia-718).
-                opponent_reach = reach_probs[opponent]
-                local_regret_updates[infoset_key] += (
-                    opponent_reach * instantaneous_regrets
+                local_regret_updates[infoset_key] += sampled_regrets(
+                    strategy, chosen_action_index, action_value
                 )
 
-            else:  # Sampling probability near zero
+            else:  # Sampling reach underflowed to zero
+                # The reach is a product over the trajectory prefix, so it gets
+                # small with depth by construction. Only an actual underflow to
+                # zero is skipped: clipping at some epsilon instead would drop
+                # deep updates and bias the estimate. Before cambia-719 this
+                # branch tested a single node's probability and was where an
+                # action at strategy probability zero got frozen out for good.
                 logger_traverse.debug(
-                    "W%d D%d P%d: Sampling prob %.3e near zero for action %s at key %s. Skipping regret update.",
+                    "W%d D%d P%d: Sampling reach %.3e underflowed for action %s at key %s. Skipping regret update.",
                     worker_id,
                     depth,
                     player,
-                    sampling_prob_chosen,
+                    next_sample_reach,
                     chosen_action,
                     infoset_key,
                 )
@@ -689,7 +826,18 @@ def _traverse_game_for_worker(
                 player,
             )
 
-    return node_value  # Return the utility vector obtained from the single sampled path
+    # The suffix factor handed to the caller. Only the updating player's own
+    # actions enter the numerator, so a node belonging to anyone else contributes
+    # 1 there while still dividing out the probability its action was sampled
+    # with.
+    if chosen_action_index is None:
+        return node_value, 1.0
+    own_action_prob = 1.0
+    if player == updating_player and len(strategy) == num_actions:
+        own_action_prob = float(strategy[chosen_action_index])
+    return node_value, suffix_reach_ratio(
+        tail_prob, own_action_prob, sampling_prob_chosen
+    )
 
 
 def run_cfr_simulation_worker(
@@ -949,11 +1097,13 @@ def run_cfr_simulation_worker(
         min_depth_after_bottom_out_tracker = [float("inf")]
         has_bottomed_out_tracker = [False]
 
-        # Run the ESMCFR traversal (Outcome Sampling)
-        final_utility_value = _traverse_game_for_worker(
+        # Run the outcome-sampling traversal
+        final_utility_value, _root_tail = _traverse_game_for_worker(
             game_state=game_state,
             agent_states=initial_agent_states,
-            reach_probs=np.ones(NUM_PLAYERS, dtype=np.float64),
+            my_reach=1.0,
+            opp_reach=1.0,
+            sample_reach=1.0,
             iteration=iteration,
             updating_player=updating_player,
             averaging_weight=iteration_averaging_weight,

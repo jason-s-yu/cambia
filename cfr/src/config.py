@@ -253,6 +253,16 @@ class CfrPlusParamsConfig(_CambiaBaseModel):
     #: Iterations whose strategies are discarded from the average. With the
     #: default of 100, iteration 101 is the first to carry weight (of 1).
     averaging_delay: int = 100
+    #: Exploration mixed into the tabular outcome-sampling behaviour policy at
+    #: the traverser's own nodes, as in Lanctot et al. (2009) and the deep
+    #: path's DeepCfrConfig.exploration_epsilon. The traversal sampled purely on
+    #: policy before cambia-719, which is this value at 0: an action regret
+    #: matching had driven to probability zero could never be sampled again and
+    #: so stayed frozen for the rest of the run. The estimate stays unbiased at
+    #: any value in (0, 1] because the regret carries the matching 1/q
+    #: correction; the value trades sampling variance against how fast an
+    #: abandoned action can come back.
+    outcome_sampling_epsilon: float = 0.6
 
 
 class AgentParamsConfig(_CambiaBaseModel):
