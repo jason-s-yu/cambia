@@ -78,7 +78,10 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request, lease na
 		LeaseDeadline: rfc3339(updated.Deadline),
 	}
 	if updated.State == nashnet.LeaseRevoking {
+		// The second delivery path of D31: a node that missed the revoke event
+		// reads the same {revoke, force} pair off its next progress tick.
 		resp.Revoke = true
+		resp.Force = p.stopForceFor(updated.LeaseID)
 		resp.RetryAfterSeconds = p.policy.ProgressIntervalSeconds
 	}
 	writeJSON(w, http.StatusOK, resp)
