@@ -1828,21 +1828,31 @@ class AgentState:
 
     # --- N-Player Knowledge Mask Methods ---
 
-    def nplayer_initialize(self, num_players: int, initial_peek_indices: tuple = ()):
+    def nplayer_initialize(
+        self, num_players: int, initial_peek_indices_by_player: dict | None = None
+    ):
         """Initialize N-player knowledge mask tracking.
+
+        Every seat peeks its own initial cards at deal time (RULES.md 2), so every seat --
+        not just this agent's own player_id -- starts out knowing its own peeked slots.
+        Seeding only player_id's own peeks understated what every other seat knows about
+        its own hand from the deal (cambia-1751); the belief about opponents' cards, which
+        this agent never saw, is unaffected either way.
 
         Args:
             num_players: Total number of players (2-6).
-            initial_peek_indices: Card slot indices (0-5) that this player can peek initially.
+            initial_peek_indices_by_player: Maps player id to the tuple of card slot
+                indices (0-5) that player peeked at deal time. A player absent from the
+                map is treated as having peeked nothing.
         """
         self.num_players = max(2, int(num_players))
         self.knowledge_masks = {}
-        # Initialize: encoding player knows their initially peeked own cards
-        for slot_idx in initial_peek_indices:
-            key = (self.player_id, int(slot_idx))
-            if key not in self.knowledge_masks:
-                self.knowledge_masks[key] = set()
-            self.knowledge_masks[key].add(self.player_id)
+        for seat, slot_indices in (initial_peek_indices_by_player or {}).items():
+            for slot_idx in slot_indices:
+                key = (int(seat), int(slot_idx))
+                if key not in self.knowledge_masks:
+                    self.knowledge_masks[key] = set()
+                self.knowledge_masks[key].add(int(seat))
 
     def nplayer_record_peek(self, target_player: int, card_slot: int, peeker: int):
         """Record that `peeker` has learned the identity of target_player's card at card_slot.
