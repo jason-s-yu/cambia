@@ -268,3 +268,92 @@ def test_recorded_sequence_returns_the_engine_to_the_deal():
         assert seen[-1] == (), f"the traversal ended at prefix {seen[-1]}, not the deal"
     finally:
         logging.disable(logging.NOTSET)
+
+
+# The engine snapshot pool is global and finite. When it is exhausted,
+# GoBrState.checkpoint returns a token with no snapshot and rewind replays the
+# prefix forward from the deepest live snapshot on the way to it instead. A real
+# traversal on these configs never exhausts the pool, so that branch would ship
+# unexercised; forcing GoEngine.save to fail is what reaches it.
+_SAVE_FAILURE_MODES = (
+    "none",  # every checkpoint takes a snapshot: the ordinary path
+    "alternate",  # a mix, so replay has to start from a shallower snapshot
+    "all",  # no snapshot ever succeeds: replay from the deal every time
+)
+
+
+@skip_if_no_go
+@pytest.mark.parametrize("failure_mode", _SAVE_FAILURE_MODES)
+def test_rewind_restores_the_checkpoint_state_without_snapshots(failure_mode: str):
+    """Rewind restores exactly the state the checkpoint was taken at.
+
+    The comparison is against the state read immediately before the checkpoint,
+    which is the property the traversal depends on however the rewind is
+    implemented: sampling resumes at the node it left.
+    """
+    from src.cfr.br_state import GoBrState, deal_spec_from_python_game
+    from src.ffi.bridge import GoEngine
+    from src.game.engine import CambiaGameState
+
+    real_save = GoEngine.save
+    calls = [0]
+
+    def save(self):
+        calls[0] += 1
+        if failure_mode == "all" or (failure_mode == "alternate" and calls[0] % 2 == 0):
+            raise RuntimeError("forced snapshot pool exhaustion")
+        return real_save(self)
+
+    GoEngine.save = save
+    logging.disable(logging.CRITICAL)
+    try:
+        cfg = _config()
+        verified = 0
+        replayed = 0  # checkpoints with no snapshot, so rewind had to replay
+        for seed in range(8):
+            pygame = CambiaGameState(
+                house_rules=cfg.cambia_rules, _rng=random.Random(5000 + seed)
+            )
+            state = GoBrState.new(cfg.cambia_rules, deal_spec_from_python_game(pygame))
+            rng = random.Random(6000 + seed)
+            try:
+                stack = []
+                for _ in range(60):
+                    if state.is_terminal():
+                        break
+                    before = _go_snapshot(state)
+                    checkpoint = state.checkpoint()
+                    replayed += checkpoint.snap_h is None
+                    pairs = state.legal_actions()
+                    state.apply(pairs[rng.randrange(len(pairs))][0])
+                    stack.append((checkpoint, before))
+                    if rng.random() < 0.45:
+                        checkpoint, before = stack.pop()
+                        state.rewind(checkpoint)
+                        assert _go_snapshot(state) == before, (
+                            f"{failure_mode} seed {seed}: rewind restored a "
+                            "different state"
+                        )
+                        state.release(checkpoint)
+                        verified += 1
+                while stack:
+                    checkpoint, before = stack.pop()
+                    state.rewind(checkpoint)
+                    assert (
+                        _go_snapshot(state) == before
+                    ), f"{failure_mode} seed {seed}: unwind restored a different state"
+                    state.release(checkpoint)
+                    verified += 1
+            finally:
+                state.close()
+        assert verified > 100, f"only {verified} rewinds were checked"
+        # Without this the two forcing modes could pass while every rewind still
+        # took the ordinary snapshot path, and the branch under test would be
+        # covered by nothing.
+        if failure_mode == "none":
+            assert replayed == 0, f"{replayed} checkpoints took no snapshot"
+        else:
+            assert replayed > 0, "no checkpoint was forced onto the replay path"
+    finally:
+        GoEngine.save = real_save
+        logging.disable(logging.NOTSET)
