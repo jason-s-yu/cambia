@@ -936,7 +936,8 @@ def collect_infosets(
     if failed_observe_transitions:
         logger.warning(
             "collect_infosets: %d game(s) aborted early due to "
-            "observe_transition failures (see per-occurrence warnings above).",
+            "observe_transition failures; the failures themselves are counted "
+            "on the estimator's policy_errors, logged once per kind.",
             failed_observe_transitions,
         )
     return sampled
