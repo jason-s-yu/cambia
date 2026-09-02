@@ -736,7 +736,7 @@ def _make_test_wrapper(kind, player_id):
         w.agent_state = None
     else:
         w = object.__new__(PPOAgentWrapper)
-        w._agent_state = None
+        w.agent_state = None
         w._encoding_version = 2
         w._obs_dim = EP_PBS_V2_INPUT_DIM
     w.player_id = int(player_id)
@@ -749,8 +749,13 @@ def _make_test_wrapper(kind, player_id):
 
 
 def _wrapper_belief(wrapper, kind):
-    """The GoAgentState the wrapper attached, under whichever name it uses."""
-    return wrapper.agent_state if kind == "desca" else wrapper._agent_state
+    """The GoAgentState the wrapper attached.
+
+    One name for both: PPOAgentWrapper published its belief privately until
+    cambia-2022, which is what made the N-player transition step raise for a PPO
+    seat above two seats.
+    """
+    return wrapper.agent_state
 
 
 def _wrapper_v2_encode(wrapper, kind, engine):

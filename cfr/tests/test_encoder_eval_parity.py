@@ -214,7 +214,6 @@ def _wrapper_encode(wrapper, agent_state, ctx: DecisionContext, drawn: int) -> n
         wrapper.agent_state = agent_state
         return wrapper._encode_v2(ctx, drawn_card_bucket=drawn)
     if isinstance(wrapper, PPOAgentWrapper):
-        wrapper._agent_state = agent_state
         wrapper.agent_state = agent_state
         return wrapper._encode_obs(ctx, drawn_card_bucket=drawn)
     raise TypeError(f"Unrecognised wrapper type: {type(wrapper)}")

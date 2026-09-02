@@ -22,6 +22,7 @@ from src.ffi.bridge import GoAgentState, GoEngine
 from src.agents.transition import TransitionBroadcaster
 from src.agents.baseline_agents import (
     BaseAgent,
+    derive_policy_seed,
     RandomAgent,
     GreedyAgent,
     ImperfectGreedyAgent,
@@ -220,8 +221,9 @@ class CFRAgentWrapper(BaseAgent):
         player_id: int,
         config: Config,
         average_strategy: Dict[InfosetKey, np.ndarray],
+        policy_seed: Optional[int] = None,
     ):
-        super().__init__(player_id, config)
+        super().__init__(player_id, config, policy_seed=policy_seed)
         if not isinstance(average_strategy, dict):
             raise TypeError(
                 "CFRAgentWrapper requires average_strategy to be a dictionary."
@@ -336,7 +338,7 @@ class CFRAgentWrapper(BaseAgent):
                 self.player_id,
                 e_key,
             )
-            return random.choice(list(legal_actions))
+            return self.uniform_action(legal_actions)
         except Exception as e_key:  # JUSTIFIED: evaluation resilience
             logger.error(
                 "CFRAgent P%d Error getting infoset key: %s. State: %s",
@@ -345,7 +347,7 @@ class CFRAgentWrapper(BaseAgent):
                 self.agent_state,
                 exc_info=True,
             )
-            return random.choice(list(legal_actions))
+            return self.uniform_action(legal_actions)
 
         strategy = self.average_strategy.get(infoset_key)
         action_list = sorted(list(legal_actions), key=repr)
@@ -373,7 +375,7 @@ class CFRAgentWrapper(BaseAgent):
                 self.player_id,
                 num_actions,
             )
-            return random.choice(action_list)  # Fallback
+            return self.uniform_action(action_list)  # Fallback
 
         # Normalize strategy if needed (defensive programming)
         strategy_sum = np.sum(strategy)
@@ -401,11 +403,11 @@ class CFRAgentWrapper(BaseAgent):
 
         # Sample action
         try:
-            chosen_index = np.random.choice(num_actions, p=strategy)
+            chosen_index = self.policy_rng.choice(num_actions, p=strategy)
             chosen_action = action_list[chosen_index]
         except (
             ValueError
-        ) as e_choice:  # Catch errors from np.random.choice (e.g., probabilities don't sum to 1)
+        ) as e_choice:  # Catch errors from Generator.choice (probabilities not summing to 1)
             logger.error(
                 "CFRAgent P%d: Error choosing action for key %s (strategy %s): %s. Choosing random.",
                 self.player_id,
@@ -413,7 +415,7 @@ class CFRAgentWrapper(BaseAgent):
                 strategy,
                 e_choice,
             )
-            chosen_action = random.choice(action_list)  # Fallback
+            chosen_action = self.uniform_action(action_list)  # Fallback
 
         # logger.debug("CFRAgent P%d chose action: %s (Prob: %.3f, Key: %s)", self.player_id, chosen_action, strategy[chosen_index], infoset_key)
         return chosen_action
@@ -460,9 +462,14 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
     """
 
     def __init__(
-        self, player_id: int, config, device: str = "cpu", use_argmax: bool = False
+        self,
+        player_id: int,
+        config,
+        device: str = "cpu",
+        use_argmax: bool = False,
+        policy_seed: Optional[int] = None,
     ):
-        super().__init__(player_id, config)
+        super().__init__(player_id, config, policy_seed=policy_seed)
         import torch
 
         self._torch = torch
@@ -719,8 +726,15 @@ class DeepCFRAgentWrapper(NeuralAgentWrapper):
         checkpoint_path: str,
         device: str = "cpu",
         use_argmax: bool = False,
+        policy_seed: Optional[int] = None,
     ):
-        super().__init__(player_id, config, device=device, use_argmax=use_argmax)
+        super().__init__(
+            player_id,
+            config,
+            device=device,
+            use_argmax=use_argmax,
+            policy_seed=policy_seed,
+        )
         from src.networks import (
             AdvantageNetwork,
             StrategyNetwork,
@@ -825,7 +839,7 @@ class DeepCFRAgentWrapper(NeuralAgentWrapper):
         from src.cfr.exceptions import ActionEncodingError
 
         if not self.agent_state:
-            return random.choice(list(legal_actions))
+            return self.uniform_action(legal_actions)
 
         legal_list = list(legal_actions)
         decision_context = self._get_decision_context(game_state)
@@ -838,7 +852,7 @@ class DeepCFRAgentWrapper(NeuralAgentWrapper):
             action_mask = encode_action_mask(legal_list)
         except Exception as e:  # JUSTIFIED: evaluation resilience
             logger.error("DeepCFRAgent P%d encoding error: %s", self.player_id, e)
-            return random.choice(legal_list)
+            return self.uniform_action(legal_list)
 
         torch = self._torch
         with torch.inference_mode():
@@ -854,7 +868,7 @@ class DeepCFRAgentWrapper(NeuralAgentWrapper):
         # Sample from legal action probabilities
         legal_indices = np.where(action_mask)[0]
         if len(legal_indices) == 0:
-            return random.choice(legal_list)
+            return self.uniform_action(legal_list)
 
         legal_probs = probs[legal_indices]
         prob_sum = legal_probs.sum()
@@ -866,13 +880,13 @@ class DeepCFRAgentWrapper(NeuralAgentWrapper):
         if self._use_argmax:
             chosen_local = np.argmax(legal_probs)
         else:
-            chosen_local = np.random.choice(len(legal_indices), p=legal_probs)
+            chosen_local = self.policy_rng.choice(len(legal_indices), p=legal_probs)
         chosen_global_idx = legal_indices[chosen_local]
 
         try:
             return index_to_action(int(chosen_global_idx), legal_list)
         except ActionEncodingError:
-            return random.choice(legal_list)
+            return self.uniform_action(legal_list)
 
 
 # --- ESCHER Agent Wrapper ---
@@ -895,8 +909,15 @@ class ESCHERAgentWrapper(NeuralAgentWrapper):
         checkpoint_path: str,
         device: str = "cpu",
         use_argmax: bool = False,
+        policy_seed: Optional[int] = None,
     ):
-        super().__init__(player_id, config, device=device, use_argmax=use_argmax)
+        super().__init__(
+            player_id,
+            config,
+            device=device,
+            use_argmax=use_argmax,
+            policy_seed=policy_seed,
+        )
         from src.encoding import INPUT_DIM, NUM_ACTIONS
 
         self._INPUT_DIM = INPUT_DIM
@@ -976,7 +997,7 @@ class ESCHERAgentWrapper(NeuralAgentWrapper):
         from src.cfr.exceptions import ActionEncodingError
 
         if not self.agent_state:
-            return random.choice(list(legal_actions))
+            return self.uniform_action(legal_actions)
 
         legal_list = list(legal_actions)
         decision_context = self._get_decision_context(game_state)
@@ -989,7 +1010,7 @@ class ESCHERAgentWrapper(NeuralAgentWrapper):
             action_mask = encode_action_mask(legal_list)
         except Exception as e:  # JUSTIFIED: evaluation resilience
             logger.error("ESCHERAgent P%d encoding error: %s", self.player_id, e)
-            return random.choice(legal_list)
+            return self.uniform_action(legal_list)
 
         torch = self._torch
         with torch.inference_mode():
@@ -1007,7 +1028,7 @@ class ESCHERAgentWrapper(NeuralAgentWrapper):
 
         legal_indices = np.where(action_mask)[0]
         if len(legal_indices) == 0:
-            return random.choice(legal_list)
+            return self.uniform_action(legal_list)
 
         legal_probs = probs[legal_indices]
         prob_sum = legal_probs.sum()
@@ -1019,13 +1040,13 @@ class ESCHERAgentWrapper(NeuralAgentWrapper):
         if self._use_argmax:
             chosen_local = np.argmax(legal_probs)
         else:
-            chosen_local = np.random.choice(len(legal_indices), p=legal_probs)
+            chosen_local = self.policy_rng.choice(len(legal_indices), p=legal_probs)
         chosen_global_idx = legal_indices[chosen_local]
 
         try:
             return index_to_action(int(chosen_global_idx), legal_list)
         except ActionEncodingError:
-            return random.choice(legal_list)
+            return self.uniform_action(legal_list)
 
 
 # --- ReBeL Agent Wrapper ---
@@ -1046,8 +1067,9 @@ class ReBeLAgentWrapper(NeuralAgentWrapper):
         checkpoint_path: str,
         device: str = "cpu",
         use_search: bool = True,
+        policy_seed: Optional[int] = None,
     ):
-        super().__init__(player_id, config, device=device)
+        super().__init__(player_id, config, device=device, policy_seed=policy_seed)
         from src.networks import PBSValueNetwork, PBSPolicyNetwork
         from src.pbs import PBS_INPUT_DIM, NUM_HAND_TYPES, uniform_range
 
@@ -1177,7 +1199,7 @@ class ReBeLAgentWrapper(NeuralAgentWrapper):
         from src.pbs import encode_pbs
 
         if not self.agent_state or game_state is None:
-            return random.choice(list(legal_actions))
+            return self.uniform_action(legal_actions)
 
         legal_list = list(legal_actions)
         try:
@@ -1186,7 +1208,7 @@ class ReBeLAgentWrapper(NeuralAgentWrapper):
             action_mask = encode_action_mask(legal_list)
         except Exception as e:  # JUSTIFIED: evaluation resilience
             logger.error("ReBeLAgent P%d encoding error: %s", self.player_id, e)
-            return random.choice(legal_list)
+            return self.uniform_action(legal_list)
 
         torch = self._torch
         with torch.inference_mode():
@@ -1197,7 +1219,7 @@ class ReBeLAgentWrapper(NeuralAgentWrapper):
 
         legal_indices = np.where(action_mask)[0]
         if len(legal_indices) == 0:
-            return random.choice(legal_list)
+            return self.uniform_action(legal_list)
 
         legal_probs = probs_np[legal_indices]
         prob_sum = legal_probs.sum()
@@ -1206,7 +1228,7 @@ class ReBeLAgentWrapper(NeuralAgentWrapper):
         else:
             legal_probs = legal_probs / prob_sum
 
-        chosen_local = np.random.choice(len(legal_indices), p=legal_probs)
+        chosen_local = self.policy_rng.choice(len(legal_indices), p=legal_probs)
         chosen_global_idx = legal_indices[chosen_local]
 
         # Update own range using observed action and current strategy.
@@ -1231,7 +1253,7 @@ class ReBeLAgentWrapper(NeuralAgentWrapper):
         try:
             return index_to_action(int(chosen_global_idx), legal_list)
         except ActionEncodingError:
-            return random.choice(legal_list)
+            return self.uniform_action(legal_list)
 
 
 class GTCFRAgentWrapper(NeuralAgentWrapper):
@@ -1249,7 +1271,9 @@ class GTCFRAgentWrapper(NeuralAgentWrapper):
         device = kwargs.get("device", "cpu")
         self._deterministic = kwargs.get("deterministic", True)
         self._per_hand_ranges = kwargs.get("per_hand_ranges", False)
-        super().__init__(player_id, config, device=device)
+        super().__init__(
+            player_id, config, device=device, policy_seed=kwargs.get("policy_seed")
+        )
         import torch
         from src.networks import build_cvpn
         from src.pbs import uniform_range
@@ -1354,7 +1378,7 @@ class GTCFRAgentWrapper(NeuralAgentWrapper):
         import torch.nn.functional as F
 
         if not self.agent_state or game_state is None:
-            return random.choice(list(legal_actions))
+            return self.uniform_action(legal_actions)
 
         legal_list = list(legal_actions)
         try:
@@ -1363,7 +1387,7 @@ class GTCFRAgentWrapper(NeuralAgentWrapper):
             action_mask = encode_action_mask(legal_list)
         except Exception as e:  # JUSTIFIED: evaluation resilience
             logger.error("GTCFRAgent P%d encoding error: %s", self.player_id, e)
-            return random.choice(legal_list)
+            return self.uniform_action(legal_list)
 
         torch = self._torch
         with torch.inference_mode():
@@ -1374,7 +1398,7 @@ class GTCFRAgentWrapper(NeuralAgentWrapper):
 
         legal_indices = np.where(action_mask)[0]
         if len(legal_indices) == 0:
-            return random.choice(legal_list)
+            return self.uniform_action(legal_list)
 
         legal_probs = probs_np[legal_indices]
         prob_sum = legal_probs.sum()
@@ -1386,7 +1410,7 @@ class GTCFRAgentWrapper(NeuralAgentWrapper):
         if self._deterministic:
             chosen_local = np.argmax(legal_probs)
         else:
-            chosen_local = np.random.choice(len(legal_indices), p=legal_probs)
+            chosen_local = self.policy_rng.choice(len(legal_indices), p=legal_probs)
         chosen_global_idx = legal_indices[chosen_local]
 
         # Range update: per-hand-type (slow, correct) or tiled (fast, approximate)
@@ -1420,7 +1444,7 @@ class GTCFRAgentWrapper(NeuralAgentWrapper):
         try:
             return index_to_action(int(chosen_global_idx), legal_list)
         except ActionEncodingError:
-            return random.choice(legal_list)
+            return self.uniform_action(legal_list)
 
     def observe_action(self, action, acting_player: int, **kwargs):
         """Update opponent range after observing their action (uniform policy fallback)."""
@@ -1543,7 +1567,7 @@ class SoGAgentWrapper(GTCFRAgentWrapper):
             action_mask = encode_action_mask(legal_list)
             legal_indices = np.where(action_mask)[0]
             if len(legal_indices) == 0:
-                return random.choice(legal_list)
+                return self.uniform_action(legal_list)
 
             legal_probs = policy[legal_indices].astype(np.float32)
             prob_sum = legal_probs.sum()
@@ -1557,7 +1581,7 @@ class SoGAgentWrapper(GTCFRAgentWrapper):
             if self._deterministic:
                 chosen_local = np.argmax(legal_probs)
             else:
-                chosen_local = np.random.choice(len(legal_indices), p=legal_probs)
+                chosen_local = self.policy_rng.choice(len(legal_indices), p=legal_probs)
             chosen_global_idx = int(legal_indices[chosen_local])
             self._last_action_idx = chosen_global_idx
 
@@ -1608,7 +1632,7 @@ class SoGAgentWrapper(GTCFRAgentWrapper):
             try:
                 return index_to_action(chosen_global_idx, legal_list)
             except ActionEncodingError:
-                return random.choice(legal_list)
+                return self.uniform_action(legal_list)
 
         except Exception as e:
             logger.error("SoGAgentWrapper P%d search error: %s", self.player_id, e)
@@ -1687,7 +1711,7 @@ class SoGInferenceAgentWrapper(GTCFRAgentWrapper):
         import torch.nn.functional as F
 
         if not self.agent_state or game_state is None:
-            return random.choice(list(legal_actions))
+            return self.uniform_action(legal_actions)
 
         legal_list = list(legal_actions)
         try:
@@ -1696,7 +1720,7 @@ class SoGInferenceAgentWrapper(GTCFRAgentWrapper):
             action_mask = encode_action_mask(legal_list)
         except Exception as e:
             logger.error("SoGInferenceAgent P%d encoding error: %s", self.player_id, e)
-            return random.choice(legal_list)
+            return self.uniform_action(legal_list)
 
         torch = self._torch
         with torch.inference_mode():
@@ -1707,7 +1731,7 @@ class SoGInferenceAgentWrapper(GTCFRAgentWrapper):
 
         legal_indices = np.where(action_mask)[0]
         if len(legal_indices) == 0:
-            return random.choice(legal_list)
+            return self.uniform_action(legal_list)
 
         legal_probs = probs_np[legal_indices]
         prob_sum = legal_probs.sum()
@@ -1719,7 +1743,7 @@ class SoGInferenceAgentWrapper(GTCFRAgentWrapper):
         if self._deterministic:
             chosen_local = np.argmax(legal_probs)
         else:
-            chosen_local = np.random.choice(len(legal_indices), p=legal_probs)
+            chosen_local = self.policy_rng.choice(len(legal_indices), p=legal_probs)
         chosen_global_idx = legal_indices[chosen_local]
 
         # Fast tiled range update (skip 468-pass matrix for inference-only eval)
@@ -1741,7 +1765,7 @@ class SoGInferenceAgentWrapper(GTCFRAgentWrapper):
         try:
             return index_to_action(int(chosen_global_idx), legal_list)
         except ActionEncodingError:
-            return random.choice(legal_list)
+            return self.uniform_action(legal_list)
 
 
 class SDCFRAgentWrapper(NeuralAgentWrapper):
@@ -1767,8 +1791,15 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
         device: str = "cpu",
         use_ema: bool = False,
         use_argmax: bool = False,
+        policy_seed: Optional[int] = None,
     ):
-        super().__init__(player_id, config, device=device, use_argmax=use_argmax)
+        super().__init__(
+            player_id,
+            config,
+            device=device,
+            use_argmax=use_argmax,
+            policy_seed=policy_seed,
+        )
         from src.networks import build_advantage_network, get_strategy_from_advantages
         from src.encoding import INPUT_DIM, NUM_ACTIONS
 
@@ -1921,7 +1952,7 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
         from src.cfr.exceptions import ActionEncodingError
 
         if not self.agent_state:
-            return random.choice(list(legal_actions))
+            return self.uniform_action(legal_actions)
 
         legal_list = list(legal_actions)
         decision_context = self._get_decision_context(game_state)
@@ -1934,7 +1965,7 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
             action_mask = encode_action_mask(legal_list)
         except Exception as e:
             logger.error("SDCFRAgent P%d encoding error: %s", self.player_id, e)
-            return random.choice(legal_list)
+            return self.uniform_action(legal_list)
 
         torch = self._torch
         with torch.inference_mode():
@@ -1974,7 +2005,7 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
 
         legal_indices = np.where(action_mask)[0]
         if len(legal_indices) == 0:
-            return random.choice(legal_list)
+            return self.uniform_action(legal_list)
 
         legal_probs = probs[legal_indices]
         prob_sum = legal_probs.sum()
@@ -1986,13 +2017,13 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
         if self._use_argmax:
             chosen_local = np.argmax(legal_probs)
         else:
-            chosen_local = np.random.choice(len(legal_indices), p=legal_probs)
+            chosen_local = self.policy_rng.choice(len(legal_indices), p=legal_probs)
         chosen_global_idx = legal_indices[chosen_local]
 
         try:
             return index_to_action(int(chosen_global_idx), legal_list)
         except ActionEncodingError:
-            return random.choice(legal_list)
+            return self.uniform_action(legal_list)
 
 
 # --- PPO Agent Wrapper ---
@@ -2001,8 +2032,15 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
 class PPOAgentWrapper(BaseAgent):
     """Wraps a trained SB3 MaskablePPO model for evaluation."""
 
-    def __init__(self, player_id: int, config, model_path: str, device: str = "cpu"):
-        super().__init__(player_id, config)
+    def __init__(
+        self,
+        player_id: int,
+        config,
+        model_path: str,
+        device: str = "cpu",
+        policy_seed: Optional[int] = None,
+    ):
+        super().__init__(player_id, config, policy_seed=policy_seed)
         try:
             from sb3_contrib import MaskablePPO
         except ImportError:
@@ -2010,16 +2048,34 @@ class PPOAgentWrapper(BaseAgent):
                 "sb3-contrib required for PPO agent. "
                 "Install with: pip install -e '.[rl]'"
             )
-        self._model = MaskablePPO.load(model_path, device=device)
-        #: This seat's belief, owned by the Go engine (cambia-1426).
-        self._agent_state: Optional[GoAgentState] = None
-        #: True while _agent_state is a handle another object owns and closes
+        # The load is bracketed by the two global RNG states because
+        # Stable-Baselines3 sets both from the saved model's seed (np.random.seed
+        # and random.seed, the fixed-state signature np.random.random() ==
+        # 0.374540118847 after a load). Anything the surrounding process was
+        # drawing from either stream restarted at that state: a match that dealt
+        # from the global module replayed one deal (cambia-1974), and DESCA,
+        # which sampled its action with np.random.choice, ran one variate stream
+        # per match regardless of the run seed (cambia-1807 F2). Both are seeded
+        # off the run seed now, so this restore is the second line: no eval
+        # path is left depending on either global stream, and constructing a PPO
+        # seat is no longer a side effect on the process (cambia-2022 AC3).
+        py_state = random.getstate()
+        np_state = np.random.get_state()
+        try:
+            self._model = MaskablePPO.load(model_path, device=device)
+        finally:
+            random.setstate(py_state)
+            np.random.set_state(np_state)
+        #: This seat's belief, owned by the Go engine (cambia-1426). Public, and
+        #: named as NeuralAgentWrapper names it: the shared transition step
+        #: advances an N-player belief through ``agent_state.update_nplayer``,
+        #: and while this wrapper kept the attribute private that call raised
+        #: for a PPO seat above two seats (cambia-711 F3).
+        self.agent_state: Optional[GoAgentState] = None
+        #: True while agent_state is a handle another object owns and closes
         #: (bind_go_state, cambia-1793).
         self._belief_borrowed = False
         self._num_players = 2
-        #: Per-instance RNG for the illegal-index fallback, so a fallback does
-        #: not draw from the unseeded module-global stream (cambia-651 RC-B2).
-        self._fallback_rng = random.Random(0xB1A5 ^ (player_id * 0x9E3779B1))
         # The model's observation space dictates which encoding layout to feed.
         # 257-dim models were trained on EP-PBS v2 (encoding_version=2); 224-dim
         # models on the v1 base layout. Feeding the wrong width crashes
@@ -2045,7 +2101,7 @@ class PPOAgentWrapper(BaseAgent):
         memory_level = int(getattr(params, "memory_level", 0))
         time_decay_turns = int(getattr(params, "time_decay_turns", 0))
         if self._num_players > 2:
-            self._agent_state = GoAgentState.new_nplayer(
+            self.agent_state = GoAgentState.new_nplayer(
                 engine,
                 self.player_id,
                 num_players=self._num_players,
@@ -2053,13 +2109,13 @@ class PPOAgentWrapper(BaseAgent):
                 time_decay_turns=time_decay_turns,
             )
         else:
-            self._agent_state = GoAgentState(
+            self.agent_state = GoAgentState(
                 engine,
                 self.player_id,
                 memory_level=memory_level,
                 time_decay_turns=time_decay_turns,
             )
-        return self._agent_state
+        return self.agent_state
 
     def belief_handle(self) -> int:
         """This seat's agent handle for apply_games_batch, or -1 if unattached.
@@ -2067,9 +2123,9 @@ class PPOAgentWrapper(BaseAgent):
         A borrowed belief reports -1, for the reason given on
         NeuralAgentWrapper.belief_handle (cambia-1793).
         """
-        if self._agent_state is None or self._belief_borrowed:
+        if self.agent_state is None or self._belief_borrowed:
             return -1
-        return int(self._agent_state.handle)
+        return int(self.agent_state.handle)
 
     def bind_go_state(self, view, agent_state: GoAgentState) -> None:
         """Read this seat's belief off a handle someone else owns and advances.
@@ -2078,7 +2134,7 @@ class PPOAgentWrapper(BaseAgent):
         NeuralAgentWrapper.bind_go_state for what it is for (cambia-1793).
         """
         self.release_belief()
-        self._agent_state = agent_state
+        self.agent_state = agent_state
         self._belief_borrowed = agent_state is not None
 
     def release_belief(self) -> None:
@@ -2086,12 +2142,12 @@ class PPOAgentWrapper(BaseAgent):
 
         A borrowed handle is dropped, not closed: its owner still holds it.
         """
-        if self._agent_state is not None and not self._belief_borrowed:
+        if self.agent_state is not None and not self._belief_borrowed:
             try:
-                self._agent_state.close()
+                self.agent_state.close()
             except Exception as e:  # JUSTIFIED: evaluation resilience
                 logger.error("PPOAgent P%d belief release error: %s", self.player_id, e)
-        self._agent_state = None
+        self.agent_state = None
         self._belief_borrowed = False
 
     def initialize_state(self, initial_game_state):
@@ -2137,16 +2193,32 @@ class PPOAgentWrapper(BaseAgent):
             if getattr(self, "_encoding_version", 1) == 2
             else "encode_eppbs_interleaved"
         )
-        st = _require_go_belief(self, self._agent_state, encoder)
+        st = _require_go_belief(self, self.agent_state, encoder)
         ctx_val = ctx.value if hasattr(ctx, "value") else int(ctx)
         return getattr(st, encoder)(ctx_val, -1).astype(np.float32)
 
     def choose_action(self, game_state, legal_actions) -> GameAction:
-        """Choose an action using the trained PPO model."""
+        """Choose an action using the trained PPO model.
+
+        An unattached belief raises rather than falling back to a uniform draw.
+        The model reads its observation off this seat's belief, so without one
+        there is no PPO policy to run: the fallback played uniform-random under
+        the PPO name for the whole game, and every row it produced read as a PPO
+        measurement (cambia-1981). A policy failure surfaces instead, which is
+        cambia-1479's contract and what every loop here already counts as an
+        error rather than scoring.
+        """
         from src.encoding import encode_action_mask, index_to_action
 
-        if not self._agent_state:
-            return self._fallback_rng.choice(list(legal_actions))
+        if not self.agent_state:
+            # Imported here: src.cfr.lbr pulls the FFI and search modules in,
+            # and this is a failure path.
+            from src.cfr.lbr import PolicyError
+
+            raise PolicyError(
+                f"PPOAgent P{self.player_id}: belief not attached; "
+                "initialize_state must run before a decision."
+            )
 
         legal_list = list(legal_actions)
         ctx = _decision_context(game_state)
@@ -2161,7 +2233,10 @@ class PPOAgentWrapper(BaseAgent):
         try:
             return index_to_action(int(action_idx), legal_list)
         except (ValueError, IndexError):
-            return self._fallback_rng.choice(legal_list)
+            # The model named an index outside the legal set. Unlike a missing
+            # belief this is one decision, not the whole game, so it draws off
+            # this seat's policy stream and plays on.
+            return self.uniform_action(legal_list)
 
 
 # --- N-Player Agent Wrapper ---
@@ -2184,9 +2259,16 @@ class NPlayerAgentWrapper(NeuralAgentWrapper):
         num_players: int = 2,
         qre_lambda: float = 0.05,
         use_argmax: bool = False,
+        policy_seed: Optional[int] = None,
         **kwargs,
     ):
-        super().__init__(player_id, config, device=device, use_argmax=use_argmax)
+        super().__init__(
+            player_id,
+            config,
+            device=device,
+            use_argmax=use_argmax,
+            policy_seed=policy_seed,
+        )
         from src.networks import build_advantage_network
         from src.constants import N_PLAYER_INPUT_DIM, N_PLAYER_NUM_ACTIONS
 
@@ -2251,7 +2333,7 @@ class NPlayerAgentWrapper(NeuralAgentWrapper):
         import numpy as np
 
         if not self.agent_state:
-            return random.choice(list(legal_actions))
+            return self.uniform_action(legal_actions)
 
         legal_list = list(legal_actions)
         decision_context = self._get_decision_context(game_state)
@@ -2267,7 +2349,7 @@ class NPlayerAgentWrapper(NeuralAgentWrapper):
             action_mask = encode_action_mask(legal_list)
         except Exception as e:  # JUSTIFIED: evaluation resilience
             logger.error("NPlayerAgent P%d encoding error: %s", self.player_id, e)
-            return random.choice(legal_list)
+            return self.uniform_action(legal_list)
 
         torch = self._torch
         with torch.inference_mode():
@@ -2293,7 +2375,7 @@ class NPlayerAgentWrapper(NeuralAgentWrapper):
 
         legal_indices = np.where(mask_np)[0]
         if len(legal_indices) == 0:
-            return random.choice(legal_list)
+            return self.uniform_action(legal_list)
 
         legal_probs = probs[legal_indices]
         prob_sum = legal_probs.sum()
@@ -2305,13 +2387,13 @@ class NPlayerAgentWrapper(NeuralAgentWrapper):
         if self._use_argmax:
             chosen_local = np.argmax(legal_probs)
         else:
-            chosen_local = np.random.choice(len(legal_indices), p=legal_probs)
+            chosen_local = self.policy_rng.choice(len(legal_indices), p=legal_probs)
         chosen_global_idx = legal_indices[chosen_local]
 
         try:
             return index_to_action(int(chosen_global_idx), legal_list)
         except (ActionEncodingError, Exception):
-            return random.choice(legal_list)
+            return self.uniform_action(legal_list)
 
 
 class MixedOpponentAgent(BaseAgent):
@@ -2328,8 +2410,9 @@ class MixedOpponentAgent(BaseAgent):
         agent_a: BaseAgent,
         agent_b: BaseAgent,
         weight_a: float = 0.6,
+        policy_seed: Optional[int] = None,
     ):
-        super().__init__(player_id, config)
+        super().__init__(player_id, config, policy_seed=policy_seed)
         self.agent_a = agent_a
         self.agent_b = agent_b
         self.weight_a = weight_a
@@ -2337,7 +2420,7 @@ class MixedOpponentAgent(BaseAgent):
     def choose_action(
         self, game_state: GameView, legal_actions: Set[GameAction]
     ) -> GameAction:
-        if random.random() < self.weight_a:
+        if self.policy_rng.random() < self.weight_a:
             return self.agent_a.choose_action(game_state, legal_actions)
         return self.agent_b.choose_action(game_state, legal_actions)
 
@@ -2361,8 +2444,15 @@ class DESCAAgentWrapper(NeuralAgentWrapper):
         checkpoint_path: str,
         device: str = "cpu",
         use_argmax: bool = False,
+        policy_seed: Optional[int] = None,
     ):
-        super().__init__(player_id, config, device=device, use_argmax=use_argmax)
+        super().__init__(
+            player_id,
+            config,
+            device=device,
+            use_argmax=use_argmax,
+            policy_seed=policy_seed,
+        )
 
         torch = self._torch
         checkpoint = torch.load(
@@ -2458,7 +2548,7 @@ class DESCAAgentWrapper(NeuralAgentWrapper):
         from src.action_abstraction import abstract_actions, unabstract
 
         if not self.agent_state:
-            return random.choice(list(legal_actions))
+            return self.uniform_action(legal_actions)
 
         legal_list = list(legal_actions)
         decision_context = self._get_decision_context(game_state)
@@ -2469,7 +2559,7 @@ class DESCAAgentWrapper(NeuralAgentWrapper):
             abstract_mask = abstract_actions(legal_list, self._belief_view())
         except Exception as e:  # JUSTIFIED: evaluation resilience
             logger.error("DESCAAgent P%d encoding error: %s", self.player_id, e)
-            return random.choice(legal_list)
+            return self.uniform_action(legal_list)
 
         torch = self._torch
         with torch.inference_mode():
@@ -2480,7 +2570,7 @@ class DESCAAgentWrapper(NeuralAgentWrapper):
 
         legal_abstract = np.where(abstract_mask)[0]
         if len(legal_abstract) == 0:
-            return random.choice(legal_list)
+            return self.uniform_action(legal_list)
 
         legal_probs = probs_np[legal_abstract]
         prob_sum = legal_probs.sum()
@@ -2492,18 +2582,23 @@ class DESCAAgentWrapper(NeuralAgentWrapper):
         if self._use_argmax:
             chosen_local = int(np.argmax(legal_probs))
         else:
-            chosen_local = int(np.random.choice(len(legal_abstract), p=legal_probs))
+            chosen_local = int(self.policy_rng.choice(len(legal_abstract), p=legal_probs))
 
         chosen_abstract_idx = int(legal_abstract[chosen_local])
 
-        seed = hash((id(game_state), chosen_abstract_idx)) & 0xFFFF_FFFF
+        # Tie-break seed for the concrete action inside the chosen abstract
+        # class. Drawn from this seat's policy stream: it was
+        # hash((id(game_state), idx)), an object ADDRESS, so which concrete
+        # action a run picked moved with the allocator rather than with the run
+        # seed and no run replayed another (cambia-2022).
+        seed = int(self.policy_rng.integers(0, 2**32))
         try:
             return unabstract(
                 chosen_abstract_idx, legal_list, self._belief_view(), seed=seed
             )
         except (ValueError, Exception) as e:
             logger.error("DESCAAgent P%d unabstract error: %s", self.player_id, e)
-            return random.choice(legal_list)
+            return self.uniform_action(legal_list)
 
 
 # --- PRT-CFR SD-CFR Mixture Wrapper ---
@@ -2549,8 +2644,15 @@ class PRTCFRAgentWrapper(NeuralAgentWrapper):
         weighting: str = "linear",
         mixture_seed: Optional[int] = None,
         crn_seed_base: Optional[int] = None,
+        policy_seed: Optional[int] = None,
     ):
-        super().__init__(player_id, config, device=device, use_argmax=use_argmax)
+        super().__init__(
+            player_id,
+            config,
+            device=device,
+            use_argmax=use_argmax,
+            policy_seed=policy_seed,
+        )
         from src.cfr.prtcfr_mixture import PRTCFRMixture
         from src.cfr.prtcfr_worker import PRODUCTION_SEQ_CAP
         from src.sequence_encoding import SequenceOverflowError
@@ -2563,29 +2665,31 @@ class PRTCFRAgentWrapper(NeuralAgentWrapper):
             weighting=weighting,
             seq_cap=PRODUCTION_SEQ_CAP,
         )
-        # Deterministic per-wrapper episode RNG so eval is reproducible and the
-        # unit tests can pin the sampled-snapshot sequence. Seat instances differ
-        # by player_id so the two seats sample independently (like action
-        # sampling, SD-CFR snapshot sampling is inherent policy stochasticity and
-        # is not CRN-paired across the seat-swap; only the deck is).
+        # Which snapshot an episode is played from is a policy draw, so it
+        # descends from the run seed like every other one: the loop threads that
+        # seed in as policy_seed, and the seat is folded into the derivation, so
+        # the two seats sample independently (like action sampling, SD-CFR
+        # snapshot sampling is inherent policy stochasticity and is not
+        # CRN-paired across the seat swap; only the deck is). An explicit
+        # ``mixture_seed`` still wins, which is how the unit tests pin the
+        # sampled-snapshot sequence; ``crn_seed_base`` stands in when the caller
+        # threaded no run seed, so a CRN-pinned run stays reproducible
+        # (cambia-651 RC-B1, cambia-2022).
+        stream_seed = (
+            self._policy_seed if self._policy_seed is not None else crn_seed_base
+        )
         seed = (
             mixture_seed
             if mixture_seed is not None
-            else 0x9E3779B1 ^ (player_id * 0x85EBCA77)
-        ) & 0xFFFF_FFFF
+            else derive_policy_seed(stream_seed, "prtcfr-mixture", player_id)
+        )
         self._episode_rng = np.random.default_rng(seed)
-        # Per-instance action-sampling RNG (cambia-651 RC-B1): choose_action
-        # previously drew from np.random.choice/random.choice against their
-        # respective module-global RNGs, which are unseeded and order-
-        # dependent across processes -- the same crn_seed_base then still
-        # produced different sampled actions run to run. Seeded with the same
-        # convention as _episode_rng (deterministic per seat, optionally
-        # salted with crn_seed_base so varying the CRN base also varies the
-        # action-sampling stream), but a different magic constant so the two
-        # streams don't mirror each other.
-        action_seed = (
-            (crn_seed_base or 0) ^ 0xC2B2AE3D ^ (player_id * 0x27D4EB2F)
-        ) & 0xFFFF_FFFF
+        # Action sampling gets its own stream, derived the same way under a
+        # different label so the two do not mirror each other. Before
+        # cambia-651 this was np.random.choice/random.choice against the
+        # module-global RNGs, which are unseeded, order-dependent across
+        # processes, and reset to a fixed state by an SB3 model load.
+        action_seed = derive_policy_seed(stream_seed, "prtcfr-action", player_id)
         self._action_rng = np.random.default_rng(action_seed)
         # Per-episode token-stream state (populated in initialize_state). The
         # stream itself lives in the engine; only the cursor position is here.
@@ -2818,18 +2922,25 @@ AGENT_REGISTRY: Dict[str, Type[BaseAgent]] = {
 
 
 def get_agent(agent_type: str, player_id: int, config, **kwargs) -> BaseAgent:
-    """Instantiates an agent based on its type."""
+    """Instantiates an agent based on its type.
+
+    ``policy_seed`` is the run seed every policy draw this agent makes descends
+    from (cambia-2022). Every branch below threads it: an agent left unseeded
+    draws from a fixed stream, never from the global ``random`` module or
+    numpy's global RNG, either of which an SB3 model load resets mid-run.
+    """
     agent_class = AGENT_REGISTRY.get(agent_type.lower())
     if not agent_class:
         raise ValueError(
             f"Unknown agent type: {agent_type}. Available: {list(AGENT_REGISTRY.keys())}"
         )
+    policy_seed = kwargs.get("policy_seed")
 
     if agent_type.lower() == "cfr":
         avg_strategy = kwargs.get("average_strategy")
         if not avg_strategy or not isinstance(avg_strategy, dict):  # Check type
             raise ValueError("CFRAgent requires 'average_strategy' dictionary.")
-        return CFRAgentWrapper(player_id, config, avg_strategy)
+        return CFRAgentWrapper(player_id, config, avg_strategy, policy_seed=policy_seed)
     elif agent_type.lower() in ("deep_cfr", "escher", "sd_cfr"):
         checkpoint_path = kwargs.get("checkpoint_path")
         if not checkpoint_path:
@@ -2844,9 +2955,15 @@ def get_agent(agent_type: str, player_id: int, config, **kwargs) -> BaseAgent:
                 device=device,
                 use_ema=bool(kwargs.get("use_ema", False)),
                 use_argmax=use_argmax,
+                policy_seed=policy_seed,
             )
         return agent_class(
-            player_id, config, checkpoint_path, device=device, use_argmax=use_argmax
+            player_id,
+            config,
+            checkpoint_path,
+            device=device,
+            use_argmax=use_argmax,
+            policy_seed=policy_seed,
         )
     elif agent_type.lower() == "ppo":
         model_path = kwargs.get("model_path") or kwargs.get("checkpoint_path")
@@ -2855,19 +2972,28 @@ def get_agent(agent_type: str, player_id: int, config, **kwargs) -> BaseAgent:
                 "PPOAgentWrapper requires 'model_path' or 'checkpoint_path'."
             )
         device = kwargs.get("device", "cpu")
-        return PPOAgentWrapper(player_id, config, model_path, device=device)
+        return PPOAgentWrapper(
+            player_id, config, model_path, device=device, policy_seed=policy_seed
+        )
     elif agent_type.lower() == "rebel":
         checkpoint_path = kwargs.get("checkpoint_path")
         if not checkpoint_path:
             raise ValueError("ReBeLAgentWrapper requires 'checkpoint_path'.")
         device = kwargs.get("device", "cpu")
-        return ReBeLAgentWrapper(player_id, config, checkpoint_path, device=device)
+        return ReBeLAgentWrapper(
+            player_id, config, checkpoint_path, device=device, policy_seed=policy_seed
+        )
     elif agent_type.lower() == "gtcfr":
         checkpoint_path = kwargs.get("checkpoint_path", "")
         device = kwargs.get("device", "cpu")
         deterministic = kwargs.get("use_argmax", True)
         return GTCFRAgentWrapper(
-            player_id, config, checkpoint_path, device=device, deterministic=deterministic
+            player_id,
+            config,
+            checkpoint_path,
+            device=device,
+            deterministic=deterministic,
+            policy_seed=policy_seed,
         )
     elif agent_type.lower() == "sog":
         checkpoint_path = kwargs.get("checkpoint_path", "")
@@ -2885,13 +3011,19 @@ def get_agent(agent_type: str, player_id: int, config, **kwargs) -> BaseAgent:
             c_puct=c_puct,
             cfr_iters=cfr_iters,
             deterministic=deterministic,
+            policy_seed=policy_seed,
         )
     elif agent_type.lower() == "sog_inference":
         checkpoint_path = kwargs.get("checkpoint_path", "")
         device = kwargs.get("device", "cpu")
         deterministic = kwargs.get("use_argmax", True)
         return SoGInferenceAgentWrapper(
-            player_id, config, checkpoint_path, device=device, deterministic=deterministic
+            player_id,
+            config,
+            checkpoint_path,
+            device=device,
+            deterministic=deterministic,
+            policy_seed=policy_seed,
         )
     elif agent_type.lower() in ("desca", "dense-escher"):
         checkpoint_path = kwargs.get("checkpoint_path")
@@ -2900,7 +3032,12 @@ def get_agent(agent_type: str, player_id: int, config, **kwargs) -> BaseAgent:
         device = kwargs.get("device", "cpu")
         use_argmax = kwargs.get("use_argmax", False)
         return DESCAAgentWrapper(
-            player_id, config, checkpoint_path, device=device, use_argmax=use_argmax
+            player_id,
+            config,
+            checkpoint_path,
+            device=device,
+            use_argmax=use_argmax,
+            policy_seed=policy_seed,
         )
     elif agent_type.lower() == "prt_cfr":
         checkpoint_path = kwargs.get("checkpoint_path")
@@ -2916,18 +3053,24 @@ def get_agent(agent_type: str, player_id: int, config, **kwargs) -> BaseAgent:
             device=device,
             use_argmax=use_argmax,
             crn_seed_base=crn_seed_base,
+            policy_seed=policy_seed,
         )
     else:
-        # Pass config to baseline agents as well. RandomAgent (and its
-        # subclasses) accept a per-instance seed (cambia-651 RC-B2); derive it
-        # from crn_seed_base + player_id when the caller supplied a CRN base,
-        # else leave it None (entropy-seeded, matching prior behavior).
+        # Baseline agents take the run seed the same way. Only the random ones
+        # draw, and they take it as ``seed``: the CRN base stands in when the
+        # caller threaded no run seed, so a CRN-pinned run stays reproducible
+        # (cambia-651 RC-B2, cambia-2022). Everything else here is decided by
+        # state alone -- the heuristics make no draw at all -- so it keeps the
+        # two-argument construction, which is also the contract a registered
+        # test stub is written against.
         if isinstance(agent_class, type) and issubclass(agent_class, RandomAgent):
-            crn_seed_base = kwargs.get("crn_seed_base")
+            stream_seed = (
+                policy_seed if policy_seed is not None else kwargs.get("crn_seed_base")
+            )
             seed = (
                 None
-                if crn_seed_base is None
-                else (crn_seed_base ^ 0xB5297A4D ^ (player_id * 0x68E31DA4)) & 0xFFFF_FFFF
+                if stream_seed is None
+                else derive_policy_seed(stream_seed, "baseline", agent_type.lower())
             )
             return agent_class(player_id, config, seed=seed)
         return agent_class(player_id, config)
@@ -3239,12 +3382,20 @@ def run_evaluation(
         crn_seed_base: When set, each seat-swap pair of games shares a
             deterministic deck seed so the agent under test faces an identical
             deal from both seats (common random numbers). None deals every game
-            an independent seed instead, drawn from ``seed``.
-        seed: Run seed every deal descends from, drawn from OS entropy and
-            recorded on the stats when not given. This is what a game is dealt
-            from when CRN pairing is off; before cambia-1974 the deck was left
-            unseeded and the engine filled it from the global ``random`` module,
-            which any Stable-Baselines3 model load resets to a fixed state.
+            an independent seed instead, drawn from ``seed``. Given a base and
+            no explicit ``seed``, the run seed is derived from the base rather
+            than from entropy, so the policy streams repeat as the decks do.
+        seed: Run seed every deal AND every policy draw descends from, drawn
+            from OS entropy and recorded on the stats when not given. This is
+            what a game is dealt from when CRN pairing is off; before cambia-1974
+            the deck was left unseeded and the engine filled it from the global
+            ``random`` module, which any Stable-Baselines3 model load resets to a
+            fixed state. The agents' own draws (a wrapper's illegal-action
+            fallback, the PRT-CFR snapshot and action sampling, a random
+            baseline's every move) were on that same module and on numpy's
+            global RNG until cambia-2022; they now take a per-agent stream
+            derived from this number, so a run replays from the seed it
+            reports.
         crn_identity: Stable string folded into the deck-seed hash alongside
             crn_seed_base (cambia-651 RC-A). Defaults to checkpoint_path (or
             agent1_type), which moves per process for a tmpdir checkpoint
@@ -3307,6 +3458,20 @@ def run_evaluation(
         logger.error("Failed to load configuration from %s", config_path)
         sys.exit(1)
 
+    # Every deal AND every policy draw this run makes descends from one recorded
+    # number, so it is resolved before the agents are built (cambia-2022).
+    #
+    # A run given no seed but pinned to a CRN base takes its run seed from that
+    # base rather than from OS entropy. The base is the caller asking for a
+    # reproducible run: its deck seeds already repeated, and now that the agents'
+    # policy streams descend from the run seed, drawing that seed from entropy
+    # would leave the run irreproducible in exactly the dimension the base was
+    # passed to pin (tests/test_prtcfr_eval_wrapper.py, cambia-651 RC-A/RC-B).
+    if seed is None and crn_seed_base is not None:
+        run_seed = derive_policy_seed(crn_seed_base, "run_seed")
+    else:
+        run_seed = resolve_run_seed(seed)
+
     average_strategy = None
     if agent1_type.lower() == "cfr" or agent2_type.lower() == "cfr":
         logger.info("Loading CFR agent data from %s...", strategy_path)
@@ -3355,6 +3520,11 @@ def run_evaluation(
         # agent types ignore it via kwargs.get.
         agent1_kwargs["crn_seed_base"] = crn_seed_base
         agent2_kwargs["crn_seed_base"] = crn_seed_base
+        # The run seed each side's policy draws descend from, labelled by side so
+        # the two do not share a stream when the same agent type sits on both
+        # (cambia-2022). Seat is folded in below this, by the agent itself.
+        agent1_kwargs["policy_seed"] = derive_policy_seed(run_seed, "agent1", agent1_type)
+        agent2_kwargs["policy_seed"] = derive_policy_seed(run_seed, "agent2", agent2_type)
 
         # Build each side at the seat(s) it will occupy. A wrapper's player_id is
         # baked in at construction and threaded into its belief, so occupying a
@@ -3399,8 +3569,6 @@ def run_evaluation(
         crn_identity = checkpoint_path or agent1_type
 
     results: Counter = Counter()
-    # Every deal this run makes descends from one recorded number.
-    run_seed = resolve_run_seed(seed)
     deck_rng = np.random.default_rng(run_seed)
     start_time = time.perf_counter()
     jsonl_overhead_ms = 0.0
@@ -3977,8 +4145,19 @@ def run_head_to_head(
     spec_a = f"{agent_type}|{checkpoint_a}"
     spec_b = f"{agent_type}|{checkpoint_b}"
 
-    a_by_seat = [_agent_class(s, config, checkpoint_a, device=device) for s in (0, 1)]
-    b_by_seat = [_agent_class(s, config, checkpoint_b, device=device) for s in (0, 1)]
+    # Each side's policy draws descend from the run seed under its own spec, so
+    # the two sides never share a stream and a match replays from the seed it
+    # reports (cambia-2022).
+    policy_seed_a = derive_policy_seed(run_seed, "side_a", spec_a)
+    policy_seed_b = derive_policy_seed(run_seed, "side_b", spec_b)
+    a_by_seat = [
+        _agent_class(s, config, checkpoint_a, device=device, policy_seed=policy_seed_a)
+        for s in (0, 1)
+    ]
+    b_by_seat = [
+        _agent_class(s, config, checkpoint_b, device=device, policy_seed=policy_seed_b)
+        for s in (0, 1)
+    ]
 
     checkpoint_a_wins = 0
     checkpoint_b_wins = 0
@@ -4135,7 +4314,7 @@ def run_head_to_head_typed(
     spec_a = f"{agent_a_type}|{checkpoint_a}|{'argmax' if use_argmax_a else 'sampling'}"
     spec_b = f"{agent_b_type}|{checkpoint_b}|{'argmax' if use_argmax_b else 'sampling'}"
 
-    def _build(agent_type: str, ckpt: str, seat: int, argmax: bool):
+    def _build(agent_type: str, ckpt: str, seat: int, argmax: bool, policy_seed: int):
         return get_agent(
             agent_type,
             seat,
@@ -4143,13 +4322,23 @@ def run_head_to_head_typed(
             checkpoint_path=ckpt,
             device=device,
             use_argmax=argmax,
+            policy_seed=policy_seed,
         )
 
     # One agent per (side, seat). Built here so no model load lands between two
     # games, where it would reseed the global random module and, before
-    # cambia-1974, the deal with it.
-    a_by_seat = [_build(agent_a_type, checkpoint_a, s, use_argmax_a) for s in (0, 1)]
-    b_by_seat = [_build(agent_b_type, checkpoint_b, s, use_argmax_b) for s in (0, 1)]
+    # cambia-1974, the deal with it. One policy stream per side too, derived
+    # from the run seed under that side's spec, so the same agent type on both
+    # sides still draws independently and the match replays from the seed it
+    # reports (cambia-2022).
+    policy_seed_a = derive_policy_seed(run_seed, "side_a", spec_a)
+    policy_seed_b = derive_policy_seed(run_seed, "side_b", spec_b)
+    a_by_seat = [
+        _build(agent_a_type, checkpoint_a, s, use_argmax_a, policy_seed_a) for s in (0, 1)
+    ]
+    b_by_seat = [
+        _build(agent_b_type, checkpoint_b, s, use_argmax_b, policy_seed_b) for s in (0, 1)
+    ]
 
     wins_a = 0
     wins_b = 0
