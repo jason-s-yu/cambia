@@ -220,8 +220,13 @@ class SnapLogicMixin:
         def log_snap_result(details_dict):
             original_log = list(self.snap_results_log)
 
+            original_this_action = list(self.snap_results_this_action)
+
             def change():
                 self.snap_results_log.append(details_dict)
+                # Also recorded as this action's own, so a clear that ends the
+                # window can hand it to the belief (cambia-1985).
+                self.snap_results_this_action.append(details_dict)
 
             def undo():
                 # Check if the last item is indeed the one we added
@@ -229,6 +234,7 @@ class SnapLogicMixin:
                     self.snap_results_log and self.snap_results_log[-1] == details_dict
                 ), f"Undo snap log mismatch. Expected last item {details_dict}, log is {self.snap_results_log}"
                 self.snap_results_log.pop()
+                self.snap_results_this_action = original_this_action
                 assert self.snap_results_log == original_log, "Undo snap log failed"
 
             self._add_change(
@@ -889,11 +895,15 @@ class SnapLogicMixin:
         if action_type_str == "ActionSnapOpponent":
             log_details["removed_opponent_index"] = removed_opponent_index
 
+        original_this_action = list(self.snap_results_this_action)
+
         def change():
             self.snap_results_log.append(log_details)
+            self.snap_results_this_action.append(log_details)
 
         def undo():
             self.snap_results_log.pop()
+            self.snap_results_this_action = original_this_action
 
         self._add_change(
             change, undo, ("snap_log_append", log_details), undo_stack, delta_list
@@ -943,7 +953,12 @@ class SnapLogicMixin:
                 self._add_change(
                     change_snap_own,
                     undo_snap_own,
-                    ("snap_own_success", winner, snap_idx, serialize_card(card_to_remove)),
+                    (
+                        "snap_own_success",
+                        winner,
+                        snap_idx,
+                        serialize_card(card_to_remove),
+                    ),
                     undo_stack,
                     delta_list,
                 )
@@ -1021,9 +1036,7 @@ class SnapLogicMixin:
 
                         def change_snap_opp_remove():
                             if (
-                                0
-                                <= target_opp_hand_idx
-                                < len(self.players[opp_idx].hand)
+                                0 <= target_opp_hand_idx < len(self.players[opp_idx].hand)
                                 and self.players[opp_idx].hand[target_opp_hand_idx]
                                 is card_to_remove
                             ):
@@ -1041,9 +1054,7 @@ class SnapLogicMixin:
                             self.players[opp_idx].hand.insert(
                                 target_opp_hand_idx, card_to_remove
                             )
-                            assert (
-                                self.players[opp_idx].hand == original_opp_hand_state
-                            )
+                            assert self.players[opp_idx].hand == original_opp_hand_state
 
                         self._add_change(
                             change_snap_opp_remove,
@@ -1109,9 +1120,11 @@ class SnapLogicMixin:
                                 type(next_pending).__name__,
                                 winner,
                                 new_pending_data,
-                                type(original_pending[0]).__name__
-                                if original_pending[0]
-                                else None,
+                                (
+                                    type(original_pending[0]).__name__
+                                    if original_pending[0]
+                                    else None
+                                ),
                                 original_pending[1],
                                 {},
                             ),
@@ -1325,17 +1338,26 @@ class SnapLogicMixin:
             self.snap_results_log
         )  # Capture log before potential clear
 
+        original_at_close = list(self.snap_results_at_close)
+
         def change_snap_end():
             self.snap_phase_active = False
             self.snap_discarded_card = None
             self.snap_potential_snappers = []
             self.snap_current_snapper_idx = 0
+            # The entries the closing action itself appended go to the belief
+            # before the log is dropped (cambia-1985). Only this action's own:
+            # anything earlier in the block was already delivered by the
+            # observation taken after the action that appended it, and handing it
+            # over again would have the belief remove the same slot twice.
+            self.snap_results_at_close = list(self.snap_results_this_action)
             self.snap_results_log = []  # Clear the log upon ending the phase
 
         def undo_snap_end():
             # Assert preconditions
             assert self.snap_phase_active is False
             # Restore previous state
+            self.snap_results_at_close = original_at_close
             self.snap_phase_active = original_snap_phase
             self.snap_discarded_card = original_snap_card
             self.snap_potential_snappers = original_snap_potentials
