@@ -242,6 +242,7 @@ def cmd_h2h(args):
         device=args.device,
         use_argmax_a=args.argmax_a,
         use_argmax_b=args.argmax_b,
+        seed=args.seed,
     )
     elapsed = time.time() - t0
 
@@ -261,7 +262,11 @@ def cmd_h2h(args):
         "selection_mode_a": "argmax" if args.argmax_a else "sampling",
         "selection_mode_b": ("argmax" if args.argmax_b else "sampling")
         + (" (PPO wrapper is argmax-only)" if args.agent_b == "ppo" else ""),
-        "seat_mode": "alternated (run_head_to_head_typed)",
+        "seat_mode": ("alternated, one deal per seat rotation (both seats see it)"),
+        # cambia-1974: the seed every deal descended from. A row without one
+        # was measured before the loop took a seed, and if a PPO seat played,
+        # it measured a single deal repeated.
+        "run_seed": res.get("run_seed"),
         "tie_semantics": "ties are non-wins for both sides (draws counted separately)",
         "wins_a": wins_a,
         "wins_b": wins_b,
@@ -357,6 +362,15 @@ def main():
     )
     h.add_argument(
         "--argmax-b", action="store_true", help="Side B uses argmax (default sampling)"
+    )
+    h.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=(
+            "Run seed every deal descends from. Omitted, one is drawn and "
+            "recorded on the row, so the match can be replayed from it."
+        ),
     )
     h.set_defaults(func=cmd_h2h)
 

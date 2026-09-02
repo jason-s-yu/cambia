@@ -326,6 +326,7 @@ _EVALS_WHITELIST = [
     "seat_balanced",
     "selection_mode",
     "crn_seed",
+    "run_seed",
     "seat_scheme",
     # cambia-1479 eval-integrity columns; a source db predating them (or a
     # source row measured before they existed) carries NULL here, which must
@@ -518,6 +519,11 @@ def _read_evals(src: sqlite3.Connection, src_run_id: Any) -> List[Dict[str, Any]
             ),
             "crn_seed": _str_or_none(
                 e.get("crn_seed"), "eval.crn_seed", _MAX_SHORT_STR_LEN
+            ),
+            # cambia-1974: the seed a pulled row's deals descended from. Carried
+            # here so a remote row is as reconstructible as a local one.
+            "run_seed": _str_or_none(
+                e.get("run_seed"), "eval.run_seed", _MAX_SHORT_STR_LEN
             ),
             "seat_scheme": _str_or_none(
                 e.get("seat_scheme"), "eval.seat_scheme", _MAX_SHORT_STR_LEN

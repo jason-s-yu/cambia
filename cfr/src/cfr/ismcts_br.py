@@ -115,6 +115,7 @@ from src.cfr.lbr import (
     belief_protocol_label,
     choose_action_pos,
     normalize_deal_decks,
+    seed_opponent_stream,
     terminal_utility,
 )
 from src.constants import ActionDrawStockpile
@@ -778,6 +779,12 @@ def ismcts_br(
     # same value, and a recorded ismcts_br seed still reproduces its number.
     master.getrandbits(63)
     opp_seed_stream = random.Random(master.getrandbits(63))
+    # Every stream above descends from `seed`, so this estimator never read the
+    # global random module. An INJECTED factory can still be one of lbr's, whose
+    # uniform opponents draw from that module's own sub-stream, so it is seeded
+    # from this run's seed too rather than left wherever the last run put it
+    # (cambia-1974).
+    seed_opponent_stream(seed)
 
     if opponent_factory is None:
         opponent_factory = _default_opponent_factory(opp_seed_stream)

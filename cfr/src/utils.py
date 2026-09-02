@@ -143,3 +143,20 @@ def format_infoset_count(count: int) -> str:
         return f"{count // 1000}k"
     else:
         return f"{count / 1_000_000:.1f}M"
+
+
+def resolve_run_seed(seed: Optional[int]) -> int:
+    """The seed a match deals from, drawn from OS entropy when unset.
+
+    Never from the global ``random`` module. Loading a Stable-Baselines3 model
+    reseeds that module to a fixed state, so a loop that drew its deck seeds
+    there after building a PPO wrapper drew the SAME value every time and dealt
+    one hand for the whole match (cambia-1974). ``SeedSequence`` reads the OS
+    entropy pool, which no library reseeds.
+
+    The resolved value rides on the result, so a match that was not given a seed
+    can still be replayed exactly by passing back the one it reports.
+    """
+    if seed is not None:
+        return int(seed) & 0xFFFF_FFFF_FFFF_FFFF
+    return int(np.random.SeedSequence().entropy) & 0xFFFF_FFFF_FFFF_FFFF

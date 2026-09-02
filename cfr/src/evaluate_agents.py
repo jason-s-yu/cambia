@@ -42,6 +42,7 @@ from src.agent_state import AgentState, AgentObservation
 from src.utils import (
     InfosetKey,
     normalize_probabilities,
+    resolve_run_seed,
 )
 
 from src.constants import (
@@ -3203,6 +3204,19 @@ def _crn_deck_seed(
     return int(hashlib.sha256(seed_key.encode("utf-8")).hexdigest()[:8], 16)
 
 
+def _h2h_deck_seed(run_seed: int, spec_a: str, spec_b: str, pair_index: int) -> int:
+    """Deck seed for one seat rotation of a head-to-head.
+
+    Symmetric in the two sides, so the pair that swaps seats within a match and
+    a second match run with the sides exchanged all meet the same deal: deck
+    luck then cancels instead of being one more thing the win rate carries
+    (cambia-1974 AC2). Built on ``_crn_deck_seed`` so the file has one deck-seed
+    formula rather than two.
+    """
+    low, high = sorted((spec_a, spec_b))
+    return _crn_deck_seed(run_seed, low, high, pair_index)
+
+
 # --- Evaluation Loop ---
 
 
@@ -3220,6 +3234,7 @@ def run_evaluation(
     crn_seed_base: Optional[int] = None,
     crn_identity: Optional[str] = None,
     num_players: int = 2,
+    seed: Optional[int] = None,
 ) -> Counter:
     """Runs head-to-head evaluation between two agents. Returns results Counter.
 
@@ -3237,8 +3252,13 @@ def run_evaluation(
             in seat 0 for every game (legacy behavior).
         crn_seed_base: When set, each seat-swap pair of games shares a
             deterministic deck seed so the agent under test faces an identical
-            deal from both seats (common random numbers). None leaves the deck
-            unseeded (process entropy), preserving prior behavior.
+            deal from both seats (common random numbers). None deals every game
+            an independent seed instead, drawn from ``seed``.
+        seed: Run seed every deal descends from, drawn from OS entropy and
+            recorded on the stats when not given. This is what a game is dealt
+            from when CRN pairing is off; before cambia-1974 the deck was left
+            unseeded and the engine filled it from the global ``random`` module,
+            which any Stable-Baselines3 model load resets to a fixed state.
         crn_identity: Stable string folded into the deck-seed hash alongside
             crn_seed_base (cambia-651 RC-A). Defaults to checkpoint_path (or
             agent1_type), which moves per process for a tmpdir checkpoint
@@ -3393,6 +3413,9 @@ def run_evaluation(
         crn_identity = checkpoint_path or agent1_type
 
     results: Counter = Counter()
+    # Every deal this run makes descends from one recorded number.
+    run_seed = resolve_run_seed(seed)
+    deck_rng = np.random.default_rng(run_seed)
     start_time = time.perf_counter()
     jsonl_overhead_ms = 0.0
     # Per-game tracking for enhanced stats
@@ -3435,7 +3458,9 @@ def run_evaluation(
                 # itself differs from the Python engine's for the same seed --
                 # different RNGs -- so a cross-engine comparison is
                 # distributional, never per-game.
-                deck_seed: Optional[int] = None
+                # With CRN off the deal is independent per game, but still drawn
+                # from this run's own generator rather than left for the engine
+                # to fill from the global random module (cambia-1974).
                 if crn_seed_base is not None:
                     pair_index = (
                         (game_num - 1) // num_players
@@ -3445,6 +3470,8 @@ def run_evaluation(
                     deck_seed = _crn_deck_seed(
                         crn_seed_base, crn_identity, agent2_type, pair_index
                     )
+                else:
+                    deck_seed = int(deck_rng.integers(0, 2**63))
 
                 # One session per game: it owns the engine handle and each
                 # belief agent's GoAgentState, built at the initial state so the
@@ -3713,6 +3740,9 @@ def run_evaluation(
         None,
     )
     enhanced_stats["crn_seed"] = crn_seed_base
+    # The seed every deal descended from, so a row says which deals produced it
+    # and a run without an explicit seed is still replayable (cambia-1974).
+    enhanced_stats["run_seed"] = run_seed
     # Attach as attribute so CLI and tests can access enhanced stats without
     # polluting the Counter sum that existing tests rely on.
     results.stats = enhanced_stats  # type: ignore[attr-defined]
@@ -3780,6 +3810,7 @@ def _run_single_baseline(args: tuple) -> tuple:
         seat_scheme,
         crn_seed_base,
         num_players,
+        seed,
     ) = args
     results = run_evaluation(
         config_path=config_path,
@@ -3794,6 +3825,7 @@ def _run_single_baseline(args: tuple) -> tuple:
         seat_scheme=seat_scheme,
         crn_seed_base=crn_seed_base,
         num_players=num_players,
+        seed=seed,
     )
     return baseline, results, getattr(results, "stats", {})
 
@@ -3811,6 +3843,7 @@ def run_evaluation_multi_baseline(
     seat_scheme: str = "alternated",
     crn_seed_base: Optional[int] = None,
     num_players: int = 2,
+    seed: Optional[int] = None,
 ) -> Dict[str, Counter]:
     """
     Evaluate a checkpoint against multiple baseline agents.
@@ -3852,8 +3885,14 @@ def run_evaluation_multi_baseline(
         crn_seed_base = int(hashlib.sha256(ident.encode("utf-8")).hexdigest()[:8], 16)
 
     # Build argument tuples
+    run_seed = resolve_run_seed(seed)
     work_items = []
     for baseline in baselines:
+        # One derived seed per baseline, so the workers do not all deal the same
+        # decks and the whole sweep still reproduces from `run_seed` alone. The
+        # workers are separate processes: a seed drawn inside one of them would
+        # be drawn from that process's own entropy and never recorded.
+        baseline_seed = _crn_deck_seed(run_seed, "multi_baseline", baseline, 0)
         output_path = f"{output_dir}/{baseline}.jsonl" if output_dir is not None else None
         work_items.append(
             (
@@ -3868,6 +3907,7 @@ def run_evaluation_multi_baseline(
                 seat_scheme,
                 crn_seed_base,
                 num_players,
+                baseline_seed,
             )
         )
 
@@ -3921,6 +3961,7 @@ def run_head_to_head(
     config,
     device: str = "cpu",
     agent_type: str = "deep_cfr",
+    seed: Optional[int] = None,
 ) -> Dict:
     """
     Play two checkpoints of the same agent type against each other.
@@ -3928,19 +3969,30 @@ def run_head_to_head(
     Alternates which checkpoint goes first every game to reduce first-mover bias.
     Supports deep_cfr, rebel, sd_cfr, escher, and other NeuralAgentWrapper types.
 
+    Seeding and agent lifetime match ``run_head_to_head_typed``: each seat
+    rotation is dealt from ``seed``, the swapped pair shares its deal, and the
+    four agents are built once for the match rather than per game (cambia-1974).
+
     Returns:
         Dict with checkpoint_a_wins, checkpoint_b_wins, ties, avg_game_turns,
-        std_game_turns.
+        std_game_turns, run_seed.
     """
+    run_seed = resolve_run_seed(seed)
     logger.info(
-        "Head-to-head (%s): %s vs %s (%d games)",
+        "Head-to-head (%s): %s vs %s (%d games, run_seed=%d)",
         agent_type,
         checkpoint_a,
         checkpoint_b,
         num_games,
+        run_seed,
     )
 
     _agent_class = AGENT_REGISTRY.get(agent_type.lower(), DeepCFRAgentWrapper)
+    spec_a = f"{agent_type}|{checkpoint_a}"
+    spec_b = f"{agent_type}|{checkpoint_b}"
+
+    a_by_seat = [_agent_class(s, config, checkpoint_a, device=device) for s in (0, 1)]
+    b_by_seat = [_agent_class(s, config, checkpoint_b, device=device) for s in (0, 1)]
 
     checkpoint_a_wins = 0
     checkpoint_b_wins = 0
@@ -3952,13 +4004,11 @@ def run_head_to_head(
         # Alternate who goes first
         a_is_p0 = game_num % 2 == 1
         if a_is_p0:
-            agent0 = _agent_class(0, config, checkpoint_a, device=device)
-            agent1 = _agent_class(1, config, checkpoint_b, device=device)
+            agents = [a_by_seat[0], b_by_seat[1]]
         else:
-            agent0 = _agent_class(0, config, checkpoint_b, device=device)
-            agent1 = _agent_class(1, config, checkpoint_a, device=device)
+            agents = [b_by_seat[0], a_by_seat[1]]
 
-        agents = [agent0, agent1]
+        deck_seed = _h2h_deck_seed(run_seed, spec_a, spec_b, (game_num - 1) // 2)
 
         session = None
         try:
@@ -3968,7 +4018,7 @@ def run_head_to_head(
                 else 500
             )
             turn = 0
-            session = _GoEvalGame(config.cambia_rules, None, 2, agents)
+            session = _GoEvalGame(config.cambia_rules, deck_seed, 2, agents)
 
             turn_failed = False
             while not session.is_terminal() and turn < max_turns:
@@ -4047,6 +4097,9 @@ def run_head_to_head(
         "avg_game_turns": avg_turns,
         "std_game_turns": std_turns,
         "total_games": num_games,
+        # The seed every deal came from (cambia-1974).
+        "run_seed": run_seed,
+        "seat_mode": "alternated, one deal per seat rotation (both seats see it)",
     }
 
 
@@ -4060,6 +4113,7 @@ def run_head_to_head_typed(
     device: str = "cpu",
     use_argmax_a: bool = False,
     use_argmax_b: bool = False,
+    seed: Optional[int] = None,
 ) -> Dict:
     """
     Play two typed agent checkpoints against each other.
@@ -4067,18 +4121,49 @@ def run_head_to_head_typed(
     Alternates seat assignment every game to reduce first-mover bias. Uses
     get_agent() to instantiate agents, enabling ESCHER, ReBeL, and Deep CFR.
 
+    Each seat rotation is dealt from ``seed`` (drawn from OS entropy and
+    reported when not given), and the pair that swaps seats shares its deal, so
+    both sides meet the identical cards from both seats. Before cambia-1974 the
+    deck seed was left to the engine, which filled it from the global ``random``
+    module: building a PPO wrapper inside this loop reseeded that module to a
+    fixed state every iteration, so the whole match was one deal played over and
+    over. The four agents are therefore built ONCE here, not per game; the
+    per-game reset they need is ``initialize_state``, which ``_GoEvalGame``
+    fires for each of them at the start of every game.
+
     Returns:
         Dict with wins_a, wins_b, draws, win_rate_a, win_rate_b, num_games,
-        errors, avg_game_turns, std_game_turns.
+        errors, avg_game_turns, std_game_turns, run_seed.
     """
+    run_seed = resolve_run_seed(seed)
     logger.info(
-        "Head-to-head-typed: %s (%s) vs %s (%s) (%d games)",
+        "Head-to-head-typed: %s (%s) vs %s (%s) (%d games, run_seed=%d)",
         agent_a_type,
         checkpoint_a,
         agent_b_type,
         checkpoint_b,
         num_games,
+        run_seed,
     )
+
+    spec_a = f"{agent_a_type}|{checkpoint_a}|{'argmax' if use_argmax_a else 'sampling'}"
+    spec_b = f"{agent_b_type}|{checkpoint_b}|{'argmax' if use_argmax_b else 'sampling'}"
+
+    def _build(agent_type: str, ckpt: str, seat: int, argmax: bool):
+        return get_agent(
+            agent_type,
+            seat,
+            config,
+            checkpoint_path=ckpt,
+            device=device,
+            use_argmax=argmax,
+        )
+
+    # One agent per (side, seat). Built here so no model load lands between two
+    # games, where it would reseed the global random module and, before
+    # cambia-1974, the deal with it.
+    a_by_seat = [_build(agent_a_type, checkpoint_a, s, use_argmax_a) for s in (0, 1)]
+    b_by_seat = [_build(agent_b_type, checkpoint_b, s, use_argmax_b) for s in (0, 1)]
 
     wins_a = 0
     wins_b = 0
@@ -4092,41 +4177,13 @@ def run_head_to_head_typed(
 
         try:
             if a_is_p0:
-                agent0 = get_agent(
-                    agent_a_type,
-                    0,
-                    config,
-                    checkpoint_path=checkpoint_a,
-                    device=device,
-                    use_argmax=use_argmax_a,
-                )
-                agent1 = get_agent(
-                    agent_b_type,
-                    1,
-                    config,
-                    checkpoint_path=checkpoint_b,
-                    device=device,
-                    use_argmax=use_argmax_b,
-                )
+                agents = [a_by_seat[0], b_by_seat[1]]
             else:
-                agent0 = get_agent(
-                    agent_b_type,
-                    0,
-                    config,
-                    checkpoint_path=checkpoint_b,
-                    device=device,
-                    use_argmax=use_argmax_b,
-                )
-                agent1 = get_agent(
-                    agent_a_type,
-                    1,
-                    config,
-                    checkpoint_path=checkpoint_a,
-                    device=device,
-                    use_argmax=use_argmax_a,
-                )
+                agents = [b_by_seat[0], a_by_seat[1]]
 
-            agents = [agent0, agent1]
+            # One deal per seat rotation: games 1 and 2 share it, 3 and 4 the
+            # next, so each side sees every deal from both seats.
+            deck_seed = _h2h_deck_seed(run_seed, spec_a, spec_b, (game_num - 1) // 2)
 
             max_turns = (
                 config.cambia_rules.max_game_turns
@@ -4134,7 +4191,7 @@ def run_head_to_head_typed(
                 else 500
             )
             turn = 0
-            session = _GoEvalGame(config.cambia_rules, None, 2, agents)
+            session = _GoEvalGame(config.cambia_rules, deck_seed, 2, agents)
 
             turn_failed = False
             while not session.is_terminal() and turn < max_turns:
@@ -4218,6 +4275,10 @@ def run_head_to_head_typed(
         "errors": errors_count,
         "avg_game_turns": avg_turns,
         "std_game_turns": std_turns,
+        # The seed every deal came from, so a match run without one can be
+        # replayed exactly by passing this back (cambia-1974).
+        "run_seed": run_seed,
+        "seat_mode": "alternated, one deal per seat rotation (both seats see it)",
     }
 
 
@@ -4313,6 +4374,10 @@ def persist_eval_results(
         row_seat_scheme = stats.get("seat_scheme", seat_scheme)
         row_selection_mode = stats.get("selection_mode", selection_mode)
         row_crn_seed = stats.get("crn_seed", crn_seed)
+        # The seed the deals descended from (cambia-1974). None on a row written
+        # before the loops took one, which is exactly the era whose deals cannot
+        # be reconstructed.
+        row_run_seed = stats.get("run_seed")
         # seat_balanced is only true when alternation actually ran and the agent
         # under test played both seats; default 0 keeps legacy/fixed runs honest.
         row_seat_balanced = int(bool(stats.get("seat_balanced", False)))
@@ -4354,6 +4419,7 @@ def persist_eval_results(
             "seat_scheme": row_seat_scheme,
             "selection_mode": row_selection_mode,
             "crn_seed": None if row_crn_seed is None else str(row_crn_seed),
+            "run_seed": None if row_run_seed is None else str(row_run_seed),
             "seat_balanced": row_seat_balanced,
             "served_policy": row_served_policy,
             "engine_errors": engine_errors,
