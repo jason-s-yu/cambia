@@ -12,6 +12,7 @@ import pytest
 from src.harness.spec import (
     ALLOWED_DEVICES,
     ALLOWED_KINDS,
+    MAX_MEASURE_ARG_LEN,
     HarnessSpecError,
     JobSpec,
     guard_relpath,
@@ -129,7 +130,13 @@ def test_exclusive_allowed_on_every_kind():
 
 
 def test_parse_kind_allowlist_exact():
-    assert set(ALLOWED_KINDS) == {"train", "evaluate", "head-to-head", "bench"}
+    assert set(ALLOWED_KINDS) == {
+        "train",
+        "evaluate",
+        "head-to-head",
+        "bench",
+        "measure",
+    }
 
 
 def test_parse_rejects_unknown_keys():
@@ -326,6 +333,131 @@ def test_to_payload_omits_warm_start_when_unset():
 
 
 # ---------------------------------------------------------------------------
+# measure kind (design D38, cambia-1072): script/args/reads, measure-only,
+# mirroring the target/warm_start kind-scoping tests above.
+# ---------------------------------------------------------------------------
+
+
+def _measure_spec(**over):
+    base = {
+        "kind": "measure",
+        "name": "measure-1",
+        "script": "cfr/scripts/measure_gate_gap.py",
+    }
+    base.update(over)
+    return base
+
+
+def test_parse_measure_minimal():
+    spec = JobSpec.parse(_measure_spec())
+    assert spec.kind == "measure"
+    assert spec.script == "cfr/scripts/measure_gate_gap.py"
+    assert spec.args == []
+    assert spec.reads == []
+
+
+def test_parse_measure_requires_script():
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse({"kind": "measure", "name": "measure-noscript"})
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "/etc/passwd",
+        "../secret.py",
+        "cfr/other/measure_gate_gap.py",
+        "cfr/scripts/",
+        "cfr/scripts",
+        "cfr/scripts_evil/x.py",
+    ],
+)
+def test_parse_measure_script_must_resolve_under_scripts_root(bad):
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_measure_spec(script=bad))
+
+
+def test_parse_script_forbidden_outside_measure():
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_train_spec(script="cfr/scripts/measure_gate_gap.py"))
+
+
+def test_parse_measure_args_verbatim():
+    spec = JobSpec.parse(_measure_spec(args=["--run", "v0.4-x2r-c1", "--shards", "17"]))
+    assert spec.args == ["--run", "v0.4-x2r-c1", "--shards", "17"]
+
+
+def test_parse_measure_args_rejects_nul_byte():
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_measure_spec(args=["a\x00b"]))
+
+
+def test_parse_measure_args_rejects_over_cap():
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_measure_spec(args=["x" * (MAX_MEASURE_ARG_LEN + 1)]))
+
+
+def test_parse_measure_args_accepts_at_cap():
+    spec = JobSpec.parse(_measure_spec(args=["x" * MAX_MEASURE_ARG_LEN]))
+    assert spec.args == ["x" * MAX_MEASURE_ARG_LEN]
+
+
+def test_parse_measure_args_must_be_list_of_strings():
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_measure_spec(args="not-a-list"))
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_measure_spec(args=[1, 2]))
+
+
+def test_parse_args_forbidden_outside_measure():
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_train_spec(args=["--x"]))
+
+
+def test_parse_measure_reads_accepted():
+    spec = JobSpec.parse(_measure_spec(reads=["v0.4-x2r-c1", "v0.4-x2r-c-rep"]))
+    assert spec.reads == ["v0.4-x2r-c1", "v0.4-x2r-c-rep"]
+
+
+@pytest.mark.parametrize("bad", ["/etc/passwd", "../secret", "a/../b"])
+def test_parse_measure_reads_rejects_unsafe_path(bad):
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_measure_spec(reads=[bad]))
+
+
+def test_parse_measure_reads_must_be_list_of_strings():
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_measure_spec(reads="not-a-list"))
+
+
+def test_parse_reads_forbidden_outside_measure():
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_train_spec(reads=["some-run"]))
+
+
+def test_to_payload_includes_measure_fields():
+    spec = JobSpec.parse(_measure_spec(args=["--run", "v0.4-x2r-c1"], reads=["seed-run"]))
+    payload = spec.to_payload("f" * 40)
+    assert payload["kind"] == "measure"
+    assert payload["script"] == "cfr/scripts/measure_gate_gap.py"
+    assert payload["args"] == ["--run", "v0.4-x2r-c1"]
+    assert payload["reads"] == ["seed-run"]
+
+
+def test_to_payload_omits_args_and_reads_when_unset():
+    spec = JobSpec.parse(_measure_spec())
+    payload = spec.to_payload("f" * 40)
+    assert "args" not in payload
+    assert "reads" not in payload
+
+
+def test_to_payload_omits_script_for_non_measure():
+    spec = JobSpec.parse(_train_spec())
+    payload = spec.to_payload("f" * 40)
+    assert "script" not in payload
+
+
+# ---------------------------------------------------------------------------
 # after / on_failure dependency fields (cambia-352): allowed on every kind, same
 # name rules as the job, self-reference rejected, on_failure enum-checked.
 # ---------------------------------------------------------------------------
@@ -377,6 +509,63 @@ def test_to_payload_omits_after_when_unset():
     payload = JobSpec.parse(_train_spec()).to_payload("f" * 40)
     assert "after" not in payload
     assert "on_failure" not in payload
+
+
+# ---------------------------------------------------------------------------
+# after as a fan-in list (design D29, cambia-1713): the AND-join wire shape.
+# The list form runs through the same per-parent validation as the single-
+# string form, and the shape given to parse() is the shape to_payload() emits
+# unchanged -- a client using the pre-r2 string form stays byte-identical.
+# ---------------------------------------------------------------------------
+
+
+def test_parse_after_accepts_list_of_parents():
+    spec = JobSpec.parse(_train_spec(after=["p1", "p2", "p3"]))
+    assert spec.after == ["p1", "p2", "p3"]
+
+
+def test_parse_after_list_validates_every_entry_name():
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_train_spec(after=["p1", "../evil"]))
+
+
+def test_parse_after_list_rejects_self_reference_anywhere():
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_train_spec(name="r1", after=["p1", "r1", "p2"]))
+
+
+def test_parse_after_list_rejects_non_string_entries():
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_train_spec(after=["p1", 2]))
+
+
+def test_parse_after_rejects_non_string_non_list():
+    with pytest.raises(HarnessSpecError):
+        JobSpec.parse(_train_spec(after={"p1": True}))
+
+
+def test_parse_after_list_allows_empty_list():
+    # design D29: a list of 0..N names; an empty list is a valid (if inert)
+    # AND-join wire shape, equivalent to no dependency.
+    spec = JobSpec.parse(_train_spec(after=[]))
+    assert spec.after == []
+
+
+def test_to_payload_preserves_list_shape():
+    spec = JobSpec.parse(_train_spec(after=["p1", "p2"], on_failure="fail"))
+    payload = spec.to_payload("f" * 40)
+    assert payload["after"] == ["p1", "p2"]
+    assert payload["on_failure"] == "fail"
+
+
+def test_to_payload_preserves_single_string_shape():
+    # The pre-r2 wire shape is unchanged: a bare string in, a bare string out,
+    # so an old daemon that only understands a single-parent string keeps
+    # working against a new client that was not asked for fan-in.
+    spec = JobSpec.parse(_train_spec(after="parent"))
+    payload = spec.to_payload("f" * 40)
+    assert payload["after"] == "parent"
+    assert isinstance(payload["after"], str)
 
 
 def test_parse_overrides_must_be_mapping():

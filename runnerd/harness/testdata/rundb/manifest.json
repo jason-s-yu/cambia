@@ -1,0 +1,61 @@
+{
+  "fixtures": [
+    {
+      "file": "valid_train.sqlite",
+      "kind": "train",
+      "expected_name": "job-train-0001",
+      "verdict": "accept",
+      "reason": ""
+    },
+    {
+      "file": "valid_evaluate.sqlite",
+      "kind": "evaluate",
+      "expected_name": "v0.4-x2r-target-run",
+      "verdict": "accept",
+      "reason": ""
+    },
+    {
+      "file": "corrupt.sqlite",
+      "kind": "train",
+      "expected_name": "job-train-0001",
+      "verdict": "reject",
+      "reason": "integrity_check"
+    },
+    {
+      "file": "extra_table.sqlite",
+      "kind": "train",
+      "expected_name": "job-train-0001",
+      "verdict": "reject",
+      "reason": "schema"
+    },
+    {
+      "file": "second_row.sqlite",
+      "kind": "train",
+      "expected_name": "job-train-0001",
+      "verdict": "reject",
+      "reason": "identity"
+    },
+    {
+      "file": "wrong_name.sqlite",
+      "kind": "train",
+      "expected_name": "job-train-0001",
+      "verdict": "reject",
+      "reason": "identity"
+    },
+    {
+      "file": "out_of_enum.sqlite",
+      "kind": "train",
+      "expected_name": "job-train-0001",
+      "verdict": "reject",
+      "reason": "enum"
+    },
+    {
+      "file": null,
+      "kind": "train",
+      "expected_name": "job-train-0001",
+      "verdict": "reject",
+      "reason": "size_cap",
+      "note": "not checked in: the size cap is checked before the file is ever opened, so both suites synthesize a sparse oversized file at test time instead of committing a large blob"
+    }
+  ]
+}

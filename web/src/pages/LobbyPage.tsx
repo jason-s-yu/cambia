@@ -32,17 +32,21 @@ const LobbyPage: React.FC = () => {
   const navigate = useNavigate();
   const hasAttemptedConnectionRef = useRef(false);
 
-  const {
-    currentLobbyId: storeLobbyId,
-    lobbyDetails,
-    isLoading: isStoreLoading,
-    error: storeError,
-    isConnected,
-    setCurrentLobbyId,
-    leaveLobby,
-    clearError: clearStoreError,
-    phase
-  } = useCurrentLobbyStore();
+  // Selected one field at a time, never a bare `useCurrentLobbyStore()`. The bare call returns the
+  // whole state object, whose identity zustand changes on every write, so a chat line, a dropped-
+  // action nonce or any other lobby traffic re-rendered this page and, through renderContent, the
+  // unmemoized table or results subtree under it. The same reading as useSocket's, in the file
+  // that fix was made for (cambia-1236, cambia-1239 review). The action selectors return functions
+  // create() defines once and never replaces.
+  const storeLobbyId = useCurrentLobbyStore((s) => s.currentLobbyId);
+  const lobbyDetails = useCurrentLobbyStore((s) => s.lobbyDetails);
+  const isStoreLoading = useCurrentLobbyStore((s) => s.isLoading);
+  const storeError = useCurrentLobbyStore((s) => s.error);
+  const isConnected = useCurrentLobbyStore((s) => s.isConnected);
+  const phase = useCurrentLobbyStore((s) => s.phase);
+  const setCurrentLobbyId = useCurrentLobbyStore((s) => s.setCurrentLobbyId);
+  const leaveLobby = useCurrentLobbyStore((s) => s.leaveLobby);
+  const clearStoreError = useCurrentLobbyStore((s) => s.clearError);
 
   const gameState = useGameStore(selectGameState);
   const selfId = useAuthStore((s) => s.user?.id) ?? null;
@@ -50,7 +54,10 @@ const LobbyPage: React.FC = () => {
 
   const isValidLobbyId = useMemo(() => urlLobbyId && typeof urlLobbyId === 'string' && urlLobbyId.length > 5, [urlLobbyId]);
 
-  const { sendMessage, closeSocket, reopenSocket } = useSocket(isValidLobbyId ? urlLobbyId : null);
+  // `gaveUp` is the hook's own record of why it stopped dialing, handed to the table as a state.
+  // The table used to rebuild it from the error copy in the store, which read a clean close from
+  // the hub as an ongoing reconnect (cambia-1239 review).
+  const { sendMessage, closeSocket, reopenSocket, gaveUp } = useSocket(isValidLobbyId ? urlLobbyId : null);
 
   // Synchronize URL id with the store id and trigger connection.
   useEffect(() => {
@@ -182,7 +189,7 @@ const LobbyPage: React.FC = () => {
             sendMessage={sendMessage}
             onLeave={requestLeave}
             connected={isConnected}
-            connectionError={storeError}
+            gaveUp={gaveUp}
           />
         </ErrorBoundary>
       );

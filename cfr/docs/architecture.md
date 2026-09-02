@@ -146,7 +146,9 @@ Config fields:
 
 ### N-Player
 
-`N_PLAYER_INPUT_DIM = 856`, `N_PLAYER_NUM_ACTIONS = 620`. Used when `num_players > 2` (MaxPlayers=8).
+`N_PLAYER_INPUT_DIM = 936`, `N_PLAYER_NUM_ACTIONS = 620`. Used when `num_players > 2` (MaxPlayers=8).
+The 936 dims are 384 powerset + 432 slot identity + 40 public + 8 own seat + 8 seat count + 64
+per-seat hand length and in-play bits. Slot blocks are ordered relative to the acting seat.
 
 ### Action Space
 

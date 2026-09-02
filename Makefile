@@ -8,9 +8,16 @@ ROOT_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 
 PYTHON ?= python
 
+# Commit this checkout is built from, stamped into libcambia.so's
+# cambia_abi_commit export so bridge.py's ABI handshake can report which
+# commit built a mismatched library (cambia-1689).
+COMMIT_HASH := $(shell git rev-parse HEAD)
+
 # Build the shared library for Python FFI
 libcambia:
-	go build -buildmode=c-shared -o cfr/libcambia.so ./engine/cgo/
+	go build -buildmode=c-shared \
+		-ldflags "-X github.com/jason-s-yu/cambia/engine/cgo.abiCommit=$(COMMIT_HASH)" \
+		-o cfr/libcambia.so ./engine/cgo/
 
 # Run the game server
 service:

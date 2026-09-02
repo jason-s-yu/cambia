@@ -415,6 +415,12 @@ export function recordOutbound<M>(outbox: OutboxEntry<M>[], entry: OutboxEntry<M
  *                           which is a frame that asked for nothing.
  *   phase_change countdown  beginCountdown, reached from start_game and from the ready that
  *                           completes an auto-start lobby (MarkUserReadyUnsafe all-ready).
+ *   phase_change open       returnToLobby (hub.go), reached from the post-game exit frame and
+ *                           from the results timer that fires it on its own; either way the
+ *                           lobby the frame asked for is open. Other paths emit the same frame
+ *                           (a countdown aborted by an unready, a search cancelled), but
+ *                           return_to_lobby is only sendable in post_game, so no outbox holding
+ *                           one can be open when they fire.
  *
  * update_rules has no case because an accepted one emits nothing at all (handleLobbyMsg applies
  * the rules and broadcasts no snapshot); OUTBOX_TTL_MS is what bounds it.
@@ -459,7 +465,12 @@ export function ackedType(type: string, payload: unknown, selfId: string | null)
 			return self.is_ready ? 'ready' : 'unready';
 		}
 		case 'phase_change':
-			return p.phase === 'countdown' ? 'start_game' : null;
+			if (p.phase === 'countdown') return 'start_game';
+			// An accepted return_to_lobby is answered by this and a lobby_state, neither of which
+			// named the frame, so it sat in the outbox until the TTL and any sync_state repair inside
+			// that window reported the player's accepted exit as dropped (cambia-1239 review).
+			if (p.phase === 'open') return 'return_to_lobby';
+			return null;
 		default:
 			return null;
 	}

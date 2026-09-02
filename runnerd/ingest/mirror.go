@@ -2,8 +2,12 @@ package ingest
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -75,18 +79,31 @@ func (m *Manager) ensureMirror(ctx context.Context) error {
 	return err
 }
 
+// resolveJobRef resolves jobID's mirror ref to its commit, without comparing it
+// against any expected value. A missing ref or non-commit target is
+// ErrReceiptMismatch. Shared by verifyReceipt (which additionally checks the
+// resolved commit against the spec) and BundleCreate (which has no expected
+// commit to check against; the ref's current target is the commit to bundle).
+func (m *Manager) resolveJobRef(ctx context.Context, jobID string) (string, error) {
+	ref := jobRef(jobID)
+	resolved, err := m.git(ctx, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	if err != nil || resolved == "" {
+		return "", fmt.Errorf("%w: ref %s does not resolve to a commit", ErrReceiptMismatch, ref)
+	}
+	return resolved, nil
+}
+
 // verifyReceipt is the runner-side receipt check (design 3.1): the job ref must
 // resolve to a commit equal to the spec commit, and that object must exist. A
 // missing ref, missing object, or sha mismatch is ErrReceiptMismatch. No ref is
 // created or updated here; the ref is authored solely by the submit-time push.
 func (m *Manager) verifyReceipt(ctx context.Context, jobID, commit string) error {
-	ref := jobRef(jobID)
-	resolved, err := m.git(ctx, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
-	if err != nil || resolved == "" {
-		return fmt.Errorf("%w: ref %s does not resolve to a commit", ErrReceiptMismatch, ref)
+	resolved, err := m.resolveJobRef(ctx, jobID)
+	if err != nil {
+		return err
 	}
 	if resolved != commit {
-		return fmt.Errorf("%w: ref %s -> %s, spec commit %s", ErrReceiptMismatch, ref, resolved, commit)
+		return fmt.Errorf("%w: ref %s -> %s, spec commit %s", ErrReceiptMismatch, jobRef(jobID), resolved, commit)
 	}
 	// Confirm the object is present in the mirror's object store.
 	if _, err := m.git(ctx, "cat-file", "-e", commit+"^{commit}"); err != nil {
@@ -139,6 +156,13 @@ func (m *Manager) verifyCommitSignature(ctx context.Context, commit string) erro
 // the "+" force prefix, a job ref that already points elsewhere and is not
 // fast-forwardable is refused by git rather than overwritten. After the fetch the
 // caller runs verifyReceipt as usual.
+//
+// A thin bundle (BundleCreate with a non-empty basis) whose negated basis
+// commit this mirror does not already hold fails the fetch with git's
+// "Repository lacks these prerequisite commits" error; that case is reported as
+// ErrBundlePrereqMissing so the node-side caller can nack bundle_prereq_miss and
+// re-claim with an empty basis (design 3.3, D48) instead of treating it as a
+// generic transport failure.
 func (m *Manager) BundleFetch(ctx context.Context, jobID, bundlePath string) error {
 	if err := validateJobID(jobID); err != nil {
 		return err
@@ -148,9 +172,167 @@ func (m *Manager) BundleFetch(ctx context.Context, jobID, bundlePath string) err
 	}
 	refspec := "refs/harness/" + jobID + ":" + jobRef(jobID)
 	if _, err := m.git(ctx, "fetch", bundlePath, refspec); err != nil {
+		if strings.Contains(err.Error(), "lacks these prerequisite commits") {
+			return fmt.Errorf("%w: %v", ErrBundlePrereqMissing, err)
+		}
 		return fmt.Errorf("bundle fetch: %w", err)
 	}
 	return nil
+}
+
+// bundleBasisCap is the maximum number of have_commits entries a claim may
+// advertise for thin-bundle negation (design 3.3, D48); anything past it is
+// refused before it ever reaches a git argv.
+const bundleBasisCap = 16
+
+// bundleExt and bundleSidecarExt name a cached bundle and the sha256-digest
+// sidecar published alongside it, so a cache hit never re-hashes a
+// potentially large file to answer with its descriptor.
+const (
+	bundleExt        = ".bundle"
+	bundleSidecarExt = ".sha256"
+)
+
+// BundleDescriptor is the built (or cache-reused) artifact BundleCreate
+// returns: the on-disk bundle path, its byte size, and its content sha256 -
+// the digest a claim response reports as snapshot.sha256/snapshot.size and the
+// coordinator's file server reports as the ETag (design 3.3, D48).
+type BundleDescriptor struct {
+	Path   string
+	Size   int64
+	SHA256 string
+}
+
+// bundleCacheKey derives the cache filename stem from the commit and a
+// validated basis set: "<commit>" for the full-tree bundle (empty basis), else
+// "<commit>-<basis-digest>" where basis-digest is the sha256 of the sorted
+// basis list, so two claims naming the same basis set in a different order
+// still share one cache entry.
+func bundleCacheKey(commit string, basis []string) string {
+	if len(basis) == 0 {
+		return commit
+	}
+	sorted := append([]string(nil), basis...)
+	sort.Strings(sorted)
+	h := sha256.Sum256([]byte(strings.Join(sorted, "\n")))
+	return commit + "-" + hex.EncodeToString(h[:])[:16]
+}
+
+// BundleCreate returns the git bundle delivering jobID's pinned commit,
+// building it through the injected runner on a cache miss and reusing a
+// cached artifact otherwise (design 3.3, D48). basis is the requesting node's
+// have_commits list: each entry is validated as a 40-hex commit present in
+// this mirror and negated in the bundle's rev-list; a malformed entry, one
+// absent from the mirror, or a list past bundleBasisCap is refused with
+// ErrInvalidBasis and no git subprocess runs. Concurrent calls for the same
+// (commit, basis) collapse into one build (singleflight), and the cache is
+// LRU-evicted at cfg.MaxSnapshots.
+//
+// Callers must not hold the placement/claim lock while calling this: a
+// cache-miss build forks a whole-repository `git bundle create`, and no git
+// subprocess may run while that lock is held (design 3.3).
+func (m *Manager) BundleCreate(ctx context.Context, jobID string, basis []string) (BundleDescriptor, error) {
+	if err := validateJobID(jobID); err != nil {
+		return BundleDescriptor{}, err
+	}
+	if len(basis) > bundleBasisCap {
+		return BundleDescriptor{}, fmt.Errorf("%w: %d entries exceeds cap %d", ErrInvalidBasis, len(basis), bundleBasisCap)
+	}
+	commit, err := m.resolveJobRef(ctx, jobID)
+	if err != nil {
+		return BundleDescriptor{}, err
+	}
+
+	clean := make([]string, len(basis))
+	for i, b := range basis {
+		if verr := validateCommit(b); verr != nil {
+			return BundleDescriptor{}, fmt.Errorf("%w: %v", ErrInvalidBasis, verr)
+		}
+		if _, rerr := m.git(ctx, "rev-parse", "--verify", "--quiet", b+"^{commit}"); rerr != nil {
+			return BundleDescriptor{}, fmt.Errorf("%w: basis %s not present in mirror", ErrInvalidBasis, b)
+		}
+		clean[i] = b
+	}
+
+	if err := os.MkdirAll(m.snapshotDir, 0o755); err != nil {
+		return BundleDescriptor{}, err
+	}
+	key := bundleCacheKey(commit, clean)
+	path := filepath.Join(m.snapshotDir, key+bundleExt)
+
+	if desc, ok := m.bundleCacheHit(path); ok {
+		return desc, nil
+	}
+
+	return m.bundleGroup.Do(key, func() (BundleDescriptor, error) {
+		if desc, ok := m.bundleCacheHit(path); ok {
+			return desc, nil
+		}
+		desc, berr := m.buildBundle(ctx, jobID, clean, path)
+		if berr != nil {
+			return BundleDescriptor{}, berr
+		}
+		m.evictSnapshots(map[string]bool{key: true})
+		return desc, nil
+	})
+}
+
+// bundleCacheHit reports whether a bundle and its digest sidecar are both
+// present at path, returning its descriptor and bumping its LRU mtime. A
+// bundle without its sidecar (a build interrupted between the two renames in
+// buildBundle) is treated as a miss so the caller rebuilds it.
+func (m *Manager) bundleCacheHit(path string) (BundleDescriptor, bool) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return BundleDescriptor{}, false
+	}
+	digest, err := os.ReadFile(path + bundleSidecarExt)
+	if err != nil {
+		return BundleDescriptor{}, false
+	}
+	touch(path, m.now())
+	return BundleDescriptor{Path: path, Size: info.Size(), SHA256: strings.TrimSpace(string(digest))}, true
+}
+
+// buildBundle forks the actual `git bundle create`, hashes the result, and
+// publishes it (and its sidecar digest) atomically so a reader never observes
+// a partially written bundle.
+func (m *Manager) buildBundle(ctx context.Context, jobID string, basis []string, path string) (BundleDescriptor, error) {
+	tmp, err := os.CreateTemp(m.snapshotDir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return BundleDescriptor{}, err
+	}
+	tmpPath := tmp.Name()
+	_ = tmp.Close()
+	defer os.Remove(tmpPath) // no-op once renamed away below
+
+	args := []string{"bundle", "create", tmpPath, jobRef(jobID)}
+	for _, b := range basis {
+		args = append(args, "^"+b)
+	}
+	if _, err := m.git(ctx, args...); err != nil {
+		return BundleDescriptor{}, fmt.Errorf("bundle create: %w", err)
+	}
+
+	digest, size, err := sha256FileStream(tmpPath)
+	if err != nil {
+		return BundleDescriptor{}, err
+	}
+
+	sidecarTmp := tmpPath + bundleSidecarExt
+	if err := os.WriteFile(sidecarTmp, []byte(digest), 0o644); err != nil {
+		return BundleDescriptor{}, err
+	}
+	// Sidecar renamed first, bundle second: bundleCacheHit only accepts a
+	// bundle whose sidecar already exists, so a crash between these two
+	// renames leaves a stray sidecar and no bundle, never the reverse.
+	if err := os.Rename(sidecarTmp, path+bundleSidecarExt); err != nil {
+		return BundleDescriptor{}, err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return BundleDescriptor{}, err
+	}
+	return BundleDescriptor{Path: path, Size: size, SHA256: digest}, nil
 }
 
 // listJobRefs returns the job ids of every refs/harness/* ref in the mirror.

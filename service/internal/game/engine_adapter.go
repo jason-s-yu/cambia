@@ -1148,13 +1148,19 @@ func (g *CambiaGame) autoResolveArmedAbility(playerID uuid.UUID) {
 		// (cambia-1171). The loop this replaces was never reproduced; this is a guard.
 		pending := g.Engine.Pending.Type
 		rank := g.SpecialAction.CardRank
+		// The frame's special field is the peek_self/peek_other/swap_blind/swap_peek enum
+		// (service/doc/game_actions.md), not a card rank, and it reaches both the wire and the
+		// game_actions row. The sibling emitters convert the same way (RejectSpecialAction, and
+		// the client's own enum echoed by special_actions.go); this one sent the rank straight
+		// through (cambia-1239).
+		special := rankToSpecial(rank)
 		if g.Engine.ResolveUntargetableArmedAbility(g.isNPlayerTable()) {
 			log.Printf("Game %s: pending ability %d for player %s had no legal target; resolved it and advanced.", g.ID, pending, playerID)
 			g.logAction(playerID, "action_special_timeout_fizzle", map[string]interface{}{
-				"rank": rank, "pending": pending,
+				"rank": rank, "special": special, "pending": pending,
 			})
 			g.SpecialAction = SpecialActionState{}
-			g.FireEventPrivateSpecialActionFail(playerID, "That ability had no legal target and was discharged.", rank, nil, nil)
+			g.FireEventPrivateSpecialActionFail(playerID, "That ability had no legal target and was discharged.", special, nil, nil)
 			g.settleEngineResolution()
 			return
 		}
@@ -1346,10 +1352,12 @@ func (g *CambiaGame) handleSnapViaEngine(playerID uuid.UUID, engineIdx uint8, pa
 			g.refuseSnapAttempt(playerID, cardID, "opponent snapping is disabled by house rules")
 			return
 		}
-		// LockCallerHand protects the caller's hand from everyone else too (RULES.md 3C). The
-		// engine's initiateSnapPhase never offers the caller's cards as a snap target once they
-		// have called, so this is refused the same way as the AllowOpponentSnapping case above:
-		// no penalty, because the target was never legal to name.
+		// LockCallerHand protects the caller's hand from everyone else too (RULES.md 3C), and the
+		// service resolves snaps outside the engine's snap phase, so this check is what applies
+		// the rule on this path. The engine's own snap mask and apply paths refuse the same target
+		// (engine/legal.go legalSnapDecision, engine/snap.go snapOpponent), which they did not
+		// before cambia-1239. Refused the same way as the AllowOpponentSnapping case above: no
+		// penalty, because the target was never legal to name.
 		if g.handLocked(oppEngineIdx) {
 			g.refuseSnapAttempt(playerID, cardID, "target's hand is locked by LockCallerHand")
 			return
@@ -1435,10 +1443,15 @@ func (g *CambiaGame) emitSnapSuccessEvents(playerID uuid.UUID, ownerID uuid.UUID
 // including yourself (snaps, swaps, etc.)"; the LockCallerHand field comment (rules.go) names
 // exactly that scope - snaps, swaps and replacements - for this flag. Swaps and replacements
 // reach that protection for free because they route through engine.ApplyAction, which already
-// gates on Rules.LockCallerHand (engine/legal.go); snap does not (see handleSnapViaEngine), which
-// is why this helper exists and every snap-path caller must consult it explicitly.
+// gates on it (engine/legal.go); snap does not (see handleSnapViaEngine), which is why this
+// helper exists and every snap-path caller must consult it explicitly.
+//
+// It asks the engine rather than re-deriving the rule from the service's own HouseRules copy,
+// which the two disagree about: mapHouseRulesToEngine hands a circuit round TournamentHouseRules,
+// where LockCallerHand is off (engine/circuit.go), while g.HouseRules keeps its default of on, so
+// the service used to refuse snaps the engine allowed for a whole circuit round (cambia-1239).
 func (g *CambiaGame) handLocked(engineIdx uint8) bool {
-	return g.HouseRules.LockCallerHand && g.isCambiaCalled() && g.Engine.CambiaCaller >= 0 && uint8(g.Engine.CambiaCaller) == engineIdx
+	return g.Engine.HandLocked(engineIdx)
 }
 
 // fireSnapFailEvent logs and broadcasts the public failure notice a rejected snap fires, whether

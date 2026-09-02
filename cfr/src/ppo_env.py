@@ -62,7 +62,11 @@ import numpy as np
 
 from src.agents import action_codec
 from src.agents.game_view import tracked_opponent_seat
-from src.constants import EP_PBS_V2_INPUT_DIM, ActionSnapOpponentMove
+from src.constants import (
+    EP_PBS_V2_INPUT_DIM,
+    N_PLAYER_MAX_PLAYERS,
+    ActionSnapOpponentMove,
+)
 from src.encoding import EP_PBS_INPUT_DIM, NUM_ACTIONS, action_to_index
 from src.ffi.bridge import GoAgentState, GoEngine
 
@@ -215,6 +219,14 @@ class CambiaEnv(gymnasium.Env):
         num_players = int(num_players)
         if num_players < 2:
             raise ValueError(f"num_players must be at least 2, got {num_players}")
+        if num_players > N_PLAYER_MAX_PLAYERS:
+            # The engine deals at most MaxPlayers seats and the belief state is sized for
+            # that table; a larger count used to reach the FFI and take the process down
+            # inside libcambia.so rather than fail as an error (cambia-1551).
+            raise ValueError(
+                f"num_players must be at most {N_PLAYER_MAX_PLAYERS} "
+                f"(engine.MaxPlayers), got {num_players}"
+            )
         self._num_players = num_players
         # 3+ seats need the engine's N-player action and encoding space; 2 seats
         # stay in the 2-player space every existing PPO checkpoint was fit in.

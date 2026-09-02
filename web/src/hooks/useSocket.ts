@@ -1,7 +1,7 @@
 // src/hooks/useSocket.ts
 // Unified WebSocket hook - single connection to /ws/{lobbyId}, subprotocol "cambia".
 // Replaces the separate useLobbySocket and useGameSocket hooks.
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { useAuthStore } from '@/stores/authStore';
 import { useCurrentLobbyStore } from '@/stores/lobbyStore';
 import { useGameStore } from '@/stores/gameStore';
@@ -12,6 +12,22 @@ import { ackOutbound, cardRefsOf, isLobbyFrame, recordOutbound, resolveOutbox, t
 import { NIL as NIL_UUID } from 'uuid';
 const MAX_RETRIES = 5;
 const INITIAL_RETRY_DELAY = 1000;
+
+/**
+ * Why this hook has stopped dialing a lobby, or null while it is still trying. Every value is a
+ * state the connection does not come back from on its own, so the surfaces that draw it say so
+ * rather than showing a reconnect that is not happening:
+ *
+ *   retries   the retry budget is spent (cambia-1236).
+ *   refused   the hub answered lobby_not_found; the id names nothing.
+ *   closed    the hub closed the socket cleanly, which it does when it displaces a duplicate
+ *             socket for the same user, on leave, and on cleanup after a dissolve or an idle
+ *             reap (service/internal/hub/hub.go, connection.go Close).
+ *
+ * Only `retries` buys a fresh budget when the tab comes back: the other two are statements about
+ * the lobby, which returning to the tab does not change.
+ */
+export type GiveUpReason = 'retries' | 'refused' | 'closed';
 
 /** The shape the hub parses the path segment as: `/ws/{lobbyId}` runs uuid.Parse on it and
  *  answers 400 for anything else (service/internal/handlers/ws.go HubWSHandler). */
@@ -98,17 +114,31 @@ export function useSocket(lobbyId: string | null | undefined) {
 	const managedLobbyId = useRef<string | null>(null);
 	const isConnecting = useRef<boolean>(false);
 	const shouldBeConnected = useRef<boolean>(false);
-	/** The lobby whose retry budget is spent, and what spent it. A cap is only a cap if exhausting
-	 *  it is remembered: the connect effect dials whenever the socket is not open, so a counter on
-	 *  its own was reset and spent again on every re-run (cambia-1236). Cleared by a successful
-	 *  open, an explicit close, a different lobby, or a tab identity change: the four things that
-	 *  make a fresh dial worth trying again.
+	/** The lobby this hook has stopped dialing, and what stopped it. A cap is only a cap if
+	 *  exhausting it is remembered: the connect effect dials whenever the socket is not open, so a
+	 *  counter on its own was reset and spent again on every re-run (cambia-1236). Cleared by a
+	 *  successful open, an explicit close, a different lobby, or a tab identity change: the four
+	 *  things that make a fresh dial worth trying again.
 	 *
 	 *  The reason is carried because a fifth thing makes one worth trying again, and only for one
-	 *  of the two: a tab coming back to the foreground. `retries` says the network was unusable a
-	 *  moment ago, which a return is evidence against; `refused` says the hub does not have this
-	 *  lobby, which returning to the tab does not change (cambia-1521). */
-	const gaveUp = useRef<{ lobbyId: string; reason: 'retries' | 'refused' } | null>(null);
+	 *  of the three: a tab coming back to the foreground. `retries` says the network was unusable
+	 *  a moment ago, which a return is evidence against; `refused` and `closed` are statements
+	 *  about the lobby, which returning to the tab does not change (cambia-1521).
+	 *
+	 *  Written through latchGaveUp, never assigned directly, so the render state below always
+	 *  agrees with it. */
+	const gaveUp = useRef<{ lobbyId: string; reason: GiveUpReason } | null>(null);
+	/** The same latch, as a render input. A ref cannot re-render the table that draws this state,
+	 *  so the table used to rebuild it by matching a regex against the error copy this hook writes
+	 *  into the lobby store. That regex read a clean close from the hub as an ongoing reconnect,
+	 *  which left the felt saying "Reconnecting" with every control locked for the rest of the
+	 *  round (cambia-1239 review). Scoped by lobby id like the ref: a latch belongs to the lobby
+	 *  it was set for. */
+	const [gaveUpState, setGaveUpState] = useState<{ lobbyId: string; reason: GiveUpReason } | null>(null);
+	const latchGaveUp = useCallback((entry: { lobbyId: string; reason: GiveUpReason } | null) => {
+		gaveUp.current = entry;
+		setGaveUpState(entry);
+	}, []);
 	const lastSeqRef = useRef<number>(0);
 	/** Frames the hub has neither applied nor answered. A repair window can swallow more than
 	 *  one, so this is a queue rather than a slot (cambia-913 F2), and the events an accepted
@@ -241,7 +271,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 				return;
 			}
 			retryCountRef.current = 0;
-			gaveUp.current = null;
+			latchGaveUp(null);
 			isConnecting.current = false;
 			if (useCurrentLobbyStore.getState().currentLobbyId === targetLobbyId) {
 				setConnected(true);
@@ -324,7 +354,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 					// A lobby the hub says does not exist is not a transient failure, so this is the last
 					// dial for that id until the hook is pointed somewhere else. Coming back to the tab
 					// does not make it exist either, which is why the reason is recorded.
-					gaveUp.current = { lobbyId: targetLobbyId, reason: 'refused' };
+					latchGaveUp({ lobbyId: targetLobbyId, reason: 'refused' });
 					retryCountRef.current = 0;
 					if (ws.current === socket) {
 						releaseSocket(socket, 'Lobby not found');
@@ -378,10 +408,13 @@ export function useSocket(lobbyId: string | null | undefined) {
 			} else {
 				managedLobbyId.current = null;
 				retryCountRef.current = 0;
-				// Budget spent on a drop that was worth retrying: stop dialing this lobby. Without the
-				// latch the connect effect dials again the next time it runs, which is how the cap went
-				// unenforced (cambia-1236 AC2).
-				if (wasUnexpected && !retryAllowed) gaveUp.current = { lobbyId: targetLobbyId, reason: 'retries' };
+				// No path out of this branch dials again: a spent budget stops the connect effect
+				// dialing the next time it runs, which is how the cap went unenforced before the latch
+				// (cambia-1236 AC2), and every other way in is a socket nothing is waiting on any more,
+				// a clean close from the hub included. Both are latched, so the felt draws a terminal
+				// state instead of a reconnect that is not coming: the hub's own close is the case that
+				// used to leave it saying "Reconnecting" for the rest of the round (cambia-1239 review).
+				latchGaveUp({ lobbyId: targetLobbyId, reason: wasUnexpected && !retryAllowed ? 'retries' : 'closed' });
 
 				if (storeLobbyId === targetLobbyId) {
 					setLoading(false);
@@ -404,7 +437,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 			}
 		};
 
-	}, [userId, setConnected, setLoading, setError, clearError, leaveLobby, context, send]);
+	}, [userId, setConnected, setLoading, setError, clearError, leaveLobby, context, send, latchGaveUp]);
 
 	// Connect/disconnect based on lobbyId prop
 	useEffect(() => {
@@ -427,12 +460,12 @@ export function useSocket(lobbyId: string | null | undefined) {
 			managedLobbyId.current = null;
 			isConnecting.current = false;
 			retryCountRef.current = 0;
-			gaveUp.current = null;
+			latchGaveUp(null);
 		}
 
 		// A lobby the hook is no longer pointed at has no claim on the retry budget.
 		if (gaveUp.current !== null && gaveUp.current.lobbyId !== lobbyId) {
-			gaveUp.current = null;
+			latchGaveUp(null);
 			retryCountRef.current = 0;
 		}
 
@@ -442,7 +475,8 @@ export function useSocket(lobbyId: string | null | undefined) {
 			const backoffPending = reconnectTimeoutId.current !== null && managedLobbyId.current === lobbyId;
 			const needsDial = managedLobbyId.current !== lobbyId || (!isConnecting.current && ws.current?.readyState !== WebSocket.OPEN);
 			if (gaveUp.current?.lobbyId === lobbyId) {
-				// Budget spent. The onclose branch has already written the copy the table reads.
+				// Done dialing this lobby. The branch that stopped has already latched why, and the
+				// table draws that latch rather than dialing again.
 				shouldBeConnected.current = false;
 			} else if (needsDial && !backoffPending) {
 				shouldBeConnected.current = true;
@@ -485,7 +519,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 			managedLobbyId.current = null;
 			isConnecting.current = false;
 			retryCountRef.current = 0;
-			gaveUp.current = null;
+			latchGaveUp(null);
 
 			if (useCurrentLobbyStore.getState().isConnected) {
 				setConnected(false);
@@ -499,7 +533,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 				reconnectTimeoutId.current = null;
 			}
 		};
-	}, [lobbyId, connectWebSocket, setConnected, setLoading, setError, sessionEpoch]);
+	}, [lobbyId, connectWebSocket, setConnected, setLoading, setError, sessionEpoch, latchGaveUp]);
 
 	/**
 	 * Reconnect when the tab comes back (cambia-1521).
@@ -514,7 +548,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 	 * What the client was missing is the return itself. Nothing above reacts to the page's
 	 * lifecycle, and every recovery path it does have runs on window.setTimeout, which a hidden tab
 	 * throttles: Chrome clamps a background page to roughly one timer wake-up a minute once it has
-	 * been hidden for five, so a backoff scheduled for 1s can land after the 60s grace has already
+	 * been hidden for five, so a backoff scheduled for 1s can land after the 90s grace has already
 	 * closed and the seat has been forfeited while the client still shows "Retrying". A tab
 	 * restored from the back/forward cache never ran the backoff at all: its socket was closed on
 	 * the way in and its timers were frozen behind it.
@@ -540,7 +574,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 				// (cambia-1236 AC2): a store write, a re-render or an effect re-run cannot produce a
 				// page-lifecycle event, so the dial count stays bounded by the user's own tab switches
 				// rather than running free.
-				gaveUp.current = null;
+				latchGaveUp(null);
 				retryCountRef.current = 0;
 			} else if (!shouldBeConnected.current) {
 				// Nothing wants this socket: an explicit closeSocket, or a clean close from the hub.
@@ -573,7 +607,7 @@ export function useSocket(lobbyId: string | null | undefined) {
 			window.removeEventListener('pageshow', attemptResume);
 			document.removeEventListener('resume', attemptResume);
 		};
-	}, [lobbyId, connectWebSocket]);
+	}, [lobbyId, connectWebSocket, latchGaveUp]);
 
 	/** Send a message over the WS. Injects last_seq automatically. */
 	const sendMessage = useCallback((message: OutboundMessage) => {
@@ -600,13 +634,13 @@ export function useSocket(lobbyId: string | null | undefined) {
 		managedLobbyId.current = null;
 		isConnecting.current = false;
 		retryCountRef.current = 0;
-		gaveUp.current = null;
+		latchGaveUp(null);
 
 		if (useCurrentLobbyStore.getState().isConnected) {
 			setConnected(false);
 			setLoading(false);
 		}
-	}, [setConnected, setLoading]);
+	}, [setConnected, setLoading, latchGaveUp]);
 
 	/**
 	 * Dials the lobby again after an explicit close. The leave sequence closes the socket before
@@ -623,14 +657,17 @@ export function useSocket(lobbyId: string | null | undefined) {
 	const reopenSocket = useCallback(() => {
 		if (!isDialableLobbyId(lobbyId)) return;
 		retryCountRef.current = 0;
-		gaveUp.current = null;
+		latchGaveUp(null);
 		shouldBeConnected.current = true;
 		connectWebSocket(lobbyId);
-	}, [lobbyId, connectWebSocket]);
+	}, [lobbyId, connectWebSocket, latchGaveUp]);
 
 	const isConnected = useCurrentLobbyStore((s) => s.isConnected);
 	const isLoading = useCurrentLobbyStore((s) => s.isLoading);
 	const error = useCurrentLobbyStore((s) => s.error);
+	// Null unless the latch belongs to the lobby this hook is pointed at now: a give-up recorded
+	// for the lobby just left says nothing about this one.
+	const gaveUpReason = gaveUpState && gaveUpState.lobbyId === lobbyId ? gaveUpState.reason : null;
 
-	return { sendMessage, closeSocket, reopenSocket, isConnected, isLoading, error };
+	return { sendMessage, closeSocket, reopenSocket, isConnected, isLoading, error, gaveUp: gaveUpReason };
 }

@@ -26,10 +26,13 @@ type ObfPlayerState struct {
 	HasCalledCambia bool      `json:"hasCalledCambia"`
 	Connected       bool      `json:"connected"`
 	IsCurrentTurn   bool      `json:"isCurrentTurn"`
-	// Forfeited is set once the player's reconnect window has closed (or immediately on the drop
-	// where the grace is 0). Connected alone cannot carry this: inside the window a player is
-	// disconnected but still in the game, and the two states read differently at the table
-	// (cambia-955).
+	// Forfeited is set when a closed reconnect window forfeits the seat, which is what a closed
+	// window means under forfeitOnDisconnect (or immediately on the drop where the grace is 0),
+	// and when a player gives the seat up on purpose (ForfeitSeat, cambia-1520). A circuit round
+	// runs with the forfeit rule off, so a window closing there takes the other branch: the seat
+	// stays in the round played by the turn clock and this stays false (cambia-1233). Connected
+	// alone cannot carry any of it: inside the window a player is disconnected but still in the
+	// game, and the two states read differently at the table (cambia-955).
 	Forfeited bool `json:"forfeited"`
 	// ReconnectDeadline is the epoch-ms time this player's reconnect window closes, present only
 	// while one is open. It lets a client that joins or resyncs mid-window render the same

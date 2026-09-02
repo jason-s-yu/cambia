@@ -179,3 +179,23 @@ func testGameNewWithRules(seed uint64, numPlayers uint8) int32 {
 
 func testNPlayerInputDim() int32   { return int32(cambia_nplayer_input_dim()) }
 func testNPlayerNumActions() int32 { return int32(cambia_nplayer_num_actions()) }
+
+// testAgentNewNPlayer drives cambia_agent_new_nplayer from Go tests. Returns the raw
+// handle, or the FFI's -1 failure sentinel.
+func testAgentNewNPlayer(gameH int32, playerID, numPlayers, memoryLevel, timeDecay uint8) int32 {
+	return int32(cambia_agent_new_nplayer(
+		C.int32_t(gameH), C.uint8_t(playerID), C.uint8_t(numPlayers),
+		C.uint8_t(memoryLevel), C.uint8_t(timeDecay),
+	))
+}
+
+// testAgentEncodeNPlayer writes the agent's NPlayerInputDim-length encoding into out
+// (caller-sized) and returns the export's status code.
+func testAgentEncodeNPlayer(ah int32, ctx uint8, drawn int8, out []float32) int32 {
+	if len(out) == 0 {
+		return -1
+	}
+	return int32(cambia_agent_encode_nplayer(
+		C.int32_t(ah), C.uint8_t(ctx), C.int8_t(drawn), (*C.float)(&out[0]),
+	))
+}

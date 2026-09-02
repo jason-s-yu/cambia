@@ -30,6 +30,7 @@ make libcambia
 ```bash
 make test           # engine + service + cfr test suites
 make parity-gate     # Go vs Python cross-engine lockstep parity
+cd web && npm test   # web client: node --test suites, then the vitest render suite (npm run test:render)
 ```
 
 `make parity-gate` is the migration acceptance for retiring the Python reference engine: it builds

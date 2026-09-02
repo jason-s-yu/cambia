@@ -169,15 +169,26 @@ V2_ACTION_CATEGORY_DRAW = 0
 V2_ACTION_CATEGORY_DISCARD = 1
 V2_ACTION_CATEGORY_ABILITY_SNAP = 2
 
-# N-Player constants (MaxPlayers=8, MaxHandSize=6, MaxOpponents=7)
+# N-Player constants (MaxPlayers=8, MaxHandSize=6, MaxOpponents=7).
+# Mirrors engine/agent/constants.go; cambia_nplayer_input_dim() pins the pair.
 N_PLAYER_MAX_PLAYERS = 8
 N_PLAYER_MAX_SLOTS = 48  # 8 players × 6 cards
 N_PLAYER_POWERSET_DIM = 384  # 48 slots × 8 bits (MaxKnowledgePlayers)
 N_PLAYER_IDENTITY_DIM = 432  # 48 slots × 9 buckets
-N_PLAYER_PUBLIC_DIM = 40
+N_PLAYER_PUBLIC_DIM = 40  # discard 10, stock 4, phase 6, ctx 6, cambia 3, drawn 11
+N_PLAYER_SEAT_DIM = 8  # the encoding agent's own seat, one-hot
+N_PLAYER_SEAT_COUNT_DIM = 8  # the table's active seat count, one-hot at num_players-1
+N_PLAYER_HAND_LEN_DIM = 7  # one seat's hand length, one-hot over 0..MaxHandSize
+N_PLAYER_SEAT_BLOCK_DIM = N_PLAYER_HAND_LEN_DIM + 1  # 8: that, plus an in-play bit
+N_PLAYER_TABLE_DIM = N_PLAYER_MAX_PLAYERS * N_PLAYER_SEAT_BLOCK_DIM  # 64
 N_PLAYER_INPUT_DIM = (
-    N_PLAYER_POWERSET_DIM + N_PLAYER_IDENTITY_DIM + N_PLAYER_PUBLIC_DIM
-)  # 856
+    N_PLAYER_POWERSET_DIM
+    + N_PLAYER_IDENTITY_DIM
+    + N_PLAYER_PUBLIC_DIM
+    + N_PLAYER_SEAT_DIM
+    + N_PLAYER_SEAT_COUNT_DIM
+    + N_PLAYER_TABLE_DIM
+)  # 936
 N_PLAYER_NUM_ACTIONS = 620  # scales with MaxOpponents=7; see engine.NPlayerNumActions
 
 # Bucket midpoints for saliency eviction

@@ -20,17 +20,19 @@ import { useCurrentLobbyStore, type LobbyPhase } from '@/stores/lobbyStore';
 import { buildGameState, SELF_ID as SEAT_ID } from '@/test/fixtures/gameState';
 import type { LobbyState } from '@/types';
 
-const { sendMessage, closeSocket, reopenSocket, leaveLobbyApi } = vi.hoisted(() => ({
+const { sendMessage, closeSocket, reopenSocket, leaveLobbyApi, socket } = vi.hoisted(() => ({
   sendMessage: vi.fn(),
   closeSocket: vi.fn(),
   reopenSocket: vi.fn(),
-  leaveLobbyApi: vi.fn()
+  leaveLobbyApi: vi.fn(),
+  /** What the hook reports; the give-up reason is the one field a test moves. */
+  socket: { gaveUp: null as 'retries' | 'refused' | 'closed' | null }
 }));
 
 // The socket itself is not under test: the page's job is to hand the hub a frame and render what
 // comes back, and both halves are driven here directly (sendMessage spy in, store update out).
 vi.mock('@/hooks/useSocket', () => ({
-  useSocket: () => ({ sendMessage, closeSocket, reopenSocket, isConnected: true, isLoading: false, error: null })
+  useSocket: () => ({ sendMessage, closeSocket, reopenSocket, isConnected: true, isLoading: false, error: null, gaveUp: socket.gaveUp })
 }));
 
 // Only the one call is replaced: LeaveRefusedError has to stay the real class, since the page
@@ -127,8 +129,8 @@ function renderResultsScreen() {
  * table between rounds, where the seat is nobody's to give up either.
  */
 function renderLiveTable(
-  { forfeited = false, gameOver = false, phase = 'in_game' }:
-    { forfeited?: boolean; gameOver?: boolean; phase?: LobbyPhase } = {}
+  { forfeited = false, gameOver = false, phase = 'in_game', connected = true }:
+    { forfeited?: boolean; gameOver?: boolean; phase?: LobbyPhase; connected?: boolean } = {}
 ) {
   const gameState = buildGameState({ self: { forfeited }, gameOver });
   useAuthStore.setState({ isAuthenticated: true, initialised: true, isLoading: false, user: { id: SEAT_ID, username: 'You' } as never });
@@ -136,7 +138,7 @@ function renderLiveTable(
   useCurrentLobbyStore.setState({
     currentLobbyId: LOBBY_ID,
     lobbyDetails: lobbyDetails(),
-    isConnected: true,
+    isConnected: connected,
     isLoading: false,
     error: null,
     phase
@@ -155,6 +157,7 @@ beforeEach(() => {
   // Default: the server accepts the leave. The tests that need a refusal say so themselves.
   leaveLobbyApi.mockReset();
   leaveLobbyApi.mockResolvedValue(undefined);
+  socket.gaveUp = null;
 });
 
 afterEach(() => {
@@ -195,6 +198,27 @@ describe('LobbyPage post-game exit', () => {
   });
 });
 
+// The give-up state travels hook -> page -> table as a value (cambia-1239 review). The table used
+// to rebuild it by matching a regex against the error copy in the store, which missed the hub's own
+// clean close - what it sends when a second tab displaces this one's socket - and left the felt
+// saying "Reconnecting" with every control locked for the rest of the round.
+describe('LobbyPage connection state', () => {
+  it('hands the table the state the hook reports, not the copy in the store', () => {
+    socket.gaveUp = 'closed';
+    renderLiveTable({ connected: false });
+
+    expect(screen.getByText('Disconnected.')).toBeInTheDocument();
+    expect(screen.queryByText('Reconnecting.')).not.toBeInTheDocument();
+  });
+
+  it('leaves the table reconnecting while the hook still is', () => {
+    renderLiveTable({ connected: false });
+
+    expect(screen.getByText('Reconnecting.')).toBeInTheDocument();
+    expect(screen.queryByText('Disconnected.')).not.toBeInTheDocument();
+  });
+});
+
 describe('LobbyPage leave flow', () => {
   it('keeps a refused leave at the table and shows the server reason', async () => {
     // A seat that has already forfeited is the caller that leaves without being asked anything,
@@ -212,6 +236,22 @@ describe('LobbyPage leave flow', () => {
     expect(screen.getByTestId('seat-self')).toBeInTheDocument();
     expect(reopenSocket).toHaveBeenCalledTimes(1);
     expect(useCurrentLobbyStore.getState().currentLobbyId).toBe(LOBBY_ID);
+  });
+
+  it('still ends at the dashboard when the leave fails for any other reason', async () => {
+    // The complementary branch to the refusal above: a request that never arrived, or a lobby that
+    // is already gone. Neither means the player is still seated, so the leave stays best-effort and
+    // nothing but a 409 keeps them at the table (cambia-1239 review).
+    leaveLobbyApi.mockRejectedValue(new Error('network'));
+    renderLiveTable({ forfeited: true });
+
+    await userEvent.click(screen.getByTestId('action-leave-forfeited'));
+
+    expect(await screen.findByText('Dashboard stand-in')).toBeInTheDocument();
+    expect(screen.queryByText(REFUSAL)).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    // The connection is only taken back on a refusal; this player is gone.
+    expect(reopenSocket).not.toHaveBeenCalled();
   });
 
   it('asks before giving a live seat up, and sends the forfeit as the answer', async () => {

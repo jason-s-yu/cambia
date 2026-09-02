@@ -168,7 +168,7 @@ func TestGameEndedDrivesPostGameWithSharedSeq(t *testing.T) {
 	h.conns[idB] = connB
 	h.Phase = PhaseInGame
 
-	h.dispatch(ClientMsg{Type: "_game_ended"})
+	h.dispatch(ClientMsg{Type: "_game_ended", internal: true})
 
 	assert.Equal(t, PhasePostGame, h.Phase, "hub must transition to PhasePostGame when the game ends")
 
@@ -201,7 +201,7 @@ func TestGameEndedIgnoredOutsideInGame(t *testing.T) {
 	h.conns[idA] = connA
 	h.Phase = PhaseOpen
 
-	h.dispatch(ClientMsg{Type: "_game_ended"})
+	h.dispatch(ClientMsg{Type: "_game_ended", internal: true})
 
 	assert.Equal(t, PhaseOpen, h.Phase, "_game_ended outside PhaseInGame must be a no-op")
 	assert.False(t, containsType(drainEnvelopes(t, connA), "phase_change"), "no phase_change should fire when the guard rejects the transition")

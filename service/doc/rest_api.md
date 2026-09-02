@@ -416,6 +416,14 @@ Handled by `internal/handlers/lobby.go`. These manage *ephemeral* in-memory lobb
     consolidated is abandoned: no client is told anything, and the still-connected parties go back
     in the queue with their original queue time, so their search simply continues.
 
+#### `POST /lobby/{id}/join`
+
+* **Description:** Joins a public lobby, or a private one the caller was invited to. `200 OK` with `{"lobby_id":"<id>"}` on success; `400 Bad Request` (invalid lobby id), `403 Forbidden` (private, not invited), `404 Not Found`. See `lobby_actions.md` for the full contract.
+
+#### `POST /lobby/{id}/leave`
+
+* **Description:** Leaves the lobby; not a WebSocket message (`lobby_actions.md`, "Leave Lobby"). `200 OK` (`{"status":"left",...}`) for a caller with no live seat, or a caller not a member at all; `409 Conflict` for a live seat's plain leave; `{"forfeit": true}` forfeits a live seat and then leaves it, also `200 OK`; `404 Not Found` for an unknown lobby. See `lobby_actions.md`, "Leave Lobby" for the row that states this contract in full.
+
 #### `GET /lobby/list`
 
 * **Description:** Lists public lobbies a caller can currently join. Requires no authentication: the handler reads no identity, so the list is the same for every caller. Three filters apply beyond simple membership:

@@ -30,4 +30,12 @@ type ClientMsg struct {
 	// post-game reset (Hub.postGameGen, cambia-1238) and by the countdown's game start
 	// (Hub.countdownGen, cambia-1557).
 	gen uint64
+
+	// internal marks a message the hub built for itself, which is the only kind allowed to name
+	// an underscore-prefixed type. Unexported for the same reason gen is: ReadPump parses the
+	// frame into the exported fields alone, so nothing off a socket can set it. dispatch used to
+	// tell the two apart by the absence of a ConnID and UserID, which fails in the dangerous
+	// direction: a socket-side producer that forgot to stamp identity would have walked through,
+	// while an internal producer that forgets this flag is refused loudly (cambia-1239).
+	internal bool
 }

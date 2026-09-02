@@ -2,6 +2,8 @@ package harness
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -66,15 +68,25 @@ func TestHealthIsTokenFree(t *testing.T) {
 	// field is exposed unauthenticated: a regression to writeJSON(w, 200, snap)
 	// would leak queue/active JobViews (job IDs, commits, configs) while a
 	// presence-only check stayed green. restart_preserves_jobs and build_commit
-	// (cambia-655) are deliberate additions: neither identifies a job.
+	// (cambia-655) are deliberate additions: neither identifies a job. features
+	// is likewise deliberate (D30): a capability list, not host detail.
+	// free_ram_gb/free_disk_gb describe the coordinator host rather than the
+	// queue and are dropped from the token-free payload by D30 (ruling q3);
+	// TestHealthAuthenticatedCarriesHostCounters pins their authenticated return.
 	want := []string{
-		"reconciled_at", "jobs_running", "queue_depth", "free_ram_gb", "free_disk_gb",
-		"restart_preserves_jobs", "build_commit",
+		"reconciled_at", "jobs_running", "queue_depth",
+		"restart_preserves_jobs", "build_commit", "features",
 	}
 	for _, k := range want {
 		if _, ok := body[k]; !ok {
 			t.Fatalf("health body missing key %q: %v", k, body)
 		}
+	}
+	if _, ok := body["free_ram_gb"]; ok {
+		t.Fatalf("token-free health body must not carry free_ram_gb: %v", body)
+	}
+	if _, ok := body["free_disk_gb"]; ok {
+		t.Fatalf("token-free health body must not carry free_disk_gb: %v", body)
 	}
 	if len(body) != len(want) {
 		t.Fatalf("token-free health body must carry exactly %d counter keys, got %d: %v", len(want), len(body), body)
@@ -179,6 +191,140 @@ func TestSubmitAfterValidation(t *testing.T) {
 		t.Fatalf("after terminal parent: got %d, want 201", resp.StatusCode)
 	}
 	resp.Body.Close()
+}
+
+// TestSubmitAfterListValidation (D29, cambia-1713): the list wire shape of
+// `after` runs through the same per-parent checks as the single-string shape
+// -- an unknown parent and a self-reference anywhere in the list are both
+// rejected -- and a list of terminal parents is accepted.
+func TestSubmitAfterListValidation(t *testing.T) {
+	r := newRig(t, rigConfig{maxJobs: 4})
+	for _, name := range []string{"al-p1", "al-p2", "al-p3"} {
+		if err := procmgr.WriteProcessState(filepath.Join(r.runsDir, name),
+			&procmgr.ProcessState{Name: name, Status: procmgr.StatusStopped}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Unknown parent inside a list -> 400 after_not_found.
+	spec := baseSpec("al-child-unknown", "fake")
+	spec["after"] = []string{"al-p1", "no-such-parent"}
+	resp := r.do(http.MethodPost, "/harness/jobs", spec)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("after list unknown parent: got %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Self-reference inside a list -> 400 invalid_after.
+	spec = baseSpec("al-self-ref", "fake")
+	spec["after"] = []string{"al-p1", "al-self-ref"}
+	resp = r.do(http.MethodPost, "/harness/jobs", spec)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("after list self-reference: got %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Every parent terminal -> accepted.
+	spec = baseSpec("al-child-ok", "fake")
+	spec["after"] = []string{"al-p1", "al-p2", "al-p3"}
+	resp = r.do(http.MethodPost, "/harness/jobs", spec)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("after list all terminal: got %d, want 201: %s", resp.StatusCode, readBody(resp))
+	}
+	resp.Body.Close()
+}
+
+// TestSubmitDependencyDepthExceeded (D29) pins the exact 32-level boundary: a
+// new job naming gen31 as its parent (own depth 31) reaches depth 32 and is
+// accepted; naming gen32 (own depth 32) reaches depth 33 and is rejected.
+func TestSubmitDependencyDepthExceeded(t *testing.T) {
+	r := newRig(t, rigConfig{maxJobs: 2})
+
+	// Build gen00..gen32 (33 nodes, depth(genN) == N), each gen(i) after
+	// gen(i-1), entirely via disk records: the depth check reads jobspec.json
+	// directly, so no dispatcher submission is needed to seed the chain.
+	const deepest = 32
+	prev := ""
+	for i := 0; i <= deepest; i++ {
+		name := fmt.Sprintf("dd-gen%02d", i)
+		st := &procmgr.ProcessState{Name: name, Status: procmgr.StatusStopped}
+		if err := procmgr.WriteProcessState(filepath.Join(r.runsDir, name), st); err != nil {
+			t.Fatal(err)
+		}
+		var after []string
+		if prev != "" {
+			after = []string{prev}
+		}
+		if err := writeJobSpec(filepath.Join(r.runsDir, name), &JobSpec{Name: name, Kind: "fake", After: after}); err != nil {
+			t.Fatal(err)
+		}
+		prev = name
+	}
+
+	// gen31's own depth is 31; a dependent on it reaches exactly 32 -- accepted.
+	spec := baseSpec("dd-at-cap", "fake")
+	spec["after"] = "dd-gen31"
+	resp := r.do(http.MethodPost, "/harness/jobs", spec)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("depth-32 (at cap): got %d, want 201: %s", resp.StatusCode, readBody(resp))
+	}
+	resp.Body.Close()
+
+	// gen32's own depth is 32; a dependent on it reaches 33 -- one over cap,
+	// rejected.
+	spec = baseSpec("dd-over-cap", "fake")
+	spec["after"] = "dd-gen32"
+	resp = r.do(http.MethodPost, "/harness/jobs", spec)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("depth-33 (over cap): got %d, want 400", resp.StatusCode)
+	}
+	var body map[string]any
+	decodeBody(t, resp, &body)
+	if body["error"] != "dependency_depth_exceeded" {
+		t.Fatalf("error = %v, want dependency_depth_exceeded", body["error"])
+	}
+}
+
+// TestSubmitTolerantOfUnknownFields (AC6): the submit decoder still ignores an
+// unrecognized field rather than rejecting the request, unchanged by the
+// custom JobSpec.UnmarshalJSON this ticket adds for the after list shape.
+func TestSubmitTolerantOfUnknownFields(t *testing.T) {
+	r := newRig(t, rigConfig{maxJobs: 2})
+	spec := baseSpec("unknown-field-ok", "fake")
+	spec["totally_made_up_field"] = "some-future-client-sent-this"
+	resp := r.do(http.MethodPost, "/harness/jobs", spec)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("unknown field: got %d, want 201: %s", resp.StatusCode, readBody(resp))
+	}
+	resp.Body.Close()
+}
+
+// TestStoredSingleStringAfterStillDecodes (AC1): a jobspec.json written by a
+// pre-r2 daemon (or a v1.0 client) with a bare `after` string still decodes
+// after the field widened to []string.
+func TestStoredSingleStringAfterStillDecodes(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{"kind":"train","name":"legacy","commit":"` + strings.Repeat("a", 40) + `","after":"legacy-parent","on_failure":"run"}`
+	if err := os.WriteFile(filepath.Join(dir, jobSpecFile), []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	spec := readJobSpec(dir)
+	if spec == nil {
+		t.Fatal("readJobSpec returned nil for a stored single-string after")
+	}
+	if len(spec.After) != 1 || spec.After[0] != "legacy-parent" {
+		t.Fatalf("After = %v, want [\"legacy-parent\"]", spec.After)
+	}
+	if spec.OnFailure != "run" {
+		t.Fatalf("OnFailure = %q, want run", spec.OnFailure)
+	}
+}
+
+// readBody drains and returns resp's body as a string, for a failure message;
+// it does not close resp.
+func readBody(resp *http.Response) string {
+	b, _ := io.ReadAll(resp.Body)
+	return string(b)
 }
 
 func TestSubmitNameCollision(t *testing.T) {
@@ -437,6 +583,8 @@ func TestListAndGet(t *testing.T) {
 	}
 }
 
+// TestHealthPayload uses r.do, an AUTHENTICATED request (a valid bearer
+// token), so the host counters are expected here per D30.
 func TestHealthPayload(t *testing.T) {
 	r := newRig(t, rigConfig{ramQuery: func() (float64, error) { return 42.0, nil }})
 	r.disp.Reconcile() // stamps reconciled_at
@@ -454,6 +602,67 @@ func TestHealthPayload(t *testing.T) {
 	}
 	if h["reconciled_at"] == "" {
 		t.Fatal("reconciled_at empty after Reconcile")
+	}
+}
+
+// TestHealthFeaturesList pins the D30 capability list exactly, so a client's
+// local capability gate has something stable to check against.
+func TestHealthFeaturesList(t *testing.T) {
+	r := newRig(t, rigConfig{})
+	body := r.healthBody()
+	raw, ok := body["features"].([]any)
+	if !ok {
+		t.Fatalf("features = %v (%T), want a list", body["features"], body["features"])
+	}
+	got := make([]string, len(raw))
+	for i, v := range raw {
+		got[i], _ = v.(string)
+	}
+	want := []string{"job-sequencing", "fan-in", "nashnet-pool", "resumable-upload", "measure-kind"}
+	if len(got) != len(want) {
+		t.Fatalf("features = %v, want %v", got, want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Fatalf("features[%d] = %q, want %q (features = %v)", i, got[i], w, got)
+		}
+	}
+}
+
+// TestHealthAuthenticatedCarriesHostCounters pins D30's split: free_ram_gb and
+// free_disk_gb describe the coordinator host, not the queue, so the token-free
+// LAN listener drops them while a request carrying a valid operator bearer
+// token still gets them. An invalid token does NOT unlock the counters: health
+// stays reachable on a bad token (never 401), it just stays narrow.
+func TestHealthAuthenticatedCarriesHostCounters(t *testing.T) {
+	r := newRig(t, rigConfig{ramQuery: func() (float64, error) { return 7.0, nil }})
+
+	free := r.healthBody() // no token
+	if _, ok := free["free_ram_gb"]; ok {
+		t.Fatalf("token-free health carries free_ram_gb: %v", free)
+	}
+
+	bad := r.doTok(http.MethodGet, "/harness/health", nil, "garbage.token.value")
+	if bad.StatusCode != http.StatusOK {
+		t.Fatalf("bad-token health: got %d, want 200 (health never 401s)", bad.StatusCode)
+	}
+	var badBody map[string]any
+	if err := json.NewDecoder(bad.Body).Decode(&badBody); err != nil {
+		t.Fatalf("decode bad-token health body: %v", err)
+	}
+	bad.Body.Close()
+	if _, ok := badBody["free_ram_gb"]; ok {
+		t.Fatalf("bad-token health carries free_ram_gb: %v", badBody)
+	}
+
+	auth := r.do(http.MethodGet, "/harness/health", nil)
+	var authBody map[string]any
+	decodeBody(t, auth, &authBody)
+	if jnum(authBody["free_ram_gb"]) != 7.0 {
+		t.Fatalf("authenticated free_ram_gb = %v, want 7", authBody["free_ram_gb"])
+	}
+	if _, ok := authBody["free_disk_gb"]; !ok {
+		t.Fatalf("authenticated health missing free_disk_gb: %v", authBody)
 	}
 }
 
