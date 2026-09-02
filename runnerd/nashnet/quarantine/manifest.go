@@ -73,10 +73,14 @@ type Head struct {
 }
 
 // Rejection is one per-entry refusal. A rejection is typed and per entry, never
-// a session kill (D52).
+// a session kill (D52). Detail is optional and carries the journal validator's
+// own reason and explanation behind the fixed rundb_invalid code, so the commit
+// response and the receipt name which D55 check failed instead of swallowing
+// it; every other rejection leaves it empty.
 type Rejection struct {
 	Path   string `json:"path"`
 	Reason string `json:"reason"`
+	Detail string `json:"detail,omitempty"`
 }
 
 // CommitResponse is the body of an accepted commit (D51 step 7).

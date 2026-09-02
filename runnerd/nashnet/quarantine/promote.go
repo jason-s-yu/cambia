@@ -143,15 +143,26 @@ func (s *Store) Commit(l Lease, req CommitRequest, body []byte) (CommitResponse,
 			kept = append(kept, e)
 			continue
 		}
-		verdict, reason := s.validator.Validate(sources[e.Path].path)
-		if verdict == JournalValid {
+		verdict, verr := s.validator.Validate(sources[e.Path].path, l.rundbName())
+		if verr != nil {
+			// The validator could not read a blob the coordinator just
+			// verified: a coordinator-side fault, not a node rejection, so the
+			// commit aborts without advancing the head rather than charging the
+			// node a journal rejection.
+			return CommitResponse{}, fmt.Errorf("validate %s: %w", RunDBPath, verr)
+		}
+		if verdict.Accepted {
 			kept = append(kept, e)
 			continue
 		}
-		if reason == "" {
-			reason = ReasonRunDBInvalid
+		// Every content-level verdict collapses to one per-entry reason (D51
+		// step 4); the validator's own reason and detail ride along so the
+		// commit response and the receipt name which check failed.
+		detail := verdict.Reason
+		if verdict.Detail != "" {
+			detail += ": " + verdict.Detail
 		}
-		rejected = append(rejected, Rejection{Path: e.Path, Reason: reason})
+		rejected = append(rejected, Rejection{Path: e.Path, Reason: ReasonRunDBInvalid, Detail: detail})
 		rundbRejected = true
 	}
 	accepted = kept

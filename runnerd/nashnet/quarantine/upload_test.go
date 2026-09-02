@@ -118,7 +118,6 @@ func TestResumeAfterCrashUsesPartSizeAlone(t *testing.T) {
 		QuarantineDir: r.quarDir,
 		RunsDir:       r.runsDir,
 		Now:           r.clock.Now,
-		Validator:     acceptAll,
 	})
 	if err != nil {
 		t.Fatalf("restart: %v", err)
@@ -291,6 +290,7 @@ func TestPackageIsLeaf(t *testing.T) {
 	allowed := map[string]bool{
 		"github.com/jason-s-yu/cambia/runnerd/pathguard": true,
 		"github.com/jason-s-yu/cambia/runnerd/procmgr":   true,
+		"github.com/jason-s-yu/cambia/runnerd/sysprobe":  true,
 	}
 	for _, imp := range pkg.Imports {
 		if strings.HasPrefix(imp, "github.com/jason-s-yu/cambia/") && !allowed[imp] {

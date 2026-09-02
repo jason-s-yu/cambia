@@ -35,12 +35,17 @@ func (c *testClock) advance(d time.Duration) {
 	c.at = c.at.Add(d)
 }
 
-// acceptAll is the stub journal validator. The real one is cambia-1717
-// (rundbcheck.go); every commit test that cares about the seam injects its own.
-var acceptAll = ValidatorFunc(func(string) (JournalVerdict, string) { return JournalValid, "" })
+// fixtureRunDBName is the runs.name valid_train.sqlite carries, so a rig
+// promoting that fixture passes the D55 identity check.
+const fixtureRunDBName = "job-train-0001"
 
-// rejectRunDB is the stub verdict the D55 call-site test drives.
-var rejectRunDB = ValidatorFunc(func(string) (JournalVerdict, string) { return JournalInvalid, ReasonRunDBInvalid })
+// journalFixture reads one file of the shared corpus at
+// runnerd/harness/testdata/rundb (cambia-1717), which both the Go validator
+// suite and the Python reconciler suite are driven from.
+func journalFixture(t *testing.T, name string) []byte {
+	t.Helper()
+	return mustRead(t, filepath.Join("..", "..", "harness", "testdata", "rundb", name))
+}
 
 type rig struct {
 	store   *Store
@@ -66,7 +71,6 @@ func newRig(t *testing.T, tune func(*Config)) *rig {
 		QuarantineDir: r.quarDir,
 		RunsDir:       r.runsDir,
 		Now:           r.clock.Now,
-		Validator:     acceptAll,
 	}
 	if tune != nil {
 		tune(&cfg)
@@ -76,7 +80,10 @@ func newRig(t *testing.T, tune func(*Config)) *rig {
 		t.Fatalf("New: %v", err)
 	}
 	r.store = s
-	r.lease = Lease{NodeID: "node-a", JobID: "job-a", LeaseID: "lease-1", Epoch: 1}
+	// The default validator is the real D55 one, so every commit test promotes
+	// a journal only if the shared corpus says it is promotable. RunDBName is
+	// the identity the corpus's valid train fixture carries.
+	r.lease = Lease{NodeID: "node-a", JobID: "job-a", LeaseID: "lease-1", Epoch: 1, RunDBName: fixtureRunDBName}
 	return r
 }
 
@@ -182,6 +189,15 @@ func rejectionReason(resp CommitResponse, path string) string {
 	for _, r := range resp.Rejected {
 		if r.Path == path {
 			return r.Reason
+		}
+	}
+	return ""
+}
+
+func rejectionDetail(resp CommitResponse, path string) string {
+	for _, r := range resp.Rejected {
+		if r.Path == path {
+			return r.Detail
 		}
 	}
 	return ""

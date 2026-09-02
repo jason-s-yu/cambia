@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
+	"github.com/jason-s-yu/cambia/runnerd/sysprobe"
 )
 
 // Subdirectory and file names of a lease's quarantine tree (D49):
@@ -195,6 +196,18 @@ type Lease struct {
 	// MaxBytes lowers Limits.MaxLeaseBytes for this lease (the grant's
 	// caps.max_lease_bytes, D56). Zero means the store default.
 	MaxBytes int64
+	// RunDBName is the runs.name this lease's journal must carry (D55). Empty
+	// means the job id, which is right for every kind but evaluate, where the
+	// coordinator resolves spec.target instead (D64).
+	RunDBName string
+}
+
+// rundbName is the identity the journal validator checks the runs row against.
+func (l Lease) rundbName() string {
+	if l.RunDBName != "" {
+		return l.RunDBName
+	}
+	return l.JobID
 }
 
 func (l Lease) validate() error {
@@ -241,13 +254,19 @@ type Config struct {
 	// Link defaults to os.Link. A test returning syscall.EXDEV drives the copy
 	// path without a second filesystem.
 	Link func(oldname, newname string) error
-	// DiskFreeGB defaults to the statfs probe below, matching the semantics of
-	// harness.diskFreeGB (server.go:238) and procmgr.DiskSpaceCheck.
+	// DiskFreeGB defaults to sysprobe.DiskFreeGB, the moved statfs probe that
+	// keeps the semantics of harness.diskFreeGB (server.go:238) and
+	// procmgr.DiskSpaceCheck.
 	DiskFreeGB func(path string) float64
-	// Validator content-validates run_db.sqlite before promotion (D55) and is
-	// required: a nil validator would let the commit path promote an
-	// unvalidated journal, which is the hole this seam exists to close.
+	// Validator content-validates run_db.sqlite before promotion (D55). Nil
+	// selects this package's own Validate under RunDB, so the commit path can
+	// never promote an unvalidated journal by omission; a test injects its own
+	// to force a verdict.
 	Validator JournalValidator
+	// RunDB bounds the journal validator: the daemon threads the env-derived
+	// RUNNERD_NASHNET_MAX_RUNDB_BYTES cap here. The zero value takes the D55
+	// defaults.
+	RunDB RunDBConfig
 	// MaterializeMode forces link or copy. Empty runs the link() probe of D49
 	// at construction: success selects link, a cross-device or unsupported
 	// link selects copy.
@@ -301,7 +320,7 @@ func New(cfg Config) (*Store, error) {
 		return nil, errors.New("quarantine: RunsDir is required")
 	}
 	if cfg.Validator == nil {
-		return nil, errors.New("quarantine: Validator is required; a nil journal validator would promote an unvalidated run_db.sqlite")
+		cfg.Validator = runDBValidator{cfg: cfg.RunDB}
 	}
 	s := &Store{
 		root:      filepath.Clean(cfg.QuarantineDir),
@@ -326,7 +345,7 @@ func New(cfg Config) (*Store, error) {
 		s.link = os.Link
 	}
 	if s.diskFree == nil {
-		s.diskFree = DiskFreeGB
+		s.diskFree = sysprobe.DiskFreeGB
 	}
 	if err := os.MkdirAll(s.root, 0o700); err != nil {
 		return nil, err
@@ -376,18 +395,6 @@ func probeMaterializeMode(quarantineDir, runsDir string, link func(string, strin
 	default:
 		return ModeCopy, "link probe failed: " + err.Error()
 	}
-}
-
-// DiskFreeGB returns the unprivileged-available space in GiB on the filesystem
-// backing path, matching harness.diskFreeGB (server.go:238) and
-// procmgr.DiskSpaceCheck. It is the default for Config.DiskFreeGB and is
-// replaced by runnerd/sysprobe.DiskFreeGB once that package lands (W1-T3).
-func DiskFreeGB(path string) float64 {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(path, &st); err != nil {
-		return 0
-	}
-	return float64(st.Bavail*uint64(st.Bsize)) / (1 << 30)
 }
 
 // leaseDir validates the lease identity and returns its quarantine tree.

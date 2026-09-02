@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -28,7 +29,7 @@ func runThreeCommits(t *testing.T, r *rig) (map[string][]byte, map[string]string
 		"config.yaml":    []byte("seats: 2\n"),
 		"snapshots/a.pt": bytes.Repeat([]byte("weights"), 64),
 		"metrics.jsonl":  []byte(`{"iter":1}` + "\n"),
-		RunDBPath:        []byte("SQLite format 3\x00 journal one"),
+		RunDBPath:        journalFixture(t, "valid_train.sqlite"),
 	}
 	digests := map[string]string{}
 	for path, data := range content {
@@ -165,7 +166,7 @@ func TestPromotionOrderingPutsTheJournalLast(t *testing.T) {
 	runDir = r.runDir
 
 	ckpt := bytes.Repeat([]byte("checkpoint"), 100)
-	journal := []byte("SQLite format 3\x00 rows naming the checkpoint")
+	journal := journalFixture(t, "valid_train.sqlite")
 	metrics := []byte(`{"iter":7}` + "\n")
 	r.putBlob(t, ckpt)
 	r.putBlob(t, journal)
@@ -284,18 +285,21 @@ func TestPartialAcceptancePromotesTheRest(t *testing.T) {
 }
 
 // TestInvalidJournalIsRejectedAndTheRestPromoted covers AC 11 and the D55 call
-// site: a manifest naming an invalid run_db.sqlite has that entry rejected as
-// rundb_invalid and every other entry promoted, and the journal never reaches
-// the run dir.
+// site against the shared fixture corpus: a manifest naming an invalid
+// run_db.sqlite has that entry rejected as rundb_invalid and every other entry
+// promoted, the journal never reaches the run dir, and the validator is handed
+// the verified blob rather than a promoted file.
 func TestInvalidJournalIsRejectedAndTheRestPromoted(t *testing.T) {
 	validated := []string{}
+	var names []string
 	r := newRig(t, func(c *Config) {
-		c.Validator = ValidatorFunc(func(path string) (JournalVerdict, string) {
+		c.Validator = ValidatorFunc(func(path, expectedName string) (Verdict, error) {
 			validated = append(validated, path)
-			return JournalInvalid, ReasonRunDBInvalid
+			names = append(names, expectedName)
+			return Validate(path, expectedName)
 		})
 	})
-	journal := []byte("not a journal at all")
+	journal := journalFixture(t, "corrupt.sqlite")
 	ckpt := bytes.Repeat([]byte("weights"), 16)
 	metrics := []byte(`{"iter":2}` + "\n")
 	journalDigest := r.putBlob(t, journal)
@@ -313,6 +317,9 @@ func TestInvalidJournalIsRejectedAndTheRestPromoted(t *testing.T) {
 	if got := rejectionReason(resp, RunDBPath); got != ReasonRunDBInvalid {
 		t.Fatalf("rejection reason = %q, want %q", got, ReasonRunDBInvalid)
 	}
+	if d := rejectionDetail(resp, RunDBPath); !strings.HasPrefix(d, ReasonIntegrityCheck) {
+		t.Fatalf("rejection detail = %q, want the validator's own reason %q", d, ReasonIntegrityCheck)
+	}
 	if !sameStrings(resp.Promoted, []string{"snapshots/a.pt", "metrics.jsonl"}) {
 		t.Fatalf("promoted = %v, want the two non-journal entries", resp.Promoted)
 	}
@@ -328,6 +335,9 @@ func TestInvalidJournalIsRejectedAndTheRestPromoted(t *testing.T) {
 	if len(validated) != 1 || validated[0] != wantPath {
 		t.Fatalf("validator saw %v, want exactly the verified blob %s", validated, wantPath)
 	}
+	if len(names) != 1 || names[0] != fixtureRunDBName {
+		t.Fatalf("validator was given identity %v, want the lease's %q", names, fixtureRunDBName)
+	}
 
 	// Three consecutive journal rejections degrade the lease (D55).
 	for seq := int64(2); seq <= 3; seq++ {
@@ -339,6 +349,58 @@ func TestInvalidJournalIsRejectedAndTheRestPromoted(t *testing.T) {
 	}
 	if !resp.Degraded || !r.store.Stats(r.lease).Degraded {
 		t.Fatal("three consecutive journal rejections did not degrade the lease")
+	}
+}
+
+// TestEveryRejectingFixtureCollapsesToRunDBInvalid asserts the collapse rule of
+// D51 step 4 over the whole shared corpus: each named verdict reaches the
+// commit response as the one fixed per-entry reason, with the validator's own
+// reason preserved as the detail, and each accepted fixture promotes under the
+// identity the corpus records for it.
+func TestEveryRejectingFixtureCollapsesToRunDBInvalid(t *testing.T) {
+	cases := []struct {
+		fixture string
+		name    string
+		reason  string
+	}{
+		{"corrupt.sqlite", fixtureRunDBName, ReasonIntegrityCheck},
+		{"extra_table.sqlite", fixtureRunDBName, ReasonSchema},
+		{"second_row.sqlite", fixtureRunDBName, ReasonIdentity},
+		{"wrong_name.sqlite", fixtureRunDBName, ReasonIdentity},
+		{"out_of_enum.sqlite", fixtureRunDBName, ReasonEnum},
+		{"valid_train.sqlite", fixtureRunDBName, ""},
+		{"valid_evaluate.sqlite", "v0.4-x2r-target-run", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.fixture, func(t *testing.T) {
+			r := newRig(t, nil)
+			r.lease.RunDBName = tc.name
+			journal := journalFixture(t, tc.fixture)
+			r.putBlob(t, journal)
+			resp := r.mustCommit(t, CommitRequest{
+				ManifestVersion: ManifestVersion, LeaseEpoch: 1, Seq: 1,
+				Entries: []Entry{entry(RunDBPath, journal, 41)},
+			})
+			promotedPath := filepath.Join(r.runDir, RunDBPath)
+			if tc.reason == "" {
+				if !sameStrings(resp.Promoted, []string{RunDBPath}) {
+					t.Fatalf("promoted = %v, rejected %v: an accepted fixture must promote", resp.Promoted, resp.Rejected)
+				}
+				if _, err := os.Stat(promotedPath); err != nil {
+					t.Fatalf("stat promoted journal: %v", err)
+				}
+				return
+			}
+			if got := rejectionReason(resp, RunDBPath); got != ReasonRunDBInvalid {
+				t.Fatalf("reason = %q, want %q", got, ReasonRunDBInvalid)
+			}
+			if d := rejectionDetail(resp, RunDBPath); !strings.HasPrefix(d, tc.reason) {
+				t.Fatalf("detail = %q, want it to name %q", d, tc.reason)
+			}
+			if _, err := os.Stat(promotedPath); !os.IsNotExist(err) {
+				t.Fatalf("a rejected journal was promoted: %v", err)
+			}
+		})
 	}
 }
 
