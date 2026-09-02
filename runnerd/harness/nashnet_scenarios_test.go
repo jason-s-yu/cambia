@@ -463,15 +463,42 @@ func TestSchedulingOverBothTransports(t *testing.T) {
 			t.Fatal("the embedded lease posted no progress")
 		}
 
-		// The run half does not reach a terminal, and the reason is F2 rather
-		// than anything about the transport: the coordinator's own progress
-		// projection writes procmgr status starting into the run dir the
-		// embedded node then launches from (nashnet_lease.go projectPhase),
-		// and procLauncher.Ensure refuses to adopt a starting row, so every
-		// embedded claim nacks prepare_node_failed before Prepare runs. The
-		// assertions above are what this leg covers today; the launch half is
-		// blocked on that fix.
-		t.Skip("F2: the coordinator's own progress projection blocks the embedded node's launch")
+		// The run half is the same assertion as the remote leg: the embedded
+		// node launched the job, it ran, its artifacts were proved in place,
+		// and the coordinator wrote the clean terminal (cambia-2017).
+		if nacks := r.requests.forPath("/nack"); len(nacks) != 0 {
+			t.Fatalf("the embedded claim was returned rather than launched: %+v", nacks)
+		}
+		if r.pool.breakerHeld(r.nodeE.id) {
+			t.Fatal("the embedded node tripped its own circuit breaker")
+		}
+		assertScheduledAndPromoted(t, r.poolRig, "both-transports")
+
+		// An in-place row is this host's own: the ProcessManager that forked
+		// the job wrote its pid there, and no coordinator projection stamped a
+		// Host that would make this daemon read its own process as another
+		// machine's (D40).
+		st := readProcessState(t, r.runsDir, "both-transports")
+		if st.Host != "" {
+			t.Fatalf("the embedded run's row carries Host %q, want none", st.Host)
+		}
+		if st.PID == 0 {
+			t.Fatal("the embedded run's row carries no pid, so nothing was forked locally")
+		}
+
+		// The terminal was admitted through the commit gate of D6: a launched
+		// lease posts one only once its final manifest is folded and its digest
+		// matches, and the coordinator's own provenance names the node that
+		// produced the run (D23).
+		var prov struct {
+			ExecutedOn string `json:"executed_on"`
+			State      string `json:"state"`
+		}
+		readJSONFile(t, filepath.Join(r.runsDir, "both-transports", envJSONFile), &prov)
+		if prov.ExecutedOn != r.nodeE.id || prov.State != nashnet.ResultStopped {
+			t.Fatalf("env.json executed_on=%q state=%q, want the embedded node and stopped",
+				prov.ExecutedOn, prov.State)
+		}
 	})
 }
 

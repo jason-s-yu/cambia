@@ -87,6 +87,12 @@ func (p *Pool) stopForceFor(leaseID string) bool {
 // the gap between the lease lookup and the revoke is the authoritative outcome,
 // and overwriting it with stopping would strand the job non-terminal with a
 // released lease no sweep will revisit.
+//
+// On an in-place lease the witness is written and nothing else is: the pid and
+// pgid on that row were recorded by this daemon's own ProcessManager at the
+// fork, so blanking them would orphan a live local process group from every
+// stop path this daemon has left after a restart, which is the opposite of what
+// the Host and PGID rules above protect against (D40, cambia-2017).
 func (p *Pool) projectStopping(l nashnet.Lease) {
 	runDir := filepath.Join(p.runsDir, l.JobID)
 	st, err := procmgr.ReadProcessState(runDir)
@@ -96,9 +102,11 @@ func (p *Pool) projectStopping(l nashnet.Lease) {
 	if isTerminal(procmgr.EffectiveStatus(st)) {
 		return
 	}
-	st.Host = l.NodeID
+	if !p.inPlaceLease(l) {
+		st.Host = l.NodeID
+		st.PGID = 0
+	}
 	st.Status = procmgr.StatusStopping
-	st.PGID = 0
 	if err := procmgr.WriteProcessState(runDir, st); err != nil {
 		poolLog("nashnet cancel: projecting stopping for %s: %v", l.JobID, err)
 	}

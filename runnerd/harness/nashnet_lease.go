@@ -65,7 +65,7 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request, lease na
 		writeLeaseFenceError(w, err)
 		return
 	}
-	if status, ok := projectPhase(req.Phase); ok {
+	if status, ok := projectPhase(req.Phase); ok && !p.inPlaceLease(lease) {
 		p.project(updated, status, req)
 	}
 	p.mu.Lock()
@@ -86,11 +86,29 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request, lease na
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// inPlaceLease reports whether a lease belongs to the node running inside this
+// process (D40), decided from the authenticated lease record rather than from
+// anything a node says about itself. It separates the two kinds of row this
+// package writes into runs/<job>/process.json: a projection of a process in
+// another host's pid space, and the row this daemon's own ProcessManager forked
+// and owns.
+func (p *Pool) inPlaceLease(l nashnet.Lease) bool {
+	return p.embedded != "" && l.NodeID == p.embedded
+}
+
 // project mirrors a node's liveness into process.json (D5). Host is the node
 // id, the field's documented purpose, and PGID is always 0: a node-supplied
 // pgid is never accepted, because ProcessManager.Stop's unsupervised branch
 // would otherwise turn an ordinary cancel into an arbitrary process-group
 // signal on the coordinator host.
+//
+// An in-place lease is not projected at all, which is why the caller tests for
+// one first: its run dir is this daemon's own, and the row there is written by
+// the ProcessManager that forks the job, holds its real pid, pgid, and
+// start-ticks guard, and probes it locally. Mirroring a node phase over that
+// row left a starting status the embedded node's own launcher then refused to
+// adopt, and a Host on a local pid would make this daemon read its own process
+// as another machine's (cambia-2017).
 func (p *Pool) project(lease nashnet.Lease, status string, req nashnet.ProgressRequest) {
 	runDir := filepath.Join(p.runsDir, lease.JobID)
 	st, err := procmgr.ReadProcessState(runDir)
@@ -295,13 +313,20 @@ func validResultState(state string) bool {
 // terminals (canceled, failed, preempted) are persisted into Status exactly as
 // the local gate terminals already are; the phase projection above is the path
 // that only ever writes procmgr enum values.
+//
+// An in-place run keeps an empty Host here for the same reason it is never
+// projected: the row is this host's, and which node produced the numbers is
+// answered by env.json's executed_on rather than by a field whose meaning is
+// "the pid on this row lives in another host's pid space" (D23, D40).
 func (p *Pool) writeTerminal(lease nashnet.Lease, req nashnet.ResultRequest) {
 	runDir := filepath.Join(p.runsDir, lease.JobID)
 	st, err := procmgr.ReadProcessState(runDir)
 	if err != nil {
 		st = &procmgr.ProcessState{Name: lease.JobID, CreatedAt: procmgr.NowRFC3339()}
 	}
-	st.Host = lease.NodeID
+	if !p.inPlaceLease(lease) {
+		st.Host = lease.NodeID
+	}
 	st.Status = req.State
 	st.PGID = 0
 	st.ExitCode = req.ExitCode
