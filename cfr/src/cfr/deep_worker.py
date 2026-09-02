@@ -839,20 +839,25 @@ def _infer_decision_context(legal_mask: np.ndarray) -> int:
       110-145: SnapMove (SnapOpponentMove)
 
     Returns:
-        Integer decision context (0=StartTurn, 1=PostDraw, 2=AbilitySelect,
-        3=SnapDecision, 4=SnapMove).
+        Integer decision context (0=StartTurn, 1=PostDraw, 2=SnapDecision,
+        3=AbilitySelect, 4=SnapMove), resolved through bridge.DecisionCtx
+        rather than hand-written literals so a future engine renumbering
+        cannot silently reintroduce the SnapDecision/AbilitySelect swap
+        (cambia-1688; see cambia-1484 for the same fix on the test-side map).
     """
+    from ..ffi.bridge import DecisionCtx  # noqa: PLC0415
+
     if legal_mask[0] or legal_mask[1] or legal_mask[2]:
-        return 0  # CtxStartTurn
+        return int(DecisionCtx.START_TURN)
     if legal_mask[3] or legal_mask[4] or any(legal_mask[5:11]):
-        return 1  # CtxPostDraw
+        return int(DecisionCtx.POST_DRAW)
     if any(legal_mask[11:97]):
-        return 2  # CtxAbilitySelect
+        return int(DecisionCtx.ABILITY_SELECT)
     if legal_mask[97] or any(legal_mask[98:110]):
-        return 3  # CtxSnapDecision
+        return int(DecisionCtx.SNAP_DECISION)
     if any(legal_mask[110:146]):
-        return 4  # CtxSnapMove
-    return 0  # fallback
+        return int(DecisionCtx.SNAP_MOVE)
+    return int(DecisionCtx.START_TURN)  # fallback
 
 
 _INTERLEAVED_NETWORK_TYPES = frozenset({"slot_film", "slot_multiply"})
