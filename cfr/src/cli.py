@@ -786,201 +786,6 @@ def train_ppo_cmd(
     )
 
 
-def _build_desca_python_env_factory(cfg):
-    """Build the production DESCA env_factory backed by the Python CambiaGameState.
-
-    Factored out of `train_desca` so the regression test in
-    `tests/test_desca_env_factory_omniscient.py` can exercise the same code
-    path. The classes are defined inside this builder (not at module scope)
-    so that `_Agent.update`'s `isinstance(engine, _Engine)` check binds to
-    the same class object the factory produces.
-    """
-    import copy
-    from .game.engine import CambiaGameState
-    from .agent_state import AgentState, AgentObservation
-    from .constants import DecisionContext, ActionDiscard
-    from .abstraction import get_card_bucket
-
-    _counter = [0]
-
-    class _Engine:
-        def __init__(self, game):
-            self._game = game
-            self._last_actor = -1
-            self._last_action = None
-
-        def legal_actions(self):
-            return sorted(self._game.get_legal_actions(), key=repr)
-
-        def is_terminal(self):
-            return self._game.is_terminal()
-
-        def get_utility(self):
-            if not self._game.is_terminal():
-                return [0.0] * len(self._game.players)
-            return [
-                float(self._game.get_utility(i)) for i in range(len(self._game.players))
-            ]
-
-        def get_acting_player(self):
-            return int(self._game.current_player_index)
-
-        def apply_action(self, action):
-            self._last_actor = int(self._game.current_player_index)
-            self._last_action = action
-            try:
-                self._game.apply_action(action)
-            except Exception:
-                pass
-
-        def save(self):
-            return copy.deepcopy(self._game)
-
-        def restore(self, snap):
-            self._game.__dict__.update(snap.__dict__)
-            self._last_actor = -1
-            self._last_action = None
-
-        def free_snapshot(self, snap):
-            pass
-
-        def get_decision_context(self):
-            if getattr(self._game, "snap_phase_active", False):
-                return DecisionContext.SNAP_DECISION.value
-            pending = getattr(self._game, "pending_action", None)
-            if pending is not None:
-                if isinstance(pending, ActionDiscard):
-                    return DecisionContext.POST_DRAW.value
-                return DecisionContext.ABILITY_SELECT.value
-            return DecisionContext.START_TURN.value
-
-        def get_drawn_card_bucket(self):
-            return -1
-
-        def _omniscient_features(self):
-            """Return 120-dim (2P) omniscient feature vector reading Python game cards.
-
-            Format mirrors `cfr.src.cfr.omniscient.compute_omniscient_features`:
-            10-dim per slot (one-hot 0..8 for CardBucket, 9 for empty/unknown);
-            slot order is `p * MaxHandSize + s` for p in [0, num_players),
-            s in [0, MaxHandSize). Avoids the silent zero-fallback at
-            `desca_worker._encode_omniscient` for the Python backend.
-            """
-            import numpy as _np
-
-            _MAX_HAND_SIZE = 6  # matches engine.MaxHandSize on the Go side
-            _PER_SLOT = 10
-            num_players = len(self._game.players)
-            feats = _np.zeros(num_players * _MAX_HAND_SIZE * _PER_SLOT, dtype=_np.float32)
-            for p in range(num_players):
-                hand = self._game.players[p].hand
-                for s in range(_MAX_HAND_SIZE):
-                    base = (p * _MAX_HAND_SIZE + s) * _PER_SLOT
-                    if s >= len(hand) or hand[s] is None:
-                        feats[base + 9] = 1.0
-                        continue
-                    v = get_card_bucket(hand[s]).value
-                    if v >= 9:
-                        feats[base + 9] = 1.0
-                    else:
-                        feats[base + v] = 1.0
-            return feats
-
-    class _Agent:
-        def __init__(self, agent_state):
-            object.__setattr__(self, "_agent", agent_state)
-
-        def update(self, engine):
-            if not isinstance(engine, _Engine):
-                return
-            if engine._last_action is None:
-                return
-            game = engine._game
-            try:
-                obs = AgentObservation(
-                    acting_player=engine._last_actor,
-                    action=engine._last_action,
-                    discard_top_card=game.get_discard_top(),
-                    player_hand_sizes=[
-                        game.get_player_card_count(i) for i in range(len(game.players))
-                    ],
-                    stockpile_size=game.get_stockpile_size(),
-                    drawn_card=None,
-                    peeked_cards=None,
-                    snap_results=[],
-                    did_cambia_get_called=False,
-                    who_called_cambia=None,
-                    is_game_over=game.is_terminal(),
-                    current_turn=game.get_turn_number(),
-                )
-                object.__getattribute__(self, "_agent").update(obs)
-            except Exception:
-                pass
-
-        def clone(self):
-            return _Agent(copy.deepcopy(object.__getattribute__(self, "_agent")))
-
-        def __getattr__(self, name):
-            return getattr(object.__getattribute__(self, "_agent"), name)
-
-        def __setattr__(self, name, value):
-            setattr(object.__getattribute__(self, "_agent"), name, value)
-
-    memory_level = getattr(getattr(cfg, "agent_params", None), "memory_level", 1)
-    time_decay_turns = getattr(getattr(cfg, "agent_params", None), "time_decay_turns", 3)
-
-    def factory(rng=None):
-        _counter[0] += 1
-        game = CambiaGameState(house_rules=cfg.cambia_rules)
-        engine = _Engine(game)
-        num_players = len(game.players)
-        init_obs = AgentObservation(
-            acting_player=-1,
-            action=None,
-            discard_top_card=game.get_discard_top(),
-            player_hand_sizes=[game.get_player_card_count(i) for i in range(num_players)],
-            stockpile_size=game.get_stockpile_size(),
-            drawn_card=None,
-            peeked_cards=None,
-            snap_results=[],
-            did_cambia_get_called=False,
-            who_called_cambia=None,
-            is_game_over=False,
-            current_turn=0,
-        )
-        agents = []
-        for pid in range(num_players):
-            initial_hand = list(game.players[pid].hand)
-            initial_peeks = getattr(
-                game.players[pid], "initial_peek_indices", tuple(range(len(initial_hand)))
-            )
-            agent_state = AgentState(
-                player_id=pid,
-                opponent_id=1 - pid,
-                memory_level=memory_level,
-                time_decay_turns=time_decay_turns,
-                initial_hand_size=len(initial_hand),
-                config=cfg,
-            )
-            agent_state.initialize(init_obs, initial_hand, initial_peeks)
-            agents.append(_Agent(agent_state))
-        return engine, agents
-
-    return factory
-
-
-def _build_desca_env_factory_for_test():
-    """Test-only convenience wrapper. Builds a minimal DESCA config and returns
-    the production env_factory. Used by `tests/test_desca_env_factory_omniscient.py`
-    to verify the omniscient pipe end-to-end."""
-    from .config import load_config
-    from pathlib import Path as _Path
-
-    cfg_path = _Path(__file__).parent.parent / "config" / "desca_phase1_rmplus.yaml"
-    cfg = load_config(str(cfg_path))
-    return _build_desca_python_env_factory(cfg)
-
-
 def _build_desca_go_env_factory(cfg):
     """Build a DESCA env_factory backed by the Go FFI engine + agent.
 
@@ -1325,8 +1130,10 @@ def _build_desca_go_env_factory(cfg):
 def _build_desca_env_factory_for_test_go():
     """Test-only convenience wrapper for the Go-backed env_factory.
 
-    Mirrors `_build_desca_env_factory_for_test` so the parametrized
-    regression tests can exercise both backends from one harness.
+    Used by `tests/test_desca_env_factory_omniscient.py` and
+    `tests/test_desca_go_adapter_parity.py`. The Python-backed counterpart
+    (`_build_desca_env_factory_for_test`) was retired at cambia-1784 along
+    with `_build_desca_python_env_factory`.
     """
     from .config import load_config
     from pathlib import Path as _Path
@@ -1369,11 +1176,7 @@ def train_desca(
     backend: str = typer.Option(
         "go",
         "--backend",
-        help=(
-            "DESCA env_factory backend: 'go' (default; Go FFI engine + agent) "
-            "or 'python' (legacy CambiaGameState + AgentState; kept for "
-            "fallback comparisons)."
-        ),
+        help="DESCA env_factory backend: 'go' (default and only supported value; Go FFI engine + agent)",
     ),
 ):
     """Train a DESCA agent (v3.1 Dense ESCHER with Semantic Action Abstraction)."""
@@ -1468,22 +1271,20 @@ def train_desca(
         input_dim=257, omniscient_dim=120, hidden_dim=_hidden
     )
 
-    # Build the production env_factory. Default backend is Go FFI: eliminates
-    # `copy.deepcopy` of Python game/agent state in the worker hot loop and
-    # routes the omniscient critic through GoEngine._get_all_cards_unsafe
-    # directly. The Python backend stays callable via `--backend python` for
-    # fallback comparisons (used by `tests/test_desca_env_factory_omniscient.py`).
+    # Build the production env_factory. Go FFI is the only supported backend:
+    # eliminates `copy.deepcopy` of Python game/agent state in the worker hot
+    # loop and routes the omniscient critic through
+    # GoEngine._get_all_cards_unsafe directly. The Python backend
+    # (`_build_desca_python_env_factory`) was retired at cambia-1784.
     _backend = (backend or "go").strip().lower()
-    if _backend not in ("go", "python"):
+    if _backend != "go":
         print(
-            f"ERROR: --backend must be 'go' or 'python', got {backend!r}.",
+            f"ERROR: --backend must be 'go' (the 'python' reference backend "
+            f"was retired at cambia-1784), got {backend!r}.",
             file=sys.stderr,
         )
         raise typer.Exit(1)
-    if _backend == "go":
-        env_factory = _build_desca_go_env_factory(cfg)
-    else:
-        env_factory = _build_desca_python_env_factory(cfg)
+    env_factory = _build_desca_go_env_factory(cfg)
 
     # Checkpoint path: CLI --save-path > config.persistence.agent_data_save_path
     _ckpt_path = str(save_path) if save_path else cfg.persistence.agent_data_save_path
@@ -1578,7 +1379,7 @@ def train_prtcfr(
     backend: Optional[str] = typer.Option(
         None,
         "--backend",
-        help="Production GameDriver backend: 'go' (default) or 'python'",
+        help="Production GameDriver backend: 'go' (default and only supported value)",
     ),
     resume: bool = typer.Option(
         False,
@@ -1622,9 +1423,10 @@ def train_prtcfr(
         prt_cfg.iterations = iterations
     if backend is not None:
         _b = backend.strip().lower()
-        if _b not in ("go", "python"):
+        if _b != "go":
             print(
-                f"ERROR: --backend must be 'go' or 'python', got {backend!r}.",
+                f"ERROR: --backend must be 'go' (the 'python' reference backend "
+                f"was retired at cambia-1784), got {backend!r}.",
                 file=sys.stderr,
             )
             raise typer.Exit(1)

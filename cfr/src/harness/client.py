@@ -207,3 +207,14 @@ class HarnessClient:
 
     def health(self) -> Dict[str, Any]:
         return self._call("GET", "/harness/health")
+
+    def nodes(self) -> List[Dict[str, Any]]:
+        """List the nashnet pool's node records: the D9 declaration, the D46
+        gate report, D3/D45 session state and staleness, live leases, the
+        coordinator-side drain hold, the D63 breaker state, and per-job D8
+        degraded marks (GET /nashnet/nodes, operator credential, design D23).
+        Empty on a daemon with no pool attached."""
+        payload = self._call("GET", "/nashnet/nodes")
+        if isinstance(payload, dict) and "nodes" in payload:
+            return payload["nodes"]
+        return payload if isinstance(payload, list) else []

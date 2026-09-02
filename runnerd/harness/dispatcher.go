@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jason-s-yu/cambia/runnerd/ingestapi"
+	"github.com/jason-s-yu/cambia/runnerd/nashnet"
 	"github.com/jason-s-yu/cambia/runnerd/pathguard"
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 )
@@ -97,6 +98,18 @@ type Dispatcher struct {
 	// max(persisted submit_seq)+1 at Reconcile so restarts never reuse a seq, and
 	// increments under d.mu on every Submit.
 	nextSeq int64
+	// pool, leases, holds, placing, unplaceableGrace, and now are the coordinator
+	// pool's placement state (D11, D13, D14, D47). They are nil on a daemon with
+	// no pool attached, which is v1.0 behavior; every read below is guarded.
+	// The per-node lease ceiling and the per-node exclusive barrier live here
+	// rather than in the node agent because they are placement facts, not launch
+	// facts (D1).
+	pool             placementSource
+	leases           *nashnet.LeaseStore
+	holds            map[string]*placementHold
+	placing          map[string]string
+	unplaceableGrace time.Duration
+	now              func() time.Time
 }
 
 // NewDispatcher builds a Dispatcher. maxJobs is the concurrency cap (<=0
@@ -221,6 +234,16 @@ func (d *Dispatcher) dispatchLocked() {
 			j.cancel()
 			d.writeGateTerminalLocked(id, StateFailed, "parent "+culprit+" did not succeed (on_failure=fail)")
 		case gateLaunch:
+			if d.pool != nil {
+				// With a coordinator pool attached, placement is the pool's and a
+				// ready job waits here for a node to claim it (D1, D11). It keeps
+				// its queue position, so a nack or an expiry returns it to the
+				// ready set at its original submit_seq with nothing to rebuild.
+				// A daemon with no pool takes the local path below unchanged,
+				// which is the zero-node behavior of D40.
+				next = append(next, id)
+				continue
+			}
 			if barrier || !d.canLaunchLocked(j) {
 				next = append(next, id) // held: no slot, exclusive gate, or behind a deferred exclusive head
 				if j.spec.Exclusive {
@@ -360,13 +383,19 @@ func (d *Dispatcher) reDispatch() {
 	d.mu.Lock()
 	d.dispatchLocked()
 	d.mu.Unlock()
+	// A queue transition is also when a pinned resume's node may have gone or
+	// come back, so the reservoir holds of D12 are re-rendered here.
+	d.refreshPinHolds()
 	d.broadcast()
 }
 
 // pendingDependentsLocked returns the names of jobs still QUEUED (gate unresolved)
 // whose after list names `parent` among its parents (D29 fan-in: any position,
 // not just a sole parent). Preparing/running dependents already passed the gate
-// and no longer need the parent, so they do not count. Callers hold d.mu.
+// and no longer need the parent, so they do not count. A dependent a node holds
+// a lease for does count: placement leaves it queued here, its in-memory state
+// is what the pool never rewrites, and D31 has a leased-but-not-started
+// dependent counting as live for exactly this refusal. Callers hold d.mu.
 func (d *Dispatcher) pendingDependentsLocked(parent string) []string {
 	var out []string
 	for name, j := range d.pending {
@@ -723,12 +752,21 @@ func (d *Dispatcher) markTerminal(name, state, lastErr string) {
 	d.broadcast()
 }
 
-// Cancel handles DELETE for a non-purge request. A queued job is dropped (marked
-// canceled); a preparing job is flagged for cancellation (runJob aborts before
-// launch); a running job is stopped (SIGINT + 30s grace, or SIGKILL on force).
+// Cancel handles DELETE for a non-purge request. A leased job takes the revoke
+// path and nothing local (D31); otherwise a queued job is dropped (marked
+// canceled), a preparing job is flagged for cancellation (runJob aborts before
+// launch), and a running job is stopped (SIGINT + 30s grace, or SIGKILL on
+// force).
 func (d *Dispatcher) Cancel(name string, force bool) (*procmgr.ProcessState, error) {
 	if err := procmgr.ValidateName(name); err != nil {
 		return nil, err
+	}
+	// The lease check comes first, before the pending set and before the
+	// supervisor: a leased job is still queued here, so the queued branch below
+	// would record it canceled while a node is running it, and the running
+	// branch would signal a pid this daemon never forked (D31, D5).
+	if st, handled := d.cancelLeased(name, force); handled {
+		return st, nil
 	}
 	d.mu.Lock()
 	j, pending := d.pending[name]
@@ -808,6 +846,9 @@ func (d *Dispatcher) Purge(name string, cascade bool) error {
 	}
 	// The run dir is gone, so the pinned commit no longer needs its gc anchor.
 	_ = d.env.PurgeRef(name)
+	// Every lease this job ever held left a quarantine tree whose only purpose
+	// was promotion into the dir just removed, so they go with it (D31, D49).
+	d.purgeLeaseTrees(name)
 	// Re-arm any transitive dependent (a grandchild whose parent was just
 	// cascade-skipped) now that the states have changed; reDispatch broadcasts.
 	d.reDispatch()
@@ -824,7 +865,7 @@ func (d *Dispatcher) Resume(name string) (JobView, error) {
 	if _, err := procmgr.ReadProcessState(d.runDir(name)); err != nil {
 		return JobView{}, ErrNotFound
 	}
-	if !hasResumableState(d.runsDir, name) {
+	if !d.hasPromotedResumableState(name) {
 		return JobView{}, ErrNoResumableState
 	}
 	spec := readJobSpec(d.runDir(name))
@@ -836,6 +877,11 @@ func (d *Dispatcher) Resume(name string) (JobView, error) {
 		}
 	}
 	spec.Resume = true
+	// A resume of a pool run pins to the node whose runs dir holds its
+	// reservoir (D12). The reservoir is excluded from both the manifest and the
+	// seed set, so it never reaches the coordinator and cannot be served to a
+	// second node; a resume placed anywhere else dies loading it.
+	d.pinResume(spec)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	d.mu.Lock()
@@ -856,6 +902,10 @@ func (d *Dispatcher) Resume(name string) (JobView, error) {
 	view := d.pendingViewLocked(name)
 	d.mu.Unlock()
 
+	// A pin whose node is gone renders its hold now rather than after the
+	// unplaceable grace: the job is not waiting for capacity, it is waiting for
+	// one named node (D12, D14).
+	d.refreshPinHolds()
 	d.broadcast()
 	return view, nil
 }

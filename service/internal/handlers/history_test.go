@@ -52,6 +52,65 @@ func seedHistoryGame(t *testing.T, winner, loser models.User, rated bool) uuid.U
 	return gameID
 }
 
+// seedHistoryGameWithRound is seedHistoryGame plus an explicit games.round_index, so a test
+// can assert a circuit round survives the read path (cambia-1240) without disturbing every
+// other seedHistoryGame caller's signature.
+func seedHistoryGameWithRound(t *testing.T, winner, loser models.User, rated bool, roundIndex int16) uuid.UUID {
+	t.Helper()
+	ctx := context.Background()
+	gameID := uuid.New()
+
+	var lobbyID uuid.UUID
+	require.NoError(t, database.DB.QueryRow(ctx,
+		`INSERT INTO lobbies (host_user_id, type, mode, ranked) VALUES ($1, 'private', $2, $3) RETURNING id`,
+		winner.ID, map[bool]string{true: "ranked", false: "casual"}[rated], rated,
+	).Scan(&lobbyID))
+	_, err := database.DB.Exec(ctx,
+		`INSERT INTO games (id, lobby_id, round_index, status) VALUES ($1, $2, $3, 'in_progress')`,
+		gameID, lobbyID, roundIndex)
+	require.NoError(t, err)
+
+	require.NoError(t, database.RecordGameAndResults(ctx, gameID,
+		[]*models.Player{{ID: winner.ID}, {ID: loser.ID}},
+		map[uuid.UUID]int{winner.ID: 4, loser.ID: 15},
+		[]uuid.UUID{winner.ID}, rated))
+	return gameID
+}
+
+// TestGameHistoryReportsRoundIndex asserts a persisted non-zero games.round_index (as a
+// circuit round writer would leave it) round-trips through GET /user/history unchanged,
+// and that a game with no round (the default 0) reports 0 rather than a leftover value from
+// another game (cambia-1240).
+func TestGameHistoryReportsRoundIndex(t *testing.T) {
+	setupFriendTest(t)
+
+	me := createTestUser(t, "hist-round-"+uuid.NewString()+"@example.com", "pw", "hist-round")
+	them := createTestUser(t, "hist-round-opp-"+uuid.NewString()+"@example.com", "pw", "hist-round-opp")
+
+	roundGame := seedHistoryGameWithRound(t, me, them, true, 3)
+	noRoundGame := seedHistoryGame(t, me, them, false)
+
+	w := getAs(t, GameHistoryHandler, "/user/history?limit=10", me.ID)
+	require.Equal(t, http.StatusOK, w.Code, "history request failed: %s", w.Body.String())
+
+	var resp HistoryResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Equal(t, 2, resp.Total)
+
+	byID := map[uuid.UUID]HistoryGameResponse{}
+	for _, g := range resp.Games {
+		byID[g.GameID] = g
+	}
+
+	rg, ok := byID[roundGame]
+	require.True(t, ok, "the circuit-round game should be in the caller's history")
+	assert.Equal(t, int16(3), rg.RoundIndex, "a persisted circuit round must round-trip through the handler, not read back as 0")
+
+	nrg, ok := byID[noRoundGame]
+	require.True(t, ok, "the non-circuit game should be in the caller's history")
+	assert.Equal(t, int16(0), nrg.RoundIndex, "a non-circuit game reports round_index 0")
+}
+
 // TestGameHistoryRequiresAuth checks the endpoint rejects an unauthenticated caller before
 // touching the database, so it needs no live Postgres.
 func TestGameHistoryRequiresAuth(t *testing.T) {

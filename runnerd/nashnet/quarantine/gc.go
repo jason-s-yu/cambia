@@ -2,10 +2,13 @@ package quarantine
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 )
 
 // retiredStamp is written when a lease reaches its result. The tree and its
@@ -69,6 +72,54 @@ func (s *Store) SweepParts() (int, error) {
 	})
 	if err != nil {
 		return removed, err
+	}
+	return removed, firstErr
+}
+
+// PurgeJob removes every lease tree a job ever had, under every node, and
+// returns how many it removed. It is what an operator purge calls after the run
+// dir is gone (D31): the debug TTL of D59 retains a tree so a receipt outlives
+// the result, and a purged run has nothing left for that receipt to describe.
+//
+// It walks every node rather than the job's current lease alone, because a job
+// re-claimed after an expiry or a nack left a tree under each node that ever
+// held it, and one skipped tree is quarantine bytes no later sweep attributes
+// to anything.
+func (s *Store) PurgeJob(jobID string) (int, error) {
+	if err := procmgr.ValidateName(jobID); err != nil {
+		return 0, fmt.Errorf("quarantine: purge %q: %w", jobID, err)
+	}
+	nodes, err := os.ReadDir(s.root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	removed := 0
+	var firstErr error
+	for _, n := range nodes {
+		if !n.IsDir() {
+			continue
+		}
+		jobDir := filepath.Join(s.root, n.Name(), jobID)
+		leases, rerr := os.ReadDir(jobDir)
+		if rerr != nil {
+			continue
+		}
+		if rmErr := os.RemoveAll(jobDir); rmErr != nil {
+			if firstErr == nil {
+				firstErr = rmErr
+			}
+			continue
+		}
+		for _, le := range leases {
+			if !le.IsDir() {
+				continue
+			}
+			s.forgetLease(n.Name(), jobID, le.Name())
+			removed++
+		}
 	}
 	return removed, firstErr
 }

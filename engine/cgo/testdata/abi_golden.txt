@@ -2,7 +2,7 @@
 # Regenerate after bumping engine/cgo/abiver.Generation for any
 # exported-signature change:
 #   go test ./cgo/ -run TestABIGolden -update
-generation=1
+generation=2
 extern float cambia_terminal_eval_dp(int32_t h, uint8_t player);
 extern float cambia_terminal_eval_linear(int32_t h, uint8_t player);
 extern float cambia_terminal_eval_mc(int32_t h, uint8_t player, int32_t num_samples);
@@ -30,6 +30,9 @@ extern int32_t cambia_agent_tokens_since(int32_t agent_h, int32_t since, int32_t
 extern int32_t cambia_agent_update(int32_t agent_h, int32_t game_h);
 extern int32_t cambia_agent_update_nplayer(int32_t agent_h, int32_t game_h);
 extern int32_t cambia_agents_update_both(int32_t a0h, int32_t a1h, int32_t gh);
+extern int32_t cambia_baseline_choose(int32_t h, int32_t game_h, int32_t* out, int32_t out_len);
+extern int32_t cambia_baseline_new(uint8_t kind, uint8_t seat, int32_t cambiaThreshold, int32_t lateCambiaTurns);
+extern int32_t cambia_baseline_reset(int32_t h);
 extern int32_t cambia_game_apply_action(int32_t h, uint16_t action_idx);
 extern int32_t cambia_game_apply_nplayer_action(int32_t h, uint16_t action_idx);
 extern int32_t cambia_game_discard_len(int32_t game_h);
@@ -43,6 +46,7 @@ extern int32_t cambia_game_get_pending(int32_t game_h, uint8_t* out_buf, int32_t
 extern int32_t cambia_game_get_snap_state(int32_t game_h, uint8_t* out_buf, int32_t buf_len);
 extern int32_t cambia_game_is_terminal(int32_t h);
 extern int32_t cambia_game_legal_actions(int32_t h, uint64_t* out);
+extern int32_t cambia_game_legal_indices(int32_t game_h, int32_t* out, int32_t out_len);
 extern int32_t cambia_game_new(uint64_t seed);
 extern int32_t cambia_game_new_with_deck(uint8_t* deckPtr, int32_t deckLen, uint8_t numPlayers, uint8_t cardsPerPlayer, uint8_t startingPlayer, uint16_t maxGameTurns, uint8_t cambiaAllowedRound, uint8_t penaltyDrawCount, uint8_t allowDrawFromDiscard, uint8_t allowReplaceAbilities, uint8_t allowOpponentSnapping, uint8_t snapRace, uint8_t numJokers, uint8_t lockCallerHand, uint8_t initialViewCount, uint8_t numDecks, uint16_t deckRanks);
 extern int32_t cambia_game_new_with_rules(uint64_t seed, uint16_t maxGameTurns, uint8_t cardsPerPlayer, uint8_t cambiaAllowedRound, uint8_t penaltyDrawCount, uint8_t allowDrawFromDiscard, uint8_t allowReplaceAbilities, uint8_t allowOpponentSnapping, uint8_t snapRace, uint8_t numJokers, uint8_t lockCallerHand, uint8_t numPlayers, uint8_t initialViewCount, uint8_t numDecks, uint16_t deckRanks);
@@ -76,6 +80,7 @@ extern uint8_t cambia_game_decision_ctx(int32_t h);
 extern uint8_t cambia_game_num_players(int32_t h);
 extern uint8_t cambia_game_stock_len(int32_t h);
 extern void cambia_agent_free(int32_t h);
+extern void cambia_baseline_free(int32_t h);
 extern void cambia_game_free(int32_t h);
 extern void cambia_game_get_utility(int32_t h, float* out);
 extern void cambia_game_get_utility_n(int32_t h, float* out, uint8_t n);

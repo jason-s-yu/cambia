@@ -6,9 +6,10 @@ shared regret net, V_phi critic, stability controller, run_db, metrics.jsonl)
 into one iteration.
 
 All tests run on CPU. The end-to-end coverage uses a scripted driver (fast,
-deterministic) plus one run over the real Python-engine driver with a bounded
-turn cap. The Go substrate (default backend) needs libcambia.so and is exercised
-by the X3 bench lane, not here.
+deterministic) plus one run over the real Go-engine driver with a bounded turn
+cap; the latter needs libcambia.so (``make libcambia``). The reference
+Python-engine driver was retired at cambia-1784 (its coverage was already
+duplicated on the Go side by tests/test_prtcfr_go_bridge_integration.py).
 """
 
 from __future__ import annotations
@@ -115,7 +116,7 @@ def _prod_config(**overrides):
         stability_min_iters=1,
         stability_patience=2,
         reservoir_capacity=1000,
-        backend="python",
+        backend="go",
         critic_enabled=True,
         critic_capacity=1000,
         critic_steps_per_iter=5,
@@ -465,11 +466,11 @@ def test_early_stop_pins_deployable_window(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# End-to-end (real Python-engine driver, bounded)
+# End-to-end (real Go-engine driver, bounded)
 # ---------------------------------------------------------------------------
 
 
-def test_end_to_end_real_python_driver(tmp_path):
+def test_end_to_end_real_go_driver(tmp_path):
     from src.config import CambiaRulesConfig
     from src.cfr.prtcfr_worker import new_production_driver
 
@@ -481,7 +482,7 @@ def test_end_to_end_real_python_driver(tmp_path):
     hr.lockCallerHand = False
 
     def driver_factory(seed):
-        return new_production_driver(seed, house_rules=hr, backend="python")
+        return new_production_driver(seed, house_rules=hr, backend="go")
 
     cfg = _prod_config(
         seq_cap=512,
@@ -497,7 +498,7 @@ def test_end_to_end_real_python_driver(tmp_path):
         str(run_dir),
         driver_factory=driver_factory,
         db_path=str(tmp_path / "db.sqlite"),
-        run_name="v0.4-prtcfr-pydriver",
+        run_name="v0.4-prtcfr-godriver",
     )
     history = trainer.train(iterations=2)
     trainer.close()
@@ -538,7 +539,7 @@ def test_cli_smoke_direct_call(tmp_path, monkeypatch):
         "  warm_start: true\n"
         "  stability_enabled: false\n"
         "  reservoir_capacity: 500\n"
-        "  backend: python\n"
+        "  backend: go\n"
         "  critic_enabled: true\n"
         "  critic_capacity: 500\n"
         "  critic_steps_per_iter: 3\n"
@@ -559,7 +560,7 @@ def test_cli_smoke_direct_call(tmp_path, monkeypatch):
         iterations=2,
         save_path=run_dir,
         device="cpu",
-        backend="python",
+        backend="go",
         resume=False,
     )
 

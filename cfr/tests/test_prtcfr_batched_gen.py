@@ -118,7 +118,7 @@ def test_carry_identity_matches_full_reencode_at_every_decision():
     max_diff = 0.0
     saw_ability_or_snap = False
     for gi, seed in enumerate(_seeds_reaching_decisions(n_games)):
-        driver = new_production_driver(seed=seed, backend="python")
+        driver = new_production_driver(seed=seed, backend="go")
         rng = random.Random(10_000 + seed)
         stream = gi  # a fresh, stable per-game stream key for the manager
         steps = 0
@@ -189,7 +189,7 @@ def _sequential_samples(net, seeds, iteration=1):
             max_trajectory_steps=_MAX_STEPS,
         )
         worker.reseed(seed)
-        driver = new_production_driver(seed=seed, backend="python")
+        driver = new_production_driver(seed=seed, backend="go")
         worker.traverse(driver, traverser=gi % 2, iteration=iteration, buf=buf)
         out[gi] = buf.samples
     return out
@@ -202,7 +202,7 @@ def _batched_samples(backend_factory, net, seeds, iteration=1):
     specs = [
         {
             "seed": seed,
-            "driver": new_production_driver(seed=seed, backend="python"),
+            "driver": new_production_driver(seed=seed, backend="go"),
             "traverser": gi % 2,
             "iteration": iteration,
             "buf": bufs[gi],
@@ -319,7 +319,7 @@ def test_fork_carry_matches_reencode_of_forked_prefix():
     old_sigma = NetProductionSigma(net, seq_cap=PRODUCTION_SEQ_CAP)
 
     # Real growing streams for two players from a partial game.
-    driver = new_production_driver(seed=7, backend="python")
+    driver = new_production_driver(seed=7, backend="go")
     rng = random.Random(7)
     for _ in range(6):
         if driver.is_terminal():
@@ -380,7 +380,7 @@ def test_incremental_manager_batched_equals_single_item():
     # Build a few real growing streams by playing partial games.
     streams = []
     for seed in range(6):
-        driver = new_production_driver(seed=seed, backend="python")
+        driver = new_production_driver(seed=seed, backend="go")
         rng = random.Random(seed)
         for _ in range(random.Random(seed).randint(1, 8)):
             if driver.is_terminal():
@@ -418,13 +418,15 @@ def test_incremental_manager_batched_equals_single_item():
         np.testing.assert_allclose(qb[i].result, singles[i], atol=1e-5)
 
 
-def test_batched_worker_closes_all_clones_python_backend():
-    """Every rollout/child clone is closed (no leaked drivers). The python
-    backend's close() is a no-op, so we assert via a clone/close counter."""
+def test_batched_worker_closes_all_clones_go_backend():
+    """Every rollout/child clone is closed (no leaked drivers): the Go
+    backend's close() frees real FFI handles, so a leak here is a real
+    handle leak, not just a bookkeeping miss. Asserted via a clone/close
+    counter on a wrapper around the real driver."""
     net = _net(5)
 
     class _CountingDriver:
-        # Wrap a python driver, counting clone/close to assert balance.
+        # Wrap a driver, counting clone/close to assert balance.
         counter = {"open": 0, "close": 0}
 
         def __init__(self, inner):
@@ -458,7 +460,7 @@ def test_batched_worker_closes_all_clones_python_backend():
 
     _CountingDriver.counter = {"open": 0, "close": 0}
     bufs = {0: _CapturingBuf()}
-    top = _CountingDriver(new_production_driver(seed=3, backend="python"))
+    top = _CountingDriver(new_production_driver(seed=3, backend="go"))
     opens_before = _CountingDriver.counter["open"]
     specs = [{"seed": 3, "driver": top, "traverser": 0, "iteration": 1, "buf": bufs[0]}]
     worker = PRTCFRBatchedProductionWorker(

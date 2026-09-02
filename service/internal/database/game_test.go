@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jason-s-yu/cambia/service/internal/models"
 	_ "github.com/joho/godotenv/autoload" // Load .env for database connection.
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -220,4 +221,31 @@ func TestRecordGameAndResultsShrinksRD4p(t *testing.T) {
 	afterGame2, err := GetUserByID(ctx, users[0].ID)
 	require.NoError(t, err)
 	require.Less(t, afterGame2.Phi4p, afterGame1.Phi4p, "phi_4p should keep shrinking across successive games, not reset to the default each time")
+}
+
+// TestUpsertInitialGameStateWritesRoundIndex asserts the games row UpsertInitialGameState
+// creates carries the caller's round index rather than leaving the column at its schema
+// default: before cambia-1240, no writer ever supplied this column, so every game's
+// round_index read back 0 regardless of which circuit round produced it.
+func TestUpsertInitialGameStateWritesRoundIndex(t *testing.T) {
+	setupGameTest(t)
+
+	host := createGameTestUser(t, "roundidx-host-"+uuid.NewString())
+	ctx := context.Background()
+
+	circuitGameID := uuid.New()
+	require.NoError(t, UpsertInitialGameState(ctx, circuitGameID, uuid.New(), host.ID, "private", false, 3,
+		map[string]interface{}{"stockpileSize": 40}))
+
+	var roundIndex int16
+	require.NoError(t, DB.QueryRow(ctx, `SELECT round_index FROM games WHERE id = $1`, circuitGameID).Scan(&roundIndex))
+	assert.Equal(t, int16(3), roundIndex, "UpsertInitialGameState must persist the round index it was given")
+
+	// A non-circuit game (round index 0) still writes the column explicitly rather than
+	// relying on it staying at whatever the schema default happens to be.
+	plainGameID := uuid.New()
+	require.NoError(t, UpsertInitialGameState(ctx, plainGameID, uuid.New(), host.ID, "private", false, 0,
+		map[string]interface{}{"stockpileSize": 40}))
+	require.NoError(t, DB.QueryRow(ctx, `SELECT round_index FROM games WHERE id = $1`, plainGameID).Scan(&roundIndex))
+	assert.Equal(t, int16(0), roundIndex)
 }

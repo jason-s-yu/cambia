@@ -53,12 +53,12 @@ prtcfr_trainer.py's own timer placement) -- they are not part of the X3 gate,
 so this harness disables them by default (``--critic-enabled`` to re-enable)
 to keep bench wall-clock focused on exactly the gated quantities.
 
-Usage (smoke, CPU, python backend, tiny cell):
+Usage (smoke, CPU, tiny cell):
   cd cfr && python scripts/prtcfr_bench.py --k-games 4 --m-rollouts 1 \\
-      --batch-size 16 --train-steps 5 --backend python --device cpu \\
+      --batch-size 16 --train-steps 5 --backend go --device cpu \\
       --max-trajectory-steps 40 --no-wait-for-clean-host
 
-Usage (a real measurement cell, Go backend, GPU):
+Usage (a real measurement cell, GPU):
   cd cfr && python scripts/prtcfr_bench.py --k-games 64 --m-rollouts 4 \\
       --backend go --device cuda --train-steps 200 --batch-size 2048 \\
       --out runs/x3-bench/cell_k64.json
@@ -90,7 +90,6 @@ from src.cfr.prtcfr_worker import (  # noqa: E402
     GoEngineGameDriver,
     IncrementalSigmaManager,
     PRODUCTION_SEQ_CAP,
-    PythonEngineGameDriver,
     new_production_driver,
 )
 from src.cfr.prtcfr_trainer import (  # noqa: E402
@@ -632,7 +631,7 @@ def run_cell(
     mon: Optional[ContentionMonitor] = None
     try:
         with contextlib.ExitStack() as stack:
-            for cls in (GoEngineGameDriver, PythonEngineGameDriver):
+            for cls in (GoEngineGameDriver,):
                 for meth in _FFI_METHODS:
                     stack.enter_context(_patched(cls, meth, timers, "ffi"))
                 stack.enter_context(_heartbeat_patched(cls, "close", hb, "game-done"))
@@ -1081,7 +1080,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--batch-size", type=int, default=8192)
     ap.add_argument("--train-steps", type=int, default=3000)
     ap.add_argument("--seq-cap", type=int, default=PRODUCTION_SEQ_CAP)
-    ap.add_argument("--backend", choices=["go", "python"], default="go")
+    ap.add_argument("--backend", choices=["go"], default="go")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--num-players", type=int, default=2)
     ap.add_argument("--max-trajectory-steps", type=int, default=4000)

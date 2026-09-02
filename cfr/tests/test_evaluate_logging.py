@@ -77,17 +77,19 @@ _config = _FakeConfig()
 
 
 class TestBaselineRegistry:
+    # The registry names the Go-backed subclass of each baseline
+    # (cambia-1487), so these assert the lineage rather than identity.
     def test_imperfect_greedy_in_registry(self):
         assert "imperfect_greedy" in AGENT_REGISTRY
-        assert AGENT_REGISTRY["imperfect_greedy"] is ImperfectGreedyAgent
+        assert issubclass(AGENT_REGISTRY["imperfect_greedy"], ImperfectGreedyAgent)
 
     def test_memory_heuristic_in_registry(self):
         assert "memory_heuristic" in AGENT_REGISTRY
-        assert AGENT_REGISTRY["memory_heuristic"] is MemoryHeuristicAgent
+        assert issubclass(AGENT_REGISTRY["memory_heuristic"], MemoryHeuristicAgent)
 
     def test_aggressive_snap_in_registry(self):
         assert "aggressive_snap" in AGENT_REGISTRY
-        assert AGENT_REGISTRY["aggressive_snap"] is AggressiveSnapAgent
+        assert issubclass(AGENT_REGISTRY["aggressive_snap"], AggressiveSnapAgent)
 
     def test_random_still_in_registry(self):
         assert "random" in AGENT_REGISTRY
