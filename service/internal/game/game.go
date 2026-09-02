@@ -308,6 +308,13 @@ type CambiaGame struct {
 	// is still scored if the table finishes without them (MATCHMAKING.md 8, "score counts
 	// normally"). Scoring reads this rather than Player.Connected (cambia-955).
 	forfeited map[uuid.UUID]bool
+
+	// leftSeats records the seats given up on purpose (ForfeitSeat), which the forfeited map
+	// alone cannot tell from the ones a closed reconnect window took. HandleReconnect lifts the
+	// second kind, because a player who was away for part of a round did not miss it; lifting the
+	// first would undo a decision the player made and confirmed, and the way back is open, since
+	// the WS gate demands lobby membership only for a private lobby (cambia-1239).
+	leftSeats map[uuid.UUID]bool
 }
 
 // NewCambiaGame creates a new game instance with default settings.
@@ -332,6 +339,7 @@ func NewCambiaGame() *CambiaGame {
 		graceDeadlines:        make(map[uuid.UUID]time.Time),
 		graceGen:              make(map[uuid.UUID]uint64),
 		forfeited:             make(map[uuid.UUID]bool),
+		leftSeats:             make(map[uuid.UUID]bool),
 		snapFills:             make(map[uuid.UUID]*snapFillState),
 	}
 	return g
@@ -637,12 +645,6 @@ func (g *CambiaGame) fireEventToPlayer(playerID uuid.UUID, ev GameEvent) {
 	}
 }
 
-// advanceTurn is kept for ProcessSpecialAction compat. Delegates to onTurnAdvanced.
-// Assumes lock is held by caller.
-func (g *CambiaGame) advanceTurn() {
-	g.onTurnAdvanced()
-}
-
 // HasPlayer reports whether playerID holds a seat in this game.
 // Public entry point: acquires mu.
 //
@@ -684,7 +686,7 @@ func (g *CambiaGame) HandleDisconnect(playerID uuid.UUID) {
 		return
 	}
 
-	shouldAdvanceTurn := false
+	clockAbandonedTurn := false
 	graceElapsed := false
 
 	// PreGameActive counts as being in the game (cambia-955 F1): Started only flips true when
@@ -719,7 +721,7 @@ func (g *CambiaGame) HandleDisconnect(playerID uuid.UUID) {
 			currentPlayerUUID := g.currentPlayerID()
 			if playerID == currentPlayerUUID {
 				log.Printf("Game %s: Current player %s disconnected with nothing holding their seat; the turn clock has to end the turn.", g.ID, playerID)
-				shouldAdvanceTurn = true
+				clockAbandonedTurn = true
 			}
 		}
 	}
@@ -730,13 +732,19 @@ func (g *CambiaGame) HandleDisconnect(playerID uuid.UUID) {
 
 	if graceElapsed {
 		g.disconnectGraceElapsed(playerID)
-	} else if shouldAdvanceTurn && g.turnTimer == nil {
+	} else if clockAbandonedTurn && g.turnTimer == nil {
 		// Arm the abandoned turn's clock. A turn that already has one is left alone: restarting it
 		// on the drop would hand a player a fresh turn's worth of thinking time for pulling their
 		// network out, which is the same reason the reconnect window does not pause it (see
-		// armDisconnectGrace). Before the scheduler clocked disconnected players this call was
-		// unconditional and did nothing at all, since the schedule it asks for was declined.
-		g.advanceTurn()
+		// armDisconnectGrace).
+		//
+		// This used to call advanceTurn, which was onTurnAdvanced under another name: it bumped
+		// the wire-visible TurnID, re-announced the same disconnected player's turn on top of the
+		// sync state broadcast just above, and cleared snapUsedForThisDiscard, which with snapRace
+		// on reopened the snap window for a second snap. None of that is arming a clock, and the
+		// one configuration that reaches this branch is TurnTimerSec 0, where there is no clock to
+		// arm and scheduleNextTurnTimer correctly does nothing (cambia-1239).
+		g.scheduleNextTurnTimer()
 	}
 }
 
@@ -887,6 +895,7 @@ func (g *CambiaGame) ForfeitSeat(playerID uuid.UUID) bool {
 	}
 	p.Connected = false
 	p.Conn = nil
+	g.leftSeats[playerID] = true
 	g.cancelDisconnectGrace(playerID)
 	g.forfeitPlayer(playerID)
 	return true
@@ -934,8 +943,15 @@ func (g *CambiaGame) HandleReconnect(playerID uuid.UUID, conn *websocket.Conn) {
 			// the game is over there is nothing to return to: endGame has already scored it.
 			// The initial card reveal is "still running" for this purpose too, so a forfeit that
 			// landed during the peek is lifted the same way (cambia-955 F1).
+			//
+			// A seat given up on purpose is the exception: that player did not miss the round,
+			// they left it, and the confirmation dialog said the seat goes now. Browser Back
+			// after that dialog reaches this path, so without the check the whole leave undoes
+			// itself and a ranked round scores the played hand instead of ForfeitRoundScore.
+			// They come back as a spectator: connected, sent the state, still forfeited
+			// (cambia-1239).
 			resumed := false
-			if (g.Started || g.PreGameActive) && !g.GameOver && g.forfeited[playerID] {
+			if (g.Started || g.PreGameActive) && !g.GameOver && g.forfeited[playerID] && !g.leftSeats[playerID] {
 				delete(g.forfeited, playerID)
 				resumed = true
 				log.Printf("Game %s: Player %s returned to a game still in progress; their forfeit is lifted.", g.ID, playerID)
@@ -1723,7 +1739,9 @@ func (g *CambiaGame) CircuitAIPlay(playerID uuid.UUID) {
 	log.Printf("Game %s: circuit seat %s is unattended; the turn clock is playing it until an agent owns it.", g.ID, playerID)
 }
 
-// IsCircuitAIControlled returns whether a player is currently under AI control due to disconnect.
+// IsCircuitAIControlled reports whether this circuit seat's reconnect window closed with nobody
+// back in it, so the turn clock's defensive timeout is playing it. No agent plays it: the one that
+// will is Phase 3 work, and the name predates that split (see the circuitAIControlled field).
 // Public entry point: acquires mu.
 func (g *CambiaGame) IsCircuitAIControlled(playerID uuid.UUID) bool {
 	g.mu.Lock()
