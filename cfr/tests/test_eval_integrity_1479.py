@@ -14,10 +14,9 @@
    to UniformRandomPolicy. The marker is claimed here per class, and claimed
    only for classes this file drives through a whole game on a GoEngine.
 
-Follow-ups on the same review: the utility helpers answered 0.0 (the value of a
-draw) for an engine read they could not make, and Tier B built a fresh
-heuristic opponent inside its innermost rollout loop. Both are covered at the
-end of this module.
+A follow-up on the same review, covered at the end of this module: the utility
+helpers answered 0.0 (the value of a draw) for an engine read they could not
+make, so an unreadable playout scored as a tie.
 """
 
 import random
@@ -485,119 +484,3 @@ def test_a_failing_engine_read_fails_the_estimator(monkeypatch):
             br_rollouts_per_infoset=2,
             seed=9,
         )
-
-
-# ---------------------------------------------------------------------------
-# F3: the Tier-B rollout opponent is built once and reset, not per rollout
-# ---------------------------------------------------------------------------
-
-
-class _NoResetOpponent:
-    """ImperfectGreedyAgent without the reset hook: the pre-fix shape.
-
-    Delegates every decision, so a fresh one per rollout behaves exactly as the
-    old per-rollout construction did.
-    """
-
-    def __init__(self, player_id, config):
-        self._inner = ImperfectGreedyAgent(player_id, config)
-
-    def choose_action(self, view, legal_actions):
-        return self._inner.choose_action(view, legal_actions)
-
-
-def test_reset_episode_matches_a_freshly_built_memory_agent():
-    """The reuse is sound only if a reset agent is indistinguishable from a new
-    one, so every per-episode field is compared after both read the same view."""
-    config = _Config()
-    state = GoSearchState.new(config.cambia_rules, 55)
-    try:
-        view = state.view()
-        fresh = ImperfectGreedyAgent(1, config)
-        fresh._init_memory(view)
-
-        reused = ImperfectGreedyAgent(1, config)
-        reused._init_memory(view)
-        reused.own_memory[0] = 13  # dirty the memory the way a rollout would
-        reused.opponent_memory[0] = 1
-        reused.reset_episode()
-        assert reused._needs_reinit(view), "reset did not force re-initialization"
-        reused._init_memory(view)
-
-        for field in (
-            "own_memory",
-            "own_rank_memory",
-            "opponent_memory",
-            "opponent_rank_memory",
-            "_current_turn",
-            "opponent_id",
-        ):
-            assert getattr(reused, field) == getattr(fresh, field), field
-    finally:
-        state.close()
-
-
-def test_tier_b_builds_a_resettable_rollout_opponent_once():
-    config = _Config()
-    built = []
-
-    def _counting_factory(player_id, cfg):
-        agent = ImperfectGreedyAgent(player_id, cfg)
-        built.append(agent)
-        return agent
-
-    result = tier_b_lbr(
-        _UniformWrapper(config),
-        config,
-        num_infosets=6,
-        br_rollouts_per_infoset=4,
-        seed=42,
-        rollout_opponent_factory=_counting_factory,
-    )
-    # One for the run's shared rollout opponent. The trajectory opponent comes
-    # from a separate factory, so nothing else may be built here.
-    assert len(built) == 1, f"built {len(built)} rollout opponents"
-    assert result["rollout_opponent"] == "ImperfectGreedyAgent"
-
-
-def test_an_unresettable_rollout_opponent_is_still_built_per_rollout():
-    config = _Config()
-    built = []
-
-    def _counting_factory(player_id, cfg):
-        agent = _NoResetOpponent(player_id, cfg)
-        built.append(agent)
-        return agent
-
-    tier_b_lbr(
-        _UniformWrapper(config),
-        config,
-        num_infosets=3,
-        br_rollouts_per_infoset=3,
-        seed=42,
-        rollout_opponent_factory=_counting_factory,
-    )
-    assert len(built) > 1, "an opponent with no reset hook must not be reused"
-
-
-def test_reusing_the_rollout_opponent_does_not_move_the_estimate():
-    """Same seed, same estimate: the reuse is a construction saving, not a
-    change of measurement protocol."""
-    config = _Config()
-    reused = tier_b_lbr(
-        _UniformWrapper(config),
-        config,
-        num_infosets=8,
-        br_rollouts_per_infoset=3,
-        seed=7,
-    )
-    rebuilt = tier_b_lbr(
-        _UniformWrapper(config),
-        config,
-        num_infosets=8,
-        br_rollouts_per_infoset=3,
-        seed=7,
-        rollout_opponent_factory=_NoResetOpponent,
-    )
-    assert reused["exploitability"] == rebuilt["exploitability"]
-    assert reused["num_infosets_sampled"] == rebuilt["num_infosets_sampled"]

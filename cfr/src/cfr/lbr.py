@@ -1085,16 +1085,13 @@ def tier_b_lbr(
         tolerated=tolerated,
     )
 
-    # One rollout opponent for the whole run when it can be reset to a fresh
-    # episode. Tier B runs len(legal) * br_rollouts_per_infoset rollouts per
-    # infoset, so a fresh opponent per rollout was tens of thousands of
-    # heuristic agents per leg; the reset is exactly what that construction
-    # bought, since ImperfectMemoryMixin rebuilds its whole memory on the next
-    # decision. An opponent without the hook keeps the per-rollout
-    # construction, the only way it starts a rollout free of the last one.
-    shared_rollout_opp = rollout_opponent_factory(_OPPONENT_ID, config)
-    opp_label = type(shared_rollout_opp).__name__
-    reusable_rollout_opp = hasattr(shared_rollout_opp, "reset_episode")
+    # A rollout opponent is built per rollout, which is the only shape that
+    # needs no reset contract at all. Reuse was measured and bought nothing:
+    # one ImperfectGreedyAgent costs 0.55 us to construct, so the tens of
+    # thousands a leg builds are ~0.02s of its ~700s, and the back-to-back pair
+    # of a counterbalanced A/B on 2026-09-02 put the reusing arm at 210.8s of
+    # CPU against 196.5s for this one, on identical estimates (cambia-1479).
+    opp_label = type(rollout_opponent_factory(_OPPONENT_ID, config)).__name__
 
     def _empty(reason: str) -> Dict[str, Any]:
         logger.warning("tier_b_lbr: %s", reason)
@@ -1136,11 +1133,7 @@ def tier_b_lbr(
                     if not state.apply_index(action_idx):
                         utils.append(0.0)
                         continue
-                    if reusable_rollout_opp:
-                        shared_rollout_opp.reset_episode()
-                        rollout_opp = shared_rollout_opp
-                    else:
-                        rollout_opp = rollout_opponent_factory(_OPPONENT_ID, config)
+                    rollout_opp = rollout_opponent_factory(_OPPONENT_ID, config)
                     utils.append(
                         _agent_policy_rollout(
                             state, agent_wrapper, rollout_opp, max_turns, tolerated

@@ -468,20 +468,6 @@ class ImperfectMemoryMixin:
     Unknown cards are estimated at UNKNOWN_CARD_EXPECTED_VALUE.
     """
 
-    def reset_episode(self) -> None:
-        """Forget this episode, so the next decision rebuilds memory from the view.
-
-        Equivalent to constructing the agent again: every per-episode field
-        (own/opponent memory and rank memory, the turn counter, the bound
-        opponent seat) is rewritten wholesale by ``_init_memory``, which this
-        forces to run again. ``src.cfr.lbr.tier_b_lbr`` uses the hook's presence
-        to reuse one rollout opponent across a run rather than building a fresh
-        heuristic agent inside its innermost loop (cambia-1479); an agent
-        without the hook is still rebuilt per rollout.
-        """
-        self._initialized = False
-        self._last_game_id = None
-
     def _needs_reinit(self, game_state: GameView) -> bool:
         """Check if memory needs re-initialization for a new game."""
         return id(game_state) != getattr(self, "_last_game_id", None)
