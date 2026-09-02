@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/jason-s-yu/cambia/service/internal/cache"
 	"github.com/jason-s-yu/cambia/service/internal/database"
 	"github.com/jason-s-yu/cambia/service/internal/testutil"
 )
@@ -55,20 +56,26 @@ func TestBasicHistorianFlow(t *testing.T) {
 	t.Log("Pushed a sample action to Redis.")
 }
 
-// endToEndActions is the number of ordinary actions pushed before the terminal
-// one. Two batches' worth at the batch size the test configures, so the run
+// endToEndActions is the number of player actions pushed before the game_end
+// record. Two batches' worth at the batch size the test configures, so the run
 // exercises a size-triggered flush and the ticker flush that carries the
 // remainder, rather than one of the two alone.
 const endToEndActions = 4
 
 // TestHistorianEndToEnd drives the shipped historian the way production runs
 // it: build cmd/db, point the binary at this environment's Redis and Postgres,
-// push a game's action stream onto its queue, and read back what landed. It
-// covers what no unit test can - the binary's env wiring, the Redis pop loop,
-// the batch flush, the rows it writes, the finalize branch that closes a game
-// on its terminal action, and a clean SIGTERM shutdown. Replaces a placeholder
-// that only described this and always skipped, which is how it stayed green
-// while nothing ran it (cambia-1246).
+// push the action stream CambiaGame.logAction really publishes, and read back
+// what landed. It covers what no unit test can - the binary's env wiring, the
+// Redis pop loop, the batch flush, the rows it writes, and a clean SIGTERM
+// shutdown. Replaces a placeholder that only described this and always
+// skipped, which is how it stayed green while nothing ran it (cambia-1246).
+//
+// The stream is what the server emits and nothing else: player actions carrying
+// a real actor, then the game_end record the server logs with uuid.Nil, which
+// has to reach the table as a NULL actor_user_id. The games row belongs to the
+// game server, so this test writes it and asserts nothing about games.status:
+// the historian appends to game_actions and no longer touches games at all
+// (cambia-1881).
 func TestHistorianEndToEnd(t *testing.T) {
 	if !redisAvailable {
 		t.Skip("skipping: no Redis reachable via REDIS_ADDR (default localhost:6379); set REDIS_ADDR to point at a running dev Redis to run this test")
@@ -146,31 +153,28 @@ func TestHistorianEndToEnd(t *testing.T) {
 	})
 
 	// Queued before the binary starts: BLPop takes whatever is waiting, so
-	// there is no readiness handshake to get wrong, and FIFO order puts the
-	// terminal action last where the finalize branch expects it.
-	for i := 0; i < endToEndActions; i++ {
-		pushAction(t, ctx, rdb, queue, gameID, actorID, i, "action_draw_stockpile")
+	// there is no readiness handshake to get wrong. Indices start at 1 because
+	// CambiaGame.logAction pre-increments, and the run ends on the game_end
+	// record the server logs with a nil actor.
+	for i := 1; i <= endToEndActions; i++ {
+		pushAction(t, ctx, rdb, queue, gameID, actorID, i, "player_draw_stockpile")
 	}
-	pushAction(t, ctx, rdb, queue, gameID, actorID, endToEndActions, "action_end_game")
+	pushAction(t, ctx, rdb, queue, gameID, uuid.Nil, endToEndActions+1, "game_end")
 
 	logPath := startHistorian(t, queue)
 
 	// Poll rather than sleep on a fixed delay: the flush is driven by a batch
 	// size and a ticker, so the write lands at a time this test does not
-	// control.
+	// control. The games row is not part of the wait: the server owns
+	// games.status, and the historian writes game_actions only (cambia-1881).
 	var actionCount int
-	var status string
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := pool.QueryRow(ctx,
 			`SELECT count(*) FROM game_actions WHERE game_id = $1`, gameID).Scan(&actionCount); err != nil {
 			t.Fatalf("count persisted actions: %v", err)
 		}
-		if err := pool.QueryRow(ctx,
-			`SELECT status FROM games WHERE id = $1`, gameID).Scan(&status); err != nil {
-			t.Fatalf("read the games row: %v", err)
-		}
-		if actionCount == endToEndActions+1 && status == "completed" {
+		if actionCount == endToEndActions+1 {
 			break
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -179,10 +183,6 @@ func TestHistorianEndToEnd(t *testing.T) {
 	if actionCount != endToEndActions+1 {
 		t.Fatalf("historian persisted %d of %d actions\nhistorian log:\n%s",
 			actionCount, endToEndActions+1, readLog(t, logPath))
-	}
-	if status != "completed" {
-		t.Fatalf("terminal action left the games row at status %q, want \"completed\"\nhistorian log:\n%s",
-			status, readLog(t, logPath))
 	}
 
 	// The rows themselves, not just their count: the historian is the only
@@ -198,8 +198,14 @@ func TestHistorianEndToEnd(t *testing.T) {
 
 	seen := 0
 	for rows.Next() {
+		seen++
+
 		var index int
-		var actor uuid.UUID
+		// A pointer, because the game_end row's actor has to come back as SQL
+		// NULL: the server logs its own game events with uuid.Nil, and a nil
+		// UUID written literally would be a foreign key into a users row that
+		// does not exist (cambia-1881).
+		var actor *uuid.UUID
 		var actionType string
 		var payload map[string]any
 		if err := rows.Scan(&index, &actor, &actionType, &payload); err != nil {
@@ -208,20 +214,31 @@ func TestHistorianEndToEnd(t *testing.T) {
 		if index != seen {
 			t.Fatalf("action %d persisted out of order, at index %d", seen, index)
 		}
-		if actor != actorID {
-			t.Fatalf("action %d persisted actor %s, want %s", index, actor, actorID)
+
+		wantType := "player_draw_stockpile"
+		if index == endToEndActions+1 {
+			wantType = "game_end"
 		}
-		want := "action_draw_stockpile"
-		if index == endToEndActions {
-			want = "action_end_game"
+		if actionType != wantType {
+			t.Fatalf("action %d persisted type %q, want %q", index, actionType, wantType)
 		}
-		if actionType != want {
-			t.Fatalf("action %d persisted type %q, want %q", index, actionType, want)
+
+		if index == endToEndActions+1 {
+			if actor != nil {
+				t.Fatalf("the game_end record's nil actor persisted as %s, want a NULL actor_user_id", *actor)
+			}
+		} else {
+			if actor == nil {
+				t.Fatalf("action %d persisted a NULL actor, want %s", index, actorID)
+			}
+			if *actor != actorID {
+				t.Fatalf("action %d persisted actor %s, want %s", index, *actor, actorID)
+			}
 		}
+
 		if got := payload["step"]; got != float64(index) {
 			t.Fatalf("action %d persisted payload %v, want step %d", index, payload, index)
 		}
-		seen++
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate persisted actions: %v", err)
@@ -231,18 +248,21 @@ func TestHistorianEndToEnd(t *testing.T) {
 	}
 }
 
-// pushAction queues one action record in the wire shape cmd/db unmarshals.
+// pushAction queues one action record. It marshals cache.GameActionRecord, the
+// type CambiaGame.logAction publishes and cmd/db unmarshals, so the wire shape
+// this test drives cannot drift from the one production uses. A uuid.Nil actor
+// is exactly what the server sends for a game event.
 func pushAction(t *testing.T, ctx context.Context, rdb *redis.Client, queue string,
 	gameID, actorID uuid.UUID, index int, actionType string) {
 	t.Helper()
 
-	data, err := json.Marshal(map[string]any{
-		"game_id":        gameID.String(),
-		"action_index":   index,
-		"actor_user_id":  actorID.String(),
-		"action_type":    actionType,
-		"action_payload": map[string]any{"step": index},
-		"timestamp":      time.Now().UnixMilli(),
+	data, err := json.Marshal(cache.GameActionRecord{
+		GameID:        gameID,
+		ActionIndex:   index,
+		ActorUserID:   actorID,
+		ActionType:    actionType,
+		ActionPayload: map[string]interface{}{"step": index},
+		Timestamp:     time.Now().UnixMilli(),
 	})
 	if err != nil {
 		t.Fatalf("marshal action %d: %v", index, err)
