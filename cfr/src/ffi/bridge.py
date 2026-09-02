@@ -194,7 +194,12 @@ STATE_PENDING_OFF = STATE_SNAP_OFF + SNAP_FIELDS
 STATE_MASK_OFF = STATE_PENDING_OFF + PENDING_FIELDS
 STATE_HANDS_OFF = STATE_MASK_OFF + 146  # agent.NumActions, as GoEngine.NUM_ACTIONS
 STATE_HAND_STRIDE = 1 + MAX_HAND_SIZE
-STATE_FIELDS = STATE_HANDS_OFF + MAX_PLAYERS * STATE_HAND_STRIDE
+# Two seats of belief ride the same record (cambia-1971): own hand length, own
+# hand buckets, opponent hand length, opponent belief buckets, in the order the
+# agent handles are passed.
+STATE_BELIEF_OFF = STATE_HANDS_OFF + MAX_PLAYERS * STATE_HAND_STRIDE
+STATE_BELIEF_STRIDE = 2 * (1 + MAX_HAND_SIZE)
+STATE_FIELDS = STATE_BELIEF_OFF + 2 * STATE_BELIEF_STRIDE
 
 # engine.PendingType values.
 PENDING_NONE = 0
@@ -549,6 +554,29 @@ class GameStateView:
             self._hands[seat] = cards
         return cards
 
+    # --- Belief (cambia-1971) ---
+    #
+    # Present only when the read was given agent handles; an absent handle's
+    # block is all sentinel and reads back as empty. Bucket values are the Go
+    # domain (0..8 known, 9 unknown), byte for byte what
+    # cambia_agent_get_own_hand and cambia_agent_get_opp_belief report.
+
+    def own_hand_buckets(self, agent_slot: int) -> Tuple[int, ...]:
+        """An agent's belief about its own hand, slot 0 first."""
+        off = STATE_BELIEF_OFF + agent_slot * STATE_BELIEF_STRIDE
+        return tuple(self._rec[off + 1 : off + 1 + self._rec[off]])
+
+    def opp_belief_buckets(self, agent_slot: int) -> Tuple[int, ...]:
+        """An agent's belief about its opponent's hand, slot 0 first."""
+        off = STATE_BELIEF_OFF + agent_slot * STATE_BELIEF_STRIDE + 1 + MAX_HAND_SIZE
+        return tuple(self._rec[off + 1 : off + 1 + self._rec[off]])
+
+    def opp_hand_len(self, agent_slot: int) -> int:
+        """The opponent hand length the agent's belief is reconciled to."""
+        return self._rec[
+            STATE_BELIEF_OFF + agent_slot * STATE_BELIEF_STRIDE + 1 + MAX_HAND_SIZE
+        ]
+
 
 # ---------------------------------------------------------------------------
 # Library loading: module-level singleton
@@ -561,7 +589,7 @@ class GameStateView:
 # ignored by the SysV calling convention, so a stale .so keeps loading and
 # keeps answering, just with the wrong rules. _check_abi_generation refuses
 # to hand back a library whose reported generation does not match this.
-ABI_GENERATION = 3
+ABI_GENERATION = 4
 
 _ffi = cffi.FFI()
 _ffi.cdef("""
@@ -739,6 +767,7 @@ _ffi.cdef("""
 
     /* cambia-1902: apply plus the whole per-node state read in one crossing */
     int32_t cambia_game_apply_and_read(int32_t game_h, int32_t action_idx,
+                                       int32_t a0_h, int32_t a1_h,
                                        uint8_t *out_buf, int32_t buf_len,
                                        float *out_util, int32_t util_len);
 """)
@@ -1491,11 +1520,20 @@ class GoEngine:
             self._batch_bufs = bufs
         return bufs
 
-    def _apply_and_read(self, action_idx: int) -> GameStateView:
+    def _apply_and_read(
+        self, action_idx: int, a0_h: int = -1, a1_h: int = -1
+    ) -> GameStateView:
         rec_buf, util_buf = self._state_bufs()
         rc = int(
             self._lib.cambia_game_apply_and_read(
-                self._game_h, action_idx, rec_buf, STATE_FIELDS, util_buf, MAX_PLAYERS
+                self._game_h,
+                action_idx,
+                a0_h,
+                a1_h,
+                rec_buf,
+                STATE_FIELDS,
+                util_buf,
+                MAX_PLAYERS,
             )
         )
         if rc == -2:
@@ -1520,7 +1558,7 @@ class GoEngine:
             util = np.frombuffer(_ffi.buffer(util_buf), dtype=np.float32).copy()
         return GameStateView(rec, util)
 
-    def read_state(self) -> GameStateView:
+    def read_state(self, a0_h: int = -1, a1_h: int = -1) -> GameStateView:
         """Read the whole node -- see GameStateView -- in a single crossing.
 
         What a traversal used to assemble from a dozen separate accessors
@@ -1529,14 +1567,21 @@ class GoEngine:
         legal_actions_mask, get_hand per seat), which cost about 21 crossings
         per applied action before cambia-1902.
         """
-        return self._apply_and_read(-1)
+        return self._apply_and_read(-1, a0_h, a1_h)
 
-    def apply_and_read_state(self, action_idx: int) -> GameStateView:
+    def apply_and_read_state(
+        self, action_idx: int, a0_h: int = -1, a1_h: int = -1
+    ) -> GameStateView:
         """Apply an action index and read the state it produced, in one crossing.
 
         The apply and the read that always follows it share a crossing, which
         is what takes the traversal below one crossing per read rather than
         merely one crossing per node.
+
+        Passing agent handles advances both beliefs over the state the action
+        produced and rides them back in the same record, so a traversal that
+        keys its table off a belief still spends one crossing a node
+        (cambia-1971).
 
         Raises:
             ValueError: If action_idx is out of range.
@@ -1547,7 +1592,7 @@ class GoEngine:
             raise ValueError(
                 f"action_idx {action_idx} out of range [0, {self.NUM_ACTIONS})"
             )
-        return self._apply_and_read(action_idx)
+        return self._apply_and_read(action_idx, a0_h, a1_h)
 
     def _get_all_cards_unsafe(self) -> np.ndarray:
         """Return a packed uint8 array of bucket indices for every slot in

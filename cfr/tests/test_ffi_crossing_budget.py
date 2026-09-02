@@ -141,6 +141,13 @@ def test_the_single_purpose_accessors_left_the_hot_path(counts):
         "cambia_agent_action_mask",
         "cambia_game_num_players",
         "cambia_game_get_utility",
+        # Folded by cambia-1971, when the belief moved onto the Go agent: the
+        # acting seat's key rides the same record as the engine state.
+        "cambia_agent_get_own_hand",
+        "cambia_agent_get_opp_belief",
+        "cambia_agent_get_hand_lens",
+        "cambia_agent_update",
+        "cambia_agents_update_both",
     ]
     still_called = {name: counts[name] for name in folded if counts[name]}
     assert not still_called, f"folded accessors still called: {still_called}"

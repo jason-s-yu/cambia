@@ -75,6 +75,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 import numpy as np
 
 from ..agent_state import AgentObservation
+from ..abstraction import get_card_bucket
 from ..agents.action_codec import index_to_action
 from ..constants import (
     ActionAbilityKingLookSelect,
@@ -91,10 +92,22 @@ from ..constants import (
     DecisionContext,
     GameAction,
 )
-from ..ffi.bridge import GameStateView, GoEngine, HouseRulesView
+from ..ffi.bridge import (
+    GameStateView,
+    GoAgentState,
+    GoEngine,
+    HouseRulesView,
+    state_restore,
+    state_save,
+    state_snapshot_free,
+)
 from .lbr import DealSpec
 
 logger = logging.getLogger(__name__)
+
+#: Go's BucketUnknown. Python's CardBucket.UNKNOWN is 99; every other bucket
+#: value is shared, so this is the whole translation between the two domains.
+_GO_BUCKET_UNKNOWN = 9
 
 __all__ = ["DealSpec", "GoBrState", "deal_spec_from_python_game"]
 
@@ -217,9 +230,17 @@ class GoBrState:
         "_closed",
         "_state",
         "_rules",
+        "_agents",
+        "_estimator",
     )
 
-    def __init__(self, engine: GoEngine, deal: DealSpec, house_rules: Any) -> None:
+    def __init__(
+        self,
+        engine: GoEngine,
+        deal: DealSpec,
+        house_rules: Any,
+        config: Any = None,
+    ) -> None:
         self.engine = engine
         self.deal = deal
         self.house_rules = house_rules
@@ -230,6 +251,10 @@ class GoBrState:
         self._closed = False
         self._state: Optional[GameStateView] = None
         self._rules: Optional[HouseRulesView] = None
+        self._agents: List[GoAgentState] = []
+        self._estimator: Any = None
+        if config is not None:
+            self._attach_belief(config)
         self._num_players = self._view().num_players
 
     @classmethod
@@ -238,6 +263,7 @@ class GoBrState:
         house_rules: Any,
         deal: DealSpec,
         action_prefix: Sequence[int] = (),
+        config: Any = None,
     ) -> "GoBrState":
         """Deal ``deal`` under ``house_rules``, then replay ``action_prefix``.
 
@@ -245,6 +271,11 @@ class GoBrState:
         sitting on: the deal is a pure function of the spec and the engine is
         deterministic given an action sequence, so replay lands on the identical
         state, snap-log mirror included.
+
+        Passing ``config`` attaches a Go-side belief a seat and makes
+        ``infoset_key`` available (cambia-1971). Without it this behaves exactly
+        as it did: no agent handles, no belief crossings, and the caller drives
+        whatever belief it wants off ``observation``.
         """
         if getattr(house_rules, "snapRace", False):
             raise ValueError(
@@ -256,7 +287,7 @@ class GoBrState:
             )
         engine = cls._deal_engine(house_rules, deal)
         try:
-            state = cls(engine, deal, house_rules)
+            state = cls(engine, deal, house_rules, config)
             if state._num_players != 2:
                 raise ValueError(
                     f"GoBrState is a 2-seat search substrate, got "
@@ -296,11 +327,97 @@ class GoBrState:
 
     # --- Read surface ---
 
+    # --- Belief (cambia-1971) ---
+
+    def _attach_belief(self, config: Any) -> None:
+        """Bind a Go AgentState a seat and keep the estimator the key needs.
+
+        The belief moves to the Go agent because the Python one was the tabular
+        traversal's throughput wall: with the per-node engine reads batched, the
+        FFI was 5.9 percent of traversal time against 23 percent in
+        ``src.agent_state`` plus the action codec (cambia-1902 F1).
+
+        Three components of the infoset key are not belief at all -- the discard
+        top bucket, the stockpile estimate and the game phase are pure functions
+        of public scalars this state already reads -- so they keep going through
+        the production estimator rather than a reimplementation, which is what
+        keeps the keys the ones training wrote. The estimator instance is never
+        initialised or updated: both methods read nothing but ``self.config``.
+        """
+        from ..agent_state import AgentState
+
+        params = config.agent_params
+        self._agents = [
+            GoAgentState(
+                self.engine,
+                seat,
+                memory_level=params.memory_level,
+                time_decay_turns=params.time_decay_turns,
+            )
+            for seat in range(2)
+        ]
+        self._estimator = AgentState(
+            player_id=0,
+            opponent_id=1,
+            memory_level=params.memory_level,
+            time_decay_turns=params.time_decay_turns,
+            initial_hand_size=0,
+            config=config,
+        )
+
+    @property
+    def has_belief(self) -> bool:
+        """True when this state drives its own Go-side belief."""
+        return bool(self._agents)
+
+    def _handles(self) -> Tuple[int, int]:
+        """The two agent handles, or (-1, -1) with no belief attached."""
+        if not self._agents:
+            return -1, -1
+        return self._agents[0].handle, self._agents[1].handle
+
+    def infoset_key(self, seat: int) -> Tuple:
+        """The seat's ``AgentState.get_infoset_key()`` tuple, off the Go belief.
+
+        Same six components in the same order, so a table written by the Python
+        belief is addressed by the same keys: own-hand buckets, opponent belief,
+        opponent count, discard-top bucket, stockpile estimate, game phase. Go
+        spells its unknown bucket 9 and Python spells it 99, which is the one
+        translation here; every other bucket value already agrees.
+        """
+        from ..constants import CardBucket
+
+        if not self._agents:
+            raise RuntimeError(
+                "GoBrState.infoset_key needs a belief; construct it with a config"
+            )
+        view = self._view()
+        unknown = CardBucket.UNKNOWN.value
+        own = tuple(
+            unknown if b == _GO_BUCKET_UNKNOWN else b for b in view.own_hand_buckets(seat)
+        )
+        opp = tuple(
+            unknown if b == _GO_BUCKET_UNKNOWN else b
+            for b in view.opp_belief_buckets(seat)
+        )
+        stock = view.stock_len
+        return (
+            own,
+            opp,
+            view.opp_hand_len(seat),
+            get_card_bucket(view.discard_top).value,
+            self._estimator._estimate_stockpile(stock).value,
+            self._estimator._estimate_game_phase(
+                stock, view.cambia_caller, view.turn_number
+            ).value,
+        )
+
     def _view(self) -> GameStateView:
         """This node's state, read in one crossing and reused until it moves."""
         state = self._state
         if state is None:
-            state = self._state = self.engine.read_state()
+            a0, a1 = self._handles()
+            state = self._state = self.engine.read_state(a0, a1)
         return state
 
     def _house_rules(self) -> HouseRulesView:
@@ -395,7 +512,8 @@ class GoBrState:
         # Dropped before the call, not after: a rejected action raises out of
         # here, and a stale view would then outlive the failure.
         self._state = None
-        self._state = self.engine.apply_and_read_state(int(action_idx))
+        a0, a1 = self._handles()
+        self._state = self.engine.apply_and_read_state(int(action_idx), a0, a1)
         self._prefix.append(int(action_idx))
 
         snap_after = self._state.snap
@@ -430,7 +548,7 @@ class GoBrState:
         global _REPLAY_FALLBACK_WARNED
         prefix = tuple(self._prefix)
         try:
-            snap_h: Optional[int] = self.engine.save()
+            snap_h: Optional[int] = self._save()
         except RuntimeError:
             snap_h = None
             if not _REPLAY_FALLBACK_WARNED:
@@ -445,11 +563,37 @@ class GoBrState:
             self._live_snaps.append((prefix, snap_h))
         return Checkpoint(snap_h, prefix, self._snap_log.clone(), self._king_swap)
 
+    def _save(self) -> int:
+        """Snapshot the game, and the two beliefs with it when there are any.
+
+        ``cambia_state_save`` is the token-inclusive triple save; with no belief
+        attached this stays on the game-only pair, which is the cheaper snapshot
+        and the one every pre-cambia-1971 caller used.
+        """
+        if not self._agents:
+            return self.engine.save()
+        a0, a1 = self._handles()
+        return state_save(self.engine.handle, a0, a1)
+
+    def _restore(self, snap_h: int) -> None:
+        """Restore a snapshot taken by ``_save``, beliefs included."""
+        if not self._agents:
+            self.engine.restore(snap_h)
+            return
+        a0, a1 = self._handles()
+        state_restore(self.engine.handle, snap_h, a0, a1)
+
+    def _free_snapshot(self, snap_h: int) -> None:
+        if not self._agents:
+            self.engine.free_snapshot(snap_h)
+            return
+        state_snapshot_free(snap_h)
+
     def rewind(self, cp: Checkpoint) -> None:
         """Restore the state the checkpoint was taken at."""
         self._state = None
         if cp.snap_h is not None:
-            self.engine.restore(cp.snap_h)
+            self._restore(cp.snap_h)
         else:
             self._replay(cp.prefix)
         self._prefix = list(cp.prefix)
@@ -460,7 +604,7 @@ class GoBrState:
         """Release a checkpoint's engine snapshot, if it took one."""
         if cp.snap_h is None:
             return
-        self.engine.free_snapshot(cp.snap_h)
+        self._free_snapshot(cp.snap_h)
         for i in range(len(self._live_snaps) - 1, -1, -1):
             if self._live_snaps[i][1] == cp.snap_h:
                 del self._live_snaps[i]
@@ -484,14 +628,31 @@ class GoBrState:
             if n <= len(prefix) and n >= start and prefix[:n] == snap_prefix:
                 start, base = n, snap_h
         if base is not None:
-            self.engine.restore(base)
+            self._restore(base)
         else:
             fresh = self._deal_engine(self.house_rules, self.deal)
             old = self.engine
             self.engine = fresh
+            # An agent handle is bound to the game it was built on, and its
+            # construction is what seeds the seat's initial peeks, so a re-deal
+            # rebuilds the beliefs rather than carrying them across.
+            if self._agents:
+                rebuilt = [
+                    GoAgentState(
+                        fresh,
+                        seat,
+                        memory_level=self._estimator.memory_level,
+                        time_decay_turns=self._estimator.time_decay_turns,
+                    )
+                    for seat in range(2)
+                ]
+                for agent in self._agents:
+                    agent.close()
+                self._agents = rebuilt
             old.close()
+        a0, a1 = self._handles()
         for action_idx in prefix[start:]:
-            self.engine.apply_action(int(action_idx))
+            self.engine.apply_and_read_state(int(action_idx), a0, a1)
 
     def close(self) -> None:
         if self._closed:
@@ -500,8 +661,11 @@ class GoBrState:
         # The snapshot pool is global and finite, so a checkpoint an aborted
         # recursion never released would be lost for the life of the process.
         for _, snap_h in self._live_snaps:
-            self.engine.free_snapshot(snap_h)
+            self._free_snapshot(snap_h)
         self._live_snaps = []
+        for agent in self._agents:
+            agent.close()
+        self._agents = []
         self.engine.close()
 
     def __enter__(self) -> "GoBrState":
