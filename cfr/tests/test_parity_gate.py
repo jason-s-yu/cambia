@@ -53,6 +53,7 @@ try:
         PARITY_SEED_COUNT,
         PARITY_SEED_COUNT_DEFAULT,
         PARITY_SEEDS,
+        PARITY_SEEDS_LOCK_OFF,
     )
     from tests.test_cross_engine_samples import (
         XorShift64,
@@ -66,6 +67,7 @@ except ImportError:  # pragma: no cover - path fallback
         PARITY_SEED_COUNT,
         PARITY_SEED_COUNT_DEFAULT,
         PARITY_SEEDS,
+        PARITY_SEEDS_LOCK_OFF,
     )
     from test_cross_engine_samples import (  # type: ignore
         XorShift64,
@@ -173,6 +175,55 @@ def test_parity_gate_two_seats():
         "utilities were never compared"
     )
     assert snap_games > 0, "no seed exercised a snap resolution"
+
+
+# ---------------------------------------------------------------------------
+# Two-seat leg, lockCallerHand off: the branch the strict leg above never sweeps
+# ---------------------------------------------------------------------------
+
+
+@skip_if_no_go
+def test_parity_gate_two_seats_lock_caller_hand_off(monkeypatch):
+    """Go == Python at 2 seats with lockCallerHand off, over a small seed set.
+
+    _TEST_RULES defaults lockCallerHand True and no cross-engine test overrides
+    it, so test_parity_gate_two_seats above never drives the branch cambia-1118
+    added on either engine: a Cambia caller's hand stays reachable to
+    swap_blind/swap_peek/SnapOpponent once the house rule is off (RULES.md 3C,
+    off in every ranked queue per MATCHMAKING.md 5.2). This leg reuses the same
+    _play_lockstep driver, over a smaller named seed set
+    (tests.parity_seeds.PARITY_SEEDS_LOCK_OFF), with _TEST_RULES.lockCallerHand
+    monkeypatched to False for the duration of the test; pytest's monkeypatch
+    fixture restores it afterward regardless of outcome, so the strict leg
+    above is unaffected however this one exits.
+    """
+    monkeypatch.setattr(_TEST_RULES, "lockCallerHand", False)
+
+    states = 0
+    terminal_games = 0
+    utility_games = 0
+
+    for seed in PARITY_SEEDS_LOCK_OFF:
+        res = _play_lockstep(seed)
+        states += res.compared
+        if res.utilities_compared:
+            terminal_games += 1
+            utility_games += 1
+
+    print(
+        f"\n[parity-gate 2p lockCallerHand=False] seeds={len(PARITY_SEEDS_LOCK_OFF)} "
+        f"states={states} terminal_games={terminal_games} utility_compares={utility_games}"
+    )
+
+    assert states > 0, (
+        f"only {states} lockstep states compared across "
+        f"{len(PARITY_SEEDS_LOCK_OFF)} lockCallerHand=False seeds; the leg is not "
+        "actually exercising the engines"
+    )
+    assert utility_games > 0, (
+        "no lockCallerHand=False seed reached a terminal state in both engines, "
+        "so terminal utilities were never compared"
+    )
 
 
 # ---------------------------------------------------------------------------

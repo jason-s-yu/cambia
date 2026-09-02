@@ -53,3 +53,39 @@ def _read_seed_count() -> int:
 PARITY_SEED_COUNT: int = _read_seed_count()
 
 PARITY_SEEDS: tuple = tuple(range(PARITY_SEED_COUNT))
+
+# The lockCallerHand=False leg (cambia-1239 FT1). PARITY_SEEDS above always drives
+# _TEST_RULES, which defaults lockCallerHand True, so the 40-seed sweep never exercises
+# the branch cambia-1118 added: the Cambia caller's hand reachable once the house rule
+# is off (RULES.md 3C, MATCHMAKING.md 5.2, off in every ranked queue). This leg is
+# intentionally smaller than the main sweep; it exists to cover the lock-off branch at
+# all, not to match the main gate's breadth.
+_ENV_VAR_LOCK_OFF = "CAMBIA_PARITY_SEEDS_LOCK_OFF"
+
+PARITY_SEED_COUNT_LOCK_OFF_DEFAULT = 8
+
+
+def _read_seed_count_lock_off() -> int:
+    raw = os.environ.get(_ENV_VAR_LOCK_OFF)
+    if raw is None or raw.strip() == "":
+        return PARITY_SEED_COUNT_LOCK_OFF_DEFAULT
+    try:
+        count = int(raw)
+    except ValueError:
+        raise ValueError(
+            f"{_ENV_VAR_LOCK_OFF}={raw!r} is not an integer; it sets how many seeds the "
+            f"lockCallerHand=False parity leg sweeps (default "
+            f"{PARITY_SEED_COUNT_LOCK_OFF_DEFAULT})."
+        ) from None
+    if count < 1:
+        raise ValueError(
+            f"{_ENV_VAR_LOCK_OFF}={count} must be >= 1; it sets how many seeds the "
+            f"lockCallerHand=False parity leg sweeps (default "
+            f"{PARITY_SEED_COUNT_LOCK_OFF_DEFAULT})."
+        )
+    return count
+
+
+PARITY_SEED_COUNT_LOCK_OFF: int = _read_seed_count_lock_off()
+
+PARITY_SEEDS_LOCK_OFF: tuple = tuple(range(PARITY_SEED_COUNT_LOCK_OFF))
