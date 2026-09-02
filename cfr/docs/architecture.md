@@ -189,10 +189,13 @@ SD-CFR (Self-Distributional CFR) drops the strategy network entirely. Instead:
 
 1. At each training step, the current advantage network weights are saved as a snapshot.
 2. Up to `sd_cfr_max_snapshots=200` snapshots are retained.
-3. At inference time, the average strategy is approximated by the EMA of all snapshots,
-   weighted by `(t+1)^1.5` (linear weighting by default).
-4. `use_ema=True` maintains a running EMA parameter vector for O(1) inference without
-   summing all snapshots at query time.
+3. At inference time the average strategy is the snapshot policy mixture: regret
+   matching per snapshot, then averaging those strategies under
+   `sd_cfr_snapshot_weighting`.
+4. `use_ema=True` opts into a running parameter blend instead, O(1) at query time and
+   an approximation of that mixture rather than the mixture itself. It weights
+   snapshots by the same rule, and it blends every step while the mixture averages the
+   snapshots the reservoir retained.
 
 Enable with `use_sd_cfr: true` in config.
 

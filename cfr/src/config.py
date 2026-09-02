@@ -554,7 +554,12 @@ class DeepCfrConfig(_CambiaBaseModel):
     use_residual: bool = True
     network_type: str = "residual"
     use_pos_embed: bool = True
-    use_ema: bool = True
+    # SD-CFR serving: blending network parameters approximates the snapshot
+    # policy mixture but is not it, since regret matching is not linear in
+    # the parameters. Opt in per run; serving reads the eval-side flag, not
+    # this one, so a stale checkpoint value cannot switch what is served
+    # (cambia-712).
+    use_ema: bool = False
 
     # Profiling
     enable_traversal_profiling: bool = False

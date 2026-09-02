@@ -1709,8 +1709,15 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
     """
     Wraps SD-CFR advantage network snapshots for evaluation.
 
-    Loads all snapshots, runs each through regret matching, and averages
-    the resulting strategies with linear or uniform weighting.
+    Serves the snapshot policy mixture: each snapshot is run through regret
+    matching and the resulting strategies are averaged with linear or uniform
+    weighting. That mixture is what SD-CFR defines.
+
+    ``use_ema`` opts into the EMA parameter blend instead, an O(1)
+    approximation of that mixture rather than the mixture itself. It is off by
+    default and a sibling ``*_ema.pt`` no longer switches it on by itself
+    (cambia-712). ``served_policy`` names whichever is in use and reaches the
+    eval row.
     """
 
     def __init__(
@@ -1719,7 +1726,7 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
         config,
         checkpoint_path: str,
         device: str = "cpu",
-        use_ema: bool = True,
+        use_ema: bool = False,
         use_argmax: bool = False,
     ):
         super().__init__(player_id, config, device=device, use_argmax=use_argmax)
@@ -1759,13 +1766,19 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
 
         base_path = os.path.splitext(checkpoint_path)[0]
 
-        # Try EMA fast path: single network, O(1) inference
+        # The EMA parameter blend is served only when this evaluation asks for
+        # it. Reading the checkpoint's use_ema, or the mere presence of the
+        # sibling file, used to switch serving to an approximation without the
+        # row saying so (cambia-712).
         ema_path = f"{base_path}_ema.pt"
-        ema_enabled = (
-            use_ema and dcfr_config.get("use_ema", True) and os.path.exists(ema_path)
-        )
+        if use_ema and not os.path.exists(ema_path):
+            raise FileNotFoundError(
+                f"use_ema was requested but no EMA weights exist at {ema_path}. "
+                "Serving the snapshot mixture instead would label the row as a "
+                "blend it never used."
+            )
 
-        if ema_enabled:
+        if use_ema:
             ema_data = torch.load(ema_path, map_location=self.device, weights_only=True)
             ema_net = build_advantage_network(
                 input_dim=net_input_dim,
@@ -1784,6 +1797,7 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
             self._ema_net = ema_net
             self._snapshot_nets = []
             self._snapshot_iterations = []
+            self.served_policy = "ema_blend"
             logger.info(
                 "SDCFRAgent P%d loaded EMA weights (step=%s) for O(1) inference.",
                 self.player_id,
@@ -1791,7 +1805,8 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
             )
         else:
             self._ema_net = None
-            # Fall back to full snapshot averaging
+            self.served_policy = "mixture"
+            # The snapshot policy mixture: SD-CFR's own definition.
             sd_snapshots_path = checkpoint.get(
                 "sd_snapshots_path", f"{base_path}_sd_snapshots.pt"
             )
@@ -1888,11 +1903,12 @@ class SDCFRAgentWrapper(NeuralAgentWrapper):
             mask_t = torch.from_numpy(action_mask).unsqueeze(0).to(self.device)
 
             if self._ema_net is not None:
-                # O(1) EMA fast path: single forward pass
+                # Opted-in O(1) blend: regret matching on averaged parameters,
+                # which approximates the mixture below rather than equalling it.
                 advantages = self._ema_net(feat_t, mask_t)
                 avg_strategy = self._get_strategy_from_advantages(advantages, mask_t)
             else:
-                # Full snapshot averaging fallback
+                # The snapshot policy mixture SD-CFR defines.
                 avg_strategy = torch.zeros(1, self._NUM_ACTIONS, device=self.device)
                 total_weight = 0.0
 
@@ -2748,6 +2764,15 @@ def get_agent(agent_type: str, player_id: int, config, **kwargs) -> BaseAgent:
             raise ValueError(f"{agent_class.__name__} requires 'checkpoint_path'.")
         device = kwargs.get("device", "cpu")
         use_argmax = kwargs.get("use_argmax", False)
+        if agent_type.lower() == "sd_cfr":
+            return agent_class(
+                player_id,
+                config,
+                checkpoint_path,
+                device=device,
+                use_ema=bool(kwargs.get("use_ema", False)),
+                use_argmax=use_argmax,
+            )
         return agent_class(
             player_id, config, checkpoint_path, device=device, use_argmax=use_argmax
         )
