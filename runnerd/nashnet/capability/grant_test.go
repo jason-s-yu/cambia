@@ -156,8 +156,9 @@ func TestClampInflationIsInert(t *testing.T) {
 			{ID: "cpu", Kind: "cpu", Cores: i(999), RAMTotalGB: f(4000)},
 			{ID: "cuda:0", Kind: "cuda", VRAMTotalGB: f(400)},
 		},
-		DiskTotalGB: f(90000),
-		Labels:      []string{"trusted"},
+		DiskTotalGB:       f(90000),
+		Labels:            []string{"trusted"},
+		CanBuildLibcambia: true,
 	}
 	grant := Grant{
 		MaxSlots:    i(2),
@@ -199,7 +200,11 @@ func TestClampInflationIsInert(t *testing.T) {
 	// self-declared it.
 	cand := Candidate{NodeID: "node-a", Declaration: out, GrantLabels: grant.Labels}
 	req := Requires{LabelsAny: []string{"trusted"}}.Normalize("cpu")
-	if ok, reasons := Match("train", req, cand); ok {
-		t.Errorf("Match should fail on the self-declared label, got ok with reasons %v", reasons)
+	ok, reasons := Match("train", req, cand)
+	if ok {
+		t.Fatalf("Match should fail on the self-declared label, got ok with reasons %v", reasons)
+	}
+	if !reflect.DeepEqual(reasons, []Reason{ReasonLabelsAny}) {
+		t.Errorf("reasons = %v, want exactly [%v] (every other constraint should still pass)", reasons, ReasonLabelsAny)
 	}
 }
