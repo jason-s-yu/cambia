@@ -11,8 +11,8 @@ This module proves both halves on a reduced, CPU-fast copy of the X2 tiny
 gate config (config/x2_tiny_gate.yaml):
 
   - full-mode warm start from a source run's DIRECTORY carries the snapshot
-    ledger, the reservoir sample count, and NashConv continuity forward (no
-    blow-up jump);
+    ledger, the reservoir sample count, and the net forward, and continues on
+    the same trajectory an in-place resume of the source run would take;
   - net-only warm start raises by default (the cambia-374 guard) and, only
     with warm_start_net_only_ok=True, proceeds -- with an EMPTY reservoir,
     the exact root-cause behavior the guard exists to gate.
@@ -20,6 +20,7 @@ gate config (config/x2_tiny_gate.yaml):
 
 import os
 import random
+import shutil
 
 import numpy as np
 import pytest
@@ -83,17 +84,29 @@ def _reduced_cfg(**over):
     return PRTCFRConfig(**base)
 
 
+def _nashconv(root, net):
+    """NashConv of ONE net's regret-matched policy on the tiny tree.
+
+    A single snapshot is the degenerate case where the cambia-708 SERVED and
+    PER_DECISION objects coincide: the served weighting divides each infoset
+    by its own reach under that one snapshot, which cancels wherever the
+    infoset is reachable at all. Both were measured at every eval point of
+    runs A and B below and agreed to the bit."""
+    net.eval()
+    policy = materialize_policy_incremental(
+        root, [(1, net)], weighting="linear", seq_cap=_SEQ_CAP
+    )
+    nashconv, _c = exploitability(root, policy)
+    return float(nashconv)
+
+
 def _make_eval(root, out):
     """Current-net NashConv eval_fn; appends (t, metric); no global-RNG use."""
 
     def eval_fn(trainer, t):
-        trainer.net.eval()
-        policy = materialize_policy_incremental(
-            root, [(1, trainer.net)], weighting="linear", seq_cap=_SEQ_CAP
-        )
-        nashconv, _c = exploitability(root, policy)
-        out.append((t, float(nashconv)))
-        return float(nashconv)
+        metric = _nashconv(root, trainer.net)
+        out.append((t, metric))
+        return metric
 
     return eval_fn
 
@@ -113,7 +126,30 @@ def warm_run_a(tiny_tree, tmp_path_factory):
 
 def test_full_mode_warm_start_is_continuous(tiny_tree, warm_run_a, tmp_path):
     """Full-mode warm start (a source run's DIRECTORY) is a state-faithful
-    continuation: ledger, buffer, and NashConv trend all carry forward."""
+    continuation: ledger, buffer, net, and the continued trajectory all carry
+    forward.
+
+    Continuity is asserted at the RUN BOUNDARY, not across a training gap
+    (restated for cambia-2016). The original form compared A's last stability
+    eval (t=12) with B's first (t=16) and allowed at most a 2x rise. Those two
+    points are four fresh iterations apart, and NashConv is not monotone over
+    four iterations on this reduced config: an uninterrupted 20-iteration run
+    of the same seed reads 1.018, 1.235, 0.540, 0.861, 1.234, 0.734 at
+    t=1,4,8,12,16,20. The bound also scaled with A's last value, so whenever A
+    ended in a trough (it ends at 1/6 here) any ordinary wander tripped it.
+    That form measured training luck rather than the warm start, and it failed
+    identically on the master tip before cambia-708 landed, so the served
+    objective is not what moved it.
+
+    What replaces it is exact and deterministic:
+      - at the boundary the net B loads scores A's last metric, because it IS
+        A's net;
+      - over the continued iterations, warm-starting A's state into a NEW run
+        dir yields the same metrics as resuming A's own dir in place, which is
+        the state-faithfulness claim itself (net, reservoir, RNG and LR
+        schedule span all restored);
+      - the reservoir starts at A's sample count, the direct cambia-374 guard.
+    """
     tr_a = warm_run_a["trainer"]
     run_a = warm_run_a["run_dir"]
     evals_a = warm_run_a["evals"]
@@ -134,14 +170,16 @@ def test_full_mode_warm_start_is_continuous(tiny_tree, warm_run_a, tmp_path):
         tiny_tree, cfg_b, run_dir=run_b, eval_fn=_make_eval(tiny_tree, evals_b)
     )
 
-    # Capture the buffer length AFTER warm-start-load but BEFORE the first
-    # new traversal adds anything, to prove it is seeded from A's state, not
-    # restarted at zero.
-    buf_at_start = {}
+    # Capture the buffer length and the loaded net's score AFTER warm-start
+    # load but BEFORE the first new traversal changes either, to prove both
+    # are seeded from A's state rather than restarted.
+    at_load = {}
     orig_run_iteration = tr_b.run_iteration
 
     def _capture_then_run(t):
-        buf_at_start.setdefault("n", len(tr_b.buffer))
+        if not at_load:
+            at_load["buffer"] = len(tr_b.buffer)
+            at_load["nashconv"] = _nashconv(tiny_tree, tr_b.net)
         return orig_run_iteration(t)
 
     tr_b.run_iteration = _capture_then_run
@@ -160,21 +198,39 @@ def test_full_mode_warm_start_is_continuous(tiny_tree, warm_run_a, tmp_path):
 
     # Buffer starts at A's persisted sample count, not zero (the cambia-374
     # bug: net-only warm start restarts this at 0 -- see the guard test below).
-    assert buf_at_start["n"] > 0
-    assert buf_at_start["n"] == len(tr_a.buffer)
+    assert at_load["buffer"] > 0
+    assert at_load["buffer"] == len(tr_a.buffer)
 
-    # NashConv continuity: B's first stability eval stays close to A's last,
-    # not the >2x-style degradation jump the net-only path produced (measured
-    # on the reduced config: ratio ~0.69, i.e. the continuation keeps
-    # improving). Bound pinned with generous margin against run-to-run float
-    # noise while still catching an empty-reservoir-style regression.
+    # Boundary continuity: the net B carries into iteration _N_A + 1 is A's
+    # net, so it scores A's last stability eval. Exact, and independent of how
+    # the metric moves once new iterations start.
     assert evals_a and evals_b
-    nashconv_a_last = evals_a[-1][1]
-    nashconv_b_first = evals_b[0][1]
-    assert nashconv_b_first <= nashconv_a_last * 2.0 + 0.05, (
-        f"B's first NashConv ({nashconv_b_first}) degraded >2x vs A's last "
-        f"({nashconv_a_last}) -- looks like the cambia-374 empty-reservoir "
-        f"regression, not a state-faithful continuation"
+    assert at_load["nashconv"] == pytest.approx(evals_a[-1][1], rel=1e-9, abs=1e-12)
+
+    # Trajectory continuity: continuing A's state in a NEW dir via warm start
+    # must match continuing A's OWN dir via the in-place resume path, which
+    # restores the same net, reservoir and RNG under the same LR schedule span.
+    # An unfaithful warm start (a dropped reservoir, an unrestored RNG, a
+    # schedule spanning the wrong horizon) diverges here; a metric that merely
+    # wanders does not, because both sides wander together.
+    run_a_resumed = str(tmp_path / "run_a_resumed")
+    shutil.copytree(run_a, run_a_resumed)
+    _seed_all(999)  # same ambient stream B got; both paths override it on load
+    evals_resumed = []
+    tr_resumed = PRTCFRTinyTrainer(
+        tiny_tree,
+        _reduced_cfg(iterations=_N_B),
+        run_dir=run_a_resumed,
+        eval_fn=_make_eval(tiny_tree, evals_resumed),
+    )
+    tr_resumed.train(iterations=_N_B, resume=True)
+    assert [t for t, _ in evals_b] == [t for t, _ in evals_resumed]
+    assert [v for _, v in evals_b] == pytest.approx(
+        [v for _, v in evals_resumed], rel=1e-9, abs=1e-12
+    ), (
+        f"warm-started continuation {evals_b} diverged from the in-place "
+        f"resume of the same state {evals_resumed}: the warm start is not "
+        f"carrying everything the continuation needs"
     )
 
 
