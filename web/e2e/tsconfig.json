@@ -1,0 +1,23 @@
+{
+  // Type check for the end-to-end suite. Separate from tsconfig.app.json because that one builds
+  // the client and includes only src/; the suite is Node plus DOM (page.evaluate bodies run in the
+  // browser), and Playwright's own runner transpiles without checking types. Run it with
+  // `npm run test:e2e:types`.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["**/*.ts"],
+  "exclude": [".artifacts"]
+}
