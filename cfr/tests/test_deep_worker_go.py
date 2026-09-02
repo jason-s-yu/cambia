@@ -35,40 +35,36 @@ skip_if_no_go = pytest.mark.skipif(not go_available, reason="libcambia.so not av
 # ---------------------------------------------------------------------------
 
 
+def _real_deep_cfr_config():
+    """Return the real DeepCfrConfig, bypassing the conftest stub."""
+    import importlib
+    import sys
+
+    _orig = sys.modules.pop("src.config", None)
+    try:
+        return importlib.import_module("src.config").DeepCfrConfig
+    finally:
+        if _orig is not None:
+            sys.modules["src.config"] = _orig
+
+
 class TestGoBackendConfig:
-    def test_real_config_default_python(self):
-        """Real Config dataclass has engine_backend defaulting to 'python'."""
-        # Import the real module (bypassing any stub)
-        import importlib
-        import sys
-
-        # Remove stub if present so we can check the real dataclass
-        real_mod = importlib.import_module("src.config")
-        # The real module should have DeepCfrConfig as a dataclass
-        DeepCfrConfig = getattr(real_mod, "DeepCfrConfig", None)
-        if DeepCfrConfig is None:
-            pytest.skip("DeepCfrConfig not in src.config (stub active)")
-        import dataclasses
-
-        if not dataclasses.is_dataclass(DeepCfrConfig):
-            pytest.skip("DeepCfrConfig is a stub, not a real dataclass")
-        cfg = DeepCfrConfig()
-        assert cfg.engine_backend == "python"
+    def test_real_config_defaults_to_go(self):
+        """Real DeepCfrConfig defaults engine_backend to 'go' (cambia-1783)."""
+        assert _real_deep_cfr_config()().engine_backend == "go"
 
     def test_real_config_go_backend(self):
-        """Real DeepCfrConfig can be set to 'go'."""
-        import importlib
-
-        real_mod = importlib.import_module("src.config")
-        DeepCfrConfig = getattr(real_mod, "DeepCfrConfig", None)
-        if DeepCfrConfig is None:
-            pytest.skip("DeepCfrConfig not in src.config (stub active)")
-        import dataclasses
-
-        if not dataclasses.is_dataclass(DeepCfrConfig):
-            pytest.skip("DeepCfrConfig is a stub, not a real dataclass")
-        cfg = DeepCfrConfig(engine_backend="go")
+        """Real DeepCfrConfig accepts an explicit 'go'."""
+        cfg = _real_deep_cfr_config()(engine_backend="go")
         assert cfg.engine_backend == "go"
+
+    def test_real_config_refuses_python_backend(self):
+        """The retired Python backend is refused with a named message."""
+        with pytest.raises(Exception) as excinfo:
+            _real_deep_cfr_config()(engine_backend="python")
+        message = str(excinfo.value)
+        assert "Python" in message and "retired" in message
+        assert "go" in message
 
 
 # ---------------------------------------------------------------------------
