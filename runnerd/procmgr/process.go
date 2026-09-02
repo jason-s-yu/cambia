@@ -565,6 +565,15 @@ func (m *ProcessManager) Stop(name string, force bool) (*ProcessState, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read process state for %q: %w", name, err)
 		}
+		// A remote row (Host set) is a projection of another host's process:
+		// its pid and pgid name entries in THAT host's pid space, so signalling
+		// them here would send an arbitrary process-group signal on this host,
+		// this daemon's own groups included. Short-circuit before any signal,
+		// exactly as EffectiveStatus does before any liveness probe; a leased
+		// job is stopped through the revoke path instead (design D5, D31).
+		if st.Host != "" {
+			return st, nil
+		}
 		if !pidAlive(st) || st.PGID <= 0 {
 			return st, nil
 		}
@@ -688,6 +697,13 @@ func (m *ProcessManager) mutateStateLocked(name string, fn func(*ProcessState)) 
 // the bare pid probe (documented compatibility gap).
 func pidAlive(st *ProcessState) bool {
 	if st == nil || st.PID <= 0 {
+		return false
+	}
+	// A remote row's pid lives in another host's pid space, so probing it here
+	// tests an unrelated local pid (the cross-host pid-reuse bug). Report not
+	// alive rather than guessing: every caller that must answer for a remote
+	// row short-circuits on Host before reaching this probe (design D5).
+	if st.Host != "" {
 		return false
 	}
 	proc, err := os.FindProcess(st.PID)
