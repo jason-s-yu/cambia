@@ -1051,6 +1051,62 @@ def test_pull_once_sanitizes_unknown_status_into_harness_sync(tmp_path, monkeypa
     dest.close()
 
 
+# ---------------------------------------------------------------------------
+# D64: an evaluate dir's synced status comes from process.json (cambia-1718)
+# ---------------------------------------------------------------------------
+
+
+def test_pull_once_evaluate_dir_status_from_process_json(tmp_path, monkeypatch):
+    """An evaluate dir's own run_db.sqlite carries the target's runs row, not
+    the eval job's own (design 8 D64): its status must come from the
+    coordinator-authored process.json, never read_run_status's newest-row
+    fallback, which would read the target's registration row as "created"
+    forever. read_run_status is forced to a value distinguishable from the
+    process.json status so a silent fallback to it is caught."""
+    _build_remote_run(tmp_path / "remote", name="eval-job-1", status="completed")
+    dest = _dest_db(tmp_path)
+    runner = FakeRunner(tmp_path / "remote")
+
+    local_dir = tmp_path / "local" / "eval-job-1"
+    local_dir.mkdir(parents=True, exist_ok=True)
+    (local_dir / "jobspec.json").write_text(
+        '{"kind": "evaluate", "name": "eval-job-1", "target": "v0.4-prtcfr-r1"}',
+        encoding="utf-8",
+    )
+    (local_dir / "process.json").write_text(
+        '{"name": "eval-job-1", "status": "running"}', encoding="utf-8"
+    )
+
+    coord = PullCoordinator(
+        runner=runner,
+        local_runs_dir=tmp_path / "local",
+        dest_conn=dest,
+        origin_host="runner",
+        replay_fn=lambda *a: {"runs": 0, "checkpoints": 0, "evals": 0},
+    )
+    monkeypatch.setattr(pullmod, "read_run_status", lambda db_path, run_name: "completed")
+    status = coord.pull_once("eval-job-1")
+    assert status == "running"
+
+
+def test_pull_once_non_evaluate_dir_status_still_from_read_run_status(tmp_path):
+    """A normal (non-evaluate) dir keeps using read_run_status: the D64 branch
+    is scoped to jobspec.json kind == "evaluate" and must not divert every
+    pull."""
+    _build_remote_run(tmp_path / "remote", status="running")
+    dest = _dest_db(tmp_path)
+    runner = FakeRunner(tmp_path / "remote")
+    coord = PullCoordinator(
+        runner=runner,
+        local_runs_dir=tmp_path / "local",
+        dest_conn=dest,
+        origin_host="runner",
+        replay_fn=lambda *a: {"runs": 0, "checkpoints": 0, "evals": 0},
+    )
+    status = coord.pull_once("v0.4-prtcfr-r1")
+    assert status == "running"
+
+
 def test_watch_reads_runnerd_job_view_fields(tmp_path, monkeypatch):
     """watch() must key off the fields runnerd actually emits.
 

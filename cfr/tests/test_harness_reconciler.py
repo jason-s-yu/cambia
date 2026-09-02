@@ -2,14 +2,18 @@
 tests/test_harness_reconciler.py
 
 Coverage for the serving-harness reconciler (cambia-256, design 4.2/4.3/5.7) and
-the run_db origin_host migration + upsert_run engine_commit_hash/origin_host
-params.
+the run_db origin_host/executed_on migration + upsert_run engine_commit_hash/
+origin_host/executed_on params. Also covers v1.1 client replay hardening
+(cambia-1718): single-row replay (D61), the evaluate-journal merge mode (D64),
+the executed_on provenance column (D23 client half), and preempted in the
+status enum (D62).
 
 Sources are built as raw sqlite files (no WAL, DELETE journal) so the tests
 control every cell verbatim, including adversarial values the run_db helpers
 would otherwise sanitize.
 """
 
+import json
 import sqlite3
 
 import pytest
@@ -166,6 +170,11 @@ def _open_dest(path):
     return run_db.get_db(path)
 
 
+def _write_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # run_db schema / upsert_run param changes
 # ---------------------------------------------------------------------------
@@ -213,6 +222,75 @@ def test_origin_host_additive_migration(tmp_path):
         ).fetchone()
         assert row is not None
         assert row["origin_host"] is None  # legacy row reads back NULL = local
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# executed_on column (cambia-1718, design 4.2 D23 client half)
+# ---------------------------------------------------------------------------
+
+
+def test_executed_on_in_fresh_ddl(tmp_path):
+    db = _open_dest(str(tmp_path / "fresh.db"))
+    try:
+        cols = {r[1] for r in db.execute("PRAGMA table_info(runs)").fetchall()}
+        assert "executed_on" in cols
+    finally:
+        db.close()
+
+
+def test_executed_on_additive_migration(tmp_path):
+    """AC (1): a db created before executed_on existed gains the column via
+    _migrate_schema and reads NULL for the pre-existing row."""
+    path = str(tmp_path / "old.db")
+    legacy_ddl = """
+    CREATE TABLE runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        algorithm TEXT,
+        status TEXT NOT NULL DEFAULT 'created',
+        engine_commit_hash TEXT,
+        origin_host TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    """
+    old = sqlite3.connect(path)
+    old.executescript(legacy_ddl)
+    old.execute(
+        "INSERT INTO runs (name, status, created_at, updated_at) VALUES (?,?,?,?)",
+        ("legacy-run", "completed", _NOW, _NOW),
+    )
+    old.commit()
+    old.close()
+
+    db = _open_dest(path)
+    try:
+        cols = {r[1] for r in db.execute("PRAGMA table_info(runs)").fetchall()}
+        assert "executed_on" in cols
+        row = db.execute(
+            "SELECT executed_on FROM runs WHERE name='legacy-run'"
+        ).fetchone()
+        assert row is not None
+        assert row["executed_on"] is None
+    finally:
+        db.close()
+
+
+def test_upsert_run_executed_on_stamped_and_preserved_on_reset(tmp_path):
+    db = _open_dest(str(tmp_path / "u.db"))
+    try:
+        run_db.upsert_run(db, name="r1", algorithm="prt-cfr", executed_on="node-9c1f")
+        row = db.execute("SELECT executed_on FROM runs WHERE name='r1'").fetchone()
+        assert row["executed_on"] == "node-9c1f"
+
+        # A later upsert with executed_on=None (e.g. a re-replay whose env.json
+        # momentarily carried no value) preserves the established value rather
+        # than regressing it to NULL.
+        run_db.upsert_run(db, name="r1", algorithm="prt-cfr")
+        row = db.execute("SELECT executed_on FROM runs WHERE name='r1'").fetchone()
+        assert row["executed_on"] == "node-9c1f"
     finally:
         db.close()
 
@@ -715,3 +793,293 @@ def test_replay_accepts_open_connection(tmp_path):
         assert db.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# Single-row replay (cambia-1718, design 5.7 D61)
+# ---------------------------------------------------------------------------
+
+
+def test_second_runs_row_rejected(tmp_path):
+    """AC (3): a journal with a second runs row is rejected on replay. Built
+    directly against run_db.py's schema as a stand-in for the shared W1-T8
+    fixture corpus (runnerd/harness/testdata/rundb/, cambia-1717); re-point
+    this test at that corpus's "second row" fixture once it lands."""
+    run_dir = tmp_path / "runs" / "v0.4-prtcfr-r1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    conn = _new_source(run_dir / "run_db.sqlite")
+    _insert_run(conn, name="v0.4-prtcfr-r1")
+    _insert_run(conn, name="some-other-run")
+    conn.close()
+    with pytest.raises(ReconcilerValidationError):
+        replay(run_dir, _dest_path(tmp_path), origin_host="runner")
+
+    # The whole journal was rejected: nothing was replayed, not even the
+    # matching row.
+    dest = _open_dest(_dest_path(tmp_path))
+    try:
+        assert dest.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+    finally:
+        dest.close()
+
+
+def test_single_row_name_must_match_run_dir(tmp_path):
+    """A single runs row is still rejected when its name does not match the
+    synced run dir it arrived in (design 5.7 D61)."""
+    run_dir = tmp_path / "runs" / "v0.4-prtcfr-r1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    conn = _new_source(run_dir / "run_db.sqlite")
+    _insert_run(conn, name="a-different-run-name")
+    conn.close()
+    with pytest.raises(ReconcilerValidationError):
+        replay(run_dir, _dest_path(tmp_path), origin_host="runner")
+
+
+# ---------------------------------------------------------------------------
+# executed_on populated from env.json (cambia-1718, design 4.2 D23)
+# ---------------------------------------------------------------------------
+
+
+def test_executed_on_populated_from_env_json(tmp_path):
+    run_dir = _build_full_run(tmp_path / "runs" / "v0.4-prtcfr-r1")
+    _write_json(run_dir / "env.json", {"executed_on": "n-9c1f2a7b0d44"})
+    dest_path = _dest_path(tmp_path)
+
+    replay(run_dir, dest_path, origin_host="runner")
+
+    db = _open_dest(dest_path)
+    try:
+        row = db.execute(
+            "SELECT executed_on FROM runs WHERE name='v0.4-prtcfr-r1'"
+        ).fetchone()
+        assert row["executed_on"] == "n-9c1f2a7b0d44"
+    finally:
+        db.close()
+
+
+def test_executed_on_absent_env_json_is_null(tmp_path):
+    run_dir = _build_full_run(tmp_path / "runs" / "v0.4-prtcfr-r1")
+    dest_path = _dest_path(tmp_path)
+    replay(run_dir, dest_path, origin_host="runner")
+
+    db = _open_dest(dest_path)
+    try:
+        row = db.execute(
+            "SELECT executed_on FROM runs WHERE name='v0.4-prtcfr-r1'"
+        ).fetchone()
+        assert row["executed_on"] is None
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("bad_value", ["has space", "../evil", "a/b", "", "x" * 200])
+def test_executed_on_invalid_dropped(tmp_path, bad_value):
+    """AC (2): an invalid executed_on is dropped -- replay still succeeds,
+    unlike origin_host (a required argument the collision guard depends on),
+    since executed_on is informational provenance from an optional file."""
+    run_dir = _build_full_run(tmp_path / "runs" / "v0.4-prtcfr-r1")
+    _write_json(run_dir / "env.json", {"executed_on": bad_value})
+    dest_path = _dest_path(tmp_path)
+
+    replay(run_dir, dest_path, origin_host="runner")
+
+    db = _open_dest(dest_path)
+    try:
+        row = db.execute(
+            "SELECT executed_on FROM runs WHERE name='v0.4-prtcfr-r1'"
+        ).fetchone()
+        assert row["executed_on"] is None
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# preempted status (cambia-1718, design 7 D62)
+# ---------------------------------------------------------------------------
+
+
+def test_preempted_status_replays(tmp_path):
+    """AC (5): preempted replays -- a gate-driven stop is a valid run status,
+    not an out-of-range enum rejection."""
+    run_dir = tmp_path / "runs" / "v0.4-prtcfr-r1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    conn = _new_source(run_dir / "run_db.sqlite")
+    _insert_run(conn, status="preempted")
+    conn.close()
+
+    summary = replay(run_dir, _dest_path(tmp_path), origin_host="runner")
+    assert summary["runs"] == 1
+
+    db = _open_dest(_dest_path(tmp_path))
+    try:
+        row = db.execute("SELECT status FROM runs WHERE name='v0.4-prtcfr-r1'").fetchone()
+        assert row["status"] == "preempted"
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Evaluate-journal merge mode (cambia-1718, design 8 D64)
+# ---------------------------------------------------------------------------
+
+
+def _seed_target(local_runs_dir, dest, target_name="v0.4-prtcfr-r1", iteration=50):
+    """Seed a target run: a local runs row in dest plus a local run dir with an
+    existing checkpoint at `iteration` and a pre-existing metrics.jsonl line,
+    mirroring a target already pulled/replayed before its evaluate journal
+    arrives."""
+    run_db.upsert_run(dest, name=target_name, algorithm="prt-cfr", status="completed")
+    target_dir = local_runs_dir / target_name
+    target_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_path = target_dir / "snapshots" / f"prtcfr_snapshot_iter_{iteration}.pt"
+    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+    ckpt_path.write_bytes(b"ckpt")
+    run_row = dest.execute("SELECT id FROM runs WHERE name=?", (target_name,)).fetchone()
+    run_db.register_checkpoint(dest, run_row["id"], iteration, str(ckpt_path))
+    (target_dir / "metrics.jsonl").write_text(
+        json.dumps({"run": target_name, "iter": iteration, "baseline": "pre-existing"})
+        + "\n",
+        encoding="utf-8",
+    )
+    return target_dir
+
+
+def _build_evaluate_journal(
+    local_runs_dir, job_name, target_name, iteration=50, baseline="random_no_cambia"
+):
+    """Build an evaluate job's own synced run dir: jobspec.json naming the
+    target, a run_db.sqlite whose single runs row is named for the target
+    (design 8 D64), and the job's own metrics.jsonl / evaluations/iter_N."""
+    job_dir = local_runs_dir / job_name
+    job_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(
+        job_dir / "jobspec.json",
+        {"kind": "evaluate", "name": job_name, "target": target_name},
+    )
+    conn = _new_source(job_dir / "run_db.sqlite")
+    rid = _insert_run(conn, name=target_name)
+    _insert_eval(conn, rid, iteration, baseline)
+    conn.close()
+
+    (job_dir / "metrics.jsonl").write_text(
+        json.dumps({"run": job_name, "iter": iteration, "baseline": baseline}) + "\n",
+        encoding="utf-8",
+    )
+    eval_dir = job_dir / "evaluations" / f"iter_{iteration}"
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    (eval_dir / "detail.json").write_text('{"ok": true}', encoding="utf-8")
+    return job_dir
+
+
+def test_evaluate_journal_merges_eval_rows_onto_target(tmp_path):
+    local_runs_dir = tmp_path / "local_runs"
+    dest_path = _dest_path(tmp_path)
+    dest = _open_dest(dest_path)
+    try:
+        target_dir = _seed_target(local_runs_dir, dest)
+        before = dict(
+            dest.execute(
+                "SELECT status, algorithm FROM runs WHERE name='v0.4-prtcfr-r1'"
+            ).fetchone()
+        )
+
+        job_dir = _build_evaluate_journal(local_runs_dir, "eval-job-1", "v0.4-prtcfr-r1")
+        summary = replay(job_dir, dest, origin_host="runner")
+        assert summary == {"runs": 0, "checkpoints": 0, "evals": 1}
+
+        # The target's runs row is untouched, and no row was created for the
+        # job's own name (design 8 D64: "touches nothing else").
+        after = dict(
+            dest.execute(
+                "SELECT status, algorithm FROM runs WHERE name='v0.4-prtcfr-r1'"
+            ).fetchone()
+        )
+        assert after == before
+        assert (
+            dest.execute("SELECT COUNT(*) FROM runs WHERE name='eval-job-1'").fetchone()[
+                0
+            ]
+            == 0
+        )
+
+        run_id = dest.execute(
+            "SELECT id FROM runs WHERE name='v0.4-prtcfr-r1'"
+        ).fetchone()["id"]
+        ckpt_id = dest.execute(
+            "SELECT id FROM checkpoints WHERE run_id=? AND iteration=50", (run_id,)
+        ).fetchone()["id"]
+        eval_row = dest.execute(
+            "SELECT checkpoint_id, baseline FROM eval_results WHERE run_id=? AND "
+            "iteration=50",
+            (run_id,),
+        ).fetchone()
+        assert eval_row["baseline"] == "random_no_cambia"
+        # checkpoint_id re-resolved locally against the target's own checkpoint,
+        # never registered from the eval journal.
+        assert eval_row["checkpoint_id"] == ckpt_id
+
+        # metrics.jsonl: the pre-existing line survives, the job's line is merged in.
+        lines = (target_dir / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+        assert any('"pre-existing"' in ln for ln in lines)
+        assert any('"random_no_cambia"' in ln for ln in lines)
+        assert len(lines) == 2
+
+        # evaluations/iter_50 contents copied onto the target.
+        merged = target_dir / "evaluations" / "iter_50" / "detail.json"
+        assert merged.exists()
+        assert merged.read_text(encoding="utf-8") == '{"ok": true}'
+    finally:
+        dest.close()
+
+
+def test_evaluate_merge_idempotent_metrics_no_duplicate_lines(tmp_path):
+    """metrics.jsonl merge must be idempotent: a re-pull of the same
+    (unchanged) evaluate journal on a later tick must not duplicate lines."""
+    local_runs_dir = tmp_path / "local_runs"
+    dest_path = _dest_path(tmp_path)
+    dest = _open_dest(dest_path)
+    try:
+        target_dir = _seed_target(local_runs_dir, dest)
+        job_dir = _build_evaluate_journal(local_runs_dir, "eval-job-1", "v0.4-prtcfr-r1")
+        replay(job_dir, dest, origin_host="runner")
+        replay(job_dir, dest, origin_host="runner")  # a second pull tick
+
+        lines = (target_dir / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 2  # pre-existing + the merged line, not duplicated
+
+        evals = dest.execute("SELECT COUNT(*) FROM eval_results").fetchone()[0]
+        assert evals == 1  # idempotent natural-key upsert, not a duplicate row
+    finally:
+        dest.close()
+
+
+def test_evaluate_journal_missing_target_locally_rejected(tmp_path):
+    local_runs_dir = tmp_path / "local_runs"
+    dest_path = _dest_path(tmp_path)
+    job_dir = _build_evaluate_journal(local_runs_dir, "eval-job-1", "never-pulled-run")
+    with pytest.raises(ReconcilerValidationError):
+        replay(job_dir, dest_path, origin_host="runner")
+
+
+def test_evaluate_journal_runs_row_name_must_match_target(tmp_path):
+    local_runs_dir = tmp_path / "local_runs"
+    dest_path = _dest_path(tmp_path)
+    dest = _open_dest(dest_path)
+    try:
+        _seed_target(local_runs_dir, dest, target_name="v0.4-prtcfr-r1")
+    finally:
+        dest.close()
+
+    job_dir = local_runs_dir / "eval-job-1"
+    job_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(
+        job_dir / "jobspec.json",
+        {"kind": "evaluate", "name": "eval-job-1", "target": "v0.4-prtcfr-r1"},
+    )
+    conn = _new_source(job_dir / "run_db.sqlite")
+    rid = _insert_run(conn, name="a-different-run")  # mismatched runs row name
+    _insert_eval(conn, rid, 50, "random_no_cambia")
+    conn.close()
+
+    with pytest.raises(ReconcilerValidationError):
+        replay(job_dir, dest_path, origin_host="runner")
