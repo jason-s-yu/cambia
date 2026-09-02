@@ -1,0 +1,35 @@
+{
+  "caps": {
+    "device_kinds": [
+      "cuda",
+      "cpu"
+    ],
+    "kinds": [
+      "train",
+      "evaluate",
+      "measure"
+    ],
+    "labels": [
+      "gpu"
+    ],
+    "max_cores": 16,
+    "max_disk_gb": 512.0,
+    "max_lease_bytes": 68719476736,
+    "max_ram_gb": 64.0,
+    "max_slots": 2,
+    "max_vram_gb": {
+      "cuda": 24.0
+    }
+  },
+  "exp": 1795996800,
+  "grant_file": "n-20cbd59e84e3.grant",
+  "iat": 1788220800,
+  "lifetime_seconds": 7776000,
+  "node_id": "n-20cbd59e84e3",
+  "node_name": "node-a",
+  "node_pubkey_hex": "570ceed310f03a290be86d423c526ac6303ebad57de811d1d93f4f8651697e6a",
+  "node_seed_hex": "717e07fa155fd44eb54e51761c97c9f7d791368e0ace73a20c77ad6c3a1bc2d0",
+  "note": "Minted by cfr/tests/test_harness_nashnet.py. Test-only keys, deterministic seeds; regenerate with CAMBIA_UPDATE_GOLDEN=1.",
+  "operator_pubkey_hex": "caf3fb6b1e9a403e3f1a27eb767f6893f0b5511efcb6732a9a56811f85f3f7f8",
+  "subject": "node:n-20cbd59e84e3"
+}
