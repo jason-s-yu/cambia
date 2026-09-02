@@ -88,8 +88,7 @@ describe('DsGameTable forfeited own seat', () => {
   const forfeitedSelf = () =>
     buildGameState({
       currentPlayerId: OPP_ID,
-      self: { forfeited: true, isCurrentTurn: false },
-      opponent: { isCurrentTurn: true }
+      self: { forfeited: true }
     });
 
   it('names the forfeit instead of the player who is to act (cambia-1237)', () => {
