@@ -18,8 +18,8 @@ func makeConfig(numPlayers, numRounds int, ids []int) CircuitConfig {
 // TestCircuitNewValidation verifies that invalid configs return errors.
 func TestCircuitNewValidation(t *testing.T) {
 	tests := []struct {
-		name   string
-		config CircuitConfig
+		name    string
+		config  CircuitConfig
 		wantErr bool
 	}{
 		{
@@ -115,7 +115,7 @@ func TestCircuitRecordRound_Subsidies4P(t *testing.T) {
 	}
 
 	// Verify cumulative scores include subsidy
-	p1 := cs.Players[0] // playerID=1
+	p1 := cs.Players[0]        // playerID=1
 	wantCumulative := 5 + (-5) // 0
 	if p1.CumulativeScore != wantCumulative {
 		t.Errorf("player 1 cumulative: want %d, got %d", wantCumulative, p1.CumulativeScore)

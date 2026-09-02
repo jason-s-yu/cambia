@@ -97,6 +97,46 @@ func TestSweepRetainsARetiredLeaseForTheDebugTTL(t *testing.T) {
 	}
 }
 
+// TestPurgeJobDropsEveryNodesTreeForThatJob covers the purge half of D31: every
+// lease tree a job ever had goes, under every node that held one, and no other
+// job's tree is touched.
+func TestPurgeJobDropsEveryNodesTreeForThatJob(t *testing.T) {
+	r := newRig(t, nil)
+	r.putBlob(t, []byte("current lease upload"))
+
+	// An earlier lease of the same job on another node, and a neighbouring
+	// job's tree that must survive.
+	earlier := filepath.Join(r.quarDir, "node-b", "job-a", "lease-0")
+	neighbour := filepath.Join(r.quarDir, "node-a", "job-b", "lease-9")
+	for _, dir := range []string{earlier, neighbour} {
+		if err := os.MkdirAll(filepath.Join(dir, "blobs"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	removed, err := r.store.PurgeJob("job-a")
+	if err != nil {
+		t.Fatalf("PurgeJob: %v", err)
+	}
+	if removed != 2 {
+		t.Fatalf("PurgeJob removed %d trees, want both of job-a's", removed)
+	}
+	for _, dir := range []string{
+		filepath.Join(r.quarDir, "node-a", "job-a"),
+		filepath.Join(r.quarDir, "node-b", "job-a"),
+	} {
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatalf("%s survived the purge: %v", dir, err)
+		}
+	}
+	if _, err := os.Stat(neighbour); err != nil {
+		t.Fatalf("PurgeJob removed another job's tree: %v", err)
+	}
+	if _, err := r.store.PurgeJob("../escape"); err == nil {
+		t.Fatal("PurgeJob accepted a job id that is not a safe path segment")
+	}
+}
+
 // TestSweepDropsATreeWhoseJobHasNoRunDir covers the startup half of D59: a tree
 // whose run was purged goes at once, without waiting out the debug TTL.
 func TestSweepDropsATreeWhoseJobHasNoRunDir(t *testing.T) {

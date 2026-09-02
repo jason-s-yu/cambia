@@ -90,9 +90,9 @@ func TestSeriesCumulativeScoring(t *testing.T) {
 
 	// Scores: p10 gets 3, p20 gets 7, p30 gets 5
 	matches := [][3]int{
-		{10, 20, 3},  // p10=3, p20=7
-		{10, 30, 3},  // p10=3, p30=5
-		{20, 30, 6},  // p20=6, p30=4
+		{10, 20, 3}, // p10=3, p20=7
+		{10, 30, 3}, // p10=3, p30=5
+		{20, 30, 6}, // p20=6, p30=4
 	}
 	for _, m := range matches {
 		p1, p2, s1, s2 := m[0], m[1], m[2], m[2]+4

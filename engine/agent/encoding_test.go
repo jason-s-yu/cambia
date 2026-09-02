@@ -303,9 +303,9 @@ func TestActionMask(t *testing.T) {
 	var legal [3]uint64
 	// Set bits 0, 5, 64, 97, 145
 	legal[0] = (1 << 0) | (1 << 5)
-	legal[1] = (1 << 0) // bit 64
+	legal[1] = (1 << 0)   // bit 64
 	legal[1] |= (1 << 33) // bit 97
-	legal[2] = (1 << 17) // bit 145
+	legal[2] = (1 << 17)  // bit 145
 
 	var mask [NumActions]bool
 	ActionMask(legal, &mask)
