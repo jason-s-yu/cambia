@@ -402,9 +402,18 @@ def test_go_driver_clone_independence_under_fan_out():
 def test_go_driver_crn_pairing_determinism_same_seeds_identical_q_hats():
     """CRN-pairing precondition on the Go substrate: running the SAME
     single-trajectory traversal (fixed worker seed, fixed driver seed) twice
-    must produce IDENTICAL recorded regret targets. This is the Go-driver
-    analogue of the bridge-level restore-replay determinism test above, at
-    the sampler's actual granularity (q_hat / regret_full), Go-side only."""
+    must produce IDENTICAL recorded regret targets, in the order the traversal
+    recorded them. This is the Go-driver analogue of the bridge-level
+    restore-replay determinism test above, at the sampler's actual granularity
+    (q_hat / regret_full), Go-side only.
+
+    Rows are read back through buf.buffer (recording order). NOT through
+    sample_batch: ReservoirBuffer.sample_batch draws its indices from the
+    process-global numpy RNG (np.random.choice(..., replace=False)), which
+    the buffer never seeds, so a full-buffer draw returns the rows in a
+    RANDOM PERMUTATION. Comparing two such draws row-by-row failed roughly
+    half the time on this two-row trajectory while the traversal itself was
+    byte-identical."""
     import numpy as np
 
     from src.cfr.prtcfr_worker import (
@@ -429,8 +438,11 @@ def test_go_driver_crn_pairing_determinism_same_seeds_identical_q_hats():
             worker.traverse(driver, traverser=0, iteration=1, buf=buf)
         finally:
             driver.close()
-        batch = buf.sample_batch(len(buf))
-        return batch.targets.copy(), batch.masks.copy()
+        rows = list(buf.buffer)
+        assert rows, "traversal recorded no regret samples"
+        targets = np.stack([r.target for r in rows])
+        masks = np.stack([r.action_mask for r in rows])
+        return targets, masks
 
     t1, m1 = run_once()
     t2, m2 = run_once()
