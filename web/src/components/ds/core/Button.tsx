@@ -10,6 +10,10 @@ export interface ButtonProps {
   children?: React.ReactNode;
   /** Stable e2e hook, e.g. `action-snap` (cambia-959). */
   testId?: string;
+  /** Marks this control as where a dialog opens focus (`data-autofocus`). ds/core/Modal picks its
+   *  own target from lib/modalFocus; this is for a hand-rolled dialog whose primary action can be
+   *  absent, where "the first button" is not the same thing as "the primary action". */
+  autoFocus?: boolean;
   style?: React.CSSProperties;
 }
 
@@ -89,7 +93,7 @@ const DISABLED: VariantSpec = {
 const DISABLED_GHOST: VariantSpec = { ...DISABLED, bg: 'transparent', hover: 'transparent', active: 'transparent', border: '1px solid transparent' };
 
 /** Flat action button: solid fill or 1px border, no offset shadow. */
-const Button: React.FC<ButtonProps> = ({ variant = 'primary', size = 'md', disabled = false, fullWidth = false, onClick, children, testId, style }) => {
+const Button: React.FC<ButtonProps> = ({ variant = 'primary', size = 'md', disabled = false, fullWidth = false, onClick, children, testId, autoFocus = false, style }) => {
   const [hover, setHover] = useState(false);
   const [press, setPress] = useState(false);
   const base = VARIANTS[variant] || VARIANTS.primary;
@@ -104,6 +108,7 @@ const Button: React.FC<ButtonProps> = ({ variant = 'primary', size = 'md', disab
       // action (lib/modalFocus, cambia-935 F6). On the element itself, so the
       // rule holds wherever the button is placed.
       data-destructive={variant === 'cambia' ? '' : undefined}
+      data-autofocus={autoFocus ? '' : undefined}
       data-testid={testId}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => {
