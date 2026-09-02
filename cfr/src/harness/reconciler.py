@@ -31,9 +31,11 @@ the local checkpoint id for each eval row is re-resolved by (run_id, iteration)
 against the destination db.
 """
 
+import json
 import math
 import os
 import re
+import shutil
 import sqlite3
 import urllib.request
 from pathlib import Path
@@ -133,6 +135,22 @@ def _validate_origin_host(host: Any) -> str:
     if len(host) > _MAX_HOST_LEN or not _HOST_RE.match(host):
         raise ReconcilerValidationError(f"invalid origin_host: {host!r}")
     return host
+
+
+def _validate_executed_on(value: Any) -> Optional[str]:
+    """Validate a pulled env.json `executed_on` field (design 4.2 D23): "which
+    node produced these numbers", the same name shape as origin_host. Unlike
+    origin_host (a required replay() argument the collision guard's ownership
+    authority depends on), executed_on is informational provenance attached
+    from an optional file, so an invalid or absent value is dropped to NULL
+    rather than failing the replay."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        return None
+    if len(value) > _MAX_HOST_LEN or not _HOST_RE.match(value):
+        return None
+    return value
 
 
 def _validate_status(status: Any) -> str:
@@ -503,6 +521,52 @@ def _read_evals(src: sqlite3.Connection, src_run_id: Any) -> List[Dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
+# Coordinator-authored sidecar files (design 4.2 D23, design 8 D64)
+# ---------------------------------------------------------------------------
+
+
+def _read_run_dir_json(run_dir: Path, filename: str) -> Optional[Dict[str, Any]]:
+    """Best-effort read of a coordinator-authored JSON sidecar (jobspec.json,
+    env.json, process.json) from a synced run dir. Absent or unparseable is not
+    an error: a pre-pool (v1.0) synced dir carries none of these, and a partial
+    sync may not have pulled one yet."""
+    path = Path(run_dir) / filename
+    if not path.exists():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _read_jobspec(run_dir: Path) -> Optional[Dict[str, Any]]:
+    """Read the coordinator-authored jobspec.json (kind, name, target, ...;
+    runnerd/harness/jobspec.go) from a synced run dir, or None if absent."""
+    return _read_run_dir_json(run_dir, "jobspec.json")
+
+
+def _read_env_json(run_dir: Path) -> Optional[Dict[str, Any]]:
+    """Read the coordinator-authored env.json (origin_host, executed_on, ...;
+    design 4.2 D23) from a synced run dir, or None if absent."""
+    return _read_run_dir_json(run_dir, "env.json")
+
+
+def _read_process_status(run_dir: Path) -> Optional[str]:
+    """Read the coordinator-authored process.json `status` field (the
+    runnerd ProcessState projection) from a synced run dir, or None if absent
+    or malformed. Used for an evaluate dir's lifecycle status (design 8 D64):
+    its run_db.sqlite carries the target's runs row, not the eval job's own,
+    so the target's status is not a usable proxy for the eval job's status."""
+    data = _read_run_dir_json(run_dir, "process.json")
+    if data is None:
+        return None
+    status = data.get("status")
+    return status if isinstance(status, str) else None
+
+
+# ---------------------------------------------------------------------------
 # Collision guard (design 4.3)
 # ---------------------------------------------------------------------------
 
@@ -534,6 +598,93 @@ def _guard_collision(dest: sqlite3.Connection, name: str, origin_host: str) -> N
 
 
 # ---------------------------------------------------------------------------
+# Evaluate-journal merge (design 8 D64)
+# ---------------------------------------------------------------------------
+
+
+def _merge_evaluate_artifacts(job_dir: Path, target_name: str) -> None:
+    """Merge an evaluate job's own metrics.jsonl lines and evaluations/iter_N
+    contents onto the target run's local dir (design 8 D64).
+
+    job_dir is the evaluate job's own synced run dir; the target's local dir is
+    its sibling under the shared local runs dir (the pull.py
+    `local_runs_dir/run_name` convention: replay() is handed the job's own
+    synced dir, not local_runs_dir directly, so the target dir is derived as
+    job_dir.parent / target_name).
+
+    metrics.jsonl is append-only on the source and may be pulled and replayed
+    on every tick before the job goes terminal, so the merge is idempotent by
+    line content: only source lines not already present at the target are
+    appended. evaluations/iter_N files are copied with overwrite, which is
+    naturally idempotent (same source bytes every tick).
+    """
+    target_dir = job_dir.parent / target_name
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    job_metrics = job_dir / "metrics.jsonl"
+    if job_metrics.exists():
+        source_lines = job_metrics.read_text(encoding="utf-8").splitlines()
+        if source_lines:
+            target_metrics = target_dir / "metrics.jsonl"
+            existing_lines: Set[str] = set()
+            if target_metrics.exists():
+                existing_lines = set(
+                    target_metrics.read_text(encoding="utf-8").splitlines()
+                )
+            new_lines = [ln for ln in source_lines if ln not in existing_lines]
+            if new_lines:
+                with open(target_metrics, "a", encoding="utf-8") as fh:
+                    for ln in new_lines:
+                        fh.write(ln + "\n")
+
+    job_evaluations = job_dir / "evaluations"
+    if job_evaluations.is_dir():
+        target_evaluations = target_dir / "evaluations"
+        for iter_dir in sorted(job_evaluations.iterdir()):
+            if not iter_dir.is_dir():
+                continue
+            dest_iter_dir = target_evaluations / iter_dir.name
+            dest_iter_dir.mkdir(parents=True, exist_ok=True)
+            for f in sorted(iter_dir.iterdir()):
+                if f.is_file():
+                    shutil.copy2(f, dest_iter_dir / f.name)
+
+
+def _replay_evaluate_merge(
+    job_dir: Path,
+    dest: sqlite3.Connection,
+    src: sqlite3.Connection,
+    run: Dict[str, Any],
+) -> Dict[str, int]:
+    """Merge an evaluate journal onto the local run named by the job's target
+    (design 8 D64). Never touches the target's `runs` columns and never
+    registers checkpoints from the eval journal: checkpoint_id is re-resolved
+    locally by (run_id, iteration), exactly as a normal replay does."""
+    target_name = run["name"]
+    dest_row = dest.execute("SELECT id FROM runs WHERE name=?", (target_name,)).fetchone()
+    if dest_row is None:
+        raise ReconcilerValidationError(
+            f"evaluate journal targets run {target_name!r}, which has no local "
+            "run row yet; replay the target run before its evaluate journal"
+        )
+    local_run_id = dest_row["id"]
+
+    eval_rows = _read_evals(src, run["_src_id"])
+    summary = {"runs": 0, "checkpoints": 0, "evals": 0}
+    for row_dict in eval_rows:
+        local_ckpt = dest.execute(
+            "SELECT id FROM checkpoints WHERE run_id=? AND iteration=?",
+            (local_run_id, row_dict["iteration"]),
+        ).fetchone()
+        local_ckpt_id = local_ckpt["id"] if local_ckpt else None
+        insert_eval_result(dest, local_run_id, local_ckpt_id, row_dict)
+        summary["evals"] += 1
+
+    _merge_evaluate_artifacts(job_dir, target_name)
+    return summary
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -545,21 +696,38 @@ def replay(
 ) -> Dict[str, int]:
     """Replay a runner's synced run_db.sqlite into the client's authoritative db.
 
+    Single-row replay (design 5.7 D61): a journal carries at most one `runs`
+    row. For a normal (train/bench/head-to-head) dir that row must be named for
+    the synced run dir itself; for an evaluate dir (jobspec.json kind
+    "evaluate", design 8 D64) it must be named for the job's target instead,
+    and replay runs in eval-merge mode: eval_results rows, metrics.jsonl lines,
+    and evaluations/iter_N contents are merged onto the target's own local run,
+    and the target's `runs` row and checkpoints are never touched. A journal
+    carrying more than one `runs` row is rejected outright, closing on the
+    client the same hole D55 closes on the coordinator.
+
     Args:
         synced_run_dir: local directory holding the pulled run (the synced run
             dir); must contain run_db.sqlite and is the root for checkpoint path
             re-derivation.
         dest_db: path to the client's cambia_runs.db, or an already-open
-            connection (from get_db, so the origin_host migration is applied).
-        origin_host: the source host stamped onto every replayed run
-            (e.g. "runner"); must be a non-empty safe identifier.
+            connection (from get_db, so the origin_host/executed_on migration
+            is applied).
+        origin_host: the source host stamped onto the replayed run (e.g.
+            "runner"); must be a non-empty safe identifier. Unused in
+            eval-merge mode (the target's origin_host is never touched).
 
     Returns:
-        {"runs": n, "checkpoints": n, "evals": n} counts of rows replayed.
+        {"runs": n, "checkpoints": n, "evals": n} counts of rows replayed. In
+        eval-merge mode "runs" and "checkpoints" are always 0.
 
     Raises:
         ReconcilerError: run_db.sqlite missing.
-        ReconcilerValidationError: any pulled row fails whitelist/range/name checks.
+        ReconcilerValidationError: any pulled row fails whitelist/range/name
+            checks, the journal carries more than one `runs` row, a row's name
+            does not match the synced dir (or the jobspec target for an
+            evaluate dir), or an evaluate journal targets a run with no local
+            row yet.
         ReconcilerCollisionError: a pulled name collides with a local (or other-host) run.
     """
     origin_host = _validate_origin_host(origin_host)
@@ -572,62 +740,98 @@ def replay(
     dest = get_db(str(dest_db)) if owns_dest else dest_db
     src = _open_readonly(src_path)
 
-    summary = {"runs": 0, "checkpoints": 0, "evals": 0}
     try:
-        for run in _read_runs(src):
-            name = run["name"]
-            # Collision guard BEFORE any write for this run: refuse to touch a
-            # local run that shares the name (design 4.3).
-            _guard_collision(dest, name, origin_host)
-
-            # Read and validate all child rows before any write, so an
-            # out-of-range checkpoint/eval rejects the run without a partial write.
-            ckpt_rows = _read_checkpoints(src, run["_src_id"])
-            eval_rows = _read_evals(src, run["_src_id"])
-
-            local_run_id = upsert_run(
-                dest,
-                name=name,
-                algorithm=run["algorithm"],
-                status=run["status"],
-                tags=run["tags"],
-                notes=run["notes"],
-                engine_commit_hash=run["engine_commit_hash"],
-                origin_host=origin_host,
+        rows = _read_runs(src)
+        if len(rows) > 1:
+            raise ReconcilerValidationError(
+                f"journal under {synced_run_dir} carries {len(rows)} runs rows; "
+                "the reconciler replays a single row per journal (design 5.7 D61)"
             )
-            summary["runs"] += 1
+        if not rows:
+            return {"runs": 0, "checkpoints": 0, "evals": 0}
+        run = rows[0]
 
-            for c in ckpt_rows:
-                file_path = _rederive_checkpoint_path(
-                    run_dir, c["iteration"], run["algorithm"], c["file_path"]
+        jobspec = _read_jobspec(run_dir)
+        if isinstance(jobspec, dict) and jobspec.get("kind") == "evaluate":
+            target = jobspec.get("target")
+            if not isinstance(target, str) or not target:
+                raise ReconcilerValidationError(
+                    "evaluate journal's jobspec.json carries no target"
                 )
-                # Force a local stat (file_size_bytes=None) so size reflects the
-                # actually-synced file, never the untrusted pulled size.
-                ckpt_id = register_checkpoint(
-                    dest,
-                    local_run_id,
-                    c["iteration"],
-                    file_path,
-                    file_size_bytes=None,
+            target = _validate_run_name(target)
+            if run["name"] != target:
+                raise ReconcilerValidationError(
+                    f"evaluate journal runs row {run['name']!r} does not match "
+                    f"jobspec target {target!r} (design 8 D64)"
                 )
-                # register_checkpoint does not set these; preserve them per row.
-                dest.execute(
-                    "UPDATE checkpoints SET is_best=?, is_retained=?, compressed=? "
-                    "WHERE id=?",
-                    (c["is_best"], c["is_retained"], c["compressed"], ckpt_id),
-                )
-                dest.commit()
-                summary["checkpoints"] += 1
+            return _replay_evaluate_merge(run_dir, dest, src, run)
 
-            for row_dict in eval_rows:
-                # ckpt_id re-resolved LOCALLY; runner surrogate ids never cross stores.
-                local_ckpt = dest.execute(
-                    "SELECT id FROM checkpoints WHERE run_id=? AND iteration=?",
-                    (local_run_id, row_dict["iteration"]),
-                ).fetchone()
-                local_ckpt_id = local_ckpt["id"] if local_ckpt else None
-                insert_eval_result(dest, local_run_id, local_ckpt_id, row_dict)
-                summary["evals"] += 1
+        expected_name = run_dir.resolve().name
+        if run["name"] != expected_name:
+            raise ReconcilerValidationError(
+                f"runs row name {run['name']!r} does not match the synced run "
+                f"dir {expected_name!r} (design 5.7 D61)"
+            )
+        name = run["name"]
+
+        # Collision guard BEFORE any write for this run: refuse to touch a
+        # local run that shares the name (design 4.3).
+        _guard_collision(dest, name, origin_host)
+
+        # Read and validate all child rows before any write, so an
+        # out-of-range checkpoint/eval rejects the run without a partial write.
+        ckpt_rows = _read_checkpoints(src, run["_src_id"])
+        eval_rows = _read_evals(src, run["_src_id"])
+
+        env = _read_env_json(run_dir)
+        executed_on = _validate_executed_on(
+            env.get("executed_on") if isinstance(env, dict) else None
+        )
+
+        local_run_id = upsert_run(
+            dest,
+            name=name,
+            algorithm=run["algorithm"],
+            status=run["status"],
+            tags=run["tags"],
+            notes=run["notes"],
+            engine_commit_hash=run["engine_commit_hash"],
+            origin_host=origin_host,
+            executed_on=executed_on,
+        )
+        summary = {"runs": 1, "checkpoints": 0, "evals": 0}
+
+        for c in ckpt_rows:
+            file_path = _rederive_checkpoint_path(
+                run_dir, c["iteration"], run["algorithm"], c["file_path"]
+            )
+            # Force a local stat (file_size_bytes=None) so size reflects the
+            # actually-synced file, never the untrusted pulled size.
+            ckpt_id = register_checkpoint(
+                dest,
+                local_run_id,
+                c["iteration"],
+                file_path,
+                file_size_bytes=None,
+            )
+            # register_checkpoint does not set these; preserve them per row.
+            dest.execute(
+                "UPDATE checkpoints SET is_best=?, is_retained=?, compressed=? "
+                "WHERE id=?",
+                (c["is_best"], c["is_retained"], c["compressed"], ckpt_id),
+            )
+            dest.commit()
+            summary["checkpoints"] += 1
+
+        for row_dict in eval_rows:
+            # ckpt_id re-resolved LOCALLY; runner surrogate ids never cross stores.
+            local_ckpt = dest.execute(
+                "SELECT id FROM checkpoints WHERE run_id=? AND iteration=?",
+                (local_run_id, row_dict["iteration"]),
+            ).fetchone()
+            local_ckpt_id = local_ckpt["id"] if local_ckpt else None
+            insert_eval_result(dest, local_run_id, local_ckpt_id, row_dict)
+            summary["evals"] += 1
         return summary
     finally:
         src.close()

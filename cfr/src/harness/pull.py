@@ -44,6 +44,8 @@ from src.harness.reconciler import (
     _ALLOWED_STATUS,
     ReconcilerError,
     ReconcilerValidationError,
+    _read_jobspec,
+    _read_process_status,
     _validate_run_name,
 )
 from src.harness.reconciler import replay as reconciler_replay
@@ -396,7 +398,16 @@ class PullCoordinator:
 
         # Replay into the authoritative db, then record freshness.
         self.replay_fn(local_dir, self.dest, self.origin_host)
-        status = read_run_status(db_path, run_name)
+        # An evaluate dir's own run_db.sqlite carries the target's runs row,
+        # not the eval job's own (design 8 D64), so read_run_status's
+        # newest-row fallback would read the target's registration row as
+        # "created" forever; the coordinator-authored process.json is the eval
+        # job's own lifecycle status instead.
+        jobspec = _read_jobspec(local_dir)
+        if isinstance(jobspec, dict) and jobspec.get("kind") == "evaluate":
+            status = _read_process_status(local_dir)
+        else:
+            status = read_run_status(db_path, run_name)
         upsert_harness_sync(
             self.dest, run_name, self.origin_host, sanitize_last_status(status)
         )
