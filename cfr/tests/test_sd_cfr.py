@@ -291,8 +291,9 @@ class TestSDCFRAgentWrapper:
             )
             assert len(wrapper._snapshot_nets) == 3
 
-            # The eval loop plays on the Go engine (cambia-1426); the wrapper's
-            # belief is a GoAgentState bound to that game.
+            # Inference on the Go engine, which is what initialize_state takes:
+            # it attaches this seat's belief through the FFI (cambia-1522); the
+            # wrapper's belief is a GoAgentState bound to that game (cambia-1426).
             from src.agents import action_codec
             from src.ffi.bridge import GoEngine
 
