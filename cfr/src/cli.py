@@ -2555,6 +2555,7 @@ def _persist_lbr_result(
     seed: int,
     num_infosets_requested: int,
     br_rollouts_per_infoset: int,
+    metrics_dir: Optional[str] = None,
 ) -> None:
     """Dual-write an LBR exploitability estimate to metrics.jsonl and SQLite.
 
@@ -2581,6 +2582,10 @@ def _persist_lbr_result(
     from pathlib import Path as _Path
 
     run_dir_path = _Path(run_dir).resolve()
+    # run_dir names the measured run; metrics_dir is where the row lands. They
+    # differ under the compute pool, where the measured run is a read-only seed
+    # this job's lease does not own (D64).
+    metrics_root = _Path(metrics_dir).resolve() if metrics_dir else run_dir_path
     run_name = run_dir_path.name
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -2625,8 +2630,8 @@ def _persist_lbr_result(
         },
     }
 
-    run_dir_path.mkdir(parents=True, exist_ok=True)
-    with open(run_dir_path / "metrics.jsonl", "a", encoding="utf-8") as f:
+    metrics_root.mkdir(parents=True, exist_ok=True)
+    with open(metrics_root / "metrics.jsonl", "a", encoding="utf-8") as f:
         f.write(_json.dumps(row) + "\n")
 
     try:
@@ -2658,7 +2663,7 @@ def _persist_lbr_result(
         db.close()
         print(
             f"[lbr] persisted tier={tier.upper()} seed={seed} to "
-            f"{run_dir_path}/metrics.jsonl and run_db "
+            f"{metrics_root}/metrics.jsonl and run_db "
             f"(run={run_name}, iter={iteration}, baseline={row['baseline']})"
         )
     except Exception as exc:  # JUSTIFIED: persistence must not fail a measurement
@@ -2748,6 +2753,17 @@ def evaluate(
         "--output-dir",
         "-o",
         help="Directory for per-baseline JSONL game logs",
+    ),
+    metrics_dir: Optional[Path] = typer.Option(
+        None,
+        "--metrics-dir",
+        help=(
+            "Where metrics.jsonl, evaluations/ and eval_summary.jsonl are "
+            "written. Defaults to the evaluated run's own directory, which is "
+            "right on a single host. The serving harness points it at the "
+            "evaluate job's own run dir, the only directory that job's lease "
+            "owns; the rows reach the evaluated run through the client's merge."
+        ),
     ),
     argmax: bool = typer.Option(
         False,
@@ -3041,8 +3057,10 @@ def evaluate(
             checkpoint_path=str(checkpoint),
             selection_mode="argmax" if argmax else "stochastic",
             seat_scheme="alternated",
+            metrics_dir=str(metrics_dir) if metrics_dir else None,
         )
-        print(f"\nResults persisted to {run_dir}/metrics.jsonl")
+        _metrics_root = metrics_dir if metrics_dir else run_dir
+        print(f"\nResults persisted to {_metrics_root}/metrics.jsonl")
 
     if lbr:
         from .config import load_config as _load_config
@@ -3108,6 +3126,7 @@ def evaluate(
                     seed=lbr_seed,
                     num_infosets_requested=lbr_infosets,
                     br_rollouts_per_infoset=lbr_rollouts,
+                    metrics_dir=str(metrics_dir) if metrics_dir else None,
                 )
             else:
                 print(
