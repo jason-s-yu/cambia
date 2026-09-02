@@ -148,15 +148,21 @@ def cmd_lbr(args):
 
     t0 = time.time()
     if tier == "B":
-        # Tier B: agent-policy continuation rollouts vs a strong opponent.
-        from src.cfr.lbr import tier_b_lbr
+        # Tier B: agent-policy continuation rollouts vs a strong opponent. The
+        # two seat-1 roles are chosen separately (cambia-1793), so a leg can
+        # hold the trajectory distribution fixed and vary only the
+        # continuation, which is the comparison the tier's rationale predicts.
+        from src.cfr.lbr import _make_random_opponent, _make_strong_opponent, tier_b_lbr
 
+        factories = {"strong": _make_strong_opponent, "uniform": _make_random_opponent}
         res = tier_b_lbr(
             agent,
             cfg,
             num_infosets=args.infosets,
             br_rollouts_per_infoset=args.rollouts,
             seed=args.seed,
+            trajectory_opponent_factory=factories[args.trajectory_opponent],
+            rollout_opponent_factory=factories[args.continuation_opponent],
             frozen_beliefs=args.frozen_beliefs,
         )
         rollout_opponent = f"{res.get('rollout_opponent', '?')} (tier B, agent-policy)"
@@ -190,6 +196,11 @@ def cmd_lbr(args):
         "std_err": round(res["std_err"], 6),
         "ci95_half": round(1.96 * res["std_err"], 6),
         "rollout_opponent": rollout_opponent,
+        # cambia-1793: the two seat-1 roles, named apart, so a Tier-B row says
+        # which distribution it measured as well as how hard the continuation
+        # was. Both are None on a Tier-A row, which has one opponent.
+        "trajectory_opponent": res.get("trajectory_opponent"),
+        "continuation_opponent": res.get("continuation_opponent"),
         # cambia-1479: what the number can be compared against, and whether the
         # run absorbed any failure on its way to producing it.
         "belief_protocol": res.get("belief_protocol"),
@@ -203,6 +214,11 @@ def cmd_lbr(args):
         f"seed={args.seed}, beliefs={out['belief_protocol']}, "
         f"policy_errors={out['policy_errors']}, {elapsed:.1f}s)"
     )
+    if tier == "B":
+        _eprint(
+            f"[E3] tier=B opponents: trajectory={out['trajectory_opponent']}, "
+            f"continuation={out['continuation_opponent']}"
+        )
     print(json.dumps(out))
 
 
@@ -303,6 +319,25 @@ def main():
         choices=["A", "B"],
         default="A",
         help="A: random rollouts (loose). B: agent-policy rollouts vs strong opp (tighter).",
+    )
+    lb.add_argument(
+        "--trajectory-opponent",
+        choices=["strong", "uniform"],
+        default="strong",
+        help=(
+            "Tier B only: who plays seat 1 while the measured infosets are "
+            "collected, which decides WHICH positions are measured."
+        ),
+    )
+    lb.add_argument(
+        "--continuation-opponent",
+        choices=["strong", "uniform"],
+        default="strong",
+        help=(
+            "Tier B only: who plays seat 1 in the continuation rollouts, which "
+            "decides HOW HARD the continuation is. The tier's rationale is "
+            "about this seat alone."
+        ),
     )
     lb.set_defaults(func=cmd_lbr)
 
