@@ -37,13 +37,16 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.environment }}-go-${{ hashFiles('go.work.sum', 'engine/go.sum', 'service/go.sum') }}
+          key: ${{ runner.environment }}-go-${{ hashFiles('go.work.sum', 'engine/go.sum', 'runnerd/go.sum', 'service/go.sum') }}
           restore-keys: |
             ${{ runner.environment }}-go-
 
+      # All three go.work modules. runnerd/ was the one nothing checked
+      # (cambia-1920): deploy.yml builds its image and never runs a tool over
+      # its source.
       - name: gofmt
         run: |
-          unformatted=$(gofmt -l engine service)
+          unformatted=$(gofmt -l engine runnerd service)
           if [ -n "$unformatted" ]; then
             echo "::error::gofmt would rewrite these files; run 'gofmt -w' on them:"
             echo "$unformatted"
@@ -52,6 +55,9 @@ jobs:
 
       - name: Engine vet
         run: cd engine && go vet ./...
+
+      - name: Runnerd vet
+        run: cd runnerd && go vet ./...
 
       - name: Service vet
         run: cd service && go vet ./...
@@ -131,12 +137,20 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.environment }}-go-${{ hashFiles('go.work.sum', 'engine/go.sum', 'service/go.sum') }}
+          key: ${{ runner.environment }}-go-${{ hashFiles('go.work.sum', 'engine/go.sum', 'runnerd/go.sum', 'service/go.sum') }}
           restore-keys: |
             ${{ runner.environment }}-go-
 
       - name: Engine tests
         run: cd engine && go test ./...
+
+      # The harness and nodeagent suites drive processes and temporary
+      # directories only, so they need none of this job's containers; runnerd
+      # rides here rather than in a job of its own so the required-check names
+      # stay as they are (cambia-1920). -count=1 keeps a cached PASS from
+      # standing in for a run.
+      - name: Runnerd tests
+        run: cd runnerd && go test ./... -count=1
 
       # -p 1 serializes the package test binaries. internal/database,
       # internal/game, internal/handlers and internal/historian share one
@@ -239,7 +253,7 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.environment }}-go-${{ hashFiles('go.work.sum', 'engine/go.sum', 'service/go.sum') }}
+          key: ${{ runner.environment }}-go-${{ hashFiles('go.work.sum', 'engine/go.sum', 'runnerd/go.sum', 'service/go.sum') }}
           restore-keys: |
             ${{ runner.environment }}-go-
 
