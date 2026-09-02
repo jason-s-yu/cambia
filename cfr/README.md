@@ -92,15 +92,15 @@ cambia train deep --config parallel.config.yaml --steps 50 --lr 0.0005 --batch-s
 cambia train deep --config parallel.config.yaml --checkpoint strategy/deep_cfr_checkpoint.pt --steps 50
 ```
 
-By default, game traversal uses the Python engine. To use the Go engine (much faster), build the shared library first and set `engine_backend: "go"` in your config:
+Game traversal runs on the Go engine, so build the shared library before training:
 
 ```bash
 # From the repo root
 make libcambia
-
-# Then in your YAML config, under deep_cfr:
-#   engine_backend: "go"
 ```
+
+`engine_backend` defaults to `"go"` and accepts no other value; a config pinning the
+retired Python engine is refused at load.
 
 The shared library is expected at `cfr/libcambia.so`. You can also set the `LIBCAMBIA_PATH` environment variable to point to it directly.
 
@@ -236,7 +236,7 @@ These are loaded from the `deep_cfr` section of the YAML config and can be overr
 | `save_interval` | int | 10 | -- | Save checkpoint every N training steps |
 | `device` | str | `"auto"` | `--device` | Compute device: `auto`, `cpu`, `cuda`, `xpu` |
 | `use_gpu` | bool | false | `--gpu/--no-gpu` | *Deprecated*, use `--device` instead |
-| `engine_backend` | str | `"python"` | -- | Game engine for traversal: `"python"` or `"go"` (requires `make libcambia`) |
+| `engine_backend` | str | `"go"` | -- | Game engine for traversal; `"go"` only (requires `make libcambia`) |
 | `es_validation_interval` | int | 10 | -- | Run ES validation every N training steps (0 to disable) |
 | `es_validation_depth` | int | 10 | -- | Max turns per ES validation game |
 | `es_validation_traversals` | int | 1000 | -- | Number of traversals per ES validation run |

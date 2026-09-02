@@ -24,6 +24,23 @@ from src.encoding import INPUT_DIM, NUM_ACTIONS
 from src.networks import AdvantageNetwork
 from src.cfr.es_validator import ESValidator, _compute_entropy
 
+
+def _go_available() -> bool:
+    try:
+        from src.config import CambiaRulesConfig  # noqa: PLC0415
+        from src.ffi.bridge import GoEngine  # noqa: PLC0415
+
+        e = GoEngine(house_rules=CambiaRulesConfig())
+        e.close()
+        return True
+    except Exception:
+        return False
+
+
+# The validator traverses on the Go engine only (cambia-1783); without
+# libcambia.so every traversal raises, which is the point of the guard.
+needs_go = pytest.mark.skipif(not _go_available(), reason="libcambia.so not available")
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -33,7 +50,7 @@ def make_test_config(
     depth: int = 5,
     interval: int = 1,
     traversals: int = 3,
-    backend: str = "python",
+    backend: str = "go",
 ) -> SimpleNamespace:
     """
     Build a SimpleNamespace config with fast ES validation settings.
@@ -69,7 +86,7 @@ def make_test_config(
     config.agent_params.memory_level = 1
     config.agent_params.time_decay_turns = 3
 
-    # cambia_rules sub-config (real class for CambiaGameState)
+    # cambia_rules sub-config (real class, as GoEngine requires)
     from src.config import CambiaRulesConfig
 
     config.cambia_rules = CambiaRulesConfig()
@@ -128,7 +145,6 @@ class TestESValidatorCreation:
 
         assert validator is not None
         assert validator.depth_limit == 5
-        assert validator.engine_backend == "python"
         assert isinstance(validator.network, AdvantageNetwork)
 
 
@@ -149,6 +165,7 @@ EXPECTED_KEYS = {
 
 
 class TestComputeExploitabilityKeys:
+    @needs_go
     def test_compute_exploitability_returns_expected_keys(self):
         """metrics dict contains all expected keys."""
         config = make_test_config(depth=3, traversals=2)
@@ -168,6 +185,7 @@ class TestComputeExploitabilityKeys:
 
 
 class TestComputeExploitabilityFewTraversals:
+    @needs_go
     def test_compute_exploitability_with_few_traversals(self):
         """Runs 5 traversals and returns a valid metrics dict."""
         config = make_test_config(depth=4, traversals=5)
@@ -190,6 +208,7 @@ class TestComputeExploitabilityFewTraversals:
 
 
 class TestMetricsReasonable:
+    @needs_go
     def test_metrics_values_are_reasonable(self):
         """mean_regret >= 0, max_regret >= mean_regret, entropy >= 0."""
         config = make_test_config(depth=5, traversals=5)
@@ -234,6 +253,7 @@ class TestZeroTraversals:
 
 
 class TestESValidatorWithTrainedNetwork:
+    @needs_go
     def test_es_validator_with_trained_network(self):
         """Metrics from a consistent (random but fixed) network are reproducible."""
         config = make_test_config(depth=4, traversals=4)
@@ -294,6 +314,7 @@ class TestEntropyComputation:
 
 
 class TestDepthLimitRespected:
+    @needs_go
     def test_depth_limit_respected(self):
         """Traversals with depth_limit=1 should visit fewer nodes than depth_limit=5."""
         weights = make_random_weights()

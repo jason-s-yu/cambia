@@ -8,17 +8,34 @@ Verifies:
 - depth_limit=N causes traversal to terminate at depth N (fewer nodes)
 - Depth-capped traversal produces valid samples
 - Config field present in the stub and source files
+
+Converted from the Python engine to Go-only traversal in cambia-1783.
 """
+
+from contextlib import contextmanager
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from types import SimpleNamespace
 
-from src.cfr.deep_worker import _deep_traverse, _deep_traverse_os
+from src.cfr.deep_worker import _deep_traverse_go, _deep_traverse_os_go
 from src.config import CambiaRulesConfig
 from src.constants import NUM_PLAYERS
-from src.game.engine import CambiaGameState
 from src.utils import WorkerStats
+
+
+def _go_available() -> bool:
+    try:
+        from src.ffi.bridge import GoEngine  # noqa: PLC0415
+
+        e = GoEngine(house_rules=CambiaRulesConfig())
+        e.close()
+        return True
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(not _go_available(), reason="libcambia.so not available")
 
 # ---------------------------------------------------------------------------
 # Config builder (SimpleNamespace, following test_deep_worker_os.py pattern)
@@ -51,7 +68,7 @@ def _make_config(
     config.deep_cfr.traversal_depth_limit = depth_limit
     config.deep_cfr.hidden_dim = 256
     config.deep_cfr.dropout = 0.1
-    config.deep_cfr.engine_backend = "python"
+    config.deep_cfr.engine_backend = "go"
 
     config.logging = SimpleNamespace()
     config.logging.log_level_file = "WARNING"
@@ -75,91 +92,86 @@ def _make_config(
 # ---------------------------------------------------------------------------
 
 
-def _setup_game_and_agents(config):
-    """Initialize game state and agent states for traversal."""
-    from src.agent_state import AgentState
-    from src.cfr.worker import _create_observation
+@contextmanager
+def _go_engine_and_agents(config, seed=None):
+    """Yield (engine, agent_states) on the Go backend and close them after."""
+    from src.ffi.bridge import GoEngine, GoAgentState  # noqa: PLC0415
 
-    game_state = CambiaGameState(house_rules=config.cambia_rules)
-    initial_obs = _create_observation(None, None, game_state, -1, [])
-    initial_hands = [list(p.hand) for p in game_state.players]
-    initial_peeks = [p.initial_peek_indices for p in game_state.players]
-
-    agent_states = []
-    for i in range(NUM_PLAYERS):
-        agent = AgentState(
-            player_id=i,
-            opponent_id=1 - i,
-            memory_level=config.agent_params.memory_level,
-            time_decay_turns=config.agent_params.time_decay_turns,
-            initial_hand_size=len(initial_hands[i]),
-            config=config,
+    engine = GoEngine(house_rules=config.cambia_rules, seed=seed)
+    agent_states = [
+        GoAgentState(
+            engine,
+            pid,
+            config.agent_params.memory_level,
+            config.agent_params.time_decay_turns,
         )
-        agent.initialize(initial_obs, initial_hands[i], initial_peeks[i])
-        agent_states.append(agent)
+        for pid in range(NUM_PLAYERS)
+    ]
+    try:
+        yield engine, agent_states
+    finally:
+        for a in agent_states:
+            a.close()
+        engine.close()
 
-    return game_state, agent_states
 
-
-def run_es_traversal(config):
+def run_es_traversal(config, seed=17):
     """Run one ES traversal; return (stats, adv_samples, strat_samples)."""
-    game_state, agent_states = _setup_game_and_agents(config)
-
     advantage_samples = []
     strategy_samples = []
     worker_stats = WorkerStats()
     min_depth_tracker = [float("inf")]
     has_bottomed_out = [False]
 
-    _deep_traverse(
-        game_state=game_state,
-        agent_states=agent_states,
-        updating_player=0,
-        network=None,
-        iteration=0,
-        config=config,
-        advantage_samples=advantage_samples,
-        strategy_samples=strategy_samples,
-        depth=0,
-        worker_stats=worker_stats,
-        progress_queue=None,
-        worker_id=0,
-        min_depth_after_bottom_out_tracker=min_depth_tracker,
-        has_bottomed_out_tracker=has_bottomed_out,
-        simulation_nodes=[],
-    )
+    with _go_engine_and_agents(config, seed=seed) as (engine, agent_states):
+        _deep_traverse_go(
+            engine=engine,
+            agent_states=agent_states,
+            updating_player=0,
+            network=None,
+            iteration=0,
+            config=config,
+            advantage_samples=advantage_samples,
+            strategy_samples=strategy_samples,
+            depth=0,
+            worker_stats=worker_stats,
+            progress_queue=None,
+            worker_id=0,
+            min_depth_after_bottom_out_tracker=min_depth_tracker,
+            has_bottomed_out_tracker=has_bottomed_out,
+            simulation_nodes=[],
+        )
 
     return worker_stats, advantage_samples, strategy_samples
 
 
-def run_os_traversal(config):
+def run_os_traversal(config, seed=17):
     """Run one OS traversal; return (stats, adv_samples, strat_samples)."""
-    game_state, agent_states = _setup_game_and_agents(config)
-
     advantage_samples = []
     strategy_samples = []
     worker_stats = WorkerStats()
     min_depth_tracker = [float("inf")]
     has_bottomed_out = [False]
 
-    _deep_traverse_os(
-        game_state=game_state,
-        agent_states=agent_states,
-        updating_player=0,
-        network=None,
-        iteration=0,
-        config=config,
-        advantage_samples=advantage_samples,
-        strategy_samples=strategy_samples,
-        depth=0,
-        worker_stats=worker_stats,
-        progress_queue=None,
-        worker_id=0,
-        min_depth_after_bottom_out_tracker=min_depth_tracker,
-        has_bottomed_out_tracker=has_bottomed_out,
-        simulation_nodes=[],
-        exploration_epsilon=0.6,
-    )
+    with _go_engine_and_agents(config, seed=seed) as (engine, agent_states):
+        _deep_traverse_os_go(
+            engine=engine,
+            agent_states=agent_states,
+            updating_player=0,
+            network=None,
+            iteration=0,
+            config=config,
+            advantage_samples=advantage_samples,
+            strategy_samples=strategy_samples,
+            depth=0,
+            worker_stats=worker_stats,
+            progress_queue=None,
+            worker_id=0,
+            min_depth_after_bottom_out_tracker=min_depth_tracker,
+            has_bottomed_out_tracker=has_bottomed_out,
+            simulation_nodes=[],
+            exploration_epsilon=0.6,
+        )
 
     return worker_stats, advantage_samples, strategy_samples
 
@@ -231,7 +243,7 @@ class TestDeepCfrConfigField:
 
 
 class TestESDepthCap:
-    """Tests for depth cap in _deep_traverse (External Sampling)."""
+    """Tests for depth cap in _deep_traverse_go (External Sampling)."""
 
     def test_depth_cap_reduces_nodes(self):
         """A lower depth cap visits no more nodes than a higher one.
@@ -283,7 +295,7 @@ class TestESDepthCap:
 
 
 class TestOSDepthCap:
-    """Tests for depth cap in _deep_traverse_os (Outcome Sampling)."""
+    """Tests for depth cap in _deep_traverse_os_go (Outcome Sampling)."""
 
     def test_depth_cap_reduces_nodes(self):
         """OS capped traversal visits no more nodes than a deeper one."""

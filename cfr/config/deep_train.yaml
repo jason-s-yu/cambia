@@ -54,7 +54,7 @@ deep_cfr:
   use_gpu: false
   sampling_method: "outcome"
   exploration_epsilon: 0.6
-  engine_backend: "python"  # "python" or "go"
+  engine_backend: "go"    # Go FFI backend; requires `make libcambia`
   es_validation_interval: 10
   es_validation_depth: 10
   es_validation_traversals: 1000

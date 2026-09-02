@@ -225,7 +225,7 @@ Hot-loop exports added for traversal performance:
 The library path defaults to `cfr/libcambia.so` and can be overridden with
 `LIBCAMBIA_PATH`. Build with `make libcambia` from the repo root.
 
-Config field: `engine_backend: "go"` (or `"python"` for the pure-Python fallback).
+Config field: `engine_backend: "go"`, the only accepted value.
 
 ## 8. Worker Process Management
 

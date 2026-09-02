@@ -128,6 +128,32 @@ def validate_num_players(num_players: int) -> int:
     return num_players
 
 
+class RetiredEngineBackendError(ValueError):
+    """Raised when a config pins the retired Python traversal engine."""
+
+
+RETIRED_ENGINE_BACKEND_MESSAGE = (
+    "engine_backend 'python' is no longer available: the Python reference "
+    "engine was retired (cambia-1422) and 'go' is the traversal backend. "
+    'Set engine_backend: "go" and build the shared library with '
+    "`make libcambia`."
+)
+
+
+def validate_engine_backend(engine_backend: str) -> str:
+    """Validate an engine_backend config value.
+
+    "go" is the only traversal backend (cambia-1783). The field is still
+    accepted so existing configs load, but a config pinning "python" is
+    refused by name instead of silently running the Go engine.
+    """
+    if engine_backend == "python":
+        raise RetiredEngineBackendError(RETIRED_ENGINE_BACKEND_MESSAGE)
+    if engine_backend != "go":
+        raise ValueError(f"engine_backend must be 'go'. Got: {engine_backend!r}.")
+    return engine_backend
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
     """Recursively merge dicts; override wins. Non-dict values replaced."""
     result = dict(base)
@@ -395,7 +421,16 @@ class DeepCfrConfig(_CambiaBaseModel):
     device: str = "auto"
     sampling_method: str = "outcome"
     exploration_epsilon: float = 0.6
-    engine_backend: str = "python"
+    # Traversal engine. "go" is the only backend; the field is kept so existing
+    # configs still load and so a config pinning the retired Python engine gets
+    # a named refusal instead of silently running something else (cambia-1783).
+    engine_backend: str = "go"
+
+    @field_validator("engine_backend")
+    @classmethod
+    def _validate_engine_backend(cls, v: str) -> str:
+        return validate_engine_backend(v)
+
     es_validation_interval: int = 10
     es_validation_depth: int = 10
     es_validation_traversals: int = 1000
@@ -953,9 +988,16 @@ def load_config(config_path: str = "config.yaml") -> Config:
         deep = raw.get("deep_cfr", {})
         if "use_gpu" in deep and "device" not in deep:
             deep["device"] = "cuda" if deep.pop("use_gpu") else "cpu"
+        # Checked before model_validate so the refusal reaches the caller: the
+        # handlers below turn a validation error into a silent fall back to
+        # default config, which would drop every other setting in the file.
+        if "engine_backend" in deep:
+            validate_engine_backend(deep["engine_backend"])
         cfg = Config.model_validate(raw)
         cfg._source_path = os.path.abspath(config_path)
         return cfg
+    except RetiredEngineBackendError:
+        raise
     except FileNotFoundError:
         log.warning(
             "Config file '%s' not found. Using default configuration.", config_path

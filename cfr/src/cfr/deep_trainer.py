@@ -102,8 +102,8 @@ class DeepCFRConfig:
     # Exploration epsilon for outcome sampling (ignored for external sampling)
     exploration_epsilon: float = 0.6
 
-    # Engine backend: "python" or "go"
-    engine_backend: str = "python"
+    # Traversal engine; "go" is the only backend (cambia-1783).
+    engine_backend: str = "go"
 
     # ES Validation
     es_validation_interval: int = 10  # validate every N training steps

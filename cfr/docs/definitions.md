@@ -70,7 +70,7 @@ A training bias caused by dividing per-sample MSE loss by the number of legal ac
 ## Bugs and Fixes
 
 **H3 fix**
-Correction to OS-MCCFR traversal (applied 2026-02-27). Before the fix, exploration_epsilon (0.6) was applied at both traverser and opponent nodes, but importance sampling correction was only applied at traverser nodes. This caused the agent to train a best response against a 60%-random opponent rather than the learned strategy. Fix: set epsilon=0 at opponent nodes (gate on `player == updating_player`). Applied to `_deep_traverse_os_go`, `_deep_traverse_os_go_nplayer`, and `_deep_traverse_os`. ES-MCCFR and ESCHER are not affected.
+Correction to OS-MCCFR traversal (applied 2026-02-27). Before the fix, exploration_epsilon (0.6) was applied at both traverser and opponent nodes, but importance sampling correction was only applied at traverser nodes. This caused the agent to train a best response against a 60%-random opponent rather than the learned strategy. Fix: set epsilon=0 at opponent nodes (gate on `player == updating_player`). Applied to `_deep_traverse_os_go`, `_deep_traverse_os_go_nplayer`, and the since-retired Python `_deep_traverse_os`. ES-MCCFR and ESCHER are not affected.
 
 **eval encoding mismatch**
 A critical evaluation bug (fixed 2026-02-27) where `NeuralAgentWrapper._encode_eppbs()` hardcoded the flat encoder regardless of the checkpoint's `encoding_layout`. All interleaved and de-aliased eval numbers prior to the fix were invalid; training was unaffected. Fix: dispatch encoding based on `self._encoding_layout` and `self._network_type` read from checkpoint metadata.
