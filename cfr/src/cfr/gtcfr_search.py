@@ -471,7 +471,6 @@ class GTCFRSearch:
 
         # Build child nodes
         n_added = 0
-        node_value = 0.0  # value of expanded node for PUCT backprop
 
         for idx, a in enumerate(legal_actions):
             child_eng = child_engines[idx]
@@ -511,15 +510,22 @@ class GTCFRSearch:
 
         node.is_expanded = True
 
-        # Value for PUCT backprop: collapse acting player's range-weighted CFV
-        if node.leaf_values is not None and node.acting_player >= 0:
-            r = range_p0 if node.acting_player == 0 else range_p1
-            node_value = float(np.dot(r, node.leaf_values[node.acting_player]))
+        # Value for PUCT backprop: range-weighted CFV per player. The CVPN emits
+        # both players' values, so each ancestor books the one for its own
+        # acting player instead of the expanded node's; adding the expanded
+        # node's own value to an ancestor with a different actor inverts that
+        # ancestor's Q and makes _puct_scores rank against its preference.
+        node_values = np.zeros(2, dtype=np.float32)
+        if node.leaf_values is not None:
+            node_values[0] = float(np.dot(range_p0, node.leaf_values[0]))
+            node_values[1] = float(np.dot(range_p1, node.leaf_values[1]))
 
         # Backprop visit counts and Q-values up the selection path
         for parent_node, action in reversed(path):
             parent_node.visit_counts[action] += 1
-            parent_node.total_action_value[action] += node_value
+            actor = parent_node.acting_player
+            if actor >= 0:
+                parent_node.total_action_value[action] += float(node_values[actor])
 
         return n_added
 

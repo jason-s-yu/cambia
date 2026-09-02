@@ -461,3 +461,93 @@ def test_uniform_fallback_node_escapes_fallback(small_cvpn: CVPN):
     # Action 2 has the best value for the acting player and should hold the mass.
     strategy = node.current_strategy()
     assert strategy[2] > strategy[0]
+
+
+# ---------------------------------------------------------------------------
+# Test: PUCT backprop uses the ancestor's perspective (cambia-717)
+# ---------------------------------------------------------------------------
+
+
+class _FakeTerminalEngine:
+    """Stand-in child engine reporting a terminal state with fixed utilities."""
+
+    def __init__(self, util):
+        self._util = np.asarray(util, dtype=np.float32)
+
+    def is_terminal(self) -> bool:
+        return True
+
+    def get_utility(self) -> np.ndarray:
+        return self._util.copy()
+
+    def close(self) -> None:
+        pass
+
+
+def _constant_leaf_values(v0: float, v1: float) -> np.ndarray:
+    """(2, NUM_HAND_TYPES) leaf values constant across hand types."""
+    lv = np.zeros((2, NUM_HAND_TYPES), dtype=np.float32)
+    lv[0, :] = v0
+    lv[1, :] = v1
+    return lv
+
+
+def test_backprop_projects_value_into_ancestor_perspective(small_cvpn: CVPN, monkeypatch):
+    """A parent books the expanded node's value for the parent's own actor.
+
+    The root acts as player 0 and both children act as player 1. Leaf values are
+    deliberately not zero-sum, so indexing by the ancestor's actor is
+    distinguishable from negating the expanded node's own value.
+    """
+    searcher = GTCFRSearch(small_cvpn, expansion_budget=1, c_puct=2.0, expansion_k=2)
+    r0, r1 = _uniform_ranges()
+
+    action_a, action_b = 0, 1
+    root_legal = np.zeros(NUM_ACTIONS, dtype=bool)
+    root_legal[[action_a, action_b]] = True
+    root = _make_node(acting_player=0, legal_mask=root_legal, is_expanded=True)
+    root.policy_prior[[action_a, action_b]] = 0.5  # equal exploration terms
+
+    child_legal = np.zeros(NUM_ACTIONS, dtype=bool)
+    child_legal[2] = True
+    child_a = _make_node(
+        acting_player=1,
+        legal_mask=child_legal,
+        depth=1,
+        leaf_values=_constant_leaf_values(0.8, -0.5),
+        engine_handle=_FakeTerminalEngine([0.0, 0.0]),
+    )
+    child_b = _make_node(
+        acting_player=1,
+        legal_mask=child_legal,
+        depth=1,
+        leaf_values=_constant_leaf_values(-0.6, 0.7),
+        engine_handle=_FakeTerminalEngine([0.0, 0.0]),
+    )
+    root.children = {action_a: child_a, action_b: child_b}
+
+    monkeypatch.setattr(
+        searcher,
+        "_make_child_engine",
+        lambda parent, action: _FakeTerminalEngine([0.0, 0.0]),
+    )
+    selections = iter([action_a, action_b])
+    monkeypatch.setattr(searcher, "_select_action", lambda node: next(selections))
+
+    searcher._expand_once(root, None, r0, r1)
+    searcher._expand_once(root, None, r0, r1)
+
+    assert root.visit_counts[action_a] == 1
+    assert root.visit_counts[action_b] == 1
+
+    # Player 0's values (0.8 / -0.6), not player 1's (-0.5 / 0.7) and not their
+    # negations (0.5 / -0.7).
+    assert root.total_action_value[action_a] == pytest.approx(0.8, abs=1e-5)
+    assert root.total_action_value[action_b] == pytest.approx(-0.6, abs=1e-5)
+
+    # Equal priors and equal visit counts, so Q decides the ranking.
+    scores = searcher._puct_scores(root)
+    assert scores[action_a] > scores[action_b], (
+        f"PUCT ranks against the root actor's preference: "
+        f"{scores[action_a]:.3f} vs {scores[action_b]:.3f}"
+    )
