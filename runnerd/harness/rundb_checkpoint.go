@@ -9,14 +9,11 @@
 package harness
 
 import (
-	"database/sql"
-	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 
-	_ "modernc.org/sqlite" // pure-Go driver: keeps the runnerd static build static (no cgo)
-
+	"github.com/jason-s-yu/cambia/runnerd/nodeagent"
 	"github.com/jason-s-yu/cambia/runnerd/pathguard"
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 )
@@ -44,47 +41,15 @@ func (s *Server) handleRunDBCheckpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := checkpointRunDB(dbPath)
+	result, err := nodeagent.FoldRunDB(dbPath)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "checkpoint_failed", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"job_id":       id,
-		"busy":         result.busy,
-		"log_frames":   result.log,
-		"checkpointed": result.checkpointed,
+		"busy":         result.Busy,
+		"log_frames":   result.Log,
+		"checkpointed": result.Checkpointed,
 	})
-}
-
-// walCheckpointResult mirrors the three integer columns "PRAGMA
-// wal_checkpoint(MODE)" returns: busy (1 if the checkpoint could not run to
-// completion because of a conflicting lock, e.g. a long-lived reader), log
-// (WAL frames present), checkpointed (frames actually moved into the main db
-// file). A TRUNCATE checkpoint that completes with busy=0 truncates the -wal
-// file to zero length.
-type walCheckpointResult struct {
-	busy         int
-	log          int
-	checkpointed int
-}
-
-// checkpointRunDB opens dbPath with a bounded busy timeout and runs "PRAGMA
-// wal_checkpoint(TRUNCATE)". The busy_timeout gives a concurrent writer (the
-// training process still appending to run_db.sqlite) a short window to
-// release its lock rather than failing the checkpoint outright.
-func checkpointRunDB(dbPath string) (walCheckpointResult, error) {
-	dsn := "file:" + dbPath + "?_pragma=busy_timeout(5000)"
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return walCheckpointResult{}, fmt.Errorf("open %s: %w", dbPath, err)
-	}
-	defer db.Close()
-
-	var res walCheckpointResult
-	row := db.QueryRow("PRAGMA wal_checkpoint(TRUNCATE);")
-	if scanErr := row.Scan(&res.busy, &res.log, &res.checkpointed); scanErr != nil {
-		return walCheckpointResult{}, fmt.Errorf("wal_checkpoint: %w", scanErr)
-	}
-	return res, nil
 }

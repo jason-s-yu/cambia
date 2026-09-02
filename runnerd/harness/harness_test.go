@@ -228,10 +228,7 @@ func newRig(t *testing.T, cfg rigConfig) *testRig {
 		// write does not race RemoveAll into a "directory not empty" error.
 		deadline := time.Now().Add(3 * time.Second)
 		for time.Now().Before(deadline) {
-			disp.mu.Lock()
-			a := disp.active
-			disp.mu.Unlock()
-			if a == 0 {
+			if disp.slots.Active() == 0 {
 				break
 			}
 			time.Sleep(10 * time.Millisecond)

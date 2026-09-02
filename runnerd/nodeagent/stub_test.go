@@ -718,3 +718,25 @@ func specJSON(t *testing.T, s Spec) json.RawMessage {
 	}
 	return b
 }
+
+// transportCase is one of the two NodeTransport implementations of D65, in the
+// shape a test drives them through: the fingerprint-pinned HTTPS client a
+// remote node runs, and the in-process loopback the coordinator's own embedded
+// node runs. Both reach the same stub coordinator, so a test parameterized
+// over this proves one path rather than two similar ones.
+type transportCase struct {
+	name  string
+	apply func(t *testing.T, stub *stubCoordinator, o *Options)
+}
+
+// transports returns both legs. The HTTPS leg leaves the client testAgent
+// already built; the loopback leg replaces it with one dialing the stub's own
+// handler, which is the same function the TLS server serves.
+func transports() []transportCase {
+	return []transportCase{
+		{name: "https", apply: func(*testing.T, *stubCoordinator, *Options) {}},
+		{name: "loopback", apply: func(_ *testing.T, stub *stubCoordinator, o *Options) {
+			o.Client = NewLoopbackClient(http.HandlerFunc(stub.serve), o.Signer)
+		}},
+	}
+}

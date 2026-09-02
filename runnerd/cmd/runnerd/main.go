@@ -157,9 +157,6 @@ func main() {
 	})
 	disp := harness.NewDispatcher(pm, env, runsDir, maxJobs, maxQueue, 0)
 
-	// Reconcile-then-report: never auto-launch (design 2.3/6).
-	disp.Reconcile()
-
 	srv, err := harness.NewServer(harness.ServerConfig{
 		Dispatcher:     disp,
 		Verifier:       verifier,
@@ -176,17 +173,65 @@ func main() {
 		log.Fatalf("build server: %v", err)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	// The nashnet coordinator is opt-in on RUNNERD_NASHNET_NODES_DIR: with it
-	// unset the daemon serves exactly the v1.0 surface (D39, D40).
+	// unset the daemon serves exactly the v1.0 surface (D39, D40) and the
+	// dispatcher launches jobs itself, with no node and no lease anywhere.
+	var startNode *embeddedNode
 	if poolEnabled {
-		sweeper, serr := startNashnet(nashCfg, srv, disp, env, runsDir, pubKeyPath, minDisk)
+		// --role both runs one embedded node over the loopback transport, and
+		// it is what makes a pool-enabled daemon run jobs at all: with a pool
+		// attached, placement owns every ready job, so a coordinator with no
+		// node would queue forever (D1, D40). --role coordinator is the
+		// deliberate opposite, a daemon that only places.
+		var embedded *embeddedNode
+		if *role == roleBoth {
+			node, nerr := newEmbeddedNode(embeddedSettings{
+				baseDir:              baseDir,
+				runsDir:              runsDir,
+				slots:                maxJobs,
+				devices:              allowedDevices,
+				minRAMGB:             minRAM,
+				minDiskGB:            minDisk,
+				requireSignedCommits: requireSignedCommits,
+				allowedSignersPath:   allowedSignersPath,
+			})
+			if nerr != nil {
+				log.Fatalf("embedded node: %v", nerr)
+			}
+			embedded = node
+		}
+
+		sweeper, serr := startNashnet(nashCfg, srv, disp, env, runsDir, pubKeyPath, minDisk, embedded)
 		if serr != nil {
 			log.Fatalf("start nashnet coordinator: %v", serr)
 		}
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
 		go sweeper.Run(ctx)
 		log.Printf("nashnet coordinator enabled (nodes=%s)", nashCfg.nodesDir)
+		startNode = embedded
+	}
+
+	// Reconcile-then-report: never auto-launch (design 2.3/6). It runs after
+	// the pool so the restored lease store is already attached: a job a lease
+	// still holds is supervised and finalized by its holder, and adopting it
+	// here would put a second watcher on the same process (D6, D7).
+	disp.Reconcile()
+
+	if startNode != nil {
+		// The handler is built after AttachPool so the node's requests reach
+		// the /nashnet/ routes, and it is the same routed handler the TLS
+		// listener serves. The node starts after Reconcile so it never claims
+		// into a queue the restart has not finished restoring.
+		handler := srv.Handler()
+		log.Printf("nashnet: embedded node %s (slots=%d, devices=%s, in place)",
+			startNode.nodeID(), maxJobs, sortedDeviceList(allowedDevices))
+		go func() {
+			if err := startNode.run(ctx, handler, pm); err != nil {
+				log.Printf("embedded node stopped: %v", err)
+			}
+		}()
 	}
 
 	// Job-preserving restart (cambia-655): SIGTERM (systemd stop/restart) detaches

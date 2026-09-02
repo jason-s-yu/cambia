@@ -2,6 +2,7 @@ package nodeagent
 
 import (
 	"context"
+	"time"
 
 	"github.com/jason-s-yu/cambia/runnerd/nashnet"
 )
@@ -53,13 +54,45 @@ func (a *Agent) resumePending(ctx context.Context, pending []*jobRun, rebound ma
 		a.mu.Lock()
 		a.active[job.rec.JobID] = job
 		a.mu.Unlock()
+		// A reattached job occupies the node exactly like a launched one, so
+		// admission must see it before the next claim goes out (cambia-723).
+		a.slots.Claim(job.spec.Exclusive)
 
 		j := job
 		a.wg.Add(1)
 		go func() {
 			defer a.wg.Done()
-			defer a.finishJob(j.rec.JobID)
+			defer a.finishJob(j)
 			j.resume(ctx)
 		}()
+	}
+}
+
+// AwaitReattachedExit blocks until a reattached job's process is gone: its row
+// reaches a terminal effective status, or its run dir is purged out from under
+// it. A reattached process was forked by a prior daemon incarnation, so this
+// one cannot waitpid it and procmgr's own wait goroutine never runs for it;
+// liveness is read off the starttime-validated pid probe behind
+// Launcher.Status instead. It is the watch half of the reattach machinery,
+// moved here with the launch path (D1); what to write for the job that exited
+// stays with the caller, because the two-witness finalizer is coordinator
+// state (D7, D35).
+func AwaitReattachedExit(l Launcher, name string, poll time.Duration, stop <-chan struct{}) {
+	if poll <= 0 {
+		poll = time.Second
+	}
+	for {
+		st := l.Status(name)
+		if !st.Found {
+			return // run dir gone (purged): nothing left to hold or finalize
+		}
+		if isTerminalStatus(st.Effective) {
+			return
+		}
+		select {
+		case <-stop:
+			return
+		case <-time.After(poll):
+		}
 	}
 }

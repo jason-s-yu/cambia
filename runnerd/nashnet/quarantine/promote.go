@@ -25,6 +25,10 @@ type source struct {
 	path      string
 	size      int64
 	fromGrant bool
+	// inPlace marks a source that already sits at the destination path the
+	// entry names, which is every source of an embedded lease (D40). It is
+	// proved by hashing rather than by upload, and promoting it is a no-op.
+	inPlace bool
 }
 
 // Commit runs the fast-forward manifest commit and the promotion transaction of
@@ -106,6 +110,9 @@ func (s *Store) Commit(l Lease, req CommitRequest, body []byte) (CommitResponse,
 	seenMissing := map[string]bool{}
 	for _, e := range accepted {
 		src, ok := s.resolveSource(l, leaseDir, e.Digest)
+		if !ok && l.InPlace {
+			src, ok = resolveInPlace(runDir, e)
+		}
 		if !ok {
 			if !seenMissing[e.Digest] {
 				seenMissing[e.Digest] = true
@@ -348,6 +355,42 @@ func (s *Store) validateBatch(l Lease, head Head, runDir string, req CommitReque
 	return accepted, deletes, rejected, unrecognized
 }
 
+// resolveInPlace proves one entry of an embedded lease against the file
+// already at its destination (D40). The digest is recomputed from the bytes on
+// disk rather than trusted from the manifest, so an embedded commit is held to
+// the same proof a remote one is: what the coordinator records is what it
+// read. A file that changed under the node fails to match and is reported as a
+// missing digest, which sends the node back around its diff.
+func resolveInPlace(runDir string, e Entry) (source, bool) {
+	target, err := pathguard.Resolve(runDir, e.Path)
+	if err != nil {
+		return source{}, false
+	}
+	fi, err := os.Stat(target)
+	if err != nil || !fi.Mode().IsRegular() {
+		return source{}, false
+	}
+	sum, err := digestFile(target)
+	if err != nil || sum != e.Digest {
+		return source{}, false
+	}
+	return source{path: target, size: fi.Size(), inPlace: true}, true
+}
+
+// digestFile is the sha256 of a file, hex, matching the blob digest spelling.
+func digestFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 // resolveSource finds a digest in the lease's provable set: its own verified
 // blobs first, then the grant set.
 func (s *Store) resolveSource(l Lease, leaseDir, digest string) (source, bool) {
@@ -378,6 +421,14 @@ func (s *Store) materialize(runDir string, e Entry, src source, seq int64) error
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return err
+	}
+	if src.inPlace {
+		// The job wrote this file at this path itself, so there is nothing to
+		// promote and nothing to restamp: touching it would race the process
+		// that owns it. Everything before this point still ran, which is what
+		// makes an embedded commit a real commit (D40).
+		s.materialized(e.Path)
+		return nil
 	}
 	mtime := time.Unix(0, e.MTime)
 

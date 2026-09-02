@@ -3,18 +3,15 @@ package harness
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/jason-s-yu/cambia/runnerd/ingestapi"
 	"github.com/jason-s-yu/cambia/runnerd/nashnet"
-	"github.com/jason-s-yu/cambia/runnerd/pathguard"
+	"github.com/jason-s-yu/cambia/runnerd/nodeagent"
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
 )
 
@@ -64,22 +61,24 @@ type Dispatcher struct {
 	maxQueue int           // queue depth cap (429 when exceeded)
 	poll     time.Duration // process-liveness poll interval for monitor
 
+	// launcher is the procmgr boundary the reattach watcher observes exits
+	// through. It is the node agent's, so a job this daemon adopted at
+	// Reconcile is watched by the same code that watches one a remote node
+	// adopted (D1). Nil when no ProcessManager was injected.
+	launcher nodeagent.Launcher
+
+	// slots is the launch accounting of the node this dispatcher launches on:
+	// its concurrency ceiling, its occupancy, and its exclusive holds. It
+	// lives in runnerd/nodeagent with the launch path it guards (D1), and the
+	// coordinator's own executor and every remote node run the one
+	// implementation. What stays here is the placement half: the per-node
+	// lease ceiling of D47 and the per-node exclusive barrier of D13, both
+	// read by the placement scan.
+	slots *nodeagent.Slots
+
 	mu      sync.Mutex
 	pending map[string]*job // queued + preparing
 	queue   []string        // FIFO of queued ids
-	// active is the count of slots this daemon drives: preparing + running jobs it
-	// launched, plus every live job it reattached at Reconcile (cambia-723 -- a
-	// reattached job occupies the runner exactly like a launched one, so admission
-	// must see it).
-	active int
-	// exclusiveHolds counts the exclusive jobs (cambia-655) currently holding the
-	// daemon: incremented when an exclusive job is launched or reattached at
-	// Reconcile, decremented when it releases its slot (runJob, or watchReattached
-	// for a reattached one). While it is non-zero no other job launches; an
-	// exclusive job itself launches only when active==0. It is a count rather than
-	// a flag so the defensive multi-reattach case holds until the LAST exclusive
-	// job exits.
-	exclusiveHolds int
 	// purging holds the names whose run dir is being removed by Purge (the
 	// RemoveAll runs outside d.mu). A reattach watcher finalizing the same job
 	// checks it before writing process.json, so a finalize racing a purge cannot
@@ -125,10 +124,16 @@ func NewDispatcher(pm *procmgr.ProcessManager, env Environment, runsDir string, 
 	if maxQueue <= 0 {
 		maxQueue = 128
 	}
+	var launcher nodeagent.Launcher
+	if pm != nil {
+		launcher = nodeagent.NewLauncher(pm)
+	}
 	return &Dispatcher{
 		pm:       pm,
 		env:      env,
 		runsDir:  runsDir,
+		launcher: launcher,
+		slots:    nodeagent.NewSlots(maxJobs),
 		maxJobs:  maxJobs,
 		maxQueue: maxQueue,
 		poll:     poll,
@@ -244,7 +249,7 @@ func (d *Dispatcher) dispatchLocked() {
 				next = append(next, id)
 				continue
 			}
-			if barrier || !d.canLaunchLocked(j) {
+			if barrier || !d.canLaunch(j) {
 				next = append(next, id) // held: no slot, exclusive gate, or behind a deferred exclusive head
 				if j.spec.Exclusive {
 					// A deferred exclusive job barriers every later ready job this
@@ -254,45 +259,41 @@ func (d *Dispatcher) dispatchLocked() {
 				continue
 			}
 			j.state = StatePreparing
-			d.claimSlotLocked(j)
+			d.claimSlot(j)
 			go d.runJob(j)
 		}
 	}
 	d.queue = next
 }
 
-// canLaunchLocked reports whether a gate-passed (ready) job may claim a slot now
-// under the exclusive-admission rules (cambia-655). Callers hold d.mu. While an
-// exclusive job is active nothing else launches; an exclusive job launches only
-// into an idle daemon (active==0); a normal job launches while a concurrency slot
-// is free. maxJobs<=0 means unlimited concurrency.
-func (d *Dispatcher) canLaunchLocked(j *job) bool {
-	if d.exclusiveHolds > 0 {
+// leasedLive reports whether a live lease holds this job, which makes its
+// supervision the lease holder's rather than this dispatcher's. The store
+// pointer is read under d.mu because attachPool writes it there; the lookup
+// itself runs outside the lock, against the store's own.
+func (d *Dispatcher) leasedLive(jobID string) bool {
+	d.mu.Lock()
+	leases := d.leases
+	d.mu.Unlock()
+	if leases == nil {
 		return false
 	}
-	if j.spec.Exclusive {
-		return d.active == 0
-	}
-	return d.maxJobs <= 0 || d.active < d.maxJobs
+	l, ok := leases.ByJob(jobID)
+	return ok && l.Live()
 }
 
-// claimSlotLocked reserves a slot for a launching or reattached job and, for an
-// exclusive job, raises the exclusive hold. Callers hold d.mu.
-func (d *Dispatcher) claimSlotLocked(j *job) {
-	d.active++
-	if j.spec.Exclusive {
-		d.exclusiveHolds++
-	}
-}
+// canLaunch reports whether a gate-passed (ready) job may claim a slot now,
+// under the exclusive-admission rules of cambia-655 as D13 re-scopes them to
+// one node. The accounting is the node agent's, so the coordinator's own
+// executor admits by exactly the rule a remote node admits by.
+func (d *Dispatcher) canLaunch(j *job) bool { return d.slots.Admit(j.spec.Exclusive) }
 
-// releaseSlotLocked frees the slot a preparing/running/reattached job held and,
-// for an exclusive job, drops its exclusive hold. Callers hold d.mu.
-func (d *Dispatcher) releaseSlotLocked(j *job) {
-	d.active--
-	if j.spec.Exclusive && d.exclusiveHolds > 0 {
-		d.exclusiveHolds--
-	}
-}
+// claimSlot reserves a slot for a launching or reattached job and, for an
+// exclusive job, raises the exclusive hold.
+func (d *Dispatcher) claimSlot(j *job) { d.slots.Claim(j.spec.Exclusive) }
+
+// releaseSlot frees the slot a preparing, running, or reattached job held and,
+// for an exclusive job, drops its exclusive hold.
+func (d *Dispatcher) releaseSlot(j *job) { d.slots.Release(j.spec.Exclusive) }
 
 // gateDecisionLocked resolves whether a queued job may launch, from the
 // current effective state of every named `after` parent (D29 AND-join, widened
@@ -429,7 +430,7 @@ func (d *Dispatcher) runJob(j *job) {
 			return
 		}
 		d.mu.Lock()
-		d.releaseSlotLocked(j)
+		d.releaseSlot(j)
 		delete(d.pending, name)
 		d.dispatchLocked()
 		d.mu.Unlock()
@@ -501,213 +502,58 @@ func (d *Dispatcher) runJob(j *job) {
 	d.monitor(name)
 
 	d.mu.Lock()
-	d.releaseSlotLocked(j)
+	d.releaseSlot(j)
 	d.dispatchLocked()
 	d.mu.Unlock()
 	d.broadcast()
 }
 
+// nodeSpec projects a JobSpec onto the launch template's view of a job. The
+// two shapes are deliberately not the same type: the coordinator's JobSpec is
+// the submit-time contract with its admission fields, and the node's Spec is
+// what a launch reads, which is all a claim carries across the wire (D1).
+func nodeSpec(j *job) nodeagent.Spec {
+	return nodeagent.Spec{
+		Kind:        j.spec.Kind,
+		Commit:      j.spec.Commit,
+		Name:        j.spec.Name,
+		Config:      j.spec.Config,
+		Overrides:   j.spec.Overrides,
+		Resume:      j.resume || j.spec.Resume,
+		Device:      j.spec.Device,
+		CheckpointA: j.spec.CheckpointA,
+		CheckpointB: j.spec.CheckpointB,
+		Target:      j.spec.Target,
+		Games:       j.spec.Games,
+		WarmStart:   j.spec.WarmStart,
+		Exclusive:   j.spec.Exclusive,
+		Script:      j.spec.Script,
+		Args:        j.spec.Args,
+		Reads:       j.spec.Reads,
+	}
+}
+
 // launchOpts builds the parameterized procmgr launch from the ingest-staged
-// Prepared (design 2.7). When the environment did not stage a venv interpreter
-// (Prepared.VenvPython empty, e.g. a stub), it returns a zero LaunchOpts so
-// procmgr takes the fixed-binary path unchanged. The subcommand for the argv is
-// resolved from the job kind through the same algos table the fixed-binary path
-// uses; an unregistered kind fails the job rather than launching.
+// Prepared (design 2.7). The per-kind argv template lives in runnerd/nodeagent
+// and is the single copy (D1): a job's command line does not depend on whether
+// the coordinator's own executor or a remote node ran it. The subcommand table
+// is injected from this daemon's own ProcessManager, so a test-registered kind
+// resolves exactly as it did before the move. When the environment staged no
+// venv interpreter (Prepared.VenvPython empty, e.g. a stub), it returns a zero
+// LaunchOpts so procmgr takes the fixed-binary path unchanged.
 func (d *Dispatcher) launchOpts(j *job, prepared *ingestapi.Prepared) (procmgr.LaunchOpts, error) {
 	if prepared == nil || prepared.VenvPython == "" {
 		return procmgr.LaunchOpts{}, nil
 	}
-	// measure (design D38) branches before AlgoSubcommand: there is no cambia
-	// subcommand for it, so the injected algos table is never consulted for
-	// this kind (HarnessAlgorithms' KindMeasure entry exists only to pass the
-	// submit allowlist).
-	if j.spec.Kind == KindMeasure {
-		return d.measureLaunchOpts(j, prepared)
-	}
-	sub, err := d.pm.AlgoSubcommand(j.spec.Kind)
+	launch, err := nodeagent.BuildLaunch(nodeSpec(j), prepared, d.runsDir, d.pm.AlgoSubcommand)
 	if err != nil {
 		return procmgr.LaunchOpts{}, err
 	}
-	argv := make([]string, 0, len(sub)+10)
-	argv = append(argv, "-m", "src.cli")
-	argv = append(argv, sub...)
-	// journalRun is the run whose per-run-dir run_db.sqlite this job writes:
-	// the job's own run for train/head-to-head/bench, the evaluated run for
-	// evaluate (eval rows must join the evaluated run's journal so they sync
-	// with it, design 4.2). head-to-head and bench never write run_db rows of
-	// their own (cli.py's head_to_head and benchmark commands do not call
-	// run_db), so the default is inert for them beyond a harmless env var.
-	journalRun := j.spec.Name
-	switch j.spec.Kind {
-	case KindEvaluate:
-		// `cambia evaluate` takes a positional checkpoint/run-dir target, not
-		// --config (spec-review finding #1): --config is omitted entirely,
-		// since run-dir mode auto-detects config.yaml from the target's own
-		// run dir (cfr/src/cli.py evaluate).
-		targetArgv, terr := d.evaluateTargetArgv(j.spec)
-		if terr != nil {
-			return procmgr.LaunchOpts{}, terr
-		}
-		argv = append(argv, targetArgv...)
-		journalRun = j.spec.Target
-	case KindHeadToHead:
-		// `cambia head-to-head` has no run-dir mode: it takes two bare
-		// checkpoint files with no config of their own, so unlike evaluate it
-		// genuinely needs --config (client-side spec.py requires it for this
-		// kind, cambia-295 item 1 contract change).
-		if prepared.RenderedConfig != "" {
-			argv = append(argv, "--config", prepared.RenderedConfig)
-		}
-		h2hArgv, herr := d.headToHeadArgv(j.spec)
-		if herr != nil {
-			return procmgr.LaunchOpts{}, herr
-		}
-		argv = append(argv, h2hArgv...)
-	case KindBench:
-		// `cambia benchmark all` takes --config, --device, and --output-dir as
-		// plain CLI flags -- none of them sourced from the rendered config's
-		// device rail the way train's device is. --output-dir is pointed at
-		// the job's own run dir (mirroring train's --save-path) so results
-		// land under runs/<name>/ instead of the CLI's container-only default.
-		if prepared.RenderedConfig != "" {
-			argv = append(argv, "--config", prepared.RenderedConfig)
-		}
-		argv = append(argv, "--output-dir", d.runDir(j.spec.Name))
-		argv = append(argv, "--device", j.spec.device())
-	default:
-		// train (and any test-injected kind that isn't evaluate/head-to-head/
-		// bench, e.g. harness_test.go's "fake"): the rendered config is
-		// consumed verbatim (design 2.7). A kind that ingest renders no config
-		// for (Prepare leaves RenderedConfig empty) gets no --config rather
-		// than an empty-valued flag.
-		if prepared.RenderedConfig != "" {
-			argv = append(argv, "--config", prepared.RenderedConfig)
-		}
-		if j.spec.Kind == KindTrain {
-			// Without an explicit name the trainer registers its run_db row
-			// under a config-derived default, decoupling the journal row from
-			// the run dir the reconciler replays (found live in M5 e2e).
-			// Without an explicit save path the trainer resolves runs/<name>
-			// against the worktree cwd, so resume_state.json and metrics.jsonl
-			// land in the worktree and die with its cleanup (also found live):
-			// the fixed-binary dashboard path always passes both.
-			argv = append(argv, "--run-name", j.spec.Name)
-			argv = append(argv, "--save-path", d.runDir(j.spec.Name))
-		}
-	}
-	if j.resume {
-		argv = append(argv, "--resume")
-	}
-	// CAMBIA_RUN_DB points every run_db write of the job process (run
-	// registration, checkpoints, eval persist) at the per-run journal the pull
-	// loop syncs (design 4.2: runs/<name>/run_db.sqlite IS the wire format).
-	env := append([]string(nil), prepared.Env...)
-	env = append(env, "CAMBIA_RUN_DB="+filepath.Join(d.runsDir, journalRun, "run_db.sqlite"))
 	return procmgr.LaunchOpts{
-		Python: prepared.VenvPython,
-		Argv:   argv,
-		Cwd:    filepath.Join(prepared.WorktreeDir, "cfr"),
-		Env:    env,
-	}, nil
-}
-
-// measureLaunchOpts builds the launch for kind=measure (design D38): argv is
-// the staged script path followed by spec.Args verbatim, with no "-m src.cli"
-// prefix and no cambia subcommand. The staged script's presence at the pinned
-// commit is checked here, once the worktree exists (submit already validated
-// script's shape and root); its absence fails the job with a named error
-// before launch, mirroring the other launchOpts helpers' "field: reason"
-// wrapping. journalRun is always the job's own name (unlike evaluate's
-// borrowed target journal): a measure job owns its own run dir and its own
-// run_db.sqlite. reads (already containment- and existence-checked at
-// submit) are re-resolved here for the same defense-in-depth reason
-// evaluateTargetArgv and headToHeadArgv re-resolve their path fields, and
-// exported as CAMBIA_MEASURE_READ_DIRS, os.pathsep-joined, so the script can
-// locate its read-only seeds without re-deriving the runs dir itself.
-func (d *Dispatcher) measureLaunchOpts(j *job, prepared *ingestapi.Prepared) (procmgr.LaunchOpts, error) {
-	scriptAbs := filepath.Join(prepared.WorktreeDir, j.spec.Script)
-	if _, err := os.Stat(scriptAbs); err != nil {
-		return procmgr.LaunchOpts{}, fmt.Errorf("script: not found at pinned commit: %s", j.spec.Script)
-	}
-
-	argv := make([]string, 0, 1+len(j.spec.Args))
-	argv = append(argv, scriptAbs)
-	argv = append(argv, j.spec.Args...)
-
-	env := append([]string(nil), prepared.Env...)
-	env = append(env, "CAMBIA_RUN_DB="+filepath.Join(d.runsDir, j.spec.Name, "run_db.sqlite"))
-	if len(j.spec.Reads) > 0 {
-		reads := make([]string, 0, len(j.spec.Reads))
-		for i, r := range j.spec.Reads {
-			resolved, rerr := pathguard.Resolve(d.runsDir, r)
-			if rerr != nil {
-				return procmgr.LaunchOpts{}, fmt.Errorf("reads[%d]: %w", i, rerr)
-			}
-			reads = append(reads, resolved)
-		}
-		env = append(env, "CAMBIA_MEASURE_READ_DIRS="+strings.Join(reads, string(os.PathListSeparator)))
-	}
-
-	return procmgr.LaunchOpts{
-		Python: prepared.VenvPython,
-		Argv:   argv,
-		Cwd:    filepath.Join(prepared.WorktreeDir, "cfr"),
-		Env:    env,
-	}, nil
-}
-
-// evaluateTargetArgv builds the evaluate-only argv tail: the resolved target
-// (the positional checkpoint/run-dir argument `cambia evaluate` requires),
-// --latest when target is a run directory (run-dir mode requires --latest or
-// --epoch; the harness always wants the newest checkpoint), --games, and
-// --device. Target was already lexically guarded and containment-checked at
-// submit (handlers.go step 4b); it is re-resolved here since launch happens
-// in a later goroutine against the persisted spec.
-func (d *Dispatcher) evaluateTargetArgv(spec JobSpec) ([]string, error) {
-	targetAbs, err := pathguard.Resolve(d.runsDir, spec.Target)
-	if err != nil {
-		return nil, fmt.Errorf("target: %w", err)
-	}
-	info, err := os.Stat(targetAbs)
-	if err != nil {
-		return nil, fmt.Errorf("target: %w", err)
-	}
-	// Run-dir mode only. In file mode cli.py leaves agent_type at its deep_cfr
-	// default and only recovers a run dir when the file sits under checkpoints/,
-	// so a PRT-CFR snapshot target evaluates under the wrong agent wrapper and
-	// reports plausible, wrong numbers instead of failing. Run-dir mode derives
-	// config, algorithm, and agent type from the target's own config.yaml.
-	if !info.IsDir() {
-		return nil, fmt.Errorf("target %q: evaluate requires a run directory, not a checkpoint file (file mode misdetects agent type)", spec.Target)
-	}
-	argv := []string{targetAbs, "--latest"}
-	argv = append(argv, "--games", strconv.Itoa(spec.gamesOrDefault()), "--device", spec.device())
-	return argv, nil
-}
-
-// headToHeadArgv builds the head-to-head argv tail: --checkpoint-a/-b (each
-// re-resolved through the same runs-dir containment guard checkpoint_a/b
-// already got at submit, handlers.go step 4b -- launch happens in a later
-// goroutine against the persisted spec, so it is re-resolved here exactly as
-// evaluateTargetArgv re-resolves target), --games, and --device. Unlike
-// evaluate's target, checkpoints have no dir-vs-file ambiguity to guard
-// against: `cambia head-to-head` declares both as typer Path(exists=True), so
-// a missing or unresolvable checkpoint fails the job at launch with a clear
-// CLI error rather than silently misinterpreting it.
-func (d *Dispatcher) headToHeadArgv(spec JobSpec) ([]string, error) {
-	a, err := pathguard.Resolve(d.runsDir, spec.CheckpointA)
-	if err != nil {
-		return nil, fmt.Errorf("checkpoint_a: %w", err)
-	}
-	b, err := pathguard.Resolve(d.runsDir, spec.CheckpointB)
-	if err != nil {
-		return nil, fmt.Errorf("checkpoint_b: %w", err)
-	}
-	return []string{
-		"--checkpoint-a", a,
-		"--checkpoint-b", b,
-		"--games", strconv.Itoa(spec.gamesOrDefault()),
-		"--device", spec.device(),
+		Python: launch.Python,
+		Argv:   launch.Argv,
+		Cwd:    launch.Cwd,
+		Env:    launch.Env,
 	}, nil
 }
 
@@ -968,6 +814,16 @@ func (d *Dispatcher) Reconcile() {
 			if st.Host != "" {
 				continue
 			}
+			// A live lease already owns this job's supervision, and its holder
+			// finalizes it through the result route (D6, D7). The embedded node
+			// is why this test is not the Host one: it runs in place, so its
+			// rows carry no Host (the node's own liveness probe needs the local
+			// pid), and adopting one here would put two watchers on one process
+			// and race two terminal writes. A daemon with no pool has no lease
+			// store and adopts every live row exactly as v1.0 does.
+			if d.leasedLive(st.Name) {
+				continue
+			}
 			rj := &job{spec: JobSpec{Name: st.Name, Kind: st.Algorithm}, state: st.Status}
 			if spec != nil {
 				rj.spec = *spec
@@ -1003,7 +859,7 @@ func (d *Dispatcher) Reconcile() {
 	}
 	d.reattachDone = true
 	for _, rj := range reattached {
-		d.claimSlotLocked(rj)
+		d.claimSlot(rj)
 	}
 	d.dispatchLocked()
 	d.reconciledAt = procmgr.NowRFC3339()
@@ -1014,32 +870,22 @@ func (d *Dispatcher) Reconcile() {
 	d.broadcast()
 }
 
-// watchReattached stands in for runJob's monitor over a job adopted at Reconcile
-// (cambia-655/cambia-723). A reattached job's OS process was forked by a prior
-// daemon incarnation, so this daemon cannot waitpid it and procmgr's waitFor
-// never runs for it: termination is observed through pid liveness
-// (EffectiveStatus, starttime-validated), and a purged run dir (GetState not
-// found) counts as gone. On exit it finalizes the row (process.json is still
-// `running` -- nothing else will ever write its terminal state), cleans up the
-// staged environment as monitor does, releases the slot and any exclusive hold,
-// and re-dispatches so a dependent gated on this job admits.
+// watchReattached stands in for runJob's monitor over a job adopted at
+// Reconcile (cambia-655/cambia-723). The wait itself is the node agent's
+// AwaitReattachedExit, which is where the reattach machinery moved with the
+// launch path (D1). What stays here is the coordinator's half: on exit it
+// finalizes the row by the two-witness rule (process.json is still `running`
+// -- nothing else will ever write its terminal state), cleans up the staged
+// environment as monitor does, releases the slot and any exclusive hold, and
+// re-dispatches so a dependent gated on this job admits.
 func (d *Dispatcher) watchReattached(j *job) {
 	name := j.spec.Name
-	for {
-		st, ok := d.pm.GetState(name)
-		if !ok {
-			break // run dir gone (purged): nothing left to hold or finalize
-		}
-		if isTerminal(procmgr.EffectiveStatus(st)) {
-			break
-		}
-		time.Sleep(d.poll)
-	}
+	nodeagent.AwaitReattachedExit(d.launcher, name, d.poll, nil)
 	final := d.finalizeReattached(name)
 	_ = d.env.Cleanup(name, final == procmgr.StatusCrashed)
 
 	d.mu.Lock()
-	d.releaseSlotLocked(j)
+	d.releaseSlot(j)
 	d.dispatchLocked()
 	d.mu.Unlock()
 	d.broadcast()

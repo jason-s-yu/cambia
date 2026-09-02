@@ -192,12 +192,15 @@ func TestSubmitTargetGuards(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------
-// launchOpts argv construction for kind=evaluate (spec-review finding #1):
-// positional target, --latest for a dir target, direct path for a file
-// target, --games propagation/default, --config omitted, --device present.
+// Launch argv for kind=evaluate, asserted end to end through the dispatcher
+// (spec-review finding #1): positional target, --latest for a dir target, a
+// refused file target, --games propagation/default, --config omitted, --device
+// present, and the D64 metrics/journal split. The template itself now lives in
+// runnerd/nodeagent, where nodeagent/launch_test.go covers it as a unit; these
+// stay here because they assert what a submitted job actually launches with.
 // Exercised through the staged (VenvPython-set) launch path, like
 // TestDispatcherLaunchesFromStagedEnv, since the M2 fixed-binary fallback
-// (VenvPython empty) never calls evaluateTargetArgv.
+// (VenvPython empty) builds no argv at all.
 // -----------------------------------------------------------------------
 
 func TestEvaluateArgvDirTargetUsesLatest(t *testing.T) {
@@ -235,15 +238,22 @@ func TestEvaluateArgvDirTargetUsesLatest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantArgv := "-m src.cli evaluate " + wantTarget + " --latest --games 250 --device cpu"
+	// --metrics-dir points metrics.jsonl and evaluations/ at the job's own run
+	// dir rather than the target's (D64): the target arrives on a node as a
+	// read-only seed, and even on the coordinator it is a run this job's lease
+	// does not own. The rows reach the target through the client's merge.
+	ownDir := filepath.Join(r.runsDir, "eval-dir")
+	wantArgv := "-m src.cli evaluate " + wantTarget +
+		" --latest --games 250 --device cpu --metrics-dir " + ownDir
 	if argv != wantArgv {
 		t.Errorf("argv = %q, want %q", argv, wantArgv)
 	}
 
-	// The eval job's run_db journal is the EVALUATED run's, not its own: eval
-	// rows must land in the target's run_db.sqlite so they sync with that run
-	// (design 4.2).
-	wantDB := filepath.Join(r.runsDir, "prior-run", "run_db.sqlite")
+	// The eval job journals into its OWN run dir, not the evaluated run's: a
+	// lease owns one run dir and writes nothing outside it (D64). The journal's
+	// single runs row is named for the target, which the coordinator's own
+	// run_db validator asserts.
+	wantDB := filepath.Join(ownDir, "run_db.sqlite")
 	if got := captureField(t, string(data), "CAMBIA_RUN_DB"); got != wantDB {
 		t.Errorf("CAMBIA_RUN_DB = %q, want %q", got, wantDB)
 	}

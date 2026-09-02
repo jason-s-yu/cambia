@@ -92,6 +92,14 @@ type Config struct {
 	// RequireSignedCommits is true. An empty value or a missing file fails
 	// closed (the job is rejected). Ignored when enforcement is off.
 	AllowedSignersPath string
+	// EnvJSONName renames the write-once provenance record this manager
+	// authors. Empty means env.json, which is every path but one. The embedded
+	// node of --role both stages into the coordinator's own run dir, where the
+	// coordinator has already authored env.json carrying executed_on (D23), and
+	// a write-once writer would silently drop the staging record on top of it;
+	// pointing the node's manager at env.node.json keeps both, under exactly the
+	// name a remote node's copy is promoted to (D40, D52).
+	EnvJSONName string
 }
 
 // Manager stages jobs under one BaseDir. It is safe for sequential use by the
@@ -136,6 +144,9 @@ func New(cfg Config) *Manager {
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
+	}
+	if cfg.EnvJSONName == "" {
+		cfg.EnvJSONName = envJSONFile
 	}
 	mirrorDir := cfg.MirrorDir
 	if mirrorDir == "" {
@@ -387,7 +398,7 @@ func (m *Manager) liveCacheKeys(liveJobIDs []string) (venvKeys, libKeys map[stri
 	venvKeys = map[string]bool{}
 	libKeys = map[string]bool{}
 	for _, id := range liveJobIDs {
-		p, err := readEnvJSON(filepath.Join(m.runDir(id), envJSONFile))
+		p, err := readEnvJSON(filepath.Join(m.runDir(id), m.cfg.EnvJSONName))
 		if err != nil {
 			continue
 		}

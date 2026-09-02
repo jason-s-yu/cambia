@@ -4103,11 +4103,25 @@ def persist_eval_results(
     selection_mode: Optional[str] = None,
     crn_seed: Optional[int] = None,
     seat_scheme: Optional[str] = None,
+    metrics_dir: Optional[str] = None,
 ) -> None:
     """Dual-write eval results to metrics.jsonl and SQLite.
 
+    The evaluated run and the directory this writes into are two different
+    things. ``run_dir`` identifies the run the numbers are about: its name keys
+    every row and its config.yaml supplies the algorithm. ``metrics_dir`` is
+    where the artifacts land. They are the same directory for a local eval with
+    no metrics root passed, which is every historical caller.
+
+    They separate under the compute pool. An evaluate job holds a lease on its
+    own run dir and on nothing else, and the run it evaluates arrives as a
+    read-only seed, so writing metrics.jsonl and evaluations/ into the target is
+    a PermissionError on a node and a cross-job write on the coordinator
+    (design D64). The rows reach the target through the client's eval-merge
+    instead.
+
     Args:
-        run_dir: Path to run directory (e.g., runs/v2.2-sog-v3/).
+        run_dir: Path to the evaluated run's directory (e.g., runs/v2.2-sog-v3/).
         iteration: Checkpoint iteration/epoch number.
         results_map: Dict mapping baseline name -> Counter with P0 Wins, P1 Wins, Ties, stats.
         run_name: Run name for JSONL rows. Auto-derived from run_dir basename if None.
@@ -4118,11 +4132,14 @@ def persist_eval_results(
             results.stats take precedence when present (they reflect the actual run).
         crn_seed: Common-random-numbers seed root override (fallback for stats).
         seat_scheme: "alternated" / "fixed" override (fallback for stats).
+        metrics_dir: Where metrics.jsonl, evaluations/ and eval_summary.jsonl are
+            written. None means run_dir, the single-host default.
     """
     from datetime import datetime, timezone
     from pathlib import Path as _Path
 
     run_dir_path = _Path(run_dir).resolve()
+    metrics_path_root = _Path(metrics_dir).resolve() if metrics_dir else run_dir_path
     if run_name is None:
         run_name = run_dir_path.name
 
@@ -4199,16 +4216,17 @@ def persist_eval_results(
         }
         all_rows.append(row)
 
-    # Append to metrics.jsonl
+    # Append to metrics.jsonl, under the metrics root rather than the evaluated
+    # run's own directory (D64).
     if all_rows:
-        run_dir_path.mkdir(parents=True, exist_ok=True)
-        metrics_path = run_dir_path / "metrics.jsonl"
+        metrics_path_root.mkdir(parents=True, exist_ok=True)
+        metrics_path = metrics_path_root / "metrics.jsonl"
         with open(metrics_path, "a", encoding="utf-8") as f:
             for row in all_rows:
                 f.write(json.dumps(row) + "\n")
 
     # Create evaluations directory
-    eval_dir = run_dir_path / "evaluations" / f"iter_{iteration}"
+    eval_dir = metrics_path_root / "evaluations" / f"iter_{iteration}"
     eval_dir.mkdir(parents=True, exist_ok=True)
 
     # SQLite dual-write (non-fatal)
@@ -4261,7 +4279,9 @@ def persist_eval_results(
                 )
             for row in all_rows:
                 run_db.insert_eval_result(db, run_id, ckpt_id, row)
-            run_db.write_eval_summary_jsonl(db, run_id, str(run_dir_path))
+            # The summary is derived from the journal this process wrote, so it
+            # lands beside it rather than in the evaluated run (D64).
+            run_db.write_eval_summary_jsonl(db, run_id, str(metrics_path_root))
             # Refresh best_metric_* from the freshly written eval rows so the
             # run's recorded best never lags behind its eval history.
             try:

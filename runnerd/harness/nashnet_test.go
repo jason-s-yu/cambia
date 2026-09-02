@@ -90,8 +90,10 @@ type poolRig struct {
 	cfg      poolRigConfig
 	nodeA    fixtureNode
 	nodeB    fixtureNode
-	opPriv   ed25519.PrivateKey
-	clock    *testClock
+	// nodeE is the embedded node, set only when poolRigConfig.embedded is on.
+	nodeE  fixtureNode
+	opPriv ed25519.PrivateKey
+	clock  *testClock
 }
 
 // fixtureNode is one enrolled node: node-a and node-b are the only fixture
@@ -126,6 +128,11 @@ type poolRigConfig struct {
 	maxClaimWaiters int
 	maxLeases       int
 	grace           time.Duration
+	// embedded attaches the coordinator's own node: an in-process grant over a
+	// key this rig generated, and the pool told which node id materializes in
+	// place (D40). It is off by default so the existing suites keep describing
+	// a coordinator with remote nodes only.
+	embedded bool
 }
 
 func newPoolRig(t *testing.T, cfg poolRigConfig) *poolRig {
@@ -139,6 +146,21 @@ func newPoolRig(t *testing.T, cfg poolRigConfig) *poolRig {
 	clock := &testClock{t: time.Date(2026, time.September, 1, 12, 0, 0, 0, time.UTC)}
 	bundles := newFakeBundles(t)
 
+	// The embedded node's key is generated before the pool because the pool
+	// has to be told its id at construction.
+	var embeddedNode fixtureNode
+	if cfg.embedded {
+		pub, priv, kerr := ed25519.GenerateKey(nil)
+		if kerr != nil {
+			t.Fatal(kerr)
+		}
+		id, derr := authtoken.DeriveNodeID(pub)
+		if derr != nil {
+			t.Fatal(derr)
+		}
+		embeddedNode = fixtureNode{name: "node-embedded", id: id, priv: priv}
+	}
+
 	var pool *Pool
 	cfg.rig.attach = func(srv *Server, disp *Dispatcher) {
 		grants, gerr := authtoken.NewGrantStore(authtoken.GrantStoreConfig{
@@ -146,6 +168,12 @@ func newPoolRig(t *testing.T, cfg poolRigConfig) *poolRig {
 		})
 		if gerr != nil {
 			t.Fatal(gerr)
+		}
+		if cfg.embedded {
+			pub, _ := embeddedNode.priv.Public().(ed25519.PublicKey)
+			if _, serr := grants.SetLocalGrant(pub, capability.Grant{}, 0); serr != nil {
+				t.Fatal(serr)
+			}
 		}
 		leases, lerr := nashnet.NewLeaseStore(nashnet.StoreConfig{
 			RunsDir: srv.runsDir, Policy: nashnet.DefaultPolicy(), Now: clock.now,
@@ -176,6 +204,7 @@ func newPoolRig(t *testing.T, cfg poolRigConfig) *poolRig {
 			Ceilings:         Ceilings{MaxClaimWaiters: cfg.maxClaimWaiters},
 			MaxLeasesPerNode: cfg.maxLeases,
 			UnplaceableGrace: cfg.grace,
+			EmbeddedNodeID:   embeddedNode.id,
 			Now:              clock.now,
 		})
 		if perr != nil {
@@ -192,6 +221,7 @@ func newPoolRig(t *testing.T, cfg poolRigConfig) *poolRig {
 	}
 	pr.nodeA = pr.enroll(t, "node-a", capability.Grant{})
 	pr.nodeB = pr.enroll(t, "node-b", capability.Grant{})
+	pr.nodeE = embeddedNode
 	return pr
 }
 
