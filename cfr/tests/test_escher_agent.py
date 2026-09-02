@@ -10,9 +10,11 @@ Tests for ESCHER Phase 0 implementation:
 """
 
 import copy
+import logging
 import tempfile
 import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -84,6 +86,35 @@ def _make_escher_checkpoint(path: str):
     torch.save(checkpoint, path)
 
 
+@contextmanager
+def _no_wrapper_fallback():
+    """Fail if a wrapper logs an error while choosing inside this block.
+
+    choose_action answers a random legal action when encoding or inference
+    raises, and logs the reason at ERROR before it does. Without this, an
+    assertion that the choice is legal passes whether or not the network was
+    ever consulted, which is the failure mode the Go-engine move has to avoid
+    reintroducing.
+    """
+    records = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = _Collect(level=logging.ERROR)
+    logger = logging.getLogger("src.evaluate_agents")
+    previous = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.ERROR)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
+    assert records == [], f"wrapper fell back instead of using its network: {records}"
+
+
 # ---------------------------------------------------------------------------
 # NeuralAgentWrapper base class tests
 # ---------------------------------------------------------------------------
@@ -99,10 +130,9 @@ class TestNeuralAgentWrapperBase:
         assert "choose_action" in NeuralAgentWrapper.__abstractmethods__
 
     def test_initialize_state_creates_agent_state(self):
-        """initialize_state() should create an AgentState on the wrapper."""
+        """initialize_state() should attach a Go belief to the wrapper."""
         from src.evaluate_agents import DeepCFRAgentWrapper
-        from src.agent_state import AgentState
-        from src.game.engine import CambiaGameState
+        from src.ffi.bridge import GoAgentState, GoEngine
 
         config = _make_config()
         with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
@@ -112,19 +142,28 @@ class TestNeuralAgentWrapperBase:
             agent = DeepCFRAgentWrapper(0, config, ckpt_path, device="cpu")
             assert agent.agent_state is None
 
-            game_state = CambiaGameState(house_rules=config.cambia_rules)
-            agent.initialize_state(game_state)
+            with GoEngine(seed=7, house_rules=config.cambia_rules) as game:
+                agent.initialize_state(game)
 
-            assert agent.agent_state is not None
-            assert isinstance(agent.agent_state, AgentState)
+                assert agent.agent_state is not None
+                assert isinstance(agent.agent_state, GoAgentState)
+                assert agent.belief_handle() >= 0
+                agent.release_belief()
         finally:
             os.unlink(ckpt_path)
 
     def test_update_state_updates_agent_state(self):
-        """update_state() should not raise and should keep agent_state intact."""
+        """update_state() should not raise and should keep the belief attached.
+
+        Belief advances inside the engine now (cambia-1426), so update_state is
+        a retained no-op for callers that still push an observation. What this
+        holds is that such a caller neither raises nor detaches the belief. The
+        observation is built here rather than through _create_observation, which
+        belongs to the tabular CFRAgentWrapper and was never on this one.
+        """
         from src.evaluate_agents import DeepCFRAgentWrapper
         from src.agent_state import AgentObservation
-        from src.game.engine import CambiaGameState
+        from src.ffi.bridge import GoEngine
 
         config = _make_config()
         with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
@@ -132,15 +171,31 @@ class TestNeuralAgentWrapperBase:
         try:
             _make_deep_cfr_checkpoint(ckpt_path)
             agent = DeepCFRAgentWrapper(0, config, ckpt_path, device="cpu")
-            game_state = CambiaGameState(house_rules=config.cambia_rules)
-            agent.initialize_state(game_state)
 
-            obs = agent._create_observation(game_state, None, 0)
-            assert obs is not None
+            with GoEngine(seed=7, house_rules=config.cambia_rules) as game:
+                agent.initialize_state(game)
+                handle_before = agent.belief_handle()
 
-            # update_state must not raise
-            agent.update_state(obs)
-            assert agent.agent_state is not None
+                obs = AgentObservation(
+                    acting_player=game.acting_player(),
+                    action=None,
+                    discard_top_card=None,
+                    player_hand_sizes=list(agent.agent_state.get_hand_lens()),
+                    stockpile_size=game.stock_len(),
+                    drawn_card=None,
+                    peeked_cards=None,
+                    snap_results=[],
+                    did_cambia_get_called=False,
+                    who_called_cambia=None,
+                    is_game_over=False,
+                    current_turn=agent.agent_state.get_current_turn(),
+                )
+
+                # update_state must not raise
+                agent.update_state(obs)
+                assert agent.agent_state is not None
+                assert agent.belief_handle() == handle_before
+                agent.release_belief()
         finally:
             os.unlink(ckpt_path)
 
@@ -202,8 +257,9 @@ class TestESCHERAgentWrapper:
 
     def test_choose_action_returns_valid_legal_action(self):
         """choose_action() returns one of the legal actions after initialization."""
+        from src.agents import action_codec
         from src.evaluate_agents import ESCHERAgentWrapper
-        from src.game.engine import CambiaGameState
+        from src.ffi.bridge import GoEngine
 
         config = _make_config()
         with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
@@ -211,14 +267,17 @@ class TestESCHERAgentWrapper:
         try:
             _make_escher_checkpoint(ckpt_path)
             agent = ESCHERAgentWrapper(0, config, ckpt_path, device="cpu")
-            game_state = CambiaGameState(house_rules=config.cambia_rules)
-            agent.initialize_state(game_state)
 
-            legal_actions = game_state.get_legal_actions()
-            assert len(legal_actions) > 0
+            with GoEngine(seed=7, house_rules=config.cambia_rules) as game:
+                agent.initialize_state(game)
 
-            chosen = agent.choose_action(game_state, legal_actions)
-            assert chosen in legal_actions
+                legal_actions = action_codec.actions_from_mask(game.legal_actions_mask())
+                assert len(legal_actions) > 0
+
+                with _no_wrapper_fallback():
+                    chosen = agent.choose_action(game, legal_actions)
+                assert chosen in legal_actions
+                agent.release_belief()
         finally:
             os.unlink(ckpt_path)
 
@@ -315,8 +374,9 @@ class TestDeepCFRAgentWrapperRegression:
 
     def test_choose_action_returns_valid_action(self):
         """DeepCFRAgentWrapper.choose_action() returns a legal action (regression)."""
+        from src.agents import action_codec
         from src.evaluate_agents import DeepCFRAgentWrapper
-        from src.game.engine import CambiaGameState
+        from src.ffi.bridge import GoEngine
 
         config = _make_config()
         with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
@@ -324,12 +384,17 @@ class TestDeepCFRAgentWrapperRegression:
         try:
             _make_deep_cfr_checkpoint(ckpt_path)
             agent = DeepCFRAgentWrapper(0, config, ckpt_path, device="cpu")
-            game_state = CambiaGameState(house_rules=config.cambia_rules)
-            agent.initialize_state(game_state)
 
-            legal_actions = game_state.get_legal_actions()
-            chosen = agent.choose_action(game_state, legal_actions)
-            assert chosen in legal_actions
+            with GoEngine(seed=7, house_rules=config.cambia_rules) as game:
+                agent.initialize_state(game)
+
+                legal_actions = action_codec.actions_from_mask(game.legal_actions_mask())
+                assert len(legal_actions) > 0
+
+                with _no_wrapper_fallback():
+                    chosen = agent.choose_action(game, legal_actions)
+                assert chosen in legal_actions
+                agent.release_belief()
         finally:
             os.unlink(ckpt_path)
 
@@ -516,17 +581,25 @@ class TestESCHERAgentStateReset:
     def test_agent_state_fresh_per_game(self):
         """Agent state must be freshly initialized for each new game.
 
-        After initialize_state() with a second game, the wrapper must hold a
-        brand-new AgentState that reflects the new game: not the old one.
-        Checks:
-          1. agent_state is not None after second init.
-          2. agent_state is a different object from the first game's state.
-          3. own_active_mask is reset (only initial-peek slots are active).
-          4. own_hand buckets reflect the new game's peek indices.
+        After initialize_state() with a second game the wrapper must hold a
+        brand-new belief that reflects the new game, not the old one. The
+        belief is a GoAgentState now (cambia-1522), so game 1 is dirtied by
+        playing it rather than by assigning to Python attributes, and the
+        checks read the Go getters:
+          1. the belief is attached and is a different object after re-init.
+          2. the observation turn counter is back to zero, after game 1 moved
+             it off zero.
+          3. exactly initial_view_count slots carry a known bucket, the rest
+             are Unknown, so no game-1 knowledge bled through.
         """
+        from src.agents import action_codec
         from src.evaluate_agents import ESCHERAgentWrapper
-        from src.agent_state import AgentState, CardBucket
-        from src.game.engine import CambiaGameState
+        from src.ffi.bridge import GoEngine, apply_games_batch
+
+        #: engine/agent's BucketUnknown, the value the Go getter reports for a
+        #: slot the seat knows nothing about. Python's CardBucket.UNKNOWN is 99
+        #: and does not line up (see src/agents/go_belief_view.py).
+        go_bucket_unknown = 9
 
         config = _make_config()
         with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
@@ -535,62 +608,69 @@ class TestESCHERAgentStateReset:
             _make_escher_checkpoint(ckpt_path)
             agent = ESCHERAgentWrapper(0, config, ckpt_path, device="cpu")
 
-            # --- Game 1 ---
-            game1 = CambiaGameState(house_rules=config.cambia_rules)
-            agent.initialize_state(game1)
+            # --- Game 1: attach, then play it so belief accumulates ---
+            with GoEngine(seed=11, house_rules=config.cambia_rules) as game1:
+                agent.initialize_state(game1)
+                assert agent.agent_state is not None
+                state_after_game1 = agent.agent_state
 
-            assert agent.agent_state is not None
-            state_after_game1 = agent.agent_state
+                for _ in range(6):
+                    if game1.is_terminal():
+                        break
+                    legal_mask = np.asarray(game1.legal_actions_mask())
+                    idx = int(np.flatnonzero(legal_mask)[0])
+                    apply_games_batch(
+                        [game1.handle], [state_after_game1.handle], [-1], [idx]
+                    )
 
-            # Dirty the state: mark all own slots as HIGH_KING bucket
-            # (simulates knowledge accumulated during a real game)
-            for slot in range(len(game1.players[0].hand)):
-                state_after_game1.own_hand[slot].bucket = CardBucket.HIGH_KING
-            dirty_id = id(state_after_game1)
+                turn_after_game1 = state_after_game1.get_current_turn()
+                assert turn_after_game1 > 0, (
+                    "the first game did not advance the belief, so this test "
+                    "would not detect a stale one"
+                )
 
             # --- Game 2 ---
-            game2 = CambiaGameState(house_rules=config.cambia_rules)
-            agent.initialize_state(game2)
+            with GoEngine(seed=12, house_rules=config.cambia_rules) as game2:
+                agent.initialize_state(game2)
 
-            assert (
-                agent.agent_state is not None
-            ), "agent_state must not be None after re-init"
-
-            # 1. Must be a fresh object, not the game-1 state
-            assert (
-                id(agent.agent_state) != dirty_id
-            ), "initialize_state() must create a new AgentState object, not reuse the old one"
-
-            # 2. own_active_mask must only contain the initial-peek slots for game 2
-            peek_indices = set(game2.players[0].initial_peek_indices)
-            active = set(agent.agent_state.own_active_mask)
-            # Every active slot must be one that was peeked at start
-            assert (
-                active <= peek_indices
-            ), f"own_active_mask {active} contains non-peeked slots; expected subset of {peek_indices}"
-
-            # 3. Peeked slots must have a non-UNKNOWN bucket (concrete knowledge)
-            for slot in peek_indices:
-                bucket = agent.agent_state.own_hand[slot].bucket
                 assert (
-                    bucket != CardBucket.UNKNOWN
-                ), f"Slot {slot} was peeked at init but has UNKNOWN bucket after initialize_state()"
+                    agent.agent_state is not None
+                ), "agent_state must not be None after re-init"
 
-            # 4. Non-peeked slots must be UNKNOWN (no bleed-over from game 1)
-            non_peeked = set(range(len(game2.players[0].hand))) - peek_indices
-            for slot in non_peeked:
-                bucket = agent.agent_state.own_hand[slot].bucket
-                assert bucket == CardBucket.UNKNOWN, (
-                    f"Slot {slot} was not peeked but has bucket {bucket} after re-init "
-                    f"(possible stale-state bleed from game 1)"
+                # 1. Must be a fresh object, not the game-1 belief.
+                assert agent.agent_state is not state_after_game1, (
+                    "initialize_state() must attach a new GoAgentState, not "
+                    "reuse the old one"
                 )
+
+                # 2. The observation counter is back to the start of a game.
+                assert agent.agent_state.get_current_turn() == 0, (
+                    "the re-attached belief carries game 1's turn counter "
+                    f"({agent.agent_state.get_current_turn()} after "
+                    f"{turn_after_game1} in game 1)"
+                )
+
+                # 3. Only the initial peek is known; nothing bled from game 1.
+                own = agent.agent_state.get_own_hand_buckets_and_seen()
+                own_len, _ = agent.agent_state.get_hand_lens()
+                known = [
+                    slot
+                    for slot in range(own_len)
+                    if int(own[slot, 0]) != go_bucket_unknown
+                ]
+                assert len(known) == config.cambia_rules.initial_view_count, (
+                    f"slots {known} carry a known bucket after re-init; "
+                    f"expected exactly {config.cambia_rules.initial_view_count} "
+                    "from the initial peek"
+                )
+                agent.release_belief()
         finally:
             os.unlink(ckpt_path)
 
     def test_agent_state_object_replaced_not_mutated(self):
         """initialize_state() must replace agent_state, not mutate it in place."""
         from src.evaluate_agents import ESCHERAgentWrapper
-        from src.game.engine import CambiaGameState
+        from src.ffi.bridge import GoEngine
 
         config = _make_config()
         with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
@@ -599,16 +679,21 @@ class TestESCHERAgentStateReset:
             _make_escher_checkpoint(ckpt_path)
             agent = ESCHERAgentWrapper(0, config, ckpt_path, device="cpu")
 
-            game1 = CambiaGameState(house_rules=config.cambia_rules)
-            agent.initialize_state(game1)
-            state1 = agent.agent_state
+            with GoEngine(seed=11, house_rules=config.cambia_rules) as game1:
+                agent.initialize_state(game1)
+                state1 = agent.agent_state
 
-            game2 = CambiaGameState(house_rules=config.cambia_rules)
-            agent.initialize_state(game2)
-            state2 = agent.agent_state
+            with GoEngine(seed=12, house_rules=config.cambia_rules) as game2:
+                agent.initialize_state(game2)
+                state2 = agent.agent_state
 
-            assert (
-                state2 is not state1
-            ), "initialize_state() must assign a new AgentState instance, not reuse the existing one"
+                # Object identity, not the handle: attach_belief releases the
+                # old handle first, so the pool is free to hand the same number
+                # back to the new belief.
+                assert state2 is not state1, (
+                    "initialize_state() must assign a new GoAgentState instance, "
+                    "not reuse the existing one"
+                )
+                agent.release_belief()
         finally:
             os.unlink(ckpt_path)

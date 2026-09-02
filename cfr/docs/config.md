@@ -648,9 +648,9 @@ Parameters for Deep CFR training. These values are loaded from the YAML config a
   * Type: `string` (`"linear"` or `"uniform"`)
   * Default: `"linear"`
 * **`use_ema`**:
-  * Description: If `true`, maintain an exponential moving average of advantage network weights for O(1) SD-CFR inference at eval time, instead of averaging all snapshots on every query.
+  * Description: If `true`, maintain an exponential moving average of advantage network weights and serve that blend at eval time instead of the snapshot policy mixture. The blend approximates the mixture in O(1) rather than equalling it, since regret matching is not linear in the parameters, so it is opt-in and the eval row's `served_policy` reads `ema_blend` instead of `mixture`. Its snapshot weighting follows `sd_cfr_snapshot_weighting`, not `alpha`.
   * Type: `boolean`
-  * Default: `true`
+  * Default: `false`
 
 **Network Architecture:**
 

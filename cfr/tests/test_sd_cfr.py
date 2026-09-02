@@ -291,20 +291,29 @@ class TestSDCFRAgentWrapper:
             )
             assert len(wrapper._snapshot_nets) == 3
 
-            # Test inference with fake game state (use default rules)
-            from src.game.engine import CambiaGameState
+            # Inference on the Go engine, which is what initialize_state takes:
+            # it attaches this seat's belief through the FFI (cambia-1522); the
+            # wrapper's belief is a GoAgentState bound to that game (cambia-1426).
+            from src.agents import action_codec
+            from src.ffi.bridge import GoEngine
 
-            game = CambiaGameState()
-            wrapper.initialize_state(game)
-
-            legal_actions = game.get_legal_actions()
-            action = wrapper.choose_action(game, legal_actions)
-            assert action in legal_actions
+            with GoEngine(seed=7, house_rules=mock_config.cambia_rules) as game:
+                wrapper.initialize_state(game)
+                legal_actions = action_codec.actions_from_mask(game.legal_actions_mask())
+                assert legal_actions
+                action = wrapper.choose_action(game, legal_actions)
+                assert action in legal_actions
+                wrapper.release_belief()
 
 
 class TestEMAWeights:
     def test_ema_math_correctness(self):
-        """EMA formula matches manual weighted average with alpha=1.5 over 10 steps."""
+        """The incremental EMA update equals the closed-form weighted average.
+
+        alpha is set to 1.5 here and must not reach the blend: the exponent
+        follows sd_cfr_snapshot_weighting so that toggling use_ema changes the
+        estimator form and not the weights (cambia-712).
+        """
         from src.cfr.deep_trainer import DeepCFRTrainer, DeepCFRConfig
         from src.config import Config
 
@@ -331,7 +340,7 @@ class TestEMAWeights:
                     p.add_(torch.ones_like(p) * 0.1)
             trainer._take_advantage_snapshot()
             trainer._update_ema()
-            w = float((step + 1) ** 1.5)
+            w = float(step + 1)
             weights.append(w)
             snapshots.append(
                 trainer.advantage_net.state_dict()[param_key].cpu().numpy().copy()
@@ -479,3 +488,157 @@ class TestEMAWeights:
             assert not os.path.exists(
                 f"{base}_ema.pt"
             ), "EMA file should NOT be saved when disabled"
+
+
+# ---------------------------------------------------------------------------
+# What sd_cfr serves (cambia-712)
+#
+# SD-CFR's solution is the mixture over snapshot policies: regret matching per
+# snapshot, then averaging the resulting strategies. The EMA blends network
+# parameters instead, and regret matching is not linear in the parameters, so
+# the blend is an approximation of that mixture and not the mixture itself.
+# It used to switch itself on whenever a sibling *_ema.pt happened to exist.
+# ---------------------------------------------------------------------------
+
+
+def _build_sd_checkpoint(tmpdir, steps=3, with_ema=True):
+    """Train far enough to write a checkpoint, its snapshots, and an EMA sibling."""
+    from src.cfr.deep_trainer import DeepCFRTrainer, DeepCFRConfig
+
+    path = os.path.join(tmpdir, "sd_test.pt")
+    mock_config = _make_mock_config(path)
+    dcfr = DeepCFRConfig(
+        use_sd_cfr=True, use_ema=with_ema, device="cpu", use_residual=False
+    )
+    trainer = DeepCFRTrainer(mock_config, deep_cfr_config=dcfr)
+    for i in range(steps):
+        trainer.training_step = i + 1
+        trainer._take_advantage_snapshot()
+        if with_ema:
+            trainer._update_ema()
+    trainer.save_checkpoint(path)
+    return path, mock_config
+
+
+class TestSDCFRServesTheMixture:
+    def test_ema_sibling_does_not_switch_serving(self):
+        """An *_ema.pt next to the checkpoint must not change what is served."""
+        from src.evaluate_agents import SDCFRAgentWrapper
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path, mock_config = _build_sd_checkpoint(tmpdir, with_ema=True)
+            assert os.path.exists(f"{os.path.splitext(path)[0]}_ema.pt")
+
+            wrapper = SDCFRAgentWrapper(
+                player_id=0, config=mock_config, checkpoint_path=path, device="cpu"
+            )
+
+            assert wrapper._ema_net is None
+            assert len(wrapper._snapshot_nets) == 3
+            assert wrapper.served_policy == "mixture"
+
+    def test_flag_serves_the_blend_and_labels_it(self):
+        from src.evaluate_agents import SDCFRAgentWrapper
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path, mock_config = _build_sd_checkpoint(tmpdir, with_ema=True)
+
+            wrapper = SDCFRAgentWrapper(
+                player_id=0,
+                config=mock_config,
+                checkpoint_path=path,
+                device="cpu",
+                use_ema=True,
+            )
+
+            assert wrapper._ema_net is not None
+            assert wrapper.served_policy == "ema_blend"
+
+    def test_flag_without_an_ema_file_raises(self):
+        """Asking for the blend and silently getting the mixture would mislabel."""
+        from src.evaluate_agents import SDCFRAgentWrapper
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path, mock_config = _build_sd_checkpoint(tmpdir, with_ema=False)
+            assert not os.path.exists(f"{os.path.splitext(path)[0]}_ema.pt")
+
+            with pytest.raises(FileNotFoundError):
+                SDCFRAgentWrapper(
+                    player_id=0,
+                    config=mock_config,
+                    checkpoint_path=path,
+                    device="cpu",
+                    use_ema=True,
+                )
+
+
+class TestEMAOptInDefaults:
+    def test_pydantic_config_defaults_off(self):
+        import importlib
+        import sys
+
+        # Bypass the conftest stub: the real pydantic model is what a YAML
+        # config loads through.
+        orig = sys.modules.pop("src.config", None)
+        try:
+            real = importlib.import_module("src.config")
+            assert real.DeepCfrConfig().use_ema is False
+        finally:
+            if orig is not None:
+                sys.modules["src.config"] = orig
+
+    def test_trainer_dataclass_defaults_off(self):
+        from src.cfr.deep_trainer import DeepCFRConfig
+
+        assert DeepCFRConfig().use_ema is False
+
+
+class TestEMAWeightingMatchesTheMixture:
+    """The blend approximates the mixture, so it must weight snapshots the
+    same way the mixture does; alpha is the loss exponent, not this one."""
+
+    def _trainer(self, weighting):
+        from src.cfr.deep_trainer import DeepCFRTrainer, DeepCFRConfig
+        from src.config import Config
+
+        return DeepCFRTrainer(
+            Config(),
+            deep_cfr_config=DeepCFRConfig(
+                use_sd_cfr=True,
+                use_ema=True,
+                device="cpu",
+                use_residual=False,
+                alpha=1.5,
+                sd_cfr_snapshot_weighting=weighting,
+            ),
+        )
+
+    def _run(self, trainer, steps=5):
+        key = list(trainer.advantage_net.state_dict().keys())[0]
+        seen = []
+        for step in range(steps):
+            trainer.training_step = step
+            with torch.no_grad():
+                for p in trainer.advantage_net.parameters():
+                    p.add_(torch.ones_like(p) * 0.1)
+            trainer._take_advantage_snapshot()
+            trainer._update_ema()
+            seen.append(trainer.advantage_net.state_dict()[key].cpu().numpy().copy())
+        return key, seen
+
+    def test_linear_weighting_uses_exponent_one(self):
+        trainer = self._trainer("linear")
+        key, seen = self._run(trainer)
+
+        weights = [float(step + 1) for step in range(len(seen))]
+        expected = sum(w * s for w, s in zip(weights, seen)) / sum(weights)
+
+        np.testing.assert_allclose(trainer._ema_state_dict[key], expected, atol=1e-5)
+
+    def test_uniform_weighting_is_flat(self):
+        trainer = self._trainer("uniform")
+        key, seen = self._run(trainer)
+
+        expected = sum(seen) / len(seen)
+
+        np.testing.assert_allclose(trainer._ema_state_dict[key], expected, atol=1e-5)

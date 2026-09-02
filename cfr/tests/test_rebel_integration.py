@@ -262,37 +262,16 @@ def test_rebel_wrapper_range_reset_on_initialize_state(rebel_checkpoint):
     wrapper._range_p1 = np.zeros(NUM_HAND_TYPES, dtype=np.float32)
     wrapper._range_p1[0] = 1.0
 
-    # initialize_state requires a game_state object; use a minimal stub
-    from src.card import Card
+    # initialize_state takes the GoEngine and attaches belief through the FFI
+    # (cambia-1522), so a Python-shaped stub cannot stand in for the game here.
+    from src.ffi.bridge import GoEngine
 
-    class _FakePlayer:
-        hand = [Card("A", "S"), Card("2", "H"), Card("3", "D"), Card("4", "C")]
-        initial_peek_indices = [0, 1]
-
-    class _FakeGameState:
-        players = {0: _FakePlayer(), 1: _FakePlayer()}
-        snap_results_log = []
-        cambia_caller_id = None
-
-        def get_discard_top(self):
-            return Card("5", "S")
-
-        def is_terminal(self):
-            return False
-
-        def get_turn_number(self):
-            return 0
-
-        def get_player_card_count(self, i):
-            return 4
-
-        def get_stockpile_size(self):
-            return 40
-
-    wrapper.initialize_state(_FakeGameState())
-    expected = uniform_range()
-    np.testing.assert_allclose(wrapper._range_p0, expected, rtol=1e-5)
-    np.testing.assert_allclose(wrapper._range_p1, expected, rtol=1e-5)
+    with GoEngine(seed=5, house_rules=config.cambia_rules) as game_state:
+        wrapper.initialize_state(game_state)
+        expected = uniform_range()
+        np.testing.assert_allclose(wrapper._range_p0, expected, rtol=1e-5)
+        np.testing.assert_allclose(wrapper._range_p1, expected, rtol=1e-5)
+        wrapper.release_belief()
 
 
 # ---------------------------------------------------------------------------

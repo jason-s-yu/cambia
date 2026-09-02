@@ -2,7 +2,7 @@
 tests/tabular_table_gate.py
 
 Shared runner for the tabular table-equality gate (cambia-1782, re-based by
-cambia-718 and cambia-719). Not a test module:
+cambia-718 and cambia-719, then by cambia-1985). Not a test module:
 ``tests/test_tabular_table_gate.py`` is.
 
 What the gate compares
@@ -20,8 +20,19 @@ output, and the gate is a regression pin rather than a port check: it holds the
 traversal bit-for-bit against the tables it writes today, so an unrelated change
 to sampling, reach threading, or the averaging weight cannot pass unnoticed.
 
+cambia-1985 then moved them again, for a different reason. A successful own
+snap that closes the snap window had its snap-results entry cleared inside the
+same apply that appended it, so the entry naming the removed slot never reached
+an observation and the belief truncated the snapper's hand from the end, keeping
+the removed card's bucket instead of the card that survived. That mis-keyed
+about 4.5 percent of this config's seat-nodes. The belief now reads the removal
+off a channel of its own, so the infoset keys are the ones the corrected belief
+writes.
+
 What that costs is that the fixture no longer proves anything about the Python
-engine; what it keeps is an exact, cheap gate over the whole traversal.
+engine; what it keeps is an exact, cheap gate over the whole traversal. Its
+provenance is the accumulation of those three corrections, which is what the
+file name records the most recent of.
 
 Making the comparison exact takes pinning both sources of randomness.
 
@@ -70,7 +81,7 @@ import numpy as np
 from src.config import load_config
 
 FIXTURE = os.path.join(
-    os.path.dirname(__file__), "fixtures", "tabular_tables_cambia_718_719.json"
+    os.path.dirname(__file__), "fixtures", "tabular_tables_cambia_1985.json"
 )
 
 #: The gate's pinned run. tiny_cambia_tabular.yaml is the smallest shipped

@@ -134,22 +134,54 @@ class _SnapLogMirror:
     a single rule. A SnapOpponentMove that resumes the phase for a remaining
     snapper is deliberately NOT a clear on either engine: the accumulated block
     stays visible to that snapper's decision.
+
+    A clear that drops entries the closing action itself produced hands them to
+    ``closing`` first (cambia-1985). Those entries are the ones no observation
+    would otherwise ever see, and the belief needs them: a successful own snap
+    names the slot that left, and without it the belief truncates the hand from
+    the end and keeps the removed card's bucket. They ride their own field on the
+    observation rather than going back into the log, because the log is the
+    tokenizer channel and Go emits public snap frames only while ``Snap.Active``.
+    Entries an earlier observation already delivered are not carried over.
     """
 
-    __slots__ = ("_entries",)
+    __slots__ = ("_entries", "_closing")
 
-    def __init__(self, entries: Optional[List[Dict[str, Any]]] = None) -> None:
+    def __init__(
+        self,
+        entries: Optional[List[Dict[str, Any]]] = None,
+        closing: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
         self._entries: List[Dict[str, Any]] = list(entries or [])
+        self._closing: List[Dict[str, Any]] = list(closing or [])
 
     def clone(self) -> "_SnapLogMirror":
-        return _SnapLogMirror([dict(e) for e in self._entries])
+        return _SnapLogMirror(
+            [dict(e) for e in self._entries], [dict(e) for e in self._closing]
+        )
 
     def entries(self) -> List[Dict[str, Any]]:
         """A copy, matching the Python builder's ``copy.deepcopy`` of the log."""
         return [dict(e) for e in self._entries]
 
-    def clear(self) -> None:
+    def closing_entries(self) -> List[Dict[str, Any]]:
+        """A copy of the entries the last window-closing action produced."""
+        return [dict(e) for e in self._closing]
+
+    def clear(self, closed_by: Optional[List[Dict[str, Any]]] = None) -> None:
+        """Drop the log. ``closed_by`` names the entries the closing action just
+        appended, which are handed to the belief instead of being lost."""
         self._entries = []
+        self._closing = list(closed_by or [])
+
+    def start_action(self) -> None:
+        """Drop the previous action's closing entries.
+
+        They are live for exactly the one observation taken after the action that
+        produced them, the same lifetime the Python engine gives
+        ``race_resolution``.
+        """
+        self._closing = []
 
     def append(self, entry: Dict[str, Any]) -> None:
         self._entries.append(entry)
@@ -349,6 +381,7 @@ class GoBrState:
         is free here.
         """
         action = index_to_action(int(action_idx))
+        self._snap_log.start_action()
         before = self._view()
         snap_before = before.snap
         entry = None
@@ -371,14 +404,20 @@ class GoBrState:
         if snap_after.active != snap_before.active:
             # A phase starting clears for the new phase (change_snap_start); a
             # phase ending clears inside the same apply that appended the last
-            # snapper's entry (change_snap_end), which is why that entry never
-            # reaches an observation. The SnapOpponentMove flush
+            # snapper's entry (change_snap_end). The SnapOpponentMove flush
             # (_flush_snap_results_log) is the same edge seen from the other
             # side: Python flushes only when no snapper remains, which is
             # exactly when Go's Snap.Active drops. A move that RESUMES the
             # phase for the next snapper deliberately keeps the block visible
             # on both engines, so no clear belongs there.
-            self._snap_log.clear()
+            #
+            # The entry this action appended is what the clear would otherwise
+            # lose, so it goes to the belief on the closing channel instead
+            # (cambia-1985). A phase START clears a block belonging to an
+            # earlier window that every interested observation already saw, so
+            # nothing is carried there.
+            closed_by = [entry] if (entry is not None and not snap_after.active) else []
+            self._snap_log.clear(closed_by)
 
     def checkpoint(self) -> Checkpoint:
         """Take a rewind token for the current node.
@@ -515,6 +554,7 @@ class GoBrState:
                 else None
             ),
             snap_results=self._snap_log.entries(),
+            closing_snap_results=self._snap_log.closing_entries(),
             did_cambia_get_called=caller is not None,
             who_called_cambia=caller,
             is_game_over=view.terminal,

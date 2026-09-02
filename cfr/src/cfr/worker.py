@@ -1368,6 +1368,9 @@ def _create_observation(
             drawn_card=drawn_card_for_obs,  # Determined from next_state based on action
             peeked_cards=peeked_cards_dict,
             snap_results=final_snap_results,
+            closing_snap_results=list(
+                getattr(next_state, "snap_results_at_close", []) or []
+            ),
             did_cambia_get_called=cambia_called,
             who_called_cambia=who_called,
             is_game_over=game_over,
@@ -1430,5 +1433,8 @@ def _filter_observation(obs: AgentObservation, observer_id: int) -> AgentObserva
 
     # Snap results are public information derived from game state deltas
     filtered_obs.snap_results = obs.snap_results
+    # Public for the same reason, and carried on its own field so the tokenizer
+    # channel above stays byte-identical to Go's (cambia-1985).
+    filtered_obs.closing_snap_results = obs.closing_snap_results
 
     return filtered_obs
