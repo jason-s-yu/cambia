@@ -155,7 +155,12 @@ func TestRevokingKeepsTheTokenAndAdmitsOnlyTheWindDownRoutes(t *testing.T) {
 		t.Fatalf("progress renewed a revoking lease: %s", got.Deadline)
 	}
 
-	for _, route := range []Route{RouteLogs, RouteBlobs, RouteManifestFinal, RouteResult, RouteProgress} {
+	// The manifest head is admitted with the wind-down writes: the final commit
+	// the grace exists for fast-forwards from the head it reads first, so a
+	// refused read is a refused commit and an orphaned output (cambia-2019).
+	for _, route := range []Route{
+		RouteLogs, RouteBlobs, RouteManifestHead, RouteManifestFinal, RouteResult, RouteProgress,
+	} {
 		if _, err := s.Fence(l.LeaseID, l.LeaseEpoch, l.NodeEpoch, token, route); err != nil {
 			t.Errorf("route %s must be admitted while revoking: %v", route, err)
 		}

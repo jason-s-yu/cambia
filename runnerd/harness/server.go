@@ -210,7 +210,10 @@ func (s *Server) registerNashnet(mux *http.ServeMux) {
 	mux.Handle("PATCH /nashnet/leases/{lease}/blobs/{digest}",
 		s.requireLeaseToken(nashnet.RouteBlobs, deadlineChunk, s.handleBlobPatch))
 	mux.Handle("DELETE /nashnet/leases/{lease}/blobs/{digest}", lease(nashnet.RouteBlobs, s.handleBlobDelete))
-	mux.Handle("GET /nashnet/leases/{lease}/manifest", lease(nashnet.RouteManifest, s.handleManifestGet))
+	// The manifest GET carries its own route because the grace admits it while
+	// refusing the non-final commit on the same path: the final commit the
+	// grace exists for reads this head to fast-forward from (D4, D62).
+	mux.Handle("GET /nashnet/leases/{lease}/manifest", lease(nashnet.RouteManifestHead, s.handleManifestGet))
 	// The manifest POST admits the state a final commit is granted, because
 	// whether this one is final is in a body the middleware has not read. The
 	// per-body gate is the handler's own fence: a non-final commit on a

@@ -249,13 +249,18 @@ func (l *Lease) advancePhase(phase string) {
 	}
 }
 
-// Route names a lease route for the revoking-state gate below.
+// Route names a lease route for the revoking-state gate below. The manifest
+// has three of them rather than one because the grace admits them differently:
+// RouteManifestHead is the GET of the folded head every commit fast-forwards
+// from, RouteManifest is a rolling non-final commit, and RouteManifestFinal is
+// the commit that closes the artifact stream.
 type Route string
 
 const (
 	RouteProgress      Route = "progress"
 	RouteLogs          Route = "logs"
 	RouteBlobs         Route = "blobs"
+	RouteManifestHead  Route = "manifest_head"
 	RouteManifest      Route = "manifest"
 	RouteManifestFinal Route = "manifest_final"
 	RouteSnapshot      Route = "snapshot"
@@ -265,17 +270,22 @@ const (
 )
 
 // PermitsRoute reports whether the lease's current state admits a call on
-// route. While revoking the coordinator accepts only log appends, blob chunks,
-// a final manifest, and a terminal; a progress post is admitted but renews
-// nothing and answers revoke (D4). Everything else is lease_superseded, which
-// is what keeps a superseded writer and a fresh lease off one run dir.
+// route. While revoking the coordinator accepts log appends, blob chunks, a
+// final manifest, and a terminal; a progress post is admitted but renews
+// nothing and answers revoke (D4). It also admits the manifest head, because
+// the grace exists so the final commit can land and that commit fast-forwards
+// from the head it reads first: refusing the read refuses the commit, which
+// orphans the output D62 says the node still posts. Refused is the writing
+// half, the non-final commit, along with the input reads a stopping job no
+// longer needs. Everything else is lease_superseded, which is what keeps a
+// superseded writer and a fresh lease off one run dir.
 func (l *Lease) PermitsRoute(route Route) bool {
 	switch l.State {
 	case LeaseActive:
 		return true
 	case LeaseRevoking:
 		switch route {
-		case RouteLogs, RouteBlobs, RouteManifestFinal, RouteResult, RouteProgress:
+		case RouteLogs, RouteBlobs, RouteManifestHead, RouteManifestFinal, RouteResult, RouteProgress:
 			return true
 		}
 		return false
