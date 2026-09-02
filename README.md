@@ -42,6 +42,14 @@ skip, blocked on cambia-1419 (the Python engine cannot play above 2 seats); 2-se
 CI runs this gate on changes to `engine/`, `cfr/src/game/`, and `cfr/src/encoding.py`
 (`.github/workflows/parity-gate.yml`).
 
+`cfr/tests/test_nplayer_encoding_parity.py` covers the 936-dim N-player encoder the
+same way at the encoding layer: it drives seeded 4-seat games through the Go FFI
+(`cambia_agent_new_nplayer` / `cambia_agent_encode_nplayer`), decodes each resulting
+vector against the documented block layout, and asserts the Python mirror
+(`encode_infoset_nplayer`) reproduces it element-for-element at every decision, over
+20 seeds with SnapRace on and off. It runs in the default `cfr` test suite whenever
+`libcambia.so` is present.
+
 ## Serving Harness
 
 Training and evaluation jobs can run on a remote runner host instead of locally. `cambia harness submit` pins the current commit, pushes it to the runner's git mirror, and submits a train or evaluate job description to a bounded queue on the runner daemon (`runnerd`). The runner stages an isolated worktree and Python environment, launches the job, and streams status and logs back over a TLS + Bearer-JWT control plane; artifacts and `run_db` rows reconcile back to the local machine with `cambia harness pull` or `cambia harness watch`.
