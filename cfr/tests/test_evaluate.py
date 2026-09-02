@@ -261,3 +261,119 @@ class TestRunEvaluationMultiBaseline:
             + results.get("Errors", 0)
         )
         assert total == 3, f"Expected 3 outcomes for 'random', got {total}"
+
+
+# --- Served policy: strategy net vs last iterate (cambia-721) ---
+
+
+def _make_checkpoint_without_strategy_net(path: str):
+    """A Deep CFR checkpoint carrying only the advantage net (SD-CFR style)."""
+    checkpoint = {
+        "advantage_net_state_dict": AdvantageNetwork(validate_inputs=False).state_dict(),
+        "training_step": 0,
+        "total_traversals": 0,
+        "dcfr_config": {"hidden_dim": 256},
+    }
+    torch.save(checkpoint, path)
+
+
+class _FixedPolicy(torch.nn.Module):
+    """Puts all mass on one action index, whatever the features."""
+
+    def __init__(self, index: int):
+        super().__init__()
+        self.index = index
+
+    def forward(self, features, action_mask):
+        out = torch.zeros(features.shape[0], NUM_ACTIONS, dtype=torch.float32)
+        out[:, self.index] = 1.0
+        return out
+
+
+class _FixedAdvantages(torch.nn.Module):
+    """Regret matching on this yields all mass on one action index."""
+
+    def __init__(self, index: int):
+        super().__init__()
+        self.index = index
+
+    def forward(self, features, action_mask):
+        out = torch.full((features.shape[0], NUM_ACTIONS), -1.0, dtype=torch.float32)
+        out[:, self.index] = 1.0
+        return out
+
+
+def _two_distinct_legal_indices(legal):
+    from src.encoding import encode_action_mask
+
+    mask = encode_action_mask(list(legal))
+    indices = list(np.where(mask)[0])
+    assert len(indices) >= 2, "need two legal actions to tell the nets apart"
+    return int(indices[0]), int(indices[1])
+
+
+class TestDeepCFRServedPolicy:
+    def _agent(self, tmp_path, with_strategy_net=True):
+        from src.evaluate_agents import DeepCFRAgentWrapper
+
+        ckpt_path = str(tmp_path / "served.pt")
+        if with_strategy_net:
+            _make_checkpoint(ckpt_path)
+        else:
+            _make_checkpoint_without_strategy_net(ckpt_path)
+        return DeepCFRAgentWrapper(
+            player_id=0,
+            config=_make_config(),
+            checkpoint_path=ckpt_path,
+            use_argmax=True,
+        )
+
+    def test_strategy_net_is_loaded_and_labelled(self, tmp_path):
+        agent = self._agent(tmp_path, with_strategy_net=True)
+
+        assert agent.strategy_net is not None
+        assert agent.served_policy == "average_strategy"
+
+    def test_strategy_net_drives_choose_action(self, tmp_path):
+        from src.agents import action_codec
+        from src.ffi.bridge import GoEngine
+        from src.encoding import index_to_action
+
+        config = _make_config()
+        agent = self._agent(tmp_path, with_strategy_net=True)
+
+        with GoEngine(seed=7, house_rules=config.cambia_rules) as game:
+            agent.initialize_state(game)
+            legal = action_codec.actions_from_mask(game.legal_actions_mask())
+            strategy_idx, advantage_idx = _two_distinct_legal_indices(legal)
+
+            agent.strategy_net = _FixedPolicy(strategy_idx)
+            agent.advantage_net = _FixedAdvantages(advantage_idx)
+
+            chosen = agent.choose_action(game, legal)
+
+            assert chosen == index_to_action(strategy_idx, list(legal))
+            agent.release_belief()
+
+    def test_missing_strategy_net_falls_back_to_the_last_iterate(self, tmp_path):
+        from src.agents import action_codec
+        from src.ffi.bridge import GoEngine
+        from src.encoding import index_to_action
+
+        config = _make_config()
+        agent = self._agent(tmp_path, with_strategy_net=False)
+
+        assert agent.strategy_net is None
+        assert agent.served_policy == "last_iterate"
+
+        with GoEngine(seed=7, house_rules=config.cambia_rules) as game:
+            agent.initialize_state(game)
+            legal = action_codec.actions_from_mask(game.legal_actions_mask())
+            _unused, advantage_idx = _two_distinct_legal_indices(legal)
+
+            agent.advantage_net = _FixedAdvantages(advantage_idx)
+
+            chosen = agent.choose_action(game, legal)
+
+            assert chosen == index_to_action(advantage_idx, list(legal))
+            agent.release_belief()

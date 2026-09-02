@@ -136,8 +136,7 @@ class TestSlotFiLMPipelineSmoke:
         # Build a fake _run_traversals_batch that returns synthetic samples
         # without touching the game engine.
         def _fake_traversal_batch(
-            iteration_offset,
-            total_traversals_offset,
+            iteration,
             config,
             network_weights,
             network_config,
@@ -150,7 +149,7 @@ class TestSlotFiLMPipelineSmoke:
         ):
             n_samples = 50
             adv_samples = _make_synthetic_samples(
-                n_samples, EP_PBS_INPUT_DIM, NUM_ACTIONS, iteration=iteration_offset
+                n_samples, EP_PBS_INPUT_DIM, NUM_ACTIONS, iteration=iteration
             )
             strat_samples = []  # SD-CFR: no strategy samples
             value_samples = []

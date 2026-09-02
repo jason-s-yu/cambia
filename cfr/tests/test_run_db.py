@@ -87,3 +87,100 @@ def test_mark_best_checkpoint_moves_flag_to_later_iteration():
     finally:
         db.close()
         Path(tmp).unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# served_policy column (cambia-721)
+# ---------------------------------------------------------------------------
+
+
+def test_eval_results_has_served_policy_column():
+    """A fresh schema carries the column, so run comparison can read it."""
+    db, tmp = _fresh_db()
+    try:
+        cols = {r[1] for r in db.execute("PRAGMA table_info(eval_results)")}
+        assert "served_policy" in cols
+    finally:
+        db.close()
+        Path(tmp).unlink(missing_ok=True)
+
+
+def test_insert_eval_result_stores_served_policy():
+    db, tmp = _fresh_db()
+    try:
+        rid = run_db.upsert_run(db, name="r1", algorithm="os-mccfr")
+        run_db.insert_eval_result(
+            db,
+            rid,
+            None,
+            {
+                "iter": 1,
+                "baseline": "random_no_cambia",
+                "win_rate": 0.6,
+                "games_played": 100,
+                "served_policy": "average_strategy",
+            },
+        )
+        row = db.execute(
+            "SELECT served_policy FROM eval_results WHERE run_id=?", (rid,)
+        ).fetchone()
+        assert row["served_policy"] == "average_strategy"
+    finally:
+        db.close()
+        Path(tmp).unlink(missing_ok=True)
+
+
+def test_insert_eval_result_leaves_served_policy_null_when_absent():
+    """An agent that serves no network, or a pre-cambia-721 row, stays NULL."""
+    db, tmp = _fresh_db()
+    try:
+        rid = run_db.upsert_run(db, name="r2", algorithm="os-mccfr")
+        run_db.insert_eval_result(
+            db,
+            rid,
+            None,
+            {
+                "iter": 1,
+                "baseline": "random_no_cambia",
+                "win_rate": 0.6,
+                "games_played": 100,
+            },
+        )
+        row = db.execute(
+            "SELECT served_policy FROM eval_results WHERE run_id=?", (rid,)
+        ).fetchone()
+        assert row["served_policy"] is None
+    finally:
+        db.close()
+        Path(tmp).unlink(missing_ok=True)
+
+
+def test_existing_db_gains_the_column_by_migration():
+    """An older database picks the column up on open, NULL for its old rows."""
+    import sqlite3
+
+    db, tmp = _fresh_db()
+    try:
+        rid = run_db.upsert_run(db, name="r3", algorithm="os-mccfr")
+        run_db.insert_eval_result(
+            db,
+            rid,
+            None,
+            {"iter": 1, "baseline": "random_no_cambia", "win_rate": 0.6},
+        )
+        db.execute("ALTER TABLE eval_results DROP COLUMN served_policy")
+        db.commit()
+        db.close()
+
+        reopened = run_db.get_db(tmp)
+        try:
+            cols = {r[1] for r in reopened.execute("PRAGMA table_info(eval_results)")}
+            assert "served_policy" in cols
+            row = reopened.execute(
+                "SELECT served_policy FROM eval_results WHERE run_id=?", (rid,)
+            ).fetchone()
+            assert row["served_policy"] is None
+        finally:
+            reopened.close()
+    finally:
+        Path(tmp).unlink(missing_ok=True)

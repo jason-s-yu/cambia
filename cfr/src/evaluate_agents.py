@@ -698,10 +698,13 @@ class NeuralAgentWrapper(BaseAgent, abc.ABC):
 
 class DeepCFRAgentWrapper(NeuralAgentWrapper):
     """
-    Wraps a trained Deep CFR AdvantageNetwork for use in evaluation.
+    Wraps a trained Deep CFR checkpoint for use in evaluation.
 
-    Loads a .pt checkpoint, reconstructs the AdvantageNetwork, and uses
-    get_strategy_from_advantages() to sample actions during play.
+    Serves the StrategyNetwork's average strategy, which is the policy Deep CFR
+    converges to, whenever the checkpoint carries one. A checkpoint without a
+    strategy net falls back to regret matching on the final advantage net, which
+    is the last iterate and carries no convergence guarantee. ``served_policy``
+    names whichever is in use and reaches the eval row (cambia-721).
     """
 
     def __init__(
@@ -715,6 +718,7 @@ class DeepCFRAgentWrapper(NeuralAgentWrapper):
         super().__init__(player_id, config, device=device, use_argmax=use_argmax)
         from src.networks import (
             AdvantageNetwork,
+            StrategyNetwork,
             get_strategy_from_advantages,
             build_advantage_network,
         )
@@ -765,17 +769,48 @@ class DeepCFRAgentWrapper(NeuralAgentWrapper):
         self.advantage_net.to(self.device)
         self.advantage_net.eval()
 
+        # Deep CFR's solution is the average strategy, which the StrategyNetwork
+        # holds. Regret matching on the final advantage net serves sigma^{T+1},
+        # the last iterate, which the algorithm gives no convergence guarantee
+        # for. Serve the strategy net whenever the checkpoint carries one, and
+        # name whichever is served so an eval row says what it measured
+        # (cambia-721).
+        strategy_state = checkpoint.get("strategy_net_state_dict")
+        if strategy_state:
+            self.strategy_net = StrategyNetwork(
+                input_dim=net_input_dim,
+                hidden_dim=hidden_dim,
+                output_dim=NUM_ACTIONS,
+                dropout=0.1,
+                validate_inputs=False,
+            )
+            # A checkpoint whose strategy net will not load must not fall back
+            # silently: that would serve a different policy than the row claims.
+            self.strategy_net.load_state_dict(strategy_state)
+            self.strategy_net.to(self.device)
+            self.strategy_net.eval()
+            self.served_policy = "average_strategy"
+        else:
+            self.strategy_net = None
+            self.served_policy = "last_iterate"
+
         logger.info(
-            "DeepCFRAgent P%d loaded checkpoint (step=%s, traversals=%s)",
+            "DeepCFRAgent P%d loaded checkpoint (step=%s, traversals=%s, "
+            "served_policy=%s)",
             self.player_id,
             checkpoint.get("training_step", "N/A"),
             checkpoint.get("total_traversals", "N/A"),
+            self.served_policy,
         )
 
     def choose_action(
         self, game_state: GameView, legal_actions: Set[GameAction]
     ) -> GameAction:
-        """Choose an action using the AdvantageNetwork via regret-matching strategy."""
+        """Choose an action from the served policy (cambia-721).
+
+        The StrategyNetwork's average strategy when the checkpoint carries one,
+        otherwise regret matching on the final advantage net.
+        """
         from src.encoding import (
             encode_infoset,
             encode_infoset_eppbs,
@@ -804,8 +839,11 @@ class DeepCFRAgentWrapper(NeuralAgentWrapper):
         with torch.inference_mode():
             feat_t = torch.from_numpy(features).unsqueeze(0).to(self.device)
             mask_t = torch.from_numpy(action_mask).unsqueeze(0).to(self.device)
-            advantages = self.advantage_net(feat_t, mask_t)
-            strategy = self._get_strategy_from_advantages(advantages, mask_t)
+            if self.strategy_net is not None:
+                strategy = self.strategy_net(feat_t, mask_t)
+            else:
+                advantages = self.advantage_net(feat_t, mask_t)
+                strategy = self._get_strategy_from_advantages(advantages, mask_t)
             probs = strategy.squeeze(0).cpu().numpy()
 
         # Sample from legal action probabilities
@@ -3666,6 +3704,14 @@ def run_evaluation(
     )
     enhanced_stats["num_players"] = num_players
     enhanced_stats["selection_mode"] = "argmax" if use_argmax else "stochastic"
+    enhanced_stats["served_policy"] = next(
+        (
+            getattr(agent, "served_policy", None)
+            for agent in agent1_by_seat.values()
+            if getattr(agent, "served_policy", None)
+        ),
+        None,
+    )
     enhanced_stats["crn_seed"] = crn_seed_base
     # Attach as attribute so CLI and tests can access enhanced stats without
     # polluting the Counter sum that existing tests rely on.
@@ -4270,6 +4316,11 @@ def persist_eval_results(
         # seat_balanced is only true when alternation actually ran and the agent
         # under test played both seats; default 0 keeps legacy/fixed runs honest.
         row_seat_balanced = int(bool(stats.get("seat_balanced", False)))
+        # Which policy the agent under test actually served: "average_strategy"
+        # (the StrategyNetwork, Deep CFR's solution) or "last_iterate" (regret
+        # matching on the final advantage net). None for agents that serve no
+        # network. Rows written before cambia-721 carry no key at all.
+        row_served_policy = stats.get("served_policy")
 
         row = {
             "run": run_name,
@@ -4304,6 +4355,7 @@ def persist_eval_results(
             "selection_mode": row_selection_mode,
             "crn_seed": None if row_crn_seed is None else str(row_crn_seed),
             "seat_balanced": row_seat_balanced,
+            "served_policy": row_served_policy,
             "engine_errors": engine_errors,
         }
         all_rows.append(row)

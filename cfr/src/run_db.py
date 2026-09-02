@@ -182,6 +182,7 @@ CREATE TABLE IF NOT EXISTS eval_results (
     policy_errors INTEGER,
     engine_errors INTEGER,
     belief_protocol TEXT,
+    served_policy TEXT,
     timestamp TEXT NOT NULL,
     UNIQUE(run_id, iteration, baseline)
 );
@@ -294,6 +295,12 @@ _COLUMN_MIGRATIONS: Dict[str, list] = {
         ("policy_errors", "INTEGER"),
         ("engine_errors", "INTEGER"),
         ("belief_protocol", "TEXT"),
+        # cambia-721: which policy the agent under test served,
+        # "average_strategy" (the trained StrategyNetwork) or "last_iterate"
+        # (regret matching on the final advantage net). NULL on a row measured
+        # before the column and on agents that serve no network; a default here
+        # would claim a measurement that was never made.
+        ("served_policy", "TEXT"),
     ],
     "harness_sync": [
         # cambia-449: permanently-unpullable classification (no run_db.sqlite on
@@ -891,7 +898,7 @@ def insert_eval_result(
     p0_wins, p1_wins, ties, adv_loss, strat_loss, avg_game_turns,
     t1_cambia_rate, avg_score_margin, timestamp. Optional hygiene fields:
     seat_balanced, selection_mode, crn_seed, seat_scheme, policy_errors,
-    engine_errors, belief_protocol (absent -> NULL).
+    engine_errors, belief_protocol, served_policy (absent -> NULL).
     """
     crn_seed = row_dict.get("crn_seed")
     db.execute(
@@ -901,8 +908,10 @@ def insert_eval_result(
              games_played, p0_wins, p1_wins, ties, avg_game_turns,
              t1_cambia_rate, avg_score_margin, adv_loss, strat_loss,
              seat_balanced, selection_mode, crn_seed, seat_scheme,
-             policy_errors, engine_errors, belief_protocol, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             policy_errors, engine_errors, belief_protocol, served_policy,
+             timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?)
         """,
         (
             run_id,
@@ -928,6 +937,7 @@ def insert_eval_result(
             row_dict.get("policy_errors"),
             row_dict.get("engine_errors"),
             row_dict.get("belief_protocol"),
+            row_dict.get("served_policy"),
             row_dict.get("timestamp", _now()),
         ),
     )
