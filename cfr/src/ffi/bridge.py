@@ -545,6 +545,15 @@ _ffi.cdef("""
 
     /* cambia-1488: cambia-caller accessor (unblocks the tabular CFRAgentWrapper infoset key) */
     int8_t cambia_game_cambia_caller(int32_t game_h);
+
+    /* cambia-1487: engine-side evaluation baselines and index-space legal set */
+    int32_t cambia_baseline_new(uint8_t kind, uint8_t seat,
+                                int32_t cambia_threshold, int32_t late_cambia_turns);
+    void    cambia_baseline_free(int32_t h);
+    int32_t cambia_baseline_reset(int32_t h);
+    int32_t cambia_baseline_choose(int32_t h, int32_t game_h,
+                                   int32_t *out, int32_t out_len);
+    int32_t cambia_game_legal_indices(int32_t game_h, int32_t *out, int32_t out_len);
 """)
 
 _LIB = None
@@ -582,6 +591,21 @@ def _get_lib():
     if _LIB is None:
         _LIB = _load_library()
     return _LIB
+
+
+def get_lib():
+    """The loaded libcambia.so, for a caller outside this module.
+
+    Callers that own an FFI-backed object of their own (the engine-side
+    evaluation baselines, cambia-1487) need the same library handle the engine
+    uses, so the loading policy stays in one place.
+    """
+    return _get_lib()
+
+
+def new_int32_buffer(length: int):
+    """Allocate an int32 scratch buffer for an FFI out-parameter."""
+    return _ffi.new(f"int32_t[{int(length)}]")
 
 
 # ---------------------------------------------------------------------------
@@ -826,6 +850,42 @@ class GoEngine:
                 f"cambia_agent_action_mask failed (returned {ret}) on handle {self._game_h}"
             )
         return np.frombuffer(_ffi.buffer(self._mask_buf), dtype=np.uint8).copy()
+
+    def legal_action_indices(self) -> List[int]:
+        """Return the legal 2-player action indices, ascending.
+
+        The same legal set legal_actions_mask reports, in index space. An eval
+        caller that only wants the indices reads them here rather than
+        unpacking a (146,) numpy mask per decision (cambia-1487).
+        """
+        buf, n = self.legal_action_view()
+        return [buf[i] for i in range(n)]
+
+    def legal_action_view(self):
+        """Return (buffer, count) over the legal 2-player action indices.
+
+        The buffer is this engine's scratch space and its first `count` entries
+        are the ascending legal indices; it is overwritten by the next call, so
+        a caller that keeps the values past its own decision must copy them.
+        The hot eval path reads this rather than legal_action_indices so a
+        decision that never inspects the legal set pays no list build.
+        """
+        buf = self._legal_idx_buf()
+        n = int(self._lib.cambia_game_legal_indices(self._game_h, buf, self.NUM_ACTIONS))
+        if n < 0:
+            raise RuntimeError(
+                f"cambia_game_legal_indices failed (returned {n}) "
+                f"on handle {self._game_h}"
+            )
+        return buf, n
+
+    def _legal_idx_buf(self):
+        """This engine's reusable legal-index scratch buffer."""
+        buf = getattr(self, "_legal_buf", None)
+        if buf is None:
+            buf = _ffi.new(f"int32_t[{self.NUM_ACTIONS}]")
+            self._legal_buf = buf
+        return buf
 
     def apply_action(self, action_idx: int) -> None:
         """
