@@ -157,6 +157,7 @@ def cmd_lbr(args):
             num_infosets=args.infosets,
             br_rollouts_per_infoset=args.rollouts,
             seed=args.seed,
+            frozen_beliefs=args.frozen_beliefs,
         )
         rollout_opponent = f"{res.get('rollout_opponent', '?')} (tier B, agent-policy)"
         experiment = "E3-LBR-tierB"
@@ -169,6 +170,7 @@ def cmd_lbr(args):
             num_infosets=args.infosets,
             br_rollouts_per_infoset=args.rollouts,
             seed=args.seed,
+            frozen_beliefs=args.frozen_beliefs,
         )
         rollout_opponent = "RandomAgent (tier A)"
         experiment = "E3-LBR-tierA"
@@ -188,12 +190,18 @@ def cmd_lbr(args):
         "std_err": round(res["std_err"], 6),
         "ci95_half": round(1.96 * res["std_err"], 6),
         "rollout_opponent": rollout_opponent,
+        # cambia-1479: what the number can be compared against, and whether the
+        # run absorbed any failure on its way to producing it.
+        "belief_protocol": res.get("belief_protocol"),
+        "policy_errors": res.get("policy_errors", 0),
+        "policy_error_detail": res.get("policy_error_detail") or {},
         "elapsed_sec": round(elapsed, 1),
     }
     _eprint(
         f"[E3] tier={tier} {args.agent_type} expl={out['exploitability']:.4f} "
         f"+/-{out['ci95_half']:.4f} (n={out['infosets_sampled']}, "
-        f"seed={args.seed}, {elapsed:.1f}s)"
+        f"seed={args.seed}, beliefs={out['belief_protocol']}, "
+        f"policy_errors={out['policy_errors']}, {elapsed:.1f}s)"
     )
     print(json.dumps(out))
 
@@ -281,6 +289,15 @@ def main():
     lb.add_argument("--seed", type=int, default=42)
     lb.add_argument("--device", default="cpu")
     lb.add_argument("--argmax", action="store_true")
+    lb.add_argument(
+        "--frozen-beliefs",
+        action="store_true",
+        help=(
+            "Measure under the pre-cambia-1479 protocol, where an agent owning "
+            "a belief kept the one it built at the deal. Only for reproducing a "
+            "number recorded before the fix."
+        ),
+    )
     lb.add_argument(
         "--tier",
         choices=["A", "B"],

@@ -9,6 +9,8 @@
 package game
 
 import (
+	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,6 +18,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/jason-s-yu/cambia/service/internal/database"
+	"github.com/jason-s-yu/cambia/service/internal/models"
 )
 
 // panicOnceEmitter forwards to the emitter it wraps, except for the first broadcast after arm(),
@@ -47,7 +52,7 @@ func (p *panicOnceEmitter) EmitTo(userID uuid.UUID, eventType string, payload an
 // not touch the game.
 func endSignal(g *CambiaGame) chan struct{} {
 	ended := make(chan struct{}, 1)
-	g.OnGameEnd = func(_ uuid.UUID, _ uuid.UUID, _ map[uuid.UUID]int, _ map[uuid.UUID]string, _ map[uuid.UUID]int, _ uuid.UUID, _ []FinalHand) {
+	g.OnGameEnd = func(_ uuid.UUID, _ uuid.UUID, _ map[uuid.UUID]int, _ map[uuid.UUID]string, _ map[uuid.UUID]int, _ uuid.UUID, _ []FinalHand, _ EndReason) {
 		select {
 		case ended <- struct{}{}:
 		default:
@@ -117,4 +122,123 @@ func TestGuardedCallbackPassesTheNonPanickingBodyThrough(t *testing.T) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	assert.False(t, g.GameOver, "and must not end a game that never panicked")
+}
+
+// TestAPanicEndedGameNamesTheInternalErrorOnItsResultsFrame pins what the table is told when the
+// guard aborts a game (cambia-1831). The abort ends the game through the same endGame every
+// ordinary ending runs through, so before this the players were handed a plain results frame
+// carrying scores read off whatever hands the panic left mid-move, indistinguishable from a game
+// somebody won. The reason names it instead, and it is the same value that withholds the rating.
+func TestAPanicEndedGameNamesTheInternalErrorOnItsResultsFrame(t *testing.T) {
+	g, _, mb := setupTestGame(t, 2, testHouseRules(0, 2))
+	g.Rated = true
+	ended := endSignal(g)
+
+	go g.runGuarded("a test goroutine", func() { panic("detached goroutine blew up") })
+
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a panic in a game-owned goroutine must have ended the game")
+	}
+
+	ev := mb.findEventByType(EventGameEnd)
+	require.NotNil(t, ev, "an aborted game must still tell the table that its game is over")
+	assert.Equal(t, string(EndReasonInternalError), ev.Payload["reason"],
+		"game_end must name the internal error: the scores beside it are not a result anyone played to")
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	assert.Equal(t, EndReasonInternalError, g.endReason, "the abort must record why it ended the game")
+	assert.False(t, g.ratePerGame(), "a rated game the guard aborted must not feed the rating system")
+}
+
+// TestAnOrdinaryEndingNamesNoReason is the negative half: a game that reaches one of its rulebook
+// endings keeps the frame it has always had, with no reason field for a client to read, and a
+// rated one still rates.
+func TestAnOrdinaryEndingNamesNoReason(t *testing.T) {
+	g, _, mb := setupTestGame(t, 2, testHouseRules(0, 2))
+	g.Rated = true
+
+	g.EndGame()
+
+	ev := mb.findEventByType(EventGameEnd)
+	require.NotNil(t, ev, "the game must report its ending")
+	_, named := ev.Payload["reason"]
+	assert.False(t, named, "a game that ended on its own terms says nothing about why")
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	assert.Equal(t, EndReasonNormal, g.endReason)
+	assert.True(t, g.ratePerGame(), "and a rated one still rates")
+}
+
+// TestAPanicEndedGameRecordsItsResultsButRatesNobody drives a real rated 2-player game to the
+// point where a game-owned goroutine panics, then reads the record path back out of the database
+// (cambia-1831). The split is the point: the game_results rows are still written, so what the
+// abort found survives for anyone diagnosing it, but no ratings row exists and neither player's
+// rating moved. Before this, the abort ran the ordinary rating update on scores read off hands the
+// panic had left mid-move.
+//
+// The counterpart that must keep passing is TestEndGameRecordsResultsAndRating: this narrows the
+// per-game rating path, it does not remove it.
+func TestAPanicEndedGameRecordsItsResultsButRatesNobody(t *testing.T) {
+	setupGameDBTest(t)
+
+	userA := createGameDBTestUser(t, "panic-end-a-"+uuid.NewString())
+	userB := createGameDBTestUser(t, "panic-end-b-"+uuid.NewString())
+
+	g := NewCambiaGame()
+	g.Emitter = newMockBroadcaster()
+	g.LobbyID = uuid.New()
+	g.HostUserID = userA.ID
+	g.LobbyType = "private"
+	g.Rated = true
+	g.HouseRules = *testHouseRules(0, 2)
+	g.TurnDuration = 0
+	g.PersistWG = &sync.WaitGroup{}
+	// OnGameEnd fires inside endGame, after persistFinalGameState has Add'd both of its write
+	// goroutines, so receiving it is the happens-before edge awaitPersistence needs (cambia-942
+	// F3).
+	ended := endSignal(g)
+
+	playerA := &models.Player{ID: userA.ID, Connected: true, User: &models.User{ID: userA.ID}}
+	playerB := &models.Player{ID: userB.ID, Connected: true, User: &models.User{ID: userB.ID}}
+	g.AddPlayer(playerA)
+	g.AddPlayer(playerB)
+
+	g.BeginPreGame()
+	g.StartGame()
+	// The games row has to exist before the abort reaches RecordGameAndResults' completion UPDATE.
+	waitForGameStatus(t, g.ID, "in_progress", 2*time.Second)
+
+	go g.runGuarded("a test goroutine", func() { panic("detached goroutine blew up mid-game") })
+
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a panic in a game-owned goroutine must have ended the game")
+	}
+	awaitPersistence(t, g.PersistWG, 5*time.Second)
+
+	ctx := context.Background()
+
+	var resultRows int
+	require.NoError(t, database.DB.QueryRow(ctx,
+		`SELECT count(*) FROM game_results WHERE game_id = $1`, g.ID).Scan(&resultRows))
+	require.Equal(t, 2, resultRows, "an aborted game is still recorded: what the abort found is the evidence")
+
+	var ratingRows int
+	require.NoError(t, database.DB.QueryRow(ctx,
+		`SELECT count(*) FROM ratings WHERE game_id = $1`, g.ID).Scan(&ratingRows))
+	require.Zero(t, ratingRows, "a game the panic guard ended must write no ratings row")
+
+	afterA, err := database.GetUserByID(ctx, userA.ID)
+	require.NoError(t, err)
+	afterB, err := database.GetUserByID(ctx, userB.ID)
+	require.NoError(t, err)
+	require.Equal(t, 1500, afterA.Elo1v1, "no rating moves on a game nobody played to a result")
+	require.Equal(t, 1500, afterB.Elo1v1, "no rating moves on a game nobody played to a result")
+	require.Equal(t, 350.0, afterA.Phi1v1, "and no rating deviation moves either")
+	require.Equal(t, 350.0, afterB.Phi1v1, "and no rating deviation moves either")
 }

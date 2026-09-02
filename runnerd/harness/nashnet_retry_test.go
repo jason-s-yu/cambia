@@ -767,11 +767,72 @@ func TestANackOfAResumedJobStillReturnsIt(t *testing.T) {
 	}
 }
 
-// TestARequeuedResumeIsNotUnProjected is the other half of the resume case: the
-// row of a job holding a promoted checkpoint is left as it stands, because the
-// resume intent lives in the queue handle and a created row would come back
-// from a restart as a fresh launch over the checkpoint's own run dir.
-func TestARequeuedResumeIsNotUnProjected(t *testing.T) {
+// restartDispatcher is what a coordinator restart leaves the dispatcher: rows on
+// disk and nothing in memory, rebuilt by the reconcile scan. The pool, the lease
+// store and the listener stay up, so the assertions are about what the scan
+// rebuilt rather than about a second process.
+func (r *poolRig) restartDispatcher(t *testing.T) {
+	t.Helper()
+	r.disp.mu.Lock()
+	for _, j := range r.disp.pending {
+		j.cancel()
+	}
+	r.disp.pending = map[string]*job{}
+	r.disp.queue = nil
+	r.disp.holds = map[string]*placementHold{}
+	r.disp.placing = map[string]string{}
+	r.disp.reattachDone = false
+	r.disp.mu.Unlock()
+	r.disp.Reconcile()
+}
+
+// TestAQueuedResumeSurvivesACoordinatorRestart is the restart half of the resume
+// contract: the intent and the reservoir pin are in jobspec.json and the row is
+// created, so the reconcile scan brings the job back as the resume it was, still
+// pinned to the node holding its reservoir, rather than as a fresh launch over
+// the checkpoint it meant to continue from.
+func TestAQueuedResumeSurvivesACoordinatorRestart(t *testing.T) {
+	r := newPoolRig(t, poolRigConfig{})
+	r.register(t, r.nodeA, 2)
+	r.register(t, r.nodeB, 2)
+	r.finishPoolRun(t, "restarted-resume")
+
+	if _, err := r.disp.Resume("restarted-resume"); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	spec := readJobSpec(filepath.Join(r.runsDir, "restarted-resume"))
+	if spec == nil || !spec.Resume {
+		t.Fatalf("persisted spec = %+v, want resume recorded", spec)
+	}
+	if node := requiresFor(spec).Node; node != r.nodeA.id {
+		t.Fatalf("persisted pin = %q, want the node holding the reservoir %q", node, r.nodeA.id)
+	}
+	if st := readProcessState(t, r.runsDir, "restarted-resume"); st.Status != procmgr.StatusCreated {
+		t.Fatalf("row after a resume = %q, want created: only a created row is re-enqueued", st.Status)
+	}
+
+	r.restartDispatcher(t)
+
+	if view, _ := r.disp.resolveView("restarted-resume"); !view.Resume || view.State != StateQueued {
+		t.Fatalf("rebuilt view = %+v, want a queued resume", view)
+	}
+	if _, other := r.claim(t, r.nodeB, nashnet.ClaimRequest{}); other != nil {
+		t.Fatalf("the pin did not survive the restart: node-b took %s", other.JobID)
+	}
+	_, mine := r.claim(t, r.nodeA, nashnet.ClaimRequest{})
+	if mine == nil || mine.JobID != "restarted-resume" {
+		t.Fatalf("the pinned node did not get its resume back, got %+v", mine)
+	}
+	if !mine.Resume {
+		t.Fatal("the claim after the restart did not carry resume")
+	}
+}
+
+// TestARequeuedResumeSurvivesTheRestartToo is the workaround cambia-1723 needed
+// before the intent was persisted: a resume whose lease expired before launch is
+// un-projected like any other returning job, and the scan still brings it back
+// as a pinned resume rather than as a fresh launch.
+func TestARequeuedResumeSurvivesTheRestartToo(t *testing.T) {
 	r := newPoolRig(t, poolRigConfig{})
 	sweeper := r.pool.Sweeper()
 	r.register(t, r.nodeA, 2)
@@ -789,7 +850,15 @@ func TestARequeuedResumeIsNotUnProjected(t *testing.T) {
 	if out := sweeper.Tick(); len(out) != 1 || out[0].Verdict != nashnet.VerdictRequeue {
 		t.Fatalf("sweep = %+v, want one requeue: the lease never launched", out)
 	}
-	if st := readProcessState(t, r.runsDir, "resumed-expiry-job"); st.Status == procmgr.StatusCreated {
-		t.Fatal("a resume with a promoted checkpoint was un-projected to created")
+	if st := readProcessState(t, r.runsDir, "resumed-expiry-job"); st.Status != procmgr.StatusCreated {
+		t.Fatalf("requeued resume projects %q, want created", st.Status)
+	}
+
+	r.restartDispatcher(t)
+
+	r.clock.advance(2 * time.Second) // past the expiry cooldown on that pair
+	_, again := r.claim(t, r.nodeA, nashnet.ClaimRequest{})
+	if again == nil || !again.Resume {
+		t.Fatalf("re-claim after the restart = %+v, want the resume back", again)
 	}
 }

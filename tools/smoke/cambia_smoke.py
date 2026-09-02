@@ -353,6 +353,10 @@ def extract_result(name: str, final_payload: dict | None) -> tuple[str, dict[str
             f"{name}: no game_end payload received (env['payload']['payload'] missing or empty; "
             f"see service/doc/game_actions.md's game_end entry for the expected shape)"
         )
+    if final_payload.get("reason") == "internal_error":
+        # cambia-1831: the server ends a game the panic guard aborted with this reason and
+        # withholds the rating; a smoke run that saw one is a failure, not a scored game.
+        raise SmokeError(f"{name}: game_end carries reason=internal_error (server aborted the game)")
     if "scores" not in final_payload:
         raise SmokeError(f"{name}: game_end payload missing 'scores' field: {final_payload}")
     if "winner" not in final_payload:

@@ -58,6 +58,15 @@ interface GameState {
 	// is answered with, so the results view has the faces whether it watched the round end or
 	// reloaded into it. A forfeited seat is absent, since it is not scored.
 	finalHands: FinalHand[] | null;
+	// Why the game ended, off the `reason` field the results frames carry for an abnormal ending
+	// (cambia-1831). Null for every ordinary result, since those frames omit the field. The one
+	// value the service sends today is 'internal_error' (GameEndReason), a game its panic guard
+	// aborted: the scores that arrive with it are read off whatever state the panic left, so the
+	// results view reports the error in place of them rather than presenting them as a scoreboard.
+	// Typed wider than GameEndReason on purpose: what makes a frame not-a-result is the field
+	// being there at all, so a reason this client has no copy for still has to suppress the
+	// scoreboard rather than fall back through to it.
+	endReason: string | null;
 	// The latest transient reveal, for the table's temporary display (cambia-848 F3, widened by
 	// cambia-1094). No face this client is shown is durable any more: sync_state hides every own
 	// hand slot in every phase, exactly as it hides every opponent slot, because the physical game
@@ -131,6 +140,7 @@ const initialState: GameState = {
 	finalScores: null,
 	winnerId: null,
 	finalHands: null,
+	endReason: null,
 	abilityReveal: null,
 	pregamePeek: [],
 	droppedActionNonce: 0,
@@ -159,6 +169,16 @@ function readFinalHands(raw: unknown): FinalHand[] | null {
 		});
 	}
 	return hands;
+}
+
+/**
+ * The `reason` off a results frame (cambia-1831). Any non-empty string is kept, not just the
+ * values this client has copy for: the field's presence is what says the frame is not a result,
+ * and a reason from a newer service has to suppress the scoreboard too. Anything else - a missing
+ * field, an empty string, a non-string - reads as the ordinary ending that omits it.
+ */
+function readEndReason(raw: unknown): string | null {
+	return typeof raw === 'string' && raw.length > 0 ? raw : null;
 }
 
 /** The fill `selfId` still owes, read out of a state snapshot's snapMoves (cambia-936). */
@@ -683,6 +703,10 @@ export const useGameStore = create<GameState & GameActions>()(
 							// The round-end reveal (RULES.md 3C, cambia-1542). Every scored seat's
 							// hand, so the results can show what each player was holding.
 							state.finalHands = readFinalHands(payload.payload?.finalHands);
+							// Why it ended (cambia-1831). Assigned rather than merged: this is the
+							// frame that reports this game's ending, so an ordinary one has to
+							// clear a reason a previous game left behind.
+							state.endReason = readEndReason(payload.payload?.reason);
 							break;
 
 						// --- Seat presence (cambia-955) ---
@@ -746,6 +770,7 @@ export const useGameStore = create<GameState & GameActions>()(
 							state.finalScores = null;
 							state.winnerId = null;
 							state.finalHands = null;
+							state.endReason = null;
 							state.abilityReveal = null;
 							state.pregamePeek = [];
 							state.lastPresence = null;
@@ -819,6 +844,12 @@ export const useGameStore = create<GameState & GameActions>()(
 								const hands = readFinalHands(payload.finalHands);
 								if (hands) state.finalHands = hands;
 							}
+							// Why the game ended rides this frame too, and for a client that
+							// reloaded into the results it is the only copy that will ever arrive
+							// (cambia-1831). Assigned rather than merged, as on game_end: this
+							// frame reports this game's ending, so an ordinary one clears any
+							// reason left over from an earlier game.
+							state.endReason = readEndReason(payload.reason);
 							if (state.gameState) {
 								state.gameState.gameOver = true;
 								state.gameState.currentPlayerId = null;
@@ -855,6 +886,7 @@ export const selectLastSnapMove = (state: GameState) => state.lastSnapMove;
 export const selectLastPresence = (state: GameState) => state.lastPresence;
 export const selectFinalScores = (state: GameState) => state.finalScores;
 export const selectFinalHands = (state: GameState) => state.finalHands;
+export const selectEndReason = (state: GameState) => state.endReason;
 export const selectCurrentPlayerId = (state: GameState) => state.gameState?.currentPlayerId;
 export const selectSelfPlayerState = (state: GameState) => {
 	const selfId = useAuthStore.getState().user?.id;

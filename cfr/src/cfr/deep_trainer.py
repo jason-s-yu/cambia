@@ -201,6 +201,15 @@ class DeepCFRConfig:
     # When 0.0, uses fixed train_steps_per_iteration.
     value_target_buffer_passes: float = 2.0
 
+    # Seed for the reservoir buffers' sample_batch/load draws (cambia-1809):
+    # keeps minibatch composition reproducible under a config seed instead of
+    # drawing from the shared global np.random stream. None (default) leaves
+    # buffers on the prior unseeded behavior -- config.py's DeepCfrConfig has
+    # no matching YAML field yet, so this is populated only via an explicit
+    # override or direct DeepCFRConfig(seed=...) construction until that
+    # follow-up wiring lands.
+    seed: Optional[int] = None
+
     def __post_init__(self):
         if self.pipeline_training and self.num_traversal_threads > 1:
             raise ValueError(
@@ -294,6 +303,11 @@ class DeepCFRConfig:
             "psro_heuristic_types": deep_cfg.psro_heuristic_types,
             "target_buffer_passes": deep_cfg.target_buffer_passes,
             "value_target_buffer_passes": deep_cfg.value_target_buffer_passes,
+            # getattr: kept defensive so a config.deep_cfr stand-in without a
+            # seed field (e.g. tests/conftest.py's stub, or an older
+            # SimpleNamespace-shaped caller) still defaults to None instead of
+            # raising (cambia-1809).
+            "seed": getattr(deep_cfg, "seed", None),
         }
         # Apply CLI overrides (only non-None values)
         for key, value in overrides.items():
@@ -722,6 +736,25 @@ class DeepCFRTrainer:
         self.archive_queue = archive_queue
         self.log_archiver_global_ref: Optional[LogArchiver] = None
 
+        # Dedicated Generator for the reservoir buffers' sample_batch/load
+        # draws, seeded from dcfr_config.seed (cambia-1809). None until the
+        # config.py/cli.py wiring lands (see DeepCFRConfig.seed's docstring);
+        # sample_batch/load treat rng=None as "no override" and fall back to
+        # the process-global numpy stream, same as before this change, so a
+        # missing seed only loses reproducibility, never raises. Warned once
+        # here (not per-call) naming the call site per cambia-1809 AC2.
+        if self.dcfr_config.seed is not None:
+            self._fit_rng: Optional[np.random.Generator] = np.random.default_rng(
+                self.dcfr_config.seed
+            )
+        else:
+            self._fit_rng = None
+            logger.warning(
+                "DeepCFRTrainer.__init__: dcfr_config.seed is None; "
+                "advantage/strategy/value buffer minibatch composition will "
+                "not be reproducible across runs (cambia-1809)."
+            )
+
         # Device selection
         resolved_device = _resolve_device(self.dcfr_config.device)
         self.device = torch.device(resolved_device)
@@ -1132,7 +1165,7 @@ class DeepCFRTrainer:
             if self.shutdown_event.is_set():
                 logger.warning("Shutdown detected during value network training.")
                 break
-            batch = self.value_buffer.sample_batch(batch_size)
+            batch = self.value_buffer.sample_batch(batch_size, rng=self._fit_rng)
             if not batch:
                 break
 
@@ -1173,7 +1206,7 @@ class DeepCFRTrainer:
     def _prefetch_batches(self, buffer, batch_size, num_steps, prefetch_queue):
         """Background thread: prepare batches and put them in the queue."""
         for _ in range(num_steps):
-            batch = buffer.sample_batch(batch_size)
+            batch = buffer.sample_batch(batch_size, rng=self._fit_rng)
             if not batch:
                 break
             features_t = torch.from_numpy(batch.features).float().pin_memory()
@@ -1272,7 +1305,7 @@ class DeepCFRTrainer:
                     logger.warning("Shutdown detected during %s training.", network_name)
                     break
 
-                batch = buffer.sample_batch(batch_size)
+                batch = buffer.sample_batch(batch_size, rng=self._fit_rng)
                 if not batch:
                     break
 
@@ -2341,7 +2374,7 @@ class DeepCFRTrainer:
                         capacity=self.dcfr_config.advantage_buffer_capacity,
                         input_dim=self.dcfr_config.input_dim,
                     )
-                    self.advantage_buffer.load(adv_buffer_path)
+                    self.advantage_buffer.load(adv_buffer_path, rng=self._fit_rng)
                     adv_loaded = True
                 else:
                     logger.warning(
@@ -2360,7 +2393,7 @@ class DeepCFRTrainer:
                         capacity=self.dcfr_config.strategy_buffer_capacity,
                         input_dim=self.dcfr_config.input_dim,
                     )
-                    self.strategy_buffer.load(strat_buffer_path)
+                    self.strategy_buffer.load(strat_buffer_path, rng=self._fit_rng)
                     strat_loaded = True
                 else:
                     logger.warning(
@@ -2389,7 +2422,7 @@ class DeepCFRTrainer:
                             target_dim=1,
                             has_mask=False,
                         )
-                        self.value_buffer.load(val_buffer_path)
+                        self.value_buffer.load(val_buffer_path, rng=self._fit_rng)
                         logger.info("Loaded value buffer from %s.", npz_path)
                     else:
                         logger.warning(

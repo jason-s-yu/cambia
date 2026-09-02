@@ -24,15 +24,17 @@ torch = pytest.importorskip("torch")
 
 from src.config import PRTCFRConfig
 from src.encoding import MAX_HAND, NUM_ACTIONS
+from src.sequence_encoding import VOCAB_SIZE
 from src import run_db
 from src.disk_reservoir import DiskReservoir
-from src.reservoir import ReservoirSample
+from src.reservoir import ReservoirBuffer, ReservoirSample
 from src.cfr.prtcfr_net import PRTCFRNet, pad_tokens
 from src.cfr.prtcfr_trainer import (
     NetProductionSigma,
     PRTCFRProductionTrainer,
     _MultiReservoirSampler,
     _UnpaddingReservoir,
+    _fit_from_scratch,
     _merge_columnar_batches,
 )
 
@@ -283,6 +285,104 @@ def test_multi_reservoir_sampler_and_merge(tmp_path):
     b1 = r1.sample_batch(3)
     merged = _merge_columnar_batches([b0, b1])
     assert merged.features.shape == (6, 5)
+
+
+# ---------------------------------------------------------------------------
+# Reservoir sample_batch RNG reproducibility (cambia-1809)
+# ---------------------------------------------------------------------------
+#
+# ReservoirBuffer.sample_batch drew from the unseeded process-global numpy
+# RNG, so PRT-CFR minibatch composition had no way to be reproducible under a
+# config seed even though traversal already was. These tests drive the actual
+# fixed mechanism -- ReservoirBuffer.sample_batch's rng kwarg and
+# _fit_from_scratch's rng threading, the same path PRTCFRTinyTrainer and
+# PRTCFRProductionTrainer now use for self._fit_rng -- directly, over two
+# short fit "iterations" on a tiny CPU network.
+
+
+def _regret_sample(rng, seq_cap, iteration):
+    """A ReservoirSample with a valid random token sequence (in-vocab ids) and
+    a small legal-action mask, shaped like PRTCFRWorker's real output."""
+    length = int(rng.integers(2, max(3, seq_cap // 4)))
+    toks = [1] + [int(x) for x in rng.integers(4, VOCAB_SIZE, size=length - 1)]
+    features = pad_tokens(toks, seq_cap).astype(np.float32)
+    target = rng.standard_normal(NUM_ACTIONS).astype(np.float32)
+    mask = np.zeros(NUM_ACTIONS, dtype=bool)
+    mask[rng.choice(NUM_ACTIONS, size=3, replace=False)] = True
+    return ReservoirSample(
+        features=features, target=target, action_mask=mask, iteration=iteration
+    )
+
+
+def _populated_buffer(seq_cap=64, n=64, data_seed=0):
+    """A buffer with fixed (seed-independent-of-the-rng-under-test) contents,
+    so only the sample_batch/fit rng varies between two calls."""
+    buf = ReservoirBuffer(
+        capacity=n, input_dim=seq_cap, target_dim=NUM_ACTIONS, has_mask=True
+    )
+    data_rng = np.random.default_rng(data_seed)
+    for i in range(n):
+        buf.add(_regret_sample(data_rng, seq_cap, iteration=i))
+    return buf
+
+
+def _run_two_iterations(reservoir_seed, seq_cap=64, batch_size=8, num_steps=3):
+    """Two short PRT-CFR fit 'iterations' (_fit_from_scratch calls) on an
+    identically-populated buffer. Net init is pinned via a separate fixed
+    torch seed so only ``reservoir_seed`` (the config-seed stand-in) varies
+    the outcome. Returns (drawn minibatch index sequences, final net
+    state_dict)."""
+    buf = _populated_buffer(seq_cap=seq_cap)
+    torch.manual_seed(0)
+    net = PRTCFRNet(
+        embed_dim=8,
+        hidden_dim=16,
+        num_layers=1,
+        dropout=0.0,
+        head_hidden_dim=16,
+        device=_DEVICE,
+    )
+    rng = np.random.default_rng(reservoir_seed)
+
+    drawn: list = []
+    real_sample_batch = buf.sample_batch
+
+    def _recording_sample_batch(bs, rng=None):
+        batch = real_sample_batch(bs, rng=rng)
+        drawn.append(batch.iterations.copy())
+        return batch
+
+    buf.sample_batch = _recording_sample_batch  # instance-level spy
+    for _ in range(2):
+        _fit_from_scratch(
+            net, buf, lr=1.0e-2, batch_size=batch_size, num_steps=num_steps, rng=rng
+        )
+    final_state = {k: v.clone() for k, v in net.state_dict().items()}
+    return drawn, final_state
+
+
+def test_fit_from_scratch_same_seed_reproducible():
+    """Same config seed -> identical minibatch index sequences and identical
+    net parameters after two short fit iterations (cambia-1809 AC3)."""
+    drawn_a, state_a = _run_two_iterations(reservoir_seed=42)
+    drawn_b, state_b = _run_two_iterations(reservoir_seed=42)
+
+    assert len(drawn_a) == len(drawn_b) > 0
+    for seq_a, seq_b in zip(drawn_a, drawn_b):
+        np.testing.assert_array_equal(seq_a, seq_b)
+
+    assert state_a.keys() == state_b.keys()
+    for key in state_a:
+        assert torch.equal(state_a[key], state_b[key]), f"parameter {key!r} diverged"
+
+
+def test_fit_from_scratch_different_seeds_diverge():
+    """Different config seeds -> different minibatch index sequences
+    (cambia-1809 AC3)."""
+    drawn_a, _ = _run_two_iterations(reservoir_seed=1)
+    drawn_b, _ = _run_two_iterations(reservoir_seed=2)
+
+    assert any(not np.array_equal(seq_a, seq_b) for seq_a, seq_b in zip(drawn_a, drawn_b))
 
 
 # ---------------------------------------------------------------------------

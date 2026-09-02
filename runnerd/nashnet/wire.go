@@ -222,10 +222,16 @@ type HeartbeatResponse struct {
 }
 
 // Event is one entry of an events response (D45).
+//
+// Drain carries the state a drain event sets, so the event says which way the
+// operator moved the hold. It is the whole payload of that event type: absent
+// is false, which is the lift, and a node applies the value rather than reading
+// the event's arrival as a drain.
 type Event struct {
 	Type    string `json:"type"`
 	LeaseID string `json:"lease_id,omitempty"`
 	Force   bool   `json:"force,omitempty"`
+	Drain   bool   `json:"drain,omitempty"`
 }
 
 // EventsResponse answers GET /nashnet/nodes/{node}/events, held up to 30s and

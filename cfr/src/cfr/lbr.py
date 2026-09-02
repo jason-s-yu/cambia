@@ -68,6 +68,15 @@ when present:
     save/restore rewind keeps consistent.
   - ``initialize_state(view)``: per-episode reset, at the start of a game and at
     the start of each infoset replay.
+  - ``belief_handle()``: the ``GoAgentState`` handle a wrapper built for itself
+    in ``initialize_state``. The search state ADOPTS it (see
+    ``GoSearchState.adopt_agent_belief``) so the engine advances that belief
+    with every applied action and the rewind restores it, which is what the
+    head-to-head and mean_imp loops do through ``apply_games_batch``. Before
+    cambia-1479 the estimators applied actions with their own handles only, so a
+    wrapper's belief was built at the deal and never moved: a whole measurement
+    ran on the opening knowledge. ``frozen_beliefs=True`` reproduces that
+    protocol on demand, and every result names the protocol it ran under.
   - ``observe_transition(view, action, actor)``: post-action frame, fed for
     every applied action along a TRAJECTORY (collection and replay) so a wrapper
     that keeps its own Python-side stream stays in step. Deliberately NOT fed
@@ -75,6 +84,17 @@ when present:
     rewinds the ``GoAgentState`` but cannot rewind wrapper-private Python state,
     so feeding it there would leave such a wrapper desynced for the rest of the
     infoset.
+
+A policy that raises while choosing is a defect, not a condition to route
+around: ``choose_action_pos`` re-raises it as a ``PolicyError`` carrying the
+seat and the phase, so a broken agent fails the run instead of scoring
+truncated playouts and reporting a low exploitability (cambia-1479). An engine
+read a utility depends on gets the same treatment as an ``EngineReadError``,
+since the 0.0 those reads used to fall back to is the value of a draw. Both are
+``MeasurementError``. The failures that ARE absorbed (a lost optional-hook
+frame, a policy returning an action outside the legal set, an infoset whose
+replay diverged) are counted on a ``ToleratedFailures`` and the count rides on
+the result as ``policy_errors``.
 
 Both tiers are pure eval-time measurement: no network or harness state is
 mutated.
@@ -223,13 +243,18 @@ class GoSearchState:
     context manager, or close in a ``finally`` -- the handle pool is finite.
     """
 
-    __slots__ = ("engine", "a0", "a1", "_closed")
+    __slots__ = ("engine", "a0", "a1", "_closed", "_belief_handles")
 
     def __init__(self, engine: GoEngine, a0: GoAgentState, a1: GoAgentState) -> None:
         self.engine = engine
         self.a0 = a0
         self.a1 = a1
         self._closed = False
+        # The belief handles the game advances and the rewind restores.
+        # They start as this state's own a0/a1 and are replaced per seat
+        # by adopt_agent_belief when the policy at that seat owns its own
+        # belief (cambia-1479 defect 2).
+        self._belief_handles = [int(a0.handle), int(a1.handle)]
 
     @classmethod
     def new(cls, house_rules: Any, seed: int) -> "GoSearchState":
@@ -292,6 +317,49 @@ class GoSearchState:
     def agent_state(self, seat: int) -> GoAgentState:
         return self.a0 if seat == 0 else self.a1
 
+    def belief_handle(self, seat: int) -> int:
+        """The handle the game advances for ``seat``: adopted, or own."""
+        return self._belief_handles[0 if seat == 0 else 1]
+
+    def adopt_agent_belief(self, seat: int, policy: Any) -> bool:
+        """Advance ``policy``'s own belief at ``seat`` instead of this state's.
+
+        The evaluation wrappers own their belief: ``initialize_state``
+        builds a GoAgentState for the seat, and the head-to-head and
+        mean_imp loops hand THAT handle to apply_games_batch, which is
+        what advances it. The estimators here applied every action with
+        their own a0/a1 instead, so a wrapper's belief was built at the
+        deal and never moved again: an entire measurement was taken on
+        the opening knowledge (cambia-1479 defect 2). Adopting the
+        wrapper's handle into the apply/save/restore triple advances it
+        the way the evaluation loop does, and keeps it under the rewind,
+        since state_restore rewinds whatever handles it is given.
+
+        The adopted handle belongs to the policy and is never freed here.
+        Returns False when the policy carries no belief of its own (the
+        heuristic baselines, the uniform rollout policies), which leaves
+        the seat on this state's handle.
+        """
+        handle_fn = getattr(policy, "belief_handle", None)
+        if handle_fn is None:
+            return False
+        try:
+            handle = int(handle_fn())
+        except Exception as exc:  # JUSTIFIED: an optional wrapper hook
+            logger.warning(
+                "lbr: %s.belief_handle() failed (%s: %s); seat %d keeps the "
+                "search state's own belief.",
+                type(policy).__name__,
+                type(exc).__name__,
+                exc,
+                seat,
+            )
+            return False
+        if handle < 0:
+            return False
+        self._belief_handles[0 if seat == 0 else 1] = handle
+        return True
+
     def acting_player(self) -> int:
         return int(self.engine.acting_player())
 
@@ -327,8 +395,8 @@ class GoSearchState:
         try:
             apply_games_batch(
                 [self.engine.handle],
-                [self.a0.handle],
-                [self.a1.handle],
+                [self._belief_handles[0]],
+                [self._belief_handles[1]],
                 [int(action_idx)],
             )
             return True
@@ -338,10 +406,17 @@ class GoSearchState:
             return False
 
     def save(self) -> int:
-        return state_save(self.engine.handle, self.a0.handle, self.a1.handle)
+        return state_save(
+            self.engine.handle, self._belief_handles[0], self._belief_handles[1]
+        )
 
     def restore(self, snap_h: int) -> None:
-        state_restore(self.engine.handle, snap_h, self.a0.handle, self.a1.handle)
+        state_restore(
+            self.engine.handle,
+            snap_h,
+            self._belief_handles[0],
+            self._belief_handles[1],
+        )
 
     @staticmethod
     def free_snapshot(snap_h: int) -> None:
@@ -405,12 +480,13 @@ _STRONG_OPPONENT_WARNED = False
 def _make_strong_opponent(player_id: int, config: Any):
     """The default strong fixed opponent (ImperfectGreedyAgent), if available.
 
-    The heuristic baselines are being ported to the ``GameView`` protocol
-    separately (cambia-1426). Until that lands they are still written against
-    the Python reference engine and cannot read a ``GoEngine``, so this falls
-    back to uniform-random and says so: a Tier-B run on the fallback is a Tier-A
-    continuation wearing a Tier-B label, which the returned
-    ``rollout_opponent`` field names so a row is never silently mislabelled.
+    The fallback to uniform-random stays for an agent that cannot read a
+    ``GoEngine``: a Tier-B run on it is a Tier-A continuation wearing a Tier-B
+    label, which the returned ``rollout_opponent`` field names so a row is never
+    silently mislabelled. That fallback is no longer the normal case --
+    ImperfectGreedyAgent claims ``accepts_game_view`` since cambia-1479, having
+    only been ported (cambia-1426) and never marked, which put both Tier-B legs
+    of 2026-09-01 on UniformRandomPolicy.
     """
     global _STRONG_OPPONENT_WARNED
     try:
@@ -442,8 +518,9 @@ def _make_strong_opponent(player_id: int, config: Any):
 def _accepts_game_view(agent: Any) -> bool:
     """True if ``agent`` declares itself runnable against a ``GameView``.
 
-    The opt-in marker a ported baseline/wrapper sets; absent it, an agent is
-    assumed to still want the Python reference engine.
+    The opt-in marker a ported baseline/wrapper sets (see
+    ``src.agents.baseline_agents.BaseAgent.accepts_game_view``); absent it, an
+    agent is assumed to still want the Python reference engine.
     """
     return bool(getattr(agent, "accepts_game_view", False))
 
@@ -454,6 +531,120 @@ DEFAULT_TRAJECTORY_OPPONENT: OpponentFactory = _make_strong_opponent
 DEFAULT_ROLLOUT_OPPONENT: OpponentFactory = _make_strong_opponent
 
 
+class MeasurementError(RuntimeError):
+    """Base for the failures an estimator refuses to absorb.
+
+    Both members answer the same question the wrong way round: an estimator
+    that routes around a failure still returns a number, and a number built on
+    a failure it hid is worse than no number (cambia-1479). Catch this base to
+    catch every such failure; the members say whether the policy or an engine
+    read was the thing that broke.
+    """
+
+
+class PolicyError(MeasurementError):
+    """A policy raised while being asked for an action at a measured decision.
+
+    Every estimator here used to catch this and break out of the playout, so a
+    broken agent scored a truncated game instead of failing the run and the
+    exploitability estimate came back quietly low (cambia-1479 defect 1). The
+    error now propagates, carrying the context a bare traceback lacks: which
+    policy, which seat, which phase of the measurement, and how many actions
+    were on offer.
+    """
+
+
+class EngineReadError(MeasurementError):
+    """An engine read an estimator needs for a utility failed.
+
+    ``terminal_utility`` and ``hand_score_utility`` used to answer 0.0 here,
+    which is the value of a draw: an unreadable playout scored as a tie and
+    pulled the estimate toward zero with nothing on the row to say so. There is
+    no correct utility to substitute for a read that failed, so the run fails.
+    """
+
+
+class ToleratedFailures:
+    """Counts the failures an estimator absorbs instead of raising.
+
+    A silently absorbed failure is what lets a measurement come back depressed
+    rather than broken, so each one is counted here and the first of its kind is
+    logged with its exception. Per-occurrence logging is not an option: a
+    production-sized run absorbs failures inside millions of rollouts. The total
+    rides on the estimator's result dict so a non-zero count reaches the
+    persisted row.
+    """
+
+    __slots__ = ("counts", "_logged")
+
+    def __init__(self) -> None:
+        self.counts: Dict[str, int] = {}
+        self._logged: set = set()
+
+    def record(self, kind: str, detail: str, exc: Optional[BaseException] = None) -> None:
+        self.counts[kind] = self.counts.get(kind, 0) + 1
+        if kind in self._logged:
+            return
+        self._logged.add(kind)
+        logger.warning(
+            "lbr: tolerated %s failure (%s)%s. Further occurrences of this kind "
+            "are counted, not logged; the total rides on the result as "
+            "policy_errors.",
+            kind,
+            detail,
+            "" if exc is None else f": {type(exc).__name__}: {exc}",
+        )
+
+    @property
+    def total(self) -> int:
+        return sum(self.counts.values())
+
+    def as_dict(self) -> Dict[str, int]:
+        return dict(self.counts)
+
+
+def choose_action_pos(
+    policy: Any,
+    view: GameView,
+    legal_actions: Sequence[GameAction],
+    *,
+    seat: int,
+    phase: str,
+    tolerated: Optional[ToleratedFailures] = None,
+) -> int:
+    """Ask ``policy`` for an action and return its position in ``legal_actions``.
+
+    A policy that RAISES is never absorbed: the exception is re-raised as a
+    ``PolicyError`` naming the policy, the seat, the phase and the legal-set
+    size, so the run fails where the defect is instead of reporting a number.
+
+    A policy that returns an action OUTSIDE the legal set is a different, and
+    recoverable, failure -- the heuristic baselines build actions without
+    always checking legality. It falls back to the first legal action, which is
+    the behaviour the collector already had, and is recorded in ``tolerated``
+    when one is passed so the count reaches the row rather than vanishing. With
+    no counter to record it in, it raises too.
+    """
+    try:
+        action = policy.choose_action(view, legal_actions)
+    except Exception as exc:
+        raise PolicyError(
+            f"{type(policy).__name__} P{seat} raised during {phase} with "
+            f"{len(legal_actions)} legal actions: {type(exc).__name__}: {exc}"
+        ) from exc
+    try:
+        return legal_actions.index(action)
+    except ValueError:
+        detail = (
+            f"{type(policy).__name__} P{seat} returned {action!r} during {phase}, "
+            f"which is not in the {len(legal_actions)}-action legal set"
+        )
+        if tolerated is None:
+            raise PolicyError(detail) from None
+        tolerated.record("illegal_action", detail)
+        return 0
+
+
 def _resolve_max_turns(config: Any) -> int:
     house_rules = config.cambia_rules
     max_turns = getattr(house_rules, "max_game_turns", 0)
@@ -462,8 +653,18 @@ def _resolve_max_turns(config: Any) -> int:
     return max_turns
 
 
-def _notify(policy: Any, method: str, *args) -> bool:
-    """Call an optional policy hook. Returns False if it raised."""
+def _notify(
+    policy: Any,
+    method: str,
+    *args,
+    tolerated: Optional[ToleratedFailures] = None,
+) -> bool:
+    """Call an optional policy hook. Returns False if it raised.
+
+    A hook is optional and a failure is recoverable, so this one absorbs; the
+    absorb is counted on ``tolerated`` (and logged once per kind there) rather
+    than logged per occurrence, so a run that lost frames says so on its result.
+    """
     fn = getattr(policy, method, None)
     if fn is None:
         return True
@@ -471,29 +672,72 @@ def _notify(policy: Any, method: str, *args) -> bool:
         fn(*args)
         return True
     except Exception as exc:  # JUSTIFIED: eval resilience for optional hooks
-        logger.warning(
-            "lbr: policy hook %s failed (%s: %s)", method, type(exc).__name__, exc
-        )
+        if tolerated is None:
+            logger.warning(
+                "lbr: policy hook %s failed (%s: %s)", method, type(exc).__name__, exc
+            )
+        else:
+            tolerated.record(
+                f"hook_{method}", f"{type(policy).__name__} hook {method}", exc
+            )
         return False
 
 
-def _begin_episode(state: GoSearchState, agent_wrapper: Any, seat: int) -> None:
-    """Hand the agent its per-episode Go handles and reset its episode state."""
-    _notify(agent_wrapper, "bind_go_state", state.view(), state.agent_state(seat))
-    _notify(agent_wrapper, "initialize_state", state.view())
+#: How a measurement treated the belief of a policy that owns one. "advancing"
+#: is the correct protocol: the engine moves the policy's belief with every
+#: applied action. "frozen" is the pre-cambia-1479 protocol, kept switchable so
+#: a historical number can be reproduced against the run that produced it.
+BELIEF_PROTOCOL_ADVANCING = "advancing"
+BELIEF_PROTOCOL_FROZEN = "frozen"
+
+
+def belief_protocol_label(frozen_beliefs: bool) -> str:
+    """The label a result records for the protocol it ran under."""
+    return BELIEF_PROTOCOL_FROZEN if frozen_beliefs else BELIEF_PROTOCOL_ADVANCING
+
+
+def _begin_episode(
+    state: GoSearchState,
+    agent_wrapper: Any,
+    seat: int,
+    frozen_beliefs: bool = False,
+    tolerated: Optional[ToleratedFailures] = None,
+) -> None:
+    """Hand the agent its per-episode Go handles and reset its episode state.
+
+    The state then adopts whatever belief the wrapper built in
+    ``initialize_state``, so the engine advances it with every applied action
+    (see ``GoSearchState.adopt_agent_belief``). ``frozen_beliefs`` skips the
+    adoption and reproduces the pre-cambia-1479 protocol, where such a belief
+    stayed at its initial state for the whole measurement.
+    """
+    _notify(
+        agent_wrapper,
+        "bind_go_state",
+        state.view(),
+        state.agent_state(seat),
+        tolerated=tolerated,
+    )
+    _notify(agent_wrapper, "initialize_state", state.view(), tolerated=tolerated)
+    if not frozen_beliefs:
+        state.adopt_agent_belief(seat, agent_wrapper)
 
 
 def hand_score_utility(view: GameView, seat: int, opponent_seat: int) -> float:
     """Utility estimate for a game cut short by the decision cap.
 
     Lower hand score wins, matching the Tier-A/Tier-B/ISMCTS timeout convention
-    so the estimators stay comparable.
+    so the estimators stay comparable. A hand that cannot be read raises
+    ``EngineReadError`` rather than scoring the playout as a tie.
     """
     try:
         mine = sum(c.value for c in view.get_player_hand(seat))
         theirs = sum(c.value for c in view.get_player_hand(opponent_seat))
-    except Exception:  # JUSTIFIED: eval resilience on odd states
-        return 0.0
+    except Exception as exc:
+        raise EngineReadError(
+            f"reading hands for the timeout hand-score utility failed "
+            f"(seat {seat} vs seat {opponent_seat}): {type(exc).__name__}: {exc}"
+        ) from exc
     if mine < theirs:
         return 1.0
     if mine > theirs:
@@ -504,17 +748,29 @@ def hand_score_utility(view: GameView, seat: int, opponent_seat: int) -> float:
 def terminal_utility(
     state: GoSearchState, seat: int = _PLAYER_ID, opponent_seat: int = _OPPONENT_ID
 ) -> float:
-    """Terminal utility for ``seat``, or a hand-score estimate on timeout."""
+    """Terminal utility for ``seat``, or a hand-score estimate on timeout.
+
+    An unreadable terminal state raises ``EngineReadError``: the 0.0 this used
+    to return is the value of a draw, so an engine read that failed scored as
+    one and dragged the estimate toward zero without a trace.
+    """
     if state.is_terminal():
         try:
             return state.utility(seat)
-        except Exception:  # JUSTIFIED: eval resilience
-            return 0.0
+        except Exception as exc:
+            raise EngineReadError(
+                f"reading the terminal utility for seat {seat} failed: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
     return hand_score_utility(state.view(), seat, opponent_seat)
 
 
 def replay_infoset(
-    house_rules: Any, infoset: SampledInfoset, agent_wrapper: Any
+    house_rules: Any,
+    infoset: SampledInfoset,
+    agent_wrapper: Any,
+    frozen_beliefs: bool = False,
+    tolerated: Optional[ToleratedFailures] = None,
 ) -> GoSearchState:
     """Rebuild the state at a sampled decision point.
 
@@ -525,7 +781,7 @@ def replay_infoset(
     """
     state = infoset.deal.new_state(house_rules)
     try:
-        _begin_episode(state, agent_wrapper, _PLAYER_ID)
+        _begin_episode(state, agent_wrapper, _PLAYER_ID, frozen_beliefs, tolerated)
         for action_idx in infoset.action_prefix:
             actor = state.acting_player()
             if not state.apply_index(action_idx):
@@ -540,6 +796,7 @@ def replay_infoset(
                 state.view(),
                 index_to_action(action_idx),
                 actor,
+                tolerated=tolerated,
             )
     except Exception:
         state.close()
@@ -556,6 +813,8 @@ def collect_infosets(
     sample_prob: float = 1.0,
     max_games: Optional[int] = None,
     deal_decks: Optional[Sequence[Any]] = None,
+    frozen_beliefs: bool = False,
+    tolerated: Optional[ToleratedFailures] = None,
 ) -> List[SampledInfoset]:
     """Collect P0 decision points by play against a trajectory opponent.
 
@@ -584,6 +843,13 @@ def collect_infosets(
             ``(deck, starting_player)`` pairs) to draw deals from instead of
             seeding the Go dealer. Required for any config whose deck the FFI
             rules struct cannot express -- see ``_reject_unsupported_rules``.
+        frozen_beliefs: reproduce the pre-cambia-1479 protocol, where a policy
+            that owns a belief kept the one it built at the deal for the whole
+            measurement. Default False: beliefs advance with every action, as
+            they do in the head-to-head and mean_imp loops.
+        tolerated: counter for the failures collection absorbs (a lost hook
+            frame, a policy returning an action outside the legal set). A
+            raising policy is never absorbed -- it leaves as a ``PolicyError``.
 
     Returns:
         list of ``SampledInfoset``.
@@ -616,7 +882,12 @@ def collect_infosets(
 
         state = deal.new_state(house_rules)
         try:
-            _begin_episode(state, agent_wrapper, _PLAYER_ID)
+            _begin_episode(state, agent_wrapper, _PLAYER_ID, frozen_beliefs, tolerated)
+            # The opponent seat has the same belief lifecycle: a belief-carrying
+            # opponent would otherwise play the whole trajectory on the deal's
+            # opening knowledge. Both hooks are optional, so a heuristic
+            # baseline or a uniform policy passes through untouched.
+            _begin_episode(state, opp_agent, _OPPONENT_ID, frozen_beliefs, tolerated)
             prefix: List[int] = []
 
             turn = 0
@@ -632,13 +903,14 @@ def collect_infosets(
 
                 if ap == _PLAYER_ID:
                     take = len(sampled) < num_infosets and rng.random() < sample_prob
-                    chosen_action = agent_wrapper.choose_action(
-                        state.view(), legal_actions
+                    pos = choose_action_pos(
+                        agent_wrapper,
+                        state.view(),
+                        legal_actions,
+                        seat=ap,
+                        phase="trajectory collection",
+                        tolerated=tolerated,
                     )
-                    try:
-                        pos = legal_actions.index(chosen_action)
-                    except ValueError:
-                        pos = 0
                     if take:
                         sampled.append(
                             SampledInfoset(
@@ -649,11 +921,14 @@ def collect_infosets(
                             )
                         )
                 else:
-                    chosen_action = opp_agent.choose_action(state.view(), legal_actions)
-                    try:
-                        pos = legal_actions.index(chosen_action)
-                    except ValueError:
-                        pos = 0
+                    pos = choose_action_pos(
+                        opp_agent,
+                        state.view(),
+                        legal_actions,
+                        seat=ap,
+                        phase="trajectory collection (opponent)",
+                        tolerated=tolerated,
+                    )
 
                 chosen_idx = legal_indices[pos]
                 if not state.apply_index(chosen_idx):
@@ -670,6 +945,7 @@ def collect_infosets(
                         state.view(),
                         legal_actions[pos],
                         ap,
+                        tolerated=tolerated,
                     ):
                         # L5 (cambia-248): a dropped frame here desyncs the
                         # agent's prefix from the true trajectory for the REST
@@ -696,7 +972,8 @@ def collect_infosets(
     if failed_observe_transitions:
         logger.warning(
             "collect_infosets: %d game(s) aborted early due to "
-            "observe_transition failures (see per-occurrence warnings above).",
+            "observe_transition failures; the failures themselves are counted "
+            "on the estimator's policy_errors, logged once per kind.",
             failed_observe_transitions,
         )
     return sampled
@@ -707,6 +984,7 @@ def _agent_policy_rollout(
     agent_wrapper,
     rollout_opponent,
     max_turns: int,
+    tolerated: Optional[ToleratedFailures] = None,
 ) -> float:
     """Roll out from the current state under agent-policy play.
 
@@ -725,14 +1003,24 @@ def _agent_policy_rollout(
         if not legal_indices:
             break
         legal_actions = actions_from_indices(legal_indices)
-        try:
-            if ap == _PLAYER_ID:
-                act = agent_wrapper.choose_action(state.view(), legal_actions)
-            else:
-                act = rollout_opponent.choose_action(state.view(), legal_actions)
-            pos = legal_actions.index(act)
-        except Exception:  # JUSTIFIED: eval resilience
-            break
+        if ap == _PLAYER_ID:
+            pos = choose_action_pos(
+                agent_wrapper,
+                state.view(),
+                legal_actions,
+                seat=ap,
+                phase="Tier-B continuation rollout",
+                tolerated=tolerated,
+            )
+        else:
+            pos = choose_action_pos(
+                rollout_opponent,
+                state.view(),
+                legal_actions,
+                seat=ap,
+                phase="Tier-B continuation rollout (opponent)",
+                tolerated=tolerated,
+            )
         if not state.apply_index(legal_indices[pos]):
             break
     return terminal_utility(state)
@@ -748,6 +1036,7 @@ def tier_b_lbr(
     rollout_opponent_factory: OpponentFactory = DEFAULT_ROLLOUT_OPPONENT,
     max_games: Optional[int] = None,
     deal_decks: Optional[Sequence[Any]] = None,
+    frozen_beliefs: bool = False,
 ) -> Dict[str, Any]:
     """Compute the Tier-B sampled LBR exploitability estimate.
 
@@ -762,6 +1051,11 @@ def tier_b_lbr(
          Agent value = mean continuation utility of the action the agent chose.
       4. Exploitability = mean(BR value - agent value) over infosets (>= 0).
 
+    ``frozen_beliefs`` reproduces the pre-cambia-1479 protocol, where a policy
+    owning a belief kept the one it built at the deal for the whole measurement.
+    Default False: beliefs advance with every applied action. The number a run
+    produces is not comparable across the two, so the result names which ran.
+
     Returns a dict:
         exploitability: float (mean BR gap; >= 0 by construction)
         num_infosets_sampled: int
@@ -769,9 +1063,15 @@ def tier_b_lbr(
         tier: "B"
         rollout_opponent: str (label of the rollout opponent class, for the row)
         seed: int (echoed, so a persisted row records what produced it)
+        belief_protocol: "advancing" or "frozen"
+        policy_errors: int (failures the run absorbed; a raising policy is not
+            absorbed, it raises PolicyError)
+        policy_error_detail: dict of absorbed-failure kind -> count
     """
     max_turns = _resolve_max_turns(config)
     house_rules = config.cambia_rules
+    tolerated = ToleratedFailures()
+    protocol = belief_protocol_label(frozen_beliefs)
 
     sampled = collect_infosets(
         agent_wrapper,
@@ -781,8 +1081,16 @@ def tier_b_lbr(
         trajectory_opponent_factory=trajectory_opponent_factory,
         max_games=max_games,
         deal_decks=deal_decks,
+        frozen_beliefs=frozen_beliefs,
+        tolerated=tolerated,
     )
 
+    # A rollout opponent is built per rollout, which is the only shape that
+    # needs no reset contract at all. Reuse was measured and bought nothing:
+    # one ImperfectGreedyAgent costs 0.55 us to construct, so the tens of
+    # thousands a leg builds are ~0.02s of its ~700s, and the back-to-back pair
+    # of a counterbalanced A/B on 2026-09-02 put the reusing arm at 210.8s of
+    # CPU against 196.5s for this one, on identical estimates (cambia-1479).
     opp_label = type(rollout_opponent_factory(_OPPONENT_ID, config)).__name__
 
     def _empty(reason: str) -> Dict[str, Any]:
@@ -794,6 +1102,9 @@ def tier_b_lbr(
             "tier": "B",
             "rollout_opponent": opp_label,
             "seed": seed,
+            "belief_protocol": protocol,
+            "policy_errors": tolerated.total,
+            "policy_error_detail": tolerated.as_dict(),
         }
 
     if not sampled:
@@ -802,9 +1113,13 @@ def tier_b_lbr(
     gaps: List[float] = []
     for infoset in sampled:
         try:
-            state = replay_infoset(house_rules, infoset, agent_wrapper)
+            state = replay_infoset(
+                house_rules, infoset, agent_wrapper, frozen_beliefs, tolerated
+            )
         except Exception as exc:  # JUSTIFIED: eval resilience
-            logger.warning("tier_b_lbr: infoset replay failed (%s); skipping.", exc)
+            # A skipped infoset shrinks the sample the estimate is built from,
+            # so it is counted onto the row rather than only logged.
+            tolerated.record("infoset_replay", "tier_b_lbr infoset replay", exc)
             continue
 
         snap_h: Optional[int] = None
@@ -821,7 +1136,7 @@ def tier_b_lbr(
                     rollout_opp = rollout_opponent_factory(_OPPONENT_ID, config)
                     utils.append(
                         _agent_policy_rollout(
-                            state, agent_wrapper, rollout_opp, max_turns
+                            state, agent_wrapper, rollout_opp, max_turns, tolerated
                         )
                     )
                 action_mean_utils.append(float(np.mean(utils)) if utils else 0.0)
@@ -854,4 +1169,7 @@ def tier_b_lbr(
         "tier": "B",
         "rollout_opponent": opp_label,
         "seed": seed,
+        "belief_protocol": protocol,
+        "policy_errors": tolerated.total,
+        "policy_error_detail": tolerated.as_dict(),
     }

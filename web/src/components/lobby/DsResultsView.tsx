@@ -17,6 +17,12 @@
 // hub.buildLobbySnapshot), so final scores fall back to gameStore's finalScores,
 // captured off the game_end event (cambia-510).
 //
+// A game the service ended on an internal error is the one case this card
+// shows no result at all (cambia-1831): the results frames carry a `reason`,
+// and the scores beside it were read off whatever state the fault left, so the
+// card reports the error and draws no scoreboard from them. The controls stay -
+// the table is over either way and the seat still needs its way out.
+//
 // When the finished table is still in the store the results render as an
 // overlay above it, so the last board state stays visible under the scrim.
 // Without one (a reload straight into post_game) the card sits on the ground.
@@ -31,7 +37,7 @@
 import React, { useEffect, useMemo, useRef } from 'react';
 import { useCurrentLobbyStore, type LobbyPhase } from '@/stores/lobbyStore';
 import { useAuthStore } from '@/stores/authStore';
-import { useGameStore, selectFinalScores, selectFinalHands } from '@/stores/gameStore';
+import { useGameStore, selectFinalScores, selectFinalHands, selectEndReason } from '@/stores/gameStore';
 import type { ClientGameAction, ObfGameState } from '@/types/game';
 import Button from '@/components/ds/core/Button';
 import Badge from '@/components/ds/core/Badge';
@@ -81,8 +87,16 @@ const DsResultsView: React.FC<DsResultsViewProps> = ({ phase, onReturnToLobby, o
     return m;
   }, [finalHands]);
 
+  // A game the service ended on an internal error carries a reason on its results frames
+  // (cambia-1831). The scores that arrive with it are read off whatever state the fault left, so
+  // this card reports the error and shows no scoreboard at all: a standings list drawn from them
+  // would be read as the game's result, which is the one thing it is not. Any reason at all does
+  // this, known copy or not; the copy below is what this client has for the one the service sends.
+  const endReason = useGameStore(selectEndReason);
+  const endedInError = !!endReason;
+
   const isMatchEnd = phase === 'match_end';
-  const title = isMatchEnd ? 'Final standings' : 'Game over';
+  const title = endedInError ? 'Game ended by an error' : isMatchEnd ? 'Final standings' : 'Game over';
   const overTable = !!gameState && !!sendMessage;
 
   const cardRef = useRef<HTMLElement>(null);
@@ -180,18 +194,26 @@ const DsResultsView: React.FC<DsResultsViewProps> = ({ phase, onReturnToLobby, o
       <div style={{ padding: '18px 20px 14px', display: 'flex', flexDirection: 'column', gap: 4 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <span style={EYEBROW}>{isMatchEnd ? 'Circuit' : 'Casual game'}</span>
+          {endedInError && <Badge tone='danger'>Internal error</Badge>}
           {isMatchEnd && matchState?.isRanked && <Badge tone='gold'>Ranked</Badge>}
           {roundCounter && <Badge tone='info'>{roundCounter}</Badge>}
         </div>
         <h1 id='results-title' style={{ margin: 0, fontSize: 'var(--ds-text-2xl)', fontWeight: 'var(--weight-bold)', letterSpacing: 'var(--ds-tracking-tight)', lineHeight: 'var(--ds-leading-tight)' }}>{title}</h1>
-        {winner && (
+        {winner && !endedInError && (
           <div style={{ fontSize: 'var(--ds-text-sm)', color: 'var(--text-secondary)' }}>
             {ownWon ? 'You win.' : `${winner.name} wins.`}{caller ? ` Cambia was called by ${callerIsSelf ? 'you' : caller}.` : ''}
           </div>
         )}
       </div>
 
-      {own && own.score !== null && (
+      {endedInError && (
+        <div data-testid='results-internal-error' style={{ borderTop: '1px solid var(--border-subtle)', padding: '12px 20px 16px', fontSize: 'var(--ds-text-sm)', color: 'var(--text-secondary)', lineHeight: 'var(--ds-leading-normal)' }}>
+          The server hit an internal error and had to end this game. The scores it was holding came
+          from an interrupted state, so they are not shown as a result and this game was not rated.
+        </div>
+      )}
+
+      {!endedInError && own && own.score !== null && (
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, padding: '0 20px 14px' }}>
           <span style={{ fontSize: 'var(--ds-text-4xl)', fontWeight: 'var(--weight-black)', letterSpacing: 'var(--ds-tracking-tight)', lineHeight: 1, fontVariantNumeric: 'tabular-nums', color: ownWon ? 'var(--accent-gold)' : 'var(--text-primary)' }}>
             {own.score}
@@ -200,6 +222,7 @@ const DsResultsView: React.FC<DsResultsViewProps> = ({ phase, onReturnToLobby, o
         </div>
       )}
 
+      {!endedInError && (
       <div style={{ borderTop: '1px solid var(--border-subtle)', padding: '12px 20px 16px' }}>
         <div style={{ ...EYEBROW, marginBottom: 6 }}>{isMatchEnd ? 'Standings' : 'Scores'}</div>
         <div style={{ display: 'flex', flexDirection: 'column' }}>
@@ -242,8 +265,9 @@ const DsResultsView: React.FC<DsResultsViewProps> = ({ phase, onReturnToLobby, o
           )}
         </div>
       </div>
+      )}
 
-      {isMatchEnd && ratingChanges && Object.keys(ratingChanges).length > 0 && (
+      {!endedInError && isMatchEnd && ratingChanges && Object.keys(ratingChanges).length > 0 && (
         <div style={{ borderTop: '1px solid var(--border-subtle)', padding: '12px 20px 16px' }}>
           <div style={{ ...EYEBROW, marginBottom: 6 }}>Rating changes</div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>

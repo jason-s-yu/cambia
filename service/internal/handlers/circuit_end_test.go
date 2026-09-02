@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/jason-s-yu/cambia/service/internal/game"
 	"github.com/jason-s-yu/cambia/service/internal/hub"
 	"github.com/jason-s-yu/cambia/service/internal/lobby"
 )
@@ -59,7 +60,7 @@ func TestAttachOnGameEnd_CircuitUsesRawScoresAndRealCaller(t *testing.T) {
 	rawScores := map[uuid.UUID]int{hostID: 8, p2ID: 8}
 	adjustedScores := map[uuid.UUID]int{hostID: 8 + lob.Circuit.Rules.WinBonus, p2ID: 8}
 
-	g.OnGameEnd(lob.ID, hostID, adjustedScores, map[uuid.UUID]string{}, rawScores, hostID, nil)
+	g.OnGameEnd(lob.ID, hostID, adjustedScores, map[uuid.UUID]string{}, rawScores, hostID, nil, game.EndReasonNormal)
 
 	if len(circuitState.Rounds) != 1 {
 		t.Fatalf("expected 1 circuit round recorded, got %d", len(circuitState.Rounds))

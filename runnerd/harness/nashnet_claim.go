@@ -162,7 +162,7 @@ func (p *Pool) placeOnce(ctx context.Context, cand candidate, req nashnet.ClaimR
 // snapshot digest and the seed entries), grants the lease, writes the
 // coordinator-authored env.json, and builds the claim response.
 func (p *Pool) grantFor(ctx context.Context, cand candidate, req nashnet.ClaimRequest, picked *pick) (*nashnet.ClaimResponse, error) {
-	seeds, grants, err := p.resolveSeeds(picked.spec, picked.resume)
+	seeds, grants, err := p.resolveSeeds(picked.spec, picked.spec.Resume)
 	if err != nil {
 		return nil, err
 	}
@@ -220,7 +220,7 @@ func (p *Pool) grantFor(ctx context.Context, cand candidate, req nashnet.ClaimRe
 		LeaseDeadline: rfc3339(lease.Deadline),
 		LeaseToken:    token,
 		Spec:          specJSON,
-		Resume:        picked.resume,
+		Resume:        picked.spec.Resume,
 		Attempt:       lease.Attempt,
 		Snapshot: nashnet.SnapshotRef{
 			URL:       "/nashnet/leases/" + lease.LeaseID + "/snapshot",
