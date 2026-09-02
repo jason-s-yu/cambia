@@ -182,12 +182,14 @@ func (s *Server) handleNack(w http.ResponseWriter, r *http.Request, lease nashne
 	}
 	if p.noteNack(lease.NodeID, lease.JobID, req.Reason,
 		time.Duration(req.CooldownSeconds)*time.Second) {
-		// Three consecutive prepare_node_failed nacks: the node stops claiming
-		// until its own cooldown runs out or an operator lifts the hold (D63).
-		// The queue is untouched, so the job this nack returned goes to the next
-		// capable node on its next claim.
+		// Three consecutive prepare_node_failed nacks: the node's claims are
+		// refused node_gated until its own cooldown runs out or an operator lifts
+		// the hold (D63). No event is posted, because the only one that would say
+		// this is drain, which names an operator act the node clears off its next
+		// heartbeat; the 204 and its Retry-After are the whole signal, and the
+		// queue is untouched, so the job this nack returned goes to the next
+		// capable node.
 		poolLog("nashnet: circuit breaker tripped for node %s", lease.NodeID)
-		p.postEvent(lease.NodeID, nashnet.Event{Type: nashnet.EventDrain})
 	}
 	// The lease settles through the same outcome path as every other ended one,
 	// so a nack posted after the process started finalizes rather than returning
