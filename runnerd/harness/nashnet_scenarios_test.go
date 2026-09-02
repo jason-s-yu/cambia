@@ -133,7 +133,10 @@ func TestSnapshotInterruptedResumesByRange(t *testing.T) {
 	if cut == 0 {
 		t.Fatalf("the fixture bundle is %d bytes: too small to interrupt", len(whole))
 	}
-	dest := filepath.Join(r.nodeCfg.BaseDir, "snapshots", "resumed-snapshot.bundle")
+	// The node names its cached bundle after the artifact the coordinator
+	// serves, which for a first claim advertising no basis is the bare pinned
+	// commit (cambia-2018).
+	dest := filepath.Join(r.nodeCfg.BaseDir, "snapshots", sha+".bundle")
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -165,6 +168,46 @@ func TestSnapshotInterruptedResumesByRange(t *testing.T) {
 	}
 	if !r.repo.nodeHas(t, sha) {
 		t.Fatalf("the resumed bundle did not import %s", sha)
+	}
+}
+
+// TestSecondClaimOnANodeThatHoldsTheSnapshot is the regression for the defect
+// cambia-1726 observed live: the node cached the bundle under the job id while
+// the coordinator keys the served artifact by (commit, basis), so a second
+// claim of one job on one node resumed a complete file, asked for a range past
+// its end, was answered 416, and nacked snapshot_failed on every retry
+// (cambia-2018). A resume, an expiry requeue, and an agent restart after the
+// fetch all produce that second claim.
+func TestSecondClaimOnANodeThatHoldsTheSnapshot(t *testing.T) {
+	r := newNodeRig(t, nodeRigConfig{claimOnce: true})
+	r.queueFixtureJob(t, "twice-claimed", 2, "quick")
+	r.runCycle(t, 60*time.Second)
+
+	// Nothing is cleared: the node keeps the bundle its first claim fetched,
+	// which is the whole of what this scenario is about.
+	r.requests.reset()
+	resp := r.do(http.MethodPost, "/harness/jobs/twice-claimed/resume", nil)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("resume: got %d, want 200 or 202", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	r.runCycle(t, 60*time.Second)
+
+	for _, row := range r.requests.forPath("/snapshot") {
+		if row.Status == http.StatusRequestedRangeNotSatisfiable {
+			t.Fatalf("the second claim asked for a range past the end of the artifact: %+v", row)
+		}
+	}
+	if nacks := r.requests.forPath("/nack"); len(nacks) != 0 {
+		t.Fatalf("the second claim nacked %d times: %+v", len(nacks), nacks)
+	}
+	view, ok := r.disp.resolveView("twice-claimed")
+	if !ok {
+		t.Fatal("the coordinator holds no view for twice-claimed after the second claim")
+	}
+	if view.State != procmgr.StatusStopped {
+		t.Fatalf("state after the second claim = %q, want the clean terminal", view.State)
 	}
 }
 
@@ -374,17 +417,13 @@ func TestSeedDeliveryForARePlacedResume(t *testing.T) {
 
 	promoted := r.promotedBody(t, "seeded-resume", "snapshots/prtcfr_checkpoint.pt")
 
-	// The re-placement: the node holds neither the run nor a cached snapshot,
-	// which is the state of any node the resume lands on other than the one
-	// that produced the run. Clearing the snapshot cache is also what keeps
-	// this scenario off F3 (a node re-fetching a bundle it already holds
-	// complete asks for a range past the end and is answered 416, which its
-	// download loop treats as a fetch failure and nacks); a second claim on
-	// the same node is that defect own case, not this one.
+	// The re-placement: the node no longer holds the prior run's bytes, which
+	// is the state of any node the resume lands on other than the one that
+	// produced the run. The snapshot cache stays: a node re-fetching a bundle
+	// it already holds is served from that cache rather than nacked
+	// (cambia-2018), and TestSecondClaimOnANodeThatHoldsTheSnapshot is that
+	// case on its own.
 	if err := os.RemoveAll(r.nodeRunDir("seeded-resume")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.RemoveAll(filepath.Join(r.nodeCfg.BaseDir, "snapshots")); err != nil {
 		t.Fatal(err)
 	}
 	r.requests.reset()

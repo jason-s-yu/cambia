@@ -436,6 +436,13 @@ func (c *Client) Download(ctx context.Context, leaseToken, rawPath string, offse
 			return 0, errRangeIgnored
 		}
 	case http.StatusPartialContent:
+	case http.StatusRequestedRangeNotSatisfiable:
+		// The offset asked for is at or past the end of what the coordinator
+		// serves, which is what a node holding the whole artifact already asks
+		// for. Whether the local file is that artifact is a question only its
+		// digest answers, so this is classified rather than reported as a
+		// transport failure (cambia-2018).
+		return 0, errRangeUnsatisfiable
 	default:
 		return 0, apiError(resp)
 	}
@@ -444,6 +451,10 @@ func (c *Client) Download(ctx context.Context, leaseToken, rawPath string, offse
 
 // errRangeIgnored tells the fetch loop to truncate and start over.
 var errRangeIgnored = errors.New("nashnet: coordinator ignored the range request")
+
+// errRangeUnsatisfiable tells the fetch loop the resume offset is past the end
+// of the served artifact, which its digest check resolves.
+var errRangeUnsatisfiable = errors.New("nashnet: resume offset is past the end of the served file")
 
 // newRequest builds a request against the coordinator base URL.
 func (c *Client) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
