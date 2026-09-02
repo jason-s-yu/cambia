@@ -104,3 +104,53 @@ func TestAttemptReshuffleReportsMovedCards(t *testing.T) {
 		t.Errorf("DiscardLen = %d, want 1", gs.DiscardLen)
 	}
 }
+
+// TestAttemptReshuffleClampBoundary pins attemptReshuffle's `DiscardLen <= 1` clamp at both sides
+// of the boundary: at 0 and 1 cards there is no material to reshuffle (a lone top card has nowhere
+// to go), and at 2 the clamp releases and moves exactly the one card below the top into the
+// stockpile, leaving the top card as the discard pile's sole survivor.
+func TestAttemptReshuffleClampBoundary(t *testing.T) {
+	gs := NewGame(7, DefaultHouseRules())
+	gs.Deal()
+
+	gs.StockLen = 0
+	gs.DiscardLen = 0
+	if gs.AttemptReshuffle() {
+		t.Error("AttemptReshuffle = true, want false (an empty discard pile has no top to keep and nothing to move)")
+	}
+	if gs.StockLen != 0 || gs.DiscardLen != 0 {
+		t.Errorf("StockLen = %d, DiscardLen = %d, want 0 and 0 (piles untouched)", gs.StockLen, gs.DiscardLen)
+	}
+
+	ace := NewCard(SuitHearts, RankAce)
+	gs.DiscardPile[0] = ace
+	gs.DiscardLen = 1
+	if gs.AttemptReshuffle() {
+		t.Error("AttemptReshuffle = true, want false (a lone top card cannot be reshuffled)")
+	}
+	if gs.StockLen != 0 || gs.DiscardLen != 1 {
+		t.Errorf("StockLen = %d, DiscardLen = %d, want 0 and 1 (piles untouched)", gs.StockLen, gs.DiscardLen)
+	}
+
+	// DiscardPile[DiscardLen-1] is the pile's top (effectiveDiscardTop and attemptReshuffle both
+	// index it that way); the two joins as the new top, so it is the card the clamp must keep and
+	// the ace is the one card there is material to move.
+	two := NewCard(SuitHearts, RankTwo)
+	gs.DiscardPile[1] = two
+	gs.DiscardLen = 2
+	if !gs.AttemptReshuffle() {
+		t.Fatal("AttemptReshuffle = false, want true (two discards releases the clamp: one stays, one moves)")
+	}
+	if gs.StockLen != 1 {
+		t.Errorf("StockLen = %d, want 1 (the one non-top card moved)", gs.StockLen)
+	}
+	if gs.DiscardLen != 1 {
+		t.Errorf("DiscardLen = %d, want 1 (the top card stays)", gs.DiscardLen)
+	}
+	if gs.DiscardPile[0] != two {
+		t.Errorf("DiscardPile[0] = %v, want the two to stay on top", gs.DiscardPile[0])
+	}
+	if gs.Stockpile[0] != ace {
+		t.Errorf("Stockpile[0] = %v, want the ace to have moved into the stockpile", gs.Stockpile[0])
+	}
+}

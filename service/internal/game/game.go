@@ -63,10 +63,10 @@ const (
 	// deadline without starting a new turn. game_player_turn may not be announced over a pending
 	// ability, which is when most of those re-arms happen, so the clock needs a channel of its own
 	// (cambia-1556). See publishTurnDeadline.
-	EventGameTurnDeadline GameEventType = "game_turn_deadline" // Public: The current turn's clock was re-armed.
-	EventPrivateSyncState       GameEventType = "private_sync_state"             // Private: Full game state sync for a player.
-	EventPrivateInitialCards    GameEventType = "private_initial_cards"          // Private: Pregame peek cards revealed to their owner.
-	EventGameEnd                GameEventType = "game_end"                       // Public: Game has ended, includes results.
+	EventGameTurnDeadline    GameEventType = "game_turn_deadline"    // Public: The current turn's clock was re-armed.
+	EventPrivateSyncState    GameEventType = "private_sync_state"    // Private: Full game state sync for a player.
+	EventPrivateInitialCards GameEventType = "private_initial_cards" // Private: Pregame peek cards revealed to their owner.
+	EventGameEnd             GameEventType = "game_end"              // Public: Game has ended, includes results.
 
 	// Disconnect grace (cambia-955). A dropped socket no longer forfeits on the spot: the seat is
 	// held for HouseRules.DisconnectGraceSec and these three events report where a player stands
@@ -176,6 +176,12 @@ type CambiaGame struct {
 	HostUserID uuid.UUID // Lobby host, satisfies lobbies.host_user_id (NOT NULL FK to users).
 	LobbyType  string    // Lobby type ("private"/"public"/"matchmaking"), satisfies lobbies.type.
 	Rated      bool      // Whether this game's results should feed the rating system.
+
+	// RoundIndex is the 1-based circuit round this game belongs to (satisfies
+	// games.round_index), or 0 when the game is not part of a circuit. Set by the constructor
+	// (CreateGameInstance) from the CircuitState CurrentRound at creation time, the same
+	// counter RecordRound advances on round completion (cambia-1240).
+	RoundIndex int16
 
 	HouseRules HouseRules // Configurable game rules.
 	Circuit    Circuit    // Circuit mode settings.
@@ -424,9 +430,9 @@ func (g *CambiaGame) BeginPreGame() {
 	if preGameDuration <= 0 {
 		preGameDuration = 10 * time.Second
 	}
-	g.preGameTimer = time.AfterFunc(preGameDuration, func() {
+	g.preGameTimer = time.AfterFunc(preGameDuration, g.guarded("the pre-game timer", func() {
 		g.StartGame() // Call StartGame after the timer.
-	})
+	}))
 	log.Printf("Game %s: Pre-game phase started. Will transition in %s.", g.ID, preGameDuration)
 }
 
@@ -550,19 +556,19 @@ func (g *CambiaGame) persistInitialGameState() {
 	}
 
 	if database.DB != nil {
-		gameID, lobbyID, hostUserID, lobbyType, rated := g.ID, g.LobbyID, g.HostUserID, g.LobbyType, g.Rated
+		gameID, lobbyID, hostUserID, lobbyType, rated, roundIndex := g.ID, g.LobbyID, g.HostUserID, g.LobbyType, g.Rated, g.RoundIndex
 		wg := g.PersistWG
 		if wg != nil {
 			wg.Add(1)
 		}
-		go func() {
+		go g.runGuarded("the initial state write", func() {
 			if wg != nil {
 				defer wg.Done()
 			}
-			if err := database.UpsertInitialGameState(context.Background(), gameID, lobbyID, hostUserID, lobbyType, rated, snap); err != nil {
+			if err := database.UpsertInitialGameState(context.Background(), gameID, lobbyID, hostUserID, lobbyType, rated, roundIndex, snap); err != nil {
 				log.Printf("Game %s: failed to persist initial game state: %v", gameID, err)
 			}
-		}()
+		})
 	}
 	g.logAction(uuid.Nil, "game_initial_state_saved", map[string]interface{}{"stockpileSize": snap.StockpileSize})
 }
@@ -787,7 +793,7 @@ func (g *CambiaGame) armDisconnectGrace(playerID uuid.UUID) {
 	log.Printf("Game %s: Player %s disconnected; holding their seat for %s before the forfeit.", g.ID, playerID, grace)
 	g.logAction(playerID, string(EventPlayerReconnecting), map[string]interface{}{"graceSeconds": g.HouseRules.DisconnectGraceSec})
 
-	g.disconnectGraceTimers[playerID] = time.AfterFunc(grace, func() {
+	g.disconnectGraceTimers[playerID] = time.AfterFunc(grace, g.guarded("a disconnect grace timer", func() {
 		g.mu.Lock()
 		defer g.mu.Unlock()
 		// Stop() cannot un-fire a callback already in flight, so a reconnect that beat this to the
@@ -805,7 +811,7 @@ func (g *CambiaGame) armDisconnectGrace(playerID uuid.UUID) {
 			return
 		}
 		g.disconnectGraceElapsed(playerID)
-	})
+	}))
 
 	g.fireEvent(GameEvent{
 		Type: EventPlayerReconnecting,
@@ -1583,14 +1589,14 @@ func (g *CambiaGame) persistFinalGameState(finalScores map[uuid.UUID]int, winner
 		if wg != nil {
 			wg.Add(2)
 		}
-		go func() {
+		go g.runGuarded("the final state write", func() {
 			if wg != nil {
 				defer wg.Done()
 			}
 			if err := database.StoreFinalGameStateInDB(context.Background(), gameID, snapshot); err != nil {
 				log.Printf("Game %s: failed to persist final game state: %v", gameID, err)
 			}
-		}()
+		})
 
 		// Record game_results and (if rated) apply rating deltas. This is the only production
 		// caller of RecordGameAndResults (cambia-450); it previously had none, so ratings never
@@ -1602,14 +1608,14 @@ func (g *CambiaGame) persistFinalGameState(finalScores map[uuid.UUID]int, winner
 			// game downstream, where RecordGameAndResults reports both as "unrated".
 			log.Printf("Game %s: circuit round; per-game rating deferred to the circuit's conclusion.", gameID)
 		}
-		go func() {
+		go g.runGuarded("the results and rating write", func() {
 			if wg != nil {
 				defer wg.Done()
 			}
 			if err := database.RecordGameAndResults(context.Background(), gameID, players, finalScores, winners, rated); err != nil {
 				log.Printf("Game %s: failed to record game results/ratings: %v", gameID, err)
 			}
-		}()
+		})
 	}
 }
 
@@ -1665,7 +1671,7 @@ func (g *CambiaGame) logAction(actorID uuid.UUID, actionType string, payload map
 	}
 
 	// Asynchronously publish to Redis.
-	go func(rec cache.GameActionRecord) {
+	go g.runGuarded("the action log publisher", func() {
 		// Short timeout for the Redis operation.
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -1674,10 +1680,10 @@ func (g *CambiaGame) logAction(actorID uuid.UUID, actionType string, payload map
 			// log.Printf("Debug: Redis client (Rdb) is nil. Cannot log action %d for game %s.", rec.ActionIndex, g.ID) // Reduce noise
 			return
 		}
-		if err := cache.PublishGameAction(ctx, rec); err != nil {
-			log.Printf("Error: Game %s: Failed publishing action %d ('%s') to Redis: %v", g.ID, rec.ActionIndex, rec.ActionType, err)
+		if err := cache.PublishGameAction(ctx, record); err != nil {
+			log.Printf("Error: Game %s: Failed publishing action %d ('%s') to Redis: %v", g.ID, record.ActionIndex, record.ActionType, err)
 		}
-	}(record)
+	})
 }
 
 // FireEventPrivateSpecialActionFail helper to send a private failure event for special actions.

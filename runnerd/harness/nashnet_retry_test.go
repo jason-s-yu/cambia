@@ -734,3 +734,62 @@ func TestThePreemptedStateSpellsTheWireValue(t *testing.T) {
 		t.Fatal("preempted must be terminal: a dependent gates on it as a non-success parent (D62)")
 	}
 }
+
+// TestANackOfAResumedJobStillReturnsIt separates the two checkpoint questions.
+// An operator resume runs because an earlier run promoted a checkpoint, so
+// reading the job's whole promoted state on a nack would fail every resume the
+// first time a node returned it. What is never re-placed is state promoted
+// under the lease being settled, and a nack is pre-launch by construction.
+func TestANackOfAResumedJobStillReturnsIt(t *testing.T) {
+	r := newPoolRig(t, poolRigConfig{})
+	r.register(t, r.nodeA, 2)
+	r.register(t, r.nodeB, 2)
+	r.finishPoolRun(t, "resumed-job")
+
+	if _, err := r.disp.Resume("resumed-job"); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	_, claimed := r.claim(t, r.nodeA, nashnet.ClaimRequest{})
+	if claimed == nil || claimed.JobID != "resumed-job" {
+		t.Fatalf("claim = %+v, want the resumed job", claimed)
+	}
+	r.nack(t, claimed, nashnet.NackSnapshotFailed)
+
+	view, _ := r.disp.resolveView("resumed-job")
+	if isTerminal(view.State) {
+		t.Fatalf("a nack of a resumed job settled it as %q", view.State)
+	}
+	// The pin holds it to its own node, so the re-placement is that node's, once
+	// the nack cooldown on that pair has run out.
+	r.clock.advance(2 * time.Second)
+	if _, again := r.claim(t, r.nodeA, nashnet.ClaimRequest{}); again == nil {
+		t.Fatal("the resumed job was not handed out again after its nack")
+	}
+}
+
+// TestARequeuedResumeIsNotUnProjected is the other half of the resume case: the
+// row of a job holding a promoted checkpoint is left as it stands, because the
+// resume intent lives in the queue handle and a created row would come back
+// from a restart as a fresh launch over the checkpoint's own run dir.
+func TestARequeuedResumeIsNotUnProjected(t *testing.T) {
+	r := newPoolRig(t, poolRigConfig{})
+	sweeper := r.pool.Sweeper()
+	r.register(t, r.nodeA, 2)
+	r.finishPoolRun(t, "resumed-expiry-job")
+
+	if _, err := r.disp.Resume("resumed-expiry-job"); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	_, claimed := r.claim(t, r.nodeA, nashnet.ClaimRequest{})
+	if claimed == nil {
+		t.Fatal("expected a claim on the resumed job")
+	}
+	r.progress(t, claimed, nashnet.ProgressRequest{Phase: nashnet.PhasePreparing})
+	r.clock.advance(time.Duration(nashnet.DefaultLeaseTTLSeconds+1) * time.Second)
+	if out := sweeper.Tick(); len(out) != 1 || out[0].Verdict != nashnet.VerdictRequeue {
+		t.Fatalf("sweep = %+v, want one requeue: the lease never launched", out)
+	}
+	if st := readProcessState(t, r.runsDir, "resumed-expiry-job"); st.Status == procmgr.StatusCreated {
+		t.Fatal("a resume with a promoted checkpoint was un-projected to created")
+	}
+}

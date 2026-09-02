@@ -207,8 +207,8 @@ func (gs *GameServer) CreateGameInstance(ctx context.Context, lobbyID, hostID uu
 	g.Emitter = emitter
 
 	if circuit.Enabled && gs.CircuitStore != nil {
-		existingState, _ := gs.CircuitStore.Get(lobbyID)
-		if existingState == nil {
+		circuitState, _ := gs.CircuitStore.Get(lobbyID)
+		if circuitState == nil {
 			pIDs := make([]int, len(playerIDs))
 			playerMap := make(map[uuid.UUID]int)
 			for i, uid := range playerIDs {
@@ -220,13 +220,21 @@ func (gs *GameServer) CreateGameInstance(ctx context.Context, lobbyID, hostID uu
 				NumPlayers: len(playerIDs),
 				PlayerIDs:  pIDs,
 			}
-			circuitState, err := engine.NewCircuit(cfg)
+			newState, err := engine.NewCircuit(cfg)
 			if err != nil {
 				log.Printf("Lobby %s: failed to create circuit state: %v", lobbyID, err)
 			} else {
-				gs.CircuitStore.Set(lobbyID, circuitState, playerMap)
-				log.Printf("Lobby %s: circuit state created (%s, %d rounds).", lobbyID, cfg.Format, circuitState.Config.NumRounds)
+				gs.CircuitStore.Set(lobbyID, newState, playerMap)
+				log.Printf("Lobby %s: circuit state created (%s, %d rounds).", lobbyID, cfg.Format, newState.Config.NumRounds)
+				circuitState = newState
 			}
+		}
+		// CurrentRound is 0-based and advances only on RecordRound (RecordRound's own RoundNum
+		// is CurrentRound+1 for the round it just recorded), so the round this new game is about
+		// to play is CurrentRound+1: 1 for a fresh circuit, N+1 after N completed rounds. This
+		// keeps games.round_index's DEFAULT 0 meaning "not a circuit game" unambiguous (cambia-1240).
+		if circuitState != nil {
+			g.RoundIndex = int16(circuitState.CurrentRound + 1)
 		}
 	}
 

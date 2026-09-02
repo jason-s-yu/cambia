@@ -104,7 +104,7 @@ func TestPeekOther(t *testing.T) {
 			nineCard := NewCard(SuitHearts, rank)
 			g := setupAbilityGame(t, nineCard)
 
-			origPlayer := g.CurrentPlayer // 0
+			origPlayer := g.CurrentPlayer   // 0
 			opp := g.OpponentOf(origPlayer) // 1
 
 			drawForcedCard(t, g)

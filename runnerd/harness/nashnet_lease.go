@@ -78,7 +78,10 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request, lease na
 		LeaseDeadline: rfc3339(updated.Deadline),
 	}
 	if updated.State == nashnet.LeaseRevoking {
+		// The second delivery path of D31: a node that missed the revoke event
+		// reads the same {revoke, force} pair off its next progress tick.
 		resp.Revoke = true
+		resp.Force = p.stopForceFor(updated.LeaseID)
 		resp.RetryAfterSeconds = p.policy.ProgressIntervalSeconds
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -118,10 +121,17 @@ func (p *Pool) project(lease nashnet.Lease, status string, req nashnet.ProgressR
 // A terminal row is left alone. The two ways a return ends in a terminal
 // instead, a spent attempt budget and a promoted checkpoint, are written by the
 // caller before this runs.
+//
+// So is a job holding a promoted checkpoint, which is a resume the operator
+// asked for: the resume intent lives in the queue handle rather than in
+// jobspec.json, so a created row would come back from a restart as a fresh
+// launch over the run dir the checkpoint sits in. Leaving that row alone costs
+// an operator act after a restart, which is what D33 asks for anyway, rather
+// than restarting a job that ran.
 func (p *Pool) projectReady(jobID string) {
 	runDir := filepath.Join(p.runsDir, jobID)
 	st, err := procmgr.ReadProcessState(runDir)
-	if err != nil || isTerminal(procmgr.EffectiveStatus(st)) {
+	if err != nil || isTerminal(procmgr.EffectiveStatus(st)) || p.promotedCheckpoint(jobID) {
 		return
 	}
 	st.Status = procmgr.StatusCreated

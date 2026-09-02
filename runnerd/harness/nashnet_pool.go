@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -250,6 +251,10 @@ type Pool struct {
 	quarGrants map[string]map[string]quarantine.Grant
 	// tickBytes is the per-lease upload budget since its last progress post.
 	tickBytes map[string]int64
+	// stopForce records whether the stop a lease is winding down under was a
+	// forced one, so the progress response of D5 carries the same force flag
+	// the revoke event does (D31).
+	stopForce map[string]bool
 	// logDropped is the coordinator-owned dropped-byte counter of D54; the
 	// in-band marker is advisory text and never the evidence.
 	logDropped map[string]int64
@@ -369,6 +374,7 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 		snapshots:  map[string]snapshotDescriptor{},
 		quarGrants: map[string]map[string]quarantine.Grant{},
 		tickBytes:  map[string]int64{},
+		stopForce:  map[string]bool{},
 		logDropped: map[string]int64{},
 		results:    map[string]nashnet.ResultResponse{},
 		resultAuth: map[string]string{},
@@ -432,8 +438,13 @@ func (p *Pool) applyOutcome(o nashnet.Outcome) {
 // else waits for an explicit operator resume. The requeue verdict is
 // pre-launch by construction, so this is the assertion of that invariant rather
 // than a path the sweeper reaches on a healthy pool.
+//
+// The test is per lease rather than per job, because an operator resume runs
+// precisely because a checkpoint from an earlier run exists: reading the job's
+// whole promoted state here would make a nack of a resumed job unrecoverable
+// without a second operator act.
 func (p *Pool) requeue(o nashnet.Outcome) {
-	if p.promotedCheckpoint(o.JobID) {
+	if p.promotedUnderLease(o.LeaseID, o.JobID) {
 		p.disp.recordPoolTerminal(o.JobID, StatePreempted,
 			"a promoted checkpoint is never auto-resumed: "+o.Reason)
 		return
@@ -461,11 +472,26 @@ func (p *Pool) maxAttempts(jobID string) int {
 // checkpoint the coordinator has already materialized (D33, D62). It reads
 // promoted state only, which the coordinator validated before materializing
 // (D55), and the head is on disk, so the answer survives a restart.
+//
+// This is the whole-job question, which is the one D62 asks of a gate stop: a
+// run resumed from an earlier checkpoint has partial state whether or not this
+// lease added to it, so its gate stop is terminal and waits for an operator.
 func (p *Pool) promotedCheckpoint(jobID string) bool {
-	head, err := p.quar.ReadHead(jobID)
-	if err != nil {
-		return false
-	}
+	head, ok := p.manifestHead(jobID)
+	return ok && headHasCheckpoint(head)
+}
+
+// promotedUnderLease narrows that question to one lease: whether the lease
+// being settled is the one whose commit put the checkpoint in the head. It is
+// what the requeue path asks, so that returning a job to ready turns on what
+// this placement produced rather than on what the job already carried.
+func (p *Pool) promotedUnderLease(leaseID, jobID string) bool {
+	head, ok := p.manifestHead(jobID)
+	return ok && head.Folded.LeaseID == leaseID && headHasCheckpoint(head)
+}
+
+// headHasCheckpoint reports whether a folded manifest names resumable state.
+func headHasCheckpoint(head quarantine.Head) bool {
 	for _, e := range head.Folded.Entries {
 		if isCheckpointPath(e.Path) {
 			return true
@@ -474,12 +500,17 @@ func (p *Pool) promotedCheckpoint(jobID string) bool {
 	return false
 }
 
-// isCheckpointPath reports whether a promoted manifest path is a training
-// checkpoint: the snapshots directory a run writes its rolling checkpoint into,
-// or the resume marker beside it. It is the manifest-side reading of
-// hasResumableState, which asks the same question of the local run dir.
+// isCheckpointPath reports whether a promoted manifest path is state a run
+// could resume from: the snapshots directory it writes its rolling checkpoint
+// into, or the resume marker beside it.
+//
+// It is deliberately broader than hasPromotedResumableState, which asks for
+// both named files before an operator may resume. This one guards the opposite
+// decision, whether the daemon may re-place the job on its own, so any promoted
+// snapshot is enough to refuse: a wrongly held job waits for an operator, and a
+// wrongly re-placed one runs twice over its own partial state.
 func isCheckpointPath(rel string) bool {
-	return rel == "resume_state.json" || strings.HasPrefix(rel, "snapshots/")
+	return rel == resumeStatePath || strings.HasPrefix(rel, path.Dir(resumeCheckpointPath)+"/")
 }
 
 // releaseLeaseState drops the per-lease route state a released lease no longer
@@ -489,6 +520,7 @@ func (p *Pool) releaseLeaseState(leaseID string) {
 	delete(p.snapshots, leaseID)
 	delete(p.quarGrants, leaseID)
 	delete(p.tickBytes, leaseID)
+	delete(p.stopForce, leaseID)
 	p.mu.Unlock()
 }
 

@@ -34,17 +34,29 @@ Protocol notes (read from service source, not guessed):
     (game.BeginPreGame) before the first "game_player_turn"
     (internal/game/game.go).
   - Actions: action_draw_stockpile (no body), action_discard
-    ({"id": <drawn-card-uuid>}, id must equal the card revealed by the
-    prior private_draw_stockpile event), action_special
+    ({"card": {"id": <drawn-card-uuid>}}, id must equal the card revealed
+    by the prior private_draw_stockpile event -- the hub's handleGameMsg
+    (internal/hub/hub.go) reads a discard/replace/snap payload only from
+    an explicit top-level "card" or "payload" key of the WS frame's body,
+    never from a bare "id"; a bare "id" unmarshals to an empty payload and
+    the engine adapter's discard handler reports "Invalid card ID for
+    discard" (internal/game/engine_adapter.go handleDiscardViaEngine)),
+    action_special
     ({"special": "skip"} always accepted regardless of triggering rank --
     internal/game/special_actions.go ProcessSpecialAction), action_cambia
     (no body, legal only at the start of a turn before drawing --
     internal/game/game.go HandlePlayerAction). Replace is never used here
     (AllowReplaceAbilities defaults to false).
   - Game end: engine ends the round exactly one full turn after a Cambia
-    call (RULES.md SS C); "game_end" broadcasts
-    {"scores": {uuid: int}, "winner": uuid, ...} (internal/game/game.go
-    endGame).
+    call (RULES.md SS C). "game_end" is fired through fireEvent
+    (internal/game/game.go endGame), so the envelope's "payload" is a
+    GameEvent {"type": "game_end", "payload": {...}} and the actual
+    {"scores": {uuid: int}, "winner": uuid, "caller": uuid,
+    "penaltyApplied": bool, "winBonusApplied": bool, "finalHands": [...]}
+    live one level deeper, inside that inner "payload" (documented next to
+    service/doc/game_actions.md's game_end entry). "winner" is the
+    tie-broken Cambia caller when the caller ties for lowest score, or
+    else whoever has the strictly lowest score.
 
 Usage:
   python3 cambia_smoke.py --base-url https://cambia.jasonyu.io [--timeout 180] [--verbose]
@@ -68,6 +80,9 @@ from websockets.asyncio.client import connect as ws_connect
 
 CAMBIA_SUBPROTOCOL = "cambia"
 STALL_TIMEOUT_SEC = 30.0
+# uuid.Nil.String(): the zero-value UUID game.go's endGame reports as the winner when no single
+# winner exists (an unresolved N-player tie). Unreachable by this script's 2-player game.
+NIL_UUID = "00000000-0000-0000-0000-000000000000"
 # Global turn index (game.CambiaGame.TurnID, 0-based, alternates host/guest)
 # at which the host calls Cambia instead of drawing. TurnID 8 is the host's
 # 5th turn (0, 2, 4, 6, 8 with host seated first).
@@ -236,7 +251,11 @@ class Player:
                 continue
 
             if etype == "game_end":
-                self.final_payload = payload
+                # game_end is a GameEvent (game.go endGame -> fireEvent), not the flat map
+                # game_results uses: env["payload"] is {"type": "game_end", "payload": {scores,
+                # winner, ...}}, so the actual result data is one level deeper than `payload`
+                # itself (game_actions.md's game_end entry documents this nesting).
+                self.final_payload = payload.get("payload")
                 self.done.set()
                 return
 
@@ -245,7 +264,7 @@ class Player:
                 card_id = card.get("id")
                 if not card_id:
                     raise SmokeError(f"{self.name}: private_draw_stockpile missing card.id")
-                await self.send("action_discard", {"id": card_id})
+                await self.send("action_discard", {"card": {"id": card_id}})
                 continue
 
             if etype == "player_special_choice":
@@ -324,6 +343,41 @@ async def run_smoke(base_url: str, timeout: float, verbose: bool) -> tuple[Playe
         guest.close()
 
 
+def extract_result(name: str, final_payload: dict | None) -> tuple[str, dict[str, int]]:
+    """Pull winner+scores out of a player's captured game_end payload and assert the shape and
+    the scoring invariant, so a service-side payload or scoring regression fails loudly by field
+    name instead of comparing None to None and printing SMOKE OK.
+    """
+    if not isinstance(final_payload, dict) or not final_payload:
+        raise SmokeError(
+            f"{name}: no game_end payload received (env['payload']['payload'] missing or empty; "
+            f"see service/doc/game_actions.md's game_end entry for the expected shape)"
+        )
+    if "scores" not in final_payload:
+        raise SmokeError(f"{name}: game_end payload missing 'scores' field: {final_payload}")
+    if "winner" not in final_payload:
+        raise SmokeError(f"{name}: game_end payload missing 'winner' field: {final_payload}")
+    scores = final_payload["scores"]
+    winner = final_payload["winner"]
+    if not isinstance(scores, dict) or not scores:
+        raise SmokeError(f"{name}: game_end 'scores' is not a non-empty object: {scores!r}")
+    if not winner or winner == NIL_UUID:
+        raise SmokeError(f"{name}: game_end 'winner' is null/nil-uuid (no winner determined): {winner!r}")
+    if winner not in scores:
+        raise SmokeError(f"{name}: game_end winner {winner!r} has no entry in scores: {scores}")
+    min_score = min(scores.values())
+    winner_score = scores[winner]
+    caller = final_payload.get("caller")
+    # findWinnersWithCambiaLogicEngine (game.go): the winner either holds the (tied-for) lowest
+    # score outright, or is the Cambia caller who tie-broke into the win.
+    if winner_score != min_score and winner != caller:
+        raise SmokeError(
+            f"{name}: game_end winner {winner!r} (score {winner_score}) is neither the lowest "
+            f"score ({min_score}) nor the tie-broken Cambia caller ({caller!r}); scores={scores}"
+        )
+    return winner, scores
+
+
 def merged_event_counts(host: Player, guest: Player) -> dict[str, int]:
     merged: dict[str, int] = {}
     for counts in (host.event_counts, guest.event_counts):
@@ -354,19 +408,30 @@ def main() -> int:
 
     elapsed = time.monotonic() - start
 
-    if not host.final_payload or not guest.final_payload:
-        print("SMOKE FAILED: game_end payload missing on one or both connections", file=sys.stderr)
+    try:
+        host_winner, host_scores = extract_result(host.name, host.final_payload)
+        guest_winner, guest_scores = extract_result(guest.name, guest.final_payload)
+    except SmokeError as e:
+        print(f"SMOKE FAILED: {e}", file=sys.stderr)
         return 1
 
-    winner = host.final_payload.get("winner")
+    if host_winner != guest_winner or host_scores != guest_scores:
+        print(
+            f"SMOKE FAILED: host and guest disagree on the game_end result: "
+            f"host winner={host_winner!r} scores={host_scores} vs "
+            f"guest winner={guest_winner!r} scores={guest_scores}",
+            file=sys.stderr,
+        )
+        return 1
+
     counts = merged_event_counts(host, guest)
     counts_str = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
     turns_played = max(host.last_turn_seen, guest.last_turn_seen) + 1
 
     print(
         f"SMOKE OK: turns_played={turns_played} host_turns={host.turns_taken} "
-        f"guest_turns={guest.turns_taken} winner={winner} elapsed={elapsed:.1f}s "
-        f"scores={host.final_payload.get('scores')} events=[{counts_str}]"
+        f"guest_turns={guest.turns_taken} winner={host_winner} elapsed={elapsed:.1f}s "
+        f"scores={host_scores} events=[{counts_str}]"
     )
     return 0
 

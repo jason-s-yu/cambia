@@ -2,9 +2,9 @@
 src/harness/cli.py
 
 Client-side `cambia harness` sub-app (cambia-256, design 2.5). Verbs: init,
-submit, status, list-remote, logs, cancel, resume, pull, push-run, watch. The
-data plane is ssh/rsync + git push; the control plane is the TLS-pinned,
-JWT-authed runnerd API.
+submit, status, list-remote, logs, cancel, resume, pull, push-run, watch,
+nodes. The data plane is ssh/rsync + git push; the control plane is the
+TLS-pinned, JWT-authed runnerd API.
 """
 
 import subprocess
@@ -314,11 +314,9 @@ def submit(
 
 
 def _render_job_row(job: dict) -> str:
-    name = job.get("job_id") or job.get("name") or "?"
-    state = job.get("state") or job.get("status") or "?"
-    qp = job.get("queue_pos")
-    qp_str = f" q={qp}" if qp is not None else ""
-    return f"  {name:32s} {state}{qp_str}"
+    from src.harness.views import render_job_row
+
+    return render_job_row(job)
 
 
 @harness_app.command("status")
@@ -328,15 +326,37 @@ def status(
 ):
     """Show one job's full state, or list all jobs when no id is given."""
     from src.harness.client import HarnessAPIError
+    from src.harness.views import format_job_placement
 
     cfg = _load_cfg(config)
     client = _build_client(cfg)
     try:
         if job_id:
-            job = client.get_job(job_id)
+            payload = client.get_job(job_id)
             import json
 
-            typer.echo(json.dumps(job, indent=2, default=str))
+            # GET /harness/jobs/{id} wraps the JobView as {"job": ..., "env":
+            # ...} (runnerd/harness/handlers.go handleGetJob); a bare JobView
+            # is also accepted so this keeps working against a test stub or a
+            # leaner future response. The placement/executed_on summary is
+            # printed before the raw dump so a node/placement/phase-bearing
+            # job (D23), and specifically a resume held reservoir_unavailable
+            # (D12), names itself in plain text rather than requiring the
+            # reader to parse JSON for it.
+            job_view = payload
+            env = None
+            if isinstance(payload, dict):
+                if isinstance(payload.get("job"), dict):
+                    job_view = payload["job"]
+                if isinstance(payload.get("env"), dict):
+                    env = payload["env"]
+            if isinstance(job_view, dict):
+                summary = format_job_placement(job_view)
+                if summary:
+                    typer.echo(summary)
+            if env and env.get("executed_on"):
+                typer.echo(f"  executed_on={env['executed_on']}")
+            typer.echo(json.dumps(payload, indent=2, default=str))
         else:
             jobs = client.list_jobs()
             if not jobs:
@@ -368,6 +388,33 @@ def list_remote(config: Optional[str] = _CONFIG_OPT):
         return
     for job in jobs:
         typer.echo(_render_job_row(job))
+
+
+# ---------------------------------------------------------------------------
+# nodes (design D23/D45, cambia-1722): the nashnet pool's listing verb. The
+# acting group (`harness node grant|revoke|drain`) is a separate ticket
+# (cambia-1725); this command only renders what GET /nashnet/nodes returns.
+# ---------------------------------------------------------------------------
+
+
+@harness_app.command("nodes")
+def nodes_cmd(config: Optional[str] = _CONFIG_OPT):
+    """List the nashnet pool's nodes: declaration, gate verdicts (with
+    next_eligible_at), session state, leases, the drain hold, the breaker
+    state, and per-job degraded marks."""
+    from src.harness.client import HarnessAPIError
+    from src.harness.views import render_nodes
+
+    cfg = _load_cfg(config)
+    client = _build_client(cfg)
+    try:
+        nodes = client.nodes()
+    except HarnessAPIError as exc:
+        _fail(str(exc))
+    except Exception as exc:
+        _fail(f"nodes failed: {exc}")
+    for line in render_nodes(nodes):
+        typer.echo(line)
 
 
 # ---------------------------------------------------------------------------

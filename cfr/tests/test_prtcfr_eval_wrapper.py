@@ -87,11 +87,11 @@ def _make_run_dir(tmp_path, iters, best_iteration=None):
 
 
 def _real_tokens(min_len: int = 60) -> list:
-    """A real full-recall token prefix from the production Python-engine driver."""
+    """A real full-recall token prefix from the production Go-engine driver."""
     logging.disable(logging.CRITICAL)
     try:
         for seed in range(200):
-            driver = new_production_driver(seed=seed, backend="python")
+            driver = new_production_driver(seed=seed, backend="go")
             driver.seq_cap = 20000
             rng = random.Random(seed)
             for _ in range(3000):
