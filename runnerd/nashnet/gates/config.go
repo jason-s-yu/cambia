@@ -108,9 +108,11 @@ type PowerGate struct {
 	OnBreach          OnBreach `yaml:"on_breach,omitempty"`
 }
 
-// JobPolicyGate is schema-complete but evaluated per running job, not by this
-// package's job-agnostic Evaluate; a later ticket applies max_runtime_hours
-// at the dispatcher layer.
+// JobPolicyGate is the node's own per-job runtime policy. Evaluate publishes it
+// as a passing check carrying its required value rather than testing it, since
+// this package sees no job: the coordinator reads the number off the gate
+// report, refuses to place a job asking for longer, and lowers the lease
+// lifetime cap of D4 to it (D46, D63).
 type JobPolicyGate struct {
 	MaxRuntimeHours *float64 `yaml:"max_runtime_hours,omitempty"`
 }

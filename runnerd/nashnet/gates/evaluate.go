@@ -84,6 +84,9 @@ func Evaluate(cfg Config, devices []DeviceRef, snap Snapshot, now time.Time) Rep
 	if cfg.Concurrency != nil {
 		checks = append(checks, evaluateConcurrency(*cfg.Concurrency, snap)...)
 	}
+	if cfg.JobPolicy != nil {
+		checks = append(checks, evaluateJobPolicy(*cfg.JobPolicy)...)
+	}
 
 	admit := true
 	var nextEligible *time.Time
@@ -116,6 +119,24 @@ func Evaluate(cfg Config, devices []DeviceRef, snap Snapshot, now time.Time) Rep
 		Observed:       buildObserved(snap),
 		DevicesAllowed: ResolveDevicesAllowed(cfg.DevicesAllowed, devices),
 	}
+}
+
+// evaluateJobPolicy publishes the node's own per-job policy as a passing check
+// carrying its required value (D46). It is job-agnostic like the rest of
+// Evaluate and so can never refuse admission: the number is a placement input
+// the coordinator reads off the report, and without this check the gate is
+// configuration a node writes and nothing ever reads.
+func evaluateJobPolicy(g JobPolicyGate) []Check {
+	if g.MaxRuntimeHours == nil {
+		return nil
+	}
+	required := *g.MaxRuntimeHours
+	return []Check{{
+		Gate:     "job_policy.max_runtime_hours",
+		OK:       true,
+		Required: &required,
+		Detail:   "this node runs no job longer than its own policy",
+	}}
 }
 
 func evaluateDrain(g DrainGate, snap Snapshot) Check {

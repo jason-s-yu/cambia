@@ -3,6 +3,7 @@ package nodeagent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jason-s-yu/cambia/runnerd/ingest"
 	"github.com/jason-s-yu/cambia/runnerd/nashnet"
 	"github.com/jason-s-yu/cambia/runnerd/nashnet/gates"
 	"github.com/jason-s-yu/cambia/runnerd/procmgr"
@@ -169,9 +171,13 @@ func TestPrepareFailureClassification(t *testing.T) {
 		stub := newStubCoordinator(t)
 		agent, _ := testAgent(t, stub, func(o *Options) {
 			o.Env = &fakeEnv{
-				worktree:   t.TempDir(),
-				runsDir:    o.Config.RunsDir,
-				prepareErr: errors.New("render config: override targets harness-owned key device"),
+				worktree: t.TempDir(),
+				runsDir:  o.Config.RunsDir,
+				// The message deliberately carries none of the words a text
+				// classifier would have matched: the sentinel is what makes this
+				// spec-fatal (D63).
+				prepareErr: fmt.Errorf("staging step 4 refused: %w: device",
+					ingest.ErrOwnedOverride),
 			}
 		})
 		job := newTestJob(t, agent, stub, Spec{Kind: KindTrain, Name: "job-render", Commit: strings.Repeat("d", 40)})
