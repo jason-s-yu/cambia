@@ -32,9 +32,11 @@ smoke test runs as long as Streams A + C are available.
 from __future__ import annotations
 
 import copy
+import logging
 import os
 import random
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
@@ -72,6 +74,37 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Minimal config helpers
 # ---------------------------------------------------------------------------
+
+
+@contextmanager
+def _no_wrapper_fallback(trial: int):
+    """Fail if the wrapper logs an error while choosing inside this block.
+
+    DESCAAgentWrapper.choose_action answers a random legal action when encoding
+    raises, and logs the reason at ERROR before it does. Without this, asserting
+    the choice is legal passes whether or not the network was consulted, which
+    is exactly the encoding bug this smoke test exists to catch.
+    """
+    records: List[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = _Collect(level=logging.ERROR)
+    logger = logging.getLogger("src.evaluate_agents")
+    previous = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.ERROR)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
+    assert records == [], (
+        f"Trial {trial}: DESCAAgentWrapper fell back to a random action instead "
+        f"of using its network: {records}"
+    )
 
 
 def _make_agent_config(micro_rules=None):
@@ -681,8 +714,17 @@ def test_desca_agent_wrapper_smoke_50_states():
     Smoke test: untrained DESCAAgentWrapper returns a legal action on every one
     of 50 randomly sampled 2P micro-game states. Catches unabstract and encoding
     bugs without running training.
+
+    The game is dealt by the Go engine from the micro rule profile, not by the
+    Python builder: initialize_state takes the GoEngine and attaches this seat's
+    belief through the FFI (cambia-1522). build_micro_rules names the 20-card
+    reduction in deck_ranks, so the engine deals the same reduced game the
+    Python harness builds: 2 seats, 2-card hands both peeked, no abilities, a
+    15-card stockpile and one starter discard.
     """
-    from tests.micro_game import build_micro_game, build_micro_rules
+    from src.agents import action_codec
+    from src.ffi.bridge import GoEngine
+    from tests.micro_game import build_micro_rules
 
     micro_rules = build_micro_rules()
     config = _make_agent_config(micro_rules)
@@ -694,18 +736,27 @@ def test_desca_agent_wrapper_smoke_50_states():
         agent = DESCAAgentWrapper(0, config, ckpt_path, device="cpu", use_argmax=False)
 
         for trial in range(50):
-            game = build_micro_game(seed=trial)
-            agent.initialize_state(game)
-            legal = game.get_legal_actions()
-            assert (
-                len(legal) > 0
-            ), f"Trial {trial}: micro-game has no legal actions at start"
-            chosen = agent.choose_action(game, legal)
-            assert chosen in legal, (
-                f"Trial {trial}: DESCAAgentWrapper returned action not in legal set.\n"
-                f"  chosen: {chosen!r}\n"
-                f"  legal: {sorted([repr(a) for a in legal])}"
-            )
+            with GoEngine(seed=trial, house_rules=micro_rules) as game:
+                agent.initialize_state(game)
+
+                assert game.stock_len() == 15, (
+                    f"Trial {trial}: the engine dealt a {game.stock_len() + 5}-card "
+                    "deck, so the micro reduction did not cross the FFI"
+                )
+
+                legal = action_codec.actions_from_mask(game.legal_actions_mask())
+                assert (
+                    len(legal) > 0
+                ), f"Trial {trial}: micro-game has no legal actions at start"
+
+                with _no_wrapper_fallback(trial):
+                    chosen = agent.choose_action(game, legal)
+                assert chosen in legal, (
+                    f"Trial {trial}: DESCAAgentWrapper returned action not in legal set.\n"
+                    f"  chosen: {chosen!r}\n"
+                    f"  legal: {sorted([repr(a) for a in legal])}"
+                )
+                agent.release_belief()
     finally:
         try:
             os.unlink(ckpt_path)

@@ -47,8 +47,18 @@ def build_micro_deck(rng: random.Random) -> List[Card]:
 
 
 def build_micro_rules() -> CambiaRulesConfig:
-    """Rules config tuned for the micro game (2-card hands, both peeked, no abilities)."""
+    """Rules config tuned for the micro game (2-card hands, both peeked, no abilities).
+
+    deck_ranks carries the 20-card reduction, which the builder below applies by
+    handing the game its own deck. Naming it here as well is what lets the same
+    profile build this game on the Go engine, where the deck is dealt from the
+    rules rather than supplied: without it a GoEngine(house_rules=...) call
+    would deal all thirteen ranks against this file's five (cambia-1996, the
+    divergence class cambia-1478 named). Inert for the Python builder, which
+    passes its own stockpile and reshuffles out of the discard pile.
+    """
     return CambiaRulesConfig(
+        deck_ranks=list(_MICRO_RANKS),
         allowDrawFromDiscardPile=True,
         allowReplaceAbilities=False,
         snapRace=False,
