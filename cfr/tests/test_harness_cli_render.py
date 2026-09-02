@@ -138,7 +138,7 @@ def test_nodes_cmd_renders_pool_state(monkeypatch, capsys):
     assert "n-9c1f2a7b0d44" in out
     assert "admit=False" in out and "next_eligible_at=2026-09-01T22:00:00-07:00" in out
     assert "v0.4-prtcfr-r13" in out
-    assert "drain: yes" in out
+    assert "hold: drain" in out
     assert "breaker_trips=1" in out
     assert "job-a" in out and "90s" in out
 
