@@ -7,6 +7,9 @@
 //     stopped reporting aria-pressed;
 //   - the piles moved between role button and role img with the turn, so a control appeared and
 //     disappeared under a screen reader instead of going unavailable.
+// Plus the two forfeited-seat gaps carried onto this ticket from cambia-1237 (note cambia-1468):
+// a forfeited seat's cards were neither dimmed nor named as forfeited, so a hand whose score had
+// stopped counting read as an ordinary live one.
 // Held in its own file, the same way DsGameTableKingRemount.test.tsx is, so it does not collide
 // with the general DsGameTable suite.
 import { act, screen } from '@testing-library/react';
@@ -142,5 +145,66 @@ describe('DsGameTable pile roles across turn state', () => {
     expect(after).toBe(stock);
     expect(after).toHaveAttribute('aria-disabled', 'true');
     expect(screen.getByRole('button', { name: /^Stockpile/ })).toBe(after);
+  });
+});
+
+describe('DsGameTable own-hand pick that outlives its click', () => {
+  it('keeps reporting a standing pick while the felt is busy, rather than lifting a silent card', async () => {
+    const user = userEvent.setup();
+    renderDsGameTable();
+
+    const card = screen.getByTestId('card-0-2');
+    await user.click(card);
+    expect(card).toHaveAttribute('aria-pressed', 'true');
+    expect(card.style.transform).toBe(LIFT);
+
+    // An action goes in flight under the standing pick. Every own-card click is off until the
+    // server answers, but nothing has touched the pick itself, so it stays lifted.
+    act(() => {
+      useGameStore.setState({ isProcessingAction: true });
+    });
+
+    const after = screen.getByTestId('card-0-2');
+    expect(after).toBe(card);
+    expect(after.style.transform).toBe(LIFT);
+    // Still a control, so the lift still has a pressed state under it: unavailable rather than
+    // demoted to an image, which is what used to strip aria-pressed off a card left lifted.
+    expect(after).not.toHaveAttribute('role');
+    expect(after).toHaveAttribute('aria-pressed', 'true');
+    expect(after).toHaveAttribute('aria-disabled', 'true');
+  });
+});
+
+describe('DsGameTable forfeited seat cards', () => {
+  const forfeitedSelf = () => buildGameState({ currentPlayerId: OPP_ID, self: { forfeited: true } });
+
+  it('dims a forfeited own hand, the way a hand held out of reach is dimmed', () => {
+    renderDsGameTable({ gameState: forfeitedSelf() });
+    expect(screen.getByTestId('card-0-0').style.opacity).toBe('0.7');
+  });
+
+  it('leaves a live own hand undimmed, so the dim keeps saying something', () => {
+    renderDsGameTable();
+    expect(screen.getByTestId('card-0-0').style.opacity).toBe('1');
+  });
+
+  it('names the forfeit on an own slot, since nothing else on the card says the score stopped counting', () => {
+    renderDsGameTable({ gameState: forfeitedSelf() });
+    expect(screen.getByTestId('card-0-0')).toHaveAttribute('aria-label', 'Your card 1, face down, seat forfeited, not scored');
+  });
+
+  it('names a forfeited seat across the table on the same rule', () => {
+    renderDsGameTable({ gameState: buildGameState({ opponent: { forfeited: true } }) });
+    expect(screen.getByTestId('card-1-0')).toHaveAttribute('aria-label', 'Rival card 1, face down, seat forfeited, not scored');
+  });
+
+  it('holds the dim and the name through round end, where the Cambia lock drops both', () => {
+    renderDsGameTable({ gameState: forfeitedSelf(), phase: 'round_end' });
+
+    const card = screen.getByTestId('card-0-0');
+    // The lock dim means "out of reach until the round ends" and goes when it does; a forfeited
+    // seat is still unscored afterwards, and its cards stay face down while the table turns over.
+    expect(card.style.opacity).toBe('0.7');
+    expect(card).toHaveAttribute('aria-label', 'Your card 1, face down, seat forfeited, not scored');
   });
 });

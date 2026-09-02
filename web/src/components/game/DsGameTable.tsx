@@ -56,6 +56,7 @@ import PlayerSeat, { type PlayerSeatState } from '@/components/ds/game/PlayerSea
 import ScorePill from '@/components/ds/game/ScorePill';
 import TimerBar from '@/components/ds/game/TimerBar';
 import { toDsCardFace, cardFaceName, cardSlotName } from './dsCardMap';
+import type { CardSlotState } from './dsCardMap';
 import { ownHandPlacement } from './handLayout';
 
 interface DsGameTableProps {
@@ -790,6 +791,11 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
     // stays slot order: the tab sequence and the 'Your card N' names still run 1, 2, 3, 4 and the
     // card-<seat>-<i> hooks stay keyed by the engine slot index.
     const slots = Math.max(hand.length, selfState?.handSize ?? 0);
+    // One state for the whole own hand, read by the dim and by the spoken name together so the
+    // two cannot part (cambia-1468). The lock dim says "out of reach until the round ends" and
+    // stops meaning anything once it has; a forfeited seat is still unscored after the round, and
+    // its cards stay face down while everyone else's turn over, so its dim and its name hold.
+    const slotState: CardSlotState = selfForfeited ? 'forfeited' : selfHandLocked && !roundOver ? 'locked' : 'live';
     const known = hand.map((card, i) => {
       // While the round runs, a slot shows a face only while something is holding it up: a live
       // transient reveal, or the pregame peek the store keeps on the slot for the length of that
@@ -814,10 +820,8 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
           size='md'
           selected={picked}
           highlight={ownTargetable && selectedIdx !== i}
-          // The lock dim says "out of reach", which stops meaning anything once the round is
-          // over: the caller's hand is then just a revealed hand like everyone else's.
-          dimmed={selfHandLocked && !roundOver}
-          label={cardSlotName('Your', i, face, selfHandLocked && !roundOver)}
+          dimmed={slotState !== 'live'}
+          label={cardSlotName('Your', i, face, slotState)}
           pressed={ownSelects || picked ? picked : undefined}
           testId={`card-${seat}-${i}`}
           style={ownHandPlacement(i, slots)}
@@ -834,8 +838,8 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
         key={`pad-${j}`}
         faceDown
         size='md'
-        dimmed={selfHandLocked}
-        label={cardSlotName('Your', hand.length + j, null, selfHandLocked)}
+        dimmed={slotState !== 'live'}
+        label={cardSlotName('Your', hand.length + j, null, slotState)}
         testId={`card-${seat}-${hand.length + j}`}
         style={ownHandPlacement(hand.length + j, slots)}
       />
@@ -918,6 +922,10 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                       // stays a legal 9/T peek target, so the lock only closes those two
                       // (cambia-1069, see src/lib/handLock.ts).
                       const locked = lockedPlayer === opp.playerId;
+                      // The same spoken state the own hand carries: a seat across the table that
+                      // forfeited keeps its cards on the felt, and its slots said nothing about it
+                      // (cambia-1468).
+                      const oppSlotState: CardSlotState = opp.forfeited ? 'forfeited' : locked ? 'locked' : 'live';
                       const targetable = opponentTargetable && !!card && !(locked && swapTargeting);
                       const snappable = opponentSnappable && !!card && !locked;
                       const picked = !!card && snapTarget?.cardId === card.id;
@@ -939,7 +947,7 @@ const DsGameTable: React.FC<DsGameTableProps> = ({ gameState, phase, sendMessage
                           selected={!!peeked || picked}
                           highlight={targetable}
                           dimmed={!targetable && !shown && (locked || !!specialRank)}
-                          label={cardSlotName(who, i, shown, locked)}
+                          label={cardSlotName(who, i, shown, oppSlotState)}
                           // An ability click commits on the card it lands on; a snap pick is the
                           // one opponent click that toggles, so it is the one that is pressed. A
                           // standing pick keeps reporting itself, the same rule the own hand

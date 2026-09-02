@@ -28,8 +28,8 @@ export interface PlayingCardProps {
    * opponent card picked for a snap). Left undefined only for a card that holds no
    * pick at all, where aria-pressed would report a state that does not exist; a card
    * drawn as `selected` because it is picked passes the same value here, so the lift
-   * and the pressed state cannot part. Reported only where the card takes a click,
-   * since only a live control has a pressed state to report.
+   * and the pressed state cannot part. A standing `true` keeps the card a control for
+   * as long as it stands, since a pressed state is something only a control reports.
    */
   pressed?: boolean;
   /** Stable e2e hook, e.g. `card-0-2`, `pile-stock`. */
@@ -107,13 +107,19 @@ const crosshatch = (pitch: number): string =>
  *   - neither: not a control. It carries role='img' so a screen reader still
  *     reads its name (cambia-876, DL-4 review F13) and tabIndex -1 so it leaves
  *     the tab sequence while still able to hold focus it already has.
+ *
+ * A card holding a pick is a control whichever of those it would otherwise be:
+ * the lift and aria-pressed both read `pressed`, and only a control can report a
+ * pressed state, so a pick that outlives its click goes unavailable rather than
+ * dropping to an image. Letting it drop is what put the lift on screen with no
+ * pressed state under it, which is the divergence this ticket exists to close.
  */
 const PlayingCard: React.FC<PlayingCardProps> = ({ rank, suit, faceDown = false, size = 'md', selected = false, highlight = false, dimmed = false, onClick, disabled = false, label, pressed, testId, style }) => {
   const d = DIMS[size] || DIMS.md;
   // A disabled card keeps the control's role and swallows its click; a card with no click at all
-  // is not a control in the first place.
+  // is not a control in the first place, unless it is holding a pick, which only a control has.
   const interactive = !!onClick && !disabled;
-  const control = interactive || disabled;
+  const control = interactive || disabled || pressed === true;
   const joker = rank === 'JOKER';
   const glyph = joker ? '★' : suit ? GLYPHS[suit] || '' : '';
   const color = joker ? 'var(--accent-gold)' : suit && RED[suit] ? 'var(--suit-red)' : 'var(--suit-black)';
@@ -202,8 +208,8 @@ const PlayingCard: React.FC<PlayingCardProps> = ({ rank, suit, faceDown = false,
       role={control ? undefined : label ? 'img' : 'presentation'}
       tabIndex={control ? undefined : -1}
       aria-label={label}
-      aria-disabled={disabled || undefined}
-      aria-pressed={interactive ? pressed : undefined}
+      aria-disabled={control && !interactive ? true : undefined}
+      aria-pressed={control ? pressed : undefined}
       data-testid={testId}
       onClick={interactive ? onClick : undefined}
       style={{ ...base, ...face }}
