@@ -13,7 +13,7 @@ import random
 import sys
 import warnings
 from pathlib import Path
-from typing import List, NamedTuple, Optional, Tuple
+from typing import Any, List, NamedTuple, Optional, Tuple
 
 import cffi
 import numpy as np
@@ -181,6 +181,20 @@ HOUSE_RULE_FIELDS = 16
 
 # engine.MaxDeckSize: the largest a discard pile can ever get (4 decks).
 MAX_DECK_SIZE = 216
+
+# engine.MaxPlayers and engine.MaxHandSize.
+MAX_PLAYERS = 8
+MAX_HAND_SIZE = 6
+
+# Offsets into the batched state record cambia_game_apply_and_read writes
+# (engine/cgo/exports.go evalState*). The snap, pending and legal-mask blocks
+# repeat their single-purpose exports' layouts byte for byte.
+STATE_SNAP_OFF = 9
+STATE_PENDING_OFF = STATE_SNAP_OFF + SNAP_FIELDS
+STATE_MASK_OFF = STATE_PENDING_OFF + PENDING_FIELDS
+STATE_HANDS_OFF = STATE_MASK_OFF + 146  # agent.NumActions, as GoEngine.NUM_ACTIONS
+STATE_HAND_STRIDE = 1 + MAX_HAND_SIZE
+STATE_FIELDS = STATE_HANDS_OFF + MAX_PLAYERS * STATE_HAND_STRIDE
 
 # engine.PendingType values.
 PENDING_NONE = 0
@@ -381,6 +395,161 @@ class HouseRulesView(NamedTuple):
     deck_rank_mask: int
 
 
+#: "Not decoded yet" marker for view fields whose real answer can be None.
+_UNSET = object()
+
+
+class GameStateView:
+    """A node's whole state, read off the engine in one crossing.
+
+    ``cambia_game_apply_and_read`` packs terminality, the acting seat, the
+    decision context, the turn number, the stockpile, the discard top, the
+    Cambia caller, the snap window, the pending record, the legal set and every
+    seat's hand into one fixed-layout record (cambia-1902). This decodes that
+    record lazily and memoises what it decodes: a node reads a different
+    handful of these fields depending on which action it is applying, and
+    building the Card objects, the pending record and the legal mask up front
+    would spend more Python than the saved crossings buy back.
+
+    A view is a snapshot. It holds its own copy of the record and never touches
+    the engine again, so it stays readable after the engine has moved on -- and
+    stops describing it. That is why ``GoBrState`` drops its view at every
+    mutation rather than refreshing one in place.
+    """
+
+    __slots__ = ("_rec", "_util", "_snap", "_pending", "_hands", "_top")
+
+    def __init__(self, rec: bytes, util: Optional[np.ndarray]) -> None:
+        self._rec = rec
+        self._util = util
+        self._snap: Optional[SnapInfo] = None
+        self._pending: Optional[PendingInfo] = None
+        self._hands: dict = {}
+        self._top: Any = _UNSET
+
+    # --- Scalars, straight out of the record ---
+
+    @property
+    def terminal(self) -> bool:
+        return self._rec[0] == 1
+
+    @property
+    def acting_player(self) -> int:
+        """The acting seat, or -1 on a terminal state."""
+        seat = self._rec[1]
+        return -1 if seat == CARD_INDEX_NONE else seat
+
+    @property
+    def decision_ctx(self) -> int:
+        """The DecisionCtx value, terminal included."""
+        return self._rec[2]
+
+    @property
+    def turn_number(self) -> int:
+        return self._rec[3] | (self._rec[4] << 8)
+
+    @property
+    def stock_len(self) -> int:
+        return self._rec[5]
+
+    @property
+    def cambia_caller(self) -> Optional[int]:
+        seat = self._rec[7]
+        return None if seat == CARD_INDEX_NONE else seat
+
+    @property
+    def num_players(self) -> int:
+        return self._rec[8]
+
+    # --- Decoded records ---
+
+    @property
+    def discard_top(self) -> Optional[Card]:
+        """The top discard as a Card, or None if the pile is empty."""
+        if self._top is _UNSET:
+            self._top = card_from_index(self._rec[6])
+        return self._top
+
+    @property
+    def snap(self) -> SnapInfo:
+        if self._snap is None:
+            rec = self._rec
+            off = STATE_SNAP_OFF
+            active = rec[off] == 1
+            seat = rec[off + 5]
+            self._snap = SnapInfo(
+                active=active,
+                rank=rank_from_index(rec[off + 1]) if active else None,
+                card=card_from_index(rec[off + 2]),
+                snapper_count=rec[off + 3],
+                snapper_cursor=rec[off + 4],
+                snapper_seat=None if seat == CARD_INDEX_NONE else seat,
+            )
+        return self._snap
+
+    @property
+    def pending(self) -> PendingInfo:
+        if self._pending is None:
+            rec = self._rec
+            off = STATE_PENDING_OFF
+
+            def _slot(i: int) -> Optional[int]:
+                v = rec[off + i]
+                return None if v == CARD_INDEX_NONE else v
+
+            self._pending = PendingInfo(
+                type=rec[off],
+                seat=_slot(1),
+                drawn_card=card_from_index(rec[off + 2]),
+                drawn_from=_slot(3),
+                own_slot=_slot(4),
+                target_slot=_slot(5),
+                target_seat=_slot(6),
+                own_card=card_from_index(rec[off + 7]),
+                target_card=card_from_index(rec[off + 8]),
+            )
+        return self._pending
+
+    @property
+    def legal_mask(self) -> np.ndarray:
+        """The (146,) uint8 legal-action mask, 1 = legal.
+
+        A read-only view over this snapshot's own bytes rather than a copy: the
+        record is immutable and the traversal only reduces the mask. Copy it
+        before handing it anywhere that writes.
+        """
+        return np.frombuffer(self._rec, dtype=np.uint8, count=146, offset=STATE_MASK_OFF)
+
+    @property
+    def utility(self) -> Optional[np.ndarray]:
+        """Per-seat utilities on a terminal state, else None.
+
+        The engine scores every hand to answer this, so the export computes it
+        at terminals only; a caller that wants the running score of a live game
+        asks ``GoEngine.get_utility`` for it.
+        """
+        return self._util
+
+    # --- Hands ---
+
+    def hand_len(self, seat: int) -> int:
+        """A seat's hand length, without building its cards."""
+        return self._rec[STATE_HANDS_OFF + seat * STATE_HAND_STRIDE]
+
+    def hand_indices(self, seat: int) -> List[int]:
+        """A seat's hand as canonical card indices, slot 0 first."""
+        off = STATE_HANDS_OFF + seat * STATE_HAND_STRIDE
+        return list(self._rec[off + 1 : off + 1 + self._rec[off]])
+
+    def hand(self, seat: int) -> List[Card]:
+        """A seat's true hand as Card objects, slot 0 first."""
+        cards = self._hands.get(seat)
+        if cards is None:
+            cards = [_CARD_BY_INDEX[idx] for idx in self.hand_indices(seat)]
+            self._hands[seat] = cards
+        return cards
+
+
 # ---------------------------------------------------------------------------
 # Library loading: module-level singleton
 # ---------------------------------------------------------------------------
@@ -392,7 +561,7 @@ class HouseRulesView(NamedTuple):
 # ignored by the SysV calling convention, so a stale .so keeps loading and
 # keeps answering, just with the wrong rules. _check_abi_generation refuses
 # to hand back a library whose reported generation does not match this.
-ABI_GENERATION = 2
+ABI_GENERATION = 3
 
 _ffi = cffi.FFI()
 _ffi.cdef("""
@@ -567,6 +736,11 @@ _ffi.cdef("""
     int32_t cambia_baseline_choose(int32_t h, int32_t game_h,
                                    int32_t *out, int32_t out_len);
     int32_t cambia_game_legal_indices(int32_t game_h, int32_t *out, int32_t out_len);
+
+    /* cambia-1902: apply plus the whole per-node state read in one crossing */
+    int32_t cambia_game_apply_and_read(int32_t game_h, int32_t action_idx,
+                                       uint8_t *out_buf, int32_t buf_len,
+                                       float *out_util, int32_t util_len);
 """)
 
 _LIB = None
@@ -1303,6 +1477,77 @@ class GoEngine:
             num_decks=int(rec[13]),
             deck_rank_mask=int(rec[14]) | (int(rec[15]) << 8),
         )
+
+    # --- Batched node read (cambia-1902) ---
+
+    def _state_bufs(self) -> tuple:
+        """This engine's scratch buffers for the batched state record."""
+        bufs = getattr(self, "_batch_bufs", None)
+        if bufs is None:
+            bufs = (
+                _ffi.new(f"uint8_t[{STATE_FIELDS}]"),
+                _ffi.new(f"float[{MAX_PLAYERS}]"),
+            )
+            self._batch_bufs = bufs
+        return bufs
+
+    def _apply_and_read(self, action_idx: int) -> GameStateView:
+        rec_buf, util_buf = self._state_bufs()
+        rc = int(
+            self._lib.cambia_game_apply_and_read(
+                self._game_h, action_idx, rec_buf, STATE_FIELDS, util_buf, MAX_PLAYERS
+            )
+        )
+        if rc == -2:
+            raise RuntimeError(
+                f"cambia_game_apply_and_read rejected action {action_idx} "
+                f"on handle {self._game_h}"
+            )
+        if rc != STATE_FIELDS:
+            raise RuntimeError(
+                f"cambia_game_apply_and_read returned {rc}, want {STATE_FIELDS}, "
+                f"on handle {self._game_h}"
+                + (
+                    ". The loaded libcambia.so is out of date with this bridge;"
+                    " rebuild it with `make libcambia`."
+                    if rc > 0
+                    else ""
+                )
+            )
+        rec = bytes(_ffi.buffer(rec_buf, STATE_FIELDS))
+        util = None
+        if rec[0] == 1:
+            util = np.frombuffer(_ffi.buffer(util_buf), dtype=np.float32).copy()
+        return GameStateView(rec, util)
+
+    def read_state(self) -> GameStateView:
+        """Read the whole node -- see GameStateView -- in a single crossing.
+
+        What a traversal used to assemble from a dozen separate accessors
+        (is_terminal, acting_player, decision_ctx, turn_number, stock_len,
+        get_discard_top, cambia_caller, get_snap_state, get_pending,
+        legal_actions_mask, get_hand per seat), which cost about 21 crossings
+        per applied action before cambia-1902.
+        """
+        return self._apply_and_read(-1)
+
+    def apply_and_read_state(self, action_idx: int) -> GameStateView:
+        """Apply an action index and read the state it produced, in one crossing.
+
+        The apply and the read that always follows it share a crossing, which
+        is what takes the traversal below one crossing per read rather than
+        merely one crossing per node.
+
+        Raises:
+            ValueError: If action_idx is out of range.
+            RuntimeError: If the engine rejected the action, in which case the
+                game is unchanged.
+        """
+        if not (0 <= action_idx < self.NUM_ACTIONS):
+            raise ValueError(
+                f"action_idx {action_idx} out of range [0, {self.NUM_ACTIONS})"
+            )
+        return self._apply_and_read(action_idx)
 
     def _get_all_cards_unsafe(self) -> np.ndarray:
         """Return a packed uint8 array of bucket indices for every slot in
