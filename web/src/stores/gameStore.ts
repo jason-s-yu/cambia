@@ -94,8 +94,10 @@ interface GameState {
 	lastSnapMove: { nonce: number; snapperId: string | null; victimId: string | null; auto: boolean } | null;
 	// The most recent seat-presence change: a socket dropped and its seat is being held
 	// ('reconnecting'), the player came back ('reconnected'), or the window closed and they
-	// forfeited ('forfeited') - cambia-955. Ids and a deadline only; the surface owns the copy.
-	lastPresence: { nonce: number; kind: 'reconnecting' | 'reconnected' | 'forfeited'; playerId: string; deadline: number | null } | null;
+	// forfeited ('forfeited') - cambia-955. Ids, a deadline and the rule's own length only; the
+	// surface owns the copy. graceSeconds is the house rule the window was opened under, which is
+	// what the notice quotes when a deadline is missing (cambia-1241).
+	lastPresence: { nonce: number; kind: 'reconnecting' | 'reconnected' | 'forfeited'; playerId: string; deadline: number | null; graceSeconds: number | null } | null;
 }
 
 interface GameActions {
@@ -697,6 +699,14 @@ export const useGameStore = create<GameState & GameActions>()(
 							const kind = type === 'player_reconnecting' ? 'reconnecting'
 								: type === 'player_reconnected' ? 'reconnected' : 'forfeited';
 							const deadline = typeof payload.payload?.deadline === 'number' ? payload.payload.deadline : null;
+							const graceSeconds = typeof payload.payload?.graceSeconds === 'number' ? payload.payload.graceSeconds : null;
+							// The frame that carries the deadline carries the send time it was taken
+							// against, so the skew is recomputed from it rather than from whichever
+							// snapshot happened to land last (cambia-488's rule, applied to the
+							// reconnect window in cambia-1241).
+							if (typeof payload.payload?.serverNow === 'number') {
+								state.serverClockOffsetMs = payload.payload.serverNow - Date.now();
+							}
 							if (state.gameState) {
 								const player = state.gameState.players.find(p => p.playerId === playerId);
 								if (player) {
@@ -709,7 +719,8 @@ export const useGameStore = create<GameState & GameActions>()(
 								nonce: (state.lastPresence?.nonce ?? 0) + 1,
 								kind,
 								playerId,
-								deadline
+								deadline,
+								graceSeconds
 							};
 							break;
 						}
