@@ -216,7 +216,18 @@ def train_deep(
     deterministic: bool = typer.Option(
         False,
         "--deterministic",
-        help="Fix all random seeds (42) and force num_traversal_threads=1 for reproducible runs.",
+        help="Fix all random seeds (42) and force num_traversal_threads=1 for reproducible "
+        "runs. Also seeds the reservoir buffers (cambia-1809; see --seed) when --seed is "
+        "not given.",
+        rich_help_panel="Deep CFR Overrides",
+    ),
+    seed: Optional[int] = typer.Option(
+        None,
+        "--seed",
+        help="Seed the reservoir buffers' sample_batch/load draws (cambia-1809), so "
+        "minibatch composition is reproducible run-to-run. Independent of "
+        "--deterministic's traversal/torch/python RNG streams; --deterministic sets "
+        "this to 42 when --seed is omitted.",
         rich_help_panel="Deep CFR Overrides",
     ),
     profile_step: Optional[int] = typer.Option(
@@ -261,6 +272,13 @@ def train_deep(
     overrides = {}
     if deterministic:
         overrides["num_traversal_threads"] = 1
+    if seed is not None:
+        overrides["seed"] = seed
+    elif deterministic:
+        # --deterministic's whole purpose is a reproducible run; the reservoir
+        # buffers are part of that unless the caller asked for a different
+        # seed explicitly (cambia-1809).
+        overrides["seed"] = 42
     if lr is not None:
         overrides["learning_rate"] = lr
     if batch_size is not None:
@@ -348,7 +366,17 @@ def train_psro(
     deterministic: bool = typer.Option(
         False,
         "--deterministic",
-        help="Fix all random seeds (42) and force num_traversal_threads=1 for reproducible runs.",
+        help="Fix all random seeds (42) and force num_traversal_threads=1 for reproducible "
+        "runs. Also seeds the reservoir buffers (cambia-1809; see --seed) when --seed is "
+        "not given.",
+    ),
+    seed: Optional[int] = typer.Option(
+        None,
+        "--seed",
+        help="Seed the reservoir buffers' sample_batch/load draws (cambia-1809), so "
+        "minibatch composition is reproducible run-to-run. Independent of "
+        "--deterministic's traversal/torch/python RNG streams; --deterministic sets "
+        "this to 42 when --seed is omitted.",
     ),
 ):
     """Train with PSRO (Policy-Space Response Oracles) meta-loop."""
@@ -385,6 +413,13 @@ def train_psro(
     overrides: dict = {"use_psro": True}
     if deterministic:
         overrides["num_traversal_threads"] = 1
+    if seed is not None:
+        overrides["seed"] = seed
+    elif deterministic:
+        # --deterministic's whole purpose is a reproducible run; the reservoir
+        # buffers are part of that unless the caller asked for a different
+        # seed explicitly (cambia-1809).
+        overrides["seed"] = 42
     if population_size is not None:
         overrides["psro_population_size"] = population_size
     if eval_games is not None:

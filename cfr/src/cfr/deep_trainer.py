@@ -303,8 +303,10 @@ class DeepCFRConfig:
             "psro_heuristic_types": deep_cfg.psro_heuristic_types,
             "target_buffer_passes": deep_cfg.target_buffer_passes,
             "value_target_buffer_passes": deep_cfg.value_target_buffer_passes,
-            # getattr: Config.deep_cfr (config.py's DeepCfrConfig) has no seed
-            # field yet (cambia-1809 follow-up); defaults to None until it does.
+            # getattr: kept defensive so a config.deep_cfr stand-in without a
+            # seed field (e.g. tests/conftest.py's stub, or an older
+            # SimpleNamespace-shaped caller) still defaults to None instead of
+            # raising (cambia-1809).
             "seed": getattr(deep_cfg, "seed", None),
         }
         # Apply CLI overrides (only non-None values)

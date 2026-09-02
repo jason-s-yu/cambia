@@ -2,19 +2,24 @@
 
 ReservoirBuffer.sample_batch drew from the unseeded process-global numpy RNG,
 so Deep CFR minibatch composition had no way to be reproducible under a
-config seed. DeepCFRConfig gained a ``seed`` field; DeepCFRTrainer builds a
-dedicated Generator from it (``self._fit_rng``) and threads it into every
-reservoir buffer's sample_batch/load call. config.py's DeepCfrConfig has no
-matching YAML field yet (out of this ticket's scope), so ``seed`` reaches
-DeepCFRConfig only via ``from_yaml_config``'s override mechanism or direct
-construction until that follow-up lands.
+config seed. DeepCFRConfig (the dataclass in deep_trainer.py) gained a
+``seed`` field; DeepCFRTrainer builds a dedicated Generator from it
+(``self._fit_rng``) and threads it into every reservoir buffer's
+sample_batch/load call. config.py's DeepCfrConfig (the pydantic model) gained
+a matching ``seed`` field too, and cli.py's ``train deep``/``train psro``
+pass it through (directly via ``--seed``, or via ``--deterministic`` when
+``--seed`` is omitted), so a real YAML config or CLI invocation reaches
+DeepCFRTrainer._fit_rng end to end.
 """
 
 import logging
+import os
+import tempfile
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import yaml
 
 from src.encoding import INPUT_DIM, NUM_ACTIONS
 from src.reservoir import ReservoirBuffer, ReservoirSample
@@ -142,3 +147,57 @@ class TestAdvantageBufferSampleReproducibility:
         batch_a = buf_a.sample_batch(16, rng=rng_a)
         batch_b = buf_b.sample_batch(16, rng=rng_b)
         assert not np.array_equal(batch_a.iterations, batch_b.iterations)
+
+
+class TestSeedReachesTrainerFromRealYamlConfig:
+    """cambia-1809 scope extension: deep_cfr.seed set in a real YAML config,
+    loaded through the real load_config, reaches DeepCFRTrainer._fit_rng.
+
+    tests/conftest.py stubs src.config for the rest of the suite (so modules
+    like agent_state/encoding can import before the real config module is
+    fully initialised); importlib.reload bypasses that stub the same way
+    tests/test_device_config.py's TestYamlBackwardCompat does, since the
+    stub's own load_config wrapper silently returns None on any exception."""
+
+    @staticmethod
+    def _load_real_config(deep_cfr_dict):
+        import importlib
+
+        real_config = importlib.reload(importlib.import_module("src.config"))
+        config_dict = {"deep_cfr": deep_cfr_dict}
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(config_dict, f)
+            f.flush()
+            try:
+                cfg = real_config.load_config(f.name)
+            finally:
+                os.unlink(f.name)
+        assert cfg is not None, "real load_config returned None"
+        return cfg
+
+    def test_yaml_seed_reaches_trainer_fit_rng(self):
+        cfg = self._load_real_config(
+            {"seed": 999, "hidden_dim": 8, "num_hidden_layers": 1, "device": "cpu"}
+        )
+        assert cfg.deep_cfr.seed == 999
+
+        dcfr = DeepCFRConfig.from_yaml_config(cfg)
+        assert dcfr.seed == 999
+
+        trainer = DeepCFRTrainer(config=cfg, deep_cfr_config=dcfr)
+        assert isinstance(trainer._fit_rng, np.random.Generator)
+
+        expected = np.random.default_rng(999).choice(1000, 20, replace=False)
+        np.testing.assert_array_equal(
+            trainer._fit_rng.choice(1000, 20, replace=False), expected
+        )
+
+    def test_yaml_without_seed_leaves_fit_rng_none(self):
+        cfg = self._load_real_config(
+            {"hidden_dim": 8, "num_hidden_layers": 1, "device": "cpu"}
+        )
+        assert cfg.deep_cfr.seed is None
+
+        dcfr = DeepCFRConfig.from_yaml_config(cfg)
+        trainer = DeepCFRTrainer(config=cfg, deep_cfr_config=dcfr)
+        assert trainer._fit_rng is None
