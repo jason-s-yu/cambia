@@ -30,12 +30,16 @@ Opponent regimes
   improves only by beating copies of itself.
 - ``"random_legal"``: opponent seats play a uniform-random legal action. Cheap
   control, and the regime the throughput benchmark uses.
-
-The fixed-baseline regime (``imperfect_greedy`` and the rest of the eval
-registry) is NOT available on this env yet: those agents are written against
-the Python ``CambiaGameState`` and are being ported to the ``GameView``
-protocol under cambia-1426. Requesting one raises rather than quietly reviving
-the Python engine behind the env.
+- a ``src.agents.baseline_agents`` name (``"imperfect_greedy"``,
+  ``"memory_heuristic"``, ``"aggressive_snap"``, ``"random"``, ``"greedy"``,
+  ``"random_no_cambia"``, ``"random_late_cambia"``, ``"human_player"``): the
+  fixed best-response diagnostic. Every opponent seat is driven by a fresh
+  instance of that baseline (cambia-1426's GameView port), rebuilt every
+  episode so a baseline's own-game memory sentinel never survives a reset.
+  Only names resolving to that module qualify (see ``is_baseline_opponent``):
+  checkpoint-backed wrappers and the tabular ``CFRAgentWrapper`` are not
+  accepted here. ``cli.py``'s ``train ppo`` defaults to ``"imperfect_greedy"``
+  (cambia-1482), matching PPO-200k's original training opponent.
 
 Observation contract
 --------------------
@@ -56,8 +60,10 @@ import threading
 import gymnasium
 import numpy as np
 
-from src.constants import EP_PBS_V2_INPUT_DIM
-from src.encoding import EP_PBS_INPUT_DIM, NUM_ACTIONS
+from src.agents import action_codec
+from src.agents.game_view import tracked_opponent_seat
+from src.constants import EP_PBS_V2_INPUT_DIM, ActionSnapOpponentMove
+from src.encoding import EP_PBS_INPUT_DIM, NUM_ACTIONS, action_to_index
 from src.ffi.bridge import GoAgentState, GoEngine
 
 logger = logging.getLogger(__name__)
@@ -87,6 +93,25 @@ SELF_PLAY_OPPONENT = "self_play"
 RANDOM_LEGAL_OPPONENT = "random_legal"
 
 SUPPORTED_OPPONENTS = (SELF_PLAY_OPPONENT, RANDOM_LEGAL_OPPONENT)
+
+#: Module a registered agent class must live in to be accepted as a fixed
+#: opponent here. These are cambia-1426's GameView port: checkpoint-free,
+#: undo-free, and reading the game only through GoEngine/GameView, so
+#: accepting one cannot revive the Python engine behind this env.
+_BASELINE_MODULE = "src.agents.baseline_agents"
+
+
+def is_baseline_opponent(name: str) -> bool:
+    """True if ``name`` names a checkpoint-free GameView baseline agent.
+
+    Excludes checkpoint-backed wrappers (deep_cfr, ppo, rebel, ...) and
+    ``CFRAgentWrapper`` (tabular, Python-only -- see its docstring in
+    evaluate_agents.py) even though they share the same agent registry.
+    """
+    from src.evaluate_agents import AGENT_REGISTRY
+
+    agent_class = AGENT_REGISTRY.get(name.lower())
+    return agent_class is not None and agent_class.__module__ == _BASELINE_MODULE
 
 
 class SelfPlayPolicyOpponent:
@@ -211,17 +236,21 @@ class CambiaEnv(gymnasium.Env):
 
         self._opponent_type = opponent_type
         self._self_play = opponent_type == SELF_PLAY_OPPONENT
-        if opponent_type not in SUPPORTED_OPPONENTS:
+        self._fixed_baseline = (
+            opponent_type not in SUPPORTED_OPPONENTS
+            and is_baseline_opponent(opponent_type)
+        )
+        if opponent_type not in SUPPORTED_OPPONENTS and not self._fixed_baseline:
             raise NotImplementedError(
                 f"opponent_type={opponent_type!r} is not available on the Go-backed "
-                f"env. Supported: {', '.join(SUPPORTED_OPPONENTS)}. The fixed "
-                "baselines (imperfect_greedy, memory_heuristic, aggressive_snap, "
-                "the random variants) are written against the Python "
-                "CambiaGameState and are being ported to the GameView protocol "
-                "under cambia-1426; this env will accept them once that lands. "
-                "Running them today would require reviving the Python engine "
-                "behind the env, which the retirement sprint removes."
+                f"env. Supported: {', '.join(SUPPORTED_OPPONENTS)}, or a "
+                "src.agents.baseline_agents name (e.g. 'imperfect_greedy', "
+                "'memory_heuristic', 'aggressive_snap', 'random', 'greedy', "
+                "'random_no_cambia', 'random_late_cambia', 'human_player'). "
+                "Checkpoint-backed wrappers and the tabular CFRAgentWrapper are "
+                "not supported here."
             )
+        self._baseline_agents: dict | None = None
         self._selfplay_snapshot_path = selfplay_snapshot_path
         self._selfplay_deterministic = selfplay_deterministic
         if self._self_play and not selfplay_snapshot_path:
@@ -350,6 +379,22 @@ class CambiaEnv(gymnasium.Env):
         else:
             self._opponent = None
 
+        if self._fixed_baseline:
+            # Fresh instances every episode: a baseline detects "new game" by
+            # id() of what it is handed (game_view.as_game_view's cache), and
+            # Go handles come from a pool an address can be reused in, so a
+            # rebuilt-not-reset instance sidesteps that sentinel entirely
+            # rather than relying on invalidating it correctly every reset.
+            from src.evaluate_agents import get_agent
+
+            self._baseline_agents = {
+                seat: get_agent(self._opponent_type, player_id=seat, config=self._config)
+                for seat in range(self._num_players)
+                if seat != self._agent_seat
+            }
+        else:
+            self._baseline_agents = None
+
     def step(self, action: int):
         engine = self._engine
         if engine is None:
@@ -396,6 +441,7 @@ class CambiaEnv(gymnasium.Env):
         for agent in self._agents or ():
             agent.close()
         self._agents = None
+        self._baseline_agents = None
         if self._engine is not None:
             self._engine.close()
             self._engine = None
@@ -440,13 +486,74 @@ class CambiaEnv(gymnasium.Env):
         engine = self._engine
         while not engine.is_terminal() and engine.acting_player() != self._agent_seat:
             seat = engine.acting_player()
-            mask = self._legal_mask()
-            if self._self_play:
-                idx = self._select_selfplay_action(seat, mask)
+            if self._fixed_baseline:
+                idx = self._select_baseline_action(seat)
             else:
-                idx = self._random_legal(mask)
+                mask = self._legal_mask()
+                if self._self_play:
+                    idx = self._select_selfplay_action(seat, mask)
+                else:
+                    idx = self._random_legal(mask)
             self._apply(idx)
             self._update_agents()
+
+    def _select_baseline_action(self, seat: int) -> int:
+        """Ask the fixed baseline occupying ``seat`` for its move.
+
+        The baseline agents' GameView contract speaks ``GameAction`` objects,
+        not engine indices, so the legal set is decoded through action_codec
+        and the agent's choice is re-encoded back to the index the engine's
+        apply path expects. This mirrors
+        ``evaluate_agents._GoEvalGame.legal_actions()`` / ``.apply()`` for the
+        same two action spaces; duplicated here (via the same action_codec /
+        game_view primitives, not re-derived arithmetic) rather than imported
+        because that class owns its own engine and agent list end to end and
+        this env owns its own separately.
+        """
+        engine = self._engine
+        agent = self._baseline_agents[seat]
+
+        if not self._nplayer_space:
+            mask = engine.legal_actions_mask()
+            legal_actions = action_codec.actions_from_mask(mask)
+            chosen = agent.choose_action(engine, legal_actions)
+            return int(action_to_index(chosen))
+
+        pending = engine.get_pending()
+        if pending.target_seat is not None and pending.target_seat != seat:
+            target = int(pending.target_seat)
+        else:
+            target = tracked_opponent_seat(seat, self._num_players)
+        rel = action_codec.relative_opponent_index(seat, target, self._num_players)
+
+        preferred, preferred_index = [], {}
+        fallback, fallback_index = [], {}
+        mask = engine.nplayer_legal_actions_mask()
+        for idx in np.flatnonzero(np.asarray(mask)):
+            entry = action_codec.nplayer_index_to_action(int(idx))
+            action = entry.action
+            if isinstance(action, ActionSnapOpponentMove):
+                # The N-player space keeps only the own-card index; the
+                # target slot lives on the pending record.
+                action = ActionSnapOpponentMove(
+                    own_card_to_move_hand_index=action.own_card_to_move_hand_index,
+                    target_empty_slot_index=int(pending.target_slot or 0),
+                )
+            if entry.opp_idx is None or entry.opp_idx == rel:
+                if action not in preferred_index:
+                    preferred.append(action)
+                    preferred_index[action] = int(idx)
+            if action not in fallback_index:
+                fallback.append(action)
+                fallback_index[action] = int(idx)
+
+        legal_actions = preferred if preferred else fallback
+        index_map = preferred_index if preferred else fallback_index
+        chosen = agent.choose_action(engine, legal_actions)
+        idx = index_map.get(chosen)
+        if idx is None:
+            idx = action_codec.nplayer_index_for(chosen, rel)
+        return int(idx)
 
     def _select_selfplay_action(self, seat: int, mask: np.ndarray) -> int:
         """Pick an opponent move from the frozen snapshot policy.
