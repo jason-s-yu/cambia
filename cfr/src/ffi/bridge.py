@@ -661,7 +661,8 @@ class GoEngine:
     # Single-sourced from cfr/src/constants.py (which mirrors the Go
     # engine/agent constants) rather than hardcoded -- cambia-542 F8: this
     # module previously hardcoded stale 580/452 values that drifted from the
-    # 856/620 dims after the MaxPlayers 6->8 bump (commit 9073646), causing
+    # 856/620 dims of the time after the MaxPlayers 6->8 bump (commit 9073646;
+    # the input dim is 936 since cambia-1551), causing
     # malloc-crash buffer overflows in encode_nplayer/nplayer_action_mask/
     # nplayer_legal_actions_mask. get_nplayer_dims() below cross-checks these
     # against the live Go values through the FFI.

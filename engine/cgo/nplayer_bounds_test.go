@@ -51,15 +51,15 @@ func TestCambiaGameNewWithRulesAcceptsTwoPlayers(t *testing.T) {
 }
 
 // TestCambiaNPlayerDimsMatchConstants pins the live Go dim exports against
-// their known-correct values (agent.NPlayerInputDim=856,
+// their known-correct values (agent.NPlayerInputDim=936,
 // engine.NPlayerNumActions=620 per engine/agent/constants.go and
 // engine/types.go). The Python-side cross-check test
 // (test_nplayer_encoding.py::TestNPlayerDimCrossCheck) asserts these same
 // exports equal cfr/src/constants.py's N_PLAYER_INPUT_DIM/N_PLAYER_NUM_ACTIONS;
 // this test guards the Go side of that contract independently.
 func TestCambiaNPlayerDimsMatchConstants(t *testing.T) {
-	if got := testNPlayerInputDim(); got != 856 {
-		t.Errorf("cambia_nplayer_input_dim() = %d, want 856 (agent.NPlayerInputDim)", got)
+	if got := testNPlayerInputDim(); got != 936 {
+		t.Errorf("cambia_nplayer_input_dim() = %d, want 936 (agent.NPlayerInputDim)", got)
 	}
 	if got := testNPlayerNumActions(); got != 620 {
 		t.Errorf("cambia_nplayer_num_actions() = %d, want 620 (engine.NPlayerNumActions)", got)

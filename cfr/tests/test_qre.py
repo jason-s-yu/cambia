@@ -312,7 +312,7 @@ class TestNPlayerDispatch:
 
     @pytest.mark.skip(
         reason="Phase 0 F8 carry-forward: N-player FFI constants stale (580/452 should be "
-        "856/620). Fix in Phase 3."
+        "936/620). Fix in Phase 3."
     )
     def test_nplayer_config_from_yaml_config(self):
         """from_yaml_config correctly propagates num_players and QRE fields."""

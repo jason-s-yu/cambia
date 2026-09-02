@@ -1102,6 +1102,17 @@ func cambia_agent_new_nplayer(game_h C.int32_t, player_id C.uint8_t, num_players
 	if game_h < 0 || game_h >= maxGames || !gameInUse[game_h] {
 		return -1
 	}
+	// The seat count is validated here and not just clamped inside the agent state: a
+	// caller asking for a table the engine cannot deal is asking for a belief state that
+	// describes no game, and returning it silently truncated hides the mistake. It used to
+	// be unvalidated, and a seven or eight seat request panicked inside the constructor
+	// (cambia-1551).
+	if num_players < 2 || uint8(num_players) > engine.MaxPlayers {
+		return -1
+	}
+	if player_id >= num_players {
+		return -1
+	}
 	ah := allocAgent()
 	if ah < 0 {
 		return -1
