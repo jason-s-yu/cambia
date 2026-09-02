@@ -266,6 +266,12 @@ func checkPlacement(runDir, rel, target string) string {
 	return ""
 }
 
+// ReservedPath reports whether rel names something the coordinator authors and
+// a node may therefore never offer in a manifest (D52). It is exported so the
+// node agent filters its own run-dir scan against this list rather than
+// keeping a second copy that could drift from the enforcement here.
+func ReservedPath(rel string) bool { return reservedPath(rel) }
+
 // reservedPath reports whether rel names something the coordinator authors.
 func reservedPath(rel string) bool {
 	if reservedExact[rel] {
