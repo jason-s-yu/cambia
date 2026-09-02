@@ -63,6 +63,65 @@ func (t *rateTable) allow(key string) bool {
 	return true
 }
 
+// byteTable is the per-node byte-rate token bucket of D56
+// (RUNNERD_NASHNET_NODE_MBPS). It is rateTable's shape with bytes for tokens:
+// the bucket holds one second of transfer, refills from the injected clock on
+// the call that reads it, and admits a whole request or none of it, so a node
+// under its rate never sees a partial transfer. Ingress (blob chunks, log
+// appends) and egress (snapshot and seed reads) share one bucket per node
+// because they share one link.
+type byteTable struct {
+	mu    sync.Mutex
+	rate  float64 // bytes per second; zero disables the bucket
+	burst float64
+	now   func() time.Time
+	seen  map[string]*bucket
+}
+
+// newByteTable returns a bucket table metering each node at mbps megabits per
+// second. A non-positive rate returns a table that admits everything, which is
+// the unlimited LAN default.
+func newByteTable(mbps int, now func() time.Time) *byteTable {
+	t := &byteTable{now: now, seen: map[string]*bucket{}}
+	if mbps > 0 {
+		t.rate = float64(mbps) * 125000 // megabits/s -> bytes/s
+		t.burst = t.rate
+	}
+	return t
+}
+
+// spend charges n bytes to key and reports whether the bucket had them. A
+// request larger than the whole burst is admitted once the bucket is full
+// rather than refused forever, since a chunk cap above the per-second rate is a
+// configuration the node cannot fix by retrying smaller.
+func (t *byteTable) spend(key string, n int64) bool {
+	if t == nil || t.rate <= 0 || n <= 0 {
+		return true
+	}
+	now := t.now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	b := t.seen[key]
+	if b == nil {
+		b = &bucket{tokens: t.burst, updated: now}
+		t.seen[key] = b
+	}
+	b.tokens += now.Sub(b.updated).Seconds() * t.rate
+	if b.tokens > t.burst {
+		b.tokens = t.burst
+	}
+	b.updated = now
+	want := float64(n)
+	if want > t.burst {
+		want = t.burst
+	}
+	if b.tokens < want {
+		return false
+	}
+	b.tokens -= want
+	return true
+}
+
 // countTable bounds concurrent holders per identity: connections, uploads, and
 // downloads all use it (D56).
 type countTable struct {

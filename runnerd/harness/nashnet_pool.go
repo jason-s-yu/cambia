@@ -5,7 +5,9 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,6 +56,11 @@ type Ceilings struct {
 	// LogBytesPerCall and LogBytesPerJob bound the log append route (D54).
 	LogBytesPerCall int64
 	LogBytesPerJob  int64
+	// NodeMBPS is RUNNERD_NASHNET_NODE_MBPS: the per-node byte-rate token
+	// bucket over the ingress routes (blob chunks, log appends) and the egress
+	// ones (snapshot and seed reads), which share one bucket because they share
+	// one link. Zero is unlimited, the documented default on a LAN.
+	NodeMBPS int
 	// GlobalInFlight and GlobalConnections are the pre-authentication caps: a
 	// stranger that reaches the listener holds no more than this many requests
 	// and connections across the daemon (D56, ruling q3).
@@ -69,16 +76,19 @@ type Ceilings struct {
 
 // Ceiling defaults, the bounds table of D56.
 const (
-	DefaultRequestsPerMinute       = 600
-	DefaultConnectionsPerNode      = 8
-	DefaultConcurrentUploads       = 4
-	DefaultConcurrentDownloads     = 2
-	DefaultBundleBuildsPerMinute   = 4
-	DefaultMaxClaimWaiters         = 64
-	DefaultChunkBytes              = 64 << 20
-	DefaultLeaseBytesPerTick       = 2 << 30
-	DefaultLogBytesPerCall         = 2 << 20
-	DefaultLogBytesPerJob          = 1 << 30
+	DefaultRequestsPerMinute     = 600
+	DefaultConnectionsPerNode    = 8
+	DefaultConcurrentUploads     = 4
+	DefaultConcurrentDownloads   = 2
+	DefaultBundleBuildsPerMinute = 4
+	DefaultMaxClaimWaiters       = 64
+	DefaultChunkBytes            = 64 << 20
+	DefaultLeaseBytesPerTick     = 2 << 30
+	DefaultLogBytesPerCall       = 2 << 20
+	DefaultLogBytesPerJob        = 1 << 30
+	// DefaultNodeMBPS is 0: unlimited, the LAN default of D56. An operator
+	// meters a node over a slow link by setting RUNNERD_NASHNET_NODE_MBPS.
+	DefaultNodeMBPS                = 0
 	DefaultGlobalInFlight          = 256
 	DefaultGlobalConnections       = 512
 	DefaultSourceRequestsPerMinute = 1200
@@ -92,6 +102,17 @@ const (
 	// DefaultDegradedJobHold is RUNNERD_NASHNET_DEGRADED_JOB_HOLD (D8): how
 	// long a per-job degraded mark stands before its own timer clears it.
 	DefaultDegradedJobHold = time.Hour
+	// DefaultMaxAttempts is the infrastructure attempt budget of D32, used for
+	// a job whose spec sets no max_attempts of its own.
+	DefaultMaxAttempts = 3
+	// resultRetention is how long a posted terminal stays replayable (D6). It
+	// covers the whole window in which a node retries a lost result response,
+	// which D36 bounds at 2 x lease TTL of lost contact, with room to spare.
+	resultRetention = time.Hour
+	// maxResultRecords is the hard ceiling on retained terminals, so a
+	// coordinator that settles more leases per hour than this drops the oldest
+	// replay record rather than growing without bound.
+	maxResultRecords = 4096
 	// maxClaimWaitSeconds is the coordinator's cap on a node-supplied
 	// wait_seconds (D2), shared by the claim and the events long poll.
 	maxClaimWaitSeconds = 30
@@ -168,6 +189,10 @@ type PoolConfig struct {
 	// MaxLeasesPerNode is RUNNERD_NASHNET_MAX_LEASES_PER_NODE, the coordinator's
 	// own ceiling on concurrent leases per node (D47).
 	MaxLeasesPerNode int
+	// MaxAttempts is RUNNERD_NASHNET_MAX_ATTEMPTS, the pool-wide infrastructure
+	// attempt budget a job with no max_attempts of its own runs under (D32).
+	// Zero means DefaultMaxAttempts.
+	MaxAttempts int
 	// UnplaceableGrace is how long a ready job matches no node before its hold
 	// is rendered in the view (D14).
 	UnplaceableGrace time.Duration
@@ -196,6 +221,7 @@ type Pool struct {
 	policy     nashnet.Policy
 	ceilings   Ceilings
 	maxLeases  int
+	maxAttempt int
 	nodeTTL    time.Duration
 	sessGrace  time.Duration
 	now        func() time.Time
@@ -213,6 +239,9 @@ type Pool struct {
 	uploads  *countTable
 	egress   *countTable
 	builds   *rateTable
+	// bytes is the per-node byte-rate bucket shared by the upload and the
+	// egress routes (D56).
+	bytes *byteTable
 	// snapshots caches the bundle descriptor a claim resolved, keyed by lease
 	// id, so the snapshot route serves the exact artifact the claim reported.
 	snapshots map[string]snapshotDescriptor
@@ -233,16 +262,20 @@ type Pool struct {
 	// returns the recorded body rather than a conflict (D6). resultAuth keeps
 	// the hash of the token that posted it, because the lease store drops the
 	// token at release and the replay must still prove it holds it.
+	// resultAt is when each was recorded, which is what bounds the three maps:
+	// they are per lease and a coordinator serves leases for its whole life, so
+	// without a retention window they are an unbounded leak.
 	results    map[string]nashnet.ResultResponse
 	resultAuth map[string]string
+	resultAt   map[string]time.Time
 	// cooldowns exclude a node from re-matching a job it nacked (D8).
 	cooldowns map[string]map[string]time.Time
 	// nacks counts a node's nacks per job; three mark the job degraded for it.
 	nacks map[string]map[string]int
-	// breaker is the per-node consecutive prepare_node_failed counter of D63.
-	// W3-T14 owns its cooldown ladder; the counter and the operator reset live
-	// here because the drain route is this ticket's.
-	breaker map[string]int
+	// breaker is the per-node circuit breaker of D63: the consecutive
+	// prepare_node_failed counter, the trip count the cooldown ladder doubles
+	// on, and the standing hold.
+	breaker map[string]*breakerState
 	// degraded marks a (node, job) pair held after three nacks (D8).
 	degraded map[string]map[string]time.Time
 
@@ -298,6 +331,10 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 	if maxLeases <= 0 {
 		maxLeases = nashnet.DefaultMaxLeasesPerNode
 	}
+	maxAttempt := cfg.MaxAttempts
+	if maxAttempt <= 0 {
+		maxAttempt = DefaultMaxAttempts
+	}
 	nodeTTL := cfg.NodeTTL
 	if nodeTTL <= 0 {
 		nodeTTL = nashnet.DefaultNodeTTLSeconds * time.Second
@@ -321,6 +358,7 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 		policy:     policy,
 		ceilings:   ceil,
 		maxLeases:  maxLeases,
+		maxAttempt: maxAttempt,
 		nodeTTL:    nodeTTL,
 		sessGrace:  sessGrace,
 		now:        now,
@@ -332,6 +370,7 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 		uploads:    newCountTable(ceil.ConcurrentUploads),
 		egress:     newCountTable(ceil.ConcurrentDownloads),
 		builds:     newRateTable(ceil.BundleBuildsPerMinute, time.Minute, now),
+		bytes:      newByteTable(ceil.NodeMBPS, now),
 		snapshots:  map[string]snapshotDescriptor{},
 		quarGrants: map[string]map[string]quarantine.Grant{},
 		tickBytes:  map[string]int64{},
@@ -339,9 +378,10 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 		logDropped: map[string]int64{},
 		results:    map[string]nashnet.ResultResponse{},
 		resultAuth: map[string]string{},
+		resultAt:   map[string]time.Time{},
 		cooldowns:  map[string]map[string]time.Time{},
 		nacks:      map[string]map[string]int{},
-		breaker:    map[string]int{},
+		breaker:    map[string]*breakerState{},
 		degraded:   map[string]map[string]time.Time{},
 		preauth:    newPreAuthGate(ceil, now),
 	}
@@ -378,16 +418,99 @@ func (p *Pool) applyOutcome(o nashnet.Outcome) {
 	p.releaseLeaseState(o.LeaseID)
 	switch o.Verdict {
 	case nashnet.VerdictRequeue:
-		// The job never left the queue: a leased job stays at its original
-		// submit_seq and the placement scan simply skips it while a lease
-		// stands (D32, "requeue at the original submit_seq").
-		p.disp.reDispatch()
+		p.requeue(o)
 	case nashnet.VerdictCanceled:
 		p.disp.recordPoolTerminal(o.JobID, StateCanceled, "lease stopped by the coordinator")
 	case nashnet.VerdictFinalize:
 		p.disp.finalizePoolJob(o.JobID)
 	}
 	p.signalPlacement()
+}
+
+// requeue returns a job to the ready set, or fails it when its attempt budget
+// is spent (the last row of D32). The job never left the queue: a leased job
+// stays at its original submit_seq and the placement scan skips it while a
+// lease stands, so returning it is one re-dispatch and no queue surgery.
+//
+// A requeue is refused outright for a job that promoted a checkpoint under the
+// lease that just ended (D33): the retry rules restart only jobs that never
+// launched or that a gate stopped before any checkpoint existed, and anything
+// else waits for an explicit operator resume. The requeue verdict is
+// pre-launch by construction, so this is the assertion of that invariant rather
+// than a path the sweeper reaches on a healthy pool.
+//
+// The test is per lease rather than per job, because an operator resume runs
+// precisely because a checkpoint from an earlier run exists: reading the job's
+// whole promoted state here would make a nack of a resumed job unrecoverable
+// without a second operator act.
+func (p *Pool) requeue(o nashnet.Outcome) {
+	if p.promotedUnderLease(o.LeaseID, o.JobID) {
+		p.disp.recordPoolTerminal(o.JobID, StatePreempted,
+			"a promoted checkpoint is never auto-resumed: "+o.Reason)
+		return
+	}
+	if max := p.maxAttempts(o.JobID); o.NextAttempt > max {
+		p.disp.recordPoolTerminal(o.JobID, StateFailed,
+			"attempts exhausted after "+itoa(max)+": "+o.Reason)
+		return
+	}
+	p.projectReady(o.JobID)
+	p.disp.reDispatch()
+}
+
+// maxAttempts is the job's own infrastructure attempt budget, falling back on
+// the pool's (D32). It reads the persisted spec rather than the queue handle,
+// so the budget survives the coordinator restart of D34.
+func (p *Pool) maxAttempts(jobID string) int {
+	if spec := readJobSpec(filepath.Join(p.runsDir, jobID)); spec != nil && spec.MaxAttempts > 0 {
+		return spec.MaxAttempts
+	}
+	return p.maxAttempt
+}
+
+// promotedCheckpoint reports whether the job's folded manifest holds a
+// checkpoint the coordinator has already materialized (D33, D62). It reads
+// promoted state only, which the coordinator validated before materializing
+// (D55), and the head is on disk, so the answer survives a restart.
+//
+// This is the whole-job question, which is the one D62 asks of a gate stop: a
+// run resumed from an earlier checkpoint has partial state whether or not this
+// lease added to it, so its gate stop is terminal and waits for an operator.
+func (p *Pool) promotedCheckpoint(jobID string) bool {
+	head, ok := p.manifestHead(jobID)
+	return ok && headHasCheckpoint(head)
+}
+
+// promotedUnderLease narrows that question to one lease: whether the lease
+// being settled is the one whose commit put the checkpoint in the head. It is
+// what the requeue path asks, so that returning a job to ready turns on what
+// this placement produced rather than on what the job already carried.
+func (p *Pool) promotedUnderLease(leaseID, jobID string) bool {
+	head, ok := p.manifestHead(jobID)
+	return ok && head.Folded.LeaseID == leaseID && headHasCheckpoint(head)
+}
+
+// headHasCheckpoint reports whether a folded manifest names resumable state.
+func headHasCheckpoint(head quarantine.Head) bool {
+	for _, e := range head.Folded.Entries {
+		if isCheckpointPath(e.Path) {
+			return true
+		}
+	}
+	return false
+}
+
+// isCheckpointPath reports whether a promoted manifest path is state a run
+// could resume from: the snapshots directory it writes its rolling checkpoint
+// into, or the resume marker beside it.
+//
+// It is deliberately broader than hasPromotedResumableState, which asks for
+// both named files before an operator may resume. This one guards the opposite
+// decision, whether the daemon may re-place the job on its own, so any promoted
+// snapshot is enough to refuse: a wrongly held job waits for an operator, and a
+// wrongly re-placed one runs twice over its own partial state.
+func isCheckpointPath(rel string) bool {
+	return rel == resumeStatePath || strings.HasPrefix(rel, path.Dir(resumeCheckpointPath)+"/")
 }
 
 // releaseLeaseState drops the per-lease route state a released lease no longer
@@ -507,11 +630,14 @@ func (p *Pool) logDroppedFor(jobID string) int64 {
 // own holds, and the node's live leases.
 type NodeView struct {
 	nashnet.NodeRecord
-	Presence     string           `json:"presence"`
-	StaleSeconds int64            `json:"stale_seconds"`
-	Leases       []LeaseView      `json:"leases,omitempty"`
-	BreakerTrips int              `json:"breaker_trips,omitempty"`
-	Degraded     map[string]int64 `json:"degraded_jobs,omitempty"`
+	Presence     string      `json:"presence"`
+	StaleSeconds int64       `json:"stale_seconds"`
+	Leases       []LeaseView `json:"leases,omitempty"`
+	BreakerTrips int         `json:"breaker_trips,omitempty"`
+	// BreakerHeldSeconds is how long the D63 hold has left, so an operator
+	// reads a time window rather than a bare trip count.
+	BreakerHeldSeconds int64            `json:"breaker_held_seconds,omitempty"`
+	Degraded           map[string]int64 `json:"degraded_jobs,omitempty"`
 }
 
 // LeaseView renders one lease inside a node listing.
@@ -556,8 +682,8 @@ func (p *Pool) nodeView(rec nashnet.NodeRecord, now time.Time) NodeView {
 			Attempt:    l.Attempt,
 		})
 	}
+	v.BreakerTrips, v.BreakerHeldSeconds = p.breakerReport(rec.NodeID, now)
 	p.mu.Lock()
-	v.BreakerTrips = p.breaker[rec.NodeID]
 	if marks := p.degraded[rec.NodeID]; len(marks) > 0 {
 		v.Degraded = map[string]int64{}
 		for job, until := range marks {
@@ -574,10 +700,12 @@ func (p *Pool) nodeView(rec nashnet.NodeRecord, now time.Time) NodeView {
 }
 
 // noteNack records a returned claim: the node is excluded from re-matching that
-// job for the cooldown, and three nacks of one job mark it degraded for that
-// node (D8). Neither mark is node-clearable; both clear on their own timer or
-// on an operator act through the drain route (D63).
-func (p *Pool) noteNack(nodeID, jobID, reason string, cooldown time.Duration) {
+// job for the cooldown, three nacks of one job mark it degraded for that node
+// (D8), and three consecutive prepare_node_failed nacks across any jobs trip
+// its circuit breaker (D63). It reports whether this nack tripped the breaker,
+// which the route turns into the node-wide hold. No mark is node-clearable;
+// each clears on its own timer or on an operator act through the drain route.
+func (p *Pool) noteNack(nodeID, jobID, reason string, cooldown time.Duration) (tripped bool) {
 	if cooldown <= 0 {
 		cooldown = DefaultNackCooldown
 	}
@@ -598,11 +726,11 @@ func (p *Pool) noteNack(nodeID, jobID, reason string, cooldown time.Duration) {
 		}
 		p.degraded[nodeID][jobID] = now.Add(DefaultDegradedJobHold)
 	}
-	if reason == nashnet.NackPrepareNodeFailed {
-		p.breaker[nodeID]++
-	} else {
-		p.breaker[nodeID] = 0
+	if p.noteBreakerLocked(nodeID, reason, now) {
+		tripped = true
 	}
+	p.pruneHoldsLocked(now)
+	return tripped
 }
 
 // heldFor reports whether the coordinator is holding this (node, job) pair: a
@@ -620,9 +748,10 @@ func (p *Pool) heldFor(nodeID, jobID string) bool {
 	return false
 }
 
-// clearBreaker resets the D63 counter and the per-job degraded marks of D8 for
-// one node. It is reachable only from the operator drain route: registration is
-// a node route, so a node-clearable hold would be no hold at all.
+// clearBreaker lifts the D63 hold, resets its counter and its trip ladder, and
+// drops the per-job degraded marks and cooldowns of D8 for one node. It is
+// reachable only from the operator drain route: registration is a node route,
+// so a node-clearable hold would be no hold at all.
 func (p *Pool) clearBreaker(nodeID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -630,6 +759,89 @@ func (p *Pool) clearBreaker(nodeID string) {
 	delete(p.degraded, nodeID)
 	delete(p.nacks, nodeID)
 	delete(p.cooldowns, nodeID)
+}
+
+// pruneHoldsLocked drops the (node, job) marks of D8 whose timer has run out.
+// They are keyed per pair and a coordinator holds nodes for its whole life, so
+// without this pass the tables grow one entry per job every node ever returns.
+// Callers hold p.mu.
+func (p *Pool) pruneHoldsLocked(now time.Time) {
+	for node, jobs := range p.cooldowns {
+		for job, until := range jobs {
+			if !until.After(now) {
+				delete(jobs, job)
+				// The per-job nack count is only read against the degraded
+				// threshold while a hold stands, so it ages out with the hold
+				// rather than counting a node's whole history.
+				delete(p.nacks[node], job)
+			}
+		}
+		if len(jobs) == 0 {
+			delete(p.cooldowns, node)
+			delete(p.nacks, node)
+		}
+	}
+	for node, jobs := range p.degraded {
+		for job, until := range jobs {
+			if !until.After(now) {
+				delete(jobs, job)
+			}
+		}
+		if len(jobs) == 0 {
+			delete(p.degraded, node)
+		}
+	}
+}
+
+// recordResult keeps a posted terminal replayable for the retention window
+// (D6). The three per-lease maps are bounded here rather than dropped at
+// release, because the replay a lost response needs happens after the lease is
+// gone: a record ages out of the window, or the oldest goes when the count
+// reaches the ceiling.
+func (p *Pool) recordResult(leaseID string, resp nashnet.ResultResponse, tokenHash string) {
+	now := p.now()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.results[leaseID] = resp
+	p.resultAuth[leaseID] = tokenHash
+	p.resultAt[leaseID] = now
+
+	cutoff := now.Add(-resultRetention)
+	for id, at := range p.resultAt {
+		if at.Before(cutoff) {
+			p.forgetResultLocked(id)
+		}
+	}
+	for len(p.resultAt) > maxResultRecords {
+		oldest, oldestAt := "", time.Time{}
+		for id, at := range p.resultAt {
+			if oldest == "" || at.Before(oldestAt) {
+				oldest, oldestAt = id, at
+			}
+		}
+		p.forgetResultLocked(oldest)
+	}
+}
+
+// forgetResultLocked drops one lease's retained route records. Callers hold
+// p.mu.
+func (p *Pool) forgetResultLocked(leaseID string) {
+	delete(p.results, leaseID)
+	delete(p.resultAuth, leaseID)
+	delete(p.resultAt, leaseID)
+	delete(p.logDropped, leaseID)
+}
+
+// StartupSweep is the coordinator-restart half of D34 and D59: quarantine trees
+// whose lease no longer lives, and the parts under them, are dropped once past
+// their debug TTL, so a restart does not inherit the upload state of leases it
+// has no record of. A live lease's tree is never touched, which is what makes
+// the restart invisible to a node with an upload in flight.
+func (p *Pool) StartupSweep() (int, error) {
+	return p.quar.Sweep(func(nodeID, jobID, leaseID string) bool {
+		l, ok := p.leases.Get(leaseID)
+		return ok && l.Live() && l.JobID == jobID && l.NodeID == nodeID
+	})
 }
 
 // writeTombstone records an operator revocation where authtoken consults it: a

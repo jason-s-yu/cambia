@@ -34,6 +34,15 @@ var (
 	// ErrStaleLock is returned when `uv lock --check` rejects the worktree lock
 	// before a venv build (design 3.3).
 	ErrStaleLock = errors.New("stale uv.lock")
+	// ErrConfigRender is returned when `config render` rejects the job's config
+	// at the pinned commit. It is a spec-fatal staging failure on a nashnet node
+	// (D63): re-placing the job on another node reproduces it exactly, so the
+	// job fails rather than nacking. Typed so the node classifies on errors.Is
+	// rather than on the stderr text this error carries.
+	ErrConfigRender = errors.New("config render rejected")
+	// ErrConfigValidate is returned when `config validate` rejects the rendered
+	// config. Spec-fatal for the same reason as ErrConfigRender.
+	ErrConfigValidate = errors.New("config validate rejected")
 	// ErrInvalidBasis is returned when a bundle basis (a claimed have_commits
 	// entry) fails the 40-hex commit contract, is absent from the mirror, or
 	// the basis list exceeds the cap; refused before it ever reaches a git argv

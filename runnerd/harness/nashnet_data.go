@@ -126,6 +126,12 @@ func (s *Server) handleBlobPatch(w http.ResponseWriter, r *http.Request, lease n
 		})
 		return
 	}
+	if !p.spendBytes(lease.NodeID, chunk) {
+		writeNashnetError(w, http.StatusTooManyRequests, nashnet.ErrorBody{
+			Error: nashnet.CodeRateLimited, Detail: "node byte rate exceeded", RetryAfterSeconds: 1,
+		})
+		return
+	}
 	body := http.MaxBytesReader(w, r.Body, p.ceilings.ChunkBytes)
 	defer body.Close()
 	res, err := p.quar.AppendChunk(p.quarantineLease(lease), r.PathValue("digest"), start, end, total, body)
@@ -137,6 +143,44 @@ func (s *Server) handleBlobPatch(w http.ResponseWriter, r *http.Request, lease n
 	writeJSON(w, http.StatusOK, map[string]any{
 		"committed_offset": res.CommittedOffset, "verified": res.Verified,
 	})
+}
+
+// spendBytes charges n bytes to the node's byte-rate bucket (D56). It is the
+// one bucket the ingress and the egress routes share, because a node moving
+// bytes in either direction is moving them over the same link.
+func (p *Pool) spendBytes(nodeID string, n int64) bool {
+	return p.bytes.spend(nodeID, n)
+}
+
+// egressBytes is what a read of a size-byte file will actually put on the wire:
+// the whole file, or the span a single byte range asks for. A range shape the
+// helper does not recognize charges the whole file, which over-meters a
+// multi-range read rather than letting it through unmetered.
+func egressBytes(r *http.Request, size int64) int64 {
+	raw := r.Header.Get("Range")
+	if !strings.HasPrefix(raw, "bytes=") || strings.Contains(raw, ",") {
+		return size
+	}
+	spec := strings.TrimPrefix(raw, "bytes=")
+	dash := strings.Index(spec, "-")
+	if dash < 0 {
+		return size
+	}
+	start, err := strconv.ParseInt(spec[:dash], 10, 64)
+	if err != nil || start < 0 || start > size {
+		return size
+	}
+	end := size - 1
+	if tail := spec[dash+1:]; tail != "" {
+		parsed, perr := strconv.ParseInt(tail, 10, 64)
+		if perr != nil || parsed < start {
+			return size
+		}
+		if parsed < end {
+			end = parsed
+		}
+	}
+	return end - start + 1
 }
 
 // spendTick charges a lease's per-tick upload budget, which resets on every
@@ -260,6 +304,12 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request, lease nashne
 		})
 		return
 	}
+	if !p.spendBytes(lease.NodeID, int64(len(raw))) {
+		writeNashnetError(w, http.StatusTooManyRequests, nashnet.ErrorBody{
+			Error: nashnet.CodeRateLimited, Detail: "node byte rate exceeded", RetryAfterSeconds: 1,
+		})
+		return
+	}
 	clean, dropped := filterLogBytes(raw)
 	if size+int64(len(clean)) > p.ceilings.LogBytesPerJob {
 		p.noteLogDropped(lease.LeaseID, int64(len(clean))+dropped)
@@ -375,6 +425,12 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request, lease na
 		p.snapshots[lease.LeaseID] = desc
 		p.mu.Unlock()
 	}
+	if !p.spendBytes(lease.NodeID, egressBytes(r, desc.Size)) {
+		writeNashnetError(w, http.StatusTooManyRequests, nashnet.ErrorBody{
+			Error: nashnet.CodeRateLimited, Detail: "node byte rate exceeded", RetryAfterSeconds: 1,
+		})
+		return
+	}
 	setDeadlines(w, r, deadlineEgress)
 	if err := ingest.ServeRangedFile(w, r, desc.Path, ingest.FormatETag(desc.SHA256)); err != nil {
 		poolLog("nashnet snapshot: serving %s: %v", lease.JobID, err)
@@ -407,11 +463,18 @@ func (s *Server) handleSeed(w http.ResponseWriter, r *http.Request, lease nashne
 		nashnetError(w, http.StatusNotFound, "not_found", "no such seed entry")
 		return
 	}
-	if fi, serr := os.Stat(abs); serr != nil || !fi.Mode().IsRegular() {
+	fi, serr := os.Stat(abs)
+	if serr != nil || !fi.Mode().IsRegular() {
 		// The grant named it, so a live lease asking for an entry that has since
 		// vanished is the one place 409 seed_missing survives (D53).
 		writeNashnetError(w, http.StatusConflict,
 			nashnet.ErrorBody{Error: nashnet.CodeSeedMissing, Detail: "granted seed entry is gone"})
+		return
+	}
+	if !p.spendBytes(lease.NodeID, egressBytes(r, fi.Size())) {
+		writeNashnetError(w, http.StatusTooManyRequests, nashnet.ErrorBody{
+			Error: nashnet.CodeRateLimited, Detail: "node byte rate exceeded", RetryAfterSeconds: 1,
+		})
 		return
 	}
 	setDeadlines(w, r, deadlineEgress)

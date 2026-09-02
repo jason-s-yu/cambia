@@ -27,6 +27,13 @@ const (
 	// non-success terminal and whose on_failure policy is skip (cambia-352). A
 	// sibling ticket's state enum carries the same name; keep it exact.
 	StateSkipped = "skipped"
+	// StatePreempted is a gate-driven stop that promoted a checkpoint (D62). It
+	// is terminal because nothing auto-resumes a job that produced one (D33), so
+	// it waits for an operator; the same gate stop with no checkpoint writes no
+	// state at all and returns the job to ready. Its value is the wire's
+	// nashnet.ResultPreempted, spelled here because this file is the state enum
+	// and importing the pool's wire package from it would invert the layering.
+	StatePreempted = "preempted"
 )
 
 // on_failure policies (cambia-352). They govern only the parent-failure branch
@@ -45,6 +52,7 @@ var terminalStates = map[string]bool{
 	StateCanceled:         true,
 	StateFailed:           true,
 	StateSkipped:          true,
+	StatePreempted:        true,
 	procmgr.StatusStopped: true,
 	procmgr.StatusCrashed: true,
 }
@@ -187,6 +195,11 @@ type JobSpec struct {
 	// bound, checked from granted_at regardless of renewals, and is not the
 	// node's own job_policy gate.
 	MaxRuntimeHours float64 `json:"max_runtime_hours,omitempty"`
+	// MaxAttempts is this job's infrastructure attempt budget (D32). Zero means
+	// the pool's RUNNERD_NASHNET_MAX_ATTEMPTS, default 3. It counts placements
+	// that never ran: a nack and a gate release cost nothing, and a job that
+	// launched is never retried at all.
+	MaxAttempts int `json:"max_attempts,omitempty"`
 }
 
 // jobSpecAlias has JobSpec's exact field set but none of its methods, so

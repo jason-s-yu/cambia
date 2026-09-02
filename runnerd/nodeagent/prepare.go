@@ -2,7 +2,8 @@ package nodeagent
 
 import (
 	"errors"
-	"strings"
+
+	"github.com/jason-s-yu/cambia/runnerd/ingest"
 )
 
 // specFatalError marks a staging failure that is a property of the job spec at
@@ -33,32 +34,35 @@ func isSpecFatal(err error) bool {
 	return errors.As(err, &sf)
 }
 
-// specFatalMarkers are the substrings that identify a spec-fatal Prepare
-// failure inside the ingest pipeline's wrapped errors. The set is closed by
-// design: D32 enumerates the spec-fatal causes, so anything else a node's
-// Prepare produces is node-attributable and nacks rather than burning the run
-// name (the run-name namespace is global). Ordering the classification this
-// way means a new ingest failure mode defaults to a nack, which costs a
-// cooldown and a breaker tick, instead of defaulting to a job failure, which
-// is unrecoverable without an operator purge.
-var specFatalMarkers = []string{
-	"receipt check",
-	"render config",
-	"render:",
-	"validate config",
-	"config validate",
-	"owned override",
-	"override targets harness-owned key",
-	"invalid override",
-	"script: not found at pinned commit",
-	"signature",
+// specFatalCauses are the ingest sentinels that identify a spec-fatal Prepare
+// failure (D63): a config render or validate rejection at the pinned commit, an
+// owned-override rejection, a receipt mismatch after a good fetch, a signature
+// refusal, a spec path that escapes containment, and a commit that is not a
+// commit. Each is a property of the job at its commit, so re-placing it on
+// another node reproduces it exactly.
+//
+// The set is closed by design: D32 enumerates the spec-fatal causes, so
+// anything else a node's Prepare produces is node-attributable and nacks rather
+// than burning the run name (the run-name namespace is global). Ordering the
+// classification this way means a new ingest failure mode defaults to a nack,
+// which costs a cooldown and a breaker tick, instead of defaulting to a job
+// failure, which is unrecoverable without an operator purge.
+var specFatalCauses = []error{
+	ingest.ErrConfigRender,
+	ingest.ErrConfigValidate,
+	ingest.ErrOwnedOverride,
+	ingest.ErrReceiptMismatch,
+	ingest.ErrSignatureVerification,
+	ingest.ErrPathEscape,
+	ingest.ErrInvalidCommit,
 }
 
 // classifyPrepare turns a Prepare error into either a spec-fatal failure or a
-// node-attributable one. It is applied to the error text because the ingest
-// pipeline reports its stages as wrapped strings rather than typed sentinels;
-// the marker list is the contract, and a marker that stops matching shows up
-// as a job that nacks forever rather than as a silently wrong verdict.
+// node-attributable one. It compares sentinels rather than error text, so the
+// prepare_node_failed signal the D63 circuit breaker counts stays reliable
+// across any rewording of the ingest pipeline's messages: a cause that stops
+// matching would otherwise silently reclassify a spec-fatal failure as a nack
+// and loop the job across every node in the pool.
 func classifyPrepare(err error) error {
 	if err == nil {
 		return nil
@@ -66,9 +70,8 @@ func classifyPrepare(err error) error {
 	if isSpecFatal(err) {
 		return err
 	}
-	text := strings.ToLower(err.Error())
-	for _, m := range specFatalMarkers {
-		if strings.Contains(text, m) {
+	for _, cause := range specFatalCauses {
+		if errors.Is(err, cause) {
 			return &specFatalError{reason: "prepare failed", err: err}
 		}
 	}
