@@ -20,12 +20,24 @@ from ..networks import build_advantage_network, get_strategy_from_advantages
 logger = logging.getLogger(__name__)
 
 
-class ESValidatorNetworkError(RuntimeError):
-    """Raised when the validator cannot build or load its advantage network.
+class ESValidatorError(RuntimeError):
+    """A validation step that produced no measurement at all.
 
-    Separate from a traversal failure: the caller must not downgrade this to a
-    log line, because a validator whose network never loads reports nothing at
-    all while training continues (cambia-1880).
+    The caller must not downgrade this to a log line: every subclass means the
+    step reported nothing while training carried on, which is the silence this
+    class of error exists to end (cambia-1880).
+    """
+
+
+class ESValidatorNetworkError(ESValidatorError):
+    """Raised when the validator cannot build or load its advantage network."""
+
+
+class ESValidatorTraversalError(ESValidatorError):
+    """Raised when no traversal in a validation step completed.
+
+    A partial failure is not this: some traversals completing still yields a
+    measurement, so those keep their per-traversal warning.
     """
 
 
@@ -162,9 +174,12 @@ class ESValidator:
 
         # Zeroed metrics read as "converged", so a run where every traversal
         # failed (most often a missing libcambia.so) must raise rather than
-        # report zeros (cambia-1783).
+        # report zeros (cambia-1783). The caller treats this like an unusable
+        # network and stops the run: nothing completed is never a healthy
+        # measurement, and the usual cause does not clear on its own
+        # (cambia-1880).
         if num_traversals > 0 and completed_traversals == 0:
-            raise RuntimeError(
+            raise ESValidatorTraversalError(
                 f"ES validation completed 0 of {num_traversals} traversals on the "
                 f"Go engine; first error: {first_error}"
             ) from first_error

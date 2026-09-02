@@ -667,3 +667,77 @@ class TestTrainerESValidationIsNotSilent:
         trainer.train(num_training_steps=1)
 
         assert trainer.es_validation_history == []
+
+
+# ---------------------------------------------------------------------------
+# Test 13: a validation step that completes no traversal is fatal
+# ---------------------------------------------------------------------------
+
+
+class TestESValidatorTraversalFailures:
+    def _validator(self):
+        return ESValidator(
+            config=make_test_config(depth=3, traversals=4),
+            network_weights=make_random_weights(),
+            network_config=make_network_config(),
+        )
+
+    def test_every_traversal_failing_raises(self):
+        """Zero completed traversals is never a measurement, so it raises."""
+        from src.cfr.es_validator import ESValidatorError
+
+        validator = self._validator()
+
+        def boom(updating_player):
+            raise RuntimeError("libcambia.so is gone")
+
+        validator._traverse_go = boom
+
+        with pytest.raises(ESValidatorError) as exc_info:
+            validator.compute_exploitability(num_traversals=4)
+
+        assert "0 of 4" in str(exc_info.value)
+
+    @needs_go
+    def test_one_failed_traversal_of_four_still_reports(self, caplog):
+        """A partial failure keeps its warning and still reports metrics."""
+        import logging
+
+        validator = self._validator()
+        real = validator._traverse_go
+        calls = []
+
+        def flaky(updating_player):
+            calls.append(updating_player)
+            if len(calls) == 2:
+                raise RuntimeError("transient hiccup")
+            return real(updating_player)
+
+        validator._traverse_go = flaky
+
+        with caplog.at_level(logging.WARNING, logger="src.cfr.es_validator"):
+            metrics = validator.compute_exploitability(num_traversals=4)
+
+        assert metrics["traversals"] == 3
+        assert metrics["mean_regret"] >= 0.0
+        assert any("traversal 1 failed" in r.getMessage() for r in caplog.records)
+
+
+class TestTrainerAbortsOnDeadValidation:
+    @needs_go
+    def test_all_traversals_failing_aborts_training(self, monkeypatch):
+        """A validation step that completes nothing stops the run."""
+        from src.cfr.deep_trainer import DeepCFRTrainer
+        from src.cfr.es_validator import ESValidatorError
+
+        def boom(self, updating_player):
+            raise RuntimeError("libcambia.so is gone")
+
+        monkeypatch.setattr(ESValidator, "_traverse_go", boom)
+
+        trainer = DeepCFRTrainer(
+            config=_small_trainer_config(), deep_cfr_config=_residual_dcfr_config()
+        )
+
+        with pytest.raises(ESValidatorError):
+            trainer.train(num_training_steps=1)
