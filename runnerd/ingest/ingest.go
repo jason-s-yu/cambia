@@ -41,6 +41,7 @@ const (
 	dirVenvs     = "venvs"
 	dirLibcambia = "libcambia"
 	dirShim      = "shim"
+	dirSnapshots = "snapshots"
 )
 
 // Config parameterizes a Manager. BaseDir is the /srv/cambia layout root; RunsDir
@@ -63,6 +64,13 @@ type Config struct {
 	MaxVenvs int
 	// MaxLibcambia caps the retained libcambia artifacts (LRU). Default 50.
 	MaxLibcambia int
+	// SnapshotDir overrides the coordinator-side git bundle cache directory
+	// (design 3.3, D48; RUNNERD_NASHNET_SNAPSHOT_DIR). Defaults to
+	// BaseDir/snapshots.
+	SnapshotDir string
+	// MaxSnapshots caps the retained cached bundles (LRU). Default 20
+	// (RUNNERD_NASHNET_SNAPSHOT_CACHE).
+	MaxSnapshots int
 	// CoresCap is the job-internal worker-count ceiling injected as a rails-last
 	// override (design 6: cores - 2). Non-positive disables the worker rail.
 	CoresCap int
@@ -95,12 +103,15 @@ type Manager struct {
 	venvsDir     string
 	libcambiaDir string
 	shimDir      string
+	snapshotDir  string
 	runner       CommandRunner
 	debugTTL     time.Duration
 	now          func() time.Time
 
 	requireSignedCommits bool
 	allowedSignersPath   string
+
+	bundleGroup flightGroup[BundleDescriptor]
 }
 
 // New constructs a Manager, applying defaults for unset Config fields.
@@ -110,6 +121,9 @@ func New(cfg Config) *Manager {
 	}
 	if cfg.MaxLibcambia <= 0 {
 		cfg.MaxLibcambia = 50
+	}
+	if cfg.MaxSnapshots <= 0 {
+		cfg.MaxSnapshots = 20
 	}
 	if cfg.PythonBin == "" {
 		cfg.PythonBin = "python3"
@@ -127,6 +141,10 @@ func New(cfg Config) *Manager {
 	if mirrorDir == "" {
 		mirrorDir = filepath.Join(cfg.BaseDir, dirMirror)
 	}
+	snapshotDir := cfg.SnapshotDir
+	if snapshotDir == "" {
+		snapshotDir = filepath.Join(cfg.BaseDir, dirSnapshots)
+	}
 	return &Manager{
 		cfg:          cfg,
 		mirrorDir:    mirrorDir,
@@ -134,6 +152,7 @@ func New(cfg Config) *Manager {
 		venvsDir:     filepath.Join(cfg.BaseDir, dirVenvs),
 		libcambiaDir: filepath.Join(cfg.BaseDir, dirLibcambia),
 		shimDir:      filepath.Join(cfg.BaseDir, dirShim),
+		snapshotDir:  snapshotDir,
 		runner:       cfg.Runner,
 		debugTTL:     cfg.DebugTTL,
 		now:          cfg.Now,
