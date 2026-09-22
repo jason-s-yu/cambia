@@ -31,6 +31,8 @@ on:
       - 'cfr/src/encoding.py'
       - 'cfr/tests/**'
       - 'Makefile'
+      - 'cfr/pyproject.toml'
+      - 'cfr/uv.lock'
       - '.github/workflows/parity-gate.yml'
   push:
     branches: [master]
@@ -40,6 +42,8 @@ on:
       - 'cfr/src/encoding.py'
       - 'cfr/tests/**'
       - 'Makefile'
+      - 'cfr/pyproject.toml'
+      - 'cfr/uv.lock'
       - '.github/workflows/parity-gate.yml'
 
 jobs:
@@ -72,7 +76,7 @@ jobs:
       # The CPU torch extra: tests/test_cross_validation.py imports torch at
       # module load for the encoding-dimension checks. Nothing here runs on a
       # GPU, so the cpu index keeps the wheel small.
-      - name: Install cfr (cpu extra)
+      - name: Install cfr (cpu and test extras)
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ./cfr[cpu,test] \
