@@ -84,6 +84,7 @@ addopts = "-m 'not slow'"
 markers = [
     "integration: slow end-to-end tests requiring libcambia.so (>10s)",
     "slow: tests that run >30s (convergence, large eval loops, whole-tree ES traversal); deselected by the addopts above, and run nightly by ci.yml's cfr-slow job",
+    "slow_cpu: tests that drive PRT-CFR training iterations, about 25s per iteration on 8 CPU threads and several per test, so their files run for minutes without a GPU (cambia-2347); ci.yml's CPU-only cfr job deselects them with -m \"not slow and not slow_cpu\", restating slow because a command-line -m replaces the addopts one",
 ]
 
 [tool.black]
