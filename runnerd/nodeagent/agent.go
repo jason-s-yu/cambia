@@ -313,12 +313,16 @@ func (a *Agent) startJob(ctx context.Context, claim *nashnet.ClaimResponse) {
 		a.log.Printf("persist lease %s: %v", rec.LeaseID, err)
 	}
 	job := &jobRun{agent: a, rec: rec, snapshot: claim.Snapshot}
-	if spec, derr := decodeSpec(claim.Spec); derr == nil {
+	spec, specErr := decodeSpec(claim.Spec)
+	if specErr == nil {
 		// The exclusive flag is read before the goroutine starts because the
 		// slot it holds is claimed here, in the caller, so a second claim
 		// racing this one sees the occupancy (D13).
 		job.spec = spec
 	}
+	// The job is whole before it is published: from the moment it is in the
+	// active set, a revoke on the events loop can stop it (cambia-2371).
+	job.init(nashnet.PhaseClaimed)
 	a.mu.Lock()
 	a.active[rec.JobID] = job
 	a.mu.Unlock()
@@ -328,7 +332,7 @@ func (a *Agent) startJob(ctx context.Context, claim *nashnet.ClaimResponse) {
 	go func() {
 		defer a.wg.Done()
 		defer a.finishJob(job)
-		job.run(ctx)
+		job.run(ctx, specErr)
 	}()
 }
 

@@ -110,7 +110,11 @@ func (j *jobRun) stopRequest() *stopReason {
 	return j.stop
 }
 
-// init builds the per-lease state both entry points share.
+// init builds the per-lease state both entry points share. It runs before the
+// job is published to the agent's active set, never on the job's goroutine:
+// the events loop reaches a published job through revokeLease and the claim
+// loop through running(), both from their own goroutines, so a job must be
+// whole by the time either can see it (cambia-2371).
 func (j *jobRun) init(phase string) {
 	j.stopCh = make(chan struct{})
 	j.syncDone = make(chan struct{})
@@ -134,22 +138,31 @@ func (j *jobRun) init(phase string) {
 	}
 }
 
-// run drives one freshly claimed lease from claim to result.
-func (j *jobRun) run(ctx context.Context) {
-	j.init(nashnet.PhaseClaimed)
-
-	spec, err := decodeSpec(j.rec.Spec)
-	if err != nil {
-		j.agent.log.Printf("lease %s: %v", j.rec.LeaseID, err)
-		j.postFailure(ctx, err.Error())
+// run drives one freshly claimed lease from claim to result. startJob decoded
+// the spec before it published the job, so this goroutine never writes the
+// spec another goroutine reads; specErr is that decode's failure, which fails
+// the job here.
+func (j *jobRun) run(ctx context.Context, specErr error) {
+	if specErr != nil {
+		j.agent.log.Printf("lease %s: %v", j.rec.LeaseID, specErr)
+		j.postFailure(ctx, specErr.Error())
 		return
 	}
-	j.spec = spec
-
 	if !j.stage(ctx) {
 		return
 	}
 	j.supervise(ctx)
+}
+
+// adopt readies a reattached lease for resume (D37). Like init, it runs before
+// the job is published.
+func (j *jobRun) adopt() {
+	j.adopted = true
+	phase := j.rec.Phase
+	if nashnet.ValidateNodePhase(phase) != nil {
+		phase = nashnet.PhaseRunning
+	}
+	j.init(phase)
 }
 
 // resume picks a reattached lease back up (D37): the process is already
@@ -157,12 +170,6 @@ func (j *jobRun) run(ctx context.Context) {
 // coordinator's head on the next tick and resumes an interrupted upload at
 // the HEAD offset.
 func (j *jobRun) resume(ctx context.Context) {
-	j.adopted = true
-	phase := j.rec.Phase
-	if nashnet.ValidateNodePhase(phase) != nil {
-		phase = nashnet.PhaseRunning
-	}
-	j.init(phase)
 	j.mu.Lock()
 	if st := j.agent.launcher.Status(j.spec.Name); st.Found {
 		j.pid = st.PID

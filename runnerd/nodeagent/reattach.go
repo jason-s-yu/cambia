@@ -53,6 +53,10 @@ func (a *Agent) resumePending(ctx context.Context, pending []*jobRun, rebound ma
 			removeLeaseRecord(a.cfg.BaseDir, job.rec.JobID)
 			continue
 		}
+		// Agent.Run starts the events loop as soon as this returns, so a revoke
+		// can reach the job before its goroutine runs: it is whole before it is
+		// published (cambia-2371).
+		job.adopt()
 		a.mu.Lock()
 		a.active[job.rec.JobID] = job
 		a.mu.Unlock()
