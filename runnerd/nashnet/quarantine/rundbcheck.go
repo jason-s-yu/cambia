@@ -49,19 +49,20 @@ const DefaultQueryTimeout = 5 * time.Second
 // within the byte cap, not to constrain a normal run.
 const DefaultMaxRowsPerTable = 200000
 
-// runDBSchema is the subset of cfr/src/run_db.py's _DDL a journal's tables
-// and columns must fit inside (D55). Kept in sync by hand with _DDL; a
-// mismatch is exactly what the shared fixture corpus under
-// runnerd/harness/testdata/rundb/ exists to surface, since the corpus is
-// generated from the real schema and consumed by both suites. Does not yet
-// include runs.executed_on (D23), which lands with a later ticket that adds
-// the column via run_db.py's _COLUMN_MIGRATIONS.
+// runDBSchema is the set of tables and columns a journal's schema must fit
+// inside (D55): every column cfr/src/run_db.py can create, through its _DDL
+// or the _COLUMN_MIGRATIONS get_db applies after it. Kept in sync by hand;
+// TestRunDBSchemaParity parses run_db.py and fails on any column missing
+// here, and the shared fixture corpus under runnerd/harness/testdata/rundb/
+// (generated from the real schema, consumed by both suites) is held current
+// by TestCorpusMatchesRunDBSchema (cambia-2358).
 var runDBSchema = map[string]map[string]bool{
 	"runs": set(
 		"id", "name", "algorithm", "status", "config_hash", "house_rules_hash",
 		"config_schema_version", "engine_commit_hash", "origin_host",
-		"best_metric_name", "best_metric_value", "best_metric_iter", "tags",
-		"notes", "parent_run_id", "created_at", "updated_at",
+		"executed_on", "best_metric_name", "best_metric_value",
+		"best_metric_iter", "tags", "notes", "parent_run_id", "created_at",
+		"updated_at",
 	),
 	"config_snapshots": set(
 		"id", "run_id", "config_yaml", "config_hash", "created_at",
@@ -75,7 +76,8 @@ var runDBSchema = map[string]map[string]bool{
 		"ci_low", "ci_high", "games_played", "p0_wins", "p1_wins", "ties",
 		"avg_game_turns", "t1_cambia_rate", "avg_score_margin", "adv_loss",
 		"strat_loss", "seat_balanced", "selection_mode", "crn_seed",
-		"seat_scheme", "timestamp",
+		"run_seed", "seat_scheme", "policy_errors", "engine_errors",
+		"belief_protocol", "served_policy", "timestamp",
 	),
 	"head_to_head": set(
 		"id", "run_id", "iter_a", "iter_b", "label", "a_wins", "b_wins",
