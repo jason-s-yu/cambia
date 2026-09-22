@@ -298,9 +298,12 @@ jobs:
       # pyproject's addopts deselects the `slow` marker: the convergence runs,
       # the large eval loops, and since cambia-1920 the whole-tree ES traversal
       # cases in tests/test_deep_worker_go.py and tests/test_deep_worker_os.py,
-      # which were 263s of those two modules' 265s. Everything else runs here,
-      # the deselected set runs in cfr-slow below, so this is a move rather
-      # than a drop.
+      # which were 263s of those two modules' 265s. That set runs in cfr-slow
+      # below, so it is a move rather than a drop. This runner has no GPU, so
+      # the `slow_cpu` marker (cambia-2347: the PRT-CFR trainer tests, minutes
+      # per file on CPU) is deselected here as well; a command-line -m replaces
+      # the addopts one, which is why `not slow` is restated. Those tests still
+      # run locally and on a GPU, where addopts alone applies.
       - name: cfr tests
         env:
           LIBCAMBIA_PATH: ${{ github.workspace }}/cfr/libcambia.so
