@@ -65,6 +65,10 @@ type jobRun struct {
 	manifestDigest string
 	stop           *stopReason
 	lastOK         time.Time
+	// adopted marks a job this incarnation reattached rather than forked
+	// (D37). No wait goroutine will ever write its terminal row, so its exit
+	// is read off the effective status and its exit code is unknown.
+	adopted bool
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
@@ -153,6 +157,7 @@ func (j *jobRun) run(ctx context.Context) {
 // coordinator's head on the next tick and resumes an interrupted upload at
 // the HEAD offset.
 func (j *jobRun) resume(ctx context.Context) {
+	j.adopted = true
 	phase := j.rec.Phase
 	if nashnet.ValidateNodePhase(phase) != nil {
 		phase = nashnet.PhaseRunning
@@ -280,7 +285,7 @@ func (j *jobRun) supervise(ctx context.Context) {
 			j.applyStop(ctx)
 			return
 		case <-poll.C:
-			if st := j.agent.launcher.Status(j.spec.Name); st.Found && isTerminalStatus(st.Status) {
+			if st, exited := j.exitStatus(); exited {
 				j.finish(ctx, st)
 				return
 			}
@@ -405,8 +410,7 @@ func (j *jobRun) applyStop(ctx context.Context) {
 func (j *jobRun) awaitExit(ctx context.Context) {
 	deadline := j.agent.now().Add(2 * stopWait)
 	for {
-		st := j.agent.launcher.Status(j.spec.Name)
-		if !st.Found || isTerminalStatus(st.Status) {
+		if st, exited := j.exitStatus(); !st.Found || exited {
 			return
 		}
 		if j.agent.now().After(deadline) {
@@ -424,14 +428,54 @@ func (j *jobRun) awaitExit(ctx context.Context) {
 // own SIGINT grace is 30s.
 const stopWait = 35 * time.Second
 
+// exitStatus reads the job's row and reports whether its process has exited.
+// A job this incarnation launched is decided on the raw status alone: its wait
+// goroutine writes the terminal together with the real exit code, and the pid
+// probe goes dead a moment earlier, between the reap and that write, which
+// would report a clean exit as a crash with no code. An adopted job has no
+// wait goroutine, so its raw status never turns terminal after the reattach
+// and its exit is read off the effective status (cambia-2357).
+func (j *jobRun) exitStatus() (ProcessStatus, bool) {
+	st := j.agent.launcher.Status(j.spec.Name)
+	if j.adopted {
+		return st, adoptedExited(st)
+	}
+	return st, st.Found && isTerminalStatus(st.Status)
+}
+
 // finish handles a job that reached a terminal status on its own.
 func (j *jobRun) finish(ctx context.Context, st ProcessStatus) {
 	j.pushLogs(ctx)
-	state := nashnet.ResultStopped
-	if st.Status == procmgr.StatusCrashed {
-		state = nashnet.ResultCrashed
+	state, exitCode, lastError := j.exitVerdict(st)
+	j.postTerminal(ctx, state, exitCode, lastError)
+}
+
+// exitVerdict maps an exited job's row to the result it posts. A row carrying
+// an exit code was written by a wait on the process, by this incarnation or by
+// the one that forked an adopted job before it went down, and is reported as
+// recorded. An adopted job with no recorded exit code was seen to exit only
+// through the pid probe, so how it ended is unknown and the run's own journal
+// is the witness, read the way the coordinator's finalizer reads it (D35): a
+// run that recorded completed exited cleanly and reports exit code 0, so a
+// dependent's success gate fires; anything else is a crash with no exit code
+// rather than a fabricated one.
+func (j *jobRun) exitVerdict(st ProcessStatus) (state string, exitCode *int, lastError string) {
+	if !j.adopted || st.ExitCode != nil {
+		state = nashnet.ResultStopped
+		if st.Status == procmgr.StatusCrashed {
+			state = nashnet.ResultCrashed
+		}
+		return state, st.ExitCode, ""
 	}
-	j.postTerminal(ctx, state, st.ExitCode, "")
+	witness := runDBRunStatus(filepath.Join(j.runDir(), runDBName), j.spec.Name)
+	if witness == runDBStatusCompleted {
+		zero := 0
+		return nashnet.ResultStopped, &zero, "reattached: exit code inferred from run_db status completed"
+	}
+	if witness == "" {
+		witness = "absent"
+	}
+	return nashnet.ResultCrashed, nil, "reattached: process exited; exit status unknown (run_db status=" + witness + ")"
 }
 
 // postTerminal commits the final manifest and posts the result. The result is

@@ -2,6 +2,8 @@ package nodeagent
 
 import (
 	"context"
+	"database/sql"
+	"os"
 	"time"
 
 	"github.com/jason-s-yu/cambia/runnerd/nashnet"
@@ -69,14 +71,16 @@ func (a *Agent) resumePending(ctx context.Context, pending []*jobRun, rebound ma
 }
 
 // AwaitReattachedExit blocks until a reattached job's process is gone: its row
-// reaches a terminal effective status, or its run dir is purged out from under
-// it. A reattached process was forked by a prior daemon incarnation, so this
-// one cannot waitpid it and procmgr's own wait goroutine never runs for it;
+// shows the exit (adoptedExited), or its run dir is purged out from under it.
+// A reattached process was forked by a prior daemon incarnation, so this one
+// cannot waitpid it and procmgr's own wait goroutine never runs for it;
 // liveness is read off the starttime-validated pid probe behind
 // Launcher.Status instead. It is the watch half of the reattach machinery,
-// moved here with the launch path (D1); what to write for the job that exited
-// stays with the caller, because the two-witness finalizer is coordinator
-// state (D7, D35).
+// moved here with the launch path (D1), and the coordinator's reattach watcher
+// blocks on it; a node's supervise loop applies the same predicate on its poll
+// tick, because it must keep renewing the lease while it waits. What to write
+// for the job that exited stays with the caller, because the two-witness
+// finalizer is coordinator state (D7, D35).
 func AwaitReattachedExit(l Launcher, name string, poll time.Duration, stop <-chan struct{}) {
 	if poll <= 0 {
 		poll = time.Second
@@ -86,7 +90,7 @@ func AwaitReattachedExit(l Launcher, name string, poll time.Duration, stop <-cha
 		if !st.Found {
 			return // run dir gone (purged): nothing left to hold or finalize
 		}
-		if isTerminalStatus(st.Effective) {
+		if adoptedExited(st) {
 			return
 		}
 		select {
@@ -95,4 +99,51 @@ func AwaitReattachedExit(l Launcher, name string, poll time.Duration, stop <-cha
 		case <-time.After(poll):
 		}
 	}
+}
+
+// adoptedExited reports whether a row shows the exit of a process this daemon
+// did not fork. Nothing here waits on such a process, so its raw status stays
+// in the live set after it is gone and the pid-validated effective status is
+// what turns terminal. A raw terminal counts too: the incarnation that forked
+// the process may have recorded its exit before it went down.
+func adoptedExited(st ProcessStatus) bool {
+	return st.Found && (isTerminalStatus(st.Status) || isTerminalStatus(st.Effective))
+}
+
+// runDBStatusCompleted is the runs.status a trainer writes on a clean end
+// (update_run_status(..., "completed") in cfr/src/cfr/prtcfr_trainer.py,
+// deep_trainer.py and the others), the only value that certifies a clean exit.
+const runDBStatusCompleted = "completed"
+
+// runDBQueryTimeout bounds the journal read so a locked or pathological
+// run_db.sqlite cannot wedge a job's finish.
+const runDBQueryTimeout = 5 * time.Second
+
+// runDBRunStatus returns the runs.status a job's journal records for name, or
+// "" when the journal is absent, unreadable, locked, or holds no row. It reads
+// the way the coordinator's finalizer does (harness runDBRunStatus): by name
+// first, then the newest row, because an evaluate job writes its single row
+// under the evaluated target's name. It opens read-only and never creates the
+// file.
+func runDBRunStatus(dbPath, name string) string {
+	if _, err := os.Stat(dbPath); err != nil {
+		return ""
+	}
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_pragma=busy_timeout(2000)")
+	if err != nil {
+		return ""
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), runDBQueryTimeout)
+	defer cancel()
+
+	var status string
+	if err := db.QueryRowContext(ctx, "SELECT status FROM runs WHERE name = ?", name).Scan(&status); err == nil {
+		return status
+	}
+	if err := db.QueryRowContext(ctx,
+		"SELECT status FROM runs ORDER BY updated_at DESC LIMIT 1").Scan(&status); err != nil {
+		return ""
+	}
+	return status
 }
