@@ -112,6 +112,9 @@ rl = [
     { name = "sb3-contrib" },
     { name = "stable-baselines3" },
 ]
+test = [
+    { name = "pytest" },
+]
 xpu = [
     { name = "torch", version = "2.13.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" } },
     { name = "triton-xpu" },
@@ -128,6 +131,7 @@ requires-dist = [
     { name = "psutil", specifier = ">=5.9" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pyjwt", marker = "extra == 'harness'", specifier = ">=2.8" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=9.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rich", specifier = ">=13.0" },
     { name = "sb3-contrib", marker = "extra == 'rl'", specifier = ">=2.4" },
@@ -140,7 +144,7 @@ requires-dist = [
     { name = "typer", extras = ["all"], specifier = ">=0.9" },
     { name = "websockets", marker = "extra == 'harness'", specifier = ">=13.0" },
 ]
-provides-extras = ["cpu", "gpu", "xpu", "rl", "harness", "dev"]
+provides-extras = ["cpu", "gpu", "xpu", "rl", "harness", "test", "dev"]
 
 [[package]]
 name = "cffi"
@@ -559,6 +563,15 @@ source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9c/92/ccef0ec3b9bd9f3cf586abaf863bcc6b7b7c0dd4868fe5b41e6155f03608/impi_rt-2021.18.0-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:7bd0328b89872f9395523c3732eb97b403b2e04a4210c85016eac87301398fbc", size = 126579109, upload-time = "2026-04-24T14:15:23.209Z" },
     { url = "https://files.pythonhosted.org/packages/39/06/6527fb776213f3fd1432b84f35421e3c848c1b4dc40ec9f38aafeabce7fd/impi_rt-2021.18.0-py2.py3-none-win_amd64.whl", hash = "sha256:344eb2c1ec364e6f060ca97481e51d913699e75934f52f0ceacfa87122047bb4", size = 21846717, upload-time = "2026-04-24T14:14:26.77Z" },
+]
+
+[[package]]
+name = "iniconfig"
+version = "2.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/72/34/14ca021ce8e5dfedc35312d08ba8bf51fdd999c576889fc2c24cb97f4f10/iniconfig-2.3.0.tar.gz", hash = "sha256:c76315c77db068650d49c5b56314774a7804df16fee4402c1f19d6d15d8c4730", size = 20503, upload-time = "2025-10-18T21:55:43.219Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cb/b1/3846dd7f199d53cb17f49cba7e651e9ce294d8497c8c150530ed11865bb8/iniconfig-2.3.0-py3-none-any.whl", hash = "sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12", size = 7484, upload-time = "2025-10-18T21:55:41.639Z" },
 ]
 
 [[package]]
@@ -1397,6 +1410,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pluggy"
+version = "1.6.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3", size = 69412, upload-time = "2025-05-15T12:30:07.975Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
+]
+
+[[package]]
 name = "psutil"
 version = "7.2.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1575,6 +1597,22 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/3b/81/58d0ac84e1ef3a3843791d6954d94c0b33d526c75eeb1efbce9d0a4c4077/pyjwt-2.13.0.tar.gz", hash = "sha256:41571c89ca91598c79e8ef18a2d07367d4810fbbd6f637794879baf1b7703423", size = 107515, upload-time = "2026-05-21T19:54:36.618Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a3/5e/ecf12fdb62546d64385c158514e9b2b671f7832108ef2ecd2020ce0af2d1/pyjwt-2.13.0-py3-none-any.whl", hash = "sha256:66adcc2aff09b3f1bbd95fc1e1577df8ac8723c978552fd43304c8a290ac5728", size = 31274, upload-time = "2026-05-21T19:54:35.362Z" },
+]
+
+[[package]]
+name = "pytest"
+version = "9.1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-10-cambia-cfr-cpu' and extra == 'extra-10-cambia-cfr-gpu') or (extra == 'extra-10-cambia-cfr-cpu' and extra == 'extra-10-cambia-cfr-xpu') or (extra == 'extra-10-cambia-cfr-gpu' and extra == 'extra-10-cambia-cfr-xpu')" },
+    { name = "iniconfig" },
+    { name = "packaging" },
+    { name = "pluggy" },
+    { name = "pygments" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e4/47/b9efed96c114afcfa3c9d3fe98a76a1d14c74a9e266d397cf6eb64be5e01/pytest-9.1.1.tar.gz", hash = "sha256:1088fbde8f2b49d95a549a195707afa7a76a3ce9bcadc26b6d71f0ffda5fe313", size = 1636369, upload-time = "2026-06-19T10:58:32.857Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/24/25/1de2678b631f5a49215c6c96fff41ba892b0a34df68d6d80292b1b48aa7f/pytest-9.1.1-py3-none-any.whl", hash = "sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c", size = 386536, upload-time = "2026-06-19T10:58:31.347Z" },
 ]
 
 [[package]]

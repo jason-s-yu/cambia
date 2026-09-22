@@ -287,7 +287,7 @@ jobs:
       - name: Install cfr (cpu extra)
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ./cfr[cpu] \
+          python -m pip install -e ./cfr[cpu,test,harness] \
             --extra-index-url https://download.pytorch.org/whl/cpu
 
       # A large part of the suite loads the Go engine through cffi, so the
@@ -343,7 +343,7 @@ jobs:
       - name: Install cfr (cpu extra)
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ./cfr[cpu] \
+          python -m pip install -e ./cfr[cpu,test,harness] \
             --extra-index-url https://download.pytorch.org/whl/cpu
 
       - name: Build libcambia
