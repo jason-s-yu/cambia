@@ -12,8 +12,10 @@ try:
     import torch
 
     _HAS_XPU = hasattr(torch, "xpu") and torch.xpu.is_available()
+    _HAS_CUDA = torch.cuda.is_available()
 except Exception:  # torch absent or XPU probe failed
     _HAS_XPU = False
+    _HAS_CUDA = False
 
 
 # ---------------------------------------------------------------------------
@@ -103,13 +105,15 @@ class TestResolveDevice:
         assert isinstance(result, str)
         assert result in ("cpu", "cuda", "xpu")
 
+    @pytest.mark.skipif(
+        not _HAS_CUDA,
+        reason="needs a CUDA device; the CPU-only CI runner has none (cambia-2347). "
+        "test_auto_prefers_cuda_over_xpu covers the resolution order anywhere.",
+    )
     def test_auto_resolves_to_cuda_on_this_host(self):
-        # This host has a CUDA device (cambia-329 spawn context); "auto" must
-        # prefer it ahead of xpu/cpu.
-        import torch
+        # On a CUDA host "auto" must prefer it ahead of xpu/cpu (cambia-329).
         from src.cfr.deep_trainer import _resolve_device
 
-        assert torch.cuda.is_available()
         assert _resolve_device("auto") == "cuda"
 
     def test_auto_prefers_cuda_over_xpu(self, monkeypatch):

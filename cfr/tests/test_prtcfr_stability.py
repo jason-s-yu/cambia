@@ -331,6 +331,7 @@ def _fast_ns(**extra):
     return types.SimpleNamespace(**base)
 
 
+@pytest.mark.slow_cpu
 def test_default_writes_no_manifest(tiny_tree, tmp_path):
     cfg = _fast_ns()  # stability disabled by default
     trainer = PRTCFRTinyTrainer(tiny_tree, cfg, str(tmp_path / "snaps"))
@@ -338,6 +339,7 @@ def test_default_writes_no_manifest(tiny_tree, tmp_path):
     assert read_deployable_manifest(str(tmp_path / "snaps")) is None
 
 
+@pytest.mark.slow_cpu
 def test_reanchor_reinits_net_on_schedule(tiny_tree, tmp_path):
     calls = {"n": 0}
 
@@ -363,6 +365,7 @@ def test_global_cosine_lowers_late_peak_lr(tiny_tree, tmp_path):
     assert late < early
 
 
+@pytest.mark.slow_cpu
 def test_stability_controller_drives_and_writes_manifest(tiny_tree, tmp_path):
     """A synthetic eval_fn that reports a diverging metric must early-stop and
     pin the deployable window to the pre-divergence best."""
@@ -392,6 +395,7 @@ def test_stability_controller_drives_and_writes_manifest(tiny_tree, tmp_path):
     assert max(man["deployable_iters"]) == 2
 
 
+@pytest.mark.slow_cpu
 def test_stability_best_mirrors_into_run_db(tiny_tree, tmp_path):
     """cambia-390: each new-best stability check must mirror the controller's
     best pointer into run_db -- exactly the new-best checkpoint row gets
@@ -449,6 +453,7 @@ def test_stability_best_mirrors_into_run_db(tiny_tree, tmp_path):
         db.close()
 
 
+@pytest.mark.slow_cpu
 def test_stability_plateau_mode_drives_trainer_and_writes_manifest(tiny_tree, tmp_path):
     """End-to-end plumbing: config.stability_stop_mode="plateau" reaches the
     controller through PRTCFRTinyTrainer and early-stops on a flattened (not

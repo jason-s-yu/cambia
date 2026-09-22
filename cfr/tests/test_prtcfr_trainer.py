@@ -64,6 +64,7 @@ def test_sigma_provider_returns_valid_distributions(tiny_tree):
         assert (p >= 0).all()
 
 
+@pytest.mark.slow_cpu
 def test_one_iteration_end_to_end_writes_snapshot(tiny_tree, tmp_path):
     cfg = _fast_config()
     snap_dir = str(tmp_path / "snaps")
@@ -76,6 +77,7 @@ def test_one_iteration_end_to_end_writes_snapshot(tiny_tree, tmp_path):
     assert os.path.exists(trainer.checkpoint_path())
 
 
+@pytest.mark.slow_cpu
 def test_snapshot_and_checkpoint_formats(tiny_tree, tmp_path):
     cfg = _fast_config()
     snap_dir = str(tmp_path / "snaps")
@@ -99,6 +101,7 @@ def test_snapshot_and_checkpoint_formats(tiny_tree, tmp_path):
     net.load_encoder_head(snap["encoder_state_dict"], snap["head_state_dict"])
 
 
+@pytest.mark.slow_cpu
 def test_buffer_accumulates_across_iterations(tiny_tree, tmp_path):
     cfg = _fast_config()
     trainer = PRTCFRTinyTrainer(tiny_tree, cfg, str(tmp_path / "snaps"))
@@ -120,6 +123,7 @@ def test_device_supports_fp64_cpu_cuda():
         assert mod._device_supports_fp64("xpu") is False
 
 
+@pytest.mark.slow_cpu
 def test_fit_accumulator_fp32_fallback_matches_fp64(tiny_tree, tmp_path, monkeypatch):
     """Devices without fp64 kernels fall back to float32 accumulators. The
     accumulator dtype never touches training dynamics, so the returned mean
@@ -159,6 +163,7 @@ def test_fit_accumulator_fp32_fallback_matches_fp64(tiny_tree, tmp_path, monkeyp
     assert loss32 == pytest.approx(loss64, rel=1e-5)
 
 
+@pytest.mark.slow_cpu
 def test_warm_start_carries_net_forward(tiny_tree, tmp_path):
     """warm_start gates the per-iteration re-init.
 
@@ -216,6 +221,7 @@ def test_warm_start_carries_net_forward(tiny_tree, tmp_path):
     assert t_warm.net is net_after_iter1
 
 
+@pytest.mark.slow_cpu
 def test_train_tiny_prtcfr_entrypoint(tmp_path):
     snap_dir = str(tmp_path / "snaps")
     hist = train_tiny_prtcfr(
