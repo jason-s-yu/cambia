@@ -278,10 +278,24 @@ func TestBundleCreateConcurrentCallersCollapseToOneBuild(t *testing.T) {
 			t.Fatalf("caller %d: BundleCreate: %v", i, err)
 		}
 	}
+	// Cached records per-call arrival, not artifact identity (cambia-2128): the
+	// singleflight leader and the callers it collapses report the build
+	// (Cached false), while a caller that reaches the cache after the build
+	// published reports the hit (Cached true). Identity is the artifact fields;
+	// the Cached invariant is that the build's own callers exist.
 	for i := 1; i < n; i++ {
-		if results[i] != results[0] {
+		if results[i].Path != results[0].Path || results[i].Size != results[0].Size || results[i].SHA256 != results[0].SHA256 {
 			t.Fatalf("caller %d descriptor %+v differs from caller 0 %+v", i, results[i], results[0])
 		}
+	}
+	built := 0
+	for _, r := range results {
+		if !r.Cached {
+			built++
+		}
+	}
+	if built == 0 {
+		t.Fatalf("every caller reported a cache hit; the collapsed build's own callers must report Cached=false")
 	}
 
 	builds := 0
