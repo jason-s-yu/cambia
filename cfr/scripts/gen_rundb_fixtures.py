@@ -15,6 +15,14 @@ the validator runs before ever opening the file, so both suites synthesize a
 sparse truncated file at test time instead of committing a large blob. It is
 still listed in manifest.json (file: null) for documentation.
 
+The helpers' clock and engine-commit stamps are pinned while the corpus is
+built, so a rerun against an unchanged schema reproduces every file byte for
+byte (with the same SQLite library) and a regenerated corpus differs from the
+checked-in one only where the schema moved. Rerun this script whenever
+src/run_db.py's _DDL or _COLUMN_MIGRATIONS changes: the Go suite's
+TestCorpusMatchesRunDBSchema fails until the accept fixtures carry the
+current columns (cambia-2358).
+
 Usage:
     python scripts/gen_rundb_fixtures.py
     python scripts/gen_rundb_fixtures.py --out runnerd/harness/testdata/rundb
@@ -24,14 +32,16 @@ import argparse
 import json
 import sqlite3
 import sys
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _CFR_ROOT = _SCRIPT_DIR.parent
 if str(_CFR_ROOT) not in sys.path:
     sys.path.insert(0, str(_CFR_ROOT))
 
+import src.run_db as _run_db  # noqa: E402
 from src.run_db import (
     get_db,
     insert_eval_result,
@@ -50,6 +60,21 @@ _VALID_STATUS = "completed"
 _INVALID_STATUS = "not_a_real_status"
 
 _FIXTURE_COMMIT = "4af0f825c576d6d86feb22c9e08e892d877168b4"
+_FIXTURE_NOW = "2026-09-01T00:00:00Z"
+
+
+@contextmanager
+def _pinned_stamps() -> Iterator[None]:
+    """Pin run_db's wall clock and its `git rev-parse` commit stamp, which
+    upsert_run and register_checkpoint read at call time, for the duration of
+    a build."""
+    saved = (_run_db._now, _run_db._get_engine_commit)
+    _run_db._now = lambda: _FIXTURE_NOW
+    _run_db._get_engine_commit = lambda: _FIXTURE_COMMIT
+    try:
+        yield
+    finally:
+        _run_db._now, _run_db._get_engine_commit = saved
 
 
 def _fresh(path: Path) -> sqlite3.Connection:
@@ -127,6 +152,9 @@ def _build_valid_evaluate(out_dir: Path) -> dict:
         engine_commit_hash=_FIXTURE_COMMIT,
         notes="fixture: valid evaluate journal, named for spec.target",
     )
+    # The eval-hygiene provenance a current `cambia evaluate` row carries
+    # (evaluate_agents.persist_eval_results), so the fixture exercises the
+    # migrated columns with values rather than only with NULLs.
     insert_eval_result(
         conn,
         run_id,
@@ -135,10 +163,19 @@ def _build_valid_evaluate(out_dir: Path) -> dict:
             "iteration": 20,
             "baseline": "imperfect_greedy",
             "win_rate": 0.61,
+            "ci_low": 0.5965,
+            "ci_high": 0.6233,
             "games_played": 5000,
             "p0_wins": 3050,
             "p1_wins": 1900,
             "ties": 50,
+            "seat_balanced": 1,
+            "selection_mode": "stochastic",
+            "seat_scheme": "alternated",
+            "crn_seed": 20260901,
+            "run_seed": 18446744073709551557,
+            "engine_errors": 0,
+            "served_policy": "average_strategy",
             "timestamp": "2026-09-01T00:05:00Z",
         },
     )
@@ -253,15 +290,16 @@ def _build_out_of_enum(out_dir: Path) -> dict:
 
 def build_all(out_dir: Path) -> list:
     out_dir.mkdir(parents=True, exist_ok=True)
-    fixtures = [
-        _build_valid_train(out_dir),
-        _build_valid_evaluate(out_dir),
-        _build_corrupt(out_dir),
-        _build_extra_table(out_dir),
-        _build_second_row(out_dir),
-        _build_wrong_name(out_dir),
-        _build_out_of_enum(out_dir),
-    ]
+    with _pinned_stamps():
+        fixtures = [
+            _build_valid_train(out_dir),
+            _build_valid_evaluate(out_dir),
+            _build_corrupt(out_dir),
+            _build_extra_table(out_dir),
+            _build_second_row(out_dir),
+            _build_wrong_name(out_dir),
+            _build_out_of_enum(out_dir),
+        ]
     fixtures.append(
         {
             "file": None,
