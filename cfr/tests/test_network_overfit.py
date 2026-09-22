@@ -29,6 +29,24 @@ LR = 1e-2
 # Targets are ±1 (normalized from the conceptual ±100 spec).
 # Scale-normalized MSE < 1e-3 ≡ RMSE < 3.2% relative error vs ±100.
 MSE_THRESHOLD = 1e-3
+# A learning-rate tail after the TRAIN_STEPS at LR. Adam at 1e-2 leaves the
+# residual net's loss oscillating around the threshold on the ep_pbs case, and
+# the endpoint then moved with the CPU matmul reduction order: 0.0012 at 8 or
+# 12 torch threads (the CI runner's default), 0.0008 elsewhere. 200 steps at
+# LR / 10 settle it to about 1e-5 at every thread count (cambia-2395).
+TAIL_STEPS = 200
+TAIL_LR = LR / 10
+
+
+@pytest.fixture(autouse=True)
+def _one_torch_thread():
+    """Pin torch to one intra-op thread for every test in this module, so the
+    trained weights and the MSE verdict do not depend on the host's core count
+    (cambia-2395)."""
+    prev = torch.get_num_threads()
+    torch.set_num_threads(1)
+    yield
+    torch.set_num_threads(prev)
 
 
 def _make_overfit_data(input_dim: int, num_actions: int = NUM_ACTIONS):
@@ -47,10 +65,14 @@ def _train_and_eval(
     action_mask: torch.Tensor,
     targets: torch.Tensor,
 ) -> float:
-    """Train network for TRAIN_STEPS steps; return final MSE on legal actions."""
+    """Train for TRAIN_STEPS steps at LR, then TAIL_STEPS at TAIL_LR; return the
+    final MSE on legal actions."""
     net.train()
     optimizer = optim.Adam(net.parameters(), lr=LR)
-    for _ in range(TRAIN_STEPS):
+    for step in range(TRAIN_STEPS + TAIL_STEPS):
+        if step == TRAIN_STEPS:
+            for group in optimizer.param_groups:
+                group["lr"] = TAIL_LR
         optimizer.zero_grad()
         preds = net(features, action_mask)
         # action_mask is all-True here so masked_fill is a no-op, but kept for generality
