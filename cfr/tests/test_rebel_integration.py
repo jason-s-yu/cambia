@@ -346,8 +346,14 @@ def test_rebel_train_one_iteration(small_value_net, small_policy_net, fast_confi
         )
 
     # --- Helper: compute loss on a fixed batch ---
+    # The whole buffer, drawn once: a fresh random 8-sample draw per call compared
+    # before and after on different batches, so the verdict rode the ambient RNG
+    # state and failed deterministically in the CPU CI selection (cambia-2347).
+    value_eval = value_buffer.sample_batch(len(value_buffer))
+    policy_eval = policy_buffer.sample_batch(len(policy_buffer))
+
     def _batch_loss_value(net) -> float:
-        batch = value_buffer.sample_batch(min(8, len(value_buffer)))
+        batch = value_eval
         if not batch:
             return float("nan")
         feat = torch.from_numpy(batch.features).float()
@@ -359,7 +365,7 @@ def test_rebel_train_one_iteration(small_value_net, small_policy_net, fast_confi
         return float(((pred - tgt) ** 2).mean().item())
 
     def _batch_loss_policy(net) -> float:
-        batch = policy_buffer.sample_batch(min(8, len(policy_buffer)))
+        batch = policy_eval
         if not batch:
             return float("nan")
         feat = torch.from_numpy(batch.features).float()
