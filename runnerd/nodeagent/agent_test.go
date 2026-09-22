@@ -303,10 +303,13 @@ func TestLossOfContactStopsJob(t *testing.T) {
 
 // TestRestartReattachesAndResumesUpload covers AC6: a restarted agent
 // reattaches its live rows, re-registers naming them in live_leases, and
-// resumes an interrupted upload at the HEAD offset.
+// resumes an interrupted upload at the HEAD offset. The job is still running
+// at the restart and exits afterwards, which only the effective status shows,
+// so the test also holds the reattached job to finishing (cambia-2357).
 func TestRestartReattachesAndResumesUpload(t *testing.T) {
 	stub := newStubCoordinator(t)
-	launcher := &fakeLauncher{status: ProcessStatus{Status: procmgr.StatusStopped, PID: 5, Found: true}}
+	live := ProcessStatus{Status: procmgr.StatusRunning, Effective: procmgr.StatusRunning, PID: 5, Found: true}
+	launcher := &fakeLauncher{status: live}
 	agent, cfg := testAgent(t, stub, func(o *Options) { o.Launcher = launcher })
 
 	spec := Spec{Kind: KindTrain, Name: "job-restart", Commit: strings.Repeat("e", 40)}
@@ -340,15 +343,15 @@ func TestRestartReattachesAndResumesUpload(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	live, pending := agent.reattach()
-	if len(live) != 1 || live[0].LeaseID != rec.LeaseID {
-		t.Fatalf("reattach did not name the live lease: %+v", live)
+	leases, pending := agent.reattach()
+	if len(leases) != 1 || leases[0].LeaseID != rec.LeaseID {
+		t.Fatalf("reattach did not name the live lease: %+v", leases)
 	}
-	if live[0].TokenHash != nashnet.HashLeaseToken(rec.Token) {
+	if leases[0].TokenHash != nashnet.HashLeaseToken(rec.Token) {
 		t.Fatalf("live lease carried the wrong token hash")
 	}
 	ctx := context.Background()
-	rebound, err := agent.register(ctx, live)
+	rebound, err := agent.register(ctx, leases)
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -359,7 +362,12 @@ func TestRestartReattachesAndResumesUpload(t *testing.T) {
 		t.Fatalf("register did not carry live_leases")
 	}
 	agent.resumePending(ctx, pending, rebound)
-	agent.wg.Wait()
+	// The process dies after the reattach: its row still reads running, and
+	// only the pid probe behind Effective sees it go.
+	exited := live
+	exited.Effective = procmgr.StatusCrashed
+	launcher.setStatus(exited)
+	waitFor(t, agentIdle(agent))
 
 	stub.mu.Lock()
 	stored := append([]byte(nil), stub.blobs[digest]...)
@@ -381,6 +389,13 @@ func TestRestartReattachesAndResumesUpload(t *testing.T) {
 	}
 	if len(results) != 1 {
 		t.Fatalf("reattached job did not post a result: %+v", results)
+	}
+	if results[0].State != nashnet.ResultCrashed || results[0].ExitCode != nil {
+		t.Fatalf("a reattached exit with no journal posted %q with exit code %v, want crashed with none",
+			results[0].State, results[0].ExitCode)
+	}
+	if got := agent.slots.Active(); got != 0 {
+		t.Fatalf("the finished reattached job still holds %d slots", got)
 	}
 }
 
