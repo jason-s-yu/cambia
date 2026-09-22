@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -230,6 +231,60 @@ func TestRevokeOnEventsStopsJobGroup(t *testing.T) {
 	_, results, _, _, _ := stub.snapshotState()
 	if len(results) != 1 || results[0].State != nashnet.ResultCanceled {
 		t.Fatalf("expected one canceled result, got %+v", results)
+	}
+}
+
+// TestRevokeRightAfterClaimStopsTheJob pins cambia-2371 on the claim path: the
+// events loop runs beside the claim loop, so a revoke can reach a job the
+// moment startJob makes it visible, before the job's goroutine has run, and
+// the claim loop's next pass counts the same job straight away. Every piece of
+// state those two paths touch must exist before the job is published: the
+// revoke stops the job cleanly instead of closing a nil channel, and -race
+// sees no write to the job behind the claim loop's read.
+func TestRevokeRightAfterClaimStopsTheJob(t *testing.T) {
+	stub := newStubCoordinator(t)
+	launcher := &fakeLauncher{}
+	agent, _ := testAgent(t, stub, func(o *Options) { o.Launcher = launcher })
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(func() {
+		cancel()
+		agent.wg.Wait()
+	})
+
+	spec := Spec{Kind: KindTrain, Name: "job-claimed-revoked", Commit: strings.Repeat("9", 40)}
+	claim := nashnet.ClaimResponse{
+		JobID:      spec.Name,
+		LeaseID:    "01JCLAIMREVOKED00000000000",
+		LeaseEpoch: 2,
+		Attempt:    1,
+		Spec:       specJSON(t, spec),
+		Snapshot: nashnet.SnapshotRef{
+			URL:    "/nashnet/leases/01JCLAIMREVOKED00000000000/snapshot",
+			Commit: spec.Commit,
+			SHA256: stub.snapshotDigest(),
+		},
+	}
+	stub.enqueue(claim)
+
+	onOneProcessor(func() {
+		agent.claimOnce(ctx)
+		revokeNow(t, agent, claim.LeaseID)
+		agent.gateReport()
+	})
+	waitFor(t, agentIdle(agent))
+
+	_, results, _, _, _ := stub.snapshotState()
+	if len(results) != 1 || results[0].State != nashnet.ResultCanceled {
+		t.Fatalf("expected one canceled result, got %+v", results)
+	}
+	launcher.mu.Lock()
+	started, stopped := len(launcher.started), len(launcher.stops)
+	launcher.mu.Unlock()
+	if started != stopped {
+		t.Fatalf("the revoked job left a process running: %d launched, %d stopped", started, stopped)
+	}
+	if got := agent.slots.Active(); got != 0 {
+		t.Fatalf("the revoked job still holds %d slots", got)
 	}
 }
 
@@ -484,6 +539,32 @@ func waitFor(t *testing.T, done chan struct{}) {
 	case <-time.After(20 * time.Second):
 		t.Fatalf("job did not settle within the timeout")
 	}
+}
+
+// onOneProcessor runs fn with GOMAXPROCS pinned to 1, so a goroutine fn starts
+// cannot run until fn's own goroutine blocks or is preempted: what fn does
+// right after a go statement lands before the new goroutine's first
+// instruction. That turns the gap between publishing a job and its goroutine
+// starting from a race a test might lose into the order the test asserts on.
+func onOneProcessor(fn func()) {
+	prev := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(prev)
+	fn()
+}
+
+// revokeNow delivers a revoke for leaseID the way the events loop does, and
+// reports a panic in the stop path as a test failure rather than a crashed
+// test binary.
+func revokeNow(t *testing.T, agent *Agent, leaseID string) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("a revoke delivered right after the job was published panicked: %v", r)
+		}
+	}()
+	agent.applyEvents(nashnet.EventsResponse{
+		Events: []nashnet.Event{{Type: nashnet.EventRevoke, LeaseID: leaseID}},
+	})
 }
 
 // testClock is the injected clock for the loss-of-contact rule.

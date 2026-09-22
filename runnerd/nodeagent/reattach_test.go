@@ -65,10 +65,9 @@ func (l *adoptedLauncher) exit() {
 	l.mu.Unlock()
 }
 
-// resumeAdoptedJob persists a launched lease record, restarts the agent's view
-// of it through reattach and register, and resumes it. It returns once the
-// resumed job has posted progress, so its supervise loop is running.
-func resumeAdoptedJob(t *testing.T, ctx context.Context, agent *Agent, stub *stubCoordinator, spec Spec) *leaseRecord {
+// writeAdoptedLease persists the lease record a prior agent incarnation left
+// for a launched job, the state a restart finds on disk.
+func writeAdoptedLease(t *testing.T, agent *Agent, stub *stubCoordinator, spec Spec) *leaseRecord {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(agent.cfg.RunsDir, spec.Name), 0o755); err != nil {
 		t.Fatal(err)
@@ -83,6 +82,15 @@ func resumeAdoptedJob(t *testing.T, ctx context.Context, agent *Agent, stub *stu
 	if err := writeLeaseRecord(agent.cfg.BaseDir, rec); err != nil {
 		t.Fatal(err)
 	}
+	return rec
+}
+
+// resumeAdoptedJob persists a launched lease record, restarts the agent's view
+// of it through reattach and register, and resumes it. It returns once the
+// resumed job has posted progress, so its supervise loop is running.
+func resumeAdoptedJob(t *testing.T, ctx context.Context, agent *Agent, stub *stubCoordinator, spec Spec) *leaseRecord {
+	t.Helper()
+	rec := writeAdoptedLease(t, agent, stub, spec)
 
 	live, pending := agent.reattach()
 	rebound, err := agent.register(ctx, live)
@@ -262,5 +270,47 @@ func TestReattachedJobStopObservesTheExit(t *testing.T) {
 	}
 	if got := agent.slots.Active(); got != 0 {
 		t.Fatalf("the stopped job still holds %d slots", got)
+	}
+}
+
+// TestRevokeRightAfterResumeStopsTheJob pins cambia-2371 on the restart path:
+// Agent.Run starts the events loop as soon as resumePending returns, so a
+// revoke already queued for a re-bound lease can reach the job before its
+// goroutine has run at all. A job must carry its stop state from the moment it
+// is visible in the active set, so that revoke stops it cleanly rather than
+// closing a channel nothing has made yet.
+func TestRevokeRightAfterResumeStopsTheJob(t *testing.T) {
+	stub := newStubCoordinator(t)
+	launcher := newAdoptedLauncher()
+	agent, _ := testAgent(t, stub, func(o *Options) { o.Launcher = launcher })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		agent.wg.Wait()
+	})
+
+	spec := Spec{Kind: KindTrain, Name: "job-adopted-revoked", Commit: strings.Repeat("e", 40)}
+	rec := writeAdoptedLease(t, agent, stub, spec)
+	live, pending := agent.reattach()
+	rebound, err := agent.register(ctx, live)
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	onOneProcessor(func() {
+		agent.resumePending(ctx, pending, rebound)
+		revokeNow(t, agent, rec.LeaseID)
+	})
+	waitFor(t, agentIdle(agent))
+
+	_, results, _, _, _ := stub.snapshotState()
+	if len(results) != 1 || results[0].State != nashnet.ResultCanceled {
+		t.Fatalf("expected one canceled result, got %+v", results)
+	}
+	if launcher.stopCount() == 0 {
+		t.Fatalf("the revoke never stopped the job group")
+	}
+	if got := agent.slots.Active(); got != 0 {
+		t.Fatalf("the revoked job still holds %d slots", got)
 	}
 }
