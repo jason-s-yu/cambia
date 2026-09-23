@@ -304,10 +304,17 @@ jobs:
       # per file on CPU) is deselected here as well; a command-line -m replaces
       # the addopts one, which is why `not slow` is restated. Those tests still
       # run locally and on a GPU, where addopts alone applies.
+      #
+      # --timeout (pytest-timeout, from the test extra) ends a hung test after 15
+      # minutes instead of holding the runner for the 6-hour job limit
+      # (cambia-2402); the slowest test here takes about 165s. The thread method
+      # exits the process with every thread's stack printed. The signal method
+      # would fail the test and go on, but the interpreter then waits at exit on
+      # a hung non-daemon child process, so the job would hang anyway.
       - name: cfr tests
         env:
           LIBCAMBIA_PATH: ${{ github.workspace }}/cfr/libcambia.so
-        run: cd cfr && python -m pytest tests/ -q -rs -m "not slow and not slow_cpu"
+        run: cd cfr && python -m pytest tests/ -q -rs -m "not slow and not slow_cpu" --timeout=900 --timeout-method=thread
 
   # The other half of the split above: what the pull-request job deselects.
   # Nightly plus a manual dispatch, off the same Python install and the same

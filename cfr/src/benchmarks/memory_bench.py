@@ -154,7 +154,7 @@ def benchmark_memory(
     )
 
     logger.info("Spawning test worker to measure memory...")
-    with multiprocessing.Pool(processes=1) as pool:
+    with multiprocessing.get_context("spawn").Pool(processes=1) as pool:
         worker_mem_result = pool.apply(_worker_memory_test, (worker_args,))
 
     worker_memory_mb = worker_mem_result

@@ -1601,7 +1601,13 @@ class DeepCFRTrainer:
 
                         if not pool:
                             logger.info("Creating worker pool (size %d)...", num_workers)
-                            pool = multiprocessing.Pool(processes=num_workers)
+                            # Spawn, not the platform default fork: a child forked
+                            # from this process inherits torch's thread pool and the
+                            # Go runtime without their threads and can block on a
+                            # lock one of them held (cambia-2402).
+                            pool = multiprocessing.get_context("spawn").Pool(
+                                processes=num_workers
+                            )
 
                         try:
                             async_results = pool.map_async(

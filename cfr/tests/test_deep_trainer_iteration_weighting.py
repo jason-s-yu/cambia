@@ -153,9 +153,12 @@ class TestPooledDispatch:
 
         import src.cfr.deep_trainer as dt
 
+        created = []
+
         class _InlinePool:
             def __init__(self, processes=None):
                 self.processes = processes
+                created.append(processes)
 
             def map_async(self, fn, args_list):
                 results = [_stub_worker(a) for a in args_list]
@@ -181,9 +184,15 @@ class TestPooledDispatch:
             def join(self):
                 pass
 
-        monkeypatch.setattr(multiprocessing, "Pool", _InlinePool)
+        # The trainer takes its pool from the spawn context (cambia-2402), so the
+        # stand-in goes on that context; a pool from anywhere else never reaches
+        # it, which the `created` check below catches.
+        monkeypatch.setattr(
+            type(multiprocessing.get_context("spawn")), "Pool", _InlinePool
+        )
         trainer = _run(monkeypatch, _dcfr_config(), num_workers=2)
 
+        assert created == [2], "the pooled path did not build its pool from spawn"
         t1, t2 = _assert_one_iteration_per_step(_iterations_by_step(trainer), 3, 2)
 
         assert (t1, t2) == (1, 2)

@@ -194,21 +194,22 @@ def _br_action_worker(
     """
     Target function for the BR pool. Applies one action and calls node logic.
 
-    ``budget_limit`` re-establishes the node bound inside this process. The pool
-    is forked before the search sets its budget, so a worker would otherwise
-    inherit no bound and walk its subtree without one. The bound it gets is a
-    fresh one, which makes the pooled bound per task rather than per search: a
-    single delegated subtree cannot run away, but N workers can between them
-    walk N times the configured budget. A bound shared exactly across processes
-    would need locked shared state on the hottest path in the search, and the
-    pool only ever fires at the root node with exploitability_num_workers > 1
-    (cambia-1785).
+    ``budget_limit`` re-establishes the node bound inside this process. A pool
+    worker is a spawned interpreter that starts before the search sets its
+    budget, so it would otherwise have no bound and walk its subtree without
+    one. The bound it gets is a fresh one, which makes the pooled bound per task
+    rather than per search: a single delegated subtree cannot run away, but N
+    workers can between them walk N times the configured budget. A bound shared
+    exactly across processes would need locked shared state on the hottest path
+    in the search, and the pool only ever fires at the root node with
+    exploitability_num_workers > 1 (cambia-1785).
 
     The node arrives as (deal spec, action prefix) rather than as a copy of the
-    game: an engine handle cannot cross a fork, so this rebuilds its own engine
-    and replays the prefix onto it. The replay is exact -- the deal is a pure
-    function of the spec and the engine is deterministic given an action
-    sequence -- so the worker starts from the identical state its parent was on.
+    game: an engine handle cannot cross a process boundary, so this rebuilds its
+    own engine and replays the prefix onto it. The replay is exact -- the deal
+    is a pure function of the spec and the engine is deterministic given an
+    action sequence -- so the worker starts from the identical state its parent
+    was on.
     """
     # No direct access to the main shutdown event here.
     # Relies on the pool being terminated if shutdown is triggered.
@@ -356,10 +357,11 @@ def _run_br_calculation_process(
     Function executed by each of the two main BR calculation processes.
     Sets up a local pool and calls the BR entry point. Includes basic error handling.
 
-    The engine is dealt inside this process, after the pool is forked: an engine
-    handle cannot cross a fork, and forking a process that has already started
-    the Go runtime is not safe either. `deal` defaults to a fresh random seed,
-    which is the unseeded per-process deal the Python-engine search had.
+    The engine is dealt inside this process: an engine handle cannot cross a
+    process boundary. This process and its pool are spawned, never forked, because
+    a child forked from a process that has started the Go runtime can deadlock
+    inside it (cambia-2402). `deal` defaults to a fresh random seed, which is the
+    unseeded per-process deal the Python-engine search had.
     """
     pool: Optional[multiprocessing.pool.Pool] = None  # Define pool here for finally block
     state: Optional[GoBrState] = None
@@ -383,11 +385,10 @@ def _run_br_calculation_process(
             exploit_workers,
         )
 
-        # The pool is forked BEFORE the engine is dealt, deliberately: a worker
-        # forked from a process that has already loaded libcambia would inherit
-        # a Go runtime it cannot safely use.
+        # Spawned, not forked: a worker forked from a process that has already
+        # loaded libcambia would inherit a Go runtime it cannot safely use.
         if exploit_workers > 1:
-            pool = multiprocessing.Pool(processes=exploit_workers)
+            pool = multiprocessing.get_context("spawn").Pool(processes=exploit_workers)
             logger.debug("BR Process P%d: Worker pool created.", br_player)
 
         # Initialize game state and agent states *within this process*
@@ -606,8 +607,14 @@ class AnalysisTools:
 
         try:
             logger.info("Starting parallel exploitability calculation...")
-            # Use a standard multiprocessing Queue
-            result_queue = multiprocessing.Queue()
+            # Spawn, not the platform default fork. This process has usually
+            # started the Go runtime and torch's thread pool, and a forked child
+            # keeps their memory but not their threads: dealing its engine can
+            # then block forever on a lock one of those threads held at the fork,
+            # which is how the CI cfr job hung (cambia-2402). The queue has to
+            # come from the same context as the processes that share it.
+            mp_context = multiprocessing.get_context("spawn")
+            result_queue = mp_context.Queue()
 
             # Spawn two processes, one for each BR player
             for br_player in range(NUM_PLAYERS):
@@ -616,7 +623,7 @@ class AnalysisTools:
                     br_player,
                 )
                 # Pass the shutdown event (it will be a copy, but process can check initial state)
-                process = multiprocessing.Process(
+                process = mp_context.Process(
                     target=_run_br_calculation_process,
                     args=(
                         average_strategy,
