@@ -6,12 +6,24 @@ carry-forward (sd-cfr / os-mccfr top-level commands).
 """
 
 import importlib
+import re
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from typer.testing import CliRunner
+
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def _plain(result) -> str:
+    """The help text without ANSI escape sequences: typer's rich help forces a
+    terminal under GITHUB_ACTIONS (and FORCE_COLOR, PY_COLORS), so on the CI
+    runner the output carries SGR codes that split an option name. A regex
+    rather than click.unstyle: the CI install's typer does not ship click
+    (cambia-2400)."""
+    return _ANSI.sub("", result.output)
 
 
 def _real_config_module():
@@ -48,22 +60,22 @@ def cambia_app():
 def test_train_desca_help(runner, cambia_app):
     result = runner.invoke(cambia_app, ["train", "desca", "--help"])
     assert result.exit_code == 0
-    assert "--config" in result.output
-    assert "--iterations" in result.output
+    assert "--config" in _plain(result)
+    assert "--iterations" in _plain(result)
 
 
 def test_train_dense_escher_help(runner, cambia_app):
     """Alias dense-escher resolves to the same command."""
     result = runner.invoke(cambia_app, ["train", "dense-escher", "--help"])
     assert result.exit_code == 0
-    assert "--config" in result.output
+    assert "--config" in _plain(result)
 
 
 def test_train_dense_escher_underscore_help(runner, cambia_app):
     """Alias dense_escher resolves to the same command."""
     result = runner.invoke(cambia_app, ["train", "dense_escher", "--help"])
     assert result.exit_code == 0
-    assert "--config" in result.output
+    assert "--config" in _plain(result)
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +89,7 @@ def test_train_desca_missing_desca_section(runner, cambia_app, tmp_path):
     cfg.write_text("cambia_rules:\n" "  use_jokers: 2\n" "deep_cfr:\n" "  device: cpu\n")
     result = runner.invoke(cambia_app, ["train", "desca", "--config", str(cfg)])
     assert result.exit_code == 1
-    assert "desca" in result.output.lower()
+    assert "desca" in _plain(result).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +100,7 @@ def test_train_desca_missing_desca_section(runner, cambia_app, tmp_path):
 def test_train_sd_cfr_help(runner, cambia_app):
     result = runner.invoke(cambia_app, ["train", "sd-cfr", "--help"])
     assert result.exit_code == 0
-    assert "--config" in result.output
+    assert "--config" in _plain(result)
 
 
 def test_train_sdcfr_alias_help(runner, cambia_app):
@@ -101,7 +113,7 @@ def test_train_sdcfr_alias_help(runner, cambia_app):
 def test_train_os_mccfr_help(runner, cambia_app):
     result = runner.invoke(cambia_app, ["train", "os-mccfr", "--help"])
     assert result.exit_code == 0
-    assert "--config" in result.output
+    assert "--config" in _plain(result)
 
 
 def test_train_osmccfr_alias_help(runner, cambia_app):
