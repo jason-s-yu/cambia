@@ -97,7 +97,9 @@ def benchmark_worker_scaling(
                 results.append(result)
         else:
             # Parallel execution
-            with multiprocessing.Pool(processes=worker_count) as pool:
+            with multiprocessing.get_context("spawn").Pool(
+                processes=worker_count
+            ) as pool:
                 results = pool.map(run_deep_cfr_worker, worker_args_list)
 
         wall_time = time.time() - start_time

@@ -132,7 +132,7 @@ def benchmark_e2e(
         if num_workers == 1:
             results = [run_deep_cfr_worker(args) for args in worker_args_list]
         else:
-            with multiprocessing.Pool(processes=num_workers) as pool:
+            with multiprocessing.get_context("spawn").Pool(processes=num_workers) as pool:
                 results = pool.map(run_deep_cfr_worker, worker_args_list)
 
         trav_time = time.time() - trav_start
